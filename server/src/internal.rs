@@ -42,7 +42,12 @@ pub async fn handle_notify(
 ) -> Response {
     let v: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"bad body: {e}\"}}")),
+        Err(e) => {
+            return json(
+                StatusCode::BAD_REQUEST,
+                format!("{{\"error\":\"bad body: {e}\"}}"),
+            )
+        }
     };
     let queue = v.get("queue").and_then(|x| x.as_str()).unwrap_or("");
     if queue.is_empty() {
@@ -53,8 +58,10 @@ pub async fn handle_notify(
     }
     let partition = v.get("partition").and_then(|x| x.as_str()).unwrap_or("");
     // Same signal a local push emits: wake local parked pops + broadcast to peers.
-    st.notifier
-        .notify_pushed(&crate::handlers::tenant_queue_key(tenant.as_str(), queue), partition);
+    st.notifier.notify_pushed(
+        &crate::handlers::tenant_queue_key(tenant.as_str(), queue),
+        partition,
+    );
     json(StatusCode::OK, "{\"status\":\"ok\"}".to_string())
 }
 
@@ -70,7 +77,10 @@ fn stats_body(st: &Arc<AppState>) -> String {
                 map.insert("enabled".into(), serde_json::Value::Bool(true));
                 map.insert("running".into(), serde_json::Value::Bool(true));
                 map.insert("maintenance_mode".into(), serde_json::Value::Bool(maint));
-                map.insert("pop_maintenance_mode".into(), serde_json::Value::Bool(pop_maint));
+                map.insert(
+                    "pop_maintenance_mode".into(),
+                    serde_json::Value::Bool(pop_maint),
+                );
             }
             obj.to_string()
         }

@@ -113,7 +113,10 @@ fn rung_one_runtime_off_is_503_with_retry_after() {
         .expect("Paused must have a status");
     assert_eq!(h.status, 503);
     assert_eq!(h.code, "kv_disabled");
-    assert!(h.retry_after.is_some_and(|s| s >= 1), "a 503 owes the client a delay");
+    assert!(
+        h.retry_after.is_some_and(|s| s >= 1),
+        "a 503 owes the client a delay"
+    );
 }
 
 /// …and the SAME rung is PERMANENT on the transaction wire (§12.1 stage 7), so
@@ -183,7 +186,10 @@ fn the_outermost_rung_wins() {
 
     let paused = Switches::for_test();
     paused.set_kv(false);
-    assert_eq!(decide(&paused, &q, T, Surface::KvWrite, 1, 1), Answer::Paused);
+    assert_eq!(
+        decide(&paused, &q, T, Surface::KvWrite, 1, 1),
+        Answer::Paused
+    );
 
     // …and with the switch back on, the rung below it speaks.
     paused.set_kv(true);
@@ -207,14 +213,20 @@ fn a_cancel_survives_every_rung() {
     let sw = Switches::for_test();
     sw.set_timers_schedule(false);
     sw.set_timers_fire(false);
-    assert_eq!(decide(&sw, &q, T, Surface::TimerCancel, 0, 0), Answer::Allow);
+    assert_eq!(
+        decide(&sw, &q, T, Surface::TimerCancel, 0, 0),
+        Answer::Allow
+    );
 
     let strict = Quotas::for_test(TestKnobs {
         require_grant: true,
         ..TestKnobs::default()
     });
     strict.refresh(vec![]);
-    assert_eq!(decide(&sw, &strict, T, Surface::TimerCancel, 0, 0), Answer::Allow);
+    assert_eq!(
+        decide(&sw, &strict, T, Surface::TimerCancel, 0, 0),
+        Answer::Allow
+    );
 }
 
 /// §9.5 — reads and deletes are always permitted, or a full tenant can never
@@ -261,7 +273,10 @@ fn the_fire_switch_does_not_stop_the_schedule() {
     sw.set_timers_fire(false);
     assert!(!sw.fire_allowed());
     let q = quotas();
-    assert_eq!(decide(&sw, &q, T, Surface::TimerSchedule, 0, 0), Answer::Allow);
+    assert_eq!(
+        decide(&sw, &q, T, Surface::TimerSchedule, 0, 0),
+        Answer::Allow
+    );
 }
 
 /// The fire switch is the ONLY thing that can stop the fire, and only an
@@ -295,7 +310,10 @@ fn an_absent_row_means_enabled() {
     sw.adopt("timers_fire_enabled", None);
     let q = quotas();
     assert_eq!(decide(&sw, &q, T, Surface::KvWrite, 1, 1), Answer::Allow);
-    assert_eq!(decide(&sw, &q, T, Surface::TimerSchedule, 0, 0), Answer::Allow);
+    assert_eq!(
+        decide(&sw, &q, T, Surface::TimerSchedule, 0, 0),
+        Answer::Allow
+    );
     assert!(sw.fire_allowed());
 }
 
@@ -328,13 +346,20 @@ fn the_system_state_keys_are_the_ones_the_plan_names() {
 
 fn eph(require_grant: bool) -> std::sync::Arc<crate::ephemeral::Ephemeral> {
     crate::ephemeral::Ephemeral::new(
-        crate::ephemeral::Knobs { require_grant, ..crate::ephemeral::Knobs::defaults() },
+        crate::ephemeral::Knobs {
+            require_grant,
+            ..crate::ephemeral::Knobs::defaults()
+        },
         std::sync::Arc::new(crate::metrics::Metrics::new()),
     )
 }
 
-const EPH_SURFACES: [Surface; 4] =
-    [Surface::EphPush, Surface::EphPop, Surface::EphAck, Surface::EphAdmin];
+const EPH_SURFACES: [Surface; 4] = [
+    Surface::EphPush,
+    Surface::EphPop,
+    Surface::EphAck,
+    Surface::EphAdmin,
+];
 
 /// A fresh broker serves every ephemeral surface, and — with no grant required —
 /// serves them to a tenant nobody has ever configured. That is the OSS posture of
@@ -344,7 +369,11 @@ fn a_fresh_broker_allows_every_ephemeral_surface() {
     let sw = Switches::for_test();
     let e = eph(false);
     for s in EPH_SURFACES {
-        assert_eq!(decide_ephemeral(&sw, &e, T, s, 1), Answer::Allow, "{s:?} was refused");
+        assert_eq!(
+            decide_ephemeral(&sw, &e, T, s, 1),
+            Answer::Allow,
+            "{s:?} was refused"
+        );
     }
 }
 
@@ -425,7 +454,10 @@ fn an_ephemeral_grant_row_admits_and_a_disabled_one_does_not() {
         max_queues: None,
         max_msgs_per_sec: None,
     }]);
-    assert_eq!(decide_ephemeral(&sw, &e, T, Surface::EphPush, 1), Answer::Allow);
+    assert_eq!(
+        decide_ephemeral(&sw, &e, T, Surface::EphPush, 1),
+        Answer::Allow
+    );
 
     e.apply_grants(vec![crate::ephemeral::Grant {
         tenant: T.to_string(),
@@ -464,7 +496,10 @@ fn ephemeral_rung_three_is_a_message_rate_and_answers_429() {
         std::sync::Arc::new(crate::metrics::Metrics::new()),
     );
     // One call, four messages: the whole burst in a single request.
-    assert_eq!(decide_ephemeral(&sw, &e, T, Surface::EphPush, 4), Answer::Allow);
+    assert_eq!(
+        decide_ephemeral(&sw, &e, T, Surface::EphPush, 4),
+        Answer::Allow
+    );
     let h = decide_ephemeral(&sw, &e, T, Surface::EphPush, 4)
         .http(Origin::Route, Surface::EphPush)
         .expect("the second batch is over the burst");
@@ -477,8 +512,14 @@ fn ephemeral_rung_three_is_a_message_rate_and_answers_429() {
     // THE POP AND THE ACK ARE NOT ON THIS RUNG. They are the only ways for a
     // tenant that has filled its allowance to get back under it, so refusing
     // them would be the self-defeating shape §9.5 forbids for kv deletes.
-    assert_eq!(decide_ephemeral(&sw, &e, T, Surface::EphPop, 0), Answer::Allow);
-    assert_eq!(decide_ephemeral(&sw, &e, T, Surface::EphAck, 0), Answer::Allow);
+    assert_eq!(
+        decide_ephemeral(&sw, &e, T, Surface::EphPop, 0),
+        Answer::Allow
+    );
+    assert_eq!(
+        decide_ephemeral(&sw, &e, T, Surface::EphAck, 0),
+        Answer::Allow
+    );
 }
 
 /// THE ORDER IS THE CONTRACT: the answer names the OUTERMOST reason. A tenant
@@ -493,7 +534,10 @@ fn the_outermost_ephemeral_rung_wins() {
     let h = decide_ephemeral(&sw, &e, T, Surface::EphPush, 1)
         .http(Origin::Route, Surface::EphPush)
         .expect("refused");
-    assert_eq!(h.code, "ephemeral_disabled", "the switch must speak before the grant");
+    assert_eq!(
+        h.code, "ephemeral_disabled",
+        "the switch must speak before the grant"
+    );
 }
 
 /// The ephemeral key is the plan's, and it adopts like the other three: an

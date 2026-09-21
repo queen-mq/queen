@@ -248,11 +248,19 @@ pub(crate) fn sleep_ms(o: CycleOutcome, idle_cycles: u32, k: &SleepKnobs, jitter
             // `NaN as u64` is 0 in Rust, so a careless refactor would turn the
             // anti-spin backoff into the spin it exists to prevent. A non-finite
             // draw degrades to the bottom of the band, never to zero.
-            let j = if jitter.is_finite() { jitter.clamp(0.0, 1.0) } else { 0.0 };
+            let j = if jitter.is_finite() {
+                jitter.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             let lo = k.empty_claim_min_ms;
             let span = k.empty_claim_max_ms as f64 - lo as f64;
             let v = lo as f64 + j * span;
-            let v = if v.is_finite() && v >= 0.0 { v as u64 } else { lo };
+            let v = if v.is_finite() && v >= 0.0 {
+                v as u64
+            } else {
+                lo
+            };
             band(v)
         }
         CycleOutcome::Idle => {
@@ -266,7 +274,10 @@ pub(crate) fn sleep_ms(o: CycleOutcome, idle_cycles: u32, k: &SleepKnobs, jitter
                 // net for DELIVERY latency and has no meaning when there is
                 // nothing to deliver (§7.1).
                 let shift = idle_cycles - k.idle_after;
-                k.max_ms.checked_shl(shift).unwrap_or(u64::MAX).min(k.idle_max_ms)
+                k.max_ms
+                    .checked_shl(shift)
+                    .unwrap_or(u64::MAX)
+                    .min(k.idle_max_ms)
             }
         }
     };
@@ -399,7 +410,7 @@ pub fn spawn(
         backoff_min_ms: cfg.sweeper_backoff_min_ms,
         backoff_max_ms: cfg.sweeper_backoff_max_ms,
         transient_backoff_ms: clamp_i32(
-            env_u64("QUEEN_SWEEPER_TRANSIENT_BACKOFF_MS", 1000).max(1) as i64,
+            env_u64("QUEEN_SWEEPER_TRANSIENT_BACKOFF_MS", 1000).max(1) as i64
         ),
         zstd_level: cfg.zstd_level,
         stmt_timeout: cfg.stmt_timeout,
@@ -410,7 +421,9 @@ pub fn spawn(
         // period, so an operator who sets a refresh interval longer than the
         // rollup interval does not accidentally make the hot path the slow one.
         usage_hot_every: Duration::from_millis(
-            cfg.kv_quota_refresh_ms.max(1000).min(cfg.kv_usage_every_ms.max(1000)),
+            cfg.kv_quota_refresh_ms
+                .max(1000)
+                .min(cfg.kv_usage_every_ms.max(1000)),
         ),
         parallelism: cfg.sweeper_parallelism.clamp(1, MAX_PARALLELISM),
     };
@@ -441,7 +454,10 @@ pub fn spawn(
 /// into `Config` beside the rest of the sweeper block, which is where
 /// `gen-config.mjs` will look for them.
 fn env_u64(k: &str, def: u64) -> u64 {
-    std::env::var(k).ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(def)
+    std::env::var(k)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(def)
 }
 
 fn clamp_i32(v: i64) -> i32 {
@@ -555,8 +571,15 @@ async fn run_loop(
         // a log stops being read.
         if switches.fire_allowed() {
             let t0 = Instant::now();
-            match fire_pass(&pool, &metrics, &k, &shards, cycle_budget(&k, pressure), &announcer)
-                .await
+            match fire_pass(
+                &pool,
+                &metrics,
+                &k,
+                &shards,
+                cycle_budget(&k, pressure),
+                &announcer,
+            )
+            .await
             {
                 Ok(pass) => {
                     fired_rows = pass.rows;
@@ -631,7 +654,11 @@ async fn run_loop(
         // query for a saving of nothing. What the watermark buys is the CADENCE,
         // and the cadence is what §9.3 asks for.
         let hot = quotas.hot();
-        let usage_every = if hot { k.usage_hot_every } else { k.usage_every };
+        let usage_every = if hot {
+            k.usage_hot_every
+        } else {
+            k.usage_every
+        };
         static USAGE_HOT: crate::obs::OnChange<bool> = crate::obs::OnChange::new();
         if let Some(Some(prev)) = USAGE_HOT.changed(hot) {
             if prev != hot {
@@ -762,7 +789,9 @@ async fn run_loop(
         let ms = if pressure == 0 {
             base
         } else {
-            base.saturating_mul(1u64 << pressure.min(12)).min(k.sleep.max_ms).max(base)
+            base.saturating_mul(1u64 << pressure.min(12))
+                .min(k.sleep.max_ms)
+                .max(base)
         };
         metrics.kvt.set_sweeper_sleep(ms as i64);
 
@@ -798,7 +827,9 @@ async fn run_loop(
 /// EVERY shard is always present: the rotation changes visit order, never
 /// coverage (§1.10).
 fn shard_ring(start: i16) -> Vec<i16> {
-    (0..SHARDS).map(|i| (start + i).rem_euclid(SHARDS)).collect()
+    (0..SHARDS)
+        .map(|i| (start + i).rem_euclid(SHARDS))
+        .collect()
 }
 
 /// Rows the fire may drain this cycle. Under pressure this SHRINKS — the plan's
@@ -868,7 +899,11 @@ async fn checkout(pool: &Pool) -> Result<Conn, CallErr> {
     match pool.get().await {
         Ok(client) => {
             let cancel = client.cancel_token();
-            Ok(Conn { slot, client, cancel })
+            Ok(Conn {
+                slot,
+                client,
+                cancel,
+            })
         }
         Err(e) => Err(CallErr::Pool(e.to_string())),
     }
@@ -890,7 +925,11 @@ impl Conn {
         what: &'static str,
         metrics: &Metrics,
     ) -> Result<T, CallErr> {
-        let Conn { slot, client, cancel } = self;
+        let Conn {
+            slot,
+            client,
+            cancel,
+        } = self;
         let out = match res {
             Ok(Ok(v)) => {
                 drop(client);
@@ -938,7 +977,10 @@ fn parse_probe(txt: &str) -> Probe {
     Probe {
         next_in_ms: v.get("nextInMs").and_then(|x| x.as_i64()),
         due: v.get("due").and_then(|x| x.as_i64()).unwrap_or(0),
-        due_capped: v.get("dueCapped").and_then(|x| x.as_bool()).unwrap_or(false),
+        due_capped: v
+            .get("dueCapped")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
         late_ms: v.get("lateMs").and_then(|x| x.as_i64()).unwrap_or(0),
     }
 }
@@ -973,15 +1015,25 @@ async fn fire_pass(
     let res =
         tokio::time::timeout(k.stmt_timeout, db::timers_due(&c.client, shards, k.due_cap)).await;
     let probe = parse_probe(&c.finish(res, "timers_due", metrics)?);
-    metrics.kvt.set_timers_due(probe.due, probe.due_capped, probe.late_ms);
+    metrics
+        .kvt
+        .set_timers_due(probe.due, probe.due_capped, probe.late_ms);
 
     let Some(next_in_ms) = probe.next_in_ms else {
         // NULL means the table is empty. This is the signal §7.1 turns into the
         // progressive idle backoff, and it is the only path to it.
-        return Ok(PassResult { outcome: CycleOutcome::Idle, rows: 0, capped: false });
+        return Ok(PassResult {
+            outcome: CycleOutcome::Idle,
+            rows: 0,
+            capped: false,
+        });
     };
     if probe.due == 0 {
-        return Ok(PassResult { outcome: CycleOutcome::Due { next_in_ms }, rows: 0, capped: false });
+        return Ok(PassResult {
+            outcome: CycleOutcome::Due { next_in_ms },
+            rows: 0,
+            capped: false,
+        });
     }
 
     // ------------------------------------------------------------------- B
@@ -1197,7 +1249,11 @@ fn group_and_pack(claims: Vec<TimerClaim>, k: &Knobs) -> Vec<Vec<Packed>> {
             // and returns after the lease with nothing corrupted.
             continue;
         };
-        let payload = if c.payload_zstd { zstd_decompress(&c.payload) } else { c.payload };
+        let payload = if c.payload_zstd {
+            zstd_decompress(&c.payload)
+        } else {
+            c.payload
+        };
         let row = Row {
             key: c.timer_key,
             token: c.token,
@@ -1254,7 +1310,9 @@ fn group_and_pack(claims: Vec<TimerClaim>, k: &Knobs) -> Vec<Vec<Packed>> {
         let mut batch: Vec<Packed> = Vec::new();
         let mut bytes = 0usize;
         for (key, chunks) in chunked.iter_mut() {
-            let Some(rows) = chunks.get_mut(r) else { continue };
+            let Some(rows) = chunks.get_mut(r) else {
+                continue;
+            };
             if rows.is_empty() {
                 continue;
             }
@@ -1395,7 +1453,15 @@ async fn fire_attempt(
     let res = tokio::time::timeout(
         k.stmt_timeout,
         db::timers_fire(
-            &c.client, &tenants, &queues, &partitions, &counts, &hashes, &blobs, &keys, &seg_of,
+            &c.client,
+            &tenants,
+            &queues,
+            &partitions,
+            &counts,
+            &hashes,
+            &blobs,
+            &keys,
+            &seg_of,
             &tokens,
         ),
     )
@@ -1437,7 +1503,10 @@ fn account_fire(metrics: &Metrics, batch: &[Packed], txt: &str) -> Vec<(String, 
     let mut fired: Vec<(String, String, u32)> = Vec::new();
     for (i, s) in batch.iter().enumerate() {
         let r = arr.get(i);
-        let result = r.and_then(|x| x.get("result")).and_then(|x| x.as_str()).unwrap_or("stale");
+        let result = r
+            .and_then(|x| x.get("result"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("stale");
         match result {
             "fired" => {
                 let n = s.rows.len() as u64;
@@ -1523,11 +1592,15 @@ async fn fail_batch(pool: &Pool, metrics: &Metrics, k: &Knobs, batch: &[Packed],
     // single wrong number for the whole batch, group by `attempts` — there are
     // at most `max_attempts + 1` distinct values, so this is a handful of calls
     // on a path that is already the failure path.
-    let mut buckets: std::collections::BTreeMap<i32, (Vec<String>, Vec<String>, Vec<String>, Vec<String>)> =
-        Default::default();
+    let mut buckets: std::collections::BTreeMap<
+        i32,
+        (Vec<String>, Vec<String>, Vec<String>, Vec<String>),
+    > = Default::default();
     for s in batch {
         for r in &s.rows {
-            let b = buckets.entry(if count_attempt { r.attempts } else { 0 }).or_default();
+            let b = buckets
+                .entry(if count_attempt { r.attempts } else { 0 })
+                .or_default();
             b.0.push(s.tenant.clone());
             b.1.push(s.queue.clone());
             b.2.push(r.key.clone());
@@ -1566,7 +1639,9 @@ async fn fail_batch(pool: &Pool, metrics: &Metrics, k: &Knobs, batch: &[Packed],
         .await;
         // If the fail call itself fails there is nothing to repair: the lease
         // expires and the rows come back on their own (§12).
-        let Ok(txt) = c.finish(res, "timers_fail", metrics) else { return };
+        let Ok(txt) = c.finish(res, "timers_fail", metrics) else {
+            return;
+        };
         let v: serde_json::Value = serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
         if let Some(a) = v.get("exhausted").and_then(|x| x.as_array()) {
             for e in a {
@@ -1637,10 +1712,20 @@ async fn dlq(
     let Ok(c) = checkout(pool).await else { return };
     let res = tokio::time::timeout(
         k.stmt_timeout,
-        db::timers_dlq(&c.client, &tenants, &queues, &keys, &payloads, &errors, k.max_attempts),
+        db::timers_dlq(
+            &c.client,
+            &tenants,
+            &queues,
+            &keys,
+            &payloads,
+            &errors,
+            k.max_attempts,
+        ),
     )
     .await;
-    let Ok(txt) = c.finish(res, "timers_dlq", metrics) else { return };
+    let Ok(txt) = c.finish(res, "timers_dlq", metrics) else {
+        return;
+    };
     let v: serde_json::Value = serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
     let archived = v.get("archived").and_then(|x| x.as_i64()).unwrap_or(0);
     if archived > 0 {
@@ -1667,8 +1752,7 @@ async fn dlq(
 /// `SKIP LOCKED` lives inside the SP, so the prune never waits on a `queen.kv`
 /// row: actor 7 of §2.3 is a singleton in the KV space that cannot be an edge of
 /// the wait-for graph.
-const KV_EXPIRE_SQL: &str =
-    "SELECT (queen.kv_expire_step_v1($1::int2[], now(), $2::int))::text";
+const KV_EXPIRE_SQL: &str = "SELECT (queen.kv_expire_step_v1($1::int2[], now(), $2::int))::text";
 
 /// `queen.kv_usage_step_v1(p_shards, p_now, p_max_tenants) -> JSONB` — the slow
 /// phase of §7.5, on `QUEEN_KV_USAGE_EVERY_MS`.
@@ -1680,8 +1764,7 @@ const KV_EXPIRE_SQL: &str =
 /// under-count exactly the large rows the quota exists to bound); an INCREMENTAL
 /// count with a rare guarded full scan; and a `SKIP LOCKED` per shard so two
 /// brokers do not repeat the same work.
-const KV_USAGE_SQL: &str =
-    "SELECT (queen.kv_usage_step_v1($1::int2[], now(), $2::int))::text";
+const KV_USAGE_SQL: &str = "SELECT (queen.kv_usage_step_v1($1::int2[], now(), $2::int))::text";
 
 /// Run one `SELECT (<sp>)::text` under the slot / connection / timeout / cancel
 /// discipline, keeping the SQLSTATE.
@@ -1740,7 +1823,9 @@ async fn kv_prune(
         // while the table grows.
         metrics.kvt.set_kv_expiry(
             v.get("unpruned").and_then(|x| x.as_i64()).unwrap_or(0),
-            v.get("unprunedCapped").and_then(|x| x.as_bool()).unwrap_or(false),
+            v.get("unprunedCapped")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
             v.get("lagMs").and_then(|x| x.as_i64()).unwrap_or(0),
         );
         deleted_total += deleted.max(0) as u64;
@@ -1770,7 +1855,11 @@ async fn usage_rollup(
     )
     .await?;
     let v: serde_json::Value = serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
-    let rows = v.get("tenants").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+    let rows = v
+        .get("tenants")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
     let usage: Vec<crate::metrics::TenantUsage> = rows
         .iter()
         .filter_map(|t| {
@@ -1779,7 +1868,10 @@ async fn usage_rollup(
                 kv_rows: t.get("kvRows").and_then(|x| x.as_i64()).unwrap_or(0),
                 kv_bytes: t.get("kvBytes").and_then(|x| x.as_i64()).unwrap_or(0),
                 timers_pending: t.get("timerRows").and_then(|x| x.as_i64()).unwrap_or(0),
-                kv_quota_ratio: t.get("kvQuotaRatio").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                kv_quota_ratio: t
+                    .get("kvQuotaRatio")
+                    .and_then(|x| x.as_f64())
+                    .unwrap_or(0.0),
                 timers_quota_ratio: t
                     .get("timerQuotaRatio")
                     .and_then(|x| x.as_f64())

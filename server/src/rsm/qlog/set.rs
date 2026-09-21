@@ -338,8 +338,25 @@ impl QLogSet {
     pub fn sync(&mut self) -> io::Result<()> {
         let dirty = std::mem::take(&mut self.dirty);
         for qid in dirty {
-            if let Some(log) = self.logs.read().expect("qlog set poisoned").get(&qid) {
-                log.write().expect("qlog poisoned").sync()?;
+            // READ-PARALLELISM FIX: the fsync used to run under the queue's WRITE
+            // lock (`log.write().sync()`), which froze all of a hot queue's pop
+            // readers for the fsync's whole duration (FAT100: 64 consumers starved
+            // → 34k/s, 2M backlog). Instead: clone the active fd under a brief READ
+            // lock (concurrent with the pop reads), release, and fsync OUTSIDE any
+            // lock. The fsync flushes the inode regardless of the fd; the single
+            // writer never rolls between the clone and the fsync, so the clone is
+            // the current active file. Pop reads now proceed during the fsync.
+            let arc = self
+                .logs
+                .read()
+                .expect("qlog set poisoned")
+                .get(&qid)
+                .cloned();
+            if let Some(log) = arc {
+                let handle = log.read().expect("qlog poisoned").active_clone()?;
+                if let Some(f) = handle {
+                    crate::rsm::qlog::fsync_file(&f, self.opts.fsync)?;
+                }
             }
         }
         // Every queue `flush` wrote was marked dirty and is now fsync'd, so

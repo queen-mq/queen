@@ -540,7 +540,10 @@ pub fn spawn_reporter(h: ReporterHandles) {
                 let was = prev_q.get(q).copied().unwrap_or_default();
                 let push_s = d(now.push_messages, was.push_messages);
                 let pop_s = d(now.pop_count, was.pop_count);
-                let ack_s = d(now.ack_success + now.ack_failed, was.ack_success + was.ack_failed);
+                let ack_s = d(
+                    now.ack_success + now.ack_failed,
+                    was.ack_success + was.ack_failed,
+                );
                 let activity = push_s + pop_s + ack_s;
                 if activity <= 0.0 {
                     continue;
@@ -552,8 +555,8 @@ pub fn spawn_reporter(h: ReporterHandles) {
                 } else {
                     0.0
                 };
-                let pop_reqs_q = (now.pop_count + now.pop_empty)
-                    .saturating_sub(was.pop_count + was.pop_empty);
+                let pop_reqs_q =
+                    (now.pop_count + now.pop_empty).saturating_sub(was.pop_count + was.pop_empty);
                 let empty_pct = if pop_reqs_q > 0 {
                     100.0 * now.pop_empty.saturating_sub(was.pop_empty) as f64 / pop_reqs_q as f64
                 } else {
@@ -562,12 +565,22 @@ pub fn spawn_reporter(h: ReporterHandles) {
                 // PLAN_CONFLATION §6.1: positions/s this queue retired without a
                 // handler invocation. 0.0 unless a group on it conflates.
                 let conflated_s = d(now.conflated, was.conflated);
-                ranked.push((q.clone(), activity, push_s, pop_s, ack_s, lag_ms, conflated_s));
+                ranked.push((
+                    q.clone(),
+                    activity,
+                    push_s,
+                    pop_s,
+                    ack_s,
+                    lag_ms,
+                    conflated_s,
+                ));
                 let _ = empty_pct; // folded into the line below
             }
             ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             let total_hot = ranked.len();
-            for (q, _act, push_s, pop_s, ack_s, lag_ms, conflated_s) in ranked.into_iter().take(h.top_n) {
+            for (q, _act, push_s, pop_s, ack_s, lag_ms, conflated_s) in
+                ranked.into_iter().take(h.top_n)
+            {
                 // The counters are keyed by the (tenant, queue) composite, whose
                 // separator is invisible — logging it raw renders as the tenant uuid
                 // glued to the queue name.

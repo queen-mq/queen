@@ -257,8 +257,11 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         pg.create_pool(Some(deadpool_postgres::Runtime::Tokio1), connector)
             .map_err(|e| StartError::Pool(e.to_string()))?
     } else {
-        pg.create_pool(Some(deadpool_postgres::Runtime::Tokio1), tokio_postgres::NoTls)
-            .map_err(|e| StartError::Pool(e.to_string()))?
+        pg.create_pool(
+            Some(deadpool_postgres::Runtime::Tokio1),
+            tokio_postgres::NoTls,
+        )
+        .map_err(|e| StartError::Pool(e.to_string()))?
     };
 
     // Fail fast with a clear error if Postgres is unreachable — a library must
@@ -347,8 +350,12 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
 
     let (init_maint, init_pop_maint) = match pool.get().await {
         Ok(c) => (
-            db::get_system_flag(&c, "maintenance_mode").await.unwrap_or(false),
-            db::get_system_flag(&c, "pop_maintenance_mode").await.unwrap_or(false),
+            db::get_system_flag(&c, "maintenance_mode")
+                .await
+                .unwrap_or(false),
+            db::get_system_flag(&c, "pop_maintenance_mode")
+                .await
+                .unwrap_or(false),
         ),
         Err(_) => (false, false),
     };
@@ -648,8 +655,7 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
     {
         let state = st.clone();
         let pool_r = pool.clone();
-        let interval =
-            std::time::Duration::from_millis(cfg.sync.cache_refresh_ms.max(1));
+        let interval = std::time::Duration::from_millis(cfg.sync.cache_refresh_ms.max(1));
         tasks.push(tokio::spawn(async move {
             use std::sync::atomic::Ordering::Relaxed;
             // Small initial delay so boot-time seeding settles first.

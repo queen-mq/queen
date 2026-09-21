@@ -58,6 +58,17 @@ pub const TXN_NONE: u8 = 0;
 /// round-trips it.
 pub const TXN_CROSS_QUEUE: u8 = 1;
 
+/// `txn_kind == 2`: a payload-free ENTRY record, not a message — the per-queue
+/// log of record that REPLACES the global raft log (per-queue-only, killing the
+/// second fsync). It carries the leader's `seq` and the serialized payload-free
+/// entry bytes (its effects — a push, a pop, an ack) in the `payload` slot, with
+/// `pid = base_offset = count = 0` (it indexes no partition: the message records
+/// beside it, `txn_kind ∈ {0,1}`, are what pop/dedup read). Recovery merges
+/// every queue's entry records by `seq` and applies them in that order, exactly
+/// as the raft-log replay did. `created_at_us` carries the entry's `now_us` so a
+/// replay reconstructs the entry's monotone clock without a second field.
+pub const REC_ENTRY: u8 = 2;
+
 /// One message's hash, in bytes: the xxh3_128 of its transaction id, exactly as
 /// [`crate::rsm::segments::frame::HASH_LEN`].
 pub const HASH_LEN: usize = 16;
@@ -303,6 +314,31 @@ pub fn encode_into(
     Ok(4 + body_len)
 }
 
+/// Append one payload-free ENTRY record ([`REC_ENTRY`]) to `out` and return how
+/// many bytes it added. `now_us` is the entry's monotone clock (recovered from
+/// `created_at_us`); `entry` is the serialized payload-free entry (its effects).
+/// `pid`/`base_offset`/`count` are 0 — an entry record indexes no partition, and
+/// carrying `count == 0` means no hash list, so `entry` is the whole tail. One
+/// write of the entry bytes; the checksum covers everything after it, exactly as
+/// a message record, so a torn entry record fails the same check and is truncated.
+pub fn encode_entry_into(out: &mut Vec<u8>, seq: u64, now_us: i64, entry: &[u8]) -> usize {
+    let body_len = FIXED_AFTER_LEN + entry.len();
+    let start = out.len();
+    out.reserve(4 + body_len);
+    out.extend_from_slice(&(body_len as u32).to_le_bytes());
+    out.extend_from_slice(&0u64.to_le_bytes()); // checksum, filled in below
+    out.extend_from_slice(&seq.to_le_bytes());
+    out.extend_from_slice(&0u64.to_le_bytes()); // pid
+    out.extend_from_slice(&0u64.to_le_bytes()); // base_offset
+    out.extend_from_slice(&0u32.to_le_bytes()); // count
+    out.extend_from_slice(&now_us.to_le_bytes()); // created_at carries now_us
+    out.push(REC_ENTRY);
+    out.extend_from_slice(entry);
+    let sum = xxh3_64(&out[start + UNCHECKED_PREFIX..]);
+    out[start + 4..start + UNCHECKED_PREFIX].copy_from_slice(&sum.to_le_bytes());
+    4 + body_len
+}
+
 /// Parse the fixed header. The buffer may hold more or less than the whole
 /// record; only [`FIXED_PREFIX`] bytes are read.
 ///
@@ -376,7 +412,11 @@ pub fn decode(buf: &[u8]) -> Result<RecordRef<'_>, RecordError> {
     // survived the checksum (it cannot) still could not index out of the frame.
     let mut off = FIXED_PREFIX;
     let txn = match header.txn_kind {
-        TXN_NONE => None,
+        // REC_ENTRY: a payload-free entry record (per-queue-only log of record).
+        // No txn envelope; count is 0 so the hash list is empty and `payload`
+        // below is the whole entry-bytes tail. It is NOT a message — the index
+        // build and the pop/dedup read skip it (count 0, txn_kind 2).
+        TXN_NONE | REC_ENTRY => None,
         TXN_CROSS_QUEUE => {
             if off + TXN_ENVELOPE > total {
                 return Err(RecordError::Stride {
@@ -420,4 +460,49 @@ pub fn decode(buf: &[u8]) -> Result<RecordRef<'_>, RecordError> {
         hashes,
         payload,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_entry_record_round_trips_and_is_not_a_message() {
+        // A payload-free entry record (per-queue-only log of record): the entry
+        // bytes go in the payload slot, count/pid/base are 0, txn_kind == REC_ENTRY.
+        let entry = b"serialized-payload-free-entry-effects";
+        let mut buf = Vec::new();
+        let n = encode_entry_into(&mut buf, 4242, 1_700_000_000_000_000, entry);
+        assert_eq!(n, buf.len());
+        let rr = decode(&buf).expect("entry record decodes");
+        assert_eq!(rr.header.txn_kind, REC_ENTRY);
+        assert_eq!(rr.header.seq, 4242);
+        assert_eq!(rr.header.created_at_us, 1_700_000_000_000_000);
+        assert_eq!(rr.header.count, 0, "an entry record indexes no partition");
+        assert_eq!(rr.header.base_offset, 0);
+        assert!(rr.txn.is_none());
+        assert!(rr.hashes.is_empty());
+        assert_eq!(rr.payload, entry, "the entry bytes survive the round trip");
+    }
+
+    #[test]
+    fn a_torn_entry_record_fails_the_checksum() {
+        let mut buf = Vec::new();
+        encode_entry_into(&mut buf, 7, 1, b"abcdefgh");
+        *buf.last_mut().expect("nonempty") ^= 0xFF; // corrupt the last entry byte
+        assert!(matches!(decode(&buf), Err(RecordError::Checksum { .. })));
+    }
+
+    #[test]
+    fn a_message_record_still_round_trips_next_to_the_entry_kind() {
+        // The new REC_ENTRY branch must not disturb ordinary message decoding.
+        let hashes = vec![0xABu8; HASH_LEN]; // count == 1
+        let mut buf = Vec::new();
+        encode_into(&mut buf, 9, 3, 100, 1, 42, None, &hashes, b"hello").expect("encode msg");
+        let rr = decode(&buf).expect("message decodes");
+        assert_eq!(rr.header.txn_kind, TXN_NONE);
+        assert_eq!(rr.header.count, 1);
+        assert_eq!(rr.header.base_offset, 100);
+        assert_eq!(rr.payload, b"hello");
+    }
 }

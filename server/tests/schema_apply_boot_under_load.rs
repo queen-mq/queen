@@ -64,7 +64,13 @@ fn cfg(host: &str, port: u16, db: &str) -> BrokerConfig {
     // the test must prove the applier rides over the pusher shape, not that a
     // stats cycle happened to win some race.
     BrokerConfig::new()
-        .pg(host.to_string(), port, "postgres", "postgres", db.to_string())
+        .pg(
+            host.to_string(),
+            port,
+            "postgres",
+            "postgres",
+            db.to_string(),
+        )
         .pool_size(4)
         .retention(false)
         .stats_refresh(false)
@@ -96,7 +102,10 @@ async fn rolling_boot_reapplies_schema_under_live_push_shaped_writes() {
     {
         let old: String = row.get(0);
         let _ = admin
-            .execute(&format!("DROP DATABASE IF EXISTS \"{old}\" WITH (FORCE)"), &[])
+            .execute(
+                &format!("DROP DATABASE IF EXISTS \"{old}\" WITH (FORCE)"),
+                &[],
+            )
             .await;
     }
 
@@ -266,7 +275,10 @@ async fn rolling_boot_reapplies_schema_under_live_push_shaped_writes() {
 
     drop(seeder);
     admin
-        .execute(&format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"), &[])
+        .execute(
+            &format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"),
+            &[],
+        )
         .await
         .expect("drop scratch database");
 }

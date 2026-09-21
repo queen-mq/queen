@@ -281,7 +281,10 @@ async fn query_count(c: &Client, tenant: &str) -> i64 {
 }
 
 async fn scalar(c: &Client, sql: &str, args: &[&(dyn tokio_postgres::types::ToSql + Sync)]) -> i64 {
-    c.query_one(sql, args).await.unwrap_or_else(|e| panic!("{sql}: {e}")).get(0)
+    c.query_one(sql, args)
+        .await
+        .unwrap_or_else(|e| panic!("{sql}: {e}"))
+        .get(0)
 }
 
 /// State keys under one `(query_id, partition_id)` shard, read straight from the table —
@@ -352,9 +355,8 @@ async fn make_queue(c: &Client, tenant: &str, queue: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs Postgres; set QUEEN_EMBEDDED_TEST_PG and run with --ignored"]
 async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
-    let target = std::env::var("QUEEN_EMBEDDED_TEST_PG").expect(
-        "QUEEN_EMBEDDED_TEST_PG must be set (host:port) for the streams isolation test",
-    );
+    let target = std::env::var("QUEEN_EMBEDDED_TEST_PG")
+        .expect("QUEEN_EMBEDDED_TEST_PG must be set (host:port) for the streams isolation test");
     let (host, port) = target
         .split_once(':')
         .map(|(h, p)| (h.to_string(), p.parse::<u16>().expect("port")))
@@ -406,10 +408,16 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
 
     let pid_a = partition_of(&c, TENANT_A, "orders", "Default").await;
     let pid_b = partition_of(&c, TENANT_B, "orders", "Default").await;
-    assert_ne!(pid_a, pid_b, "same queue NAME, two queue rows, two partitions");
+    assert_ne!(
+        pid_a, pid_b,
+        "same queue NAME, two queue rows, two partitions"
+    );
     let b_sink_pid = partition_of(&c, TENANT_B, SINK, "Default").await;
     let b_sink_before = log_state(&c, &b_sink_pid).await;
-    assert_eq!(b_sink_before.0, 1, "B's sink starts with the one segment its seed push made");
+    assert_eq!(
+        b_sink_before.0, 1,
+        "B's sink starts with the one segment its seed push made"
+    );
 
     // ========================================================================
     section("1. the same query NAME under two tenants is two queries");
@@ -424,7 +432,11 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
     )
     .await;
     assert!(ok(&ra), "A registers its own name: {ra}");
-    assert_eq!(ra["fresh"], json!(true), "a first registration is fresh: {ra}");
+    assert_eq!(
+        ra["fresh"],
+        json!(true),
+        "a first registration is fresh: {ra}"
+    );
     let ida = text(&ra, "query_id");
 
     let rb = register(
@@ -443,10 +455,18 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
         "and it is B's OWN fresh row, not an update of A's: {rb}"
     );
     let idb = text(&rb, "query_id");
-    assert_ne!(ida, idb, "two names that are equal, two queries that are not");
+    assert_ne!(
+        ida, idb,
+        "two names that are equal, two queries that are not"
+    );
 
     assert_eq!(
-        scalar(&c, "SELECT count(*) FROM queen_streams.queries WHERE name = $1", &[&QNAME]).await,
+        scalar(
+            &c,
+            "SELECT count(*) FROM queen_streams.queries WHERE name = $1",
+            &[&QNAME]
+        )
+        .await,
         2,
         "two rows for one name: the pre-tenancy global UNIQUE(name) would have collapsed \
          them into one — and 002 drops that constraint AND a same-named hand-made index, \
@@ -457,7 +477,10 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
         "hash-A",
         "B's registration did not overwrite A's config_hash"
     );
-    assert_eq!(query_row(&c, TENANT_B, QNAME).await.expect("B's row").1, "hash-B");
+    assert_eq!(
+        query_row(&c, TENANT_B, QNAME).await.expect("B's row").1,
+        "hash-B"
+    );
 
     // The conflict, which is where the pre-tenancy leak was: the result hands back the
     // EXISTING row's query_id, and with a bare-name lookup that was the OTHER owner's.
@@ -467,7 +490,10 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
         json!({"name": QNAME, "source_queue": "orders", "config_hash": "hash-CHANGED"}),
     )
     .await;
-    assert!(!ok(&conflict), "a changed operator chain must not silently rebind: {conflict}");
+    assert!(
+        !ok(&conflict),
+        "a changed operator chain must not silently rebind: {conflict}"
+    );
     assert!(
         text(&conflict, "error").contains("config_hash mismatch"),
         "the refusal must say what changed: {conflict}"
@@ -490,7 +516,11 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
         "hash-A",
         "a refused registration changes nothing"
     );
-    assert_eq!(query_row(&c, TENANT_B, QNAME).await.expect("B").1, "hash-B", "B untouched");
+    assert_eq!(
+        query_row(&c, TENANT_B, QNAME).await.expect("B").1,
+        "hash-B",
+        "B untouched"
+    );
 
     // ========================================================================
     section("2. owner writes state through the real cycle; the foreigner reads nothing");
@@ -509,7 +539,8 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
     assert!(ok(&wa), "A's own cycle on A's own partition: {wa}");
     assert_eq!(wa["state_ops_applied"], json!(1), "{wa}");
     assert_eq!(
-        wa["queueName"], json!("orders"),
+        wa["queueName"],
+        json!("orders"),
         "the source queue name is resolved under the caller's tenant: {wa}"
     );
 
@@ -534,17 +565,43 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
          query ids are what keep them apart"
     );
 
-    let ga = state_get(&c, Some(TENANT_A), json!({"query_id": ida, "partition_id": pid_a})).await;
+    let ga = state_get(
+        &c,
+        Some(TENANT_A),
+        json!({"query_id": ida, "partition_id": pid_a}),
+    )
+    .await;
     assert!(ok(&ga), "{ga}");
-    assert_eq!(ga["rows"].as_array().map(|r| r.len()), Some(1), "A reads its own: {ga}");
-    assert_eq!(ga["rows"][0]["value"]["total"], json!(1), "and gets A's value: {ga}");
+    assert_eq!(
+        ga["rows"].as_array().map(|r| r.len()),
+        Some(1),
+        "A reads its own: {ga}"
+    );
+    assert_eq!(
+        ga["rows"][0]["value"]["total"],
+        json!(1),
+        "and gets A's value: {ga}"
+    );
 
-    let gb = state_get(&c, Some(TENANT_B), json!({"query_id": idb, "partition_id": pid_b})).await;
-    assert_eq!(gb["rows"][0]["value"]["total"], json!(2), "B reads B's: {gb}");
+    let gb = state_get(
+        &c,
+        Some(TENANT_B),
+        json!({"query_id": idb, "partition_id": pid_b}),
+    )
+    .await;
+    assert_eq!(
+        gb["rows"][0]["value"]["total"],
+        json!(2),
+        "B reads B's: {gb}"
+    );
 
     // THE NO-ORACLE HALF: B asks for A's exact (query_id, partition_id).
-    let foreign = state_get(&c, Some(TENANT_B), json!({"query_id": ida, "partition_id": pid_a}))
-        .await;
+    let foreign = state_get(
+        &c,
+        Some(TENANT_B),
+        json!({"query_id": ida, "partition_id": pid_a}),
+    )
+    .await;
     assert!(
         ok(&foreign),
         "a foreign read is not an ERROR — 009 writes ownership as a PREDICATE, not a \
@@ -556,8 +613,12 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
         json!([]),
         "...and the predicate must actually filter: {foreign}"
     );
-    let stranger =
-        state_get(&c, Some(TENANT_C), json!({"query_id": ida, "partition_id": pid_a})).await;
+    let stranger = state_get(
+        &c,
+        Some(TENANT_C),
+        json!({"query_id": ida, "partition_id": pid_a}),
+    )
+    .await;
     assert_eq!(
         stranger["rows"],
         json!([]),
@@ -584,7 +645,10 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
                "state_ops": [upsert("pwned-by-pid", json!({"total": 666}))]}),
     )
     .await;
-    assert!(!ok(&foreign_pid), "B must not cycle on A's partition: {foreign_pid}");
+    assert!(
+        !ok(&foreign_pid),
+        "B must not cycle on A's partition: {foreign_pid}"
+    );
     assert_eq!(
         text(&foreign_pid, "error"),
         "partition not found",
@@ -604,7 +668,11 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
         "B owns this partition but not this query — the state ops are keyed by query_id \
          ALONE, so without the query gate they would write into A's shard: {foreign_query}"
     );
-    assert_eq!(text(&foreign_query, "error"), "query not found", "{foreign_query}");
+    assert_eq!(
+        text(&foreign_query, "error"),
+        "query not found",
+        "{foreign_query}"
+    );
 
     let bogus = cycle(
         &c,
@@ -695,8 +763,16 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
     // carries no tenant predicate of its own — it is scoped by the query_id the
     // tenant-scoped lookup returned. That is correct only while the lookup is scoped.
     // ========================================================================
-    assert_eq!(state_keys(&c, &ida, &pid_a).await.len(), 2, "A has two keys to lose");
-    assert_eq!(state_keys(&c, &idb, &pid_b).await.len(), 1, "B has one to keep");
+    assert_eq!(
+        state_keys(&c, &ida, &pid_a).await.len(),
+        2,
+        "A has two keys to lose"
+    );
+    assert_eq!(
+        state_keys(&c, &idb, &pid_b).await.len(),
+        1,
+        "B has one to keep"
+    );
 
     let reset = register(
         &c,
@@ -705,9 +781,16 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
                "reset": true}),
     )
     .await;
-    assert!(ok(&reset), "reset:true is the way through a config_hash conflict: {reset}");
+    assert!(
+        ok(&reset),
+        "reset:true is the way through a config_hash conflict: {reset}"
+    );
     assert_eq!(reset["reset"], json!(true), "{reset}");
-    assert_eq!(text(&reset, "query_id"), ida, "and it is still the same query: {reset}");
+    assert_eq!(
+        text(&reset, "query_id"),
+        ida,
+        "and it is still the same query: {reset}"
+    );
     assert!(
         state_keys(&c, &ida, &pid_a).await.is_empty(),
         "A's state is gone, which is what A asked for"
@@ -718,7 +801,10 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
         "B's identically-keyed state under its identically-named query is NOT: one DELETE, \
          one query id, one tenant"
     );
-    assert_eq!(query_row(&c, TENANT_A, QNAME).await.expect("A").1, "hash-A2");
+    assert_eq!(
+        query_row(&c, TENANT_A, QNAME).await.expect("A").1,
+        "hash-A2"
+    );
     assert_eq!(
         query_row(&c, TENANT_B, QNAME).await.expect("B").1,
         "hash-B",
@@ -728,7 +814,11 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
     // ========================================================================
     section("5. the grant: absence is a denial, and revocation never stops a drain");
     // ========================================================================
-    assert_eq!(has_grant(&c, TENANT_C).await, 0, "C starts with no grant row");
+    assert_eq!(
+        has_grant(&c, TENANT_C).await,
+        0,
+        "C starts with no grant row"
+    );
     let ungranted = register(
         &c,
         Some(TENANT_C),
@@ -773,7 +863,10 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
                "config_hash": "hash-C2"}),
     )
     .await;
-    assert!(denied(&revoked_new), "enabled=false denies a NEW name: {revoked_new}");
+    assert!(
+        denied(&revoked_new),
+        "enabled=false denies a NEW name: {revoked_new}"
+    );
     assert_eq!(
         text(&revoked_new, "error"),
         "streams not granted for this tenant",
@@ -794,7 +887,11 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
          posture the proxy's GatedOp documents for the cycle route: {redeploy}"
     );
     assert!(!denied(&redeploy), "{redeploy}");
-    assert_eq!(text(&redeploy, "query_id"), idc, "and it is the same query: {redeploy}");
+    assert_eq!(
+        text(&redeploy, "query_id"),
+        idc,
+        "and it is the same query: {redeploy}"
+    );
 
     let revoked_reset = register(
         &c,
@@ -838,7 +935,11 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
         .await;
         assert!(ok(&r), "D's query {n} is within a cap of 2: {r}");
     }
-    assert_eq!(query_count(&c, TENANT_D).await, 2, "D is exactly at its cap");
+    assert_eq!(
+        query_count(&c, TENANT_D).await,
+        2,
+        "D is exactly at its cap"
+    );
 
     let capped = register(
         &c,
@@ -847,14 +948,21 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
     )
     .await;
     assert!(!ok(&capped), "{capped}");
-    assert!(denied(&capped), "a cap refusal is a 403, not a 409: {capped}");
+    assert!(
+        denied(&capped),
+        "a cap refusal is a 403, not a 409: {capped}"
+    );
     assert_eq!(
         text(&capped, "error"),
         "streams query quota exceeded (max 2)",
         "the refusal must name the cap it hit — an operator raising a limit needs to know \
          which one: {capped}"
     );
-    assert_eq!(query_count(&c, TENANT_D).await, 2, "and the third row was not inserted");
+    assert_eq!(
+        query_count(&c, TENANT_D).await,
+        2,
+        "and the third row was not inserted"
+    );
 
     let at_cap_redeploy = register(
         &c,
@@ -914,7 +1022,10 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
          grant row to do it: {rdef}"
     );
     let id_def = text(&rdef, "query_id");
-    assert!(id_def != ida && id_def != idb, "three names that are equal, three queries");
+    assert!(
+        id_def != ida && id_def != idb,
+        "three names that are equal, three queries"
+    );
     assert_eq!(
         has_grant(&c, TENANT_DEFAULT).await,
         0,
@@ -930,20 +1041,32 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
     )
     .await;
     assert!(ok(&cdef), "the one-argument cycle: {cdef}");
-    let gdef = state_get(&c, None, json!({"query_id": id_def, "partition_id": pid_def})).await;
-    assert_eq!(gdef["rows"][0]["value"]["total"], json!(0), "the one-argument read: {gdef}");
+    let gdef = state_get(
+        &c,
+        None,
+        json!({"query_id": id_def, "partition_id": pid_def}),
+    )
+    .await;
+    assert_eq!(
+        gdef["rows"][0]["value"]["total"],
+        json!(0),
+        "the one-argument read: {gdef}"
+    );
 
     // "Global-feeling" is not "global". The default tenant is the tenant every unlabelled
     // caller lands in, not a superuser over the others.
-    let def_peeks_at_a =
-        state_get(&c, None, json!({"query_id": ida, "partition_id": pid_a})).await;
+    let def_peeks_at_a = state_get(&c, None, json!({"query_id": ida, "partition_id": pid_a})).await;
     assert_eq!(
         def_peeks_at_a["rows"],
         json!([]),
         "the default tenant cannot read A's shard: {def_peeks_at_a}"
     );
-    let a_peeks_at_def =
-        state_get(&c, Some(TENANT_A), json!({"query_id": id_def, "partition_id": pid_def})).await;
+    let a_peeks_at_def = state_get(
+        &c,
+        Some(TENANT_A),
+        json!({"query_id": id_def, "partition_id": pid_def}),
+    )
+    .await;
     assert_eq!(
         a_peeks_at_def["rows"],
         json!([]),
@@ -962,7 +1085,12 @@ async fn two_tenants_sharing_every_streaming_name_share_nothing_else() {
         "nor cycle on it: {def_cycles_at_a}"
     );
     assert_eq!(
-        scalar(&c, "SELECT count(*) FROM queen_streams.state WHERE key LIKE 'pwned-%'", &[]).await,
+        scalar(
+            &c,
+            "SELECT count(*) FROM queen_streams.state WHERE key LIKE 'pwned-%'",
+            &[]
+        )
+        .await,
         0,
         "still nothing written by anyone who did not own both ends"
     );
@@ -1006,13 +1134,18 @@ fn handler_source_pins_the_status_map() {
         .expect("read src/handlers/streams.rs");
 
     assert_eq!(
-        src.matches("Extension(tenant): Extension<crate::tenant::Tenant>").count(),
+        src.matches("Extension(tenant): Extension<crate::tenant::Tenant>")
+            .count(),
         3,
         "all THREE streams handlers (register, state_get, cycle) must take the request \
          tenant as an extractor — a handler that does not cannot scope anything, and the \
          SP it calls would silently fall back to the default tenant"
     );
-    for wrapper in ["db::streams_register(", "db::streams_state_get(", "db::streams_cycle("] {
+    for wrapper in [
+        "db::streams_register(",
+        "db::streams_state_get(",
+        "db::streams_cycle(",
+    ] {
         assert!(
             src.contains(wrapper),
             "src/handlers/streams.rs must reach the SPs through the `{wrapper}` wrapper in \

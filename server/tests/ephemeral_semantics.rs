@@ -97,15 +97,24 @@ async fn boot(host: &str, port: u16) -> Broker {
 // ---------------------------------------------------------------------------
 
 fn msgs(v: &Value) -> Vec<&Value> {
-    v.get("messages").and_then(|m| m.as_array()).map(|a| a.iter().collect()).unwrap_or_default()
+    v.get("messages")
+        .and_then(|m| m.as_array())
+        .map(|a| a.iter().collect())
+        .unwrap_or_default()
 }
 
 fn payload_n(m: &Value) -> i64 {
-    m.get("payload").and_then(|p| p.get("n")).and_then(|n| n.as_i64()).unwrap_or(-1)
+    m.get("payload")
+        .and_then(|p| p.get("n"))
+        .and_then(|n| n.as_i64())
+        .unwrap_or(-1)
 }
 
 fn id_of(m: &Value) -> String {
-    m.get("id").and_then(|i| i.as_str()).unwrap_or_default().to_string()
+    m.get("id")
+        .and_then(|i| i.as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn attempts_of(m: &Value) -> i64 {
@@ -117,7 +126,12 @@ fn outcomes(v: &Value) -> Vec<String> {
         .and_then(|r| r.as_array())
         .map(|a| {
             a.iter()
-                .map(|x| x.get("outcome").and_then(|o| o.as_str()).unwrap_or("?").to_string())
+                .map(|x| {
+                    x.get("outcome")
+                        .and_then(|o| o.as_str())
+                        .unwrap_or("?")
+                        .to_string()
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -170,8 +184,12 @@ fn pop_params(queue: &str, extra: &[(&str, &str)]) -> Vec<(&'static str, String)
 async fn case_fifo_per_partition(b: &Broker) -> Case {
     let q = unique("eph-fifo-");
     for n in 0..5 {
-        b.ephemeral_push(push_one(&q, Some("a"), n)).await.map_err(|e| e.to_string())?;
-        b.ephemeral_push(push_one(&q, Some("b"), 100 + n)).await.map_err(|e| e.to_string())?;
+        b.ephemeral_push(push_one(&q, Some("a"), n))
+            .await
+            .map_err(|e| e.to_string())?;
+        b.ephemeral_push(push_one(&q, Some("b"), 100 + n))
+            .await
+            .map_err(|e| e.to_string())?;
     }
     // Partition-scoped pops: the order INSIDE one partition is the contract; the
     // interleaving between two partitions is not, which is why they are read
@@ -196,10 +214,18 @@ async fn case_fifo_per_partition(b: &Broker) -> Case {
 
 async fn case_lease_redelivery_counts_attempts(b: &Broker) -> Case {
     let q = unique("eph-lease-");
-    b.ephemeral_push(push_one(&q, None, 1)).await.map_err(|e| e.to_string())?;
+    b.ephemeral_push(push_one(&q, None, 1))
+        .await
+        .map_err(|e| e.to_string())?;
 
-    let first = b.ephemeral_pop(&pop_params(&q, &[])).await.map_err(|e| e.to_string())?;
-    chk!(msgs(&first).len() == 1, "the first pop must deliver the message");
+    let first = b
+        .ephemeral_pop(&pop_params(&q, &[]))
+        .await
+        .map_err(|e| e.to_string())?;
+    chk!(
+        msgs(&first).len() == 1,
+        "the first pop must deliver the message"
+    );
     chk!(
         attempts_of(msgs(&first)[0]) == 1,
         "a first delivery is attempt 1, got {}",
@@ -233,9 +259,14 @@ async fn case_lease_redelivery_counts_attempts(b: &Broker) -> Case {
 
 async fn case_ack_statuses(b: &Broker) -> Case {
     let q = unique("eph-ack-");
-    b.ephemeral_push(push_one(&q, None, 7)).await.map_err(|e| e.to_string())?;
+    b.ephemeral_push(push_one(&q, None, 7))
+        .await
+        .map_err(|e| e.to_string())?;
 
-    let got = b.ephemeral_pop(&pop_params(&q, &[])).await.map_err(|e| e.to_string())?;
+    let got = b
+        .ephemeral_pop(&pop_params(&q, &[]))
+        .await
+        .map_err(|e| e.to_string())?;
     let id = id_of(msgs(&got)[0]);
 
     // `retry` and `failed` are the same DECISION (both redeliver with attempts+1)
@@ -245,18 +276,35 @@ async fn case_ack_statuses(b: &Broker) -> Case {
         .ephemeral_ack(json!({ "queue": q, "acks": [{ "id": id, "status": "retry" }] }))
         .await
         .map_err(|e| e.to_string())?;
-    chk!(outcomes(&r) == vec!["redelivered"], "retry must redeliver, got {:?}", outcomes(&r));
+    chk!(
+        outcomes(&r) == vec!["redelivered"],
+        "retry must redeliver, got {:?}",
+        outcomes(&r)
+    );
 
-    let got = b.ephemeral_pop(&pop_params(&q, &[])).await.map_err(|e| e.to_string())?;
-    chk!(msgs(&got).len() == 1, "a redelivered message must come back at once, not on lease expiry");
-    chk!(attempts_of(msgs(&got)[0]) == 2, "the redelivery is attempt 2");
+    let got = b
+        .ephemeral_pop(&pop_params(&q, &[]))
+        .await
+        .map_err(|e| e.to_string())?;
+    chk!(
+        msgs(&got).len() == 1,
+        "a redelivered message must come back at once, not on lease expiry"
+    );
+    chk!(
+        attempts_of(msgs(&got)[0]) == 2,
+        "the redelivery is attempt 2"
+    );
     let id = id_of(msgs(&got)[0]);
 
     let r = b
         .ephemeral_ack(json!({ "queue": q, "acks": [{ "id": id, "status": "completed" }] }))
         .await
         .map_err(|e| e.to_string())?;
-    chk!(outcomes(&r) == vec!["acked"], "completed must retire the message, got {:?}", outcomes(&r));
+    chk!(
+        outcomes(&r) == vec!["acked"],
+        "completed must retire the message, got {:?}",
+        outcomes(&r)
+    );
 
     // A second ack of the same id: our epoch, no live lease. `unknown`, and NOT
     // an error — a client flushing buffered acks must not meet a 4xx storm.
@@ -264,10 +312,20 @@ async fn case_ack_statuses(b: &Broker) -> Case {
         .ephemeral_ack(json!({ "queue": q, "acks": [{ "id": id }] }))
         .await
         .map_err(|e| e.to_string())?;
-    chk!(outcomes(&r) == vec!["unknown"], "a re-ack is unknown, got {:?}", outcomes(&r));
+    chk!(
+        outcomes(&r) == vec!["unknown"],
+        "a re-ack is unknown, got {:?}",
+        outcomes(&r)
+    );
 
-    let after = b.ephemeral_pop(&pop_params(&q, &[])).await.map_err(|e| e.to_string())?;
-    chk!(msgs(&after).is_empty(), "a completed message must not come back");
+    let after = b
+        .ephemeral_pop(&pop_params(&q, &[]))
+        .await
+        .map_err(|e| e.to_string())?;
+    chk!(
+        msgs(&after).is_empty(),
+        "a completed message must not come back"
+    );
     Ok(())
 }
 
@@ -280,9 +338,14 @@ async fn case_retry_limit_exhaustion_is_counted(b: &Broker) -> Case {
     b.ephemeral_configure(json!({ "queue": q, "options": { "retryLimit": 1 } }))
         .await
         .map_err(|e| e.to_string())?;
-    b.ephemeral_push(push_one(&q, None, 1)).await.map_err(|e| e.to_string())?;
+    b.ephemeral_push(push_one(&q, None, 1))
+        .await
+        .map_err(|e| e.to_string())?;
 
-    let got = b.ephemeral_pop(&pop_params(&q, &[])).await.map_err(|e| e.to_string())?;
+    let got = b
+        .ephemeral_pop(&pop_params(&q, &[]))
+        .await
+        .map_err(|e| e.to_string())?;
     let id = id_of(msgs(&got)[0]);
     let r = b
         .ephemeral_ack(json!({ "queue": q, "acks": [{ "id": id, "status": "failed" }] }))
@@ -296,11 +359,20 @@ async fn case_retry_limit_exhaustion_is_counted(b: &Broker) -> Case {
         "an exhausted nack retires the message with `acked`, got {:?}",
         outcomes(&r)
     );
-    let after = b.ephemeral_pop(&pop_params(&q, &[])).await.map_err(|e| e.to_string())?;
-    chk!(msgs(&after).is_empty(), "an exhausted message must not be redelivered");
+    let after = b
+        .ephemeral_pop(&pop_params(&q, &[]))
+        .await
+        .map_err(|e| e.to_string())?;
+    chk!(
+        msgs(&after).is_empty(),
+        "an exhausted message must not be redelivered"
+    );
 
     let drops = drops_of(b, &q).await?;
-    chk!(drops.2 >= 1, "the exhaustion must be COUNTED as a retry drop, got {drops:?}");
+    chk!(
+        drops.2 >= 1,
+        "the exhaustion must be COUNTED as a retry drop, got {drops:?}"
+    );
     Ok(())
 }
 
@@ -310,7 +382,9 @@ async fn case_retry_limit_exhaustion_is_counted(b: &Broker) -> Case {
 
 async fn case_auto_ack_is_at_most_once(b: &Broker) -> Case {
     let q = unique("eph-autoack-");
-    b.ephemeral_push(push_one(&q, None, 42)).await.map_err(|e| e.to_string())?;
+    b.ephemeral_push(push_one(&q, None, 42))
+        .await
+        .map_err(|e| e.to_string())?;
     let got = b
         .ephemeral_pop(&pop_params(&q, &[("autoAck", "true")]))
         .await
@@ -332,8 +406,14 @@ async fn case_auto_ack_is_at_most_once(b: &Broker) -> Case {
     // The cursor advanced AT DELIVERY: nothing redelivers, ever — not on lease
     // expiry (there is no lease) and not on a later pop.
     tokio::time::sleep(std::time::Duration::from_millis(1_400)).await;
-    let after = b.ephemeral_pop(&pop_params(&q, &[])).await.map_err(|e| e.to_string())?;
-    chk!(msgs(&after).is_empty(), "an autoAck message must never be redelivered");
+    let after = b
+        .ephemeral_pop(&pop_params(&q, &[]))
+        .await
+        .map_err(|e| e.to_string())?;
+    chk!(
+        msgs(&after).is_empty(),
+        "an autoAck message must never be redelivered"
+    );
     Ok(())
 }
 
@@ -347,34 +427,63 @@ async fn case_fan_out_across_groups(b: &Broker) -> Case {
     // fan-out subscriber actually uses (park first, then the producer arrives),
     // and it is the one the `known_groups` pre-seeding exists to make safe.
     for g in ["alpha", "beta"] {
-        b.ephemeral_pop(&pop_params(&q, &[("group", g)])).await.map_err(|e| e.to_string())?;
+        b.ephemeral_pop(&pop_params(&q, &[("group", g)]))
+            .await
+            .map_err(|e| e.to_string())?;
     }
     for n in 0..3 {
-        b.ephemeral_push(push_one(&q, None, n)).await.map_err(|e| e.to_string())?;
+        b.ephemeral_push(push_one(&q, None, n))
+            .await
+            .map_err(|e| e.to_string())?;
     }
     for g in ["alpha", "beta"] {
         let got = b
-            .ephemeral_pop(&pop_params(&q, &[("group", g), ("batch", "10"), ("autoAck", "true")]))
+            .ephemeral_pop(&pop_params(
+                &q,
+                &[("group", g), ("batch", "10"), ("autoAck", "true")],
+            ))
             .await
             .map_err(|e| e.to_string())?;
         let seq: Vec<i64> = msgs(&got).iter().map(|m| payload_n(m)).collect();
-        chk!(seq == vec![0, 1, 2], "group {g} must receive EVERY message, got {seq:?}");
+        chk!(
+            seq == vec![0, 1, 2],
+            "group {g} must receive EVERY message, got {seq:?}"
+        );
     }
     // One ring, not two copies: the depth read shows both cursors over the same
     // partition, which is the difference between fan-out here and fan-out by
     // duplication.
-    let d = b.ephemeral_depth(&q, None).await.map_err(|e| e.to_string())?;
-    let groups = d.get("groups").and_then(|g| g.as_array()).cloned().unwrap_or_default();
-    chk!(groups.len() == 2, "both group cursors live on the one ring, got {groups:?}");
-    let parts = d.get("partitions").and_then(|p| p.as_array()).cloned().unwrap_or_default();
-    chk!(parts.len() == 1, "fan-out must not create a second partition, got {parts:?}");
+    let d = b
+        .ephemeral_depth(&q, None)
+        .await
+        .map_err(|e| e.to_string())?;
+    let groups = d
+        .get("groups")
+        .and_then(|g| g.as_array())
+        .cloned()
+        .unwrap_or_default();
+    chk!(
+        groups.len() == 2,
+        "both group cursors live on the one ring, got {groups:?}"
+    );
+    let parts = d
+        .get("partitions")
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
+    chk!(
+        parts.len() == 1,
+        "fan-out must not create a second partition, got {parts:?}"
+    );
     Ok(())
 }
 
 async fn case_groupless_is_queue_mode(b: &Broker) -> Case {
     let q = unique("eph-queuemode-");
     for n in 0..4 {
-        b.ephemeral_push(push_one(&q, None, n)).await.map_err(|e| e.to_string())?;
+        b.ephemeral_push(push_one(&q, None, n))
+            .await
+            .map_err(|e| e.to_string())?;
     }
     // Two group-less consumers COMPETE: they share the one `__QUEUE_MODE__`
     // cursor, exactly as on the durable engine. If they fanned out instead, each
@@ -389,16 +498,29 @@ async fn case_groupless_is_queue_mode(b: &Broker) -> Case {
         .map_err(|e| e.to_string())?;
     let sa: Vec<i64> = msgs(&a).iter().map(|m| payload_n(m)).collect();
     let sc: Vec<i64> = msgs(&c).iter().map(|m| payload_n(m)).collect();
-    chk!(sa == vec![0, 1], "the first group-less pop takes the head, got {sa:?}");
-    chk!(sc == vec![2, 3], "the second takes what is left, got {sc:?}");
+    chk!(
+        sa == vec![0, 1],
+        "the first group-less pop takes the head, got {sa:?}"
+    );
+    chk!(
+        sc == vec![2, 3],
+        "the second takes what is left, got {sc:?}"
+    );
 
     // And the group-less cursor is spelled with the durable engine's sentinel, so
     // a reader who knows one engine knows the other.
-    let d = b.ephemeral_depth(&q, None).await.map_err(|e| e.to_string())?;
+    let d = b
+        .ephemeral_depth(&q, None)
+        .await
+        .map_err(|e| e.to_string())?;
     let names: Vec<String> = d
         .get("groups")
         .and_then(|g| g.as_array())
-        .map(|a| a.iter().filter_map(|x| x.get("group")?.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.get("group")?.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     chk!(
         names == vec!["__QUEUE_MODE__".to_string()],
@@ -416,7 +538,9 @@ async fn case_ttl_head_drop(b: &Broker) -> Case {
     b.ephemeral_configure(json!({ "queue": q, "options": { "ttlSeconds": 1 } }))
         .await
         .map_err(|e| e.to_string())?;
-    b.ephemeral_push(push_one(&q, None, 1)).await.map_err(|e| e.to_string())?;
+    b.ephemeral_push(push_one(&q, None, 1))
+        .await
+        .map_err(|e| e.to_string())?;
 
     let gone = wait_for(3_000, || async {
         let got = b.ephemeral_pop(&pop_params(&q, &[])).await.ok()?;
@@ -425,7 +549,10 @@ async fn case_ttl_head_drop(b: &Broker) -> Case {
     })
     .await
     .ok_or("the ttl'd message was still deliverable, or the drop was not counted, after 3s")?;
-    chk!(gone.1 >= 1, "the drop must be attributed to ttl, got {gone:?}");
+    chk!(
+        gone.1 >= 1,
+        "the drop must be attributed to ttl, got {gone:?}"
+    );
     chk!(gone.0 == 0, "a ttl drop is not a bounds drop, got {gone:?}");
     Ok(())
 }
@@ -440,7 +567,9 @@ async fn case_bounds_reject(b: &Broker) -> Case {
         .await
         .map_err(|e| e.to_string())?;
     for n in 0..2 {
-        b.ephemeral_push(push_one(&q, None, n)).await.map_err(|e| e.to_string())?;
+        b.ephemeral_push(push_one(&q, None, n))
+            .await
+            .map_err(|e| e.to_string())?;
     }
     let e = b
         .ephemeral_push(push_one(&q, None, 99))
@@ -452,7 +581,10 @@ async fn case_bounds_reject(b: &Broker) -> Case {
     // bounded buffer already knows how to drain against.
     chk!(status == 429, "queue_full is 429, got {status} ({text})");
 
-    let d = b.ephemeral_depth(&q, None).await.map_err(|e| e.to_string())?;
+    let d = b
+        .ephemeral_depth(&q, None)
+        .await
+        .map_err(|e| e.to_string())?;
     chk!(
         d.get("pending").and_then(|p| p.as_i64()) == Some(2),
         "a rejected push must change nothing: {d}"
@@ -468,7 +600,9 @@ async fn case_bounds_drop_oldest(b: &Broker) -> Case {
     .await
     .map_err(|e| e.to_string())?;
     for n in 0..5 {
-        b.ephemeral_push(push_one(&q, None, n)).await.map_err(|e| e.to_string())?;
+        b.ephemeral_push(push_one(&q, None, n))
+            .await
+            .map_err(|e| e.to_string())?;
     }
     let got = b
         .ephemeral_pop(&pop_params(&q, &[("batch", "10"), ("autoAck", "true")]))
@@ -478,7 +612,10 @@ async fn case_bounds_drop_oldest(b: &Broker) -> Case {
     // Feed semantics: the NEWEST survive, the head is what goes.
     chk!(seq == vec![3, 4], "dropOldest keeps the tail, got {seq:?}");
     let drops = drops_of(b, &q).await?;
-    chk!(drops.0 == 3, "three head drops must be counted as bounds, got {drops:?}");
+    chk!(
+        drops.0 == 3,
+        "three head drops must be counted as bounds, got {drops:?}"
+    );
     Ok(())
 }
 
@@ -495,12 +632,19 @@ async fn case_cursor_skips_evicted_range(b: &Broker) -> Case {
     .map_err(|e| e.to_string())?;
     // The group registers a cursor at the head and then falls behind while the
     // producer runs the ring past it.
-    b.ephemeral_pop(&pop_params(&q, &[("group", "slow")])).await.map_err(|e| e.to_string())?;
+    b.ephemeral_pop(&pop_params(&q, &[("group", "slow")]))
+        .await
+        .map_err(|e| e.to_string())?;
     for n in 0..6 {
-        b.ephemeral_push(push_one(&q, None, n)).await.map_err(|e| e.to_string())?;
+        b.ephemeral_push(push_one(&q, None, n))
+            .await
+            .map_err(|e| e.to_string())?;
     }
     let got = b
-        .ephemeral_pop(&pop_params(&q, &[("group", "slow"), ("batch", "10"), ("autoAck", "true")]))
+        .ephemeral_pop(&pop_params(
+            &q,
+            &[("group", "slow"), ("batch", "10"), ("autoAck", "true")],
+        ))
         .await
         .map_err(|e| e.to_string())?;
     let seq: Vec<i64> = msgs(&got).iter().map(|m| payload_n(m)).collect();
@@ -511,14 +655,23 @@ async fn case_cursor_skips_evicted_range(b: &Broker) -> Case {
     // AND THE SKIP IS COUNTED. For a fan-out consumer this is the difference
     // between "slow" and "lost data", which on this class is legal — and is
     // exactly why it has to be visible.
-    let d = b.ephemeral_depth(&q, None).await.map_err(|e| e.to_string())?;
+    let d = b
+        .ephemeral_depth(&q, None)
+        .await
+        .map_err(|e| e.to_string())?;
     let skipped = d
         .get("groups")
         .and_then(|g| g.as_array())
-        .and_then(|a| a.iter().find(|x| x.get("group").and_then(|n| n.as_str()) == Some("slow")))
+        .and_then(|a| {
+            a.iter()
+                .find(|x| x.get("group").and_then(|n| n.as_str()) == Some("slow"))
+        })
         .and_then(|x| x.get("skipped").and_then(|s| s.as_u64()))
         .unwrap_or(0);
-    chk!(skipped == 4, "four messages passed under the cursor unseen, got {skipped}");
+    chk!(
+        skipped == 4,
+        "four messages passed under the cursor unseen, got {skipped}"
+    );
     Ok(())
 }
 
@@ -533,8 +686,12 @@ async fn case_window_buffer_fattens_a_waiting_pop(b: &Broker) -> Case {
     )
     .await
     .map_err(|e| e.to_string())?;
-    b.ephemeral_push(push_one(&q, None, 1)).await.map_err(|e| e.to_string())?;
-    b.ephemeral_push(push_one(&q, None, 2)).await.map_err(|e| e.to_string())?;
+    b.ephemeral_push(push_one(&q, None, 1))
+        .await
+        .map_err(|e| e.to_string())?;
+    b.ephemeral_push(push_one(&q, None, 2))
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Two messages are ready and the batch asks for five: without the window the
     // pop returns immediately with two (the durable behaviour). With it, it holds
@@ -543,16 +700,31 @@ async fn case_window_buffer_fattens_a_waiting_pop(b: &Broker) -> Case {
     let got = b
         .ephemeral_pop(&pop_params(
             &q,
-            &[("batch", "5"), ("wait", "true"), ("timeout", "3000"), ("autoAck", "true")],
+            &[
+                ("batch", "5"),
+                ("wait", "true"),
+                ("timeout", "3000"),
+                ("autoAck", "true"),
+            ],
         ))
         .await
         .map_err(|e| e.to_string())?;
     let waited = t0.elapsed().as_millis();
-    chk!(msgs(&got).len() == 2, "the window must not LOSE messages, got {}", msgs(&got).len());
-    chk!(waited >= 300, "the window must hold the pop open (~400ms), returned after {waited}ms");
+    chk!(
+        msgs(&got).len() == 2,
+        "the window must not LOSE messages, got {}",
+        msgs(&got).len()
+    );
+    chk!(
+        waited >= 300,
+        "the window must hold the pop open (~400ms), returned after {waited}ms"
+    );
     // Bounded by the pop's own timeout and by the window, never by neither: 3s of
     // timeout must not become 3s of waiting.
-    chk!(waited < 2_000, "the window must not hold past its own ms, waited {waited}ms");
+    chk!(
+        waited < 2_000,
+        "the window must not hold past its own ms, waited {waited}ms"
+    );
     Ok(())
 }
 
@@ -562,8 +734,12 @@ async fn case_window_buffer_fattens_a_waiting_pop(b: &Broker) -> Case {
 
 async fn case_epoch_stale_acks(b: &Broker) -> Case {
     let q = unique("eph-stale-");
-    b.ephemeral_push(push_one(&q, None, 1)).await.map_err(|e| e.to_string())?;
-    b.ephemeral_pop(&pop_params(&q, &[])).await.map_err(|e| e.to_string())?;
+    b.ephemeral_push(push_one(&q, None, 1))
+        .await
+        .map_err(|e| e.to_string())?;
+    b.ephemeral_pop(&pop_params(&q, &[]))
+        .await
+        .map_err(|e| e.to_string())?;
 
     // An id minted by an epoch that is not this process's. THE ANSWER IS NEVER AN
     // ERROR: a client reconnecting after a restart flushes its outstanding acks,
@@ -598,9 +774,16 @@ async fn case_epoch_stale_acks(b: &Broker) -> Case {
 
 async fn case_implicit_gc(b: &Broker) -> Case {
     let q = unique("eph-gc-");
-    b.ephemeral_push(push_one(&q, None, 1)).await.map_err(|e| e.to_string())?;
-    b.ephemeral_pop(&pop_params(&q, &[("autoAck", "true")])).await.map_err(|e| e.to_string())?;
-    chk!(listed(b, &q).await?.is_some(), "the implicit queue must exist while it is in use");
+    b.ephemeral_push(push_one(&q, None, 1))
+        .await
+        .map_err(|e| e.to_string())?;
+    b.ephemeral_pop(&pop_params(&q, &[("autoAck", "true")]))
+        .await
+        .map_err(|e| e.to_string())?;
+    chk!(
+        listed(b, &q).await?.is_some(),
+        "the implicit queue must exist while it is in use"
+    );
 
     // QUEEN_EPHEMERAL_IMPLICIT_IDLE_S is 1 for this suite and the backstop runs
     // once a second, so ~4s is three chances. The wait is a poll rather than a
@@ -628,7 +811,10 @@ async fn case_configure_rejects_unknown_options(b: &Broker) -> Case {
         .err()
         .ok_or("an unknown option must be refused, not ignored")?;
     let (status, text) = status_and_code(&e);
-    chk!(status == 400, "an unknown option is a 400, got {status} ({text})");
+    chk!(
+        status == 400,
+        "an unknown option is a 400, got {status} ({text})"
+    );
     chk!(
         text.contains("ttlSecond"),
         "the refusal must name the offending key so a typo is findable: {text}"
@@ -656,9 +842,14 @@ async fn case_configure_reset_delete_round_trip(b: &Broker) -> Case {
         echo.get("queue").and_then(|x| x.as_str()) == Some(q.as_str()),
         "configure echoes the stored row: {echo}"
     );
-    chk!(echo.get("options").is_some(), "the echo carries the stored options: {echo}");
+    chk!(
+        echo.get("options").is_some(),
+        "the echo carries the stored options: {echo}"
+    );
 
-    let row = listed(b, &q).await?.ok_or("a declared queue must be listed")?;
+    let row = listed(b, &q)
+        .await?
+        .ok_or("a declared queue must be listed")?;
     chk!(
         row.get("tier").and_then(|t| t.as_str()) == Some("declared"),
         "the tier of a configured queue is `declared`: {row}"
@@ -675,23 +866,39 @@ async fn case_configure_reset_delete_round_trip(b: &Broker) -> Case {
     );
 
     for n in 0..4 {
-        b.ephemeral_push(push_one(&q, None, n)).await.map_err(|e| e.to_string())?;
+        b.ephemeral_push(push_one(&q, None, n))
+            .await
+            .map_err(|e| e.to_string())?;
     }
     // A lease is outstanding across the reset, which is the interesting case: the
     // reset must void it, not leave a lease pointing at a seq that is gone.
-    b.ephemeral_pop(&pop_params(&q, &[])).await.map_err(|e| e.to_string())?;
+    b.ephemeral_pop(&pop_params(&q, &[]))
+        .await
+        .map_err(|e| e.to_string())?;
 
     let r = b.ephemeral_reset(&q).await.map_err(|e| e.to_string())?;
     chk!(
         r.get("dropped").and_then(|d| d.as_i64()) == Some(4),
         "reset reports what it dropped: {r}"
     );
-    let d = b.ephemeral_depth(&q, None).await.map_err(|e| e.to_string())?;
-    chk!(d.get("pending").and_then(|p| p.as_i64()) == Some(0), "reset empties the queue: {d}");
-    chk!(d.get("bytes").and_then(|p| p.as_i64()) == Some(0), "reset returns the bytes: {d}");
+    let d = b
+        .ephemeral_depth(&q, None)
+        .await
+        .map_err(|e| e.to_string())?;
+    chk!(
+        d.get("pending").and_then(|p| p.as_i64()) == Some(0),
+        "reset empties the queue: {d}"
+    );
+    chk!(
+        d.get("bytes").and_then(|p| p.as_i64()) == Some(0),
+        "reset returns the bytes: {d}"
+    );
     // The queue itself SURVIVES a reset — it is declared, and its configuration
     // is durable. Only the contents were ever disposable.
-    chk!(listed(b, &q).await?.is_some(), "reset must not delete a declared queue");
+    chk!(
+        listed(b, &q).await?.is_some(),
+        "reset must not delete a declared queue"
+    );
 
     let del = b.ephemeral_delete(&q).await.map_err(|e| e.to_string())?;
     chk!(
@@ -699,7 +906,10 @@ async fn case_configure_reset_delete_round_trip(b: &Broker) -> Case {
             && del.get("declared").and_then(|x| x.as_bool()) == Some(true),
         "delete removes both halves and says so: {del}"
     );
-    chk!(listed(b, &q).await?.is_none(), "a deleted queue is gone from the listing");
+    chk!(
+        listed(b, &q).await?.is_none(),
+        "a deleted queue is gone from the listing"
+    );
 
     // A second delete is 200 with deleted:false — the house rule, and the reason
     // it is not a 404: the status describes the outcome of the CALL.
@@ -715,7 +925,11 @@ async fn case_configure_reset_delete_round_trip(b: &Broker) -> Case {
         .await
         .err()
         .ok_or("the depth of a deleted queue must be a 404")?;
-    chk!(e.status() == Some(404), "depth of an absent queue is 404, got {:?}", e.status());
+    chk!(
+        e.status() == Some(404),
+        "depth of an absent queue is 404, got {:?}",
+        e.status()
+    );
     Ok(())
 }
 
@@ -728,13 +942,18 @@ async fn listed(b: &Broker, queue: &str) -> Result<Option<Value>, String> {
     let v = b.ephemeral_queues().await.map_err(|e| e.to_string())?;
     Ok(v.get("queues")
         .and_then(|q| q.as_array())
-        .and_then(|a| a.iter().find(|x| x.get("queue").and_then(|n| n.as_str()) == Some(queue)))
+        .and_then(|a| {
+            a.iter()
+                .find(|x| x.get("queue").and_then(|n| n.as_str()) == Some(queue))
+        })
         .cloned())
 }
 
 /// `(bounds, ttl, retry)` drops for one queue.
 async fn drops_of(b: &Broker, queue: &str) -> Result<(u64, u64, u64), String> {
-    let row = listed(b, queue).await?.ok_or_else(|| format!("queue {queue} is not listed"))?;
+    let row = listed(b, queue)
+        .await?
+        .ok_or_else(|| format!("queue {queue} is not listed"))?;
     let d = row.get("drops").cloned().unwrap_or(Value::Null);
     let g = |k: &str| d.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
     Ok((g("bounds"), g("ttl"), g("retry")))
@@ -791,21 +1010,51 @@ async fn ephemeral_semantics() {
     // ---- phase A: one broker, the whole §1 contract ----------------------
     let b = boot(&host, port).await;
     report.push(("fifo_per_partition", case_fifo_per_partition(&b).await));
-    report.push(("lease_redelivery_counts_attempts", case_lease_redelivery_counts_attempts(&b).await));
-    report.push(("ack_statuses_completed_failed_retry", case_ack_statuses(&b).await));
-    report.push(("retry_limit_exhaustion_is_counted", case_retry_limit_exhaustion_is_counted(&b).await));
-    report.push(("auto_ack_is_at_most_once", case_auto_ack_is_at_most_once(&b).await));
-    report.push(("fan_out_across_groups", case_fan_out_across_groups(&b).await));
-    report.push(("groupless_is_queue_mode", case_groupless_is_queue_mode(&b).await));
+    report.push((
+        "lease_redelivery_counts_attempts",
+        case_lease_redelivery_counts_attempts(&b).await,
+    ));
+    report.push((
+        "ack_statuses_completed_failed_retry",
+        case_ack_statuses(&b).await,
+    ));
+    report.push((
+        "retry_limit_exhaustion_is_counted",
+        case_retry_limit_exhaustion_is_counted(&b).await,
+    ));
+    report.push((
+        "auto_ack_is_at_most_once",
+        case_auto_ack_is_at_most_once(&b).await,
+    ));
+    report.push((
+        "fan_out_across_groups",
+        case_fan_out_across_groups(&b).await,
+    ));
+    report.push((
+        "groupless_is_queue_mode",
+        case_groupless_is_queue_mode(&b).await,
+    ));
     report.push(("ttl_head_drop", case_ttl_head_drop(&b).await));
     report.push(("bounds_reject", case_bounds_reject(&b).await));
     report.push(("bounds_drop_oldest", case_bounds_drop_oldest(&b).await));
-    report.push(("cursor_skips_evicted_range", case_cursor_skips_evicted_range(&b).await));
-    report.push(("window_buffer_fattens_a_waiting_pop", case_window_buffer_fattens_a_waiting_pop(&b).await));
+    report.push((
+        "cursor_skips_evicted_range",
+        case_cursor_skips_evicted_range(&b).await,
+    ));
+    report.push((
+        "window_buffer_fattens_a_waiting_pop",
+        case_window_buffer_fattens_a_waiting_pop(&b).await,
+    ));
     report.push(("epoch_stale_acks", case_epoch_stale_acks(&b).await));
     report.push(("implicit_gc", case_implicit_gc(&b).await));
-    report.push(("configure_rejects_unknown_options", case_configure_rejects_unknown_options(&b).await));
-    report.push(("configure_reset_delete_round_trip", case_configure_reset_delete_round_trip(&b).await));
+    report.push((
+        "configure_rejects_unknown_options",
+        case_configure_rejects_unknown_options(&b).await,
+    ));
+    report.push((
+        "configure_reset_delete_round_trip",
+        case_configure_reset_delete_round_trip(&b).await,
+    ));
 
     // ---- phase B: a declared queue survives a restart, EMPTY --------------
     //
@@ -820,7 +1069,9 @@ async fn ephemeral_semantics() {
             .await
             .map_err(|e| e.to_string())?;
         for n in 0..3 {
-            b.ephemeral_push(push_one(&survivor, None, n)).await.map_err(|e| e.to_string())?;
+            b.ephemeral_push(push_one(&survivor, None, n))
+                .await
+                .map_err(|e| e.to_string())?;
         }
         b.shutdown().await;
 
@@ -837,12 +1088,23 @@ async fn ephemeral_semantics() {
             "it must come back EMPTY — contents survive nothing (§1.2): {row}"
         );
         chk!(
-            row.get("options").and_then(|o| o.get("maxLength")).and_then(|x| x.as_i64()) == Some(7),
+            row.get("options")
+                .and_then(|o| o.get("maxLength"))
+                .and_then(|x| x.as_i64())
+                == Some(7),
             "its CONFIGURATION must have survived: {row}"
         );
-        let got = b2.ephemeral_pop(&pop_params(&survivor, &[])).await.map_err(|e| e.to_string())?;
-        chk!(msgs(&got).is_empty(), "nothing may be delivered from before the restart");
-        b2.ephemeral_delete(&survivor).await.map_err(|e| e.to_string())?;
+        let got = b2
+            .ephemeral_pop(&pop_params(&survivor, &[]))
+            .await
+            .map_err(|e| e.to_string())?;
+        chk!(
+            msgs(&got).is_empty(),
+            "nothing may be delivered from before the restart"
+        );
+        b2.ephemeral_delete(&survivor)
+            .await
+            .map_err(|e| e.to_string())?;
         b2.shutdown().await;
         Ok(())
     }
@@ -857,7 +1119,10 @@ async fn ephemeral_semantics() {
     std::env::set_var("QUEEN_EPHEMERAL_REQUIRE_GRANT", "true");
     let pg = connect(&host, port).await;
     let _ = pg
-        .execute("DELETE FROM queen.ephemeral_quota WHERE tenant_id = $1::text::uuid", &[&DEFAULT_TENANT])
+        .execute(
+            "DELETE FROM queen.ephemeral_quota WHERE tenant_id = $1::text::uuid",
+            &[&DEFAULT_TENANT],
+        )
         .await;
 
     let ungranted: Case = async {
@@ -945,7 +1210,10 @@ async fn ephemeral_semantics() {
     // Leave the database as it was found: the row is tenant-scoped and a
     // leftover would make a re-run of phase C start already granted.
     let _ = pg
-        .execute("DELETE FROM queen.ephemeral_quota WHERE tenant_id = $1::text::uuid", &[&DEFAULT_TENANT])
+        .execute(
+            "DELETE FROM queen.ephemeral_quota WHERE tenant_id = $1::text::uuid",
+            &[&DEFAULT_TENANT],
+        )
         .await;
 
     println!("\n=============== Ephemeral semantics (EPHEMERAL_QUEUES §7.1) ===============");
@@ -964,5 +1232,8 @@ async fn ephemeral_semantics() {
         report.len() - failed,
         report.len()
     );
-    assert_eq!(failed, 0, "{failed} ephemeral semantics case(s) failed — see the table above");
+    assert_eq!(
+        failed, 0,
+        "{failed} ephemeral semantics case(s) failed — see the table above"
+    );
 }

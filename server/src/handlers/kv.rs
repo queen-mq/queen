@@ -138,7 +138,10 @@ pub(super) fn write_footprint(ops: &[Value]) -> (i64, i64) {
         match o.get("op").and_then(|v| v.as_str()) {
             Some("put" | "putIfAbsent" | "incr") => {
                 rows += 1;
-                bytes += o.get("value").map(|v| v.to_string().len() as i64).unwrap_or(0);
+                bytes += o
+                    .get("value")
+                    .map(|v| v.to_string().len() as i64)
+                    .unwrap_or(0);
             }
             _ => {}
         }
@@ -303,7 +306,10 @@ fn json_retry(status: StatusCode, body: String, secs: u32) -> Response {
 }
 
 fn bad_request(reason: &str, detail: &str) -> Response {
-    json(StatusCode::BAD_REQUEST, err("kv_bad_request", Some(reason), Some(detail)))
+    json(
+        StatusCode::BAD_REQUEST,
+        err("kv_bad_request", Some(reason), Some(detail)),
+    )
 }
 
 fn unavailable(reason: &str) -> Response {
@@ -346,7 +352,10 @@ fn precondition_200(detail: Option<&str>) -> Response {
         ("reason", Value::String("kv_precondition".to_string())),
     ];
     if let Some(v) = parsed {
-        pairs.push(("failedIndex", v.get("index").cloned().unwrap_or(Value::Null)));
+        pairs.push((
+            "failedIndex",
+            v.get("index").cloned().unwrap_or(Value::Null),
+        ));
         pairs.push(("kvReason", v.get("reason").cloned().unwrap_or(Value::Null)));
         pairs.push(("version", v.get("version").cloned().unwrap_or(Value::Null)));
         pairs.push(("value", v.get("value").cloned().unwrap_or(Value::Null)));
@@ -393,7 +402,8 @@ pub(super) fn resolve_db<T>(
             Err(Some(e))
         }
         Err(elapsed) => {
-            let _: Option<T> = db::resolve_query_timeout(Err(elapsed), client, cancel, what, metrics);
+            let _: Option<T> =
+                db::resolve_query_timeout(Err(elapsed), client, cancel, what, metrics);
             Err(None)
         }
     }
@@ -477,14 +487,23 @@ fn db_error_response(st: &AppState, e: &tokio_postgres::Error) -> Response {
 /// transaction wire passes TRUE from its own call site (§5.5, §6.3) — that flag
 /// is a parameter of the SP and not a second procedure, so the two surfaces can
 /// never drift apart.
-async fn apply_ops(st: &Arc<AppState>, tenant: &str, ops: Vec<Value>, write: bool) -> Result<Vec<Value>, Response> {
+async fn apply_ops(
+    st: &Arc<AppState>,
+    tenant: &str,
+    ops: Vec<Value>,
+    write: bool,
+) -> Result<Vec<Value>, Response> {
     if ops.is_empty() {
         return Ok(Vec::new());
     }
     if ops.len() > max_ops_per_call() {
         return Err(bad_request(
             "kv_too_many_ops",
-            &format!("{} ops in one call, the ceiling is {}", ops.len(), max_ops_per_call()),
+            &format!(
+                "{} ops in one call, the ceiling is {}",
+                ops.len(),
+                max_ops_per_call()
+            ),
         ));
     }
     // §6.1 point 4: an op count alone bounds nothing — 63 getMany of 256 keys
@@ -514,7 +533,11 @@ async fn apply_ops(st: &Arc<AppState>, tenant: &str, ops: Vec<Value>, write: boo
     if keys > max_keys_per_call() {
         return Err(bad_request(
             "kv_too_many_keys",
-            &format!("{} keys in one call, the ceiling is {}", keys, max_keys_per_call()),
+            &format!(
+                "{} keys in one call, the ceiling is {}",
+                keys,
+                max_keys_per_call()
+            ),
         ));
     }
     // Raw-body half of the value ceiling (§9.2). Measured on the serialized
@@ -543,7 +566,9 @@ async fn apply_ops(st: &Arc<AppState>, tenant: &str, ops: Vec<Value>, write: boo
     // keeps the transaction working. Reads are not shed — they are the cheap half
     // and the one an idempotency marker cannot do without.
     if write && standalone_shed(st) {
-        st.metrics.kvt.kv_read_rejected(crate::metrics::KvReject::Pool);
+        st.metrics
+            .kvt
+            .kv_read_rejected(crate::metrics::KvReject::Pool);
         return Err(json_retry(
             StatusCode::SERVICE_UNAVAILABLE,
             err(
@@ -566,12 +591,12 @@ async fn apply_ops(st: &Arc<AppState>, tenant: &str, ops: Vec<Value>, write: boo
     // the six pre-incident signals (§14.3.1) — not a fault, but the advance
     // warning of the one new failure mode this feature introduces: a customer
     // who has just put KV reads on their own end users' request path.
-    let (add_rows, add_bytes) = if write {
-        write_footprint(&ops)
+    let (add_rows, add_bytes) = if write { write_footprint(&ops) } else { (0, 0) };
+    let surface = if write {
+        Surface::KvWrite
     } else {
-        (0, 0)
+        Surface::KvRead
     };
-    let surface = if write { Surface::KvWrite } else { Surface::KvRead };
     if let Some(resp) = gated(st, tenant, surface, add_rows, add_bytes) {
         return Err(resp);
     }
@@ -579,7 +604,10 @@ async fn apply_ops(st: &Arc<AppState>, tenant: &str, ops: Vec<Value>, write: boo
     // The op kinds are kept for the metrics: on failure the SP tells us nothing
     // per-op, and a batch whose ops all read as `get` would misattribute the
     // whole error series.
-    let kinds: Vec<crate::metrics::KvOp> = ops.iter().filter_map(|o| kv_op_label(o.get("op").and_then(|v| v.as_str()))).collect();
+    let kinds: Vec<crate::metrics::KvOp> = ops
+        .iter()
+        .filter_map(|o| kv_op_label(o.get("op").and_then(|v| v.as_str())))
+        .collect();
     let bytes_in: u64 = ops
         .iter()
         .filter_map(|o| o.get("value"))
@@ -595,7 +623,9 @@ async fn apply_ops(st: &Arc<AppState>, tenant: &str, ops: Vec<Value>, write: boo
         // and with Retry-After — §12.1 degradation stage 2.
         Err(_) => {
             st.metrics.record_db_error();
-            st.metrics.kvt.kv_read_rejected(crate::metrics::KvReject::Pool);
+            st.metrics
+                .kvt
+                .kv_read_rejected(crate::metrics::KvReject::Pool);
             note_pool(st, false);
             // The call never reached the database, so the charge it took must go
             // back. Without this, a slow database inflates every delta until the
@@ -1131,7 +1161,9 @@ async fn console_client(st: &AppState) -> Result<deadpool_postgres::Client, Resp
         }
         Err(_) => {
             st.metrics.record_db_error();
-            st.metrics.kvt.kv_read_rejected(crate::metrics::KvReject::Pool);
+            st.metrics
+                .kvt
+                .kv_read_rejected(crate::metrics::KvReject::Pool);
             note_pool(st, false);
             Err(unavailable("kv_pool_exhausted"))
         }
@@ -1171,7 +1203,8 @@ pub async fn handle_kv_namespaces(
         Err(resp) => return resp,
     };
     let cancel = client.cancel_token();
-    let res = tokio::time::timeout(st.stmt_timeout, db::kv_namespaces(&client, tenant.as_str())).await;
+    let res =
+        tokio::time::timeout(st.stmt_timeout, db::kv_namespaces(&client, tenant.as_str())).await;
     match resolve_db(res, client, cancel, "kv_namespaces", &st.metrics) {
         // The stored procedure returns the bare array; the route wraps it, the
         // same way `batch_response` wraps the batch's. An object leaves room for
@@ -1278,8 +1311,15 @@ mod tests {
         assert_eq!(b.namespace, "orders");
         assert_eq!(b.prefix(), "", "an absent prefix lists the whole namespace");
         assert_eq!(b.after(), None, "no cursor is the first page");
-        assert_eq!(b.limit(), None, "the limit's one home is the stored procedure");
-        assert!(!b.keys_only(), "values come back unless the caller opts out");
+        assert_eq!(
+            b.limit(),
+            None,
+            "the limit's one home is the stored procedure"
+        );
+        assert!(
+            !b.keys_only(),
+            "values come back unless the caller opts out"
+        );
         assert!(
             !b.include_expired(),
             "§5.7 holds for anyone who did not ask otherwise: an expired row is \
@@ -1321,7 +1361,11 @@ mod tests {
         assert_eq!(b.limit(), Some(i32::MAX));
         let neg: KvListBody =
             serde_json::from_slice(br#"{"namespace":"n","limit":-9000000000}"#).expect("parse");
-        assert_eq!(neg.limit(), Some(i32::MIN), "the SP clamps up to 1 from here");
+        assert_eq!(
+            neg.limit(),
+            Some(i32::MIN),
+            "the SP clamps up to 1 from here"
+        );
         // Still a body-shape error, and correctly so: a page size is a whole
         // number, and `1e9` is a JSON float. The contract is about a limit that
         // is too HIGH, not about a value that is not a limit at all.
@@ -1409,7 +1453,9 @@ mod tests {
             .route("/api/v1/kv", post(handle_kv_batch))
             .route(
                 "/api/v1/kv/:ns/*key",
-                get(handle_kv_get).put(handle_kv_put).delete(handle_kv_delete),
+                get(handle_kv_get)
+                    .put(handle_kv_put)
+                    .delete(handle_kv_delete),
             );
     }
 
@@ -1427,10 +1473,7 @@ mod tests {
     fn the_two_console_routes_accept_these_handlers() {
         use axum::routing::{get, post};
         let _: axum::Router<Arc<AppState>> = axum::Router::new()
-            .route(
-                "/api/v1/resources/kv/namespaces",
-                get(handle_kv_namespaces),
-            )
+            .route("/api/v1/resources/kv/namespaces", get(handle_kv_namespaces))
             .route("/api/v1/resources/kv/list", post(handle_kv_list))
             .route("/api/v1/resources/queues/:queue", get(handle_kv_namespaces));
     }
@@ -1471,12 +1514,24 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
 
-        assert_eq!(get_body(addr, "/api/v1/kv/orders/order/9f1/items").await, "orders|order/9f1/items");
-        assert_eq!(get_body(addr, "/api/v1/kv/orders/simple").await, "orders|simple");
+        assert_eq!(
+            get_body(addr, "/api/v1/kv/orders/order/9f1/items").await,
+            "orders|order/9f1/items"
+        );
+        assert_eq!(
+            get_body(addr, "/api/v1/kv/orders/simple").await,
+            "orders|simple"
+        );
         // Percent-decoding happens in the extractor, once: a key that really
         // contains a slash is expressible and does not become two segments.
-        assert_eq!(get_body(addr, "/api/v1/kv/orders/a%2Fb").await, "orders|a/b");
-        assert_eq!(get_body(addr, "/api/v1/timers/q/tenant/42").await, "q|tenant/42");
+        assert_eq!(
+            get_body(addr, "/api/v1/kv/orders/a%2Fb").await,
+            "orders|a/b"
+        );
+        assert_eq!(
+            get_body(addr, "/api/v1/timers/q/tenant/42").await,
+            "q|tenant/42"
+        );
 
         server.abort();
     }
@@ -1488,11 +1543,15 @@ mod tests {
     async fn get_body(addr: std::net::SocketAddr, path: &str) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
-        s.write_all(format!("GET {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n").as_bytes())
-            .await
-            .unwrap();
+        s.write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
+        .await
+        .unwrap();
         let mut buf = String::new();
         s.read_to_string(&mut buf).await.unwrap();
-        buf.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default()
+        buf.split_once("\r\n\r\n")
+            .map(|(_, b)| b.to_string())
+            .unwrap_or_default()
     }
 }

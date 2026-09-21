@@ -84,7 +84,10 @@ impl Authenticator {
     pub fn uses_jwks(&self) -> bool {
         self.cfg.enabled
             && !self.cfg.jwks_url.is_empty()
-            && matches!(self.cfg.algorithm.as_str(), "RS256" | "RS384" | "RS512" | "EdDSA" | "auto")
+            && matches!(
+                self.cfg.algorithm.as_str(),
+                "RS256" | "RS384" | "RS512" | "EdDSA" | "auto"
+            )
     }
 
     pub fn jwks_refresh_interval(&self) -> Duration {
@@ -259,25 +262,38 @@ impl Authenticator {
         match alg {
             HS256 | HS384 | HS512 => {
                 if self.cfg.secret.is_empty() {
-                    return Err((StatusCode::INTERNAL_SERVER_ERROR, "HS secret not configured"));
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "HS secret not configured",
+                    ));
                 }
                 Ok(DecodingKey::from_secret(self.cfg.secret.as_bytes()))
             }
             RS256 | RS384 | RS512 => {
                 if !self.cfg.public_key.is_empty() {
-                    DecodingKey::from_rsa_pem(self.cfg.public_key.as_bytes())
-                        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "invalid RSA public key PEM"))
+                    DecodingKey::from_rsa_pem(self.cfg.public_key.as_bytes()).map_err(|_| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "invalid RSA public key PEM",
+                        )
+                    })
                 } else {
-                    self.key_for_kid(kid.unwrap_or("")).await
+                    self.key_for_kid(kid.unwrap_or(""))
+                        .await
                         .ok_or((StatusCode::UNAUTHORIZED, "Unknown key ID"))
                 }
             }
             EdDSA => {
                 if !self.cfg.public_key.is_empty() {
-                    DecodingKey::from_ed_pem(self.cfg.public_key.as_bytes())
-                        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "invalid Ed public key PEM"))
+                    DecodingKey::from_ed_pem(self.cfg.public_key.as_bytes()).map_err(|_| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "invalid Ed public key PEM",
+                        )
+                    })
                 } else {
-                    self.key_for_kid(kid.unwrap_or("")).await
+                    self.key_for_kid(kid.unwrap_or(""))
+                        .await
                         .ok_or((StatusCode::UNAUTHORIZED, "Unknown key ID"))
                 }
             }
@@ -333,7 +349,11 @@ impl Authenticator {
 /// None for unsupported key types / malformed keys.
 fn jwk_to_decoding_key(k: &serde_json::Value) -> Option<(String, DecodingKey)> {
     let kty = k.get("kty")?.as_str()?;
-    let kid = k.get("kid").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let kid = k
+        .get("kid")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     match kty {
         "RSA" => {
             let n = k.get("n")?.as_str()?;
@@ -701,7 +721,9 @@ mod tests {
     /// an unknown `JWT_ALGORITHM` falls to the `_ => false` arm and matches none.
     fn verifier_accepts(algorithm: &str) -> bool {
         let a = Authenticator::new(cfg_with_alg(algorithm));
-        EVERY_ALG.iter().any(|&alg| a.check_alg_allowed(alg).is_ok())
+        EVERY_ALG
+            .iter()
+            .any(|&alg| a.check_alg_allowed(alg).is_ok())
     }
 
     fn boot_accepts(algorithm: &str) -> bool {
@@ -725,8 +747,8 @@ mod tests {
             // wired here (ES*/PS*), plus the near-misses and the empty value, so
             // the two sides are pinned on their REFUSALS too, not just their
             // acceptances.
-            "ES256", "ES384", "PS256", "PS384", "PS512", "none", "None", "HS128",
-            "hs256", "RS128", "eddsa", "", "   ",
+            "ES256", "ES384", "PS256", "PS384", "PS512", "none", "None", "HS128", "hs256", "RS128",
+            "eddsa", "", "   ",
         ];
         for c in candidates {
             assert_eq!(
@@ -749,7 +771,10 @@ mod tests {
         );
         for alg in SUPPORTED_JWT_ALGORITHMS {
             assert!(boot_accepts(alg), "{alg} is in the set but boot refuses it");
-            assert!(verifier_accepts(alg), "{alg} is in the set but the verifier refuses it");
+            assert!(
+                verifier_accepts(alg),
+                "{alg} is in the set but the verifier refuses it"
+            );
         }
     }
 
@@ -760,7 +785,10 @@ mod tests {
     fn the_boot_error_names_every_supported_algorithm() {
         let err = cfg_with_alg("ES256").validate().unwrap_err();
         for alg in SUPPORTED_JWT_ALGORITHMS {
-            assert!(err.contains(*alg), "{alg} missing from the boot error: {err}");
+            assert!(
+                err.contains(*alg),
+                "{alg} missing from the boot error: {err}"
+            );
         }
         assert!(
             err.contains("use HS256, HS384, HS512, RS256, RS384, RS512, EdDSA, or auto"),
@@ -780,20 +808,31 @@ mod tests {
             c.validate()
         };
         for alg in ["HS256", "HS384", "HS512", "auto"] {
-            assert!(hs_only_secret(alg).is_ok(), "{alg} should boot on JWT_SECRET alone");
+            assert!(
+                hs_only_secret(alg).is_ok(),
+                "{alg} should boot on JWT_SECRET alone"
+            );
         }
-        for alg in ["HS256", "HS384", "HS512", "RS256", "RS384", "RS512", "EdDSA", "auto"] {
+        for alg in [
+            "HS256", "HS384", "HS512", "RS256", "RS384", "RS512", "EdDSA", "auto",
+        ] {
             let mut c = cfg_with_alg(alg);
             c.secret = String::new();
             c.public_key = String::new();
             c.jwks_url = String::new();
-            assert!(c.validate().is_err(), "{alg} with NO key material must not boot");
+            assert!(
+                c.validate().is_err(),
+                "{alg} with NO key material must not boot"
+            );
         }
         for alg in ["RS256", "RS384", "RS512", "EdDSA"] {
             let mut c = cfg_with_alg(alg);
             c.public_key = String::new();
             c.jwks_url = String::new();
-            assert!(c.validate().is_err(), "{alg} must not boot on a secret alone");
+            assert!(
+                c.validate().is_err(),
+                "{alg} must not boot on a secret alone"
+            );
         }
         // Disabled auth validates whatever it is given: the middleware is a
         // pass-through, so an unsupported value is inert rather than fatal.

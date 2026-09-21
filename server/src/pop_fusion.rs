@@ -57,8 +57,8 @@ use std::time::{Duration, Instant};
 use deadpool_postgres::Pool;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::db;
 use crate::admission::{Admission, Lane};
+use crate::db;
 
 // Coalescing observability: COMMITS counts fused transactions, JOBS the pop
 // claims inside them. jobs/commit is the fusion gain, cross-checkable against

@@ -358,14 +358,16 @@ fn spawn_flush(ctx: Arc<FlushCtx>, rows: Vec<Folded>, done: mpsc::UnboundedSende
                         parse_multi(&txt, n)
                     }
                     Ok(Err(e)) => {
-                        static ACK_MULTI_ERR: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+                        static ACK_MULTI_ERR: crate::obs::Sampler =
+                            crate::obs::Sampler::new(10_000);
                         if let Some(suppressed) = ACK_MULTI_ERR.tick_now() {
                             tracing::error!(target: "ack-fusion", rows = n, error = %e, suppressed, "log_ack_multi error");
                         }
                         None
                     }
                     Err(_) => {
-                        static ACK_MULTI_TIMEOUT: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+                        static ACK_MULTI_TIMEOUT: crate::obs::Sampler =
+                            crate::obs::Sampler::new(10_000);
                         if let Some(suppressed) = ACK_MULTI_TIMEOUT.tick_now() {
                             tracing::error!(target: "ack-fusion", rows = n, suppressed, "log_ack_multi timeout");
                         }
@@ -401,8 +403,8 @@ fn spawn_flush(ctx: Arc<FlushCtx>, rows: Vec<Folded>, done: mpsc::UnboundedSende
 
         record_flush(n);
         let _ = t0; // (rtt available if a latency metric is wired later)
-        // Release the in-flight slot LAST so the shard re-dispatches only after
-        // this commit is visible. Best-effort: a closed receiver means shutdown.
+                    // Release the in-flight slot LAST so the shard re-dispatches only after
+                    // this commit is visible. Best-effort: a closed receiver means shutdown.
         let _ = done.send(());
     });
 }
@@ -566,7 +568,11 @@ mod tests {
         // Not ok ⇒ None (whole-flush FlushErr).
         assert!(parse_multi(r#"{"ok":false}"#, 1).is_none());
         // Length mismatch ⇒ None.
-        assert!(parse_multi(r#"{"ok":true,"results":[{"ok":true,"acked":1,"error":null}]}"#, 2).is_none());
+        assert!(parse_multi(
+            r#"{"ok":true,"results":[{"ok":true,"acked":1,"error":null}]}"#,
+            2
+        )
+        .is_none());
         // Missing per-row ok ⇒ None (can't trust a partial ack).
         assert!(parse_multi(r#"{"ok":true,"results":[{"acked":1}]}"#, 1).is_none());
         // Missing results ⇒ None.
@@ -584,9 +590,7 @@ mod tests {
             enabled: false,
         };
         assert!(!f.enabled());
-        let v = f
-            .ack("p1".into(), "g".into(), "w1".into(), 10, 1)
-            .await;
+        let v = f.ack("p1".into(), "g".into(), "w1".into(), 10, 1).await;
         assert_eq!(v, AckVerdict::FlushErr);
     }
 }

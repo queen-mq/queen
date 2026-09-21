@@ -19,6 +19,7 @@ use serde::de::{self, Deserializer, Visitor};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
+use crate::admission::Lane;
 use crate::db;
 use crate::frames::{
     pack_frames, unpack_frames, uuid_bytes_to_string, uuid_string_to_bytes, zstd_compress,
@@ -27,7 +28,6 @@ use crate::frames::{
 use crate::fusion::{json_escape_into, AddMsg, Fusion, ItemResult, OwnedFrame, PushState};
 use crate::metrics::Metrics;
 use crate::util::{uuidv7_bytes, FnvHashMap};
-use crate::admission::Lane;
 
 // ------------------------------------------------------------------ push
 
@@ -243,11 +243,11 @@ pub async fn handle_push(
     // the `as u16` cast while `body_len` still counted the full length — a corrupt
     // frame, not a rejected push. Enforce the wire limit at the boundary that can
     // still answer, and reject the whole batch rather than write a bad segment.
-    if let Some(bad) = parsed
-        .items
-        .iter()
-        .position(|it| it.transaction_id.as_deref().is_some_and(|t| t.len() > MAX_TXN_BYTES))
-    {
+    if let Some(bad) = parsed.items.iter().position(|it| {
+        it.transaction_id
+            .as_deref()
+            .is_some_and(|t| t.len() > MAX_TXN_BYTES)
+    }) {
         return json(
             StatusCode::BAD_REQUEST,
             json_err(
@@ -292,8 +292,7 @@ pub async fn handle_push(
         let queue = it.queue.as_str().to_string();
         let partition = it.partition.as_deref().unwrap_or("Default").to_string();
 
-        let mut seen_key =
-            String::with_capacity(queue.len() + partition.len() + txn.len() + 2);
+        let mut seen_key = String::with_capacity(queue.len() + partition.len() + txn.len() + 2);
         seen_key.push_str(&queue);
         seen_key.push('\x1f');
         seen_key.push_str(&partition);
@@ -367,13 +366,16 @@ pub async fn handle_push(
             (body.slice_ref(raw), false)
         };
 
-        groups.entry((queue, partition)).or_default().push(PreFrame {
-            mid,
-            txn,
-            payload,
-            encrypted,
-            item: i,
-        });
+        groups
+            .entry((queue, partition))
+            .or_default()
+            .push(PreFrame {
+                mid,
+                txn,
+                payload,
+                encrypted,
+                item: i,
+            });
     }
 
     // producer_sub (computed above) is carried THROUGH fusion on each OwnedFrame —
@@ -389,7 +391,13 @@ pub async fn handle_push(
     // bare-name clone already cost.
     let landed: Vec<(String, String, u32)> = groups
         .iter()
-        .map(|((q, p), v)| (tenant_queue_key(tenant.as_str(), q), p.clone(), v.len() as u32))
+        .map(|((q, p), v)| {
+            (
+                tenant_queue_key(tenant.as_str(), q),
+                p.clone(),
+                v.len() as u32,
+            )
+        })
         .collect();
     let (tx, rx) = tokio::sync::oneshot::channel();
     let state = Arc::new(PushState {
@@ -466,8 +474,14 @@ pub async fn handle_push(
     for i in error_leaders {
         let it = &parsed.items[i];
         let txn = state.results.lock().unwrap()[i].txn.clone();
-        let (payload, encrypted) =
-            spool_payload(&st, it.queue.as_str(), tenant.as_str(), it.payload, &mut enc_flags).await;
+        let (payload, encrypted) = spool_payload(
+            &st,
+            it.queue.as_str(),
+            tenant.as_str(),
+            it.payload,
+            &mut enc_flags,
+        )
+        .await;
         let ok = st.file_buffer.write_event(
             it.queue.as_str(),
             it.partition.as_deref().unwrap_or("Default"),
@@ -529,9 +543,7 @@ async fn spool_payload(
         };
         if on {
             if let Some(env) = st.encryption.encrypt(raw.get().as_bytes()) {
-                if let Ok(rv) =
-                    RawValue::from_string(String::from_utf8_lossy(&env).into_owned())
-                {
+                if let Ok(rv) = RawValue::from_string(String::from_utf8_lossy(&env).into_owned()) {
                     // RUSTFIX item 8: report that the spooled payload IS an envelope,
                     // so the drain re-stamps FLAG_ENCRYPTED on the replayed frame.
                     return (rv, true);
@@ -663,7 +675,10 @@ struct Conflation {
 }
 
 impl Conflation {
-    const OFF: Conflation = Conflation { on: false, conflict: false };
+    const OFF: Conflation = Conflation {
+        on: false,
+        conflict: false,
+    };
 }
 
 /// Resolve the effective conflation policy for (queue, group) — §3.3: SQL is the
@@ -687,7 +702,10 @@ async fn resolve_conflation(
     if group == "__QUEUE_MODE__" {
         return Conflation::OFF;
     }
-    let stored = st.group_policy(queue, group, tenant).await.map(|p| p.conflation);
+    let stored = st
+        .group_policy(queue, group, tenant)
+        .await
+        .map(|p| p.conflation);
     let on = stored.unwrap_or_else(|| requested.unwrap_or(false));
     let conflict = matches!(requested, Some(r) if r != on);
     if conflict {
@@ -792,11 +810,7 @@ struct PopPart {
     // Group-scoped redelivery count written by the SQL claim path. Defaulting
     // to one keeps rolling upgrades safe when a broker briefly sees metadata
     // produced by the previous procedure version.
-    #[serde(
-        rename = "deliveryAttempt",
-        alias = "attempt",
-        default
-    )]
+    #[serde(rename = "deliveryAttempt", alias = "attempt", default)]
     delivery_attempt: Option<i32>,
     #[serde(default)]
     segments: Vec<PopSeg>,
@@ -849,11 +863,7 @@ struct PopSpecificResult {
     segments: Vec<PopSeg>,
     #[serde(rename = "partitionId", default)]
     partition_id: String,
-    #[serde(
-        rename = "deliveryAttempt",
-        alias = "attempt",
-        default
-    )]
+    #[serde(rename = "deliveryAttempt", alias = "attempt", default)]
     delivery_attempt: Option<i32>,
     #[serde(default)]
     error: Option<String>,
@@ -910,7 +920,9 @@ pub async fn handle_pop(
             json(StatusCode::NO_CONTENT, POP_PAUSED.to_string())
         };
     }
-    let group = p.consumer_group.unwrap_or_else(|| "__QUEUE_MODE__".to_string());
+    let group = p
+        .consumer_group
+        .unwrap_or_else(|| "__QUEUE_MODE__".to_string());
     let cfl = resolve_conflation(&st, &queue, &group, tenant.as_str(), p.conflation).await;
     // M5 (§3.2): `partitions` defaults to 1, and a conflating pop yields at most
     // ONE message per partition — so the batch budget stops being the thing that
@@ -993,8 +1005,22 @@ pub async fn handle_pop(
             None => (batch, max_parts),
         };
         return serve_pop_hotlist(
-            &st, &qkey, &queue, &group, batch, max_parts, auto_ack, wait, deadline, lease_seconds,
-            &sub_mode, &sub_from, &worker, tenant.as_str(), cfl, &ticket,
+            &st,
+            &qkey,
+            &queue,
+            &group,
+            batch,
+            max_parts,
+            auto_ack,
+            wait,
+            deadline,
+            lease_seconds,
+            &sub_mode,
+            &sub_from,
+            &worker,
+            tenant.as_str(),
+            cfl,
+            &ticket,
         )
         .await;
     }
@@ -1015,7 +1041,9 @@ pub async fn handle_pop(
         // pool.get measured ~0µs) and never touches the admission budget, so the quiet re-poll
         // storm can no longer starve real deliveries.
         let pending = match st.pool.get().await {
-            Ok(c) => db::has_pending(&c, &queue, &group, tenant.as_str()).await.unwrap_or(true),
+            Ok(c) => db::has_pending(&c, &queue, &group, tenant.as_str())
+                .await
+                .unwrap_or(true),
             Err(_) => true, // probe unavailable → fall back to the full scan (safe)
         };
 
@@ -1026,7 +1054,10 @@ pub async fn handle_pop(
                 Err(_) => {
                     st.metrics.record_db_error();
                     drop(slot);
-                    return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string());
+                    return json(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "{\"error\":\"pool\"}".to_string(),
+                    );
                 }
             };
             // Cancel token captured BEFORE issuing the query: on a broker-side
@@ -1037,40 +1068,72 @@ pub async fn handle_pop(
             let res = tokio::time::timeout(
                 st.stmt_timeout,
                 db::pop_wildcard_bin(
-                    &client, &queue, &group, batch, lease_seconds, &worker, auto_ack, max_parts,
-                    &sub_mode, &sub_from, tenant.as_str(), cfl.on,
+                    &client,
+                    &queue,
+                    &group,
+                    batch,
+                    lease_seconds,
+                    &worker,
+                    auto_ack,
+                    max_parts,
+                    &sub_mode,
+                    &sub_from,
+                    tenant.as_str(),
+                    cfl.on,
                 ),
             )
             .await;
             let rtt = t0.elapsed();
-            if matches!(res, Ok(Ok(_))) { slot.commit_done(rtt); }
+            if matches!(res, Ok(Ok(_))) {
+                slot.commit_done(rtt);
+            }
             drop(slot);
             // Spec §10 (parked long-poll): resolve_query_timeout releases the pooled
             // connection (drop on success/db-error, DETACH+cancel on timeout) BEFORE
             // any parking below — a parked pop must never pin a PG connection.
-            let (txt, blobs) = match db::resolve_query_timeout(res, client, cancel_token, "pop_wildcard", &st.metrics) {
+            let (txt, blobs) = match db::resolve_query_timeout(
+                res,
+                client,
+                cancel_token,
+                "pop_wildcard",
+                &st.metrics,
+            ) {
                 Some(t) => {
                     // Phase 2 observability: an actual wildcard candidate scan.
                     st.metrics.pop_wildcard.fetch_add(1, Ordering::Relaxed);
                     t
                 }
                 None => {
-                    return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pop failed\"}".to_string())
+                    return json(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "{\"error\":\"pop failed\"}".to_string(),
+                    )
                 }
             };
             (txt, blobs, rtt)
         } else {
             // Nothing pending — synthesize an empty wildcard result and fall through
             // to the shared park/serve logic below WITHOUT taking a serving permit.
-            ("{\"partitions\":[]}".to_string(), Vec::new(), Duration::ZERO)
+            (
+                "{\"partitions\":[]}".to_string(),
+                Vec::new(),
+                Duration::ZERO,
+            )
         };
 
         // On a leased (non-autoAck) pop, the worker id IS the lease id the client
         // echoes back in ack/renew. autoAck pops advance the cursor server-side and
         // carry no lease, so they report an empty leaseId.
         let lease_id: &str = if auto_ack { "" } else { &worker };
-        let (body, count, meta) =
-            build_pop_response(&txt, Some(&blobs), &queue, &group, lease_id, &st.encryption, cfl);
+        let (body, count, meta) = build_pop_response(
+            &txt,
+            Some(&blobs),
+            &queue,
+            &group,
+            lease_id,
+            &st.encryption,
+            cfl,
+        );
         if count == 0 && wait && Instant::now() < deadline {
             // Park on the queue's wake gate; a push wakes us at once.
             // RUSTFIX item 19: exponentially-backing-off re-query; a push-wake resets it.
@@ -1107,8 +1170,18 @@ pub async fn handle_pop(
                     let hints = st.notifier.drain_hints(&qkey, max_parts.max(1) as usize);
                     if !hints.is_empty() {
                         if let Some(resp) = try_targeted_serve(
-                            &st, &queue, &hints, &group, batch, lease_seconds, &worker, auto_ack,
-                            &sub_mode, &sub_from, tenant.as_str(), cfl,
+                            &st,
+                            &queue,
+                            &hints,
+                            &group,
+                            batch,
+                            lease_seconds,
+                            &worker,
+                            auto_ack,
+                            &sub_mode,
+                            &sub_from,
+                            tenant.as_str(),
+                            cfl,
                         )
                         .await
                         {
@@ -1125,10 +1198,16 @@ pub async fn handle_pop(
         st.metrics.pop.record_batch(count, true, rtt);
         // RUSTFIX item 24: per-queue pop throughput for queue_lag_metrics.
         if count > 0 {
-            st.metrics.per_queue.add_pop(tenant.as_str(), &queue, count as u64);
             st.metrics
                 .per_queue
-                .add_pop_lag(tenant.as_str(), &queue, meta.lag_sum_ms, meta.lag_max_ms, meta.lag_n);
+                .add_pop(tenant.as_str(), &queue, count as u64);
+            st.metrics.per_queue.add_pop_lag(
+                tenant.as_str(),
+                &queue,
+                meta.lag_sum_ms,
+                meta.lag_max_ms,
+                meta.lag_n,
+            );
             for pid in &meta.partition_ids {
                 st.remember_partition_queue(pid, &queue);
             }
@@ -1139,7 +1218,9 @@ pub async fn handle_pop(
         // IS an acknowledgement — count it so the ack throughput / completed totals
         // on the dashboard reflect auto-acked consumption too.
         if auto_ack && count > 0 {
-            st.metrics.per_queue.add_ack(tenant.as_str(), &queue, count as u64, 0);
+            st.metrics
+                .per_queue
+                .add_ack(tenant.as_str(), &queue, count as u64, 0);
             st.metrics.ack.record_request(count);
             st.metrics
                 .ack_success
@@ -1244,22 +1325,36 @@ async fn try_targeted_serve(
         let res = tokio::time::timeout(
             st.stmt_timeout,
             db::pop_specific(
-                &client, queue, hint, group, remaining, lease_seconds, worker, auto_ack, sub_mode,
-                sub_from, tenant, cfl.on,
+                &client,
+                queue,
+                hint,
+                group,
+                remaining,
+                lease_seconds,
+                worker,
+                auto_ack,
+                sub_mode,
+                sub_from,
+                tenant,
+                cfl.on,
             ),
         )
         .await;
         let rtt = t0.elapsed();
-        if matches!(res, Ok(Ok(_))) { slot.commit_done(rtt); }
+        if matches!(res, Ok(Ok(_))) {
+            slot.commit_done(rtt);
+        }
         total_rtt += rtt;
         drop(slot);
         // This is a targeted (hint-driven) pop — count it whether or not it found
         // data; an empty result still cost ~1ms vs the wildcard's ~10ms.
         st.metrics.pop_targeted.fetch_add(1, Ordering::Relaxed);
-        let txt = match db::resolve_query_timeout(res, client, cancel_token, "pop_targeted", &st.metrics) {
-            Some(t) => t,
-            None => break, // DB error/timeout — abandon targeted, fall back to wildcard
-        };
+        let txt =
+            match db::resolve_query_timeout(res, client, cancel_token, "pop_targeted", &st.metrics)
+            {
+                Some(t) => t,
+                None => break, // DB error/timeout — abandon targeted, fall back to wildcard
+            };
         let parsed: PopSpecificResult = match serde_json::from_str(&txt) {
             Ok(p) => p,
             Err(_) => continue,
@@ -1409,10 +1504,22 @@ async fn serve_pop_hotlist(
     let t_rq = Instant::now();
     // uuidv7 is time-ordered: the LEADING hex is the timestamp and collides
     // across concurrent requests — the trailing bits are the random part.
-    let wtag: &str = if worker.len() >= 8 { &worker[worker.len() - 8..] } else { worker };
+    let wtag: &str = if worker.len() >= 8 {
+        &worker[worker.len() - 8..]
+    } else {
+        worker
+    };
     if st.hotlist.traced(qkey) {
-        eprintln!("[hlt] rqin q={} g={} w={} batch={} mp={} wait={} t={}",
-            queue, group, wtag, batch, max_parts, wait, crate::hotlist::trace_now_ms());
+        eprintln!(
+            "[hlt] rqin q={} g={} w={} batch={} mp={} wait={} t={}",
+            queue,
+            group,
+            wtag,
+            batch,
+            max_parts,
+            wait,
+            crate::hotlist::trace_now_ms()
+        );
     }
     loop {
         // ── TASK M (minimum pop wait). The ceiling on a small cell is
@@ -1465,7 +1572,9 @@ async fn serve_pop_hotlist(
                     // is served early; a MISSED wake only costs the remainder of an
                     // already-bounded window, never correctness.
                     st.notifier.wait_queue(qkey, left).await;
-                    if st.hotlist.ready_est(qkey, group, crate::util::now_epoch_ms())
+                    if st
+                        .hotlist
+                        .ready_est(qkey, group, crate::util::now_epoch_ms())
                         >= batch as u64
                     {
                         break;
@@ -1479,8 +1588,21 @@ async fn serve_pop_hotlist(
         }
 
         let (body, count, meta, rtt) = match hotlist_pop_attempt(
-            st, qkey, queue, group, batch, max_parts, auto_ack, lease_seconds, sub_mode, sub_from,
-            worker, lease_id, tenant, cfl, ticket,
+            st,
+            qkey,
+            queue,
+            group,
+            batch,
+            max_parts,
+            auto_ack,
+            lease_seconds,
+            sub_mode,
+            sub_from,
+            worker,
+            lease_id,
+            tenant,
+            cfl,
+            ticket,
         )
         .await
         {
@@ -1507,9 +1629,16 @@ async fn serve_pop_hotlist(
             let t_park = Instant::now();
             let woke = st.notifier.wait_queue(qkey, waitd).await;
             if st.hotlist.traced(qkey) {
-                eprintln!("[hlt] park q={} g={} w={} ms={} woke={} bo={} t={}", queue, group,
-                    wtag, t_park.elapsed().as_millis(), woke, backoff_count,
-                    crate::hotlist::trace_now_ms());
+                eprintln!(
+                    "[hlt] park q={} g={} w={} ms={} woke={} bo={} t={}",
+                    queue,
+                    group,
+                    wtag,
+                    t_park.elapsed().as_millis(),
+                    woke,
+                    backoff_count,
+                    crate::hotlist::trace_now_ms()
+                );
             }
             if woke {
                 backoff_count = 0;
@@ -1521,14 +1650,23 @@ async fn serve_pop_hotlist(
         st.metrics.pop.record_request(count);
         st.metrics.pop.record_batch(count, true, rtt);
         if count > 0 && st.hotlist.traced(qkey) {
-            eprintln!("[hlt] served q={} g={} n={} t={}", queue, group, count,
-                crate::hotlist::trace_now_ms());
+            eprintln!(
+                "[hlt] served q={} g={} n={} t={}",
+                queue,
+                group,
+                count,
+                crate::hotlist::trace_now_ms()
+            );
         }
         if count > 0 {
             st.metrics.per_queue.add_pop(tenant, queue, count as u64);
-            st.metrics
-                .per_queue
-                .add_pop_lag(tenant, queue, meta.lag_sum_ms, meta.lag_max_ms, meta.lag_n);
+            st.metrics.per_queue.add_pop_lag(
+                tenant,
+                queue,
+                meta.lag_sum_ms,
+                meta.lag_max_ms,
+                meta.lag_n,
+            );
             for pid in &meta.partition_ids {
                 st.remember_partition_queue(pid, queue);
             }
@@ -1543,9 +1681,15 @@ async fn serve_pop_hotlist(
                 .fetch_add(count as u64, Ordering::Relaxed);
         }
         if st.hotlist.traced(qkey) {
-            eprintln!("[hlt] rqout q={} g={} w={} n={} ms={} t={}",
-                queue, group, wtag, count, t_rq.elapsed().as_millis(),
-                crate::hotlist::trace_now_ms());
+            eprintln!(
+                "[hlt] rqout q={} g={} w={} n={} ms={} t={}",
+                queue,
+                group,
+                wtag,
+                count,
+                t_rq.elapsed().as_millis(),
+                crate::hotlist::trace_now_ms()
+            );
         }
         // ── POP AUTOPILOT: the loop closes HERE, once per request (never per poll
         // iteration) — measure at the end of pop N, apply at the start of pop
@@ -1704,22 +1848,35 @@ async fn hotlist_pop_attempt(
         let res = tokio::time::timeout(
             st.stmt_timeout,
             db::pop_wildcard_bin(
-                &client, queue, group, batch, lease_seconds, worker, auto_ack, max_parts,
-                sub_mode, sub_from, tenant, cfl.on,
+                &client,
+                queue,
+                group,
+                batch,
+                lease_seconds,
+                worker,
+                auto_ack,
+                max_parts,
+                sub_mode,
+                sub_from,
+                tenant,
+                cfl.on,
             ),
         )
         .await;
         let rtt = t0.elapsed();
-        if matches!(res, Ok(Ok(_))) { slot.commit_done(rtt); }
+        if matches!(res, Ok(Ok(_))) {
+            slot.commit_done(rtt);
+        }
         drop(slot);
-        let (txt, blobs) = match db::resolve_query_timeout(res, client, cancel_token, "pop_wildcard", &st.metrics)
-        {
-            Some(t) => t,
-            None => {
-                let (b, c, m) = empty();
-                return Ok((b, c, m, rtt));
-            }
-        };
+        let (txt, blobs) =
+            match db::resolve_query_timeout(res, client, cancel_token, "pop_wildcard", &st.metrics)
+            {
+                Some(t) => t,
+                None => {
+                    let (b, c, m) = empty();
+                    return Ok((b, c, m, rtt));
+                }
+            };
         // Learn ids for the ack bridge; the ring is populated by the next pop's
         // reseed (cursors now seeded ⇒ pending partitions become visible to it).
         if let Ok(parsed) = serde_json::from_str::<PopResult>(&txt) {
@@ -1728,7 +1885,13 @@ async fn hotlist_pop_attempt(
                     .note_partition_id(qkey, &part.partition, &part.partition_id);
             }
             let (body, count, meta) = render_pop_parts(
-                &parsed.partitions, Some(&blobs), queue, group, lease_id, &st.encryption, cfl,
+                &parsed.partitions,
+                Some(&blobs),
+                queue,
+                group,
+                lease_id,
+                &st.encryption,
+                cfl,
             );
             return Ok((body, count, meta, rtt));
         }
@@ -1763,12 +1926,19 @@ async fn hotlist_pop_attempt(
     // floor), or a stale deferral-config refresh (§6) — each gated by a cheap
     // in-memory predicate here. The quiet re-poll short-circuits WITHOUT ever
     // touching the admission budget / the pool.
-    let need_reseed = st.hotlist.reseed_due(qkey, group, now_ms, st.hotlist_reseed_ms);
+    let need_reseed = st
+        .hotlist
+        .reseed_due(qkey, group, now_ms, st.hotlist_reseed_ms);
     let need_cfg = !st.hotlist.cfg_fresh(qkey, now_ms, HOTLIST_CFG_TTL_MS);
     if !need_reseed && !need_cfg && !st.hotlist.has_ready(qkey, group, now_ms) {
         if st.hotlist.traced(qkey) {
-            eprintln!("[hlt] quiet q={} g={} w={} t={}", queue, group,
-                &worker[worker.len().saturating_sub(8)..], crate::hotlist::trace_now_ms());
+            eprintln!(
+                "[hlt] quiet q={} g={} w={} t={}",
+                queue,
+                group,
+                &worker[worker.len().saturating_sub(8)..],
+                crate::hotlist::trace_now_ms()
+            );
         }
         let (b, c, m) = empty();
         return Ok((b, c, m, Duration::ZERO));
@@ -1783,20 +1953,26 @@ async fn hotlist_pop_attempt(
     // transaction.
     if st.pop_fusion.enabled() && !need_cfg && !need_reseed {
         // Checkout width = the SQL's serve cap, 1:1. The old 2x over-fetch dated
-    // from the random-candidate-scan era, when half a claim's candidates were
-    // routinely stolen or empty. With the hot-list ring the candidates are
-    // near-perfect (measured 2026-08-03: leased 0.0%, empty 1.0%) — and the
-    // over-fetch systematically returned the surplus HALF of every claim with
-    // no verdict (requeue 49% of all candidates), sending perfectly good
-    // partitions to the BACK of the ready ring for a full extra lap (~1s at
-    // the sparse shape's service rate). One line, half the latency.
-    let k = (max_parts.max(1) as usize).clamp(2, 64);
+        // from the random-candidate-scan era, when half a claim's candidates were
+        // routinely stolen or empty. With the hot-list ring the candidates are
+        // near-perfect (measured 2026-08-03: leased 0.0%, empty 1.0%) — and the
+        // over-fetch systematically returned the surplus HALF of every claim with
+        // no verdict (requeue 49% of all candidates), sending perfectly good
+        // partitions to the BACK of the ready ring for a full extra lap (~1s at
+        // the sparse shape's service rate). One line, half the latency.
+        let k = (max_parts.max(1) as usize).clamp(2, 64);
         let want = batch.max(1) as u32;
         let cands = st.hotlist.take_batch(qkey, group, k, want, now_ms);
         if st.hotlist.traced(qkey) {
-            eprintln!("[hlt] take q={} g={} w={} got={} est={} fused=1 t={}", queue, group,
-                &worker[worker.len().saturating_sub(8)..], cands.len(),
-                st.hotlist.ready_est(qkey, group, now_ms), crate::hotlist::trace_now_ms());
+            eprintln!(
+                "[hlt] take q={} g={} w={} got={} est={} fused=1 t={}",
+                queue,
+                group,
+                &worker[worker.len().saturating_sub(8)..],
+                cands.len(),
+                st.hotlist.ready_est(qkey, group, now_ms),
+                crate::hotlist::trace_now_ms()
+            );
         }
         if cands.is_empty() {
             // The quiet gate said ready, but a concurrent serve drained the
@@ -1846,15 +2022,38 @@ async fn hotlist_pop_attempt(
         guard.armed = false;
         let cands = std::mem::take(&mut guard.cands);
         if st.hotlist.traced(qkey) {
-            eprintln!("[hlt] fusedwait q={} g={} w={} ms={} t={}", queue, group,
-                &worker[worker.len().saturating_sub(8)..], t_claim.elapsed().as_millis(),
-                crate::hotlist::trace_now_ms());
+            eprintln!(
+                "[hlt] fusedwait q={} g={} w={} ms={} t={}",
+                queue,
+                group,
+                &worker[worker.len().saturating_sub(8)..],
+                t_claim.elapsed().as_millis(),
+                crate::hotlist::trace_now_ms()
+            );
         }
         match verdict {
-            crate::pop_fusion::PopVerdict::Served { meta, blobs, states, rtt } => {
+            crate::pop_fusion::PopVerdict::Served {
+                meta,
+                blobs,
+                states,
+                rtt,
+            } => {
                 return Ok(finish_pop_serve(
-                    st, qkey, queue, group, cands, meta, blobs, states, now_ms, auto_ack,
-                    lease_ms, lease_seconds, lease_id, rtt, cfl,
+                    st,
+                    qkey,
+                    queue,
+                    group,
+                    cands,
+                    meta,
+                    blobs,
+                    states,
+                    now_ms,
+                    auto_ack,
+                    lease_ms,
+                    lease_seconds,
+                    lease_id,
+                    rtt,
+                    cfl,
                 ));
             }
             crate::pop_fusion::PopVerdict::FlushErr => {
@@ -1882,9 +2081,17 @@ async fn hotlist_pop_attempt(
     // reseed/cfg floor (O(served + #queues / reseed_interval)), never the
     // O(#queues) quiet re-poll storm.
     let tr = st.hotlist.traced(qkey);
-    let t_start = if tr { crate::hotlist::trace_now_ms() } else { 0 };
+    let t_start = if tr {
+        crate::hotlist::trace_now_ms()
+    } else {
+        0
+    };
     let mut slot = st.admission.acquire(Lane::Pop).await;
-    let t_adm = if tr { crate::hotlist::trace_now_ms() } else { 0 };
+    let t_adm = if tr {
+        crate::hotlist::trace_now_ms()
+    } else {
+        0
+    };
     let client = match st.pool.get().await {
         Ok(c) => c,
         Err(_) => {
@@ -1901,8 +2108,13 @@ async fn hotlist_pop_attempt(
         }
     };
     if tr {
-        eprintln!("[hlt] attempt q={} start={} adm_wait={} pool_wait={}",
-            queue, t_start, t_adm - t_start, crate::hotlist::trace_now_ms() - t_adm);
+        eprintln!(
+            "[hlt] attempt q={} start={} adm_wait={} pool_wait={}",
+            queue,
+            t_start,
+            t_adm - t_start,
+            crate::hotlist::trace_now_ms() - t_adm
+        );
     }
 
     // Lazy deferral-config refresh (§6), TTL-throttled.
@@ -1937,9 +2149,14 @@ async fn hotlist_pop_attempt(
     let want = batch.max(1) as u32;
     let mut cands = st.hotlist.take_batch(qkey, group, k, want, now_ms);
     if tr {
-        eprintln!("[hlt] take q={} g={} got={} est={} fused=0 t={}", queue, group,
-            cands.len(), st.hotlist.ready_est(qkey, group, now_ms),
-            crate::hotlist::trace_now_ms());
+        eprintln!(
+            "[hlt] take q={} g={} got={} est={} fused=0 t={}",
+            queue,
+            group,
+            cands.len(),
+            st.hotlist.ready_est(qkey, group, now_ms),
+            crate::hotlist::trace_now_ms()
+        );
     }
     if cands.is_empty() && need_reseed {
         hotlist_reseed_scan(
@@ -1988,16 +2205,35 @@ async fn hotlist_pop_attempt(
     let res = tokio::time::timeout(
         st.stmt_timeout,
         db::pop_list(
-            &client, queue, group, &names, batch, lease_seconds, worker, auto_ack, max_parts,
-            sub_mode, sub_from, skip_window, tenant, cfl.on,
+            &client,
+            queue,
+            group,
+            &names,
+            batch,
+            lease_seconds,
+            worker,
+            auto_ack,
+            max_parts,
+            sub_mode,
+            sub_from,
+            skip_window,
+            tenant,
+            cfl.on,
         ),
     )
     .await;
     let rtt = t0.elapsed();
     if tr {
-        eprintln!("[hlt] sqldone q={} cands={} sql_ms={}", queue, names.len(), rtt.as_millis());
+        eprintln!(
+            "[hlt] sqldone q={} cands={} sql_ms={}",
+            queue,
+            names.len(),
+            rtt.as_millis()
+        );
     }
-    if matches!(res, Ok(Ok(_))) { slot.commit_done(rtt); }
+    if matches!(res, Ok(Ok(_))) {
+        slot.commit_done(rtt);
+    }
     drop(slot);
     // The await returned (not dropped) — take ownership of the candidates back and
     // disarm the guard; every path below runs an explicit checkin.
@@ -2039,8 +2275,21 @@ async fn hotlist_pop_attempt(
         };
 
     Ok(finish_pop_serve(
-        st, qkey, queue, group, cands, meta_txt, blobs, states_txt, now_ms, auto_ack,
-        lease_ms, lease_seconds, lease_id, rtt, cfl,
+        st,
+        qkey,
+        queue,
+        group,
+        cands,
+        meta_txt,
+        blobs,
+        states_txt,
+        now_ms,
+        auto_ack,
+        lease_ms,
+        lease_seconds,
+        lease_id,
+        rtt,
+        cfl,
     ))
 }
 
@@ -2120,10 +2369,12 @@ fn finish_pop_serve(
             // push committing after the SQL read keeps batch_count>0 via its own
             // mark, so a stale-low lastOff can never cause a wrong clear.
             let drained = match (&verdict, vmap.get(c.name.as_str())) {
-                (crate::hotlist::Verdict::Took, Some(s)) => match (s.last_off, batch_ends.get(c.name.as_str())) {
-                    (Some(lo), Some(&be)) => be >= lo,
-                    _ => false,
-                },
+                (crate::hotlist::Verdict::Took, Some(s)) => {
+                    match (s.last_off, batch_ends.get(c.name.as_str())) {
+                        (Some(lo), Some(&be)) => be >= lo,
+                        _ => false,
+                    }
+                }
                 _ => false,
             };
             crate::hotlist::CheckinResult {
@@ -2144,9 +2395,17 @@ fn finish_pop_serve(
                 crate::hotlist::Verdict::Requeue => req += 1,
             }
         }
-        eprintln!("[hlt] tri q={} g={} w={} took={} leased={} empty={} req={} t={}",
-            queue, group, &lease_id[lease_id.len().saturating_sub(8)..], took, leased, emp, req,
-            crate::hotlist::trace_now_ms());
+        eprintln!(
+            "[hlt] tri q={} g={} w={} took={} leased={} empty={} req={} t={}",
+            queue,
+            group,
+            &lease_id[lease_id.len().saturating_sub(8)..],
+            took,
+            leased,
+            emp,
+            req,
+            crate::hotlist::trace_now_ms()
+        );
     }
     st.hotlist
         .checkin(qkey, group, results, now_ms, auto_ack, lease_ms);
@@ -2156,7 +2415,13 @@ fn finish_pop_serve(
             .note_partition_id(qkey, &part.partition, &part.partition_id);
     }
     let (body, count, meta) = render_pop_parts(
-        &parsed.partitions, Some(&blobs), queue, group, lease_id, &st.encryption, cfl,
+        &parsed.partitions,
+        Some(&blobs),
+        queue,
+        group,
+        lease_id,
+        &st.encryption,
+        cfl,
     );
     (body, count, meta, rtt)
 }
@@ -2355,7 +2620,9 @@ async fn hotlist_reseed_run(
                 if cutoff.is_none() {
                     cutoff = cut;
                 }
-                r.into_iter().map(|(id, name, _)| (id, name)).collect::<Vec<_>>()
+                r.into_iter()
+                    .map(|(id, name, _)| (id, name))
+                    .collect::<Vec<_>>()
             }
             Err(_) => {
                 ok = false;
@@ -2382,7 +2649,12 @@ async fn hotlist_reseed_run(
         }
     }
     let stamped = hl.reseed_finish(ticket, ok);
-    ReseedOutcome { mode, rows: seen, ok, stamped }
+    ReseedOutcome {
+        mode,
+        rows: seen,
+        ok,
+        stamped,
+    }
 }
 
 // GET /api/v1/pop/queue/:queue/partition/:partition — pop from ONE named
@@ -2429,7 +2701,9 @@ pub async fn handle_pop_partition(
             json(StatusCode::NO_CONTENT, POP_PAUSED.to_string())
         };
     }
-    let group = p.consumer_group.unwrap_or_else(|| "__QUEUE_MODE__".to_string());
+    let group = p
+        .consumer_group
+        .unwrap_or_else(|| "__QUEUE_MODE__".to_string());
     // `max_parts` is irrelevant here (a pinned pop is one partition), so M5 does
     // not apply; the flag only switches the claim to the tail (§3.2).
     let cfl = resolve_conflation(&st, &queue, &group, tenant.as_str(), p.conflation).await;
@@ -2492,7 +2766,10 @@ pub async fn handle_pop_partition(
             Err(_) => {
                 st.metrics.record_db_error();
                 drop(slot);
-                return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string());
+                return json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "{\"error\":\"pool\"}".to_string(),
+                );
             }
         };
         // Cancel token captured BEFORE issuing the query (see handle_pop): a
@@ -2503,27 +2780,51 @@ pub async fn handle_pop_partition(
         let res = tokio::time::timeout(
             st.stmt_timeout,
             db::pop_specific(
-                &client, &queue, &partition, &group, batch, lease_seconds, &worker,
-                auto_ack, &sub_mode, &sub_from, tenant.as_str(), cfl.on,
+                &client,
+                &queue,
+                &partition,
+                &group,
+                batch,
+                lease_seconds,
+                &worker,
+                auto_ack,
+                &sub_mode,
+                &sub_from,
+                tenant.as_str(),
+                cfl.on,
             ),
         )
         .await;
         let rtt = t0.elapsed();
-        if matches!(res, Ok(Ok(_))) { slot.commit_done(rtt); }
+        if matches!(res, Ok(Ok(_))) {
+            slot.commit_done(rtt);
+        }
         drop(slot);
         // Spec §10 (parked long-poll): resolve_query_timeout releases the pooled
         // connection (drop on success/db-error, DETACH+cancel on timeout) BEFORE any
         // parking below — a parked pop must never pin a PG connection.
-        let txt = match db::resolve_query_timeout(res, client, cancel_token, "pop_specific", &st.metrics) {
-            Some(t) => t,
-            None => {
-                return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pop failed\"}".to_string())
-            }
-        };
+        let txt =
+            match db::resolve_query_timeout(res, client, cancel_token, "pop_specific", &st.metrics)
+            {
+                Some(t) => t,
+                None => {
+                    return json(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "{\"error\":\"pop failed\"}".to_string(),
+                    )
+                }
+            };
 
         let lease_id: &str = if auto_ack { "" } else { &worker };
-        let (body, count, meta) =
-            build_pop_specific_response(&txt, &queue, &partition, &group, lease_id, &st.encryption, cfl);
+        let (body, count, meta) = build_pop_specific_response(
+            &txt,
+            &queue,
+            &partition,
+            &group,
+            lease_id,
+            &st.encryption,
+            cfl,
+        );
         if count == 0 && wait && Instant::now() < deadline {
             // A push to any partition of this queue wakes us.
             // RUSTFIX item 19: exponentially-backing-off re-query; a push-wake resets it.
@@ -2545,10 +2846,16 @@ pub async fn handle_pop_partition(
         st.metrics.pop.record_batch(count, true, rtt);
         // RUSTFIX item 24: per-queue pop throughput for queue_lag_metrics.
         if count > 0 {
-            st.metrics.per_queue.add_pop(tenant.as_str(), &queue, count as u64);
             st.metrics
                 .per_queue
-                .add_pop_lag(tenant.as_str(), &queue, meta.lag_sum_ms, meta.lag_max_ms, meta.lag_n);
+                .add_pop(tenant.as_str(), &queue, count as u64);
+            st.metrics.per_queue.add_pop_lag(
+                tenant.as_str(),
+                &queue,
+                meta.lag_sum_ms,
+                meta.lag_max_ms,
+                meta.lag_n,
+            );
             for pid in &meta.partition_ids {
                 st.remember_partition_queue(pid, &queue);
             }
@@ -2559,7 +2866,9 @@ pub async fn handle_pop_partition(
         // IS an acknowledgement — count it so the ack throughput / completed totals
         // on the dashboard reflect auto-acked consumption too.
         if auto_ack && count > 0 {
-            st.metrics.per_queue.add_ack(tenant.as_str(), &queue, count as u64, 0);
+            st.metrics
+                .per_queue
+                .add_ack(tenant.as_str(), &queue, count as u64, 0);
             st.metrics.ack.record_request(count);
             st.metrics
                 .ack_success
@@ -2631,7 +2940,8 @@ pub async fn handle_pop_discover(
     if namespace.is_empty() && task.is_empty() {
         return json(
             StatusCode::BAD_REQUEST,
-            "{\"success\":false,\"error\":\"namespace or task is required\",\"messages\":[]}".to_string(),
+            "{\"success\":false,\"error\":\"namespace or task is required\",\"messages\":[]}"
+                .to_string(),
         );
     }
     let batch = p.batch.unwrap_or(200);
@@ -2652,7 +2962,9 @@ pub async fn handle_pop_discover(
             json(StatusCode::NO_CONTENT, POP_PAUSED.to_string())
         };
     }
-    let group = p.consumer_group.unwrap_or_else(|| "__QUEUE_MODE__".to_string());
+    let group = p
+        .consumer_group
+        .unwrap_or_else(|| "__QUEUE_MODE__".to_string());
     // A discovery pop spans QUEUES, so there is no single (queue, group) whose
     // stored policy the broker could cache here — and the request flag must NEVER
     // become the echo by default: queen.log_pop_discover_wire_v1 resolves the
@@ -2671,7 +2983,11 @@ pub async fn handle_pop_discover(
     // is served conflated (the SP's stored policy wins, as it must) with
     // max_parts=1, i.e. one message per round trip. Correct, just slow, and the
     // broker cannot do better without a per-queue lookup it has no key for.
-    let requested = if group == "__QUEUE_MODE__" { None } else { p.conflation };
+    let requested = if group == "__QUEUE_MODE__" {
+        None
+    } else {
+        p.conflation
+    };
     // M5 (§3.2), as in handle_pop.
     let max_parts = if requested == Some(true) {
         p.partitions.unwrap_or(batch).clamp(1, 64)
@@ -2727,7 +3043,10 @@ pub async fn handle_pop_discover(
             Err(_) => {
                 st.metrics.record_db_error();
                 drop(slot);
-                return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string());
+                return json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "{\"error\":\"pool\"}".to_string(),
+                );
             }
         };
         // Cancel token captured BEFORE issuing the query (see handle_pop): a
@@ -2738,23 +3057,41 @@ pub async fn handle_pop_discover(
         let res = tokio::time::timeout(
             st.stmt_timeout,
             db::pop_discover(
-                &client, &namespace, &task, &group, batch, lease_seconds, &worker,
-                auto_ack, max_parts, &sub_mode, &sub_from, tenant.as_str(), requested,
+                &client,
+                &namespace,
+                &task,
+                &group,
+                batch,
+                lease_seconds,
+                &worker,
+                auto_ack,
+                max_parts,
+                &sub_mode,
+                &sub_from,
+                tenant.as_str(),
+                requested,
             ),
         )
         .await;
         let rtt = t0.elapsed();
-        if matches!(res, Ok(Ok(_))) { slot.commit_done(rtt); }
+        if matches!(res, Ok(Ok(_))) {
+            slot.commit_done(rtt);
+        }
         drop(slot);
         // Spec §10 (parked long-poll): resolve_query_timeout releases the pooled
         // connection (drop on success/db-error, DETACH+cancel on timeout) BEFORE any
         // parking below — a parked pop must never pin a PG connection.
-        let txt = match db::resolve_query_timeout(res, client, cancel_token, "pop_discover", &st.metrics) {
-            Some(t) => t,
-            None => {
-                return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pop failed\"}".to_string())
-            }
-        };
+        let txt =
+            match db::resolve_query_timeout(res, client, cancel_token, "pop_discover", &st.metrics)
+            {
+                Some(t) => t,
+                None => {
+                    return json(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "{\"error\":\"pop failed\"}".to_string(),
+                    )
+                }
+            };
 
         let lease_id: &str = if auto_ack { "" } else { &worker };
         // Discovery spans queues, so there is no single top-level queue name; the
@@ -2775,10 +3112,22 @@ pub async fn handle_pop_discover(
             // the same identity the SDKs key their warn-once registry on.
             let scope = format!(
                 "{}/{}",
-                if namespace.is_empty() { "*" } else { &namespace },
+                if namespace.is_empty() {
+                    "*"
+                } else {
+                    &namespace
+                },
                 if task.is_empty() { "*" } else { &task }
             );
-            note_conflation_conflict(&st, tenant.as_str(), None, &scope, &group, cfl.on, requested);
+            note_conflation_conflict(
+                &st,
+                tenant.as_str(),
+                None,
+                &scope,
+                &group,
+                cfl.on,
+                requested,
+            );
         }
         if count == 0 && wait && Instant::now() < deadline {
             // Discovery pops span queues -> this tenant's discovery gate, woken by
@@ -2845,7 +3194,13 @@ pub(crate) struct LeaseInsert {
 // (queen.log_ack_at_v1) instead of per-ack hash resolution. No-op when there are
 // no leases (autoAck, or an empty/partial render) — the registry is disabled or
 // the batch simply defers to the SQL ack path.
-fn register_leases(st: &Arc<AppState>, group: &str, worker: &str, lease_seconds: i32, meta: &PopMeta) {
+fn register_leases(
+    st: &Arc<AppState>,
+    group: &str,
+    worker: &str,
+    lease_seconds: i32,
+    meta: &PopMeta,
+) {
     if meta.leases.is_empty() {
         return;
     }
@@ -2891,7 +3246,15 @@ fn build_pop_response(
     if let Some(e) = parsed.error {
         return pop_error_body(&e);
     }
-    render_pop_parts(&parsed.partitions, bin_blobs, queue, group, lease_id, enc, cfl)
+    render_pop_parts(
+        &parsed.partitions,
+        bin_blobs,
+        queue,
+        group,
+        lease_id,
+        enc,
+        cfl,
+    )
 }
 
 // Discovery pop response (GET /api/v1/pop?namespace=&task=). Same SP result shape
@@ -2960,7 +3323,15 @@ fn build_pop_specific_response(
         delivery_attempt: parsed.delivery_attempt,
         segments: parsed.segments,
     };
-    render_pop_parts(std::slice::from_ref(&part), None, queue, group, lease_id, enc, cfl)
+    render_pop_parts(
+        std::slice::from_ref(&part),
+        None,
+        queue,
+        group,
+        lease_id,
+        enc,
+        cfl,
+    )
 }
 
 // Shared renderer: decode + slice each partition's segment frames into the
@@ -3061,8 +3432,8 @@ fn render_pop_parts(
         for seg in &part.segments {
             // Pop lag: message age at delivery. All frames of a segment share the
             // segment's createdAt (one push call), so parse it once per segment.
-            let seg_age_ms: Option<u64> = crate::util::parse_iso_ms(&seg.created_at)
-                .map(|c| (now_ms - c).max(0) as u64);
+            let seg_age_ms: Option<u64> =
+                crate::util::parse_iso_ms(&seg.created_at).map(|c| (now_ms - c).max(0) as u64);
             // bin path: the blob arrives as native bytes, positionally aligned.
             // wire path: Postgres encode(...,'base64') wraps lines at 76 cols —
             // strip whitespace before decoding (STANDARD rejects non-alphabet bytes).
@@ -3098,10 +3469,7 @@ fn render_pop_parts(
                         .map(|f| crate::frames::FrameRef {
                             message_id: uuid_string_to_bytes(&f.message_id).unwrap_or([0; 16]),
                             txn: &f.txn,
-                            trace_id: f
-                                .trace_id
-                                .as_deref()
-                                .and_then(uuid_string_to_bytes),
+                            trace_id: f.trace_id.as_deref().and_then(uuid_string_to_bytes),
                             producer_sub: f.producer_sub.as_deref(),
                             payload: &f.payload,
                             encrypted: f.encrypted,
@@ -3327,7 +3695,10 @@ pub async fn handle_ack(
         Ok(v) => v,
         Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
     };
-    let group = a.consumer_group.clone().unwrap_or_else(|| "__QUEUE_MODE__".to_string());
+    let group = a
+        .consumer_group
+        .clone()
+        .unwrap_or_else(|| "__QUEUE_MODE__".to_string());
     let acks = vec![Ack {
         txn: a.transaction_id.unwrap_or_default(),
         partition_id: a.partition_id.unwrap_or_default(),
@@ -3352,7 +3723,10 @@ pub async fn handle_ack_batch(
         Ok(v) => v,
         Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
     };
-    let group = b.consumer_group.clone().unwrap_or_else(|| "__QUEUE_MODE__".to_string());
+    let group = b
+        .consumer_group
+        .clone()
+        .unwrap_or_else(|| "__QUEUE_MODE__".to_string());
     let acks: Vec<Ack> = b
         .acknowledgments
         .into_iter()
@@ -3437,7 +3811,15 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
                 for e in errors.iter_mut() {
                     *e = Some("pool".to_string());
                 }
-                return render_ack_results(&acks, &success, &errors, &lease_released, &dlq_flags, &noop_flags, &conflated);
+                return render_ack_results(
+                    &acks,
+                    &success,
+                    &errors,
+                    &lease_released,
+                    &dlq_flags,
+                    &noop_flags,
+                    &conflated,
+                );
             }
         }
     }
@@ -3506,8 +3888,9 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
                 .iter()
                 .map(|&i| u128::from_be_bytes(crate::util::txn_hash128(&acks[i].txn)))
                 .collect();
-            if let Some(batch_end) =
-                st.ack_registry.take_if_full_batch(&pid, group, &worker, &acked)
+            if let Some(batch_end) = st
+                .ack_registry
+                .take_if_full_batch(&pid, group, &worker, &acked)
             {
                 // A HIT proved (worker matches, whole batch completed, upto ==
                 // batch_end). ACK FUSION coalesces the positional advance into one
@@ -3554,7 +3937,8 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
                         .unwrap_or(false);
                     if hit_ok {
                         FastAck::Committed(
-                            hit.as_ref().and_then(|v| v.get("conflated").and_then(|x| x.as_i64())),
+                            hit.as_ref()
+                                .and_then(|v| v.get("conflated").and_then(|x| x.as_i64())),
                         )
                     } else {
                         FastAck::FallBack
@@ -3576,9 +3960,13 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
                             if let Some(&i0) = idxs.first() {
                                 conflated[i0] = Some(c);
                             }
-                            st.metrics.conflated.fetch_add(c.max(0) as u64, Ordering::Relaxed);
+                            st.metrics
+                                .conflated
+                                .fetch_add(c.max(0) as u64, Ordering::Relaxed);
                             if let Some(q) = queue_name.as_ref() {
-                                st.metrics.per_queue.add_conflated(tenant, q, c.max(0) as u64);
+                                st.metrics
+                                    .per_queue
+                                    .add_conflated(tenant, q, c.max(0) as u64);
                             }
                         }
                         // Per-queue ack attribution (identical to the SQL-path tail).
@@ -3596,12 +3984,23 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
                                 // GROUP, not per message.
                                 let qkey = tenant_queue_key(tenant, q);
                                 if st.hotlist.traced(&qkey) {
-                                    eprintln!("[hlt] promote q={} g={} t={}", q, group, crate::hotlist::trace_now_ms());
+                                    eprintln!(
+                                        "[hlt] promote q={} g={} t={}",
+                                        q,
+                                        group,
+                                        crate::hotlist::trace_now_ms()
+                                    );
                                 }
                                 // covered=true: the registry cover test proved this
                                 // ack completes the WHOLE leased batch — eligible for
                                 // clear-su-ack when nothing arrived during the lease.
-                                st.hotlist.promote_ack(&qkey, group, &pid, crate::util::now_epoch_ms(), true);
+                                st.hotlist.promote_ack(
+                                    &qkey,
+                                    group,
+                                    &pid,
+                                    crate::util::now_epoch_ms(),
+                                    true,
+                                );
                             }
                         }
                         continue; // whole group handled — skip the SQL path
@@ -3665,7 +4064,16 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
             statuses.push(acks[i].status.to_string());
         }
 
-        match db::ack_by_hash(client.as_ref().unwrap(), &pid, group, &worker, &hashes, &statuses).await {
+        match db::ack_by_hash(
+            client.as_ref().unwrap(),
+            &pid,
+            group,
+            &worker,
+            &hashes,
+            &statuses,
+        )
+        .await
+        {
             Ok(txt) => {
                 // {"ok":bool,"error":?,...}
                 let v: serde_json::Value =
@@ -3682,8 +4090,16 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
                     // not the cursor (005_log_ack contract).
                     if v.get("dlq").and_then(|x| x.as_bool()).unwrap_or(false) {
                         let off = v.get("off").and_then(|x| x.as_i64()).unwrap_or(0);
-                        match dlq_file_head(client.as_ref().unwrap(), &pid, group, &worker, off, &acks, &idxs)
-                            .await
+                        match dlq_file_head(
+                            client.as_ref().unwrap(),
+                            &pid,
+                            group,
+                            &worker,
+                            off,
+                            &acks,
+                            &idxs,
+                        )
+                        .await
                         {
                             Ok(true) => {
                                 for &i in &idxs {
@@ -3717,9 +4133,13 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
                         if let Some(&i0) = idxs.first() {
                             conflated[i0] = Some(c);
                         }
-                        st.metrics.conflated.fetch_add(c.max(0) as u64, Ordering::Relaxed);
+                        st.metrics
+                            .conflated
+                            .fetch_add(c.max(0) as u64, Ordering::Relaxed);
                         if let Some(q) = queue_name.as_ref() {
-                            st.metrics.per_queue.add_conflated(tenant, q, c.max(0) as u64);
+                            st.metrics
+                                .per_queue
+                                .add_conflated(tenant, q, c.max(0) as u64);
                         }
                     }
                     // Below-cursor honesty (ack-as-commit): the SP reports hashes
@@ -3748,7 +4168,8 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
                     // reporting them success would tell the client an ack
                     // landed that never did — the silent redelivery livelock.
                     let unresolved_hashes = hash_set("unresolvedHashes");
-                    if !noop_hashes.is_empty() || !stale_hashes.is_empty()
+                    if !noop_hashes.is_empty()
+                        || !stale_hashes.is_empty()
                         || !unresolved_hashes.is_empty()
                     {
                         for (k, &i) in idxs.iter().enumerate() {
@@ -3823,12 +4244,18 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
             if released && st.hotlist.enabled() {
                 let qkey = tenant_queue_key(tenant, &q);
                 if st.hotlist.traced(&qkey) {
-                    eprintln!("[hlt] promote2 q={} g={} t={}", q, group, crate::hotlist::trace_now_ms());
+                    eprintln!(
+                        "[hlt] promote2 q={} g={} t={}",
+                        q,
+                        group,
+                        crate::hotlist::trace_now_ms()
+                    );
                 }
                 // covered=false: this is the SQL-fallback release path (NACK,
                 // partial, mixed) — coverage is unproven, so always promote; the
                 // worst case is one spurious ~0.2ms probe on a rare path.
-                st.hotlist.promote_ack(&qkey, group, &pid, crate::util::now_epoch_ms(), false);
+                st.hotlist
+                    .promote_ack(&qkey, group, &pid, crate::util::now_epoch_ms(), false);
             }
         }
 
@@ -3847,11 +4274,15 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
     // completion-vs-nack split as the per-queue counters above.
     {
         use std::sync::atomic::Ordering::Relaxed;
-        let ok = (0..n).filter(|&i| success[i] && acks[i].status == "completed").count() as u64;
+        let ok = (0..n)
+            .filter(|&i| success[i] && acks[i].status == "completed")
+            .count() as u64;
         let dlq = dlq_flags.iter().filter(|&&d| d).count() as u64;
         st.metrics.ack.record_request(n);
         st.metrics.ack_success.fetch_add(ok, Relaxed);
-        st.metrics.ack_failed.fetch_add((n as u64).saturating_sub(ok), Relaxed);
+        st.metrics
+            .ack_failed
+            .fetch_add((n as u64).saturating_sub(ok), Relaxed);
         st.metrics.dlq_moved.fetch_add(dlq, Relaxed);
     }
 
@@ -3859,7 +4290,15 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
     // run shows how much of the ack traffic took the positional fast path.
     st.ack_registry.maybe_report(crate::util::now_epoch_ms());
 
-    render_ack_results(&acks, &success, &errors, &lease_released, &dlq_flags, &noop_flags, &conflated)
+    render_ack_results(
+        &acks,
+        &success,
+        &errors,
+        &lease_released,
+        &dlq_flags,
+        &noop_flags,
+        &conflated,
+    )
 }
 
 // Decode the segment COVERING the poison offset, extract the poison frame
@@ -3878,32 +4317,32 @@ async fn dlq_file_head(
     acks: &[Ack],
     idxs: &[usize],
 ) -> Result<bool, tokio_postgres::Error> {
-    let (payload, txn, message_id) = match db::log_segment_covering(client, partition_id, off).await?
-    {
-        Some((base, end, blob)) => {
-            // log_segment_at_v1 returns the last segment with base <= off; a
-            // retention gap can leave `off` past its end — nothing to snapshot.
-            if off < base || off > end {
-                return Ok(false);
-            }
-            let raw = zstd_decompress(&blob);
-            match unpack_frames(&raw) {
-                Some(frames) => match frames.get((off - base) as usize) {
-                    Some(f) => {
-                        let payload = if f.payload.is_empty() {
-                            "null".to_string()
-                        } else {
-                            String::from_utf8_lossy(&f.payload).into_owned()
-                        };
-                        (payload, f.txn.clone(), f.message_id.clone())
-                    }
+    let (payload, txn, message_id) =
+        match db::log_segment_covering(client, partition_id, off).await? {
+            Some((base, end, blob)) => {
+                // log_segment_at_v1 returns the last segment with base <= off; a
+                // retention gap can leave `off` past its end — nothing to snapshot.
+                if off < base || off > end {
+                    return Ok(false);
+                }
+                let raw = zstd_decompress(&blob);
+                match unpack_frames(&raw) {
+                    Some(frames) => match frames.get((off - base) as usize) {
+                        Some(f) => {
+                            let payload = if f.payload.is_empty() {
+                                "null".to_string()
+                            } else {
+                                String::from_utf8_lossy(&f.payload).into_owned()
+                            };
+                            (payload, f.txn.clone(), f.message_id.clone())
+                        }
+                        None => return Ok(false),
+                    },
                     None => return Ok(false),
-                },
-                None => return Ok(false),
+                }
             }
-        }
-        None => return Ok(false),
-    };
+            None => return Ok(false),
+        };
 
     // Failure reason: the nacked ack whose txn matches the poison frame; else the
     // first nacked error in the group; else a default (v1's "Retries exhausted").
@@ -3925,7 +4364,16 @@ async fn dlq_file_head(
     // `seq` argument (now the absolute offset); the frame_idx argument is
     // vestigial and ignored by the wrapper (pass 0).
     let res = db::seg_dlq_head(
-        client, partition_id, group, worker, off, 0, &message_id, &txn, &payload, &error,
+        client,
+        partition_id,
+        group,
+        worker,
+        off,
+        0,
+        &message_id,
+        &txn,
+        &payload,
+        &error,
     )
     .await?;
     let v: serde_json::Value = serde_json::from_str(&res).unwrap_or(serde_json::Value::Null);
@@ -4058,7 +4506,12 @@ pub async fn handle_lease_extend(
     let _slot = crate::admission::lane_slot(crate::admission::Lane::Ack).await;
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
 
     // Tenancy OFF ⇒ the verbatim unscoped call, no gate query (an OSS broker has
@@ -4074,7 +4527,8 @@ pub async fn handle_lease_extend(
     match renewed {
         Ok(txt) => {
             // {"renewed":n,"expiresAt":iso|null}
-            let v: serde_json::Value = serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
+            let v: serde_json::Value =
+                serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
             let renewed = v.get("renewed").and_then(|x| x.as_i64()).unwrap_or(0);
             let expires = v.get("expiresAt").and_then(|x| x.as_str());
 
@@ -4172,7 +4626,11 @@ fn txn_add_push(
     group_of: &mut HashMap<(String, String), usize>,
     echoes: &mut Vec<TxnPushEcho>,
 ) {
-    let queue = item.get("queue").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let queue = item
+        .get("queue")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     let partition = item
         .get("partition")
         .and_then(|x| x.as_str())
@@ -4578,7 +5036,10 @@ async fn txn_prepare_timers(
             "claim_token",
             "claimedUntil",
         ];
-        if let Some(k) = obj.keys().find(|k| TIMER_SERVER_OWNED.contains(&k.as_str())) {
+        if let Some(k) = obj
+            .keys()
+            .find(|k| TIMER_SERVER_OWNED.contains(&k.as_str()))
+        {
             return Err(txn_fail_body(
                 txn_id,
                 "bad_request",
@@ -4771,7 +5232,10 @@ fn txn_scatter_rider(
         };
         obj.insert("opIndex".to_string(), serde_json::Value::from(i));
         obj.insert("index".to_string(), serde_json::Value::from(flat));
-        obj.insert("type".to_string(), serde_json::Value::String(kind.to_string()));
+        obj.insert(
+            "type".to_string(),
+            serde_json::Value::String(kind.to_string()),
+        );
         results[flat] = serde_json::Value::Object(obj);
     }
 }
@@ -4989,7 +5453,14 @@ fn txn_gate(
     txn_id: &str,
 ) -> Option<Response> {
     use crate::switches::{decide, Origin};
-    let a = decide(&st.switches, &st.quota, tenant, surface, add_rows, add_bytes);
+    let a = decide(
+        &st.switches,
+        &st.quota,
+        tenant,
+        surface,
+        add_rows,
+        add_bytes,
+    );
     let h = a.http(Origin::Wire, surface)?;
     st.metrics.kvt.kv_read_rejected(match h.status {
         429 => crate::metrics::KvReject::RateLimited,
@@ -5134,7 +5605,10 @@ async fn txn_kv_only(
         Ok(c) => c,
         Err(_) => {
             st.metrics.record_db_error();
-            return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string());
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            );
         }
     };
     // Captured BEFORE the query: on a broker-side timeout the still-running
@@ -5154,8 +5628,7 @@ async fn txn_kv_only(
         Ok(txt) => match serde_json::from_str::<serde_json::Value>(&txt) {
             Ok(serde_json::Value::Array(a)) if a.len() == n => {
                 txn_record_kv(st, &a, ms, bytes_in);
-                let mut results: Vec<serde_json::Value> =
-                    vec![serde_json::Value::Null; n];
+                let mut results: Vec<serde_json::Value> = vec![serde_json::Value::Null; n];
                 txn_scatter_rider(&mut results, 0, "kv", &a);
                 let out = serde_json::json!({
                     "transactionId": txn_id,
@@ -5202,7 +5675,12 @@ async fn txn_kv_only(
         }
         Err(None) => {
             txn_record_kv_all(st, &ops, crate::metrics::KvResult::Error, ms);
-            txn_fail_body(txn_id, "db_error", "QTXN kv apply timed out", StatusCode::OK)
+            txn_fail_body(
+                txn_id,
+                "db_error",
+                "QTXN kv apply timed out",
+                StatusCode::OK,
+            )
         }
     }
 }
@@ -5375,9 +5853,16 @@ pub async fn handle_transaction(
                 }
             }
             "ack" => {
-                let txn = op.get("transactionId").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                let partition_id =
-                    op.get("partitionId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let txn = op
+                    .get("transactionId")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let partition_id = op
+                    .get("partitionId")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let group = op
                     .get("consumerGroup")
                     .and_then(|x| x.as_str())
@@ -5401,7 +5886,10 @@ pub async fn handle_transaction(
                     lease_hints.push(l.clone());
                 }
 
-                ack_echoes.push(TxnAckEcho { index: flat, txn: txn.clone() });
+                ack_echoes.push(TxnAckEcho {
+                    index: flat,
+                    txn: txn.clone(),
+                });
                 let key = (partition_id.clone(), group.clone());
                 let gi = *ack_group_of.entry(key).or_insert_with(|| {
                     ack_groups.push(TxnAckGroup {
@@ -5418,7 +5906,12 @@ pub async fn handle_transaction(
                         ag.worker = l;
                     }
                 }
-                ag.items.push(TxnAckItem { txn, status, error, index: flat });
+                ag.items.push(TxnAckItem {
+                    txn,
+                    status,
+                    error,
+                    index: flat,
+                });
                 flat += 1;
             }
             _ => {
@@ -5444,9 +5937,9 @@ pub async fn handle_transaction(
                  request (\"kv\":[...], \"timers\":[...]), never elements of `operations`"
                 .to_string(),
             "" => "every transaction operation needs a `type` of push or ack".to_string(),
-            other => format!(
-                "segments transaction supports only push and ack operations, got `{other}`"
-            ),
+            other => {
+                format!("segments transaction supports only push and ack operations, got `{other}`")
+            }
         };
         return txn_fail_body(&txn_id, "bad_request", &err, StatusCode::BAD_REQUEST);
     }
@@ -5468,7 +5961,9 @@ pub async fn handle_transaction(
         let mut seen_q: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for g in &groups {
             if seen_q.insert(g.queue.as_str()) {
-                st.metrics.per_queue.add_transaction(tenant.as_str(), &g.queue);
+                st.metrics
+                    .per_queue
+                    .add_transaction(tenant.as_str(), &g.queue);
             }
         }
     }
@@ -5506,7 +6001,10 @@ pub async fn handle_transaction(
         Ok(c) => c,
         Err(_) => {
             st.metrics.record_db_error();
-            return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string());
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            );
         }
     };
 
@@ -5702,7 +6200,8 @@ pub async fn handle_transaction(
 
     match db::transaction(&client, &payload).await {
         Ok(txt) => {
-            let v: serde_json::Value = serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
+            let v: serde_json::Value =
+                serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
             if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
                 // RUSTFIX item 10: DLQ hand-off. log_ack_by_hash_v1 (via the wire SP)
                 // returns dlq:true for a forced-dlq or budget-exhausted nack and KEEPS
@@ -5742,10 +6241,8 @@ pub async fn handle_transaction(
                             })
                             .collect();
                         let idxs: Vec<usize> = (0..acks.len()).collect();
-                        let _ = dlq_file_head(
-                            &client, pid, grp, &ag.worker, off, &acks, &idxs,
-                        )
-                        .await;
+                        let _ =
+                            dlq_file_head(&client, pid, grp, &ag.worker, off, &acks, &idxs).await;
                         for it in &ag.items {
                             dlq_indices.insert(it.index);
                         }
@@ -5755,9 +6252,10 @@ pub async fn handle_transaction(
                 // dlq_moved per dead-lettered item) so worker_metrics.dlq_count and
                 // the Prometheus lifetime DLQ total include transaction DLQs too.
                 if !dlq_indices.is_empty() {
-                    st.metrics
-                        .dlq_moved
-                        .fetch_add(dlq_indices.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                    st.metrics.dlq_moved.fetch_add(
+                        dlq_indices.len() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                 }
                 // 19-wildcard-hotlist §7 (transaction): the txn committed in the
                 // procedure (NOT via the fusion flush), so mark every (queue,
@@ -5769,8 +6267,12 @@ pub async fn handle_transaction(
                     for g in &groups {
                         if !g.frames.is_empty() {
                             let qkey = tenant_queue_key(tenant.as_str(), &g.queue);
-                            st.hotlist
-                                .mark_local(&qkey, &g.partition, g.frames.len() as u32, now_ms);
+                            st.hotlist.mark_local(
+                                &qkey,
+                                &g.partition,
+                                g.frames.len() as u32,
+                                now_ms,
+                            );
                         }
                     }
                     for ag in &ack_groups {
@@ -5778,7 +6280,13 @@ pub async fn handle_transaction(
                             // covered=false: txn acks may cover only part of a
                             // leased batch; promote unconditionally (rare path).
                             let qkey = tenant_queue_key(tenant.as_str(), &q);
-                            st.hotlist.promote_ack(&qkey, &ag.group, &ag.partition_id, now_ms, false);
+                            st.hotlist.promote_ack(
+                                &qkey,
+                                &ag.group,
+                                &ag.partition_id,
+                                now_ms,
+                                false,
+                            );
                         }
                     }
                 }
@@ -5826,8 +6334,8 @@ pub async fn handle_transaction(
                         Ok(None) => {}
                         Ok(Some(arr)) => {
                             if key == "kv" {
-                                let ms = t_txn.elapsed().as_secs_f64() * 1000.0
-                                    / (sent.max(1) as f64);
+                                let ms =
+                                    t_txn.elapsed().as_secs_f64() * 1000.0 / (sent.max(1) as f64);
                                 txn_record_kv(&st, arr, ms, kv_bytes_in);
                             }
                             txn_scatter_rider(&mut results, base, kind, arr);
@@ -5937,12 +6445,7 @@ pub async fn handle_transaction(
             }
             if reason == "kv_precondition" {
                 let detail = e.as_db_error().and_then(|d| d.detail()).map(str::to_string);
-                return txn_fail_precondition(
-                    &txn_id,
-                    &msg,
-                    detail.as_deref(),
-                    riders.kv_base,
-                );
+                return txn_fail_precondition(&txn_id, &msg, detail.as_deref(), riders.kv_base);
             }
             txn_fail_body(&txn_id, reason, &msg, StatusCode::OK)
         }
@@ -5964,7 +6467,8 @@ mod tests {
         // never through a name the caller could influence.
         assert!(RENEW_OWNED_SQL.contains("JOIN queen.log_partitions p ON p.id = c.partition_id"));
         // The SP must stay behind the qual (projection), not beside it.
-        assert!(RENEW_OWNED_SQL.starts_with("SELECT (queen.log_renew_lease_v1($1, $2::int))::text WHERE EXISTS"));
+        assert!(RENEW_OWNED_SQL
+            .starts_with("SELECT (queen.log_renew_lease_v1($1, $2::int))::text WHERE EXISTS"));
     }
 
     // --------------------------------------------- TASK M: minimum pop wait
@@ -6021,10 +6525,7 @@ mod tests {
             min_pop_wait_window(100, true, 50, 1, Duration::from_millis(10)),
             Some(Duration::from_millis(10))
         );
-        assert_eq!(
-            min_pop_wait_window(100, true, 50, 1, Duration::ZERO),
-            None
-        );
+        assert_eq!(min_pop_wait_window(100, true, 50, 1, Duration::ZERO), None);
         assert_eq!(
             min_pop_wait_window(100, true, 50, 1, Duration::from_millis(100)),
             Some(Duration::from_millis(100))
@@ -6279,8 +6780,14 @@ mod protocol_conformance {
         let parsed: AckBatch = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed.consumer_group.as_deref(), Some("workers"));
         assert_eq!(parsed.acknowledgments.len(), 2);
-        assert_eq!(parsed.acknowledgments[0].transaction_id.as_deref(), Some("t1"));
-        assert_eq!(parsed.acknowledgments[0].partition_id.as_deref(), Some("p1"));
+        assert_eq!(
+            parsed.acknowledgments[0].transaction_id.as_deref(),
+            Some("t1")
+        );
+        assert_eq!(
+            parsed.acknowledgments[0].partition_id.as_deref(),
+            Some("p1")
+        );
         assert_eq!(parsed.acknowledgments[1].error.as_deref(), Some("poison"));
 
         // And the statuses survive normalization to the same four outcomes.
@@ -6460,7 +6967,10 @@ mod protocol_conformance {
             "workers",
             "lease-1",
             &crate::encryption::Encryption::from_env(),
-            Conflation { on: true, conflict: true },
+            Conflation {
+                on: true,
+                conflict: true,
+            },
         );
         assert_eq!(count, 0, "empty claim");
         let parsed: qp::PopResponse = serde_json::from_str(&body).unwrap();
@@ -6771,19 +7281,17 @@ mod protocol_conformance {
     /// knows nothing about this option", which is every consumer in the field.
     #[test]
     fn the_autopilot_opt_in_is_read_from_the_query() {
-        let uri: axum::http::Uri =
-            "http://x/api/v1/pop/queue/q?consumerGroup=w&autopilot=true"
-                .parse()
-                .unwrap();
+        let uri: axum::http::Uri = "http://x/api/v1/pop/queue/q?consumerGroup=w&autopilot=true"
+            .parse()
+            .unwrap();
         let axum::extract::Query(p) =
             axum::extract::Query::<PopParams>::try_from_uri(&uri).unwrap();
         assert_eq!(p.autopilot, Some(true));
         // Per-dimension: the opt-in rides alongside an explicit knob, and the
         // explicit knob still arrives intact for the handler to honour.
-        let uri: axum::http::Uri =
-            "http://x/api/v1/pop/queue/q?autopilot=true&partitions=1"
-                .parse()
-                .unwrap();
+        let uri: axum::http::Uri = "http://x/api/v1/pop/queue/q?autopilot=true&partitions=1"
+            .parse()
+            .unwrap();
         let axum::extract::Query(p) =
             axum::extract::Query::<PopParams>::try_from_uri(&uri).unwrap();
         assert_eq!(p.autopilot, Some(true));
@@ -6913,14 +7421,26 @@ mod push_body_charset {
     fn escapes_that_real_sdks_emit_are_accepted_and_unescaped() {
         // (literal inside the JSON, expected decoded value, which encoder emits it)
         let cases: &[(&str, &str, &str)] = &[
-            (r"a\u0026b", "a&b", "Go encoding/json, SetEscapeHTML default true"),
+            (
+                r"a\u0026b",
+                "a&b",
+                "Go encoding/json, SetEscapeHTML default true",
+            ),
             (r"a\u003cb\u003ec", "a<b>c", "Go encoding/json, < and >"),
             (r#"a\"b"#, "a\"b", "every JSON encoder: quote"),
             (r"a\\b", r"a\b", "every JSON encoder: backslash"),
-            (r"2026\/07\/BK-11", "2026/07/BK-11", "PHP json_encode / Guzzle: solidus"),
+            (
+                r"2026\/07\/BK-11",
+                "2026/07/BK-11",
+                "PHP json_encode / Guzzle: solidus",
+            ),
             (r"citt\u00e0", "città", "PHP + httpx<0.28: non-ASCII"),
             (r"a\u0041b", "aAb", "escape of a plain ASCII char"),
-            ("Bed&Breakfast-771", "Bed&Breakfast-771", "JS/Python/Rust: literal &"),
+            (
+                "Bed&Breakfast-771",
+                "Bed&Breakfast-771",
+                "JS/Python/Rust: literal &",
+            ),
             ("città", "città", "JS/Python/Rust: raw UTF-8"),
         ];
         for field in ["queue", "partition", "transactionId"] {
@@ -7063,173 +7583,188 @@ mod push_body_charset {
 mod wire_demux {
     use super::*;
 
-// ---------------------------------------------- the HTTP -> wire demux (§8.2)
-//
-// These pin the index contract, which is the one thing in this feature that
-// can break two shipped clients WITHOUT any error appearing anywhere.
+    // ---------------------------------------------- the HTTP -> wire demux (§8.2)
+    //
+    // These pin the index contract, which is the one thing in this feature that
+    // can break two shipped clients WITHOUT any error appearing anywhere.
 
-/// PARITY, and the reason it is the first test here: with no riders, nothing
-/// about the answer path changes. The guard does not consult the response at
-/// all when nothing was sent — it must not turn "this database has no kv leg"
-/// into a failure for a bundle that never asked for one, which is every
-/// bundle every existing client sends.
-#[test]
-fn no_rider_means_no_guard_and_no_lookup() {
-    let answer = serde_json::json!({"ok": true, "pushes": [], "acks": []});
-    assert!(matches!(txn_rider_results(&answer, "kv", 0), Ok(None)));
-    assert!(matches!(txn_rider_results(&answer, "timers", 0), Ok(None)));
-}
-
-/// The old-database detector. A broker that grew the kv array against a
-/// database whose wire procedure predates it gets NO `kv` key back: the
-/// bundle committed, and without this the caller would read `success:true`
-/// for a transaction whose gate never ran.
-#[test]
-fn a_missing_rider_result_is_loud_not_silent() {
-    let answer = serde_json::json!({"ok": true, "pushes": [], "acks": []});
-    let e = txn_rider_results(&answer, "kv", 2).expect_err("must not read as success");
-    assert!(e.contains("IGNORED"), "{e}");
-    // Short is the same class of fault as missing.
-    let short = serde_json::json!({"ok": true, "kv": [{"index": 0}]});
-    assert!(txn_rider_results(&short, "kv", 2).is_err());
-    let exact = serde_json::json!({"ok": true, "kv": [{"index": 0}, {"index": 1}]});
-    assert!(txn_rider_results(&exact, "kv", 2).is_ok());
-}
-
-/// The scatter, which is the mapping itself: `index` becomes the FLAT
-/// ordinal (what `results[]` and `failedIndex` both speak), and the
-/// array-local one survives as `opIndex`. If these two were ever swapped,
-/// every client would index somebody else's operation and nothing would say
-/// so.
-#[test]
-fn the_scatter_rewrites_index_into_the_flat_space() {
-    let mut results = vec![serde_json::Value::Null; 4];
-    // Two pushes already occupy 0 and 1.
-    results[0] = serde_json::json!({"index": 0, "type": "push"});
-    results[1] = serde_json::json!({"index": 1, "type": "push"});
-    let kv = vec![
-        serde_json::json!({"index": 0, "op": "put", "applied": true}),
-        serde_json::json!({"index": 1, "op": "get", "found": false}),
-    ];
-    txn_scatter_rider(&mut results, 2, "kv", &kv);
-    assert_eq!(results[2]["index"], 2);
-    assert_eq!(results[2]["opIndex"], 0);
-    assert_eq!(results[2]["type"], "kv");
-    assert_eq!(results[3]["index"], 3);
-    assert_eq!(results[3]["opIndex"], 1);
-    // The existing entries are untouched: riders APPEND, they never move
-    // anything that was already there.
-    assert_eq!(results[0]["index"], 0);
-    assert_eq!(results[1]["type"], "push");
-    assert!(results.iter().all(|r| !r.is_null()));
-}
-
-/// §8.2 point 4. The procedure raises with its own array-local ordinal; a
-/// client that indexed with it would blame the wrong operation whenever a
-/// bundle carries any push or ack at all — i.e. in the case the feature
-/// exists for.
-#[test]
-fn failed_index_is_translated_into_the_flat_space() {
-    let detail = r#"{"index":1,"op":"put","ns":"saga","key":"k","reason":"exists","version":7,"value":{"a":1}}"#;
-    let v = txn_precondition_json("txn-1", "kv_precondition_failed", Some(detail), 3);
-    assert_eq!(v["failedIndex"], 4, "kv ordinal 1 with kv_base 3 is flat 4");
-    assert_eq!(v["reason"], "kv_precondition");
-    assert_eq!(v["kvReason"], "exists");
-    assert_eq!(v["version"], 7);
-    assert_eq!(v["value"]["a"], 1);
-    // Both spellings: the transaction envelope's `success` and the KV
-    // route's `ok`, so one client branch reads the same verdict from either
-    // surface.
-    assert_eq!(v["success"], false);
-    assert_eq!(v["ok"], false);
-}
-
-/// A DETAIL truncated by the procedure's 4 KiB cap is invalid JSON. It must
-/// degrade to the bare verdict, never turn a legitimate lost race into a 500.
-#[test]
-fn a_truncated_detail_still_yields_the_verdict() {
-    let v = txn_precondition_json("txn-1", "kv_precondition_failed", Some("{\"index\":1,\"val"), 0);
-    assert_eq!(v["reason"], "kv_precondition");
-    assert!(v.get("failedIndex").is_none());
-    assert_eq!(
-        txn_fail_precondition("txn-1", "x", None, 0).status(),
-        StatusCode::OK,
-        "a lost precondition is a verdict, never a 4xx or a 5xx"
-    );
-}
-
-/// §5.5: the boundary on this wire is COST, not the kind of operation.
-/// `getMany` is allowed and counted by its keys; `getPrefix` is refused
-/// before a connection is spent.
-#[test]
-fn the_wire_kv_guard_counts_keys_and_refuses_prefix() {
-    let many: Vec<serde_json::Value> = (0..3)
-        .map(|_| serde_json::json!({"op": "getMany", "ns": "n", "keys": ["a", "b", "c"]}))
-        .collect();
-    assert!(txn_check_kv(&many, "t").is_none(), "9 keys is under the ceiling");
-
-    let over: Vec<serde_json::Value> = (0..2)
-        .map(|_| {
-            let keys: Vec<String> = (0..200).map(|i| format!("k{i}")).collect();
-            serde_json::json!({"op": "getMany", "ns": "n", "keys": keys})
-        })
-        .collect();
-    assert!(
-        txn_check_kv(&over, "t").is_some(),
-        "400 keys over 2 ops must be refused by the KEY budget, which an op \
-         count alone does not bound"
-    );
-
-    let prefix = vec![serde_json::json!({"op": "getPrefix", "ns": "n", "prefix": "p"})];
-    assert!(txn_check_kv(&prefix, "t").is_some());
-}
-
-/// A verdict is not a database failure. Counting a lost idempotency gate — the
-/// single most frequent outcome of the product's number-one use case — as a DB
-/// error would make every dashboard read as broken under normal operation.
-#[test]
-fn a_verdict_is_never_counted_as_a_database_failure() {
-    for (state, msg, reason) in [
-        (Some("23514"), "kv_precondition_failed", "kv_precondition"),
-        (Some("22023"), "kv_bad_request", "bad_request"),
-        (Some("22001"), "kv_value_too_large", "payload_too_large"),
-        (None, "QDUP duplicate messages", "duplicate"),
-        (None, "QTXN ack failed", "ack_rejected"),
-        (None, "QTIMER op 0: field producerSub is server-owned", "ack_rejected"),
-    ] {
-        let (got, is_failure) = txn_reason_for(state, msg);
-        assert_eq!(got, reason, "{msg}");
-        assert!(!is_failure, "a verdict must not inflate the DB error series: {msg}");
+    /// PARITY, and the reason it is the first test here: with no riders, nothing
+    /// about the answer path changes. The guard does not consult the response at
+    /// all when nothing was sent — it must not turn "this database has no kv leg"
+    /// into a failure for a bundle that never asked for one, which is every
+    /// bundle every existing client sends.
+    #[test]
+    fn no_rider_means_no_guard_and_no_lookup() {
+        let answer = serde_json::json!({"ok": true, "pushes": [], "acks": []});
+        assert!(matches!(txn_rider_results(&answer, "kv", 0), Ok(None)));
+        assert!(matches!(txn_rider_results(&answer, "timers", 0), Ok(None)));
     }
-    // A real infrastructure failure is the one thing that IS counted.
-    let (got, is_failure) = txn_reason_for(Some("08006"), "connection closed");
-    assert_eq!(got, "db_error");
-    assert!(is_failure);
-}
 
-/// The failure envelope grew (§8.3) and every failure now carries a `reason`
-/// code. Without it a client has to string-match the message, which is
-/// forbidden everywhere in this codebase — and it is what all seven of them
-/// have had to do until now.
-#[test]
-fn every_failure_carries_a_switchable_reason() {
-    let v = txn_fail_json("txn-1", "duplicate", "QDUP ...");
-    assert_eq!(v["reason"], "duplicate");
-    assert_eq!(v["success"], false);
-    assert_eq!(v["transactionId"], "txn-1");
-    assert!(v["results"].as_array().unwrap().is_empty());
-    // The three fields every client already reads are still exactly where
-    // they were: this grew, it did not change shape.
-    assert!(v.get("error").is_some());
-}
+    /// The old-database detector. A broker that grew the kv array against a
+    /// database whose wire procedure predates it gets NO `kv` key back: the
+    /// bundle committed, and without this the caller would read `success:true`
+    /// for a transaction whose gate never ran.
+    #[test]
+    fn a_missing_rider_result_is_loud_not_silent() {
+        let answer = serde_json::json!({"ok": true, "pushes": [], "acks": []});
+        let e = txn_rider_results(&answer, "kv", 2).expect_err("must not read as success");
+        assert!(e.contains("IGNORED"), "{e}");
+        // Short is the same class of fault as missing.
+        let short = serde_json::json!({"ok": true, "kv": [{"index": 0}]});
+        assert!(txn_rider_results(&short, "kv", 2).is_err());
+        let exact = serde_json::json!({"ok": true, "kv": [{"index": 0}, {"index": 1}]});
+        assert!(txn_rider_results(&exact, "kv", 2).is_ok());
+    }
 
-/// The wire caps are the mirror of the procedure's `p_in_wire = true`
-/// constants. They are deliberately tighter than the HTTP surface's, and if
-/// one side moves without the other the edge stops being a guard and starts
-/// being a second, disagreeing opinion.
-#[test]
-fn the_wire_caps_mirror_the_procedures_in_wire_constants() {
-    assert_eq!(WIRE_KV_MAX_OPS, 64);
-    assert_eq!(WIRE_KV_MAX_KEYS, 256);
-}
+    /// The scatter, which is the mapping itself: `index` becomes the FLAT
+    /// ordinal (what `results[]` and `failedIndex` both speak), and the
+    /// array-local one survives as `opIndex`. If these two were ever swapped,
+    /// every client would index somebody else's operation and nothing would say
+    /// so.
+    #[test]
+    fn the_scatter_rewrites_index_into_the_flat_space() {
+        let mut results = vec![serde_json::Value::Null; 4];
+        // Two pushes already occupy 0 and 1.
+        results[0] = serde_json::json!({"index": 0, "type": "push"});
+        results[1] = serde_json::json!({"index": 1, "type": "push"});
+        let kv = vec![
+            serde_json::json!({"index": 0, "op": "put", "applied": true}),
+            serde_json::json!({"index": 1, "op": "get", "found": false}),
+        ];
+        txn_scatter_rider(&mut results, 2, "kv", &kv);
+        assert_eq!(results[2]["index"], 2);
+        assert_eq!(results[2]["opIndex"], 0);
+        assert_eq!(results[2]["type"], "kv");
+        assert_eq!(results[3]["index"], 3);
+        assert_eq!(results[3]["opIndex"], 1);
+        // The existing entries are untouched: riders APPEND, they never move
+        // anything that was already there.
+        assert_eq!(results[0]["index"], 0);
+        assert_eq!(results[1]["type"], "push");
+        assert!(results.iter().all(|r| !r.is_null()));
+    }
+
+    /// §8.2 point 4. The procedure raises with its own array-local ordinal; a
+    /// client that indexed with it would blame the wrong operation whenever a
+    /// bundle carries any push or ack at all — i.e. in the case the feature
+    /// exists for.
+    #[test]
+    fn failed_index_is_translated_into_the_flat_space() {
+        let detail = r#"{"index":1,"op":"put","ns":"saga","key":"k","reason":"exists","version":7,"value":{"a":1}}"#;
+        let v = txn_precondition_json("txn-1", "kv_precondition_failed", Some(detail), 3);
+        assert_eq!(v["failedIndex"], 4, "kv ordinal 1 with kv_base 3 is flat 4");
+        assert_eq!(v["reason"], "kv_precondition");
+        assert_eq!(v["kvReason"], "exists");
+        assert_eq!(v["version"], 7);
+        assert_eq!(v["value"]["a"], 1);
+        // Both spellings: the transaction envelope's `success` and the KV
+        // route's `ok`, so one client branch reads the same verdict from either
+        // surface.
+        assert_eq!(v["success"], false);
+        assert_eq!(v["ok"], false);
+    }
+
+    /// A DETAIL truncated by the procedure's 4 KiB cap is invalid JSON. It must
+    /// degrade to the bare verdict, never turn a legitimate lost race into a 500.
+    #[test]
+    fn a_truncated_detail_still_yields_the_verdict() {
+        let v = txn_precondition_json(
+            "txn-1",
+            "kv_precondition_failed",
+            Some("{\"index\":1,\"val"),
+            0,
+        );
+        assert_eq!(v["reason"], "kv_precondition");
+        assert!(v.get("failedIndex").is_none());
+        assert_eq!(
+            txn_fail_precondition("txn-1", "x", None, 0).status(),
+            StatusCode::OK,
+            "a lost precondition is a verdict, never a 4xx or a 5xx"
+        );
+    }
+
+    /// §5.5: the boundary on this wire is COST, not the kind of operation.
+    /// `getMany` is allowed and counted by its keys; `getPrefix` is refused
+    /// before a connection is spent.
+    #[test]
+    fn the_wire_kv_guard_counts_keys_and_refuses_prefix() {
+        let many: Vec<serde_json::Value> = (0..3)
+            .map(|_| serde_json::json!({"op": "getMany", "ns": "n", "keys": ["a", "b", "c"]}))
+            .collect();
+        assert!(
+            txn_check_kv(&many, "t").is_none(),
+            "9 keys is under the ceiling"
+        );
+
+        let over: Vec<serde_json::Value> = (0..2)
+            .map(|_| {
+                let keys: Vec<String> = (0..200).map(|i| format!("k{i}")).collect();
+                serde_json::json!({"op": "getMany", "ns": "n", "keys": keys})
+            })
+            .collect();
+        assert!(
+            txn_check_kv(&over, "t").is_some(),
+            "400 keys over 2 ops must be refused by the KEY budget, which an op \
+         count alone does not bound"
+        );
+
+        let prefix = vec![serde_json::json!({"op": "getPrefix", "ns": "n", "prefix": "p"})];
+        assert!(txn_check_kv(&prefix, "t").is_some());
+    }
+
+    /// A verdict is not a database failure. Counting a lost idempotency gate — the
+    /// single most frequent outcome of the product's number-one use case — as a DB
+    /// error would make every dashboard read as broken under normal operation.
+    #[test]
+    fn a_verdict_is_never_counted_as_a_database_failure() {
+        for (state, msg, reason) in [
+            (Some("23514"), "kv_precondition_failed", "kv_precondition"),
+            (Some("22023"), "kv_bad_request", "bad_request"),
+            (Some("22001"), "kv_value_too_large", "payload_too_large"),
+            (None, "QDUP duplicate messages", "duplicate"),
+            (None, "QTXN ack failed", "ack_rejected"),
+            (
+                None,
+                "QTIMER op 0: field producerSub is server-owned",
+                "ack_rejected",
+            ),
+        ] {
+            let (got, is_failure) = txn_reason_for(state, msg);
+            assert_eq!(got, reason, "{msg}");
+            assert!(
+                !is_failure,
+                "a verdict must not inflate the DB error series: {msg}"
+            );
+        }
+        // A real infrastructure failure is the one thing that IS counted.
+        let (got, is_failure) = txn_reason_for(Some("08006"), "connection closed");
+        assert_eq!(got, "db_error");
+        assert!(is_failure);
+    }
+
+    /// The failure envelope grew (§8.3) and every failure now carries a `reason`
+    /// code. Without it a client has to string-match the message, which is
+    /// forbidden everywhere in this codebase — and it is what all seven of them
+    /// have had to do until now.
+    #[test]
+    fn every_failure_carries_a_switchable_reason() {
+        let v = txn_fail_json("txn-1", "duplicate", "QDUP ...");
+        assert_eq!(v["reason"], "duplicate");
+        assert_eq!(v["success"], false);
+        assert_eq!(v["transactionId"], "txn-1");
+        assert!(v["results"].as_array().unwrap().is_empty());
+        // The three fields every client already reads are still exactly where
+        // they were: this grew, it did not change shape.
+        assert!(v.get("error").is_some());
+    }
+
+    /// The wire caps are the mirror of the procedure's `p_in_wire = true`
+    /// constants. They are deliberately tighter than the HTTP surface's, and if
+    /// one side moves without the other the edge stops being a guard and starts
+    /// being a second, disagreeing opinion.
+    #[test]
+    fn the_wire_caps_mirror_the_procedures_in_wire_constants() {
+        assert_eq!(WIRE_KV_MAX_OPS, 64);
+        assert_eq!(WIRE_KV_MAX_KEYS, 256);
+    }
 }

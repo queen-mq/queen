@@ -103,7 +103,9 @@ fn pg_err(e: tokio_postgres::Error) -> String {
             "{} {}{}",
             db.code().code(),
             db.message(),
-            db.detail().map(|d| format!(" | DETAIL: {d}")).unwrap_or_default()
+            db.detail()
+                .map(|d| format!(" | DETAIL: {d}"))
+                .unwrap_or_default()
         ),
         None => format!("{e}"),
     }
@@ -126,7 +128,15 @@ async fn list_raw(
         .query_one(
             "SELECT (queen.kv_list_v1($1::text::uuid, $2, $3::text, $4::text, $5::int, \
              $6::bool, $7::bool))::text",
-            &[&tenant, &ns, &prefix, &after, &limit, &keys_only, &include_expired],
+            &[
+                &tenant,
+                &ns,
+                &prefix,
+                &after,
+                &limit,
+                &keys_only,
+                &include_expired,
+            ],
         )
         .await?;
     let txt: String = row.get(0);
@@ -177,7 +187,10 @@ async fn put_many(c: &Client, tenant: &str, ns: &str, ops: Vec<Value>) -> Result
         let res: Value = serde_json::from_str(&txt).unwrap_or(Value::Null);
         let all = res
             .as_array()
-            .map(|a| a.iter().all(|r| r.get("applied") == Some(&Value::Bool(true))))
+            .map(|a| {
+                a.iter()
+                    .all(|r| r.get("applied") == Some(&Value::Bool(true)))
+            })
             .unwrap_or(false);
         if !all {
             return Err(format!("seeding {ns} did not apply: {res}"));
@@ -202,7 +215,12 @@ fn rows_of(page: &Value) -> Vec<Value> {
 fn keys_of(page: &Value) -> Vec<String> {
     rows_of(page)
         .iter()
-        .map(|r| r.get("key").and_then(|k| k.as_str()).unwrap_or("<nokey>").to_string())
+        .map(|r| {
+            r.get("key")
+                .and_then(|k| k.as_str())
+                .unwrap_or("<nokey>")
+                .to_string()
+        })
         .collect()
 }
 
@@ -211,7 +229,9 @@ fn truncated(page: &Value) -> Option<bool> {
 }
 
 fn next_after(page: &Value) -> Option<String> {
-    page.get("nextAfter").and_then(|n| n.as_str()).map(String::from)
+    page.get("nextAfter")
+        .and_then(|n| n.as_str())
+        .map(String::from)
 }
 
 /// Push a row's expiry into the past, in place. The row keeps its version, its
@@ -242,7 +262,13 @@ async fn expire_now(c: &Client, tenant: &str, ns: &str, key: &str) -> Result<(),
 // ===========================================================================
 async fn case_empty_prefix_lists_the_whole_namespace(c: &Client) -> Case {
     let ns = unique("kvall");
-    put_many(c, DEFAULT_TENANT, &ns, puts(&ns, &["B", "a", "Z", "b", "A"], json!(1))).await?;
+    put_many(
+        c,
+        DEFAULT_TENANT,
+        &ns,
+        puts(&ns, &["B", "a", "Z", "b", "A"], json!(1)),
+    )
+    .await?;
 
     let page = list(c, &ns, "", None, None).await?;
     chk!(
@@ -272,7 +298,14 @@ async fn case_empty_prefix_lists_the_whole_namespace(c: &Client) -> Case {
     // Every row of a value-bearing page carries the five fields the console
     // renders. A missing one is a blank column, never an error.
     let first = rows_of(&page).first().cloned().unwrap_or(Value::Null);
-    for f in ["key", "value", "version", "expiresAt", "updatedAt", "expired"] {
+    for f in [
+        "key",
+        "value",
+        "version",
+        "expiresAt",
+        "updatedAt",
+        "expired",
+    ] {
         chk!(first.get(f).is_some(), "a row must carry `{f}`: {first}");
     }
     chk!(
@@ -297,7 +330,14 @@ async fn case_prefix_is_a_tight_range(c: &Client) -> Case {
         &ns,
         puts(
             &ns,
-            &["wh.deliver:a", "wh.deliver:b", "wh.retry:a", "xx.deliver:a", "a%b", "azb"],
+            &[
+                "wh.deliver:a",
+                "wh.deliver:b",
+                "wh.retry:a",
+                "xx.deliver:a",
+                "a%b",
+                "azb",
+            ],
             json!({ "v": 1 }),
         ),
     )
@@ -348,11 +388,24 @@ async fn case_prefix_is_a_tight_range(c: &Client) -> Case {
 // ===========================================================================
 async fn case_the_cursor_is_exclusive_and_ends(c: &Client) -> Case {
     let ns = unique("kvpage");
-    put_many(c, DEFAULT_TENANT, &ns, puts(&ns, &["k1", "k2", "k3", "k4", "k5"], json!(0))).await?;
+    put_many(
+        c,
+        DEFAULT_TENANT,
+        &ns,
+        puts(&ns, &["k1", "k2", "k3", "k4", "k5"], json!(0)),
+    )
+    .await?;
 
     let p1 = list(c, &ns, "", None, Some(2)).await?;
-    chk!(keys_of(&p1) == vec!["k1", "k2"], "page 1: {:?}", keys_of(&p1));
-    chk!(truncated(&p1) == Some(true), "page 1 must be truncated: {p1}");
+    chk!(
+        keys_of(&p1) == vec!["k1", "k2"],
+        "page 1: {:?}",
+        keys_of(&p1)
+    );
+    chk!(
+        truncated(&p1) == Some(true),
+        "page 1 must be truncated: {p1}"
+    );
     chk!(
         next_after(&p1).as_deref() == Some("k2"),
         "nextAfter must be the LAST RETURNED key: {p1}"
@@ -364,7 +417,10 @@ async fn case_the_cursor_is_exclusive_and_ends(c: &Client) -> Case {
         "the cursor is EXCLUSIVE: page 2 must not repeat k2, got {:?}",
         keys_of(&p2)
     );
-    chk!(truncated(&p2) == Some(true), "page 2 must be truncated: {p2}");
+    chk!(
+        truncated(&p2) == Some(true),
+        "page 2 must be truncated: {p2}"
+    );
 
     let p3 = list(c, &ns, "", next_after(&p2).as_deref(), Some(2)).await?;
     chk!(keys_of(&p3) == vec!["k5"], "page 3: {:?}", keys_of(&p3));
@@ -381,10 +437,20 @@ async fn case_the_cursor_is_exclusive_and_ends(c: &Client) -> Case {
     // comes from a probe row or from arithmetic. Four keys, limit 2, two pages:
     // the second is full AND final.
     let ns4 = unique("kvpage4");
-    put_many(c, DEFAULT_TENANT, &ns4, puts(&ns4, &["a", "b", "c", "d"], json!(0))).await?;
+    put_many(
+        c,
+        DEFAULT_TENANT,
+        &ns4,
+        puts(&ns4, &["a", "b", "c", "d"], json!(0)),
+    )
+    .await?;
     let f1 = list(c, &ns4, "", None, Some(2)).await?;
     let f2 = list(c, &ns4, "", next_after(&f1).as_deref(), Some(2)).await?;
-    chk!(keys_of(&f2) == vec!["c", "d"], "page 2 of 2: {:?}", keys_of(&f2));
+    chk!(
+        keys_of(&f2) == vec!["c", "d"],
+        "page 2 of 2: {:?}",
+        keys_of(&f2)
+    );
     chk!(
         truncated(&f2) == Some(false) && next_after(&f2).is_none(),
         "a last page that is exactly full is still the last page: {f2}"
@@ -423,7 +489,11 @@ async fn case_the_limit_is_clamped_and_defaults(c: &Client) -> Case {
         "the default limit is {LIMIT_DEFAULT}, got {}",
         rows_of(&def).len()
     );
-    chk!(truncated(&def) == Some(true), "1200 keys, 100 shown: {}", rows_of(&def).len());
+    chk!(
+        truncated(&def) == Some(true),
+        "1200 keys, 100 shown: {}",
+        rows_of(&def).len()
+    );
 
     let big = list(c, &ns, "", None, Some(5000)).await?;
     chk!(
@@ -546,7 +616,13 @@ async fn case_the_byte_budget_ends_the_page(c: &Client) -> Case {
 // ===========================================================================
 async fn case_expired_rows_are_visible_and_hidable(c: &Client) -> Case {
     let ns = unique("kvexp");
-    put_many(c, DEFAULT_TENANT, &ns, puts(&ns, &["alive", "dead"], json!({"v": 1}))).await?;
+    put_many(
+        c,
+        DEFAULT_TENANT,
+        &ns,
+        puts(&ns, &["alive", "dead"], json!({"v": 1})),
+    )
+    .await?;
     expire_now(c, DEFAULT_TENANT, &ns, "dead").await?;
 
     let shown = list_raw(c, DEFAULT_TENANT, &ns, "", None, None, false, true)
@@ -702,7 +778,13 @@ async fn case_namespaces_count_and_order(c: &Client) -> Case {
     let stem = unique("kvns");
     let a = format!("{stem}.a");
     let b = format!("{stem}.b");
-    put_many(c, DEFAULT_TENANT, &a, puts(&a, &["k1", "k2", "k3"], json!(1))).await?;
+    put_many(
+        c,
+        DEFAULT_TENANT,
+        &a,
+        puts(&a, &["k1", "k2", "k3"], json!(1)),
+    )
+    .await?;
     put_many(c, DEFAULT_TENANT, &b, puts(&b, &["k1"], json!(1))).await?;
 
     let all = namespaces(c, DEFAULT_TENANT).await?;
@@ -732,7 +814,10 @@ async fn case_namespaces_count_and_order(c: &Client) -> Case {
         .collect();
     let mut sorted = names.clone();
     sorted.sort_unstable();
-    chk!(names == sorted, "the namespace list must be ordered: {names:?}");
+    chk!(
+        names == sorted,
+        "the namespace list must be ordered: {names:?}"
+    );
 
     // A namespace exists if and only if a row exists: delete the last key and it
     // leaves the selector, with no registry to clean up.
@@ -764,8 +849,20 @@ async fn case_namespaces_count_and_order(c: &Client) -> Case {
 async fn case_another_tenants_keys_are_invisible(c: &Client) -> Case {
     let shared = unique("kvshared");
     let theirs = unique("kvtheirs");
-    put_many(c, DEFAULT_TENANT, &shared, puts(&shared, &["mine"], json!("mine"))).await?;
-    put_many(c, OTHER_TENANT, &shared, puts(&shared, &["theirs"], json!("theirs"))).await?;
+    put_many(
+        c,
+        DEFAULT_TENANT,
+        &shared,
+        puts(&shared, &["mine"], json!("mine")),
+    )
+    .await?;
+    put_many(
+        c,
+        OTHER_TENANT,
+        &shared,
+        puts(&shared, &["theirs"], json!("theirs")),
+    )
+    .await?;
     put_many(c, OTHER_TENANT, &theirs, puts(&theirs, &["k"], json!(1))).await?;
 
     let page = list(c, &shared, "", None, None).await?;
@@ -793,7 +890,10 @@ async fn case_another_tenants_keys_are_invisible(c: &Client) -> Case {
     let ours = namespaces(c, OTHER_TENANT).await?;
     let their_shared = ours
         .as_array()
-        .and_then(|l| l.iter().find(|e| e.get("namespace") == Some(&json!(shared))))
+        .and_then(|l| {
+            l.iter()
+                .find(|e| e.get("namespace") == Some(&json!(shared)))
+        })
         .cloned()
         .ok_or("the other tenant cannot see its own namespace")?;
     chk!(
@@ -814,7 +914,18 @@ async fn case_another_tenants_keys_are_invisible(c: &Client) -> Case {
 // key ceiling is simply a range that matches nothing.
 // ===========================================================================
 async fn case_the_namespace_is_validated_and_the_prefix_is_free(c: &Client) -> Case {
-    match list_raw(c, DEFAULT_TENANT, "NOT A NAMESPACE", "", None, None, false, true).await {
+    match list_raw(
+        c,
+        DEFAULT_TENANT,
+        "NOT A NAMESPACE",
+        "",
+        None,
+        None,
+        false,
+        true,
+    )
+    .await
+    {
         Ok(v) => return Err(format!("a malformed namespace must RAISE, got {v}")),
         Err(e) => {
             let db = e
@@ -852,7 +963,10 @@ async fn case_the_namespace_is_validated_and_the_prefix_is_free(c: &Client) -> C
             &[&null_tenant, &ns],
         )
         .await;
-    chk!(r.is_err(), "a NULL tenant must raise, not answer an empty page");
+    chk!(
+        r.is_err(),
+        "a NULL tenant must raise, not answer an empty page"
+    );
     Ok(())
 }
 
@@ -887,7 +1001,10 @@ async fn kv_console_list() {
         "empty_prefix_lists_the_whole_namespace",
         case_empty_prefix_lists_the_whole_namespace(&c).await,
     ));
-    report.push(("prefix_is_a_tight_range", case_prefix_is_a_tight_range(&c).await));
+    report.push((
+        "prefix_is_a_tight_range",
+        case_prefix_is_a_tight_range(&c).await,
+    ));
     report.push((
         "the_cursor_is_exclusive_and_ends",
         case_the_cursor_is_exclusive_and_ends(&c).await,
@@ -937,5 +1054,8 @@ async fn kv_console_list() {
         report.len() - failed,
         report.len()
     );
-    assert_eq!(failed, 0, "{failed} KV console case(s) failed — see the table above");
+    assert_eq!(
+        failed, 0,
+        "{failed} KV console case(s) failed — see the table above"
+    );
 }

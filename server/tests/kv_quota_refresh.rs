@@ -101,7 +101,10 @@ async fn the_refresh_joins_quota_and_usage_without_losing_either_side() {
     {
         let old: String = row.get(0);
         let _ = admin
-            .execute(&format!("DROP DATABASE IF EXISTS \"{old}\" WITH (FORCE)"), &[])
+            .execute(
+                &format!("DROP DATABASE IF EXISTS \"{old}\" WITH (FORCE)"),
+                &[],
+            )
             .await;
     }
     let db = format!(
@@ -119,7 +122,10 @@ async fn the_refresh_joins_quota_and_usage_without_losing_either_side() {
     let result = run(&host, port, &db).await;
 
     let _ = admin
-        .execute(&format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"), &[])
+        .execute(
+            &format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"),
+            &[],
+        )
         .await;
 
     if let Err(report) = result {
@@ -132,7 +138,13 @@ async fn run(host: &str, port: u16, db: &str) -> Result<(), String> {
 
     let broker = Broker::start(
         BrokerConfig::new()
-            .pg(host.to_string(), port, "postgres", "postgres", db.to_string())
+            .pg(
+                host.to_string(),
+                port,
+                "postgres",
+                "postgres",
+                db.to_string(),
+            )
             .pool_size(4)
             .retention(false)
             .stats_refresh(false)
@@ -149,7 +161,10 @@ async fn run(host: &str, port: u16, db: &str) -> Result<(), String> {
     // with `require_grant` on is "deny everybody".
     let rows = refresh(&c, 100).await;
     if !rows.is_empty() {
-        f.push(format!("  ✗ a virgin cell returned {} rows, expected 0", rows.len()));
+        f.push(format!(
+            "  ✗ a virgin cell returned {} rows, expected 0",
+            rows.len()
+        ));
     }
 
     // ------------------------------------------------------------ the fixture
@@ -371,7 +386,13 @@ async fn run(host: &str, port: u16, db: &str) -> Result<(), String> {
 
     let broker = Broker::start(
         BrokerConfig::new()
-            .pg(host.to_string(), port, "postgres", "postgres", db.to_string())
+            .pg(
+                host.to_string(),
+                port,
+                "postgres",
+                "postgres",
+                db.to_string(),
+            )
             .pool_size(4)
             .retention(false)
             .stats_refresh(false)

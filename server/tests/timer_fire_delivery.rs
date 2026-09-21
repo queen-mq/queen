@@ -123,9 +123,15 @@ impl BrokerProc {
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| format!("spawn queen binary: {e}"))?;
-        let http = Http { addr: format!("127.0.0.1:{port}") };
+        let http = Http {
+            addr: format!("127.0.0.1:{port}"),
+        };
         wait_health(&http, 40, &log_path).await?;
-        Ok(BrokerProc { child, http, log_path })
+        Ok(BrokerProc {
+            child,
+            http,
+            log_path,
+        })
     }
 }
 
@@ -133,7 +139,10 @@ async fn wait_health(http: &Http, secs: u64, log_path: &std::path::Path) -> Resu
     let deadline = Instant::now() + Duration::from_secs(secs);
     let mut last = String::from("<no response yet>");
     while Instant::now() < deadline {
-        match http.req("GET", "/health", None, Duration::from_secs(5)).await {
+        match http
+            .req("GET", "/health", None, Duration::from_secs(5))
+            .await
+        {
             Ok((200, _)) => return Ok(()),
             Ok((code, body)) => last = format!("{code}: {body}"),
             Err(e) => last = e,
@@ -188,12 +197,18 @@ impl Http {
             req.push_str(&format!("Content-Length: {}\r\n", payload.len()));
         }
         req.push_str("\r\n");
-        s.write_all(req.as_bytes()).await.map_err(|e| format!("write: {e}"))?;
+        s.write_all(req.as_bytes())
+            .await
+            .map_err(|e| format!("write: {e}"))?;
         if body.is_some() {
-            s.write_all(payload.as_bytes()).await.map_err(|e| format!("write body: {e}"))?;
+            s.write_all(payload.as_bytes())
+                .await
+                .map_err(|e| format!("write body: {e}"))?;
         }
         let mut raw = Vec::with_capacity(16 * 1024);
-        s.read_to_end(&mut raw).await.map_err(|e| format!("read: {e}"))?;
+        s.read_to_end(&mut raw)
+            .await
+            .map_err(|e| format!("read: {e}"))?;
         parse_http(&raw)
     }
 }
@@ -205,7 +220,12 @@ fn parse_http(raw: &[u8]) -> Result<(u16, Value), String> {
     let sep = raw
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
-        .ok_or_else(|| format!("no header/body separator in: {:.200}", String::from_utf8_lossy(raw)))?;
+        .ok_or_else(|| {
+            format!(
+                "no header/body separator in: {:.200}",
+                String::from_utf8_lossy(raw)
+            )
+        })?;
     let head = String::from_utf8_lossy(&raw[..sep]).to_string();
     let mut lines = head.split("\r\n");
     let status_line = lines.next().unwrap_or("");
@@ -214,12 +234,10 @@ fn parse_http(raw: &[u8]) -> Result<(u16, Value), String> {
         .nth(1)
         .and_then(|c| c.parse().ok())
         .ok_or_else(|| format!("bad status line: {status_line}"))?;
-    let chunked = lines
-        .filter_map(|l| l.split_once(':'))
-        .any(|(k, v)| {
-            k.trim().eq_ignore_ascii_case("transfer-encoding")
-                && v.to_ascii_lowercase().contains("chunked")
-        });
+    let chunked = lines.filter_map(|l| l.split_once(':')).any(|(k, v)| {
+        k.trim().eq_ignore_ascii_case("transfer-encoding")
+            && v.to_ascii_lowercase().contains("chunked")
+    });
     let mut body = raw[sep + 4..].to_vec();
     if chunked {
         body = dechunk(&body)?;
@@ -227,8 +245,12 @@ fn parse_http(raw: &[u8]) -> Result<(u16, Value), String> {
     if body.is_empty() {
         return Ok((code, Value::Null));
     }
-    let v: Value = serde_json::from_slice(&body)
-        .map_err(|e| format!("non-JSON body ({e}): {:.400}", String::from_utf8_lossy(&body)))?;
+    let v: Value = serde_json::from_slice(&body).map_err(|e| {
+        format!(
+            "non-JSON body ({e}): {:.400}",
+            String::from_utf8_lossy(&body)
+        )
+    })?;
     Ok((code, v))
 }
 
@@ -278,7 +300,12 @@ fn schedule_op(queue: &str) -> Value {
 /// `POST /api/v1/timers`, the standalone route.
 async fn schedule_via_route(h: &Http, queue: &str) -> Result<(), String> {
     let (code, v) = h
-        .req("POST", "/api/v1/timers", Some(&json!([schedule_op(queue)])), Duration::from_secs(10))
+        .req(
+            "POST",
+            "/api/v1/timers",
+            Some(&json!([schedule_op(queue)])),
+            Duration::from_secs(10),
+        )
         .await?;
     if code != 200 {
         return Err(format!("POST /api/v1/timers -> {code}: {v}"));
@@ -317,7 +344,12 @@ fn pop_qs(wait: bool, timeout_ms: u64) -> String {
 /// and the test would be measuring the seed, not the announce.
 async fn first_contact(h: &Http, queue: &str) -> Result<(), String> {
     let (code, v) = h
-        .req("GET", &format!("/api/v1/pop/queue/{queue}?{}", pop_qs(false, 0)), None, Duration::from_secs(10))
+        .req(
+            "GET",
+            &format!("/api/v1/pop/queue/{queue}?{}", pop_qs(false, 0)),
+            None,
+            Duration::from_secs(10),
+        )
         .await?;
     if code != 200 && code != 204 {
         return Err(format!("first contact pop {queue} -> {code}: {v}"));
@@ -329,15 +361,25 @@ async fn first_contact(h: &Http, queue: &str) -> Result<(), String> {
 }
 
 fn msgs(v: &Value) -> Vec<Value> {
-    v.get("messages").and_then(|m| m.as_array()).cloned().unwrap_or_default()
+    v.get("messages")
+        .and_then(|m| m.as_array())
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// A long-poll parked on the queue (`partition` = None: the queue-scoped route,
 /// the one gap A blinds) or on one partition (the pinned route, the control).
 /// Resolves with the instant the response arrived and the messages it carried.
-async fn parked_pop(h: Http, queue: String, partition: Option<&'static str>) -> Result<(Instant, Vec<Value>), String> {
+async fn parked_pop(
+    h: Http,
+    queue: String,
+    partition: Option<&'static str>,
+) -> Result<(Instant, Vec<Value>), String> {
     let path = match partition {
-        Some(p) => format!("/api/v1/pop/queue/{queue}/partition/{p}?{}", pop_qs(true, 30_000)),
+        Some(p) => format!(
+            "/api/v1/pop/queue/{queue}/partition/{p}?{}",
+            pop_qs(true, 30_000)
+        ),
         None => format!("/api/v1/pop/queue/{queue}?{}", pop_qs(true, 30_000)),
     };
     let (code, v) = h.req("GET", &path, None, Duration::from_secs(45)).await?;
@@ -347,7 +389,11 @@ async fn parked_pop(h: Http, queue: String, partition: Option<&'static str>) -> 
     Ok((Instant::now(), msgs(&v)))
 }
 
-fn check(name: &str, t0: Instant, got: Result<(Instant, Vec<Value>), String>) -> Result<(), String> {
+fn check(
+    name: &str,
+    t0: Instant,
+    got: Result<(Instant, Vec<Value>), String>,
+) -> Result<(), String> {
     let (at, messages) = got?;
     let took = at.saturating_duration_since(t0);
     if messages.is_empty() {
@@ -402,9 +448,15 @@ async fn a_fired_timer_reaches_a_parked_consumer_in_the_same_cycle() {
     tokio::time::sleep(Duration::from_millis(300)).await; // let the three park
 
     let t0 = Instant::now();
-    schedule_via_route(&h, &via_route).await.expect("schedule via POST /api/v1/timers");
-    schedule_via_wire(&h, &via_wire).await.expect("schedule via the transaction wire");
-    schedule_via_route(&h, &via_pinned).await.expect("schedule for the pinned control");
+    schedule_via_route(&h, &via_route)
+        .await
+        .expect("schedule via POST /api/v1/timers");
+    schedule_via_wire(&h, &via_wire)
+        .await
+        .expect("schedule via the transaction wire");
+    schedule_via_route(&h, &via_pinned)
+        .await
+        .expect("schedule for the pinned control");
 
     let (r, w, p) = tokio::join!(parked_route, parked_wire, parked_pinned);
     let cases = [
@@ -414,8 +466,7 @@ async fn a_fired_timer_reaches_a_parked_consumer_in_the_same_cycle() {
     ];
     let mut failed = Vec::new();
     for (name, joined) in cases {
-        let got = joined.map_err(|e| format!("join: {e}"))
-            .and_then(|r| r);
+        let got = joined.map_err(|e| format!("join: {e}")).and_then(|r| r);
         match check(name, t0, got) {
             Ok(()) => {}
             Err(e) => {

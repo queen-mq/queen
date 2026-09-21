@@ -38,15 +38,26 @@ pub async fn handle_get_message(
 ) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
 
     // Track B (§5) OWNERSHIP GATE: this endpoint is addressed by raw partition uuid
     // and the resolver SPs carry no tenant. Verify the pid belongs to the request
     // tenant BEFORE reading any payload; a foreign pid returns the SAME 404 as a
     // genuinely-missing message (no cross-tenant existence leak). No-op when off.
-    if !st.tenant_owns_partition(&client, &partition_id, tenant.as_str()).await {
-        return json(StatusCode::NOT_FOUND, "{\"error\":\"Message not found\"}".to_string());
+    if !st
+        .tenant_owns_partition(&client, &partition_id, tenant.as_str())
+        .await
+    {
+        return json(
+            StatusCode::NOT_FOUND,
+            "{\"error\":\"Message not found\"}".to_string(),
+        );
     }
 
     // Resolve (base_offset, frame_idx): hash the txn (xxh3_128 BE, §3) and probe
@@ -97,22 +108,29 @@ pub async fn handle_get_message(
     let (seq, frame_idx) = match resolved {
         Some(p) => p,
         None => {
-            return json(StatusCode::NOT_FOUND, "{\"error\":\"Message not found\"}".to_string())
-        }
-    };
-
-    let (created_at, partition_name, blob) = match db::seg_fetch_segment(&client, &partition_id, seq).await {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            return json(StatusCode::NOT_FOUND, "{\"error\":\"Message not found\"}".to_string())
-        }
-        Err(e) => {
             return json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                json_err("segment fetch failed: ", &e),
+                StatusCode::NOT_FOUND,
+                "{\"error\":\"Message not found\"}".to_string(),
             )
         }
     };
+
+    let (created_at, partition_name, blob) =
+        match db::seg_fetch_segment(&client, &partition_id, seq).await {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                return json(
+                    StatusCode::NOT_FOUND,
+                    "{\"error\":\"Message not found\"}".to_string(),
+                )
+            }
+            Err(e) => {
+                return json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json_err("segment fetch failed: ", &e),
+                )
+            }
+        };
 
     let raw = zstd_decompress(&blob);
     let frames = match unpack_frames(&raw) {
@@ -126,7 +144,12 @@ pub async fn handle_get_message(
     };
     let f = match frames.get(frame_idx.max(0) as usize) {
         Some(f) => f,
-        None => return json(StatusCode::NOT_FOUND, "{\"error\":\"Message not found\"}".to_string()),
+        None => {
+            return json(
+                StatusCode::NOT_FOUND,
+                "{\"error\":\"Message not found\"}".to_string(),
+            )
+        }
     };
 
     // RUSTFIX item 8: decrypt the {encrypted,iv,authTag} envelope when the
@@ -154,13 +177,17 @@ pub async fn handle_get_message(
             _ => serde_json::json!({}),
         };
     let boolf = |k: &str| detail.get(k).and_then(|x| x.as_bool()).unwrap_or(false);
-    let bus_groups = detail.get("busGroups").and_then(|x| x.as_i64()).unwrap_or(0);
+    let bus_groups = detail
+        .get("busGroups")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
     let is_dlq = boolf("isDlq");
     // status: dead_letter | completed | processing | pending (the status
     // derivation of the retired rows-era get_message_v1).
     let status = if is_dlq {
         "dead_letter"
-    } else if (bus_groups > 0 && boolf("busAllPassed")) || (bus_groups == 0 && boolf("qmodePassed")) {
+    } else if (bus_groups > 0 && boolf("busAllPassed")) || (bus_groups == 0 && boolf("qmodePassed"))
+    {
         "completed"
     } else if boolf("anyLeaseLive") {
         "processing"
@@ -224,7 +251,12 @@ pub async fn handle_delete_message(
 ) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
     let not_found = || {
         json(
@@ -241,7 +273,10 @@ pub async fn handle_delete_message(
     };
     // Track B (§5) OWNERSHIP GATE (pid-addressed delete): a foreign pid must not
     // delete another tenant's DLQ row — treat it as "not found" (no-op when off).
-    if !st.tenant_owns_partition(&client, &partition_id, tenant.as_str()).await {
+    if !st
+        .tenant_owns_partition(&client, &partition_id, tenant.as_str())
+        .await
+    {
         return not_found();
     }
     match db::delete_message(&client, &partition_id, &transaction_id).await {
@@ -654,9 +689,7 @@ struct ReplayBody {
     partition: Option<String>,
 }
 
-fn parse_replay_overrides(
-    body: &Bytes,
-) -> Result<(Option<String>, Option<String>), &'static str> {
+fn parse_replay_overrides(body: &Bytes) -> Result<(Option<String>, Option<String>), &'static str> {
     // The dashboard's plain "Replay" sends no body at all, and a `{}` from a
     // curl is the same request: neither is a 400.
     if body.iter().all(|b| b.is_ascii_whitespace()) {
@@ -735,7 +768,12 @@ pub async fn handle_dlq_replay(
 
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
 
     // A malformed id is not a row, and it gets the same `gone` as a row that is
@@ -804,7 +842,12 @@ pub async fn handle_retry_message(
     }
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
     let not_found = || {
         json(
@@ -821,7 +864,10 @@ pub async fn handle_retry_message(
     };
     // Track B (§5) OWNERSHIP GATE: a foreign pid must not replay (or reveal)
     // another tenant's DLQ row — same 404 as a genuinely-missing address.
-    if !st.tenant_owns_partition(&client, &partition_id, tenant.as_str()).await {
+    if !st
+        .tenant_owns_partition(&client, &partition_id, tenant.as_str())
+        .await
+    {
         return not_found();
     }
 
@@ -903,12 +949,19 @@ async fn enrich_segment_payloads(
             Some(s) => s.to_string(),
             None => continue,
         };
-        let seg = obj.get("segment").cloned().unwrap_or(serde_json::Value::Null);
+        let seg = obj
+            .get("segment")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         let seq = match seg.get("seq").and_then(|x| x.as_i64()) {
             Some(s) => s,
             None => continue,
         };
-        let fidx = seg.get("frameIdx").and_then(|x| x.as_i64()).unwrap_or(0).max(0) as usize;
+        let fidx = seg
+            .get("frameIdx")
+            .and_then(|x| x.as_i64())
+            .unwrap_or(0)
+            .max(0) as usize;
 
         let key = (pid.clone(), seq);
         if !cache.contains_key(&key) {
@@ -936,18 +989,36 @@ async fn enrich_segment_payloads(
                 obj.insert("payload".to_string(), payload);
                 // 010_log_admin's log entries carry id (and transactionId) as null — the
                 // frame is the only carrier of the mid; fill both from it.
-                obj.insert("id".to_string(), serde_json::Value::String(f.message_id.clone()));
-                obj.insert("transactionId".to_string(), serde_json::Value::String(f.txn.clone()));
+                obj.insert(
+                    "id".to_string(),
+                    serde_json::Value::String(f.message_id.clone()),
+                );
+                obj.insert(
+                    "transactionId".to_string(),
+                    serde_json::Value::String(f.txn.clone()),
+                );
                 obj.insert(
                     "traceId".to_string(),
-                    f.trace_id.clone().map(serde_json::Value::String).unwrap_or(serde_json::Value::Null),
+                    f.trace_id
+                        .clone()
+                        .map(serde_json::Value::String)
+                        .unwrap_or(serde_json::Value::Null),
                 );
                 obj.insert(
                     "producerSub".to_string(),
-                    f.producer_sub.clone().map(serde_json::Value::String).unwrap_or(serde_json::Value::Null),
+                    f.producer_sub
+                        .clone()
+                        .map(serde_json::Value::String)
+                        .unwrap_or(serde_json::Value::Null),
                 );
-                obj.insert("isEncrypted".to_string(), serde_json::Value::Bool(f.encrypted));
-                obj.insert("payloadAvailable".to_string(), serde_json::Value::Bool(true));
+                obj.insert(
+                    "isEncrypted".to_string(),
+                    serde_json::Value::Bool(f.encrypted),
+                );
+                obj.insert(
+                    "payloadAvailable".to_string(),
+                    serde_json::Value::Bool(true),
+                );
             }
         }
     }
@@ -959,14 +1030,31 @@ pub async fn handle_list_messages(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let mut filters =
-        filters_from_query(&params, &["queue", "partition", "namespace", "ns", "task", "status", "from", "to"]);
+    let mut filters = filters_from_query(
+        &params,
+        &[
+            "queue",
+            "partition",
+            "namespace",
+            "ns",
+            "task",
+            "status",
+            "from",
+            "to",
+        ],
+    );
     // Accept `ns` as an alias for `namespace` (the C++ route uses `ns`).
     if let Some(ns) = filters.remove("ns") {
         filters.entry("namespace".to_string()).or_insert(ns);
     }
-    filters.insert("limit".to_string(), serde_json::json!(qint(&params, "limit", 200)));
-    filters.insert("offset".to_string(), serde_json::json!(qint(&params, "offset", 0)));
+    filters.insert(
+        "limit".to_string(),
+        serde_json::json!(qint(&params, "limit", 200)),
+    );
+    filters.insert(
+        "offset".to_string(),
+        serde_json::json!(qint(&params, "offset", 0)),
+    );
     // Track B (§5): queen.list_messages_v1 reads `_tenant` from the filters JSON and
     // scopes the listing to that tenant's queues (default tenant when off).
     filters.insert("_tenant".to_string(), serde_json::json!(tenant.as_str()));
@@ -974,7 +1062,12 @@ pub async fn handle_list_messages(
 
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
 
     let txt = match db::list_messages(&client, &filters_json).await {
@@ -993,7 +1086,11 @@ pub async fn handle_list_messages(
         return sp_result_to_response(v.to_string());
     }
     if let Some(obj) = v.as_object_mut() {
-        let total = obj.get("messages").and_then(|m| m.as_array()).map(|a| a.len()).unwrap_or(0);
+        let total = obj
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
         obj.insert("total".to_string(), serde_json::json!(total));
     }
     json(StatusCode::OK, v.to_string())
@@ -1008,15 +1105,26 @@ pub async fn handle_dlq(
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let mut filters = filters_from_query(&params, &["queue", "consumerGroup"]);
-    filters.insert("limit".to_string(), serde_json::json!(qint(&params, "limit", 100)));
-    filters.insert("offset".to_string(), serde_json::json!(qint(&params, "offset", 0)));
+    filters.insert(
+        "limit".to_string(),
+        serde_json::json!(qint(&params, "limit", 100)),
+    );
+    filters.insert(
+        "offset".to_string(),
+        serde_json::json!(qint(&params, "offset", 0)),
+    );
     // Track B (§5): queen.get_dlq_messages_v1 reads `_tenant` from the filters JSON.
     filters.insert("_tenant".to_string(), serde_json::json!(tenant.as_str()));
     let filters_json = serde_json::Value::Object(filters).to_string();
 
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
 
     let txt = match db::get_dlq_messages(&client, &filters_json).await {
@@ -1039,7 +1147,11 @@ pub async fn handle_dlq(
     // ciphertext and is useless for the debugging it exists for.
     decrypt_dlq_payloads(&st.encryption, &mut v);
     if let Some(obj) = v.as_object_mut() {
-        let total = obj.get("messages").and_then(|m| m.as_array()).map(|a| a.len()).unwrap_or(0);
+        let total = obj
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
         obj.insert("total".to_string(), serde_json::json!(total));
     }
     json(StatusCode::OK, v.to_string())
@@ -1185,9 +1297,10 @@ mod tests {
         let p = parse_replay_overrides(&Bytes::from(r#"{"partition":"eu-2"}"#)).unwrap();
         assert_eq!(p, (None, Some("eu-2".to_string())));
 
-        let both =
-            parse_replay_overrides(&Bytes::from(r#"{"queue":"orders.retry","partition":"eu-2"}"#))
-                .unwrap();
+        let both = parse_replay_overrides(&Bytes::from(
+            r#"{"queue":"orders.retry","partition":"eu-2"}"#,
+        ))
+        .unwrap();
         assert_eq!(
             both,
             (Some("orders.retry".to_string()), Some("eu-2".to_string()))

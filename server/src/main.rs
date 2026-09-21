@@ -1,10 +1,10 @@
 mod ack_fusion;
-mod pop_autopilot;
-mod pop_fusion;
 mod ack_registry;
 mod auth;
 mod config;
 mod db;
+mod pop_autopilot;
+mod pop_fusion;
 // Broker-side dedup cache (doc 18 §5). Storage-free; wired into the push path
 // by the fusion slice of the log-engine rewrite.
 #[allow(dead_code)]
@@ -40,13 +40,13 @@ mod sqs_facade;
 // QUEEN_S3_EMBEDDED=true. Listed here rather than in alphabetical order because
 // the three are read together. In BOTH crate roots for the same reason as its
 // twins, and never STARTED in the library target.
-mod s3_sink;
 mod lease;
 mod mesh;
 mod metrics;
 mod migrate;
 mod notify;
 mod obs;
+mod s3_sink;
 // EPHEMERAL_QUEUES.md §3.6 — the broker→broker forwarding client. Twin of the
 // `mod peerclient;` in lib.rs (the twin-list rule of lib.rs's header).
 mod peerclient;
@@ -66,11 +66,11 @@ mod switches;
 // KV + timers background sweeper (PLAN_KV_TIMERS.md §7). Registered in three places
 // like every other background loop: this list, the twin list in lib.rs, and the spawn
 // below. The task is spawned on every broker unless QUEEN_SWEEPER=false.
+mod admission;
 mod sweeper;
 mod syscollect;
 mod tenant;
 mod util;
-mod admission;
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -98,8 +98,14 @@ fn invalidate_queue_caches(st: &Arc<AppState>, tenant: Option<&str>, queue: &str
         }
         None => {
             let suffix = format!("\u{1f}{queue}");
-            st.lease_cache.lock().unwrap().retain(|k, _| !k.ends_with(&suffix));
-            st.enc_cache.lock().unwrap().retain(|k, _| !k.ends_with(&suffix));
+            st.lease_cache
+                .lock()
+                .unwrap()
+                .retain(|k, _| !k.ends_with(&suffix));
+            st.enc_cache
+                .lock()
+                .unwrap()
+                .retain(|k, _| !k.ends_with(&suffix));
         }
     }
 }
@@ -140,7 +146,10 @@ async fn main() {
             &cfg.kafka_facade.bin,
             std::env::current_exe().ok().as_deref(),
         );
-        if let Err(e) = kafka_facade::preflight(&bin, std::env::var("QUEEN_KAFKA_ADVERTISED_ADDR").ok().as_deref()) {
+        if let Err(e) = kafka_facade::preflight(
+            &bin,
+            std::env::var("QUEEN_KAFKA_ADVERTISED_ADDR").ok().as_deref(),
+        ) {
             obs::fatal(e);
         }
         // ...and the posture that is legal but almost certainly a mistake: auth on
@@ -163,10 +172,8 @@ async fn main() {
     // unfixable-by-retry case is not an advertised address but the credential
     // pair SigV4 — the default mode — has no default for.
     let sqs_bin = if cfg.sqs_facade.enabled {
-        let bin = sqs_facade::resolve_bin(
-            &cfg.sqs_facade.bin,
-            std::env::current_exe().ok().as_deref(),
-        );
+        let bin =
+            sqs_facade::resolve_bin(&cfg.sqs_facade.bin, std::env::current_exe().ok().as_deref());
         if let Err(e) = sqs_facade::preflight(
             &bin,
             std::env::var("QUEEN_SQS_AUTH").ok().as_deref(),
@@ -276,7 +283,12 @@ async fn main() {
             // *verification* keys and forge accepted tokens. We fetch it anyway
             // (localhost/in-cluster JWKS-over-http is a legitimate setup) but warn
             // loudly — matching the warn-on-security-downgrade posture elsewhere.
-            if cfg.auth.jwks_url.to_ascii_lowercase().starts_with("http://") {
+            if cfg
+                .auth
+                .jwks_url
+                .to_ascii_lowercase()
+                .starts_with("http://")
+            {
                 tracing::warn!(
                     target: "auth",
                     jwks_url = %cfg.auth.jwks_url,
@@ -285,7 +297,9 @@ async fn main() {
             }
             match authenticator.fetch_jwks().await {
                 Ok(n) => tracing::info!(target: "auth", keys = n, "JWKS pre-fetch OK"),
-                Err(e) => tracing::warn!(target: "auth", error = %e, "JWKS pre-fetch failed (will retry on demand)"),
+                Err(e) => {
+                    tracing::warn!(target: "auth", error = %e, "JWKS pre-fetch failed (will retry on demand)")
+                }
             }
             let a = authenticator.clone();
             let interval = authenticator.jwks_refresh_interval();
@@ -362,8 +376,12 @@ async fn main() {
     // SharedStateManager, which reads the same {"enabled":..} rows at boot).
     let (init_maint, init_pop_maint) = match pool.get().await {
         Ok(c) => (
-            db::get_system_flag(&c, "maintenance_mode").await.unwrap_or(false),
-            db::get_system_flag(&c, "pop_maintenance_mode").await.unwrap_or(false),
+            db::get_system_flag(&c, "maintenance_mode")
+                .await
+                .unwrap_or(false),
+            db::get_system_flag(&c, "pop_maintenance_mode")
+                .await
+                .unwrap_or(false),
         ),
         Err(_) => (false, false),
     };
@@ -764,7 +782,11 @@ async fn main() {
                     // actually running at, which with the kill switch (full_ms = 0,
                     // every pass full) is the reseed cadence itself. A ring past it is
                     // either failing its full walk (B2) or has never had one.
-                    let overdue_ms = if full_ms > 0 { 2 * full_ms } else { 2 * interval_ms };
+                    let overdue_ms = if full_ms > 0 {
+                        2 * full_ms
+                    } else {
+                        2 * interval_ms
+                    };
                     let stale = |x: &crate::hotlist::RingSize| {
                         x.full_age_ms < 0 || x.full_age_ms > overdue_ms
                     };
@@ -901,7 +923,10 @@ async fn main() {
         // The fire's post-commit announce: the same hot-list mark and peer
         // fan-out a push makes, so a fired timer reaches a parked consumer in
         // the same cycle instead of at the next reseed.
-        handlers::Announcer { hotlist: hotlist.clone(), notifier: notifier.clone() },
+        handlers::Announcer {
+            hotlist: hotlist.clone(),
+            notifier: notifier.clone(),
+        },
     );
     if !cfg.sweeper_enabled {
         // The configuration that silently accumulates: live surfaces with their only
@@ -1064,8 +1089,7 @@ async fn main() {
                     let hl = hotlist.clone();
                     let tt = t.clone();
                     tokio::spawn(async move {
-                        let mut iv =
-                            tokio::time::interval(std::time::Duration::from_millis(20));
+                        let mut iv = tokio::time::interval(std::time::Duration::from_millis(20));
                         loop {
                             iv.tick().await;
                             let items = hl.drain_dirty(50_000);
@@ -1129,7 +1153,10 @@ async fn main() {
         // Resources LIST API. Static siblings (queues/overview/namespaces/tasks)
         // registered alongside the `:queue` param route; matchit keeps the static
         // `/resources/queues` distinct from the deeper `/resources/queues/:queue`.
-        .route("/api/v1/resources/queues", get(handlers::handle_list_queues))
+        .route(
+            "/api/v1/resources/queues",
+            get(handlers::handle_list_queues),
+        )
         .route(
             "/api/v1/resources/overview",
             get(handlers::handle_system_overview),
@@ -1210,8 +1237,14 @@ async fn main() {
         .route("/api/v1/status", get(handlers::handle_api_status))
         // Static `/status/analytics` + `/status/buffers` registered before the
         // `/status/queues/:queue` param route so matchit keeps them distinct.
-        .route("/api/v1/status/analytics", get(handlers::handle_status_analytics))
-        .route("/api/v1/status/buffers", get(handlers::handle_status_buffers))
+        .route(
+            "/api/v1/status/analytics",
+            get(handlers::handle_status_analytics),
+        )
+        .route(
+            "/api/v1/status/buffers",
+            get(handlers::handle_status_buffers),
+        )
         .route("/api/v1/status/queues", get(handlers::handle_status_queues))
         .route(
             "/api/v1/status/queues/:queue",
@@ -1226,14 +1259,23 @@ async fn main() {
             "/api/v1/analytics/worker-metrics",
             get(handlers::handle_worker_metrics),
         )
-        .route("/api/v1/analytics/queue-lag", get(handlers::handle_queue_lag))
-        .route("/api/v1/analytics/queue-ops", get(handlers::handle_queue_ops))
+        .route(
+            "/api/v1/analytics/queue-lag",
+            get(handlers::handle_queue_lag),
+        )
+        .route(
+            "/api/v1/analytics/queue-ops",
+            get(handlers::handle_queue_ops),
+        )
         .route("/api/v1/analytics/workload", get(handlers::handle_workload))
         .route(
             "/api/v1/analytics/queue-parked-replicas",
             get(handlers::handle_queue_parked_replicas),
         )
-        .route("/api/v1/analytics/retention", get(handlers::handle_retention))
+        .route(
+            "/api/v1/analytics/retention",
+            get(handlers::handle_retention),
+        )
         .route(
             "/api/v1/analytics/dlq-signatures",
             get(handlers::handle_dlq_signatures),
@@ -1277,7 +1319,10 @@ async fn main() {
             "/api/v1/consumer-groups/:group/queues/:queue/partitions/:partition/seek",
             post(handlers::handle_seek_partition),
         )
-        .route("/api/v1/stats/refresh", post(handlers::handle_stats_refresh))
+        .route(
+            "/api/v1/stats/refresh",
+            post(handlers::handle_stats_refresh),
+        )
         // ------------------------------------------------ system maintenance
         .route(
             "/api/v1/system/maintenance",
@@ -1340,29 +1385,29 @@ async fn main() {
         .route("/auth/me", get(handlers::handle_auth_me))
         .route("/auth/login", get(handlers::handle_auth_login))
         .route("/auth/logout", post(handlers::handle_auth_logout))
-    // ------------------------------------------------------ kv (PLAN_KV_TIMERS.md §8.1)
-    //
-    // Data path, not management plane.
-    //
-    // Order matters: matchit keeps the static `/api/v1/kv` distinct from the deeper
-    // parametric paths, the same rule this file already follows four times over.
-    // `*key` is a CATCH-ALL so `order/9f1/items` can be written naturally, and there
-    // is deliberately NO literal segment under `/api/v1/kv/:ns/` — one would make
-    // every key named after it unreachable, which is also why `incr` exists only on
-    // the POST batch.
-    //
-    // One rule for status codes: the status describes the outcome of the CALL, not of
-    // the business predicate. An absent key, a lost race and a delete that matched
-    // nothing are all 200 with an explicit field. The cost is stated (curl does not
-    // behave "RESTfully" on a missing key, and whoever scripts against it must read
-    // the body); the benefit is that no SDK, proxy, dashboard or retry policy treats
-    // the product's most frequent outcome as an error. The house precedent is queue
-    // deletion, which keeps 200 on `deleted:false`.
-    //
-    // No flag to read: /api/v1/kv is on every cell that runs this binary, the same
-    // way /api/v1/push is. A registration behind a boot flag was the last thing that
-    // made "does this cell have KV?" a question a client could have to ask, and the
-    // answer is now always yes.
+        // ------------------------------------------------------ kv (PLAN_KV_TIMERS.md §8.1)
+        //
+        // Data path, not management plane.
+        //
+        // Order matters: matchit keeps the static `/api/v1/kv` distinct from the deeper
+        // parametric paths, the same rule this file already follows four times over.
+        // `*key` is a CATCH-ALL so `order/9f1/items` can be written naturally, and there
+        // is deliberately NO literal segment under `/api/v1/kv/:ns/` — one would make
+        // every key named after it unreachable, which is also why `incr` exists only on
+        // the POST batch.
+        //
+        // One rule for status codes: the status describes the outcome of the CALL, not of
+        // the business predicate. An absent key, a lost race and a delete that matched
+        // nothing are all 200 with an explicit field. The cost is stated (curl does not
+        // behave "RESTfully" on a missing key, and whoever scripts against it must read
+        // the body); the benefit is that no SDK, proxy, dashboard or retry policy treats
+        // the product's most frequent outcome as an error. The house precedent is queue
+        // deletion, which keeps 200 on `deleted:false`.
+        //
+        // No flag to read: /api/v1/kv is on every cell that runs this binary, the same
+        // way /api/v1/push is. A registration behind a boot flag was the last thing that
+        // made "does this cell have KV?" a question a client could have to ask, and the
+        // answer is now always yes.
         .route("/api/v1/kv", post(handlers::handle_kv_batch))
         .route(
             "/api/v1/kv/:ns/*key",
@@ -1370,48 +1415,60 @@ async fn main() {
                 .put(handlers::handle_kv_put)
                 .delete(handlers::handle_kv_delete),
         )
-    // --------------------------------------------------- timers (PLAN_KV_TIMERS.md §8.1)
-    //
-    // Note what is NOT here: a tenant-wide timer list. `list` is scoped to a queue and
-    // the queue is a PATH SEGMENT, not a filter, precisely so that no call can ask for
-    // "every timer of this tenant" — that is a scan an end user of the customer could
-    // trigger (§4.1).
-    //
-    // And the cancel has its OWN route and its own authorization class (§9.6). It is
-    // the same stored procedure as schedule but NOT the same authorization decision:
-    // `POST /api/v1/timers` carries cancels in the same array as schedules, so a
-    // tenant over quota would be refused on its cancels too — while the fire never
-    // stops on its own (§12), meaning that tenant would keep producing messages it
-    // cannot stop, up to the horizon or an operator's intervention. Blocking would
-    // produce the opposite of its purpose, so cancel goes through a route the proxy
-    // classifies as read/management and never blocks.
-    // ------------------------------------- ephemeral (EPHEMERAL_QUEUES.md §3.1)
-    //
-    // The RAM-class surface: contents live in this process's heap and survive
-    // nothing (§1.2). Eight routes — three hot verbs, three management verbs and
-    // two status reads.
-    //
-    // ORDER MATTERS HERE, and this is the sixth time this file says it: matchit
-    // needs the STATIC segments registered before their `:param` siblings.
-    // `/queues` and `/queues/:queue/depth` are distinct paths so they cannot
-    // collide, but `/queue/:queue` (the delete) sits one segment deep under a
-    // family whose other members are all static, and registering it first would
-    // make `/api/v1/ephemeral/queue/...` shadow nothing today and something
-    // tomorrow. Static first, param last, always.
-    //
-    // Unconditional, like kv and timers above and for the same reason: no flag
-    // decides whether this surface exists, so a 404 here can only ever mean the
-    // broker predates the feature (which is exactly what the SDKs map it to).
-    // Pausing it is the runtime kill switch at /api/v1/system/ephemeral above.
-        .route("/api/v1/ephemeral/push", post(handlers::handle_ephemeral_push))
+        // --------------------------------------------------- timers (PLAN_KV_TIMERS.md §8.1)
+        //
+        // Note what is NOT here: a tenant-wide timer list. `list` is scoped to a queue and
+        // the queue is a PATH SEGMENT, not a filter, precisely so that no call can ask for
+        // "every timer of this tenant" — that is a scan an end user of the customer could
+        // trigger (§4.1).
+        //
+        // And the cancel has its OWN route and its own authorization class (§9.6). It is
+        // the same stored procedure as schedule but NOT the same authorization decision:
+        // `POST /api/v1/timers` carries cancels in the same array as schedules, so a
+        // tenant over quota would be refused on its cancels too — while the fire never
+        // stops on its own (§12), meaning that tenant would keep producing messages it
+        // cannot stop, up to the horizon or an operator's intervention. Blocking would
+        // produce the opposite of its purpose, so cancel goes through a route the proxy
+        // classifies as read/management and never blocks.
+        // ------------------------------------- ephemeral (EPHEMERAL_QUEUES.md §3.1)
+        //
+        // The RAM-class surface: contents live in this process's heap and survive
+        // nothing (§1.2). Eight routes — three hot verbs, three management verbs and
+        // two status reads.
+        //
+        // ORDER MATTERS HERE, and this is the sixth time this file says it: matchit
+        // needs the STATIC segments registered before their `:param` siblings.
+        // `/queues` and `/queues/:queue/depth` are distinct paths so they cannot
+        // collide, but `/queue/:queue` (the delete) sits one segment deep under a
+        // family whose other members are all static, and registering it first would
+        // make `/api/v1/ephemeral/queue/...` shadow nothing today and something
+        // tomorrow. Static first, param last, always.
+        //
+        // Unconditional, like kv and timers above and for the same reason: no flag
+        // decides whether this surface exists, so a 404 here can only ever mean the
+        // broker predates the feature (which is exactly what the SDKs map it to).
+        // Pausing it is the runtime kill switch at /api/v1/system/ephemeral above.
+        .route(
+            "/api/v1/ephemeral/push",
+            post(handlers::handle_ephemeral_push),
+        )
         .route("/api/v1/ephemeral/pop", get(handlers::handle_ephemeral_pop))
-        .route("/api/v1/ephemeral/ack", post(handlers::handle_ephemeral_ack))
+        .route(
+            "/api/v1/ephemeral/ack",
+            post(handlers::handle_ephemeral_ack),
+        )
         .route(
             "/api/v1/ephemeral/configure",
             post(handlers::handle_ephemeral_configure),
         )
-        .route("/api/v1/ephemeral/reset", post(handlers::handle_ephemeral_reset))
-        .route("/api/v1/ephemeral/queues", get(handlers::handle_ephemeral_queues))
+        .route(
+            "/api/v1/ephemeral/reset",
+            post(handlers::handle_ephemeral_reset),
+        )
+        .route(
+            "/api/v1/ephemeral/queues",
+            get(handlers::handle_ephemeral_queues),
+        )
         .route(
             "/api/v1/ephemeral/queues/:queue/depth",
             get(handlers::handle_ephemeral_depth),
@@ -1448,7 +1505,9 @@ async fn main() {
         // request extensions. Inner to auth so a 401 short-circuits before this,
         // but otherwise independent — it only reads a header + stamps an extension.
         .layer(axum::middleware::from_fn_with_state(
-            tenant::TenancyConfig { enabled: cfg.tenancy_header },
+            tenant::TenancyConfig {
+                enabled: cfg.tenancy_header,
+            },
             tenant::tenant_middleware,
         ))
         // Auth runs outermost: it validates the token + route level before any

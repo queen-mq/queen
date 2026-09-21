@@ -144,6 +144,7 @@ mod tests {
         assert!(parse_tenant_uuid("not-a-uuid").is_none());
         assert!(parse_tenant_uuid("00000000000000000000000000000001").is_none()); // no dashes
         assert!(parse_tenant_uuid("00000000-0000-0000-0000-00000000000g").is_none()); // non-hex
-        assert!(parse_tenant_uuid("00000000-0000-0000-0000-0000000000012").is_none()); // too long
+        assert!(parse_tenant_uuid("00000000-0000-0000-0000-0000000000012").is_none());
+        // too long
     }
 }

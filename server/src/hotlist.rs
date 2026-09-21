@@ -50,12 +50,12 @@
 //! entry stays. Every race degrades to a false positive, never a false negative
 //! beyond the reseed floor.
 
-use std::collections::BinaryHeap;
 use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
 use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 
 use crate::notify::Notifier;
 
@@ -107,7 +107,8 @@ const NIL: u32 = u32::MAX;
 // timers actually fire. Sampled summary ~1 line / 10s via obs::Sampler.
 pub static FLOOR_LEASED_PARKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static FLOOR_PROMOTE_CLEAR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub static FLOOR_PROMOTE_REQUEUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static FLOOR_PROMOTE_REQUEUE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 fn floor_summary() {
     static S: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
     if S.tick_now().is_some() {
@@ -123,8 +124,10 @@ fn floor_summary() {
 fn pad_ms() -> i64 {
     static V: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
-        std::env::var("QUEEN_HOTLIST_PAD_MS").ok()
-            .and_then(|v| v.parse().ok()).unwrap_or(300)
+        std::env::var("QUEEN_HOTLIST_PAD_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300)
     })
 }
 // Cap on how long a leased entry is parked in the wheel before it is re-probed.
@@ -192,7 +195,11 @@ fn reseed_fail_warns(n: u32) -> bool {
 /// time no pass ever covers. One definition, so the two cannot drift apart.
 pub const fn max_reseed_jitter_ms(interval_ms: i64) -> i64 {
     let scaled = interval_ms / RESEED_JITTER_DIV;
-    if scaled > RESEED_JITTER_MS { scaled } else { RESEED_JITTER_MS }
+    if scaled > RESEED_JITTER_MS {
+        scaled
+    } else {
+        RESEED_JITTER_MS
+    }
 }
 
 /// One (tenant, queue, group) ring whose periodic reseed floor (§8) is due. A named
@@ -1076,8 +1083,10 @@ impl LapStats {
         }
     }
     fn note_visit(&self, n: usize) {
-        self.visits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.cands.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+        self.visits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.cands
+            .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
     }
     pub fn visits(&self) -> u64 {
         self.visits.load(std::sync::atomic::Ordering::Relaxed)
@@ -1092,10 +1101,7 @@ impl LapStats {
             (0.0, 0.0)
         } else {
             v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            (
-                v[v.len() / 2],
-                v[(v.len() * 95 / 100).min(v.len() - 1)],
-            )
+            (v[v.len() / 2], v[(v.len() * 95 / 100).min(v.len() - 1)])
         };
         (
             self.visits.load(std::sync::atomic::Ordering::Relaxed),
@@ -1201,7 +1207,9 @@ impl HotList {
             queues: Mutex::new(HashMap::new()),
             by_queue: Mutex::new(HashMap::new()),
             notifier: OnceLock::new(),
-            trace_prefix: std::env::var("QUEEN_HOTLIST_TRACE").ok().filter(|v| !v.is_empty()),
+            trace_prefix: std::env::var("QUEEN_HOTLIST_TRACE")
+                .ok()
+                .filter(|v| !v.is_empty()),
             dirty: Mutex::new(HashSet::new()),
             any_min_pop_wait: std::sync::atomic::AtomicBool::new(false),
             reseeds_full: std::sync::atomic::AtomicU64::new(0),
@@ -1221,9 +1229,9 @@ impl HotList {
     /// from `QUEEN_HOTLIST_UNSERVED_TRIM_MS`, before any traffic — same shape as
     /// [`HotList::attach_notifier`]. 0 leaves it off.
     pub fn set_unserved_trim_ms(&self, ms: i64) {
-        self.unserved_trim_ms.store(ms.max(0), std::sync::atomic::Ordering::Relaxed);
+        self.unserved_trim_ms
+            .store(ms.max(0), std::sync::atomic::Ordering::Relaxed);
     }
-
 
     #[inline]
     pub fn enabled(&self) -> bool {
@@ -1241,7 +1249,9 @@ impl HotList {
     /// composite key, so the operator still writes a plain queue prefix.
     pub fn traced(&self, qkey: &str) -> bool {
         match &self.trace_prefix {
-            Some(p) => crate::handlers::split_tenant_queue(qkey).1.starts_with(p.as_str()),
+            Some(p) => crate::handlers::split_tenant_queue(qkey)
+                .1
+                .starts_with(p.as_str()),
             None => false,
         }
     }
@@ -1295,7 +1305,14 @@ impl HotList {
     /// it, TTL-throttled). `now_ms` stamps the fetch for the TTL check. Per
     /// (tenant, queue): `delayed`/`windowBuffer` are per-tenant queue config, so a
     /// same-named queue of another tenant must never install its deferral here.
-    pub fn set_queue_cfg(&self, qkey: &str, delayed: i32, window: i32, min_pop_wait_ms: i32, now_ms: i64) {
+    pub fn set_queue_cfg(
+        &self,
+        qkey: &str,
+        delayed: i32,
+        window: i32,
+        min_pop_wait_ms: i32,
+        now_ms: i64,
+    ) {
         let s = self.qstate(qkey);
         let mut c = s.cfg.lock().unwrap();
         c.delayed = delayed;
@@ -1371,12 +1388,17 @@ impl HotList {
         sub.ensure(local);
         if self.trace_prefix.is_some() && self.traced(qkey) {
             let (t, q) = crate::handlers::split_tenant_queue(qkey);
-            eprintln!("[hlt] mark q={} p={} st={} tn={} t={}", q, partition,
-                sub.state[local as usize], t, crate::hotlist::trace_now_ms());
+            eprintln!(
+                "[hlt] mark q={} p={} st={} tn={} t={}",
+                q,
+                partition,
+                sub.state[local as usize],
+                t,
+                crate::hotlist::trace_now_ms()
+            );
         }
         sub.epoch[local as usize] = sub.epoch[local as usize].wrapping_add(1);
-        sub.batch_count[local as usize] =
-            sub.batch_count[local as usize].saturating_add(count);
+        sub.batch_count[local as usize] = sub.batch_count[local as usize].saturating_add(count);
         // A write restarts the deferral clock the empty verdict reasons about:
         // on a windowBuffer queue THIS mark is what pushes the visibility cut
         // forward, so the ghost test below must never fire on a partition that
@@ -1720,10 +1742,17 @@ impl HotList {
         let _ = now_ms;
         if self.traced(qkey) {
             let (_, q) = crate::handlers::split_tenant_queue(qkey);
-            eprintln!("[hlt] promote q={} g={} idx={} st={} cov={} bc={} dr={} t={}",
-                q, group, idx, sub.state[local as usize], covered,
-                sub.batch_count[local as usize], sub.drained[local as usize],
-                trace_now_ms());
+            eprintln!(
+                "[hlt] promote q={} g={} idx={} st={} cov={} bc={} dr={} t={}",
+                q,
+                group,
+                idx,
+                sub.state[local as usize],
+                covered,
+                sub.batch_count[local as usize],
+                sub.drained[local as usize],
+                trace_now_ms()
+            );
         }
         match sub.state[local as usize] {
             WHEEL => {
@@ -1737,10 +1766,7 @@ impl HotList {
                 // (~250ms of woken→served wait). A NACK/partial release
                 // (covered=false) always promotes: the batch itself is
                 // redeliverable content.
-                if covered
-                    && sub.batch_count[local as usize] == 0
-                    && sub.drained[local as usize]
-                {
+                if covered && sub.batch_count[local as usize] == 0 && sub.drained[local as usize] {
                     sub.revisit_at[local as usize] = 0;
                     sub.state[local as usize] = IDLE; // stale heap entry skips lazily
                     FLOOR_PROMOTE_CLEAR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2101,8 +2127,8 @@ impl HotList {
                     // Bounded (MAX_LEASE_REVISIT_MS): our own ack normally promotes
                     // this before the deadline, but if that promote is lost to the
                     // race the cap re-probes within ~1s instead of at lease expiry.
-                    let park = (now_ms + lease_ms.max(1) + pad_ms())
-                        .min(now_ms + MAX_LEASE_REVISIT_MS);
+                    let park =
+                        (now_ms + lease_ms.max(1) + pad_ms()).min(now_ms + MAX_LEASE_REVISIT_MS);
                     sub.wheel_schedule(local, park);
                 }
                 Verdict::Took => {
@@ -2412,7 +2438,10 @@ impl HotList {
             for (gname, ring) in groups {
                 let last = *ring.reseed_ms.lock().unwrap();
                 if last != 0 && now_ms - last >= interval_ms + ring.jitter_ms(interval_ms) {
-                    out.push(ReseedDue { qkey: qname.clone(), group: gname });
+                    out.push(ReseedDue {
+                        qkey: qname.clone(),
+                        group: gname,
+                    });
                 }
             }
         }
@@ -2431,15 +2460,13 @@ impl HotList {
     /// vecchia la entry piu' vecchia".
     pub fn ready_probe(&self) -> (f64, u64) {
         let now = crate::util::now_epoch_ms();
-        let queues: Vec<Arc<QueueState>> = {
-            self.queues.lock().unwrap().values().cloned().collect()
-        };
+        let queues: Vec<Arc<QueueState>> =
+            { self.queues.lock().unwrap().values().cloned().collect() };
         let mut oldest_ms = 0.0f64;
         let mut depth = 0u64;
         for s in queues {
-            let groups: Vec<Arc<GroupRing>> = {
-                s.groups.lock().unwrap().values().cloned().collect()
-            };
+            let groups: Vec<Arc<GroupRing>> =
+                { s.groups.lock().unwrap().values().cloned().collect() };
             for ring in groups {
                 for sub in ring.subs.iter() {
                     let sg = sub.lock().unwrap();
@@ -2487,7 +2514,13 @@ impl HotList {
                     ready += sg.len_ready;
                     wheel += sg.wheel.len();
                 }
-                let age = |stamp: i64| if stamp == 0 { -1 } else { (now_ms - stamp).max(0) };
+                let age = |stamp: i64| {
+                    if stamp == 0 {
+                        -1
+                    } else {
+                        (now_ms - stamp).max(0)
+                    }
+                };
                 let full_age_ms = age(*ring.full_reseed_ms.lock().unwrap());
                 let reseed_age_ms = age(*ring.reseed_ms.lock().unwrap());
                 out.push(RingSize {
@@ -2642,7 +2675,9 @@ impl HotList {
         };
         let mut woke = 0;
         for (qname, s) in queues {
-            if s.wake_pending.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            if s.wake_pending
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
                 if self.traced(&qname) {
                     let (tn, q) = crate::handlers::split_tenant_queue(&qname);
                     eprintln!("[hlt] tickwake q={} tn={} t={}", q, tn, trace_now_ms());
@@ -2856,7 +2891,9 @@ impl HotList {
     /// broker with no consumer traffic for it, where there are no pops to contend with.
     /// A serving broker returns on the first branch and never walks.
     pub fn trim_unserved(&self, now_ms: i64) -> usize {
-        let trim_ms = self.unserved_trim_ms.load(std::sync::atomic::Ordering::Relaxed);
+        let trim_ms = self
+            .unserved_trim_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
         if !self.enabled || trim_ms <= 0 {
             return 0;
         }
@@ -2867,7 +2904,8 @@ impl HotList {
             // the last pass ⇒ keep it whatever its depth. THIS is the branch that saves
             // the lagged-but-healthy queue.
             if s.served.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                s.unserved_since_ms.store(0, std::sync::atomic::Ordering::Relaxed);
+                s.unserved_since_ms
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
                 return true;
             }
             // Same argument as `evict_idle`: the map being the sole holder is what proves
@@ -2877,9 +2915,12 @@ impl HotList {
             }
             // Start the clock on the first pass that finds it unserved, so the effective
             // grace is [trim_ms, trim_ms + one pass) rather than a single missed stamp.
-            let since = s.unserved_since_ms.load(std::sync::atomic::Ordering::Relaxed);
+            let since = s
+                .unserved_since_ms
+                .load(std::sync::atomic::Ordering::Relaxed);
             if since == 0 {
-                s.unserved_since_ms.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                s.unserved_since_ms
+                    .store(now_ms, std::sync::atomic::Ordering::Relaxed);
                 return true;
             }
             if now_ms.saturating_sub(since) < trim_ms {
@@ -3006,10 +3047,26 @@ mod tests {
         let mut it = QueueIntern::new();
         it.note_id("p0", "6ba7b810-9dad-41d1-80b4-00c04fd430c8");
         let want = Some(0);
-        assert_eq!(it.idx_of_id("6ba7b810-9dad-41d1-80b4-00c04fd430c8"), want, "as written");
-        assert_eq!(it.idx_of_id("6BA7B810-9DAD-41D1-80B4-00C04FD430C8"), want, "upper case");
-        assert_eq!(it.idx_of_id("6ba7b8109dad41d180b400c04fd430c8"), want, "no dashes");
-        assert_eq!(it.idx_of_id("6ba7b810-9dad-41d1-80b4-00c04fd430c9"), None, "a different id");
+        assert_eq!(
+            it.idx_of_id("6ba7b810-9dad-41d1-80b4-00c04fd430c8"),
+            want,
+            "as written"
+        );
+        assert_eq!(
+            it.idx_of_id("6BA7B810-9DAD-41D1-80B4-00C04FD430C8"),
+            want,
+            "upper case"
+        );
+        assert_eq!(
+            it.idx_of_id("6ba7b8109dad41d180b400c04fd430c8"),
+            want,
+            "no dashes"
+        );
+        assert_eq!(
+            it.idx_of_id("6ba7b810-9dad-41d1-80b4-00c04fd430c9"),
+            None,
+            "a different id"
+        );
     }
 
     // An id that is not a uuid costs the bridge entry and NOTHING else: the partition is
@@ -3020,21 +3077,41 @@ mod tests {
     fn an_unparseable_id_still_interns_its_partition() {
         let mut it = QueueIntern::new();
         it.note_id("p0", "not-a-uuid");
-        assert_eq!(it.idx_of("p0"), Some(0), "the partition is interned regardless");
+        assert_eq!(
+            it.idx_of("p0"),
+            Some(0),
+            "the partition is interned regardless"
+        );
         assert_eq!(it.name_of(0), Some("p0"));
-        assert_eq!(it.idx_of_id("not-a-uuid"), None, "but it gets no bridge entry");
+        assert_eq!(
+            it.idx_of_id("not-a-uuid"),
+            None,
+            "but it gets no bridge entry"
+        );
     }
 
     #[test]
     fn parse_uuid16_rejects_what_is_not_a_uuid() {
         assert!(parse_uuid16("00000000-0000-4000-8000-000000000000").is_some());
         assert!(parse_uuid16("").is_none(), "empty");
-        assert!(parse_uuid16("00000000-0000-4000-8000-00000000000").is_none(), "too short");
-        assert!(parse_uuid16("00000000-0000-4000-8000-0000000000000").is_none(), "too long");
-        assert!(parse_uuid16("0000000g-0000-4000-8000-000000000000").is_none(), "non-hex");
+        assert!(
+            parse_uuid16("00000000-0000-4000-8000-00000000000").is_none(),
+            "too short"
+        );
+        assert!(
+            parse_uuid16("00000000-0000-4000-8000-0000000000000").is_none(),
+            "too long"
+        );
+        assert!(
+            parse_uuid16("0000000g-0000-4000-8000-000000000000").is_none(),
+            "non-hex"
+        );
         // Dashes are ignored wherever they fall — this is a value parser, not a format
         // validator, and the only producer is Postgres.
-        assert_eq!(parse_uuid16("--0000000000000000000000000000000a"), parse_uuid16("0000000000000000000000000000000a"));
+        assert_eq!(
+            parse_uuid16("--0000000000000000000000000000000a"),
+            parse_uuid16("0000000000000000000000000000000a")
+        );
     }
 
     // ------------------------------------------------ the post-commit announce
@@ -3057,8 +3134,16 @@ mod tests {
 
         crate::handlers::announce_landed(&h, &n, &[("q".to_string(), "p0".to_string(), 2)]);
 
-        assert_eq!(h.ready_peek("q", "g", now).0, 1, "the landed partition is a candidate");
-        assert_eq!(h.wake_tick(), 1, "and the queue is flagged for the coalesced wake");
+        assert_eq!(
+            h.ready_peek("q", "g", now).0,
+            1,
+            "the landed partition is a candidate"
+        );
+        assert_eq!(
+            h.wake_tick(),
+            1,
+            "and the queue is flagged for the coalesced wake"
+        );
         assert_eq!(h.wake_tick(), 0, "exactly once");
     }
 
@@ -3238,7 +3323,11 @@ mod tests {
         // 30 minutes later the backlog is still there and a consumer is still claiming.
         let much_later = t0 + 1_800_000;
         let got = h.take_batch("q", "g", 1, 1, much_later);
-        assert_eq!(got.len(), 1, "a serving consumer is claiming from the backlog");
+        assert_eq!(
+            got.len(),
+            1,
+            "a serving consumer is claiming from the backlog"
+        );
         assert!(
             h.ready_est("q", "g", much_later) > 1,
             "the backlog must still be deep for this test to mean anything"
@@ -3251,7 +3340,10 @@ mod tests {
             "still served since the last pass ⇒ keep, whatever the head age"
         );
         assert_eq!(h.queue_count(), 1, "the ring survived");
-        assert_eq!(h.trims_unserved.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(
+            h.trims_unserved.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
     }
 
     // The standby: the ring fills from marks and reseed rows, nothing ever pops it.
@@ -3266,12 +3358,25 @@ mod tests {
         for i in 0..32 {
             h.mark_remote("q", &format!("p{i}"), t0);
         }
-        walk_rows(&h, "q", "g", t0, &[("11111111-1111-4111-8111-111111111111", "px")]);
+        walk_rows(
+            &h,
+            "q",
+            "g",
+            t0,
+            &[("11111111-1111-4111-8111-111111111111", "px")],
+        );
         assert_eq!(h.queue_count(), 1);
 
         assert_eq!(trim_twice(&h, t0, 30_000), 1, "nothing popped it ⇒ trimmed");
-        assert_eq!(h.queue_count(), 0, "the whole QueueState is gone (intern freed)");
-        assert_eq!(h.trims_unserved.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            h.queue_count(),
+            0,
+            "the whole QueueState is gone (intern freed)"
+        );
+        assert_eq!(
+            h.trims_unserved.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 
     // The discriminator itself: the paths that FILL a ring must not look like service.
@@ -3288,7 +3393,13 @@ mod tests {
         h.mark_remote("q", "b", t0);
         h.trim_unserved(t0);
         h.mark_local("q", "c", 1, t0 + 15_000);
-        walk_rows(&h, "q", "g", t0 + 20_000, &[("22222222-2222-4222-8222-222222222222", "d")]);
+        walk_rows(
+            &h,
+            "q",
+            "g",
+            t0 + 20_000,
+            &[("22222222-2222-4222-8222-222222222222", "d")],
+        );
         h.note_partition_id("q", "e", "33333333-3333-4333-8333-333333333333");
         assert_eq!(
             h.trim_unserved(t0 + 30_001),
@@ -3392,13 +3503,21 @@ mod tests {
         h.trim_unserved(t0);
         h.trim_unserved(t0 + 10); // clock starts
         h.has_ready("q", "g", t0 + 25_000); // a consumer shows up late in the window
-        assert_eq!(h.trim_unserved(t0 + 30_020), 0, "the stamp clears the clock");
+        assert_eq!(
+            h.trim_unserved(t0 + 30_020),
+            0,
+            "the stamp clears the clock"
+        );
         assert_eq!(
             h.trim_unserved(t0 + 30_030),
             0,
             "and the window restarts from here, not from t0"
         );
-        assert_eq!(h.trim_unserved(t0 + 60_050), 1, "a full fresh window later ⇒ trimmed");
+        assert_eq!(
+            h.trim_unserved(t0 + 60_050),
+            1,
+            "a full fresh window later ⇒ trimmed"
+        );
     }
 
     // A trimmed ring is a cache drop, never a data loss: the next reseed walk rebuilds it
@@ -3416,9 +3535,19 @@ mod tests {
         // The consumer comes back: register, reseed from PG, claim.
         let t1 = t0 + 100_000;
         reg(&h, "q", "g");
-        walk(&h, "q", "g", t1, &[("44444444-4444-4444-8444-444444444444", "p0")]);
+        walk(
+            &h,
+            "q",
+            "g",
+            t1,
+            &[("44444444-4444-4444-8444-444444444444", "p0")],
+        );
         let got = h.take_batch("q", "g", 1, 1, t1);
-        assert_eq!(names(&got), vec!["p0".to_string()], "the work is discoverable again");
+        assert_eq!(
+            names(&got),
+            vec!["p0".to_string()],
+            "the work is discoverable again"
+        );
     }
 
     // …and the rebuild is a FULL walk, not a windowed one. This is the assertion that
@@ -3435,9 +3564,17 @@ mod tests {
         let t0 = 1_450_000;
         h.mark_local("q", "p0", 1, t0);
         // Give the ring a completed FULL walk, so only the trim can reset that history.
-        assert!(walk(&h, "q", "g", t0, &[("55555555-5555-4555-8555-555555555555", "p0")]));
+        assert!(walk(
+            &h,
+            "q",
+            "g",
+            t0,
+            &[("55555555-5555-4555-8555-555555555555", "p0")]
+        ));
         assert!(
-            !h.reseed_begin("q", "g", t0 + 1_000, 600_000, 120_000).mode().is_full(),
+            !h.reseed_begin("q", "g", t0 + 1_000, 600_000, 120_000)
+                .mode()
+                .is_full(),
             "a ring that just full-walked would otherwise take the cheap windowed walk"
         );
 
@@ -3449,7 +3586,9 @@ mod tests {
             "a rebuilt ring owes a reseed before a pop may conclude it is empty"
         );
         assert!(
-            h.reseed_begin("q", "g", t1, 600_000, 120_000).mode().is_full(),
+            h.reseed_begin("q", "g", t1, 600_000, 120_000)
+                .mode()
+                .is_full(),
             "and that reseed MUST be the full walk, whatever the full-walk interval says"
         );
     }
@@ -3463,10 +3602,17 @@ mod tests {
         let t0 = 1_500_000;
         h.mark_local("q", "p0", 1, t0);
         for step in 0..5 {
-            assert_eq!(h.trim_unserved(t0 + step * 1_000_000), 0, "disabled ⇒ never trims");
+            assert_eq!(
+                h.trim_unserved(t0 + step * 1_000_000),
+                0,
+                "disabled ⇒ never trims"
+            );
         }
         assert_eq!(h.queue_count(), 1);
-        assert_eq!(h.trims_unserved.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(
+            h.trims_unserved.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
     }
 
     // A disabled hot-list must not grow a trim either (the OSS default path).
@@ -3591,7 +3737,11 @@ mod tests {
             h.mark_local("q", &format!("p{p}"), 2_000, 0); // deep: 2k marks each
         }
         let c = h.take_batch("q", "g", 10, 1_000, 0);
-        assert_eq!(names(&c), vec!["p0"], "deep head partition covers the budget alone");
+        assert_eq!(
+            names(&c),
+            vec!["p0"],
+            "deep head partition covers the budget alone"
+        );
         // The other three are claimable RIGHT NOW by concurrent serves.
         assert_eq!(names(&h.take_batch("q", "g", 10, 1_000, 0)), vec!["p1"]);
         assert_eq!(names(&h.take_batch("q", "g", 10, 1_000, 0)), vec!["p2"]);
@@ -3617,7 +3767,9 @@ mod tests {
     }
 
     fn due_keys(d: &[ReseedDue]) -> Vec<(String, String)> {
-        d.iter().map(|x| (x.qkey.clone(), x.group.clone())).collect()
+        d.iter()
+            .map(|x| (x.qkey.clone(), x.group.clone()))
+            .collect()
     }
 
     #[test]
@@ -3787,7 +3939,12 @@ mod tests {
         h.checkin(
             "q",
             "g",
-            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took, drained: true }],
+            vec![CheckinResult {
+                name: "p0".into(),
+                epoch: c[0].epoch,
+                verdict: Verdict::Took,
+                drained: true,
+            }],
             100,
             false,
             60_000,
@@ -3854,18 +4011,38 @@ mod tests {
         // drained=true persisted at its Took.
         h.mark_local("q", "p0", 1, 0);
         let c1 = h.take_batch("q", "g", 1, u32::MAX, 0);
-        h.checkin("q", "g",
-            vec![CheckinResult { name: "p0".into(), epoch: c1[0].epoch, verdict: Verdict::Took, drained: true }],
-            10, false, 60_000);
+        h.checkin(
+            "q",
+            "g",
+            vec![CheckinResult {
+                name: "p0".into(),
+                epoch: c1[0].epoch,
+                verdict: Verdict::Took,
+                drained: true,
+            }],
+            10,
+            false,
+            60_000,
+        );
         h.promote_ack("q", "g", ID0, 20, true); // covered+drained ⇒ IDLE
-        // Cycle 2: a 100-message backlog lands; OUR claim's Took checkin loses
-        // the race to a concurrent popper's Leased verdict (ownership gate has
-        // already been passed by the Leased one in this simulation).
+                                                // Cycle 2: a 100-message backlog lands; OUR claim's Took checkin loses
+                                                // the race to a concurrent popper's Leased verdict (ownership gate has
+                                                // already been passed by the Leased one in this simulation).
         h.mark_local("q", "p0", 100, 30);
         let c2 = h.take_batch("q", "g", 1, u32::MAX, 30);
-        h.checkin("q", "g",
-            vec![CheckinResult { name: "p0".into(), epoch: c2[0].epoch, verdict: Verdict::Leased(60_030), drained: false }],
-            40, false, 60_000);
+        h.checkin(
+            "q",
+            "g",
+            vec![CheckinResult {
+                name: "p0".into(),
+                epoch: c2[0].epoch,
+                verdict: Verdict::Leased(60_030),
+                drained: false,
+            }],
+            40,
+            false,
+            60_000,
+        );
         // The winner's ack arrives (covered): the stale drained=true from cycle
         // 1 must NOT cause a clear — the entry must come back claimable.
         h.promote_ack("q", "g", ID0, 50, true);
@@ -3890,7 +4067,12 @@ mod tests {
         h.checkin(
             "q",
             "g",
-            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took, drained: false }],
+            vec![CheckinResult {
+                name: "p0".into(),
+                epoch: c[0].epoch,
+                verdict: Verdict::Took,
+                drained: false,
+            }],
             100,
             false,
             60_000,
@@ -3913,7 +4095,12 @@ mod tests {
         h.checkin(
             "q",
             "g",
-            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took, drained: true }],
+            vec![CheckinResult {
+                name: "p0".into(),
+                epoch: c[0].epoch,
+                verdict: Verdict::Took,
+                drained: true,
+            }],
             100,
             false,
             60_000,
@@ -3941,7 +4128,12 @@ mod tests {
         h.checkin(
             "q",
             "g",
-            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took, drained: true }],
+            vec![CheckinResult {
+                name: "p0".into(),
+                epoch: c[0].epoch,
+                verdict: Verdict::Took,
+                drained: true,
+            }],
             100,
             false,
             60_000,
@@ -4002,7 +4194,10 @@ mod tests {
             true,
             60_000,
         );
-        assert!(h.take_batch("q", "g", 1, u32::MAX, 0).is_empty(), "clean empty clears");
+        assert!(
+            h.take_batch("q", "g", 1, u32::MAX, 0).is_empty(),
+            "clean empty clears"
+        );
     }
 
     // §4 interleaving 3: mark delayed PAST the clear ⇒ clear passes, late mark re-adds.
@@ -4099,7 +4294,10 @@ mod tests {
         assert!(h.take_batch("q", "g", 1, u32::MAX, 1000).is_empty());
         // after commit_ts + D + pad
         h.tick(2400);
-        assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 2400)), vec!["p0"]);
+        assert_eq!(
+            names(&h.take_batch("q", "g", 1, u32::MAX, 2400)),
+            vec!["p0"]
+        );
     }
 
     #[test]
@@ -4112,11 +4310,17 @@ mod tests {
         h.mark_local("q", "p0", 10, 0);
         assert!(h.take_batch("q", "g", 1, u32::MAX, 1000).is_empty());
         h.tick(5100);
-        assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 5100)), vec!["p0"]);
+        assert_eq!(
+            names(&h.take_batch("q", "g", 1, u32::MAX, 5100)),
+            vec!["p0"]
+        );
 
         // fat batch on a fresh partition: promoted early (before the window)
         h.mark_local("q", "p1", 100, 10_000); // batch_count >= threshold
-        assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 10_050)), vec!["p1"]);
+        assert_eq!(
+            names(&h.take_batch("q", "g", 1, u32::MAX, 10_050)),
+            vec!["p1"]
+        );
     }
 
     #[test]
@@ -4135,7 +4339,7 @@ mod tests {
         let h = hl1();
         reg(&h, "q", "g");
         h.set_queue_cfg("q", 2, 0, 0, 0); // delayed queue
-        // put p0 ready via the wheel firing
+                                          // put p0 ready via the wheel firing
         h.mark_local("q", "p0", 1, 0);
         h.tick(2400);
         let c = h.take_batch("q", "g", 1, u32::MAX, 2400);
@@ -4157,7 +4361,10 @@ mod tests {
         // still tracked (in the wheel), reappears after the backoff
         assert!(h.take_batch("q", "g", 1, u32::MAX, 2400).is_empty());
         h.tick(10_000);
-        assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 10_000)), vec!["p0"]);
+        assert_eq!(
+            names(&h.take_batch("q", "g", 1, u32::MAX, 10_000)),
+            vec!["p0"]
+        );
     }
 
     #[test]
@@ -4224,7 +4431,11 @@ mod tests {
         reg(&h, "q", "g");
         h.mark_local("q", "p0", 1, 0); // wake=true ⇒ immediate, no tick flag
         h.mark_remote("q", "p1", 0); // wake=true ⇒ immediate, no tick flag
-        assert_eq!(h.wake_tick(), 0, "immediate-wake marks must not flag the tick");
+        assert_eq!(
+            h.wake_tick(),
+            0,
+            "immediate-wake marks must not flag the tick"
+        );
     }
 
     // With no peers configured, a local mark skips the dirty-hint set entirely (no
@@ -4272,8 +4483,18 @@ mod tests {
             "q",
             "g",
             vec![
-                CheckinResult { name: "p_keep".into(), epoch: c[0].epoch, verdict: Verdict::Took, drained: false },
-                CheckinResult { name: "p_lost".into(), epoch: c[1].epoch, verdict: Verdict::Empty, drained: false },
+                CheckinResult {
+                    name: "p_keep".into(),
+                    epoch: c[0].epoch,
+                    verdict: Verdict::Took,
+                    drained: false,
+                },
+                CheckinResult {
+                    name: "p_lost".into(),
+                    epoch: c[1].epoch,
+                    verdict: Verdict::Empty,
+                    drained: false,
+                },
             ],
             base,
             true,
@@ -4299,7 +4520,9 @@ mod tests {
         // The background task runs the keyset scan: reseed_row for the still-pending
         // p_lost (exactly what the reseed walk returns: last_offset>committed).
         walk(&h, "q", "g", due_at, &[("id_lost", "p_lost")]);
-        let got: HashSet<String> = names(&h.take_batch("q", "g", 5, u32::MAX, due_at)).into_iter().collect();
+        let got: HashSet<String> = names(&h.take_batch("q", "g", 5, u32::MAX, due_at))
+            .into_iter()
+            .collect();
         assert!(
             got.contains("p_lost"),
             "periodic reseed must recover the cleared partition; got {got:?}"
@@ -4323,7 +4546,12 @@ mod tests {
         h.checkin(
             "q",
             "g",
-            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took, drained: false }],
+            vec![CheckinResult {
+                name: "p0".into(),
+                epoch: c[0].epoch,
+                verdict: Verdict::Took,
+                drained: false,
+            }],
             5100,
             true,
             60_000,
@@ -4334,7 +4562,10 @@ mod tests {
         );
         // Claimable again only after the next window.
         h.tick(10_300);
-        assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 10_300)), vec!["p0"]);
+        assert_eq!(
+            names(&h.take_batch("q", "g", 1, u32::MAX, 10_300)),
+            vec!["p0"]
+        );
     }
 
     // Guard: a NON-window queue's auto-ack Took still re-appends to READY at once
@@ -4348,12 +4579,21 @@ mod tests {
         h.checkin(
             "q",
             "g",
-            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took, drained: false }],
+            vec![CheckinResult {
+                name: "p0".into(),
+                epoch: c[0].epoch,
+                verdict: Verdict::Took,
+                drained: false,
+            }],
             0,
             true,
             60_000,
         );
-        assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 0)), vec!["p0"], "no window ⇒ immediate READY");
+        assert_eq!(
+            names(&h.take_batch("q", "g", 1, u32::MAX, 0)),
+            vec!["p0"],
+            "no window ⇒ immediate READY"
+        );
     }
 
     #[test]
@@ -4361,7 +4601,10 @@ mod tests {
         let h = hl1();
         assert!(h.reseed_due("q", "g", 1000, 30_000)); // cold
         walk(&h, "q", "g", 1000, &[(ID0, "p0"), (ID1, "p1")]);
-        assert_eq!(names(&h.take_batch("q", "g", 5, u32::MAX, 1000)), vec!["p0", "p1"]);
+        assert_eq!(
+            names(&h.take_batch("q", "g", 5, u32::MAX, 1000)),
+            vec!["p0", "p1"]
+        );
         assert!(!h.reseed_due("q", "g", 1000, 30_000)); // just reseeded
         assert!(h.reseed_due("q", "g", 40_000, 30_000)); // stale again
     }
@@ -4396,7 +4639,10 @@ mod tests {
         // broker, an evicted ring, a group whose first contact bulk-seeded every
         // partition of the queue at once (log_pop_v1's seed INSERT) — none of those
         // partitions were necessarily written recently.
-        assert_eq!(mode_now(&h, "q", "g", 1_000, 300_000, 120_000), ReseedMode::Full);
+        assert_eq!(
+            mode_now(&h, "q", "g", 1_000, 300_000, 120_000),
+            ReseedMode::Full
+        );
         // A pass that did NOT complete its full walk cannot satisfy that debt either.
         let t = h.reseed_begin("q", "g", 1_000, 300_000, 120_000);
         assert!(h.reseed_finish(t, false));
@@ -4406,7 +4652,10 @@ mod tests {
             "a failed walk must never stand in for the cold-start full walk"
         );
         // Only a completed full one does.
-        assert_eq!(pass(&h, "q", "g", 2_000, 300_000, 120_000), ReseedMode::Full);
+        assert_eq!(
+            pass(&h, "q", "g", 2_000, 300_000, 120_000),
+            ReseedMode::Full
+        );
         assert_eq!(
             mode_now(&h, "q", "g", 3_000, 300_000, 120_000),
             ReseedMode::Window(120_000)
@@ -4430,7 +4679,14 @@ mod tests {
         // ring's own, because the offset is random per ring by design — the assertion
         // has to hold for every draw.)
         assert_eq!(
-            mode_now(&h, "q", "g", base + 300_000 + max_jitter_ms(300_000), 300_000, 120_000),
+            mode_now(
+                &h,
+                "q",
+                "g",
+                base + 300_000 + max_jitter_ms(300_000),
+                300_000,
+                120_000
+            ),
             ReseedMode::Full
         );
     }
@@ -4475,7 +4731,10 @@ mod tests {
         let h = hl1();
         walk(&h, "q", "g", 1_000, &[]);
         assert_eq!(mode_now(&h, "q", "g", 1_001, 0, 120_000), ReseedMode::Full);
-        assert_eq!(mode_now(&h, "q", "g", 999_999, 0, 120_000), ReseedMode::Full);
+        assert_eq!(
+            mode_now(&h, "q", "g", 999_999, 0, 120_000),
+            ReseedMode::Full
+        );
     }
 
     #[test]
@@ -4484,9 +4743,18 @@ mod tests {
         let (a, b) = (k("t1", "orders"), k("t2", "orders"));
         walk(&h, &a, "g1", 1_000, &[]);
         // A full walk for one (tenant, queue, group) says nothing about any other.
-        assert_eq!(mode_now(&h, &a, "g1", 2_000, 300_000, 120_000), ReseedMode::Window(120_000));
-        assert_eq!(mode_now(&h, &a, "g2", 2_000, 300_000, 120_000), ReseedMode::Full);
-        assert_eq!(mode_now(&h, &b, "g1", 2_000, 300_000, 120_000), ReseedMode::Full);
+        assert_eq!(
+            mode_now(&h, &a, "g1", 2_000, 300_000, 120_000),
+            ReseedMode::Window(120_000)
+        );
+        assert_eq!(
+            mode_now(&h, &a, "g2", 2_000, 300_000, 120_000),
+            ReseedMode::Full
+        );
+        assert_eq!(
+            mode_now(&h, &b, "g1", 2_000, 300_000, 120_000),
+            ReseedMode::Full
+        );
     }
 
     #[test]
@@ -4537,7 +4805,10 @@ mod tests {
         got.sort();
         assert_eq!(
             got,
-            vec![DirtyHint::new("q", "p0", None), DirtyHint::new("q", "p0", Some("g"))]
+            vec![
+                DirtyHint::new("q", "p0", None),
+                DirtyHint::new("q", "p0", Some("g"))
+            ]
         );
     }
 
@@ -4568,7 +4839,9 @@ mod tests {
         reg(&h, "q", "known");
         let n2 = n.clone();
         let waiter =
-            tokio::spawn(async move { n2.wait_queue("q", std::time::Duration::from_secs(2)).await });
+            tokio::spawn(
+                async move { n2.wait_queue("q", std::time::Duration::from_secs(2)).await },
+            );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert!(
             !h.mark_remote_group("q", "p0", "never-polled", 0),
@@ -4576,7 +4849,12 @@ mod tests {
         );
         assert!(waiter.await.unwrap(), "the queue gate must still be woken");
         let rings = h.ring_sizes(0);
-        assert_eq!(rings.len(), 1, "no ring may be allocated by a hint: {:?}", rings.len());
+        assert_eq!(
+            rings.len(),
+            1,
+            "no ring may be allocated by a hint: {:?}",
+            rings.len()
+        );
         assert_eq!(rings[0].group, "known");
     }
 
@@ -4598,7 +4876,8 @@ mod tests {
                 "every tenant holding the name must be marked"
             );
             assert!(
-                h.take_batch(&k(t, "orders"), "other", 5, u32::MAX, 0).is_empty(),
+                h.take_batch(&k(t, "orders"), "other", 5, u32::MAX, 0)
+                    .is_empty(),
                 "…and only on the group the hint named"
             );
         }
@@ -4659,7 +4938,10 @@ mod tests {
         let t = h.reseed_begin("q", "g", 1_000, 300_000, 120_000);
         assert!(t.mode().is_full(), "a cold ring owes a full walk");
         h.reseed_row(&t, ID0, "p0");
-        assert!(h.reseed_finish(t, true), "an untouched ring must take its stamp");
+        assert!(
+            h.reseed_finish(t, true),
+            "an untouched ring must take its stamp"
+        );
         assert_eq!(
             mode_now(&h, "q", "g", 2_000, 300_000, 120_000),
             ReseedMode::Window(120_000),
@@ -4686,7 +4968,11 @@ mod tests {
             ReseedMode::Full,
             "the new ring must still cold-start"
         );
-        assert_eq!(counters(&h), (0, 0, 0, 1), "the pass counts as dropped and nothing else");
+        assert_eq!(
+            counters(&h),
+            (0, 0, 0, 1),
+            "the pass counts as dropped and nothing else"
+        );
     }
 
     #[test]
@@ -4698,7 +4984,10 @@ mod tests {
         h.forget_group_all_queues(TA, "workers");
         h.ensure_group(&qk, "workers");
         assert!(!h.reseed_finish(t, true));
-        assert_eq!(mode_now(&h, &qk, "workers", 2_000, 300_000, 120_000), ReseedMode::Full);
+        assert_eq!(
+            mode_now(&h, &qk, "workers", 2_000, 300_000, 120_000),
+            ReseedMode::Full
+        );
     }
 
     // The rows are NOT rolled back on a dropped stamp — they went to the ring the walk
@@ -4730,8 +5019,14 @@ mod tests {
         let h = hl1();
         reg(&h, "q", "g");
         let t = h.reseed_begin("q", "g", 1_000, 300_000, 120_000);
-        assert!(h.reseed_finish(t, false), "the stamp lands: the ring is unchanged");
-        assert!(!h.reseed_due("q", "g", 1_500, 30_000), "the cadence clock moved");
+        assert!(
+            h.reseed_finish(t, false),
+            "the stamp lands: the ring is unchanged"
+        );
+        assert!(
+            !h.reseed_due("q", "g", 1_500, 30_000),
+            "the cadence clock moved"
+        );
         assert_eq!(
             mode_now(&h, "q", "g", 2_000, 300_000, 120_000),
             ReseedMode::Full,
@@ -4776,7 +5071,11 @@ mod tests {
         h.forget_group("q", "g");
         h.ensure_group("q", "g");
         h.reseed_finish(t, true);
-        assert_eq!(counters(&h), (0, 0, 0, 1), "nothing was stamped, so no mode counted it");
+        assert_eq!(
+            counters(&h),
+            (0, 0, 0, 1),
+            "nothing was stamped, so no mode counted it"
+        );
         assert_eq!(h.reseeds_total(), 0);
     }
 
@@ -4808,9 +5107,15 @@ mod tests {
     // flood every 30s.
     #[test]
     fn a_failing_walk_warns_on_a_streak_and_then_only_on_doublings() {
-        assert!(!reseed_fail_warns(1), "one failure is a hiccup, not a stall");
+        assert!(
+            !reseed_fail_warns(1),
+            "one failure is a hiccup, not a stall"
+        );
         assert!(!reseed_fail_warns(2));
-        assert!(reseed_fail_warns(3), "the first line, ~90s into a ring not reseeding");
+        assert!(
+            reseed_fail_warns(3),
+            "the first line, ~90s into a ring not reseeding"
+        );
         assert!(!reseed_fail_warns(5), "…then quiet until the count doubles");
         assert!(reseed_fail_warns(8));
         assert!(reseed_fail_warns(1024), "and it never goes fully silent");
@@ -4857,7 +5162,10 @@ mod tests {
             "a freshly full-walked ring is windowed"
         );
         assert!(h.request_full_walk("q", "g"));
-        assert_eq!(mode_now(&h, "q", "g", 2_000, 300_000, 120_000), ReseedMode::Full);
+        assert_eq!(
+            mode_now(&h, "q", "g", 2_000, 300_000, 120_000),
+            ReseedMode::Full
+        );
     }
 
     // The regression guard for `reseed_ms = 1` instead of 0. Zero is the never-reseeded
@@ -4891,7 +5199,10 @@ mod tests {
     fn request_full_walk_never_creates_a_ring_it_did_not_hold() {
         let h = hl1();
         reg(&h, "q", "g");
-        assert!(!h.request_full_walk("q", "unknown-group"), "no ring, nothing repaired");
+        assert!(
+            !h.request_full_walk("q", "unknown-group"),
+            "no ring, nothing repaired"
+        );
         assert!(!h.request_full_walk("unknown-queue", "g"));
         assert_eq!(h.queue_count(), 1, "no QueueState was allocated");
         assert_eq!(h.ring_sizes(0).len(), 1, "and no ring was");
@@ -4921,7 +5232,11 @@ mod tests {
                 .count()
         };
         // Nobody early, everybody by the widest offset the interval admits.
-        assert_eq!(full_at(base + 299_999), 0, "no ring may come due before its interval");
+        assert_eq!(
+            full_at(base + 299_999),
+            0,
+            "no ring may come due before its interval"
+        );
         assert_eq!(
             full_at(base + 300_000 + max_jitter_ms(300_000)),
             rings,
@@ -4952,7 +5267,8 @@ mod tests {
             "no ring is due before the interval"
         );
         assert_eq!(
-            h.periodic_reseed_due(base + 30_000 + RESEED_JITTER_MS, 30_000).len(),
+            h.periodic_reseed_due(base + 30_000 + RESEED_JITTER_MS, 30_000)
+                .len(),
             rings,
             "every ring is due within interval + the original 15s band"
         );
@@ -4989,7 +5305,10 @@ mod tests {
         // Stuck: not claimable, and a fresh mark cannot re-link an INFLIGHT entry.
         assert!(h.take_batch("q", "g", 1, u32::MAX, 0).is_empty());
         h.mark_local("q", "p0", 1, 0); // epoch bump only — still not in the ring
-        assert!(h.take_batch("q", "g", 1, u32::MAX, 0).is_empty(), "mark cannot re-add INFLIGHT");
+        assert!(
+            h.take_batch("q", "g", 1, u32::MAX, 0).is_empty(),
+            "mark cannot re-add INFLIGHT"
+        );
         // The reseed floor re-adds the still-pending partition (last_offset>committed).
         walk(&h, "q", "g", 0, &[(ID0, "p0")]);
         assert_eq!(
@@ -5009,7 +5328,7 @@ mod tests {
         reg(&h, "q", "g");
         h.mark_local("q", "p0", 1, 0);
         let c = h.take_batch("q", "g", 1, u32::MAX, 0); // p0 INFLIGHT, epoch snapshot
-        // reseed reclaims it back to READY while the "pop" is still in flight.
+                                                        // reseed reclaims it back to READY while the "pop" is still in flight.
         walk(&h, "q", "g", 0, &[(ID0, "p0")]);
         // A second pop can now take it (redundant probe — allowed).
         assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 0)), vec!["p0"]);
@@ -5019,14 +5338,22 @@ mod tests {
         h.checkin(
             "q",
             "g",
-            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took, drained: false }],
+            vec![CheckinResult {
+                name: "p0".into(),
+                epoch: c[0].epoch,
+                verdict: Verdict::Took,
+                drained: false,
+            }],
             0,
             true,
             60_000,
         );
         // Whatever the interleaving, p0 appears at most once (no duplicate links).
         let got = names(&h.take_batch("q", "g", 5, u32::MAX, 0));
-        assert!(got == vec!["p0"] || got.is_empty(), "no duplicate ring entry: {got:?}");
+        assert!(
+            got == vec!["p0"] || got.is_empty(),
+            "no duplicate ring entry: {got:?}"
+        );
     }
 
     // Retries-stall floor (2026-07-24): a manual-ack (leased) pop parks the entry in
@@ -5046,7 +5373,12 @@ mod tests {
         h.checkin(
             "q",
             "g",
-            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took, drained: false }],
+            vec![CheckinResult {
+                name: "p0".into(),
+                epoch: c[0].epoch,
+                verdict: Verdict::Took,
+                drained: false,
+            }],
             0,
             false,
             300_000,
@@ -5083,7 +5415,10 @@ mod tests {
             "deferral wheel entry must stay parked until its window is due"
         );
         // Still delivered once the window elapses.
-        assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 6_000)), vec!["p0"]);
+        assert_eq!(
+            names(&h.take_batch("q", "g", 1, u32::MAX, 6_000)),
+            vec!["p0"]
+        );
     }
 
     #[test]
@@ -5120,7 +5455,10 @@ mod tests {
         h.forget_group("q", "g1");
         // g1 is now cold: no stale ready entry, and a fresh reseed is due.
         assert!(!h.has_ready("q", "g1", 1500), "stale ring must not survive");
-        assert!(h.reseed_due("q", "g1", 1500, 30_000), "forgotten ring reseeds cold");
+        assert!(
+            h.reseed_due("q", "g1", 1500, 30_000),
+            "forgotten ring reseeds cold"
+        );
         // g2 is untouched — the delete was scoped to g1.
         assert!(h.has_ready("q", "g2", 1500), "sibling group ring untouched");
         assert!(!h.reseed_due("q", "g2", 1500, 30_000));
@@ -5147,7 +5485,10 @@ mod tests {
         assert!(h.reseed_due("qa", "g", 0, 30_000));
         assert!(h.reseed_due("qb", "g", 0, 30_000));
         // …but a co-resident group on one of those queues is untouched.
-        assert!(h.has_ready("qa", "other", 0), "co-resident group ring untouched");
+        assert!(
+            h.has_ready("qa", "other", 0),
+            "co-resident group ring untouched"
+        );
     }
 
     // forget_* on a disabled hot-list, an unknown queue, or an unregistered group is
@@ -5180,8 +5521,13 @@ mod tests {
         reg(&h, &k(TB, "orders"), "workers");
         h.mark_local(&k(TA, "orders"), "p0", 1, 0);
         // B has nothing pending: its take must not see A's candidate.
-        assert!(h.take_batch(&k(TB, "orders"), "workers", 10, u32::MAX, 0).is_empty());
-        assert_eq!(names(&h.take_batch(&k(TA, "orders"), "workers", 10, u32::MAX, 0)), vec!["p0"]);
+        assert!(h
+            .take_batch(&k(TB, "orders"), "workers", 10, u32::MAX, 0)
+            .is_empty());
+        assert_eq!(
+            names(&h.take_batch(&k(TA, "orders"), "workers", 10, u32::MAX, 0)),
+            vec!["p0"]
+        );
     }
 
     // The headline shared-cell defect: with one shared ring, tenant B's pop checks
@@ -5269,7 +5615,8 @@ mod tests {
         // resolve it to the same dense index and promote A's entry.
         h.promote_ack(&k(TA, "orders"), "workers", IDB, 1, false);
         assert!(
-            h.take_batch(&k(TA, "orders"), "workers", 10, u32::MAX, 1).is_empty(),
+            h.take_batch(&k(TA, "orders"), "workers", 10, u32::MAX, 1)
+                .is_empty(),
             "another tenant's partition id must not promote this tenant's entry"
         );
         // A's own ack releases A's lease — and only A's.
@@ -5279,7 +5626,8 @@ mod tests {
             vec!["shared-part"]
         );
         assert!(
-            h.take_batch(&k(TB, "orders"), "workers", 10, u32::MAX, 1).is_empty(),
+            h.take_batch(&k(TB, "orders"), "workers", 10, u32::MAX, 1)
+                .is_empty(),
             "tenant B's entry must stay wheeled until B's own ack"
         );
     }
@@ -5296,10 +5644,17 @@ mod tests {
         }
         assert!(h.periodic_reseed_due(base + 1_000, 30_000).is_empty());
         let due_at = base + 30_000 + RESEED_JITTER_MS + 1;
-        let got: HashSet<(String, String)> =
-            due_keys(&h.periodic_reseed_due(due_at, 30_000)).into_iter().collect();
-        assert!(got.contains(&(k(TA, "orders"), "workers".to_string())), "got {got:?}");
-        assert!(got.contains(&(k(TB, "orders"), "workers".to_string())), "got {got:?}");
+        let got: HashSet<(String, String)> = due_keys(&h.periodic_reseed_due(due_at, 30_000))
+            .into_iter()
+            .collect();
+        assert!(
+            got.contains(&(k(TA, "orders"), "workers".to_string())),
+            "got {got:?}"
+        );
+        assert!(
+            got.contains(&(k(TB, "orders"), "workers".to_string())),
+            "got {got:?}"
+        );
         // And the key round-trips to the tenant the background scan will bind to SQL.
         assert_eq!(
             crate::handlers::split_tenant_queue(&k(TB, "orders")),
@@ -5352,7 +5707,10 @@ mod tests {
         h.mark_remote_all_tenants("orders", "p0", 0);
         assert!(h.has_ready(&k(TA, "orders"), "workers", 0));
         assert!(h.has_ready(&k(TB, "orders"), "workers", 0));
-        assert!(!h.has_ready(&k(TA, "other"), "workers", 0), "other queues untouched");
+        assert!(
+            !h.has_ready(&k(TA, "other"), "workers", 0),
+            "other queues untouched"
+        );
     }
 
     // R1 — the flag-OFF invariant. With QUEEN_TENANCY_HEADER unset no non-default
@@ -5368,13 +5726,20 @@ mod tests {
         reg(&h, &def, "workers");
         reg(&h, &k(TB, "orders"), "workers"); // unreachable without tenancy — a scan would hit it
         h.mark_remote_all_tenants("orders", "p0", 0);
-        assert!(h.has_ready(&def, "workers", 0), "the default tenant's ring is marked");
+        assert!(
+            h.has_ready(&def, "workers", 0),
+            "the default tenant's ring is marked"
+        );
         assert!(
             !h.has_ready(&k(TB, "orders"), "workers", 0),
             "flag-off must not scan the ring map — only the default tenant is reachable"
         );
         // …and the fan-out index nothing reads is never even built on this lane.
-        assert_eq!(h.index_len(), 0, "flag-off must not maintain the fan-out index");
+        assert_eq!(
+            h.index_len(),
+            0,
+            "flag-off must not maintain the fan-out index"
+        );
     }
 
     // R2 — the fan-out is served by the bare-name → composite-keys index, so its cost is
@@ -5422,7 +5787,11 @@ mod tests {
         }
         assert_eq!(h.queue_count(), 10_000);
         h.evict_idle(); // second chance
-        assert_eq!(h.evict_idle(), 10_000, "every idle, empty ring is reclaimed");
+        assert_eq!(
+            h.evict_idle(),
+            10_000,
+            "every idle, empty ring is reclaimed"
+        );
         assert_eq!(h.queue_count(), 0);
     }
 
@@ -5445,9 +5814,17 @@ mod tests {
         assert_eq!(h.queue_count(), 1, "an INFLIGHT claim blocks eviction");
         // Drain it: Empty verdict clears to IDLE, and only then may it be reclaimed.
         h.checkin(
-            "q", "g",
-            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Empty, drained: false }],
-            0, true, 60_000,
+            "q",
+            "g",
+            vec![CheckinResult {
+                name: "p0".into(),
+                epoch: c[0].epoch,
+                verdict: Verdict::Empty,
+                drained: false,
+            }],
+            0,
+            true,
+            60_000,
         );
         h.evict_idle();
         assert_eq!(h.evict_idle(), 1);
@@ -5464,7 +5841,11 @@ mod tests {
         h.evict_idle();
         h.evict_idle();
         assert_eq!(h.queue_count(), 1);
-        assert_eq!(names(&h.take_batch("q", "g", 5, u32::MAX, 6000)), vec!["p0"], "the deferral survived");
+        assert_eq!(
+            names(&h.take_batch("q", "g", 5, u32::MAX, 6000)),
+            vec!["p0"],
+            "the deferral survived"
+        );
     }
 
     // Eviction must take the fan-out index with it, or the index becomes the second leak
@@ -5478,10 +5859,18 @@ mod tests {
         h.evict_idle();
         assert_eq!(h.evict_idle(), 2);
         assert_eq!(h.queue_count(), 0);
-        assert_eq!(h.index_len(), 0, "the emptied name-set is removed, not left behind");
+        assert_eq!(
+            h.index_len(),
+            0,
+            "the emptied name-set is removed, not left behind"
+        );
         // A tenant-less frame for the now-unknown name is a miss, not a stale wake.
         h.mark_remote_all_tenants("orders", "p0", 0);
-        assert_eq!(h.queue_count(), 0, "a fan-out must not resurrect evicted rings");
+        assert_eq!(
+            h.queue_count(),
+            0,
+            "a fan-out must not resurrect evicted rings"
+        );
     }
 
     // R4 (missed wake, empty groups map): a (tenant, queue) whose ONLY consumer is a
@@ -5499,12 +5888,17 @@ mod tests {
         // NB: no reg() — a partition-targeted pop registers no group ring.
         let n2 = n.clone();
         let qk2 = qk.clone();
-        let waiter = tokio::spawn(async move {
-            n2.wait_queue(&qk2, std::time::Duration::from_secs(2)).await
-        });
+        let waiter =
+            tokio::spawn(
+                async move { n2.wait_queue(&qk2, std::time::Duration::from_secs(2)).await },
+            );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         h.mark_local_quiet(&qk, "p0", 1, 0);
-        assert_eq!(h.wake_tick(), 1, "a push to a ring-less queue must flag the wake tick");
+        assert_eq!(
+            h.wake_tick(),
+            1,
+            "a push to a ring-less queue must flag the wake tick"
+        );
         assert!(
             waiter.await.unwrap(),
             "the partition-targeted pop parked on this queue must be woken by its own push"
@@ -5521,12 +5915,16 @@ mod tests {
         let qk = k(TA, "orders");
         let n2 = n.clone();
         let qk2 = qk.clone();
-        let waiter = tokio::spawn(async move {
-            n2.wait_queue(&qk2, std::time::Duration::from_secs(2)).await
-        });
+        let waiter =
+            tokio::spawn(
+                async move { n2.wait_queue(&qk2, std::time::Duration::from_secs(2)).await },
+            );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         h.mark_local(&qk, "p0", 1, 0);
-        assert!(waiter.await.unwrap(), "commit-path mark must wake a ring-less queue's gate");
+        assert!(
+            waiter.await.unwrap(),
+            "commit-path mark must wake a ring-less queue's gate"
+        );
     }
 
     // The hotlist↔notifier key contract (see the module note): a mark must wake the
@@ -5541,12 +5939,16 @@ mod tests {
         let qk = k(TA, "orders");
         let n2 = n.clone();
         let qk2 = qk.clone();
-        let waiter = tokio::spawn(async move {
-            n2.wait_queue(&qk2, std::time::Duration::from_secs(3)).await
-        });
+        let waiter =
+            tokio::spawn(
+                async move { n2.wait_queue(&qk2, std::time::Duration::from_secs(3)).await },
+            );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         h.mark_local(&qk, "p0", 1, 0);
-        assert!(waiter.await.unwrap(), "the mark must wake the pop parked on the same qkey");
+        assert!(
+            waiter.await.unwrap(),
+            "the mark must wake the pop parked on the same qkey"
+        );
     }
 
     // …and it must NOT wake a pop parked on another tenant's same-named queue.
@@ -5559,7 +5961,8 @@ mod tests {
         let n2 = n.clone();
         let kb = k(TB, "orders");
         let waiter = tokio::spawn(async move {
-            n2.wait_queue(&kb, std::time::Duration::from_millis(300)).await
+            n2.wait_queue(&kb, std::time::Duration::from_millis(300))
+                .await
         });
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         h.mark_local(&k(TA, "orders"), "p0", 1, 0);
@@ -5575,7 +5978,11 @@ mod tests {
     fn ready_est_counts_claimable_marks_only() {
         let h = hl1();
         reg(&h, "q", "g");
-        assert_eq!(h.ready_est("q", "g", 0), 0, "empty ring ⇒ 0 (long-poll's case)");
+        assert_eq!(
+            h.ready_est("q", "g", 0),
+            0,
+            "empty ring ⇒ 0 (long-poll's case)"
+        );
         h.mark_local("q", "p0", 3, 0);
         h.mark_local("q", "p1", 4, 0);
         assert_eq!(h.ready_est("q", "g", 0), 7);
@@ -5605,7 +6012,11 @@ mod tests {
         reg(&h, "q", "g");
         h.set_queue_cfg("q", 0, 5, 0, 0); // windowBuffer ⇒ the mark parks in the wheel
         h.mark_local("q", "p0", 1, 0);
-        assert_eq!(h.ready_est("q", "g", 0), 0, "not due yet ⇒ nothing claimable");
+        assert_eq!(
+            h.ready_est("q", "g", 0),
+            0,
+            "not due yet ⇒ nothing claimable"
+        );
         assert_eq!(
             h.ready_est("q", "g", 6_000),
             u64::MAX,
@@ -5622,10 +6033,16 @@ mod tests {
     #[test]
     fn min_pop_wait_global_latch_stays_off_until_a_queue_asks() {
         let h = hl1();
-        assert!(!h.min_pop_wait_in_play(), "fresh broker ⇒ feature not in play");
+        assert!(
+            !h.min_pop_wait_in_play(),
+            "fresh broker ⇒ feature not in play"
+        );
         h.set_queue_cfg("a", 0, 0, 0, 1); // plain queue
         h.set_queue_cfg("b", 3, 5, 0, 1); // deferrals, but no pop wait
-        assert!(!h.min_pop_wait_in_play(), "deferrals must not arm the pop wait");
+        assert!(
+            !h.min_pop_wait_in_play(),
+            "deferrals must not arm the pop wait"
+        );
         h.set_queue_cfg("c", 0, 0, 10, 1);
         assert!(h.min_pop_wait_in_play(), "a configured window arms it");
     }
@@ -5677,9 +6094,12 @@ mod tests {
         reg(&h, "q", "g");
         h.set_queue_cfg("q", 0, 5, 0, 0); // windowBuffer 5s ⇒ deferral queue
         h.mark_remote("q", "p0", 0); // one T_HOTLIST_DIRTY_BATCH item, no data behind it
-        // The ghost is allowed its ladder — one cut plus the confirming grace — and
-        // nothing after it.
-        assert!(drive_empty(&h, 0, 30_000) <= 200, "the revisit ladder must be bounded");
+                                     // The ghost is allowed its ladder — one cut plus the confirming grace — and
+                                     // nothing after it.
+        assert!(
+            drive_empty(&h, 0, 30_000) <= 200,
+            "the revisit ladder must be bounded"
+        );
         assert_eq!(
             drive_empty(&h, 30_000, 60_000),
             0,
@@ -5688,7 +6108,11 @@ mod tests {
         // The consumer leaves. The reconcile sweep must now be able to reclaim the ring
         // (the claims above kept it active, so the first sweep is its second chance).
         h.evict_idle();
-        assert_eq!(h.evict_idle(), 1, "a queue holding only ghosts must be reclaimable");
+        assert_eq!(
+            h.evict_idle(),
+            1,
+            "a queue holding only ghosts must be reclaimable"
+        );
         assert_eq!(h.queue_count(), 0);
     }
 
@@ -5707,7 +6131,12 @@ mod tests {
         h.checkin(
             "q",
             "g",
-            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took, drained: true }],
+            vec![CheckinResult {
+                name: "p0".into(),
+                epoch: c[0].epoch,
+                verdict: Verdict::Took,
+                drained: true,
+            }],
             5_100,
             true,
             60_000,
@@ -5718,7 +6147,11 @@ mod tests {
             "the caught-up partition takes one confirming probe, then clears"
         );
         h.evict_idle();
-        assert_eq!(h.evict_idle(), 1, "a fully drained deferral queue must be reclaimable");
+        assert_eq!(
+            h.evict_idle(),
+            1,
+            "a fully drained deferral queue must be reclaimable"
+        );
     }
 
     // The other side of the ghost test, and the reason it is dated from the last MARK
@@ -5756,7 +6189,11 @@ mod tests {
         }
         h.evict_idle();
         h.evict_idle();
-        assert_eq!(h.queue_count(), 1, "a written-to partition must stay tracked");
+        assert_eq!(
+            h.queue_count(),
+            1,
+            "a written-to partition must stay tracked"
+        );
         h.tick(t + 6_000);
         assert_eq!(
             names(&h.take_batch("q", "g", 8, u32::MAX, t + 6_000)),
@@ -5780,18 +6217,38 @@ mod tests {
         let c = h.take_batch("q", "g", 1, u32::MAX, 2_400);
         assert_eq!(names(&c), vec!["p0"]);
         h.checkin(
-            "q", "g",
-            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Empty, drained: false }],
-            2_400, true, 60_000,
+            "q",
+            "g",
+            vec![CheckinResult {
+                name: "p0".into(),
+                epoch: c[0].epoch,
+                verdict: Verdict::Empty,
+                drained: false,
+            }],
+            2_400,
+            true,
+            60_000,
         );
         h.tick(4_600);
         let c = h.take_batch("q", "g", 1, u32::MAX, 4_600);
-        assert_eq!(names(&c), vec!["p0"], "the first empty claim must only revisit");
+        assert_eq!(
+            names(&c),
+            vec!["p0"],
+            "the first empty claim must only revisit"
+        );
         // Past cut + 2×pad + REVISIT_MAX_MS with no mark since: a ghost.
         h.checkin(
-            "q", "g",
-            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Empty, drained: false }],
-            4_600, true, 60_000,
+            "q",
+            "g",
+            vec![CheckinResult {
+                name: "p0".into(),
+                epoch: c[0].epoch,
+                verdict: Verdict::Empty,
+                drained: false,
+            }],
+            4_600,
+            true,
+            60_000,
         );
         h.tick(10_000);
         assert!(
@@ -5806,11 +6263,16 @@ mod tests {
         assert_eq!(h.min_pop_wait_ms("q"), 0, "absent config ⇒ OFF");
         h.set_queue_cfg("q", 0, 0, 25, 1);
         assert_eq!(h.min_pop_wait_ms("q"), 25);
-        assert!(!h.cfg_of("q").is_deferral(), "min pop wait is not a deferral");
-        assert!(!h.skip_window("q"), "min pop wait must not bypass the SQL window");
+        assert!(
+            !h.cfg_of("q").is_deferral(),
+            "min pop wait is not a deferral"
+        );
+        assert!(
+            !h.skip_window("q"),
+            "min pop wait must not bypass the SQL window"
+        );
     }
 }
-
 
 pub(crate) fn trace_now_ms() -> i64 {
     std::time::SystemTime::now()

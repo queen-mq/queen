@@ -400,7 +400,9 @@ pub fn spawn(pool: Pool, cfg: &Config) {
         metrics_retention_days: cfg.metrics_retention_days,
         batch_size: cfg.retention_batch_size,
         parallelism: cfg.retention_parallelism.clamp(1, MAX_PARALLELISM),
-        partition_cleanup_days: cfg.partition_cleanup_enabled.then_some(cfg.partition_cleanup_days),
+        partition_cleanup_days: cfg
+            .partition_cleanup_enabled
+            .then_some(cfg.partition_cleanup_days),
         lock_stmt_timeout_ms: cfg.retention_interval_ms.clamp(30_000, 900_000),
     };
     // 0 is not reachable here (config.rs derives it), but a caller that built a
@@ -520,8 +522,8 @@ async fn run_loop(
             }
         };
         let start = Instant::now();
-        let sweep_partitions = partitions_swept_at
-            .is_none_or(|at| start.duration_since(at) >= PARTITION_SWEEP_EVERY);
+        let sweep_partitions =
+            partitions_swept_at.is_none_or(|at| start.duration_since(at) >= PARTITION_SWEEP_EVERY);
         match run_cycle(&pool, knobs, &work_list, sweep_partitions).await {
             Ok(Outcome::Skipped) => {
                 // Belt session lock busy: an old-image pod's own timer is
@@ -532,8 +534,13 @@ async fn run_loop(
                     "claimed but advisory lock busy; period served by another replica"
                 );
                 let elapsed_ms = start.elapsed().as_millis() as i32;
-                crate::lease::release(&pool, TASK, fence, crate::lease::Release::Advance { elapsed_ms })
-                    .await;
+                crate::lease::release(
+                    &pool,
+                    TASK,
+                    fence,
+                    crate::lease::Release::Advance { elapsed_ms },
+                )
+                .await;
             }
             Ok(Outcome::Ran {
                 queues,
@@ -585,7 +592,9 @@ async fn run_loop(
                     &pool,
                     TASK,
                     fence,
-                    crate::lease::Release::Advance { elapsed_ms: elapsed_ms as i32 },
+                    crate::lease::Release::Advance {
+                        elapsed_ms: elapsed_ms as i32,
+                    },
                 )
                 .await;
             }
@@ -741,13 +750,19 @@ async fn run_cycle(
     // SET LOCAL dies with the transaction, so the bound cannot leak into the
     // pooled connection (stats.rs T0.2 precedent; see Knobs::lock_stmt_timeout_ms).
     lock_tx
-        .batch_execute(&format!("SET LOCAL statement_timeout = {}", knobs.lock_stmt_timeout_ms))
+        .batch_execute(&format!(
+            "SET LOCAL statement_timeout = {}",
+            knobs.lock_stmt_timeout_ms
+        ))
         .await?;
     // The take is the LAST table-free statement this transaction may ever run.
     // Anything added here that reads a queen table holds its AccessShare for the
     // whole cycle and re-creates the boot-DDL blocker (module docs); the work
     // list itself was moved out for exactly that reason.
-    let got: bool = lock_tx.query_one(LOCK_SQL, &[&CLEANUP_LOCK_ID]).await?.get(0);
+    let got: bool = lock_tx
+        .query_one(LOCK_SQL, &[&CLEANUP_LOCK_ID])
+        .await?
+        .get(0);
     if !got {
         // Early return drops lock_tx: ROLLBACK is enqueued and the connection
         // goes back to the pool clean.
@@ -803,7 +818,10 @@ async fn cycle_body(
     let mut list_client = pool.get().await?;
     let list_tx = list_client.transaction().await?;
     list_tx
-        .batch_execute(&format!("SET LOCAL statement_timeout = {}", knobs.lock_stmt_timeout_ms))
+        .batch_execute(&format!(
+            "SET LOCAL statement_timeout = {}",
+            knobs.lock_stmt_timeout_ms
+        ))
         .await?;
     // SINK HOLD (PLAN_S3_SINK.md §5.3), and it runs HERE — first statement of
     // this transaction, before the work list — for the lock-order rule of
@@ -880,21 +898,36 @@ async fn cycle_body(
     // (retention_enabled AND a positive window — encoded as at least one
     // non-NULL cutoff, which the work list turns into "this queue emits no
     // partitions at all").
-    let segments_deleted =
-        run_phase(pool, Phase::Retention, &rules, &due_retention, par, max_rows, cycle).await?;
+    let segments_deleted = run_phase(
+        pool,
+        Phase::Retention,
+        &rules,
+        &due_retention,
+        par,
+        max_rows,
+        cycle,
+    )
+    .await?;
 
     // Phase 2: log_txns hash-sidecar purge, on the partitions whose SIDECAR
     // watermark (oldest_txn_at) is past the window — not the segment one, which
     // would nominate every partition holding more than an hour of data
     // (work_list_sql / 001_log_schema).
-    let txns_purged =
-        run_phase(pool, Phase::Txns, &rules, &due_txns, par, max_rows, cycle).await?;
+    let txns_purged = run_phase(pool, Phase::Txns, &rules, &due_txns, par, max_rows, cycle).await?;
 
     // Phase 3: max_wait_time_seconds eviction — applies regardless of
     // retention_enabled (a queue configured with ONLY maxWaitTimeSeconds still
     // gets swept), matching the old db::seg_evict_max_wait / C++ EvictionService.
-    let max_wait =
-        run_phase(pool, Phase::MaxWait, &rules, &due_max_wait, par, max_rows, cycle).await?;
+    let max_wait = run_phase(
+        pool,
+        Phase::MaxWait,
+        &rules,
+        &due_max_wait,
+        par,
+        max_rows,
+        cycle,
+    )
+    .await?;
 
     // Phase 4: delete EMPTY, long-inactive partitions —
     // queen.log_partition_cleanup_step_v1, the restored C++
@@ -1097,7 +1130,10 @@ async fn phase_worker(
         match phase {
             Phase::Retention => loop {
                 let row = client
-                    .query_one(&stmt, &[&w.pid, &r.all_cutoff, &r.completed_cutoff, &max_rows])
+                    .query_one(
+                        &stmt,
+                        &[&w.pid, &r.all_cutoff, &r.completed_cutoff, &max_rows],
+                    )
                     .await?;
                 let (deleted, done) = step_result(row.get(0));
                 here += deleted;
@@ -1113,9 +1149,13 @@ async fn phase_worker(
                 // batch horizon. The work list cannot produce a NULL here (the
                 // cutoff has a 900 s floor and no CASE around it), so this guard
                 // is for the day someone adds one.
-                let Some(cutoff) = &r.txns_cutoff else { continue };
+                let Some(cutoff) = &r.txns_cutoff else {
+                    continue;
+                };
                 loop {
-                    let row = client.query_one(&stmt, &[&w.pid, cutoff, &max_rows]).await?;
+                    let row = client
+                        .query_one(&stmt, &[&w.pid, cutoff, &max_rows])
+                        .await?;
                     let (deleted, done) = step_result(row.get(0));
                     here += deleted;
                     if done || deleted == 0 {
@@ -1193,7 +1233,9 @@ fn assemble_work_list(rows: impl IntoIterator<Item = RawRow>) -> (Vec<Rules>, [V
     let mut rules: Vec<Rules> = Vec::new();
     let mut index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for r in rows.iter().filter(|r| r.phase == 0) {
-        let Some(queue_id) = r.queue_id.as_deref() else { continue };
+        let Some(queue_id) = r.queue_id.as_deref() else {
+            continue;
+        };
         index.insert(queue_id, rules.len());
         let [all, completed, txns, max_wait] = &r.cutoffs;
         rules.push(Rules {
@@ -1212,7 +1254,10 @@ fn assemble_work_list(rows: impl IntoIterator<Item = RawRow>) -> (Vec<Rules>, [V
         else {
             continue;
         };
-        list.push(Due { pid: pid.to_string(), q });
+        list.push(Due {
+            pid: pid.to_string(),
+            q,
+        });
     }
     (rules, due)
 }
@@ -1302,8 +1347,12 @@ impl Backoff {
     /// returning how many were dropped. Called once per phase, on the cycle
     /// thread, so the fan-out never contends on the lock for filtering.
     fn retain_due(&self, phase: u8, cycle: u64, due: &mut Vec<Due>) -> usize {
-        let Ok(phases) = self.phases.lock() else { return 0 };
-        let Some(map) = phases.get(phase as usize) else { return 0 };
+        let Ok(phases) = self.phases.lock() else {
+            return 0;
+        };
+        let Some(map) = phases.get(phase as usize) else {
+            return 0;
+        };
         if map.is_empty() {
             return 0;
         }
@@ -1315,9 +1364,13 @@ impl Backoff {
     /// Record the outcome of one partition's visit: progress clears its strikes,
     /// a fruitless visit adds one and pushes the next visit out.
     fn observe(&self, phase: u8, cycle: u64, pid: &str, progressed: bool) {
-        let Ok(mut phases) = self.phases.lock() else { return };
+        let Ok(mut phases) = self.phases.lock() else {
+            return;
+        };
         let total: usize = phases.iter().map(|m| m.len()).sum();
-        let Some(map) = phases.get_mut(phase as usize) else { return };
+        let Some(map) = phases.get_mut(phase as usize) else {
+            return;
+        };
         if progressed {
             map.remove(pid);
             return;
@@ -1405,7 +1458,9 @@ async fn walk_loop(pool: Pool, period_ms: u64, holder: String) {
                             &pool,
                             WALK_TASK,
                             fence,
-                            crate::lease::Release::Advance { elapsed_ms: elapsed_ms as i32 },
+                            crate::lease::Release::Advance {
+                                elapsed_ms: elapsed_ms as i32,
+                            },
                         )
                         .await;
                     }
@@ -1418,8 +1473,13 @@ async fn walk_loop(pool: Pool, period_ms: u64, holder: String) {
                         // wait a whole period, or retention runs a day on a
                         // work list that is missing whatever the walk had not
                         // reached yet.
-                        crate::lease::release(&pool, WALK_TASK, fence, crate::lease::Release::Retry)
-                            .await;
+                        crate::lease::release(
+                            &pool,
+                            WALK_TASK,
+                            fence,
+                            crate::lease::Release::Retry,
+                        )
+                        .await;
                     }
                 }
             }
@@ -1496,7 +1556,10 @@ fn walk_result(s: String) -> WalkStep {
     WalkStep {
         scanned: v.get("scanned").and_then(|x| x.as_i64()).unwrap_or(0),
         repaired: v.get("repaired").and_then(|x| x.as_i64()).unwrap_or(0),
-        last_id: v.get("last_id").and_then(|x| x.as_str()).map(str::to_string),
+        last_id: v
+            .get("last_id")
+            .and_then(|x| x.as_str())
+            .map(str::to_string),
         done: v.get("done").and_then(|x| x.as_bool()).unwrap_or(true),
     }
 }
@@ -1520,12 +1583,8 @@ async fn purge_metrics(
     knobs: Knobs,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let worker = db::cleanup_worker_metrics(client, knobs.metrics_retention_days).await?;
-    let system = db::cleanup_system_metrics(
-        client,
-        knobs.metrics_retention_days,
-        knobs.batch_size,
-    )
-    .await?;
+    let system =
+        db::cleanup_system_metrics(client, knobs.metrics_retention_days, knobs.batch_size).await?;
     Ok(format!("worker={} system_rows={}", worker.trim(), system))
 }
 
@@ -1547,7 +1606,10 @@ mod tests {
         let src = include_str!("retention.rs");
         // The lock statement must be issued on the holder transaction, so its
         // release is structurally tied to that transaction's end.
-        assert!(src.contains("lock_tx.query_one(LOCK_SQL"), "lock must be taken on the holder tx");
+        assert!(
+            src.contains("lock_tx.query_one(LOCK_SQL"),
+            "lock must be taken on the holder tx"
+        );
         // The session-scoped take and the explicit unlock must stay dead. The
         // needles are concat!-split so this test's own literals don't match.
         assert!(
@@ -1572,9 +1634,12 @@ mod tests {
     #[test]
     fn the_holder_transaction_runs_nothing_but_the_lock_take() {
         let src = include_str!("retention.rs");
-        let (_, after) = src.split_once("async fn run_cycle(").expect("run_cycle present");
-        let (run_cycle, rest) =
-            after.split_once("async fn cycle_body(").expect("cycle_body follows run_cycle");
+        let (_, after) = src
+            .split_once("async fn run_cycle(")
+            .expect("run_cycle present");
+        let (run_cycle, rest) = after
+            .split_once("async fn cycle_body(")
+            .expect("cycle_body follows run_cycle");
         // Preparing a statement on the holder means running one on it.
         assert!(
             !run_cycle.contains("prepare_cached"),
@@ -1622,7 +1687,11 @@ mod tests {
     #[test]
     fn work_list_joins_by_id() {
         let sql = work_list_sql(5000);
-        assert_eq!(sql.matches("WHERE p.queue_id = q.id").count(), 3, "one probe per phase");
+        assert_eq!(
+            sql.matches("WHERE p.queue_id = q.id").count(),
+            3,
+            "one probe per phase"
+        );
         // The dead name-join must not resurface in any form.
         assert!(!sql.contains("log_queues"));
         assert!(!sql.contains("lq.name"));
@@ -1648,13 +1717,17 @@ mod tests {
             "AND p.oldest_live_at < GREATEST(q.all_cutoff, q.completed_cutoff) \
              ORDER BY p.oldest_live_at LIMIT 1234"
         ));
-        assert!(sql
-            .contains("AND p.oldest_txn_at < q.txns_cutoff ORDER BY p.oldest_txn_at LIMIT 1234"));
+        assert!(
+            sql.contains("AND p.oldest_txn_at < q.txns_cutoff ORDER BY p.oldest_txn_at LIMIT 1234")
+        );
         assert!(sql.contains(
             "AND p.oldest_live_at < q.max_wait_cutoff ORDER BY p.oldest_live_at LIMIT 1234"
         ));
         // The cap is inlined, never bound.
-        assert!(!sql.contains("LIMIT $"), "a parametric LIMIT loses the index plan");
+        assert!(
+            !sql.contains("LIMIT $"),
+            "a parametric LIMIT loses the index plan"
+        );
         assert_eq!(sql.matches("LIMIT 1234").count(), 3);
         // The sidecar phase must NOT be driven by the segment watermark: its
         // cutoff is far shorter, so that test nominates every partition holding
@@ -1672,7 +1745,8 @@ mod tests {
         assert_eq!(sql.matches("q.txns_cutoff::text").count(), 1);
         // Three due branches, each with the four cutoff slots NULLed out.
         assert_eq!(
-            sql.matches("NULL::text, NULL::text, NULL::text, NULL::text").count(),
+            sql.matches("NULL::text, NULL::text, NULL::text, NULL::text")
+                .count(),
             3
         );
     }
@@ -1950,7 +2024,12 @@ mod tests {
     }
 
     fn due_list(pids: &[&str]) -> Vec<Due> {
-        pids.iter().map(|p| Due { pid: p.to_string(), q: 0 }).collect()
+        pids.iter()
+            .map(|p| Due {
+                pid: p.to_string(),
+                q: 0,
+            })
+            .collect()
     }
 
     /// The backoff skips a fruitless partition and lets it back in when the
@@ -1981,7 +2060,11 @@ mod tests {
         let c = b.next_cycle();
         b.observe(Phase::Retention.idx(), c, "p", false);
         let mut list = due_list(&["p"]);
-        assert_eq!(b.retain_due(Phase::Txns.idx(), c, &mut list), 0, "other phases unaffected");
+        assert_eq!(
+            b.retain_due(Phase::Txns.idx(), c, &mut list),
+            0,
+            "other phases unaffected"
+        );
         let mut list = due_list(&["p"]);
         assert_eq!(b.retain_due(Phase::Retention.idx(), c, &mut list), 1);
     }
@@ -2008,7 +2091,10 @@ mod tests {
         assert_eq!(seen[1], BACKOFF_BASE_CYCLES * 2);
         let ceiling = BACKOFF_BASE_CYCLES << BACKOFF_MAX_SHIFT;
         assert_eq!(*seen.last().unwrap(), ceiling);
-        assert_eq!(ceiling, 512, "the documented ~43 min ceiling at the 5 s default");
+        assert_eq!(
+            ceiling, 512,
+            "the documented ~43 min ceiling at the 5 s default"
+        );
         // One delete wipes the record entirely.
         b.observe(0, cycle, "p", true);
         let mut list = due_list(&["p"]);
@@ -2079,7 +2165,11 @@ mod tests {
         // backfill, without which the work list is empty and nothing is deleted.
         // (The relation to SAFETY_WALK_MAX_MS is pinned at compile time next to
         // the constants; what belongs here is the default's own scale.)
-        assert_eq!(WALK_DISABLED_PERIOD_MS / 86_400_000, 365, "disabled = a year of days");
+        assert_eq!(
+            WALK_DISABLED_PERIOD_MS / 86_400_000,
+            365,
+            "disabled = a year of days"
+        );
     }
 
     /// The legacy full walk must not be reachable from the cycle path under any
@@ -2168,13 +2258,19 @@ mod tests {
             "queen_streams.state",
             "queen.log_consumers",
         ] {
-            assert!(pred.contains(table), "{table} veto missing from the predicate");
+            assert!(
+                pred.contains(table),
+                "{table} veto missing from the predicate"
+            );
         }
         // The lease veto must stay bounded by expiry: an unbounded
         // `batch_end IS NOT NULL` pins a partition forever once a worker dies
         // mid-batch, because an empty partition never gets the pop that would
         // clear it.
-        assert!(pred.contains("c.batch_end IS NOT NULL"), "live-lease veto missing");
+        assert!(
+            pred.contains("c.batch_end IS NOT NULL"),
+            "live-lease veto missing"
+        );
         assert!(
             pred.contains("c.lease_expires_at IS NULL OR c.lease_expires_at > now()"),
             "live-lease veto is not bounded by lease expiry"
@@ -2186,9 +2282,15 @@ mod tests {
         let (_, step) = sql
             .split_once("CREATE OR REPLACE FUNCTION queen.log_partition_cleanup_step_v1")
             .expect("step function present");
-        assert!(step.contains("DELETE FROM queen.log_txns"), "sidecar purge missing");
+        assert!(
+            step.contains("DELETE FROM queen.log_txns"),
+            "sidecar purge missing"
+        );
         assert!(step.contains("ORDER BY p.id"), "lock order missing");
-        assert!(step.contains("FOR UPDATE OF p SKIP LOCKED"), "lock mode changed");
+        assert!(
+            step.contains("FOR UPDATE OF p SKIP LOCKED"),
+            "lock mode changed"
+        );
     }
 
     // -- PG-gated: the holder transaction, observed in pg_locks --------------
@@ -2245,13 +2347,19 @@ mod tests {
         let (host, port) = pg_target().await;
         let admin = raw_connect(&host, port, "postgres").await;
         for row in admin
-            .query("SELECT datname FROM pg_database WHERE datname LIKE 'qret\\_hold\\_%'", &[])
+            .query(
+                "SELECT datname FROM pg_database WHERE datname LIKE 'qret\\_hold\\_%'",
+                &[],
+            )
             .await
             .expect("list leftovers")
         {
             let old: String = row.get(0);
             let _ = admin
-                .execute(&format!("DROP DATABASE IF EXISTS \"{old}\" WITH (FORCE)"), &[])
+                .execute(
+                    &format!("DROP DATABASE IF EXISTS \"{old}\" WITH (FORCE)"),
+                    &[],
+                )
                 .await;
         }
         let db = format!(
@@ -2261,7 +2369,10 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         );
-        admin.execute(&format!("CREATE DATABASE \"{db}\""), &[]).await.expect("create database");
+        admin
+            .execute(&format!("CREATE DATABASE \"{db}\""), &[])
+            .await
+            .expect("create database");
 
         let mut dp = deadpool_postgres::Config::new();
         dp.host = Some(host.clone());
@@ -2271,7 +2382,10 @@ mod tests {
         dp.dbname = Some(db.clone());
         dp.pool = Some(deadpool_postgres::PoolConfig::new(8));
         let pool = dp
-            .create_pool(Some(deadpool_postgres::Runtime::Tokio1), tokio_postgres::NoTls)
+            .create_pool(
+                Some(deadpool_postgres::Runtime::Tokio1),
+                tokio_postgres::NoTls,
+            )
             .expect("pool");
         crate::schema::apply(&pool).await.expect("schema apply");
 
@@ -2378,7 +2492,10 @@ mod tests {
             .expect("the cycle must finish once phase 5 is unblocked")
             .expect("join")
             .expect("cycle error");
-        assert!(matches!(outcome, Outcome::Ran { .. }), "the cycle must have run, not skipped");
+        assert!(
+            matches!(outcome, Outcome::Ran { .. }),
+            "the cycle must have run, not skipped"
+        );
         // The belt lock died with the holder transaction.
         let still: i64 = monitor
             .query_one(
@@ -2395,7 +2512,10 @@ mod tests {
         drop(monitor);
         drop(pool);
         admin
-            .execute(&format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"), &[])
+            .execute(
+                &format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"),
+                &[],
+            )
             .await
             .expect("drop scratch database");
     }

@@ -382,12 +382,30 @@ impl Writer {
                     None => pending.iter().map(|p| p.bytes.as_ref()).collect(),
                 };
                 let fsync_started = trace.then(Instant::now);
-                let first_index = match self.log.append_group(&slices) {
-                    Ok(i) => i,
-                    Err(e) => {
-                        drop(slices);
-                        self.fail(&format!("local log append failed: {e}"), pending);
-                        return false;
+                // PER-QUEUE-ONLY PROTOTYPE (remove the global raft log): with the
+                // qlog on, the qlog fsync in `write_qlog_group` above is the ONE
+                // durability barrier. Write the raft-log entry (page cache) so the
+                // index is assigned and apply gets its in-memory handoff, but do
+                // NOT fsync it — the second fsync is gone. `_no_fsync` is dropped
+                // unsynced on purpose. (Recovery-from-qlog is the follow-on; this
+                // measures whether killing the 2nd fsync moves the numbers.)
+                let first_index = if self.qlog.is_some() {
+                    match self.log.append_group_deferred(&slices) {
+                        Ok((i, _no_fsync)) => i,
+                        Err(e) => {
+                            drop(slices);
+                            self.fail(&format!("local log append failed: {e}"), pending);
+                            return false;
+                        }
+                    }
+                } else {
+                    match self.log.append_group(&slices) {
+                        Ok(i) => i,
+                        Err(e) => {
+                            drop(slices);
+                            self.fail(&format!("local log append failed: {e}"), pending);
+                            return false;
+                        }
                     }
                 };
                 if payload_free.is_some() && first_index != peeked {

@@ -12,9 +12,9 @@ use crate::dedup::{DedupCache, PushCheck};
 // `pack_frames` and `zstd_compress` are no longer named here: the segment recipe
 // moved to `frames::pack_segment_with_hashes` (see build_hashes_and_blob), which
 // this module now calls by full path.
+use crate::admission::{Admission, Lane};
 use crate::frames::{unpack_frames_ref, uuid_bytes_to_string, zstd_decompress, FrameIn};
 use crate::metrics::Metrics;
-use crate::admission::{Admission, Lane};
 
 // ---------------------------------------------------------------------------
 // Cross-partition BUNDLING observability (Trap 3b). Every dispatch commits ONE
@@ -390,7 +390,14 @@ impl Fusion {
                 pg_cancel_tls: pg_cancel_tls.clone(),
                 part_meta: Mutex::new(FnvHashMap::default()),
             });
-            tokio::spawn(shard_loop(rx, ctx, hold_ms, max_inflight, bundle_max, floor));
+            tokio::spawn(shard_loop(
+                rx,
+                ctx,
+                hold_ms,
+                max_inflight,
+                bundle_max,
+                floor,
+            ));
         }
         Arc::new(Fusion { senders, dedup })
     }
@@ -536,7 +543,9 @@ async fn shard_loop(
             let next = earliest_floor_deadline(&groups, &inflight, floor, Instant::now());
             if next != floor_armed {
                 if let Some(dl) = next {
-                    floor_timer.as_mut().reset(tokio::time::Instant::from_std(dl));
+                    floor_timer
+                        .as_mut()
+                        .reset(tokio::time::Instant::from_std(dl));
                 }
                 floor_armed = next;
             }
@@ -666,7 +675,14 @@ fn sweep_bundles(
 ) {
     while *inflight_bundles < max_inflight {
         if !try_dispatch_bundle(
-            groups, inflight, inflight_bundles, max_inflight, bundle_max, floor, ctx, done,
+            groups,
+            inflight,
+            inflight_bundles,
+            max_inflight,
+            bundle_max,
+            floor,
+            ctx,
+            done,
         ) {
             break;
         }
@@ -795,7 +811,15 @@ async fn push_log_multi(
     let row = client
         .query_one(
             &stmt,
-            &[&queues, &partitions, &msg_counts, &hashes, &verified, &blobs, &tenants],
+            &[
+                &queues,
+                &partitions,
+                &msg_counts,
+                &hashes,
+                &verified,
+                &blobs,
+                &tenants,
+            ],
         )
         .await?;
     Ok(row.get(0))
@@ -858,7 +882,10 @@ async fn get_meta(
         }
     }
     let stmt = client.prepare_cached(PART_META_SQL).await.ok()?;
-    let rows = client.query(&stmt, &[&queue, &partition, &tenant]).await.ok()?;
+    let rows = client
+        .query(&stmt, &[&queue, &partition, &tenant])
+        .await
+        .ok()?;
     let mut map = ctx.part_meta.lock().unwrap();
     let Some(row) = rows.first() else {
         // Not provisioned (or deleted): drop any stale meta so we never hand
@@ -907,7 +934,8 @@ async fn hydrate_partition(
     }
     let now = now_epoch_ms();
     let window_start_ms = now - meta.window_secs as i64 * 1000 - DEDUP_SKEW_SLACK_MS;
-    ctx.dedup.hydrate(key, v, window_start_ms, meta.last_offset, now);
+    ctx.dedup
+        .hydrate(key, v, window_start_ms, meta.last_offset, now);
     if let Some(e) = ctx.part_meta.lock().unwrap().get_mut(key) {
         e.force_rehydrate = false;
     }
@@ -988,10 +1016,18 @@ async fn resolve_dup_mids(
     let mut out = vec![zero_uuid(); dups.len()];
     // Partition uuid: from the meta cache when the dedup path populated it,
     // else one inline lookup (cache disabled, or meta degraded this flush).
-    let cached: Option<String> = ctx.part_meta.lock().unwrap().get(key).map(|m| m.pid.clone());
+    let cached: Option<String> = ctx
+        .part_meta
+        .lock()
+        .unwrap()
+        .get(key)
+        .map(|m| m.pid.clone());
     let pid: Option<String> = match cached {
         Some(p) => Some(p),
-        None => match client.query(PART_PID_SQL, &[&queue, &partition, &tenant]).await {
+        None => match client
+            .query(PART_PID_SQL, &[&queue, &partition, &tenant])
+            .await
+        {
             Ok(rows) => rows.first().map(|r| r.get(0)),
             Err(e) => {
                 static DUP_PID_ERR: crate::obs::Sampler = crate::obs::Sampler::new(30_000);
@@ -1026,8 +1062,7 @@ async fn resolve_dup_mids(
                         let blob: Vec<u8> = row.get(1);
                         let raw = zstd_decompress(&blob);
                         if let Some(frames) = unpack_frames_ref(&raw) {
-                            let mids: Vec<[u8; 16]> =
-                                frames.iter().map(|f| f.message_id).collect();
+                            let mids: Vec<[u8; 16]> = frames.iter().map(|f| f.message_id).collect();
                             let end = base + mids.len() as i64 - 1;
                             seg = Some((base, end, mids));
                         }
@@ -1163,7 +1198,8 @@ fn spawn_bundle_flush(
                 match vres {
                     Ok(v) => verified = v,
                     Err(_) => {
-                        static DEDUP_HYDR_TIMEOUT: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+                        static DEDUP_HYDR_TIMEOUT: crate::obs::Sampler =
+                            crate::obs::Sampler::new(10_000);
                         if let Some(suppressed) = DEDUP_HYDR_TIMEOUT.tick_now() {
                             tracing::warn!(
                                 target: "fusion",
@@ -1207,7 +1243,14 @@ fn spawn_bundle_flush(
             let push_res = tokio::time::timeout(
                 ctx.stmt_timeout,
                 push_log_multi(
-                    &client, &queues, &partitions, &counts, &hash_blobs, &verified, blobs, &tenants,
+                    &client,
+                    &queues,
+                    &partitions,
+                    &counts,
+                    &hash_blobs,
+                    &verified,
+                    blobs,
+                    &tenants,
                 ),
             )
             .await;
@@ -1227,7 +1270,8 @@ fn spawn_bundle_flush(
                     None
                 }
                 Err(_) => {
-                    static PUSH_MULTI_TIMEOUT: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+                    static PUSH_MULTI_TIMEOUT: crate::obs::Sampler =
+                        crate::obs::Sampler::new(10_000);
                     if let Some(suppressed) = PUSH_MULTI_TIMEOUT.tick_now() {
                         tracing::error!(
                             target: "fusion",
@@ -1264,7 +1308,8 @@ fn spawn_bundle_flush(
                             let g = &gs[gi];
                             let hs: Vec<[u8; 16]> =
                                 g.pending.iter().map(|&fi| g.hashes[fi]).collect();
-                            ctx.dedup.on_push_committed(&keys[gi], *base, &hs, *created_ms);
+                            ctx.dedup
+                                .on_push_committed(&keys[gi], *base, &hs, *created_ms);
                         }
                         let g = &mut gs[gi];
                         // C1: the segment was packed from `pending` IN ORDER
@@ -1398,7 +1443,10 @@ fn spawn_bundle_flush(
         for g in gs {
             let mut per_state: FnvHashMap<
                 usize,
-                (Arc<PushState>, Vec<(usize, &'static str, String, Option<i64>)>),
+                (
+                    Arc<PushState>,
+                    Vec<(usize, &'static str, String, Option<i64>)>,
+                ),
             > = FnvHashMap::default();
             for (i, f) in g.group.frames.iter().enumerate() {
                 let l = g.leader_idx[i];
@@ -1628,16 +1676,25 @@ mod tests {
         // broker would otherwise skip the cache commit silently).
         assert!(parse_multi_outcome(r#"[{"status":"queued"}]"#, 1).is_none());
         // Length mismatch fails too.
-        assert!(parse_multi_outcome(r#"[{"status":"queued","baseOffset":1,"createdAt":"x"}]"#, 2).is_none());
+        assert!(
+            parse_multi_outcome(r#"[{"status":"queued","baseOffset":1,"createdAt":"x"}]"#, 2)
+                .is_none()
+        );
     }
 
     // ---- FAT-BATCH FLOOR (experiment flag) --------------------------------
 
     fn off() -> Floor {
-        Floor { min_frames: 0, min_wait: Duration::from_millis(2) }
+        Floor {
+            min_frames: 0,
+            min_wait: Duration::from_millis(2),
+        }
     }
     fn on() -> Floor {
-        Floor { min_frames: 200, min_wait: Duration::from_millis(2) }
+        Floor {
+            min_frames: 200,
+            min_wait: Duration::from_millis(2),
+        }
     }
 
     #[test]
@@ -1689,9 +1746,14 @@ mod tests {
         let aged = now - Duration::from_millis(3);
         // Held (below floor, young): deadline = first_frame + MIN_WAIT, and it is
         // ALWAYS strictly in the future — the no-busy-spin invariant.
-        let dl = f.deadline(50, young, now).expect("held group has a deadline");
+        let dl = f
+            .deadline(50, young, now)
+            .expect("held group has a deadline");
         assert_eq!(dl, young + Duration::from_millis(2));
-        assert!(dl > now, "held deadline must be strictly future (no busy-spin)");
+        assert!(
+            dl > now,
+            "held deadline must be strictly future (no busy-spin)"
+        );
         // At/above the frame floor ⇒ no hold deadline (dispatches on size).
         assert_eq!(f.deadline(200, young, now), None);
         // Already aged out ⇒ no hold deadline: it is eligible, so the shared-permit
@@ -1720,7 +1782,11 @@ mod tests {
         // Nothing held (all eligible / in-flight / empty) ⇒ None.
         assert_eq!(
             earliest_deadline(
-                [(300usize, older, false), (0usize, older, false), (10usize, older, true)],
+                [
+                    (300usize, older, false),
+                    (0usize, older, false),
+                    (10usize, older, true)
+                ],
                 f,
                 now
             ),

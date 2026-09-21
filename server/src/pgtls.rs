@@ -113,7 +113,9 @@ impl TrustPolicy {
 /// The trust decision. See the table in the module header.
 pub fn trust_policy(has_root_ca: bool, reject_unauthorized: bool) -> TrustPolicy {
     match (has_root_ca, reject_unauthorized) {
-        (true, reject) => TrustPolicy::SuppliedCa { escape_hatch_redundant: !reject },
+        (true, reject) => TrustPolicy::SuppliedCa {
+            escape_hatch_redundant: !reject,
+        },
         (false, true) => TrustPolicy::WebpkiRoots,
         (false, false) => TrustPolicy::AcceptAny,
     }
@@ -196,7 +198,9 @@ pub fn boot_advisory(
         return None;
     }
     match trust_policy(has_root_ca, reject_unauthorized) {
-        TrustPolicy::SuppliedCa { escape_hatch_redundant: true } => Some(format!(
+        TrustPolicy::SuppliedCa {
+            escape_hatch_redundant: true,
+        } => Some(format!(
             "{}=false is now unnecessary and is being IGNORED: {} supplies a CA, so the chain is \
              verified against it. The escape hatch existed only because there was no way to \
              supply a CA — unset it, and this line goes away.",
@@ -316,7 +320,9 @@ fn parse_pem_certificates(pem: &str) -> Result<Vec<Vec<u8>>, String> {
                      -----BEGIN {label}----- on line {open_line}"
                 ));
             }
-            if label == "CERTIFICATE" || label == "X509 CERTIFICATE" || label == "TRUSTED CERTIFICATE"
+            if label == "CERTIFICATE"
+                || label == "X509 CERTIFICATE"
+                || label == "TRUSTED CERTIFICATE"
             {
                 let der = B64_STD.decode(body.as_bytes()).map_err(|e| {
                     format!(
@@ -376,7 +382,10 @@ fn looks_like_a_path(v: &str) -> bool {
     !v.is_empty()
         && !v.contains('\n')
         && v.len() < 512
-        && (v.starts_with('/') || v.starts_with("./") || v.starts_with("~/") || v.contains(".pem")
+        && (v.starts_with('/')
+            || v.starts_with("./")
+            || v.starts_with("~/")
+            || v.contains(".pem")
             || v.contains(".crt")
             || v.contains(".cert"))
 }
@@ -475,13 +484,17 @@ cFiWxl/YjudWoYm2+g==\n\
         assert_eq!(trust_policy(false, false), TrustPolicy::AcceptAny);
         assert_eq!(
             trust_policy(true, true),
-            TrustPolicy::SuppliedCa { escape_hatch_redundant: false }
+            TrustPolicy::SuppliedCa {
+                escape_hatch_redundant: false
+            }
         );
         // The point of the whole exercise: a supplied CA beats the escape hatch,
         // and says the hatch is now dead weight.
         assert_eq!(
             trust_policy(true, false),
-            TrustPolicy::SuppliedCa { escape_hatch_redundant: true }
+            TrustPolicy::SuppliedCa {
+                escape_hatch_redundant: true
+            }
         );
     }
 
@@ -505,8 +518,14 @@ cFiWxl/YjudWoYm2+g==\n\
 
     #[test]
     fn authenticated_is_true_only_for_a_verified_tls_link() {
-        assert!(!link_authenticated(false, true, true), "plaintext is not authenticated");
-        assert!(!link_authenticated(true, false, false), "accept-any is not authenticated");
+        assert!(
+            !link_authenticated(false, true, true),
+            "plaintext is not authenticated"
+        );
+        assert!(
+            !link_authenticated(true, false, false),
+            "accept-any is not authenticated"
+        );
         assert!(link_authenticated(true, false, true));
         assert!(link_authenticated(true, true, true));
         // The combination the whole feature exists for: a CA supplied on a cell
@@ -526,7 +545,10 @@ cFiWxl/YjudWoYm2+g==\n\
         assert!(m.contains("PG_USE_SSL"), "{m}");
         // Same rule, proxy names — the whole point of TlsVars.
         let p = boot_advisory(false, true, true, PROXY_VARS).expect("warns");
-        assert!(p.contains("PXDB_SSL_ROOT_CERT") && p.contains("PXDB_USE_SSL"), "{p}");
+        assert!(
+            p.contains("PXDB_SSL_ROOT_CERT") && p.contains("PXDB_USE_SSL"),
+            "{p}"
+        );
         assert!(!p.contains("PG_USE_SSL="), "{p}");
     }
 
@@ -575,7 +597,8 @@ cFiWxl/YjudWoYm2+g==\n\
 
     #[test]
     fn text_around_the_blocks_is_ignored_like_openssl_does() {
-        let pem = format!("subject=CN = Queen Test Root CA 1\nissuer=self\n{CA1}\n# trailing note\n");
+        let pem =
+            format!("subject=CN = Queen Test Root CA 1\nissuer=self\n{CA1}\n# trailing note\n");
         assert_eq!(root_store_from_pem(&pem).expect("parses").len(), 1);
     }
 
@@ -605,7 +628,10 @@ cFiWxl/YjudWoYm2+g==\n\
     #[test]
     fn an_empty_value_is_rejected_not_silently_trust_nothing() {
         let e = root_store_from_pem("").unwrap_err();
-        assert!(e.contains("no -----BEGIN CERTIFICATE----- block found"), "{e}");
+        assert!(
+            e.contains("no -----BEGIN CERTIFICATE----- block found"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -638,7 +664,10 @@ cFiWxl/YjudWoYm2+g==\n\
         // the rest of a bundle and quietly trust fewer anchors than the operator
         // supplied.
         let pem = CA1.replace("MIIBWTCCAQCg", "not base64 !!!");
-        assert_ne!(pem, CA1, "the fixture changed; pick a prefix that is still in it");
+        assert_ne!(
+            pem, CA1,
+            "the fixture changed; pick a prefix that is still in it"
+        );
         let e = root_store_from_pem(&pem).unwrap_err();
         assert!(e.contains("not valid base64"), "{e}");
     }
@@ -660,7 +689,10 @@ cFiWxl/YjudWoYm2+g==\n\
 
     #[test]
     fn mismatched_end_label_is_an_error() {
-        let pem = CA1.replace("-----END CERTIFICATE-----", "-----END TRUSTED CERTIFICATE-----");
+        let pem = CA1.replace(
+            "-----END CERTIFICATE-----",
+            "-----END TRUSTED CERTIFICATE-----",
+        );
         let e = root_store_from_pem(&pem).unwrap_err();
         assert!(e.contains("closes a block that opened as"), "{e}");
     }

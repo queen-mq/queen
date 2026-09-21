@@ -113,7 +113,10 @@ async fn embedded_end_to_end() {
         )
         .await
         .expect("configure q");
-    assert!(conf.configured, "configure must report configured: {conf:?}");
+    assert!(
+        conf.configured,
+        "configure must report configured: {conf:?}"
+    );
     broker
         .configure(&qp::ConfigureRequest::new(q2.clone()))
         .await
@@ -140,8 +143,11 @@ async fn embedded_end_to_end() {
 
     // Same explicit transactionId again -> dedup, same pre-existing message id.
     let dup = broker
-        .push(vec![qp::PushItem::new(q.clone(), serde_json::json!({"n": 1}))
-            .transaction_id(txn_id.clone())])
+        .push(vec![qp::PushItem::new(
+            q.clone(),
+            serde_json::json!({"n": 1}),
+        )
+        .transaction_id(txn_id.clone())])
         .await
         .expect("dup push");
     assert_eq!(dup[0].status, qp::PushStatus::Duplicate, "{dup:?}");
@@ -248,7 +254,10 @@ async fn embedded_end_to_end() {
 
     // ------------------------------------------------ nack -> redelivery
     broker
-        .push(vec![qp::PushItem::new(q.clone(), serde_json::json!({"retry": true}))])
+        .push(vec![qp::PushItem::new(
+            q.clone(),
+            serde_json::json!({"retry": true}),
+        )])
         .await
         .expect("push retryable");
     let claimed = pop_until(&broker, &q, &params, 1).await;
@@ -272,7 +281,10 @@ async fn embedded_end_to_end() {
 
     // ----------------------------------------------- pop_partition + autoAck
     broker
-        .push(vec![qp::PushItem::new(q.clone(), serde_json::json!({"aa": 1}))])
+        .push(vec![qp::PushItem::new(
+            q.clone(),
+            serde_json::json!({"aa": 1}),
+        )])
         .await
         .expect("push autoack");
     let auto = broker
@@ -313,7 +325,10 @@ async fn embedded_end_to_end() {
         .await
         .expect("configure namespaced");
     broker
-        .push(vec![qp::PushItem::new(qd.clone(), serde_json::json!({"d": 1}))])
+        .push(vec![qp::PushItem::new(
+            qd.clone(),
+            serde_json::json!({"d": 1}),
+        )])
         .await
         .expect("push namespaced");
     let discovered = broker
@@ -359,7 +374,10 @@ async fn embedded_end_to_end() {
         let params = params.clone();
         async move {
             broker
-                .push(vec![qp::PushItem::new(q4.clone(), serde_json::json!({"poison": tag}))])
+                .push(vec![qp::PushItem::new(
+                    q4.clone(),
+                    serde_json::json!({"poison": tag}),
+                )])
                 .await
                 .expect("push poison");
             let claimed = pop_until(&broker, &q4, &params, 1).await;
@@ -389,7 +407,11 @@ async fn embedded_end_to_end() {
         )
         .await
         .expect("retry");
-    assert_eq!(replay.get("success"), Some(&serde_json::json!(true)), "{replay}");
+    assert_eq!(
+        replay.get("success"),
+        Some(&serde_json::json!(true)),
+        "{replay}"
+    );
     let replayed = pop_until(&broker, &q4, &params, 1).await;
     assert_eq!(replayed.len(), 1, "replayed message must be poppable");
     assert_eq!(replayed[0].data, serde_json::json!({"poison": 1}));
@@ -445,7 +467,10 @@ async fn embedded_end_to_end() {
     };
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     broker
-        .push(vec![qp::PushItem::new(q3.clone(), serde_json::json!({"wake": true}))])
+        .push(vec![qp::PushItem::new(
+            q3.clone(),
+            serde_json::json!({"wake": true}),
+        )])
         .await
         .expect("wake push");
     let (elapsed, got) = waiter.await.expect("waiter join");

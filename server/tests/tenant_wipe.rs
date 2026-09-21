@@ -139,19 +139,27 @@ fn section(title: &str) {
 /// refusal that does not say what it is protecting is a refusal an operator will work
 /// around.
 fn db_message(e: &tokio_postgres::Error) -> String {
-    e.as_db_error().map(|d| d.message().to_string()).unwrap_or_else(|| e.to_string())
+    e.as_db_error()
+        .map(|d| d.message().to_string())
+        .unwrap_or_else(|| e.to_string())
 }
 
 /// `SELECT count(*) FROM <table> WHERE tenant_id = $1`. The table name is a constant from
 /// `TENANT_TABLES`, never input.
 async fn tenant_rows(c: &Client, table: &str, tenant: &str) -> i64 {
     let sql = format!("SELECT count(*) FROM {table} WHERE tenant_id = $1::text::uuid");
-    c.query_one(&sql, &[&tenant]).await.unwrap_or_else(|e| panic!("count {table}: {e}")).get(0)
+    c.query_one(&sql, &[&tenant])
+        .await
+        .unwrap_or_else(|e| panic!("count {table}: {e}"))
+        .get(0)
 }
 
 /// One scalar count, for the queue-scoped tables that carry no tenant of their own.
 async fn count(c: &Client, sql: &str, args: &[&(dyn tokio_postgres::types::ToSql + Sync)]) -> i64 {
-    c.query_one(sql, args).await.unwrap_or_else(|e| panic!("{sql}: {e}")).get(0)
+    c.query_one(sql, args)
+        .await
+        .unwrap_or_else(|e| panic!("{sql}: {e}"))
+        .get(0)
 }
 
 async fn purge(c: &Client, tenant: &str, max_queues: i32) -> serde_json::Value {
@@ -184,9 +192,10 @@ async fn purge(c: &Client, tenant: &str, max_queues: i32) -> serde_json::Value {
 /// the reason the rest of the fixture shares every name: per-tenant uniqueness means
 /// nothing unless something actually collides.
 async fn seed(c: &Client, tenant: &str, tag: &str) {
-    for (queue, opts) in
-        [("orders", r#"{"namespace":"shop","task":"pay"}"#), ("audit", "{}")]
-    {
+    for (queue, opts) in [
+        ("orders", r#"{"namespace":"shop","task":"pay"}"#),
+        ("audit", "{}"),
+    ] {
         c.execute(
             "SELECT queen.configure_queue_v1($1, $2::text::jsonb, $3::text::uuid)",
             &[&queue, &opts, &tenant],
@@ -364,9 +373,12 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
     // clear acceptable — and DELETE, not TRUNCATE, because TRUNCATE takes ACCESS
     // EXCLUSIVE (the lock class the KV/timer tables set vacuum_truncate=off to avoid).
     for t in [TENANT_A, TENANT_B, TENANT_C, TENANT_D] {
-        c.execute("SELECT queen.delete_tenant_data_v1($1::text::uuid, 1000, 1000000)", &[&t])
-            .await
-            .expect("pre-clean");
+        c.execute(
+            "SELECT queen.delete_tenant_data_v1($1::text::uuid, 1000, 1000000)",
+            &[&t],
+        )
+        .await
+        .expect("pre-clean");
     }
 
     // ========================================================================
@@ -418,8 +430,14 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
     seed(&c, TENANT_B, "B").await;
 
     for t in TENANT_TABLES {
-        assert!(tenant_rows(&c, t, TENANT_A).await > 0, "seed left {t} empty for A");
-        assert!(tenant_rows(&c, t, TENANT_B).await > 0, "seed left {t} empty for B");
+        assert!(
+            tenant_rows(&c, t, TENANT_A).await > 0,
+            "seed left {t} empty for A"
+        );
+        assert!(
+            tenant_rows(&c, t, TENANT_B).await > 0,
+            "seed left {t} empty for B"
+        );
     }
 
     // The queue-scoped side, captured by id BEFORE the purge. This is not convenience:
@@ -437,18 +455,33 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
     );
     let a_parts = partition_ids(&c, &a_ids).await;
     let b_parts = partition_ids(&c, &b_ids).await;
-    assert_eq!(a_parts.len(), 2, "A's two queues each got a partition from the push");
-    assert_eq!(b_parts.len(), 2, "B's two queues each got a partition from the push");
+    assert_eq!(
+        a_parts.len(),
+        2,
+        "A's two queues each got a partition from the push"
+    );
+    assert_eq!(
+        b_parts.len(),
+        2,
+        "B's two queues each got a partition from the push"
+    );
 
     let b_before = queue_scoped_counts(&c, &b_ids, &b_parts).await;
-    assert!(b_before.iter().all(|(_, n)| *n > 0), "B's queue-scoped seed: {b_before:?}");
+    assert!(
+        b_before.iter().all(|(_, n)| *n > 0),
+        "B's queue-scoped seed: {b_before:?}"
+    );
 
     // ========================================================================
     section("purge tenant A");
     // ========================================================================
     let res = purge(&c, TENANT_A, 100).await;
     println!("{res}");
-    assert_eq!(res["done"], serde_json::json!(true), "one call was enough: {res}");
+    assert_eq!(
+        res["done"],
+        serde_json::json!(true),
+        "one call was enough: {res}"
+    );
     assert_eq!(res["phase"], serde_json::json!("complete"));
     assert_eq!(res["queues"]["deleted"], serde_json::json!(2));
     assert_eq!(res["queues"]["remaining"], serde_json::json!(0));
@@ -472,7 +505,11 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
     // a missing key, and an operator reading two results never has to wonder whether an
     // absent key means "zero" or "not attempted". The three streaming ones are named
     // explicitly because two of them are new and the third moved phase.
-    for k in ["queen_streams.state", "queen_streams.queries", "queen_streams.quota"] {
+    for k in [
+        "queen_streams.state",
+        "queen_streams.queries",
+        "queen_streams.quota",
+    ] {
         assert!(
             res["rows"].get(k).is_some(),
             "a completed purge must report a `rows` key for {k}: {res}"
@@ -519,7 +556,11 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
     section("zero rows remain for A, in every tenant-carrying table");
     // ========================================================================
     for t in TENANT_TABLES {
-        assert_eq!(tenant_rows(&c, t, TENANT_A).await, 0, "{t} still holds A rows");
+        assert_eq!(
+            tenant_rows(&c, t, TENANT_A).await,
+            0,
+            "{t} still holds A rows"
+        );
     }
 
     // ...and in everything reachable only through A's queue and partition ids, including
@@ -551,7 +592,10 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
         &[&TENANT_B],
     )
     .await;
-    assert_eq!(b_kv, 1, "B's KV row shares its name with the one just deleted, and survived");
+    assert_eq!(
+        b_kv, 1,
+        "B's KV row shares its name with the one just deleted, and survived"
+    );
 
     // ========================================================================
     section("idempotent: the same call again is a no-op that says so");
@@ -560,10 +604,17 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
     assert_eq!(again["done"], serde_json::json!(true), "{again}");
     assert_eq!(again["queues"]["deleted"], serde_json::json!(0));
     for t in TENANT_TABLES.iter().filter(|t| **t != "queen.queues") {
-        assert_eq!(again["rows"][*t], serde_json::json!(0), "{t} on the second run: {again}");
+        assert_eq!(
+            again["rows"][*t],
+            serde_json::json!(0),
+            "{t} on the second run: {again}"
+        );
     }
     for t in TENANT_TABLES {
-        assert!(tenant_rows(&c, t, TENANT_B).await > 0, "{t} lost B's rows on the re-run");
+        assert!(
+            tenant_rows(&c, t, TENANT_B).await > 0,
+            "{t} lost B's rows on the re-run"
+        );
     }
 
     // ========================================================================
@@ -592,8 +643,7 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
         )
         .await
         .expect("budgeted purge");
-    let stalled: serde_json::Value =
-        serde_json::from_str(&row.get::<_, String>(0)).expect("json");
+    let stalled: serde_json::Value = serde_json::from_str(&row.get::<_, String>(0)).expect("json");
     assert_eq!(stalled["done"], serde_json::json!(false), "{stalled}");
     assert_eq!(
         stalled["phase"],
@@ -690,7 +740,8 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
               WHERE q.tenant_id = $1::text::uuid AND q.name = 'orders'",
             &[&TENANT_C],
         )
-        .await > 0,
+        .await
+            > 0,
         "the fixture is meaningless unless traces are actually left over: {residue}"
     );
     // ... and the loop still converges on the SAME tight budget, which is the other half
@@ -706,7 +757,10 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
             .expect("budgeted purge");
         let r: serde_json::Value = serde_json::from_str(&row.get::<_, String>(0)).expect("json");
         calls += 1;
-        assert!(calls <= 20, "the trace budget did not converge in 20 calls: {r}");
+        assert!(
+            calls <= 20,
+            "the trace budget did not converge in 20 calls: {r}"
+        );
         if r["done"] == serde_json::json!(true) {
             break;
         }
@@ -716,7 +770,11 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
         "two rows per call cannot have drained six traces plus the queue in {calls} call(s) \
          — the LIMIT is not being applied"
     );
-    assert_eq!(tenant_rows(&c, "queen.queues", TENANT_C).await, 0, "C is drained");
+    assert_eq!(
+        tenant_rows(&c, "queen.queues", TENANT_C).await,
+        0,
+        "C is drained"
+    );
 
     // ========================================================================
     section("bounded per call: p_max_queues walks the queues one at a time");
@@ -734,9 +792,16 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
             "p_max_queues=1 deleted more than one queue: {r}"
         );
     }
-    assert!(calls > 1, "the budget must have forced more than one call, got {calls}");
+    assert!(
+        calls > 1,
+        "the budget must have forced more than one call, got {calls}"
+    );
     for t in TENANT_TABLES {
-        assert_eq!(tenant_rows(&c, t, TENANT_B).await, 0, "{t} still holds B rows");
+        assert_eq!(
+            tenant_rows(&c, t, TENANT_B).await,
+            0,
+            "{t} still holds B rows"
+        );
     }
 
     // ========================================================================
@@ -766,13 +831,21 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
     let swept: serde_json::Value = serde_json::from_str(&row.get::<_, String>(0)).expect("json");
     assert_eq!(swept["done"], serde_json::json!(false), "{swept}");
     assert_eq!(swept["phase"], serde_json::json!("sweep"), "{swept}");
-    assert_eq!(swept["rows"]["queen.kv"], serde_json::json!(2), "the budget is per table: {swept}");
+    assert_eq!(
+        swept["rows"]["queen.kv"],
+        serde_json::json!(2),
+        "the budget is per table: {swept}"
+    );
     let mut calls = 0;
     while purge(&c, TENANT_A, 100).await["done"] != serde_json::json!(true) {
         calls += 1;
         assert!(calls <= 10, "the sweep did not converge in 10 calls");
     }
-    assert_eq!(tenant_rows(&c, "queen.kv", TENANT_A).await, 0, "the sweep drained");
+    assert_eq!(
+        tenant_rows(&c, "queen.kv", TENANT_A).await,
+        0,
+        "the sweep drained"
+    );
 
     // ========================================================================
     section("phase 3a: ORPHAN stream state, bounded, and BEFORE any queries row dies");
@@ -891,10 +964,20 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
             .expect("budgeted orphan-state purge");
         let r: serde_json::Value = serde_json::from_str(&row.get::<_, String>(0)).expect("json");
         calls += 1;
-        assert!(calls <= 20, "the state budget did not converge in 20 calls: {r}");
+        assert!(
+            calls <= 20,
+            "the state budget did not converge in 20 calls: {r}"
+        );
         if r["done"] == serde_json::json!(true) {
-            for k in ["queen_streams.state", "queen_streams.queries", "queen_streams.quota"] {
-                assert!(r["rows"].get(k).is_some(), "completed purge is missing {k}: {r}");
+            for k in [
+                "queen_streams.state",
+                "queen_streams.queries",
+                "queen_streams.quota",
+            ] {
+                assert!(
+                    r["rows"].get(k).is_some(),
+                    "completed purge is missing {k}: {r}"
+                );
             }
             break;
         }
@@ -915,7 +998,11 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
         "the orphan state the partition-keyed sweep cannot see is still there"
     );
     for t in TENANT_TABLES {
-        assert_eq!(tenant_rows(&c, t, TENANT_D).await, 0, "{t} still holds D rows");
+        assert_eq!(
+            tenant_rows(&c, t, TENANT_D).await,
+            0,
+            "{t} still holds D rows"
+        );
     }
 
     // ========================================================================
@@ -923,7 +1010,10 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
     // On a single-tenant self-hosted broker the default tenant IS the installation.
     // ========================================================================
     let err = c
-        .query_one("SELECT (queen.delete_tenant_data_v1($1::text::uuid))::text", &[&TENANT_DEFAULT])
+        .query_one(
+            "SELECT (queen.delete_tenant_data_v1($1::text::uuid))::text",
+            &[&TENANT_DEFAULT],
+        )
         .await
         .expect_err("the default tenant must be refused");
     let msg = db_message(&err);
@@ -937,7 +1027,10 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
             &[&TENANT_DEFAULT],
         )
         .await;
-    assert!(ok.is_ok(), "p_allow_default_tenant => true must be the way through: {ok:?}");
+    assert!(
+        ok.is_ok(),
+        "p_allow_default_tenant => true must be the way through: {ok:?}"
+    );
 
     // ========================================================================
     section("guard: a tenant-carrying table the function does not know about is fatal");
@@ -949,7 +1042,10 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
         .await
         .expect("probe table");
     let err = c
-        .query_one("SELECT (queen.delete_tenant_data_v1($1::text::uuid))::text", &[&TENANT_A])
+        .query_one(
+            "SELECT (queen.delete_tenant_data_v1($1::text::uuid))::text",
+            &[&TENANT_A],
+        )
         .await
         .expect_err("an unknown tenant-carrying table must abort the purge");
     let msg = db_message(&err);
@@ -957,7 +1053,9 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
         msg.contains("zz_wipe_probe") && msg.contains("C_TENANT_TABLES"),
         "the refusal must name the table AND where to fix it, got: {msg}"
     );
-    c.batch_execute("DROP TABLE queen.zz_wipe_probe").await.expect("drop probe");
+    c.batch_execute("DROP TABLE queen.zz_wipe_probe")
+        .await
+        .expect("drop probe");
 
     // The SAME guard in the second schema, which is not a duplicate: the coverage check
     // has to enumerate `queen` AND `queen_streams` for it to hold, and it was scoped to
@@ -967,7 +1065,10 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
         .await
         .expect("streams probe table");
     let err = c
-        .query_one("SELECT (queen.delete_tenant_data_v1($1::text::uuid))::text", &[&TENANT_A])
+        .query_one(
+            "SELECT (queen.delete_tenant_data_v1($1::text::uuid))::text",
+            &[&TENANT_A],
+        )
         .await
         .expect_err("an unknown tenant-carrying table in queen_streams must abort the purge");
     let msg = db_message(&err);
@@ -1043,7 +1144,12 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
         );
     }
     assert_eq!(
-        count(&c, "SELECT count(*) FROM queen_streams.queries WHERE name = 'sv-legacy'", &[]).await,
+        count(
+            &c,
+            "SELECT count(*) FROM queen_streams.queries WHERE name = 'sv-legacy'",
+            &[]
+        )
+        .await,
         1,
         "the pre-tenancy row survives — there is no tenant on it to attribute, and 'do the \
          part that exists' is the same posture the absent-schema guard takes"
@@ -1110,7 +1216,10 @@ async fn queue_scoped_counts(
         ("consumer_watermarks", "queen.consumer_watermarks"),
         ("queue_lag_metrics", "queen.queue_lag_metrics"),
         ("stats", "queen.stats"),
-        ("consumer_groups_metadata(queue-scoped)", "queen.consumer_groups_metadata"),
+        (
+            "consumer_groups_metadata(queue-scoped)",
+            "queen.consumer_groups_metadata",
+        ),
     ];
     let by_partition: &[(&'static str, &'static str)] = &[
         ("log_segments", "queen.log_segments"),

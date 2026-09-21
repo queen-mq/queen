@@ -353,7 +353,15 @@ async fn case_two_concurrent_movers_produce_one_message(
     // The winner, holding the row lock in an uncommitted transaction.
     let first_conn = connect(host, port).await;
     first_conn.batch_execute("BEGIN").await.map_err(pg_err)?;
-    let first = move_row(&first_conn, DEFAULT_TENANT, &dlq_id, &sink, "Default", &hash).await?;
+    let first = move_row(
+        &first_conn,
+        DEFAULT_TENANT,
+        &dlq_id,
+        &sink,
+        "Default",
+        &hash,
+    )
+    .await?;
     chk!(
         result_of(&first) == "moved",
         "the first mover holds the row and moves it: {first}"
@@ -504,7 +512,10 @@ async fn case_moving_one_group_leaves_the_other(broker: &Broker, c: &Client) -> 
         &synthetic_hash(0x0003_0000_0000_0000_0000_0000_0000_0003),
     )
     .await?;
-    chk!(result_of(&moved) == "moved", "moving group-a's row: {moved}");
+    chk!(
+        result_of(&moved) == "moved",
+        "moving group-a's row: {moved}"
+    );
     chk!(
         moved.get("consumerGroup") == Some(&serde_json::json!("group-a")),
         "the verdict names the group whose record was moved: {moved}"
@@ -622,7 +633,8 @@ async fn case_a_duplicate_writes_nothing_and_keeps_the_row(broker: &Broker, c: &
     let queue = unique("dlqmove.dup");
     let sink = unique("dlqmove.dupsink");
 
-    let first = dead_letter_one(broker, &queue, "movers", serde_json::json!({"n": "first"})).await?;
+    let first =
+        dead_letter_one(broker, &queue, "movers", serde_json::json!({"n": "first"})).await?;
     let second =
         dead_letter_one(broker, &queue, "movers", serde_json::json!({"n": "second"})).await?;
     let id_first = first.id.clone().ok_or("no row id for the first")?;
@@ -679,16 +691,16 @@ async fn case_a_duplicate_writes_nothing_and_keeps_the_row(broker: &Broker, c: &
 // re-partition the message), and the moved frame is a real, poppable message at
 // the destination.
 // ===========================================================================
-async fn case_the_id_route_moves_only_the_half_it_was_given(
-    broker: &Broker,
-    c: &Client,
-) -> Case {
+async fn case_the_id_route_moves_only_the_half_it_was_given(broker: &Broker, c: &Client) -> Case {
     let queue = unique("dlqmove.byid");
     let sink = unique("dlqmove.byidsink");
     let payload = serde_json::json!({"addressed": "by row id"});
     let row = dead_letter_one(broker, &queue, "movers", payload.clone()).await?;
     let dlq_id = row.id.clone().ok_or("no row id")?;
-    let source_partition = row.partition.clone().ok_or("the listing carried no partition")?;
+    let source_partition = row
+        .partition
+        .clone()
+        .ok_or("the listing carried no partition")?;
 
     let answer = broker
         .dlq_replay(&dlq_id, Some(&sink), None)
@@ -831,7 +843,10 @@ async fn case_the_guards_are_loud(broker: &Broker, c: &Client) -> Case {
 
     let short = move_row(c, DEFAULT_TENANT, &dlq_id, "sink", "Default", b"short").await;
     chk!(
-        short.as_ref().err().is_some_and(|e| e.contains("QMOVE bad segment")),
+        short
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.contains("QMOVE bad segment")),
         "a hash blob that is not 16 bytes must RAISE: {short:?}"
     );
     let unnamed = move_row(
@@ -844,7 +859,10 @@ async fn case_the_guards_are_loud(broker: &Broker, c: &Client) -> Case {
     )
     .await;
     chk!(
-        unnamed.as_ref().err().is_some_and(|e| e.contains("QMOVE unnamed destination")),
+        unnamed
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.contains("QMOVE unnamed destination")),
         "an empty destination queue must RAISE: {unnamed:?}"
     );
     chk!(
@@ -900,7 +918,10 @@ async fn case_an_encrypted_snapshot_round_trips(broker: &Broker, c: &Client) -> 
         replay.get("result") == Some(&serde_json::json!("moved")),
         "the replay: {replay}"
     );
-    chk!(dlq_row_count(c, &dlq_id).await? == 0, "the row must be gone");
+    chk!(
+        dlq_row_count(c, &dlq_id).await? == 0,
+        "the row must be gone"
+    );
 
     let got = broker
         .pop(&queue, &group_params(group, None))
@@ -1002,7 +1023,10 @@ async fn dlq_move_semantics() {
         "push_maintenance_refuses_a_move",
         case_push_maintenance_refuses_a_move(&broker, &c).await,
     ));
-    report.push(("the_guards_are_loud", case_the_guards_are_loud(&broker, &c).await));
+    report.push((
+        "the_guards_are_loud",
+        case_the_guards_are_loud(&broker, &c).await,
+    ));
     report.push((
         "an_encrypted_snapshot_round_trips",
         case_an_encrypted_snapshot_round_trips(&broker, &c).await,
@@ -1024,5 +1048,8 @@ async fn dlq_move_semantics() {
         report.len() - failed,
         report.len()
     );
-    assert_eq!(failed, 0, "{failed} DLQ move case(s) failed — see the table above");
+    assert_eq!(
+        failed, 0,
+        "{failed} DLQ move case(s) failed — see the table above"
+    );
 }

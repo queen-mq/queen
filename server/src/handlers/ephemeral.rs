@@ -186,7 +186,8 @@ fn gated(st: &AppState, tenant: &str, surface: Surface, add_msgs: i64) -> Option
 /// telling the client that waiting helps.
 fn with_retry_after(mut resp: Response, secs: u32) -> Response {
     if let Ok(v) = axum::http::HeaderValue::from_str(&secs.to_string()) {
-        resp.headers_mut().insert(axum::http::header::RETRY_AFTER, v);
+        resp.headers_mut()
+            .insert(axum::http::header::RETRY_AFTER, v);
     }
     resp
 }
@@ -407,7 +408,10 @@ async fn forward_to_owner(
     };
     match again {
         Route::Local => None,
-        Route::Remote { server_id, http_addr } => {
+        Route::Remote {
+            server_id,
+            http_addr,
+        } => {
             // The same answer as before means nothing has converged yet; a second
             // call to the broker that just refused would get the same refusal.
             if server_id == first_owner {
@@ -496,7 +500,10 @@ pub async fn handle_ephemeral_push(
     if let Err(r) = check_name("queue", &parsed.queue) {
         return r;
     }
-    let partition = parsed.partition.as_deref().unwrap_or(ephemeral::DEFAULT_PARTITION);
+    let partition = parsed
+        .partition
+        .as_deref()
+        .unwrap_or(ephemeral::DEFAULT_PARTITION);
     if let Err(r) = check_name("partition", partition) {
         return r;
     }
@@ -516,7 +523,11 @@ pub async fn handle_ephemeral_push(
     // effective ceiling depend on how its queue names happened to hash. Rung 1
     // (this broker's kill switch) and rung 2 (is this tenant granted here at all)
     // are properties of the RECEIVING broker and still apply to every hop.
-    let charge = if forwarded { 0 } else { parsed.messages.len() as i64 };
+    let charge = if forwarded {
+        0
+    } else {
+        parsed.messages.len() as i64
+    };
     if let Some(r) = gated(&st, tenant.as_str(), Surface::EphPush, charge) {
         return r;
     }
@@ -525,8 +536,12 @@ pub async fn handle_ephemeral_push(
     // DROPS whatever this broker still holds for that partition (the
     // membership-change wipe), so an ownership move frees its memory on the first
     // request that observes it rather than waiting for the periodic reap.
-    if let Route::Remote { server_id, http_addr } =
-        st.ephemeral.route(tenant.as_str(), &parsed.queue, partition)
+    if let Route::Remote {
+        server_id,
+        http_addr,
+    } = st
+        .ephemeral
+        .route(tenant.as_str(), &parsed.queue, partition)
     {
         // A forwarded request is NEVER re-forwarded (§3.6).
         if forwarded {
@@ -564,13 +579,17 @@ pub async fn handle_ephemeral_push(
     let n = payloads.len();
 
     let now = crate::util::now_epoch_ms();
-    match st.ephemeral.push(tenant.as_str(), &parsed.queue, partition, payloads, now) {
+    match st
+        .ephemeral
+        .push(tenant.as_str(), &parsed.queue, partition, payloads, now)
+    {
         Ok(pushed) => {
             // §3.4 — the hotlist-OFF direct wake. Ephemeral never enters the
             // hot list or its ~5 ms coalescing tick: the list exists to make a
             // wildcard SQL candidate scan cheap, and there is no scan here.
             let qkey = ephemeral::Ephemeral::qkey(tenant.as_str(), &parsed.queue);
-            st.notifier.notify_pushed_batch(&[(qkey, partition.to_string())]);
+            st.notifier
+                .notify_pushed_batch(&[(qkey, partition.to_string())]);
             json(StatusCode::CREATED, format!("{{\"pushed\":{pushed}}}"))
         }
         Err(r) => {
@@ -612,7 +631,10 @@ pub async fn handle_ephemeral_pop(
     if let Err(r) = check_name("queue", queue) {
         return r;
     }
-    let partition = q.get("partition").map(String::as_str).filter(|s| !s.is_empty());
+    let partition = q
+        .get("partition")
+        .map(String::as_str)
+        .filter(|s| !s.is_empty());
     if let Some(p) = partition {
         if let Err(r) = check_name("partition", p) {
             return r;
@@ -641,7 +663,11 @@ pub async fn handle_ephemeral_pop(
         Some(p) => st.ephemeral.route(tenant.as_str(), queue, p),
         None => st.ephemeral.route_queue(tenant.as_str(), queue),
     };
-    if let Route::Remote { server_id, http_addr } = route {
+    if let Route::Remote {
+        server_id,
+        http_addr,
+    } = route
+    {
         if is_forwarded(&headers) {
             return owner_moved();
         }
@@ -750,7 +776,8 @@ pub async fn handle_ephemeral_pop(
 /// normalize numbers — a broker that silently rewrites a payload is a broker
 /// nobody can checksum against.
 fn render_pop(queue: &str, msgs: &[ephemeral::Delivered]) -> Response {
-    let mut out = String::with_capacity(128 + msgs.iter().map(|m| m.payload.len() + 96).sum::<usize>());
+    let mut out =
+        String::with_capacity(128 + msgs.iter().map(|m| m.payload.len() + 96).sum::<usize>());
     out.push_str("{\"queue\":\"");
     crate::fusion::json_escape_into(&mut out, queue);
     out.push_str("\",\"messages\":[");
@@ -847,8 +874,12 @@ pub async fn handle_ephemeral_ack(
         .first()
         .and_then(|a| ephemeral::parse_id(&a.id).map(|(_, p, _)| p.to_string()))
         .unwrap_or_else(|| ephemeral::DEFAULT_PARTITION.to_string());
-    if let Route::Remote { server_id, http_addr } =
-        st.ephemeral.route(tenant.as_str(), &parsed.queue, &ack_partition)
+    if let Route::Remote {
+        server_id,
+        http_addr,
+    } = st
+        .ephemeral
+        .route(tenant.as_str(), &parsed.queue, &ack_partition)
     {
         if is_forwarded(&headers) {
             return owner_moved();
@@ -1000,7 +1031,9 @@ fn parse_options(v: &serde_json::Value) -> Result<(ephemeral::QueueOptions, Stri
     // 0 is MEANINGFUL on these two and must survive the filter above: it is how
     // an operator turns an age limit back off on a declared queue.
     o.ttl_ms = num("ttlSeconds")?.map(|s| s.saturating_mul(1000));
-    o.lease_ms = num("leaseSeconds")?.filter(|n| *n > 0).map(|s| s.saturating_mul(1000));
+    o.lease_ms = num("leaseSeconds")?
+        .filter(|n| *n > 0)
+        .map(|s| s.saturating_mul(1000));
     o.retry_limit = num("retryLimit")?.map(|n| n.clamp(0, u32::MAX as i64) as u32);
     if let Some(p) = map.get("policy") {
         let Some(s) = p.as_str().and_then(ephemeral::Policy::parse) else {
@@ -1018,7 +1051,10 @@ fn parse_options(v: &serde_json::Value) -> Result<(ephemeral::QueueOptions, Stri
             }
         }
         let g = |k: &str| wo.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-        o.window = Some(ephemeral::Window { ms: g("ms"), count: g("count") as usize });
+        o.window = Some(ephemeral::Window {
+            ms: g("ms"),
+            count: g("count") as usize,
+        });
     }
     Ok((o, v.to_string()))
 }
@@ -1046,7 +1082,9 @@ pub async fn handle_ephemeral_configure(
     if let Err(r) = check_name("queue", &parsed.queue) {
         return r;
     }
-    let raw = parsed.options.unwrap_or(serde_json::Value::Object(Default::default()));
+    let raw = parsed
+        .options
+        .unwrap_or(serde_json::Value::Object(Default::default()));
     let (opts, blob) = match parse_options(&raw) {
         Ok(v) => v,
         Err(r) => return r,
@@ -1072,7 +1110,8 @@ pub async fn handle_ephemeral_configure(
             )
         }
     };
-    st.ephemeral.set_config(tenant.as_str(), &parsed.queue, opts, true);
+    st.ephemeral
+        .set_config(tenant.as_str(), &parsed.queue, opts, true);
     // §3.5 — tell the peers to re-read this one row. The frame carries no
     // options: the TABLE is the authority (the row was written above, before
     // this line), so a peer reads what was stored rather than what a frame
@@ -1116,7 +1155,10 @@ pub async fn handle_ephemeral_reset(
     if let Err(r) = check_name("queue", &parsed.queue) {
         return r;
     }
-    let dropped = st.ephemeral.reset(tenant.as_str(), &parsed.queue).unwrap_or(0);
+    let dropped = st
+        .ephemeral
+        .reset(tenant.as_str(), &parsed.queue)
+        .unwrap_or(0);
     // §3.5 — every broker drops its own rings for this queue. `dropped` is
     // therefore THIS broker's count and not the cell's, which is the honest
     // number to report: a fire-and-forget broadcast cannot know what the peers
@@ -1161,7 +1203,8 @@ pub async fn handle_ephemeral_delete_queue(
     // by the next refresh, §1.2). Broadcasting only on success would instead
     // leave every peer holding rings for a queue this broker has already dropped
     // whenever the database is the thing that failed.
-    st.ephemeral.broadcast_admin("delete", tenant.as_str(), &queue);
+    st.ephemeral
+        .broadcast_admin("delete", tenant.as_str(), &queue);
     let declared;
     match st.pool.get().await {
         Ok(c) => match db::eph_config_delete(&c, tenant.as_str(), &queue).await {

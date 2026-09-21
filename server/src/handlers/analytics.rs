@@ -26,7 +26,10 @@ macro_rules! client_or_500 {
         match $st.pool.get().await {
             Ok(c) => c,
             Err(_) => {
-                return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string())
+                return json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "{\"error\":\"pool\"}".to_string(),
+                )
             }
         }
     };
@@ -56,7 +59,10 @@ pub async fn handle_queue_detail(
     // body maps to 404 ("not found") / 500 instead of being served at HTTP 200. A
     // valid queue detail has no top-level "error" key, so success is still 200.
     // Track B (§5): scoped to the request tenant's queue.
-    serve("queue detail failed: ", db::get_queue_detail(&client, &queue, tenant.as_str()).await)
+    serve(
+        "queue detail failed: ",
+        db::get_queue_detail(&client, &queue, tenant.as_str()).await,
+    )
 }
 
 // ---------------------------------------------- GET /api/v1/status/analytics
@@ -65,7 +71,11 @@ pub async fn handle_status_analytics(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let f = filters_json_tenant(&params, &["from", "to", "interval", "queue", "namespace", "task"], tenant.as_str());
+    let f = filters_json_tenant(
+        &params,
+        &["from", "to", "interval", "queue", "namespace", "task"],
+        tenant.as_str(),
+    );
     let client = client_or_500!(st);
     serve("analytics failed: ", db::get_analytics(&client, &f).await)
 }
@@ -77,7 +87,10 @@ pub async fn handle_system_metrics(
 ) -> Response {
     let f = filters_json(&params, &["from", "to", "hostname", "workerId"]);
     let client = client_or_500!(st);
-    serve("system metrics failed: ", db::get_system_metrics(&client, &f).await)
+    serve(
+        "system metrics failed: ",
+        db::get_system_metrics(&client, &f).await,
+    )
 }
 
 // --------------------------------------- GET /api/v1/analytics/worker-metrics
@@ -87,7 +100,10 @@ pub async fn handle_worker_metrics(
 ) -> Response {
     let f = filters_json(&params, &["from", "to", "queue", "hostname", "workerId"]);
     let client = client_or_500!(st);
-    serve("worker metrics failed: ", db::get_worker_metrics_ts(&client, &f).await)
+    serve(
+        "worker metrics failed: ",
+        db::get_worker_metrics_ts(&client, &f).await,
+    )
 }
 
 // -------------------------------------------- GET /api/v1/analytics/queue-lag
@@ -98,11 +114,23 @@ pub async fn handle_queue_lag(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let from = params.get("from").filter(|s| !s.is_empty()).map(|s| s.as_str());
-    let to = params.get("to").filter(|s| !s.is_empty()).map(|s| s.as_str());
-    let queue = params.get("queue").filter(|s| !s.is_empty()).map(|s| s.as_str());
+    let from = params
+        .get("from")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.as_str());
+    let to = params
+        .get("to")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.as_str());
+    let queue = params
+        .get("queue")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.as_str());
     let client = client_or_500!(st);
-    serve("queue lag failed: ", db::get_queue_lag(&client, from, to, queue, tenant.as_str()).await)
+    serve(
+        "queue lag failed: ",
+        db::get_queue_lag(&client, from, to, queue, tenant.as_str()).await,
+    )
 }
 
 // -------------------------------------------- GET /api/v1/analytics/queue-ops
@@ -129,7 +157,10 @@ pub async fn handle_workload(
 ) -> Response {
     if let Some(g) = params.get("groupBy").filter(|s| !s.is_empty()) {
         if !matches!(g.as_str(), "namespace" | "task" | "queue") {
-            return json(StatusCode::BAD_REQUEST, "{\"error\":\"bad groupBy\"}".to_string());
+            return json(
+                StatusCode::BAD_REQUEST,
+                "{\"error\":\"bad groupBy\"}".to_string(),
+            );
         }
     }
     // filters_from_query drops empty values, but `namespace=` / `task=` with an
@@ -146,7 +177,10 @@ pub async fn handle_workload(
             m.insert(k.to_string(), serde_json::Value::String(String::new()));
         }
     }
-    m.insert("_tenant".to_string(), serde_json::Value::String(tenant.as_str().to_string()));
+    m.insert(
+        "_tenant".to_string(),
+        serde_json::Value::String(tenant.as_str().to_string()),
+    );
     let f = serde_json::Value::Object(m).to_string();
     let client = client_or_500!(st);
     serve("workload failed: ", db::get_workload(&client, &f).await)
@@ -161,7 +195,10 @@ pub async fn handle_queue_parked_replicas(
 ) -> Response {
     let f = filters_json_tenant(&params, &["from", "to", "queue"], tenant.as_str());
     let client = client_or_500!(st);
-    serve("parked replicas failed: ", db::get_queue_parked_replicas(&client, &f).await)
+    serve(
+        "parked replicas failed: ",
+        db::get_queue_parked_replicas(&client, &f).await,
+    )
 }
 
 // -------------------------------------------- GET /api/v1/analytics/retention
@@ -179,12 +216,22 @@ pub async fn handle_retention(
 ) -> Response {
     if let Some(g) = params.get("groupBy").filter(|s| !s.is_empty()) {
         if !matches!(g.as_str(), "namespace" | "task" | "queue") {
-            return json(StatusCode::BAD_REQUEST, "{\"error\":\"bad groupBy\"}".to_string());
+            return json(
+                StatusCode::BAD_REQUEST,
+                "{\"error\":\"bad groupBy\"}".to_string(),
+            );
         }
     }
-    let f = filters_json_tenant(&params, &["from", "to", "queue", "groupBy"], tenant.as_str());
+    let f = filters_json_tenant(
+        &params,
+        &["from", "to", "queue", "groupBy"],
+        tenant.as_str(),
+    );
     let client = client_or_500!(st);
-    serve("retention failed: ", db::get_retention_ts(&client, &f).await)
+    serve(
+        "retention failed: ",
+        db::get_retention_ts(&client, &f).await,
+    )
 }
 
 // --------------------------------------- GET /api/v1/analytics/dlq-signatures
@@ -197,11 +244,17 @@ pub async fn handle_dlq_signatures(
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     if params.get("queue").filter(|s| !s.is_empty()).is_none() {
-        return json(StatusCode::BAD_REQUEST, "{\"error\":\"queue required\"}".to_string());
+        return json(
+            StatusCode::BAD_REQUEST,
+            "{\"error\":\"queue required\"}".to_string(),
+        );
     }
     let f = filters_json_tenant(&params, &["queue", "limit"], tenant.as_str());
     let client = client_or_500!(st);
-    serve("dlq signatures failed: ", db::get_dlq_signatures(&client, &f).await)
+    serve(
+        "dlq signatures failed: ",
+        db::get_dlq_signatures(&client, &f).await,
+    )
 }
 
 // ----------------------------------- GET /api/v1/analytics/partition-liveness
@@ -220,16 +273,25 @@ pub async fn handle_partition_liveness(
             m.insert(k.to_string(), serde_json::Value::String(String::new()));
         }
     }
-    m.insert("_tenant".to_string(), serde_json::Value::String(tenant.as_str().to_string()));
+    m.insert(
+        "_tenant".to_string(),
+        serde_json::Value::String(tenant.as_str().to_string()),
+    );
     let f = serde_json::Value::Object(m).to_string();
     let client = client_or_500!(st);
-    serve("partition liveness failed: ", db::get_partition_liveness(&client, &f).await)
+    serve(
+        "partition liveness failed: ",
+        db::get_partition_liveness(&client, &f).await,
+    )
 }
 
 // --------------------------------------- GET /api/v1/analytics/postgres-stats
 pub async fn handle_postgres_stats(State(st): State<Arc<AppState>>) -> Response {
     let client = client_or_500!(st);
-    serve("postgres stats failed: ", db::get_postgres_stats(&client).await)
+    serve(
+        "postgres stats failed: ",
+        db::get_postgres_stats(&client).await,
+    )
 }
 
 // --------------------------------------------- GET /api/v1/status/buffers

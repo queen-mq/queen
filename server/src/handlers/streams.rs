@@ -28,10 +28,7 @@ use crate::util::{txn_hash128, uuidv7_bytes};
 // object. Falls back to the raw parsed value if the shape is unexpected.
 fn unwrap_stream_result(txt: &str) -> serde_json::Value {
     let v: serde_json::Value = serde_json::from_str(txt).unwrap_or(serde_json::Value::Null);
-    v.get(0)
-        .and_then(|e| e.get("result"))
-        .cloned()
-        .unwrap_or(v)
+    v.get(0).and_then(|e| e.get("result")).cloned().unwrap_or(v)
 }
 
 // POST /streams/v1/queries — idempotent query registration
@@ -54,15 +51,29 @@ pub async fn handle_streams_register(
         Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
     };
     // Required-field validation mirrors the C++ route (400 before the SP).
-    let field = |k: &str| root.get(k).and_then(|x| x.as_str()).filter(|s| !s.is_empty()).is_some();
+    let field = |k: &str| {
+        root.get(k)
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .is_some()
+    };
     if !field("name") {
-        return json(StatusCode::BAD_REQUEST, "{\"error\":\"name is required\"}".to_string());
+        return json(
+            StatusCode::BAD_REQUEST,
+            "{\"error\":\"name is required\"}".to_string(),
+        );
     }
     if !field("source_queue") {
-        return json(StatusCode::BAD_REQUEST, "{\"error\":\"source_queue is required\"}".to_string());
+        return json(
+            StatusCode::BAD_REQUEST,
+            "{\"error\":\"source_queue is required\"}".to_string(),
+        );
     }
     if !field("config_hash") {
-        return json(StatusCode::BAD_REQUEST, "{\"error\":\"config_hash is required\"}".to_string());
+        return json(
+            StatusCode::BAD_REQUEST,
+            "{\"error\":\"config_hash is required\"}".to_string(),
+        );
     }
     // Stamp idx:0 and wrap in a one-element requests array.
     if let Some(obj) = root.as_object_mut() {
@@ -72,12 +83,20 @@ pub async fn handle_streams_register(
 
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
     match db::streams_register(&client, &requests, tenant.as_str()).await {
         Ok(txt) => {
             let result = unwrap_stream_result(&txt);
-            let ok = result.get("success").and_then(|x| x.as_bool()).unwrap_or(true);
+            let ok = result
+                .get("success")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(true);
             // TWO failure classes, and they must not be conflated — a client
             // retrying a 409 with reset:true is doing the right thing, and doing
             // it against a 403 forever is not:
@@ -88,7 +107,10 @@ pub async fn handle_streams_register(
             //   * anything else with success:false → config_hash mismatch
             //     (missing-field cases are rejected above) → 409, matching the
             //     C++ route.
-            let denied = result.get("denied").and_then(|x| x.as_bool()).unwrap_or(false);
+            let denied = result
+                .get("denied")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false);
             let status = if ok {
                 StatusCode::OK
             } else if denied {
@@ -133,15 +155,24 @@ pub async fn handle_streams_state_get(
     if let Some(obj) = root.as_object_mut() {
         obj.insert("idx".to_string(), serde_json::json!(0));
         // Default keys:[] so the SP's COALESCE(r->'keys',...) always has a value.
-        obj.entry("keys".to_string()).or_insert_with(|| serde_json::json!([]));
+        obj.entry("keys".to_string())
+            .or_insert_with(|| serde_json::json!([]));
     } else {
-        return json(StatusCode::BAD_REQUEST, "{\"error\":\"request body must be a JSON object\"}".to_string());
+        return json(
+            StatusCode::BAD_REQUEST,
+            "{\"error\":\"request body must be a JSON object\"}".to_string(),
+        );
     }
     let requests = serde_json::Value::Array(vec![root]).to_string();
 
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
 
     // Track B (§5) OWNERSHIP GATE on the pid, same posture as the pid-addressed
@@ -157,9 +188,14 @@ pub async fn handle_streams_state_get(
     // caller nothing. (Unlike the cycle route, this handler has no earlier
     // required-field check to lean on.)
     if !partition_id.is_empty()
-        && !st.tenant_owns_partition(&client, &partition_id, tenant.as_str()).await
+        && !st
+            .tenant_owns_partition(&client, &partition_id, tenant.as_str())
+            .await
     {
-        return json(StatusCode::NOT_FOUND, "{\"error\":\"not found\"}".to_string());
+        return json(
+            StatusCode::NOT_FOUND,
+            "{\"error\":\"not found\"}".to_string(),
+        );
     }
 
     match db::streams_state_get(&client, &requests, tenant.as_str()).await {
@@ -230,13 +266,31 @@ pub async fn handle_streams_cycle(
         Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
     };
 
-    let query_id = match root.get("query_id").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+    let query_id = match root
+        .get("query_id")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+    {
         Some(q) => q.to_string(),
-        None => return json(StatusCode::BAD_REQUEST, "{\"error\":\"query_id is required\"}".to_string()),
+        None => {
+            return json(
+                StatusCode::BAD_REQUEST,
+                "{\"error\":\"query_id is required\"}".to_string(),
+            )
+        }
     };
-    let partition_id = match root.get("partition_id").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+    let partition_id = match root
+        .get("partition_id")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+    {
         Some(p) => p.to_string(),
-        None => return json(StatusCode::BAD_REQUEST, "{\"error\":\"partition_id is required\"}".to_string()),
+        None => {
+            return json(
+                StatusCode::BAD_REQUEST,
+                "{\"error\":\"partition_id is required\"}".to_string(),
+            )
+        }
     };
     let consumer_group = root
         .get("consumer_group")
@@ -245,9 +299,15 @@ pub async fn handle_streams_cycle(
         .to_string();
     // Default true preserves the atomic full-batch cycle; a gate operator passes
     // false to retain the source lease on the un-acked tail.
-    let release_lease = root.get("release_lease").and_then(|x| x.as_bool()).unwrap_or(true);
+    let release_lease = root
+        .get("release_lease")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(true);
     // state_ops pass through verbatim to the SP (upsert/delete on queen_streams.state).
-    let state_ops = root.get("state_ops").cloned().unwrap_or_else(|| serde_json::json!([]));
+    let state_ops = root
+        .get("state_ops")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
 
     // ---- pack push_items -> sink_segments, grouped by (queue, partition) -------
     struct SinkFrame {
@@ -261,7 +321,11 @@ pub async fn handle_streams_cycle(
     let mut group_of: HashMap<(String, String), usize> = HashMap::new();
     if let Some(items) = root.get("push_items").and_then(|x| x.as_array()) {
         for pi in items {
-            let queue = pi.get("queue").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let queue = pi
+                .get("queue")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             if queue.is_empty() {
                 continue; // no sink queue -> nothing to push
             }
@@ -330,7 +394,8 @@ pub async fn handle_streams_cycle(
                         f.encrypted = true;
                     }
                     None => {
-                        static ENC_FAIL_STREAMS: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+                        static ENC_FAIL_STREAMS: crate::obs::Sampler =
+                            crate::obs::Sampler::new(10_000);
                         if let Some(suppressed) = ENC_FAIL_STREAMS.tick_now() {
                             tracing::warn!(target: "streams", queue = %queue, suppressed, "encryption failed; stored plaintext");
                         }
@@ -385,7 +450,11 @@ pub async fn handle_streams_cycle(
         Some(a) if !a.is_null() => {
             let ok = status_is_ok(a.get("status").and_then(|x| x.as_str()));
             let count = a.get("count").and_then(|x| x.as_i64()).unwrap_or(0);
-            let worker = a.get("leaseId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let worker = a
+                .get("leaseId")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             ack_ok = ok;
             ack_req_count = count.max(0) as u64;
             (worker, serde_json::json!({"ok": ok, "count": count}))
@@ -421,7 +490,12 @@ pub async fn handle_streams_cycle(
     let _slot = crate::admission::lane_slot(crate::admission::Lane::Push).await;
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
 
     // Track B (§5) OWNERSHIP GATE on the SOURCE partition, after the checkout so
@@ -431,8 +505,14 @@ pub async fn handle_streams_cycle(
     // missing one gets, never a 403 that would confirm it exists. The SP's own
     // source/query/sink predicates are the authoritative backstop — this gate is
     // the cached fast path that keeps a foreign cycle from reaching the SP at all.
-    if !st.tenant_owns_partition(&client, &partition_id, tenant.as_str()).await {
-        return json(StatusCode::NOT_FOUND, "{\"error\":\"not found\"}".to_string());
+    if !st
+        .tenant_owns_partition(&client, &partition_id, tenant.as_str())
+        .await
+    {
+        return json(
+            StatusCode::NOT_FOUND,
+            "{\"error\":\"not found\"}".to_string(),
+        );
     }
 
     match db::streams_cycle(&client, &requests, tenant.as_str()).await {
@@ -454,7 +534,11 @@ pub async fn handle_streams_cycle(
             // Gated on the element's success: the SP wraps each element in a
             // subtransaction, so success:false means nothing committed and there is
             // nothing to advertise.
-            if result.get("success").and_then(|x| x.as_bool()).unwrap_or(false) {
+            if result
+                .get("success")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false)
+            {
                 // Per-queue + broker-wide metric attribution for the traffic this
                 // cycle committed. Same root cause as the discoverability block
                 // below: the SP commits everything internally, so NEITHER
@@ -511,11 +595,8 @@ pub async fn handle_streams_cycle(
                     // count comes from the SP (authoritative — it is what the cursor
                     // actually advanced by, including the gate partial-ack case);
                     // the failed count from the request, per ack_req_count above.
-                    let committed = ar
-                        .get("count")
-                        .and_then(|x| x.as_i64())
-                        .unwrap_or(0)
-                        .max(0) as u64;
+                    let committed =
+                        ar.get("count").and_then(|x| x.as_i64()).unwrap_or(0).max(0) as u64;
                     let (ok, failed) = if ack_ok {
                         (committed, 0u64)
                     } else {
@@ -550,7 +631,11 @@ pub async fn handle_streams_cycle(
                 let landed: Vec<(String, String, u32)> = sink_marks
                     .iter()
                     .map(|(q, p, n)| {
-                        (crate::handlers::tenant_queue_key(tenant.as_str(), q), p.clone(), *n)
+                        (
+                            crate::handlers::tenant_queue_key(tenant.as_str(), q),
+                            p.clone(),
+                            *n,
+                        )
                     })
                     .collect();
                 crate::handlers::announce_landed(&st.hotlist, &st.notifier, &landed);

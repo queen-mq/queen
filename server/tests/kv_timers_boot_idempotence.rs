@@ -127,7 +127,13 @@ async fn snapshot(c: &tokio_postgres::Client) -> Vec<String> {
 async fn boot(host: &str, port: u16, db: &str, leg: &str) {
     let broker = Broker::start(
         BrokerConfig::new()
-            .pg(host.to_string(), port, "postgres", "postgres", db.to_string())
+            .pg(
+                host.to_string(),
+                port,
+                "postgres",
+                "postgres",
+                db.to_string(),
+            )
             .pool_size(4)
             // Off so the apply is the only thing touching this database. The
             // per-statement lock_timeout+retry machinery in schema.rs exists
@@ -178,7 +184,10 @@ async fn schema_applies_twice_on_virgin_and_again_on_populated() {
     {
         let old: String = row.get(0);
         let _ = admin
-            .execute(&format!("DROP DATABASE IF EXISTS \"{old}\" WITH (FORCE)"), &[])
+            .execute(
+                &format!("DROP DATABASE IF EXISTS \"{old}\" WITH (FORCE)"),
+                &[],
+            )
             .await;
     }
 
@@ -197,7 +206,10 @@ async fn schema_applies_twice_on_virgin_and_again_on_populated() {
     let result = run_legs(&host, port, &db).await;
 
     let _ = admin
-        .execute(&format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"), &[])
+        .execute(
+            &format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"),
+            &[],
+        )
         .await;
 
     if let Err(report) = result {
@@ -231,7 +243,12 @@ async fn run_legs(host: &str, port: u16, db: &str) -> Result<(), String> {
     // ---------------------------------------------- leg 2: virgin, second boot
     boot(host, port, db, "boot 2 (virgin, re-apply)").await;
     let snap2 = snapshot(&c).await;
-    diff(&snap1, &snap2, "boot 1 → boot 2 (virgin re-apply)", &mut failures);
+    diff(
+        &snap1,
+        &snap2,
+        "boot 1 → boot 2 (virgin re-apply)",
+        &mut failures,
+    );
 
     // ------------------------------------------------------ populate, then boot
     // Rows an operator wrote (quota) and rows the feature wrote (kv, timers).
@@ -256,7 +273,12 @@ async fn run_legs(host: &str, port: u16, db: &str) -> Result<(), String> {
 
     boot(host, port, db, "boot 3 (populated)").await;
     let snap3 = snapshot(&c).await;
-    diff(&snap1, &snap3, "boot 1 → boot 3 (populated re-apply)", &mut failures);
+    diff(
+        &snap1,
+        &snap3,
+        "boot 1 → boot 3 (populated re-apply)",
+        &mut failures,
+    );
 
     if seeded.is_ok() {
         rows_survived(&c, &mut failures).await;
@@ -284,7 +306,10 @@ fn diff(a: &[String], b: &[String], leg: &str, failures: &mut Vec<String>) {
         if v.is_empty() {
             "      (none)".to_string()
         } else {
-            v.iter().map(|l| format!("      {l}")).collect::<Vec<_>>().join("\n")
+            v.iter()
+                .map(|l| format!("      {l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
         }
     };
     failures.push(format!(
@@ -334,38 +359,72 @@ async fn schema_contract(c: &tokio_postgres::Client, snap: &[String], failures: 
     let hot = ["kv", "log_timers"];
     let cold = ["kv_quota", "kv_usage"];
     for t in hot.iter().chain(cold.iter()) {
-        require_reloption(c, t, "vacuum_truncate=off", failures,
+        require_reloption(
+            c,
+            t,
+            "vacuum_truncate=off",
+            failures,
             "GOTCHA/§3.2 + §2.4 C4: heap truncation takes ACCESS EXCLUSIVE on a table that \
              empties and refills in steady state — the root cause of the wobble class, and on \
-             queen.kv part of the lock order itself").await;
-        require_reloption(c, t, "autovacuum_vacuum_scale_factor=0", failures,
+             queen.kv part of the lock order itself",
+        )
+        .await;
+        require_reloption(
+            c,
+            t,
+            "autovacuum_vacuum_scale_factor=0",
+            failures,
             "§3.2, copied verbatim from queen.log_partitions (001_log_schema.sql:47-68): between \
              passes the dead tuples outnumber the live ones, so scale_factor 0 keeps autovacuum \
-             re-firing every naptime").await;
+             re-firing every naptime",
+        )
+        .await;
         require_reloption(c, t, "autovacuum_vacuum_threshold=500", failures, "§3.2").await;
     }
     for t in hot {
-        require_reloption(c, t, "autovacuum_vacuum_cost_delay=0", failures,
-            "§3.2: unthrottled, but only on the two hot tables").await;
-        require_reloption(c, t, "fillfactor=70", failures,
+        require_reloption(
+            c,
+            t,
+            "autovacuum_vacuum_cost_delay=0",
+            failures,
+            "§3.2: unthrottled, but only on the two hot tables",
+        )
+        .await;
+        require_reloption(
+            c,
+            t,
+            "fillfactor=70",
+            failures,
             "§3.2: by ANALOGY with 001_log_schema.sql:39-46, explicitly NOT measured — to be \
-             replaced with a measured number after the first soak").await;
+             replaced with a measured number after the first soak",
+        )
+        .await;
     }
     for t in cold {
         // §3.2 says this in as many words: autovacuum_max_workers is a GLOBAL
         // budget (default 3), and seven unthrottled tables would contend for it
         // with log_partitions, log_consumers and log_segments — the tables the
         // engine depends on. These two are tiny and have no need to be aggressive.
-        forbid_reloption(c, t, "autovacuum_vacuum_cost_delay", failures,
+        forbid_reloption(
+            c,
+            t,
+            "autovacuum_vacuum_cost_delay",
+            failures,
             "§3.2: cost_delay 0 ONLY on queen.kv and queen.log_timers, never on the config and \
-             measurement tables — autovacuum_max_workers is a GLOBAL budget").await;
+             measurement tables — autovacuum_max_workers is a GLOBAL budget",
+        )
+        .await;
     }
 
     // ------------------------------------------------------ generated columns
     // GENERATED STORED so no UPDATE can ever move a row's shard (§3.2), and so
     // the modulus is frozen at write time — always-virgin covers the SCHEMA, not
     // the DATA, and changing 64 would silently re-shard rows already written.
-    for (t, col) in [("kv", "shard"), ("log_timers", "shard"), ("log_timers", "visible_at")] {
+    for (t, col) in [
+        ("kv", "shard"),
+        ("log_timers", "shard"),
+        ("log_timers", "visible_at"),
+    ] {
         let g: Option<String> = c
             .query_opt(
                 "SELECT a.attgenerated::text FROM pg_attribute a
@@ -392,7 +451,10 @@ async fn schema_contract(c: &tokio_postgres::Client, snap: &[String], failures: 
     // §3.4: exactly ONE secondary index per new table, each with exactly ONE
     // reader (the sweeper). The named non-index is the point: an index on
     // updated_at would make EVERY counter update non-HOT.
-    for (t, want_idx) in [("kv", "idx_kv_shard_expires"), ("log_timers", "idx_log_timers_visible")] {
+    for (t, want_idx) in [
+        ("kv", "idx_kv_shard_expires"),
+        ("log_timers", "idx_log_timers_visible"),
+    ] {
         let extra: Vec<String> = c
             .query(
                 "SELECT i.relname FROM pg_index x
@@ -561,7 +623,10 @@ async fn forbid_reloption(
         .expect("reloptions")
         .and_then(|r| r.get(0));
     let opts = opts.unwrap_or_default();
-    if opts.iter().any(|o| o.starts_with(&format!("{forbidden_key}="))) {
+    if opts
+        .iter()
+        .any(|o| o.starts_with(&format!("{forbidden_key}=")))
+    {
         failures.push(format!(
             "  ✗ queen.{table}: reloption {forbidden_key} is set and must not be\n      plan: \
              {why}\n      got:  {opts:?}"

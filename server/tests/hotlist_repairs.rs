@@ -33,10 +33,7 @@ fn unique(prefix: &str) -> String {
 }
 
 /// Every repair published for `queue`, as (group, partition_name, reason).
-async fn repairs(
-    c: &tokio_postgres::Client,
-    queue: &str,
-) -> Vec<(String, Option<String>, String)> {
+async fn repairs(c: &tokio_postgres::Client, queue: &str) -> Vec<(String, Option<String>, String)> {
     c.query(
         "SELECT consumer_group, partition_name, reason FROM queen.hotlist_repairs \
          WHERE queue_name = $1 ORDER BY consumer_group",
@@ -140,7 +137,11 @@ async fn a_cursor_move_publishes_a_repair_the_peers_can_read() {
     .expect("seek p1");
     assert_eq!(
         repairs(&c, &queue).await,
-        vec![(group.to_string(), Some("p1".to_string()), "seek-partition".to_string())],
+        vec![(
+            group.to_string(),
+            Some("p1".to_string()),
+            "seek-partition".to_string()
+        )],
         "one repair, naming the ONE partition that moved — a reader marks exactly it \
          instead of walking 9,563"
     );
@@ -155,7 +156,11 @@ async fn a_cursor_move_publishes_a_repair_the_peers_can_read() {
     .expect("seek p1 again");
     assert_eq!(
         repairs(&c, &queue).await,
-        vec![(group.to_string(), Some("p1".to_string()), "seek-partition".to_string())],
+        vec![(
+            group.to_string(),
+            Some("p1".to_string()),
+            "seek-partition".to_string()
+        )],
         "an upsert, and the scope is unchanged"
     );
 
@@ -183,7 +188,10 @@ async fn a_cursor_move_publishes_a_repair_the_peers_can_read() {
         .await
         .expect("seek missing")
         .get(0);
-    assert!(txt.contains("\"success\": false"), "the seek itself failed: {txt}");
+    assert!(
+        txt.contains("\"success\": false"),
+        "the seek itself failed: {txt}"
+    );
     assert_eq!(
         repairs(&c, &other).await,
         before,
@@ -233,7 +241,8 @@ async fn a_cursor_move_publishes_a_repair_the_peers_can_read() {
         .collect();
     assert_eq!(ours.len(), 2, "one row per repaired (tenant, queue, group)");
     assert!(
-        ours.iter().all(|(t, _, p, at)| t == TENANT && p.is_none() && !at.is_empty()),
+        ours.iter()
+            .all(|(t, _, p, at)| t == TENANT && p.is_none() && !at.is_empty()),
         "the reader gets the tenant that owns the ring, the scope, and a change token"
     );
     // Re-reading changes nothing: the same rows with the same tokens, which is exactly

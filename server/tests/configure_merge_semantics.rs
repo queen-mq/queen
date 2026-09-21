@@ -618,7 +618,9 @@ async fn case_a_refused_body_changes_nothing(c: &Client) -> Case {
     )
     .await?;
     chk!(
-        refused["error"].as_str().is_some_and(|e| e.contains("retentionSinkHoldMaxSeconds")),
+        refused["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("retentionSinkHoldMaxSeconds")),
         "expected the out-of-range refusal, got {refused}"
     );
     let got = stored(c, &q).await?;
@@ -799,19 +801,58 @@ async fn configure_merge_semantics() {
     let c = connect(&host, port).await;
 
     let mut report: Vec<(&str, Case)> = Vec::new();
-    report.push(("create_takes_todays_defaults", case_create_takes_todays_defaults(&c).await));
-    report.push(("partial_edit_keeps_the_other_columns", case_partial_edit_keeps_the_other_columns(&c).await));
-    report.push(("explicit_null_restores_the_default", case_explicit_null_restores_the_default(&c).await));
-    report.push(("replace_resets_everything_not_given", case_replace_resets_everything_not_given(&c).await));
-    report.push(("namespace_and_task_follow_the_rule", case_namespace_and_task_follow_the_rule(&c).await));
-    report.push(("a_push_created_queue_keeps_its_derived_labels", case_a_push_created_queue_keeps_its_derived_labels(&c).await));
-    report.push(("a_legacy_null_label_is_kept_as_empty_string", case_a_legacy_null_label_is_kept_as_empty_string(&c).await));
-    report.push(("concurrent_merges_both_land", case_concurrent_merges_both_land(&host, port).await));
-    report.push(("the_echo_is_the_effective_row", case_the_echo_is_the_effective_row(&c).await));
-    report.push(("a_refused_body_changes_nothing", case_a_refused_body_changes_nothing(&c).await));
-    report.push(("merge_is_tenant_scoped", case_merge_is_tenant_scoped(&c).await));
-    report.push(("the_handler_wires_mode_to_replace", case_the_handler_wires_mode_to_replace(&broker, &c).await));
-    report.push(("the_handler_refuses_on_the_right_status", case_the_handler_refuses_on_the_right_status(&broker, &c).await));
+    report.push((
+        "create_takes_todays_defaults",
+        case_create_takes_todays_defaults(&c).await,
+    ));
+    report.push((
+        "partial_edit_keeps_the_other_columns",
+        case_partial_edit_keeps_the_other_columns(&c).await,
+    ));
+    report.push((
+        "explicit_null_restores_the_default",
+        case_explicit_null_restores_the_default(&c).await,
+    ));
+    report.push((
+        "replace_resets_everything_not_given",
+        case_replace_resets_everything_not_given(&c).await,
+    ));
+    report.push((
+        "namespace_and_task_follow_the_rule",
+        case_namespace_and_task_follow_the_rule(&c).await,
+    ));
+    report.push((
+        "a_push_created_queue_keeps_its_derived_labels",
+        case_a_push_created_queue_keeps_its_derived_labels(&c).await,
+    ));
+    report.push((
+        "a_legacy_null_label_is_kept_as_empty_string",
+        case_a_legacy_null_label_is_kept_as_empty_string(&c).await,
+    ));
+    report.push((
+        "concurrent_merges_both_land",
+        case_concurrent_merges_both_land(&host, port).await,
+    ));
+    report.push((
+        "the_echo_is_the_effective_row",
+        case_the_echo_is_the_effective_row(&c).await,
+    ));
+    report.push((
+        "a_refused_body_changes_nothing",
+        case_a_refused_body_changes_nothing(&c).await,
+    ));
+    report.push((
+        "merge_is_tenant_scoped",
+        case_merge_is_tenant_scoped(&c).await,
+    ));
+    report.push((
+        "the_handler_wires_mode_to_replace",
+        case_the_handler_wires_mode_to_replace(&broker, &c).await,
+    ));
+    report.push((
+        "the_handler_refuses_on_the_right_status",
+        case_the_handler_refuses_on_the_right_status(&broker, &c).await,
+    ));
 
     println!("\n============ configure merge semantics (PLAN_DASHBOARD_ACTIONS §2.2) ============");
     let mut failed = 0;
@@ -824,7 +865,13 @@ async fn configure_merge_semantics() {
             }
         }
     }
-    println!("=========================== {}/{} passed ===========================\n",
-             report.len() - failed, report.len());
-    assert_eq!(failed, 0, "{failed} configure merge case(s) failed — see the table above");
+    println!(
+        "=========================== {}/{} passed ===========================\n",
+        report.len() - failed,
+        report.len()
+    );
+    assert_eq!(
+        failed, 0,
+        "{failed} configure merge case(s) failed — see the table above"
+    );
 }

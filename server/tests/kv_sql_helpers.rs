@@ -137,7 +137,9 @@ struct Report(Vec<String>);
 
 impl Report {
     fn fail(&mut self, what: &str, why: &str, detail: String) {
-        self.0.push(format!("  ✗ {what}\n      plan: {why}\n      got:  {detail}"));
+        self.0.push(format!(
+            "  ✗ {what}\n      plan: {why}\n      got:  {detail}"
+        ));
     }
 
     fn finish(self, heading: &str) {
@@ -565,11 +567,7 @@ async fn prefix_end_cases(c: &tokio_postgres::Client, r: &mut Report) {
                     );
                 }
             }
-            Err(e) => r.fail(
-                &format!("kv_prefix_end_v1: {id}"),
-                why,
-                detail(&e),
-            ),
+            Err(e) => r.fail(&format!("kv_prefix_end_v1: {id}"), why, detail(&e)),
         }
     }
 
@@ -621,10 +619,30 @@ async fn prefix_end_cases(c: &tokio_postgres::Client, r: &mut Report) {
 async fn check_names_cases(c: &tokio_postgres::Client, r: &mut Report) {
     // (id, ns SQL, key SQL, why)
     let accepted: Vec<(&str, &str, &str, &str)> = vec![
-        ("minimal", "'a'", "'k'", "one lowercase letter is a legal namespace"),
-        ("digit first", "'0'", "'k'", "^[a-z0-9] — a digit is a legal first character"),
-        ("full charset", "'a.b_c-d0'", "'k'", "[a-z0-9._-] after the first character"),
-        ("64 chars", "'a' || repeat('z', 63)", "'k'", "{0,63} after the first = 64 characters total"),
+        (
+            "minimal",
+            "'a'",
+            "'k'",
+            "one lowercase letter is a legal namespace",
+        ),
+        (
+            "digit first",
+            "'0'",
+            "'k'",
+            "^[a-z0-9] — a digit is a legal first character",
+        ),
+        (
+            "full charset",
+            "'a.b_c-d0'",
+            "'k'",
+            "[a-z0-9._-] after the first character",
+        ),
+        (
+            "64 chars",
+            "'a' || repeat('z', 63)",
+            "'k'",
+            "{0,63} after the first = 64 characters total",
+        ),
         (
             "key is opaque",
             "'saga'",
@@ -660,7 +678,12 @@ async fn check_names_cases(c: &tokio_postgres::Client, r: &mut Report) {
     }
 
     let rejected: Vec<(&str, &str, &str, &str)> = vec![
-        ("empty namespace", "''", "'k'", "^[a-z0-9] requires at least one character"),
+        (
+            "empty namespace",
+            "''",
+            "'k'",
+            "^[a-z0-9] requires at least one character",
+        ),
         (
             "uppercase namespace",
             "'Saga'",
@@ -668,15 +691,45 @@ async fn check_names_cases(c: &tokio_postgres::Client, r: &mut Report) {
             "§3.2: the charset exists so the COMMON typo classes cannot mint a phantom \
              namespace that reads empty forever; case is the first of them",
         ),
-        ("leading dot", "'.saga'", "'k'", "^[a-z0-9] — a separator cannot lead"),
-        ("leading dash", "'-saga'", "'k'", "^[a-z0-9] — a separator cannot lead"),
-        ("leading underscore", "'_saga'", "'k'", "'_' is not in the charset at all"),
+        (
+            "leading dot",
+            "'.saga'",
+            "'k'",
+            "^[a-z0-9] — a separator cannot lead",
+        ),
+        (
+            "leading dash",
+            "'-saga'",
+            "'k'",
+            "^[a-z0-9] — a separator cannot lead",
+        ),
+        (
+            "leading underscore",
+            "'_saga'",
+            "'k'",
+            "'_' is not in the charset at all",
+        ),
         ("space", "'sa ga'", "'k'", "not in [a-z0-9._-]"),
-        ("slash", "'sa/ga'", "'k'", "not in [a-z0-9._-] — and a path separator invites a hierarchy that does not exist"),
+        (
+            "slash",
+            "'sa/ga'",
+            "'k'",
+            "not in [a-z0-9._-] — and a path separator invites a hierarchy that does not exist",
+        ),
         ("colon", "'sa:ga'", "'k'", "not in [a-z0-9._-]"),
         ("non-ascii", "chr(225) || 'bc'", "'k'", "^[a-z0-9] is ASCII"),
-        ("65 chars", "'a' || repeat('z', 64)", "'k'", "{0,63} after the first = 64 total, so 65 is out"),
-        ("empty key", "'saga'", "''", "§6.1: the key must be non-empty"),
+        (
+            "65 chars",
+            "'a' || repeat('z', 64)",
+            "'k'",
+            "{0,63} after the first = 64 total, so 65 is out",
+        ),
+        (
+            "empty key",
+            "'saga'",
+            "''",
+            "§6.1: the key must be non-empty",
+        ),
         (
             "key one byte over the cap",
             "'saga'",

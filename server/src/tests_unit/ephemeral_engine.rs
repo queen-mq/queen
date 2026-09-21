@@ -21,7 +21,10 @@ fn engine(k: Knobs) -> Arc<Ephemeral> {
 }
 
 fn small() -> Knobs {
-    Knobs { implicit_idle_ms: 1_000, ..Knobs::defaults() }
+    Knobs {
+        implicit_idle_ms: 1_000,
+        ..Knobs::defaults()
+    }
 }
 
 fn body(s: &str) -> Box<[u8]> {
@@ -124,14 +127,23 @@ fn budget_refund_saturates_at_zero() {
 /// untouched (the refund path of §1.6).
 #[test]
 fn a_refused_push_refunds_every_rung() {
-    let e = engine(Knobs { global_max_bytes: 40, ..small() });
-    assert!(e.push(T, "q", "Default", vec![body("0123456789")], 0).is_ok());
+    let e = engine(Knobs {
+        global_max_bytes: 40,
+        ..small()
+    });
+    assert!(e
+        .push(T, "q", "Default", vec![body("0123456789")], 0)
+        .is_ok());
     let after_one = e.global_bytes();
     assert_eq!(after_one, 10);
     // 5 x 7 bytes = 35, against a 40-byte cell that already holds 10.
     let r = e.push(T, "q", "Default", bodies(5), 0);
     assert_eq!(r, Err(Refusal::NoRoom));
-    assert_eq!(e.global_bytes(), after_one, "the cell budget is back where it was");
+    assert_eq!(
+        e.global_bytes(),
+        after_one,
+        "the cell budget is back where it was"
+    );
     assert_eq!(e.depth(T, "q"), Some((1, 10)), "and so is the queue's");
 }
 
@@ -166,7 +178,11 @@ fn every_group_sees_everything() {
     }
     // ONE copy in RAM however many groups read it: three groups that each read
     // two messages must not cost six messages' worth of bytes.
-    assert_eq!(e.depth(T, "q"), Some((0, 0)), "reclaimed once every cursor passed");
+    assert_eq!(
+        e.depth(T, "q"),
+        Some((0, 0)),
+        "reclaimed once every cursor passed"
+    );
 }
 
 /// "Competing consumers = the same `group`" — two pops of one group take
@@ -195,7 +211,11 @@ fn groupless_pops_share_one_cursor_like_queue_mode() {
     let a = e.pop(T, "q", None, None, 1, true, 0);
     let b = e.pop(T, "q", None, Some(QUEUE_MODE), 1, true, 0);
     assert_eq!(payload_of(&a[0]), "{\"n\":0}");
-    assert_eq!(payload_of(&b[0]), "{\"n\":1}", "the sentinel IS the group-less cursor");
+    assert_eq!(
+        payload_of(&b[0]),
+        "{\"n\":1}",
+        "the sentinel IS the group-less cursor"
+    );
     assert!(e.pop(T, "q", None, None, 10, true, 0).is_empty());
 }
 
@@ -249,7 +269,8 @@ fn a_parked_group_is_seeded_into_a_ring_created_after_it() {
 #[test]
 fn two_tenants_may_share_a_queue_name() {
     let e = engine(small());
-    e.push(T, "orders", "Default", vec![body("\"mine\"")], 0).unwrap();
+    e.push(T, "orders", "Default", vec![body("\"mine\"")], 0)
+        .unwrap();
     assert!(e.pop(OTHER, "orders", None, None, 10, true, 0).is_empty());
     assert_eq!(e.pop(T, "orders", None, None, 10, true, 0).len(), 1);
 }
@@ -274,7 +295,10 @@ fn qkey_namespaces_the_queue_half() {
 /// `failed`/`retry` redeliver with `attempts+1`".
 #[test]
 fn an_expired_lease_redelivers_with_attempts_incremented() {
-    let e = engine(Knobs { lease_ms: 1_000, ..small() });
+    let e = engine(Knobs {
+        lease_ms: 1_000,
+        ..small()
+    });
     e.push(T, "q", "Default", bodies(1), 0).unwrap();
     let first = e.pop(T, "q", None, Some("g"), 10, false, 0);
     assert_eq!(first.len(), 1);
@@ -293,11 +317,18 @@ fn an_expired_lease_redelivers_with_attempts_incremented() {
 /// consumer that dies holding it has lost it — which is the contract.
 #[test]
 fn auto_ack_leaves_no_lease() {
-    let e = engine(Knobs { lease_ms: 1_000, ..small() });
+    let e = engine(Knobs {
+        lease_ms: 1_000,
+        ..small()
+    });
     e.push(T, "q", "Default", bodies(1), 0).unwrap();
     assert_eq!(e.pop(T, "q", None, Some("g"), 10, true, 0).len(), 1);
     assert!(e.pop(T, "q", None, Some("g"), 10, true, 10_000).is_empty());
-    assert_eq!(e.depth(T, "q"), Some((0, 0)), "and the byte is reclaimed at once");
+    assert_eq!(
+        e.depth(T, "q"),
+        Some((0, 0)),
+        "and the byte is reclaimed at once"
+    );
 }
 
 /// A `completed` ack retires the message; a `failed` one puts it back with the
@@ -331,19 +362,39 @@ fn ack_outcomes_are_acked_and_redelivered() {
 /// answers `acked` and `eph_dropped_retry` is where the drop is visible.
 #[test]
 fn retry_limit_exhaustion_drops_and_counts() {
-    let e = engine(Knobs { retry_limit: 2, ..small() });
+    let e = engine(Knobs {
+        retry_limit: 2,
+        ..small()
+    });
     e.push(T, "q", "Default", bodies(1), 0).unwrap();
     // attempt 1 -> nack, attempt 2 -> nack (now at the limit), attempt 3 -> gone
     let a = e.pop(T, "q", None, Some("g"), 1, false, 0);
     assert_eq!(a[0].attempts, 1);
     assert_eq!(
-        e.ack(T, "q", Some("g"), &[(a[0].id.clone(), AckStatus::Failed)], 0)[0].1,
+        e.ack(
+            T,
+            "q",
+            Some("g"),
+            &[(a[0].id.clone(), AckStatus::Failed)],
+            0
+        )[0]
+        .1,
         AckOutcome::Redelivered
     );
     let b = e.pop(T, "q", None, Some("g"), 1, false, 0);
     assert_eq!(b[0].attempts, 2);
-    let last = e.ack(T, "q", Some("g"), &[(b[0].id.clone(), AckStatus::Failed)], 0);
-    assert_eq!(last[0].1, AckOutcome::Acked, "terminal: the message is retired");
+    let last = e.ack(
+        T,
+        "q",
+        Some("g"),
+        &[(b[0].id.clone(), AckStatus::Failed)],
+        0,
+    );
+    assert_eq!(
+        last[0].1,
+        AckOutcome::Acked,
+        "terminal: the message is retired"
+    );
     assert!(e.pop(T, "q", None, Some("g"), 10, false, 0).is_empty());
     assert_eq!(e.metrics.eph_dropped_retry.load(Ordering::Relaxed), 1);
 }
@@ -352,15 +403,31 @@ fn retry_limit_exhaustion_drops_and_counts() {
 /// the message away from another group that is still owed it.
 #[test]
 fn exhaustion_is_per_group() {
-    let e = engine(Knobs { retry_limit: 1, ..small() });
+    let e = engine(Knobs {
+        retry_limit: 1,
+        ..small()
+    });
     // Both groups are subscribers of this fan-out queue before the push.
     assert!(e.pop(T, "q", None, Some("a"), 1, false, 0).is_empty());
     assert!(e.pop(T, "q", None, Some("b"), 1, false, 0).is_empty());
     e.push(T, "q", "Default", bodies(1), 0).unwrap();
     let a = e.pop(T, "q", None, Some("a"), 1, false, 0);
-    e.ack(T, "q", Some("a"), &[(a[0].id.clone(), AckStatus::Failed)], 0);
-    assert!(e.pop(T, "q", None, Some("a"), 10, false, 0).is_empty(), "a gave up");
-    assert_eq!(e.pop(T, "q", None, Some("b"), 10, false, 0).len(), 1, "b is still owed it");
+    e.ack(
+        T,
+        "q",
+        Some("a"),
+        &[(a[0].id.clone(), AckStatus::Failed)],
+        0,
+    );
+    assert!(
+        e.pop(T, "q", None, Some("a"), 10, false, 0).is_empty(),
+        "a gave up"
+    );
+    assert_eq!(
+        e.pop(T, "q", None, Some("b"), 10, false, 0).len(),
+        1,
+        "b is still owed it"
+    );
 }
 
 /// "An ack whose epoch is not the current owner's returns `stale`, never an
@@ -386,7 +453,11 @@ fn a_foreign_epoch_answers_stale_and_ours_without_a_lease_answers_unknown() {
     );
     assert_eq!(r[0].1, AckOutcome::Stale);
     assert_eq!(r[1].1, AckOutcome::Acked);
-    assert_eq!(r[2].1, AckOutcome::Unknown, "the lease was already released");
+    assert_eq!(
+        r[2].1,
+        AckOutcome::Unknown,
+        "the lease was already released"
+    );
     assert_eq!(r[3].1, AckOutcome::Unknown);
 }
 
@@ -419,9 +490,20 @@ fn acking_an_unknown_queue_still_reports_the_epoch_verdict() {
 #[test]
 fn policy_reject_refuses_and_keeps_the_backlog() {
     let e = engine(small());
-    e.set_config(T, "q", QueueOptions { max_length: Some(2), ..Default::default() }, true);
+    e.set_config(
+        T,
+        "q",
+        QueueOptions {
+            max_length: Some(2),
+            ..Default::default()
+        },
+        true,
+    );
     e.push(T, "q", "Default", bodies(2), 0).unwrap();
-    assert_eq!(e.push(T, "q", "Default", bodies(1), 0), Err(Refusal::QueueFull));
+    assert_eq!(
+        e.push(T, "q", "Default", bodies(1), 0),
+        Err(Refusal::QueueFull)
+    );
     let got = e.pop(T, "q", None, None, 10, true, 0);
     assert_eq!(got.len(), 2);
     assert_eq!(payload_of(&got[0]), "{\"n\":0}", "the OLDEST survived");
@@ -443,10 +525,15 @@ fn policy_drop_oldest_evicts_the_head_and_counts_it() {
         true,
     );
     e.push(T, "q", "Default", bodies(2), 0).unwrap();
-    e.push(T, "q", "Default", vec![body("\"newest\"")], 0).unwrap();
+    e.push(T, "q", "Default", vec![body("\"newest\"")], 0)
+        .unwrap();
     let got = e.pop(T, "q", None, None, 10, true, 0);
     assert_eq!(got.len(), 2);
-    assert_eq!(payload_of(&got[0]), "{\"n\":1}", "n:0 was dropped from the head");
+    assert_eq!(
+        payload_of(&got[0]),
+        "{\"n\":1}",
+        "n:0 was dropped from the head"
+    );
     assert_eq!(payload_of(&got[1]), "\"newest\"");
     assert_eq!(e.metrics.eph_dropped_bounds.load(Ordering::Relaxed), 1);
 }
@@ -472,7 +559,10 @@ fn an_evicted_range_advances_the_cursor_and_counts_the_skip() {
     assert_eq!(e.pop(T, "q", None, Some("slow"), 0, true, 0).len(), 0);
     e.pop(T, "q", Some("Default"), Some("slow"), 1, true, 0);
     e.push(T, "q", "Default", bodies(2), 0).unwrap();
-    assert!(e.skipped(T, "q", "Default", "slow") >= 1, "the skip must be counted");
+    assert!(
+        e.skipped(T, "q", "Default", "slow") >= 1,
+        "the skip must be counted"
+    );
 }
 
 // ===========================================================================
@@ -484,7 +574,15 @@ fn an_evicted_range_advances_the_cursor_and_counts_the_skip() {
 #[test]
 fn ttl_head_drops_on_the_next_touch() {
     let e = engine(small());
-    e.set_config(T, "q", QueueOptions { ttl_ms: Some(1_000), ..Default::default() }, true);
+    e.set_config(
+        T,
+        "q",
+        QueueOptions {
+            ttl_ms: Some(1_000),
+            ..Default::default()
+        },
+        true,
+    );
     e.push(T, "q", "Default", bodies(2), 0).unwrap();
     // Still young.
     assert_eq!(e.pop(T, "q", None, Some("g"), 10, true, 500).len(), 2);
@@ -507,7 +605,15 @@ fn ttl_head_drops_on_the_next_touch() {
 #[test]
 fn ttl_returns_the_bytes_to_every_budget() {
     let e = engine(small());
-    e.set_config(T, "q", QueueOptions { ttl_ms: Some(1_000), ..Default::default() }, true);
+    e.set_config(
+        T,
+        "q",
+        QueueOptions {
+            ttl_ms: Some(1_000),
+            ..Default::default()
+        },
+        true,
+    );
     e.push(T, "q", "Default", bodies(4), 0).unwrap();
     assert!(e.global_bytes() > 0);
     // Any touch past the deadline runs the drop.
@@ -561,7 +667,10 @@ fn implicit_queues_are_collected_and_declared_ones_are_not() {
     let s = e.sweep(5_000);
     assert_eq!(s.gc_queues, 1);
     assert_eq!(e.queue_count(), 1);
-    assert!(e.depth(T, "declared").is_some(), "the declared config survives");
+    assert!(
+        e.depth(T, "declared").is_some(),
+        "the declared config survives"
+    );
 }
 
 /// THE ABA HAZARD the seq base exists to close. An implicit queue is collected
@@ -576,13 +685,23 @@ fn a_recreated_ring_never_reuses_the_ids_of_the_one_it_replaced() {
     e.push(T, "inbox", "Default", bodies(1), 0).unwrap();
     let old = e.pop(T, "inbox", None, Some("g"), 1, true, 0);
     let old_id = old[0].id.clone();
-    assert_eq!(e.sweep(5_000).gc_queues, 1, "the emptied inbox is collected");
+    assert_eq!(
+        e.sweep(5_000).gc_queues,
+        1,
+        "the emptied inbox is collected"
+    );
 
     e.push(T, "inbox", "Default", bodies(1), 6_000).unwrap();
     let new = e.pop(T, "inbox", None, Some("g"), 1, false, 6_000);
     assert_ne!(new[0].id, old_id, "the recreated ring must mint a fresh id");
     // …and the stale ack lands on nothing rather than on the new message.
-    let r = e.ack(T, "inbox", Some("g"), &[(old_id, AckStatus::Completed)], 6_000);
+    let r = e.ack(
+        T,
+        "inbox",
+        Some("g"),
+        &[(old_id, AckStatus::Completed)],
+        6_000,
+    );
     assert_eq!(r[0].1, AckOutcome::Unknown);
     assert_eq!(
         e.pop(T, "inbox", None, Some("g"), 1, false, 40_000).len(),
@@ -606,7 +725,10 @@ fn a_non_empty_implicit_queue_survives_the_gc() {
 /// expire the lease and hand the message back.
 #[test]
 fn the_backstop_expires_leases_nobody_touched() {
-    let e = engine(Knobs { lease_ms: 1_000, ..small() });
+    let e = engine(Knobs {
+        lease_ms: 1_000,
+        ..small()
+    });
     e.push(T, "q", "Default", bodies(1), 0).unwrap();
     e.pop(T, "q", None, Some("g"), 1, false, 0);
     let s = e.sweep(2_000);
@@ -618,7 +740,10 @@ fn the_backstop_expires_leases_nobody_touched() {
 /// `hint_in_ms` for it instead of waiting out its own cadence (§3.2).
 #[test]
 fn the_backstop_reports_the_next_expiry() {
-    let e = engine(Knobs { lease_ms: 5_000, ..small() });
+    let e = engine(Knobs {
+        lease_ms: 5_000,
+        ..small()
+    });
     e.push(T, "q", "Default", bodies(1), 0).unwrap();
     e.pop(T, "q", None, Some("g"), 1, false, 1_000);
     assert_eq!(e.sweep(1_100).next_expiry_ms, Some(6_000));
@@ -634,7 +759,11 @@ fn the_backstop_reports_the_next_expiry() {
 /// validates nothing — the clamp has to live here or the two authorities drift.
 #[test]
 fn options_are_clamped_against_the_knobs() {
-    let k = Knobs { queue_max_bytes: 1_000, queue_max_length: 10, ..Knobs::defaults() };
+    let k = Knobs {
+        queue_max_bytes: 1_000,
+        queue_max_length: 10,
+        ..Knobs::defaults()
+    };
     let c = QueueOptions {
         max_bytes: Some(i64::MAX),
         max_length: Some(1_000_000),
@@ -644,5 +773,8 @@ fn options_are_clamped_against_the_knobs() {
     .apply(QueueConfig::from_knobs(&k), &k);
     assert_eq!(c.max_bytes, 1_000);
     assert_eq!(c.max_length, 10);
-    assert_eq!(c.ttl_ms, 0, "a negative ttl is no ttl, never a drop-everything");
+    assert_eq!(
+        c.ttl_ms, 0,
+        "a negative ttl is no ttl, never a drop-everything"
+    );
 }

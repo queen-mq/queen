@@ -117,7 +117,9 @@ fn pg_err(e: tokio_postgres::Error) -> String {
             "{} {}{}",
             db.code().code(),
             db.message(),
-            db.detail().map(|d| format!(" | DETAIL: {d}")).unwrap_or_default()
+            db.detail()
+                .map(|d| format!(" | DETAIL: {d}"))
+                .unwrap_or_default()
         ),
         None => format!("{e}"),
     }
@@ -132,29 +134,33 @@ fn results(v: &Value) -> Result<Vec<Value>, String> {
     if let Some(a) = v.get("results").and_then(|r| r.as_array()) {
         return Ok(a.clone());
     }
-    Err(format!("kv_apply_v1 returned a non index-aligned shape: {v}"))
+    Err(format!(
+        "kv_apply_v1 returned a non index-aligned shape: {v}"
+    ))
 }
 
 async fn apply(c: &Client, ops: Value) -> Result<Vec<Value>, String> {
     let n = ops.as_array().map(|a| a.len()).unwrap_or(0);
-    let v = apply_raw(c, "now()", false, ops)
-        .await
-        .map_err(pg_err)?;
+    let v = apply_raw(c, "now()", false, ops).await.map_err(pg_err)?;
     let r = results(&v)?;
     if r.len() != n {
-        return Err(format!("expected {n} index-aligned results, got {}", r.len()));
+        return Err(format!(
+            "expected {n} index-aligned results, got {}",
+            r.len()
+        ));
     }
     Ok(r)
 }
 
 async fn apply_at(c: &Client, now_expr: &str, ops: Value) -> Result<Vec<Value>, String> {
     let n = ops.as_array().map(|a| a.len()).unwrap_or(0);
-    let v = apply_raw(c, now_expr, false, ops)
-        .await
-        .map_err(pg_err)?;
+    let v = apply_raw(c, now_expr, false, ops).await.map_err(pg_err)?;
     let r = results(&v)?;
     if r.len() != n {
-        return Err(format!("expected {n} index-aligned results, got {}", r.len()));
+        return Err(format!(
+            "expected {n} index-aligned results, got {}",
+            r.len()
+        ));
     }
     Ok(r)
 }
@@ -308,7 +314,10 @@ async fn case_one_winner(host: &str, port: u16) -> Case {
 
     // And exactly one physical row, holding the winner's value.
     let c = connect(host, port).await;
-    chk!(row_count(&c, &ns, key).await? == 1, "expected exactly 1 row");
+    chk!(
+        row_count(&c, &ns, key).await? == 1,
+        "expected exactly 1 row"
+    );
     Ok(())
 }
 
@@ -328,7 +337,10 @@ async fn case_expect_positive_never_creates(c: &Client) -> Case {
                 "ttlSeconds": 60, "expect": 90101 }),
     )
     .await?;
-    chk!(!applied(&r), "expect:N>0 on an absent key must NOT apply: {r}");
+    chk!(
+        !applied(&r),
+        "expect:N>0 on an absent key must NOT apply: {r}"
+    );
     chk!(
         reason(&r) == "absent",
         "expected reason 'absent', got '{}': {r}",
@@ -349,7 +361,10 @@ async fn case_expect_positive_never_creates(c: &Client) -> Case {
         json!({ "op": "delete", "ns": ns, "key": "ghost2", "expect": 90101 }),
     )
     .await?;
-    chk!(!applied(&d), "delete expect:N>0 on an absent key must not apply: {d}");
+    chk!(
+        !applied(&d),
+        "delete expect:N>0 on an absent key must not apply: {d}"
+    );
     chk!(
         reason(&d) == "absent",
         "expected reason 'absent' on delete, got '{}': {d}",
@@ -407,7 +422,11 @@ async fn case_expired_reads_as_absent(c: &Client) -> Case {
     );
     let missing: Vec<String> = m["missing"]
         .as_array()
-        .map(|a| a.iter().filter_map(|k| k.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|k| k.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     chk!(
         missing.contains(&"k1".to_string()) && missing.contains(&"never-written".to_string()),
@@ -481,7 +500,10 @@ async fn case_incr_max_rejects_without_consuming(c: &Client) -> Case {
                 "ttlSeconds": 60 }),
     )
     .await?;
-    chk!(!applied(&over), "the 4th incr must be REFUSED under max=3: {over}");
+    chk!(
+        !applied(&over),
+        "the 4th incr must be REFUSED under max=3: {over}"
+    );
     chk!(
         reason(&over) == "limit",
         "expected reason 'limit', got '{}': {over}",
@@ -786,7 +808,10 @@ async fn case_expiry_is_mandatory(c: &Client) -> Case {
         { "op": "put", "ns": ns, "key": "no-ttl", "value": {"x": 2} }
     ]);
     let (code, _, _) = expect_raise(c, "now()", false, ops).await?;
-    chk!(code == "22023", "batch validation must raise 22023, got {code}");
+    chk!(
+        code == "22023",
+        "batch validation must raise 22023, got {code}"
+    );
     chk!(
         row_count(c, &ns, "valid-first").await? == 0,
         "validate-then-apply: nothing may be written when any op is rejected (§6.1)"
@@ -935,7 +960,10 @@ async fn case_read_ceilings(c: &Client) -> Case {
             })
             .collect();
         let r = apply(c, json!(ops)).await?;
-        chk!(r.iter().all(applied), "seeding big values must apply: {r:?}");
+        chk!(
+            r.iter().all(applied),
+            "seeding big values must apply: {r:?}"
+        );
     }
     let fat = one(
         c,
@@ -1031,7 +1059,10 @@ async fn case_loser_gets_current_value_and_version(c: &Client) -> Case {
         json!({ "op": "delete", "ns": ns, "key": key, "expect": v1 }),
     )
     .await?;
-    chk!(applied(&ok), "delete with the matching version must apply: {ok}");
+    chk!(
+        applied(&ok),
+        "delete with the matching version must apply: {ok}"
+    );
     chk!(
         row_count(c, &ns, key).await? == 0,
         "the row must be gone after a matching delete"
@@ -1081,18 +1112,48 @@ async fn kv_semantics() {
     let c = connect(&host, port).await;
 
     let mut report: Vec<(&str, Case)> = Vec::new();
-    report.push(("one_winner_among_concurrent_putIfAbsent", case_one_winner(&host, port).await));
-    report.push(("expect_positive_never_creates", case_expect_positive_never_creates(&c).await));
-    report.push(("expired_reads_as_absent", case_expired_reads_as_absent(&c).await));
-    report.push(("incr_max_rejects_without_consuming", case_incr_max_rejects_without_consuming(&c).await));
-    report.push(("incr_first_call_over_max", case_incr_first_call_over_max(&c).await));
-    report.push(("incr_expired_non_numeric_restarts", case_incr_expired_non_numeric_restarts(&c).await));
-    report.push(("incr_ttl_is_create_only", case_incr_ttl_is_create_only(&c).await));
-    report.push(("prefix_metacharacters_are_literal", case_prefix_metacharacters_are_literal(&c).await));
+    report.push((
+        "one_winner_among_concurrent_putIfAbsent",
+        case_one_winner(&host, port).await,
+    ));
+    report.push((
+        "expect_positive_never_creates",
+        case_expect_positive_never_creates(&c).await,
+    ));
+    report.push((
+        "expired_reads_as_absent",
+        case_expired_reads_as_absent(&c).await,
+    ));
+    report.push((
+        "incr_max_rejects_without_consuming",
+        case_incr_max_rejects_without_consuming(&c).await,
+    ));
+    report.push((
+        "incr_first_call_over_max",
+        case_incr_first_call_over_max(&c).await,
+    ));
+    report.push((
+        "incr_expired_non_numeric_restarts",
+        case_incr_expired_non_numeric_restarts(&c).await,
+    ));
+    report.push((
+        "incr_ttl_is_create_only",
+        case_incr_ttl_is_create_only(&c).await,
+    ));
+    report.push((
+        "prefix_metacharacters_are_literal",
+        case_prefix_metacharacters_are_literal(&c).await,
+    ));
     report.push(("expiry_is_mandatory", case_expiry_is_mandatory(&c).await));
-    report.push(("getPrefix_forbidden_in_wire", case_getprefix_forbidden_in_wire(&c).await));
+    report.push((
+        "getPrefix_forbidden_in_wire",
+        case_getprefix_forbidden_in_wire(&c).await,
+    ));
     report.push(("read_ceilings", case_read_ceilings(&c).await));
-    report.push(("loser_gets_current_value_and_version", case_loser_gets_current_value_and_version(&c).await));
+    report.push((
+        "loser_gets_current_value_and_version",
+        case_loser_gets_current_value_and_version(&c).await,
+    ));
 
     println!("\n===================== KV semantics (PLAN_KV_TIMERS §5) =====================");
     let mut failed = 0;
@@ -1105,7 +1166,13 @@ async fn kv_semantics() {
             }
         }
     }
-    println!("=========================== {}/{} passed ===========================\n",
-             report.len() - failed, report.len());
-    assert_eq!(failed, 0, "{failed} KV semantics case(s) failed — see the table above");
+    println!(
+        "=========================== {}/{} passed ===========================\n",
+        report.len() - failed,
+        report.len()
+    );
+    assert_eq!(
+        failed, 0,
+        "{failed} KV semantics case(s) failed — see the table above"
+    );
 }

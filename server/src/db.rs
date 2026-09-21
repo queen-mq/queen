@@ -107,20 +107,26 @@ pub fn cancel_connector(
     if !cfg.pg_use_ssl {
         return Ok(None);
     }
-    crate::pgtls::make_connector(cfg.pg_ssl_reject_unauthorized, cfg.pg_ssl_root_cert.as_deref())
-        .map(Some)
-        .map_err(|e| format!("PG_SSL_ROOT_CERT: {e}"))
+    crate::pgtls::make_connector(
+        cfg.pg_ssl_reject_unauthorized,
+        cfg.pg_ssl_root_cert.as_deref(),
+    )
+    .map(Some)
+    .map_err(|e| format!("PG_SSL_ROOT_CERT: {e}"))
 }
 
 /// Log at most once per 30s per event class, so a cancellation storm (exactly the
 /// scenario this exists for) does not flood the log. `what` is the event class
 /// (e.g. "pop_wildcard").
 fn log_cancel_once(what: &'static str, msg: &str) {
-    static LAST: OnceLock<Mutex<std::collections::HashMap<&'static str, Instant>>> = OnceLock::new();
+    static LAST: OnceLock<Mutex<std::collections::HashMap<&'static str, Instant>>> =
+        OnceLock::new();
     let map = LAST.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
     let mut g = map.lock().unwrap();
     let now = Instant::now();
-    let fire = g.get(what).map_or(true, |&t| now.duration_since(t) >= Duration::from_secs(30));
+    let fire = g
+        .get(what)
+        .map_or(true, |&t| now.duration_since(t) >= Duration::from_secs(30));
     if fire {
         g.insert(what, now);
         drop(g);
@@ -134,14 +140,20 @@ fn log_cancel_once(what: &'static str, msg: &str) {
 /// it does not touch the poisoned pooled connection. Logging is throttled per class.
 pub(crate) fn spawn_cancel(cancel: CancelToken, what: &'static str) {
     let tls = cancel_tls();
-    log_cancel_once(what, &format!("stmt-timeout ({what}): issuing server-side query cancellation"));
+    log_cancel_once(
+        what,
+        &format!("stmt-timeout ({what}): issuing server-side query cancellation"),
+    );
     tokio::spawn(async move {
         let r = match tls {
             CancelTls::NoTls => cancel.cancel_query(NoTls).await,
             CancelTls::Rustls(c) => cancel.cancel_query(c).await,
         };
         if let Err(e) = r {
-            log_cancel_once(what, &format!("stmt-timeout ({what}): cancel request could not be delivered: {e}"));
+            log_cancel_once(
+                what,
+                &format!("stmt-timeout ({what}): cancel request could not be delivered: {e}"),
+            );
         }
     });
 }
@@ -373,8 +385,19 @@ pub async fn pop_specific(
     let row = client
         .query_one(
             &stmt,
-            &[&queue, &partition, &group, &budget, &lease_seconds, &worker, &auto_ack,
-              &sub_mode, &sub_from, &tenant, &conflate],
+            &[
+                &queue,
+                &partition,
+                &group,
+                &budget,
+                &lease_seconds,
+                &worker,
+                &auto_ack,
+                &sub_mode,
+                &sub_from,
+                &tenant,
+                &conflate,
+            ],
         )
         .await?;
     Ok(row.get(0))
@@ -404,14 +427,25 @@ pub async fn pop_list(
     tenant: &str,
     conflate: bool,
 ) -> Result<(String, Vec<Vec<u8>>, String), tokio_postgres::Error> {
-    let stmt = client
-        .prepare_cached(POP_LIST_SQL)
-        .await?;
+    let stmt = client.prepare_cached(POP_LIST_SQL).await?;
     let row = client
         .query_one(
             &stmt,
-            &[&queue, &group, &partitions, &budget, &lease_seconds, &worker, &auto_ack,
-              &max_partitions, &sub_mode, &sub_from, &skip_window, &tenant, &conflate],
+            &[
+                &queue,
+                &group,
+                &partitions,
+                &budget,
+                &lease_seconds,
+                &worker,
+                &auto_ack,
+                &max_partitions,
+                &sub_mode,
+                &sub_from,
+                &skip_window,
+                &tenant,
+                &conflate,
+            ],
         )
         .await?;
     Ok((row.get(0), row.get(1), row.get(2)))
@@ -450,8 +484,21 @@ pub async fn pop_list_tx(
     let row = tx
         .query_one(
             &stmt,
-            &[&queue, &group, &partitions, &budget, &lease_seconds, &worker, &auto_ack,
-              &max_partitions, &sub_mode, &sub_from, &skip_window, &tenant, &conflate],
+            &[
+                &queue,
+                &group,
+                &partitions,
+                &budget,
+                &lease_seconds,
+                &worker,
+                &auto_ack,
+                &max_partitions,
+                &sub_mode,
+                &sub_from,
+                &skip_window,
+                &tenant,
+                &conflate,
+            ],
         )
         .await?;
     Ok((row.get(0), row.get(1), row.get(2)))
@@ -506,7 +553,16 @@ pub async fn hotlist_reseed_window(
     let rows = client
         .query(
             &stmt,
-            &[&queue, &group, &after_write, &after_id, &limit, &window_ms, &tenant, &cutoff],
+            &[
+                &queue,
+                &group,
+                &after_write,
+                &after_id,
+                &limit,
+                &window_ms,
+                &tenant,
+                &cutoff,
+            ],
         )
         .await?;
     // Every row of one page carries the same cutoff (one constant per execution), so
@@ -515,7 +571,9 @@ pub async fn hotlist_reseed_window(
     // the bound, never panic inside a `get`.
     let cutoff = rows.first().and_then(|r| r.get::<_, Option<String>>(3));
     Ok((
-        rows.iter().map(|r| (r.get(0), r.get(1), r.get(2))).collect(),
+        rows.iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2)))
+            .collect(),
         cutoff,
     ))
 }
@@ -756,7 +814,9 @@ pub async fn configure_queue(
     // $2::text::jsonb pins $2 to TEXT so a &str binds (a bare $2::jsonb would make
     // tokio-postgres expect a Json param). Track B: $3 = tenant (default when off).
     let stmt = "SELECT (queen.configure_queue_v1($1, $2::text::jsonb, $3::text::uuid))::text";
-    let row = client.query_one(stmt, &[&queue, &opts_json, &tenant]).await?;
+    let row = client
+        .query_one(stmt, &[&queue, &opts_json, &tenant])
+        .await?;
     Ok(row.get(0))
 }
 
@@ -815,7 +875,8 @@ pub async fn seg_queue_message_stats(
     queue: &str,
     tenant: &str,
 ) -> Result<(i64, i64), tokio_postgres::Error> {
-    let stmt = "SELECT segments, messages FROM queen.log_queue_message_stats_v1($1, $2::text::uuid)";
+    let stmt =
+        "SELECT segments, messages FROM queen.log_queue_message_stats_v1($1, $2::text::uuid)";
     let row = client.query_one(stmt, &[&queue, &tenant]).await?;
     Ok((row.get(0), row.get(1)))
 }
@@ -831,7 +892,10 @@ pub async fn get_queues(
     tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
-        .query_one("SELECT (queen.get_queues_v2($1::text::uuid))::text", &[&tenant])
+        .query_one(
+            "SELECT (queen.get_queues_v2($1::text::uuid))::text",
+            &[&tenant],
+        )
         .await?;
     Ok(row.get(0))
 }
@@ -843,7 +907,10 @@ pub async fn get_system_overview(
     tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
-        .query_one("SELECT (queen.get_system_overview_v3($1::text::uuid))::text", &[&tenant])
+        .query_one(
+            "SELECT (queen.get_system_overview_v3($1::text::uuid))::text",
+            &[&tenant],
+        )
         .await?;
     Ok(row.get(0))
 }
@@ -853,7 +920,10 @@ pub async fn get_namespaces(
     tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
-        .query_one("SELECT (queen.get_namespaces_v2($1::text::uuid))::text", &[&tenant])
+        .query_one(
+            "SELECT (queen.get_namespaces_v2($1::text::uuid))::text",
+            &[&tenant],
+        )
         .await?;
     Ok(row.get(0))
 }
@@ -863,7 +933,10 @@ pub async fn get_tasks(
     tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
-        .query_one("SELECT (queen.get_tasks_v2($1::text::uuid))::text", &[&tenant])
+        .query_one(
+            "SELECT (queen.get_tasks_v2($1::text::uuid))::text",
+            &[&tenant],
+        )
         .await?;
     Ok(row.get(0))
 }
@@ -903,7 +976,9 @@ pub async fn queue_lease_time(
     // for the requesting tenant's queue (else the cache would hand tenant B the
     // lease time tenant A configured on a same-named queue).
     let stmt = client
-        .prepare_cached("SELECT lease_time FROM queen.queues WHERE name = $1 AND tenant_id = $2::text::uuid")
+        .prepare_cached(
+            "SELECT lease_time FROM queen.queues WHERE name = $1 AND tenant_id = $2::text::uuid",
+        )
         .await?;
     let rows = client.query(&stmt, &[&queue, &tenant]).await?;
     Ok(rows.first().map(|r| r.get::<_, i32>(0)))
@@ -970,9 +1045,13 @@ pub async fn log_segment_covering(
         )
         .await?;
     let rows = client.query(&stmt, &[&partition_id, &off]).await?;
-    Ok(rows
-        .first()
-        .map(|r| (r.get::<_, i64>(0), r.get::<_, i64>(1), r.get::<_, Vec<u8>>(2))))
+    Ok(rows.first().map(|r| {
+        (
+            r.get::<_, i64>(0),
+            r.get::<_, i64>(1),
+            r.get::<_, Vec<u8>>(2),
+        )
+    }))
 }
 
 // RUSTFIX item 23: fallback resolver for a txn whose log_txns rows have been
@@ -989,7 +1068,10 @@ pub async fn seg_scan_segments(
     let stmt = "SELECT s.base_offset, s.blob FROM queen.log_segments s \
                 WHERE s.partition_id = $1::text::uuid ORDER BY s.base_offset DESC LIMIT $2";
     let rows = client.query(stmt, &[&partition_id, &limit]).await?;
-    Ok(rows.iter().map(|r| (r.get::<_, i64>(0), r.get::<_, Vec<u8>>(1))).collect())
+    Ok(rows
+        .iter()
+        .map(|r| (r.get::<_, i64>(0), r.get::<_, Vec<u8>>(1)))
+        .collect())
 }
 
 // RUSTFIX item 23: the extra management fields for GET /messages/:pid/:txn
@@ -1083,9 +1165,13 @@ pub async fn seg_fetch_segment(
                 JOIN queen.log_partitions lp ON lp.id = s.partition_id \
                 WHERE s.partition_id = $1::text::uuid AND s.base_offset = $2::bigint";
     let rows = client.query(stmt, &[&partition_id, &seq]).await?;
-    Ok(rows
-        .first()
-        .map(|r| (r.get::<_, String>(0), r.get::<_, String>(1), r.get::<_, Vec<u8>>(2))))
+    Ok(rows.first().map(|r| {
+        (
+            r.get::<_, String>(0),
+            r.get::<_, String>(1),
+            r.get::<_, Vec<u8>>(2),
+        )
+    }))
 }
 
 // ------------------------------------------------------------- messages / dlq
@@ -1330,7 +1416,9 @@ pub async fn get_traces_by_name(
     tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let stmt = "SELECT (queen.get_traces_by_name_v1($1, $2::int, $3::int, $4::text::uuid))::text";
-    let row = client.query_one(stmt, &[&name, &limit, &offset, &tenant]).await?;
+    let row = client
+        .query_one(stmt, &[&name, &limit, &offset, &tenant])
+        .await?;
     Ok(row.get(0))
 }
 
@@ -1340,7 +1428,8 @@ pub async fn get_trace_names(
     offset: i32,
     tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
-    let stmt = "SELECT (queen.get_available_trace_names_v1($1::int, $2::int, $3::text::uuid))::text";
+    let stmt =
+        "SELECT (queen.get_available_trace_names_v1($1::int, $2::int, $3::text::uuid))::text";
     let row = client.query_one(stmt, &[&limit, &offset, &tenant]).await?;
     Ok(row.get(0))
 }
@@ -1364,7 +1453,9 @@ pub async fn get_status_queues(
     offset: i32,
 ) -> Result<String, tokio_postgres::Error> {
     let stmt = "SELECT (queen.get_status_queues_v2($1::text::jsonb, $2::int, $3::int))::text";
-    let row = client.query_one(stmt, &[&filters_json, &limit, &offset]).await?;
+    let row = client
+        .query_one(stmt, &[&filters_json, &limit, &offset])
+        .await?;
     Ok(row.get(0))
 }
 
@@ -1400,7 +1491,10 @@ pub async fn get_queue_detail(
 ) -> Result<String, tokio_postgres::Error> {
     // Track B (§5): $2 = tenant, scopes the single-queue detail to the tenant's queue.
     let row = client
-        .query_one("SELECT (queen.get_queue_detail_v2($1, $2::text::uuid))::text", &[&queue, &tenant])
+        .query_one(
+            "SELECT (queen.get_queue_detail_v2($1, $2::text::uuid))::text",
+            &[&queue, &tenant],
+        )
         .await?;
     Ok(row.get(0))
 }
@@ -1411,7 +1505,10 @@ pub async fn get_analytics(
     filters_json: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
-        .query_one("SELECT (queen.get_analytics_v1($1::text::jsonb))::text", &[&filters_json])
+        .query_one(
+            "SELECT (queen.get_analytics_v1($1::text::jsonb))::text",
+            &[&filters_json],
+        )
         .await?;
     Ok(row.get(0))
 }
@@ -1422,7 +1519,10 @@ pub async fn get_system_metrics(
     filters_json: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
-        .query_one("SELECT (queen.get_system_metrics_v1($1::text::jsonb))::text", &[&filters_json])
+        .query_one(
+            "SELECT (queen.get_system_metrics_v1($1::text::jsonb))::text",
+            &[&filters_json],
+        )
         .await?;
     Ok(row.get(0))
 }
@@ -1454,7 +1554,9 @@ pub async fn get_queue_lag(
     let stmt = "SELECT (queen.get_queue_lag_v1(\
                 COALESCE($1::text::timestamptz, NOW() - INTERVAL '1 hour'), \
                 COALESCE($2::text::timestamptz, NOW()), $3::text, $4::text::uuid))::text";
-    let row = client.query_one(stmt, &[&from, &to, &queue, &tenant]).await?;
+    let row = client
+        .query_one(stmt, &[&from, &to, &queue, &tenant])
+        .await?;
     Ok(row.get(0))
 }
 
@@ -1464,7 +1566,10 @@ pub async fn get_queue_ops(
     filters_json: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
-        .query_one("SELECT (queen.get_queue_ops_v1($1::text::jsonb))::text", &[&filters_json])
+        .query_one(
+            "SELECT (queen.get_queue_ops_v1($1::text::jsonb))::text",
+            &[&filters_json],
+        )
         .await?;
     Ok(row.get(0))
 }
@@ -1477,7 +1582,10 @@ pub async fn get_workload(
     filters_json: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
-        .query_one("SELECT (queen.get_workload_v1($1::text::jsonb))::text", &[&filters_json])
+        .query_one(
+            "SELECT (queen.get_workload_v1($1::text::jsonb))::text",
+            &[&filters_json],
+        )
         .await?;
     Ok(row.get(0))
 }
@@ -1504,7 +1612,10 @@ pub async fn get_retention_ts(
     filters_json: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
-        .query_one("SELECT (queen.get_retention_timeseries_v1($1::text::jsonb))::text", &[&filters_json])
+        .query_one(
+            "SELECT (queen.get_retention_timeseries_v1($1::text::jsonb))::text",
+            &[&filters_json],
+        )
         .await?;
     Ok(row.get(0))
 }
@@ -1517,7 +1628,10 @@ pub async fn get_dlq_signatures(
     filters_json: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
-        .query_one("SELECT (queen.get_dlq_signatures_v1($1::text::jsonb))::text", &[&filters_json])
+        .query_one(
+            "SELECT (queen.get_dlq_signatures_v1($1::text::jsonb))::text",
+            &[&filters_json],
+        )
         .await?;
     Ok(row.get(0))
 }
@@ -1530,7 +1644,10 @@ pub async fn get_partition_liveness(
     filters_json: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
-        .query_one("SELECT (queen.get_partition_liveness_v1($1::text::jsonb))::text", &[&filters_json])
+        .query_one(
+            "SELECT (queen.get_partition_liveness_v1($1::text::jsonb))::text",
+            &[&filters_json],
+        )
         .await?;
     Ok(row.get(0))
 }
@@ -1622,27 +1739,27 @@ pub async fn insert_worker_metrics(
         .execute(
             stmt,
             &[
-                &hostname,       // $1
-                &worker_id,      // $2
-                &pid,            // $3
-                &push_requests,  // $4  (also jobs_done + push_request_count)
-                &push_messages,  // $5
-                &pop_requests,   // $6
-                &pop_messages,   // $7
-                &ack_requests,   // $8
-                &ack_messages,   // $9
-                &ack_success,    // $10
-                &ack_failed,     // $11
-                &transactions,   // $12
-                &dlq,            // $13
-                &db_errors,      // $14
+                &hostname,              // $1
+                &worker_id,             // $2
+                &pid,                   // $3
+                &push_requests,         // $4  (also jobs_done + push_request_count)
+                &push_messages,         // $5
+                &pop_requests,          // $6
+                &pop_messages,          // $7
+                &ack_requests,          // $8
+                &ack_messages,          // $9
+                &ack_success,           // $10
+                &ack_failed,            // $11
+                &transactions,          // $12
+                &dlq,                   // $13
+                &db_errors,             // $14
                 &avg_event_loop_lag_ms, // $15
                 &max_event_loop_lag_ms, // $16
-                &avg_lag_ms,     // $17
-                &max_lag_ms,     // $18
-                &lag_count,      // $19
-                &pool_active,    // $20 (db_connections)
-                &pool_idle,      // $21 (avg_free_slots + min_free_slots)
+                &avg_lag_ms,            // $17
+                &max_lag_ms,            // $18
+                &lag_count,             // $19
+                &pool_active,           // $20 (db_connections)
+                &pool_idle,             // $21 (avg_free_slots + min_free_slots)
             ],
         )
         .await?;
@@ -1677,7 +1794,15 @@ pub async fn log_push_multi(
     let row = client
         .query_one(
             &stmt,
-            &[&queues, &partitions, &counts, &hashes, &verified, &blobs, &tenants],
+            &[
+                &queues,
+                &partitions,
+                &counts,
+                &hashes,
+                &verified,
+                &blobs,
+                &tenants,
+            ],
         )
         .await?;
     Ok(row.get(0))
@@ -1699,7 +1824,10 @@ pub async fn insert_system_metrics(
         ON CONFLICT (timestamp, hostname, port, worker_id) DO UPDATE SET \
             metrics = EXCLUDED.metrics, sample_count = EXCLUDED.sample_count";
     client
-        .execute(stmt, &[&hostname, &port, &worker_id, &sample_count, &metrics_json])
+        .execute(
+            stmt,
+            &[&hostname, &port, &worker_id, &sample_count, &metrics_json],
+        )
         .await?;
     Ok(())
 }
@@ -1805,7 +1933,10 @@ pub async fn upsert_queue_parked_replica(
         ON CONFLICT (bucket_time, queue_name, hostname, worker_id, tenant_id) DO UPDATE SET \
             parked_count = EXCLUDED.parked_count";
     client
-        .execute(stmt, &[&queue, &hostname, &worker_id, &parked_count, &tenant])
+        .execute(
+            stmt,
+            &[&queue, &hostname, &worker_id, &parked_count, &tenant],
+        )
         .await?;
     Ok(())
 }
@@ -1858,7 +1989,10 @@ pub async fn cleanup_worker_metrics(
     days: i32,
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
-        .query_one("SELECT (queen.cleanup_worker_metrics_v1($1::int))::text", &[&days])
+        .query_one(
+            "SELECT (queen.cleanup_worker_metrics_v1($1::int))::text",
+            &[&days],
+        )
         .await?;
     Ok(row.get(0))
 }
@@ -1933,8 +2067,19 @@ pub async fn pop_wildcard_bin(
     let row = client
         .query_one(
             &stmt,
-            &[&queue, &group, &budget, &lease_seconds, &worker, &auto_ack,
-              &max_partitions, &sub_mode, &sub_from, &tenant, &conflate],
+            &[
+                &queue,
+                &group,
+                &budget,
+                &lease_seconds,
+                &worker,
+                &auto_ack,
+                &max_partitions,
+                &sub_mode,
+                &sub_from,
+                &tenant,
+                &conflate,
+            ],
         )
         .await?;
     Ok((row.get(0), row.get(1)))
@@ -1978,7 +2123,15 @@ pub async fn log_fetch_bin(
     let row = client
         .query_one(
             &stmt,
-            &[&queues, &partitions, &offsets, &max_bytes, &budget, &max_records, &tenant],
+            &[
+                &queues,
+                &partitions,
+                &offsets,
+                &max_bytes,
+                &budget,
+                &max_records,
+                &tenant,
+            ],
         )
         .await?;
     Ok((row.get(0), row.get(1)))
@@ -2101,8 +2254,20 @@ pub async fn pop_discover(
     let row = client
         .query_one(
             &stmt,
-            &[&namespace, &task, &group, &budget, &lease_seconds, &worker,
-              &auto_ack, &max_partitions, &sub_mode, &sub_from, &tenant, &conflate],
+            &[
+                &namespace,
+                &task,
+                &group,
+                &budget,
+                &lease_seconds,
+                &worker,
+                &auto_ack,
+                &max_partitions,
+                &sub_mode,
+                &sub_from,
+                &tenant,
+                &conflate,
+            ],
         )
         .await?;
     Ok(row.get(0))
@@ -2119,7 +2284,10 @@ pub async fn get_consumer_groups(
 ) -> Result<String, tokio_postgres::Error> {
     // Track B (§5): $1 = tenant, scopes the (cross-queue) group listing.
     let row = client
-        .query_one("SELECT (queen.get_consumer_groups_v4($1::text::uuid))::text", &[&tenant])
+        .query_one(
+            "SELECT (queen.get_consumer_groups_v4($1::text::uuid))::text",
+            &[&tenant],
+        )
         .await?;
     Ok(row.get(0))
 }
@@ -2318,7 +2486,10 @@ pub async fn seg_seek_partition(
 ) -> Result<String, tokio_postgres::Error> {
     let stmt = "SELECT (queen.log_seek_partition_v1($1, $2, $3, $4::bool, $5::text::timestamptz, $6::text::uuid))::text";
     let row = client
-        .query_one(stmt, &[&group, &queue, &partition, &to_end, &timestamp, &tenant])
+        .query_one(
+            stmt,
+            &[&group, &queue, &partition, &to_end, &timestamp, &tenant],
+        )
         .await?;
     Ok(row.get(0))
 }
@@ -2373,7 +2544,9 @@ pub async fn streams_cycle(
     tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let stmt = client
-        .prepare_cached("SELECT (queen.log_streams_cycle_v1($1::text::jsonb, $2::text::uuid))::text")
+        .prepare_cached(
+            "SELECT (queen.log_streams_cycle_v1($1::text::jsonb, $2::text::uuid))::text",
+        )
         .await?;
     let t0 = std::time::Instant::now();
     let row = client.query_one(&stmt, &[&requests_json, &tenant]).await?;
@@ -2392,7 +2565,10 @@ pub async fn get_system_flag(
 ) -> Result<bool, tokio_postgres::Error> {
     let stmt = "SELECT (value->>'enabled') = 'true' FROM queen.system_state WHERE key = $1";
     let rows = client.query(stmt, &[&key]).await?;
-    Ok(rows.first().and_then(|r| r.get::<_, Option<bool>>(0)).unwrap_or(false))
+    Ok(rows
+        .first()
+        .and_then(|r| r.get::<_, Option<bool>>(0))
+        .unwrap_or(false))
 }
 
 /// The SAME rows, read TRI-STATE: `None` means no row has ever been written.
@@ -2419,7 +2595,11 @@ pub async fn set_system_flag(
     enabled: bool,
 ) -> Result<(), tokio_postgres::Error> {
     // $2::text::jsonb pins the value param to TEXT so a &str binds.
-    let value = if enabled { "{\"enabled\": true}" } else { "{\"enabled\": false}" };
+    let value = if enabled {
+        "{\"enabled\": true}"
+    } else {
+        "{\"enabled\": false}"
+    };
     let stmt = "INSERT INTO queen.system_state (key, value, updated_at) \
                 VALUES ($1, $2::text::jsonb, NOW()) \
                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()";
@@ -2597,7 +2777,9 @@ pub async fn kv_apply(
             "SELECT (queen.kv_apply_v1($1::text::jsonb, $2::text::uuid, now(), $3::bool))::text",
         )
         .await?;
-    let row = client.query_one(&stmt, &[&ops_json, &tenant, &in_wire]).await?;
+    let row = client
+        .query_one(&stmt, &[&ops_json, &tenant, &in_wire])
+        .await?;
     Ok(row.get(0))
 }
 
@@ -2644,7 +2826,15 @@ pub async fn kv_list(
     let row = client
         .query_one(
             &stmt,
-            &[&tenant, &namespace, &prefix, &after, &limit, &keys_only, &include_expired],
+            &[
+                &tenant,
+                &namespace,
+                &prefix,
+                &after,
+                &limit,
+                &keys_only,
+                &include_expired,
+            ],
         )
         .await?;
     Ok(row.get(0))
@@ -2877,7 +3067,9 @@ pub async fn eph_config_set(
             "SELECT (queen.eph_config_set_v1($1::text, $2::text, $3::text::jsonb))::text",
         )
         .await?;
-    let row = client.query_one(&stmt, &[&tenant, &queue, &options_json]).await?;
+    let row = client
+        .query_one(&stmt, &[&tenant, &queue, &options_json])
+        .await?;
     Ok(row.get(0))
 }
 
@@ -3181,7 +3373,17 @@ pub async fn timers_fire(
     let row = client
         .query_one(
             &stmt,
-            &[&tenants, &queues, &partitions, &counts, &hashes, &blobs, &keys, &seg_of, &tokens],
+            &[
+                &tenants,
+                &queues,
+                &partitions,
+                &counts,
+                &hashes,
+                &blobs,
+                &keys,
+                &seg_of,
+                &tokens,
+            ],
         )
         .await?;
     Ok(row.get(0))
@@ -3222,8 +3424,16 @@ pub async fn timers_fail(
     let row = client
         .query_one(
             &stmt,
-            &[&tenants, &queues, &keys, &tokens, &backoff_ms, &error, &count_attempt,
-              &max_attempts],
+            &[
+                &tenants,
+                &queues,
+                &keys,
+                &tokens,
+                &backoff_ms,
+                &error,
+                &count_attempt,
+                &max_attempts,
+            ],
         )
         .await?;
     Ok(row.get(0))
@@ -3270,7 +3480,10 @@ pub async fn timers_dlq(
         )
         .await?;
     let row = client
-        .query_one(&stmt, &[&tenants, &queues, &keys, &payloads, &errors, &min_attempts])
+        .query_one(
+            &stmt,
+            &[&tenants, &queues, &keys, &payloads, &errors, &min_attempts],
+        )
         .await?;
     Ok(row.get(0))
 }
@@ -3290,7 +3503,9 @@ pub async fn timers_peek(
     let stmt = client
         .prepare_cached("SELECT (queen.log_timers_peek_v1($1::text::uuid, $2, $3))::text")
         .await?;
-    let row = client.query_one(&stmt, &[&tenant, &queue, &timer_key]).await?;
+    let row = client
+        .query_one(&stmt, &[&tenant, &queue, &timer_key])
+        .await?;
     Ok(row.get(0))
 }
 
@@ -3320,7 +3535,9 @@ pub async fn timers_list(
             "SELECT (queen.log_timers_list_v1($1::text::uuid, $2, $3::text, $4::int))::text",
         )
         .await?;
-    let row = client.query_one(&stmt, &[&tenant, &queue, &after, &limit]).await?;
+    let row = client
+        .query_one(&stmt, &[&tenant, &queue, &after, &limit])
+        .await?;
     Ok(row.get(0))
 }
 
@@ -3340,9 +3557,7 @@ pub async fn timers_count(
     prefix: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let stmt = client
-        .prepare_cached(
-            "SELECT (queen.log_timers_count_v1($1::text::uuid, $2, $3::text))::text",
-        )
+        .prepare_cached("SELECT (queen.log_timers_count_v1($1::text::uuid, $2, $3::text))::text")
         .await?;
     let row = client.query_one(&stmt, &[&tenant, &queue, &prefix]).await?;
     Ok(row.get(0))

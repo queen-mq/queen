@@ -49,7 +49,9 @@ fn sql_files(dir: &Path) -> Vec<String> {
 #[test]
 fn every_procedures_file_is_in_the_schema_rs_list() {
     let schema_rs = read("src/schema.rs").expect("src/schema.rs");
-    let list_start = schema_rs.find("const PROCEDURES").expect("the PROCEDURES list");
+    let list_start = schema_rs
+        .find("const PROCEDURES")
+        .expect("the PROCEDURES list");
     let list = &schema_rs[list_start..];
     let list_end = list.find("];").map(|i| i + 2).unwrap_or(list.len());
     let list = &list[..list_end];
@@ -80,7 +82,10 @@ fn every_procedures_file_is_in_the_schema_rs_list() {
 fn the_sqlstate_rules_live_in_exactly_one_place() {
     let db = read("src/db.rs").expect("src/db.rs");
     if !db.contains("fn classify_sqlstate") {
-        skip("one-classifier pin", "db.rs has no classify_sqlstate yet (F3, §7.6)");
+        skip(
+            "one-classifier pin",
+            "db.rs has no classify_sqlstate yet (F3, §7.6)",
+        );
         return;
     }
     let fb = read("src/file_buffer.rs").expect("src/file_buffer.rs");

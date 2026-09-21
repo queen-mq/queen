@@ -108,7 +108,12 @@ pub async fn handle_api_status(
     let filters_json = serde_json::Value::Object(filters).to_string();
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
     match db::get_status(&client, &filters_json).await {
         Ok(txt) => sp_result_to_response(txt),
@@ -136,7 +141,12 @@ pub async fn handle_status_queues(
     let offset = qint(&params, "offset", 0);
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
     match db::get_status_queues(&client, &filters_json, limit, offset).await {
         Ok(txt) => sp_result_to_response(txt),
@@ -212,7 +222,9 @@ fn format_db_prometheus(txt: &str, out: &mut String) {
         ];
         for (k, metric) in map {
             if let Some(n) = t.get(k).and_then(|x| x.as_i64()) {
-                out.push_str(&format!("# HELP {metric} DB-backed cluster lifetime total\n# TYPE {metric} counter\n"));
+                out.push_str(&format!(
+                    "# HELP {metric} DB-backed cluster lifetime total\n# TYPE {metric} counter\n"
+                ));
                 out.push_str(metric);
                 out.push_str("{scope=\"cluster\"} ");
                 out.push_str(&n.to_string());
@@ -223,7 +235,9 @@ fn format_db_prometheus(txt: &str, out: &mut String) {
         out.push_str("# HELP queen_cluster_ack_total Acks by outcome (DB-backed)\n# TYPE queen_cluster_ack_total counter\n");
         for (k, res) in [("ackSuccess", "success"), ("ackFailed", "failed")] {
             if let Some(n) = t.get(k).and_then(|x| x.as_i64()) {
-                out.push_str(&format!("queen_cluster_ack_total{{scope=\"cluster\",result=\"{res}\"}} {n}\n"));
+                out.push_str(&format!(
+                    "queen_cluster_ack_total{{scope=\"cluster\",result=\"{res}\"}} {n}\n"
+                ));
             }
         }
     }
@@ -254,7 +268,9 @@ fn format_db_prometheus(txt: &str, out: &mut String) {
             ("queen_queue_metrics_age_seconds", "bucket_age_seconds"),
         ];
         for (fam, _) in fams {
-            out.push_str(&format!("# HELP {fam} Per-queue minute-rate\n# TYPE {fam} gauge\n"));
+            out.push_str(&format!(
+                "# HELP {fam} Per-queue minute-rate\n# TYPE {fam} gauge\n"
+            ));
         }
         out.push_str("# HELP queen_queue_pop_lag_milliseconds Per-queue pop lag\n# TYPE queen_queue_pop_lag_milliseconds gauge\n");
         out.push_str("# HELP queen_queue_ack_per_minute Per-queue acks by result\n# TYPE queen_queue_ack_per_minute gauge\n");
@@ -264,15 +280,29 @@ fn format_db_prometheus(txt: &str, out: &mut String) {
             for (fam, key) in fams {
                 out.push_str(&format!("{fam}{{queue=\"{q}\"}} {}\n", num(key)));
             }
-            out.push_str(&format!("queen_queue_pop_lag_milliseconds{{queue=\"{q}\",stat=\"avg\"}} {}\n", num("avg_lag_ms")));
-            out.push_str(&format!("queen_queue_pop_lag_milliseconds{{queue=\"{q}\",stat=\"max\"}} {}\n", num("max_lag_ms")));
-            out.push_str(&format!("queen_queue_ack_per_minute{{queue=\"{q}\",result=\"success\"}} {}\n", num("ack_success_count")));
-            out.push_str(&format!("queen_queue_ack_per_minute{{queue=\"{q}\",result=\"failed\"}} {}\n", num("ack_failed_count")));
+            out.push_str(&format!(
+                "queen_queue_pop_lag_milliseconds{{queue=\"{q}\",stat=\"avg\"}} {}\n",
+                num("avg_lag_ms")
+            ));
+            out.push_str(&format!(
+                "queen_queue_pop_lag_milliseconds{{queue=\"{q}\",stat=\"max\"}} {}\n",
+                num("max_lag_ms")
+            ));
+            out.push_str(&format!(
+                "queen_queue_ack_per_minute{{queue=\"{q}\",result=\"success\"}} {}\n",
+                num("ack_success_count")
+            ));
+            out.push_str(&format!(
+                "queen_queue_ack_per_minute{{queue=\"{q}\",result=\"failed\"}} {}\n",
+                num("ack_failed_count")
+            ));
         }
     }
     // DLQ depth (cluster total + per-queue).
     if let Some(d) = v.get("dlq") {
-        out.push_str("# HELP queen_dlq_depth Dead-letter queue depth\n# TYPE queen_dlq_depth gauge\n");
+        out.push_str(
+            "# HELP queen_dlq_depth Dead-letter queue depth\n# TYPE queen_dlq_depth gauge\n",
+        );
         out.push_str("# HELP queen_dlq_depth_by_queue Dead-letter depth per queue\n# TYPE queen_dlq_depth_by_queue gauge\n");
         if let Some(n) = d.get("total").and_then(|x| x.as_i64()) {
             out.push_str("queen_dlq_depth{scope=\"cluster\"} ");
@@ -323,7 +353,9 @@ pub async fn handle_prometheus(State(st): State<Arc<AppState>>) -> Response {
     body.push_str("# HELP queen_admission_budget Write-transaction admission budget\n# TYPE queen_admission_budget gauge\n");
     body.push_str(&format!("queen_admission_budget {}\n", adm.budget));
     body.push_str("# HELP queen_admission_inflight Admitted write transactions per lane\n# TYPE queen_admission_inflight gauge\n");
-    body.push_str("# HELP queen_admission_waiting Waiters per lane\n# TYPE queen_admission_waiting gauge\n");
+    body.push_str(
+        "# HELP queen_admission_waiting Waiters per lane\n# TYPE queen_admission_waiting gauge\n",
+    );
     for (i, lane) in ["push", "pop", "ack", "maint"].iter().enumerate() {
         body.push_str(&format!(
             "queen_admission_inflight{{lane=\"{}\"}} {}\nqueen_admission_waiting{{lane=\"{}\"}} {}\n",
@@ -331,11 +363,20 @@ pub async fn handle_prometheus(State(st): State<Arc<AppState>>) -> Response {
         ));
     }
     body.push_str("# HELP queen_admission_trains_per_s Commit trains per second (flush cycles)\n# TYPE queen_admission_trains_per_s gauge\n");
-    body.push_str(&format!("queen_admission_trains_per_s {:.2}\n", adm.trains_per_s));
+    body.push_str(&format!(
+        "queen_admission_trains_per_s {:.2}\n",
+        adm.trains_per_s
+    ));
     body.push_str("# HELP queen_admission_txn_per_train Mean transactions per commit train\n# TYPE queen_admission_txn_per_train gauge\n");
-    body.push_str(&format!("queen_admission_txn_per_train {:.2}\n", adm.txn_per_train_avg));
+    body.push_str(&format!(
+        "queen_admission_txn_per_train {:.2}\n",
+        adm.txn_per_train_avg
+    ));
     body.push_str("# HELP queen_admission_cycle_ms Median flush-cycle duration\n# TYPE queen_admission_cycle_ms gauge\n");
-    body.push_str(&format!("queen_admission_cycle_ms {:.3}\n", adm.cycle_ms.unwrap_or(0.0)));
+    body.push_str(&format!(
+        "queen_admission_cycle_ms {:.3}\n",
+        adm.cycle_ms.unwrap_or(0.0)
+    ));
 
     // RUSTFIX item 24: restore the DB pool gauges (prometheus.cpp:157-174), the
     // maintenance-mode gauge (prometheus.cpp:253-266), and the file-buffer gauges
@@ -343,10 +384,17 @@ pub async fn handle_prometheus(State(st): State<Arc<AppState>>) -> Response {
     // intentionally obsolete for the single-process async broker.
     let ps = st.pool.status();
     let active = (ps.size as i64 - ps.available as i64).max(0);
-    body.push_str("# HELP queen_db_pool_size Configured DB pool size\n# TYPE queen_db_pool_size gauge\n");
+    body.push_str(
+        "# HELP queen_db_pool_size Configured DB pool size\n# TYPE queen_db_pool_size gauge\n",
+    );
     body.push_str(&format!("queen_db_pool_size {}\n", ps.max_size));
-    body.push_str("# HELP queen_db_pool_idle Idle pooled connections\n# TYPE queen_db_pool_idle gauge\n");
-    body.push_str(&format!("queen_db_pool_idle {}\n", (ps.available as i64).max(0)));
+    body.push_str(
+        "# HELP queen_db_pool_idle Idle pooled connections\n# TYPE queen_db_pool_idle gauge\n",
+    );
+    body.push_str(&format!(
+        "queen_db_pool_idle {}\n",
+        (ps.available as i64).max(0)
+    ));
     body.push_str("# HELP queen_db_pool_active Active pooled connections\n# TYPE queen_db_pool_active gauge\n");
     body.push_str(&format!("queen_db_pool_active {active}\n"));
     body.push_str("# HELP queen_maintenance_mode_enabled Push maintenance mode flag\n# TYPE queen_maintenance_mode_enabled gauge\n");
@@ -355,11 +403,20 @@ pub async fn handle_prometheus(State(st): State<Arc<AppState>>) -> Response {
         st.maintenance.load(std::sync::atomic::Ordering::Relaxed) as i32
     ));
     body.push_str("# HELP queen_file_buffer_pending Spooled push events awaiting drain\n# TYPE queen_file_buffer_pending gauge\n");
-    body.push_str(&format!("queen_file_buffer_pending {}\n", st.file_buffer.pending_count()));
+    body.push_str(&format!(
+        "queen_file_buffer_pending {}\n",
+        st.file_buffer.pending_count()
+    ));
     body.push_str("# HELP queen_file_buffer_failed Spool write failures\n# TYPE queen_file_buffer_failed gauge\n");
-    body.push_str(&format!("queen_file_buffer_failed {}\n", st.file_buffer.failed_count()));
+    body.push_str(&format!(
+        "queen_file_buffer_failed {}\n",
+        st.file_buffer.failed_count()
+    ));
     body.push_str("# HELP queen_file_buffer_db_healthy File-buffer DB-reachability hint\n# TYPE queen_file_buffer_db_healthy gauge\n");
-    body.push_str(&format!("queen_file_buffer_db_healthy {}\n", st.file_buffer.db_healthy() as i32));
+    body.push_str(&format!(
+        "queen_file_buffer_db_healthy {}\n",
+        st.file_buffer.db_healthy() as i32
+    ));
 
     if let Ok(c) = st.pool.get().await {
         if let Ok(txt) = db::get_prometheus_metrics(&c).await {
@@ -370,7 +427,10 @@ pub async fn handle_prometheus(State(st): State<Arc<AppState>>) -> Response {
     (
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8"),
+            (
+                header::CONTENT_TYPE,
+                "text/plain; version=0.0.4; charset=utf-8",
+            ),
             (header::CACHE_CONTROL, "no-cache"),
         ],
         body,
@@ -403,7 +463,12 @@ pub async fn handle_prometheus(State(st): State<Arc<AppState>>) -> Response {
 pub async fn handle_stats_refresh(State(st): State<Arc<AppState>>) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
     match db::seg_refresh_all_stats(&client).await {
         Ok(txt) => sp_result_to_response(txt),
@@ -413,4 +478,3 @@ pub async fn handle_stats_refresh(State(st): State<Arc<AppState>>) -> Response {
         ),
     }
 }
-

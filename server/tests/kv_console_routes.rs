@@ -207,14 +207,18 @@ impl Http {
             req.push_str(&format!("Content-Length: {}\r\n", payload.len()));
         }
         req.push_str("\r\n");
-        s.write_all(req.as_bytes()).await.map_err(|e| format!("write: {e}"))?;
+        s.write_all(req.as_bytes())
+            .await
+            .map_err(|e| format!("write: {e}"))?;
         if body.is_some() {
             s.write_all(payload.as_bytes())
                 .await
                 .map_err(|e| format!("write body: {e}"))?;
         }
         let mut raw = Vec::with_capacity(16 * 1024);
-        s.read_to_end(&mut raw).await.map_err(|e| format!("read: {e}"))?;
+        s.read_to_end(&mut raw)
+            .await
+            .map_err(|e| format!("read: {e}"))?;
         parse_http(&raw)
     }
 }
@@ -238,7 +242,8 @@ fn parse_http(raw: &[u8]) -> Result<(u16, Value), String> {
         .and_then(|c| c.parse().ok())
         .ok_or_else(|| format!("bad status line: {status_line}"))?;
     let chunked = lines.filter_map(|l| l.split_once(':')).any(|(k, v)| {
-        k.trim().eq_ignore_ascii_case("transfer-encoding") && v.to_ascii_lowercase().contains("chunked")
+        k.trim().eq_ignore_ascii_case("transfer-encoding")
+            && v.to_ascii_lowercase().contains("chunked")
     });
     let mut body = raw[sep + 4..].to_vec();
     if chunked {
@@ -298,7 +303,8 @@ async fn put(h: &Http, ns: &str, key: &str, value: Value) -> Result<(), String> 
 }
 
 async fn list(h: &Http, body: Value) -> Result<(u16, Value), String> {
-    h.req("POST", "/api/v1/resources/kv/list", Some(&body)).await
+    h.req("POST", "/api/v1/resources/kv/list", Some(&body))
+        .await
 }
 
 fn rows_of(page: &Value) -> Vec<Value> {
@@ -309,7 +315,9 @@ fn rows_of(page: &Value) -> Vec<Value> {
 }
 
 fn row(page: &Value, key: &str) -> Option<Value> {
-    rows_of(page).into_iter().find(|r| r.get("key") == Some(&json!(key)))
+    rows_of(page)
+        .into_iter()
+        .find(|r| r.get("key") == Some(&json!(key)))
 }
 
 /// Push a row's expiry into the past, in place — the same move
@@ -356,16 +364,20 @@ async fn case_the_two_routes_answer_their_envelopes(h: &Http, c: &Client) -> Cas
     expire_now(c, &ns, "dead").await?;
 
     // ---- the namespace selector -------------------------------------------
-    let (code, v) = h.req("GET", "/api/v1/resources/kv/namespaces", None).await?;
+    let (code, v) = h
+        .req("GET", "/api/v1/resources/kv/namespaces", None)
+        .await?;
     chk!(code == 200, "GET namespaces -> {code}: {v}");
     let arr = v
         .get("namespaces")
         .and_then(|n| n.as_array())
         .cloned()
-        .ok_or_else(|| format!(
-            "the route WRAPS the procedure's bare array as {{\"namespaces\": […]}} — the \
+        .ok_or_else(|| {
+            format!(
+                "the route WRAPS the procedure's bare array as {{\"namespaces\": […]}} — the \
              dashboard reads that key: {v}"
-        ))?;
+            )
+        })?;
     let mine = arr
         .iter()
         .find(|e| e.get("namespace") == Some(&json!(ns)))
@@ -404,10 +416,12 @@ async fn case_the_two_routes_answer_their_envelopes(h: &Http, c: &Client) -> Cas
         alive.get("expired") == Some(&Value::Bool(false)),
         "a live row reads expired:false: {alive}"
     );
-    let dead = row(&page, "dead").ok_or_else(|| format!(
-        "the expired row must be SHOWN and labelled when the console asks for it — \
+    let dead = row(&page, "dead").ok_or_else(|| {
+        format!(
+            "the expired row must be SHOWN and labelled when the console asks for it — \
          missing here is the same bind swap seen from the other side: {page}"
-    ))?;
+        )
+    })?;
     chk!(
         dead.get("expired") == Some(&Value::Bool(true)),
         "the expired row must carry expired:true so the page can grey it: {dead}"
@@ -418,7 +432,11 @@ async fn case_the_two_routes_answer_their_envelopes(h: &Http, c: &Client) -> Cas
     );
 
     // ---- keysOnly: no values, and 0 bytes charged -------------------------
-    let (code, ko) = list(h, json!({"namespace": ns, "keysOnly": true, "includeExpired": true})).await?;
+    let (code, ko) = list(
+        h,
+        json!({"namespace": ns, "keysOnly": true, "includeExpired": true}),
+    )
+    .await?;
     chk!(code == 200, "POST list keysOnly -> {code}: {ko}");
     chk!(
         rows_of(&ko).iter().all(|r| r.get("value").is_none()),
@@ -499,7 +517,11 @@ async fn case_the_cursor_is_a_body_field_and_a_url_is_refused(h: &Http) -> Case 
     // is deliberate: it is the spelling a caller carries over from the batch's
     // `getPrefix`, and it is a key fragment.
     let (code, v) = h
-        .req("GET", "/api/v1/resources/kv/namespaces?prefix=quota:acme:", None)
+        .req(
+            "GET",
+            "/api/v1/resources/kv/namespaces?prefix=quota:acme:",
+            None,
+        )
         .await?;
     chk!(
         code == 400 && v.get("reason") == Some(&json!("kv_no_query_string")),
@@ -509,7 +531,9 @@ async fn case_the_cursor_is_a_body_field_and_a_url_is_refused(h: &Http) -> Case 
     );
     // …and the refusal must not have become the answer to every request on it:
     // a plain GET still serves.
-    let (code, v) = h.req("GET", "/api/v1/resources/kv/namespaces", None).await?;
+    let (code, v) = h
+        .req("GET", "/api/v1/resources/kv/namespaces", None)
+        .await?;
     chk!(
         code == 200 && v.get("namespaces").is_some(),
         "the selector without a query string still answers its envelope: {code}: {v}"
@@ -538,15 +562,22 @@ async fn case_the_ladder_answers_on_both_routes(h: &Http) -> Case {
     set_kv_surface(h, true).await?;
     paused?;
 
-    let (code, _) = h.req("GET", "/api/v1/resources/kv/namespaces", None).await?;
-    chk!(code == 200, "the selector must come back when the switch does: {code}");
+    let (code, _) = h
+        .req("GET", "/api/v1/resources/kv/namespaces", None)
+        .await?;
+    chk!(
+        code == 200,
+        "the selector must come back when the switch does: {code}"
+    );
     let (code, _) = list(h, json!({"namespace": ns})).await?;
     chk!(code == 200, "and so must the page: {code}");
     Ok(())
 }
 
 async fn check_paused(h: &Http, ns: &str) -> Case {
-    let (code, v) = h.req("GET", "/api/v1/resources/kv/namespaces", None).await?;
+    let (code, v) = h
+        .req("GET", "/api/v1/resources/kv/namespaces", None)
+        .await?;
     chk!(
         code == 503 && v.get("error") == Some(&json!("kv_disabled")),
         "with KV reads paused the selector must answer 503 kv_disabled — the code \
@@ -603,5 +634,8 @@ async fn kv_console_routes() {
         report.len() - failed,
         report.len()
     );
-    assert_eq!(failed, 0, "{failed} KV console route case(s) failed — see the table above");
+    assert_eq!(
+        failed, 0,
+        "{failed} KV console route case(s) failed — see the table above"
+    );
 }

@@ -666,18 +666,24 @@ async fn timers_batch_inner(
     for (i, raw) in raw_ops.into_iter().enumerate() {
         let obj = match raw {
             Value::Object(o) => o,
-            _ => return bad_request("timers_bad_op", &format!("op at index {i} is not an object")),
+            _ => {
+                return bad_request(
+                    "timers_bad_op",
+                    &format!("op at index {i} is not an object"),
+                )
+            }
         };
         if let Some(r) = reject_server_owned(&obj, i) {
             return r;
         }
         let kind = obj.get("op").and_then(|v| v.as_str()).unwrap_or_default();
         match kind {
-            "schedule" | "reschedule" => match prepare_schedule(st, tenant.as_str(), obj, i).await
-            {
-                Ok(prepared) => ops.push(prepared),
-                Err(resp) => return resp,
-            },
+            "schedule" | "reschedule" => {
+                match prepare_schedule(st, tenant.as_str(), obj, i).await {
+                    Ok(prepared) => ops.push(prepared),
+                    Err(resp) => return resp,
+                }
+            }
             // Cancel and anything unknown go through untouched: the stored
             // procedure owns the closed taxonomy, and duplicating it here would
             // give the product two places to disagree about what an operation is.
@@ -708,7 +714,12 @@ async fn timers_batch_inner(
         })
         .count() as i64;
     if schedules > 0 {
-        if let Some(mut resp) = gated(st, tenant.as_str(), crate::switches::Surface::TimerSchedule, schedules) {
+        if let Some(mut resp) = gated(
+            st,
+            tenant.as_str(),
+            crate::switches::Surface::TimerSchedule,
+            schedules,
+        ) {
             if schedules < ops.len() as i64 {
                 tracing::debug!(
                     target: "timers",
@@ -764,7 +775,12 @@ pub async fn handle_timer_cancel(
     // operator's schedule pause, not a missing grant, not a full quota. A tenant
     // that cannot cancel keeps producing messages it cannot stop, because the
     // fire never switches itself off (§12).
-    if let Some(resp) = gated(&st, tenant.as_str(), crate::switches::Surface::TimerCancel, 0) {
+    if let Some(resp) = gated(
+        &st,
+        tenant.as_str(),
+        crate::switches::Surface::TimerCancel,
+        0,
+    ) {
         return resp;
     }
     // A cancel carries no producer identity: it produces nothing. It is charged
@@ -823,13 +839,8 @@ pub async fn handle_timer_peek(
 
 #[derive(Debug, PartialEq, Eq)]
 enum TimerReadQuery {
-    List {
-        after: Option<String>,
-        limit: i32,
-    },
-    Count {
-        prefix: String,
-    },
+    List { after: Option<String>, limit: i32 },
+    Count { prefix: String },
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -392,7 +392,11 @@ impl Quotas {
     pub fn refresh(&self, rows: Vec<TenantRow>) {
         let prev: HashMap<String, Measure> = match self.snapshot.read() {
             Ok(g) => g.iter().map(|(k, v)| (k.clone(), v.measure)).collect(),
-            Err(p) => p.into_inner().iter().map(|(k, v)| (k.clone(), v.measure)).collect(),
+            Err(p) => p
+                .into_inner()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.measure))
+                .collect(),
         };
         let mut next: HashMap<String, Snap> = HashMap::with_capacity(rows.len());
         let mut hot = false;
@@ -521,7 +525,10 @@ impl Quotas {
             Ok(g) => g.get(tenant).copied(),
             Err(p) => p.into_inner().get(tenant).copied(),
         };
-        match snap.and_then(|s| s.limits).and_then(|l| l.max_timer_horizon_s) {
+        match snap
+            .and_then(|s| s.limits)
+            .and_then(|l| l.max_timer_horizon_s)
+        {
             Some(s) if s > 0 => cell_ms.min(s.saturating_mul(1000)),
             _ => cell_ms,
         }
@@ -598,7 +605,11 @@ impl Quotas {
         // in-place updates never reach this test at all (§9.5).
         if let Some(Some(l)) = snap.map(|s| s.limits) {
             let m = snap.map(|s| s.measure).unwrap_or_default();
-            let held = (m.kv_rows + e.d_rows, m.kv_bytes + e.d_bytes, m.timer_rows + e.d_timers);
+            let held = (
+                m.kv_rows + e.d_rows,
+                m.kv_bytes + e.d_bytes,
+                m.timer_rows + e.d_timers,
+            );
             if over(&mut e.blocked_rows, add_rows, held.0, l.max_rows) {
                 return Verdict::OverQuota(Resource::KvRows);
             }
@@ -708,14 +719,20 @@ fn is_hot(r: &TenantRow, ratio: f64) -> bool {
 }
 
 fn read_rate(k: &Knobs, snap: &Option<Snap>) -> (u32, u32) {
-    match snap.and_then(|s| s.limits).and_then(|l| l.max_reads_per_sec) {
+    match snap
+        .and_then(|s| s.limits)
+        .and_then(|l| l.max_reads_per_sec)
+    {
         Some(r) if r > 0 => (r, r.max(1)),
         _ => (k.read_rate, k.read_burst),
     }
 }
 
 fn write_rate(k: &Knobs, snap: &Option<Snap>) -> (u32, u32) {
-    match snap.and_then(|s| s.limits).and_then(|l| l.max_writes_per_sec) {
+    match snap
+        .and_then(|s| s.limits)
+        .and_then(|l| l.max_writes_per_sec)
+    {
         Some(r) if r > 0 => (r, r.max(1)),
         _ => (k.write_rate, k.write_burst),
     }

@@ -427,4 +427,3 @@ pub async fn handle_set_ephemeral(State(st): State<Arc<AppState>>, body: Bytes) 
 // returning — the SDK reads the inner result object directly (res.success /
 // res.query_id / res.rows / res.push_results ...). This mirrors the C++ streams
 // routes (server/src/routes/streams/*.cpp).
-

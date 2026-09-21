@@ -32,16 +32,28 @@ fn k() -> SleepKnobs {
 #[test]
 fn defaults_are_the_documented_numbers() {
     let k = k();
-    assert_eq!(k.min_ms, 5, "§4.2: a healthy timer lands within ~10 ms above MIN_SLEEP_MS");
+    assert_eq!(
+        k.min_ms, 5,
+        "§4.2: a healthy timer lands within ~10 ms above MIN_SLEEP_MS"
+    );
     assert_eq!(
         k.max_ms, 1000,
         "§7.4: with no mesh frame, MAX_SLEEP_MS *is* the worst-case recovery window for a timer \
          scheduled by another broker — the docs promise at most one second"
     );
-    assert_eq!(k.idle_max_ms, 30_000, "§7.1: the empty-table backoff tops out at 30 s");
-    assert_eq!(k.empty_claim_min_ms, 25, "§7.2: the empty-claim band is 25..200 ms");
+    assert_eq!(
+        k.idle_max_ms, 30_000,
+        "§7.1: the empty-table backoff tops out at 30 s"
+    );
+    assert_eq!(
+        k.empty_claim_min_ms, 25,
+        "§7.2: the empty-claim band is 25..200 ms"
+    );
     assert_eq!(k.empty_claim_max_ms, 200);
-    assert!(k.idle_after >= 1, "the backoff must not engage on the very first idle cycle");
+    assert!(
+        k.idle_after >= 1,
+        "the backoff must not engage on the very first idle cycle"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -52,11 +64,30 @@ fn defaults_are_the_documented_numbers() {
 fn due_is_clamped_into_the_band() {
     let k = k();
     // Below the floor, at the floor, inside, at the ceiling, above it.
-    assert_eq!(sleep_ms(CycleOutcome::Due { next_in_ms: 1 }, 0, &k, 0.0), k.min_ms);
+    assert_eq!(
+        sleep_ms(CycleOutcome::Due { next_in_ms: 1 }, 0, &k, 0.0),
+        k.min_ms
+    );
     assert_eq!(sleep_ms(CycleOutcome::Due { next_in_ms: 5 }, 0, &k, 0.0), 5);
-    assert_eq!(sleep_ms(CycleOutcome::Due { next_in_ms: 250 }, 0, &k, 0.0), 250);
-    assert_eq!(sleep_ms(CycleOutcome::Due { next_in_ms: 1000 }, 0, &k, 0.0), 1000);
-    assert_eq!(sleep_ms(CycleOutcome::Due { next_in_ms: 86_400_000 }, 0, &k, 0.0), k.max_ms);
+    assert_eq!(
+        sleep_ms(CycleOutcome::Due { next_in_ms: 250 }, 0, &k, 0.0),
+        250
+    );
+    assert_eq!(
+        sleep_ms(CycleOutcome::Due { next_in_ms: 1000 }, 0, &k, 0.0),
+        1000
+    );
+    assert_eq!(
+        sleep_ms(
+            CycleOutcome::Due {
+                next_in_ms: 86_400_000
+            },
+            0,
+            &k,
+            0.0
+        ),
+        k.max_ms
+    );
 }
 
 #[test]
@@ -81,7 +112,10 @@ fn due_ignores_the_idle_counter() {
     // asleep for an hour would keep sleeping 30 s while timers mature under it. (`hint()` also
     // resets it — this pins that the reset is not the ONLY thing standing between us and that.)
     let k = k();
-    assert_eq!(sleep_ms(CycleOutcome::Due { next_in_ms: 40 }, 9_999, &k, 0.0), 40);
+    assert_eq!(
+        sleep_ms(CycleOutcome::Due { next_in_ms: 40 }, 9_999, &k, 0.0),
+        40
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -93,8 +127,14 @@ fn empty_claim_spans_the_jitter_band_end_to_end() {
     let k = k();
     let lo = sleep_ms(CycleOutcome::EmptyClaim, 0, &k, 0.0);
     let hi = sleep_ms(CycleOutcome::EmptyClaim, 0, &k, 1.0);
-    assert_eq!(lo, k.empty_claim_min_ms, "jitter 0.0 must give the bottom of the band");
-    assert_eq!(hi, k.empty_claim_max_ms, "jitter 1.0 must give the top of the band");
+    assert_eq!(
+        lo, k.empty_claim_min_ms,
+        "jitter 0.0 must give the bottom of the band"
+    );
+    assert_eq!(
+        hi, k.empty_claim_max_ms,
+        "jitter 1.0 must give the top of the band"
+    );
     // Both ends must be reachable, or the jitter does not de-correlate the brokers and the
     // storm reforms one cycle later at a different offset.
     assert!(hi > lo);
@@ -172,14 +212,23 @@ fn idle_backs_off_progressively_to_the_cap() {
     let mut reached_cap = false;
     for n in k.idle_after + 1..k.idle_after + 40 {
         let s = sleep_ms(CycleOutcome::Idle, n, &k, 0.0);
-        assert!(s >= prev, "idle backoff went backwards at cycle {n}: {s} < {prev}");
-        assert!(s <= k.idle_max_ms, "idle backoff {s} passed the 30 s cap at cycle {n}");
+        assert!(
+            s >= prev,
+            "idle backoff went backwards at cycle {n}: {s} < {prev}"
+        );
+        assert!(
+            s <= k.idle_max_ms,
+            "idle backoff {s} passed the 30 s cap at cycle {n}"
+        );
         if s == k.idle_max_ms {
             reached_cap = true;
         }
         prev = s;
     }
-    assert!(reached_cap, "the backoff must actually reach IDLE_MAX_SLEEP_MS, not creep toward it");
+    assert!(
+        reached_cap,
+        "the backoff must actually reach IDLE_MAX_SLEEP_MS, not creep toward it"
+    );
     // It must climb fast enough to matter. Doubling from 1 s reaches 30 s in five steps; a
     // linear ramp would leave a permanently-empty cell probing for minutes.
     assert!(
@@ -208,10 +257,17 @@ fn a_saturated_idle_counter_does_not_overflow() {
 fn the_idle_cap_can_be_below_the_normal_ceiling() {
     // Nonsensical but reachable from the environment: IDLE_MAX < MAX. The result must still be
     // bounded and must not panic; the idle branch simply never rises above the ceiling.
-    let k = SleepKnobs { max_ms: 1000, idle_max_ms: 200, ..k() };
+    let k = SleepKnobs {
+        max_ms: 1000,
+        idle_max_ms: 200,
+        ..k()
+    };
     for n in [0u32, 5, 6, 50, u32::MAX] {
         let s = sleep_ms(CycleOutcome::Idle, n, &k, 0.0);
-        assert!(s <= k.max_ms.max(k.idle_max_ms), "idle sleep {s} unbounded at cycle {n}");
+        assert!(
+            s <= k.max_ms.max(k.idle_max_ms),
+            "idle sleep {s} unbounded at cycle {n}"
+        );
     }
 }
 
@@ -253,9 +309,16 @@ fn zero_knobs_never_produce_a_spin() {
         empty_claim_min_ms: 0,
         empty_claim_max_ms: 0,
     };
-    for o in [CycleOutcome::Due { next_in_ms: 0 }, CycleOutcome::EmptyClaim, CycleOutcome::Idle] {
+    for o in [
+        CycleOutcome::Due { next_in_ms: 0 },
+        CycleOutcome::EmptyClaim,
+        CycleOutcome::Idle,
+    ] {
         let s = sleep_ms(o, 0, &k, 0.0);
-        assert!(s >= ABSOLUTE_FLOOR_MS, "a zeroed config produced a {s} ms sleep");
+        assert!(
+            s >= ABSOLUTE_FLOOR_MS,
+            "a zeroed config produced a {s} ms sleep"
+        );
     }
 }
 

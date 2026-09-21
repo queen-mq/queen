@@ -110,7 +110,9 @@ pub async fn ensure_row(
     period_ms: u64,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = pool.get().await?;
-    client.execute(ENSURE_SQL, &[&task, &(period_ms as i64)]).await?;
+    client
+        .execute(ENSURE_SQL, &[&task, &(period_ms as i64)])
+        .await?;
     Ok(())
 }
 

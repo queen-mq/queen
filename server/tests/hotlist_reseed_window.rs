@@ -95,8 +95,16 @@ async fn windowed_walk_paced(
                  FROM queen.log_hotlist_reseed_window_v1\
                  ($1,$2,$3::text::timestamptz,$4::text::uuid,$5,$6,\
                   $7::text::uuid,$8::text::timestamptz)",
-                &[&queue, &group, &after_write, &after_id, &page, &window_ms,
-                  &DEFAULT_TENANT, &cutoff],
+                &[
+                    &queue,
+                    &group,
+                    &after_write,
+                    &after_id,
+                    &page,
+                    &window_ms,
+                    &DEFAULT_TENANT,
+                    &cutoff,
+                ],
             )
             .await
             .expect("windowed walk");
@@ -157,7 +165,16 @@ async fn unbounded_walk(
                  FROM queen.log_hotlist_reseed_window_v1\
                  ($1,$2,$3::text::timestamptz,$4::text::uuid,$5,$6,\
                   $7::text::uuid,$8::text::timestamptz)",
-                &[&queue, &group, &after_write, &after_id, &page, &0i64, &DEFAULT_TENANT, &cutoff],
+                &[
+                    &queue,
+                    &group,
+                    &after_write,
+                    &after_id,
+                    &page,
+                    &0i64,
+                    &DEFAULT_TENANT,
+                    &cutoff,
+                ],
             )
             .await
             .expect("unbounded walk");
@@ -325,7 +342,10 @@ async fn windowed_reseed_matches_the_full_walk() {
     // group the windowed walk just crossed, and it must be log_hotlist_reseed_v1's
     // exact set, once — that equivalence is what made the move safe.
     let (unbounded, unbounded_pages) = unbounded_walk(&c, &queue, group, 100).await;
-    assert!(unbounded_pages > 4, "expected several pages at 100/page, got {unbounded_pages}");
+    assert!(
+        unbounded_pages > 4,
+        "expected several pages at 100/page, got {unbounded_pages}"
+    );
     let unique_unbounded: std::collections::HashSet<_> = unbounded.iter().cloned().collect();
     assert_eq!(
         unique_unbounded.len(),
@@ -346,7 +366,11 @@ async fn windowed_reseed_matches_the_full_walk() {
     // broker never passes 0, but a misconfigured knob must fail closed and be
     // healed by the full walk, not silently scan the whole queue.
     let (empty, _) = windowed_walk(&c, &queue, group, 0, 1_000_000).await;
-    assert!(empty.is_empty(), "a zero window returned {} rows", empty.len());
+    assert!(
+        empty.is_empty(),
+        "a zero window returned {} rows",
+        empty.len()
+    );
 
     // ------------------------------------------- the cutoff is per WALK (B1)
     // Four partitions bunched against the OLD edge of a 5s window, which is where
@@ -368,7 +392,10 @@ async fn windowed_reseed_matches_the_full_walk() {
         "a walk pinned to one cutoff must cover the window it started on, got {:?}",
         pinned
     );
-    assert!(cut.is_some(), "the first page must report the cutoff it derived");
+    assert!(
+        cut.is_some(),
+        "the first page must report the cutoff it derived"
+    );
 
     // The control: the same walk re-deriving the bound per page, which is what
     // 1.0.1-beta.1 did — it sees the first row and then nothing. If this ever
@@ -392,8 +419,16 @@ async fn windowed_reseed_matches_the_full_walk() {
             "SELECT r_id::text FROM queen.log_hotlist_reseed_window_v1\
              ($1,$2,$3::text::timestamptz,$4::text::uuid,$5,$6,\
               $7::text::uuid,$8::text::timestamptz)",
-            &[&pinq, &group, &"-infinity", &NIL, &1_000i32, &0i64,
-              &DEFAULT_TENANT, &Some("-infinity")],
+            &[
+                &pinq,
+                &group,
+                &"-infinity",
+                &NIL,
+                &1_000i32,
+                &0i64,
+                &DEFAULT_TENANT,
+                &Some("-infinity"),
+            ],
         )
         .await
         .expect("cutoff walk")
@@ -452,7 +487,9 @@ async fn windowed_reseed_matches_the_full_walk() {
         control.contains("Index Scan using log_partitions_pkey"),
         "control: log_hotlist_reseed_v1 no longer takes the PK walk under a generic plan:\n{control}"
     );
-    c.batch_execute("DEALLOCATE ALL; RESET plan_cache_mode").await.ok();
+    c.batch_execute("DEALLOCATE ALL; RESET plan_cache_mode")
+        .await
+        .ok();
 
     broker.shutdown().await;
 }

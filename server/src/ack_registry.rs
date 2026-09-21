@@ -457,7 +457,10 @@ mod tests {
         let r = reg();
         r.insert_lease("p1", "g", "w1", 7, &[10, 20], 60, T0);
         // Client re-sent an ack for txn 10 → still an exact cover of {10,20}.
-        assert_eq!(r.take_if_full_batch("p1", "g", "w1", &[10, 10, 20, 20]), Some(7));
+        assert_eq!(
+            r.take_if_full_batch("p1", "g", "w1", &[10, 10, 20, 20]),
+            Some(7)
+        );
     }
 
     #[test]
@@ -517,8 +520,14 @@ mod tests {
         assert_eq!(r.len(), 1);
         assert!(r.bytes() > b1);
         // Old worker no longer matches; new one hits at the new batch_end.
-        assert_eq!(r.take_if_full_batch("p1", "g", "w1", &[1, 2, 3, 4, 5]), None);
-        assert_eq!(r.take_if_full_batch("p1", "g", "w2", &[1, 2, 3, 4, 5]), Some(9));
+        assert_eq!(
+            r.take_if_full_batch("p1", "g", "w1", &[1, 2, 3, 4, 5]),
+            None
+        );
+        assert_eq!(
+            r.take_if_full_batch("p1", "g", "w2", &[1, 2, 3, 4, 5]),
+            Some(9)
+        );
     }
 
     #[test]

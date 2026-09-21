@@ -90,7 +90,10 @@ where
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
-        let n = stream.read(&mut chunk).await.map_err(|e| format!("read: {e}"))?;
+        let n = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|e| format!("read: {e}"))?;
         if n == 0 {
             break; // EOF (Connection: close)
         }
@@ -141,7 +144,8 @@ fn dechunk(mut body: &[u8]) -> Result<Vec<u8>, String> {
         let nl = find_subslice(body, b"\r\n").ok_or("chunk: missing size line")?;
         let size_line = String::from_utf8_lossy(&body[..nl]);
         let size_hex = size_line.split(';').next().unwrap_or("").trim();
-        let size = usize::from_str_radix(size_hex, 16).map_err(|_| "chunk: bad size".to_string())?;
+        let size =
+            usize::from_str_radix(size_hex, 16).map_err(|_| "chunk: bad size".to_string())?;
         body = &body[nl + 2..];
         if size == 0 {
             break;

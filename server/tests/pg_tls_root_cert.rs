@@ -102,7 +102,10 @@ async fn pg_ssl_root_cert_verifies_a_private_ca() {
     //    error rather than a process exit, because this is the library path.
     //    (The binary turns the identical check into `obs::fatal`.)
     std::env::set_var("PG_SSL_ROOT_CERT", "/etc/ssl/certs/whatever.pem");
-    let e = Broker::start(cfg(&host, port, true)).await.err().expect("must refuse to start");
+    let e = Broker::start(cfg(&host, port, true))
+        .await
+        .err()
+        .expect("must refuse to start");
     match &e {
         StartError::Config(m) => {
             assert!(m.contains("PG_SSL_ROOT_CERT"), "{m}");
@@ -115,16 +118,28 @@ async fn pg_ssl_root_cert_verifies_a_private_ca() {
     // 2. The status quo ante: a private chain against the compiled-in Mozilla
     //    set. This is why every cell so far shipped with the escape hatch.
     std::env::remove_var("PG_SSL_ROOT_CERT");
-    let e = Broker::start(cfg(&host, port, true)).await.err().expect("webpki-roots must refuse");
-    assert!(matches!(e, StartError::Connect(_)), "expected a connect failure, got {e}");
+    let e = Broker::start(cfg(&host, port, true))
+        .await
+        .err()
+        .expect("webpki-roots must refuse");
+    assert!(
+        matches!(e, StartError::Connect(_)),
+        "expected a connect failure, got {e}"
+    );
     println!("no CA            -> {e}");
 
     // 3. The negative control, FIRST: an unrelated CA must not open this link.
     //    Without it, everything below would also pass against an implementation
     //    that ignored the variable and quietly turned verification off.
     std::env::set_var("PG_SSL_ROOT_CERT", OTHER_CA);
-    let e = Broker::start(cfg(&host, port, true)).await.err().expect("wrong CA must refuse");
-    assert!(matches!(e, StartError::Connect(_)), "expected a connect failure, got {e}");
+    let e = Broker::start(cfg(&host, port, true))
+        .await
+        .err()
+        .expect("wrong CA must refuse");
+    assert!(
+        matches!(e, StartError::Connect(_)),
+        "expected a connect failure, got {e}"
+    );
     println!("wrong CA         -> {e}");
 
     // 4. The decision this feature rests on: a supplied CA OUTRANKS the escape
@@ -135,7 +150,10 @@ async fn pg_ssl_root_cert_verifies_a_private_ca() {
         .await
         .err()
         .expect("PG_SSL_REJECT_UNAUTHORIZED=false must not rescue a wrong CA");
-    assert!(matches!(e, StartError::Connect(_)), "expected a connect failure, got {e}");
+    assert!(
+        matches!(e, StartError::Connect(_)),
+        "expected a connect failure, got {e}"
+    );
     println!("wrong CA + hatch -> {e}");
 
     // 5. The fix.

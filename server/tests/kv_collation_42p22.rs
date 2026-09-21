@@ -315,7 +315,9 @@ async fn collate_c_columns_compare_against_text_without_42p22() {
                 };
                 failures.push(format!(
                     "  ✗ {}\n      plan: {}\n      {verdict}: {}",
-                    f.id, f.why, detail(&e)
+                    f.id,
+                    f.why,
+                    detail(&e)
                 ));
             }
         }

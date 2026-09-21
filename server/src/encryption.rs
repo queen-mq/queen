@@ -128,7 +128,9 @@ mod tests {
 
     fn test_enc() -> Encryption {
         // Fixed 32-byte key; construct directly (bypass env) so the test is hermetic.
-        Encryption { key: Some([7u8; 32]) }
+        Encryption {
+            key: Some([7u8; 32]),
+        }
     }
 
     #[test]
@@ -151,7 +153,9 @@ mod tests {
     fn wrong_key_fails_tag_verify() {
         let a = test_enc();
         let env = a.encrypt(b"secret").unwrap();
-        let b = Encryption { key: Some([9u8; 32]) };
+        let b = Encryption {
+            key: Some([9u8; 32]),
+        };
         assert!(b.decrypt_payload_bytes(&env).is_none());
     }
 

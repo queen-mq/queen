@@ -121,8 +121,13 @@ async fn run_loop(pool: Pool, period: Duration, holder: String) {
                     "claimed but advisory lock busy; period served by another writer"
                 );
                 let elapsed_ms = start.elapsed().as_millis() as i32;
-                crate::lease::release(&pool, TASK, fence, crate::lease::Release::Advance { elapsed_ms })
-                    .await;
+                crate::lease::release(
+                    &pool,
+                    TASK,
+                    fence,
+                    crate::lease::Release::Advance { elapsed_ms },
+                )
+                .await;
             }
             Ok(Outcome::Ran { summary }) => {
                 let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -139,7 +144,9 @@ async fn run_loop(pool: Pool, period: Duration, holder: String) {
                     &pool,
                     TASK,
                     fence,
-                    crate::lease::Release::Advance { elapsed_ms: elapsed_ms as i32 },
+                    crate::lease::Release::Advance {
+                        elapsed_ms: elapsed_ms as i32,
+                    },
                 )
                 .await;
             }
@@ -309,7 +316,9 @@ async fn run_bytes_loop(pool: Pool, period: Duration, holder: String) {
                     &pool,
                     TASK_BYTES,
                     fence,
-                    crate::lease::Release::Advance { elapsed_ms: elapsed_ms as i32 },
+                    crate::lease::Release::Advance {
+                        elapsed_ms: elapsed_ms as i32,
+                    },
                 )
                 .await;
             }

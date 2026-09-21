@@ -44,8 +44,16 @@ fn the_pick_is_independent_of_the_node_list_order() {
     let c = nodes(&["queen-b", "queen-c", "queen-a"]);
     for k in keys(500) {
         let pa = hrw_pick(&k, &a).unwrap();
-        assert_eq!(pa, hrw_pick(&k, &b).unwrap(), "key {k:?} moved with the order");
-        assert_eq!(pa, hrw_pick(&k, &c).unwrap(), "key {k:?} moved with the order");
+        assert_eq!(
+            pa,
+            hrw_pick(&k, &b).unwrap(),
+            "key {k:?} moved with the order"
+        );
+        assert_eq!(
+            pa,
+            hrw_pick(&k, &c).unwrap(),
+            "key {k:?} moved with the order"
+        );
     }
 }
 
@@ -132,7 +140,10 @@ fn removing_a_node_moves_only_its_own_keys() {
         let was = hrw_pick(k, &before).unwrap();
         let now = hrw_pick(k, &after).unwrap();
         if was != now {
-            assert_eq!(was, "queen-c", "key {k:?} moved but was not on the departed node");
+            assert_eq!(
+                was, "queen-c",
+                "key {k:?} moved but was not on the departed node"
+            );
             assert!(now == "queen-a" || now == "queen-b");
             moved += 1;
         }
@@ -158,7 +169,10 @@ fn keys_spread_across_the_nodes() {
     assert_eq!(counts.len(), 3, "some node got nothing at all");
     for (n, c) in counts {
         let frac = c as f64 / ks.len() as f64;
-        assert!((0.25..0.42).contains(&frac), "{n} took {frac:.3} of the keys");
+        assert!(
+            (0.25..0.42).contains(&frac),
+            "{n} took {frac:.3} of the keys"
+        );
     }
 }
 
@@ -278,8 +292,14 @@ fn the_refresh_forgets_declared_queues_whose_row_is_gone() {
     e.set_config(T, "declared-kept", QueueOptions::default(), true);
     e.set_config(T, "declared-gone", QueueOptions::default(), true);
     // An implicit queue, born of a push exactly as a real one would be.
-    e.push(T, "implicit", "Default", vec![b"1".to_vec().into_boxed_slice()], 1)
-        .unwrap();
+    e.push(
+        T,
+        "implicit",
+        "Default",
+        vec![b"1".to_vec().into_boxed_slice()],
+        1,
+    )
+    .unwrap();
     assert_eq!(e.list(T).len(), 3);
 
     let present: std::collections::HashSet<String> =
@@ -287,7 +307,10 @@ fn the_refresh_forgets_declared_queues_whose_row_is_gone() {
     assert_eq!(e.drop_undeclared(T, &present), 1);
 
     let names: Vec<String> = e.list(T).into_iter().map(|q| q.name).collect();
-    assert_eq!(names, vec!["declared-kept".to_string(), "implicit".to_string()]);
+    assert_eq!(
+        names,
+        vec!["declared-kept".to_string(), "implicit".to_string()]
+    );
     // Idempotent: a second pass with the same row set drops nothing more.
     assert_eq!(e.drop_undeclared(T, &present), 0);
 }

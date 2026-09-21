@@ -45,9 +45,12 @@ fn unique(prefix: &str) -> String {
 /// A queue of `parts` partitions, each holding data (last_offset = 9, i.e. ten
 /// retained frames), with `segs_per_part` segments apiece.
 async fn seed_queue(c: &tokio_postgres::Client, queue: &str, parts: i32, segs_per_part: i64) {
-    c.execute("INSERT INTO queen.queues(name) VALUES ($1) ON CONFLICT DO NOTHING", &[&queue])
-        .await
-        .expect("queue");
+    c.execute(
+        "INSERT INTO queen.queues(name) VALUES ($1) ON CONFLICT DO NOTHING",
+        &[&queue],
+    )
+    .await
+    .expect("queue");
     c.execute(
         "INSERT INTO queen.log_partitions(queue_id,name,last_offset,log_start,last_write_at)
          SELECT (SELECT id FROM queen.queues WHERE name=$1), 'p'||g, 9, 0, now()
@@ -139,8 +142,14 @@ async fn queue_list_reads_the_segment_count_the_slow_lane_writes() {
     // ------------------------------------------- before any lane pass: live vs lagged
     // The counters refresh creates the 'queue' stat row; the segment count is the
     // lane's, so it reads the DDL default until the lane has been over this queue.
-    c.execute("SELECT queen.log_refresh_all_stats_v1()", &[]).await.expect("counters refresh");
-    assert_eq!(stat_segment_count(&c, &queue).await, Some(0), "the counters refresh must not write the count");
+    c.execute("SELECT queen.log_refresh_all_stats_v1()", &[])
+        .await
+        .expect("counters refresh");
+    assert_eq!(
+        stat_segment_count(&c, &queue).await,
+        Some(0),
+        "the counters refresh must not write the count"
+    );
     assert_eq!(
         listed(&c, &queue).await,
         Some((3, 0, 30)),
@@ -153,15 +162,28 @@ async fn queue_list_reads_the_segment_count_the_slow_lane_writes() {
         .await
         .expect("lane")
         .get(0);
-    assert!(summary.contains("\"segmentsTotal\""), "the lane's summary must report the count: {summary}");
+    assert!(
+        summary.contains("\"segmentsTotal\""),
+        "the lane's summary must report the count: {summary}"
+    );
     assert_eq!(stat_segment_count(&c, &queue).await, Some(6));
-    assert_eq!(listed(&c, &queue).await, Some((3, 6, 30)), "the list reports the lane's count");
+    assert_eq!(
+        listed(&c, &queue).await,
+        Some((3, 6, 30)),
+        "the list reports the lane's count"
+    );
 
     // ------------------------------------- the counters refresh must not zero it
     // 011's upsert names every counter column; this one must be self-assigned
     // (like retained_bytes), or the list would flap between 6 and 0 every cycle.
-    c.execute("SELECT queen.log_refresh_all_stats_v1()", &[]).await.expect("counters refresh");
-    assert_eq!(stat_segment_count(&c, &queue).await, Some(6), "011 zeroed segment_count — it must self-assign it");
+    c.execute("SELECT queen.log_refresh_all_stats_v1()", &[])
+        .await
+        .expect("counters refresh");
+    assert_eq!(
+        stat_segment_count(&c, &queue).await,
+        Some(6),
+        "011 zeroed segment_count — it must self-assign it"
+    );
 
     // ------------------------------------------------------------ the lag contract
     // Segments appended after the pass are invisible to the LIST until the next
@@ -174,9 +196,19 @@ async fn queue_list_reads_the_segment_count_the_slow_lane_writes() {
     )
     .await
     .expect("advance watermarks");
-    assert_eq!(listed(&c, &queue).await, Some((3, 6, 60)), "frames live, segment count lagged");
-    c.execute("SELECT queen.log_refresh_retained_bytes_v1()", &[]).await.expect("lane");
-    assert_eq!(listed(&c, &queue).await, Some((3, 9, 60)), "caught up on the next pass");
+    assert_eq!(
+        listed(&c, &queue).await,
+        Some((3, 6, 60)),
+        "frames live, segment count lagged"
+    );
+    c.execute("SELECT queen.log_refresh_retained_bytes_v1()", &[])
+        .await
+        .expect("lane");
+    assert_eq!(
+        listed(&c, &queue).await,
+        Some((3, 9, 60)),
+        "caught up on the next pass"
+    );
 
     // A queue the lane has never seen: partitions live, count 0, no error.
     let fresh = unique("freshq");
@@ -201,7 +233,10 @@ async fn queue_list_reads_the_segment_count_the_slow_lane_writes() {
         !plan.contains("log_segments"),
         "the queue list must not touch log_segments (Θ(segments) per call):\n{plan}"
     );
-    assert!(plan.contains("log_partitions"), "partitions are still counted live:\n{plan}");
+    assert!(
+        plan.contains("log_partitions"),
+        "partitions are still counted live:\n{plan}"
+    );
 
     broker.shutdown().await;
 }

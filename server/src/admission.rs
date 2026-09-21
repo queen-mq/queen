@@ -310,8 +310,8 @@ impl AdmissionCfg {
 struct Waiter {
     lane: Lane,
     tx: oneshot::Sender<Slot>, // the granted slot itself: if the waiter's
-    // future was dropped after a successful send, the Slot is dropped inside
-    // the dead channel and its RAII release runs — the grant can never leak.
+                               // future was dropped after a successful send, the Slot is dropped inside
+                               // the dead channel and its RAII release runs — the grant can never leak.
 }
 
 #[derive(Default)]
@@ -346,8 +346,7 @@ impl TrainStats {
         let span_cap = gap.mul_f64(TRAIN_SPAN_CAP_MULT).max(TRAIN_SPAN_CAP_MIN);
         match (self.cur_start, self.cur_last) {
             (Some(start), Some(last))
-                if now.duration_since(last) <= gap
-                    && now.duration_since(start) <= span_cap =>
+                if now.duration_since(last) <= gap && now.duration_since(start) <= span_cap =>
             {
                 self.cur_len += 1;
                 self.cur_last = Some(now);
@@ -395,7 +394,8 @@ impl TrainStats {
         // 2026-08-03: real cycle ~0.4 ms, window min ~0.2, recent p50 ~0.7 —
         // permanent false "inflation").
         let floor = sorted[sorted.len() / CYCLE_FLOOR_DIV];
-        let mut recent: Vec<Duration> = gaps.iter().rev().take(CYCLE_RECENT_GAPS).copied().collect();
+        let mut recent: Vec<Duration> =
+            gaps.iter().rev().take(CYCLE_RECENT_GAPS).copied().collect();
         recent.sort();
         let p50 = recent[recent.len() / 2];
         Some((p50, floor))
@@ -527,8 +527,7 @@ impl Drop for Slot {
             let mut c = self.adm.core.lock().unwrap();
             Admission::touch_busy(&mut c);
             c.slots.remove(&self.id);
-            c.inflight[self.lane as usize] =
-                c.inflight[self.lane as usize].saturating_sub(1);
+            c.inflight[self.lane as usize] = c.inflight[self.lane as usize].saturating_sub(1);
             Admission::wake_next(&self.adm, &mut c)
         };
         drop(failed); // out-of-lock: each re-enters Drop and re-offers capacity
@@ -616,7 +615,12 @@ impl Admission {
             let under_cap = (c.inflight[lane as usize] as f64) < c.cap[lane as usize];
             if under_b && under_cap {
                 let id = self.register(&mut c, lane);
-                return Slot { adm: self.clone(), id, lane, done: false };
+                return Slot {
+                    adm: self.clone(),
+                    id,
+                    lane,
+                    done: false,
+                };
             }
             if under_cap {
                 c.saturated = true; // refused by B, not by the lane's own cap
@@ -642,7 +646,12 @@ impl Admission {
                 // degrade to a direct registration so the caller never wedges.
                 let mut c = self.core.lock().unwrap();
                 let id = self.register(&mut c, lane);
-                Slot { adm: self.clone(), id, lane, done: false }
+                Slot {
+                    adm: self.clone(),
+                    id,
+                    lane,
+                    done: false,
+                }
             }
         }
     }
@@ -655,7 +664,12 @@ impl Admission {
         let under_cap = (c.inflight[lane as usize] as f64) < c.cap[lane as usize];
         if under_b && under_cap {
             let id = self.register(&mut c, lane);
-            Some(Slot { adm: self.clone(), id, lane, done: false })
+            Some(Slot {
+                adm: self.clone(),
+                id,
+                lane,
+                done: false,
+            })
         } else {
             if under_cap {
                 c.saturated = true;
@@ -693,7 +707,12 @@ impl Admission {
             let Some(lane) = pick(c) else { break };
             let w = c.waiting[lane as usize].pop_front().unwrap();
             let id = adm.register(c, w.lane);
-            let slot = Slot { adm: adm.clone(), id, lane: w.lane, done: false };
+            let slot = Slot {
+                adm: adm.clone(),
+                id,
+                lane: w.lane,
+                done: false,
+            };
             if let Err(slot_back) = w.tx.send(slot) {
                 // Receiver already gone (request cancelled before the grant):
                 // hand the constructed slot back to the caller for an
@@ -902,8 +921,7 @@ impl Admission {
         // cycle widens exactly when amortization is working (first arbiter
         // build shrank on it and pinned the budget below the workload — the
         // same category of mistake the Vegas estimator made with per-op RTT).
-        let queueing =
-            oldest_age > cycle_p50.mul_f64(QUEUE_CYCLES) && oldest_age > QUEUE_AGE_MIN;
+        let queueing = oldest_age > cycle_p50.mul_f64(QUEUE_CYCLES) && oldest_age > QUEUE_AGE_MIN;
         let (next, reason) = if queueing {
             (old - old.ln().max(1.0), "oldest-age")
         } else if saturated {
@@ -1064,9 +1082,13 @@ impl Snapshot {
         Lane::ALL
             .iter()
             .map(|&l| {
-                format!("{}:{}/{}w{}", l.name(),
-                    self.inflight[l as usize], self.cap[l as usize],
-                    self.waiting[l as usize])
+                format!(
+                    "{}:{}/{}w{}",
+                    l.name(),
+                    self.inflight[l as usize],
+                    self.cap[l as usize],
+                    self.waiting[l as usize]
+                )
             })
             .collect::<Vec<_>>()
             .join(" ")
@@ -1102,11 +1124,19 @@ mod tests {
         for train in 0..3u64 {
             let start = t0 + Duration::from_millis(5 * train);
             for i in 0..3u64 {
-                ts.feed(start + Duration::from_micros(100 * i), Duration::from_millis(2), gap);
+                ts.feed(
+                    start + Duration::from_micros(100 * i),
+                    Duration::from_millis(2),
+                    gap,
+                );
             }
         }
         // Close the last train by feeding one more far away.
-        ts.feed(t0 + Duration::from_millis(50), Duration::from_millis(2), gap);
+        ts.feed(
+            t0 + Duration::from_millis(50),
+            Duration::from_millis(2),
+            gap,
+        );
         let (avg, _) = ts.txn_per_train();
         assert!((avg - 3.0).abs() < 0.01, "avg train size {avg}");
         let (p50, min) = ts.cycle().expect("cycle");
@@ -1173,8 +1203,11 @@ mod tests {
             let mut c = adm.core.lock().unwrap();
             let gap = Duration::from_micros(300);
             for k in 0..6u64 {
-                c.trains
-                    .feed(t0 + Duration::from_millis(2 * k), Duration::from_millis(1), gap);
+                c.trains.feed(
+                    t0 + Duration::from_millis(2 * k),
+                    Duration::from_millis(1),
+                    gap,
+                );
                 c.trains.feed(
                     t0 + Duration::from_millis(2 * k) + Duration::from_micros(100),
                     Duration::from_millis(1),
@@ -1199,7 +1232,10 @@ mod tests {
         }
         adm.adapt();
         let shrunk = adm.core.lock().unwrap().budget;
-        assert!(shrunk < grown, "oldest-age must shrink ({grown} -> {shrunk})");
+        assert!(
+            shrunk < grown,
+            "oldest-age must shrink ({grown} -> {shrunk})"
+        );
         {
             // Maint slots must NOT count as queueing: clear the stuck pop slot,
             // plant an ancient maint slot, saturate — the budget must grow.
@@ -1215,7 +1251,10 @@ mod tests {
         }
         adm.adapt();
         let regrown = adm.core.lock().unwrap().budget;
-        assert!(regrown > shrunk, "maint age must not block growth ({shrunk} -> {regrown})");
+        assert!(
+            regrown > shrunk,
+            "maint age must not block growth ({shrunk} -> {regrown})"
+        );
     }
 
     #[tokio::test]
@@ -1254,12 +1293,19 @@ mod tests {
             (reverted - 8.0).abs() < 0.01,
             "negative-returns probe must revert ({probed} -> {reverted})"
         );
-        assert!(adm.core.lock().unwrap().lane_backoff[pop] > 0, "backoff armed");
+        assert!(
+            adm.core.lock().unwrap().lane_backoff[pop] > 0,
+            "backoff armed"
+        );
     }
 
     /// Drive one adapt tick with a fabricated pop state: probe pending, cap
     /// raised by 1 from 8, chosen signal now vs before. Returns the cap after.
-    async fn pop_verdict_case(sig_before: LaneSignal, sig_now: LaneSignal, vrate_before: f64) -> f64 {
+    async fn pop_verdict_case(
+        sig_before: LaneSignal,
+        sig_now: LaneSignal,
+        vrate_before: f64,
+    ) -> f64 {
         let mut cf = cfg();
         cf.init = 32;
         cf.max = 64;
@@ -1288,8 +1334,16 @@ mod tests {
 
     #[tokio::test]
     async fn pop_probe_kept_when_age_improves() {
-        let before = LaneSignal { oldest_ms: 200.0, depth: 500, visits: 0 };
-        let now = LaneSignal { oldest_ms: 100.0, depth: 500, visits: 400 };
+        let before = LaneSignal {
+            oldest_ms: 200.0,
+            depth: 500,
+            visits: 0,
+        };
+        let now = LaneSignal {
+            oldest_ms: 100.0,
+            depth: 500,
+            visits: 400,
+        };
         let cap = pop_verdict_case(before, now, 400.0).await;
         assert!((cap - 9.0).abs() < 0.01, "age improved must keep ({cap})");
     }
@@ -1297,19 +1351,41 @@ mod tests {
     #[tokio::test]
     async fn pop_probe_held_when_load_grew() {
         // Age worse BUT depth grew >20% and visits held: the arrivals did it.
-        let before = LaneSignal { oldest_ms: 100.0, depth: 500, visits: 0 };
-        let now = LaneSignal { oldest_ms: 180.0, depth: 700, visits: 400 };
+        let before = LaneSignal {
+            oldest_ms: 100.0,
+            depth: 500,
+            visits: 0,
+        };
+        let now = LaneSignal {
+            oldest_ms: 180.0,
+            depth: 700,
+            visits: 400,
+        };
         let cap = pop_verdict_case(before, now, 400.0).await;
-        assert!((cap - 9.0).abs() < 0.01, "load-attributed must hold ({cap})");
+        assert!(
+            (cap - 9.0).abs() < 0.01,
+            "load-attributed must hold ({cap})"
+        );
     }
 
     #[tokio::test]
     async fn pop_probe_reverts_when_visits_fell() {
         // Age worse, depth flat, visit rate dropped: the probe did it.
-        let before = LaneSignal { oldest_ms: 100.0, depth: 500, visits: 0 };
-        let now = LaneSignal { oldest_ms: 180.0, depth: 510, visits: 300 };
+        let before = LaneSignal {
+            oldest_ms: 100.0,
+            depth: 500,
+            visits: 0,
+        };
+        let now = LaneSignal {
+            oldest_ms: 180.0,
+            depth: 510,
+            visits: 300,
+        };
         let cap = pop_verdict_case(before, now, 400.0).await;
-        assert!((cap - 8.0).abs() < 0.01, "ambiguous/worse must revert ({cap})");
+        assert!(
+            (cap - 8.0).abs() < 0.01,
+            "ambiguous/worse must revert ({cap})"
+        );
     }
 
     #[tokio::test]

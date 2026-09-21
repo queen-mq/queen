@@ -73,9 +73,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::quota::{Quotas, Verdict};
 #[cfg(test)]
 use crate::quota::{Limits, Measure, TenantRow, TestKnobs};
+use crate::quota::{Quotas, Verdict};
 
 pub struct Switches {
     kv_on: AtomicBool,
@@ -355,7 +355,11 @@ impl Answer {
             Answer::Paused => Some(Http {
                 status: if origin == Origin::Wire { 403 } else { 503 },
                 code: family.disabled_code(),
-                retry_after: if origin == Origin::Wire { None } else { Some(1) },
+                retry_after: if origin == Origin::Wire {
+                    None
+                } else {
+                    Some(1)
+                },
             }),
             Answer::Refused(v) => v.http().map(|(status, code)| Http {
                 status,
@@ -404,7 +408,10 @@ pub fn decide(
         // fails CLOSED and says so in a debug build rather than admitting a call
         // nobody checked.
         Surface::EphPush | Surface::EphPop | Surface::EphAck | Surface::EphAdmin => {
-            debug_assert!(false, "ephemeral surfaces go through switches::decide_ephemeral");
+            debug_assert!(
+                false,
+                "ephemeral surfaces go through switches::decide_ephemeral"
+            );
             return Answer::Paused;
         }
     };

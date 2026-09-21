@@ -624,6 +624,20 @@ impl QLog {
         Ok(())
     }
 
+    /// A dup'd handle to the active file, so the caller can [`fsync_file`] it
+    /// OUTSIDE the per-queue lock — the read-parallelism fix (a single hot
+    /// queue's 64 consumers must not block for the writer's fsync). `fsync`
+    /// flushes the inode's dirty pages regardless of which fd is used, and the
+    /// SINGLE writer never rolls between taking this clone and fsyncing it, so
+    /// the clone is always the current active file. `None` when nothing was
+    /// written yet.
+    pub(crate) fn active_clone(&self) -> io::Result<Option<File>> {
+        match self.active.as_ref() {
+            Some(f) => Ok(Some(f.try_clone()?)),
+            None => Ok(None),
+        }
+    }
+
     /// Create a fresh active file id `id` whose header records `first_seq`.
     fn create_active(&mut self, id: u64, first_seq: u64) -> io::Result<()> {
         let path = file_path(&self.dir, id);
@@ -1274,7 +1288,7 @@ fn corrupt(path: &Path, what: &str) -> io::Error {
 // Fsync: F_FULLFSYNC on macOS, plain fsync elsewhere
 // ---------------------------------------------------------------------------
 
-fn fsync_file(f: &File, mode: Fsync) -> io::Result<()> {
+pub(crate) fn fsync_file(f: &File, mode: Fsync) -> io::Result<()> {
     match mode {
         Fsync::Off => Ok(()),
         Fsync::Data => f.sync_data(),

@@ -8,10 +8,10 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use deadpool_postgres::Pool;
 
+use crate::admission::Admission;
 use crate::db;
 use crate::fusion::{json_escape_into, Fusion};
 use crate::metrics::Metrics;
-use crate::admission::Admission;
 
 /// PLAN_CONFLATION §3.2/§3.3 — the durable per-(queue, group) delivery policy the
 /// broker caches off `queen.consumer_groups_metadata`. SQL is the authority; a
@@ -269,7 +269,10 @@ pub(crate) fn announce_landed(
         return;
     }
     let keys = || -> Vec<(String, String)> {
-        marks.iter().map(|(q, p, _)| (q.clone(), p.clone())).collect()
+        marks
+            .iter()
+            .map(|(q, p, _)| (q.clone(), p.clone()))
+            .collect()
     };
     if hotlist.enabled() {
         let now_ms = crate::util::now_epoch_ms();
@@ -406,7 +409,8 @@ impl AppState {
         if m.len() >= PARTITION_QUEUE_CACHE_CAP {
             m.clear(); // rare, cheap reset; repopulates from live traffic
         }
-        m.entry(partition_id.to_string()).or_insert_with(|| queue.to_string());
+        m.entry(partition_id.to_string())
+            .or_insert_with(|| queue.to_string());
     }
 
     // Memo-only partition→queue resolution (no DB). The ack-fusion fast path uses
@@ -416,7 +420,11 @@ impl AppState {
     // client-carrying queue_for_partition, whose short-lived client is dropped
     // before the fusion enqueue.
     pub(crate) fn partition_queue_memo(&self, partition_id: &str) -> Option<String> {
-        self.partition_queue.lock().unwrap().get(partition_id).cloned()
+        self.partition_queue
+            .lock()
+            .unwrap()
+            .get(partition_id)
+            .cloned()
     }
 
     // Resolve a partition id to its queue name for ack attribution: memo first,
@@ -427,7 +435,13 @@ impl AppState {
         client: &deadpool_postgres::Client,
         partition_id: &str,
     ) -> Option<String> {
-        if let Some(q) = self.partition_queue.lock().unwrap().get(partition_id).cloned() {
+        if let Some(q) = self
+            .partition_queue
+            .lock()
+            .unwrap()
+            .get(partition_id)
+            .cloned()
+        {
             return Some(q);
         }
         match db::partition_queue_name(client, partition_id).await {
@@ -568,7 +582,6 @@ pub(crate) fn sp_result_to_response(txt: String) -> Response {
     }
 }
 
-
 // PLAN_RAFT.md WP-1.7a — the raft-mode storage seam wiring: the receiver
 // dispatch helpers the message-path handlers branch to, the RsmError→HTTP
 // mapping, the raft-mode `/health`/`/metrics/prometheus`/`stats/refresh`
@@ -596,39 +609,39 @@ mod fetch;
 // DISCOVERY surface. Its own module and not another handler in `fetch`: it
 // shares neither that path's segment machinery nor its long poll, and it is the
 // only route in the file whose entire body is composed by the SQL.
-mod partitions;
-mod queues;
-mod messages;
-mod traces;
-mod status;
 mod consumer_groups;
 mod maintenance;
-mod streams;
+mod messages;
+mod partitions;
+mod queues;
 mod standalone;
+mod status;
+mod streams;
+mod traces;
 // Dashboard SPA assets (rust-embed): HTTP-broker only. The embedded library
 // serves no static files, so the module and its rust-embed dependency are
 // gated out of default-features = false builds.
+mod analytics;
 #[cfg(feature = "server")]
 mod static_files;
-mod analytics;
 
+pub use analytics::*;
+pub use consumer_groups::*;
 pub use data::*;
-pub use kv::*;
 pub use ephemeral::*;
-pub use timers::*;
 pub use fetch::*;
+pub use kv::*;
+pub use maintenance::*;
+pub use messages::*;
 pub use partitions::*;
 pub use queues::*;
-pub use messages::*;
-pub use traces::*;
-pub use status::*;
-pub use consumer_groups::*;
-pub use maintenance::*;
-pub use streams::*;
 pub use standalone::*;
 #[cfg(feature = "server")]
 pub use static_files::*;
-pub use analytics::*;
+pub use status::*;
+pub use streams::*;
+pub use timers::*;
+pub use traces::*;
 
 pub(crate) fn status_is_ok(s: Option<&str>) -> bool {
     // The JS/Go/etc clients send "completed" for success and "failed" for a nack.
@@ -671,7 +684,10 @@ pub(crate) fn filters_from_query(
 }
 
 pub(crate) fn qint(params: &HashMap<String, String>, key: &str, def: i32) -> i32 {
-    params.get(key).and_then(|v| v.parse::<i32>().ok()).unwrap_or(def)
+    params
+        .get(key)
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(def)
 }
 
 pub(crate) fn qbool(params: &HashMap<String, String>, key: &str, def: bool) -> bool {
@@ -681,4 +697,3 @@ pub(crate) fn qbool(params: &HashMap<String, String>, key: &str, def: bool) -> b
         _ => def,
     }
 }
-

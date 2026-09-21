@@ -206,6 +206,10 @@ func runMaxMode(args []string) {
 	// server confirmed committed; ackErr = msgs that failed to commit; ackCalls
 	// + ackLatUs feed the avg ack-latency readout. See ackFullBatch.
 	var acked, ackErr, ackCalls, ackLatUs int64
+	// CONSUMER-TIME BREAKDOWN (instrumentation): cumulative consumer-nanoseconds
+	// spent in each phase across all consumer goroutines, plus batch-size sum, so
+	// the reporter can show WHERE a consumer's wall-time goes (pop vs ack vs empty).
+	var popNs, ackNs, emptyNs, batchSum, batchCnt int64
 
 	// -ack-async plumbing (only exercised when -manual-ack -ack-async): a global
 	// buffered-channel semaphore bounds in-flight acks at -ack-inflight, ackWg
@@ -274,7 +278,9 @@ func runMaxMode(args []string) {
 				}
 				// -manual-ack -> lease (AutoAck=false) and commit explicitly below;
 				// otherwise server-side autoAck (original max behavior, unchanged).
+				tPop := time.Now()
 				msgs, e := qb.Batch(*popBatch).AutoAck(!*manualAck).Pop(ctx)
+				atomic.AddInt64(&popNs, time.Since(tPop).Nanoseconds())
 				if e != nil {
 					if ctx.Err() != nil {
 						return
@@ -285,13 +291,19 @@ func runMaxMode(args []string) {
 				}
 				if len(msgs) == 0 {
 					atomic.AddInt64(&emptyPops, 1)
+					tEmpty := time.Now()
 					time.Sleep(time.Duration(*emptySleepMs) * time.Millisecond)
+					atomic.AddInt64(&emptyNs, time.Since(tEmpty).Nanoseconds())
 					continue
 				}
 				atomic.AddInt64(&popped, int64(len(msgs)))
+				atomic.AddInt64(&batchSum, int64(len(msgs)))
+				atomic.AddInt64(&batchCnt, 1)
 				if *manualAck {
+					tAck := time.Now()
 					dispatchAck(ctx, ackCtx, q, msgs, *ackAsync, ackSem, &ackWg,
 						&acked, &ackErr, &ackCalls, &ackLatUs)
+					atomic.AddInt64(&ackNs, time.Since(tAck).Nanoseconds())
 				}
 			}
 		}(home)
@@ -319,6 +331,33 @@ func runMaxMode(args []string) {
 					line += fmt.Sprintf(" | ack=%8.0f/s tot=%d ackErr=%d ackAvg=%.2fms",
 						float64(a-la)/secs, a, atomic.LoadInt64(&ackErr), avgAckMs(&ackLatUs, &ackCalls))
 					la = a
+				}
+				{
+					pn := atomic.LoadInt64(&popNs)
+					an := atomic.LoadInt64(&ackNs)
+					en := atomic.LoadInt64(&emptyNs)
+					bs := atomic.LoadInt64(&batchSum)
+					bc := atomic.LoadInt64(&batchCnt)
+					ep := atomic.LoadInt64(&emptyPops)
+					ab := float64(bs)
+					if bc > 0 {
+						ab = float64(bs) / float64(bc)
+					}
+					tot := float64(pn + an + en)
+					if tot < 1 {
+						tot = 1
+					}
+					popCalls := float64(bc + ep)
+					if popCalls < 1 {
+						popCalls = 1
+					}
+					ackCallsF := float64(bc)
+					if ackCallsF < 1 {
+						ackCallsF = 1
+					}
+					line += fmt.Sprintf(" | TIME%%[pop=%.0f ack=%.0f empty=%.0f] avgBatch=%.1f avgPopMs=%.2f avgAckMs=%.2f",
+						100*float64(pn)/tot, 100*float64(an)/tot, 100*float64(en)/tot,
+						ab, float64(pn)/1e6/popCalls, float64(an)/1e6/ackCallsF)
 				}
 				fmt.Println(line)
 				lp, lo = p, o
@@ -632,6 +671,8 @@ func runOpenLoopMode(args []string) {
 	var pushed, popped, pushErr, popErr, emptyPops int64
 	// manual-ack counters (only mutated when -manual-ack); see ackFullBatch.
 	var acked, ackErr, ackCalls, ackLatUs int64
+	// CONSUMER-TIME BREAKDOWN (openloop instrumentation), same as max mode.
+	var popNs, ackNs, emptyNs, batchSum, batchCnt int64
 
 	// -ack-async plumbing (only exercised when -manual-ack -ack-async); see the
 	// consumer loop and the shutdown drain, and the max-mode note above for the
@@ -833,7 +874,9 @@ func runOpenLoopMode(args []string) {
 				}
 				// -manual-ack -> lease (AutoAck=false) and commit explicitly below;
 				// otherwise server-side autoAck (original openloop behavior).
+				tPop := time.Now()
 				msgs, e := qb.Batch(*popBatch).AutoAck(!*manualAck).Pop(ctx)
+				atomic.AddInt64(&popNs, time.Since(tPop).Nanoseconds())
 				if e != nil {
 					if ctx.Err() != nil {
 						return
@@ -844,13 +887,19 @@ func runOpenLoopMode(args []string) {
 				}
 				if len(msgs) == 0 {
 					atomic.AddInt64(&emptyPops, 1)
+					tEmpty := time.Now()
 					time.Sleep(time.Duration(*emptySleepMs) * time.Millisecond)
+					atomic.AddInt64(&emptyNs, time.Since(tEmpty).Nanoseconds())
 					continue
 				}
 				atomic.AddInt64(&popped, int64(len(msgs)))
+				atomic.AddInt64(&batchSum, int64(len(msgs)))
+				atomic.AddInt64(&batchCnt, 1)
 				if *manualAck {
+					tAck := time.Now()
 					dispatchAck(ctx, ackCtx, q, msgs, *ackAsync, ackSem, &ackWg,
 						&acked, &ackErr, &ackCalls, &ackLatUs)
+					atomic.AddInt64(&ackNs, time.Since(tAck).Nanoseconds())
 				}
 			}
 		}(home)
@@ -899,6 +948,33 @@ func runOpenLoopMode(args []string) {
 					line += fmt.Sprintf(" | ack=%9.0f/s ackErr=%d ackAvg=%.2fms",
 						float64(a-lAck)*1.0/secs, atomic.LoadInt64(&ackErr), avgAckMs(&ackLatUs, &ackCalls))
 					lAck = a
+				}
+				{
+					pn := atomic.LoadInt64(&popNs)
+					an := atomic.LoadInt64(&ackNs)
+					en := atomic.LoadInt64(&emptyNs)
+					bs := atomic.LoadInt64(&batchSum)
+					bc := atomic.LoadInt64(&batchCnt)
+					ep := atomic.LoadInt64(&emptyPops)
+					ab := float64(bs)
+					if bc > 0 {
+						ab = float64(bs) / float64(bc)
+					}
+					tot := float64(pn + an + en)
+					if tot < 1 {
+						tot = 1
+					}
+					popCalls := float64(bc + ep)
+					if popCalls < 1 {
+						popCalls = 1
+					}
+					ackCallsF := float64(bc)
+					if ackCallsF < 1 {
+						ackCallsF = 1
+					}
+					line += fmt.Sprintf(" | TIME%%[pop=%.0f ack=%.0f empty=%.0f] avgBatch=%.1f avgPopMs=%.2f avgAckMs=%.2f prodPops=%d emptyPops=%d",
+						100*float64(pn)/tot, 100*float64(an)/tot, 100*float64(en)/tot,
+						ab, float64(pn)/1e6/popCalls, float64(an)/1e6/ackCallsF, bc, ep)
 				}
 				fmt.Println(line)
 				lOff, lAch, lShed, lPop = off, ach, shed, pop

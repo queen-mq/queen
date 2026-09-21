@@ -45,7 +45,12 @@ pub async fn handle_consumer_groups(
 ) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
     match db::get_consumer_groups(&client, tenant.as_str()).await {
         Ok(txt) => sp_result_to_response(txt),
@@ -68,7 +73,12 @@ pub async fn handle_lagging_consumers(
     let min_lag = qint(&params, "minLagSeconds", 3600);
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
     match db::get_lagging_partitions(&client, min_lag, tenant.as_str()).await {
         Ok(txt) => sp_result_to_response(txt),
@@ -87,7 +97,12 @@ pub async fn handle_consumer_group_details(
 ) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
     match db::get_consumer_group_details(&client, &group, tenant.as_str()).await {
         Ok(txt) => sp_result_to_response(txt),
@@ -113,10 +128,17 @@ pub async fn handle_delete_consumer_group(
     let delete_metadata = qbool(&params, "deleteMetadata", true);
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
 
-    let seg = match db::delete_consumer_group_seg(&client, &group, delete_metadata, tenant.as_str()).await {
+    let seg = match db::delete_consumer_group_seg(&client, &group, delete_metadata, tenant.as_str())
+        .await
+    {
         Ok(t) => t,
         Err(e) => {
             return json(
@@ -132,8 +154,14 @@ pub async fn handle_delete_consumer_group(
 
     let seg_v: serde_json::Value = serde_json::from_str(&seg).unwrap_or(serde_json::Value::Null);
     let rows_v: serde_json::Value = serde_json::from_str(&rows).unwrap_or(serde_json::Value::Null);
-    let seg_n = seg_v.get("deletedPartitions").and_then(|x| x.as_i64()).unwrap_or(0);
-    let rows_n = rows_v.get("deletedPartitions").and_then(|x| x.as_i64()).unwrap_or(0);
+    let seg_n = seg_v
+        .get("deletedPartitions")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
+    let rows_n = rows_v
+        .get("deletedPartitions")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
 
     // Hot-list invalidation (2026-07-24) — symmetry with the DB cursor/watermark
     // delete above. The delete removed the group's committed cursors, so it must
@@ -194,24 +222,41 @@ pub async fn handle_delete_consumer_group_for_queue(
     let delete_metadata = qbool(&params, "deleteMetadata", true);
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
-    };
-
-    let seg_n = match db::delete_consumer_group_for_queue_seg(&client, &group, &queue, tenant.as_str()).await {
-        Ok(n) => n as i64,
-        Err(e) => {
+        Err(_) => {
             return json(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                json_err("delete(seg) failed: ", &e),
+                "{\"error\":\"pool\"}".to_string(),
             )
         }
     };
+
+    let seg_n =
+        match db::delete_consumer_group_for_queue_seg(&client, &group, &queue, tenant.as_str())
+            .await
+        {
+            Ok(n) => n as i64,
+            Err(e) => {
+                return json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json_err("delete(seg) failed: ", &e),
+                )
+            }
+        };
     // Best-effort rows-side cleanup (empty for a pure-segments deployment).
-    let rows = db::delete_consumer_group_for_queue_rows(&client, &group, &queue, delete_metadata, tenant.as_str())
-        .await
-        .unwrap_or_else(|_| "{}".to_string());
+    let rows = db::delete_consumer_group_for_queue_rows(
+        &client,
+        &group,
+        &queue,
+        delete_metadata,
+        tenant.as_str(),
+    )
+    .await
+    .unwrap_or_else(|_| "{}".to_string());
     let rows_v: serde_json::Value = serde_json::from_str(&rows).unwrap_or(serde_json::Value::Null);
-    let rows_n = rows_v.get("deletedPartitions").and_then(|x| x.as_i64()).unwrap_or(0);
+    let rows_n = rows_v
+        .get("deletedPartitions")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
 
     // Hot-list invalidation (2026-07-24), scoped to this queue — see the all-queues
     // sibling for the rationale. Drop the group's ring for `queue` so a stale
@@ -272,7 +317,12 @@ pub async fn handle_update_subscription(
     };
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
     match db::update_consumer_group_subscription(&client, &group, &ts, tenant.as_str()).await {
         Ok(txt) => sp_result_to_response(txt),
@@ -491,11 +541,26 @@ pub async fn handle_seek_consumer_group(
     };
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
-    match db::seg_seek_consumer_group(&client, &group, &queue, to_end, ts.as_deref(), tenant.as_str()).await {
+    match db::seg_seek_consumer_group(
+        &client,
+        &group,
+        &queue,
+        to_end,
+        ts.as_deref(),
+        tenant.as_str(),
+    )
+    .await
+    {
         Ok(txt) => {
-            let repair = reseed_after_seek(&st, &client, &group, &queue, tenant.as_str(), &txt).await;
+            let repair =
+                reseed_after_seek(&st, &client, &group, &queue, tenant.as_str(), &txt).await;
             sp_result_to_response(note_partial_repair(txt, repair.as_ref()))
         }
         Err(e) => json(
@@ -526,9 +591,24 @@ pub async fn handle_seek_partition(
     };
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
-    match db::seg_seek_partition(&client, &group, &queue, &partition, to_end, ts.as_deref(), tenant.as_str()).await {
+    match db::seg_seek_partition(
+        &client,
+        &group,
+        &queue,
+        &partition,
+        to_end,
+        ts.as_deref(),
+        tenant.as_str(),
+    )
+    .await
+    {
         Ok(txt) => {
             // A2: targeted, not the queue-wide walk this used to share with the
             // per-queue seek.
@@ -551,10 +631,16 @@ mod seek_repair_report {
     use super::*;
     use crate::hotlist::ReseedMode;
 
-    const SEEK_OK: &str = r#"{"success":true,"consumerGroup":"g","queueName":"orders","partitionsUpdated":9563}"#;
+    const SEEK_OK: &str =
+        r#"{"success":true,"consumerGroup":"g","queueName":"orders","partitionsUpdated":9563}"#;
 
     fn outcome(ok: bool) -> super::super::data::ReseedOutcome {
-        super::super::data::ReseedOutcome { mode: ReseedMode::Full, rows: 0, ok, stamped: true }
+        super::super::data::ReseedOutcome {
+            mode: ReseedMode::Full,
+            rows: 0,
+            ok,
+            stamped: true,
+        }
     }
 
     #[test]
@@ -573,7 +659,11 @@ mod seek_repair_report {
         let out = note_partial_repair(SEEK_OK.to_string(), Some(&outcome(false)));
         let v: serde_json::Value = serde_json::from_str(&out).expect("still JSON");
         assert_eq!(v["success"], serde_json::json!(true), "the cursor DID move");
-        assert_eq!(v["partitionsUpdated"], serde_json::json!(9563), "SP keys survive");
+        assert_eq!(
+            v["partitionsUpdated"],
+            serde_json::json!(9563),
+            "SP keys survive"
+        );
         assert_eq!(v["hotlistRepaired"], serde_json::json!(false));
         assert!(v["warning"].as_str().unwrap().contains("failed"));
         // An `error` key would make sp_result_to_response answer 500 for a seek that
@@ -585,7 +675,13 @@ mod seek_repair_report {
     fn a_body_that_is_not_a_json_object_is_passed_through_untouched() {
         // The SPs always return an object; a future one that does not must not have its
         // response rewritten into something its client cannot read.
-        assert_eq!(note_partial_repair("[]".to_string(), Some(&outcome(false))), "[]");
-        assert_eq!(note_partial_repair("nope".to_string(), Some(&outcome(false))), "nope");
+        assert_eq!(
+            note_partial_repair("[]".to_string(), Some(&outcome(false))),
+            "[]"
+        );
+        assert_eq!(
+            note_partial_repair("nope".to_string(), Some(&outcome(false))),
+            "nope"
+        );
     }
 }

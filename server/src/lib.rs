@@ -26,14 +26,14 @@
 #![allow(unused_imports)]
 
 mod ack_fusion;
-mod pop_autopilot;
-mod pop_fusion;
 mod ack_registry;
 mod auth;
 mod config;
 mod db;
 mod dedup;
 mod encryption;
+mod pop_autopilot;
+mod pop_fusion;
 // EPHEMERAL_QUEUES.md §3.2 — twin of the `mod ephemeral;` in main.rs. The
 // engine needs no pool, no mesh and no sweeper, so the library target compiles
 // and runs it unchanged.
@@ -56,7 +56,6 @@ mod sqs_facade;
 // Twin of the `mod s3_sink;` in main.rs (the S3 / data-lake sink connector), on
 // the same terms as the two facades above: compiled, never started, and its
 // process-global reads `None` here.
-mod s3_sink;
 mod lease;
 mod mesh;
 mod metrics;
@@ -68,12 +67,14 @@ mod pgtls;
 mod quota;
 mod reconcile;
 mod retention;
+mod s3_sink;
 // PLAN_RAFT.md §3.4 — the replicated state machine (Queen without Postgres).
 // In BOTH crate roots (the twin-list rule of this header): the embedded
 // `queen::Broker` is a single-node deployment, which is exactly the topology
 // the LocalReplicator serves (O15). Compiled from WP-1.1 on, reached by no
 // handler until the storage seam of WP-1.7 exists, and inert in
 // QUEEN_STORAGE=postgres, which is the default until GA (D1).
+mod admission;
 mod rsm;
 mod schema;
 mod stats;
@@ -81,7 +82,6 @@ mod switches;
 mod syscollect;
 mod tenant;
 mod util;
-mod admission;
 
 /// Broker version, embedded from server.json at build time (see build.rs).
 /// Same value the binary reports from /health.

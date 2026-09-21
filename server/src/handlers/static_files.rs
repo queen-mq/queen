@@ -62,7 +62,12 @@ fn serve(path: &str) -> Option<Response> {
 pub async fn handle_static(method: axum::http::Method, uri: Uri) -> Response {
     let path = uri.path();
     let readable = method == axum::http::Method::GET || method == axum::http::Method::HEAD;
-    if path.starts_with("/api/") || path == "/api" || path.starts_with("/auth/") || path == "/auth" || !readable {
+    if path.starts_with("/api/")
+        || path == "/api"
+        || path.starts_with("/auth/")
+        || path == "/auth"
+        || !readable
+    {
         return json(
             StatusCode::NOT_FOUND,
             "{\"error\":\"Not Found\",\"code\":\"no_such_route\"}".to_string(),

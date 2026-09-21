@@ -104,7 +104,9 @@ impl PeerClient {
     ) -> Result<PeerResponse, String> {
         let mut req = Request::builder().method(method).uri(url);
         {
-            let h = req.headers_mut().ok_or_else(|| "bad peer url".to_string())?;
+            let h = req
+                .headers_mut()
+                .ok_or_else(|| "bad peer url".to_string())?;
             let mut base = HeaderMap::new();
             base.insert(
                 axum::http::header::CONTENT_TYPE,
@@ -122,10 +124,7 @@ impl PeerClient {
             .map_err(|_| "peer did not answer within the forwarding deadline".to_string())?
             .map_err(|e| e.to_string())?;
         let status = resp.status();
-        let retry_after = resp
-            .headers()
-            .get(axum::http::header::RETRY_AFTER)
-            .cloned();
+        let retry_after = resp.headers().get(axum::http::header::RETRY_AFTER).cloned();
         let collected = tokio::time::timeout(deadline, resp.into_body().collect())
             .await
             .map_err(|_| "peer response body stalled".to_string())?
@@ -134,7 +133,11 @@ impl PeerClient {
         if bytes.len() > MAX_RESPONSE_BYTES {
             return Err("peer response exceeds the relay cap".to_string());
         }
-        Ok(PeerResponse { status, body: bytes, retry_after })
+        Ok(PeerResponse {
+            status,
+            body: bytes,
+            retry_after,
+        })
     }
 }
 

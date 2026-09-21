@@ -49,8 +49,16 @@ async fn two_tenants_sharing_every_name_share_nothing_else() {
     // §13.1: the tenant is not a filter applied to an id the caller presented — it is part
     // of the primary key, because the caller only ever presents names it chose itself.
     // ========================================================================
-    seed(c, &Seed::new(TENANT_A, &queue, &key).delay_s(-1.0).txn("txn-A")).await;
-    seed(c, &Seed::new(TENANT_B, &queue, &key).delay_s(-1.0).txn("txn-B")).await;
+    seed(
+        c,
+        &Seed::new(TENANT_A, &queue, &key).delay_s(-1.0).txn("txn-A"),
+    )
+    .await;
+    seed(
+        c,
+        &Seed::new(TENANT_B, &queue, &key).delay_s(-1.0).txn("txn-B"),
+    )
+    .await;
     assert_eq!(timer_keys(c, TENANT_A, &queue).await, vec![key.clone()]);
     assert_eq!(timer_keys(c, TENANT_B, &queue).await, vec![key.clone()]);
     assert_eq!(
@@ -66,7 +74,11 @@ async fn two_tenants_sharing_every_name_share_nothing_else() {
     let pa = peek(c, TENANT_A, &queue, &key).await;
     let pb = peek(c, TENANT_B, &queue, &key).await;
     assert_eq!(pa["found"].as_bool(), Some(true), "A peeks its own ({pa})");
-    assert_eq!(pa["txn"].as_str(), Some("txn-A"), "and gets A's payload identity");
+    assert_eq!(
+        pa["txn"].as_str(),
+        Some("txn-A"),
+        "and gets A's payload identity"
+    );
     assert_eq!(pb["txn"].as_str(), Some("txn-B"), "B gets B's ({pb})");
     let pc = peek(c, TENANT_C, &queue, &key).await;
     assert_eq!(
@@ -109,20 +121,38 @@ async fn two_tenants_sharing_every_name_share_nothing_else() {
         "and A's row is byte-identical afterwards"
     );
 
-    let r = apply(c, &serde_json::json!([cancel_op(&queue, &key)]), TENANT_C, None, 0.0)
-        .await
-        .expect("C cancels a key it does not own");
+    let r = apply(
+        c,
+        &serde_json::json!([cancel_op(&queue, &key)]),
+        TENANT_C,
+        None,
+        0.0,
+    )
+    .await
+    .expect("C cancels a key it does not own");
     assert_eq!(
         op_status(&r, 0),
         (false, "absent".to_string()),
         "absent with ok:false — not revealing is right, saying ok:true is not (§4.4)"
     );
-    assert!(timer_row(c, TENANT_A, &queue, &key).await.is_some(), "A untouched");
-    assert!(timer_row(c, TENANT_B, &queue, &key).await.is_some(), "B untouched");
+    assert!(
+        timer_row(c, TENANT_A, &queue, &key).await.is_some(),
+        "A untouched"
+    );
+    assert!(
+        timer_row(c, TENANT_B, &queue, &key).await.is_some(),
+        "B untouched"
+    );
 
-    let r = apply(c, &serde_json::json!([cancel_op(&queue, &key)]), TENANT_B, None, 0.0)
-        .await
-        .expect("B cancels its own");
+    let r = apply(
+        c,
+        &serde_json::json!([cancel_op(&queue, &key)]),
+        TENANT_B,
+        None,
+        0.0,
+    )
+    .await
+    .expect("B cancels its own");
     assert_eq!(op_status(&r, 0), (true, "cancelled".to_string()));
     assert!(
         timer_row(c, TENANT_B, &queue, &key).await.is_none(),
@@ -140,7 +170,11 @@ async fn two_tenants_sharing_every_name_share_nothing_else() {
     // customer's message lands in the other's log. Grouped by (tenant, queue, partition)
     // they are two segments on two partitions of two different queue rows.
     // ========================================================================
-    seed(c, &Seed::new(TENANT_B, &queue, &key).delay_s(-1.0).txn("txn-B")).await;
+    seed(
+        c,
+        &Seed::new(TENANT_B, &queue, &key).delay_s(-1.0).txn("txn-B"),
+    )
+    .await;
     let claimed = claim(c, 0.0, LEASE_MS, 100, 100).await;
     assert_eq!(
         claimed.len(),
@@ -186,13 +220,26 @@ async fn two_tenants_sharing_every_name_share_nothing_else() {
         (1, 1),
         "A got exactly its own one message, in its own one segment"
     );
-    assert_eq!((pb.messages_in_segments, pb.segments), (1, 1), "and B likewise");
+    assert_eq!(
+        (pb.messages_in_segments, pb.segments),
+        (1, 1),
+        "and B likewise"
+    );
 
     // The strongest form of the same statement: a segment declared under one tenant must
     // not be able to reach a row of another, even when it names it exactly.
     let k_bonly = unique("k-b-only");
-    seed(c, &Seed::new(TENANT_B, &queue, &k_bonly).delay_s(-1.0).txn("txn-B-only")).await;
-    assert_eq!(claim(c, 0.0, LEASE_MS, 100, 100).await, vec![k_bonly.clone()]);
+    seed(
+        c,
+        &Seed::new(TENANT_B, &queue, &k_bonly)
+            .delay_s(-1.0)
+            .txn("txn-B-only"),
+    )
+    .await;
+    assert_eq!(
+        claim(c, 0.0, LEASE_MS, 100, 100).await,
+        vec![k_bonly.clone()]
+    );
     let tok_bonly = token_of(c, TENANT_B, &queue, &k_bonly).await;
     let res = fire(
         c,
@@ -215,7 +262,9 @@ async fn two_tenants_sharing_every_name_share_nothing_else() {
         Some(tok_bonly.as_str()),
         "and its lease was never touched by the other tenant's transaction"
     );
-    let pa = partition_state(c, TENANT_A, &queue, "Default").await.expect("A");
+    let pa = partition_state(c, TENANT_A, &queue, "Default")
+        .await
+        .expect("A");
     assert_eq!(
         pa.messages_in_segments, 1,
         "A's log did not grow by someone else's message"
@@ -228,8 +277,22 @@ async fn two_tenants_sharing_every_name_share_nothing_else() {
     // isolation story for dead letters.
     // ========================================================================
     let k_dead = unique("k-dead");
-    seed(c, &Seed::new(TENANT_A, &queue, &k_dead).delay_s(-1.0).attempts(5).txn("txn-A-dead")).await;
-    seed(c, &Seed::new(TENANT_B, &queue, &k_dead).delay_s(-1.0).attempts(5).txn("txn-B-dead")).await;
+    seed(
+        c,
+        &Seed::new(TENANT_A, &queue, &k_dead)
+            .delay_s(-1.0)
+            .attempts(5)
+            .txn("txn-A-dead"),
+    )
+    .await;
+    seed(
+        c,
+        &Seed::new(TENANT_B, &queue, &k_dead)
+            .delay_s(-1.0)
+            .attempts(5)
+            .txn("txn-B-dead"),
+    )
+    .await;
     dlq(
         c,
         TENANT_A,
@@ -303,8 +366,16 @@ async fn two_tenants_sharing_every_name_share_nothing_else() {
     )
     .await
     .expect("B reads");
-    assert_eq!(ga[0]["value"]["owner"].as_str(), Some("A"), "A reads A's: {ga}");
-    assert_eq!(gb[0]["value"]["owner"].as_str(), Some("B"), "B reads B's: {gb}");
+    assert_eq!(
+        ga[0]["value"]["owner"].as_str(),
+        Some("A"),
+        "A reads A's: {ga}"
+    );
+    assert_eq!(
+        gb[0]["value"]["owner"].as_str(),
+        Some("B"),
+        "B reads B's: {gb}"
+    );
 
     let gc = kv_apply(
         c,

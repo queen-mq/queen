@@ -270,7 +270,8 @@ async fn sample(c: &tokio_postgres::Client, s: &mut Soak) {
         for r in &rows {
             let rel: String = r.get(0);
             let granted: bool = r.get(2);
-            s.access_exclusive.push(format!("{rel} (granted={granted})"));
+            s.access_exclusive
+                .push(format!("{rel} (granted={granted})"));
         }
     }
 
@@ -367,7 +368,10 @@ async fn the_new_tables_never_take_an_access_exclusive_and_never_starve_autovacu
     {
         let old: String = row.get(0);
         let _ = admin
-            .execute(&format!("DROP DATABASE IF EXISTS \"{old}\" WITH (FORCE)"), &[])
+            .execute(
+                &format!("DROP DATABASE IF EXISTS \"{old}\" WITH (FORCE)"),
+                &[],
+            )
             .await;
     }
     let db = format!(
@@ -385,7 +389,10 @@ async fn the_new_tables_never_take_an_access_exclusive_and_never_starve_autovacu
     let result = run(&host, port, &db).await;
 
     let _ = admin
-        .execute(&format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"), &[])
+        .execute(
+            &format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"),
+            &[],
+        )
         .await;
 
     if let Err(report) = result {
@@ -417,7 +424,13 @@ async fn run(host: &str, port: u16, db: &str) -> Result<(), String> {
     // pass happily against a stale `cargo build`.
     let broker = Broker::start(
         BrokerConfig::new()
-            .pg(host.to_string(), port, "postgres", "postgres", db.to_string())
+            .pg(
+                host.to_string(),
+                port,
+                "postgres",
+                "postgres",
+                db.to_string(),
+            )
             .pool_size(4)
             .retention(false)
             .stats_refresh(false)

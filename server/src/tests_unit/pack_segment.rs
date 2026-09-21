@@ -21,7 +21,14 @@
 use super::*;
 
 fn f<'a>(mid: [u8; 16], txn: &'a str, payload: &'a [u8]) -> FrameIn<'a> {
-    FrameIn { message_id: mid, txn, trace_id: None, producer_sub: None, payload, encrypted: false }
+    FrameIn {
+        message_id: mid,
+        txn,
+        trace_id: None,
+        producer_sub: None,
+        payload,
+        encrypted: false,
+    }
 }
 
 /// A segment shaped like one the fire actually builds: a scheduled timer carries a producer sub
@@ -74,8 +81,14 @@ fn blob_and_hashes_are_byte_identical_to_the_fusion_recipe() {
         expect_hashes.extend_from_slice(&crate::util::txn_hash128(fr.txn));
     }
 
-    assert_eq!(seg.blob, expect_blob, "segment blob diverged from the fusion recipe");
-    assert_eq!(seg.hashes, expect_hashes, "hash blob diverged from the fusion recipe");
+    assert_eq!(
+        seg.blob, expect_blob,
+        "segment blob diverged from the fusion recipe"
+    );
+    assert_eq!(
+        seg.hashes, expect_hashes,
+        "hash blob diverged from the fusion recipe"
+    );
     assert_eq!(seg.count, fins.len());
 }
 
@@ -88,7 +101,11 @@ fn the_hash_blob_satisfies_the_fires_alignment_guard() {
         let fins: Vec<FrameIn> = txns.iter().map(|t| f([0u8; 16], t, b"{}")).collect();
         let seg = pack_segment(&fins, 3);
         assert_eq!(seg.count, n);
-        assert_eq!(seg.hashes.len(), seg.count * 16, "stride broken at {n} frames");
+        assert_eq!(
+            seg.hashes.len(),
+            seg.count * 16,
+            "stride broken at {n} frames"
+        );
     }
 }
 
@@ -103,7 +120,10 @@ fn hash_k_is_the_hash_of_frame_k() {
         f([3u8; 16], "dup", b"{}"),
     ];
     let seg = pack_segment(&fins, 3);
-    assert_eq!(seg.count, 3, "pack_segment must not collapse duplicate txns");
+    assert_eq!(
+        seg.count, 3,
+        "pack_segment must not collapse duplicate txns"
+    );
     for (i, fr) in fins.iter().enumerate() {
         assert_eq!(
             &seg.hashes[i * 16..(i + 1) * 16],
@@ -111,7 +131,11 @@ fn hash_k_is_the_hash_of_frame_k() {
             "hash slot {i} does not belong to frame {i}"
         );
     }
-    assert_eq!(&seg.hashes[0..16], &seg.hashes[32..48], "equal txns must hash equal");
+    assert_eq!(
+        &seg.hashes[0..16],
+        &seg.hashes[32..48],
+        "equal txns must hash equal"
+    );
 }
 
 #[test]
@@ -124,15 +148,26 @@ fn the_blob_round_trips_every_field_the_fire_carries() {
     assert_eq!(out.len(), fins.len());
 
     for (o, i) in out.iter().zip(fins.iter()) {
-        assert_eq!(o.txn, i.txn, "txn is the dedup identity and the cancel-after-fire answer");
+        assert_eq!(
+            o.txn, i.txn,
+            "txn is the dedup identity and the cancel-after-fire answer"
+        );
         assert_eq!(o.payload, i.payload);
-        assert_eq!(o.producer_sub.as_deref(), i.producer_sub, "§6.2: provenance is SP-supplied");
+        assert_eq!(
+            o.producer_sub.as_deref(),
+            i.producer_sub,
+            "§6.2: provenance is SP-supplied"
+        );
         assert_eq!(
             o.encrypted, i.encrypted,
             "§13.4: the ciphertext bit is set at SCHEDULE; losing it here delivers ciphertext \
              that the consumer never decrypts"
         );
-        assert_eq!(o.message_id, uuid_bytes_to_string(&i.message_id), "the promised messageId");
+        assert_eq!(
+            o.message_id,
+            uuid_bytes_to_string(&i.message_id),
+            "the promised messageId"
+        );
     }
 }
 

@@ -143,56 +143,140 @@ const PROCEDURES: &[(&str, &str)] = &[
     //     the free mechanical guard that keeps log_partition_dead_v1 (006,
     //     LANGUAGE sql) from ever growing a veto leg on queen.kv or
     //     queen.log_timers, and with it the O(partitions) scan it fronts.
-    ("001_log_schema.sql", include_str!("../sql/procedures/001_log_schema.sql")),
-    ("002_streams_schema.sql", include_str!("../sql/procedures/002_streams_schema.sql")),
-    ("003_log_push.sql", include_str!("../sql/procedures/003_log_push.sql")),
-    ("004_log_pop.sql", include_str!("../sql/procedures/004_log_pop.sql")),
-    ("005_log_ack.sql", include_str!("../sql/procedures/005_log_ack.sql")),
-    ("006_log_maintenance.sql", include_str!("../sql/procedures/006_log_maintenance.sql")),
-    ("007_log_streams.sql", include_str!("../sql/procedures/007_log_streams.sql")),
-    ("008_streams_register_query_v1.sql", include_str!("../sql/procedures/008_streams_register_query_v1.sql")),
-    ("009_streams_state_get_v1.sql", include_str!("../sql/procedures/009_streams_state_get_v1.sql")),
-    ("010_log_admin.sql", include_str!("../sql/procedures/010_log_admin.sql")),
-    ("011_log_stats.sql", include_str!("../sql/procedures/011_log_stats.sql")),
-    ("012_configure.sql", include_str!("../sql/procedures/012_configure.sql")),
-    ("013_analytics.sql", include_str!("../sql/procedures/013_analytics.sql")),
-    ("014_consumer_groups.sql", include_str!("../sql/procedures/014_consumer_groups.sql")),
-    ("015_status.sql", include_str!("../sql/procedures/015_status.sql")),
-    ("016_messages.sql", include_str!("../sql/procedures/016_messages.sql")),
-    ("017_traces.sql", include_str!("../sql/procedures/017_traces.sql")),
-    ("018_stats.sql", include_str!("../sql/procedures/018_stats.sql")),
-    ("019_worker_metrics.sql", include_str!("../sql/procedures/019_worker_metrics.sql")),
-    ("020_log_partition_counters.sql", include_str!("../sql/procedures/020_log_partition_counters.sql")),
-    ("021_postgres_stats.sql", include_str!("../sql/procedures/021_postgres_stats.sql")),
-    ("022_retention_analytics.sql", include_str!("../sql/procedures/022_retention_analytics.sql")),
-    ("023_prometheus.sql", include_str!("../sql/procedures/023_prometheus.sql")),
+    (
+        "001_log_schema.sql",
+        include_str!("../sql/procedures/001_log_schema.sql"),
+    ),
+    (
+        "002_streams_schema.sql",
+        include_str!("../sql/procedures/002_streams_schema.sql"),
+    ),
+    (
+        "003_log_push.sql",
+        include_str!("../sql/procedures/003_log_push.sql"),
+    ),
+    (
+        "004_log_pop.sql",
+        include_str!("../sql/procedures/004_log_pop.sql"),
+    ),
+    (
+        "005_log_ack.sql",
+        include_str!("../sql/procedures/005_log_ack.sql"),
+    ),
+    (
+        "006_log_maintenance.sql",
+        include_str!("../sql/procedures/006_log_maintenance.sql"),
+    ),
+    (
+        "007_log_streams.sql",
+        include_str!("../sql/procedures/007_log_streams.sql"),
+    ),
+    (
+        "008_streams_register_query_v1.sql",
+        include_str!("../sql/procedures/008_streams_register_query_v1.sql"),
+    ),
+    (
+        "009_streams_state_get_v1.sql",
+        include_str!("../sql/procedures/009_streams_state_get_v1.sql"),
+    ),
+    (
+        "010_log_admin.sql",
+        include_str!("../sql/procedures/010_log_admin.sql"),
+    ),
+    (
+        "011_log_stats.sql",
+        include_str!("../sql/procedures/011_log_stats.sql"),
+    ),
+    (
+        "012_configure.sql",
+        include_str!("../sql/procedures/012_configure.sql"),
+    ),
+    (
+        "013_analytics.sql",
+        include_str!("../sql/procedures/013_analytics.sql"),
+    ),
+    (
+        "014_consumer_groups.sql",
+        include_str!("../sql/procedures/014_consumer_groups.sql"),
+    ),
+    (
+        "015_status.sql",
+        include_str!("../sql/procedures/015_status.sql"),
+    ),
+    (
+        "016_messages.sql",
+        include_str!("../sql/procedures/016_messages.sql"),
+    ),
+    (
+        "017_traces.sql",
+        include_str!("../sql/procedures/017_traces.sql"),
+    ),
+    (
+        "018_stats.sql",
+        include_str!("../sql/procedures/018_stats.sql"),
+    ),
+    (
+        "019_worker_metrics.sql",
+        include_str!("../sql/procedures/019_worker_metrics.sql"),
+    ),
+    (
+        "020_log_partition_counters.sql",
+        include_str!("../sql/procedures/020_log_partition_counters.sql"),
+    ),
+    (
+        "021_postgres_stats.sql",
+        include_str!("../sql/procedures/021_postgres_stats.sql"),
+    ),
+    (
+        "022_retention_analytics.sql",
+        include_str!("../sql/procedures/022_retention_analytics.sql"),
+    ),
+    (
+        "023_prometheus.sql",
+        include_str!("../sql/procedures/023_prometheus.sql"),
+    ),
     ("024_kv.sql", include_str!("../sql/procedures/024_kv.sql")),
-    ("025_log_timers.sql", include_str!("../sql/procedures/025_log_timers.sql")),
+    (
+        "025_log_timers.sql",
+        include_str!("../sql/procedures/025_log_timers.sql"),
+    ),
     // The sweeper's two slow phases (§7.5). Separate from 024 because these are
     // the only KV functions no request calls, and the only two the broker is
     // designed to run WITHOUT: sweeper.rs degrades each to OffConfig on SQLSTATE
     // class 42 and keeps serving, which is what made their earlier absence a
     // pair of startup WARNs instead of a boot failure.
-    ("026_kv_sweeper.sql", include_str!("../sql/procedures/026_kv_sweeper.sql")),
+    (
+        "026_kv_sweeper.sql",
+        include_str!("../sql/procedures/026_kv_sweeper.sql"),
+    ),
     // The quota/measurement read (§9.3). A third actor again: not the request
     // path (024) and not the sweeper (026), but a read-only poll that EVERY
     // broker runs — including one with QUEEN_SWEEPER=false, which still has to
     // enforce quotas. Read-only, so it takes no lock-order argument and writes
     // nothing.
-    ("027_kv_quota.sql", include_str!("../sql/procedures/027_kv_quota.sql")),
+    (
+        "027_kv_quota.sql",
+        include_str!("../sql/procedures/027_kv_quota.sql"),
+    ),
     // The retained-bytes slow lane (PLAN_STATS_REFRESH.md T1.0): the one
     // O(segments) heap scan left in the stats family, moved out of 011's
     // per-cadence refresh onto its own loop (stats.rs::spawn_retained_bytes).
     // Ships in the SAME image as the 011 that stopped writing the column: a
     // fleet where 011 self-assigns retained_bytes and this file is absent
     // leaves the proxy's storage-quota gauge with no writer at all.
-    ("028_retained_bytes.sql", include_str!("../sql/procedures/028_retained_bytes.sql")),
+    (
+        "028_retained_bytes.sql",
+        include_str!("../sql/procedures/028_retained_bytes.sql"),
+    ),
     // The durable per-task scheduler (PLAN_STATS_REFRESH.md T2.1): cadence for
     // the cluster-singleton loops (stats, retained-bytes, retention) as one row
     // per task, DB-clock arbitrated, lease-bounded, fenced. The 737_00x
     // advisory locks stay in the loops as belt until every deployment
     // schedules through this table.
-    ("029_maintenance_leases.sql", include_str!("../sql/procedures/029_maintenance_leases.sql")),
+    (
+        "029_maintenance_leases.sql",
+        include_str!("../sql/procedures/029_maintenance_leases.sql"),
+    ),
     // The ephemeral queue class's ENTIRE database footprint (EPHEMERAL_QUEUES.md
     // §2): two cold tables (declared configs, grant rows) and their SPs. Position
     // carries no ordering argument — nothing before it references these tables and
@@ -200,7 +284,10 @@ const PROCEDURES: &[(&str, &str)] = &[
     // it is newest. The load-bearing property is the opposite of 024/025's: this
     // file is touched at boot, at `configure` and at `delete`, and NEVER by push,
     // pop or ack, which construct no SQL at all.
-    ("030_ephemeral.sql", include_str!("../sql/procedures/030_ephemeral.sql")),
+    (
+        "030_ephemeral.sql",
+        include_str!("../sql/procedures/030_ephemeral.sql"),
+    ),
     // The tenant purge (queen.delete_tenant_data_v1). LAST, and that position
     // is load-bearing in one direction only: its body is plpgsql, so it
     // resolves names at RUNTIME and could sit anywhere — but it names tables
@@ -209,14 +296,20 @@ const PROCEDURES: &[(&str, &str)] = &[
     // queen.delete_queue_v1 from 013, so last is the position at which a
     // reader can see that every one of them already exists. Rewriting it as
     // LANGUAGE sql would make that a hard requirement instead of a courtesy.
-    ("031_tenant_purge.sql", include_str!("../sql/procedures/031_tenant_purge.sql")),
+    (
+        "031_tenant_purge.sql",
+        include_str!("../sql/procedures/031_tenant_purge.sql"),
+    ),
     // PLAN_QUEEN_KAFKA.md C2 — the read-from-offset surface behind
     // `POST /api/v1/fetch`. Position carries no ordering argument in either
     // direction: its body is plpgsql (names resolve at runtime) and it reads
     // only queen.log_partitions and queen.log_segments, both from 001. It sits
     // last because it is newest, and because nothing else may come to depend on
     // it — it is a leaf of the corpus, like 030 was before 031 arrived.
-    ("032_log_fetch.sql", include_str!("../sql/procedures/032_log_fetch.sql")),
+    (
+        "032_log_fetch.sql",
+        include_str!("../sql/procedures/032_log_fetch.sql"),
+    ),
     // PLAN_S3_SINK.md §5.1/§5.2 — the partition-discovery surface behind
     // `POST /api/v1/partitions/changed`. Same position argument as 032, and for
     // the same reasons: plpgsql (names resolve at runtime), reads only
@@ -232,7 +325,10 @@ const PROCEDURES: &[(&str, &str)] = &[
     // catch (a .sql that is never applied, a green boot, and 42883 at the first
     // call). Several entries above are long for the same reason and carry the
     // same disagreement.
-    ("033_log_partitions_changed.sql", include_str!("../sql/procedures/033_log_partitions_changed.sql")),
+    (
+        "033_log_partitions_changed.sql",
+        include_str!("../sql/procedures/033_log_partitions_changed.sql"),
+    ),
 ];
 
 /// Minimum PostgreSQL this schema can be applied to, as `server_version_num`
@@ -341,9 +437,11 @@ pub async fn apply(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
     // into request traffic, turning ordinary row-lock waits into 55P03 errors.
     // Dropping the taken client closes the connection instead; the pool
     // re-creates the slot lazily.
-    let client = deadpool_postgres::Client::take(pool.get().await.map_err(|e| {
-        format!("getting the apply connection from the pool: {e}")
-    })?);
+    let client = deadpool_postgres::Client::take(
+        pool.get()
+            .await
+            .map_err(|e| format!("getting the apply connection from the pool: {e}"))?,
+    );
 
     // Named so the AccessExclusive waits this connection produces during a
     // rolling boot are attributable in pg_stat_activity and the server log.
@@ -372,7 +470,12 @@ pub async fn apply(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
     client
         .execute("SET lock_timeout = 0", &[])
         .await
-        .map_err(|e| format!("clearing lock_timeout before the schema lock: {}", pg_error_text(&e)))?;
+        .map_err(|e| {
+            format!(
+                "clearing lock_timeout before the schema lock: {}",
+                pg_error_text(&e)
+            )
+        })?;
     // POLL, never block: a blocking `pg_advisory_lock` wait is itself a live
     // (implicit) transaction holding a snapshot, and the peer's
     // CREATE INDEX CONCURRENTLY must wait for every older snapshot to end —
@@ -387,7 +490,12 @@ pub async fn apply(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
         let got: bool = client
             .query_one("SELECT pg_try_advisory_lock($1)", &[&SCHEMA_LOCK_KEY])
             .await
-            .map_err(|e| format!("trying the schema apply advisory lock: {}", pg_error_text(&e)))?
+            .map_err(|e| {
+                format!(
+                    "trying the schema apply advisory lock: {}",
+                    pg_error_text(&e)
+                )
+            })?
             .get(0);
         if got {
             break;
@@ -1118,7 +1226,10 @@ fn statement_kind(stmt: &str) -> StatementKind {
 /// log lines and error messages.
 fn preview(stmt: &str) -> String {
     let start = skip_ws_and_comments(stmt.as_bytes(), 0);
-    let collapsed = stmt[start..].split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = stmt[start..]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     if collapsed.chars().count() > 96 {
         let mut s: String = collapsed.chars().take(96).collect();
         s.push('…');
@@ -1265,17 +1376,32 @@ mod tests {
     #[test]
     fn classifier_kinds() {
         use StatementKind::*;
-        assert_eq!(statement_kind("CREATE INDEX CONCURRENTLY IF NOT EXISTS i ON t(x);"), CreateIndexConcurrently);
-        assert_eq!(statement_kind("CREATE UNIQUE INDEX CONCURRENTLY i ON t(x);"), CreateIndexConcurrently);
+        assert_eq!(
+            statement_kind("CREATE INDEX CONCURRENTLY IF NOT EXISTS i ON t(x);"),
+            CreateIndexConcurrently
+        );
+        assert_eq!(
+            statement_kind("CREATE UNIQUE INDEX CONCURRENTLY i ON t(x);"),
+            CreateIndexConcurrently
+        );
         assert_eq!(
             statement_kind("-- c\n/* c */ create index\n  concurrently if not exists i ON t(x);"),
             CreateIndexConcurrently
         );
-        assert_eq!(statement_kind("CREATE INDEX IF NOT EXISTS i ON t(x);"), Plain);
+        assert_eq!(
+            statement_kind("CREATE INDEX IF NOT EXISTS i ON t(x);"),
+            Plain
+        );
         assert_eq!(statement_kind("CREATE TABLE t (i int);"), Plain);
-        assert_eq!(statement_kind("ALTER TABLE t ADD COLUMN IF NOT EXISTS c int;"), Plain);
+        assert_eq!(
+            statement_kind("ALTER TABLE t ADD COLUMN IF NOT EXISTS c int;"),
+            Plain
+        );
         assert_eq!(statement_kind("DROP FUNCTION IF EXISTS f(TEXT);"), Drop);
-        assert_eq!(statement_kind("  -- x\nDROP TRIGGER IF EXISTS tr ON t;"), Drop);
+        assert_eq!(
+            statement_kind("  -- x\nDROP TRIGGER IF EXISTS tr ON t;"),
+            Drop
+        );
     }
 
     /// Every embedded file must partition losslessly (the splitter can lose or
@@ -1287,7 +1413,10 @@ mod tests {
         for (name, sql) in files {
             let stmts = split_sql_statements(sql);
             let rejoined: String = stmts.iter().map(|s| s.text).collect();
-            assert_eq!(rejoined, sql, "{name}: fragments must concatenate back to the file");
+            assert_eq!(
+                rejoined, sql,
+                "{name}: fragments must concatenate back to the file"
+            );
             let exec = stmts.iter().filter(|s| s.executable).count();
             assert!(exec >= 1, "{name}: no executable statements found");
         }
@@ -1305,7 +1434,9 @@ mod tests {
             .expect("001 in PROCEDURES");
         let cic = split_sql_statements(sql)
             .iter()
-            .filter(|s| s.executable && statement_kind(s.text) == StatementKind::CreateIndexConcurrently)
+            .filter(|s| {
+                s.executable && statement_kind(s.text) == StatementKind::CreateIndexConcurrently
+            })
             .count();
         assert_eq!(
             cic, 2,
@@ -1328,16 +1459,32 @@ mod tests {
         let bases: Vec<u64> = (1..=APPLY_LOCK_ATTEMPTS)
             .map(|a| lock_backoff_base(a).as_millis() as u64)
             .collect();
-        assert!(bases.windows(2).all(|w| w[1] >= w[0]), "the base schedule must not go backwards");
-        assert_eq!(*bases.last().unwrap(), 2_000, "the base saturates at one slice");
+        assert!(
+            bases.windows(2).all(|w| w[1] >= w[0]),
+            "the base schedule must not go backwards"
+        );
+        assert_eq!(
+            *bases.last().unwrap(),
+            2_000,
+            "the base saturates at one slice"
+        );
 
         for attempt in 1..=APPLY_LOCK_ATTEMPTS {
             let base = lock_backoff_base(attempt).as_millis() as u64;
             for _ in 0..64 {
                 let ms = lock_backoff(attempt).as_millis() as u64;
-                assert!(ms >= base, "attempt {attempt}: {ms}ms is below its base {base}ms");
-                assert!(ms <= base + base / 2, "attempt {attempt}: {ms}ms is more than +50%");
-                assert!(ms <= APPLY_BACKOFF_MAX_MS, "attempt {attempt}: {ms}ms breaks the cap");
+                assert!(
+                    ms >= base,
+                    "attempt {attempt}: {ms}ms is below its base {base}ms"
+                );
+                assert!(
+                    ms <= base + base / 2,
+                    "attempt {attempt}: {ms}ms is more than +50%"
+                );
+                assert!(
+                    ms <= APPLY_BACKOFF_MAX_MS,
+                    "attempt {attempt}: {ms}ms breaks the cap"
+                );
             }
         }
 
@@ -1457,7 +1604,10 @@ mod tests {
         let loader = connect().await;
         loader.batch_execute("BEGIN").await.expect("begin");
         loader
-            .query_one(&format!("SELECT v FROM {schema}.{table} WHERE id = 1 FOR UPDATE"), &[])
+            .query_one(
+                &format!("SELECT v FROM {schema}.{table} WHERE id = 1 FOR UPDATE"),
+                &[],
+            )
             .await
             .expect("for update");
 
@@ -1474,13 +1624,20 @@ mod tests {
         // ShareLock, while the applier's AE wait conflicts with our HELD
         // RowShare. Cycle closed; the deadlock detector fires within ~1s.
         let update = loader
-            .execute(&format!("UPDATE {schema}.{table} SET v = v + 1 WHERE id = 1"), &[])
+            .execute(
+                &format!("UPDATE {schema}.{table} SET v = v + 1 WHERE id = 1"),
+                &[],
+            )
             .await;
         let apply_res = apply_task.await.expect("join");
 
         let codes: Vec<String> = [
-            update.err().and_then(|e| e.code().map(|c| c.code().to_string())),
-            apply_res.err().and_then(|e| e.code().map(|c| c.code().to_string())),
+            update
+                .err()
+                .and_then(|e| e.code().map(|c| c.code().to_string())),
+            apply_res
+                .err()
+                .and_then(|e| e.code().map(|c| c.code().to_string())),
         ]
         .into_iter()
         .flatten()
@@ -1511,7 +1668,10 @@ mod tests {
         let loader = connect().await;
         loader.batch_execute("BEGIN").await.expect("begin");
         loader
-            .query_one(&format!("SELECT v FROM {schema}.{table} WHERE id = 1 FOR UPDATE"), &[])
+            .query_one(
+                &format!("SELECT v FROM {schema}.{table} WHERE id = 1 FOR UPDATE"),
+                &[],
+            )
             .await
             .expect("for update");
 
@@ -1529,7 +1689,10 @@ mod tests {
 
         // Must SUCCEED (no 40P01): the applier holds nothing while queued.
         loader
-            .execute(&format!("UPDATE {schema}.{table} SET v = v + 1 WHERE id = 1"), &[])
+            .execute(
+                &format!("UPDATE {schema}.{table} SET v = v + 1 WHERE id = 1"),
+                &[],
+            )
             .await
             .expect("the pusher-shaped upgrade must not deadlock against the per-statement apply");
         loader.batch_execute("COMMIT").await.expect("commit");
@@ -1789,8 +1952,12 @@ mod tests {
 
         let _ = blocker.batch_execute("ROLLBACK").await;
         drop(applier);
-        let _ = owner.batch_execute(&format!("DROP SCHEMA {schema} CASCADE")).await;
-        let _ = owner.batch_execute(&format!("DROP ROLE IF EXISTS {role}")).await;
+        let _ = owner
+            .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+            .await;
+        let _ = owner
+            .batch_execute(&format!("DROP ROLE IF EXISTS {role}"))
+            .await;
     }
 
     /// "No blockers" is a CLAIM, and it may only be made when it is true: the
@@ -1805,14 +1972,23 @@ mod tests {
 
         // Genuinely empty: no session in a throwaway server is a day old.
         let empty = blocker_report(&client, 86_400).await;
-        assert!(empty.contains(NO_BLOCKERS), "an empty list must say so plainly:\n{empty}");
-        assert!(!empty.contains(UNKNOWN_BLOCKERS), "an empty list is not an unknown one");
+        assert!(
+            empty.contains(NO_BLOCKERS),
+            "an empty list must say so plainly:\n{empty}"
+        );
+        assert!(
+            !empty.contains(UNKNOWN_BLOCKERS),
+            "an empty list is not an unknown one"
+        );
 
         // Now make the diagnostic itself fail. An aborted transaction rejects
         // every following statement with 25P02 — a real state for a connection
         // that has just had an error, and the cheapest honest injection.
         client.batch_execute("BEGIN").await.expect("begin");
-        assert!(client.batch_execute("SELECT 1/0").await.is_err(), "the injection must fail");
+        assert!(
+            client.batch_execute("SELECT 1/0").await.is_err(),
+            "the injection must fail"
+        );
         let failed = blocker_report(&client, 5).await;
         assert!(
             failed.contains(UNKNOWN_BLOCKERS),

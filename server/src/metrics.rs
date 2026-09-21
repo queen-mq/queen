@@ -257,7 +257,12 @@ impl PerQueue {
         if let Some(c) = self.map.read().unwrap().get(key) {
             return c.clone();
         }
-        self.map.write().unwrap().entry(key.to_string()).or_default().clone()
+        self.map
+            .write()
+            .unwrap()
+            .entry(key.to_string())
+            .or_default()
+            .clone()
     }
     pub fn add_push(&self, tenant: &str, queue: &str, msgs: u64) {
         let c = self.counters(&crate::handlers::tenant_queue_key(tenant, queue));
@@ -843,11 +848,13 @@ impl KvTimers {
     #[allow(dead_code)]
     pub fn kv_singleflight_coalesced(&self, n: u64) {
         if n > 0 {
-            self.kv_singleflight_coalesced.fetch_add(n, Ordering::Relaxed);
+            self.kv_singleflight_coalesced
+                .fetch_add(n, Ordering::Relaxed);
         }
     }
     pub fn set_kv_expiry(&self, unpruned: i64, capped: bool, lag_ms: i64) {
-        self.kv_expired_not_pruned.store(unpruned, Ordering::Relaxed);
+        self.kv_expired_not_pruned
+            .store(unpruned, Ordering::Relaxed);
         self.kv_expired_not_pruned_capped
             .store(capped as i64, Ordering::Relaxed);
         self.kv_expiry_lag_ms.store(lag_ms, Ordering::Relaxed);
@@ -866,7 +873,8 @@ impl KvTimers {
 
     pub fn set_timers_due(&self, due: i64, capped: bool, oldest_late_ms: i64) {
         self.timers_due.store(due, Ordering::Relaxed);
-        self.timers_due_capped.store(capped as i64, Ordering::Relaxed);
+        self.timers_due_capped
+            .store(capped as i64, Ordering::Relaxed);
         self.timers_oldest_late_ms
             .store(oldest_late_ms, Ordering::Relaxed);
     }
@@ -966,7 +974,8 @@ impl KvTimers {
     }
     pub fn kv_pool(&self) -> (i64, i64) {
         (
-            self.kv_pool_size.load(Ordering::Relaxed) - self.kv_pool_available.load(Ordering::Relaxed),
+            self.kv_pool_size.load(Ordering::Relaxed)
+                - self.kv_pool_available.load(Ordering::Relaxed),
             self.kv_pool_size.load(Ordering::Relaxed),
         )
     }
@@ -1022,8 +1031,18 @@ impl KvTimers {
             .unwrap_or(0.0)
     }
 
-    fn render(&self, s: &mut String, ht: &dyn Fn(&mut String, &str, &str, &str), g: &dyn Fn(&mut String, &str, &str, String)) {
-        ht(s, "queen_kv_ops_total", "KV operations by code path and outcome", "counter");
+    fn render(
+        &self,
+        s: &mut String,
+        ht: &dyn Fn(&mut String, &str, &str, &str),
+        g: &dyn Fn(&mut String, &str, &str, String),
+    ) {
+        ht(
+            s,
+            "queen_kv_ops_total",
+            "KV operations by code path and outcome",
+            "counter",
+        );
         for op in KvOp::ALL {
             for res in KvResult::ALL {
                 g(
@@ -1036,7 +1055,12 @@ impl KvTimers {
                 );
             }
         }
-        ht(s, "queen_kv_op_duration_milliseconds", "KV operation latency", "gauge");
+        ht(
+            s,
+            "queen_kv_op_duration_milliseconds",
+            "KV operation latency",
+            "gauge",
+        );
         for op in KvOp::ALL {
             for (q, p) in [("0.5", 50.0), ("0.99", 99.0)] {
                 g(
@@ -1047,39 +1071,163 @@ impl KvTimers {
                 );
             }
         }
-        ht(s, "queen_kv_bytes_total", "KV value bytes written / read", "counter");
-        g(s, "queen_kv_bytes_total", "{dir=\"in\"}", self.kv_bytes_in.load(Ordering::Relaxed).to_string());
-        g(s, "queen_kv_bytes_total", "{dir=\"out\"}", self.kv_bytes_out.load(Ordering::Relaxed).to_string());
-        ht(s, "queen_kv_expired_not_pruned", "Expired KV rows the sweeper has not pruned yet (capped)", "gauge");
-        g(s, "queen_kv_expired_not_pruned", "", self.kv_expired_not_pruned.load(Ordering::Relaxed).to_string());
-        ht(s, "queen_kv_expired_not_pruned_capped", "1 when the unpruned count hit its cap and is a floor", "gauge");
-        g(s, "queen_kv_expired_not_pruned_capped", "", self.kv_expired_not_pruned_capped.load(Ordering::Relaxed).to_string());
-        ht(s, "queen_kv_expiry_lag_seconds", "Age of the oldest expired, unpruned KV row", "gauge");
-        g(s, "queen_kv_expiry_lag_seconds", "", format!("{:.3}", self.kv_expiry_lag_ms.load(Ordering::Relaxed) as f64 / 1000.0));
-        ht(s, "queen_kv_read_rejected_total", "KV reads refused before reaching the database", "counter");
+        ht(
+            s,
+            "queen_kv_bytes_total",
+            "KV value bytes written / read",
+            "counter",
+        );
+        g(
+            s,
+            "queen_kv_bytes_total",
+            "{dir=\"in\"}",
+            self.kv_bytes_in.load(Ordering::Relaxed).to_string(),
+        );
+        g(
+            s,
+            "queen_kv_bytes_total",
+            "{dir=\"out\"}",
+            self.kv_bytes_out.load(Ordering::Relaxed).to_string(),
+        );
+        ht(
+            s,
+            "queen_kv_expired_not_pruned",
+            "Expired KV rows the sweeper has not pruned yet (capped)",
+            "gauge",
+        );
+        g(
+            s,
+            "queen_kv_expired_not_pruned",
+            "",
+            self.kv_expired_not_pruned
+                .load(Ordering::Relaxed)
+                .to_string(),
+        );
+        ht(
+            s,
+            "queen_kv_expired_not_pruned_capped",
+            "1 when the unpruned count hit its cap and is a floor",
+            "gauge",
+        );
+        g(
+            s,
+            "queen_kv_expired_not_pruned_capped",
+            "",
+            self.kv_expired_not_pruned_capped
+                .load(Ordering::Relaxed)
+                .to_string(),
+        );
+        ht(
+            s,
+            "queen_kv_expiry_lag_seconds",
+            "Age of the oldest expired, unpruned KV row",
+            "gauge",
+        );
+        g(
+            s,
+            "queen_kv_expiry_lag_seconds",
+            "",
+            format!(
+                "{:.3}",
+                self.kv_expiry_lag_ms.load(Ordering::Relaxed) as f64 / 1000.0
+            ),
+        );
+        ht(
+            s,
+            "queen_kv_read_rejected_total",
+            "KV reads refused before reaching the database",
+            "counter",
+        );
         for why in KvReject::ALL {
             g(
                 s,
                 "queen_kv_read_rejected_total",
                 &format!("{{reason=\"{}\"}}", why.as_str()),
-                self.kv_read_rejected[why as usize].load(Ordering::Relaxed).to_string(),
+                self.kv_read_rejected[why as usize]
+                    .load(Ordering::Relaxed)
+                    .to_string(),
             );
         }
         ht(s, "queen_kv_pool", "Dedicated KV connection pool", "gauge");
-        g(s, "queen_kv_pool", "{state=\"size\"}", self.kv_pool_size.load(Ordering::Relaxed).to_string());
-        g(s, "queen_kv_pool", "{state=\"available\"}", self.kv_pool_available.load(Ordering::Relaxed).to_string());
-        g(s, "queen_kv_pool", "{state=\"waiting\"}", self.kv_pool_waiting.load(Ordering::Relaxed).to_string());
-        ht(s, "queen_kv_singleflight_coalesced_total", "KV reads that shared an in-flight query", "counter");
-        g(s, "queen_kv_singleflight_coalesced_total", "", self.kv_singleflight_coalesced.load(Ordering::Relaxed).to_string());
-        ht(s, "queen_timers_due", "Timers due now, from the sweep probe (capped)", "gauge");
-        g(s, "queen_timers_due", "", self.timers_due.load(Ordering::Relaxed).to_string());
-        ht(s, "queen_timers_due_capped", "1 when the due count hit its cap and is a floor", "gauge");
-        g(s, "queen_timers_due_capped", "", self.timers_due_capped.load(Ordering::Relaxed).to_string());
-        ht(s, "queen_timers_oldest_late_seconds", "Lateness of the oldest due timer", "gauge");
-        g(s, "queen_timers_oldest_late_seconds", "", format!("{:.3}", self.timers_oldest_late_ms.load(Ordering::Relaxed) as f64 / 1000.0));
+        g(
+            s,
+            "queen_kv_pool",
+            "{state=\"size\"}",
+            self.kv_pool_size.load(Ordering::Relaxed).to_string(),
+        );
+        g(
+            s,
+            "queen_kv_pool",
+            "{state=\"available\"}",
+            self.kv_pool_available.load(Ordering::Relaxed).to_string(),
+        );
+        g(
+            s,
+            "queen_kv_pool",
+            "{state=\"waiting\"}",
+            self.kv_pool_waiting.load(Ordering::Relaxed).to_string(),
+        );
+        ht(
+            s,
+            "queen_kv_singleflight_coalesced_total",
+            "KV reads that shared an in-flight query",
+            "counter",
+        );
+        g(
+            s,
+            "queen_kv_singleflight_coalesced_total",
+            "",
+            self.kv_singleflight_coalesced
+                .load(Ordering::Relaxed)
+                .to_string(),
+        );
+        ht(
+            s,
+            "queen_timers_due",
+            "Timers due now, from the sweep probe (capped)",
+            "gauge",
+        );
+        g(
+            s,
+            "queen_timers_due",
+            "",
+            self.timers_due.load(Ordering::Relaxed).to_string(),
+        );
+        ht(
+            s,
+            "queen_timers_due_capped",
+            "1 when the due count hit its cap and is a floor",
+            "gauge",
+        );
+        g(
+            s,
+            "queen_timers_due_capped",
+            "",
+            self.timers_due_capped.load(Ordering::Relaxed).to_string(),
+        );
+        ht(
+            s,
+            "queen_timers_oldest_late_seconds",
+            "Lateness of the oldest due timer",
+            "gauge",
+        );
+        g(
+            s,
+            "queen_timers_oldest_late_seconds",
+            "",
+            format!(
+                "{:.3}",
+                self.timers_oldest_late_ms.load(Ordering::Relaxed) as f64 / 1000.0
+            ),
+        );
         // The motivated exception to the cardinality rule (§14.1): an occupancy
         // gauge, and the only series that names which tenant caused a backlog.
-        ht(s, "queen_timers_fire_lag_seconds", "Delivery lateness of fired timers, per tenant", "gauge");
+        ht(
+            s,
+            "queen_timers_fire_lag_seconds",
+            "Delivery lateness of fired timers, per tenant",
+            "gauge",
+        );
         for (tenant, ring) in self.fire_lag.read().unwrap().iter() {
             for (q, p) in [("0.5", 50.0), ("0.95", 95.0)] {
                 g(
@@ -1090,27 +1238,98 @@ impl KvTimers {
                 );
             }
         }
-        ht(s, "queen_timers_fire_lag_tenants_dropped_total", "Fire-lag samples dropped because the tenant cap was reached", "counter");
-        g(s, "queen_timers_fire_lag_tenants_dropped_total", "", self.fire_lag_dropped.load(Ordering::Relaxed).to_string());
-        ht(s, "queen_timers_fired_total", "Fired timer segments by outcome", "counter");
+        ht(
+            s,
+            "queen_timers_fire_lag_tenants_dropped_total",
+            "Fire-lag samples dropped because the tenant cap was reached",
+            "counter",
+        );
+        g(
+            s,
+            "queen_timers_fire_lag_tenants_dropped_total",
+            "",
+            self.fire_lag_dropped.load(Ordering::Relaxed).to_string(),
+        );
+        ht(
+            s,
+            "queen_timers_fired_total",
+            "Fired timer segments by outcome",
+            "counter",
+        );
         for r in FireResult::ALL {
-            g(s, "queen_timers_fired_total", &format!("{{result=\"{}\"}}", r.as_str()), self.timers_fired[r as usize].load(Ordering::Relaxed).to_string());
+            g(
+                s,
+                "queen_timers_fired_total",
+                &format!("{{result=\"{}\"}}", r.as_str()),
+                self.timers_fired[r as usize]
+                    .load(Ordering::Relaxed)
+                    .to_string(),
+            );
         }
-        ht(s, "queen_timers_dlq_total", "Timers dead-lettered after exhausting attempts", "counter");
-        g(s, "queen_timers_dlq_total", "", self.timers_dlq.load(Ordering::Relaxed).to_string());
-        ht(s, "queen_timers_fire_failures_total", "Failed fire transactions by SQLSTATE class", "counter");
+        ht(
+            s,
+            "queen_timers_dlq_total",
+            "Timers dead-lettered after exhausting attempts",
+            "counter",
+        );
+        g(
+            s,
+            "queen_timers_dlq_total",
+            "",
+            self.timers_dlq.load(Ordering::Relaxed).to_string(),
+        );
+        ht(
+            s,
+            "queen_timers_fire_failures_total",
+            "Failed fire transactions by SQLSTATE class",
+            "counter",
+        );
         for c in FireFailure::ALL {
-            g(s, "queen_timers_fire_failures_total", &format!("{{class=\"{}\"}}", c.as_str()), self.timers_fire_failures[c as usize].load(Ordering::Relaxed).to_string());
+            g(
+                s,
+                "queen_timers_fire_failures_total",
+                &format!("{{class=\"{}\"}}", c.as_str()),
+                self.timers_fire_failures[c as usize]
+                    .load(Ordering::Relaxed)
+                    .to_string(),
+            );
         }
-        ht(s, "queen_timers_poisoned_total", "Batches replayed one segment per call after a permanent error", "counter");
-        g(s, "queen_timers_poisoned_total", "", self.timers_poisoned.load(Ordering::Relaxed).to_string());
-        ht(s, "queen_timers_schedule_rejected_total", "Timer schedules refused", "counter");
+        ht(
+            s,
+            "queen_timers_poisoned_total",
+            "Batches replayed one segment per call after a permanent error",
+            "counter",
+        );
+        g(
+            s,
+            "queen_timers_poisoned_total",
+            "",
+            self.timers_poisoned.load(Ordering::Relaxed).to_string(),
+        );
+        ht(
+            s,
+            "queen_timers_schedule_rejected_total",
+            "Timer schedules refused",
+            "counter",
+        );
         for w in ScheduleReject::ALL {
-            g(s, "queen_timers_schedule_rejected_total", &format!("{{reason=\"{}\"}}", w.as_str()), self.timers_schedule_rejected[w as usize].load(Ordering::Relaxed).to_string());
+            g(
+                s,
+                "queen_timers_schedule_rejected_total",
+                &format!("{{reason=\"{}\"}}", w.as_str()),
+                self.timers_schedule_rejected[w as usize]
+                    .load(Ordering::Relaxed)
+                    .to_string(),
+            );
         }
         // The sweeper serves both surfaces; the phase labels say which half did the
         // work.
-        ht(s, "queen_sweeper_cycle_milliseconds", "Sweeper phase duration", "gauge");
+        ht(
+            s,
+            "queen_sweeper_cycle_milliseconds",
+            "Sweeper phase duration",
+            "gauge",
+        );
         for ph in SweepPhase::ALL {
             for (q, p) in [("0.5", 50.0), ("0.99", 99.0)] {
                 g(
@@ -1121,18 +1340,62 @@ impl KvTimers {
                 );
             }
         }
-        ht(s, "queen_sweeper_rows_total", "Rows handled by each sweeper phase", "counter");
+        ht(
+            s,
+            "queen_sweeper_rows_total",
+            "Rows handled by each sweeper phase",
+            "counter",
+        );
         for ph in SweepPhase::ALL {
-            g(s, "queen_sweeper_rows_total", &format!("{{phase=\"{}\"}}", ph.as_str()), self.sweeper_rows[ph as usize].load(Ordering::Relaxed).to_string());
+            g(
+                s,
+                "queen_sweeper_rows_total",
+                &format!("{{phase=\"{}\"}}", ph.as_str()),
+                self.sweeper_rows[ph as usize]
+                    .load(Ordering::Relaxed)
+                    .to_string(),
+            );
         }
-        ht(s, "queen_sweeper_skip_locked_total", "Rows another broker was already holding", "counter");
-        g(s, "queen_sweeper_skip_locked_total", "", self.sweeper_skip_locked.load(Ordering::Relaxed).to_string());
-        ht(s, "queen_sweeper_phase_skipped_total", "Phases shed under pressure (the degradation ladder, made visible)", "counter");
+        ht(
+            s,
+            "queen_sweeper_skip_locked_total",
+            "Rows another broker was already holding",
+            "counter",
+        );
+        g(
+            s,
+            "queen_sweeper_skip_locked_total",
+            "",
+            self.sweeper_skip_locked.load(Ordering::Relaxed).to_string(),
+        );
+        ht(
+            s,
+            "queen_sweeper_phase_skipped_total",
+            "Phases shed under pressure (the degradation ladder, made visible)",
+            "counter",
+        );
         for ph in SweepPhase::ALL {
-            g(s, "queen_sweeper_phase_skipped_total", &format!("{{phase=\"{}\"}}", ph.as_str()), self.sweeper_phase_skipped[ph as usize].load(Ordering::Relaxed).to_string());
+            g(
+                s,
+                "queen_sweeper_phase_skipped_total",
+                &format!("{{phase=\"{}\"}}", ph.as_str()),
+                self.sweeper_phase_skipped[ph as usize]
+                    .load(Ordering::Relaxed)
+                    .to_string(),
+            );
         }
-        ht(s, "queen_sweeper_sleep_milliseconds", "Sleep the sweeper chose after the last cycle", "gauge");
-        g(s, "queen_sweeper_sleep_milliseconds", "", self.sweeper_sleep_ms.load(Ordering::Relaxed).to_string());
+        ht(
+            s,
+            "queen_sweeper_sleep_milliseconds",
+            "Sleep the sweeper chose after the last cycle",
+            "gauge",
+        );
+        g(
+            s,
+            "queen_sweeper_sleep_milliseconds",
+            "",
+            self.sweeper_sleep_ms.load(Ordering::Relaxed).to_string(),
+        );
     }
 }
 
@@ -1256,37 +1519,126 @@ impl Metrics {
             s.push_str(&v);
             s.push('\n');
         };
-        ht(&mut s, "queen_uptime_seconds", "Process uptime in seconds", "gauge");
-        g(&mut s, "queen_uptime_seconds", "", (self.start.elapsed().as_secs()).to_string());
-        ht(&mut s, "queen_process_resident_memory_bytes", "Resident memory of this process", "gauge");
-        g(&mut s, "queen_process_resident_memory_bytes", "", resident_bytes().to_string());
+        ht(
+            &mut s,
+            "queen_uptime_seconds",
+            "Process uptime in seconds",
+            "gauge",
+        );
+        g(
+            &mut s,
+            "queen_uptime_seconds",
+            "",
+            (self.start.elapsed().as_secs()).to_string(),
+        );
+        ht(
+            &mut s,
+            "queen_process_resident_memory_bytes",
+            "Resident memory of this process",
+            "gauge",
+        );
+        g(
+            &mut s,
+            "queen_process_resident_memory_bytes",
+            "",
+            resident_bytes().to_string(),
+        );
         // RUSTFIX item 24: these are PER-PROCESS counters (reset on restart), so they
         // are named queen_process_* — the queen_cluster_* namespace is reclaimed by
         // the DB-backed lifetime totals in status.rs (which survive restart).
         let process = [
-            ("queen_process_push_requests_total", "Push API requests handled by this process", &self.push.requests),
-            ("queen_process_pop_requests_total", "Pop API requests handled by this process", &self.pop.requests),
-            ("queen_process_ack_requests_total", "Ack API requests handled by this process", &self.ack.requests),
-            ("queen_process_push_messages_total", "Messages pushed by this process", &self.push.messages),
-            ("queen_process_pop_messages_total", "Messages popped by this process", &self.pop.messages),
-            ("queen_process_ack_messages_total", "Messages acked by this process", &self.ack.messages),
+            (
+                "queen_process_push_requests_total",
+                "Push API requests handled by this process",
+                &self.push.requests,
+            ),
+            (
+                "queen_process_pop_requests_total",
+                "Pop API requests handled by this process",
+                &self.pop.requests,
+            ),
+            (
+                "queen_process_ack_requests_total",
+                "Ack API requests handled by this process",
+                &self.ack.requests,
+            ),
+            (
+                "queen_process_push_messages_total",
+                "Messages pushed by this process",
+                &self.push.messages,
+            ),
+            (
+                "queen_process_pop_messages_total",
+                "Messages popped by this process",
+                &self.pop.messages,
+            ),
+            (
+                "queen_process_ack_messages_total",
+                "Messages acked by this process",
+                &self.ack.messages,
+            ),
         ];
         for (name, help, ctr) in process {
             ht(&mut s, name, help, "counter");
             g(&mut s, name, "", ctr.load(Ordering::Relaxed).to_string());
         }
         // Pop path split (Phase 2): targeted hint-driven pops vs wildcard scans.
-        ht(&mut s, "queen_pop_targeted_total", "Hinted targeted single-partition pops issued", "counter");
-        g(&mut s, "queen_pop_targeted_total", "", self.pop_targeted.load(Ordering::Relaxed).to_string());
-        ht(&mut s, "queen_pop_wildcard_total", "Wildcard candidate-scan pops issued", "counter");
-        g(&mut s, "queen_pop_wildcard_total", "", self.pop_wildcard.load(Ordering::Relaxed).to_string());
-        ht(&mut s, "queen_pop_fill_wait_total", "Pops that held an under-full batch back (minPopWaitTime)", "counter");
-        g(&mut s, "queen_pop_fill_wait_total", "", self.pop_fill_wait.load(Ordering::Relaxed).to_string());
-        ht(&mut s, "queen_pop_fill_wait_microseconds_total", "Total time pops spent fattening an under-full batch", "counter");
-        g(&mut s, "queen_pop_fill_wait_microseconds_total", "", self.pop_fill_wait_us.load(Ordering::Relaxed).to_string());
+        ht(
+            &mut s,
+            "queen_pop_targeted_total",
+            "Hinted targeted single-partition pops issued",
+            "counter",
+        );
+        g(
+            &mut s,
+            "queen_pop_targeted_total",
+            "",
+            self.pop_targeted.load(Ordering::Relaxed).to_string(),
+        );
+        ht(
+            &mut s,
+            "queen_pop_wildcard_total",
+            "Wildcard candidate-scan pops issued",
+            "counter",
+        );
+        g(
+            &mut s,
+            "queen_pop_wildcard_total",
+            "",
+            self.pop_wildcard.load(Ordering::Relaxed).to_string(),
+        );
+        ht(
+            &mut s,
+            "queen_pop_fill_wait_total",
+            "Pops that held an under-full batch back (minPopWaitTime)",
+            "counter",
+        );
+        g(
+            &mut s,
+            "queen_pop_fill_wait_total",
+            "",
+            self.pop_fill_wait.load(Ordering::Relaxed).to_string(),
+        );
+        ht(
+            &mut s,
+            "queen_pop_fill_wait_microseconds_total",
+            "Total time pops spent fattening an under-full batch",
+            "counter",
+        );
+        g(
+            &mut s,
+            "queen_pop_fill_wait_microseconds_total",
+            "",
+            self.pop_fill_wait_us.load(Ordering::Relaxed).to_string(),
+        );
         // Live parked long-polls per queue (instantaneous; the DB-backed
         // queen_queue_parked_consumers in status.rs is the minute-average).
-        ht(&mut s, "queen_parked_long_polls", "Currently parked long-poll pops on this process", "gauge");
+        ht(
+            &mut s,
+            "queen_parked_long_polls",
+            "Currently parked long-poll pops on this process",
+            "gauge",
+        );
         for (q, v) in self.parked.live() {
             let mut lbl = String::from("{queue=\"");
             for c in q.chars() {
@@ -1308,21 +1660,80 @@ impl Metrics {
         } else {
             0.0
         };
-        ht(&mut s, "queen_event_loop_lag_avg_milliseconds", "Mean scheduler (event-loop) lag since start", "gauge");
-        g(&mut s, "queen_event_loop_lag_avg_milliseconds", "", format!("{:.3}", evl_avg_ms));
-        ht(&mut s, "queen_batches_fired_total", "Fusion batches flushed", "counter");
-        ht(&mut s, "queen_batch_items_fired_total", "Items flushed across fusion batches", "counter");
-        ht(&mut s, "queen_fusion_items_per_batch", "Mean items per fusion batch", "gauge");
-        ht(&mut s, "queen_batch_rtt_milliseconds", "Fusion batch round-trip latency", "gauge");
+        ht(
+            &mut s,
+            "queen_event_loop_lag_avg_milliseconds",
+            "Mean scheduler (event-loop) lag since start",
+            "gauge",
+        );
+        g(
+            &mut s,
+            "queen_event_loop_lag_avg_milliseconds",
+            "",
+            format!("{:.3}", evl_avg_ms),
+        );
+        ht(
+            &mut s,
+            "queen_batches_fired_total",
+            "Fusion batches flushed",
+            "counter",
+        );
+        ht(
+            &mut s,
+            "queen_batch_items_fired_total",
+            "Items flushed across fusion batches",
+            "counter",
+        );
+        ht(
+            &mut s,
+            "queen_fusion_items_per_batch",
+            "Mean items per fusion batch",
+            "gauge",
+        );
+        ht(
+            &mut s,
+            "queen_batch_rtt_milliseconds",
+            "Fusion batch round-trip latency",
+            "gauge",
+        );
         for op in [&self.push, &self.pop, &self.ack] {
             let lbl = format!("{{op=\"{}\"}}", op.name);
-            g(&mut s, "queen_batches_fired_total", &lbl, op.batches_fired.load(Ordering::Relaxed).to_string());
-            g(&mut s, "queen_batch_items_fired_total", &lbl, op.items_fired.load(Ordering::Relaxed).to_string());
+            g(
+                &mut s,
+                "queen_batches_fired_total",
+                &lbl,
+                op.batches_fired.load(Ordering::Relaxed).to_string(),
+            );
+            g(
+                &mut s,
+                "queen_batch_items_fired_total",
+                &lbl,
+                op.items_fired.load(Ordering::Relaxed).to_string(),
+            );
             let bf = op.batches_fired.load(Ordering::Relaxed);
-            let ratio = if bf > 0 { op.items_fired.load(Ordering::Relaxed) as f64 / bf as f64 } else { 0.0 };
-            g(&mut s, "queen_fusion_items_per_batch", &lbl, format!("{:.2}", ratio));
-            g(&mut s, "queen_batch_rtt_milliseconds", &format!("{{op=\"{}\",quantile=\"0.5\"}}", op.name), format!("{:.3}", op.rtt_percentile(50.0)));
-            g(&mut s, "queen_batch_rtt_milliseconds", &format!("{{op=\"{}\",quantile=\"0.99\"}}", op.name), format!("{:.3}", op.rtt_percentile(99.0)));
+            let ratio = if bf > 0 {
+                op.items_fired.load(Ordering::Relaxed) as f64 / bf as f64
+            } else {
+                0.0
+            };
+            g(
+                &mut s,
+                "queen_fusion_items_per_batch",
+                &lbl,
+                format!("{:.2}", ratio),
+            );
+            g(
+                &mut s,
+                "queen_batch_rtt_milliseconds",
+                &format!("{{op=\"{}\",quantile=\"0.5\"}}", op.name),
+                format!("{:.3}", op.rtt_percentile(50.0)),
+            );
+            g(
+                &mut s,
+                "queen_batch_rtt_milliseconds",
+                &format!("{{op=\"{}\",quantile=\"0.99\"}}", op.name),
+                format!("{:.3}", op.rtt_percentile(99.0)),
+            );
         }
         // PLAN_KV_TIMERS.md §14.2. Appended LAST, and UNCONDITIONALLY: the block used
         // to be suppressed while the two boot flags were off, so that a broker which
@@ -1337,7 +1748,12 @@ impl Metrics {
         // fleet. NO `tenant` label anywhere here — the per-tenant view of this
         // class is the `sizes` top-N log line (§14.1), because a series keyed by
         // a value the caller chooses is a cardinality the caller chooses.
-        ht(&mut s, "queen_ephemeral_messages_total", "Ephemeral messages by verb", "counter");
+        ht(
+            &mut s,
+            "queen_ephemeral_messages_total",
+            "Ephemeral messages by verb",
+            "counter",
+        );
         for (verb, ctr) in [
             ("pushed", &self.eph_pushed),
             ("popped", &self.eph_popped),
@@ -1358,7 +1774,12 @@ impl Metrics {
         // failing — which is why the label exists at all. On this class a drop is
         // LEGAL (§1.2), and that is exactly why it has to be visible: nothing
         // else in the system will complain about it.
-        ht(&mut s, "queen_ephemeral_dropped_total", "Ephemeral messages dropped, by cause", "counter");
+        ht(
+            &mut s,
+            "queen_ephemeral_dropped_total",
+            "Ephemeral messages dropped, by cause",
+            "counter",
+        );
         for (cause, ctr) in [
             ("bounds", &self.eph_dropped_bounds),
             ("ttl", &self.eph_dropped_ttl),
@@ -1385,14 +1806,54 @@ impl Metrics {
         // On a single-broker cell both stay at 0 for ever and that is the correct
         // reading, not a gap: the rendezvous short-circuits to self (§3.7), so
         // nothing is ever forwarded and nothing ever moves.
-        ht(&mut s, "queen_ephemeral_forwarded_total", "Ephemeral requests relayed to the partition's rendezvous owner", "counter");
-        g(&mut s, "queen_ephemeral_forwarded_total", "", self.eph_forwarded.load(Ordering::Relaxed).to_string());
-        ht(&mut s, "queen_ephemeral_wipes_total", "Ephemeral rings dropped because their partition moved owner", "counter");
-        g(&mut s, "queen_ephemeral_wipes_total", "", self.eph_wipes.load(Ordering::Relaxed).to_string());
-        ht(&mut s, "queen_ephemeral_bytes", "Bytes held by this broker's ephemeral rings", "gauge");
-        g(&mut s, "queen_ephemeral_bytes", "", self.eph_bytes.load(Ordering::Relaxed).to_string());
-        ht(&mut s, "queen_ephemeral_queues", "Ephemeral queues on this broker (declared + live implicit)", "gauge");
-        g(&mut s, "queen_ephemeral_queues", "", self.eph_queues.load(Ordering::Relaxed).to_string());
+        ht(
+            &mut s,
+            "queen_ephemeral_forwarded_total",
+            "Ephemeral requests relayed to the partition's rendezvous owner",
+            "counter",
+        );
+        g(
+            &mut s,
+            "queen_ephemeral_forwarded_total",
+            "",
+            self.eph_forwarded.load(Ordering::Relaxed).to_string(),
+        );
+        ht(
+            &mut s,
+            "queen_ephemeral_wipes_total",
+            "Ephemeral rings dropped because their partition moved owner",
+            "counter",
+        );
+        g(
+            &mut s,
+            "queen_ephemeral_wipes_total",
+            "",
+            self.eph_wipes.load(Ordering::Relaxed).to_string(),
+        );
+        ht(
+            &mut s,
+            "queen_ephemeral_bytes",
+            "Bytes held by this broker's ephemeral rings",
+            "gauge",
+        );
+        g(
+            &mut s,
+            "queen_ephemeral_bytes",
+            "",
+            self.eph_bytes.load(Ordering::Relaxed).to_string(),
+        );
+        ht(
+            &mut s,
+            "queen_ephemeral_queues",
+            "Ephemeral queues on this broker (declared + live implicit)",
+            "gauge",
+        );
+        g(
+            &mut s,
+            "queen_ephemeral_queues",
+            "",
+            self.eph_queues.load(Ordering::Relaxed).to_string(),
+        );
         s
     }
 }
@@ -1458,13 +1919,18 @@ mod kv_timers_tests {
     /// their family name and everything else, every family and label set and value,
     /// still has to match byte for byte.
     fn without_live_process_samples(exposition: &str) -> String {
-        const LIVE: [&str; 2] = ["queen_uptime_seconds", "queen_process_resident_memory_bytes"];
+        const LIVE: [&str; 2] = [
+            "queen_uptime_seconds",
+            "queen_process_resident_memory_bytes",
+        ];
         exposition
             .lines()
-            .map(|line| match LIVE.iter().find(|n| line.starts_with(&format!("{n} "))) {
-                Some(name) => format!("{name} <live sample>"),
-                None => line.to_string(),
-            })
+            .map(
+                |line| match LIVE.iter().find(|n| line.starts_with(&format!("{n} "))) {
+                    Some(name) => format!("{name} <live sample>"),
+                    None => line.to_string(),
+                },
+            )
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -1555,7 +2021,10 @@ mod kv_timers_tests {
         let m = Metrics::new();
         m.kvt.fire_lag("ev\"il\\", 10.0);
         let out = m.prometheus();
-        assert!(out.contains(r#"tenant="ev\"il\\""#), "unescaped label: {out}");
+        assert!(
+            out.contains(r#"tenant="ev\"il\\""#),
+            "unescaped label: {out}"
+        );
     }
 
     /// The cap DENIES, it does not evict (§9.4 correction 2). Under an attacker-chosen
@@ -1582,9 +2051,24 @@ mod kv_timers_tests {
     fn usage_top_ranks_by_quota_pressure_then_size() {
         let m = Metrics::new();
         m.kvt.set_usage(vec![
-            TenantUsage { tenant: "huge-but-fine".into(), kv_rows: 1_000_000, kv_quota_ratio: 0.1, ..Default::default() },
-            TenantUsage { tenant: "small-but-full".into(), kv_rows: 900, kv_quota_ratio: 0.95, ..Default::default() },
-            TenantUsage { tenant: "timers-full".into(), timers_pending: 990, timers_quota_ratio: 0.99, ..Default::default() },
+            TenantUsage {
+                tenant: "huge-but-fine".into(),
+                kv_rows: 1_000_000,
+                kv_quota_ratio: 0.1,
+                ..Default::default()
+            },
+            TenantUsage {
+                tenant: "small-but-full".into(),
+                kv_rows: 900,
+                kv_quota_ratio: 0.95,
+                ..Default::default()
+            },
+            TenantUsage {
+                tenant: "timers-full".into(),
+                timers_pending: 990,
+                timers_quota_ratio: 0.99,
+                ..Default::default()
+            },
         ]);
         let (top, total) = m.kvt.usage_top(2);
         assert_eq!(total, 3);

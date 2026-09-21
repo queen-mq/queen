@@ -287,7 +287,10 @@ impl QueueOptions {
             c.retry_limit = v.min(1_000);
         }
         if let Some(v) = self.window {
-            c.window = Window { ms: v.ms.min(60_000), count: v.count.min(10_000) };
+            c.window = Window {
+                ms: v.ms.min(60_000),
+                count: v.count.min(10_000),
+            };
         }
         c
     }
@@ -313,7 +316,10 @@ pub struct Budget {
 
 impl Budget {
     pub fn new(cap: i64) -> Budget {
-        Budget { used: AtomicI64::new(0), cap: AtomicI64::new(cap) }
+        Budget {
+            used: AtomicI64::new(0),
+            cap: AtomicI64::new(cap),
+        }
     }
 
     /// Reserve `n`. False (and nothing charged) when it would cross the cap.
@@ -346,9 +352,11 @@ impl Budget {
         if n <= 0 {
             return;
         }
-        let _ = self.used.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-            Some((cur - n).max(0))
-        });
+        let _ = self
+            .used
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                Some((cur - n).max(0))
+            });
     }
 
     #[inline]
@@ -408,7 +416,10 @@ pub enum Route {
 /// per node and the key is walked once per candidate, and — unlike
 /// `hash(node ++ key)` — no concatenation buffer is allocated per candidate.
 pub fn hrw_score(node: &str, key: &str) -> u64 {
-    xxhash_rust::xxh3::xxh3_64_with_seed(key.as_bytes(), xxhash_rust::xxh3::xxh3_64(node.as_bytes()))
+    xxhash_rust::xxh3::xxh3_64_with_seed(
+        key.as_bytes(),
+        xxhash_rust::xxh3::xxh3_64(node.as_bytes()),
+    )
 }
 
 /// The winner of `key` among `nodes`. `None` only on an empty candidate set,
@@ -709,9 +720,7 @@ impl Ring {
                 .min();
             floor = floor.min(g.low_water(leased));
         }
-        while let Some((seq, bytes)) =
-            self.deque.front().map(|m| (m.seq, m.payload.len() as i64))
-        {
+        while let Some((seq, bytes)) = self.deque.front().map(|m| (m.seq, m.payload.len() as i64)) {
             if seq >= floor {
                 break;
             }
@@ -740,7 +749,9 @@ impl Ring {
             .map(|(k, _)| *k)
             .collect();
         for k in due {
-            let Some(rec) = self.leases.remove(&k) else { continue };
+            let Some(rec) = self.leases.remove(&k) else {
+                continue;
+            };
             self.lease_at.remove(&(rec.gix, rec.seq));
             let limit = retry_limit;
             let g = &mut self.groups[rec.gix as usize];
@@ -909,11 +920,7 @@ impl EqQueue {
     }
 
     /// Get-or-create. `base` is called ONLY on the create path.
-    fn ring_or_create(
-        &self,
-        partition: &str,
-        base: impl FnOnce() -> u64,
-    ) -> Arc<Mutex<Ring>> {
+    fn ring_or_create(&self, partition: &str, base: impl FnOnce() -> u64) -> Arc<Mutex<Ring>> {
         if let Some(r) = self.ring(partition) {
             return r;
         }
@@ -993,7 +1000,10 @@ struct RateBucket {
 
 impl RateBucket {
     fn new(burst: u32) -> RateBucket {
-        RateBucket { tokens: burst as f64, last_ms: crate::util::now_epoch_ms() }
+        RateBucket {
+            tokens: burst as f64,
+            last_ms: crate::util::now_epoch_ms(),
+        }
     }
 
     /// Spend `n` tokens, refilling first. `Retry-After` is never zero: it reads
@@ -1304,7 +1314,8 @@ impl Ephemeral {
     /// with large numbers costs nothing.
     fn next_ring_base(&self) -> u64 {
         const RING_SEQ_STRIDE: u64 = 1 << 28;
-        self.ring_seq_base.fetch_add(RING_SEQ_STRIDE, Ordering::Relaxed)
+        self.ring_seq_base
+            .fetch_add(RING_SEQ_STRIDE, Ordering::Relaxed)
     }
 
     fn hint(&self, delay_ms: i64) {
@@ -1410,11 +1421,16 @@ impl Ephemeral {
     pub fn gate_grant(&self, tenant: &str) -> crate::quota::Verdict {
         use crate::quota::Verdict;
         let seen = self.with_tenant(tenant, |t| {
-            (t.granted.load(Ordering::Relaxed), t.enabled.load(Ordering::Relaxed))
+            (
+                t.granted.load(Ordering::Relaxed),
+                t.enabled.load(Ordering::Relaxed),
+            )
         });
         // The map is full and this tenant is new: a CELL condition, not the
         // tenant's doing, so it takes the cell's status (503) and not a 403.
-        let Some((granted, enabled)) = seen else { return Verdict::NoRoom };
+        let Some((granted, enabled)) = seen else {
+            return Verdict::NoRoom;
+        };
         if self.knobs.require_grant && !granted {
             return Verdict::NotGranted;
         }
@@ -1464,7 +1480,9 @@ impl Ephemeral {
     /// the queue here is what makes a declared queue exist "as configured but
     /// empty" across a restart (§1.2).
     pub fn set_config(&self, tenant: &str, name: &str, opts: QueueOptions, declared: bool) {
-        let Some(q) = self.lookup(tenant, name, true) else { return };
+        let Some(q) = self.lookup(tenant, name, true) else {
+            return;
+        };
         let base = QueueConfig::from_knobs(&self.knobs);
         let cfg = opts.apply(base, &self.knobs);
         *q.config.lock().unwrap() = cfg;
@@ -1537,7 +1555,10 @@ impl Ephemeral {
             None => Route::Local,
             Some((server_id, http_addr)) => {
                 self.wipe_ring(tenant, name, partition);
-                Route::Remote { server_id, http_addr }
+                Route::Remote {
+                    server_id,
+                    http_addr,
+                }
             }
         }
     }
@@ -1636,7 +1657,9 @@ impl Ephemeral {
     /// partitions lock for the whole of somebody else's append, on this class,
     /// would be paying a convoy to protect data that is allowed to disappear.
     fn wipe_ring(&self, tenant: &str, name: &str, partition: &str) -> bool {
-        let Some(q) = self.lookup(tenant, name, false) else { return false };
+        let Some(q) = self.lookup(tenant, name, false) else {
+            return false;
+        };
         let ring = q.partitions.lock().unwrap().remove(partition);
         let Some(ring) = ring else { return false };
         let freed = ring.lock().unwrap().wipe();
@@ -1658,7 +1681,9 @@ impl Ephemeral {
     pub fn reap_foreign(&self) -> u64 {
         // ONE membership snapshot for the whole pass (see `owner_in`), and the
         // no-mesh short-circuit in the same line.
-        let Some(cands) = self.candidates() else { return 0 };
+        let Some(cands) = self.candidates() else {
+            return 0;
+        };
         let snapshot: Vec<(String, Arc<EqQueue>)> = self
             .queues
             .lock()
@@ -1709,7 +1734,9 @@ impl Ephemeral {
         if payloads.is_empty() {
             return Ok(0);
         }
-        let Some(q) = self.lookup(tenant, name, true) else { return Err(Refusal::NoRoom) };
+        let Some(q) = self.lookup(tenant, name, true) else {
+            return Err(Refusal::NoRoom);
+        };
         let cfg = *q.config.lock().unwrap();
         let ring = q.ring_or_create(partition, || self.next_ring_base());
         q.touch(now_ms);
@@ -1726,8 +1753,11 @@ impl Ephemeral {
             let mut r = ring.lock().unwrap();
             let sweep = r.sweep_leases(now_ms, cfg.retry_limit);
             if sweep.exhausted > 0 {
-                self.metrics.eph_dropped_retry.fetch_add(sweep.exhausted, Ordering::Relaxed);
-                q.dropped_retry.fetch_add(sweep.exhausted, Ordering::Relaxed);
+                self.metrics
+                    .eph_dropped_retry
+                    .fetch_add(sweep.exhausted, Ordering::Relaxed);
+                q.dropped_retry
+                    .fetch_add(sweep.exhausted, Ordering::Relaxed);
             }
             freed.merge(r.drop_expired(now_ms, cfg.ttl_ms));
             freed.merge(r.trim_consumed());
@@ -1765,11 +1795,19 @@ impl Ephemeral {
                     r.head_seq = seq;
                 }
                 r.bytes += p.len() as i64;
-                r.deque.push_back(Msg { seq, payload: p, enqueued_ms: now_ms });
+                r.deque.push_back(Msg {
+                    seq,
+                    payload: p,
+                    enqueued_ms: now_ms,
+                });
             }
         }
-        self.metrics.eph_pushed.fetch_add(count as u64, Ordering::Relaxed);
-        self.metrics.eph_bytes.store(self.global.used(), Ordering::Relaxed);
+        self.metrics
+            .eph_pushed
+            .fetch_add(count as u64, Ordering::Relaxed);
+        self.metrics
+            .eph_bytes
+            .store(self.global.used(), Ordering::Relaxed);
         // A ttl'd queue nobody polls still has to shed: the sweeper is what
         // runs the drop, and this is how it learns there is anything to run for.
         if cfg.ttl_ms > 0 {
@@ -1836,14 +1874,20 @@ impl Ephemeral {
         let _ = self.with_tenant(tenant, |t| t.bytes.refund(f.bytes));
         self.global.refund(f.bytes);
         if f.by_ttl > 0 {
-            self.metrics.eph_dropped_ttl.fetch_add(f.by_ttl, Ordering::Relaxed);
+            self.metrics
+                .eph_dropped_ttl
+                .fetch_add(f.by_ttl, Ordering::Relaxed);
             q.dropped_ttl.fetch_add(f.by_ttl, Ordering::Relaxed);
         }
         if f.by_bounds > 0 {
-            self.metrics.eph_dropped_bounds.fetch_add(f.by_bounds, Ordering::Relaxed);
+            self.metrics
+                .eph_dropped_bounds
+                .fetch_add(f.by_bounds, Ordering::Relaxed);
             q.dropped_bounds.fetch_add(f.by_bounds, Ordering::Relaxed);
         }
-        self.metrics.eph_bytes.store(self.global.used(), Ordering::Relaxed);
+        self.metrics
+            .eph_bytes
+            .store(self.global.used(), Ordering::Relaxed);
     }
 
     // ----------------------------------------------------------------- pop
@@ -1872,7 +1916,9 @@ impl Ephemeral {
         // Auto-vivify on pop too (§1.1): a consumer that parks on its inbox
         // before the producer's first push is the NORMAL req/reply order, and
         // a pop that created nothing would have no gate for the push to wake.
-        let Some(q) = self.lookup(tenant, name, true) else { return out };
+        let Some(q) = self.lookup(tenant, name, true) else {
+            return out;
+        };
         let cfg = *q.config.lock().unwrap();
         let group = group.filter(|g| !g.is_empty()).unwrap_or(QUEUE_MODE);
         q.touch(now_ms);
@@ -1906,8 +1952,11 @@ impl Ephemeral {
                 let mut r = ring.lock().unwrap();
                 let sweep = r.sweep_leases(now_ms, cfg.retry_limit);
                 if sweep.exhausted > 0 {
-                    self.metrics.eph_dropped_retry.fetch_add(sweep.exhausted, Ordering::Relaxed);
-                    q.dropped_retry.fetch_add(sweep.exhausted, Ordering::Relaxed);
+                    self.metrics
+                        .eph_dropped_retry
+                        .fetch_add(sweep.exhausted, Ordering::Relaxed);
+                    q.dropped_retry
+                        .fetch_add(sweep.exhausted, Ordering::Relaxed);
                 }
                 freed.merge(r.drop_expired(now_ms, cfg.ttl_ms));
 
@@ -1930,7 +1979,9 @@ impl Ephemeral {
             self.release(tenant, &q, &freed);
         }
         if !out.is_empty() {
-            self.metrics.eph_popped.fetch_add(out.len() as u64, Ordering::Relaxed);
+            self.metrics
+                .eph_popped
+                .fetch_add(out.len() as u64, Ordering::Relaxed);
         }
         // The lease-expiry backstop only has to be woken when a lease was
         // actually created; a pure autoAck workload never rings it.
@@ -2090,7 +2141,9 @@ impl Ephemeral {
             self.metrics.eph_acked.fetch_add(acked, Ordering::Relaxed);
         }
         if exhausted > 0 {
-            self.metrics.eph_dropped_retry.fetch_add(exhausted, Ordering::Relaxed);
+            self.metrics
+                .eph_dropped_retry
+                .fetch_add(exhausted, Ordering::Relaxed);
             q.dropped_retry.fetch_add(exhausted, Ordering::Relaxed);
         }
         out
@@ -2157,7 +2210,9 @@ impl Ephemeral {
         // Counted once per PASS and not once per ring, so the counter and the
         // sweeper's log line agree on what one pass did.
         if out.exhausted > 0 {
-            self.metrics.eph_dropped_retry.fetch_add(out.exhausted, Ordering::Relaxed);
+            self.metrics
+                .eph_dropped_retry
+                .fetch_add(out.exhausted, Ordering::Relaxed);
         }
         out.gc_queues = self.gc_implicit(now_ms);
         if let Some(d) = out.next_expiry_ms {
@@ -2203,9 +2258,11 @@ impl Ephemeral {
             // per-tenant queue COUNT is what has to come down.
             let (tenant, _) = crate::handlers::split_tenant_queue(k);
             let _ = self.with_tenant(tenant, |t| {
-                let _ = t.queues.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                    Some((n - 1).max(0))
-                });
+                let _ = t
+                    .queues
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                        Some((n - 1).max(0))
+                    });
             });
             debug_assert_eq!(q.bytes.used(), 0);
         }
@@ -2225,7 +2282,8 @@ impl Ephemeral {
     /// will answer a peer's cheap depth probe from.
     #[allow(dead_code)]
     pub fn depth(&self, tenant: &str, name: &str) -> Option<(i64, i64)> {
-        self.lookup(tenant, name, false).map(|q| (q.length.used(), q.bytes.used()))
+        self.lookup(tenant, name, false)
+            .map(|q| (q.length.used(), q.bytes.used()))
     }
 
     /// Per-partition, per-group backlog for `GET .../:queue/depth` (§3.1).
@@ -2256,7 +2314,11 @@ impl Ephemeral {
         }
         parts.sort_by(|a, b| a.partition.cmp(&b.partition));
         for (name, (pending, skipped)) in seen_groups {
-            groups.push(GroupDepth { group: name, pending, skipped });
+            groups.push(GroupDepth {
+                group: name,
+                pending,
+                skipped,
+            });
         }
         groups.sort_by(|a, b| a.group.cmp(&b.group));
         Some(Depth {
@@ -2342,7 +2404,9 @@ impl Ephemeral {
     /// declared config row — is dropped by the handler through `db.rs`; this is
     /// only the RAM half.
     pub fn remove(&self, tenant: &str, name: &str) -> bool {
-        let Some(dropped) = self.reset(tenant, name) else { return false };
+        let Some(dropped) = self.reset(tenant, name) else {
+            return false;
+        };
         let _ = dropped;
         let key = Self::qkey(tenant, name);
         let gone = {
@@ -2355,9 +2419,11 @@ impl Ephemeral {
         };
         if gone {
             let _ = self.with_tenant(tenant, |t| {
-                let _ = t.queues.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                    Some((n - 1).max(0))
-                });
+                let _ = t
+                    .queues
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                        Some((n - 1).max(0))
+                    });
             });
         }
         gone
@@ -2384,7 +2450,11 @@ impl Ephemeral {
     /// here and is re-vivified by the next refresh. It costs a declared-but-empty
     /// queue its config for one interval — never a message, because a queue that
     /// was declared moments ago has none.
-    pub fn drop_undeclared(&self, tenant: &str, present: &std::collections::HashSet<String>) -> u64 {
+    pub fn drop_undeclared(
+        &self,
+        tenant: &str,
+        present: &std::collections::HashSet<String>,
+    ) -> u64 {
         let prefix = crate::handlers::tenant_queue_key(tenant, EPH_PREFIX);
         let doomed: Vec<String> = self
             .queues
@@ -2462,9 +2532,12 @@ impl Ephemeral {
             e.granted.store(true, Ordering::Relaxed);
             e.enabled.store(r.enabled, Ordering::Relaxed);
             e.bytes.set_cap(r.max_bytes.unwrap_or(0).max(0));
-            e.queues_cap.store(r.max_queues.unwrap_or(0).max(0), Ordering::Relaxed);
-            e.rate_per_s
-                .store(r.max_msgs_per_sec.unwrap_or(0).clamp(0, u32::MAX as i64) as u32, Ordering::Relaxed);
+            e.queues_cap
+                .store(r.max_queues.unwrap_or(0).max(0), Ordering::Relaxed);
+            e.rate_per_s.store(
+                r.max_msgs_per_sec.unwrap_or(0).clamp(0, u32::MAX as i64) as u32,
+                Ordering::Relaxed,
+            );
         }
     }
 
@@ -2513,15 +2586,18 @@ impl Ephemeral {
     /// own suite pins the per-partition attribution, which a sum cannot show.
     #[allow(dead_code)]
     pub fn skipped(&self, tenant: &str, name: &str, partition: &str, group: &str) -> u64 {
-        let Some(q) = self.lookup(tenant, name, false) else { return 0 };
-        let Some(ring) = q.ring(partition) else { return 0 };
+        let Some(q) = self.lookup(tenant, name, false) else {
+            return 0;
+        };
+        let Some(ring) = q.ring(partition) else {
+            return 0;
+        };
         let r = ring.lock().unwrap();
         match r.gix.get(group) {
             Some(&i) => r.groups[i as usize].skipped,
             None => 0,
         }
     }
-
 }
 
 // ===========================================================================
@@ -2572,7 +2648,9 @@ fn parse_grants(txt: &str) -> Vec<Grant> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(txt) else {
         return Vec::new();
     };
-    let Some(arr) = v.as_array() else { return Vec::new() };
+    let Some(arr) = v.as_array() else {
+        return Vec::new();
+    };
     arr.iter()
         .filter_map(|t| {
             let num = |k: &str| t.get(k).and_then(|x| x.as_i64()).filter(|n| *n > 0);
@@ -2606,7 +2684,10 @@ fn parse_options(v: &serde_json::Value) -> QueueOptions {
     o.ttl_ms = g("ttlSeconds").map(|s| s.saturating_mul(1000));
     o.lease_ms = g("leaseSeconds").map(|s| s.saturating_mul(1000));
     o.retry_limit = g("retryLimit").map(|n| n.clamp(0, u32::MAX as i64) as u32);
-    o.policy = v.get("policy").and_then(|x| x.as_str()).and_then(Policy::parse);
+    o.policy = v
+        .get("policy")
+        .and_then(|x| x.as_str())
+        .and_then(Policy::parse);
     o.window = v.get("windowBuffer").and_then(|w| {
         let ms = w.get("ms").and_then(|x| x.as_u64()).unwrap_or(0);
         let count = w.get("count").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
@@ -2665,7 +2746,9 @@ pub async fn refresh_once(
             // casts) would otherwise cost every OTHER tenant its configuration.
             Err(e) => return Err(e.to_string()),
         };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else {
+            continue;
+        };
         let Some(arr) = v.as_array() else { continue };
         // §10 Q4 — the row set, for the ghost backstop below. Built from the
         // SAME read that applies the configs, so the two can never disagree
@@ -2673,7 +2756,9 @@ pub async fn refresh_once(
         let mut present: std::collections::HashSet<String> =
             std::collections::HashSet::with_capacity(arr.len());
         for row in arr {
-            let Some(queue) = row.get("queue").and_then(|x| x.as_str()) else { continue };
+            let Some(queue) = row.get("queue").and_then(|x| x.as_str()) else {
+                continue;
+            };
             let opts = row.get("options").map(parse_options).unwrap_or_default();
             // `declared = true` vivifies the queue EMPTY (§1.2): the
             // configuration is what survives a restart, never the contents.

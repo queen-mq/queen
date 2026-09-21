@@ -47,8 +47,8 @@ fn manifest(rel: &str) -> PathBuf {
 }
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = std::fs::read_dir(dir)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -64,7 +64,11 @@ fn handlers_never_name_the_feature_tables() {
     let dir = manifest("src/handlers");
     let mut files = Vec::new();
     rust_files(&dir, &mut files);
-    assert!(!files.is_empty(), "no handler sources found under {}", dir.display());
+    assert!(
+        !files.is_empty(),
+        "no handler sources found under {}",
+        dir.display()
+    );
 
     let mut offenders = Vec::new();
     for f in &files {

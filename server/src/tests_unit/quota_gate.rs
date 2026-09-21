@@ -50,7 +50,11 @@ fn measure(kv_rows: i64, kv_bytes: i64, timer_rows: i64) -> Measure {
 #[test]
 fn reads_are_allowed_over_quota() {
     let q = Quotas::for_test(TestKnobs::default());
-    q.refresh(vec![row(T, Some(limits(Some(10), None, None)), measure(1_000_000, 0, 0))]);
+    q.refresh(vec![row(
+        T,
+        Some(limits(Some(10), None, None)),
+        measure(1_000_000, 0, 0),
+    )]);
     assert_eq!(q.check_kv_read(T), Verdict::Allow);
 }
 
@@ -60,7 +64,11 @@ fn reads_are_allowed_over_quota() {
 #[test]
 fn deletes_are_allowed_over_quota() {
     let q = Quotas::for_test(TestKnobs::default());
-    q.refresh(vec![row(T, Some(limits(Some(10), None, None)), measure(1_000_000, 0, 0))]);
+    q.refresh(vec![row(
+        T,
+        Some(limits(Some(10), None, None)),
+        measure(1_000_000, 0, 0),
+    )]);
     assert_eq!(q.charge_kv_write(T, 0, 0), Verdict::Allow);
 }
 
@@ -71,7 +79,11 @@ fn deletes_are_allowed_over_quota() {
 #[test]
 fn timer_cancels_are_never_blocked() {
     let q = Quotas::for_test(TestKnobs::default());
-    q.refresh(vec![row(T, Some(limits(None, None, Some(1))), measure(0, 0, 500_000))]);
+    q.refresh(vec![row(
+        T,
+        Some(limits(None, None, Some(1))),
+        measure(0, 0, 500_000),
+    )]);
     assert_eq!(q.check_timers_cancel(T), Verdict::Allow);
     // Even for a tenant with no grant at all, on a cell that requires one.
     let strict = Quotas::for_test(TestKnobs {
@@ -95,7 +107,10 @@ fn rows_bytes_and_timers_are_three_separate_verdicts() {
         Some(limits(Some(100), Some(1000), Some(10))),
         measure(100, 0, 0),
     )]);
-    assert_eq!(q.charge_kv_write(T, 1, 0), Verdict::OverQuota(Resource::KvRows));
+    assert_eq!(
+        q.charge_kv_write(T, 1, 0),
+        Verdict::OverQuota(Resource::KvRows)
+    );
 
     let q = Quotas::for_test(TestKnobs::default());
     q.refresh(vec![row(
@@ -103,7 +118,10 @@ fn rows_bytes_and_timers_are_three_separate_verdicts() {
         Some(limits(Some(100), Some(1000), Some(10))),
         measure(0, 1000, 0),
     )]);
-    assert_eq!(q.charge_kv_write(T, 1, 1), Verdict::OverQuota(Resource::KvBytes));
+    assert_eq!(
+        q.charge_kv_write(T, 1, 1),
+        Verdict::OverQuota(Resource::KvBytes)
+    );
 
     let q = Quotas::for_test(TestKnobs::default());
     q.refresh(vec![row(
@@ -163,7 +181,11 @@ fn an_absent_row_denies_when_a_grant_is_required() {
         require_grant: true,
         ..TestKnobs::default()
     });
-    q.refresh(vec![row(OTHER, Some(limits(None, None, None)), measure(0, 0, 0))]);
+    q.refresh(vec![row(
+        OTHER,
+        Some(limits(None, None, None)),
+        measure(0, 0, 0),
+    )]);
     assert_eq!(q.charge_kv_write(T, 1, 10), Verdict::NotGranted);
     assert_eq!(q.charge_timers(T, 1), Verdict::NotGranted);
     // …and the granted tenant next to it is unaffected: NULL is still unlimited.
@@ -237,7 +259,11 @@ fn a_granted_tenant_is_never_refused_for_room() {
         cap: 1,
         ..TestKnobs::default()
     });
-    q.refresh(vec![row(T, Some(limits(None, None, None)), measure(0, 0, 0))]);
+    q.refresh(vec![row(
+        T,
+        Some(limits(None, None, None)),
+        measure(0, 0, 0),
+    )]);
     assert_eq!(q.charge_kv_write("junk-1", 1, 1), Verdict::Allow);
     assert_eq!(q.charge_kv_write("junk-2", 1, 1), Verdict::NoRoom);
     assert_eq!(q.charge_kv_write(T, 1, 1), Verdict::Allow);
@@ -256,18 +282,36 @@ fn the_block_is_immediate_and_the_release_waits_for_the_band() {
         release_percent: 90,
         ..TestKnobs::default()
     });
-    q.refresh(vec![row(T, Some(limits(Some(100), None, None)), measure(99, 0, 0))]);
+    q.refresh(vec![row(
+        T,
+        Some(limits(Some(100), None, None)),
+        measure(99, 0, 0),
+    )]);
     // Local writes carry it over on THIS broker, with no new measurement: the
     // fast half.
     assert_eq!(q.charge_kv_write(T, 1, 0), Verdict::Allow);
-    assert_eq!(q.charge_kv_write(T, 1, 0), Verdict::OverQuota(Resource::KvRows));
+    assert_eq!(
+        q.charge_kv_write(T, 1, 0),
+        Verdict::OverQuota(Resource::KvRows)
+    );
 
     // A measurement that merely dips under the cap does NOT release: 95 > 90.
-    q.refresh(vec![row(T, Some(limits(Some(100), None, None)), measure(95, 0, 0))]);
-    assert_eq!(q.charge_kv_write(T, 1, 0), Verdict::OverQuota(Resource::KvRows));
+    q.refresh(vec![row(
+        T,
+        Some(limits(Some(100), None, None)),
+        measure(95, 0, 0),
+    )]);
+    assert_eq!(
+        q.charge_kv_write(T, 1, 0),
+        Verdict::OverQuota(Resource::KvRows)
+    );
 
     // Under the band, it does.
-    q.refresh(vec![row(T, Some(limits(Some(100), None, None)), measure(89, 0, 0))]);
+    q.refresh(vec![row(
+        T,
+        Some(limits(Some(100), None, None)),
+        measure(89, 0, 0),
+    )]);
     assert_eq!(q.charge_kv_write(T, 1, 0), Verdict::Allow);
 }
 
@@ -277,8 +321,15 @@ fn the_block_is_immediate_and_the_release_waits_for_the_band() {
 #[test]
 fn a_tenant_already_over_at_boot_blocks_on_the_first_pass() {
     let q = Quotas::for_test(TestKnobs::default());
-    q.refresh(vec![row(T, Some(limits(Some(100), None, None)), measure(500, 0, 0))]);
-    assert_eq!(q.charge_kv_write(T, 1, 0), Verdict::OverQuota(Resource::KvRows));
+    q.refresh(vec![row(
+        T,
+        Some(limits(Some(100), None, None)),
+        measure(500, 0, 0),
+    )]);
+    assert_eq!(
+        q.charge_kv_write(T, 1, 0),
+        Verdict::OverQuota(Resource::KvRows)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -293,7 +344,11 @@ fn a_tenant_already_over_at_boot_blocks_on_the_first_pass() {
 #[test]
 fn the_delta_is_an_upper_bound_and_the_refresh_is_what_corrects_it() {
     let q = Quotas::for_test(TestKnobs::default());
-    q.refresh(vec![row(T, Some(limits(Some(1000), None, None)), measure(0, 0, 0))]);
+    q.refresh(vec![row(
+        T,
+        Some(limits(Some(1000), None, None)),
+        measure(0, 0, 0),
+    )]);
     for _ in 0..10 {
         assert_eq!(q.charge_kv_write(T, 1, 100), Verdict::Allow);
     }
@@ -301,7 +356,11 @@ fn the_delta_is_an_upper_bound_and_the_refresh_is_what_corrects_it() {
     // The refresh brings the truth — the ten writes all landed on ONE key — and
     // the delta goes back to zero rather than being adjusted: it counts writes
     // SINCE the measurement, so a newer measurement makes it double counting.
-    q.refresh(vec![row(T, Some(limits(Some(1000), None, None)), measure(1, 100, 0))]);
+    q.refresh(vec![row(
+        T,
+        Some(limits(Some(1000), None, None)),
+        measure(1, 100, 0),
+    )]);
     assert_eq!(q.delta_of(T), (0, 0, 0));
 }
 
@@ -313,7 +372,11 @@ fn the_delta_is_an_upper_bound_and_the_refresh_is_what_corrects_it() {
 #[test]
 fn a_failed_call_refunds_its_charge() {
     let q = Quotas::for_test(TestKnobs::default());
-    q.refresh(vec![row(T, Some(limits(Some(10), None, None)), measure(0, 0, 0))]);
+    q.refresh(vec![row(
+        T,
+        Some(limits(Some(10), None, None)),
+        measure(0, 0, 0),
+    )]);
     assert_eq!(q.charge_kv_write(T, 5, 50), Verdict::Allow);
     q.refund(T, 5, 50, 0);
     assert_eq!(q.delta_of(T), (0, 0, 0));
@@ -341,7 +404,10 @@ fn the_bucket_limits_writes_and_reads_on_separate_budgets() {
     // Two writes fit the burst, the third does not.
     assert_eq!(q.charge_kv_write(T, 1, 1), Verdict::Allow);
     assert_eq!(q.charge_kv_write(T, 1, 1), Verdict::Allow);
-    assert!(matches!(q.charge_kv_write(T, 1, 1), Verdict::RateLimited(_)));
+    assert!(matches!(
+        q.charge_kv_write(T, 1, 1),
+        Verdict::RateLimited(_)
+    ));
     // The read budget is its own: a tenant that exhausted its writes still reads.
     assert_eq!(q.check_kv_read(T), Verdict::Allow);
 }
@@ -375,7 +441,10 @@ fn a_rate_limited_call_is_not_charged_to_the_occupancy_delta() {
     });
     q.refresh(vec![]);
     assert_eq!(q.charge_kv_write(T, 1, 7), Verdict::Allow);
-    assert!(matches!(q.charge_kv_write(T, 1, 7), Verdict::RateLimited(_)));
+    assert!(matches!(
+        q.charge_kv_write(T, 1, 7),
+        Verdict::RateLimited(_)
+    ));
     assert_eq!(q.delta_of(T), (1, 7, 0));
 }
 
@@ -399,7 +468,10 @@ fn a_quota_row_overrides_the_cell_rate_defaults() {
         measure(0, 0, 0),
     )]);
     assert_eq!(q.charge_kv_write(T, 1, 1), Verdict::Allow);
-    assert!(matches!(q.charge_kv_write(T, 1, 1), Verdict::RateLimited(_)));
+    assert!(matches!(
+        q.charge_kv_write(T, 1, 1),
+        Verdict::RateLimited(_)
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -410,12 +482,27 @@ fn a_quota_row_overrides_the_cell_rate_defaults() {
 #[test]
 fn a_tenant_above_the_watermark_makes_the_cell_hot() {
     let q = Quotas::for_test(TestKnobs::default());
-    q.refresh(vec![row(T, Some(limits(Some(100), None, None)), measure(50, 0, 0))]);
+    q.refresh(vec![row(
+        T,
+        Some(limits(Some(100), None, None)),
+        measure(50, 0, 0),
+    )]);
     assert!(!q.hot(), "half full is not hot");
-    q.refresh(vec![row(T, Some(limits(Some(100), None, None)), measure(81, 0, 0))]);
-    assert!(q.hot(), "81% of a soft quota is already late — that is the point");
+    q.refresh(vec![row(
+        T,
+        Some(limits(Some(100), None, None)),
+        measure(81, 0, 0),
+    )]);
+    assert!(
+        q.hot(),
+        "81% of a soft quota is already late — that is the point"
+    );
     // Unlimited is never hot: no quota, no ratio, and no division by zero.
-    q.refresh(vec![row(T, Some(limits(None, None, None)), measure(10_000_000, 0, 0))]);
+    q.refresh(vec![row(
+        T,
+        Some(limits(None, None, None)),
+        measure(10_000_000, 0, 0),
+    )]);
     assert!(!q.hot());
 }
 

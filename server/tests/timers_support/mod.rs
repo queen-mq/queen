@@ -490,7 +490,13 @@ pub async fn dlq(
 /// A schedule op. `_messageId` is the server-injected id (see the CONTRACT block): the
 /// client-spellable `messageId` is a RAISE 22023 and is only ever built by the tests that
 /// assert that rejection.
-pub fn schedule_op(queue: &str, key: &str, partition: &str, delay_ms: i64, txn: &str) -> serde_json::Value {
+pub fn schedule_op(
+    queue: &str,
+    key: &str,
+    partition: &str,
+    delay_ms: i64,
+    txn: &str,
+) -> serde_json::Value {
     serde_json::json!({
         "op": "schedule",
         "queue": queue,
@@ -647,7 +653,13 @@ pub async fn peek(c: &Client, tenant: &str, queue: &str, key: &str) -> serde_jso
 /// tenant-wide list, because that would be a scan an end user of the customer could
 /// trigger). DERIVED signature:
 /// `(p_tenant UUID, p_queue TEXT, p_after TEXT, p_limit INT) RETURNS JSONB {rows: [...]}`.
-pub async fn list(c: &Client, tenant: &str, queue: &str, after: Option<&str>, limit: i32) -> serde_json::Value {
+pub async fn list(
+    c: &Client,
+    tenant: &str,
+    queue: &str,
+    after: Option<&str>,
+    limit: i32,
+) -> serde_json::Value {
     let row = c
         .query_one(
             "SELECT (queen.log_timers_list_v1($1::text::uuid, $2, $3, $4::int))::text",

@@ -311,7 +311,10 @@ mod hotlist_repair_memory {
     fn a_new_timestamp_or_a_widened_scope_is_a_new_repair() {
         let mut seen = AppliedRepairs::default();
         assert!(pass(&mut seen, &v("2026-08-12 10:00:00+00", Some("p1"))));
-        assert!(pass(&mut seen, &v("2026-08-12 10:00:05+00", Some("p1"))), "seeked again");
+        assert!(
+            pass(&mut seen, &v("2026-08-12 10:00:05+00", Some("p1"))),
+            "seeked again"
+        );
         assert!(
             pass(&mut seen, &v("2026-08-12 10:00:05+00", None)),
             "same instant, wider scope — still something new to do"
@@ -340,6 +343,9 @@ mod hotlist_repair_memory {
         let row = v("2026-08-12 10:00:00+00", None);
         assert!(pass(&mut seen, &row));
         seen.replace(HashMap::new()); // the publisher pruned it
-        assert!(seen.is_new(KEY, &row), "nothing remembered, so nothing suppressed");
+        assert!(
+            seen.is_new(KEY, &row),
+            "nothing remembered, so nothing suppressed"
+        );
     }
 }

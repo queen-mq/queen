@@ -52,7 +52,11 @@ async fn the_declared_timer_semantics() {
     )
     .await
     .expect("schedule");
-    assert_eq!(op_status(&r, 0), (true, "scheduled".to_string()), "a new name inserts");
+    assert_eq!(
+        op_status(&r, 0),
+        (true, "scheduled".to_string()),
+        "a new name inserts"
+    );
 
     let d = due(c, 0.0, 2000).await;
     assert_eq!(d["due"].as_i64(), Some(0), "nothing is due yet: {d}");
@@ -129,9 +133,20 @@ async fn the_declared_timer_semantics() {
     seed(c, &Seed::new(t, &q_ord, &gamma).delay_s(-1.0)).await;
     assert_eq!(claim(c, 0.0, LEASE_MS, 100, 100).await, vec![gamma.clone()]);
     let tok = token_of(c, t, &q_ord, &gamma).await;
-    fail(c, t, &q_ord, &gamma, &tok, 2_000, "08006 transient", false, 5, 0.0)
-        .await
-        .expect("backoff");
+    fail(
+        c,
+        t,
+        &q_ord,
+        &gamma,
+        &tok,
+        2_000,
+        "08006 transient",
+        false,
+        5,
+        0.0,
+    )
+    .await
+    .expect("backoff");
 
     // alpha is scheduled next but due last; beta is scheduled last and due first.
     apply(
@@ -212,7 +227,15 @@ async fn the_declared_timer_semantics() {
         let k_t = unique("k-tenant");
         let mut op = schedule_op(&q_in, &k_t, "Default", 60_000, "txn-tenant");
         op[field] = serde_json::json!(TENANT_B);
-        match apply(c, &serde_json::json!([op]), TENANT_A, Some("scheduler"), 0.0).await {
+        match apply(
+            c,
+            &serde_json::json!([op]),
+            TENANT_A,
+            Some("scheduler"),
+            0.0,
+        )
+        .await
+        {
             Ok(v) => panic!("'{field}' inside an op must raise 22023, got a verdict: {v}"),
             Err(e) => assert_eq!(
                 sqlstate(&e),
@@ -248,9 +271,15 @@ async fn an_absolute_deliver_at_is_not_on_the_wire(c: &tokio_postgres::Client) {
     let mut op = schedule_op(&q, &k, "Default", 60_000, "txn-absolute");
     op.as_object_mut().unwrap().remove("delayMs");
     op["deliverAt"] = serde_json::json!("2030-01-01T00:00:00Z");
-    let e = apply(c, &serde_json::json!([op]), TENANT_DEFAULT, Some("scheduler"), 0.0)
-        .await
-        .expect_err("an absolute instant is not expressible on this wire");
+    let e = apply(
+        c,
+        &serde_json::json!([op]),
+        TENANT_DEFAULT,
+        Some("scheduler"),
+        0.0,
+    )
+    .await
+    .expect_err("an absolute instant is not expressible on this wire");
     assert_eq!(
         sqlstate(&e),
         "22023",

@@ -362,7 +362,11 @@ impl FileBufferManager {
                 finalize_path(&old.path);
             }
             let path = self.new_tmp_path();
-            match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
                 Ok(file) => {
                     *guard = Some(Active {
                         file,
@@ -389,7 +393,11 @@ impl FileBufferManager {
         }
         let a = guard.as_mut().unwrap();
         let len = (body.len() as u32).to_le_bytes();
-        if a.file.write_all(&len).and_then(|_| a.file.write_all(&body)).is_err() {
+        if a.file
+            .write_all(&len)
+            .and_then(|_| a.file.write_all(&body))
+            .is_err()
+        {
             self.failed.fetch_add(1, Ordering::Relaxed);
             return false;
         }
@@ -495,7 +503,10 @@ impl FileBufferManager {
             match self.drain_file(pool, &f).await {
                 Ok(n) => {
                     let _ = std::fs::remove_file(&f);
-                    self.pending.fetch_sub(n.min(self.pending.load(Ordering::Relaxed)), Ordering::Relaxed);
+                    self.pending.fetch_sub(
+                        n.min(self.pending.load(Ordering::Relaxed)),
+                        Ordering::Relaxed,
+                    );
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -542,7 +553,10 @@ impl FileBufferManager {
             match self.drain_file(pool, &f).await {
                 Ok(n) => {
                     let _ = std::fs::remove_file(&f);
-                    self.pending.fetch_sub(n.min(self.pending.load(Ordering::Relaxed)), Ordering::Relaxed);
+                    self.pending.fetch_sub(
+                        n.min(self.pending.load(Ordering::Relaxed)),
+                        Ordering::Relaxed,
+                    );
                     self.db_healthy.store(true, Ordering::Relaxed);
                     self.consecutive_failures.store(0, Ordering::Relaxed);
                     self.clear_poison(); // made progress on the FIFO head
@@ -684,9 +698,18 @@ impl FileBufferManager {
             .get()
             .await
             .map_err(|e| DrainErr::Transient(format!("pool: {e}")))?;
-        db::log_push_multi(&client, &queues, &partitions, &counts, &hashes, &verified, &blobs, &tenants)
-            .await
-            .map_err(|e| classify_push_error(&e))?;
+        db::log_push_multi(
+            &client,
+            &queues,
+            &partitions,
+            &counts,
+            &hashes,
+            &verified,
+            &blobs,
+            &tenants,
+        )
+        .await
+        .map_err(|e| classify_push_error(&e))?;
         if let Some(sl) = slot.as_mut() {
             sl.commit_done(t0.elapsed());
         }
@@ -701,7 +724,11 @@ impl FileBufferManager {
                 .iter()
                 .zip(&counts)
                 .map(|((t, q, p), n)| {
-                    (crate::handlers::tenant_queue_key(t, q), p.clone(), (*n).max(0) as u32)
+                    (
+                        crate::handlers::tenant_queue_key(t, q),
+                        p.clone(),
+                        (*n).max(0) as u32,
+                    )
                 })
                 .collect();
             a.landed(&landed);
@@ -794,7 +821,9 @@ pub fn spawn_drain(manager: std::sync::Arc<FileBufferManager>, pool: Pool) {
         loop {
             let start = Instant::now();
             manager.drain_cycle(&pool).await;
-            let sleep = interval.checked_sub(start.elapsed()).unwrap_or(Duration::ZERO);
+            let sleep = interval
+                .checked_sub(start.elapsed())
+                .unwrap_or(Duration::ZERO);
             tokio::time::sleep(sleep).await;
         }
     });

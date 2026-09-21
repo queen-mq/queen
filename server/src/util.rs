@@ -44,7 +44,13 @@ pub fn now_epoch_ms() -> i64 {
 // on any shape mismatch — lag is best-effort instrumentation, never an error.
 pub fn parse_iso_ms(s: &str) -> Option<i64> {
     let b = s.as_bytes();
-    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' {
+    if b.len() < 19
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+    {
         return None;
     }
     let num = |r: std::ops::Range<usize>| -> Option<i64> { s.get(r)?.parse::<i64>().ok() };
@@ -135,15 +141,15 @@ mod tests {
         assert_eq!(
             txn_hash128(""),
             [
-                0x99, 0xaa, 0x06, 0xd3, 0x01, 0x47, 0x98, 0xd8, 0x60, 0x01, 0xc3, 0x24, 0x46,
-                0x8d, 0x49, 0x7f
+                0x99, 0xaa, 0x06, 0xd3, 0x01, 0x47, 0x98, 0xd8, 0x60, 0x01, 0xc3, 0x24, 0x46, 0x8d,
+                0x49, 0x7f
             ]
         );
         assert_eq!(
             txn_hash128("txn-0001"),
             [
-                0xe6, 0xdb, 0x1a, 0x37, 0x61, 0x71, 0xf0, 0x85, 0x29, 0x9a, 0x00, 0x09, 0x43,
-                0x06, 0x5f, 0x9c
+                0xe6, 0xdb, 0x1a, 0x37, 0x61, 0x71, 0xf0, 0x85, 0x29, 0x9a, 0x00, 0x09, 0x43, 0x06,
+                0x5f, 0x9c
             ]
         );
     }

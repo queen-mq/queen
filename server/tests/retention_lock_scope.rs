@@ -120,7 +120,10 @@ async fn drain(
         if done || deleted == 0 {
             return (deleted_total, dones);
         }
-        assert!(dones.len() < max_calls, "step loop made no bounded progress: {dones:?}");
+        assert!(
+            dones.len() < max_calls,
+            "step loop made no bounded progress: {dones:?}"
+        );
     }
 }
 
@@ -209,8 +212,10 @@ fn buffers_of(plan: &str) -> i64 {
     for line in plan.lines() {
         for key in ["hit=", "read="] {
             if let Some(pos) = line.find(key) {
-                let digits: String =
-                    line[pos + key.len()..].chars().take_while(|c| c.is_ascii_digit()).collect();
+                let digits: String = line[pos + key.len()..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
                 total += digits.parse::<i64>().unwrap_or(0);
             }
         }
@@ -245,7 +250,9 @@ async fn timed_out_or_cancelled_cycle_frees_the_belt_lock() {
     // SESSION flavor of their belt locks — the mixed-fleet exclusion doing its
     // job (an old-image pod's session lock must gate the new xact takes).
     for id in [737_001i64, 737_002, 737_003] {
-        c.execute("SELECT pg_advisory_lock($1)", &[&id]).await.expect("freeze lock");
+        c.execute("SELECT pg_advisory_lock($1)", &[&id])
+            .await
+            .expect("freeze lock");
     }
 
     // A deadpool pool with the broker's own shapes (deadpool_postgres is the
@@ -258,7 +265,10 @@ async fn timed_out_or_cancelled_cycle_frees_the_belt_lock() {
     dp.dbname = Some("postgres".into());
     dp.pool = Some(deadpool_postgres::PoolConfig::new(4));
     let pool = dp
-        .create_pool(Some(deadpool_postgres::Runtime::Tokio1), tokio_postgres::NoTls)
+        .create_pool(
+            Some(deadpool_postgres::Runtime::Tokio1),
+            tokio_postgres::NoTls,
+        )
         .expect("pool");
 
     let c2 = raw_connect(&host, port).await;
@@ -271,16 +281,24 @@ async fn timed_out_or_cancelled_cycle_frees_the_belt_lock() {
     {
         let mut lc = pool.get().await.expect("get");
         let tx = lc.transaction().await.expect("tx");
-        tx.batch_execute("SET LOCAL statement_timeout = 100").await.expect("set local");
+        tx.batch_execute("SET LOCAL statement_timeout = 100")
+            .await
+            .expect("set local");
         let got: bool = tx
             .query_one("SELECT pg_try_advisory_xact_lock($1)", &[&LOCK_A])
             .await
             .expect("xact take")
             .get(0);
         assert!(got, "scratch lock unexpectedly busy");
-        assert!(!try_session_lock(&c2, LOCK_A).await, "xact lock must gate the session take");
+        assert!(
+            !try_session_lock(&c2, LOCK_A).await,
+            "xact lock must gate the session take"
+        );
         let err = tx.batch_execute("SELECT pg_sleep(2)").await;
-        assert!(err.is_err(), "the 100ms statement_timeout must kill pg_sleep(2)");
+        assert!(
+            err.is_err(),
+            "the 100ms statement_timeout must kill pg_sleep(2)"
+        );
         let _ = tx.rollback().await;
         drop(lc);
         assert!(
@@ -291,7 +309,11 @@ async fn timed_out_or_cancelled_cycle_frees_the_belt_lock() {
         // The pooled connection survived (statement_timeout is not fatal) and
         // carries no SET LOCAL residue.
         let pc = pool.get().await.expect("reuse");
-        let t: String = pc.query_one("SHOW statement_timeout", &[]).await.expect("show").get(0);
+        let t: String = pc
+            .query_one("SHOW statement_timeout", &[])
+            .await
+            .expect("show")
+            .get(0);
         assert_ne!(t, "100ms", "SET LOCAL leaked out of the holder transaction");
     }
 
@@ -307,17 +329,24 @@ async fn timed_out_or_cancelled_cycle_frees_the_belt_lock() {
         let tx = lc.transaction().await.expect("tx");
         // The bound the holder sets for itself (Knobs::lock_stmt_timeout_ms
         // in miniature): it is what caps how long the queued ROLLBACK can wait.
-        tx.batch_execute("SET LOCAL statement_timeout = 1000").await.expect("set local");
+        tx.batch_execute("SET LOCAL statement_timeout = 1000")
+            .await
+            .expect("set local");
         let got: bool = tx
             .query_one("SELECT pg_try_advisory_xact_lock($1)", &[&LOCK_B])
             .await
             .expect("xact take")
             .get(0);
         assert!(got);
-        let abandoned =
-            tokio::time::timeout(std::time::Duration::from_millis(50), tx.batch_execute("SELECT pg_sleep(10)"))
-                .await;
-        assert!(abandoned.is_err(), "the broker-side timeout must elapse first");
+        let abandoned = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            tx.batch_execute("SELECT pg_sleep(10)"),
+        )
+        .await;
+        assert!(
+            abandoned.is_err(),
+            "the broker-side timeout must elapse first"
+        );
         // The cycle future is dropped here: guard Drop enqueues ROLLBACK, the
         // connection object goes back to the pool.
         drop(tx);
@@ -337,7 +366,10 @@ async fn timed_out_or_cancelled_cycle_frees_the_belt_lock() {
             .await
             .expect("xact try")
             .get(0);
-        assert!(!got, "a session holder must gate the xact take (old-image pod exclusion)");
+        assert!(
+            !got,
+            "a session holder must gate the xact take (old-image pod exclusion)"
+        );
         session_unlock(&c2, LOCK_A).await;
         let got: bool = tx
             .query_one("SELECT pg_try_advisory_xact_lock($1)", &[&LOCK_A])
@@ -345,9 +377,15 @@ async fn timed_out_or_cancelled_cycle_frees_the_belt_lock() {
             .expect("xact retry")
             .get(0);
         assert!(got, "released session lock must be takeable xact-style");
-        assert!(!try_session_lock(&c2, LOCK_A).await, "xact holder must gate the session take");
+        assert!(
+            !try_session_lock(&c2, LOCK_A).await,
+            "xact holder must gate the session take"
+        );
         tx.rollback().await.expect("rollback");
-        assert!(try_session_lock(&c2, LOCK_A).await, "rollback must free the xact lock");
+        assert!(
+            try_session_lock(&c2, LOCK_A).await,
+            "rollback must free the xact lock"
+        );
         session_unlock(&c2, LOCK_A).await;
     }
 
@@ -356,12 +394,18 @@ async fn timed_out_or_cancelled_cycle_frees_the_belt_lock() {
     // the real step SPs the phase workers call.
     let queue = unique("retq");
     let qid: String = c
-        .query_one("INSERT INTO queen.queues(name) VALUES ($1) RETURNING id::text", &[&queue])
+        .query_one(
+            "INSERT INTO queen.queues(name) VALUES ($1) RETURNING id::text",
+            &[&queue],
+        )
         .await
         .expect("queue")
         .get(0);
-    let cutoff_now: String =
-        c.query_one("SELECT now()::text", &[]).await.expect("now").get(0);
+    let cutoff_now: String = c
+        .query_one("SELECT now()::text", &[])
+        .await
+        .expect("now")
+        .get(0);
     let no_cutoff: Option<String> = None;
 
     // 2a — all-stale backlog drains fully, in exactly ceil(N/batch) bounded
@@ -369,26 +413,51 @@ async fn timed_out_or_cancelled_cycle_frees_the_belt_lock() {
     // miniature: the old walk re-scanned the whole remainder on every call.
     {
         let pid = seed_partition(&c, &qid, "p-stale", 2_500, 2_500).await;
-        let (deleted, dones) =
-            drain(&c, RETENTION_STEP, &[&pid, &cutoff_now, &no_cutoff, &400i32], 20).await;
+        let (deleted, dones) = drain(
+            &c,
+            RETENTION_STEP,
+            &[&pid, &cutoff_now, &no_cutoff, &400i32],
+            20,
+        )
+        .await;
         assert_eq!(deleted, 2_500, "all-stale backlog must drain fully");
         assert_eq!(dones.len(), 7, "2500 rows at batch 400 = 7 bounded calls");
-        assert!(dones[..6].iter().all(|d| !d), "clipped calls must answer done=false");
+        assert!(
+            dones[..6].iter().all(|d| !d),
+            "clipped calls must answer done=false"
+        );
         assert!(dones[6], "the final call must answer done=true");
         assert_eq!(segment_count(&c, &pid).await, 0);
-        assert_eq!(log_start(&c, &pid).await, 25_000, "watermark = last deleted frame + 1");
+        assert_eq!(
+            log_start(&c, &pid).await,
+            25_000,
+            "watermark = last deleted frame + 1"
+        );
     }
 
     // 2b — mixed backlog: the walk must stop exactly at the first fresh
     // segment, and a head-fresh partition must answer done=true at once.
     {
         let pid = seed_partition(&c, &qid, "p-mixed", 500, 300).await;
-        let (deleted, dones) =
-            drain(&c, RETENTION_STEP, &[&pid, &cutoff_now, &no_cutoff, &50i32], 20).await;
+        let (deleted, dones) = drain(
+            &c,
+            RETENTION_STEP,
+            &[&pid, &cutoff_now, &no_cutoff, &50i32],
+            20,
+        )
+        .await;
         assert_eq!(deleted, 300, "only the stale prefix may go");
         assert_eq!(dones.len(), 7, "6 deleting calls + 1 head-fresh done call");
-        assert_eq!(segment_count(&c, &pid).await, 200, "fresh tail must survive");
-        assert_eq!(log_start(&c, &pid).await, 3_000, "watermark = first fresh base");
+        assert_eq!(
+            segment_count(&c, &pid).await,
+            200,
+            "fresh tail must survive"
+        );
+        assert_eq!(
+            log_start(&c, &pid).await,
+            3_000,
+            "watermark = first fresh base"
+        );
     }
 
     // 2c — rule 2's consumed-only cap must survive the windowing: boundary
@@ -403,11 +472,23 @@ async fn timed_out_or_cancelled_cycle_frees_the_belt_lock() {
         )
         .await
         .expect("consumer");
-        let (deleted, dones) =
-            drain(&c, RETENTION_STEP, &[&pid, &no_cutoff, &cutoff_now, &30i32], 20).await;
-        assert_eq!(deleted, 50, "only fully consumed segments below MIN(committed)+1");
+        let (deleted, dones) = drain(
+            &c,
+            RETENTION_STEP,
+            &[&pid, &no_cutoff, &cutoff_now, &30i32],
+            20,
+        )
+        .await;
+        assert_eq!(
+            deleted, 50,
+            "only fully consumed segments below MIN(committed)+1"
+        );
         assert_eq!(dones, vec![false, true], "clip, then exact cap");
-        assert_eq!(segment_count(&c, &pid).await, 50, "unconsumed tail preserved");
+        assert_eq!(
+            segment_count(&c, &pid).await,
+            50,
+            "unconsumed tail preserved"
+        );
         assert_eq!(log_start(&c, &pid).await, 500, "watermark = the rule-2 cap");
         let types: i64 = c
             .query_one(
@@ -418,7 +499,10 @@ async fn timed_out_or_cancelled_cycle_frees_the_belt_lock() {
             .await
             .expect("history")
             .get(0);
-        assert_eq!(types, 2, "both deleting calls attribute to completed_retention");
+        assert_eq!(
+            types, 2,
+            "both deleting calls attribute to completed_retention"
+        );
     }
 
     // 2d — the eviction wrapper still delegates through the same windowed path.
@@ -564,7 +648,11 @@ async fn timed_out_or_cancelled_cycle_frees_the_belt_lock() {
             );
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
-        assert_eq!(log_start(&c, &pid).await, 1_200, "watermark after the broker's own sweep");
+        assert_eq!(
+            log_start(&c, &pid).await,
+            1_200,
+            "watermark after the broker's own sweep"
+        );
         assert_lock_frees(&c2, 737_001, 10_000).await;
     }
 }

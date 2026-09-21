@@ -115,7 +115,9 @@ fn offsets_stay_correct_across_segments_and_entries() {
 
     let e0 = v["entries"][0]["records"].as_array().unwrap();
     assert_eq!(
-        e0.iter().map(|r| r["offset"].as_i64().unwrap()).collect::<Vec<_>>(),
+        e0.iter()
+            .map(|r| r["offset"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
         vec![10, 11, 40, 41]
     );
     let e1 = v["entries"][1]["records"].as_array().unwrap();
@@ -131,12 +133,22 @@ fn an_empty_entry_still_carries_its_bounds() {
     // segments, both watermarks present, no error. This is also the entry the
     // long poll parks on, so `bytes` must be zero.
     let meta = r#"{"entries":[{"high":57,"logStart":12,"segments":[]}]}"#;
-    let p = render_fetch(meta, &[], &["orders".to_string()], &["eu".to_string()], &enc()).unwrap();
+    let p = render_fetch(
+        meta,
+        &[],
+        &["orders".to_string()],
+        &["eu".to_string()],
+        &enc(),
+    )
+    .unwrap();
     let v: serde_json::Value = serde_json::from_str(&p.body).unwrap();
     assert!(v["entries"][0]["records"].as_array().unwrap().is_empty());
     assert_eq!(v["entries"][0]["highWatermark"], 57);
     assert_eq!(v["entries"][0]["logStartOffset"], 12);
-    assert!(v["entries"][0].get("error").is_none(), "no error key when there is no error");
+    assert!(
+        v["entries"][0].get("error").is_none(),
+        "no error key when there is no error"
+    );
     assert_eq!(p.bytes, 0);
     assert!(!p.any_error);
 }
@@ -151,7 +163,11 @@ fn the_two_error_markers_survive_to_the_wire_and_release_the_poll() {
         {"error":"OFFSET_OUT_OF_RANGE","high":900,"logStart":800,"segments":[]},
         {"high":5,"logStart":0,"segments":[]},
         {"error":"UNKNOWN_TOPIC_OR_PARTITION","high":0,"logStart":0,"segments":[]}]}"#;
-    let qs = vec!["orders".to_string(), "orders".to_string(), "ghost".to_string()];
+    let qs = vec![
+        "orders".to_string(),
+        "orders".to_string(),
+        "ghost".to_string(),
+    ];
     let ps = vec!["eu".to_string(), "us".to_string(), "Default".to_string()];
     let p = render_fetch(meta, &[], &qs, &ps, &enc()).unwrap();
     let v: serde_json::Value = serde_json::from_str(&p.body).unwrap();
@@ -175,11 +191,23 @@ fn an_empty_payload_still_counts_one_byte_towards_min_bytes() {
     let blob = seg(&[("t-0", b"")]);
     let meta = r#"{"entries":[{"high":1,"logStart":0,"segments":[
         {"base":0,"startIdx":0,"take":1,"createdAt":"2026-08-28T10:00:00.000000Z"}]}]}"#;
-    let p = render_fetch(meta, &[blob], &["q".to_string()], &["Default".to_string()], &enc())
-        .unwrap();
+    let p = render_fetch(
+        meta,
+        &[blob],
+        &["q".to_string()],
+        &["Default".to_string()],
+        &enc(),
+    )
+    .unwrap();
     let v: serde_json::Value = serde_json::from_str(&p.body).unwrap();
-    assert_eq!(v["entries"][0]["records"][0]["payload"], serde_json::Value::Null);
-    assert_eq!(p.bytes, 1, "an empty payload is one byte for the minBytes test");
+    assert_eq!(
+        v["entries"][0]["records"][0]["payload"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        p.bytes, 1,
+        "an empty payload is one byte for the minBytes test"
+    );
 }
 
 #[test]
@@ -213,7 +241,11 @@ fn the_rendered_response_stops_at_the_memory_ceiling() {
     let counts: Vec<usize> = (0..3)
         .map(|i| v["entries"][i]["records"].as_array().unwrap().len())
         .collect();
-    assert_eq!(counts, vec![2, 0, 0], "the ceiling is CALL-wide, not per entry");
+    assert_eq!(
+        counts,
+        vec![2, 0, 0],
+        "the ceiling is CALL-wide, not per entry"
+    );
     // ...and every entry still reports its bounds, so the answer stays aligned
     // with the request and a caller learns where each of its lanes stands.
     assert_eq!(v["entries"][2]["highWatermark"], 9);
@@ -237,11 +269,22 @@ fn the_first_record_of_a_call_is_delivered_however_large_it_is() {
     let meta = r#"{"entries":[{"high":2,"logStart":0,"segments":[
         {"base":0,"startIdx":0,"take":2,"createdAt":"2026-08-28T10:00:00.000000Z"}]}]}"#;
 
-    let p = render_capped(meta, &[blob], &["q".to_string()], &["a".to_string()], &enc(), 1024)
-        .unwrap();
+    let p = render_capped(
+        meta,
+        &[blob],
+        &["q".to_string()],
+        &["a".to_string()],
+        &enc(),
+        1024,
+    )
+    .unwrap();
     let v: serde_json::Value = serde_json::from_str(&p.body).unwrap();
     let recs = v["entries"][0]["records"].as_array().unwrap();
-    assert_eq!(recs.len(), 1, "exactly one: the exemption is not a per-record one");
+    assert_eq!(
+        recs.len(),
+        1,
+        "exactly one: the exemption is not a per-record one"
+    );
     assert_eq!(recs[0]["offset"], 0);
 }
 
@@ -291,11 +334,23 @@ fn a_misaligned_sp_answer_is_refused_rather_than_served() {
     // of bug (the running index would then read another entry's segment).
     let meta2 = r#"{"entries":[{"high":9,"logStart":0,"segments":[
         {"base":0,"startIdx":0,"take":1,"createdAt":"2026-08-28T10:00:00.000000Z"}]}]}"#;
-    assert!(
-        render_fetch(meta2, &[], &["a".to_string()], &["Default".to_string()], &enc()).is_none()
-    );
+    assert!(render_fetch(
+        meta2,
+        &[],
+        &["a".to_string()],
+        &["Default".to_string()],
+        &enc()
+    )
+    .is_none());
     // And a body that is not the SP's JSON at all.
-    assert!(render_fetch("not json", &[], &["a".to_string()], &["p".to_string()], &enc()).is_none());
+    assert!(render_fetch(
+        "not json",
+        &[],
+        &["a".to_string()],
+        &["p".to_string()],
+        &enc()
+    )
+    .is_none());
 }
 
 #[test]
@@ -433,7 +488,10 @@ fn absent_poll_knobs_mean_answer_now() {
 fn the_clamps_are_the_ceilings_the_module_documents() {
     // Pinned as arithmetic rather than as prose: these are the values passed to
     // SQL, and the SQL is where an unbounded read would actually happen.
-    assert_eq!(2_000_000i64.clamp(1, MAX_BYTES_PER_ENTRY), MAX_BYTES_PER_ENTRY.min(2_000_000));
+    assert_eq!(
+        2_000_000i64.clamp(1, MAX_BYTES_PER_ENTRY),
+        MAX_BYTES_PER_ENTRY.min(2_000_000)
+    );
     assert_eq!((-5i64).clamp(1, MAX_BYTES_PER_ENTRY), 1);
     assert_eq!(
         (MAX_BYTES_PER_ENTRY * 4).clamp(1, MAX_BYTES_PER_ENTRY),

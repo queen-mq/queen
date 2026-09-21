@@ -232,9 +232,11 @@ impl MeshTransport {
         handlers: SyncHandlers,
         eph_epoch: u64,
     ) -> std::io::Result<(Arc<MeshTransport>, MeshBindings)> {
-        let listener =
-            TcpListener::bind(crate::config::host_port(&cfg.bind_addr, &cfg.mesh_port.to_string()))
-                .await?;
+        let listener = TcpListener::bind(crate::config::host_port(
+            &cfg.bind_addr,
+            &cfg.mesh_port.to_string(),
+        ))
+        .await?;
         let mut peers = Vec::with_capacity(cfg.peers.len());
         let mut peer_rxs = Vec::with_capacity(cfg.peers.len());
         for (h, p) in &cfg.peers {
@@ -666,7 +668,9 @@ impl MeshTransport {
         match ty {
             T_HEARTBEAT => { /* liveness already recorded in inbound_conn */ }
             T_MESSAGE_AVAILABLE => {
-                let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else { return };
+                let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else {
+                    return;
+                };
                 let q = v.get("queue").and_then(|x| x.as_str()).unwrap_or("");
                 if q.is_empty() {
                     return;
@@ -676,8 +680,12 @@ impl MeshTransport {
                 (self.handlers.on_message_available)(t.as_deref(), q, p);
             }
             T_MESSAGE_AVAILABLE_BATCH => {
-                let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else { return };
-                let Some(items) = v.get("items").and_then(|x| x.as_array()) else { return };
+                let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else {
+                    return;
+                };
+                let Some(items) = v.get("items").and_then(|x| x.as_array()) else {
+                    return;
+                };
                 for it in items {
                     let q = it.get("queue").and_then(|x| x.as_str()).unwrap_or("");
                     if q.is_empty() {
@@ -689,8 +697,12 @@ impl MeshTransport {
                 }
             }
             T_HOTLIST_DIRTY_BATCH => {
-                let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else { return };
-                let Some(items) = v.get("items").and_then(|x| x.as_array()) else { return };
+                let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else {
+                    return;
+                };
+                let Some(items) = v.get("items").and_then(|x| x.as_array()) else {
+                    return;
+                };
                 for it in items {
                     let q = it.get("queue").and_then(|x| x.as_str()).unwrap_or("");
                     if q.is_empty() {
@@ -709,36 +721,52 @@ impl MeshTransport {
                 }
             }
             T_MAINTENANCE_MODE_SET => {
-                let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else { return };
+                let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else {
+                    return;
+                };
                 let e = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false);
                 (self.handlers.on_maintenance)(e);
             }
             T_POP_MAINTENANCE_MODE_SET => {
-                let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else { return };
+                let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else {
+                    return;
+                };
                 let e = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false);
                 (self.handlers.on_pop_maintenance)(e);
             }
             T_QUEUE_CONFIG_SET => {
-                let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else { return };
+                let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else {
+                    return;
+                };
                 if let Some(q) = v.get("queue").and_then(|x| x.as_str()) {
                     let t = frame_tenant(&v);
                     (self.handlers.on_queue_config_set)(t.as_deref(), q);
                 }
             }
             T_QUEUE_CONFIG_DELETE => {
-                let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else { return };
+                let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else {
+                    return;
+                };
                 if let Some(q) = v.get("queue").and_then(|x| x.as_str()) {
                     let t = frame_tenant(&v);
                     (self.handlers.on_queue_config_delete)(t.as_deref(), q);
                 }
             }
             T_EPH_ADMIN => {
-                let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else { return };
-                let Some(op) = v.get("op").and_then(|x| x.as_str()).filter(|s| !s.is_empty())
+                let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else {
+                    return;
+                };
+                let Some(op) = v
+                    .get("op")
+                    .and_then(|x| x.as_str())
+                    .filter(|s| !s.is_empty())
                 else {
                     return;
                 };
-                let Some(q) = v.get("queue").and_then(|x| x.as_str()).filter(|s| !s.is_empty())
+                let Some(q) = v
+                    .get("queue")
+                    .and_then(|x| x.as_str())
+                    .filter(|s| !s.is_empty())
                 else {
                     return;
                 };
@@ -952,7 +980,11 @@ fn verify_hello(payload: &[u8], secret: &str) -> Option<PeerHello> {
 }
 
 fn gen_nonce_hex() -> String {
-    format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>())
+    format!(
+        "{:016x}{:016x}",
+        rand::random::<u64>(),
+        rand::random::<u64>()
+    )
 }
 
 #[cfg(test)]
@@ -1133,9 +1165,10 @@ mod tests {
     async fn mesh_delivers_single_and_batched_wakes() {
         // Node B listens (no peers of its own); node A dials B and sends.
         let (btx, mut brx) = tmpsc::unbounded_channel();
-        let (tb, bind_b) = MeshTransport::bind(&mk_cfg(vec![], "", "B"), forwarding_handlers(btx), 0xb0)
-            .await
-            .unwrap();
+        let (tb, bind_b) =
+            MeshTransport::bind(&mk_cfg(vec![], "", "B"), forwarding_handlers(btx), 0xb0)
+                .await
+                .unwrap();
         let pb = bind_b.local_addr().unwrap().port();
         tb.start(bind_b);
 
@@ -1149,7 +1182,10 @@ mod tests {
         .unwrap();
         ta.start(bind_a);
 
-        assert!(wait_peer0_connected(&ta, true).await, "A never connected to B");
+        assert!(
+            wait_peer0_connected(&ta, true).await,
+            "A never connected to B"
+        );
 
         // Single-item MESSAGE_AVAILABLE. The send takes a COMPOSITE qkey and splits
         // it onto the wire, so the peer receives the tenant alongside the queue.
@@ -1159,14 +1195,18 @@ mod tests {
             .await
             .expect("no wake within 2s")
             .unwrap();
-        assert_eq!(got, (Some(ta_uuid.to_string()), "q1".to_string(), "p1".to_string()));
+        assert_eq!(
+            got,
+            (
+                Some(ta_uuid.to_string()),
+                "q1".to_string(),
+                "p1".to_string()
+            )
+        );
 
         // Batched form — one frame carrying two partitions.
         let k2 = crate::handlers::tenant_queue_key(ta_uuid, "q2");
-        ta.send_messages_available_batch(&[
-            (k2.clone(), "pa".into()),
-            (k2.clone(), "pb".into()),
-        ]);
+        ta.send_messages_available_batch(&[(k2.clone(), "pa".into()), (k2.clone(), "pb".into())]);
         let g1 = tokio::time::timeout(Duration::from_secs(2), brx.recv())
             .await
             .unwrap()
@@ -1180,8 +1220,16 @@ mod tests {
         assert_eq!(
             both,
             [
-                (Some(ta_uuid.to_string()), "q2".to_string(), "pa".to_string()),
-                (Some(ta_uuid.to_string()), "q2".to_string(), "pb".to_string())
+                (
+                    Some(ta_uuid.to_string()),
+                    "q2".to_string(),
+                    "pa".to_string()
+                ),
+                (
+                    Some(ta_uuid.to_string()),
+                    "q2".to_string(),
+                    "pb".to_string()
+                )
             ]
         );
 
@@ -1195,7 +1243,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             gd,
-            (Some(ta_uuid.to_string()), "dirty:q3".to_string(), "p3".to_string())
+            (
+                Some(ta_uuid.to_string()),
+                "dirty:q3".to_string(),
+                "p3".to_string()
+            )
         );
 
         // …and a GROUP-scoped hint carries its scope over the same frame, so the peer
@@ -1207,7 +1259,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             gg,
-            (Some(ta_uuid.to_string()), "dirty:q3/workers".to_string(), "p4".to_string())
+            (
+                Some(ta_uuid.to_string()),
+                "dirty:q3/workers".to_string(),
+                "p4".to_string()
+            )
         );
 
         // Received-frame counter advanced on B (single + batch + 2 dirty = 4 frames).
@@ -1220,9 +1276,10 @@ mod tests {
     #[tokio::test]
     async fn a_tenantless_frame_is_never_attributed_to_a_tenant() {
         let (tx, mut rx) = tmpsc::unbounded_channel();
-        let (t, _bind) = MeshTransport::bind(&mk_cfg(vec![], "", "solo"), forwarding_handlers(tx), 0x50)
-            .await
-            .unwrap();
+        let (t, _bind) =
+            MeshTransport::bind(&mk_cfg(vec![], "", "solo"), forwarding_handlers(tx), 0x50)
+                .await
+                .unwrap();
         t.dispatch(
             T_HOTLIST_DIRTY_BATCH,
             br#"{"items":[{"queue":"orders","partition":"p0"}]}"#,
@@ -1251,10 +1308,8 @@ mod tests {
             "partition": "p0",
             "tenant": "11111111-1111-1111-1111-111111111111",
         });
-        let v: serde_json::Value = serde_json::from_slice(
-            &serde_json::to_vec(&payload).unwrap(),
-        )
-        .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_slice(&serde_json::to_vec(&payload).unwrap()).unwrap();
         assert_eq!(v.get("queue").and_then(|x| x.as_str()), Some("orders"));
         assert_eq!(v.get("partition").and_then(|x| x.as_str()), Some("p0"));
     }
@@ -1263,10 +1318,13 @@ mod tests {
     async fn mesh_rejects_wrong_secret() {
         // B requires a secret; A dials with the wrong one.
         let (btx, mut brx) = tmpsc::unbounded_channel();
-        let (tb, bind_b) =
-            MeshTransport::bind(&mk_cfg(vec![], "right", "B"), forwarding_handlers(btx), 0xb1)
-                .await
-                .unwrap();
+        let (tb, bind_b) = MeshTransport::bind(
+            &mk_cfg(vec![], "right", "B"),
+            forwarding_handlers(btx),
+            0xb1,
+        )
+        .await
+        .unwrap();
         let pb = bind_b.local_addr().unwrap().port();
         tb.start(bind_b);
 
@@ -1378,17 +1436,21 @@ mod tests {
         // HELLO + one frame, then goes silent and disconnects. After dead_threshold
         // the listener must report it dead — and still serve a fresh connection.
         let (btx, mut brx) = tmpsc::unbounded_channel();
-        let (tb, bind_b) = MeshTransport::bind(&mk_cfg(vec![], "", "B"), forwarding_handlers(btx), 0xb0)
-            .await
-            .unwrap();
+        let (tb, bind_b) =
+            MeshTransport::bind(&mk_cfg(vec![], "", "B"), forwarding_handlers(btx), 0xb0)
+                .await
+                .unwrap();
         let pb = bind_b.local_addr().unwrap().port();
         tb.start(bind_b);
 
         {
             let mut s = TcpStream::connect(("127.0.0.1", pb)).await.unwrap();
-            s.write_all(&encode_frame(T_HELLO, &build_hello_payload("ghost", "", "http://ghost:6632", 0x9)))
-                .await
-                .unwrap();
+            s.write_all(&encode_frame(
+                T_HELLO,
+                &build_hello_payload("ghost", "", "http://ghost:6632", 0x9),
+            ))
+            .await
+            .unwrap();
             s.write_all(&encode_frame(
                 T_MESSAGE_AVAILABLE,
                 br#"{"queue":"q","partition":"p"}"#,
@@ -1417,9 +1479,12 @@ mod tests {
 
         // The listener keeps serving: a fresh connection is dispatched normally.
         let mut s2 = TcpStream::connect(("127.0.0.1", pb)).await.unwrap();
-        s2.write_all(&encode_frame(T_HELLO, &build_hello_payload("live", "", "http://live:6632", 0xa)))
-            .await
-            .unwrap();
+        s2.write_all(&encode_frame(
+            T_HELLO,
+            &build_hello_payload("live", "", "http://live:6632", 0xa),
+        ))
+        .await
+        .unwrap();
         s2.write_all(&encode_frame(
             T_MESSAGE_AVAILABLE,
             br#"{"queue":"q2","partition":"p2"}"#,
@@ -1554,7 +1619,10 @@ mod tests {
         .await
         .unwrap();
         ta.start(bind_a);
-        assert!(wait_peer0_connected(&ta, true).await, "A never connected to B");
+        assert!(
+            wait_peer0_connected(&ta, true).await,
+            "A never connected to B"
+        );
 
         // B learned A from the HELLO — address and epoch, not just the id.
         let mut members = Vec::new();
@@ -1585,7 +1653,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             got,
-            (Some(uuid.to_string()), "eph:reset".to_string(), "inbox".to_string())
+            (
+                Some(uuid.to_string()),
+                "eph:reset".to_string(),
+                "inbox".to_string()
+            )
         );
     }
 
@@ -1602,7 +1674,10 @@ mod tests {
         // No tenant at all (a pre-Track-B shape), a garbled one, and a missing
         // op or queue: all four are silently skipped.
         t.dispatch(T_EPH_ADMIN, br#"{"op":"delete","queue":"inbox"}"#);
-        t.dispatch(T_EPH_ADMIN, br#"{"op":"delete","queue":"inbox","tenant":"nope"}"#);
+        t.dispatch(
+            T_EPH_ADMIN,
+            br#"{"op":"delete","queue":"inbox","tenant":"nope"}"#,
+        );
         t.dispatch(
             T_EPH_ADMIN,
             br#"{"queue":"inbox","tenant":"11111111-1111-1111-1111-111111111111"}"#,

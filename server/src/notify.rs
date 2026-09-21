@@ -324,8 +324,7 @@ impl Notifier {
             return;
         }
         if !self.tenancy {
-            let qkey =
-                crate::handlers::tenant_queue_key(crate::config::DEFAULT_TENANT, queue);
+            let qkey = crate::handlers::tenant_queue_key(crate::config::DEFAULT_TENANT, queue);
             self.wake_local_hint(&qkey, partition);
             return;
         }
@@ -431,7 +430,6 @@ impl Notifier {
             t.send_queue_config_delete(qkey);
         }
     }
-
 }
 
 // ===========================================================================
@@ -476,7 +474,10 @@ impl Default for SweeperWake {
 
 impl SweeperWake {
     pub fn new() -> Self {
-        SweeperWake { earliest_ms: AtomicI64::new(i64::MAX), notify: Notify::new() }
+        SweeperWake {
+            earliest_ms: AtomicI64::new(i64::MAX),
+            notify: Notify::new(),
+        }
     }
 
     /// Ring for a timer that becomes due in `delay_ms`. A past or negative delay
@@ -553,7 +554,10 @@ mod tests {
             "a later delivery must not move the minimum"
         );
         w.hint(1);
-        assert!(w.earliest_ms.load(Ordering::Relaxed) < after_first, "an earlier one must");
+        assert!(
+            w.earliest_ms.load(Ordering::Relaxed) < after_first,
+            "an earlier one must"
+        );
     }
 
     /// A negative delay is legal (§4.2: a `deliverAt` in the past fires on the
@@ -644,7 +648,10 @@ mod tests {
         for p in ["x", "y", "z"] {
             n.wake_local_hint("q", p);
         }
-        assert_eq!(n.drain_hints("q", 2), vec!["x".to_string(), "y".to_string()]);
+        assert_eq!(
+            n.drain_hints("q", 2),
+            vec!["x".to_string(), "y".to_string()]
+        );
         assert_eq!(n.drain_hints("q", 10), vec!["z".to_string()]);
     }
 
@@ -661,12 +668,14 @@ mod tests {
         let n = Notifier::new(false);
         let n2 = n.clone();
         // Park a waiter; it creates the gate.
-        let waiter =
-            tokio::spawn(async move { n2.wait_queue("q", Duration::from_secs(5)).await });
+        let waiter = tokio::spawn(async move { n2.wait_queue("q", Duration::from_secs(5)).await });
         // Give the waiter a moment to arm + register.
         tokio::time::sleep(Duration::from_millis(20)).await;
         n.wake_local_hint("q", "p7");
-        assert!(waiter.await.unwrap(), "the parked pop should have been woken");
+        assert!(
+            waiter.await.unwrap(),
+            "the parked pop should have been woken"
+        );
         // The hint the wake carried is now drainable by that pop.
         assert_eq!(n.drain_hints("q", 10), vec!["p7".to_string()]);
     }
@@ -688,7 +697,10 @@ mod tests {
         n.gate(&ka);
         n.gate(&kb);
         n.wake_local_hint(&ka, "p1");
-        assert!(n.drain_hints(&kb, 10).is_empty(), "B must not steal A's hint");
+        assert!(
+            n.drain_hints(&kb, 10).is_empty(),
+            "B must not steal A's hint"
+        );
         assert_eq!(n.drain_hints(&ka, 10), vec!["p1".to_string()]);
     }
 
@@ -717,7 +729,10 @@ mod tests {
         n.wake_local_hint_all_tenants("orders", "p1");
         assert_eq!(n.drain_hints(&ka, 10), vec!["p1".to_string()]);
         assert_eq!(n.drain_hints(&kb, 10), vec!["p1".to_string()]);
-        assert!(n.drain_hints(&other, 10).is_empty(), "other queues untouched");
+        assert!(
+            n.drain_hints(&other, 10).is_empty(),
+            "other queues untouched"
+        );
     }
 
     // R1 — the flag-OFF invariant, gate side. QUEEN_TENANCY_HEADER unset ⇒ only the
@@ -760,7 +775,11 @@ mod tests {
         n.gate("q");
         n.evict_idle();
         n.wake_local_hint("q", "p1"); // marks it used again
-        assert_eq!(n.evict_idle(), 0, "a gate used since the last sweep is kept");
+        assert_eq!(
+            n.evict_idle(),
+            0,
+            "a gate used since the last sweep is kept"
+        );
         assert_eq!(n.drain_hints("q", 10), vec!["p1".to_string()]);
     }
 
@@ -771,8 +790,7 @@ mod tests {
     async fn a_parked_waiter_is_never_evicted_and_still_wakes() {
         let n = Notifier::new(false);
         let n2 = n.clone();
-        let waiter =
-            tokio::spawn(async move { n2.wait_queue("q", Duration::from_secs(2)).await });
+        let waiter = tokio::spawn(async move { n2.wait_queue("q", Duration::from_secs(2)).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
         // Two sweeps: the second chance is spent, yet the waiter keeps the gate alive.
         assert_eq!(n.evict_idle(), 0);
@@ -791,7 +809,10 @@ mod tests {
         assert_eq!(n.by_queue.lock().unwrap().len(), 1);
         n.evict_idle();
         assert_eq!(n.evict_idle(), 2);
-        assert!(n.by_queue.lock().unwrap().is_empty(), "the emptied name-set is removed");
+        assert!(
+            n.by_queue.lock().unwrap().is_empty(),
+            "the emptied name-set is removed"
+        );
     }
 
     // A discovery pop parks on no queue at all, so before the per-tenant gate every
@@ -803,8 +824,7 @@ mod tests {
         let n = Notifier::new(true);
         n.gate(&k(TA, "orders")); // A has a parked queue pop, so the wake finds a gate
         let n2 = n.clone();
-        let waiter =
-            tokio::spawn(async move { n2.wait_any(TB, Duration::from_millis(300)).await });
+        let waiter = tokio::spawn(async move { n2.wait_any(TB, Duration::from_millis(300)).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
         n.wake_local_hint(&k(TA, "orders"), "p1");
         assert!(
@@ -818,8 +838,7 @@ mod tests {
         let n = Notifier::new(true);
         n.gate(&k(TB, "orders"));
         let n2 = n.clone();
-        let waiter =
-            tokio::spawn(async move { n2.wait_any(TB, Duration::from_secs(5)).await });
+        let waiter = tokio::spawn(async move { n2.wait_any(TB, Duration::from_secs(5)).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
         n.wake_local_hint(&k(TB, "orders"), "p1");
         assert!(waiter.await.unwrap(), "its own tenant's push must wake it");
@@ -835,6 +854,9 @@ mod tests {
         let wb = tokio::spawn(async move { nb.wait_any(TB, Duration::from_secs(5)).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
         n.wake_local_hint_all_tenants("orders", "p1");
-        assert!(wa.await.unwrap() && wb.await.unwrap(), "both tenants must wake");
+        assert!(
+            wa.await.unwrap() && wb.await.unwrap(),
+            "both tenants must wake"
+        );
     }
 }

@@ -39,7 +39,13 @@ pub fn spawn(pool: Pool, metrics: Arc<Metrics>, cfg: &Config) {
     tokio::spawn(async move { run_loop(pool, metrics, interval, hostname, port).await });
 }
 
-async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostname: String, port: i32) {
+async fn run_loop(
+    pool: Pool,
+    metrics: Arc<Metrics>,
+    interval: Duration,
+    hostname: String,
+    port: i32,
+) {
     let started = Instant::now();
     // Baseline snapshot: the first flush reflects only traffic since boot.
     let mut last: Counters = metrics.snapshot();
@@ -78,7 +84,9 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
         // sum/count from the 100ms probe (metrics::spawn_samplers), swap-drain the
         // interval max. Feeds worker_metrics.avg/max_event_loop_lag_ms — the
         // dashboard's "Event loop" row.
-        let evl_sum = metrics.evl_sum_us.load(std::sync::atomic::Ordering::Relaxed);
+        let evl_sum = metrics
+            .evl_sum_us
+            .load(std::sync::atomic::Ordering::Relaxed);
         let evl_cnt = metrics.evl_count.load(std::sync::atomic::Ordering::Relaxed);
         let d_evl_sum = evl_sum.saturating_sub(last_evl_sum);
         let d_evl_cnt = evl_cnt.saturating_sub(last_evl_cnt);
@@ -89,8 +97,10 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
         } else {
             0
         };
-        let max_evl_ms: i32 =
-            (metrics.evl_max_us.swap(0, std::sync::atomic::Ordering::Relaxed) / 1000) as i32;
+        let max_evl_ms: i32 = (metrics
+            .evl_max_us
+            .swap(0, std::sync::atomic::Ordering::Relaxed)
+            / 1000) as i32;
 
         // Worker-level pop lag for this interval: fold the per-queue lag deltas
         // (worker_metrics.avg/max_lag_ms + lag_count feed the System view's
@@ -103,7 +113,11 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
             w_lag_sum += cur.lag_sum_ms.saturating_sub(prev.lag_sum_ms);
             w_lag_n += cur.lag_count.saturating_sub(prev.lag_count);
         }
-        let w_lag_avg: i64 = if w_lag_n > 0 { (w_lag_sum / w_lag_n) as i64 } else { 0 };
+        let w_lag_avg: i64 = if w_lag_n > 0 {
+            (w_lag_sum / w_lag_n) as i64
+        } else {
+            0
+        };
         let w_lag_max: i64 = lag_max.values().copied().max().unwrap_or(0) as i64;
 
         // Pool gauges are sampled BEFORE the worker_metrics insert so the row
@@ -152,8 +166,15 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
         let cpu_sys = cur_sys_us.saturating_sub(last_sys_us) as f64 / (secs * 100.0);
         last_user_us = cur_user_us;
         last_sys_us = cur_sys_us;
-        let metrics_json =
-            build_system_metrics_json(uptime, cpu_user, cpu_sys, rss, pool_size, pool_idle, pool_active);
+        let metrics_json = build_system_metrics_json(
+            uptime,
+            cpu_user,
+            cpu_sys,
+            rss,
+            pool_size,
+            pool_idle,
+            pool_active,
+        );
         if let Err(e) = db::insert_system_metrics(
             &client,
             &hostname,
@@ -217,7 +238,11 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
             {
                 continue;
             }
-            let avg_lag = if d.lag_count > 0 { (d.lag_sum_ms / d.lag_count) as i64 } else { 0 };
+            let avg_lag = if d.lag_count > 0 {
+                (d.lag_sum_ms / d.lag_count) as i64
+            } else {
+                0
+            };
             if let Err(e) = db::upsert_queue_lag_metrics(
                 &client,
                 q_tenant,
@@ -244,8 +269,10 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
                 }
             }
             if parked_avg > 0 {
-                if let Err(e) =
-                    db::upsert_queue_parked_replica(&client, q_tenant, q_name, &hostname, 0, parked_avg).await
+                if let Err(e) = db::upsert_queue_parked_replica(
+                    &client, q_tenant, q_name, &hostname, 0, parked_avg,
+                )
+                .await
                 {
                     static PARKED_ERR: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
                     if let Some(suppressed) = PARKED_ERR.tick_now() {
@@ -272,7 +299,8 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
                 }
             }
             if let Err(e) =
-                db::upsert_queue_parked_replica(&client, q_tenant, q_name, &hostname, 0, parked_avg).await
+                db::upsert_queue_parked_replica(&client, q_tenant, q_name, &hostname, 0, parked_avg)
+                    .await
             {
                 static PARKED_ERR_ONLY: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
                 if let Some(suppressed) = PARKED_ERR_ONLY.tick_now() {
@@ -350,8 +378,11 @@ fn rusage() -> (u64, u64, u64) {
         let user_us = u.ru_utime.tv_sec as u64 * 1_000_000 + u.ru_utime.tv_usec as u64;
         let sys_us = u.ru_stime.tv_sec as u64 * 1_000_000 + u.ru_stime.tv_usec as u64;
         let maxrss = u.ru_maxrss as u64;
-        let peak_bytes =
-            if cfg!(target_os = "macos") { maxrss } else { maxrss.saturating_mul(1024) };
+        let peak_bytes = if cfg!(target_os = "macos") {
+            maxrss
+        } else {
+            maxrss.saturating_mul(1024)
+        };
         (user_us, sys_us, current_rss_bytes().unwrap_or(peak_bytes))
     }
 }

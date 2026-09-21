@@ -68,8 +68,14 @@ async fn timers_survive_every_declared_fault() {
 
     // The lease expires. Nothing failed, so nothing was spent.
     let second = claim(c, 31.0, LEASE_MS, 100, 100).await;
-    assert_eq!(second, vec![k_kill.clone()], "the expired lease is reclaimable");
-    let row = timer_row(c, t, &q_kill, &k_kill).await.expect("still pending");
+    assert_eq!(
+        second,
+        vec![k_kill.clone()],
+        "the expired lease is reclaimable"
+    );
+    let row = timer_row(c, t, &q_kill, &k_kill)
+        .await
+        .expect("still pending");
     assert_eq!(
         row.attempts, 0,
         "a lease expiry is not a failure: it must NOT consume the DLQ budget (§4.5)"
@@ -84,14 +90,9 @@ async fn timers_survive_every_declared_fault() {
 
     // The dead broker wakes up and fires with its stale token.
     let segs = vec![Seg::new(t, &q_kill, "Default")];
-    let stale = fire(
-        c,
-        &segs,
-        &[Framed::new(&k_kill, 1, &k_kill, &token1)],
-        31.0,
-    )
-    .await
-    .expect("a stale fire is a verdict, not an error");
+    let stale = fire(c, &segs, &[Framed::new(&k_kill, 1, &k_kill, &token1)], 31.0)
+        .await
+        .expect("a stale fire is a verdict, not an error");
     assert_eq!(seg_result(&stale, 0), "stale", "wrong token ⇒ stale");
     assert!(
         partition_state(c, t, &q_kill, "Default").await.is_none(),
@@ -131,8 +132,13 @@ async fn timers_survive_every_declared_fault() {
         "the row is gone, so the segment cannot verify — and 'gone' must read as stale, \
          never as a reason to push again"
     );
-    let p = partition_state(c, t, &q_kill, "Default").await.expect("partition");
-    assert_eq!(p.messages_in_segments, 1, "still exactly one message: exactly-once");
+    let p = partition_state(c, t, &q_kill, "Default")
+        .await
+        .expect("partition");
+    assert_eq!(
+        p.messages_in_segments, 1,
+        "still exactly one message: exactly-once"
+    );
 
     // ========================================================================
     section("a lease that expires is reclaimed, and reclaiming is not failing");
@@ -147,7 +153,10 @@ async fn timers_survive_every_declared_fault() {
         Some(true),
         "claimed_until is the lease; claim_token is the identity. Both, always (§3.3)"
     );
-    assert!(row.visible_in_future, "visible_at follows claimed_until while claimed");
+    assert!(
+        row.visible_in_future,
+        "visible_at follows claimed_until while claimed"
+    );
     assert!(
         claim(c, 0.5, 1_000, 100, 100).await.is_empty(),
         "still inside the lease"
@@ -166,9 +175,15 @@ async fn timers_survive_every_declared_fault() {
     let q_race = unique("tfi-race");
     let k_early = unique("k-early");
     seed(c, &Seed::new(t, &q_race, &k_early).delay_s(-0.5)).await;
-    let r = apply(c, &serde_json::json!([cancel_op(&q_race, &k_early)]), t, None, 0.0)
-        .await
-        .expect("cancel before the claim");
+    let r = apply(
+        c,
+        &serde_json::json!([cancel_op(&q_race, &k_early)]),
+        t,
+        None,
+        0.0,
+    )
+    .await
+    .expect("cancel before the claim");
     assert_eq!(
         op_status(&r, 0),
         (true, "cancelled".to_string()),
@@ -178,11 +193,22 @@ async fn timers_survive_every_declared_fault() {
 
     let k_late = unique("k-late");
     seed(c, &Seed::new(t, &q_race, &k_late).delay_s(-0.5)).await;
-    assert_eq!(claim(c, 0.0, LEASE_MS, 100, 100).await, vec![k_late.clone()]);
-    let r = apply(c, &serde_json::json!([cancel_op(&q_race, &k_late)]), t, None, 0.0)
-        .await
-        .expect("a lost race must NOT raise: it is a verdict, and the SQL must not abort \
-                 the caller's transaction over it");
+    assert_eq!(
+        claim(c, 0.0, LEASE_MS, 100, 100).await,
+        vec![k_late.clone()]
+    );
+    let r = apply(
+        c,
+        &serde_json::json!([cancel_op(&q_race, &k_late)]),
+        t,
+        None,
+        0.0,
+    )
+    .await
+    .expect(
+        "a lost race must NOT raise: it is a verdict, and the SQL must not abort \
+                 the caller's transaction over it",
+    );
     assert_eq!(
         op_status(&r, 0),
         (false, "too_late".to_string()),
@@ -196,7 +222,13 @@ async fn timers_survive_every_declared_fault() {
     // Same rule for a reschedule — ONE rule, not two (§12).
     let r = apply(
         c,
-        &serde_json::json!([schedule_op(&q_race, &k_late, "Default", 60_000, "txn-rescheduled")]),
+        &serde_json::json!([schedule_op(
+            &q_race,
+            &k_late,
+            "Default",
+            60_000,
+            "txn-rescheduled"
+        )]),
         t,
         Some("tester"),
         0.0,
@@ -270,7 +302,11 @@ async fn timers_survive_every_declared_fault() {
         "verification is all-or-nothing PER SEGMENT: the blob is already packed, so one \
          missing timer makes that blob wrong"
     );
-    assert_eq!(seg_result(&res, 1), "fired", "and a healthy segment is unaffected");
+    assert_eq!(
+        seg_result(&res, 1),
+        "fired",
+        "and a healthy segment is unaffected"
+    );
 
     for k in [&k1, &k3] {
         let row = timer_row(c, t, &q_st, k)
@@ -298,9 +334,14 @@ async fn timers_survive_every_declared_fault() {
         partition_state(c, t, &q_st, "pstale").await.is_none(),
         "a stale segment writes nothing at all"
     );
-    let p = partition_state(c, t, &q_ok, "p2").await.expect("the live segment");
+    let p = partition_state(c, t, &q_ok, "p2")
+        .await
+        .expect("the live segment");
     assert_eq!((p.messages_in_segments, p.segments), (1, 1));
-    assert!(timer_row(c, t, &q_ok, &k4).await.is_none(), "delivered ⇒ deleted");
+    assert!(
+        timer_row(c, t, &q_ok, &k4).await.is_none(),
+        "delivered ⇒ deleted"
+    );
 
     // ========================================================================
     section("the fire does NOT dedup against the log — the ratified cost of p_verified = v_last");
@@ -353,10 +394,17 @@ async fn timers_survive_every_declared_fault() {
     let (kd1, kd2) = (unique("k-d1"), unique("k-d2"));
     seed(
         c,
-        &Seed::new(t, &q_dup, &kd1).partition("pdup").delay_s(-1.0).txn(&txn_dup),
+        &Seed::new(t, &q_dup, &kd1)
+            .partition("pdup")
+            .delay_s(-1.0)
+            .txn(&txn_dup),
     )
     .await;
-    seed(c, &Seed::new(t, &q_dup, &kd2).partition("pdup").delay_s(-1.0)).await;
+    seed(
+        c,
+        &Seed::new(t, &q_dup, &kd2).partition("pdup").delay_s(-1.0),
+    )
+    .await;
     let claimed = claim(c, 0.0, LEASE_MS, 100, 100).await;
     assert_eq!(claimed.len(), 2, "both due: {claimed:?}");
     let (td1, td2) = (
@@ -366,7 +414,10 @@ async fn timers_survive_every_declared_fault() {
     let res = fire(
         c,
         &[Seg::new(t, &q_dup, "pdup")],
-        &[Framed::new(&kd1, 1, &txn_dup, &td1), Framed::new(&kd2, 1, &kd2, &td2)],
+        &[
+            Framed::new(&kd1, 1, &txn_dup, &td1),
+            Framed::new(&kd2, 1, &kd2, &td2),
+        ],
         0.0,
     )
     .await
@@ -387,7 +438,9 @@ async fn timers_survive_every_declared_fault() {
             "{why}: the whole live segment is pushed and its timers removed in one transaction"
         );
     }
-    let p = partition_state(c, t, &q_dup, "pdup").await.expect("partition");
+    let p = partition_state(c, t, &q_dup, "pdup")
+        .await
+        .expect("partition");
     assert_eq!(
         p.messages_in_segments, 3,
         "1 pre-existing + 2 fired: the duplicated txn IS appended again. The fire's guarantee \
@@ -398,8 +451,16 @@ async fn timers_survive_every_declared_fault() {
     // silently, and that is itself a contract: two live segments on one destination would
     // hand the second a stale last_offset for p_verified.
     let (kd3, kd4) = (unique("k-d3"), unique("k-d4"));
-    seed(c, &Seed::new(t, &q_dup, &kd3).partition("pdup2").delay_s(-1.0)).await;
-    seed(c, &Seed::new(t, &q_dup, &kd4).partition("pdup2").delay_s(-1.0)).await;
+    seed(
+        c,
+        &Seed::new(t, &q_dup, &kd3).partition("pdup2").delay_s(-1.0),
+    )
+    .await;
+    seed(
+        c,
+        &Seed::new(t, &q_dup, &kd4).partition("pdup2").delay_s(-1.0),
+    )
+    .await;
     let _ = claim(c, 0.0, LEASE_MS, 100, 100).await;
     let (td3, td4) = (
         token_of(c, t, &q_dup, &kd3).await,
@@ -443,7 +504,11 @@ async fn timers_survive_every_declared_fault() {
     for i in 0..199 {
         let k = format!("k-b{i}-{}", unique("p"));
         let part = format!("p{i}");
-        seed(c, &Seed::new(t, &q_batch, &k).partition(&part).delay_s(-1.0)).await;
+        seed(
+            c,
+            &Seed::new(t, &q_batch, &k).partition(&part).delay_s(-1.0),
+        )
+        .await;
         segs.push(Seg::new(t, &q_batch, &part));
         keys.push(k);
     }
@@ -482,10 +547,10 @@ async fn timers_survive_every_declared_fault() {
     let tok_poison = token_of(c, t, &q_poison, &k_poison).await;
     frames.push(Framed::new(&k_poison, 200, &k_poison, &tok_poison));
 
-    let err = fire(c, &segs, &frames, 0.0)
-        .await
-        .expect_err("one poisoned segment fails the whole transaction — that IS the reason \
-                     QUEEN_SWEEPER_ISOLATE_ON_PERMANENT exists");
+    let err = fire(c, &segs, &frames, 0.0).await.expect_err(
+        "one poisoned segment fails the whole transaction — that IS the reason \
+                     QUEEN_SWEEPER_ISOLATE_ON_PERMANENT exists",
+    );
     let code = sqlstate(&err);
     assert!(
         code.starts_with("22") || code.starts_with("23") || code == "P0001",
@@ -548,15 +613,26 @@ async fn timers_survive_every_declared_fault() {
     )
     .await
     .expect("fail_v1");
-    assert!(r.is_object() || r.is_array(), "fail returns the exhausted list ({r})");
-    let row = timer_row(c, t, &q_poison, &k_poison).await.expect("still pending");
+    assert!(
+        r.is_object() || r.is_array(),
+        "fail returns the exhausted list ({r})"
+    );
+    let row = timer_row(c, t, &q_poison, &k_poison)
+        .await
+        .expect("still pending");
     assert_eq!(row.attempts, 1, "one permanent failure, one attempt");
     assert!(
         row.claim_token.is_none(),
         "a row in backoff is in NOBODY's hands — that is what keeps it cancellable (§4.1)"
     );
-    assert!(row.visible_in_future, "and invisible until the backoff elapses");
-    assert!(row.last_error.is_some(), "with the reason kept for the operator");
+    assert!(
+        row.visible_in_future,
+        "and invisible until the backoff elapses"
+    );
+    assert!(
+        row.last_error.is_some(),
+        "with the reason kept for the operator"
+    );
 
     // ========================================================================
     section("an exhausted timer is archived under ITS OWN partition, then deleted");
@@ -585,7 +661,11 @@ async fn timers_survive_every_declared_fault() {
         ("__timer__", -1),
         "a synthetic group and a non-position offset, exactly as declared"
     );
-    assert_eq!(rows[0].2.as_deref(), Some(k_dead.as_str()), "carrying the timer's txn");
+    assert_eq!(
+        rows[0].2.as_deref(),
+        Some(k_dead.as_str()),
+        "carrying the timer's txn"
+    );
     assert!(
         timer_row(c, t, &q_dlq, &k_dead).await.is_none(),
         "archived ⇒ removed"
@@ -600,7 +680,11 @@ async fn timers_survive_every_declared_fault() {
     // The race the guard closes: a reschedule landing between fail_v1 and dlq_v1 resets
     // attempts, so the archive must find nothing and the row must live (§6.2).
     let k_resched = unique("k-resched");
-    seed(c, &Seed::new(t, &q_dlq, &k_resched).delay_s(-1.0).attempts(0)).await;
+    seed(
+        c,
+        &Seed::new(t, &q_dlq, &k_resched).delay_s(-1.0).attempts(0),
+    )
+    .await;
     dlq(
         c,
         t,
@@ -678,15 +762,32 @@ async fn timers_survive_every_declared_fault() {
 
     // The broker then reports the transient failure WITHOUT spending an attempt.
     fail(
-        c, t, &q_db, &k_db, &tok_db, 5_000,
-        "08006 connection failure during fire", false, 5, 0.0,
+        c,
+        t,
+        &q_db,
+        &k_db,
+        &tok_db,
+        5_000,
+        "08006 connection failure during fire",
+        false,
+        5,
+        0.0,
     )
     .await
     .expect("fail_v1 transient");
     let row = timer_row(c, t, &q_db, &k_db).await.expect("pending");
-    assert_eq!(row.attempts, 0, "count_attempt = false means the budget is untouched");
-    assert!(row.claim_token.is_none(), "and the row is released into backoff");
-    assert!(row.visible_in_future, "held back by the backoff, not by a lease");
+    assert_eq!(
+        row.attempts, 0,
+        "count_attempt = false means the budget is untouched"
+    );
+    assert!(
+        row.claim_token.is_none(),
+        "and the row is released into backoff"
+    );
+    assert!(
+        row.visible_in_future,
+        "held back by the backoff, not by a lease"
+    );
 
     // ========================================================================
     section("cancel during a BACKOFF succeeds — claim_token is NULL on purpose (§4.1)");
@@ -697,22 +798,37 @@ async fn timers_survive_every_declared_fault() {
         claim(c, 0.0, LEASE_MS, 100, 100).await.is_empty(),
         "the backing-off row is invisible to the sweeper"
     );
-    let r = apply(c, &serde_json::json!([cancel_op(&q_db, &k_db)]), t, None, 0.0)
-        .await
-        .expect("cancel during backoff");
+    let r = apply(
+        c,
+        &serde_json::json!([cancel_op(&q_db, &k_db)]),
+        t,
+        None,
+        0.0,
+    )
+    .await
+    .expect("cancel during backoff");
     assert_eq!(
         op_status(&r, 0),
         (true, "cancelled".to_string()),
         "in backoff ≠ in someone's hands"
     );
-    assert!(timer_row(c, t, &q_db, &k_db).await.is_none(), "and it is gone");
+    assert!(
+        timer_row(c, t, &q_db, &k_db).await.is_none(),
+        "and it is gone"
+    );
 
     // A cancel for something that is no longer pending is `absent` with ok:false — never
     // ok:true, because a caller that trusts the flag would read it as 'stopped in time'
     // (§4.4).
-    let r = apply(c, &serde_json::json!([cancel_op(&q_db, &k_db)]), t, None, 0.0)
-        .await
-        .expect("second cancel");
+    let r = apply(
+        c,
+        &serde_json::json!([cancel_op(&q_db, &k_db)]),
+        t,
+        None,
+        0.0,
+    )
+    .await
+    .expect("second cancel");
     assert_eq!(
         op_status(&r, 0),
         (false, "absent".to_string()),

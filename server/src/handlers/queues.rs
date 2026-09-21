@@ -58,7 +58,10 @@ pub async fn handle_configure(
     let queue = match root.get("queue").and_then(|x| x.as_str()) {
         Some(q) => q.to_string(),
         None => {
-            return json(StatusCode::BAD_REQUEST, "{\"error\":\"queue is required\"}".to_string())
+            return json(
+                StatusCode::BAD_REQUEST,
+                "{\"error\":\"queue is required\"}".to_string(),
+            )
         }
     };
 
@@ -80,7 +83,12 @@ pub async fn handle_configure(
 
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
 
     let cfg_txt = match db::configure_queue(&client, &queue, tenant.as_str(), &opts_json).await {
@@ -217,7 +225,12 @@ pub async fn handle_delete_queue(
 ) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
 
     let del_txt = match db::delete_queue(&client, &queue, tenant.as_str()).await {
@@ -279,7 +292,12 @@ pub async fn handle_get_queue(
 ) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
 
     let txt = match db::get_queue(&client, &queue, tenant.as_str()).await {
@@ -293,7 +311,10 @@ pub async fn handle_get_queue(
     };
     let mut v: serde_json::Value = serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
     if v.get("error").is_some() || v.is_null() {
-        return json(StatusCode::NOT_FOUND, "{\"error\":\"Queue not found\"}".to_string());
+        return json(
+            StatusCode::NOT_FOUND,
+            "{\"error\":\"Queue not found\"}".to_string(),
+        );
     }
 
     // Enrich with segment counts (best-effort; leave the base detail intact on error).
@@ -330,11 +351,19 @@ pub async fn handle_queue_depth(
 ) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
     match db::queue_depth(&client, &queue, p.group.as_deref(), tenant.as_str()).await {
         Ok(Some(txt)) => json(StatusCode::OK, txt),
-        Ok(None) => json(StatusCode::NOT_FOUND, "{\"error\":\"Queue not found\"}".to_string()),
+        Ok(None) => json(
+            StatusCode::NOT_FOUND,
+            "{\"error\":\"Queue not found\"}".to_string(),
+        ),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("depth failed: ", &e),
@@ -378,7 +407,12 @@ pub async fn handle_list_queues(
 ) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
 
     let txt = match db::get_queues(&client, tenant.as_str()).await {
@@ -485,7 +519,12 @@ pub async fn handle_system_overview(
 ) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
     match db::get_system_overview(&client, tenant.as_str()).await {
         Ok(t) => sp_result_to_response(t),
@@ -504,7 +543,12 @@ pub async fn handle_list_namespaces(
 ) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
     match db::get_namespaces(&client, tenant.as_str()).await {
         Ok(t) => sp_result_to_response(t),
@@ -523,7 +567,12 @@ pub async fn handle_list_tasks(
 ) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
     match db::get_tasks(&client, tenant.as_str()).await {
         Ok(t) => sp_result_to_response(t),

@@ -95,10 +95,7 @@ pub struct AuthConfig {
 
 impl AuthConfig {
     fn from_env() -> AuthConfig {
-        let skip_raw = env_str(
-            "JWT_SKIP_PATHS",
-            "/health,/metrics/prometheus,/metrics,/",
-        );
+        let skip_raw = env_str("JWT_SKIP_PATHS", "/health,/metrics/prometheus,/metrics,/");
         let skip_paths: Vec<String> = skip_raw
             .split(',')
             .map(|s| s.trim().to_string())
@@ -153,7 +150,8 @@ impl AuthConfig {
             // denied operators the ability to PIN one — `auto`, the workaround,
             // accepts all seven algorithms and is the weaker posture.
             "HS256" | "HS384" | "HS512" | "auto" => {
-                if self.secret.is_empty() && self.jwks_url.is_empty() && self.public_key.is_empty() {
+                if self.secret.is_empty() && self.jwks_url.is_empty() && self.public_key.is_empty()
+                {
                     return Err(format!(
                         "JWT_ENABLED=true with JWT_ALGORITHM={} but no key material: set JWT_SECRET (HS256/HS384/HS512), or JWT_PUBLIC_KEY / JWT_JWKS_URL (RS256/EdDSA)",
                         self.algorithm
@@ -173,7 +171,9 @@ impl AuthConfig {
                 if let Some(i) = list.rfind(", ") {
                     list.replace_range(i..i + 2, ", or ");
                 }
-                return Err(format!("JWT_ALGORITHM={other} is not supported (use {list})"));
+                return Err(format!(
+                    "JWT_ALGORITHM={other} is not supported (use {list})"
+                ));
             }
         }
         Ok(())
@@ -253,7 +253,10 @@ impl SyncConfig {
         let bind_addr = checked_bind_addr(
             "QUEEN_MESH_BIND_ADDR",
             "QUEEN_MESH_PORT",
-            env_str("QUEEN_MESH_BIND_ADDR", &env_str("QUEEN_BIND_ADDR", "0.0.0.0")),
+            env_str(
+                "QUEEN_MESH_BIND_ADDR",
+                &env_str("QUEEN_BIND_ADDR", "0.0.0.0"),
+            ),
         );
         let peers_raw = {
             let mesh = env_str("QUEEN_MESH_PEERS", "");
@@ -318,7 +321,11 @@ fn os_hostname() -> String {
     // SAFETY: the pointer and length describe a live, correctly sized stack
     // buffer; gethostname NUL-terminates within it or fails.
     if unsafe { libc::gethostname(buf.as_mut_ptr(), buf.len()) } == 0 {
-        let bytes: Vec<u8> = buf.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+        let bytes: Vec<u8> = buf
+            .iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| c as u8)
+            .collect();
         if let Ok(s) = String::from_utf8(bytes) {
             if !s.is_empty() {
                 return s;
@@ -1185,7 +1192,11 @@ pub fn host_port(host: &str, port: &str) -> String {
 /// The HTTP listener's bind host, validated. Also the mesh listener's default,
 /// which is why it is a function and not an inline `env_str`.
 fn http_bind_addr() -> String {
-    checked_bind_addr("QUEEN_BIND_ADDR", "PORT", env_str("QUEEN_BIND_ADDR", "0.0.0.0"))
+    checked_bind_addr(
+        "QUEEN_BIND_ADDR",
+        "PORT",
+        env_str("QUEEN_BIND_ADDR", "0.0.0.0"),
+    )
 }
 
 /// FATAL on a bind host that carries a port, or that is explicitly empty.
@@ -1214,7 +1225,10 @@ fn env_str(k: &str, def: &str) -> String {
     std::env::var(k).unwrap_or_else(|_| def.to_string())
 }
 fn env_int(k: &str, def: i64) -> i64 {
-    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(def)
+    std::env::var(k)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(def)
 }
 // RUSTFIX item 4: PG_DATABASE (Rust name) → PG_DB (C++ name, config.hpp:86) →
 // "postgres". Uses a non-empty filter independent of `env_str`'s item-6 semantics
@@ -1227,7 +1241,10 @@ pub fn resolve_db_name() -> String {
         .unwrap_or_else(|| "postgres".to_string())
 }
 fn env_f64(k: &str, def: f64) -> f64 {
-    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(def)
+    std::env::var(k)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(def)
 }
 // ---------------------------------------------------------------------------
 // Boolean env parsing — ONE parser for every boolean knob in the broker.
@@ -1274,9 +1291,8 @@ fn resolve_bool(key: &str, raw: Option<&str>, def: bool) -> Result<bool, String>
         // alone" in compose/Helm) ⇒ the documented default.
         None => Ok(def),
         Some(v) if v.trim().is_empty() => Ok(def),
-        Some(v) => parse_bool(v).ok_or_else(|| {
-            format!("{key}=\"{v}\" is not a boolean (expected {BOOL_SPELLINGS})")
-        }),
+        Some(v) => parse_bool(v)
+            .ok_or_else(|| format!("{key}=\"{v}\" is not a boolean (expected {BOOL_SPELLINGS})")),
     }
 }
 
@@ -1437,9 +1453,14 @@ pub fn log_effective(cfg: &Config) {
     // setting them (deploy files, helm) must hear about it at boot rather
     // than tune a ghost.
     for dead in [
-        "QUEEN_SEG_PUSH_INIT", "QUEEN_SEG_PUSH_MIN", "QUEEN_SEG_PUSH_MAX",
-        "QUEEN_SEG_POP_INIT", "QUEEN_SEG_POP_MIN", "QUEEN_SEG_POP_MAX",
-        "QUEEN_VEGAS_ALPHA", "QUEEN_VEGAS_BETA",
+        "QUEEN_SEG_PUSH_INIT",
+        "QUEEN_SEG_PUSH_MIN",
+        "QUEEN_SEG_PUSH_MAX",
+        "QUEEN_SEG_POP_INIT",
+        "QUEEN_SEG_POP_MIN",
+        "QUEEN_SEG_POP_MAX",
+        "QUEEN_VEGAS_ALPHA",
+        "QUEEN_VEGAS_BETA",
     ] {
         if std::env::var(dead).is_ok() {
             tracing::warn!(target: "boot",
@@ -1854,8 +1875,11 @@ pub fn load() -> Config {
         // rows_per_commit 104-107 under fsync backpressure, push_multi 38→21ms).
         // "0"/"false" disables — the kill switch mirrors the QUEEN_HOTLIST parse.
         ack_fusion_enabled: env_bool("QUEEN_ACK_FUSION", true),
-        ack_fusion_shards: env_int("QUEEN_ACK_FUSION_SHARDS", env_int("QUEEN_V2_FUSION_SHARDS", 8))
-            .max(1) as usize,
+        ack_fusion_shards: env_int(
+            "QUEEN_ACK_FUSION_SHARDS",
+            env_int("QUEEN_V2_FUSION_SHARDS", 8),
+        )
+        .max(1) as usize,
         ack_fusion_hold_ms: env_int("QUEEN_ACK_FUSION_HOLD_MS", 3).max(1) as u64,
         // POP FUSION (server/src/pop_fusion.rs): N pop claim legs share one
         // transaction/commit. Default OFF for the A/B; the win is the sparse-
@@ -1881,8 +1905,7 @@ pub fn load() -> Config {
         partition_cleanup_days: env_int("PARTITION_CLEANUP_DAYS", 30).max(1) as i32,
         partition_cleanup_enabled: env_bool("QUEEN_PARTITION_CLEANUP_ENABLED", true),
         stats_interval_ms: env_int("STATS_INTERVAL_MS", 10000).max(1000) as u64,
-        retained_bytes_interval_ms: env_int("RETAINED_BYTES_INTERVAL_MS", 600000).max(1000)
-            as u64,
+        retained_bytes_interval_ms: env_int("RETAINED_BYTES_INTERVAL_MS", 600000).max(1000) as u64,
         metrics_flush_ms: env_int("METRICS_FLUSH_MS", 60000).max(1000) as u64,
         auth: AuthConfig::from_env(),
         sync: SyncConfig::from_env(),
@@ -1896,8 +1919,8 @@ pub fn load() -> Config {
         // disk). "0"/"false" disables — the legacy SQL candidate-scan path
         // stays intact behind the kill switch.
         hotlist_enabled: env_bool("QUEEN_HOTLIST", true),
-        hotlist_shards: env_int("QUEEN_HOTLIST_SHARDS", env_int("QUEEN_V2_FUSION_SHARDS", 8))
-            .max(1) as usize,
+        hotlist_shards: env_int("QUEEN_HOTLIST_SHARDS", env_int("QUEEN_V2_FUSION_SHARDS", 8)).max(1)
+            as usize,
         hotlist_window_batch: env_int("QUEEN_HOTLIST_WINDOW_BATCH", 100).max(1) as u32,
         hotlist_reseed_ms: env_int("QUEEN_HOTLIST_RESEED_MS", 30000).max(1),
         hotlist_reseed_full_ms: env_int("QUEEN_HOTLIST_RESEED_FULL_MS", 300_000).max(0),
@@ -1963,8 +1986,8 @@ pub fn load() -> Config {
         kv_quota_release_percent: env_int("QUEEN_KV_QUOTA_RELEASE_PERCENT", 90).clamp(1, 99),
         kv_quota_hot_percent: env_int("QUEEN_KV_QUOTA_HOT_PERCENT", 80).clamp(1, 100),
         kv_standalone_shed_after: env_int("QUEEN_KV_STANDALONE_SHED_AFTER", 5).max(1) as u32,
-        timers_max_payload_bytes: env_int("QUEEN_TIMERS_MAX_PAYLOAD_BYTES", 1024 * 1024)
-            .max(1) as usize,
+        timers_max_payload_bytes: env_int("QUEEN_TIMERS_MAX_PAYLOAD_BYTES", 1024 * 1024).max(1)
+            as usize,
         timers_max_horizon_s: env_int("QUEEN_TIMERS_MAX_HORIZON_S", 7_776_000).max(1),
         timers_max_ops_per_call: env_int("QUEEN_TIMERS_MAX_OPS_PER_CALL", 256).max(1) as usize,
         // ------------------------------------- ephemeral (EPHEMERAL_QUEUES.md §3.8)
@@ -1993,14 +2016,13 @@ pub fn load() -> Config {
         sweeper_enabled: env_bool("QUEEN_SWEEPER", true),
         sweeper_min_sleep_ms: env_int("QUEEN_SWEEPER_MIN_SLEEP_MS", 5).max(1) as u64,
         sweeper_max_sleep_ms: env_int("QUEEN_SWEEPER_MAX_SLEEP_MS", 1000).max(1) as u64,
-        sweeper_idle_max_sleep_ms: env_int("QUEEN_SWEEPER_IDLE_MAX_SLEEP_MS", 30_000).max(1)
-            as u64,
+        sweeper_idle_max_sleep_ms: env_int("QUEEN_SWEEPER_IDLE_MAX_SLEEP_MS", 30_000).max(1) as u64,
         sweeper_lease_ms: env_int("QUEEN_SWEEPER_LEASE_MS", 30_000).max(1) as u64,
         sweeper_claim_batch: env_int("QUEEN_SWEEPER_CLAIM_BATCH", 200).max(1),
         sweeper_cycle_max_rows: env_int("QUEEN_SWEEPER_CYCLE_MAX_ROWS", 5000).max(1),
         sweeper_due_cap: env_int("QUEEN_SWEEPER_DUE_CAP", 2000).max(1),
-        sweeper_max_fire_bytes: env_int("QUEEN_SWEEPER_MAX_FIRE_BYTES", 8 * 1024 * 1024)
-            .max(1) as usize,
+        sweeper_max_fire_bytes: env_int("QUEEN_SWEEPER_MAX_FIRE_BYTES", 8 * 1024 * 1024).max(1)
+            as usize,
         sweeper_max_attempts: env_int("QUEEN_SWEEPER_MAX_ATTEMPTS", 5).max(1) as i32,
         // .max(1) only — the ceiling is sweeper::MAX_PARALLELISM, applied at the call
         // site exactly as retention.rs applies its own. One clamp, one owner.
@@ -2079,8 +2101,14 @@ pub fn load() -> Config {
     // daily-by-accident — so an unparseable value is fatal rather than
     // defaulted.
     for (key, max) in [
-        ("QUEEN_RETENTION_DUE_CAP", crate::retention::DUE_CAP_MAX as i64),
-        ("QUEEN_RETENTION_SAFETY_WALK_MS", crate::retention::SAFETY_WALK_MAX_MS as i64),
+        (
+            "QUEEN_RETENTION_DUE_CAP",
+            crate::retention::DUE_CAP_MAX as i64,
+        ),
+        (
+            "QUEEN_RETENTION_SAFETY_WALK_MS",
+            crate::retention::SAFETY_WALK_MAX_MS as i64,
+        ),
     ] {
         let raw = std::env::var(key).ok();
         if let Err(e) = nonneg_env_verdict(key, raw.as_deref(), max) {
@@ -2154,9 +2182,10 @@ impl Config {
             // Clamped here and range-CHECKED in `load()`: the check is what an
             // operator sees, this is what keeps a hand-assembled `Config` in a
             // test from handing the claim path a zero.
-            auto_batch: self
-                .pop_autopilot_batch
-                .clamp(crate::pop_autopilot::AUTO_BATCH_MIN, crate::pop_autopilot::AUTO_BATCH_MAX),
+            auto_batch: self.pop_autopilot_batch.clamp(
+                crate::pop_autopilot::AUTO_BATCH_MIN,
+                crate::pop_autopilot::AUTO_BATCH_MAX,
+            ),
             target_age_ms: self.pop_autopilot_target_age_ms,
             dwell_ms: self.pop_autopilot_dwell_ms,
             dwell_pops: self.pop_autopilot_dwell_pops,
@@ -2291,7 +2320,10 @@ mod tests {
         // 0 is legal and MEANINGFUL on both knobs (derive / no recurring walk).
         assert_eq!(nonneg_env_verdict(key, Some("0"), max), Ok(()));
         assert_eq!(nonneg_env_verdict(key, Some(" 5000 "), max), Ok(()));
-        assert!(nonneg_env_verdict(key, Some("1O"), max).is_err(), "letter O must not pass");
+        assert!(
+            nonneg_env_verdict(key, Some("1O"), max).is_err(),
+            "letter O must not pass"
+        );
         assert!(nonneg_env_verdict(key, Some("-1"), max).is_err());
         assert!(nonneg_env_verdict(key, Some(&(max + 1).to_string()), max).is_err());
         // The safety-walk ceiling is a year: past it the walk is
@@ -2335,10 +2367,14 @@ mod tests {
 
     #[test]
     fn parses_every_accepted_spelling_case_insensitively() {
-        for t in ["true", "TRUE", "True", "1", "yes", "YES", "on", "ON", " true ", "\tOn\n"] {
+        for t in [
+            "true", "TRUE", "True", "1", "yes", "YES", "on", "ON", " true ", "\tOn\n",
+        ] {
             assert_eq!(parse_bool(t), Some(true), "{t:?} should parse as true");
         }
-        for f in ["false", "FALSE", "False", "0", "no", "NO", "off", "OFF", " false ", "\tOff\n"] {
+        for f in [
+            "false", "FALSE", "False", "0", "no", "NO", "off", "OFF", " false ", "\tOff\n",
+        ] {
             assert_eq!(parse_bool(f), Some(false), "{f:?} should parse as false");
         }
     }
@@ -2346,7 +2382,9 @@ mod tests {
     #[test]
     fn rejects_unrecognised_values() {
         // Including the near-misses that a permissive parser would guess at.
-        for bad in ["maybe", "y", "n", "t", "f", "2", "-1", "enabled", "disabled", "truthy", "0.0"] {
+        for bad in [
+            "maybe", "y", "n", "t", "f", "2", "-1", "enabled", "disabled", "truthy", "0.0",
+        ] {
             assert_eq!(parse_bool(bad), None, "{bad:?} should not parse");
         }
     }
@@ -2375,7 +2413,10 @@ mod tests {
         // it alone", NOT false — the old parser resolved "" to false, which for a
         // default-true knob like PG_SSL_REJECT_UNAUTHORIZED was a silent downgrade.
         assert_eq!(resolve_bool("JWT_ENABLED", Some(""), false), Ok(false));
-        assert_eq!(resolve_bool("PG_SSL_REJECT_UNAUTHORIZED", Some("   "), true), Ok(true));
+        assert_eq!(
+            resolve_bool("PG_SSL_REJECT_UNAUTHORIZED", Some("   "), true),
+            Ok(true)
+        );
     }
 
     #[test]
@@ -2439,7 +2480,14 @@ mod subscription_mode_tests {
     /// the exact opposite of what it advertises.
     #[test]
     fn documented_aliases_of_new_all_resolve_to_new() {
-        for raw in ["new", "new-only", "new_only", "newonly", "NEW", " New-Only "] {
+        for raw in [
+            "new",
+            "new-only",
+            "new_only",
+            "newonly",
+            "NEW",
+            " New-Only ",
+        ] {
             assert_eq!(normalize_subscription_mode(raw), "new", "{raw}");
         }
     }
@@ -2493,7 +2541,9 @@ mod reseed_window_tests {
         // The property the clamp exists to guarantee, checked across the cadences an
         // operator might plausibly set: the derivation must never be the thing that
         // needs raising.
-        for reseed_ms in [1, 100, 1_000, 5_000, 30_000, 75_000, 120_000, 600_000, 3_600_000] {
+        for reseed_ms in [
+            1, 100, 1_000, 5_000, 30_000, 75_000, 120_000, 600_000, 3_600_000,
+        ] {
             let w = resolve_reseed_window_ms(0, reseed_ms);
             assert!(
                 w >= gap(reseed_ms),
@@ -2528,17 +2578,24 @@ mod reseed_window_tests {
         // verbatim, including a very generous one.
         assert_eq!(resolve_reseed_window_ms(45_000, 30_000), 45_000);
         assert_eq!(resolve_reseed_window_ms(600_000, 30_000), 600_000);
-        assert_eq!(resolve_reseed_window_ms(RESEED_WINDOW_CEILING_MS, 30_000),
-                   RESEED_WINDOW_CEILING_MS);
+        assert_eq!(
+            resolve_reseed_window_ms(RESEED_WINDOW_CEILING_MS, 30_000),
+            RESEED_WINDOW_CEILING_MS
+        );
     }
 
     #[test]
     fn an_absurd_window_is_lowered_to_the_ceiling_without_overflowing() {
         // i64::MAX ms is ~292 million years: make_interval would take it, `now() -`
         // would not. Nothing here may panic or wrap on the way to saying so.
-        assert_eq!(resolve_reseed_window_ms(i64::MAX, 30_000), RESEED_WINDOW_CEILING_MS);
-        assert_eq!(resolve_reseed_window_ms(RESEED_WINDOW_CEILING_MS + 1, 30_000),
-                   RESEED_WINDOW_CEILING_MS);
+        assert_eq!(
+            resolve_reseed_window_ms(i64::MAX, 30_000),
+            RESEED_WINDOW_CEILING_MS
+        );
+        assert_eq!(
+            resolve_reseed_window_ms(RESEED_WINDOW_CEILING_MS + 1, 30_000),
+            RESEED_WINDOW_CEILING_MS
+        );
     }
 
     #[test]
@@ -2549,8 +2606,14 @@ mod reseed_window_tests {
         let month = 30 * 24 * 3_600_000i64;
         assert!(gap(month) > RESEED_WINDOW_CEILING_MS);
         assert_eq!(resolve_reseed_window_ms(0, month), RESEED_WINDOW_CEILING_MS);
-        assert_eq!(resolve_reseed_window_ms(1_000, month), RESEED_WINDOW_CEILING_MS);
+        assert_eq!(
+            resolve_reseed_window_ms(1_000, month),
+            RESEED_WINDOW_CEILING_MS
+        );
         // Same for a cadence so long it would overflow the multiplication outright.
-        assert_eq!(resolve_reseed_window_ms(0, i64::MAX), RESEED_WINDOW_CEILING_MS);
+        assert_eq!(
+            resolve_reseed_window_ms(0, i64::MAX),
+            RESEED_WINDOW_CEILING_MS
+        );
     }
 }

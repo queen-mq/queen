@@ -445,7 +445,9 @@ impl Entry {
         if self.hot.contains(&h) {
             return true;
         }
-        self.sealed.iter().any(|b| b.hashes.binary_search(&h).is_ok())
+        self.sealed
+            .iter()
+            .any(|b| b.hashes.binary_search(&h).is_ok())
     }
 
     /// Bloom-front probe: could `h` be present? Newest generation first —
@@ -464,7 +466,11 @@ impl Entry {
             None => true,
         };
         if need_new {
-            let cap = if self.gen_next_cap == 0 { block_cap } else { self.gen_next_cap };
+            let cap = if self.gen_next_cap == 0 {
+                block_cap
+            } else {
+                self.gen_next_cap
+            };
             let g = BloomGen::new(cap);
             self.gen_next_cap = (g.cap * GEN_TIER_FACTOR).min(GEN_CAP_MAX);
             self.gens.push_back(g);
@@ -772,7 +778,11 @@ impl DedupCache {
                 continue;
             }
             total_hashes += hashes.len();
-            segs.push(Hseg { base, created_ms, hashes });
+            segs.push(Hseg {
+                base,
+                created_ms,
+                hashes,
+            });
         }
         segs.sort_by_key(|s| s.base);
 
@@ -783,10 +793,7 @@ impl DedupCache {
         // map write lock is taken only to publish it. Pre-size the ring from the
         // row count so the load allocates each block exactly once.
         let (hydrated_from, verified_upto) = match (segs.first(), segs.last()) {
-            (Some(first), Some(last)) => (
-                first.base - 1,
-                last.base + last.hashes.len() as i64 - 1,
-            ),
+            (Some(first), Some(last)) => (first.base - 1, last.base + last.hashes.len() as i64 - 1),
             _ => (-1, current_last_offset),
         };
         let mut e = Entry::empty(now_ms, tick);
@@ -861,7 +868,9 @@ impl DedupCache {
             if !e.needs_full {
                 // Resident + vouching (None) or a resident interleave gap (Span);
                 // both are cheap and always allowed, even under cap pressure.
-                return e.needs_topup.map(|(from, to)| HydrationNeed::Span { from, to });
+                return e
+                    .needs_topup
+                    .map(|(from, to)| HydrationNeed::Span { from, to });
             }
         }
         // Absent, or resident-but-poisoned (needs_full): a FULL rebuild is
@@ -924,8 +933,7 @@ impl DedupCache {
             let pruned = (before - g.suppressed_until.len()) as i64;
             gauge.fetch_sub(pruned, Ordering::Relaxed);
         }
-        if g
-            .suppressed_until
+        if g.suppressed_until
             .insert(pid.to_string(), now_ms + SUPPRESS_COOLDOWN_MS)
             .is_none()
         {
@@ -1135,17 +1143,29 @@ mod tests {
     fn contiguous_advance() {
         let c = DedupCache::with_max_bytes(1 << 20, true);
         // Unknown partition: can't vouch, wants full hydration.
-        assert_eq!(c.verified_for_push("p1", &[h(1)], T0), PushCheck::Verified(-1));
+        assert_eq!(
+            c.verified_for_push("p1", &[h(1)], T0),
+            PushCheck::Verified(-1)
+        );
         assert_eq!(c.needs_hydration("p1", T0), Some(HydrationNeed::Full));
         // Empty-window hydration → complete entry, watermark -1 (nothing to vouch past).
         c.hydrate("p1", vec![], 0, -1, T0);
         assert_eq!(c.needs_hydration("p1", T0), None);
-        assert_eq!(c.verified_for_push("p1", &[h(1)], T0), PushCheck::Verified(-1));
+        assert_eq!(
+            c.verified_for_push("p1", &[h(1)], T0),
+            PushCheck::Verified(-1)
+        );
         // Contiguous commits advance the watermark.
         c.on_push_committed("p1", 0, &[h(1), h(2)], 1_000);
-        assert_eq!(c.verified_for_push("p1", &[h(3)], T0), PushCheck::Verified(1));
+        assert_eq!(
+            c.verified_for_push("p1", &[h(3)], T0),
+            PushCheck::Verified(1)
+        );
         c.on_push_committed("p1", 2, &[h(3)], 1_001);
-        assert_eq!(c.verified_for_push("p1", &[h(4)], T0), PushCheck::Verified(2));
+        assert_eq!(
+            c.verified_for_push("p1", &[h(4)], T0),
+            PushCheck::Verified(2)
+        );
     }
 
     #[test]
@@ -1172,7 +1192,10 @@ mod tests {
         c.on_push_committed("p1", 0, &[h(1), h(2)], 1_000);
         // Another broker wrote offsets 2..=4: our push landed at 5.
         c.on_push_committed("p1", 5, &[h(6)], 1_001);
-        assert_eq!(c.verified_for_push("p1", &[h(9)], T0), PushCheck::Verified(-1));
+        assert_eq!(
+            c.verified_for_push("p1", &[h(9)], T0),
+            PushCheck::Verified(-1)
+        );
         // The interleave surfaces as a Span hint (the caller still fetches full).
         assert_eq!(
             c.needs_hydration("p1", T0),
@@ -1191,7 +1214,10 @@ mod tests {
             T0,
         );
         assert_eq!(c.needs_hydration("p1", T0), None);
-        assert_eq!(c.verified_for_push("p1", &[h(9)], T0), PushCheck::Verified(5));
+        assert_eq!(
+            c.verified_for_push("p1", &[h(9)], T0),
+            PushCheck::Verified(5)
+        );
         // Every rebuilt hash — including the gap span and the original tail — is
         // now a known duplicate.
         for x in [1u8, 2, 3, 4, 5, 6] {
@@ -1210,10 +1236,7 @@ mod tests {
         let c = DedupCache::with_params(1 << 20, true, 1);
         c.hydrate(
             "p1",
-            vec![
-                (0, 0, 1_000, blob(&[h(1)])),
-                (1, 1, 5_000, blob(&[h(3)])),
-            ],
+            vec![(0, 0, 1_000, blob(&[h(1)])), (1, 1, 5_000, blob(&[h(3)]))],
             0,
             1,
             1_000,
@@ -1232,7 +1255,10 @@ mod tests {
         }
         // Expired hash is no longer a duplicate; the entry still vouches; the
         // surviving block's hash is still a known duplicate.
-        assert_eq!(c.verified_for_push("p1", &[h(1)], 6_000), PushCheck::Verified(1));
+        assert_eq!(
+            c.verified_for_push("p1", &[h(1)], 6_000),
+            PushCheck::Verified(1)
+        );
         assert_eq!(
             c.verified_for_push("p1", &[h(3)], 6_000),
             PushCheck::LocalDuplicate(vec![0])
@@ -1247,10 +1273,7 @@ mod tests {
         let c = DedupCache::with_params(1 << 20, true, 4);
         c.hydrate(
             "p1",
-            vec![
-                (0, 0, 1_000, blob(&[h(1)])),
-                (1, 1, 5_000, blob(&[h(3)])),
-            ],
+            vec![(0, 0, 1_000, blob(&[h(1)])), (1, 1, 5_000, blob(&[h(3)]))],
             0,
             1,
             1_000,
@@ -1276,10 +1299,7 @@ mod tests {
         let c = DedupCache::with_params(1 << 20, true, 1);
         c.hydrate(
             "p1",
-            vec![
-                (0, 0, 1_000, blob(&[h(1)])),
-                (1, 1, 5_000, blob(&[h(1)])),
-            ],
+            vec![(0, 0, 1_000, blob(&[h(1)])), (1, 1, 5_000, blob(&[h(1)]))],
             0,
             1,
             1_000,
@@ -1318,7 +1338,10 @@ mod tests {
                 "h({x}) present"
             );
         }
-        assert_eq!(c.verified_for_push("p1", &[h(9)], T0), PushCheck::Verified(4));
+        assert_eq!(
+            c.verified_for_push("p1", &[h(9)], T0),
+            PushCheck::Verified(4)
+        );
     }
 
     #[test]
@@ -1333,7 +1356,10 @@ mod tests {
         c.hydrate("p2", vec![(0, 0, 1_000, blob(&[h(2)]))], 0, 0, T0);
         // Age past the eviction guard so p2 is evictable; touch p1 so p2 is the LRU.
         let t = T0 + RECENT_USE_GUARD_MS + 1;
-        assert_eq!(c.verified_for_push("p1", &[h(9)], t), PushCheck::Verified(0));
+        assert_eq!(
+            c.verified_for_push("p1", &[h(9)], t),
+            PushCheck::Verified(0)
+        );
         // Third partition overflows the budget → p2 (LRU, past the guard) evicted whole.
         c.hydrate("p3", vec![(0, 0, 1_000, blob(&[h(3)]))], 0, 0, t);
         assert!(!contains(&c, "p2"), "p2 (LRU) evicted whole");
@@ -1341,7 +1367,10 @@ mod tests {
         // Its footprint is remembered so a re-hydration can be fit-tested.
         assert_eq!(last_bytes_of(&c, "p2"), Some(one));
         // Evicted partition is no longer resident → sound -1 until it re-hydrates.
-        assert_eq!(c.verified_for_push("p2", &[h(9)], t), PushCheck::Verified(-1));
+        assert_eq!(
+            c.verified_for_push("p2", &[h(9)], t),
+            PushCheck::Verified(-1)
+        );
         assert!(total_bytes(&c) <= one * 2 + one / 2);
     }
 
@@ -1379,7 +1408,11 @@ mod tests {
         // evicted at footprint ~one (deterministic setup of last_bytes).
         let c = DedupCache::with_max_bytes(one * 2, true); // budget = 0.9 * 2one = 1.8one
         c.hydrate("hot", vec![(0, 0, 1_000, blob(&[h(1)]))], 0, 0, 5_000);
-        c.global.lock().unwrap().last_bytes.insert("cold".to_string(), one);
+        c.global
+            .lock()
+            .unwrap()
+            .last_bytes
+            .insert("cold".to_string(), one);
 
         let hydrations_before = c.hydrations_total();
         // others(one) + est(one) = 2one > budget(1.8one) → SUPPRESS, no query.
@@ -1438,11 +1471,17 @@ mod tests {
         c.on_push_committed("p1", 0, &[h(1), h(2)], 1_000);
         // Impossible under the monotone allocator → defensive full rebuild.
         c.on_push_committed("p1", 1, &[h(3)], 1_001);
-        assert_eq!(c.verified_for_push("p1", &[h(9)], T0), PushCheck::Verified(-1));
+        assert_eq!(
+            c.verified_for_push("p1", &[h(9)], T0),
+            PushCheck::Verified(-1)
+        );
         assert_eq!(c.needs_hydration("p1", T0), Some(HydrationNeed::Full));
         // A full hydration heals it.
         c.hydrate("p1", vec![(0, 1, 1_000, blob(&[h(1), h(2)]))], 0, 1, T0);
-        assert_eq!(c.verified_for_push("p1", &[h(9)], T0), PushCheck::Verified(1));
+        assert_eq!(
+            c.verified_for_push("p1", &[h(9)], T0),
+            PushCheck::Verified(1)
+        );
     }
 
     #[test]
@@ -1451,7 +1490,10 @@ mod tests {
         c.hydrate("p1", vec![(0, 0, 1_000, blob(&[h(1)]))], 0, 0, T0);
         c.on_push_committed("p1", 1, &[h(2)], 1_001);
         assert_eq!(c.needs_hydration("p1", T0), None);
-        assert_eq!(c.verified_for_push("p1", &[h(1)], T0), PushCheck::Verified(-1));
+        assert_eq!(
+            c.verified_for_push("p1", &[h(1)], T0),
+            PushCheck::Verified(-1)
+        );
         assert_eq!(total_bytes(&c), 0);
         // Disabled ⇒ no hydration bookkeeping at all.
         assert_eq!(c.hydrations_total(), 0);
@@ -1627,7 +1669,11 @@ mod tests {
         {
             let arc = entry(&c, "p1");
             let e = arc.lock().unwrap();
-            assert!(e.gens.len() >= 2, "several generations live: {}", e.gens.len());
+            assert!(
+                e.gens.len() >= 2,
+                "several generations live: {}",
+                e.gens.len()
+            );
         }
         for (i, x) in hs.iter().enumerate() {
             assert_eq!(
@@ -1695,7 +1741,11 @@ mod tests {
         c.hydrate("p1", vec![], 0, -1, T0);
         let hs: Vec<[u8; 16]> = (0..64u16).map(|i| hb(3, i as u8)).collect();
         c.on_push_committed("p1", 0, &hs, 1_000);
-        assert_eq!(total_bytes(&c), sum_entry_bytes(&c), "gens included in budget");
+        assert_eq!(
+            total_bytes(&c),
+            sum_entry_bytes(&c),
+            "gens included in budget"
+        );
         let before = total_bytes(&c);
         // Everything pre-window → all blocks and all generations drop; hot is
         // empty (block_cap=1 seals every hash), so only fixed overhead remains.

@@ -40,8 +40,14 @@ pub async fn handle_record_trace(
         Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
     };
 
-    let txn = body_v.get("transactionId").and_then(|x| x.as_str()).filter(|s| !s.is_empty());
-    let pid = body_v.get("partitionId").and_then(|x| x.as_str()).filter(|s| !s.is_empty());
+    let txn = body_v
+        .get("transactionId")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty());
+    let pid = body_v
+        .get("partitionId")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty());
     let (txn, pid) = match (txn, pid) {
         (Some(t), Some(p)) => (t, p),
         _ => {
@@ -53,26 +59,48 @@ pub async fn handle_record_trace(
     };
     let data = match body_v.get("data") {
         Some(d) => d.clone(),
-        None => return json(StatusCode::BAD_REQUEST, "{\"error\":\"data is required\"}".to_string()),
+        None => {
+            return json(
+                StatusCode::BAD_REQUEST,
+                "{\"error\":\"data is required\"}".to_string(),
+            )
+        }
     };
 
     let mut sp = serde_json::Map::new();
-    sp.insert("transactionId".to_string(), serde_json::Value::String(txn.to_string()));
-    sp.insert("partitionId".to_string(), serde_json::Value::String(pid.to_string()));
+    sp.insert(
+        "transactionId".to_string(),
+        serde_json::Value::String(txn.to_string()),
+    );
+    sp.insert(
+        "partitionId".to_string(),
+        serde_json::Value::String(pid.to_string()),
+    );
     sp.insert(
         "consumerGroup".to_string(),
         serde_json::Value::String(
-            body_v.get("consumerGroup").and_then(|x| x.as_str()).unwrap_or("__QUEUE_MODE__").to_string(),
+            body_v
+                .get("consumerGroup")
+                .and_then(|x| x.as_str())
+                .unwrap_or("__QUEUE_MODE__")
+                .to_string(),
         ),
     );
     sp.insert(
         "eventType".to_string(),
         serde_json::Value::String(
-            body_v.get("eventType").and_then(|x| x.as_str()).unwrap_or("info").to_string(),
+            body_v
+                .get("eventType")
+                .and_then(|x| x.as_str())
+                .unwrap_or("info")
+                .to_string(),
         ),
     );
     sp.insert("data".to_string(), data);
-    sp.insert("workerId".to_string(), serde_json::Value::String("seg-rust".to_string()));
+    sp.insert(
+        "workerId".to_string(),
+        serde_json::Value::String("seg-rust".to_string()),
+    );
     if let Some(tn) = body_v.get("traceNames") {
         if tn.is_array() {
             sp.insert("traceNames".to_string(), tn.clone());
@@ -84,7 +112,12 @@ pub async fn handle_record_trace(
 
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
     // Track B (§5) OWNERSHIP GATE (pid-addressed WRITE): partitionId is taken
     // straight off the wire, so a leaked/guessed pid would otherwise let anyone
@@ -92,7 +125,10 @@ pub async fn handle_record_trace(
     // SAME "Message not found" a genuinely-unknown one would (the GET/DELETE
     // /messages/:pid precedent) — a distinct 403 would confirm the partition
     // exists under some other tenant. No-op, zero DB round-trips, when off.
-    if !st.tenant_owns_partition(&client, pid, tenant.as_str()).await {
+    if !st
+        .tenant_owns_partition(&client, pid, tenant.as_str())
+        .await
+    {
         return json(
             StatusCode::NOT_FOUND,
             "{\"success\":false,\"error\":\"Message not found\"}".to_string(),
@@ -100,10 +136,18 @@ pub async fn handle_record_trace(
     }
     match db::record_trace(&client, &sp_json).await {
         Ok(txt) => {
-            let v: serde_json::Value = serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
+            let v: serde_json::Value =
+                serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
             let ok = v.get("success").and_then(|x| x.as_bool()).unwrap_or(true)
                 && v.get("error").map(|e| e.is_null()).unwrap_or(true);
-            json(if ok { StatusCode::CREATED } else { StatusCode::INTERNAL_SERVER_ERROR }, txt)
+            json(
+                if ok {
+                    StatusCode::CREATED
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                },
+                txt,
+            )
         }
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -120,11 +164,19 @@ pub async fn handle_message_traces(
 ) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
     // Track B (§5) OWNERSHIP GATE (pid-addressed): a foreign pid's traces must not
     // leak — return the same empty set as a message with no traces (no-op when off).
-    if !st.tenant_owns_partition(&client, &partition_id, tenant.as_str()).await {
+    if !st
+        .tenant_owns_partition(&client, &partition_id, tenant.as_str())
+        .await
+    {
         return json(StatusCode::OK, "{\"traces\":[]}".to_string());
     }
     match db::get_message_traces(&client, &partition_id, &transaction_id).await {
@@ -149,7 +201,12 @@ pub async fn handle_traces_by_name(
     let offset = qint(&params, "offset", 0);
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
     match db::get_traces_by_name(&client, &trace_name, limit, offset, tenant.as_str()).await {
         Ok(txt) => sp_result_to_response(txt),
@@ -172,7 +229,12 @@ pub async fn handle_trace_names(
     let offset = qint(&params, "offset", 0);
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
     };
     match db::get_trace_names(&client, limit, offset, tenant.as_str()).await {
         Ok(txt) => sp_result_to_response(txt),
@@ -182,4 +244,3 @@ pub async fn handle_trace_names(
         ),
     }
 }
-

@@ -93,7 +93,10 @@ pub fn pack_frames(frames: &[FrameIn]) -> Vec<u8> {
         // length and actual content disagree. The push handler rejects those at
         // the HTTP boundary (`handlers::data::MAX_TXN_BYTES`); this pins the
         // invariant here, where it is actually load-bearing.
-        debug_assert!(txn.len() <= u16::MAX as usize, "txn exceeds the u16 frame limit");
+        debug_assert!(
+            txn.len() <= u16::MAX as usize,
+            "txn exceeds the u16 frame limit"
+        );
         let mut body_len = 1 + 16 + 2 + txn.len() + f.payload.len();
         if f.trace_id.is_some() {
             body_len += 16;

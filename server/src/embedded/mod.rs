@@ -668,8 +668,7 @@ impl Broker {
     /// Dead-lettered messages, newest first, filtered by `params` (queue,
     /// consumer group, limit/offset).
     pub async fn dlq(&self, params: &qp::DlqParams) -> Result<qp::DlqResponse, Error> {
-        let mut query: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
+        let mut query: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         for (k, v) in params.to_pairs() {
             query.insert(k.to_string(), v);
         }
@@ -817,7 +816,10 @@ impl Broker {
     // ladder of §1.6 is observable from here exactly as a client sees it.
 
     /// `POST /api/v1/ephemeral/push` — `{queue, partition?, messages:[{payload}]}`.
-    pub async fn ephemeral_push(&self, body: serde_json::Value) -> Result<serde_json::Value, Error> {
+    pub async fn ephemeral_push(
+        &self,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, Error> {
         self.eph(
             crate::handlers::handle_ephemeral_push(
                 State(self.inner.st.clone()),
@@ -1163,7 +1165,8 @@ mod tests {
         // to add just for a test.
         let queue_scoped: serde_json::Value = pop_params(&p, None, None).unwrap();
         assert_eq!(queue_scoped["conflation"], serde_json::json!(true));
-        let discovery: serde_json::Value = pop_params(&p, Some("billing"), Some("invoice")).unwrap();
+        let discovery: serde_json::Value =
+            pop_params(&p, Some("billing"), Some("invoice")).unwrap();
         assert_eq!(discovery["conflation"], serde_json::json!(true));
         // And it deserializes into the real params structs, so a rename on the
         // handler side is a failure here rather than a silently ignored key.
