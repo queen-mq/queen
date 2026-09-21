@@ -290,6 +290,47 @@ Order rationale: A proves the double-write mechanism + FAT win cheaply; C is wha
 actually moves the small-message write-amp; B is the correctness-critical
 transaction machinery; D/E are the finishers.
 
+### Phase A status + the A3b design (2026-09-21)
+
+**Done + committed + proven:** A0 (`682059a6`, per-queue log store, 24 crash tests),
+A1 (`15832603`, shadow write, byte-match), A2 (`096680e9`, pop+dedup read from the
+qlog, difffuzz vs the pg oracle 0 count-divergences), A3a (`e195526f`, the qlog is a
+WAL — fsync-at-commit + a qlog-durable index + a reopen reconciliation that REFUSES
+a qlog behind the store (NA-QLOG-I1); crash matrix 26/0 with the knob on, 2 new qlog
+cells). The qlog is the read-authoritative, WAL-grade, crash-recoverable store — but
+the double-write is NOT yet killed (the raft log still carries the payload).
+
+**A3b — the double-write kill (the crux, deep, highest-risk).** The raft log entry
+must stop carrying the payload so it is written ONCE (the qlog). Since apply cannot
+build the qlog from a blob-less entry, the payload must reach the qlog on the WRITE
+path, not at apply. Design (single-node):
+1. **The writer writes the qlog.** The writer thread (`replicator/local.rs`) already
+   owns the group commit + the one fsync. Move the payload write there: for each
+   proposed entry's `Append`, the writer writes the payload to its queue's qlog AND
+   the reference (queue_id + `Loc`/`seq`) into the raft-log entry, then fsyncs the
+   raft log AND the touched qlogs as ONE durability event before the ack. One write
+   of the payload (qlog); the raft-log entry is references + metadata only.
+2. **The entry carries a reference, not the blob** (`effect.rs` `Append.blob` →
+   a qlog reference; `hashes`/offsets stay). Apply reads nothing new — the payload is
+   already in the qlog from the writer; apply updates the store metadata and does NOT
+   `segments.append`.
+3. **Close the ack seam (A3a flag #1):** the ack is gated on the group fsync that
+   now covers the qlog, so an acked message's payload is on the platter at the ack.
+4. **Recovery from the qlog:** replay the raft log (references + metadata) from the
+   durable point; the payloads are already durable in the qlog; the NA-QLOG-I1
+   reconciliation bounds it. Remove the seg recovery.
+5. **Remove** the seg payload write + the raft-log blob; the segments module + the
+   LMDB message keyspaces become dead and are deleted in the cleanup.
+- **Gate:** the SIGKILL crash matrix (adapted — the payload is now written at the
+  writer, before apply) AND — because the qlog is now the SOLE payload WAL — the
+  **dm-flakey power-loss run on the VM** (SIGKILL keeps the page cache and cannot
+  prove no lost unsynced bytes). This is the durability proof A3b cannot ship without.
+- **Cost:** the writer now fsyncs the raft log + K per-queue qlogs per group (fan-out);
+  Phase E parallelizes it. Write-amp: FAT ~2x, all shapes lose the ~7 MB/s log copy.
+
+A3b is a writer/consensus-core restructure whose failure mode is silent data loss
+under power failure, so it is designed and dm-flakey-verified, never rushed.
+
 ---
 
 ## 11. Correctness gates (non-negotiable, every phase)
