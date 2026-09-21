@@ -556,6 +556,7 @@ func runOpenLoopMode(args []string) {
 	popWait := fs.Bool("pop-wait", false, "long-poll pop (Wait=true)")
 	popTimeout := fs.Int("pop-timeout", 2000, "pop long-poll timeout ms (used when -pop-wait)")
 	payloadBytes := fs.Int("payload", 256, "payload size in bytes")
+	payloadRandom := fs.Bool("payload-random", false, "incompressible payloads: every message of a push batch carries distinct random base64 (64-batch pool rotated per push); the default strings.Repeat(\"x\") compresses to nothing")
 	durationSec := fs.Int("duration", 0, "run duration seconds (0 = run until SIGINT)")
 	idleConns := fs.Int("idle-conns", 2048, "MaxIdleConnsPerHost for the client (keep-alive pool; size near max-inflight to avoid churn)")
 	reportSec := fs.Int("report", 5, "report interval seconds")
@@ -614,6 +615,33 @@ func runOpenLoopMode(args []string) {
 	payloads := make([]interface{}, *pushBatch)
 	for j := range payloads {
 		payloads[j] = payload
+	}
+	// -payload-random: a pool of 64 batches, each message distinct random base64
+	// of exactly payloadBytes, rotated per push — incompressible within a stored
+	// batch, and no per-push generation cost on the hot path.
+	var payloadPool [][]interface{}
+	var poolIdx uint64
+	if *payloadRandom {
+		const alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+		payloadPool = make([][]interface{}, 64)
+		for b := range payloadPool {
+			batch := make([]interface{}, *pushBatch)
+			for j := range batch {
+				buf := make([]byte, *payloadBytes)
+				for k := range buf {
+					buf[k] = alpha[rng.Intn(len(alpha))]
+				}
+				batch[j] = map[string]interface{}{"data": string(buf), "src": "goload-ol"}
+			}
+			payloadPool[b] = batch
+		}
+	}
+	nextPayloads := func() []interface{} {
+		if payloadPool == nil {
+			return payloads
+		}
+		return payloadPool[atomic.AddUint64(&poolIdx, 1)%uint64(len(payloadPool))]
 	}
 
 	// Open-loop producers do NOT retry: RetryAttempts=-1 forces exactly one
@@ -733,7 +761,7 @@ func runOpenLoopMode(args []string) {
 			atomic.AddInt64(&inflight, -1)
 			<-sem
 		}()
-		_, e := q.Queue(*queueName).Partition(part).Push(payloads).Execute(ctx)
+		_, e := q.Queue(*queueName).Partition(part).Push(nextPayloads()).Execute(ctx)
 		if e != nil {
 			if ctx.Err() == nil {
 				atomic.AddInt64(&pushErr, 1)

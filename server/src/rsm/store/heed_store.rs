@@ -590,6 +590,18 @@ impl<'s> HeedWrite<'s> {
     /// the kernel consumes the fsync error and drops the dirty pages, so the
     /// next sync succeeds silently: this return value is the only notice.
     fn cycle(&mut self, durable: bool) -> Result<()> {
+        // PHASE-C PROTOTYPE (one-fsync): LMDB is the SECOND fsync domain (its
+        // `mdb_env_sync` at the durable point, MDB_NOSYNC otherwise). With
+        // QUEEN_RAFT_STORE_NOSYNC=1 we SKIP that sync so the per-queue qlog fsync
+        // (writer, per group) is the ONE fsync — like PG's single WAL flush.
+        // Metadata durability then drops to at-least-once on power loss (rebuilt
+        // from the log = Phase C recovery, prototype-lossy). Default off = today.
+        static NOSYNC: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+            matches!(
+                std::env::var("QUEEN_RAFT_STORE_NOSYNC").as_deref(),
+                Ok("1") | Ok("true") | Ok("on")
+            )
+        });
         let durable_leg = durable || self.store.sync_every_commit;
         let Some(txn) = self.txn.take() else {
             return Err(self.poisoned());
@@ -599,8 +611,10 @@ impl<'s> HeedWrite<'s> {
             return Err(self.commit_failed(durable_leg, inner));
         }
         if durable_leg {
-            if let Err(inner) = self.store.sync_now() {
-                return Err(self.commit_failed(true, inner));
+            if !*NOSYNC {
+                if let Err(inner) = self.store.sync_now() {
+                    return Err(self.commit_failed(true, inner));
+                }
             }
             StoreMetrics::inc(&self.store.metrics.durable_commits, 1);
         } else {
