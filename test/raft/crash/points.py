@@ -80,10 +80,10 @@ POINTS = [
     # commit's qlog block, and prove the per-queue qlog is durable AT the store
     # commit (so A3b can remove the raft-log payload). raft1 only in phase 1.
     Point("qlog.record_written", "qlog WAL durability",
-          "this commit's qlog records are on the page cache; the qlog fsync has NOT run",
+          "A3b: the writer wrote this group's Append payloads to the qlog page cache; the qlog fsync has NOT run and the raft-log entry is NOT written",
           "NA-QLOG-I1", ("raft1", "raft3")),
     Point("qlog.record_fsynced", "qlog WAL durability",
-          "the qlog is fsynced through this commit's records; the store commit has NOT landed",
+          "A3b: the writer fsynced the qlog payloads (durable); the referencing raft-log entry is still NOT written — a kill here loses the unacked op cleanly (orphan payload, no entry)",
           "NA-QLOG-I1", ("raft1", "raft3")),
     # --- durable points ---------------------------------------------------
     Point("durable.files_synced", "durable points",

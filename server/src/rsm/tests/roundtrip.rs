@@ -945,3 +945,91 @@ fn every_field_has_its_own_slot() {
     };
     assert_eq!(decode_effect(&encode_effect(&e)).unwrap().0, e);
 }
+
+/// A3b (`ALICE_PGLESS_NEWARCH.md` §5): the log-native reference encoding
+/// [`encode_entry_payload_free`] drops every `Append`'s PAYLOAD and replaces it
+/// with the payload's 4-byte FRAME LENGTH — nothing else changes. It is
+/// byte-identical to `encode_entry` of the same entry whose `Append`s were built
+/// with that 4-byte length as their blob — so the writer's raft-log bytes and the
+/// codec cannot drift — and it decodes back to exactly that length-carrying
+/// entry, which is what a replay hands apply (so `RetainedBytes` is computed from
+/// the same length live and on replay: replay-stable, I2). The payload itself is
+/// gone from the entry (it lives once, in the qlog).
+#[test]
+fn payload_free_entry_carries_the_frame_length_and_matches_its_length_blob_twin() {
+    // Two frames, so the hash list is a non-trivial 32 bytes that MUST survive.
+    let hashes = [uuid(5).to_vec(), uuid(6).to_vec()].concat();
+    let payload = vec![10u8, 11, 12, 13, 14, 15, 16, 17]; // 8 bytes
+    let with_blob = Effect::Append {
+        pid: 7,
+        bucket: 2,
+        base_offset: 3,
+        count: 2,
+        created_at_us: 4,
+        hashes: hashes.clone(),
+        blob: payload.clone(),
+    };
+    // The frame length the payload-free entry carries in place of the payload:
+    // frame::encoded_len(count, payload_len) — the segment's own pos.len.
+    let frame_len = crate::rsm::segments::frame::encoded_len(2, payload.len()) as u32;
+    let length_blob = Effect::Append {
+        pid: 7,
+        bucket: 2,
+        base_offset: 3,
+        count: 2,
+        created_at_us: 4,
+        hashes,
+        blob: frame_len.to_le_bytes().to_vec(), // the 4-byte length, not the payload
+    };
+    // A non-Append effect alongside it: the payload-free path must leave every
+    // other effect (and the header, commands and outcomes) untouched.
+    let mut with = Entry::new(100, 0, 0);
+    with.add_command(uuid(1), Outcome::Empty, vec![Effect::Noop, with_blob])
+        .unwrap();
+    let mut length = Entry::new(100, 0, 0);
+    length
+        .add_command(
+            uuid(1),
+            Outcome::Empty,
+            vec![Effect::Noop, length_blob.clone()],
+        )
+        .unwrap();
+
+    let pf = encode_entry_payload_free(&with).unwrap();
+    // 1. byte-identical to encoding the length-blob entry (no drift).
+    assert_eq!(
+        pf,
+        encode_entry(&length).unwrap(),
+        "the payload-free encoding drifted from the length-blob entry"
+    );
+    // 2. it decodes to exactly the length-blob entry (what a replay hands apply).
+    assert_eq!(decode_entry(&pf).unwrap(), length);
+    // 3. the recovered Append carries the SAME metadata and the 4-byte length,
+    //    NOT the payload.
+    let Effect::Append {
+        pid,
+        base_offset,
+        count,
+        hashes: rec_hashes,
+        blob,
+        ..
+    } = &decode_entry(&pf).unwrap().effects[1]
+    else {
+        panic!("second effect is not an Append");
+    };
+    assert_eq!((*pid, *base_offset, *count), (7, 3, 2));
+    assert_eq!(rec_hashes.len(), 32, "the hash list survives");
+    assert_eq!(
+        blob.len(),
+        4,
+        "the entry carries the 4-byte frame length, not the payload"
+    );
+    assert_eq!(
+        u32::from_le_bytes(blob[..4].try_into().unwrap()),
+        frame_len,
+        "the carried length is the frame length"
+    );
+    assert_ne!(*blob, payload, "the payload bytes are NOT in the entry");
+    // 4. it is smaller than the with-blob encoding (4-byte length < 8-byte payload).
+    assert!(pf.len() < encode_entry(&with).unwrap().len());
+}

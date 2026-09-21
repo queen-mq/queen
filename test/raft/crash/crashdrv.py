@@ -383,14 +383,20 @@ def _results_header_lines(broker_bin, run_dir, late_nth):
                  "the broker's stderr tail — when it does not.")
     lines.append(f"- **cadence** `QUEEN_RAFT_DURABLE_EVERY_MS=150` so a later hit crosses a "
                  "durable point quickly (§13.6: cover every periodic boundary)")
-    lines.append(f"- **qlog** `QUEEN_RAFT_QLOG=1` (ALICE_PGLESS_NEWARCH.md §5, Phase A3a): the "
-                 "per-queue qlog is a WAL — fsynced at EACH store commit (before the commit) and "
-                 "at each durable point, with a recorded `QLOG_DURABLE_INDEX` recovery reconciles "
-                 "against. This run proves (a) the two new `qlog.record_written` / "
-                 "`qlog.record_fsynced` cells recover, and (b) every EXISTING §13.5 cell still "
-                 "recovers with the knob on (the raft log is still the WAL in A3a; qlog durability "
-                 "is ADDED, nothing removed). With the knob on, pop reads the payload FROM the "
-                 "qlog, so the cells also cross \"acked records are readable from the qlog\".")
+    lines.append(f"- **qlog** `QUEEN_RAFT_QLOG=1` (ALICE_PGLESS_NEWARCH.md §5, Phase A3b — the "
+                 "double-write kill): the payload is written ONCE. The LOG WRITER writes each "
+                 "`Append`'s payload to its queue's qlog and fsyncs it BEFORE the referencing "
+                 "raft-log entry, which is now PAYLOAD-FREE; apply does the metadata only and "
+                 "reads the payload from the qlog. This run proves (a) the two writer cells "
+                 "`qlog.record_written` (payload on the page cache, entry not written) and "
+                 "`qlog.record_fsynced` (payload DURABLE, entry not written) both recover — a kill "
+                 "before the group fsync loses the unacked op cleanly, a kill after it recovers the "
+                 "op with its payload; (b) every EXISTING §13.5 cell still recovers with the knob "
+                 "on; and (c) `apply.segment_written` is N/A (apply writes no segment on this "
+                 "path). With the knob on, pop reads the payload FROM the qlog, so the cells also "
+                 "cross \"acked records are readable from the qlog\". A knob-OFF control run "
+                 "(`QUEEN_RAFT_QLOG=0`) arms `apply.segment_written` and marks the two qlog cells "
+                 "N/A, proving today's path is unchanged.")
     lines.append(f"- **nth** each point armed at `nth=1` and `nth={late_nth}` (a later hit)")
     lines.append(f"- **run dir** `{run_dir}` (data dirs, per-cell `run.jsonl`, `pre.stderr`, "
                  "`post.stderr`)")

@@ -40,9 +40,9 @@
 //! | `log.flushed` | [`replicator`] the group is fsynced in the log | I4 |
 //! | `commit.before_apply` | [`replicator`] committed, not yet applied here | I4, I13 |
 //! | `apply.mid_entry` | [`apply`] some effects applied, the rest not | I1, I11 |
-//! | `apply.segment_written` | [`apply`] payload bytes in a file, store not committed | I11 |
-//! | `qlog.record_written` | [`apply`] qlog records on the page cache, pre-fsync | NA-QLOG-I1 |
-//! | `qlog.record_fsynced` | [`apply`] qlog records fsynced, pre-store-commit | NA-QLOG-I1 |
+//! | `apply.segment_written` | [`apply`] payload bytes in a file, store not committed (knob OFF only) | I11 |
+//! | `qlog.record_written` | [`replicator`] writer wrote the payload to the qlog page cache, pre-fsync | NA-QLOG-I1 |
+//! | `qlog.record_fsynced` | [`replicator`] writer fsynced the qlog payload, entry NOT yet written | NA-QLOG-I1 |
 //! | `apply.store_committed` | [`apply`] the store commit landed, files unsynced | I11 |
 //! | `durable.files_synced` | [`apply`] files fsynced, durable commit not landed | I11 |
 //! | `durable.store_committed` | [`apply`] the durable point is complete | I11 |
@@ -50,10 +50,17 @@
 //! | `gc.after_unlink` | [`apply`] the file is unlinked | I10 |
 //!
 //! The two `qlog.*` points are NOT §13.5: they are the `ALICE_PGLESS_NEWARCH.md`
-//! §5 (Phase A3a) crash cells that prove the per-queue qlog is durable AT the
-//! store commit, so A3b can later remove the raft-log payload. They fire only
-//! when `QUEEN_RAFT_QLOG` is on (inside the `commit_inner` qlog block, around the
-//! commit fsync); with the knob off the block is skipped and neither is reached.
+//! §5 crash cells that prove the double-write kill (A3b) is durable. They now
+//! fire on the LOG WRITER (`replicator/local.rs` `write_qlog_group`), which
+//! writes each `Append`'s payload to the qlog and fsyncs it BEFORE the raft-log
+//! entry that references it: `qlog.record_written` fires with the payload on the
+//! qlog page cache and the entry not yet written; `qlog.record_fsynced` fires
+//! with the payload DURABLE and the entry still not written. They fire only when
+//! `QUEEN_RAFT_QLOG` is on (the writer's qlog is `None` otherwise). A kill at
+//! either loses the unacked op cleanly (no committed entry ever points at a
+//! missing payload — the ordering the crash matrix proves). In A3b
+//! `apply.segment_written` no longer fires with the knob on (apply writes no
+//! segment); it is the knob-OFF payload point.
 //!
 //! Two extra points serve the segment layer's own roll tests (R-107), so a
 //! `kill` around a roll is deterministic instead of timing-driven; they are not

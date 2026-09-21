@@ -44,7 +44,7 @@ use crate::rsm::replicator::log::{Fsync, LogOptions, LogStore};
 use crate::rsm::replicator::{AppliedAt, ProposeError, Replicator, Role};
 use crate::rsm::store::{HeedStore, Store};
 
-use super::apply::{cfg, run_workload, seg_opts, store_opts, Node, Workload};
+use super::apply::{cfg, run_workload, seg_opts, settle, store_opts, Node, Workload};
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -498,6 +498,189 @@ async fn qlog_on_drives_the_real_apply_thread_and_publishes_a_reader() {
         "the knob was on but no qlog/ directory was created"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// One valid entry that creates a partition and appends `blob` to it, framed for
+/// the replicator (A3b payload-once proof). Bypasses the batcher — it is raw
+/// bytes the writer accepts — so `blob` is exactly what reaches the qlog.
+fn magic_push_entry(blob: &[u8]) -> Bytes {
+    use crate::rsm::effect::Effect;
+    use crate::rsm::entry::{Entry, Outcome};
+    let now = 1_000_000i64;
+    // A fresh store's counters are 1-based (pid_base = kv_version_base = 1); this
+    // entry assigns pid 1 to the partition and no KV version.
+    let mut e = Entry::new(now, 1, 1);
+    // Create the partition (pid = pid_base + 0 = 1).
+    e.add_command(
+        super::samples::uuid(1),
+        Outcome::Empty,
+        vec![Effect::PartitionCreate {
+            pid: 1,
+            uuid: super::samples::uuid(2),
+            tenant: "t".into(),
+            queue: "q".into(),
+            partition: "p".into(),
+            created_at_us: now,
+        }],
+    )
+    .unwrap();
+    // Append the distinctive payload (count 1, one 16-byte hash).
+    e.add_command(
+        super::samples::uuid(3),
+        Outcome::Empty,
+        vec![Effect::Append {
+            pid: 1,
+            bucket: 0,
+            base_offset: 0,
+            count: 1,
+            created_at_us: now,
+            hashes: super::samples::uuid(9).to_vec(),
+            blob: blob.to_vec(),
+        }],
+    )
+    .unwrap();
+    Bytes::from(encode_entry(&e).unwrap())
+}
+
+/// True if any file under `dir` (recursively) contains `needle` as a byte run.
+fn dir_contains(dir: &Path, needle: &[u8]) -> bool {
+    if !dir.exists() {
+        return false;
+    }
+    for entry in std::fs::read_dir(dir).expect("read_dir") {
+        let path = entry.expect("entry").path();
+        if path.is_dir() {
+            if dir_contains(&path, needle) {
+                return true;
+            }
+        } else {
+            let bytes = std::fs::read(&path).expect("read file");
+            if bytes.windows(needle.len()).any(|w| w == needle) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// A3b (`ALICE_PGLESS_NEWARCH.md` §5, the double-write kill): with the qlog knob
+/// ON the payload is written ONCE — to its queue's qlog, by the writer, before
+/// the referencing raft-log entry — so the raft log no longer carries it. This
+/// proves it at the BYTE level: a distinctive payload is ABSENT from the raft log
+/// (`log/`) and PRESENT in the qlog (`qlog/`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_payload_lives_once_in_the_qlog_not_the_raft_log() {
+    // 4 KiB of a magic run that cannot occur by chance in the entry metadata.
+    let magic: Vec<u8> =
+        std::iter::repeat_n([0xDEu8, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE], 512)
+            .flatten()
+            .collect();
+    let dir = scratch("repl-payload-once");
+    {
+        let store = Arc::new(HeedStore::open(&dir.join("store"), &store_opts()).expect("store"));
+        let repl = open_repl_qlog(&dir, store);
+        repl.propose(magic_push_entry(&magic), deadline())
+            .await
+            .expect("propose");
+        assert_eq!(repl.applied_index(), 1);
+        let (_stats, store) = repl.shutdown().expect("shutdown");
+        Arc::try_unwrap(store)
+            .unwrap_or_else(|_| panic!("store still shared"))
+            .close();
+    }
+    // The raft log entry is PAYLOAD-FREE: the magic is not in `log/`.
+    assert!(
+        !dir_contains(&dir.join("log"), &magic),
+        "the payload is in the RAFT LOG — the double-write was NOT killed"
+    );
+    // The payload lives ONCE, in the qlog: the magic IS in `qlog/`.
+    assert!(
+        dir_contains(&dir.join("qlog"), &magic),
+        "the payload is not in the qlog — the writer did not write it there"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A3b (`ALICE_PGLESS_NEWARCH.md` §5): the replicated digest is REPLAY-STABLE
+/// with the qlog on — the crash-recovery replay of the payload-free raft log
+/// reproduces the live digest BYTE-FOR-BYTE, including `RetainedBytes`. This is
+/// the I2 fix: the reference entry carries the payload's frame LENGTH (not the
+/// payload), so apply computes `RetainedBytes` from the same value whether an
+/// `Append` is applied live (the writer hands apply the length-carrying form) or
+/// replayed from the log. Before the fix this test FAILS at "counters" — live
+/// computed `RetainedBytes` from the real payload, replay from an empty blob.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_replicated_digest_is_replay_stable_with_the_qlog_on() {
+    const N: u64 = 60;
+    let dir = scratch("repl-replay-stable-live");
+
+    // 1. LIVE: run the workload knob-on through the real writer + apply, take a
+    //    durable point (shutdown), and read the replicated digest.
+    let live = {
+        let store = Arc::new(HeedStore::open(&dir.join("store"), &store_opts()).expect("store"));
+        let repl = open_repl_qlog(&dir, store);
+        for e in entry_bytes(N) {
+            repl.propose(e, deadline()).await.expect("propose");
+        }
+        let (_stats, store) = repl.shutdown().expect("shutdown");
+        digest_and_close(store)
+    };
+
+    // 2. REPLAY: read the PAYLOAD-FREE raft log the live run wrote and apply it
+    //    into a FRESH applier configured for recovery (qlog on + writer-external),
+    //    simulating a crash restart. The payload lives only in the qlog; these
+    //    entries carry the frame LENGTH, so apply must derive `RetainedBytes` from
+    //    it exactly as the live path did.
+    let replay_dir = scratch("repl-replay-stable-fresh");
+    let recovered = {
+        let (log, _rec) =
+            LogStore::open(&dir.join("log"), LogOptions::from_env()).expect("open raft log");
+        let mut entries: Vec<(u64, u64, crate::rsm::entry::Entry)> = Vec::new();
+        log.scan_from(1, &mut |index, term, body| {
+            entries.push((
+                index,
+                term,
+                crate::rsm::entry::decode_entry(body).expect("decode replayed entry"),
+            ));
+            Ok(())
+        })
+        .expect("scan raft log");
+
+        let store = Arc::new(
+            HeedStore::open(&replay_dir.join("store"), &store_opts()).expect("fresh store"),
+        );
+        {
+            let recovery_cfg = apply::ApplyConfig {
+                qlog: true,
+                qlog_writer_external: true,
+                ..cfg()
+            };
+            let (mut a, _rec) = apply::Applier::open(
+                &*store,
+                &replay_dir.join("seg"),
+                seg_opts(),
+                recovery_cfg,
+                Arc::new(apply::NoNotify),
+            )
+            .expect("open recovery applier");
+            for (index, term, entry) in entries {
+                a.apply(&apply::Committed { index, term, entry })
+                    .expect("apply replayed entry");
+            }
+            settle(&mut a);
+        }
+        digest_and_close(store)
+    };
+
+    assert_eq!(
+        recovered.whole,
+        live.whole,
+        "the crash-recovered digest DRIFTS from the live digest, first at {:?} \
+         — RetainedBytes must be computed from the frame length on both paths (I2)",
+        recovered.first_difference(&live),
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&replay_dir);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

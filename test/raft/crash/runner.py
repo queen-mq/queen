@@ -96,10 +96,12 @@ PUSHACK_REACHABLE = {
     "apply.store_committed",
     "durable.files_synced",
     "durable.store_committed",
-    # ALICE_PGLESS_NEWARCH.md §5 (Phase A3a): the qlog WAL durability cells. They
-    # fire in the store commit's qlog block (a push crosses it every round with
-    # QUEEN_RAFT_QLOG on — see QLOG_KNOB below), so the push/pop/ack workload
-    # reaches them exactly as it reaches apply.store_committed.
+    # ALICE_PGLESS_NEWARCH.md §5 / A3b (the double-write kill): the qlog WAL
+    # durability cells. They fire on the LOG WRITER — it writes each push's
+    # payload to the qlog and fsyncs it BEFORE the raft-log entry — so every push
+    # round crosses them with QUEEN_RAFT_QLOG on (see QLOG_KNOB below). A kill at
+    # either loses the unacked op cleanly; a kill after the group fsync recovers
+    # the op with its payload (proven across the restart).
     "qlog.record_written",
     "qlog.record_fsynced",
 }
@@ -494,6 +496,35 @@ def run_push_ack(broker_path, point, nth, run_dir, topology, out=sys.stdout) -> 
         res.reasons.append(
             "not reachable by a phase-1 push/pop/ack workload "
             "(no retention or delete route yet; §10.3, WP-2.7)"
+        )
+        return res
+    # ALICE_PGLESS_NEWARCH.md A3b (the double-write kill): with the qlog knob ON
+    # the payload is written ONCE, by the LOG WRITER to the qlog, BEFORE the
+    # raft-log entry — never by apply into a segment. So `apply.segment_written`
+    # is not a state the broker ever reaches with the knob on; the payload-durable
+    # crossing point moved to `qlog.record_written`/`qlog.record_fsynced` on the
+    # writer. Marking it N/A here (rather than arming a point that can never fire
+    # and timing out) is the A3b twin of the reachability gate above. A knob-off
+    # control run (QUEEN_RAFT_QLOG=0) still arms and crashes it exactly as today.
+    if point == "apply.segment_written" and QLOG_KNOB != "0":
+        res.verdict = "N/A"
+        res.reasons.append(
+            "A3b: the payload is written to the qlog by the log writer (before the "
+            "entry), not into a segment by apply — this state does not occur with "
+            "QUEEN_RAFT_QLOG on; the durable-payload crossing is qlog.record_written / "
+            "qlog.record_fsynced on the writer (QUEEN_RAFT_QLOG=0 arms it as today)"
+        )
+        return res
+    # The mirror of the above for a knob-OFF control run: the writer's qlog is
+    # `None` with the knob off, so `qlog.record_written` / `qlog.record_fsynced`
+    # are never reached — the payload lives in the raft-log entry and a segment,
+    # and `apply.segment_written` is the payload point. Mark the qlog cells N/A.
+    if point in ("qlog.record_written", "qlog.record_fsynced") and QLOG_KNOB == "0":
+        res.verdict = "N/A"
+        res.reasons.append(
+            "QUEEN_RAFT_QLOG=0: the writer keeps no qlog, so this A3b writer crash "
+            "point is never reached (the payload is in the raft-log entry + a segment; "
+            "apply.segment_written is the payload point on this control run)"
         )
         return res
 

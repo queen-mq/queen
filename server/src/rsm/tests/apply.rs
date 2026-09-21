@@ -192,6 +192,10 @@ pub fn cfg() -> ApplyConfig {
         // Phase A1: the shadow qlog is off across the shared apply suite, so
         // every existing test runs today's exact path; the qlog tests opt in.
         qlog: false,
+        // A3b: unit tests drive apply directly (no external writer), so apply
+        // owns any qlog it opens; the qlog tests opt into `qlog: true` and rely
+        // on this being false so apply writes the qlog they read back.
+        qlog_writer_external: false,
     }
 }
 
@@ -1351,7 +1355,7 @@ fn transitions_ring_equals_a_rebuild_at_every_boundary() {
     let mut last = [-1i64; 4];
     let mut committed = [[-1i64; 2]; 4];
     let mut rng = 0x51ED_2A17u64;
-    let mut roll = |rng: &mut u64| {
+    let roll = |rng: &mut u64| {
         *rng = rng
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
@@ -1444,7 +1448,7 @@ fn slow_consumers_never_leave_the_ring_empty_while_lag_remains() {
         .expect("setup");
     // Seed every partition with 3 frames.
     let mut last = [-1i64; N as usize];
-    let mut committed = [-1i64; N as usize];
+    let committed = [-1i64; N as usize];
     let mut lease_exp = [None::<i64>; N as usize];
     let mut idx = 2u64;
     let mut ids = 1_000u64;

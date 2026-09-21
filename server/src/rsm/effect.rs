@@ -1643,6 +1643,65 @@ pub fn write_effect(out: &mut Vec<u8>, e: &Effect) {
     out.extend_from_slice(&body);
 }
 
+/// Like [`write_effect`], but an [`Effect::Append`] is framed with an EMPTY
+/// payload (`blob`) while every other field — `pid`, `bucket`, `base_offset`,
+/// `count`, `created_at_us` and the whole hash list — is byte-identical to what
+/// [`write_effect`] writes. Every non-`Append` effect is written verbatim by
+/// [`write_effect`].
+///
+/// This is the ONE serialization difference the log-native write path
+/// introduces (`ALICE_PGLESS_NEWARCH.md` A3b): the payload lives ONCE, in its
+/// queue's qlog, so the raft-log entry that references it carries no payload —
+/// its `blob` field instead holds the payload's 4-byte FRAME LENGTH (`u32`,
+/// little-endian: `frame::encoded_len(count, payload_len)`, i.e. the segment's
+/// own `pos.len`).
+///
+/// Carrying the LENGTH (not the payload) is what makes the replicated digest
+/// REPLAY-STABLE (I2): apply computes `RetainedBytes` — a replicated counter —
+/// and the length-only `seg_loc` from this same value whether the entry is
+/// applied live (the writer hands apply this same length-carrying form) or
+/// replayed from the payload-free log, so no path ever reads it off an empty
+/// blob. Four bytes is not the payload, so the double-write stays dead (the
+/// payload lives ONCE, in the qlog; `tests/replicator.rs` proves a KiB payload is
+/// still absent from the raft log). A drift test in `tests/roundtrip.rs` pins the
+/// encoding to `write_effect` of the same `Append` built with the 4-byte length
+/// as its blob.
+pub fn write_effect_payload_free(out: &mut Vec<u8>, e: &Effect) {
+    match e {
+        Effect::Append {
+            pid,
+            bucket,
+            base_offset,
+            count,
+            created_at_us,
+            hashes,
+            blob,
+        } => {
+            let frame_len = crate::rsm::segments::frame::encoded_len(*count, blob.len()) as u32;
+            let mut w = Writer::with_capacity(HEADER_HINT_APPEND + hashes.len());
+            w.u64(*pid);
+            w.u16(*bucket);
+            w.u64(*base_offset);
+            w.u32(*count);
+            w.i64(*created_at_us);
+            w.blob(hashes);
+            // The payload lives once, in the qlog; the entry carries its frame
+            // LENGTH (4 bytes) so RetainedBytes is identical live and on replay.
+            w.blob(&frame_len.to_le_bytes());
+            let body = w.into_inner();
+            out.extend_from_slice(&(e.kind() as u16).to_le_bytes());
+            out.extend_from_slice(&e.version().to_le_bytes());
+            out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            out.extend_from_slice(&body);
+        }
+        other => write_effect(out, other),
+    }
+}
+
+/// Bytes reserved for an `Append` body before its hashes: the six fixed fields
+/// plus the two blob length prefixes.
+const HEADER_HINT_APPEND: usize = 8 + 2 + 8 + 4 + 8 + 4 + 4;
+
 /// Decode one framed effect; returns it and the bytes consumed.
 ///
 /// An effect never travels alone: in the product it is decoded inside an entry

@@ -818,6 +818,32 @@ pub fn encode_entry(e: &Entry) -> Result<Vec<u8>, CodecError> {
     Ok(frame_entry_body(&body))
 }
 
+/// Encode an entry exactly like [`encode_entry`], except every
+/// [`Effect::Append`] is framed WITHOUT its payload — its `blob` field carries
+/// the payload's 4-byte FRAME LENGTH instead (see
+/// [`super::effect::write_effect_payload_free`]). This is the reference entry the
+/// log-native write path puts in the raft log (`ALICE_PGLESS_NEWARCH.md` A3b):
+/// the payload lives once, in the queue's qlog, written + fsync'd BEFORE this
+/// entry is made durable, so an entry decoded from these bytes on recovery reads
+/// its payload from the qlog and never re-materializes it. Carrying the LENGTH
+/// (not the payload) keeps `RetainedBytes` replay-stable (I2). Every other byte —
+/// offsets, `count`, `created_at`, the hash list, every non-`Append` effect, the
+/// header and the checksum — is produced by the SAME code as [`encode_entry`], so
+/// the two cannot drift.
+///
+/// The result is byte-identical to `encode_entry` of the same entry whose
+/// `Append`s were built with the 4-byte length as their `blob`, and it is always
+/// SMALLER than `encode_entry` of `e`, so an entry that fit the codec limit still
+/// fits.
+pub fn encode_entry_payload_free(e: &Entry) -> Result<Vec<u8>, CodecError> {
+    e.validate()?;
+    let body = encode_entry_body_with(e, super::effect::write_effect_payload_free);
+    if body.len() > MAX_BODY_LEN as usize {
+        return Err(CodecError::Layout("entry body above the codec's limit"));
+    }
+    Ok(frame_entry_body(&body))
+}
+
 /// The raw serializer, with no checks at all: for the tests that must FORGE
 /// bytes a valid encoder cannot produce, so the decoder's refusals can be
 /// exercised. Never compiled into the product — the product path is
@@ -838,6 +864,16 @@ fn frame_entry_body(body: &[u8]) -> Vec<u8> {
 }
 
 fn encode_entry_body(e: &Entry) -> Vec<u8> {
+    encode_entry_body_with(e, write_effect)
+}
+
+/// The entry-body serializer, parameterized by how one effect is framed. The
+/// product path passes [`write_effect`]; the log-native reference path passes
+/// [`super::effect::write_effect_payload_free`], which is identical except an
+/// `Append` carries no payload. Everything else — the header, the commands and
+/// their outcomes, the effect count — is written the same way, so the two
+/// encodings cannot drift apart on anything but the payload.
+fn encode_entry_body_with(e: &Entry, write_one: fn(&mut Vec<u8>, &Effect)) -> Vec<u8> {
     let mut body = Vec::with_capacity(64 + e.effects.len() * 64);
     body.extend_from_slice(&e.format.to_le_bytes());
     body.extend_from_slice(&e.kinds_version.to_le_bytes());
@@ -859,7 +895,7 @@ fn encode_entry_body(e: &Entry) -> Vec<u8> {
 
     body.extend_from_slice(&(e.effects.len() as u32).to_le_bytes());
     for eff in &e.effects {
-        write_effect(&mut body, eff);
+        write_one(&mut body, eff);
     }
 
     body

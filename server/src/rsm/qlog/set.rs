@@ -306,6 +306,30 @@ impl QLogSet {
         Ok(())
     }
 
+    /// Write one queue's group of records directly (one `write`, NO fsync),
+    /// opening the queue's log lazily — the log-native WRITER path
+    /// (`ALICE_PGLESS_NEWARCH.md` A3b). The writer thread keys by `queue_id` (it
+    /// holds a `pid -> queue_id` map, not the queue names the [`QLogSet::buffer`]
+    /// applier path carries), groups a written raft-log group's `Append`s by
+    /// queue, and calls this once per touched queue BEFORE it fsyncs — then
+    /// [`QLogSet::sync`] makes them durable, and only THEN is the referencing
+    /// raft-log entry written and fsynced (the payload-before-entry ordering that
+    /// keeps a committed entry from ever pointing at a missing payload). `records`
+    /// carry `seq` = the entry index (the leader's order stamp), exactly as the
+    /// applier path's buffer did. Marks the queue dirty for the next `sync` and
+    /// advances the written watermark.
+    pub fn write_group_for_qid(&mut self, qid: u64, records: &[RecordInput<'_>]) -> io::Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let group_max_seq = records.iter().map(|r| r.seq).max().unwrap_or(0);
+        let log = self.get_or_open(qid)?;
+        log.write().expect("qlog poisoned").write_group(records)?;
+        self.dirty.insert(qid);
+        self.written_seq = self.written_seq.max(group_max_seq);
+        Ok(())
+    }
+
     /// Fsync every queue written since the last sync (§5: a durable point leaves
     /// every buffered record fsync'd). One fsync per touched queue, batched across
     /// the entries since the last durable point — the qlog twin of the segment

@@ -471,7 +471,28 @@ pub struct ApplyConfig {
     /// replicated digest can see (it only adds files under `qlog/`) and off-vs-on
     /// is behaviourally identical — the segment/txns read and the qlog read
     /// return byte-identical bytes and verdicts (the read-match test).
+    ///
+    /// A3b (`ALICE_PGLESS_NEWARCH.md` §5): with the knob on, apply no longer
+    /// files the payload into a `.seg` (the double-write is gone); it does the
+    /// message METADATA only and reads the payload from the qlog. WHO writes the
+    /// qlog then depends on [`ApplyConfig::qlog_writer_external`].
     pub qlog: bool,
+    /// A3b: `true` when an EXTERNAL writer (the `LocalReplicator` log writer)
+    /// owns the qlog — it writes each payload and fsyncs it BEFORE the referencing
+    /// raft-log entry, the durability ordering apply itself cannot provide
+    /// (apply runs AFTER the entry is durable). Then `Applier::open` opens no
+    /// qlog of its own and apply's `append`/`execute`/commit qlog sites are all
+    /// skipped; apply still records `meta::QLOG_DURABLE_INDEX` (from the highest
+    /// applied `Append` index) so recovery reconciles against it.
+    ///
+    /// `false` (the default) keeps the A1/A2/A3a behaviour: apply opens and
+    /// writes the qlog itself (fsync at the store-commit cadence). This is what
+    /// the unit tests drive — they build entries and apply them without a
+    /// replicator writer — and it exercises the SAME record format and read path
+    /// the external writer produces. The live single-node path (the
+    /// `LocalReplicator`) sets this `true`; the external writer's ordering is
+    /// proven by the crash matrix, not the unit apply loop.
+    pub qlog_writer_external: bool,
 }
 
 impl Default for ApplyConfig {
@@ -511,6 +532,9 @@ impl Default for ApplyConfig {
             // Phase A1 shadow: off by default, so an unset knob is byte-for-byte
             // today's behaviour and no `qlog/` directory is ever created.
             qlog: false,
+            // A3b: apply owns the qlog by default (the unit-test path); the
+            // `LocalReplicator` sets this true so the WRITER owns it.
+            qlog_writer_external: false,
         }
     }
 }
@@ -559,6 +583,9 @@ impl ApplyConfig {
             batch_counters: flag("QUEEN_RAFT_BATCH_COUNTERS", d.batch_counters),
             pending_transitions: flag("QUEEN_RAFT_PENDING_TRANSITIONS", d.pending_transitions),
             qlog: flag("QUEEN_RAFT_QLOG", d.qlog),
+            // Set by the `LocalReplicator` boot, never from the environment: the
+            // storage seam decides who owns the qlog, not a knob.
+            qlog_writer_external: d.qlog_writer_external,
         }
     }
 }
@@ -812,6 +839,15 @@ pub struct Applier<'s, S: Store> {
     kv_version_next: u64,
     last_now_us: i64,
     max_created_at_us: i64,
+    /// A3b (`ALICE_PGLESS_NEWARCH.md` §5): the highest entry index that carried an
+    /// `Append`. Recorded into `meta::QLOG_DURABLE_INDEX` at every commit /
+    /// durable point when the qlog knob is on, so recovery reconciles the
+    /// reopened qlog's durable tail against it (NA-QLOG-I1). With an external
+    /// writer the qlog record of every applied `Append` is fsync'd BEFORE the
+    /// entry reached apply, so it is durable by the time this index names it —
+    /// which is exactly what the reconciliation needs. Seeded at open from the
+    /// stored value so it never regresses over a reopened tail.
+    last_append_index: u64,
 
     /// Entries executed since the last store commit (§11.3's second trigger).
     entries_since_commit: u64,
@@ -928,7 +964,13 @@ impl<'s, S: Store> Applier<'s, S> {
         // immediately, before any new append — and so the lazy open on the first
         // flush is only ever a genuinely new queue, never a `create_new`
         // collision with a directory a previous run left.
-        let qlog = if cfg.qlog {
+        // A3b: with an EXTERNAL writer (the `LocalReplicator` log writer) the qlog
+        // is opened + reconciled + owned by the BOOT thread, and the writer writes
+        // it BEFORE the raft-log entry — so apply opens NO qlog of its own here
+        // (a second `QLogSet` on the same directory would double-open it). The
+        // A1/A2/A3a path (`qlog_writer_external == false`, the unit tests) still
+        // opens + reconciles + writes it below.
+        let qlog = if cfg.qlog && !cfg.qlog_writer_external {
             let opts = crate::rsm::qlog::QLogOptions {
                 segment_bytes: seg_opts.segment_bytes,
                 fsync: match seg_opts.fsync {
@@ -1012,6 +1054,7 @@ impl<'s, S: Store> Applier<'s, S> {
             kv_version_next,
             last_now_us,
             max_created_at_us,
+            last_append_index: qlog_durable_index,
             entries_since_commit: 0,
             dirty: false,
             poisoned: None,
@@ -1299,19 +1342,28 @@ impl<'s, S: Store> Applier<'s, S> {
         // no-op when buffering is off.
         self.segments.flush_writes()?;
 
-        // Phase A1 write / A2 read: write this entry's buffered qlog records to
-        // the file + RAM index NOW — one `write` per touched queue, NO fsync —
-        // at the SAME boundary the segment payload becomes readable, and BEFORE
-        // the leader answers below (`notify.applied`). This is the A2 read
-        // invariant, and the bug it fixes: a pop is rendered right after apply,
-        // and it can claim (via the overlay) an offset an in-flight push appended
-        // in this same, not-yet-committed commit window — so the payload MUST be
-        // in the qlog the moment the entry is applied, exactly as it is in the
-        // segment file, not one store commit later. The fsync is batched to the
-        // durable point (`durable_point_inner` → `qlog.sync`). `None`/empty when
-        // the knob is off, so this is exactly today's path then.
+        // Write this entry's buffered qlog records to the file + RAM index (one
+        // `write` per touched queue, NO fsync). `Some` ONLY on the unit-test /
+        // A1-A2-A3a path; on the LIVE A3b path the external writer already wrote
+        // AND fsync'd them before the entry reached apply, so this is `None`.
+        // Where it runs it does so at the boundary the payload becomes readable,
+        // before the leader answers — the A2 read invariant.
         if let Some(qlog) = self.qlog.as_mut() {
             qlog.flush().map_err(ApplyError::Qlog)?;
+        }
+        // A3b: the highest applied `Append` index, recorded into
+        // `meta::QLOG_DURABLE_INDEX` at the next commit / durable point so
+        // recovery reconciles the reopened qlog's durable tail against it
+        // (NA-QLOG-I1). On the live path the external writer fsync'd this entry's
+        // qlog record BEFORE the entry reached apply, so it is durable by the time
+        // this index names it. Only when the qlog knob is on (else no qlog).
+        if self.cfg.qlog
+            && c.entry
+                .effects
+                .iter()
+                .any(|e| matches!(e, Effect::Append { .. }))
+        {
+            self.last_append_index = self.last_append_index.max(c.index);
         }
 
         // §5.4: every LOGGED command's outcome is recorded, so a retry of a
@@ -1685,25 +1737,80 @@ impl<'s, S: Store> Applier<'s, S> {
             });
         }
 
-        let pos =
-            self.segments
-                .append(bucket, pid, base_offset, count, created_at_us, hashes, blob)?;
-        // §13.5 `apply.segment_written`: the payload bytes are in a segment
-        // file (page cache, unsynced) and the store commit that records this
-        // append and the applied index has NOT happened. A crash here reopens
-        // at the previous applied index; recovery truncates the file to the
-        // length the reopened store records and the entry replays (I11).
-        crate::rsm::faults::hit("apply.segment_written");
-        self.writes.put_seg_loc(
-            pid,
-            base_offset,
-            &SegLocRow {
-                bucket: pos.bucket,
-                file_id: pos.file_id,
-                offset: pos.offset,
-                len: pos.len,
-            },
-        )?;
+        // A3b (`ALICE_PGLESS_NEWARCH.md` §5, the double-write kill): on the LIVE
+        // path (`qlog_writer_external`) the payload lives ONCE, in the qlog —
+        // written + fsync'd by the log writer BEFORE this entry was made durable,
+        // never in a segment. So apply files NO segment and records NO `seg_loc`
+        // (both NODE-LOCAL and dead on the qlog read path); `retained_len` is
+        // still the frame length the segment WOULD have taken (`frame::encoded_len`
+        // == the segment's own `pos.len`, a pure function of `count` and the
+        // payload size), so `RetainedBytes` — a REPLICATED counter — is
+        // byte-for-byte the knob-off value and the off-vs-on digest stays
+        // transparent. Knob OFF, or the unit-test path where apply owns the qlog
+        // (`!qlog_writer_external`): file the payload into a segment and record
+        // its location, exactly today — the seg + qlog are both written there so
+        // the read-match tests can compare them.
+        let retained_len: u64 = if self.cfg.qlog && self.cfg.qlog_writer_external {
+            // No segment (the payload lives once, in the qlog). The reference
+            // entry carries the payload's 4-byte FRAME LENGTH in place of the
+            // payload (`effect::write_effect_payload_free`), and the writer hands
+            // apply that SAME length-only form live — so `len` is read from the
+            // entry IDENTICALLY whether this `Append` came live or from a replay
+            // of the payload-free log. That is what makes `RetainedBytes` — a
+            // REPLICATED counter — REPLAY-STABLE (I2): the crash-recovered digest
+            // equals the live digest, and no path computes it off an empty blob.
+            // Record it into a `seg_loc` with a sentinel `file_id = 0` (never a
+            // real segment file, so retention's `segments.release` is a no-op for
+            // it) so the watermark handler still decrements `RetainedBytes` THROUGH
+            // RETENTION exactly as knob-off. `seg_loc` is NODE-LOCAL, so this row
+            // is invisible to the replicated digest.
+            let len: u64 = if blob.len() == 4 {
+                u32::from_le_bytes(blob.try_into().expect("4-byte frame length")) as u64
+            } else {
+                // Defensive only: the writer/replay never hand apply a full blob on
+                // this path. Account a stray shape rather than lose it.
+                crate::rsm::segments::frame::encoded_len(count, blob.len()) as u64
+            };
+            self.writes.put_seg_loc(
+                pid,
+                base_offset,
+                &SegLocRow {
+                    bucket,
+                    file_id: 0,
+                    offset: 0,
+                    len: len as u32,
+                },
+            )?;
+            len
+        } else {
+            let pos = self.segments.append(
+                bucket,
+                pid,
+                base_offset,
+                count,
+                created_at_us,
+                hashes,
+                blob,
+            )?;
+            // §13.5 `apply.segment_written`: the payload bytes are in a segment
+            // file (page cache, unsynced) and the store commit that records this
+            // append and the applied index has NOT happened. A crash here reopens
+            // at the previous applied index; recovery truncates the file to the
+            // length the reopened store records and the entry replays (I11). It
+            // does not fire on the qlog path — there is no segment write there.
+            crate::rsm::faults::hit("apply.segment_written");
+            self.writes.put_seg_loc(
+                pid,
+                base_offset,
+                &SegLocRow {
+                    bucket: pos.bucket,
+                    file_id: pos.file_id,
+                    offset: pos.offset,
+                    len: pos.len,
+                },
+            )?;
+            pos.len as u64
+        };
         // The dedup index and the txns row (D10 option (a), lean). Apply
         // re-reads the row it extends rather than carrying the planner's view
         // forward: the probe ran in another transaction, on another node.
@@ -1736,12 +1843,14 @@ impl<'s, S: Store> Applier<'s, S> {
         let queue = p.queue.clone();
         self.writes.put_partition(pid, &p)?;
 
-        // Phase A1 SHADOW: the same message `segments.append` just filed, also
-        // buffered as a qlog record for its queue (flushed + fsynced at the next
-        // commit/durable point). `seq` = the entry index (the leader's order
-        // stamp); `txn` is always `None` in A1 (Phase B adds cross-queue txns).
-        // Off unless `QUEEN_RAFT_QLOG` is on; not authoritative — nothing reads
-        // it back but the A1 match test.
+        // The qlog record for this `Append`. `self.qlog` is `Some` ONLY on the
+        // unit-test / A1-A2-A3a path (`qlog_writer_external == false`): there
+        // apply owns the qlog and buffers the record here, flushed in `execute`
+        // and fsync'd at the commit/durable point. On the LIVE A3b path the
+        // EXTERNAL writer has already written AND fsync'd this record BEFORE the
+        // entry reached apply (the durability ordering), so `self.qlog` is `None`
+        // and this is skipped. `seq` = the entry index (the leader's order
+        // stamp); `txn` is `None` (Phase B adds cross-queue txns).
         if let Some(qlog) = self.qlog.as_mut() {
             qlog.buffer(
                 &tenant,
@@ -1774,7 +1883,7 @@ impl<'s, S: Store> Applier<'s, S> {
             &queue,
             None,
             Counter::RetainedBytes,
-            pos.len as i64,
+            retained_len as i64,
         )?;
         self.stamp(pid, &tenant, &queue, Counter::LastPushUs, created_at_us)?;
 
@@ -1796,7 +1905,7 @@ impl<'s, S: Store> Applier<'s, S> {
 
         self.stats.appends += 1;
         self.stats.messages += count as u64;
-        self.stats.bytes_appended += pos.len as u64;
+        self.stats.bytes_appended += retained_len;
         Ok(())
     }
 
@@ -2982,36 +3091,24 @@ impl<'s, S: Store> Applier<'s, S> {
         // group-list cache, which is scoped to the transaction.
         self.counters.flush(&mut self.writes)?;
         self.groups_cache.clear();
-        // A3a (`ALICE_PGLESS_NEWARCH.md` §5): the qlog is a WAL — fsync every
-        // touched queue's records BEFORE the store commit records the applied
-        // index, so the qlog record of every entry this commit makes committed is
-        // ALREADY on the platter (independently crash-survivable at commit, the
-        // twin of the raft log's group-commit fsync). The records themselves were
-        // written per entry in `execute` (the A2 read invariant); this is the
-        // added barrier, plus the recorded durable index recovery reconciles
-        // against. It adds fsyncs at the store-commit cadence — a perf cost
-        // deferred to Phase E; correctness first. A no-op / today's path when the
-        // knob is off.
-        let qlog_durable = if let Some(qlog) = self.qlog.as_mut() {
-            // §A3a `qlog.record_written`: this commit's records are on the page
-            // cache (written in `execute`), the qlog fsync has NOT run. A power
-            // loss here drops the un-fsync'd tail — the records are unanswered
-            // (their store commit never landed). A `kill -9` keeps the page cache,
-            // so the tail survives and the raft log (still the WAL in A3a) replays
-            // it; recovery reconciles it as AHEAD of the store's durable index.
-            crate::rsm::faults::hit("qlog.record_written");
+        // The qlog is a WAL. On the LIVE A3b path the EXTERNAL writer already
+        // fsync'd every `Append`'s record BEFORE its raft-log entry was made
+        // durable — the record of any applied entry is on the platter, and the
+        // `qlog.record_written`/`qlog.record_fsynced` crash points fire THERE (on
+        // the writer), not here. So apply does not sync the qlog on this path. On
+        // the unit-test / A1-A2-A3a path (`Some`) apply owns the qlog and fsyncs
+        // it now, before the store commit records the applied index.
+        if let Some(qlog) = self.qlog.as_mut() {
             qlog.sync().map_err(ApplyError::Qlog)?;
-            // §A3a `qlog.record_fsynced`: the qlog is fsync'd through this
-            // commit's records, the store commit has NOT landed. The records are
-            // durable in the qlog; the store reopens at the PREVIOUS applied
-            // index and replays. This is the durability the qlog gains in A3a.
-            crate::rsm::faults::hit("qlog.record_fsynced");
-            Some(qlog.durable_seq())
-        } else {
-            None
-        };
-        if let Some(qd) = qlog_durable {
-            self.writes.set_meta_u64(meta::QLOG_DURABLE_INDEX, qd)?;
+        }
+        // Record the qlog-durable index from the highest applied `Append` index
+        // (NA-QLOG-I1). It is durable on both paths — fsync'd by the external
+        // writer before the entry, or by the `sync` just above — so recovery may
+        // reconcile the reopened qlog's tail against it. Gated on the knob (else
+        // there is no qlog at all).
+        if self.cfg.qlog {
+            self.writes
+                .set_meta_u64(meta::QLOG_DURABLE_INDEX, self.last_append_index)?;
         }
         self.writes.commit()?;
         // §13.5 `apply.store_committed`: the (non-durable) store commit that
@@ -3055,22 +3152,13 @@ impl<'s, S: Store> Applier<'s, S> {
 
     fn durable_point_inner(&mut self) -> Result<u64> {
         let point = self.segments.durable_point()?;
-        // Phase A1 write / A2 read: fsync every qlog queue written since the last
-        // durable point, alongside the segment files (§5: a durable point leaves
-        // every buffered record fsynced). The records themselves were already
-        // WRITTEN to the qlog per entry in `execute` (that is the read
-        // invariant); this is only the batched barrier, the qlog twin of the
-        // segment durable point above. Off/empty when the knob is off.
-        let qlog_durable = if let Some(qlog) = self.qlog.as_mut() {
+        // Fsync the qlog alongside the segment files ONLY on the unit-test /
+        // A1-A2-A3a path (`Some`). On the LIVE A3b path the external writer fsync'd
+        // every record on the write path (before its entry), so there is nothing
+        // to sync here.
+        if let Some(qlog) = self.qlog.as_mut() {
             qlog.sync().map_err(ApplyError::Qlog)?;
-            // A3a: the durable point's store commit records the qlog-durable
-            // index too, so recovery reconciles against the highest seq the qlog
-            // is fsync'd through (§5). At a durable point that is every record up
-            // to `applied_index`, so it moves in lock-step with `DURABLE_INDEX`.
-            Some(qlog.durable_seq())
-        } else {
-            None
-        };
+        }
         // §13.5 `durable.files_synced`: every segment file written since the
         // last point is fsynced (step 1, §11.4), the durable store commit that
         // records their lengths (step 2) has NOT landed. A crash here reopens
@@ -3091,8 +3179,11 @@ impl<'s, S: Store> Applier<'s, S> {
         self.groups_cache.clear();
         self.writes
             .set_meta_u64(meta::DURABLE_INDEX, self.applied_index)?;
-        if let Some(qd) = qlog_durable {
-            self.writes.set_meta_u64(meta::QLOG_DURABLE_INDEX, qd)?;
+        // NA-QLOG-I1: record the qlog-durable index from the highest applied
+        // `Append` index (durable on both paths — see `commit_inner`).
+        if self.cfg.qlog {
+            self.writes
+                .set_meta_u64(meta::QLOG_DURABLE_INDEX, self.last_append_index)?;
         }
         self.writes
             .set_applied(self.applied_index, self.applied_term)?;
@@ -3535,9 +3626,7 @@ pub fn spawn<S: Store + 'static>(
     clock: Arc<dyn Clock>,
     rx: Receiver<Committed>,
 ) -> std::thread::JoinHandle<Result<ApplyStats>> {
-    spawn_with_reader(
-        store, seg_root, seg_opts, cfg, notify, clock, rx, None, None,
-    )
+    spawn_with_reader(store, seg_root, seg_opts, cfg, notify, clock, rx, None)
 }
 
 /// [`spawn`], plus a one-shot sink the thread publishes the segment
@@ -3562,7 +3651,6 @@ pub fn spawn_with_reader<S: Store + 'static>(
     clock: Arc<dyn Clock>,
     rx: Receiver<Committed>,
     reader_sink: Option<Arc<std::sync::OnceLock<segments::Reader>>>,
-    qlog_reader_sink: Option<Arc<std::sync::OnceLock<Option<crate::rsm::qlog::set::QLogReader>>>>,
 ) -> std::thread::JoinHandle<Result<ApplyStats>> {
     std::thread::Builder::new()
         .name("queen-rsm-apply".into())
@@ -3573,13 +3661,9 @@ pub fn spawn_with_reader<S: Store + 'static>(
                 // replicator, so this sets exactly once.
                 let _ = sink.set(applier.reader());
             }
-            if let Some(sink) = &qlog_reader_sink {
-                // Phase A2: publish the qlog reader (or `None` when the knob is
-                // off) the same way and at the same point as the segment reader,
-                // so the facade + planner read pop payloads and dedup hashes off
-                // the SAME live logs the applier appends to.
-                let _ = sink.set(applier.qlog_reader());
-            }
+            // A3b: the qlog reader is published by the BOOT thread from the
+            // writer-owned qlog, not here — the applier no longer owns the qlog
+            // on the live path.
             // The async durable-point helper (§11.4). Spawned per apply thread,
             // dropped (Stop + join) when `run` returns, so it never outlives the
             // segment handles it holds dup'd copies of.
