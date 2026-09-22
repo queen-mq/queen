@@ -597,12 +597,19 @@ impl RaftFacade {
             Ok(b) => b,
             Err(e) => return Ok(fail("bad_request", &format!("bad body: {e}"))),
         };
-        if body.timers.as_ref().is_some_and(|v| !v.is_empty()) {
-            return Ok(fail(
-                "unsupported",
-                "timer riders need the raft timer surface (Phase B3), not in this build yet",
-            ));
-        }
+        // The timers rider: schedules and cancels in one array, as on the
+        // POST /timers route (025), validated by the timers port.
+        let timer_values: Vec<serde_json::Value> = body
+            .timers
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|r| serde_json::from_str(r.get()).unwrap_or(serde_json::Value::Null))
+            .collect();
+        let timer_ops = match crate::rsm::planner::timers::parse_timer_ops(&timer_values, None) {
+            Ok(o) => o,
+            Err(e) => return Ok(fail("bad_request", &e.message)),
+        };
         // The KV rider, validated with the WIRE's limits (024: fewer ops, no
         // getPrefix inside a transaction).
         let kv_values: Vec<serde_json::Value> = body
@@ -622,7 +629,7 @@ impl RaftFacade {
             Err(e) => return Ok(fail(e.reason, &e.detail)),
         };
         let ops = body.operations.unwrap_or_default();
-        if ops.is_empty() && kv_ops.is_empty() {
+        if ops.is_empty() && kv_ops.is_empty() && timer_ops.is_empty() {
             return Ok(fail(
                 "bad_request",
                 "transaction requires an operations array (or a top-level kv/timers array)",
@@ -783,6 +790,8 @@ impl RaftFacade {
         // layout: operations keep their indices, the riders append).
         let kv_base = flat;
         flat += kv_ops.len();
+        let timers_base = flat;
+        flat += timer_ops.len();
 
         // The single unambiguous lease hint is every lease-less ack's worker
         // (the JS/Go builders put the pop's leaseId in `requiredLeases`).
@@ -842,6 +851,7 @@ impl RaftFacade {
             pushes: push_cmds,
             acks: targets,
             kv: kv_ops.clone(),
+            timers: timer_ops,
         });
         let out = match self.submit(&ctx, cmd).await? {
             Reply::Done { outcome, .. } => crate::rsm::batcher::TxnOutcome::from_outcome(&outcome)
@@ -935,6 +945,22 @@ impl RaftFacade {
                     "queueName": p.queue,
                     "duplicate": true,
                 });
+            }
+        }
+        for (i, v) in out.timers.iter().enumerate() {
+            let mut obj = match v.clone() {
+                serde_json::Value::Object(m) => m,
+                other => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("result".to_string(), other);
+                    m
+                }
+            };
+            obj.insert("opIndex".to_string(), serde_json::Value::from(i));
+            obj.insert("index".to_string(), serde_json::Value::from(timers_base + i));
+            obj.insert("type".to_string(), serde_json::Value::String("timer".into()));
+            if timers_base + i < results.len() {
+                results[timers_base + i] = serde_json::Value::Object(obj);
             }
         }
         for (i, txn, status) in ack_txn {

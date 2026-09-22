@@ -917,3 +917,57 @@ async fn a_transaction_carries_a_kv_rider_all_or_nothing() {
     assert_eq!(still["results"][0]["value"], serde_json::json!({"at": 1}), "{still}");
     facade.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_transaction_schedules_a_timer_that_fires_only_if_it_commits() {
+    // Phase B4: the `timers` rider rides the transaction's one entry.
+    let dir = scratch("txn-timer");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+
+    // ---- commit: a push and a timer schedule in one bundle ----------------------
+    let ok = txn(
+        &facade,
+        serde_json::json!({
+            "operations": [{"type": "push", "items": [{"queue": "tq-in", "payload": {"a": 1}, "transactionId": "x1"}]}],
+            "timers": [{"op": "schedule", "queue": "tq", "timerKey": "t1", "delayMs": 50,
+                        "txn": "tt1", "payload": "eyJ0IjoxfQ=="}]
+        }),
+    )
+    .await;
+    assert_eq!(ok["success"], true, "{ok}");
+    assert_eq!(ok["results"][1]["type"], "timer", "{ok}");
+    assert_eq!(ok["results"][1]["index"], 1, "{ok}");
+    let mut fired = serde_json::json!({"messages": []});
+    for _ in 0..150 {
+        fired = pop_q(&facade, "tq").await;
+        if fired["messages"].as_array().is_some_and(|m| !m.is_empty()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        fired["messages"].as_array().map(|m| m.len()),
+        Some(1),
+        "the committed timer fired: {fired}"
+    );
+    assert_eq!(fired["messages"][0]["data"]["t"], 1, "{fired}");
+
+    // ---- rollback: a timer in a bundle whose ack is rejected never fires --------
+    let bad = txn(
+        &facade,
+        serde_json::json!({
+            "operations": [{"type": "ack", "transactionId": "nope", "partitionId": "1", "leaseId": "x"}],
+            "timers": [{"op": "schedule", "queue": "tq2", "timerKey": "t2", "delayMs": 10,
+                        "txn": "tt2", "payload": "eyJ0IjoxfQ=="}]
+        }),
+    )
+    .await;
+    assert_eq!(bad["success"], false, "{bad}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        pop_q(&facade, "tq2").await["messages"].as_array().map(|m| m.len()),
+        Some(0),
+        "the rolled-back timer never fires"
+    );
+    facade.shutdown().await;
+}

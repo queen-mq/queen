@@ -633,6 +633,8 @@ pub(crate) fn build_raft_router(
         )
         .route("/api/v1/ack", post(super::handle_ack))
         .route("/api/v1/ack/batch", post(super::handle_ack_batch))
+        // Phase B: the wire transaction → one facade command, all-or-nothing.
+        .route("/api/v1/transaction", post(super::handle_transaction))
         .route(
             "/api/v1/lease/:leaseId/extend",
             post(super::handle_lease_extend),
@@ -1218,8 +1220,8 @@ mod tests {
         // The fallback: /api and /streams paths that phase 1 does not serve are a
         // clean 503 (never 500, never a panic).
         let resp = super::raft_fallback(
-            axum::http::Method::POST,
-            "/api/v1/transaction".parse().unwrap(),
+            axum::http::Method::GET,
+            "/api/v1/resources/queues".parse().unwrap(),
         )
         .await;
         let (status, text) = body_of(resp).await;

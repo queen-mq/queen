@@ -35,6 +35,8 @@ pub struct TxnCommand {
     pub acks: Vec<AckTarget>,
     /// The `kv` rider, validated with the wire's limits (`parse_ops(.., true, ..)`).
     pub kv: Vec<KvOp>,
+    /// The `timers` rider (schedules and cancels, `parse_timer_ops`).
+    pub timers: Vec<super::timers::TimerOp>,
 }
 
 /// The decoded transaction outcome: per push group, per ack target.
@@ -45,6 +47,9 @@ pub struct TxnOutcome {
     /// The KV rider's verdicts, or the ONE lost `required` precondition that
     /// rolled the whole bundle back (then nothing was logged).
     pub kv: KvOutcome,
+    /// The timers rider's results, as the timers wire renders them
+    /// (`TimerOpResult::to_json`).
+    pub timers: Vec<serde_json::Value>,
 }
 
 impl TxnOutcome {
@@ -64,6 +69,9 @@ impl TxnOutcome {
         let k = Outcome::Kv(self.kv).encode();
         body.extend_from_slice(&(k.len() as u32).to_le_bytes());
         body.extend_from_slice(&k);
+        let t = serde_json::to_vec(&self.timers).unwrap_or_else(|_| b"[]".to_vec());
+        body.extend_from_slice(&(t.len() as u32).to_le_bytes());
+        body.extend_from_slice(&t);
         Placeholder::new(TXN_OUTCOME_TAG, crate::rsm::effect::VERSION_1, body)
             .map(Outcome::Placeholder)
             .map_err(|e| Refusal::retry("internal", format!("txn outcome: {e:?}")))
@@ -102,7 +110,15 @@ impl TxnOutcome {
             Outcome::Kv(k) => k,
             _ => return None,
         };
-        Some(TxnOutcome { pushes, acks, kv })
+        at += len;
+        let len = u32_at(&mut at)?;
+        let timers: Vec<serde_json::Value> = serde_json::from_slice(b.get(at..at + len)?).ok()?;
+        Some(TxnOutcome {
+            pushes,
+            acks,
+            kv,
+            timers,
+        })
     }
 }
 
@@ -203,6 +219,18 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 results: kvp.results,
                 failed: None,
             };
+        }
+
+        // The timers rider (the SQL wire's order: messages, keys, timers). The
+        // helper folds its effects into the overlay on success and leaves it
+        // untouched on refusal; the whole bundle is refused either way.
+        if !cmd.timers.is_empty() {
+            let (effs, results) = match self.plan_timer_ops(ov, &cmd.tenant, &cmd.timers) {
+                Ok(v) => v,
+                Err(r) => return refuse(ov, r),
+            };
+            effects.extend(effs);
+            out.timers = results.iter().map(|r| r.to_json()).collect();
         }
 
         let outcome = match out.into_outcome() {

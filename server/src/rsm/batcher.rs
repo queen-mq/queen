@@ -343,6 +343,8 @@ impl Command {
                     .map(|p| p.items.iter().map(|i| i.frame.len() + 16).sum::<usize>() + 64)
                     .sum::<usize>()
                     + c.acks.iter().map(|t| t.items.len() * 48 + 64).sum::<usize>()
+                    + c.kv.len() * 128
+                    + c.timers.iter().map(|t| t.size_hint()).sum::<usize>()
                     + 64
             }
             Command::Kv(c) => {
