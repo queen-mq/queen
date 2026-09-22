@@ -20,7 +20,7 @@
 
 use crate::rsm::effect::{
     CodecError, CursorRow, GarbageScope, GroupMeta, Pid, QueueConfig, Reader, SubscriptionMode,
-    Writer,
+    TimerRow, Writer,
 };
 
 /// The row layout this build writes. A field added to a row is a new version,
@@ -707,6 +707,67 @@ pub fn dlq_ids_decode(b: &[u8]) -> Result<Vec<[u8; 16]>, CodecError> {
         .collect())
 }
 
+// ---------------------------------------------------------------------------
+// timers (025, WP-2.3)
+// ---------------------------------------------------------------------------
+
+/// The instant a timer becomes fireable: `deliver_at`, pushed out by a
+/// backoff's `visible_at` (025's generated `visible_at` column:
+/// `CASE WHEN claimed_until IS NULL OR claimed_until < deliver_at THEN
+/// deliver_at ELSE claimed_until END`). The `timers_due` index is keyed by it.
+pub fn timer_due_us(r: &TimerRow) -> i64 {
+    match r.visible_at_us {
+        Some(v) => v.max(r.deliver_at_us),
+        None => r.deliver_at_us,
+    }
+}
+
+/// The stored `timers` row: the effect's [`TimerRow`] whole. There is nothing
+/// apply knows that the planner does not — the fire is one entry, so there is
+/// no claim to record (see [`TimerRow`]).
+pub fn timer_encode(t: &TimerRow) -> Vec<u8> {
+    let mut w = Writer::with_capacity(160 + t.frame.len() + t.txn.len());
+    head(&mut w);
+    w.str(&t.partition);
+    w.i64(t.deliver_at_us);
+    w.opt_i64(t.visible_at_us);
+    w.blob(&t.frame);
+    w.bool(t.payload_zstd);
+    w.bool(t.encrypted);
+    w.str(&t.txn);
+    w.bytes16(&t.message_id);
+    w.i32(t.attempts);
+    w.opt_str(t.last_error.as_deref());
+    w.opt_str(t.producer_sub.as_deref());
+    w.i64(t.created_at_us);
+    w.i64(t.updated_at_us);
+    w.into_inner()
+}
+
+pub fn timer_decode(b: &[u8]) -> Result<TimerRow, CodecError> {
+    let mut r = Reader::new(b);
+    expect_v1(&mut r, "timer row version")?;
+    let row = TimerRow {
+        partition: r.str("partition")?,
+        deliver_at_us: r.i64("deliver_at_us")?,
+        visible_at_us: r.opt_i64("visible_at_us")?,
+        frame: r.blob("frame")?,
+        payload_zstd: r.bool("payload_zstd")?,
+        encrypted: r.bool("encrypted")?,
+        txn: r.str("txn")?,
+        message_id: r.bytes16("message_id")?,
+        attempts: r.i32("attempts")?,
+        last_error: r.opt_str("last_error")?,
+        producer_sub: r.opt_str("producer_sub")?,
+        created_at_us: r.i64("created_at_us")?,
+        updated_at_us: r.i64("updated_at_us")?,
+    };
+    if !r.done() {
+        return Err(CodecError::Field("timer row trailing bytes"));
+    }
+    Ok(row)
+}
+
 /// One segment file as this node knows it (§6.2, I11).
 ///
 /// `len` is the length AT THE LAST STORE COMMIT that recorded it — the number
@@ -965,6 +1026,39 @@ mod tests {
         b[0] = 99;
         let err = queue_decode(&b).unwrap_err();
         assert!(err.fatal(), "{err:?}");
+    }
+
+    #[test]
+    fn a_timer_row_round_trips_and_its_due_honours_the_backoff() {
+        let mut t = TimerRow {
+            partition: "Default".into(),
+            deliver_at_us: 100,
+            visible_at_us: None,
+            frame: vec![1, 2, 3],
+            payload_zstd: false,
+            encrypted: true,
+            txn: "tx".into(),
+            message_id: [9u8; 16],
+            attempts: 2,
+            last_error: Some("boom".into()),
+            producer_sub: Some("svc".into()),
+            created_at_us: 5,
+            updated_at_us: 6,
+        };
+        assert_eq!(timer_decode(&timer_encode(&t)).unwrap(), t);
+        assert_eq!(timer_due_us(&t), 100);
+        t.visible_at_us = Some(250);
+        assert_eq!(timer_decode(&timer_encode(&t)).unwrap(), t);
+        assert_eq!(
+            timer_due_us(&t),
+            250,
+            "a backoff pushes the due instant out"
+        );
+        t.visible_at_us = Some(50);
+        assert_eq!(timer_due_us(&t), 100, "never earlier than deliver_at");
+        let mut b = timer_encode(&t);
+        b[0] = 42;
+        assert!(timer_decode(&b).unwrap_err().fatal());
     }
 
     #[test]

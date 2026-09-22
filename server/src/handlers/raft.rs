@@ -458,6 +458,17 @@ pub(crate) async fn handle_prometheus(
 /// Shared by `main.rs`, `embedded/boot.rs` and the seam test so the raft state
 /// cannot drift between them.
 pub(crate) fn build_raft_state(cfg: &Config) -> Result<Arc<AppState>, String> {
+    build_raft_state_with(cfg, None)
+}
+
+/// [`build_raft_state`] with the facade supplied by the caller instead of the
+/// builder hook — the handler tests' seam: they drive the REAL handlers over a
+/// real `RaftFacade` without registering the process-global builder (which
+/// would change what the WP-1.7a seam tests get).
+pub(crate) fn build_raft_state_with(
+    cfg: &Config,
+    rsm_override: Option<Arc<dyn facade::Rsm>>,
+) -> Result<Arc<AppState>, String> {
     // Lazy pool handle (no connection; see the doc above).
     let pool = crate::db::create_pool(cfg);
 
@@ -476,11 +487,14 @@ pub(crate) fn build_raft_state(cfg: &Config) -> Result<Arc<AppState>, String> {
     let encryption = crate::encryption::Encryption::from_env();
 
     // The facade: the real state machine when WP-1.7c has registered its
-    // builder, the NotReady stub otherwise.
-    let rsm = facade::build(&facade::RsmBuildCtx {
-        data_dir: cfg.raft_dir.clone(),
-        notifier: notifier.clone(),
-    });
+    // builder, the NotReady stub otherwise — or the caller's own.
+    let rsm = match rsm_override {
+        Some(r) => r,
+        None => facade::build(&facade::RsmBuildCtx {
+            data_dir: cfg.raft_dir.clone(),
+            notifier: notifier.clone(),
+        }),
+    };
 
     let fusion = crate::fusion::Fusion::new(
         cfg.fusion_shards,
@@ -640,6 +654,15 @@ pub(crate) fn build_raft_router(
             get(super::handle_kv_namespaces),
         )
         .route("/api/v1/resources/kv/list", post(super::handle_kv_list))
+        // ------------------------------------ timers (WP-2.3) → facade, 025's wire
+        // The same four routes main.rs registers for the postgres class; the
+        // handlers branch to the state machine on `st.storage.is_raft()`.
+        .route("/api/v1/timers", post(super::handle_timers_batch))
+        .route("/api/v1/timers/:queue", get(super::handle_timers_list))
+        .route(
+            "/api/v1/timers/:queue/*timerKey",
+            get(super::handle_timer_peek).delete(super::handle_timer_cancel),
+        )
         // ---------------------------------------------- observability (no pool)
         .route("/health", get(handle_health))
         .route("/metrics", get(super::handle_metrics))
@@ -688,9 +711,10 @@ pub(crate) fn build_raft_router(
 }
 
 /// The fallback for the raft router: any `/api/` or `/streams/` route that phase
-/// 1 does not serve answers `503 raft_phase1_unsupported` (transaction, timers,
+/// 1 does not serve answers `503 raft_phase1_unsupported` (transaction,
 /// streams, configure beyond implicit creation, admin, analytics, …; KV is
-/// served since WP-2.2); anything else is the dashboard SPA / static assets.
+/// served since WP-2.2 and timers since WP-2.3); anything else is the dashboard
+/// SPA / static assets.
 #[cfg(feature = "server")]
 async fn raft_fallback(method: Method, uri: Uri) -> Response {
     let path = uri.path();
@@ -838,6 +862,175 @@ mod tests {
             text.contains("\"storageReady\":false"),
             "phase-1 storage is not ready: {text}"
         );
+    }
+
+    /// WP-2.3: the four timer routes, through the REAL handlers, over a REAL
+    /// `RaftFacade` — the same funnel the postgres class uses above it (body
+    /// shape, server-owned fields, horizon, the ladder), the state machine
+    /// below it. Schedule → peek → list/count → it fires → the pop sees the
+    /// message; cancel → `absent` with the caller's txn echoed; a bad call is
+    /// the SP's `400 timers_bad_request`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn timers_routes_serve_raft_mode_end_to_end() {
+        use std::collections::HashMap;
+        use std::time::Duration;
+
+        use base64::Engine;
+
+        let cfg = raft_config();
+        let dir = std::env::temp_dir().join(format!(
+            "queen-raft-timers-handlers-{}-{}",
+            std::process::id(),
+            crate::util::uuidv7_bytes()[15]
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("QUEEN_RAFT_MAP_BYTES", (256usize << 20).to_string());
+        let facade = crate::rsm::facade::real::RaftFacade::open_with(
+            &crate::rsm::facade::RsmBuildCtx {
+                data_dir: dir.display().to_string(),
+                notifier: crate::notify::Notifier::new(false),
+            },
+            crate::rsm::batcher::BatcherConfig {
+                timer_tick_ms: 10,
+                ..crate::rsm::batcher::BatcherConfig::from_env()
+            },
+        )
+        .expect("open facade");
+        let rsm: Arc<dyn crate::rsm::facade::Rsm> = Arc::new(facade);
+        let st = super::build_raft_state_with(&cfg, Some(rsm)).expect("raft state");
+        let tenant = || Extension(Tenant::default_tenant());
+        let payload = base64::engine::general_purpose::STANDARD.encode(br#"{"hello":"raft"}"#);
+
+        // ---- POST /api/v1/timers: one schedule far out, one due soon --------
+        let body = format!(
+            r#"{{"operations":[
+                {{"op":"schedule","queue":"hq","timerKey":"later","delayMs":600000,"txn":"tx-later","payload":"{payload}"}},
+                {{"op":"schedule","queue":"hq","timerKey":"soon","delayMs":300,"txn":"tx-soon","payload":"{payload}"}}
+            ]}}"#
+        );
+        let resp = super::super::handle_timers_batch(
+            State(st.clone()),
+            Extension(AuthedSub(Some("svc-h".into()))),
+            tenant(),
+            Bytes::from(body),
+        )
+        .await;
+        let (status, text) = body_of(resp).await;
+        assert_eq!(status, StatusCode::OK, "schedule: {text}");
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["results"][0]["status"], "scheduled", "{text}");
+        assert_eq!(v["results"][1]["status"], "scheduled", "{text}");
+        let soon_mid = v["results"][1]["messageId"].as_str().unwrap().to_string();
+
+        // ---- GET peek / list / count ----------------------------------------
+        let resp = super::super::handle_timer_peek(
+            State(st.clone()),
+            tenant(),
+            Path(("hq".to_string(), "later".to_string())),
+        )
+        .await;
+        let (status, text) = body_of(resp).await;
+        assert_eq!(status, StatusCode::OK);
+        let p: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(p["found"], true, "{text}");
+        assert_eq!(p["producerSub"], "svc-h", "stamped from the JWT sub");
+        assert_eq!(p["payload"], payload);
+
+        let q: super::super::timers::TimerReadParams =
+            serde_json::from_str(r#"{"mode":"count","prefix":"so"}"#).unwrap();
+        let resp = super::super::handle_timers_list(
+            State(st.clone()),
+            tenant(),
+            Path("hq".to_string()),
+            Query(q),
+        )
+        .await;
+        let (status, text) = body_of(resp).await;
+        assert_eq!((status, text.as_str()), (StatusCode::OK, r#"{"count":1}"#));
+
+        // ---- it fires on its own; the pop route sees the message ------------
+        let mut fired = false;
+        for _ in 0..500 {
+            let resp = super::super::handle_timer_peek(
+                State(st.clone()),
+                tenant(),
+                Path(("hq".to_string(), "soon".to_string())),
+            )
+            .await;
+            let (_, text) = body_of(resp).await;
+            if text.contains("\"found\":false") {
+                fired = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(fired, "the due timer never fired");
+        let p: super::super::PopParams = serde_json::from_str("{}").expect("PopParams");
+        let resp = super::super::handle_pop(
+            State(st.clone()),
+            tenant(),
+            Path("hq".to_string()),
+            Query(p),
+        )
+        .await;
+        let (status, text) = body_of(resp).await;
+        assert_eq!(status, StatusCode::OK, "pop: {text}");
+        let pop: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let msgs = pop["messages"].as_array().expect("messages");
+        assert_eq!(msgs.len(), 1, "only the due one fired: {text}");
+        assert_eq!(msgs[0]["id"], soon_mid.as_str());
+        assert_eq!(msgs[0]["transactionId"], "tx-soon");
+        assert_eq!(msgs[0]["data"]["hello"], "raft");
+
+        // ---- DELETE: cancel the pending one, then `absent` ------------------
+        let resp = super::super::handle_timer_cancel(
+            State(st.clone()),
+            tenant(),
+            Path(("hq".to_string(), "later".to_string())),
+            Query(HashMap::new()),
+        )
+        .await;
+        let (status, text) = body_of(resp).await;
+        assert_eq!(status, StatusCode::OK);
+        let c: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(c["status"], "cancelled", "{text}");
+        let mut qp = HashMap::new();
+        qp.insert("txn".to_string(), "tx-later".to_string());
+        let resp = super::super::handle_timer_cancel(
+            State(st.clone()),
+            tenant(),
+            Path(("hq".to_string(), "later".to_string())),
+            Query(qp),
+        )
+        .await;
+        let (_, text) = body_of(resp).await;
+        let c: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            (c["ok"].clone(), c["status"].clone()),
+            (false.into(), "absent".into())
+        );
+        assert_eq!(
+            c["txn"], "tx-later",
+            "the expected txn is echoed (025 §4.4)"
+        );
+
+        // ---- a bad call: the SP's 400, nothing scheduled --------------------
+        let bad = format!(
+            r#"[{{"op":"schedule","queue":"hq","timerKey":"x","delayMs":5,"payload":"{payload}"}}]"#
+        );
+        let resp = super::super::handle_timers_batch(
+            State(st.clone()),
+            Extension(AuthedSub(None)),
+            tenant(),
+            Bytes::from(bad),
+        )
+        .await;
+        let (status, text) = body_of(resp).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+        assert!(text.contains("timers_bad_request"), "{text}");
+        assert!(text.contains("txn is required"), "{text}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// PLAN_RAFT.md WP-2.2: the KV routes, through the REAL handlers, answered

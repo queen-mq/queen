@@ -430,8 +430,15 @@ async fn prepare_schedule(
     // that ALSO claims `encrypted:true` while the broker is about to encrypt is
     // an ambiguity, not a convenience: double encryption or a lie to the
     // consumer, depending on who is right. Refuse instead of guessing.
-    let broker_encrypts =
-        st.encryption.is_enabled() && st.encryption_enabled_for(&queue, tenant).await;
+    //
+    // Raft mode (PLAN_RAFT WP-2.3) never probes: `encryption_enabled_for` reads
+    // the queue row through the Postgres pool, which must not be dialled there,
+    // and the raft push path does not encrypt either (phase-1 queues are
+    // unencrypted, rsm/facade/real.rs). A client's own `encrypted` flag still
+    // travels on the frame, exactly as on the postgres class.
+    let broker_encrypts = !st.storage.is_raft()
+        && st.encryption.is_enabled()
+        && st.encryption_enabled_for(&queue, tenant).await;
     let client_claims = op.get("encrypted").and_then(|v| v.as_bool()) == Some(true);
     if broker_encrypts && client_claims {
         return Err(bad_request(
@@ -574,6 +581,101 @@ async fn apply_ops(
         // committed — the cancel is best-effort — so the charge stands until the
         // next refresh corrects it against the true measurement.
         Err(None) => Err(unavailable("timers_timeout")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Raft mode (PLAN_RAFT.md WP-2.3): the same funnel, the state machine where the
+// stored procedure was. Everything above the funnel — the body shape, the
+// server-owned field rule, the horizon, the payload ceiling, the ladder and
+// its per-op charge — is shared with the postgres class, so the two cannot
+// disagree about what a timer call is.
+// ---------------------------------------------------------------------------
+
+/// The facade's deadline for one timer call: the statement timeout the
+/// postgres path gives the SP, never below a second.
+fn raft_ctx(st: &AppState, tenant: &str) -> crate::rsm::facade::ReqCtx {
+    let budget = st.stmt_timeout.max(std::time::Duration::from_secs(1));
+    crate::rsm::facade::ReqCtx::new(tenant, crate::rsm::facade::Deadline::after(budget))
+}
+
+/// A facade error in the vocabulary of this surface (§9.5): a bad call is
+/// `400 timers_bad_request` exactly as the SP's 22023, an oversized one is the
+/// 413 of the payload ceiling, a cluster that cannot answer is the retryable
+/// `503 timers_unavailable`. What has no timer-specific meaning (a name over
+/// the store's key limit, storage full, the phase-1 stub) keeps the raft
+/// rendering.
+fn raft_error_response(e: crate::rsm::facade::RsmError) -> Response {
+    use crate::rsm::facade::RsmError;
+    match e {
+        RsmError::Rejected { code, message } if code == "timers_bad_request" => json(
+            StatusCode::BAD_REQUEST,
+            err("timers_bad_request", Some(&message), None),
+        ),
+        RsmError::Rejected { code, message } if code == "too_large" => json(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            err(
+                "payload_too_large",
+                Some("timers_call_too_large"),
+                Some(&message),
+            ),
+        ),
+        RsmError::Rejected { code, message } => json(
+            StatusCode::BAD_REQUEST,
+            err("timers_bad_request", Some(&code), Some(&message)),
+        ),
+        RsmError::Timeout => unavailable("timers_timeout"),
+        RsmError::Retry { .. } => unavailable("timers_retry"),
+        RsmError::NoLeader => unavailable("no_leader"),
+        RsmError::Internal(m) => json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            err("timers_error", Some(&m), None),
+        ),
+        other => super::raft::err_response(other),
+    }
+}
+
+/// `apply_ops`'s raft twin: one [`crate::rsm::facade::Rsm::timers_apply`] call.
+/// The refund rule is the postgres one: give the charge back only when NOTHING
+/// can have been scheduled (the call was refused before it was planned); a
+/// timeout or a retry may have committed, so its charge stands until the next
+/// measurement corrects it — over-counting is the safe direction.
+async fn apply_ops_raft(
+    st: &Arc<AppState>,
+    tenant: &str,
+    producer_sub: Option<&str>,
+    ops: Vec<Value>,
+    charged: i64,
+) -> Result<Vec<Value>, Response> {
+    use crate::rsm::facade::RsmError;
+    if ops.is_empty() {
+        return Ok(Vec::new());
+    }
+    if ops.len() > max_ops_per_call() {
+        return Err(bad_request(
+            "timers_too_many_ops",
+            &format!(
+                "{} ops in one call, the ceiling is {}",
+                ops.len(),
+                max_ops_per_call()
+            ),
+        ));
+    }
+    let req = crate::rsm::facade::TimersReq {
+        ops,
+        producer_sub: producer_sub.map(str::to_string),
+    };
+    match st.rsm.timers_apply(raft_ctx(st, tenant), req).await {
+        Ok(out) => Ok(out.results),
+        Err(e) => {
+            if matches!(
+                e,
+                RsmError::Rejected { .. } | RsmError::NameTooLong { .. } | RsmError::Unsupported
+            ) {
+                st.quota.refund(tenant, 0, 0, charged);
+            }
+            Err(raft_error_response(e))
+        }
     }
 }
 
@@ -739,8 +841,15 @@ async fn timers_batch_inner(
         }
     }
 
-    // The sweeper wake (§7.4) rang inside `apply_ops`, after the commit.
-    match apply_ops(st, tenant.as_str(), producer_sub.as_deref(), ops, schedules).await {
+    // The sweeper wake (§7.4) rang inside `apply_ops`, after the commit. Raft
+    // mode has no sweeper to wake: the leader's fire step runs on its own tick
+    // and in the very cycle that plans this call.
+    let res = if st.storage.is_raft() {
+        apply_ops_raft(st, tenant.as_str(), producer_sub.as_deref(), ops, schedules).await
+    } else {
+        apply_ops(st, tenant.as_str(), producer_sub.as_deref(), ops, schedules).await
+    };
+    match res {
         Ok(results) => batch_response(results),
         Err(resp) => resp,
     }
@@ -785,7 +894,12 @@ pub async fn handle_timer_cancel(
     }
     // A cancel carries no producer identity: it produces nothing. It is charged
     // ZERO and never refunded (§9.7: the cancel counts zero and does not refund).
-    match apply_ops(&st, tenant.as_str(), None, vec![Value::Object(op)], 0).await {
+    let res = if st.storage.is_raft() {
+        apply_ops_raft(&st, tenant.as_str(), None, vec![Value::Object(op)], 0).await
+    } else {
+        apply_ops(&st, tenant.as_str(), None, vec![Value::Object(op)], 0).await
+    };
+    match res {
         Ok(results) => single_response(results),
         Err(resp) => resp,
     }
@@ -802,6 +916,14 @@ pub async fn handle_timer_peek(
 ) -> Response {
     if let Some(resp) = gated(&st, tenant.as_str(), crate::switches::Surface::TimerRead, 0) {
         return resp;
+    }
+    // Raft mode: a local read of the state machine (the same body shape).
+    if st.storage.is_raft() {
+        let req = crate::rsm::facade::TimerPeekReq { queue, timer_key };
+        return match st.rsm.timer_peek(raft_ctx(&st, tenant.as_str()), req).await {
+            Ok(out) => json(StatusCode::OK, out.body),
+            Err(e) => raft_error_response(e),
+        };
     }
     let client = match st.pool.get().await {
         Ok(c) => c,
@@ -927,6 +1049,29 @@ pub async fn handle_timers_list(
         Ok(q) => q,
         Err((reason, detail)) => return bad_request(reason, &detail),
     };
+
+    // Raft mode: local reads of the state machine, the same two contracts.
+    if st.storage.is_raft() {
+        let ctx = raft_ctx(&st, tenant.as_str());
+        let res = match query {
+            TimerReadQuery::List { after, limit } => {
+                let req = crate::rsm::facade::TimersListReq {
+                    queue,
+                    after,
+                    limit,
+                };
+                st.rsm.timers_list(ctx, req).await
+            }
+            TimerReadQuery::Count { prefix } => {
+                let req = crate::rsm::facade::TimersCountReq { queue, prefix };
+                st.rsm.timers_count(ctx, req).await
+            }
+        };
+        return match res {
+            Ok(out) => json(StatusCode::OK, out.body),
+            Err(e) => raft_error_response(e),
+        };
+    }
 
     let client = match st.pool.get().await {
         Ok(c) => c,

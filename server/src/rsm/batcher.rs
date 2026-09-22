@@ -77,12 +77,13 @@ use tokio::time::MissedTickBehavior;
 use crate::rsm::dedup::DedupFront;
 use crate::rsm::effect::{Effect, Pid};
 use crate::rsm::entry::{encode_entry, Entry, Outcome, RequestId};
+use crate::rsm::planner::timers::{TimerFireConfig, TimersCommand};
+pub use crate::rsm::planner::txn::{TxnCommand, TxnOutcome};
 use crate::rsm::planner::Refusal;
 use crate::rsm::planner::{
     AckCommand, AckPositionalCommand, CommandKind, DlqHeadCommand, KvCommand, Lookup, NackCommand,
     Overlay, Plan, PlanConfig, Planned, Planner, PopCommand, PushCommand, RenewCommand,
 };
-pub use crate::rsm::planner::txn::{TxnCommand, TxnOutcome};
 use crate::rsm::qlog::set::QLogReader;
 use crate::rsm::replicator::{AppliedAt, NodeId, ProposeError, Replicator, Role};
 use crate::rsm::segments::Reader;
@@ -149,6 +150,16 @@ pub struct BatcherConfig {
     pub kv_sweep_every_ms: u64,
     /// `QUEEN_RAFT_KV_SWEEP_LIMIT`: the most rows one step deletes.
     pub kv_sweep_limit: usize,
+    /// `QUEEN_RAFT_TIMER_TICK_MS` (WP-2.3): the cadence of the leader's timer
+    /// fire step (025's sweeper, as a leader loop). `0` = timers never fire.
+    /// The step also runs in any cycle that planned a timers command, so a
+    /// timer scheduled already due fires in the entry that schedules it.
+    /// The programmatic default is OFF so the batcher's own tests plan exactly
+    /// as before; [`BatcherConfig::from_env`] (every real node) turns it on.
+    /// It never stops for maintenance: 025's fire does not either.
+    pub timer_tick_ms: u64,
+    /// The fire step's bounds and backoff.
+    pub timer_fire: TimerFireConfig,
 }
 
 impl Default for BatcherConfig {
@@ -167,9 +178,16 @@ impl Default for BatcherConfig {
             drain_greedy: true,
             kv_sweep_every_ms: 1_000,
             kv_sweep_limit: crate::rsm::planner::kv::SWEEP_LIMIT_DEFAULT,
+            timer_tick_ms: 0,
+            timer_fire: TimerFireConfig::default(),
         }
     }
 }
+
+/// The production timer tick (`QUEEN_RAFT_TIMER_TICK_MS` unset): the bound on
+/// how late a due timer fires on an idle node, and the cost of one cheap
+/// planning cycle (one fire-order seek) when nothing is due.
+pub const TIMER_TICK_MS_DEFAULT: u64 = 50;
 
 impl BatcherConfig {
     /// Resolve from the environment. Called ONCE at boot by the storage seam
@@ -228,6 +246,12 @@ impl BatcherConfig {
             drain_greedy: flag("QUEEN_RAFT_DRAIN_GREEDY", d.drain_greedy),
             kv_sweep_every_ms: num("QUEEN_RAFT_KV_SWEEP_MS", d.kv_sweep_every_ms),
             kv_sweep_limit: num("QUEEN_RAFT_KV_SWEEP_LIMIT", d.kv_sweep_limit as u64) as usize,
+            // `0` is honoured here (firing off), unlike the other numeric knobs.
+            timer_tick_ms: std::env::var("QUEEN_RAFT_TIMER_TICK_MS")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(TIMER_TICK_MS_DEFAULT),
+            timer_fire: TimerFireConfig::from_env(),
         }
     }
 }
@@ -255,6 +279,9 @@ pub enum Command {
     Transaction(TxnCommand),
     /// A KV call carrying at least one write (024, WP-2.2).
     Kv(KvCommand),
+    /// Timer schedules and cancels (025 `log_timers_apply_v1`, WP-2.3). The
+    /// FIRE is not a command: it is the driver's own leader-loop step.
+    Timers(TimersCommand),
 }
 
 impl Command {
@@ -273,6 +300,7 @@ impl Command {
             Command::DlqHead(c) => c.request_id,
             Command::Transaction(c) => c.request_id,
             Command::Kv(c) => c.request_id,
+            Command::Timers(c) => c.request_id,
         }
     }
 
@@ -290,6 +318,7 @@ impl Command {
             Command::DlqHead(_) => CommandKind::DlqHead,
             Command::Transaction(_) => CommandKind::Transaction,
             Command::Kv(_) => CommandKind::Kv,
+            Command::Timers(_) => CommandKind::Timers,
         }
     }
 
@@ -328,12 +357,14 @@ impl Command {
                     .sum::<usize>()
                     + 64
             }
+            Command::Timers(c) => c.ops.iter().map(|o| o.size_hint()).sum::<usize>() + 64,
             _ => 128,
         }
     }
 
     /// How many messages this command carries, for the `drain_messages`
-    /// histogram (PERF-1): a push's items, an ack's items, one for the rest.
+    /// histogram (PERF-1): a push's items, an ack's items, a timers call's
+    /// ops, one for the rest.
     fn message_count(&self) -> u64 {
         match self {
             Command::Push(c) => c.items.len() as u64,
@@ -342,6 +373,7 @@ impl Command {
                 c.pushes.iter().map(|p| p.items.len() as u64).sum::<u64>()
                     + c.acks.iter().map(|t| t.items.len() as u64).sum::<u64>()
             }
+            Command::Timers(c) => c.ops.len().max(1) as u64,
             _ => 1,
         }
     }
@@ -371,6 +403,7 @@ impl Command {
             // No queue; never a namespace or a key either — names stay out of
             // shared logs (024 §13.5).
             Command::Kv(c) => (&c.tenant, ""),
+            Command::Timers(c) => (&c.tenant, c.ops.first().map_or("", |o| o.queue())),
         }
     }
 
@@ -390,6 +423,7 @@ impl Command {
             Command::DlqHead(c) => p.plan_dlq_head(ov, c),
             Command::Transaction(c) => p.plan_transaction(ov, c),
             Command::Kv(c) => p.plan_kv(ov, c),
+            Command::Timers(c) => p.plan_timers(ov, c),
         }
     }
 }
@@ -683,6 +717,61 @@ struct PlanOutput {
     /// The KV expiry sweep (WP-2.2) ran this cycle — whether or not it found
     /// anything due, so the driver clears its flag either way.
     kv_swept: bool,
+    /// The timer fire step ran this cycle (WP-2.3), whatever it found.
+    fired: bool,
+    /// ...and hit one of its bounds: more timers are due now.
+    fire_more: bool,
+}
+
+/// The leader-loop step that fires due timers (WP-2.3): plan it against the
+/// committed view plus the overlay — AFTER the cycle's commands, so a cancel or
+/// a reschedule drained in the same cycle wins over the fire — and add its
+/// effects to the entry as ONE command with its own minted id, answered by
+/// nobody, exactly like the request-id expiry step. The message append and the
+/// timer's removal (or its backoff) are therefore one entry: they commit, apply
+/// and replay together, which is the whole of exactly-once in effect.
+///
+/// Returns whether the step hit a bound (more is due now).
+fn plan_fire_step<R: Reads + ?Sized>(
+    planner: &Planner<'_, R>,
+    ov: &mut Overlay,
+    entry: &mut Entry,
+    cfg: &TimerFireConfig,
+) -> bool {
+    match planner.plan_timer_fire(ov, cfg) {
+        Ok((effects, report)) => {
+            if !effects.is_empty() {
+                let id = crate::util::uuidv7_bytes();
+                if let Err(e) = entry.add_command(id, Outcome::Empty, effects) {
+                    // Unreachable (the effects are non-empty); the timers stay
+                    // due and the next tick plans them again.
+                    tracing::error!(target: "rsm", error = ?e, "timer fire step did not fit the entry");
+                    return false;
+                }
+                tracing::debug!(
+                    target: "rsm",
+                    fired = report.fired,
+                    duplicates = report.duplicates,
+                    backed_off = report.backed_off,
+                    dead_lettered = report.dead_lettered,
+                    more = report.more,
+                    "timer fire step",
+                );
+            }
+            report.more
+        }
+        Err(r) => {
+            // The candidate read failed before anything was folded (I14):
+            // nothing fires this cycle; the next tick retries.
+            tracing::warn!(
+                target: "rsm",
+                code = %r.code,
+                message = %r.message,
+                "timer fire step refused; retried on the next tick",
+            );
+            false
+        }
+    }
 }
 
 /// Plan one cycle inside ONE store read transaction (I15: on the blocking
@@ -702,6 +791,7 @@ fn plan_cycle_blocking<S: Store>(
     wall_us: i64,
     expire_window_us: Option<i64>,
     kv_sweep_limit: Option<usize>,
+    fire: Option<TimerFireConfig>,
 ) -> crate::rsm::store::Result<PlanOutput> {
     // P4: the rings this batch's wildcard pops walk — the only part of
     // `Derived` the planner reads. A discovery pop spans queues: every ring.
@@ -842,6 +932,16 @@ fn plan_cycle_blocking<S: Store>(
                 .record_dur(start.elapsed());
         }
 
+        // WP-2.3 timer fire: after the commands (a cancel or a reschedule
+        // drained this cycle wins), before the KV sweep and the expiry step.
+        // The two leader steps touch disjoint state (timers and the messages
+        // they push; KV rows), so their relative order is immaterial.
+        let fired = fire.is_some();
+        let fire_more = match fire.as_ref() {
+            Some(fcfg) => plan_fire_step(&planner, &mut ov, &mut entry, fcfg),
+            None => false,
+        };
+
         // WP-2.2 KV expiry sweep (026's `kv_expire_step_v1` as a leader loop):
         // one bounded step, planned AFTER this cycle's commands so it sees
         // their writes in the overlay (a key a command just rewrote is not
@@ -892,6 +992,8 @@ fn plan_cycle_blocking<S: Store>(
             slots,
             expired,
             kv_swept,
+            fired,
+            fire_more,
         })
     })
 }
@@ -971,6 +1073,13 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             tokio::time::interval(Duration::from_millis(self.cfg.kv_sweep_every_ms.max(1)));
         kv_sweep.set_missed_tick_behavior(MissedTickBehavior::Delay);
         kv_sweep.tick().await;
+        // WP-2.3: the timer fire cadence. Off (`0`) keeps the arm disabled. Its
+        // first tick is NOT swallowed: timers already due at boot (a restart
+        // after downtime) fire in the first cycle.
+        let timers_on = self.cfg.timer_tick_ms > 0;
+        let mut timer_tick =
+            tokio::time::interval(Duration::from_millis(self.cfg.timer_tick_ms.max(1)));
+        timer_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         // Capture what the watch and metrics say BEFORE the fields move into
         // `RunState`.
@@ -1006,6 +1115,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             closing: false,
             expire_due: false,
             kv_sweep_due: false,
+            timers_due: false,
             stopped: false,
             wake_reason: "init",
             wake_seq: 0,
@@ -1046,6 +1156,10 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                 _ = kv_sweep.tick() => {
                     st.note_wake("kv_sweep");
                     st.kv_sweep_due = true;
+                }
+                _ = timer_tick.tick(), if timers_on => {
+                    st.note_wake("timers");
+                    st.timers_due = true;
                 }
                 _ = tokio::time::sleep(Duration::from_millis(HOLD_POLL_MS)),
                     if st.holding_until.is_some() =>
@@ -1120,10 +1234,13 @@ struct RunState<S: Store, R: Replicator> {
     /// WP-2.2: the KV expiry sweep is due (set by its tick, cleared once a
     /// cycle has run it).
     kv_sweep_due: bool,
+    /// WP-2.3: the timer tick fired (or the last fire step hit a bound), so
+    /// the next cycle runs the fire step even with no command to plan.
+    timers_due: bool,
     stopped: bool,
     /// PERF-K trace: what the last `select!` wake was (`arrival` / `result` /
-    /// `applied_notify` / `expire` / `hold` / `role`), for the `CYCLETRACE`
-    /// "reason" field. Cheap `&'static str`, always maintained.
+    /// `applied_notify` / `expire` / `kv_sweep` / `timers` / `hold` / `role`), for the
+    /// `CYCLETRACE` "reason" field. Cheap `&'static str`, always maintained.
     wake_reason: &'static str,
     /// PERF-K trace: a monotone counter bumped on each `select!` wake, so the
     /// analysis can group the burst of cycles that ran after one wake.
@@ -1147,7 +1264,8 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             && !self.paused
             && self.holding_until.is_none()
             && self.unresolved() < self.cfg.pipeline
-            && (!self.queue.is_empty() || ((self.expire_due || self.kv_sweep_due) && !self.closing))
+            && (!self.queue.is_empty()
+                || ((self.expire_due || self.kv_sweep_due || self.timers_due) && !self.closing))
     }
 
     fn should_exit(&self) -> bool {
@@ -1187,7 +1305,15 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         let batch = self.drain_batch();
         let expire = self.expire_due && !self.closing;
         let kv_sweep = self.kv_sweep_due && !self.closing;
-        if batch.is_empty() && !expire && !kv_sweep {
+        // WP-2.3: the fire step runs on its tick, and in any cycle that plans a
+        // timers command (a timer scheduled already due fires in its own entry).
+        let fire = self.cfg.timer_tick_ms > 0
+            && !self.closing
+            && (self.timers_due
+                || batch
+                    .iter()
+                    .any(|s| matches!(s.command, Command::Timers(_))));
+        if batch.is_empty() && !expire && !kv_sweep && !fire {
             return;
         }
         // PERF-K trace: capture the before-state and the inter-cycle gap now
@@ -1285,6 +1411,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         let front = self.front.clone();
         let reader = self.reader.clone();
         let qlog_reader = self.qlog_reader.clone();
+        let fire_cfg = fire.then(|| self.cfg.timer_fire.clone());
 
         let planned = tokio::task::spawn_blocking(move || {
             plan_cycle_blocking(
@@ -1298,14 +1425,21 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 wall_us,
                 expire_window_us,
                 kv_sweep_limit,
+                fire_cfg,
             )
         })
         .await;
 
-        // The KV sweep is best-effort and self-rescheduling: a cycle that could
-        // not plan leaves it to the next tick rather than spinning on it.
-        if kv_sweep && !matches!(planned, Ok(Ok(_))) {
-            self.kv_sweep_due = false;
+        // The KV sweep and the timer fire are best-effort and self-rescheduling:
+        // a cycle that could not plan leaves them to their next tick rather
+        // than spinning on a store that cannot answer.
+        if !matches!(planned, Ok(Ok(_))) {
+            if kv_sweep {
+                self.kv_sweep_due = false;
+            }
+            if fire {
+                self.timers_due = false;
+            }
         }
         let out = match planned {
             Ok(Ok(out)) => out,
@@ -1335,6 +1469,11 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         }
         if out.kv_swept {
             self.kv_sweep_due = false;
+        }
+        if out.fired {
+            // A step that hit a bound runs again at once; otherwise the next
+            // tick does.
+            self.timers_due = out.fire_more;
         }
 
         // §13.5 `planner.planned`: effects and outcomes exist in the overlay;

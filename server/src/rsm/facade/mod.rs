@@ -384,6 +384,56 @@ pub struct DepthOut {
     pub pending: i64,
 }
 
+/// `POST /api/v1/timers` (and the cancel route, as one `cancel` op): the ops
+/// the HTTP edge already shaped (server-owned fields refused, `_messageId`
+/// minted, the horizon and payload ceilings enforced), plus the AUTHENTICATED
+/// subject, which is stamped on every scheduled frame and never read from an op
+/// (025 §4.2). The receiver validates them exactly as 025's
+/// `log_timers_apply_v1` does and answers a bad call with
+/// [`RsmError::Rejected`] `{code: "timers_bad_request"}`.
+#[derive(Clone, Debug)]
+pub struct TimersReq {
+    pub ops: Vec<serde_json::Value>,
+    pub producer_sub: Option<String>,
+}
+
+/// The index-aligned per-op verdicts (025 §4.1), as the JSON objects the
+/// handler wraps in `{"results": …}` (or answers alone, on the cancel route).
+#[derive(Clone, Debug)]
+pub struct TimersOut {
+    pub results: Vec<serde_json::Value>,
+}
+
+/// `GET /api/v1/timers/:queue/*timerKey` — one key, with its payload.
+#[derive(Clone, Debug)]
+pub struct TimerPeekReq {
+    pub queue: String,
+    pub timer_key: String,
+}
+
+/// `GET /api/v1/timers/:queue` — the keyset list (`after` exclusive, `limit`
+/// clamped to `[1, 1000]`).
+#[derive(Clone, Debug)]
+pub struct TimersListReq {
+    pub queue: String,
+    pub after: Option<String>,
+    pub limit: i32,
+}
+
+/// `GET /api/v1/timers/:queue?mode=count&prefix=…` — the exact pending count
+/// under one literal key prefix.
+#[derive(Clone, Debug)]
+pub struct TimersCountReq {
+    pub queue: String,
+    pub prefix: String,
+}
+
+/// A timer read, rendered: the JSON body 025's read procedures return.
+#[derive(Clone, Debug)]
+pub struct TimerReadOut {
+    pub body: String,
+}
+
 // ---------------------------------------------------------------------------
 // KV (024, WP-2.2).
 // ---------------------------------------------------------------------------
@@ -527,6 +577,33 @@ pub trait Rsm: Send + Sync {
     /// `[{namespace, keys}]`, rendered.
     async fn kv_namespaces(&self, _ctx: ReqCtx) -> Result<String, KvFailure> {
         Err(KvFailure::Rsm(RsmError::Unsupported))
+    }
+
+    /// `POST /api/v1/timers` and the cancel route (WP-2.3): schedule,
+    /// reschedule and cancel in ONE command (025 `log_timers_apply_v1`). The
+    /// default is the phase-1 answer, so a facade without timers says so.
+    async fn timers_apply(&self, _ctx: ReqCtx, _req: TimersReq) -> Result<TimersOut, RsmError> {
+        Err(RsmError::Unsupported)
+    }
+    /// `GET /api/v1/timers/:queue/*timerKey` (025 `log_timers_peek_v1`).
+    async fn timer_peek(&self, _ctx: ReqCtx, _req: TimerPeekReq) -> Result<TimerReadOut, RsmError> {
+        Err(RsmError::Unsupported)
+    }
+    /// `GET /api/v1/timers/:queue` (025 `log_timers_list_v1`).
+    async fn timers_list(
+        &self,
+        _ctx: ReqCtx,
+        _req: TimersListReq,
+    ) -> Result<TimerReadOut, RsmError> {
+        Err(RsmError::Unsupported)
+    }
+    /// `GET /api/v1/timers/:queue?mode=count` (025 `log_timers_count_v1`).
+    async fn timers_count(
+        &self,
+        _ctx: ReqCtx,
+        _req: TimersCountReq,
+    ) -> Result<TimerReadOut, RsmError> {
+        Err(RsmError::Unsupported)
     }
 
     /// The `/health` raft block (§14.1). Cheap and non-async: a node-local read.
