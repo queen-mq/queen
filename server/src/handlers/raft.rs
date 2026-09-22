@@ -446,8 +446,9 @@ pub(crate) async fn handle_prometheus(
         .into_response()
 }
 
-/// `GET /metrics` in raft mode. Process metrics remain local and the database
-/// block is replaced by state-machine role/readiness data (§14.6).
+/// `GET /metrics` in raft mode. Process metrics remain local. The legacy
+/// database pool block stays present (with zero SQL connections) for dashboard
+/// compatibility, while state-machine role/readiness lives in `raft` (§14.6).
 pub(crate) async fn handle_metrics(
     axum::extract::State(st): axum::extract::State<Arc<AppState>>,
 ) -> Response {
@@ -462,6 +463,11 @@ pub(crate) async fn handle_metrics(
         "messages": {
             "total": snap.push_messages + snap.pop_messages + snap.ack_messages,
             "rate": 0,
+        },
+        "database": {
+            "poolSize": 0,
+            "idleConnections": 0,
+            "waitingRequests": 0,
         },
         "memory": {
             "rss": st.metrics.resident_bytes(),
@@ -864,6 +870,7 @@ pub(crate) async fn dispatch_api(
             let status =
                 StatusCode::from_u16(out.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             if status.is_success() {
+                #[cfg(feature = "server")]
                 apply_local_control(st, method, path, query, tenant, &body);
             }
             (status, [(header::CONTENT_TYPE, out.content_type)], out.body).into_response()
@@ -1561,6 +1568,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn phase2_fallback_serves_api_and_unknown_routes_are_404() {
         use crate::rsm::facade::real::RaftFacade;

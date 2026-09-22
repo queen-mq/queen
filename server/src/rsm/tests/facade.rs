@@ -545,8 +545,12 @@ async fn phase_two_admin_detail_and_stream_state_accept_the_raft_partition_id() 
         .push(
             ctx(),
             PushReq {
-                raw: br#"{"items":[{"queue":"stream-source","payload":{"n":1},"transactionId":"stream-tx"}]}"#
-                    .to_vec(),
+                raw: br#"{"items":[
+                    {"queue":"stream-source","payload":{"n":1},"transactionId":"stream-tx"},
+                    {"queue":"stream-source","payload":{"n":2},"transactionId":"stream-z"},
+                    {"queue":"stream-source","payload":{"n":3},"transactionId":"stream-a"}
+                ]}"#
+                .to_vec(),
             },
         )
         .await
@@ -557,7 +561,7 @@ async fn phase_two_admin_detail_and_stream_state_accept_the_raft_partition_id() 
             PopReq {
                 queue: "stream-source".into(),
                 group: Some("stream-group".into()),
-                batch: 1,
+                batch: 3,
                 auto_ack: false,
                 wait: false,
                 timeout_ms: 1_000,
@@ -571,6 +575,8 @@ async fn phase_two_admin_detail_and_stream_state_accept_the_raft_partition_id() 
         .expect("pop");
     let pop = parse(&popped.body);
     let pid = pop["partitionId"].as_str().expect("numeric pid");
+    let lease = pop["leaseId"].as_str().expect("lease id");
+    assert_eq!(pop["messages"].as_array().map(Vec::len), Some(3));
     assert!(pid.parse::<u64>().is_ok(), "Raft partition id: {pid}");
 
     let detail = facade
@@ -624,14 +630,41 @@ async fn phase_two_admin_detail_and_stream_state_accept_the_raft_partition_id() 
                     "consumer_group":"stream-group",
                     "state_ops":[{"type":"upsert","key":"count","value":{"n":1}}],
                     "push_items":[],
-                    "ack":null
+                    "ack":{"leaseId":lease,"status":"completed","count":3},
+                    "release_lease":true
                 }),
             ),
         )
         .await
         .expect("stream cycle");
     assert_eq!(cycle.status, 200, "{}", cycle.body);
-    assert_eq!(parse(&cycle.body)["success"], true, "{}", cycle.body);
+    let cycle = parse(&cycle.body);
+    assert_eq!(cycle["success"], true, "{cycle}");
+    assert_eq!(cycle["ack_result"]["count"], 3, "{cycle}");
+    assert_eq!(cycle["ack_result"]["lease_released"], true, "{cycle}");
+
+    let empty = facade
+        .pop_wildcard(
+            ctx(),
+            PopReq {
+                queue: "stream-source".into(),
+                group: Some("stream-group".into()),
+                batch: 3,
+                auto_ack: false,
+                wait: false,
+                timeout_ms: 1_000,
+                options: crate::rsm::facade::PopOptions {
+                    subscription_mode: "all".into(),
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .expect("post-cycle pop");
+    assert!(
+        empty.empty,
+        "the Streams cycle committed the full leased batch"
+    );
 
     let state = facade
         .api(

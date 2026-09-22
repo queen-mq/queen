@@ -933,29 +933,6 @@ fn plan_cycle_blocking<S: Store>(
         // leaves the segment path untouched.
         planner.set_qlog_reader(qlog_reader.clone());
 
-        // Queue-log files are node-local and are therefore reclaimed outside
-        // replicated apply.  Use only watermarks from this committed read;
-        // effects planned below become eligible on a later maintenance pass.
-        // A local I/O failure must not reject unrelated client commands: keep
-        // the replicated retention loop moving and retry the file sweep.
-        if maintenance.is_some() {
-            if let Some(qlogs) = qlog_reader.as_ref() {
-                match crate::rsm::maintenance::reclaim_qlogs(r, qlogs) {
-                    Ok(n) if n > 0 => tracing::info!(
-                        target: "rsm",
-                        files = n,
-                        "rsm qlog retention reclaimed sealed files"
-                    ),
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(
-                        target: "rsm",
-                        error = %e,
-                        "rsm qlog retention will retry"
-                    ),
-                }
-            }
-        }
-
         let mut entry = Entry::new(now_us, ov.cycle_pid_base(), ov.cycle_kv_base());
         let mut slots: Vec<Slot> = Vec::with_capacity(batch.len());
         // Ids already logged into THIS entry, so a same-cycle retry becomes a
@@ -1251,6 +1228,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             kv_sweep_due: false,
             timers_due: false,
             maintenance_due: maintenance_on,
+            qlog_gc_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             stopped: false,
             wake_reason: "init",
             wake_seq: 0,
@@ -1307,6 +1285,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                 _ = maintenance_tick.tick(), if maintenance_on => {
                     st.note_wake("maintenance");
                     st.maintenance_due = true;
+                    st.start_qlog_gc();
                 }
                 _ = tokio::time::sleep(Duration::from_millis(HOLD_POLL_MS)),
                     if st.holding_until.is_some() =>
@@ -1386,6 +1365,9 @@ struct RunState<S: Store, R: Replicator> {
     timers_due: bool,
     /// WP-2.7: retention / trace expiry / garbage continuation is due.
     maintenance_due: bool,
+    /// The node-local qlog sweep runs independently of serialized command
+    /// planning. The flag coalesces ticks while one bounded step is active.
+    qlog_gc_running: Arc<std::sync::atomic::AtomicBool>,
     stopped: bool,
     /// PERF-K trace: what the last `select!` wake was (`arrival` / `result` /
     /// `applied_notify` / `expire` / `kv_sweep` / `timers` / `hold` / `role`), for the
@@ -1399,6 +1381,43 @@ struct RunState<S: Store, R: Replicator> {
 }
 
 impl<S: Store + 'static, R: Replicator> RunState<S, R> {
+    fn start_qlog_gc(&self) {
+        use std::sync::atomic::Ordering;
+
+        if self.paused || self.closing {
+            return;
+        }
+        let Some(qlogs) = self.qlog_reader.clone() else {
+            return;
+        };
+        if self
+            .qlog_gc_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let store = self.store.clone();
+        let running = self.qlog_gc_running.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = store.read(|r| crate::rsm::maintenance::reclaim_qlogs(r, &qlogs));
+            match result {
+                Ok(n) if n > 0 => tracing::info!(
+                    target: "rsm",
+                    files = n,
+                    "rsm qlog retention reclaimed sealed files"
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(
+                    target: "rsm",
+                    error = %e,
+                    "rsm qlog retention will retry"
+                ),
+            }
+            running.store(false, Ordering::Release);
+        });
+    }
+
     /// Entries proposed but not yet applied locally (the I3 pipeline count):
     /// a `Timeout` does NOT decrement it until the entry applies.
     fn unresolved(&self) -> usize {

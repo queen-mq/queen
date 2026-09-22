@@ -441,11 +441,28 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         }
         let mut cur = cur0.clone();
         let old_committed = cur0.committed;
-        let (acked, conflated): (u32, u32) = match (cmd.upto, cmd.ok) {
-            (Some(upto), true) => {
+        let (acked, conflated): (u32, u32) = match cmd.ok {
+            true => {
                 let Some(be) = cur.batch_end else {
                     return Err(Refusal::client("no_batch", "no leased batch"));
                 };
+                // A full Streams cycle intentionally names no absolute offset:
+                // the recorded batch_end is the authority. A partial gate
+                // cycle advances exactly `acked_count` delivered frames from
+                // the attempt head and keeps the lease for the denied tail.
+                let upto = cmd.upto.unwrap_or_else(|| {
+                    if cmd.release_lease {
+                        be as i64
+                    } else if cmd.acked_count <= 0 {
+                        cur.committed
+                    } else {
+                        let start = cur.attempt_offset.unwrap_or((cur.committed + 1) as u64);
+                        start
+                            .saturating_add(cmd.acked_count.max(0) as u64)
+                            .saturating_sub(1)
+                            .min(be) as i64
+                    }
+                });
                 if upto > be as i64 {
                     return Err(Refusal::client(
                         "beyond_batch",
@@ -463,11 +480,18 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                     0
                 };
                 cur.committed = upto;
-                release_lease(&mut cur);
+                if cmd.release_lease {
+                    release_lease(&mut cur);
+                    cur.attempt_offset = None;
+                    cur.attempt_count = 0;
+                    cur.batch_retry_count = 0;
+                } else {
+                    cur.attempt_offset = Some((upto + 1).max(0) as u64);
+                }
                 cur.total_consumed += retired;
                 (cmd.acked_count.max(0) as u32, conflated)
             }
-            _ => {
+            false => {
                 // nack: release, cursor untouched.
                 release_lease(&mut cur);
                 (0, 0)
@@ -479,7 +503,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             acked,
             conflated,
             dlq: 0,
-            lease_released: cur0.batch_end.is_some(),
+            lease_released: cur0.batch_end.is_some() && (!cmd.ok || cmd.release_lease),
             batch_retry_count: cur.batch_retry_count,
             noop_hashes: Vec::new(),
             stale_hashes: Vec::new(),

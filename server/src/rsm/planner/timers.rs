@@ -968,7 +968,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                     frame: row.frame.clone(),
                 })
                 .collect(),
-            create_cfg: implicit_queue_config(),
+            create_cfg: implicit_queue_config_for(queue),
         };
         let verdicts: Result<Vec<PushVerdict>, Refusal> = match self.plan_push(ov, &cmd) {
             Ok(Plan::Logged {
@@ -1098,7 +1098,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             Some(pid) => pid,
             None => {
                 if self.queue_cfg(ov, tenant, queue)?.is_none() {
-                    let mut cfg = implicit_queue_config();
+                    let mut cfg = implicit_queue_config_for(queue);
                     cfg.created_at_us = now;
                     effs.push(Effect::QueueUpsert {
                         tenant: tenant.to_string(),
@@ -1204,6 +1204,18 @@ pub fn implicit_queue_config() -> QueueConfig {
         retention_sink_hold_max_seconds: 0,
         created_at_us: 0,
     }
+}
+
+/// The implicit defaults plus the namespace/task labels derived by every SQL
+/// provisioning path (`003_log_push` and `025_log_timers`).  PostgreSQL's
+/// `split_part` keeps only the first two dotted components: an undotted queue
+/// has its full name as the namespace and an empty task.
+pub fn implicit_queue_config_for(queue: &str) -> QueueConfig {
+    let mut cfg = implicit_queue_config();
+    let mut parts = queue.split('.');
+    cfg.namespace = Some(parts.next().unwrap_or_default().to_string());
+    cfg.task = Some(parts.next().unwrap_or_default().to_string());
+    cfg
 }
 
 // ---------------------------------------------------------------------------

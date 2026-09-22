@@ -32,11 +32,47 @@ async fn maintenance_modes_behave() {
     restore(&q).await;
 
     maintenance_state_is_readable(&q).await;
+    if std::env::var("QUEEN_TEST_STORAGE").as_deref() == Ok("raft") {
+        raft_push_maintenance_refuses_without_lying(&q).await;
+        pop_maintenance_pauses_consumers_without_erroring(&q).await;
+        restore(&q).await;
+        return;
+    }
     push_maintenance_spools_and_then_replays(&q).await;
     pop_maintenance_pauses_consumers_without_erroring(&q).await;
     live_traffic_crosses_the_window_without_loss_or_duplication(&q).await;
 
     restore(&q).await;
+}
+
+/// Raft D19: a voter must not claim that a push was durably buffered on its
+/// node-local spool. Such an acknowledgement could disappear on failover, so
+/// push maintenance is an explicit retryable 503 until the switch is cleared.
+async fn raft_push_maintenance_refuses_without_lying(q: &queen_mq::Queen) {
+    let queue = unique("maint-raft-push");
+    create_queue(q, &queue, QueueOptions::default()).await;
+
+    let state = q.admin().set_maintenance(true).await.unwrap();
+    assert_eq!(state.push_paused(), Some(true));
+
+    let error = q
+        .queue(&queue)
+        .push(serde_json::json!({ "phase": "during" }))
+        .await
+        .expect_err("a Raft maintenance push must not be acknowledged as buffered");
+    assert_eq!(error.status(), Some(503), "unexpected refusal: {error}");
+
+    let state = q.admin().set_maintenance(false).await.unwrap();
+    assert_eq!(state.push_paused(), Some(false));
+
+    let after = q
+        .queue(&queue)
+        .push(serde_json::json!({ "phase": "after" }))
+        .await
+        .unwrap();
+    assert_eq!(after[0].status, PushStatus::Queued);
+
+    drop_queue(q, &queue).await;
 }
 
 async fn push_maintenance_spools_and_then_replays(q: &queen_mq::Queen) {

@@ -14,6 +14,7 @@ use crate::rsm::facade::{ApiOut, ApiReq, ReqCtx, RsmError};
 use crate::rsm::planner::EffectsCommand;
 use crate::rsm::replicator::{ProposeError, Replicator};
 use crate::rsm::store::keys::{self, Counter};
+use crate::rsm::store::rows;
 use crate::rsm::store::{Keyspace, Reads, Store, TypedReads};
 
 mod admin;
@@ -119,7 +120,7 @@ impl RaftFacade {
                 }
                 Ok(ApiOut::json(
                     404,
-                    json!({"error":"not found","path":req.path}).to_string(),
+                    json!({"code":"no_such_route","error":"not found","path":req.path}).to_string(),
                 ))
             }
         }
@@ -489,17 +490,114 @@ impl RaftFacade {
     }
 
     async fn api_get_queue(&self, ctx: ReqCtx, queue: &str) -> Result<ApiOut, RsmError> {
-        let rows = self.queue_snapshots(&ctx.tenant).await?;
-        match rows
-            .into_iter()
-            .find(|v| v.get("name").and_then(Value::as_str) == Some(queue))
-        {
+        match self.queue_resource_detail(&ctx.tenant, queue).await? {
             Some(v) => Ok(ApiOut::json(200, v.to_string())),
             None => Ok(ApiOut::json(
                 404,
                 json!({"error":"Queue not found"}).to_string(),
             )),
         }
+    }
+
+    async fn queue_resource_detail(
+        &self,
+        tenant: &str,
+        queue: &str,
+    ) -> Result<Option<Value>, RsmError> {
+        let store = self.store.clone();
+        let tenant = tenant.to_string();
+        let queue = queue.to_string();
+        let now = super::wall_micros();
+        tokio::task::spawn_blocking(move || store.read(|r| {
+            let Some(cfg) = r.queue(&tenant, &queue)? else {
+                return Ok(None);
+            };
+            let mut dlq_by_pid: BTreeMap<u64, i64> = BTreeMap::new();
+            for (_, _, _, row) in reads::scan_dlq_rows(r, &tenant, Some(&queue), None)? {
+                *dlq_by_pid.entry(row.pid).or_default() += 1;
+            }
+            let mut partitions = Vec::new();
+            let mut totals = [0i64; 5]; // total, pending, processing, completed, dlq
+            let mut retained = 0i64;
+            let mut segments = 0i64;
+            r.scan_queue_partitions(&tenant, &queue, None, usize::MAX, &mut |pid| {
+                let Ok(Some(p)) = r.partition(pid) else { return true };
+                let total = (p.last_offset - p.log_start as i64 + 1).max(0);
+                let mut named_min: Option<i64> = None;
+                let mut queue_min: Option<i64> = None;
+                let mut processing = 0i64;
+                let mut consumed = 0u64;
+                let mut last_activity: Option<i64> = None;
+                let _ = r.scan_cursors(pid, usize::MAX, &mut |group, c| {
+                    if group == "__QUEUE_MODE__" {
+                        queue_min = Some(queue_min.map_or(c.committed, |v| v.min(c.committed)));
+                    } else {
+                        named_min = Some(named_min.map_or(c.committed, |v| v.min(c.committed)));
+                    }
+                    if rows::lease_live(&c, now) {
+                        processing += c
+                            .batch_end
+                            .map(|end| (end as i64 - c.committed).max(0))
+                            .unwrap_or(0);
+                    }
+                    consumed = consumed.saturating_add(c.total_consumed);
+                    last_activity = match (last_activity, c.lease_acquired_at_us) {
+                        (Some(a), Some(b)) => Some(a.max(b)),
+                        (None, Some(b)) => Some(b),
+                        (a, None) => a,
+                    };
+                    true
+                });
+                let pending = p.pending_from(named_min.or(queue_min).unwrap_or(-1)) as i64;
+                processing = processing.min(pending);
+                let dead_letter = dlq_by_pid.get(&pid).copied().unwrap_or(0);
+                let completed = (total - pending - dead_letter).max(0);
+                let stats = json!({
+                    "total":total,"pending":pending,"processing":processing,
+                    "completed":completed,"failed":Value::Null,"deadLetter":dead_letter
+                });
+                totals[0] += total;
+                totals[1] += pending;
+                totals[2] += processing;
+                totals[3] += completed;
+                totals[4] += dead_letter;
+                retained += r.partition_counter(pid, Counter::RetainedBytes).unwrap_or(0);
+                let mut sealed = 0i64;
+                let _ = r.scan_partition_files(pid, usize::MAX, &mut |_| {
+                    sealed += 1;
+                    true
+                });
+                // The current open tail is a live API segment even though it
+                // has not been sealed into PartitionFiles yet.
+                segments += sealed + i64::from(p.last_offset >= p.log_start as i64);
+                partitions.push(json!({
+                    "id":uuid_bytes_to_string(&p.uuid),
+                    "name":p.partition,
+                    "createdAt":crate::rsm::planner::timers::iso_us(p.created_at_us),
+                    "messages":stats,
+                    "stats":stats,
+                    "cursor":{"totalConsumed":consumed,"batchesConsumed":0},
+                    "lastActivity":last_activity.map(crate::rsm::planner::timers::iso_us),
+                    "oldestMessage":p.oldest_live_at_us.map(crate::rsm::planner::timers::iso_us),
+                    "newestMessage":if total > 0 { Some(crate::rsm::planner::timers::iso_us(p.last_created_at_us)) } else { None }
+                }));
+                true
+            })?;
+            partitions.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            Ok(Some(json!({
+                "id":uuid_bytes_to_string(&cfg.id),"name":queue,
+                "namespace":cfg.namespace.clone().unwrap_or_default(),
+                "task":cfg.task.clone().unwrap_or_default(),
+                "createdAt":crate::rsm::planner::timers::iso_us(cfg.created_at_us),
+                "options":config_options(&cfg),"partitions":partitions,
+                "segments":{"segments":segments,"messages":totals[0]},
+                "totals":{"total":totals[0],"pending":totals[1],"processing":totals[2],"completed":totals[3],"failed":Value::Null,"deadLetter":totals[4]},
+                "retainedBytes":retained
+            })))
+        }))
+        .await
+        .map_err(|e| RsmError::Internal(format!("queue detail: {e}")))?
+        .map_err(read_error)
     }
 
     async fn api_queue_depth(
@@ -531,6 +629,18 @@ impl RaftFacade {
     async fn api_overview(&self, ctx: ReqCtx) -> Result<ApiOut, RsmError> {
         let rows = self.queue_snapshots(&ctx.tenant).await?;
         let queues = rows.len() as i64;
+        let namespaces = rows
+            .iter()
+            .filter_map(|v| v.get("namespace").and_then(Value::as_str))
+            .filter(|s| !s.is_empty())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len() as i64;
+        let tasks = rows
+            .iter()
+            .filter_map(|v| v.get("task").and_then(Value::as_str))
+            .filter(|s| !s.is_empty())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len() as i64;
         let partitions: i64 = rows
             .iter()
             .filter_map(|v| v.get("partitions")?.as_i64())
@@ -543,9 +653,26 @@ impl RaftFacade {
             .iter()
             .filter_map(|v| v.pointer("/messages/pending")?.as_i64())
             .sum();
+        let processing: i64 = rows
+            .iter()
+            .filter_map(|v| v.pointer("/messages/processing")?.as_i64())
+            .sum();
+        let completed: i64 = rows
+            .iter()
+            .filter_map(|v| v.pointer("/messages/completed")?.as_i64())
+            .sum();
+        let dead_letter: i64 = rows
+            .iter()
+            .filter_map(|v| v.pointer("/messages/deadLetter")?.as_i64())
+            .sum();
         Ok(ApiOut::json(
             200,
-            json!({"queues":queues,"partitions":partitions,"messages":{"total":total,"pending":pending}}).to_string(),
+            json!({
+                "queues":queues,"partitions":partitions,
+                "namespaces":namespaces,"tasks":tasks,
+                "messages":{"total":total,"pending":pending,"processing":processing,"completed":completed,"deadLetter":dead_letter},
+                "lag":{"time":{"avg":0,"max":0},"offset":{"avg":pending,"max":pending}}
+            }).to_string(),
         ))
     }
 
@@ -586,6 +713,7 @@ impl RaftFacade {
                     let mut total = 0i64;
                     let mut pending = 0i64;
                     let mut retained = 0i64;
+                    let mut segments = 0i64;
                     r.scan_queue_partitions(&tenant, &name, None, usize::MAX, &mut |pid| {
                         if let Ok(Some(p)) = r.partition(pid) {
                             parts += 1;
@@ -608,10 +736,20 @@ impl RaftFacade {
                             retained += r
                                 .partition_counter(pid, Counter::RetainedBytes)
                                 .unwrap_or(0);
+                            let mut sealed = 0i64;
+                            let _ = r.scan_partition_files(pid, usize::MAX, &mut |_| {
+                                sealed += 1;
+                                true
+                            });
+                            // The open tail is not in PartitionFiles yet, but
+                            // it is a live segment from the API's perspective.
+                            segments += sealed + i64::from(p.last_offset >= p.log_start as i64);
                         }
                         true
                     })?;
-                    out.push(queue_json(&name, &cfg, parts, total, pending, retained));
+                    out.push(queue_json(
+                        &name, &cfg, parts, segments, total, pending, retained,
+                    ));
                 }
                 Ok(out)
             })
@@ -981,11 +1119,12 @@ fn queue_json(
     name: &str,
     c: &QueueConfig,
     parts: i64,
+    segments: i64,
     total: i64,
     pending: i64,
     retained: i64,
 ) -> Value {
-    json!({"id":uuid_bytes_to_string(&c.id),"name":name,"queue":name,"namespace":c.namespace.clone().unwrap_or_default(),"task":c.task.clone().unwrap_or_default(),"storage":"segments","partitions":parts,"messages":{"total":total,"pending":pending,"processing":0,"completed":(total-pending).max(0),"deadLetter":0},"retainedBytes":retained,"options":config_options(c),"createdAt":crate::rsm::planner::timers::iso_us(c.created_at_us)})
+    json!({"id":uuid_bytes_to_string(&c.id),"name":name,"queue":name,"namespace":c.namespace.clone().unwrap_or_default(),"task":c.task.clone().unwrap_or_default(),"storage":"segments","partitions":parts,"segments":{"segments":segments,"messages":total},"messages":{"total":total,"pending":pending,"processing":0,"completed":(total-pending).max(0),"deadLetter":0},"retainedBytes":retained,"options":config_options(c),"createdAt":crate::rsm::planner::timers::iso_us(c.created_at_us)})
 }
 
 fn query_value(query: Option<&str>, key: &str) -> Option<String> {

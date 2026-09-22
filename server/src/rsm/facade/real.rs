@@ -49,7 +49,9 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
-use crate::frames::{pack_frames, unpack_frames_ref, uuid_bytes_to_string, FrameIn};
+use crate::frames::{
+    pack_frames, unpack_frames_ref, uuid_bytes_to_string, uuid_string_to_bytes, FrameIn,
+};
 use crate::notify::Notifier;
 use crate::rsm::apply::SystemClock;
 use crate::rsm::batcher::{Batcher, BatcherConfig, Command, CommandTx, Reply, Submission};
@@ -66,7 +68,7 @@ use crate::rsm::qlog::set::QLogReader;
 use crate::rsm::replicator::local::{LocalReplicator, OpenConfig, Waker};
 use crate::rsm::replicator::Replicator;
 use crate::rsm::segments;
-use crate::rsm::store::{HeedStore, Reads, Store, StoreOpts, TypedReads};
+use crate::rsm::store::{rows, HeedStore, Reads, Store, StoreOpts, TypedReads};
 use crate::util::{txn_hash128, uuidv7_bytes};
 
 use super::{
@@ -225,6 +227,9 @@ pub struct RaftFacade {
     pop_fastpath_empty: bool,
     data_dir: PathBuf,
     storage_full: std::sync::atomic::AtomicBool,
+    storage_pressure_enabled: bool,
+    storage_checked_at_us: std::sync::atomic::AtomicI64,
+    storage_check_interval_us: i64,
     disk_high_pct: f64,
     disk_low_pct: f64,
 }
@@ -296,6 +301,23 @@ impl RaftFacade {
 
     fn storage_pressure(&self) -> bool {
         use std::sync::atomic::Ordering;
+        if !self.storage_pressure_enabled {
+            return false;
+        }
+        let now = wall_micros();
+        let checked = self.storage_checked_at_us.load(Ordering::Acquire);
+        if now.saturating_sub(checked) < self.storage_check_interval_us {
+            return self.storage_full.load(Ordering::Relaxed);
+        }
+        // One caller refreshes the cached probe; concurrent submissions use
+        // the previous safe result instead of issuing a statvfs storm.
+        if self
+            .storage_checked_at_us
+            .compare_exchange(checked, now, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return self.storage_full.load(Ordering::Relaxed);
+        }
         let map_pct = self.store.map_usage().pct();
         let disk_pct = filesystem_used_pct(&self.data_dir).unwrap_or(0.0);
         let was_full = self.storage_full.load(Ordering::Relaxed);
@@ -314,13 +336,28 @@ impl RaftFacade {
     /// Open the whole RSM at `ctx.data_dir` (§11.1). Blocking boot I/O; called
     /// once, from the storage seam (`build_raft_state`) inside the runtime.
     pub fn open(ctx: &RsmBuildCtx) -> Result<RaftFacade, String> {
-        RaftFacade::open_with(ctx, BatcherConfig::from_env())
+        let mut batcher = BatcherConfig::from_env();
+        if cfg!(test) {
+            // Unit tests create many independent facades in parallel. Their
+            // subject is command semantics, not the real-node background loop;
+            // keep host disk fullness and concurrent local GC out of them.
+            batcher.maintenance_every_ms = 0;
+        }
+        RaftFacade::open_inner(ctx, batcher, !cfg!(test))
     }
 
     /// [`RaftFacade::open`] with an explicit batcher configuration instead of
     /// the environment's — the tests' seam (a fast timer tick, the injected
     /// fire failure), never the boot path's.
     pub fn open_with(ctx: &RsmBuildCtx, batcher_cfg: BatcherConfig) -> Result<RaftFacade, String> {
+        RaftFacade::open_inner(ctx, batcher_cfg, false)
+    }
+
+    fn open_inner(
+        ctx: &RsmBuildCtx,
+        batcher_cfg: BatcherConfig,
+        storage_pressure_enabled: bool,
+    ) -> Result<RaftFacade, String> {
         let dir = PathBuf::from(&ctx.data_dir);
         if ctx.data_dir.trim().is_empty() {
             return Err("QUEEN_RAFT_DIR is required in raft mode (§11.1)".into());
@@ -385,6 +422,14 @@ impl RaftFacade {
             pop_fastpath_empty: env_flag("QUEEN_RAFT_POP_FASTPATH_EMPTY", true),
             data_dir: dir,
             storage_full: std::sync::atomic::AtomicBool::new(false),
+            storage_pressure_enabled,
+            storage_checked_at_us: std::sync::atomic::AtomicI64::new(0),
+            storage_check_interval_us: std::env::var("QUEEN_RAFT_DISK_CHECK_MS")
+                .ok()
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or(100)
+                .clamp(10, 60_000)
+                .saturating_mul(1_000),
             disk_high_pct: env_pct("QUEEN_RAFT_DISK_HIGH_PCT", 85.0),
             disk_low_pct: env_pct("QUEEN_RAFT_DISK_LOW_PCT", 80.0),
         })
@@ -410,6 +455,9 @@ impl RaftFacade {
             pop_fastpath_empty: _,
             data_dir: _,
             storage_full: _,
+            storage_pressure_enabled: _,
+            storage_checked_at_us: _,
+            storage_check_interval_us: _,
             disk_high_pct: _,
             disk_low_pct: _,
         } = self;
@@ -588,8 +636,8 @@ fn derived_request_id(base: RequestId, ordinal: u32) -> RequestId {
 /// receiver mints the id. ONE definition, shared with the timer fire's own
 /// implicit creation (`planner::timers::implicit_queue_config`), so a queue
 /// born from a fired timer is configured exactly like one born from a push.
-fn default_queue_config() -> QueueConfig {
-    crate::rsm::planner::timers::implicit_queue_config()
+fn default_queue_config(queue: &str) -> QueueConfig {
+    crate::rsm::planner::timers::implicit_queue_config_for(queue)
 }
 
 /// The store options, honouring `QUEEN_RAFT_MAP_BYTES` (the boot path is exempt
@@ -637,6 +685,8 @@ struct TxnOpIn<'a> {
     payload: Option<&'a RawValue>,
     #[serde(default, rename = "transactionId")]
     transaction_id: Option<String>,
+    #[serde(borrow, default, rename = "traceId")]
+    trace_id: Option<std::borrow::Cow<'a, str>>,
     #[serde(default, rename = "partitionId")]
     partition_id: Option<String>,
     #[serde(default, rename = "consumerGroup")]
@@ -761,6 +811,7 @@ impl RaftFacade {
                             partition: Option<&str>,
                             payload: &RawValue,
                             txn_in: Option<&str>,
+                            trace_id: Option<&str>,
                             flat: usize,
                             pushes: &mut Vec<TxnPush>|
          -> Result<(), RsmError> {
@@ -788,7 +839,9 @@ impl RaftFacade {
                 pack_frames(&[FrameIn {
                     message_id: mid,
                     txn: &txn,
-                    trace_id: None,
+                    // Invalid trace ids are deliberately ignored, matching the
+                    // permissive transaction wire contract.
+                    trace_id: trace_id.and_then(uuid_string_to_bytes),
                     producer_sub: ctx.producer_sub.as_deref(),
                     payload: &payload,
                     encrypted,
@@ -818,6 +871,7 @@ impl RaftFacade {
                                 it.partition.as_deref(),
                                 it.payload,
                                 it.transaction_id.as_deref(),
+                                it.trace_id.as_deref(),
                                 flat,
                                 &mut pushes,
                             )?;
@@ -835,6 +889,7 @@ impl RaftFacade {
                             op.partition.as_deref(),
                             pl,
                             op.transaction_id.as_deref(),
+                            op.trace_id.as_deref(),
                             flat,
                             &mut pushes,
                         )?;
@@ -929,7 +984,7 @@ impl RaftFacade {
                         frame: pushes[i].frame.clone(),
                     })
                     .collect(),
-                create_cfg: default_queue_config(),
+                create_cfg: default_queue_config(&g.queue),
             });
             push_members.push(g.members.clone());
         }
@@ -973,6 +1028,7 @@ impl RaftFacade {
             tenant: ctx.tenant.clone(),
             pushes: push_cmds,
             acks: targets,
+            positional_acks: Vec::new(),
             kv: kv_ops.clone(),
             timers: timer_ops,
             extra_effects: Vec::new(),
@@ -1139,6 +1195,8 @@ struct PushItemIn<'a> {
     payload: &'a RawValue,
     #[serde(borrow, default, rename = "transactionId")]
     transaction_id: Option<std::borrow::Cow<'a, str>>,
+    #[serde(borrow, default, rename = "traceId")]
+    trace_id: Option<std::borrow::Cow<'a, str>>,
 }
 
 /// One input item, receiver-resolved: its original index, minted id, txn, queue,
@@ -1276,6 +1334,9 @@ impl RaftFacade {
         if body.items.is_empty() {
             return Ok(PushOut { body: "[]".into() });
         }
+        if self.storage_pressure() {
+            return Err(RsmError::StorageFull);
+        }
         let encrypted_queues = self
             .encrypted_queues(
                 &ctx.tenant,
@@ -1381,7 +1442,7 @@ impl RaftFacade {
                 queue: g.queue.clone(),
                 partition: g.partition.clone(),
                 items,
-                create_cfg: default_queue_config(),
+                create_cfg: default_queue_config(&g.queue),
             });
             let (sub, rx) = Submission::new(cmd);
             let _t_send = crate::rsm::timing::stamp();
@@ -1778,7 +1839,7 @@ impl RaftFacade {
                 namespace: namespace.clone(),
                 task: task.clone(),
                 create_cfg: if wildcard_create {
-                    Some(default_queue_config())
+                    Some(default_queue_config(&queue))
                 } else {
                     None
                 },
@@ -2348,6 +2409,7 @@ struct AckPerItem {
     target: usize,
     hash: [u8; 16],
     status: AckStatus,
+    lease_invalid: bool,
 }
 
 struct AckSnapshotWork {
@@ -2407,6 +2469,21 @@ fn resolve_ack_targets(
                     }
                 };
                 let hash = txn_hash128(&f.txn);
+                // Keep the reason for a planner-side stale result.  AckResult's
+                // replicated shape intentionally carries hashes rather than
+                // receiver error strings, so the receiver snapshots whether a
+                // presented lease was already invalid while resolving it.
+                let lease_invalid = if f.worker.is_empty() {
+                    false
+                } else {
+                    match r.cursor(f.pid, group)? {
+                        Some(cur) => {
+                            cur.worker.as_deref() != Some(f.worker.as_str())
+                                || !rows::lease_live(&cur, wall_micros())
+                        }
+                        None => true,
+                    }
+                };
                 // O20: a signal carries the original frame snapshot so the DLQ
                 // write and cursor advance remain one replicated entry. Populate
                 // it after this short store read from the node-local payload log.
@@ -2453,6 +2530,7 @@ fn resolve_ack_targets(
                     target: ti,
                     hash,
                     status: f.status,
+                    lease_invalid,
                 });
             }
             Ok(())
@@ -2586,7 +2664,9 @@ fn render_ack(
                 // in this AckResult shape and marks each signal item — the
                 // per-item DLQ set the outcome must carry to disambiguate.
                 let dlq = res.dlq > 0 && matches!(p.status, AckStatus::Dlq | AckStatus::Failed);
-                let error = if stale && !matches!(p.status, AckStatus::Ok) {
+                let error = if stale && p.lease_invalid {
+                    Some("invalid or expired lease")
+                } else if stale && !matches!(p.status, AckStatus::Ok) {
                     Some(
                             "transaction is unresolvable, already committed, or acknowledgment is stale",
                         )

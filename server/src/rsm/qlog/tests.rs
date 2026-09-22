@@ -1014,7 +1014,15 @@ fn reclaim_below_txns_compacts_mixed_sealed_files() {
     starts.insert(10, u64::MAX);
     starts.insert(11, 0);
     let bytes_before = q.bytes();
-    let changed = q.unlink_below_txns(&starts).unwrap();
+    let mut changed = 0;
+    loop {
+        let step = q.unlink_below_txns_bounded(&starts, 1).unwrap();
+        assert!(step.examined <= 1, "the local-GC file budget was exceeded");
+        changed += step.changed;
+        if !step.more {
+            break;
+        }
+    }
     assert!(changed > 0, "mixed files are compacted");
     assert_eq!(q.file_count(), before, "partial compaction keeps file ids");
     assert!(
@@ -1032,6 +1040,8 @@ fn reclaim_below_txns_compacts_mixed_sealed_files() {
         );
     }
     assert!(expired_gone > 0, "sealed expired records are gone");
+    let cached = q.unlink_below_txns_bounded(&starts, 1).unwrap();
+    assert_eq!(cached.examined, 0, "unchanged files were scanned again");
 
     drop(q);
     let (mut q, recovery) = QLog::open(td.path(), 1, opts).unwrap();
@@ -1041,7 +1051,15 @@ fn reclaim_below_txns_compacts_mixed_sealed_files() {
     }
 
     starts.insert(11, u64::MAX);
-    let dropped = q.unlink_below_txns(&starts).unwrap();
+    let mut dropped = 0;
+    loop {
+        let step = q.unlink_below_txns_bounded(&starts, 1).unwrap();
+        assert!(step.examined <= 1);
+        dropped += step.changed;
+        if !step.more {
+            break;
+        }
+    }
     assert!(dropped > 0);
     assert_eq!(q.file_count(), 1, "the active file is never reclaimed");
 }

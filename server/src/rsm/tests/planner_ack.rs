@@ -2,7 +2,8 @@
 //! `native/tests/ack.rs` and the pitfalls of §8 row 005.
 
 use super::planner_harness::{
-    ack, ack_pos, nack, pop_pinned, pop_pinned_with, push, push_cfg, qcfg, renew, Cell,
+    ack, ack_pos, ack_pos_with_release, nack, pop_pinned, pop_pinned_with, push, push_cfg, qcfg,
+    renew, Cell,
 };
 use crate::rsm::entry::{AckResult, Outcome, PopClaim, PopOutcome, RenewOutcome};
 use crate::rsm::planner::{AckStatus::*, Plan};
@@ -229,6 +230,39 @@ fn a_positional_full_batch_ack_lands_where_the_hash_ack_does() {
     let r = ackres(&cy.outcome(0));
     assert_eq!(r.committed, 2);
     assert!(r.lease_released);
+}
+
+#[test]
+fn a_streams_full_batch_ack_uses_the_recorded_batch_end() {
+    let mut c = Cell::new("ack-pos-streams-full");
+    let pid = lease(&mut c, 1, "q", "p0", &["a", "b", "c"], "w1");
+    let cy = c.run(&[ack_pos_with_release(
+        3, pid, "q", "g", "w1", None, true, true, 3,
+    )]);
+    let r = ackres(&cy.outcome(0));
+    assert_eq!(r.committed, 2, "the recorded batch end is authoritative");
+    assert_eq!(r.acked, 3);
+    assert!(r.lease_released);
+    let cur = c.cursor(pid, "g").unwrap();
+    assert!(cur.worker.is_none());
+    assert!(cur.batch_end.is_none());
+}
+
+#[test]
+fn a_streams_partial_ack_advances_the_count_and_retains_the_lease() {
+    let mut c = Cell::new("ack-pos-streams-partial");
+    let pid = lease(&mut c, 1, "q", "p0", &["a", "b", "c"], "w1");
+    let cy = c.run(&[ack_pos_with_release(
+        3, pid, "q", "g", "w1", None, true, false, 2,
+    )]);
+    let r = ackres(&cy.outcome(0));
+    assert_eq!(r.committed, 1, "exactly two delivered frames advance");
+    assert_eq!(r.acked, 2);
+    assert!(!r.lease_released);
+    let cur = c.cursor(pid, "g").unwrap();
+    assert_eq!(cur.worker.as_deref(), Some("w1"));
+    assert_eq!(cur.batch_end, Some(2));
+    assert_eq!(cur.attempt_offset, Some(2));
 }
 
 #[test]

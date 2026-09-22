@@ -66,8 +66,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use crate::rsm::qlog::{
-    BandFrame, CommittedFrame, EntryRecord, OwnedRecord, QLog, QLogOptions, RecordInput,
-    WriteRecord,
+    BandFrame, CommittedFrame, EntryRecord, OwnedRecord, QLog, QLogOptions, ReclaimProgress,
+    RecordInput, WriteRecord,
 };
 
 /// Phase C: the reserved queue id of the SYSTEM log (`<root>/q0/`). It holds the
@@ -177,6 +177,8 @@ pub struct QLogSet {
     /// maintenance reader because retention may compact a log off the writer
     /// thread.
     totals: Arc<SharedTotals>,
+    /// Fair starting point for the globally bounded local-GC step.
+    reclaim_queue_cursor: Arc<AtomicU64>,
 }
 
 impl QLogSet {
@@ -195,6 +197,7 @@ impl QLogSet {
             durable_seq: 0,
             floor: Arc::new(AtomicU64::new(0)),
             totals: Arc::new(SharedTotals::default()),
+            reclaim_queue_cursor: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -264,6 +267,7 @@ impl QLogSet {
             logs: self.logs.clone(),
             floor: self.floor.clone(),
             totals: self.totals.clone(),
+            reclaim_queue_cursor: self.reclaim_queue_cursor.clone(),
         }
     }
 
@@ -729,6 +733,7 @@ pub struct QLogReader {
     /// Running qlog sizes, shared with the writer so copy-forward retention is
     /// visible to the replicator metrics without waiting for another append.
     totals: Arc<SharedTotals>,
+    reclaim_queue_cursor: Arc<AtomicU64>,
 }
 
 impl QLogReader {
@@ -755,26 +760,51 @@ impl QLogReader {
         self.floor.clone()
     }
 
-    /// Node-local retention for one queue.  The committed RSM watermarks are
-    /// supplied by the leader maintenance read; the queue lock serializes the
-    /// unlink with appends and readers.  Missing queues are a cheap no-op.
-    pub fn reclaim_below_txns(
+    /// Node-local retention for one queue. The committed RSM watermarks are
+    /// supplied by the leader maintenance read. Work is bounded by file count;
+    /// `try_write` ensures GC never queues in front of an append already using
+    /// this queue.
+    pub(crate) fn reclaim_below_txns(
         &self,
         queue_id: u64,
         txns_starts: &std::collections::HashMap<u64, u64>,
-    ) -> io::Result<usize> {
+        max_files: usize,
+    ) -> io::Result<ReclaimProgress> {
         match self.log(queue_id) {
             Some(log) => {
-                let mut log = log.write().expect("qlog poisoned");
+                let Ok(mut log) = log.try_write() else {
+                    return Ok(ReclaimProgress {
+                        more: true,
+                        ..ReclaimProgress::default()
+                    });
+                };
                 let (files_before, bytes_before) = (log.file_count() as u64, log.bytes());
-                let result = log.unlink_below_txns(txns_starts);
+                let result = log.unlink_below_txns_bounded(txns_starts, max_files);
                 let (files_after, bytes_after) = (log.file_count() as u64, log.bytes());
                 replace_total(&self.totals.files, files_before, files_after);
                 replace_total(&self.totals.bytes, bytes_before, bytes_after);
                 result
             }
-            None => Ok(0),
+            None => Ok(ReclaimProgress::default()),
         }
+    }
+
+    pub(crate) fn log_ids(&self) -> Vec<u64> {
+        self.logs
+            .read()
+            .expect("qlog set poisoned")
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    pub(crate) fn reclaim_queue_cursor(&self) -> u64 {
+        self.reclaim_queue_cursor.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn advance_reclaim_queue_cursor(&self, queue_id: u64) {
+        self.reclaim_queue_cursor
+            .store(queue_id.wrapping_add(1), Ordering::Release);
     }
 
     /// The open log for `queue_id`, or `None` when the applier has never written

@@ -509,6 +509,22 @@ pub struct QLog {
     written_total: u64,
     /// EWMA of bytes appended per sync; 0 until the first sync is seen.
     bytes_per_sync: u64,
+    /// Local retention progress. A sealed immutable file only needs another
+    /// index walk when either its contents are new or a partition's txn
+    /// watermark changed. Without this cache the 5 s maintenance tick walked
+    /// the whole retained log forever, making request latency grow with queue
+    /// history.
+    reclaim_generation: u64,
+    reclaim_txns_starts: HashMap<u64, u64>,
+    reclaim_checked: HashMap<u64, u64>,
+    reclaim_cursor: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ReclaimProgress {
+    pub changed: usize,
+    pub examined: usize,
+    pub more: bool,
 }
 
 impl QLog {
@@ -673,6 +689,10 @@ impl QLog {
             written_at_seen: 0,
             written_total: 0,
             bytes_per_sync: 0,
+            reclaim_generation: 1,
+            reclaim_txns_starts: HashMap::new(),
+            reclaim_checked: HashMap::new(),
+            reclaim_cursor: FIRST_FILE_ID,
         };
         tracing::info!(
             target: "rsm",
@@ -1619,54 +1639,86 @@ impl QLog {
         &mut self,
         txns_starts: &std::collections::HashMap<u64, u64>,
     ) -> io::Result<usize> {
+        Ok(self
+            .unlink_below_txns_bounded(txns_starts, usize::MAX)?
+            .changed)
+    }
+
+    /// One bounded local-GC step. At most `max_files` immutable indexes are
+    /// examined, and an unchanged file/watermark pair is never examined twice.
+    /// The cursor rotates so a hot mixed file cannot starve newer files when
+    /// watermarks advance on every retention tick.
+    pub(crate) fn unlink_below_txns_bounded(
+        &mut self,
+        txns_starts: &std::collections::HashMap<u64, u64>,
+        max_files: usize,
+    ) -> io::Result<ReclaimProgress> {
+        if self.reclaim_txns_starts != *txns_starts {
+            self.reclaim_txns_starts = txns_starts.clone();
+            self.reclaim_generation = self.reclaim_generation.wrapping_add(1).max(1);
+        }
+        let generation = self.reclaim_generation;
         let floor = self.floor.load(Ordering::Acquire);
         let active = self.active_index.file_id();
-        let eligible: Vec<u64> = self
+        let mut candidates: Vec<u64> = self
             .files
             .iter()
             .filter(|meta| meta.sealed && Some(meta.id) != active && meta.max_seq <= floor)
+            .filter(|meta| self.reclaim_checked.get(&meta.id).copied() != Some(generation))
             .map(|meta| meta.id)
             .collect();
-        let mut dead = std::collections::BTreeSet::new();
-        let mut partial = Vec::new();
-        for id in eligible {
-            let Some(view) = self.sealed.get(&id) else {
-                continue;
-            };
-            let mut live = 0usize;
-            let mut dead_records = 0usize;
-            let mut live_bytes = FILE_HEADER_LEN;
-            for record in view.records() {
-                if record_is_dead(&record, txns_starts) {
-                    dead_records += 1;
-                } else {
-                    live += 1;
-                    live_bytes = live_bytes.saturating_add(u64::from(record.len));
-                }
-            }
-            if live == 0 {
-                dead.insert(id);
-            } else {
-                let old_bytes = self
-                    .files
-                    .iter()
-                    .find(|meta| meta.id == id)
-                    .map_or(live_bytes, |meta| meta.bytes);
-                // Even with no expired message, payload-free recovery entries
-                // below the durable floor are reclaimable.
-                if dead_records > 0 || live_bytes < old_bytes {
-                    partial.push(id);
-                }
-            }
-        }
+        let split = candidates.partition_point(|id| *id < self.reclaim_cursor);
+        candidates.rotate_left(split);
+        let limit = max_files.max(1).min(candidates.len());
+        let more = candidates.len() > limit;
+        let selected: Vec<u64> = candidates.into_iter().take(limit).collect();
+        let mut out = ReclaimProgress {
+            more,
+            ..ReclaimProgress::default()
+        };
 
-        let mut changed = 0usize;
-        for id in partial {
-            self.compact_file_below_txns(id, txns_starts)?;
-            changed += 1;
+        for id in selected {
+            out.examined += 1;
+            self.reclaim_cursor = id.wrapping_add(1).max(FIRST_FILE_ID);
+            let (live, dead_messages) = {
+                let Some(view) = self.sealed.get(&id) else {
+                    continue;
+                };
+                let mut live = 0usize;
+                let mut dead_messages = 0usize;
+                for record in view.records() {
+                    // Entry records have count=0. They are cheap recovery
+                    // metadata, not a reason to rewrite a 64 MiB file whose
+                    // messages are all live. They disappear when a genuinely
+                    // dead message causes compaction or the whole file dies.
+                    if record.count == 0 {
+                        continue;
+                    }
+                    if record_is_dead(&record, txns_starts) {
+                        dead_messages += 1;
+                    } else {
+                        live += 1;
+                    }
+                }
+                (live, dead_messages)
+            };
+
+            if live == 0 {
+                out.changed += self.unlink_dead_files(|meta| meta.id == id)?;
+            } else if dead_messages > 0 {
+                self.compact_file_below_txns(id, txns_starts)?;
+                out.changed += 1;
+            }
+            if self.files.iter().any(|meta| meta.id == id) {
+                self.reclaim_checked.insert(id, generation);
+            } else {
+                self.reclaim_checked.remove(&id);
+            }
         }
-        changed += self.unlink_dead_files(|meta| dead.contains(&meta.id))?;
-        Ok(changed)
+        let live_ids: std::collections::BTreeSet<u64> =
+            self.files.iter().map(|meta| meta.id).collect();
+        self.reclaim_checked.retain(|id, _| live_ids.contains(id));
+        Ok(out)
     }
 
     /// Crash-safe copy-forward compaction of one sealed, durable file. The

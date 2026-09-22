@@ -289,6 +289,20 @@ pub fn ack_pos(
     ok: bool,
     acked_count: i32,
 ) -> Cmd {
+    ack_pos_with_release(id, pid, queue, group, worker, upto, ok, true, acked_count)
+}
+
+pub fn ack_pos_with_release(
+    id: u64,
+    pid: Pid,
+    queue: &str,
+    group: &str,
+    worker: &str,
+    upto: Option<i64>,
+    ok: bool,
+    release_lease: bool,
+    acked_count: i32,
+) -> Cmd {
     Cmd::AckPos(AckPositionalCommand {
         request_id: rid(id),
         pid,
@@ -298,6 +312,7 @@ pub fn ack_pos(
         worker: worker.to_string(),
         upto,
         ok,
+        release_lease,
         acked_count,
     })
 }

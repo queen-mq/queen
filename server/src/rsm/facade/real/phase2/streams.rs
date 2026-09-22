@@ -8,7 +8,7 @@ use crate::frames::{pack_frames, uuid_bytes_to_string, uuid_string_to_bytes, Fra
 use crate::rsm::batcher::Command;
 use crate::rsm::entry::PushVerdict;
 use crate::rsm::planner::txn::TxnCommand;
-use crate::rsm::planner::{AckItem, AckStatus, AckTarget, PushCommand, PushItem};
+use crate::rsm::planner::{AckPositionalCommand, PushCommand, PushItem};
 use crate::rsm::store::{Reads, Store, TypedReads};
 use crate::util::{txn_hash128, uuidv7_bytes};
 
@@ -145,33 +145,23 @@ impl RaftFacade {
                     hash: txn_hash128(&txn),
                     frame,
                 }],
-                create_cfg: super::super::default_queue_config(),
+                create_cfg: super::super::default_queue_config(queue),
             });
             push_meta.push((queue.to_string(), mid_s, txn));
         }
 
-        let mut acks = Vec::new();
+        let mut positional_acks = Vec::new();
         if let Some(a) = root.get("ack").filter(|a| !a.is_null()) {
-            let txn = a.get("transactionId").and_then(Value::as_str).unwrap_or("");
-            if txn.is_empty() {
-                return Ok(ApiOut::json(
-                    400,
-                    json!({"success":false,"error":"ack.transactionId is required"}).to_string(),
-                ));
-            }
-            let status = match a
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("completed")
-                .to_ascii_lowercase()
-                .as_str()
-            {
-                "completed" | "success" | "acked" | "ok" | "" => AckStatus::Ok,
-                "failed" => AckStatus::Failed,
-                "dlq" | "dead_letter" => AckStatus::Dlq,
-                _ => AckStatus::Retry,
-            };
-            acks.push(AckTarget {
+            let ok = matches!(
+                a.get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("completed")
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "completed" | "success" | "acked" | "ok" | ""
+            );
+            positional_acks.push(AckPositionalCommand {
+                request_id: super::super::derived_request_id(ctx.request_id, 0x7fff_fffe),
                 pid,
                 tenant: ctx.tenant.clone(),
                 queue: source.queue.clone(),
@@ -181,12 +171,17 @@ impl RaftFacade {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string(),
-                items: vec![AckItem {
-                    hash: txn_hash128(txn),
-                    status,
-                    error: a.get("error").and_then(Value::as_str).map(str::to_string),
-                    snapshot: None,
-                }],
+                upto: None,
+                ok,
+                release_lease: root
+                    .get("release_lease")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                acked_count: a
+                    .get("count")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0)
+                    .clamp(0, i32::MAX as i64) as i32,
             });
         }
 
@@ -226,7 +221,8 @@ impl RaftFacade {
             request_id: ctx.request_id,
             tenant: ctx.tenant.clone(),
             pushes,
-            acks,
+            acks: Vec::new(),
+            positional_acks,
             kv: Vec::new(),
             timers: Vec::new(),
             extra_effects: extra,

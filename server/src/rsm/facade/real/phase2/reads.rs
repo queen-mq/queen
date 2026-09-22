@@ -28,6 +28,8 @@ pub(super) struct Record {
     pub(super) partition: String,
     pub(super) partition_id: [u8; 16],
     pub(super) offset: u64,
+    pub(super) segment_base: u64,
+    pub(super) frame_idx: usize,
     pub(super) created_at_us: i64,
     pub(super) id: [u8; 16],
     pub(super) txn: String,
@@ -388,6 +390,38 @@ impl RaftFacade {
             .get("offset")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0usize);
+        let selected_parts = self
+            .parts(&ctx.tenant, queue.as_deref(), partition.as_deref())
+            .await?;
+        let selected_pids: Vec<Pid> = selected_parts.iter().map(|p| p.pid).collect();
+        let store = self.store.clone();
+        let mode = tokio::task::spawn_blocking(move || {
+            store.read(|r| {
+            let mut has_queue_mode = false;
+            let mut groups = BTreeSet::new();
+            for pid in selected_pids {
+                r.scan_cursors(pid, usize::MAX, &mut |group, _| {
+                    if group == "__QUEUE_MODE__" {
+                        has_queue_mode = true;
+                    } else {
+                        groups.insert(group.to_string());
+                    }
+                    true
+                })?;
+            }
+            let bus_groups_count = groups.len();
+            let ty = match (has_queue_mode, bus_groups_count > 0) {
+                (false, false) => "none",
+                (true, false) => "queue",
+                (false, true) => "bus",
+                (true, true) => "hybrid",
+            };
+            Ok(json!({"hasQueueMode":has_queue_mode,"busGroupsCount":bus_groups_count,"type":ty}))
+        })
+        })
+        .await
+        .map_err(|e| RsmError::Internal(format!("message mode read: {e}")))?
+        .map_err(read_error)?;
         let mut records = self
             .collect_records(
                 &ctx.tenant,
@@ -410,7 +444,7 @@ impl RaftFacade {
             .collect();
         Ok(ApiOut::json(
             200,
-            json!({"messages":rows,"total":total,"pagination":{"limit":limit,"offset":offset}})
+            json!({"messages":rows,"total":total,"pagination":{"limit":limit,"offset":offset},"mode":mode})
                 .to_string(),
         ))
     }
@@ -526,12 +560,22 @@ impl RaftFacade {
         let only_read = only.clone();
         let now = super::super::wall_micros();
         let groups = tokio::task::spawn_blocking(move || {
-            store.read(|r| group_view(r, &tenant, only_read.as_deref(), now))
+            store.read(|r| {
+                if let Some(group) = only_read.as_deref() {
+                    group_detail(r, &tenant, group, now).map(|v| vec![v])
+                } else {
+                    group_view(r, &tenant, None, now)
+                }
+            })
         })
         .await
         .map_err(|e| RsmError::Internal(format!("groups read: {e}")))?
         .map_err(read_error)?;
-        if only.is_some() && groups.is_empty() {
+        if only.is_some()
+            && groups
+                .first()
+                .is_none_or(|v| v.as_object().is_none_or(|o| o.is_empty()))
+        {
             return Ok(ApiOut::json(
                 404,
                 json!({"error":"Consumer group not found"}).to_string(),
@@ -540,7 +584,11 @@ impl RaftFacade {
         Ok(ApiOut::json(
             200,
             if only.is_some() {
-                json!({"consumerGroup":only,"queues":groups}).to_string()
+                groups
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| json!({}))
+                    .to_string()
             } else {
                 json!({"consumerGroups":groups}).to_string()
             },
@@ -555,26 +603,17 @@ impl RaftFacade {
         let min = query_map(query)
             .get("minLagSeconds")
             .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(3600)
-            * 1_000_000;
+            .unwrap_or(3600);
         let now = super::super::wall_micros();
         let store = self.store.clone();
         let tenant = ctx.tenant.clone();
         let rows = tokio::task::spawn_blocking(move || {
-            store.read(|r| {
-                let all = group_view(r, &tenant, None, now)?;
-                Ok(all
-                    .into_iter()
-                    .filter(|x| {
-                        x.get("lagSeconds").and_then(Value::as_i64).unwrap_or(0) * 1_000_000 >= min
-                    })
-                    .collect::<Vec<_>>())
-            })
+            store.read(|r| lagging_partitions(r, &tenant, min, now))
         })
         .await
         .map_err(|e| RsmError::Internal(format!("lag read: {e}")))?
         .map_err(read_error)?;
-        Ok(ApiOut::json(200, json!({"partitions":rows}).to_string()))
+        Ok(ApiOut::json(200, Value::Array(rows).to_string()))
     }
 
     pub(super) async fn api_trace_record(
@@ -601,7 +640,8 @@ impl RaftFacade {
             .and_then(Value::as_str);
         let pid = self.resolve_pid(&ctx.tenant, pid_s).await?;
         let names = v
-            .get("names")
+            .get("traceNames")
+            .or_else(|| v.get("names"))
             .and_then(Value::as_array)
             .map(|a| {
                 a.iter()
@@ -652,31 +692,62 @@ impl RaftFacade {
         ctx: ReqCtx,
         query: Option<&str>,
     ) -> Result<ApiOut, RsmError> {
-        let limit = query_map(query)
+        let params = query_map(query);
+        let limit = params
             .get("limit")
             .and_then(|s| s.parse().ok())
             .unwrap_or(100usize)
             .clamp(1, 1000);
+        let offset = params
+            .get("offset")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0usize);
         let store = self.store.clone();
         let tenant = ctx.tenant.clone();
         let names = tokio::task::spawn_blocking(move || {
             store.read(|r| {
-                let mut s = BTreeSet::new();
+                let mut stats: std::collections::BTreeMap<
+                    String,
+                    (usize, BTreeSet<(Option<Pid>, String)>, i64),
+                > = std::collections::BTreeMap::new();
                 r.scan_traces(usize::MAX, &mut |_k, e| {
                     if e.tenant == tenant {
-                        for n in e.names {
-                            s.insert(n);
+                        for n in &e.names {
+                            let stat = stats
+                                .entry(n.clone())
+                                .or_insert_with(|| (0, BTreeSet::new(), e.created_at_us));
+                            stat.0 += 1;
+                            stat.1.insert((e.pid, e.txn.clone()));
+                            stat.2 = stat.2.max(e.created_at_us);
                         }
                     }
                     true
                 })?;
-                Ok(s.into_iter().take(limit).collect::<Vec<_>>())
+                let total = stats.len();
+                let rows = stats
+                    .into_iter()
+                    .skip(offset)
+                    .take(limit)
+                    .map(|(name, (trace_count, messages, last_seen))| {
+                        json!({
+                            "trace_name":name,
+                            "trace_count":trace_count,
+                            "message_count":messages.len(),
+                            "last_seen":crate::rsm::planner::timers::iso_us(last_seen)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                Ok((total, rows))
             })
         })
         .await
         .map_err(|e| RsmError::Internal(format!("trace names: {e}")))?
         .map_err(read_error)?;
-        Ok(ApiOut::json(200, json!({"names":names}).to_string()))
+        Ok(ApiOut::json(
+            200,
+            json!({"trace_names":names.1,"total":names.0,"pagination":{"limit":limit,"offset":offset}})
+                .to_string(),
+        ))
     }
 
     pub(super) async fn api_traces(
@@ -687,11 +758,16 @@ impl RaftFacade {
         name: Option<&str>,
         query: Option<&str>,
     ) -> Result<ApiOut, RsmError> {
-        let limit = query_map(query)
+        let params = query_map(query);
+        let limit = params
             .get("limit")
             .and_then(|s| s.parse().ok())
             .unwrap_or(200usize)
             .clamp(1, 1000);
+        let offset = params
+            .get("offset")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0usize);
         let wanted_pid = self.resolve_pid(&ctx.tenant, pid).await?;
         let tenant = ctx.tenant.clone();
         let txn = txn.map(str::to_string);
@@ -706,7 +782,11 @@ impl RaftFacade {
                         && txn.as_ref().is_none_or(|t| &e.txn == t)
                         && name.as_ref().is_none_or(|n| e.names.contains(n))
                     {
-                        out.push(trace_json(e));
+                        let location = e
+                            .pid
+                            .and_then(|pid| r.partition(pid).ok().flatten())
+                            .map(|p| (p.queue, p.partition));
+                        out.push((e.created_at_us, trace_json(e, location)));
                     }
                     true
                 })?;
@@ -716,12 +796,18 @@ impl RaftFacade {
         .await
         .map_err(|e| RsmError::Internal(format!("traces: {e}")))?
         .map_err(read_error)?;
-        events.sort_by(|a, b| b["createdAt"].as_str().cmp(&a["createdAt"].as_str()));
-        events.truncate(limit);
+        events.sort_by(|a, b| b.0.cmp(&a.0));
+        let total = events.len();
+        let events: Vec<Value> = events
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|(_, event)| event)
+            .collect();
         let events2 = events.clone();
         Ok(ApiOut::json(
             200,
-            json!({"traces":events,"events":events2}).to_string(),
+            json!({"traces":events,"events":events2,"total":total,"pagination":{"limit":limit,"offset":offset}}).to_string(),
         ))
     }
 
@@ -936,6 +1022,8 @@ pub(super) fn walk_records(
                     partition: part.row.partition.clone(),
                     partition_id: part.row.uuid,
                     offset: pos,
+                    segment_base: base,
+                    frame_idx: i,
                     created_at_us: created,
                     id: f.message_id,
                     txn: f.txn.to_string(),
@@ -975,7 +1063,8 @@ fn decrypt_record(encryption: &crate::encryption::Encryption, record: &mut Recor
     }
 }
 fn message_json(r: Record) -> Value {
-    json!({"id":uuid_bytes_to_string(&r.id),"transactionId":r.txn,"data":payload_json(&r.payload),"payload":payload_json(&r.payload),"traceId":r.trace_id.map(|x|uuid_bytes_to_string(&x)),"producerSub":r.producer_sub,"createdAt":crate::rsm::planner::timers::iso_us(r.created_at_us),"offset":r.offset,"queue":r.queue,"partition":r.partition,"partitionId":uuid_bytes_to_string(&r.partition_id),"status":"pending","isEncrypted":r.encrypted})
+    let txn_hash = hex::encode(crate::util::txn_hash128(&r.txn));
+    json!({"id":uuid_bytes_to_string(&r.id),"transactionId":r.txn,"txnHash":txn_hash,"data":payload_json(&r.payload),"payload":payload_json(&r.payload),"traceId":r.trace_id.map(|x|uuid_bytes_to_string(&x)),"producerSub":r.producer_sub,"createdAt":crate::rsm::planner::timers::iso_us(r.created_at_us),"offset":r.offset,"queue":r.queue,"partition":r.partition,"partitionId":uuid_bytes_to_string(&r.partition_id),"status":"pending","segment":{"seq":r.segment_base,"frameIdx":r.frame_idx},"isEncrypted":r.encrypted})
 }
 
 pub(super) fn scan_dlq_rows<R: Reads + ?Sized>(
@@ -1018,7 +1107,115 @@ fn dlq_json(
     (_t, q, id, r): (String, String, [u8; 16], DlqRow),
     partition: Option<&(String, [u8; 16])>,
 ) -> Value {
-    json!({"id":uuid_bytes_to_string(&id),"queue":q,"partition":partition.map(|p|p.0.clone()),"partitionId":partition.map(|p|uuid_bytes_to_string(&p.1)),"consumerGroup":r.group,"offset":r.offset,"messageId":r.message_id.map(|x|uuid_bytes_to_string(&x)),"transactionId":r.txn,"data":payload_json(&r.payload),"payload":payload_json(&r.payload),"errorMessage":r.error,"retryCount":r.retry_count,"failedAt":crate::rsm::planner::timers::iso_us(r.failed_at_us)})
+    json!({"id":uuid_bytes_to_string(&id),"queue":q,"partition":partition.map(|p|p.0.clone()),"partitionId":r.pid.to_string(),"consumerGroup":r.group,"offset":r.offset,"messageId":r.message_id.map(|x|uuid_bytes_to_string(&x)),"transactionId":r.txn,"data":payload_json(&r.payload),"payload":payload_json(&r.payload),"errorMessage":r.error,"retryCount":r.retry_count,"failedAt":crate::rsm::planner::timers::iso_us(r.failed_at_us)})
+}
+
+fn group_detail<R: Reads + ?Sized>(
+    r: &R,
+    tenant: &str,
+    group: &str,
+    now: i64,
+) -> crate::rsm::store::Result<Value> {
+    let mut queues = Vec::new();
+    r.scan_queues(tenant, usize::MAX, &mut |q, _| {
+        queues.push(q.to_string());
+        true
+    })?;
+    let mut answer = serde_json::Map::new();
+    for queue in queues {
+        let meta = r.group(tenant, &queue, group)?;
+        let mut partitions = Vec::new();
+        r.scan_queue_partitions(tenant, &queue, None, usize::MAX, &mut |pid| {
+            if let (Ok(Some(p)), Ok(Some(c))) = (r.partition(pid), r.cursor(pid, group)) {
+                let lag = p.pending_from(c.committed);
+                let lag_seconds = if lag == 0 {
+                    0
+                } else {
+                    (now - p.oldest_live_at_us.unwrap_or(p.last_write_at_us)).max(0) / 1_000_000
+                };
+                partitions.push(json!({
+                    "partition":p.partition,
+                    "workerId":c.worker,
+                    "lastConsumedAt":Value::Null,
+                    "totalConsumed":c.total_consumed,
+                    "offsetLag":lag,
+                    "timeLagSeconds":lag_seconds,
+                    "leaseActive":rows::lease_live(&c, now)
+                }));
+            }
+            true
+        })?;
+        if !partitions.is_empty() {
+            partitions.sort_by(|a, b| a["partition"].as_str().cmp(&b["partition"].as_str()));
+            answer.insert(
+                queue,
+                json!({
+                    "conflation":meta.as_ref().is_some_and(|m| m.meta.conflation),
+                    "kind":"queen",
+                    "partitions":partitions
+                }),
+            );
+        }
+    }
+    Ok(Value::Object(answer))
+}
+
+fn lagging_partitions<R: Reads + ?Sized>(
+    r: &R,
+    tenant: &str,
+    min_lag_seconds: i64,
+    now: i64,
+) -> crate::rsm::store::Result<Vec<Value>> {
+    let mut queues = Vec::new();
+    r.scan_queues(tenant, usize::MAX, &mut |q, _| {
+        queues.push(q.to_string());
+        true
+    })?;
+    let mut answer = Vec::new();
+    for queue in queues {
+        r.scan_queue_partitions(tenant, &queue, None, usize::MAX, &mut |pid| {
+            if let Ok(Some(p)) = r.partition(pid) {
+                let _ = r.scan_cursors(pid, usize::MAX, &mut |group, c| {
+                    if group == "__QUEUE_MODE__" {
+                        return true;
+                    }
+                    let offset_lag = p.pending_from(c.committed);
+                    if offset_lag == 0 {
+                        return true;
+                    }
+                    let oldest_us = p.oldest_live_at_us.unwrap_or(p.last_write_at_us);
+                    // SQL rounds this age to whole seconds and applies a strict
+                    // greater-than filter. Keep a newly-created backlog visible
+                    // for minLagSeconds=0 even inside its first second.
+                    let time_lag_seconds = ((now - oldest_us).max(0) / 1_000_000).max(1);
+                    if time_lag_seconds <= min_lag_seconds {
+                        return true;
+                    }
+                    answer.push(json!({
+                        "consumer_group":group,
+                        "queue_name":queue,
+                        "partition_name":p.partition,
+                        "partition_id":uuid_bytes_to_string(&p.uuid),
+                        "worker_id":c.worker,
+                        "kind":"queen",
+                        "offset_lag":offset_lag,
+                        "time_lag_seconds":time_lag_seconds,
+                        "lag_hours":time_lag_seconds as f64 / 3600.0,
+                        "oldest_unconsumed_at":crate::rsm::planner::timers::iso_us(oldest_us),
+                        "last_consumed_at":Value::Null
+                    }));
+                    true
+                });
+            }
+            true
+        })?;
+    }
+    answer.sort_by(|a, b| {
+        b["time_lag_seconds"]
+            .as_i64()
+            .cmp(&a["time_lag_seconds"].as_i64())
+    });
+    Ok(answer)
 }
 
 fn group_view<R: Reads + ?Sized>(
@@ -1082,8 +1279,38 @@ fn group_view<R: Reads + ?Sized>(
     Ok(out)
 }
 
-fn trace_json(e: TraceEvent) -> Value {
-    json!({"traceId":uuid_bytes_to_string(&e.trace_id),"partitionId":e.pid.map(|p|p.to_string()),"messageId":e.message_id.map(|x|uuid_bytes_to_string(&x)),"transactionId":e.txn,"consumerGroup":e.consumer_group,"eventType":e.event_type,"data":serde_json::from_slice::<Value>(&e.data).unwrap_or(Value::Null),"worker":e.worker,"names":e.names,"createdAt":crate::rsm::planner::timers::iso_us(e.created_at_us)})
+fn trace_json(e: TraceEvent, location: Option<(String, String)>) -> Value {
+    let partition_id = e.pid.map(|p| p.to_string());
+    let message_id = e.message_id.map(|x| uuid_bytes_to_string(&x));
+    let created_at = crate::rsm::planner::timers::iso_us(e.created_at_us);
+    let data = serde_json::from_slice::<Value>(&e.data).unwrap_or(Value::Null);
+    let (queue_name, partition_name) = location
+        .map(|(q, p)| (Some(q), Some(p)))
+        .unwrap_or((None, None));
+    json!({
+        "traceId":uuid_bytes_to_string(&e.trace_id),
+        "trace_id":uuid_bytes_to_string(&e.trace_id),
+        "partitionId":partition_id,
+        "partition_id":partition_id,
+        "messageId":message_id,
+        "message_id":message_id,
+        "transactionId":e.txn,
+        "transaction_id":e.txn,
+        "consumerGroup":e.consumer_group,
+        "consumer_group":e.consumer_group,
+        "eventType":e.event_type,
+        "event_type":e.event_type,
+        "data":data,
+        "worker":e.worker,
+        "worker_id":e.worker,
+        "names":e.names,
+        "trace_names":e.names,
+        "createdAt":created_at,
+        "created_at":created_at,
+        "queue_name":queue_name,
+        "partition_name":partition_name,
+        "message_payload":Value::Null
+    })
 }
 
 fn parse_changed_cursor(raw: Option<&str>, mode: char) -> Option<(char, i64, String)> {

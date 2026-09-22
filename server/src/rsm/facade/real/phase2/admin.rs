@@ -84,11 +84,13 @@ impl RaftFacade {
         body: &[u8],
     ) -> Result<ApiOut, RsmError> {
         let v: Value = serde_json::from_slice(body).map_err(|e| super::rejected("bad_body", e))?;
-        let ts = v
+        let timestamp = v
             .get("subscriptionTimestamp")
             .and_then(Value::as_str)
-            .and_then(crate::util::parse_iso_ms)
             .ok_or_else(|| super::reject("bad_request", "subscriptionTimestamp is required"))?
+            .to_string();
+        let ts = crate::util::parse_iso_ms(&timestamp)
+            .ok_or_else(|| super::reject("bad_request", "subscriptionTimestamp is invalid"))?
             * 1000;
         let store = self.store.clone();
         let tenant = ctx.tenant.clone();
@@ -122,14 +124,11 @@ impl RaftFacade {
         .await
         .map_err(|e| RsmError::Internal(format!("subscription read: {e}")))?
         .map_err(read_error)?;
-        if effects.is_empty() {
-            return Ok(ApiOut::json(
-                404,
-                json!({"success":false,"error":"Consumer group not found"}).to_string(),
-            ));
+        let rows_updated = effects.len();
+        if !effects.is_empty() {
+            self.submit_effects(&ctx, effects).await?;
         }
-        self.submit_effects(&ctx, effects).await?;
-        Ok(ApiOut::json(200,json!({"success":true,"consumerGroup":group,"subscriptionTimestamp":crate::rsm::planner::timers::iso_us(ts)}).to_string()))
+        Ok(ApiOut::json(200,json!({"success":true,"consumerGroup":group,"newTimestamp":timestamp,"rowsUpdated":rows_updated}).to_string()))
     }
 
     pub(super) async fn api_group_seek(
@@ -346,7 +345,8 @@ impl RaftFacade {
         let store = self.store.clone();
         let tenant = ctx.tenant.clone();
         let idb = id.and_then(uuid_string_to_bytes);
-        let addr_pid = address.and_then(|(p, _)| uuid_string_to_bytes(p));
+        let addr_pid = address.and_then(|(p, _)| p.parse::<u64>().ok());
+        let addr_uuid = address.and_then(|(p, _)| uuid_string_to_bytes(p));
         let addr_txn = address.map(|(_, t)| t.to_string());
         let found = tokio::task::spawn_blocking(move || {
             store.read(|r| {
@@ -356,7 +356,8 @@ impl RaftFacade {
                     };
                     let id_match = idb.is_some_and(|x| x == row_id);
                     let address_match = addr_txn.as_ref().is_some_and(|t| t == &row.txn)
-                        && addr_pid.is_some_and(|p| p == source_part.uuid);
+                        && (addr_pid.is_some_and(|p| p == row.pid)
+                            || addr_uuid.is_some_and(|p| p == source_part.uuid));
                     if id_match || address_match {
                         return Ok(Some((source_queue, source_part.partition, row_id, row)));
                     }
@@ -407,13 +408,14 @@ impl RaftFacade {
                 hash: txn_hash128(&transaction_id),
                 frame,
             }],
-            create_cfg: super::super::default_queue_config(),
+            create_cfg: super::super::default_queue_config(&queue),
         };
         let cmd = Command::Transaction(TxnCommand {
             request_id: ctx.request_id,
             tenant: ctx.tenant.clone(),
             pushes: vec![push],
             acks: Vec::new(),
+            positional_acks: Vec::new(),
             kv: Vec::new(),
             timers: Vec::new(),
             extra_effects: vec![Effect::DlqDelete {
@@ -663,7 +665,20 @@ impl RaftFacade {
             .iter()
             .filter_map(|x| x.pointer("/messages/pending")?.as_i64())
             .sum();
-        Ok(ApiOut::json(200,json!({"status":"ok","engine":"raft","queues":queues,"totals":{"messages":total,"pending":pending}}).to_string()))
+        let completed: i64 = queues
+            .iter()
+            .filter_map(|x| x.pointer("/messages/completed")?.as_i64())
+            .sum();
+        let now = super::super::wall_micros();
+        Ok(ApiOut::json(200,json!({
+            "timeRange":{"from":crate::rsm::planner::timers::iso_us(now-3_600_000_000),"to":crate::rsm::planner::timers::iso_us(now)},
+            "bucketMinutes":1,"pointCount":0,"throughput":[],"queues":queues,
+            "messages":{"total":total,"pending":pending,"processing":0,"completed":completed,"failed":0,"deadLetter":0,"requests":{"push":0,"pop":0,"ack":0}},
+            "leases":{"active":0,"partitionsWithLeases":0,"totalBatchSize":0,"totalAcked":0},
+            "deadLetterQueue":{"totalMessages":0,"currentMessages":0,"affectedPartitions":0,"topErrors":[]},
+            "workers":[],"errors":{"dbErrors":0,"ackFailed":0,"dlqMessages":0},"statsAge":0,
+            "engine":"raft"
+        }).to_string()))
     }
 
     pub(super) async fn api_raft_status(&self, _ctx: ReqCtx) -> Result<ApiOut, RsmError> {
@@ -722,10 +737,26 @@ impl RaftFacade {
         queue: &str,
         _query: Option<&str>,
     ) -> Result<ApiOut, RsmError> {
-        let rows = self.queue_snapshots(&ctx.tenant).await?;
-        let found = rows.into_iter().find(|v| v["name"] == queue);
-        match found {
-            Some(v) => Ok(ApiOut::json(200, v.to_string())),
+        match self.queue_resource_detail(&ctx.tenant, queue).await? {
+            Some(v) => {
+                let totals = v.get("totals").cloned().unwrap_or_else(|| json!({}));
+                let options = v.get("options").cloned().unwrap_or_else(|| json!({}));
+                let queue_info = json!({
+                    "id":v.get("id"),"name":v.get("name"),
+                    "namespace":v.get("namespace"),"task":v.get("task"),
+                    "priority":options.get("priority"),"createdAt":v.get("createdAt"),
+                    "config":options
+                });
+                Ok(ApiOut::json(
+                    200,
+                    json!({
+                        "queue":queue_info,
+                        "partitions":v.get("partitions").cloned().unwrap_or_else(|| json!([])),
+                        "totals":{"messages":totals}
+                    })
+                    .to_string(),
+                ))
+            }
             None => Ok(ApiOut::json(
                 404,
                 json!({"error":"Queue not found"}).to_string(),
@@ -734,11 +765,19 @@ impl RaftFacade {
     }
     pub(super) async fn api_status_analytics(&self, ctx: ReqCtx) -> Result<ApiOut, RsmError> {
         let queues = self.queue_snapshots(&ctx.tenant).await?;
-        let system = self.local_system_metrics();
-        let workers = self.local_worker_metrics();
+        let total: i64 = queues
+            .iter()
+            .filter_map(|x| x.pointer("/messages/total")?.as_i64())
+            .sum();
+        let now = super::super::wall_micros();
         Ok(ApiOut::json(
             200,
-            json!({"engine":"raft","queues":queues,"systemMetrics":system,"workerMetrics":workers})
+            json!({
+                "dataPoints":[{"timestamp":crate::rsm::planner::timers::iso_us(now),"messages":total}],
+                "interval":"hour",
+                "from":crate::rsm::planner::timers::iso_us(now-86_400_000_000),
+                "to":crate::rsm::planner::timers::iso_us(now)
+            })
                 .to_string(),
         ))
     }
@@ -776,8 +815,10 @@ impl RaftFacade {
             .into_iter()
             .map(|(k, v)| (k.to_string(), json!(v)))
             .collect();
+        let now = super::super::wall_micros();
         json!({
             "engine":"raft",
+            "timeRange":{"from":crate::rsm::planner::timers::iso_us(now-3_600_000_000),"to":crate::rsm::planner::timers::iso_us(now)},
             "replicaCount":1,
             "bucketMinutes":1,
             "pointCount":1,
@@ -794,7 +835,9 @@ impl RaftFacade {
     fn local_worker_metrics(&self) -> Value {
         use std::sync::atomic::Ordering;
         let m = crate::rsm::timing::metrics();
+        let now = super::super::wall_micros();
         json!({
+            "timeRange":{"from":crate::rsm::planner::timers::iso_us(now-3_600_000_000),"to":crate::rsm::planner::timers::iso_us(now)},
             "bucketMinutes":1,
             "pointCount":1,
             "timeSeries":[{

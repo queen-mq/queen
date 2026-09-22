@@ -441,10 +441,15 @@ pub struct AckPositionalCommand {
     pub queue: String,
     pub group: String,
     pub worker: String,
-    /// `Some(offset)` acks up to and including it; `None` (or `ok=false`) is a
-    /// nack that releases the lease and redelivers.
+    /// `Some(offset)` acks up to and including it. Streams leaves this `None`:
+    /// a releasing cycle uses the recorded batch end, while a partial cycle
+    /// advances `acked_count` frames from the attempt head. `ok=false` nacks.
     pub upto: Option<i64>,
     pub ok: bool,
+    /// Release the recorded batch after the acknowledgement. Streams gate
+    /// cycles set this false so only the acknowledged prefix advances and the
+    /// denied tail remains on the same lease.
+    pub release_lease: bool,
     /// How many frames the handler is acking, for `total_consumed`.
     pub acked_count: i32,
 }

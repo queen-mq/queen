@@ -44,9 +44,9 @@ pub struct Planned {
 /// boundaries differ per replica.  It runs from the blocking maintenance
 /// cycle, never on a Tokio worker, and is safe to repeat after a crash.
 pub fn reclaim_qlogs<R: Reads + ?Sized>(r: &R, qlogs: &QLogReader) -> Result<usize> {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
-    let mut queues: HashMap<u64, HashMap<Pid, u64>> = HashMap::new();
+    let mut queues: BTreeMap<u64, HashMap<Pid, u64>> = BTreeMap::new();
     let mut corrupt = false;
     r.scan_raw(
         Keyspace::Partitions,
@@ -69,11 +69,29 @@ pub fn reclaim_qlogs<R: Reads + ?Sized>(r: &R, qlogs: &QLogReader) -> Result<usi
         return Err(StoreError::corrupt(Keyspace::Partitions, "partition row"));
     }
 
+    // Queue logs can outlive queue/partition metadata, and q0 is the system
+    // entry log. Empty watermarks correctly make their durable sealed message
+    // records dead and their entry-only files reclaimable.
+    for qid in qlogs.log_ids() {
+        queues.entry(qid).or_default();
+    }
+
     let mut removed = 0usize;
-    for (qid, starts) in queues {
-        removed += qlogs
-            .reclaim_below_txns(qid, &starts)
+    let mut ordered: Vec<_> = queues.into_iter().collect();
+    let cursor = qlogs.reclaim_queue_cursor();
+    let split = ordered.partition_point(|(qid, _)| *qid < cursor);
+    ordered.rotate_left(split);
+    // One immutable file per cadence, globally. Copy-forward can touch tens of
+    // MiB, so queue count must not multiply a maintenance pause.
+    for (qid, starts) in ordered {
+        let progress = qlogs
+            .reclaim_below_txns(qid, &starts, 1)
             .map_err(|e| StoreError::Io(format!("qlog retention: {e}")))?;
+        qlogs.advance_reclaim_queue_cursor(qid);
+        removed += progress.changed;
+        if progress.examined > 0 {
+            break;
+        }
     }
     Ok(removed)
 }

@@ -73,7 +73,7 @@ PARITY_SUITES="$CLIENT_SUITES s3sink"
 # runner cannot honour.
 # Every full-featured SDK runner below skips only its optional SQL cleanup in
 # raft mode; the tests themselves use Queen's public HTTP API.
-RAFT_SUITES="js go py"
+RAFT_SUITES="js go py cpp laravel rust-client"
 # Suites whose single↔raft1 verdicts the RAFT PARITY gate compares. The same set
 # by construction: a suite is comparable exactly when it ran a raft1 lane.
 RAFT_PARITY_SUITES="$RAFT_SUITES"

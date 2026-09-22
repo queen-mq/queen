@@ -109,7 +109,8 @@ class TestQueenStreamsE2E:
             # 3. Mid-stream kill, then restart.
             await asyncio.sleep(2.0)
             await handle.stop()
-            print("[e2e] mid-stream stop, metrics =", handle.metrics())
+            first_metrics = handle.metrics()
+            print("[e2e] mid-stream stop, metrics =", first_metrics)
 
             handle2 = await (
                 Stream.from_(q.queue(SOURCE_QUEUE))
@@ -119,8 +120,22 @@ class TestQueenStreamsE2E:
                 .run(query_id=QUERY_ID, url=QUEEN_URL, batch_size=100, max_partitions=4)
             )
 
+            # Prove that a fresh worker can immediately resume other ready
+            # partitions when the first worker actually left work behind. On
+            # fast brokers the first worker can finish all 10k before stop(),
+            # in which case a zero count here is the correct result.
+            if first_metrics["messagesTotal"] < TOTAL_MESSAGES:
+                resume_deadline = time.monotonic() + 30.0
+                while (
+                    handle2.metrics()["messagesTotal"] == 0
+                    and time.monotonic() < resume_deadline
+                ):
+                    await asyncio.sleep(0.25)
+                assert handle2.metrics()["messagesTotal"] > 0, (
+                    "the restarted stream worker could not claim any ready partition"
+                )
+
             # 4. Tail messages to force window closures.
-            await asyncio.sleep(3.0)
             tail_items = [
                 {
                     "queue": SOURCE_QUEUE,

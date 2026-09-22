@@ -18,7 +18,9 @@ use crate::rsm::entry::{
     AckOutcome, KvOutcome, Outcome, Placeholder, PushOutcome, PushVerdict, RequestId,
 };
 
-use super::{AckTarget, KvOp, Overlay, Plan, Planned, Planner, PushCommand, Refusal};
+use super::{
+    AckPositionalCommand, AckTarget, KvOp, Overlay, Plan, Planned, Planner, PushCommand, Refusal,
+};
 use crate::rsm::store::Reads;
 
 /// The placeholder tag of a transaction outcome (reserved range, §5.4).
@@ -34,6 +36,10 @@ pub struct TxnCommand {
     pub pushes: Vec<PushCommand>,
     /// One per (pid, group, worker), like a batch ack.
     pub acks: Vec<AckTarget>,
+    /// Positional source acknowledgements used by Streams cycles. They are
+    /// planned inside this same command so source ack, state and sink pushes
+    /// remain one atomic entry.
+    pub positional_acks: Vec<AckPositionalCommand>,
     /// The `kv` rider, validated with the wire's limits (`parse_ops(.., true, ..)`).
     pub kv: Vec<KvOp>,
     /// The `timers` rider (schedules and cancels, `parse_timer_ops`).
@@ -210,6 +216,25 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             ov.apply_effects(&effs);
             effects.extend(effs);
             out.acks.results.push(res);
+        }
+
+        for a in &cmd.positional_acks {
+            let (effs, ack) = match self.plan_ack_positional(ov, a) {
+                Ok(Plan::Logged {
+                    effects,
+                    outcome: Outcome::Ack(ack),
+                }) => (effects, ack),
+                Ok(Plan::Empty(Outcome::Ack(ack))) => (Vec::new(), ack),
+                Ok(Plan::Refused(r)) | Err(r) => return refuse(ov, r),
+                Ok(other) => {
+                    return refuse(
+                        ov,
+                        Refusal::retry("internal", format!("positional ack planned {other:?}")),
+                    )
+                }
+            };
+            effects.extend(effs);
+            out.acks.results.extend(ack.results);
         }
 
         // The KV rider last (024's order: the bundle's messages, then its keys).
