@@ -263,17 +263,15 @@ fn a_node_killed_mid_apply_repairs_by_replaying_from_the_durable_index() {
                 Arc::new(NoNotify),
             )
             .expect("round: the killed node reopens");
-            assert!(
-                rec.applied_index >= rec.durable_index,
-                "round {round}: reopened at {} BEHIND the durable point {}",
-                rec.applied_index,
-                rec.durable_index
+            // Phase C: no plain commit persists anything, so the killed node
+            // reopens EXACTLY at its durable checkpoint and replays everything
+            // after it (the child may well have died before its first durable
+            // point: then the whole run replays from 0).
+            assert_eq!(
+                rec.applied_index, rec.durable_index,
+                "round {round}: Phase C reopens exactly at the durable checkpoint"
             );
             assert_eq!(rec.replay_after, rec.durable_index);
-            assert!(
-                rec.applied_index > 0,
-                "round {round}: the child applied nothing"
-            );
 
             // The repair: every entry after the durable point, in order. The
             // ones the store already holds are skipped; the rest are applied,
@@ -339,11 +337,9 @@ fn a_node_killed_mid_apply_repairs_by_replaying_from_the_durable_index() {
         weak_rounds < KILL_AFTER.len(),
         "every round killed a child that had already finished: the delays need raising"
     );
-    assert!(
-        crossed > 0,
-        "no round reopened past its durable point, so nothing exercised the \
-         idempotence the repair needs"
-    );
+    // Phase C: a reopen never lands past the durable point, so `crossed`
+    // stays 0 — the idempotent-skip path it counted is structurally gone.
+    assert_eq!(crossed, 0, "a Phase C node reopened past its durable point");
 }
 
 // ---------------------------------------------------------------------------

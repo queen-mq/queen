@@ -16,8 +16,9 @@
 //!    reopened applied index and the rows then have to agree exactly:
 //!    `rows == applied × ROWS`, every value right, nothing from the entry
 //!    after it. [`a_store_killed_while_committing_reopens_whole`].
-//! 2. **An uncommitted transaction leaves nothing**, killed where it stands.
-//!    [`an_uncommitted_transaction_is_invisible_after_a_kill`].
+//! 2. **An uncommitted transaction leaves nothing**, killed where it stands —
+//!    and since Phase C neither does a plain commit: only the durable point
+//!    survives. [`an_uncommitted_transaction_is_invisible_after_a_kill`].
 //! 3. **The applied index never goes backwards across a crash-restart
 //!    sequence.** Each round continues in the SAME directory from the index it
 //!    reopened with, so a store that lost a committed transaction fails the
@@ -26,16 +27,17 @@
 //!
 //! # What is NOT checked here: durability
 //!
-//! `kill -9` leaves the page cache intact. With `MDB_NOSYNC` (pin 1) every
-//! committed transaction therefore survives whether or not anything was ever
-//! flushed, so this file CANNOT tell [`Writes::durable_commit`] from
-//! [`Writes::commit`]: it passes unchanged if `force_sync` were a no-op, and
-//! the reopened index legitimately lands PAST the durable point (S1 measured
-//! that in 12 of 15 runs). The assertion below is written as a RANGE for that
-//! reason, and the run that gives the durable point its meaning is the
-//! dropped-unflushed-writes one (dm-flakey on the Linux VM: WP-1.8's crash
-//! matrix, and the deferred D-01/D-02). **Until that run exists, D9's
-//! durability leg is not discharged by this file** — the two legs above are.
+//! `kill -9` leaves the page cache intact, so this file cannot tell a durable
+//! point that reached the platter from one that did not: it passes unchanged
+//! if `force_sync` were a no-op. What it DOES tell apart since Phase C is the
+//! checkpoint from a plain commit: every keyspace is a RAM table that only
+//! [`Writes::durable_commit`] writes into LMDB, so the store reopens EXACTLY at
+//! the last durable point (`reopen_and_check` asserts `applied == durable`) —
+//! no longer past it, as S1 measured in 12 of 15 runs before. The run that
+//! gives the durable point its platter meaning is the dropped-unflushed-writes
+//! one (dm-flakey on the Linux VM: WP-1.8's crash matrix, and the deferred
+//! D-01/D-02). **Until that run exists, D9's durability leg is not discharged
+//! by this file** — the legs above are.
 //!
 //! # The power of check 1, demonstrated
 //!
@@ -105,8 +107,9 @@ fn row_key(n: u64) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 /// `steady`: continue from the applied index the store reopens with and commit
-/// entry after entry until killed. `midtxn`: commit a few entries, then open a
-/// transaction that is never committed and wait to be killed inside it.
+/// entry after entry until killed. `midtxn`: take a durable point at the 2nd
+/// entry, a plain commit at the 3rd, then stage a 4th that is never committed
+/// and wait to be killed inside it.
 #[test]
 fn crash_child_writer() {
     let Ok(dir) = std::env::var(CRASH_DIR_ENV) else {
@@ -139,7 +142,9 @@ fn crash_child_writer() {
             panic!("child: was not killed");
         }
 
-        if e % DURABLE_EVERY == 0 {
+        // `midtxn` needs a durable point BELOW its plain commit: Phase C
+        // persists nothing else, so that is what a kill must reopen at.
+        if e % DURABLE_EVERY == 0 || (mode == "midtxn" && e == from + 2) {
             w.set_meta_u64(crate::rsm::store::meta::DURABLE_INDEX, e)
                 .expect("child: durable index");
             w.durable_commit().expect("child: durable commit");
@@ -246,9 +251,12 @@ fn reopen_and_check(dir: &Path) -> Reopened {
         .read(|r| {
             let applied = r.applied_index()?;
             let durable = r.durable_index()?;
-            assert!(
-                applied >= durable,
-                "reopened at {applied}, BEHIND the durable point {durable}"
+            // Phase C: every keyspace is a RAM table checkpointed only at the
+            // durable point, so a reopen lands EXACTLY on it — never behind,
+            // and never past it on a plain commit that reached the page cache.
+            assert_eq!(
+                applied, durable,
+                "reopened at applied {applied}, not at the durable point {durable}"
             );
 
             // The rows and the applied index agree EXACTLY: a whole number of
@@ -329,20 +337,12 @@ fn a_store_killed_while_committing_reopens_whole() {
         );
         assert!(
             now.applied > prev.applied,
-            "round {round}: the child committed nothing, so nothing was tested"
+            "round {round}: the child reached no durable point, so nothing was tested"
         );
         println!(
             "round {round}: killed {:?} into the commit loop; reopened at applied={} \
-             (durable={}, rows={}){}",
-            delay,
-            now.applied,
-            now.durable,
-            now.rows,
-            if now.applied > now.durable {
-                ", PAST the durable point — MDB_NOSYNC plus an intact page cache (§11.5 step 2)"
-            } else {
-                ", at the durable point"
-            }
+             (durable={}, rows={}), at the durable point",
+            delay, now.applied, now.durable, now.rows,
         );
         prev = now;
     }
@@ -366,9 +366,15 @@ fn an_uncommitted_transaction_is_invisible_after_a_kill() {
     w.kill();
 
     let now = reopen_and_check(&dir);
+    // Phase C: only the durable point survives. The plain commit of entry 3
+    // wrote nothing into LMDB (every keyspace is a RAM table), and the staged
+    // entry 4 was never committed at all; `reopen_and_check` proved neither
+    // left a row behind.
     assert_eq!(
-        now.applied, 3,
-        "the child committed 3 entries and staged a 4th"
+        (now.applied, now.durable),
+        (2, 2),
+        "the child took a durable point at entry 2, plain-committed entry 3 and \
+         staged a 4th: only the durable point survives a kill"
     );
     println!(
         "kill -9 inside an open transaction: reopened at applied={} with {} rows",

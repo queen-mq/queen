@@ -1597,7 +1597,8 @@ fn crash_at_non_durable_commit(pending_transitions: bool) {
     }
     let want = clean.digest();
 
-    let node = Node::new("ctr-crash");
+    let dir = tmp_dir("ctr-crash");
+    let mut node = Node::at(dir.clone());
     {
         let (mut a, _) = Applier::open(
             node.store(),
@@ -1619,6 +1620,10 @@ fn crash_at_non_durable_commit(pending_transitions: bool) {
         }
         assert_eq!(a.durable_index(), 0, "no durable point in the prefix");
     }
+    // The crash: the process dies, so every RAM table is gone and only the
+    // LMDB checkpoint survives (Phase C: no plain commit persists anything).
+    node.close();
+    let node = Node::at(dir);
     {
         let (mut a, rec) = Applier::open(
             node.store(),
@@ -1629,13 +1634,13 @@ fn crash_at_non_durable_commit(pending_transitions: bool) {
         )
         .expect("open");
         assert!(
-            rec.applied_index > 0 && rec.applied_index <= 20 && rec.durable_index == 0,
-            "reopened at a non-durable commit inside the prefix, got applied {} durable {}",
+            rec.applied_index == rec.durable_index && rec.durable_index == 0,
+            "Phase C reopens EXACTLY at the durable checkpoint, got applied {} durable {}",
             rec.applied_index,
             rec.durable_index
         );
         for c in &entries {
-            a.apply(c).expect("apply"); // the prefix is skipped
+            a.apply(c).expect("apply"); // everything replays from the checkpoint
         }
         settle(&mut a);
     }
@@ -2660,6 +2665,7 @@ fn a_reopened_node_recovers_its_indexes_and_replays_from_the_durable_point() {
     ));
     let _ = std::fs::remove_dir_all(&dir);
     let mut node = Node::at(dir.clone());
+    let checkpoint: std::cell::RefCell<Option<StateDigest>> = std::cell::RefCell::new(None);
     let (applied, durable, before) = {
         let mut w = Workload::new(11);
         let (mut a, _) = Applier::open(
@@ -2675,11 +2681,13 @@ fn a_reopened_node_recovers_its_indexes_and_replays_from_the_durable_point() {
             a.apply(&c).expect("apply");
             if n == 40 {
                 a.durable_point().expect("durable point");
+                *checkpoint.borrow_mut() = Some(node.digest());
             }
         }
         a.commit().expect("commit");
         (a.applied_index(), a.durable_index(), node.digest())
     };
+    let checkpoint = checkpoint.into_inner().expect("the durable point's digest");
     assert_eq!(applied, 60);
     assert_eq!(durable, 40);
 
@@ -2694,9 +2702,9 @@ fn a_reopened_node_recovers_its_indexes_and_replays_from_the_durable_point() {
             Arc::new(crate::rsm::apply::NoNotify),
         )
         .expect("reopen");
-        // §11.5 step 2: the applied index the REOPENED state reports, which is
-        // legitimately past the durable point.
-        assert_eq!(rec.applied_index, 60);
+        // §11.5 step 2, Phase C: the store reopens EXACTLY at the durable
+        // checkpoint (a plain commit persists nothing), so replay starts there.
+        assert_eq!(rec.applied_index, 40);
         assert_eq!(rec.durable_index, 40);
         assert_eq!(rec.replay_after, 40);
         // Step 4: the rings and the leases are back, rebuilt from `pending`
@@ -2706,14 +2714,16 @@ fn a_reopened_node_recovers_its_indexes_and_replays_from_the_durable_point() {
             a.derived().pending_rows() > 0,
             "the rebuild walked the pending keyspace"
         );
-        // Step 3 found no disagreement: nothing was truncated below a
-        // recorded length and no file was missing.
-        assert!(rec.segments.truncated.is_empty(), "{:?}", rec.segments);
+        // Step 3, Phase C: the segment bytes above the checkpoint are
+        // referenced by no recovered row, so they are CUT (the WAL replay
+        // re-appends them) — never verified-and-kept.
+        assert!(rec.segments.verified.is_empty(), "{:?}", rec.segments);
     }
+    let _ = before;
     assert_eq!(
         node.digest().whole,
-        before.whole,
-        "a reopen changes nothing"
+        checkpoint.whole,
+        "a reopen lands exactly on the durable checkpoint's state"
     );
 }
 
@@ -4437,7 +4447,7 @@ fn a_durable_point_costs_the_files_that_grew_not_the_files_held() {
 }
 
 #[test]
-fn a_verified_tail_gets_the_barrier_it_never_had() {
+fn a_plain_commit_records_no_unbarriered_tail() {
     // §11.5 step 3 verifies the frames between a file's durable length and its
     // recorded length — bytes a plain store commit recorded and NO fsync has
     // ever covered (§11.3). Recovery accepted them and the next durable point
@@ -4467,29 +4477,31 @@ fn a_verified_tail_gets_the_barrier_it_never_had() {
     }
     node.close();
 
-    // The reopen verifies that tail (step 3) and gives it the barrier it never
-    // had (step 7).
+    // Phase C: a plain store commit records NOTHING durable (every keyspace
+    // reopens exactly at the durable checkpoint), so the unbarriered bytes are
+    // referenced by no recovered row. The old hazard — recovery accepting them
+    // and the next durable point calling them durable without a barrier —
+    // cannot arise: recovery CUTS them (the WAL replay re-appends what was
+    // acked), verifies nothing above the checkpoint, and owes no barrier.
     let mut node = Node::at(dir.clone());
     {
         let (mut a, rec) = open_at(&node);
+        assert_eq!(rec.segments.synced, 0, "nothing above the checkpoint is kept: {rec:?}");
+        assert!(rec.segments.verified.is_empty(), "nothing is verified-and-kept: {rec:?}");
         assert!(
-            rec.segments.synced > 0,
-            "the frames recovery verified were never fsynced: {rec:?}",
+            !rec.segments.truncated.is_empty() || !rec.segments.deleted.is_empty(),
+            "the unbarriered tail must be cut: {rec:?}"
         );
-        assert!(!rec.segments.verified.is_empty() || !rec.segments.rescanned.is_empty());
-        // Recording them is what stops the next boot from doing it again.
         a.commit().expect("commit");
     }
     node.close();
-
-    // And the boot after that has nothing to verify and nothing to sync: the
-    // cost followed the change and did not repeat it (I8).
+    // And the boot after that has nothing to cut, verify or sync (I8).
     let node = Node::at(dir);
     let (_a, rec) = open_at(&node);
     assert_eq!(
-        (rec.segments.synced, rec.segments.verified.len()),
-        (0, 0),
-        "the same frames were verified and synced twice: {rec:?}",
+        (rec.segments.synced, rec.segments.verified.len(), rec.segments.truncated.len()),
+        (0, 0, 0),
+        "a second boot repeated recovery work: {rec:?}",
     );
 }
 
@@ -5039,7 +5051,7 @@ fn a_buffered_half_entry_leaves_nothing_on_the_disk() {
 }
 
 #[test]
-fn a_frame_damaged_above_the_last_durable_point_refuses_to_start() {
+fn a_tail_above_the_last_durable_point_is_dropped_not_trusted() {
     // §11.5 step 3: "verify the checksums of every frame the state references
     // past the last durable point". A SEALED file was exempt from that: its
     // `.qidx` is written at the seal and normally opens fine, and recovery
@@ -5107,55 +5119,41 @@ fn a_frame_damaged_above_the_last_durable_point_refuses_to_start() {
     };
     node.close();
 
-    // Healthy first: the reopen VERIFIES that tail — the frames between the
-    // file's durable length and its recorded length — and accepts it.
-    {
-        let mut node = Node::at(dir.clone());
-        node.keep();
-        let (_a, rec) = open_at(&node);
-        let verified = rec
-            .segments
-            .verified
-            .iter()
-            .find(|(b, id, _, _)| (*b, *id) == (bucket, file_id))
-            .copied();
-        assert_eq!(
-            verified,
-            Some((bucket, file_id, from, to)),
-            "the tail above the durable point is the range §11.5 step 3 checks: {:?}",
-            rec.segments.verified
-        );
-    }
-
+    // Phase C: a plain store commit records NOTHING durable — every keyspace
+    // reopens exactly at the last durable checkpoint — so the frames above the
+    // durable length are referenced by NO recovered row. They are not trusted
+    // and not verified: recovery drops them (the WAL replay re-appends what was
+    // acked). Damage one first; the reopen must neither refuse nor serve it.
     let path = node
         .seg_dir()
         .join(format!("b{bucket:03}"))
         .join(format!("f{file_id:010}.seg"));
     let mut bytes = std::fs::read(&path).expect("the segment file");
     let at = (from + 40) as usize;
-    assert!(
-        at < to as usize,
-        "a frame above the durable point to damage"
-    );
+    assert!(at < to as usize, "a frame above the durable point to damage");
     bytes[at] ^= 0xFF;
     std::fs::write(&path, &bytes).expect("damage the frame");
 
     let node = Node::at(dir);
-    let opened = Applier::open(
-        node.store(),
-        &node.seg_dir(),
-        seg_opts(),
-        cfg(),
-        Arc::new(crate::rsm::apply::NoNotify),
+    let (_a, rec) = open_at(&node);
+    assert!(
+        rec.segments
+            .verified
+            .iter()
+            .all(|(b, id, _, _)| (*b, *id) != (bucket, file_id)),
+        "nothing above the durable point may be verified-and-kept: {:?}",
+        rec.segments.verified
     );
-    match opened {
-        Err(e @ ApplyError::Disagreement { .. }) => assert!(e.fatal(), "{e}"),
-        Err(other) => panic!("expected the I11 disagreement, got {other:?}"),
-        Ok(_) => panic!(
-            "a frame damaged between b{bucket:03}/f{file_id}'s durable length \
-             {from} and its recorded length {to} was accepted"
-        ),
-    }
+    assert!(
+        rec.segments
+            .truncated
+            .iter()
+            .any(|&(b, id, was, now)| (b, id) == (bucket, file_id) && was == to && now == from),
+        "b{bucket:03}/f{file_id} must be cut back to its durable length {from}: {:?}",
+        rec.segments.truncated
+    );
+    let len = std::fs::metadata(&path).expect("the segment file").len();
+    assert_eq!(len, from, "the damaged tail is gone from the file");
 }
 
 #[test]
@@ -5456,4 +5454,74 @@ fn retention_cycle_uncommitted<S: Store>(
             .at(index, 1),
     )
     .expect("apply");
+}
+
+#[test]
+fn a_group_registered_after_the_messages_sees_every_partition() {
+    // Push-then-consume: partitions that hold frames BEFORE the group exists
+    // wrote no `pending` row for it, and the wildcard first contact enumerates
+    // them for one pop only. Registering an `all` group must arm EVERY one of
+    // them, or all but the first-claimed partition are stranded (found by the
+    // Phase C power-loss gate: 500 of 5000 drained, then nothing).
+    let node = Node::new("group-after-push");
+    let (mut a, _) = Applier::open(
+        node.store(),
+        &node.seg_dir(),
+        seg_opts(),
+        cfg(),
+        Arc::new(crate::rsm::apply::NoNotify),
+    )
+    .expect("open");
+    a.apply(&setup_entry(3, &[], queue_config(BASE_US))).expect("setup");
+    for p in 0..3u64 {
+        a.apply(
+            &Build::new(BASE_US + 10 + p as i64, 4, 100 + p * 10)
+                .cmd(vec![Effect::Append {
+                    pid: 1 + p,
+                    bucket: 1,
+                    base_offset: 0,
+                    count: 1,
+                    created_at_us: BASE_US + 10 + p as i64,
+                    hashes: hashes(40 + p, 1),
+                    blob: vec![9; 100],
+                }])
+                .at(2 + p, 1),
+        )
+        .expect("append");
+    }
+    let mut meta = group_meta(0, BASE_US + 100);
+    meta.mode = SubscriptionMode::All;
+    a.apply(
+        &Build::new(BASE_US + 100, 4, 200)
+            .cmd(vec![Effect::GroupUpsert {
+                tenant: TENANT.into(),
+                queue: QUEUE.into(),
+                group: "late".into(),
+                meta,
+            }])
+            .at(5, 1),
+    )
+    .expect("register");
+    a.commit().expect("commit"); // PERF-D batches counters until a commit
+    node.store()
+        .read(|r| {
+            for pid in 1..=3u64 {
+                assert!(
+                    r.pending_at(TENANT, QUEUE, "late", pid)?.is_some(),
+                    "pid {pid} predates the group and must be armed"
+                );
+            }
+            assert_eq!(
+                r.counter_at(&keys::counter_group(TENANT, QUEUE, "late", Counter::Pending))?,
+                3,
+                "the group inherits the retained backlog"
+            );
+            Ok(())
+        })
+        .expect("read");
+    assert_eq!(
+        a.derived().ring(TENANT, QUEUE, "late").map(|r| r.live_len()),
+        Some(3),
+        "all three partitions are in the live ring"
+    );
 }

@@ -22,6 +22,19 @@
 //! durable points is not durable (§11.3, I4). The waiter is registered before
 //! the entry is handed to apply, so `Notify::applied` never races ahead of it.
 //!
+//! # Phase C: the queue logs are the WAL (`QUEEN_RAFT_QLOG` on)
+//!
+//! With the qlog knob on the writer does not append to the raft log at all: it
+//! ASSIGNS the indexes itself, writes every entry (payload records + one
+//! payload-free entry record per touched queue log, or the system log) into
+//! the per-queue logs, fsyncs every touched log once, and only then hands the
+//! group to apply ([`Writer::write_qlog_group`]). `open` replays from the queue
+//! logs (`QLogSet::scan_entries`: merged, deduped, gapless, complete entries
+//! only), truncates the unacknowledged tail, and continues the indexes right
+//! after the replayed prefix. `Notify::durable` raises the queue logs' recovery
+//! floor so retention never drops a file recovery still needs. With the knob
+//! off, everything below is the raft-log path exactly as before.
+//!
 //! # Threads (I15)
 //!
 //! - the **writer** thread owns the [`LogStore`], batches proposals into one
@@ -53,9 +66,9 @@ use tokio::sync::{oneshot, watch};
 use tokio::sync::Notify as ApplyWake;
 
 use crate::rsm::apply::{self, ApplyConfig, ApplyStats, Committed, Notify};
-use crate::rsm::entry::{decode_entry, encode_entry_payload_free};
-use crate::rsm::qlog::set::QLogSet;
-use crate::rsm::qlog::RecordInput;
+use crate::rsm::entry::{decode_entry, encode_entry_payload_free, Entry};
+use crate::rsm::qlog::set::{QLogSet, SYSTEM_QUEUE_ID};
+use crate::rsm::qlog::{EntryInput, RecordInput, WriteRecord};
 use crate::rsm::segments;
 use crate::rsm::store::{Store, TypedReads};
 
@@ -152,6 +165,11 @@ impl Shared {
 struct ReplNotify {
     shared: Arc<Shared>,
     waker: Arc<dyn Waker>,
+    /// Phase C: the queue logs' recovery floor (`QUEEN_RAFT_QLOG` on), raised
+    /// to each durable index so retention never unlinks a file recovery still
+    /// replays from. `None` with the knob off. An atomic, like `durable_index`:
+    /// it holds nothing that could outlive shutdown.
+    qlog_floor: Option<Arc<AtomicU64>>,
 }
 
 impl Notify for ReplNotify {
@@ -179,6 +197,13 @@ impl Notify for ReplNotify {
         // The writer drops log files behind this between groups. No channel,
         // so this notifier holds nothing that could outlive shutdown.
         self.shared.durable_index.fetch_max(index, Ordering::AcqRel);
+        // Phase C: the store now durably holds everything through `index`, so
+        // recovery replays from `index + 1` and the queue logs may give up
+        // files wholly at or below it (never above). Called on the apply thread
+        // only after the durable store commit landed (`durable_point_inner`).
+        if let Some(floor) = &self.qlog_floor {
+            floor.fetch_max(index, Ordering::AcqRel);
+        }
     }
 }
 
@@ -218,7 +243,10 @@ enum WriterSink {
 struct SyncJob {
     pending: Vec<Pending>,
     first_index: u64,
-    handle: SyncHandle,
+    /// The raft-log barrier still owed for this group; `None` on the Phase C
+    /// queue-log path, where the writer already fsynced every touched queue log
+    /// (the only barrier) and the syncer only hands the group on, in order.
+    handle: Option<SyncHandle>,
     log_files: u64,
     log_bytes: u64,
 }
@@ -228,10 +256,13 @@ struct SyncJob {
 type PartitionLookup = Arc<dyn Fn(u64) -> io::Result<Option<u64>> + Send + Sync>;
 
 /// The log-native WRITE side the writer owns when `QUEEN_RAFT_QLOG` is on
-/// (`ALICE_PGLESS_NEWARCH.md` A3b, the double-write kill). The payload of every
-/// `Append` is written to its queue's qlog HERE, on the write path, and fsynced
-/// BEFORE the referencing raft-log entry — so the entry is payload-free (the
-/// double-write dies) and no committed entry ever points at a missing payload.
+/// (`ALICE_PGLESS_NEWARCH.md` A3b, the double-write kill; Phase C, the queue
+/// logs as the ONLY write-ahead log). For every entry of a group the writer
+/// writes each `Append`'s payload record AND the entry's payload-free entry
+/// record into every queue log the entry touches (or the system log), fsyncs
+/// every touched log ONCE, and only then hands the group to apply. The raft log
+/// is not written on this path: the queue logs alone recover every
+/// acknowledged entry.
 struct QlogWrite {
     /// The per-queue logs (opened + reconciled at boot, moved here). The single
     /// WRITER of them; the facade + planner read the SAME logs through a shared
@@ -251,6 +282,10 @@ struct QlogWrite {
 }
 
 struct Writer {
+    /// The raft log. The WAL with the knob off; with `QUEEN_RAFT_QLOG` on it is
+    /// no longer written (Phase C) — only a legacy tail from before Phase C is
+    /// replayed from it at open, and its sealed files are still dropped behind
+    /// durable points.
     log: LogStore,
     sink: WriterSink,
     shared: Arc<Shared>,
@@ -263,6 +298,10 @@ struct Writer {
     /// off (then the writer writes the raft log EXACTLY as today: the entry
     /// carries its payload, apply files it into a segment).
     qlog: Option<QlogWrite>,
+    /// Phase C (qlog path only): the index the next entry gets. The writer
+    /// ASSIGNS indexes itself now that no raft log is appended: monotone,
+    /// gapless, starting right after the recovered prefix (`open`).
+    next_index: u64,
 }
 
 impl Writer {
@@ -324,7 +363,7 @@ impl Writer {
     /// apply; in `Pipelined` mode write it and hand the unfsynced group to the
     /// syncer, which flushes and acknowledges it. Returns false when the log,
     /// the apply thread or the syncer failed and the node must stop.
-    fn commit(&mut self, mut pending: Vec<Pending>) -> bool {
+    fn commit(&mut self, pending: Vec<Pending>) -> bool {
         // PERF-1/PERF-G: group size and the writer-pickup leg, before any write.
         if crate::rsm::timing::enabled() {
             let tm = crate::rsm::timing::metrics();
@@ -351,74 +390,28 @@ impl Writer {
             0
         };
 
-        // A3b (`ALICE_PGLESS_NEWARCH.md`): knob ON — write every `Append`'s
-        // payload to its queue's qlog and fsync it HERE, then encode a
-        // PAYLOAD-FREE raft-log entry (the double-write dies: the payload lives
-        // once, in the qlog). The qlog is made durable in `write_qlog_group`
-        // BELOW, strictly BEFORE the raft-log entry that references it is written
-        // and fsynced — so a crash can never leave a committed entry pointing at
-        // a payload the qlog never got. `peeked` is the index `append_group` will
-        // assign this group's first entry (single writer, sequential): the qlog
-        // record's `seq` is that entry index, so we peek it before the write and
-        // assert equality after the append. Knob OFF: no qlog, the raft log
-        // carries the payload exactly as today (byte-for-byte).
-        let peeked = self.log.next_index();
-        let payload_free: Option<Vec<Vec<u8>>> = if self.qlog.is_some() {
-            match self.write_qlog_group(&mut pending, peeked) {
-                Ok(pf) => Some(pf),
-                Err(e) => {
-                    self.fail(&format!("local qlog write failed: {e}"), pending);
-                    return false;
-                }
-            }
-        } else {
-            None
-        };
+        // Phase C (`QUEEN_RAFT_QLOG` on): the queue logs are the only WAL — the
+        // writer assigns the indexes, writes every entry (and every `Append`'s
+        // payload) into the queue logs, fsyncs them once, and hands the group
+        // to apply. The raft log is not touched.
+        if self.qlog.is_some() {
+            return self.commit_qlog(pending, trace, group_len, group_bytes_t);
+        }
 
+        // Knob OFF: the raft log carries the entry (payload included) exactly
+        // as before the qlog existed, byte-for-byte.
         match &self.sink {
             WriterSink::Direct(_) => {
-                let slices: Vec<&[u8]> = match &payload_free {
-                    Some(pf) => pf.iter().map(|b| b.as_slice()).collect(),
-                    None => pending.iter().map(|p| p.bytes.as_ref()).collect(),
-                };
+                let slices: Vec<&[u8]> = pending.iter().map(|p| p.bytes.as_ref()).collect();
                 let fsync_started = trace.then(Instant::now);
-                // PER-QUEUE-ONLY PROTOTYPE (remove the global raft log): with the
-                // qlog on, the qlog fsync in `write_qlog_group` above is the ONE
-                // durability barrier. Write the raft-log entry (page cache) so the
-                // index is assigned and apply gets its in-memory handoff, but do
-                // NOT fsync it — the second fsync is gone. `_no_fsync` is dropped
-                // unsynced on purpose. (Recovery-from-qlog is the follow-on; this
-                // measures whether killing the 2nd fsync moves the numbers.)
-                let first_index = if self.qlog.is_some() {
-                    match self.log.append_group_deferred(&slices) {
-                        Ok((i, _no_fsync)) => i,
-                        Err(e) => {
-                            drop(slices);
-                            self.fail(&format!("local log append failed: {e}"), pending);
-                            return false;
-                        }
-                    }
-                } else {
-                    match self.log.append_group(&slices) {
-                        Ok(i) => i,
-                        Err(e) => {
-                            drop(slices);
-                            self.fail(&format!("local log append failed: {e}"), pending);
-                            return false;
-                        }
+                let first_index = match self.log.append_group(&slices) {
+                    Ok(i) => i,
+                    Err(e) => {
+                        drop(slices);
+                        self.fail(&format!("local log append failed: {e}"), pending);
+                        return false;
                     }
                 };
-                if payload_free.is_some() && first_index != peeked {
-                    drop(slices);
-                    self.fail(
-                        &format!(
-                            "A3b: qlog seq peeked index {peeked} != assigned raft-log index \
-                             {first_index}; qlog records would carry the wrong seq"
-                        ),
-                        pending,
-                    );
-                    return false;
-                }
                 if let Some(started) = fsync_started {
                     let now = Instant::now();
                     let gap = self
@@ -448,10 +441,7 @@ impl Writer {
                 true
             }
             WriterSink::Pipelined(_) => {
-                let slices: Vec<&[u8]> = match &payload_free {
-                    Some(pf) => pf.iter().map(|b| b.as_slice()).collect(),
-                    None => pending.iter().map(|p| p.bytes.as_ref()).collect(),
-                };
+                let slices: Vec<&[u8]> = pending.iter().map(|p| p.bytes.as_ref()).collect();
                 let (first_index, handle) = match self.log.append_group_deferred(&slices) {
                     Ok(v) => v,
                     Err(e) => {
@@ -460,23 +450,12 @@ impl Writer {
                         return false;
                     }
                 };
-                if payload_free.is_some() && first_index != peeked {
-                    drop(slices);
-                    self.fail(
-                        &format!(
-                            "A3b: qlog seq peeked index {peeked} != assigned raft-log index \
-                             {first_index}; qlog records would carry the wrong seq"
-                        ),
-                        pending,
-                    );
-                    return false;
-                }
                 drop(slices);
                 self.refresh_log_metrics();
                 let job = SyncJob {
                     pending,
                     first_index,
-                    handle,
+                    handle: Some(handle),
                     log_files: self.log.file_count() as u64,
                     log_bytes: self.log.bytes(),
                 };
@@ -494,62 +473,177 @@ impl Writer {
         }
     }
 
-    /// A3b: write every `Append` in this group's entries to its queue's qlog
-    /// (page cache), fsync the touched queues, and return the PAYLOAD-FREE
-    /// raft-log bytes for each entry — the durability core of the double-write
-    /// kill (`ALICE_PGLESS_NEWARCH.md` §5, A3b).
+    /// Phase C, one group on the queue-log path: assign the indexes, write and
+    /// fsync every entry into the queue logs ([`Writer::write_qlog_group`]), then
+    /// hand the group to apply (directly, or through the syncer, which then only
+    /// preserves the order — the barrier already ran). Returns false when the
+    /// node must stop.
+    fn commit_qlog(
+        &mut self,
+        mut pending: Vec<Pending>,
+        trace: bool,
+        group_len: usize,
+        group_bytes_t: u64,
+    ) -> bool {
+        let first_index = self.next_index;
+        let started = trace.then(Instant::now);
+        if let Err(e) = self.write_qlog_group(&mut pending, first_index) {
+            self.fail(&format!("local qlog write failed: {e}"), pending);
+            return false;
+        }
+        // Indexes are consumed only once the group is durable: a failed write
+        // poisoned the node above, so no index is ever handed out twice.
+        self.next_index = first_index + pending.len() as u64;
+        if let Some(started) = started {
+            let now = Instant::now();
+            let gap = self
+                .last_group_at
+                .map(|t| now.saturating_duration_since(t).as_micros() as u64)
+                .unwrap_or(0);
+            self.last_group_at = Some(now);
+            crate::rsm::timing::cycle_trace_line(format!(
+                "GROUPTRACE t={} entries={} bytes={} write_fsync_us={} gap_us={} qlog=1",
+                crate::rsm::timing::trace_now_us(),
+                group_len,
+                group_bytes_t,
+                started.elapsed().as_micros() as u64,
+                gap,
+            ));
+        }
+        let (files, bytes) = self.qlog.as_ref().expect("qlog on").set.totals();
+        match &self.sink {
+            WriterSink::Direct(apply_tx) => {
+                if !handoff_group(&self.shared, apply_tx, pending, first_index, files, bytes) {
+                    self.poison("apply thread gone");
+                    return false;
+                }
+                true
+            }
+            WriterSink::Pipelined(job_tx) => {
+                let job = SyncJob {
+                    pending,
+                    first_index,
+                    handle: None,
+                    log_files: files,
+                    log_bytes: bytes,
+                };
+                if job_tx.send(job).is_err() {
+                    self.poison("log syncer gone");
+                    return false;
+                }
+                true
+            }
+        }
+    }
+
+    /// Phase C: write EVERY entry of this group into the queue logs and fsync
+    /// them — the queue logs are the only write-ahead log (`QUEEN_RAFT_QLOG`).
+    ///
+    /// # Layout
+    ///
+    /// For each entry, in index order, its `seq` is its ENTRY INDEX
+    /// (`first_index + position`). Every queue log the entry's effects touch
+    /// gets, in one `write` per log for the whole group: the entry's `Append`
+    /// payload records for that queue (message records, indexed for pop/dedup,
+    /// as in A3b), then ONE payload-free ENTRY record (`REC_ENTRY`) carrying the
+    /// exact `encode_entry_payload_free` bytes and `copies` = the number of logs
+    /// that get this same record. An entry that touches no queue — or one of
+    /// whose pid-scoped effects names a partition that cannot be resolved (a
+    /// deleted one) — also (or only) goes to the system log
+    /// ([`SYSTEM_QUEUE_ID`]). Queue of an effect:
+    ///
+    /// - by name: `QueueUpsert`, `QueueDelete`, `GroupUpsert`, `GroupDelete`,
+    ///   `PartitionCreate`, `DlqInsert`, `DlqDelete`;
+    /// - by pid (the `pid -> queue_id` map, filled on a miss from the committed
+    ///   catalog): `Append` (a miss is fatal: the payload must land in its
+    ///   queue), `CursorSet`, `CursorDelete`, `Watermark`, `PartitionDelete`;
+    /// - none (system log): everything else — `Noop`, `RequestIdsExpire`, KV,
+    ///   timers, streams, traces, flags, quotas, ephemeral config, garbage
+    ///   bookkeeping, cluster version, membership notes.
     ///
     /// # Ordering (the invariant)
     ///
-    /// The qlog is made durable HERE (`set.sync()`), and this whole call returns
-    /// BEFORE the caller writes the referencing raft-log entry. So:
+    /// Every record of the group is written first, then ONE `sync` fsyncs every
+    /// touched log (THE barrier), and only then does the caller hand the group
+    /// to apply and answer it. So every answered entry — push, pop lease, ack,
+    /// create — is durable in the queue logs, the raft log plays no part, and:
     ///
-    /// - a crash before `set.sync()` (fault `qlog.record_written`) leaves the
-    ///   payload un-fsync'd AND the entry unwritten — the op is cleanly lost, no
-    ///   committed entry points at it;
-    /// - a crash after `set.sync()` but before the raft-log write+fsync (fault
-    ///   `qlog.record_fsynced`) leaves the payload DURABLE (an orphan qlog record
-    ///   — benign, NA-QLOG-I1 "qlog ahead") and the entry truncated on reopen —
-    ///   again cleanly lost;
-    /// - only after the raft-log entry is fsync'd is the op committed, and by
-    ///   then its payload is already on the platter.
+    /// - a crash before the sync (`qlog.record_written` / `log.appended`) or
+    ///   during it leaves the group partially on disk: some logs may hold an
+    ///   entry's record and others not, and a later entry may survive an
+    ///   earlier one. Nothing of the group was answered. Recovery
+    ///   ([`QLogSet::scan_entries`]) keeps only the gapless prefix of COMPLETE
+    ///   entries (all `copies` found) and truncates the rest
+    ///   ([`QLogSet::truncate_from`]) before the seqs are reused — and an entry
+    ///   whose record is present in every touched log has all its payloads too
+    ///   (a log's records before its entry record precede it in the file, and a
+    ///   torn tail is only ever cut as a suffix);
+    /// - a crash after the sync (`qlog.record_fsynced` / `log.flushed`) leaves
+    ///   the whole group durable: it replays on restart, exactly once (I4).
     ///
-    /// `seq` for each record is the ENTRY INDEX (`first_index + position` in the
-    /// group), the leader's order stamp — exactly what the applier path stamped
-    /// in A2/A3a. The queue of each `Append` is resolved from the writer's
-    /// `pid -> queue_id` map, which it keeps current from the group's own
-    /// `PartitionCreate`/`PartitionDelete` effects (a create always precedes the
-    /// first append to its pid, in the log and inside an entry) and fills on a
-    /// miss from the committed catalog.
-    fn write_qlog_group(
-        &mut self,
-        pending: &mut [Pending],
-        first_index: u64,
-    ) -> io::Result<Vec<Vec<u8>>> {
+    /// Each `p.entry` is then replaced by its payload-free decode, so apply sees
+    /// LIVE exactly the form a replay hands it (the I2 `RetainedBytes` rule).
+    fn write_qlog_group(&mut self, pending: &mut [Pending], first_index: u64) -> io::Result<()> {
         use crate::rsm::effect::Effect;
-        // Phase 1: write every `Append`'s payload to its queue's qlog and fsync
-        // it. The `RecordInput`s borrow `pending` (their `hashes`/`payload`), so
-        // this whole phase is scoped in a block that ends BEFORE Phase 2 rewrites
-        // the entries.
+        // The payload-free bytes of every entry, encoded from the ORIGINAL entry
+        // (the payloads are still in it) — the entry records carry these.
+        let mut pf: Vec<Vec<u8>> = Vec::with_capacity(pending.len());
+        for p in pending.iter() {
+            pf.push(
+                encode_entry_payload_free(&p.entry)
+                    .map_err(|e| io::Error::other(format!("payload-free entry encode: {e:?}")))?,
+            );
+        }
+        // The records borrow `pending` (payloads/hashes) and `pf` (entry bytes),
+        // so the write + barrier are scoped to end BEFORE the entries are
+        // rewritten below.
         {
             let q = self.qlog.as_mut().expect("qlog on");
             let lookup = q.lookup.clone();
-            // Group every `Append` across the group's entries by queue id, in one
-            // pass that also keeps the pid->queue_id map current.
-            let mut by_qid: std::collections::BTreeMap<u64, Vec<RecordInput<'_>>> =
+            let mut by_qid: std::collections::BTreeMap<u64, Vec<WriteRecord<'_>>> =
                 std::collections::BTreeMap::new();
+            let mut touched: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+            let mut msgs: Vec<(u64, RecordInput<'_>)> = Vec::new();
             for (i, p) in pending.iter().enumerate() {
                 let seq = first_index + i as u64;
+                touched.clear();
+                msgs.clear();
+                let mut unresolved = false;
                 for eff in &p.entry.effects {
                     match eff {
+                        Effect::QueueUpsert { tenant, queue, .. }
+                        | Effect::QueueDelete { tenant, queue }
+                        | Effect::GroupUpsert { tenant, queue, .. }
+                        | Effect::GroupDelete { tenant, queue, .. }
+                        | Effect::DlqInsert { tenant, queue, .. }
+                        | Effect::DlqDelete { tenant, queue, .. } => {
+                            touched.insert(QLogSet::queue_id_of(tenant, queue));
+                        }
                         Effect::PartitionCreate {
                             pid, tenant, queue, ..
                         } => {
                             let qid = QLogSet::queue_id_of(tenant, queue);
                             q.pid_qid.insert(*pid, qid);
+                            touched.insert(qid);
                         }
                         Effect::PartitionDelete { pid } => {
+                            match resolve_qid(&mut q.pid_qid, &lookup, *pid)? {
+                                Some(qid) => {
+                                    touched.insert(qid);
+                                }
+                                None => unresolved = true,
+                            }
                             q.pid_qid.remove(pid);
+                        }
+                        Effect::CursorSet { pid, .. }
+                        | Effect::CursorDelete { pid, .. }
+                        | Effect::Watermark { pid, .. } => {
+                            match resolve_qid(&mut q.pid_qid, &lookup, *pid)? {
+                                Some(qid) => {
+                                    touched.insert(qid);
+                                }
+                                None => unresolved = true,
+                            }
                         }
                         Effect::Append {
                             pid,
@@ -560,69 +654,88 @@ impl Writer {
                             blob,
                             ..
                         } => {
-                            let qid = match q.pid_qid.get(pid) {
-                                Some(v) => *v,
-                                None => {
-                                    let v = lookup(*pid)?.ok_or_else(|| {
-                                        io::Error::other(format!(
-                                            "A3b qlog route: no partition row for pid {pid}"
-                                        ))
-                                    })?;
-                                    q.pid_qid.insert(*pid, v);
-                                    v
-                                }
-                            };
-                            by_qid.entry(qid).or_default().push(RecordInput {
-                                seq,
-                                pid: *pid,
-                                base_offset: *base_offset,
-                                count: *count,
-                                created_at_us: *created_at_us,
-                                txn: None,
-                                hashes,
-                                payload: blob,
-                            });
+                            let qid =
+                                resolve_qid(&mut q.pid_qid, &lookup, *pid)?.ok_or_else(|| {
+                                    io::Error::other(format!(
+                                        "qlog route: no partition row for pid {pid}"
+                                    ))
+                                })?;
+                            touched.insert(qid);
+                            msgs.push((
+                                qid,
+                                RecordInput {
+                                    seq,
+                                    pid: *pid,
+                                    base_offset: *base_offset,
+                                    count: *count,
+                                    created_at_us: *created_at_us,
+                                    txn: None,
+                                    hashes,
+                                    payload: blob,
+                                },
+                            ));
                         }
                         _ => {}
                     }
                 }
+                if touched.is_empty() || unresolved {
+                    touched.insert(SYSTEM_QUEUE_ID);
+                }
+                let copies = touched.len() as u32;
+                // Each log: this entry's payload records (effect order), then its
+                // entry record — so an entry record found on disk implies every
+                // payload record of that entry in the same log precedes it.
+                for (qid, r) in msgs.drain(..) {
+                    by_qid.entry(qid).or_default().push(WriteRecord::Msg(r));
+                }
+                for qid in &touched {
+                    by_qid
+                        .entry(*qid)
+                        .or_default()
+                        .push(WriteRecord::Entry(EntryInput {
+                            seq,
+                            now_us: p.entry.now_us,
+                            copies,
+                            entry: &pf[i],
+                        }));
+                }
             }
-            // Write each touched queue's records to the page cache (one write
-            // each, no fsync yet).
+            // One write per touched log (page cache, no fsync yet). Every log
+            // written is marked dirty, so the sync below covers a group of pops
+            // and acks exactly as it covers pushes.
             for (qid, records) in &by_qid {
-                q.set.write_group_for_qid(*qid, records)?;
+                q.set.write_mixed_for_qid(*qid, records)?;
             }
-            // §A3b `qlog.record_written`: payloads are in the qlog page cache; the
-            // qlog fsync has NOT run and no raft-log entry is written. A SIGKILL
-            // keeps the page cache (orphan records, no entry — the op is
-            // unrecovered); a power loss drops both — either way cleanly lost,
-            // never a dangling reference.
+            // `qlog.record_written` (and its raft-era twin `log.appended`): the
+            // group is in the page cache, not fsynced, nothing answered. A kill
+            // here keeps the page cache and the group replays; a power loss may
+            // keep any subset — recovery keeps the complete gapless prefix.
             crate::rsm::faults::hit("qlog.record_written");
-            // THE BARRIER: the payloads are durable now, before the entry below.
+            crate::rsm::faults::hit("log.appended");
+            // THE BARRIER: every touched queue log, once. Timed into `log_fsync`
+            // (PERF-1), which keeps meaning "the WAL barrier" on this path.
+            let s0 = crate::rsm::timing::stamp();
             q.set.sync()?;
-            // §A3b `qlog.record_fsynced`: payloads on the platter, entry still not
-            // written/fsynced. Proves the ordering — a kill here recovers the
-            // payload as a benign orphan and the entry is absent (cleanly lost).
+            if let Some(s0) = s0 {
+                crate::rsm::timing::metrics()
+                    .log_fsync
+                    .record_dur(s0.elapsed());
+            }
+            // `qlog.record_fsynced` (and `log.flushed`): the group is durable in
+            // the queue logs and not yet applied; it WILL replay on restart.
             crate::rsm::faults::hit("qlog.record_fsynced");
+            crate::rsm::faults::hit("log.flushed");
         }
-        // Phase 2: the raft-log entries, PAYLOAD-FREE — each `Append`'s `blob`
-        // becomes the payload's 4-byte frame length. Re-decode each into `p.entry`
-        // so the entry apply receives LIVE (via handoff) carries that SAME
-        // length-only form, byte-identical to what a replay of the payload-free
-        // raft log hands apply. That is what keeps `RetainedBytes` — a REPLICATED
-        // counter — computed from the length on BOTH paths, so the digest is
-        // replay-stable (I2); no path ever reads it off an empty blob. The
-        // re-decode is cheap (the entry carries no payload).
-        let mut out = Vec::with_capacity(pending.len());
-        for p in pending.iter_mut() {
-            let bytes = encode_entry_payload_free(&p.entry)
-                .map_err(|e| io::Error::other(format!("A3b payload-free entry encode: {e:?}")))?;
-            p.entry = decode_entry(&bytes).map_err(|e| {
-                io::Error::other(format!("A3b payload-free entry re-decode: {e:?}"))
-            })?;
-            out.push(bytes);
+        // Hand apply the PAYLOAD-FREE form — each `Append`'s `blob` is the
+        // payload's 4-byte frame length — byte-identical to what a replay from the
+        // queue logs hands it, so `RetainedBytes` (a REPLICATED counter) is
+        // computed from the length on BOTH paths and the digest is replay-stable
+        // (I2). Cheap: the entry carries no payload.
+        for (p, bytes) in pending.iter_mut().zip(pf.iter()) {
+            p.entry = decode_entry(bytes)
+                .map_err(|e| io::Error::other(format!("payload-free entry re-decode: {e:?}")))?;
         }
-        Ok(out)
+        Ok(())
     }
 
     /// The log write itself failed: drop the pending waiters (their proposes
@@ -637,13 +750,35 @@ impl Writer {
         let _ = self.role_tx.send(Role::Stopped);
     }
 
+    /// Publish the WAL gauges: the queue logs' totals on the Phase C path, the
+    /// raft log's otherwise.
     fn refresh_log_metrics(&self) {
-        self.shared
-            .log_files
-            .store(self.log.file_count() as u64, Ordering::Release);
-        self.shared
-            .log_bytes
-            .store(self.log.bytes(), Ordering::Release);
+        let (files, bytes) = match &self.qlog {
+            Some(q) => q.set.totals(),
+            None => (self.log.file_count() as u64, self.log.bytes()),
+        };
+        self.shared.log_files.store(files, Ordering::Release);
+        self.shared.log_bytes.store(bytes, Ordering::Release);
+    }
+}
+
+/// `pid -> queue_id` for the writer's routing: the map, else the committed
+/// partition catalog (a partition created before the last restart), memoized.
+/// `None` when neither knows the pid (a partition already deleted).
+fn resolve_qid(
+    map: &mut HashMap<u64, u64>,
+    lookup: &PartitionLookup,
+    pid: u64,
+) -> io::Result<Option<u64>> {
+    if let Some(qid) = map.get(&pid) {
+        return Ok(Some(*qid));
+    }
+    match lookup(pid)? {
+        Some(qid) => {
+            map.insert(pid, qid);
+            Ok(Some(qid))
+        }
+        None => Ok(None),
     }
 }
 
@@ -745,17 +880,22 @@ impl Syncer {
                 (0, 0)
             };
             let fsync_started = trace.then(Instant::now);
-            if let Err(e) = handle.sync() {
-                // The barrier failed: the group is NOT durable. Drop its
-                // waiters (their proposes see a closed channel → Fatal) and
-                // stop the node — the same disposition the inline writer's
-                // `fail` takes on a write error.
-                drop(pending);
-                self.poison(&format!("local log fsync failed: {e}"));
-                return;
+            // `None`: the Phase C queue-log path, whose writer already ran the
+            // barrier (every touched queue log fsynced); this thread only keeps
+            // the hand-off in index order.
+            if let Some(handle) = handle {
+                if let Err(e) = handle.sync() {
+                    // The barrier failed: the group is NOT durable. Drop its
+                    // waiters (their proposes see a closed channel → Fatal) and
+                    // stop the node — the same disposition the inline writer's
+                    // `fail` takes on a write error.
+                    drop(pending);
+                    self.poison(&format!("local log fsync failed: {e}"));
+                    return;
+                }
+                // §13.5 `log.flushed`: the group is durable in the raft log.
+                crate::rsm::faults::hit("log.flushed");
             }
-            // §13.5 `log.flushed`: the group is durable in the raft log.
-            crate::rsm::faults::hit("log.flushed");
             if let Some(started) = fsync_started {
                 let now = Instant::now();
                 let gap = last_group_at
@@ -890,13 +1030,24 @@ impl<S: Store + 'static> LocalReplicator<S> {
     /// durable index into apply (§11.5), waits for apply to catch up, then
     /// begins accepting proposals. A boot call: it does blocking I/O and must
     /// not run on a tokio worker.
+    ///
+    /// Phase C (`QUEEN_RAFT_QLOG` on): the queue logs are the WAL. The replay is
+    /// (a) any LEGACY raft-log tail above the store's durable index (a data
+    /// directory last run before Phase C, whose un-fsynced payload-free raft log
+    /// may still hold entries), then (b) the queue logs' entry records from
+    /// there on ([`QLogSet::scan_entries`]: merged across every log, deduped,
+    /// gapless, complete entries only). Everything at or above where (b) stops
+    /// is the unacknowledged tail of a group whose fsyncs did not all land and
+    /// is truncated ([`QLogSet::truncate_from`]); the writer then assigns
+    /// indexes from right after the replayed prefix.
     pub fn open(
         store: Arc<S>,
         cfg: OpenConfig,
         waker: Arc<dyn Waker>,
         clock: Arc<dyn apply::Clock>,
     ) -> io::Result<LocalReplicator<S>> {
-        // 1. The log: recover it, truncate any torn tail.
+        // 1. The log: recover it, truncate any torn tail. With the qlog knob on
+        //    it is only a legacy source (nothing appends to it any more).
         let (log, log_rec) = LogStore::open(&cfg.log_dir, cfg.log_opts)?;
         let last_log = log.last_index();
 
@@ -907,7 +1058,9 @@ impl<S: Store + 'static> LocalReplicator<S> {
             .read(|r| Ok((r.applied_index()?, r.applied_term()?, r.durable_index()?)))
             .map_err(|e| io::Error::other(format!("read store recovery point: {e}")))?;
 
-        if store_applied > last_log {
+        // The raft log is the WAL only with the qlog knob off; with it on the
+        // queue logs are, and the same check runs against them after replay.
+        if !cfg.apply_cfg.qlog && store_applied > last_log {
             // The store is ahead of the log: impossible if the log is the WAL,
             // and a sign the log directory was truncated or swapped. Refuse
             // rather than silently lose the tail (§0.3 "refuse, never guess").
@@ -995,22 +1148,37 @@ impl<S: Store + 'static> LocalReplicator<S> {
             });
             // The applier must not open or write the qlog now: the writer does.
             apply_cfg.qlog_writer_external = true;
+            // Phase C recovery floor: the store durably holds everything
+            // through its durable index, so no queue-log file wholly at or
+            // below it is needed for replay. Raised at each durable point by
+            // `ReplNotify::durable`.
+            set.set_recovery_floor(store_durable);
             (Some(set), Some(lookup), Some(reader))
         } else {
             (None, None, None)
         };
+        let mut qlog_set = qlog_set;
         // Seeded during replay (below) from the replay window's Create/Delete.
         let mut seed_pid_qid: HashMap<u64, u64> = HashMap::new();
 
+        let (log_files0, log_bytes0) = match &qlog_set {
+            Some(set) => set.totals(),
+            None => (log.file_count() as u64, log.bytes()),
+        };
         let shared = Arc::new(Shared {
             node_id: cfg.node_id,
             applied_index: AtomicU64::new(store_applied),
             applied_term: AtomicU64::new(store_term),
             durable_index: AtomicU64::new(store_durable),
-            last_log_index: AtomicU64::new(last_log),
+            // The qlog path learns its tip only after the replay below.
+            last_log_index: AtomicU64::new(if qlog_on {
+                store_applied.max(store_durable)
+            } else {
+                last_log
+            }),
             proposals: AtomicU64::new(0),
-            log_files: AtomicU64::new(log.file_count() as u64),
-            log_bytes: AtomicU64::new(log.bytes()),
+            log_files: AtomicU64::new(log_files0),
+            log_bytes: AtomicU64::new(log_bytes0),
             poisoned: Mutex::new(None),
             waiters: Mutex::new(HashMap::new()),
             applied_notify: Arc::new(ApplyWake::new()),
@@ -1025,6 +1193,7 @@ impl<S: Store + 'static> LocalReplicator<S> {
         let notify: Arc<dyn Notify> = Arc::new(ReplNotify {
             shared: shared.clone(),
             waker,
+            qlog_floor: qlog_set.as_ref().map(|s| s.recovery_floor_handle()),
         });
         // The apply thread owns the segment writer; publish its reader here so
         // the facade can read pop payloads off the same live file set (§7.5,
@@ -1049,43 +1218,91 @@ impl<S: Store + 'static> LocalReplicator<S> {
         // 5. Replay: every entry after the store's durable index, in order.
         //    Apply skips whatever the store already holds (idempotence,
         //    §11.5). Sends block only if apply is momentarily behind, which is
-        //    fine on this boot thread.
+        //    fine on this boot thread. Returns the last index replayed (the
+        //    log's tip), which the writer continues from.
         let mut replayed = 0u64;
-        let replay = log.scan_from(store_durable + 1, &mut |index, term, body| {
-            let entry = decode_entry(body).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("replay: entry {index} does not decode: {e:?}"),
-                )
-            })?;
-            // A3b: seed the writer's `pid -> queue_id` map from the replay window
-            // — partitions created between the store's durable point and the log
-            // tip. Their creates are ABOVE the committed catalog boundary the
-            // writer's on-demand lookup can see, so without this seed the first
-            // live append to such a partition after boot could not be routed. A
-            // no-op when the qlog knob is off.
-            if qlog_on {
-                for eff in &entry.effects {
-                    match eff {
-                        crate::rsm::effect::Effect::PartitionCreate {
-                            pid, tenant, queue, ..
-                        } => {
-                            seed_pid_qid.insert(*pid, QLogSet::queue_id_of(tenant, queue));
-                        }
-                        crate::rsm::effect::Effect::PartitionDelete { pid } => {
-                            seed_pid_qid.remove(pid);
-                        }
-                        _ => {}
-                    }
-                }
+        let replay: io::Result<u64> = (|| {
+            if !qlog_on {
+                // Knob OFF: the raft log is the WAL, exactly as before.
+                log.scan_from(store_durable + 1, &mut |index, term, body| {
+                    let entry = decode_replayed(index, body)?;
+                    apply_tx
+                        .send(Committed { index, term, entry })
+                        .map_err(|_| io::Error::other("replay: apply thread exited"))?;
+                    replayed += 1;
+                    Ok(())
+                })?;
+                return Ok(last_log);
             }
-            apply_tx
-                .send(Committed { index, term, entry })
-                .map_err(|_| io::Error::other("replay: apply thread exited"))?;
-            replayed += 1;
-            Ok(())
-        });
-        let replay = match replay {
+            // (a) A LEGACY raft-log tail: entries above the durable point that a
+            //     pre-Phase-C writer put only in the raft log (payload-free, their
+            //     payloads fsync'd in the queue logs). Empty on a Phase C node.
+            let mut next = store_durable + 1;
+            log.scan_from(next, &mut |index, term, body| {
+                if index != next {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("replay: legacy raft log jumps from {next} to {index}"),
+                    ));
+                }
+                let entry = decode_replayed(index, body)?;
+                seed_pid_qid_from(&mut seed_pid_qid, &entry);
+                apply_tx
+                    .send(Committed { index, term, entry })
+                    .map_err(|_| io::Error::other("replay: apply thread exited"))?;
+                replayed += 1;
+                next += 1;
+                Ok(())
+            })?;
+            // (b) The queue logs: every entry record from `next` on, merged
+            //     across the logs, deduped, gapless and complete.
+            let set = qlog_set.as_mut().expect("qlog on");
+            let scan = set.scan_entries(next, &mut |rec| {
+                let index = rec.seq;
+                let entry = decode_replayed(index, &rec.entry)?;
+                // Seed the writer's `pid -> queue_id` map from the replay window:
+                // these creates are above the committed catalog the writer's
+                // on-demand lookup reads.
+                seed_pid_qid_from(&mut seed_pid_qid, &entry);
+                apply_tx
+                    .send(Committed {
+                        index,
+                        term: LOG_TERM,
+                        entry,
+                    })
+                    .map_err(|_| io::Error::other("replay: apply thread exited"))?;
+                replayed += 1;
+                Ok(())
+            })?;
+            // (c) Everything at or above the cut is an unacknowledged tail (a
+            //     group whose fsyncs did not all land): drop it, durably, before
+            //     the writer hands those seqs to new entries.
+            let cut = scan.next_seq;
+            let dropped = set.truncate_from(cut)?;
+            if scan.stopped.is_some() || dropped > 0 {
+                tracing::warn!(
+                    target: "rsm",
+                    cut,
+                    discarded_entries = scan.discarded,
+                    max_seq_found = scan.max_seq_found,
+                    dropped_bytes = dropped,
+                    why = scan.stopped.as_deref().unwrap_or("stale records above the cut"),
+                    "rsm qlog recovery: dropped an unacknowledged tail",
+                );
+            }
+            let tip = cut - 1;
+            if store_applied > tip {
+                // The store holds an entry the WAL cannot replay: every applied
+                // entry was fsync'd in the queue logs before apply saw it, so
+                // this is a swapped or damaged directory. Refuse (§0.3).
+                return Err(io::Error::other(format!(
+                    "store applied index {store_applied} is ahead of the queue logs' \
+                     recoverable tip {tip}"
+                )));
+            }
+            Ok(tip)
+        })();
+        let last_index = match replay {
             Ok(n) => n,
             Err(e) => {
                 // Tear the apply thread down before returning, so the store's
@@ -1095,10 +1312,11 @@ impl<S: Store + 'static> LocalReplicator<S> {
                 return Err(e);
             }
         };
+        shared.last_log_index.store(last_index, Ordering::Release);
 
         // 6. Wait for apply to reach the log's end. Past this the node may
         //    serve local stale reads (§11.5 step 6).
-        if let Err(e) = wait_until_applied(&shared, last_log, cfg.replay_deadline, &apply_join) {
+        if let Err(e) = wait_until_applied(&shared, last_index, cfg.replay_deadline, &apply_join) {
             drop(apply_tx);
             let _ = apply_join.join();
             return Err(e);
@@ -1149,9 +1367,11 @@ impl<S: Store + 'static> LocalReplicator<S> {
             target: "rsm",
             node = cfg.node_id,
             last_log,
+            last_index,
             store_applied,
             store_durable,
-            replayed = replay,
+            replayed,
+            qlog_wal = qlog_on,
             log_files = log_rec.files,
             truncated_tail = log_rec.truncated_tail,
             "local replicator open",
@@ -1187,6 +1407,7 @@ impl<S: Store + 'static> LocalReplicator<S> {
             last_truncated: store_durable,
             last_group_at: None,
             qlog: qlog_write,
+            next_index: last_index + 1,
         };
         let writer_join = std::thread::Builder::new()
             .name("queen-rsm-log".into())
@@ -1284,6 +1505,37 @@ impl<S: Store> Drop for LocalReplicator<S> {
     fn drop(&mut self) {
         if self.writer_join.is_some() || self.syncer_join.is_some() || self.apply_join.is_some() {
             let _ = self.stop();
+        }
+    }
+}
+
+/// Decode one replayed entry (raft log or queue-log entry record).
+fn decode_replayed(index: u64, body: &[u8]) -> io::Result<Entry> {
+    decode_entry(body).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("replay: entry {index} does not decode: {e:?}"),
+        )
+    })
+}
+
+/// Seed the writer's `pid -> queue_id` map from a replayed entry's
+/// `PartitionCreate`/`PartitionDelete` (qlog path): partitions created above
+/// the store's durable point are not in the committed catalog the writer's
+/// on-demand lookup reads, so without this the first live append to one after
+/// boot could not be routed.
+fn seed_pid_qid_from(map: &mut HashMap<u64, u64>, entry: &Entry) {
+    for eff in &entry.effects {
+        match eff {
+            crate::rsm::effect::Effect::PartitionCreate {
+                pid, tenant, queue, ..
+            } => {
+                map.insert(*pid, QLogSet::queue_id_of(tenant, queue));
+            }
+            crate::rsm::effect::Effect::PartitionDelete { pid } => {
+                map.remove(pid);
+            }
+            _ => {}
         }
     }
 }

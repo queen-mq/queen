@@ -717,7 +717,11 @@ fn a_second_write_handle_is_refused_not_queued() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_reader_sees_the_last_committed_transaction_and_not_the_open_one() {
+fn a_reader_sees_the_open_transaction_live() {
+    // Phase C: every keyspace is a RAM table read LIVE (read-uncommitted) —
+    // there is no MVCC snapshot. A local read sees what apply wrote a moment
+    // ago, before any commit; the planner stays correct because the batcher
+    // folds every not-yet-applied entry into its overlay (§7.2).
     let t = TempStore::new();
     let s = t.s();
     let v1 = samples::queue_config();
@@ -736,12 +740,19 @@ fn a_reader_sees_the_last_committed_transaction_and_not_the_open_one() {
     w.put_queue("t", "q2", &v2).unwrap();
 
     // …and read from another thread, which is where a local read runs
-    // (spawn_blocking, §9.4). It must see v1 and no q2.
+    // (spawn_blocking, §9.4). It already sees v2 and q2.
     std::thread::scope(|scope| {
         scope.spawn(|| {
             s.read(|r| {
-                assert_eq!(r.queue("t", "q")?.unwrap().priority, v1.priority);
-                assert!(r.queue("t", "q2")?.is_none());
+                assert_eq!(
+                    r.queue("t", "q")?.unwrap().priority,
+                    v2.priority,
+                    "an uncommitted update is live"
+                );
+                assert!(
+                    r.queue("t", "q2")?.is_some(),
+                    "an uncommitted insert is live"
+                );
                 Ok(())
             })
             .unwrap();
@@ -752,13 +763,28 @@ fn a_reader_sees_the_last_committed_transaction_and_not_the_open_one() {
     // written in this entry (a counter, a dedup occurrence list).
     assert_eq!(w.queue("t", "q").unwrap().unwrap().priority, v2.priority);
 
-    w.commit().unwrap();
+    // A delete is live too.
+    assert!(w.del_queue("t", "q2").unwrap());
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            s.read(|r| {
+                assert!(
+                    r.queue("t", "q2")?.is_none(),
+                    "an uncommitted delete is live"
+                );
+                Ok(())
+            })
+            .unwrap();
+        });
+    });
 
+    // A commit changes nothing a reader sees.
+    w.commit().unwrap();
     std::thread::scope(|scope| {
         scope.spawn(|| {
             s.read(|r| {
                 assert_eq!(r.queue("t", "q")?.unwrap().priority, v2.priority);
-                assert!(r.queue("t", "q2")?.is_some());
+                assert!(r.queue("t", "q2")?.is_none());
                 Ok(())
             })
             .unwrap();
@@ -767,23 +793,47 @@ fn a_reader_sees_the_last_committed_transaction_and_not_the_open_one() {
 }
 
 #[test]
-fn an_aborted_transaction_leaves_nothing_behind() {
-    let t = TempStore::new();
-    let s = t.s();
+fn an_aborted_transaction_is_not_rolled_back() {
+    // Phase C: abort (like dropping the handle) throws away the LMDB
+    // transaction only, which holds nothing between durable cycles; a write to
+    // a store row — every keyspace is a RAM table — is NOT undone. Nothing
+    // relies on a rollback: apply poisons itself on any failure and recovery
+    // rebuilds from the checkpoint plus the WAL. What decides whether a write
+    // survives a restart is the durable point, and only it.
+    let mut t = TempStore::new();
     {
+        let s = t.s();
         let mut w = s.write().unwrap();
         w.put_queue("t", "q", &samples::queue_config()).unwrap();
         w.abort().unwrap();
         // The handle is usable again: abort starts the next transaction.
         w.set_applied(1, 1).unwrap();
         w.commit().unwrap();
+        drop(w);
+        s.read(|r| {
+            assert!(
+                r.queue("t", "q")?.is_some(),
+                "abort rolled a store row back"
+            );
+            assert_eq!(r.applied_index()?, 1);
+            Ok(())
+        })
+        .unwrap();
     }
-    s.read(|r| {
-        assert!(r.queue("t", "q")?.is_none());
-        assert_eq!(r.applied_index()?, 1);
-        Ok(())
-    })
-    .unwrap();
+    // No durable point was taken, so a restart reopens at the last checkpoint
+    // (the empty store): neither the aborted write nor the committed one is
+    // behind.
+    t.reopen(StoreOpts {
+        map_bytes: Some(64 << 20),
+        ..Default::default()
+    });
+    t.s()
+        .read(|r| {
+            assert!(r.queue("t", "q")?.is_none());
+            assert_eq!(r.applied_index()?, 0);
+            Ok(())
+        })
+        .unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -885,10 +935,17 @@ fn running_out_of_reader_slots_is_a_refusal() {
     assert_eq!(StoreMetrics::get(&s.metrics().readers_full), full as u64);
 }
 
-/// PIN 4. `MDB_MAP_FULL` is a typed error with a metric, and it is FATAL for
-/// this node: a node-local liveness cliff the leader cannot see (§11.8, R-18).
+/// PIN 4. `MDB_MAP_FULL` is typed, counted, and FATAL for this node: a
+/// node-local liveness cliff the leader cannot see (§11.8, R-18).
+///
+/// Phase C: a put is a RAM write and never touches the map, so the map fills
+/// at the durable CHECKPOINT, where the dirty rows are flushed into LMDB — and
+/// it surfaces there, as the durable point that did not happen
+/// (`CommitFailed { durable: true }`, naming `MDB_MAP_FULL`), with the
+/// `map_full` metric raised.
 #[test]
 fn a_full_map_is_a_typed_error_and_a_metric() {
+    const ROWS: u64 = 2_000;
     let t = TempStore::with(StoreOpts {
         // One megabyte: small enough to fill in a fraction of a second.
         map_bytes: Some(1 << 20),
@@ -900,38 +957,59 @@ fn a_full_map_is_a_typed_error_and_a_metric() {
     assert!(usage.pct() < 100.0);
 
     let mut w = s.write().unwrap();
-    let mut hit: Option<StoreError> = None;
     let val = vec![7u8; 4096];
-    for i in 0..10_000u64 {
-        let k = keys::dedup(i, &[0u8; 16]);
-        match w.put_raw(Keyspace::Dedup, &k, &val) {
-            Ok(()) => {}
-            Err(e) => {
-                hit = Some(e);
-                break;
-            }
-        }
+    // 8 MiB of rows into a 1 MiB map: every put lands (RAM), and so does a
+    // plain commit, which writes nothing into LMDB.
+    for i in 0..ROWS {
+        w.put_raw(Keyspace::Dedup, &keys::dedup(i, &[0u8; 16]), &val)
+            .unwrap();
     }
-    let err = hit.expect("a 1 MiB map does not hold 40 MiB");
-    match err {
-        StoreError::MapFull {
-            used_bytes,
-            map_bytes,
-        } => {
-            assert!(map_bytes > 0);
-            assert!(used_bytes <= map_bytes);
+    w.commit().unwrap();
+    assert_eq!(
+        StoreMetrics::get(&s.metrics().map_full),
+        0,
+        "no put or plain commit reaches the map"
+    );
+
+    let err = w
+        .durable_commit()
+        .expect_err("a 1 MiB map does not hold 8 MiB");
+    match &err {
+        StoreError::CommitFailed { durable, detail } => {
+            assert!(durable, "the checkpoint is the durable point");
+            assert!(
+                detail.contains("MDB_MAP_FULL"),
+                "the cause is named: {detail}"
+            );
         }
-        other => panic!("expected MapFull, got {other}"),
+        other => panic!("expected the durable point to fail on MDB_MAP_FULL, got {other}"),
     }
     assert!(
         err.fatal(),
         "the node stops; it does not retry into the wall"
     );
     assert!(!err.retryable());
+    assert!(
+        err.lost_durable_point(),
+        "no durable index is reported for it"
+    );
     assert_eq!(StoreMetrics::get(&s.metrics().map_full), 1);
-    // Nothing is lost: the Raft log is the write-ahead log, so the aborted
-    // transaction is re-applied after a restart with a larger map.
+    assert_eq!(StoreMetrics::get(&s.metrics().commit_failed), 1);
+    assert_eq!(StoreMetrics::get(&s.metrics().durable_commits), 0);
+    // The handle is dead, and says why.
+    assert_eq!(w.commit().unwrap_err(), err);
     drop(w);
+    // Nothing is lost: every row is still live and still dirty for the next
+    // checkpoint, and the WAL (the queue logs) re-applies them after a restart
+    // with a larger map.
+    assert_eq!(s.dirty_len(Keyspace::Dedup), ROWS as usize);
+    s.read(|r| {
+        assert_eq!(r.count(Keyspace::Dedup)?, ROWS);
+        Ok(())
+    })
+    .unwrap();
+    let after = s.map_usage();
+    assert!(after.used_bytes <= after.map_bytes, "{after:?}");
 }
 
 #[test]
@@ -948,7 +1026,17 @@ fn map_usage_is_what_status_reports() {
             w.put_raw(Keyspace::Dedup, &keys::dedup(i, &[1u8; 16]), &[9u8; 512])
                 .unwrap();
         }
+        // Phase C: the rows are RAM until the checkpoint, so neither the puts
+        // nor a plain commit move the map (which is what `Status` and the
+        // §11.8 gate read — one durable interval behind the live rows)…
         w.commit().unwrap();
+        assert_eq!(
+            s.map_usage().used_bytes,
+            before.used_bytes,
+            "a plain commit wrote rows into LMDB"
+        );
+        // …and the durable cycle that flushes them does.
+        w.durable_commit().unwrap();
     }
     let after = s.map_usage();
     assert!(after.used_bytes > before.used_bytes);

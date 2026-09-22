@@ -38,11 +38,14 @@ use bytes::Bytes;
 
 use crate::rsm::apply::{self, state_digest, SystemClock};
 use crate::rsm::entry::encode_entry;
+use crate::rsm::qlog::set::QLogSet;
+use crate::rsm::qlog::QLogOptions;
 use crate::rsm::replicator::fake::{FakeReplicator, Step};
 use crate::rsm::replicator::local::{LocalReplicator, NoWaker, OpenConfig};
-use crate::rsm::replicator::log::{Fsync, LogOptions, LogStore};
+use crate::rsm::replicator::log::{Fsync, LogOptions, LogStore, LOG_TERM};
 use crate::rsm::replicator::{AppliedAt, ProposeError, Replicator, Role};
-use crate::rsm::store::{HeedStore, Store};
+use crate::rsm::segments::FsyncMode;
+use crate::rsm::store::{HeedStore, Store, TypedReads};
 
 use super::apply::{cfg, run_workload, seg_opts, settle, store_opts, Node, Workload};
 
@@ -602,13 +605,17 @@ async fn the_payload_lives_once_in_the_qlog_not_the_raft_log() {
 }
 
 /// A3b (`ALICE_PGLESS_NEWARCH.md` §5): the replicated digest is REPLAY-STABLE
-/// with the qlog on — the crash-recovery replay of the payload-free raft log
+/// with the qlog on — the crash-recovery replay of the payload-free entries
 /// reproduces the live digest BYTE-FOR-BYTE, including `RetainedBytes`. This is
 /// the I2 fix: the reference entry carries the payload's frame LENGTH (not the
 /// payload), so apply computes `RetainedBytes` from the same value whether an
 /// `Append` is applied live (the writer hands apply the length-carrying form) or
 /// replayed from the log. Before the fix this test FAILS at "counters" — live
 /// computed `RetainedBytes` from the real payload, replay from an empty blob.
+///
+/// Phase C: with the qlog on the queue logs are the ONLY write-ahead log (the
+/// raft `log/` is no longer written), so the replay reads the entry records
+/// from them, exactly as `LocalReplicator::open` recovers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_replicated_digest_is_replay_stable_with_the_qlog_on() {
     const N: u64 = 60;
@@ -626,29 +633,56 @@ async fn the_replicated_digest_is_replay_stable_with_the_qlog_on() {
         digest_and_close(store)
     };
 
-    // 2. REPLAY: read the PAYLOAD-FREE raft log the live run wrote and apply it
-    //    into a FRESH applier configured for recovery (qlog on + writer-external),
-    //    simulating a crash restart. The payload lives only in the qlog; these
-    //    entries carry the frame LENGTH, so apply must derive `RetainedBytes` from
-    //    it exactly as the live path did.
+    // 2. REPLAY: read the PAYLOAD-FREE entry records the live run wrote into the
+    //    QUEUE LOGS — the WAL on the qlog path — the way `LocalReplicator::open`
+    //    does (`reopen_all`, then `scan_entries` from the store's durable index
+    //    + 1), and apply them into a FRESH applier configured for recovery (qlog
+    //    on + writer-external), simulating a crash restart onto an empty store.
+    //    The payload lives only in the qlog; these entries carry the frame
+    //    LENGTH, so apply must derive `RetainedBytes` from it exactly as the
+    //    live path did.
     let replay_dir = scratch("repl-replay-stable-fresh");
     let recovered = {
-        let (log, _rec) =
-            LogStore::open(&dir.join("log"), LogOptions::from_env()).expect("open raft log");
-        let mut entries: Vec<(u64, u64, crate::rsm::entry::Entry)> = Vec::new();
-        log.scan_from(1, &mut |index, term, body| {
-            entries.push((
-                index,
-                term,
-                crate::rsm::entry::decode_entry(body).expect("decode replayed entry"),
-            ));
-            Ok(())
-        })
-        .expect("scan raft log");
-
         let store = Arc::new(
             HeedStore::open(&replay_dir.join("store"), &store_opts()).expect("fresh store"),
         );
+        let from = store
+            .read(|r| r.durable_index())
+            .expect("read durable index")
+            + 1;
+        assert_eq!(from, 1, "a fresh store replays the whole history");
+
+        // Options mirror the segment writer's, as `LocalReplicator::open` sets
+        // them.
+        let so = seg_opts();
+        let mut qlogs = QLogSet::new(
+            dir.join("qlog"),
+            QLogOptions {
+                segment_bytes: so.segment_bytes,
+                fsync: match so.fsync {
+                    FsyncMode::Full => crate::rsm::qlog::Fsync::Full,
+                    FsyncMode::Data => crate::rsm::qlog::Fsync::Data,
+                },
+            },
+        );
+        qlogs.reopen_all().expect("reopen the queue logs");
+        let mut entries: Vec<(u64, crate::rsm::entry::Entry)> = Vec::new();
+        let scan = qlogs
+            .scan_entries(from, &mut |rec| {
+                entries.push((
+                    rec.seq,
+                    crate::rsm::entry::decode_entry(&rec.entry).expect("decode replayed entry"),
+                ));
+                Ok(())
+            })
+            .expect("scan the queue logs");
+        assert_eq!(
+            (scan.delivered, scan.next_seq, scan.stopped.as_deref()),
+            (N, N + 1, None),
+            "every proposed entry is replayable from the queue logs, gapless and complete"
+        );
+        drop(qlogs);
+
         {
             let recovery_cfg = apply::ApplyConfig {
                 qlog: true,
@@ -663,9 +697,15 @@ async fn the_replicated_digest_is_replay_stable_with_the_qlog_on() {
                 Arc::new(apply::NoNotify),
             )
             .expect("open recovery applier");
-            for (index, term, entry) in entries {
-                a.apply(&apply::Committed { index, term, entry })
-                    .expect("apply replayed entry");
+            // The queue logs carry no term: `LocalReplicator` replays at its
+            // single one, as it proposed.
+            for (index, entry) in entries {
+                a.apply(&apply::Committed {
+                    index,
+                    term: LOG_TERM,
+                    entry,
+                })
+                .expect("apply replayed entry");
             }
             settle(&mut a);
         }

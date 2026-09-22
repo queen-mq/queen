@@ -9,9 +9,12 @@
 //!
 //! - **[`a_store_commit_fsyncs_the_qlog_and_records_its_durable_index`]** — a
 //!   store commit (NO durable point) fsyncs the qlog and records
-//!   `meta::QLOG_DURABLE_INDEX` at the last Append's entry index; reopening
-//!   reconciles (the guard does not fire) and the acked records are readable
-//!   from the qlog after the reopen.
+//!   `meta::QLOG_DURABLE_INDEX` at the last Append's entry index — in the LIVE
+//!   store: Phase C keeps `meta` in RAM and persists it only at a durable
+//!   point, so a reopen finds the index the last durable point recorded while
+//!   the qlog, fsync'd at the later commit, is AHEAD of it; reopening reconciles
+//!   (the guard does not fire) and the acked records are readable from the qlog
+//!   after the reopen.
 //! - **[`recovery_refuses_when_the_qlog_is_behind_the_recorded_durable_index`]**
 //!   — the reconciliation is NOT vacuous: a store that records a qlog-durable
 //!   index ABOVE the qlog's real tail (the shape of a lost committed record once
@@ -103,16 +106,32 @@ fn append_script() -> Vec<Committed> {
     vec![e1, e2, e3]
 }
 
+/// `meta::QLOG_DURABLE_INDEX` as a reader sees it LIVE (Phase C: `meta` is a
+/// RAM table, read-uncommitted), from a thread of its own — the caller's thread
+/// holds the applier's write transaction, and LMDB allows one per thread.
+fn live_qlog_durable_index(store: &HeedStore) -> u64 {
+    std::thread::scope(|sc| {
+        sc.spawn(|| {
+            store
+                .read(|r| Ok(r.meta_u64(meta::QLOG_DURABLE_INDEX)?.unwrap_or(0)))
+                .expect("read the live qlog durable index")
+        })
+        .join()
+        .expect("reader thread")
+    })
+}
+
 #[test]
 fn a_store_commit_fsyncs_the_qlog_and_records_its_durable_index() {
     let dir = tmp_dir("qlog-wal-commit");
     std::fs::create_dir_all(&dir).expect("dir");
     let script = append_script();
 
-    // Apply the script and take a NON-DURABLE store commit only — no durable
-    // point. A3a fsyncs the qlog inside `commit_inner` (before the store commit)
-    // and records the durable index, so the qlog is crash-survivable at commit,
-    // not one durable point (~1 s) later.
+    // Entries 1–2 through a DURABLE point — Phase C's only commit that persists
+    // `meta`, `QLOG_DURABLE_INDEX` included — then entry 3 through a
+    // NON-DURABLE store commit only. A3a fsyncs the qlog inside `commit_inner`
+    // (before the store commit) and records the durable index, so the qlog is
+    // crash-survivable at commit, not one durable point (~1 s) later.
     {
         let store = HeedStore::open(&dir.join("store"), &store_opts()).expect("open store");
         let (mut a, _rec) = Applier::open(
@@ -123,27 +142,42 @@ fn a_store_commit_fsyncs_the_qlog_and_records_its_durable_index() {
             Arc::new(NoNotify),
         )
         .expect("open applier (qlog on)");
-        for c in &script {
-            a.apply(c).expect("apply");
-        }
+        a.apply(&script[0]).expect("apply entry 1");
+        a.apply(&script[1]).expect("apply entry 2");
+        assert_eq!(a.durable_point().expect("durable point"), 2);
+        a.apply(&script[2]).expect("apply entry 3");
         a.commit().expect("store commit");
+        assert_eq!(
+            live_qlog_durable_index(&store),
+            3,
+            "a store commit must record the qlog durable index at the last Append (entry 3), \
+             with no durable point"
+        );
         drop(a);
         store.close();
     }
 
-    // Reopen: the store records the qlog as durable through entry 3 (the last
-    // Append) WITHOUT any durable point having run — proof the fsync happened at
-    // the store commit — and `Applier::open` reconciles the reopened qlog's tail
-    // against it and succeeds.
+    // Reopen: the store is back EXACTLY at the durable point (entry 2) — the
+    // plain commit persisted nothing — and so is its record of the qlog. The
+    // qlog is AHEAD of that record (entry 3's record, fsync'd at the commit),
+    // which is the benign direction: it is the WAL recovery replays from. So
+    // `Applier::open` reconciles the reopened qlog's tail against it and
+    // succeeds.
     {
         let store = HeedStore::open(&dir.join("store"), &store_opts()).expect("reopen store");
-        let qdi = store
-            .read(|r| Ok(r.meta_u64(meta::QLOG_DURABLE_INDEX)?.unwrap_or(0)))
-            .expect("read qlog durable index");
+        let (applied, qdi) = store
+            .read(|r| {
+                Ok((
+                    r.applied_index()?,
+                    r.meta_u64(meta::QLOG_DURABLE_INDEX)?.unwrap_or(0),
+                ))
+            })
+            .expect("read the reopened recovery point");
         assert_eq!(
-            qdi, 3,
-            "a store commit must record the qlog durable index at the last Append (entry 3), \
-             with no durable point"
+            (applied, qdi),
+            (2, 2),
+            "the store reopens at the durable point with the qlog durable index it recorded; \
+             the plain commit of entry 3 persisted nothing"
         );
 
         let (a, rec) = Applier::open(
@@ -153,15 +187,16 @@ fn a_store_commit_fsyncs_the_qlog_and_records_its_durable_index() {
             cfg_qlog(),
             Arc::new(NoNotify),
         )
-        .expect("reopen reconciles: the qlog tail is not behind the recorded index");
-        assert!(
-            rec.applied_index >= 3,
-            "reopened with the committed entries (applied {})",
+        .expect("reopen reconciles: the qlog tail (3) is not behind the recorded index (2)");
+        assert_eq!(
+            rec.applied_index, 2,
+            "reopened at the durable point (applied {})",
             rec.applied_index
         );
 
-        // The acked records are readable from the qlog AFTER the reopen — the A3a
-        // property that lets A3b drop the raft-log payload.
+        // Both acked records are readable from the qlog AFTER the reopen —
+        // entry 3's with no durable point covering it: the store commit
+        // fsync'd it. The A3a property that lets A3b drop the raft-log payload.
         let reader = a.qlog_reader().expect("qlog reader is on");
         let qid = QLogReader::queue_id_of(TENANT, QUEUE);
         let r0 = reader
@@ -188,7 +223,8 @@ fn recovery_refuses_when_the_qlog_is_behind_the_recorded_durable_index() {
     std::fs::create_dir_all(&dir).expect("dir");
     let script = append_script();
 
-    // A normal qlog-on run: the qlog's real tail is entry 3.
+    // A normal qlog-on run through a durable point: the store is durably at
+    // entry 3 and the qlog's real tail is entry 3.
     {
         let store = HeedStore::open(&dir.join("store"), &store_opts()).expect("open store");
         let (mut a, _rec) = Applier::open(
@@ -202,7 +238,7 @@ fn recovery_refuses_when_the_qlog_is_behind_the_recorded_durable_index() {
         for c in &script {
             a.apply(c).expect("apply");
         }
-        a.commit().expect("store commit");
+        assert_eq!(a.durable_point().expect("durable point"), 3);
         drop(a);
         store.close();
     }
@@ -210,14 +246,16 @@ fn recovery_refuses_when_the_qlog_is_behind_the_recorded_durable_index() {
     // Forge the store's record of qlog durability to CLAIM a record the qlog does
     // not have (well past entry 3). This is exactly the on-disk shape of a lost
     // committed record once A3b makes the qlog the sole payload store: the store
-    // says "durable through 103", the qlog only has up to 3.
+    // says "durable through 103", the qlog only has up to 3. Phase C: `meta` is
+    // persisted only by a DURABLE commit, so that is what the forgery takes.
     {
         let store = HeedStore::open(&dir.join("store"), &store_opts()).expect("reopen store");
         {
             let mut w = store.write().expect("write handle");
             w.set_meta_u64(meta::QLOG_DURABLE_INDEX, 103)
                 .expect("forge qlog durable index");
-            w.commit().expect("commit forged meta");
+            w.durable_commit()
+                .expect("durable commit of the forged meta");
         }
         store.close();
     }

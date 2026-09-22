@@ -1,4 +1,5 @@
-//! The heed (LMDB) adapter, with the four pins of D9.
+//! The heed (LMDB) adapter, with the four pins of D9 — and, since Phase C, an
+//! in-RAM write-back cache over the hot keyspaces.
 //!
 //! Every pin is implemented here and named at its implementation:
 //!
@@ -22,11 +23,71 @@
 //! between tokio workers. That is pin 2's rule turned into a type, and
 //! [`HeedStore::read`]'s closure is what keeps it: the handle is borrowed for
 //! the length of one blocking call and cannot escape it.
+//!
+//! # Phase C: RAM keyspaces over an LMDB checkpoint
+//!
+//! LMDB's per-op copy-on-write churn on the hot keyspaces was the measured
+//! write floor (~34 MB/s on small-message shapes). In Phase C the per-queue
+//! logs are the write-ahead log — every entry is written, payload-free, into
+//! the queue logs it touches and fsynced before the answer — so LMDB no longer
+//! has to carry the latest value of every hot row on every commit: for those
+//! rows it is a CHECKPOINT store.
+//!
+//! - **RAM keyspaces** ([`Keyspace::is_ram`]: `meta`, `queues`, `groups`,
+//!   `partitions`, `partitions_by_key`, `queue_partitions`, `cursors`,
+//!   `leases_by_worker`, `pending`, `counters`, `request_ids`,
+//!   `request_expiry`) are served from one ordered map per keyspace
+//!   ([`RamTable`]), loaded IN FULL at [`HeedStore::open`] with no dirty key.
+//!   A write mutates the map under its write lock and marks the key dirty (a
+//!   dirty key whose value is absent is a delete). A read — from the apply
+//!   thread's write handle or from any read handle — sees the map LIVE.
+//! - **LMDB-direct keyspaces** (`garbage`, `partition_files`, `dlq`,
+//!   `dlq_by_pos`, `dedup`, `txns`, `seg_loc`, `files`) are exactly what they
+//!   were: rows in the open write transaction, committed on the §11.3 cadence.
+//!
+//! ## Commit semantics
+//!
+//! - [`super::Writes::commit`] (§11.3, `cycle(false)`) commits the LMDB
+//!   transaction — the LMDB-direct keyspaces ONLY. RAM keys stay dirty.
+//! - [`super::Writes::durable_commit`] (§11.4, `cycle(true)`; and every commit
+//!   when the store is opened `sync_every_commit`) FIRST writes every dirty RAM
+//!   key into the open transaction (its current value, or a delete), THEN
+//!   commits and syncs. Since the apply thread is the only writer and calls it
+//!   between entries, the LMDB image of the RAM keyspaces is a consistent
+//!   checkpoint as of that call.
+//!
+//! So after a crash the RAM keyspaces — `meta` included, which is where
+//! `applied_index` and `durable_index` live — reopen EXACTLY at the last
+//! durable checkpoint, and the replicator replays the entries after
+//! `durable_index` from the WAL. The LMDB-direct keyspaces can reopen AHEAD of
+//! that index (a non-durable commit that reached the page cache survives a
+//! `kill -9`), which the replay has to tolerate.
+//!
+//! ## Isolation
+//!
+//! RAM keyspaces are READ-UNCOMMITTED and live: a write by the apply thread is
+//! visible to every reader at once, before any commit, and a reader can
+//! observe an entry half-applied. LMDB-direct keyspaces keep their MVCC
+//! snapshot semantics (a read handle sees the last commit before it opened).
+//! A reader that mixes both — the planner — is correct because the batcher
+//! folds every not-yet-applied entry into its overlay (§7.2).
+//!
+//! ## Abort does NOT roll RAM back
+//!
+//! [`super::Writes::abort`] and dropping a [`HeedWrite`] throw the LMDB
+//! transaction away; they do not undo RAM writes, which stay dirty and reach
+//! the next checkpoint. Nothing relies on the rollback: apply POISONS itself
+//! on any failure and the process restarts, and recovery rebuilds from the
+//! checkpoint plus the WAL. A durable cycle that fails puts the keys it had
+//! taken back into the dirty sets, so nothing is ever silently dropped from
+//! the next checkpoint.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashSet};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use heed::types::Bytes;
 use heed::{Database, Env, EnvFlags, EnvOpenOptions, RwTxn, WithTls};
@@ -39,6 +100,13 @@ use super::{
 /// broker runs on (4 KiB on x86-64 Linux, 16 KiB on Apple silicon), so the
 /// rule never hands LMDB a size it silently rounds down.
 pub const MAP_ROUND: usize = 1 << 16;
+
+/// How many rows a RAM scan copies out (two `Arc` clones each) under the read
+/// lock at a time. The callback NEVER runs under the lock, so a slow callback
+/// cannot stall the apply thread's writes, and a callback that reads — or, on
+/// the apply thread, writes — the same keyspace cannot deadlock against it
+/// (`std`'s `RwLock` may block a recursive read behind a waiting writer).
+const RAM_SCAN_CHUNK: usize = 256;
 
 thread_local! {
     /// Pin 2. True while this thread is inside [`HeedStore::read`]. With
@@ -115,6 +183,161 @@ pub(crate) fn err(store: &HeedStore, e: heed::Error) -> StoreError {
 }
 
 // ---------------------------------------------------------------------------
+// RAM keyspaces (Phase C)
+// ---------------------------------------------------------------------------
+
+/// Keys and values are `Arc`s so that a reader can take a row out from under
+/// the lock for the price of a reference count — a scan's chunk, a `get`'s
+/// arena — and so that marking a key dirty never allocates.
+type RamKey = Arc<[u8]>;
+type RamVal = Arc<[u8]>;
+
+/// What one [`RamTable`]'s lock guards.
+struct RamRows {
+    /// The live rows, in `memcmp` order — LMDB's comparator, so every range
+    /// walk is the walk the LMDB keyspace would do.
+    map: BTreeMap<RamKey, RamVal>,
+    /// The keys changed since the last checkpoint. A key here whose value is
+    /// absent from `map` is a delete. Only the apply thread (the one writer)
+    /// touches it; readers never do.
+    dirty: HashSet<RamKey>,
+}
+
+/// One RAM keyspace: the live rows and their dirty set (module header).
+pub(crate) struct RamTable {
+    rows: RwLock<RamRows>,
+}
+
+impl RamTable {
+    fn loaded(rows: Vec<(RamKey, RamVal)>) -> RamTable {
+        RamTable {
+            rows: RwLock::new(RamRows {
+                // The rows come in key order off an LMDB cursor, so the
+                // collect's sort is a single linear pass before the bulk build.
+                map: rows.into_iter().collect(),
+                dirty: HashSet::new(),
+            }),
+        }
+    }
+
+    // A panic under the WRITE lock is an allocation failure inside one
+    // `BTreeMap`/`HashSet` operation, which leaves both structurally whole, so
+    // a poisoned lock is read through rather than turned into a second panic.
+    fn read(&self) -> RwLockReadGuard<'_, RamRows> {
+        self.rows.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn write(&self) -> RwLockWriteGuard<'_, RamRows> {
+        self.rows.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn get(&self, key: &[u8]) -> Option<RamVal> {
+        self.read().map.get(key).cloned()
+    }
+
+    fn put(&self, key: &[u8], val: RamVal) {
+        let old = {
+            let mut g = self.write();
+            let rows = &mut *g;
+            if let Some(slot) = rows.map.get_mut(key) {
+                let old = std::mem::replace(slot, val);
+                if !rows.dirty.contains(key) {
+                    // First change since the checkpoint: the dirty set shares
+                    // the map's key allocation.
+                    let k = match rows.map.get_key_value(key) {
+                        Some((k, _)) => k.clone(),
+                        None => Arc::from(key),
+                    };
+                    rows.dirty.insert(k);
+                }
+                Some(old)
+            } else {
+                let k: RamKey = Arc::from(key);
+                if !rows.dirty.contains(key) {
+                    rows.dirty.insert(k.clone());
+                }
+                rows.map.insert(k, val);
+                None
+            }
+        };
+        // The replaced value is freed outside the lock.
+        drop(old);
+    }
+
+    /// Returns the removed value (freed by the caller, outside the lock).
+    fn remove(&self, key: &[u8]) -> Option<RamVal> {
+        let mut g = self.write();
+        let rows = &mut *g;
+        let (k, v) = rows.map.remove_entry(key)?;
+        // Already dirty: `insert` keeps the set's copy and drops this one,
+        // which is never the last reference.
+        rows.dirty.insert(k);
+        Some(v)
+    }
+
+    /// Empty the keyspace: every row it held becomes a dirty delete, so the
+    /// checkpoint loses them at the next durable cycle and not before.
+    fn clear(&self) {
+        let old = {
+            let mut g = self.write();
+            let rows = &mut *g;
+            let old = std::mem::take(&mut rows.map);
+            for k in old.keys() {
+                if !rows.dirty.contains(&**k) {
+                    rows.dirty.insert(k.clone());
+                }
+            }
+            old
+        };
+        drop(old);
+    }
+
+    /// Take the dirty set, leaving an empty one (O(1) under the lock).
+    fn take_dirty(&self) -> HashSet<RamKey> {
+        std::mem::take(&mut self.write().dirty)
+    }
+
+    /// Put keys back into the dirty set: a durable cycle that did not happen.
+    fn restore_dirty(&self, keys: Vec<RamKey>) {
+        self.write().dirty.extend(keys);
+    }
+}
+
+/// Keep `v` alive for as long as the handle that owns `arena`, and hand out a
+/// slice of it borrowed for that long.
+///
+/// This is how `get_raw` keeps its `Option<&[u8]>` signature over a RAM row
+/// that the apply thread can replace or delete at any moment: the reader owns
+/// a reference to the value it was given.
+fn pin_in_arena(arena: &RefCell<Vec<RamVal>>, v: RamVal) -> &[u8] {
+    let p: *const [u8] = &*v;
+    arena.borrow_mut().push(v);
+    // SAFETY: `p` points into the heap allocation of the `Arc` just pushed
+    // into `arena`, and an `Arc`'s pointee never moves — growing the `Vec`
+    // moves the fat pointer, not the bytes. The allocation stays alive while
+    // `arena` holds that `Arc`, and `arena` only ever LOSES an element when
+    // (a) the handle that owns it is dropped, or (b) a `&mut self` method of
+    // [`HeedWrite`] clears it through `RefCell::get_mut`. Both need every
+    // `&self` borrow of the handle to have ended, and the returned slice is
+    // bounded by exactly such a borrow (the lifetime of `arena` here), so it
+    // can never outlive the `Arc` that keeps its bytes.
+    unsafe { &*p }
+}
+
+/// Whether `BTreeMap::range` accepts these bounds. It PANICS on an inverted
+/// range (and on an empty one with both ends excluded), where an LMDB cursor
+/// just yields nothing — so such a range is answered as empty, as LMDB does.
+fn range_is_walkable(lo: Bound<&[u8]>, hi: Bound<&[u8]>) -> bool {
+    match (lo, hi) {
+        (Bound::Unbounded, _) | (_, Bound::Unbounded) => true,
+        (Bound::Excluded(a), Bound::Excluded(b)) => a < b,
+        (Bound::Included(a) | Bound::Excluded(a), Bound::Included(b) | Bound::Excluded(b)) => {
+            a <= b
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The store
 // ---------------------------------------------------------------------------
 
@@ -122,6 +345,9 @@ pub struct HeedStore {
     env: Env<WithTls>,
     /// Indexed by [`Keyspace::slot`].
     dbs: Vec<Database<Bytes, Bytes>>,
+    /// Indexed by [`Keyspace::slot`]; `Some` exactly for the RAM keyspaces
+    /// ([`Keyspace::is_ram`]). See the module header.
+    ram: Vec<Option<RamTable>>,
     dir: PathBuf,
     metrics: StoreMetrics,
     max_key: usize,
@@ -150,6 +376,9 @@ impl HeedStore {
     /// from the rule of §11.8 ([`StoreOpts::map_size_for`]) applied to what the
     /// data file already holds, so a store that has grown reopens with room to
     /// apply what the Raft log still holds.
+    ///
+    /// Every RAM keyspace is then read IN FULL into its [`RamTable`] (one read
+    /// transaction), which is the checkpoint the WAL replays on top of.
     pub fn open(dir: &Path, opts: &StoreOpts) -> Result<HeedStore> {
         std::fs::create_dir_all(dir)
             .map_err(|e| StoreError::Io(format!("{}: {e}", dir.display())))?;
@@ -204,11 +433,36 @@ impl HeedStore {
         env.force_sync()
             .map_err(|e| StoreError::Mdb(format!("sync keyspaces: {e}")))?;
 
+        // Phase C: load the checkpoint of every RAM keyspace. No key is dirty
+        // afterwards — the RAM image IS the LMDB image.
+        let mut ram: Vec<Option<RamTable>> = (0..dbs.len()).map(|_| None).collect();
+        {
+            let r = env
+                .read_txn()
+                .map_err(|e| StoreError::Mdb(format!("open load txn: {e}")))?;
+            for ks in Keyspace::ALL {
+                if !ks.is_ram() {
+                    continue;
+                }
+                let mut rows: Vec<(RamKey, RamVal)> = Vec::new();
+                let it = dbs[ks.slot()]
+                    .iter(&r)
+                    .map_err(|e| StoreError::Mdb(format!("load {}: {e}", ks.name())))?;
+                for row in it {
+                    let (k, v) =
+                        row.map_err(|e| StoreError::Mdb(format!("load {}: {e}", ks.name())))?;
+                    rows.push((Arc::from(k), Arc::from(v)));
+                }
+                ram[ks.slot()] = Some(RamTable::loaded(rows));
+            }
+        }
+
         let max_key = env.max_key_size();
         let max_readers = env.max_readers();
         Ok(HeedStore {
             env,
             dbs,
+            ram,
             dir: dir.to_path_buf(),
             metrics: StoreMetrics::default(),
             max_key,
@@ -225,6 +479,28 @@ impl HeedStore {
     #[cfg(test)]
     pub fn fail_next_sync(&self) {
         self.fail_sync.store(true, Ordering::Relaxed);
+    }
+
+    /// TEST ONLY: how many keys of a RAM keyspace are dirty (changed since the
+    /// last checkpoint). 0 for an LMDB-direct keyspace.
+    #[cfg(test)]
+    pub fn dirty_len(&self, ks: Keyspace) -> usize {
+        self.ram(ks).map(|t| t.read().dirty.len()).unwrap_or(0)
+    }
+
+    /// TEST ONLY: the row as the LMDB image holds it — for a RAM keyspace, the
+    /// CHECKPOINT, bypassing the live table. Opens its own read transaction,
+    /// so call it from a thread that holds no other one.
+    #[cfg(test)]
+    pub fn checkpoint_get(&self, ks: Keyspace, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let _guard = ReadGuard::acquire(&self.metrics)?;
+        let txn = self.env.read_txn().map_err(|e| err(self, e))?;
+        let v = self
+            .db(ks)
+            .get(&txn, key)
+            .map_err(|e| err(self, e))?
+            .map(|v| v.to_vec());
+        Ok(v)
     }
 
     /// `mdb_env_sync(env, 1)`, with the test hook above in front of it. This is
@@ -254,6 +530,9 @@ impl HeedStore {
     /// REOPEN inside one process — recovery tests, and the snapshot install of
     /// §11.6 which replaces the live state directory — has to go through here
     /// rather than through `drop`, which does not wait.
+    ///
+    /// RAM rows still dirty are NOT written: closing is a crash as far as the
+    /// RAM keyspaces are concerned, and they reopen at the last checkpoint.
     pub fn close(self) {
         let HeedStore { env, dbs, .. } = self;
         drop(dbs);
@@ -272,6 +551,11 @@ impl HeedStore {
         &self.dbs[ks.slot()]
     }
 
+    /// The live table of a RAM keyspace, `None` for an LMDB-direct one.
+    fn ram(&self, ks: Keyspace) -> Option<&RamTable> {
+        self.ram[ks.slot()].as_ref()
+    }
+
     fn check_key(&self, ks: Keyspace, key: &[u8]) -> Result<()> {
         if key.len() > self.max_key {
             StoreMetrics::inc(&self.metrics.key_too_long, 1);
@@ -283,14 +567,60 @@ impl HeedStore {
         }
         Ok(())
     }
+
+    /// The checkpoint half of a durable cycle: write every dirty RAM key into
+    /// `txn` — its current value, or a delete when it is gone — in key order.
+    ///
+    /// The keys taken are appended to `taken` BEFORE they are written, so a
+    /// caller whose cycle fails at any later step (a put here, the commit, the
+    /// sync) can hand them back with [`HeedStore::restore_dirty`].
+    fn drain_dirty(&self, txn: &mut RwTxn<'_>, taken: &mut Vec<(usize, Vec<RamKey>)>) -> Result<()> {
+        for ks in Keyspace::ALL {
+            let Some(t) = self.ram(ks) else { continue };
+            let set = t.take_dirty();
+            if set.is_empty() {
+                continue;
+            }
+            let mut keys: Vec<RamKey> = set.into_iter().collect();
+            // Key order: LMDB's B-tree is written leaf after leaf, not at
+            // random.
+            keys.sort_unstable();
+            taken.push((ks.slot(), keys));
+            let keys = &taken[taken.len() - 1].1;
+            let db = *self.db(ks);
+            // A read lock is enough: the caller is the only writer. Readers
+            // are not held up by it.
+            let g = t.read();
+            for k in keys {
+                match g.map.get(&**k) {
+                    Some(v) => db.put(txn, k, v).map_err(|e| err(self, e))?,
+                    None => {
+                        db.delete(txn, k).map_err(|e| err(self, e))?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Hand the keys a failed durable cycle had taken back to their dirty
+    /// sets, so the next checkpoint still carries them.
+    fn restore_dirty(&self, taken: Vec<(usize, Vec<RamKey>)>) {
+        for (slot, keys) in taken {
+            if let Some(t) = self.ram[slot].as_ref() {
+                t.restore_dirty(keys);
+            }
+        }
+    }
 }
 
 // `HeedStore` is `Send + Sync` by its fields — heed's `Env` and `Database` are
-// both — so the AUTO impls are what `Store: Send + Sync` is satisfied by, and
-// there is deliberately no `unsafe impl` here: one would keep compiling (and
-// keep asserting thread safety) if a field that is not `Sync` were ever added.
-// The transactions are the ones that are not `Send`, which is what keeps a
-// read inside one blocking call (pin 2).
+// both, and so is an `RwLock` over maps of `Arc<[u8]>` — so the AUTO impls are
+// what `Store: Send + Sync` is satisfied by, and there is deliberately no
+// `unsafe impl` here: one would keep compiling (and keep asserting thread
+// safety) if a field that is not `Sync` were ever added. The transactions are
+// the ones that are not `Send`, which is what keeps a read inside one blocking
+// call (pin 2).
 
 impl Store for HeedStore {
     type Read<'s> = HeedRead<'s>;
@@ -301,7 +631,11 @@ impl Store for HeedStore {
         let _guard = ReadGuard::acquire(&self.metrics)?;
         let txn = self.env.read_txn().map_err(|e| err(self, e))?;
         StoreMetrics::inc(&self.metrics.read_txns, 1);
-        let handle = HeedRead { store: self, txn };
+        let handle = HeedRead {
+            store: self,
+            txn,
+            arena: RefCell::new(Vec::new()),
+        };
         f(&handle)
     }
 
@@ -329,6 +663,7 @@ impl Store for HeedStore {
             store: self,
             txn: Some(txn),
             poison: None,
+            arena: RefCell::new(Vec::new()),
         })
     }
 
@@ -356,6 +691,9 @@ impl Store for HeedStore {
         // if it fails, the bytes are not on the platter and the caller must
         // report no durable index. Same classification as
         // [`super::Writes::durable_commit`], for the same reason.
+        //
+        // It syncs what LMDB has COMMITTED; it does not checkpoint the RAM
+        // keyspaces (only a durable cycle of the write handle does).
         self.sync_now().map_err(|e| {
             StoreMetrics::inc(&self.metrics.commit_failed, 1);
             StoreError::CommitFailed {
@@ -367,18 +705,67 @@ impl Store for HeedStore {
 }
 
 // ---------------------------------------------------------------------------
-// The read handle
+// Range scans
 // ---------------------------------------------------------------------------
 
-/// A read transaction. Cannot be `Send` (thread-local reader slots) and cannot
-/// outlive the [`Store::read`] call that made it.
-pub struct HeedRead<'s> {
-    store: &'s HeedStore,
-    txn: heed::RoTxn<'s, WithTls>,
+/// The two ends of a range scan, shared by the LMDB walk and the RAM walk so a
+/// scan behaves identically over either kind of keyspace.
+///
+/// THE PREFIX IS A RANGE, not just a stop condition. Walking from one end of
+/// the whole keyspace and breaking at the first key that does not match is
+/// right only when the prefix's rows happen to sit at that end: a reverse scan
+/// for tenant `t1`'s newest dead letters would otherwise start on `t2`'s last
+/// row and answer an EMPTY list. So both ends of the range are bounded by the
+/// prefix, and `from` is CLAMPED into it; the walks keep a `break` as a belt
+/// over the bounds.
+///
+/// `end` is [`super::prefix_end`] of a non-empty prefix (`None` for an empty
+/// prefix, or one that is all `0xFF`).
+fn scan_bounds<'a>(
+    from: &'a [u8],
+    prefix: &'a [u8],
+    end: Option<&'a [u8]>,
+    rev: bool,
+) -> (Bound<&'a [u8]>, Bound<&'a [u8]>) {
+    let lo: Bound<&[u8]> = match (from.is_empty(), prefix.is_empty()) {
+        (true, true) => Bound::Unbounded,
+        (true, false) => Bound::Included(prefix),
+        // In reverse, `from` is the HIGH end (see `hi`); the walk runs down to
+        // the start of the keyspace. Bounding the low end at `from` too made
+        // the range `[from, from]`: a reverse scan returned at most the one row
+        // AT `from` (pre-existing; found by the Phase C reference-walk test).
+        (false, true) if rev => Bound::Unbounded,
+        (false, true) => Bound::Included(from),
+        // Forward with a resume point below the prefix range starts at the
+        // prefix; in reverse, `from` bounds the other end and the low end is
+        // the prefix itself.
+        (false, false) => {
+            if rev || from < prefix {
+                Bound::Included(prefix)
+            } else {
+                Bound::Included(from)
+            }
+        }
+    };
+    let hi: Bound<&[u8]> = if rev && !from.is_empty() {
+        match end {
+            // A `from` at or past the end of the prefix range is clamped to
+            // it, so the walk begins on the prefix's last row.
+            Some(e) if from >= e => Bound::Excluded(e),
+            _ => Bound::Included(from),
+        }
+    } else {
+        match end {
+            Some(e) => Bound::Excluded(e),
+            None => Bound::Unbounded,
+        }
+    };
+    (lo, hi)
 }
 
-/// One walk over a range, shared by the read and the write handle so a scan
-/// behaves identically whether the apply thread or a reader runs it.
+/// One walk over an LMDB-direct keyspace, shared by the read and the write
+/// handle so a scan behaves identically whether the apply thread or a reader
+/// runs it.
 ///
 /// Eight arguments because that is the range contract of [`super::Reads`] —
 /// keyspace, start, prefix, limit, direction and the callback — plus the store
@@ -401,47 +788,12 @@ fn scan_with<'t>(
     let db = store.db(ks);
     let mut n = 0usize;
 
-    // THE PREFIX IS A RANGE, not just a stop condition. Walking from one end
-    // of the whole keyspace and breaking at the first key that does not match
-    // is right only when the prefix's rows happen to sit at that end: a
-    // reverse scan for tenant `t1`'s newest dead letters would otherwise start
-    // on `t2`'s last row and answer an EMPTY list. So both ends of the range
-    // are bounded by the prefix, and `from` is CLAMPED into it; the `break`
-    // below stays as a belt over the bounds.
     let end = if prefix.is_empty() {
         None
     } else {
         super::prefix_end(prefix)
     };
-    let lo: Bound<&[u8]> = match (from.is_empty(), prefix.is_empty()) {
-        (true, true) => Bound::Unbounded,
-        (true, false) => Bound::Included(prefix),
-        (false, true) => Bound::Included(from),
-        // Forward with a resume point below the prefix range starts at the
-        // prefix; in reverse, `from` bounds the other end and the low end is
-        // the prefix itself.
-        (false, false) => {
-            if rev || from < prefix {
-                Bound::Included(prefix)
-            } else {
-                Bound::Included(from)
-            }
-        }
-    };
-    let hi: Bound<&[u8]> = if rev && !from.is_empty() {
-        match end.as_deref() {
-            // A `from` at or past the end of the prefix range is clamped to
-            // it, so the walk begins on the prefix's last row.
-            Some(e) if from >= e => Bound::Excluded(e),
-            _ => Bound::Included(from),
-        }
-    } else {
-        match end.as_deref() {
-            Some(e) => Bound::Excluded(e),
-            None => Bound::Unbounded,
-        }
-    };
-    let range = (lo, hi);
+    let range = scan_bounds(from, prefix, end.as_deref(), rev);
 
     macro_rules! walk {
         ($it:expr) => {{
@@ -469,6 +821,93 @@ fn scan_with<'t>(
     Ok(n)
 }
 
+/// The same walk over a RAM keyspace, with EXACTLY [`scan_with`]'s bounds,
+/// prefix belt, `limit` (a limit of 0 still hands over the first row, as the
+/// LMDB walk does) and early stop.
+///
+/// The rows are copied out in chunks of [`RAM_SCAN_CHUNK`] under the read lock
+/// and handed to `cb` with the lock released; the next chunk resumes strictly
+/// past the last key handed over. Every key is therefore seen at most once and
+/// in order, each with its value as of its chunk — the live, read-uncommitted
+/// view the module header describes.
+#[allow(clippy::too_many_arguments)]
+fn ram_scan(
+    store: &HeedStore,
+    table: &RamTable,
+    ks: Keyspace,
+    from: &[u8],
+    prefix: &[u8],
+    limit: usize,
+    rev: bool,
+    cb: &mut dyn FnMut(&[u8], &[u8]) -> bool,
+) -> Result<usize> {
+    if !from.is_empty() {
+        store.check_key(ks, from)?;
+    }
+    let end = if prefix.is_empty() {
+        None
+    } else {
+        super::prefix_end(prefix)
+    };
+    let (lo, hi) = scan_bounds(from, prefix, end.as_deref(), rev);
+    let want = limit.max(1);
+    let mut n = 0usize;
+    let mut buf: Vec<(RamKey, RamVal)> = Vec::with_capacity(want.min(RAM_SCAN_CHUNK));
+    let mut last: Option<RamKey> = None;
+    loop {
+        let take = (want - n).min(RAM_SCAN_CHUNK);
+        {
+            let (clo, chi) = match (&last, rev) {
+                (None, _) => (lo, hi),
+                (Some(k), false) => (Bound::Excluded(&**k), hi),
+                (Some(k), true) => (lo, Bound::Excluded(&**k)),
+            };
+            if !range_is_walkable(clo, chi) {
+                break;
+            }
+            let g = table.read();
+            let it = g.map.range::<[u8], _>((clo, chi));
+            if rev {
+                buf.extend(it.rev().take(take).map(|(k, v)| (k.clone(), v.clone())));
+            } else {
+                buf.extend(it.take(take).map(|(k, v)| (k.clone(), v.clone())));
+            }
+        }
+        let exhausted = buf.len() < take;
+        for (k, v) in buf.drain(..) {
+            if !prefix.is_empty() && !k.starts_with(prefix) {
+                return Ok(n);
+            }
+            n += 1;
+            if !cb(&k, &v) || n >= want {
+                return Ok(n);
+            }
+            last = Some(k);
+        }
+        if exhausted {
+            break;
+        }
+    }
+    Ok(n)
+}
+
+// ---------------------------------------------------------------------------
+// The read handle
+// ---------------------------------------------------------------------------
+
+/// A read transaction. Cannot be `Send` (thread-local reader slots) and cannot
+/// outlive the [`Store::read`] call that made it.
+///
+/// LMDB-direct keyspaces are read from the transaction's snapshot; RAM
+/// keyspaces from the live tables (module header).
+pub struct HeedRead<'s> {
+    store: &'s HeedStore,
+    txn: heed::RoTxn<'s, WithTls>,
+    /// The RAM values this handle has returned from `get_raw`, kept alive for
+    /// as long as the handle ([`pin_in_arena`]).
+    arena: RefCell<Vec<RamVal>>,
+}
+
 impl super::Reads for HeedRead<'_> {
     fn max_key_len(&self) -> usize {
         self.store.max_key
@@ -476,6 +915,9 @@ impl super::Reads for HeedRead<'_> {
 
     fn get_raw(&self, ks: Keyspace, key: &[u8]) -> Result<Option<&[u8]>> {
         self.store.check_key(ks, key)?;
+        if let Some(t) = self.store.ram(ks) {
+            return Ok(t.get(key).map(|v| pin_in_arena(&self.arena, v)));
+        }
         self.store
             .db(ks)
             .get(&self.txn, key)
@@ -490,6 +932,9 @@ impl super::Reads for HeedRead<'_> {
         limit: usize,
         cb: &mut dyn FnMut(&[u8], &[u8]) -> bool,
     ) -> Result<usize> {
+        if let Some(t) = self.store.ram(ks) {
+            return ram_scan(self.store, t, ks, from, prefix, limit, false, cb);
+        }
         scan_with(self.store, &self.txn, ks, from, prefix, limit, false, cb)
     }
 
@@ -501,6 +946,9 @@ impl super::Reads for HeedRead<'_> {
         limit: usize,
         cb: &mut dyn FnMut(&[u8], &[u8]) -> bool,
     ) -> Result<usize> {
+        if let Some(t) = self.store.ram(ks) {
+            return ram_scan(self.store, t, ks, from, prefix, limit, true, cb);
+        }
         scan_with(self.store, &self.txn, ks, from, prefix, limit, true, cb)
     }
 }
@@ -514,6 +962,9 @@ impl super::Reads for HeedRead<'_> {
 /// It stays open ACROSS entries and is committed on the cadence of §11.3, so
 /// [`super::Writes::commit`] ends one transaction and opens the next rather
 /// than consuming the handle.
+///
+/// RAM keyspaces are written straight into the live tables; see the module
+/// header for what a commit, a durable commit and an abort mean for them.
 pub struct HeedWrite<'s> {
     store: &'s HeedStore,
     /// `None` only when the handle is poisoned (a commit that did not happen,
@@ -524,6 +975,12 @@ pub struct HeedWrite<'s> {
     /// answers the SAME fatal error instead of a vague "the write transaction
     /// is closed", which `fatal()` would read as continuable.
     poison: Option<StoreError>,
+    /// The RAM values `get_raw` has returned since the last `&mut self` call,
+    /// kept alive for the `&self` borrows they were returned under
+    /// ([`pin_in_arena`]). Every `&mut self` method clears it first — no
+    /// borrow can be outstanding then — so it never grows past one run of
+    /// reads.
+    arena: RefCell<Vec<RamVal>>,
 }
 
 impl Drop for HeedWrite<'_> {
@@ -533,6 +990,9 @@ impl Drop for HeedWrite<'_> {
         // open a window in which the next caller passes the guard and then
         // blocks inside LMDB's writer mutex on this very transaction — the
         // deadline-less wait the guard exists to prevent.
+        //
+        // RAM writes are NOT undone: they stay dirty for the next checkpoint
+        // (module header).
         if let Some(txn) = self.txn.take() {
             txn.abort();
         }
@@ -550,6 +1010,27 @@ impl<'s> HeedWrite<'s> {
         // borrowed mutably, so the error is built first.
         let e = self.poisoned();
         self.txn.as_mut().ok_or(e)
+    }
+
+    /// The poison check a RAM access makes in place of borrowing the
+    /// transaction: a dead handle answers its fatal error for every keyspace.
+    fn usable(&self) -> Result<()> {
+        if self.txn.is_none() {
+            return Err(self.poisoned());
+        }
+        Ok(())
+    }
+
+    /// Drop every value `get_raw` handed out. Only callable with `&mut self`,
+    /// i.e. when no slice borrowed from `&self` can still be alive.
+    fn release_arena(&mut self) {
+        self.arena.get_mut().clear();
+    }
+
+    /// TEST ONLY: how many RAM values the arena is holding.
+    #[cfg(test)]
+    pub fn arena_len(&self) -> usize {
+        self.arena.borrow().len()
     }
 
     /// What a poisoned handle answers. Never `None` in practice: `txn` is only
@@ -581,45 +1062,51 @@ impl<'s> HeedWrite<'s> {
 
     /// End the open transaction and start the next one.
     ///
-    /// Both legs of a durable point are checked: `mdb_txn_commit` and then
-    /// `mdb_env_sync(env, 1)`. A failure in either one means the durable point
-    /// did not happen, and the caller must NOT report a durable index for it
-    /// (§11.4 step 3) — reporting one lets the replicator truncate its log
-    /// behind a point that is not on the platter, which a later crash turns
-    /// into acknowledged effects no replay can bring back (I4, I11). On Linux
-    /// the kernel consumes the fsync error and drops the dirty pages, so the
-    /// next sync succeeds silently: this return value is the only notice.
+    /// NON-DURABLE (`durable == false`, and the store not opened
+    /// `sync_every_commit`): commit the LMDB transaction, which carries the
+    /// LMDB-direct keyspaces only. RAM keys stay dirty.
+    ///
+    /// DURABLE: first drain every dirty RAM key into the transaction, then
+    /// commit, then sync — the checkpoint (module header). Both legs of a
+    /// durable point are checked: `mdb_txn_commit` and then
+    /// `mdb_env_sync(env, 1)`. A failure in either one (or in the drain)
+    /// means the durable point did not happen, and the caller must NOT report
+    /// a durable index for it (§11.4 step 3) — reporting one lets the
+    /// replicator truncate its log behind a point that is not on the platter,
+    /// which a later crash turns into acknowledged effects no replay can bring
+    /// back (I4, I11). On Linux the kernel consumes the fsync error and drops
+    /// the dirty pages, so the next sync succeeds silently: this return value
+    /// is the only notice. The drained keys go back to their dirty sets on any
+    /// failure.
     fn cycle(&mut self, durable: bool) -> Result<()> {
-        // PHASE-C PROTOTYPE (one-fsync): LMDB is the SECOND fsync domain (its
-        // `mdb_env_sync` at the durable point, MDB_NOSYNC otherwise). With
-        // QUEEN_RAFT_STORE_NOSYNC=1 we SKIP that sync so the per-queue qlog fsync
-        // (writer, per group) is the ONE fsync — like PG's single WAL flush.
-        // Metadata durability then drops to at-least-once on power loss (rebuilt
-        // from the log = Phase C recovery, prototype-lossy). Default off = today.
-        static NOSYNC: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
-            matches!(
-                std::env::var("QUEEN_RAFT_STORE_NOSYNC").as_deref(),
-                Ok("1") | Ok("true") | Ok("on")
-            )
-        });
+        self.release_arena();
         let durable_leg = durable || self.store.sync_every_commit;
-        let Some(txn) = self.txn.take() else {
+        let Some(mut txn) = self.txn.take() else {
             return Err(self.poisoned());
         };
+        let mut taken: Vec<(usize, Vec<RamKey>)> = Vec::new();
+        if durable_leg {
+            if let Err(inner) = self.store.drain_dirty(&mut txn, &mut taken) {
+                txn.abort();
+                self.store.restore_dirty(taken);
+                return Err(self.commit_failed(true, inner));
+            }
+        }
         if let Err(e) = txn.commit() {
             let inner = err(self.store, e);
+            self.store.restore_dirty(taken);
             return Err(self.commit_failed(durable_leg, inner));
         }
         if durable_leg {
-            if !*NOSYNC {
-                if let Err(inner) = self.store.sync_now() {
-                    return Err(self.commit_failed(true, inner));
-                }
+            if let Err(inner) = self.store.sync_now() {
+                self.store.restore_dirty(taken);
+                return Err(self.commit_failed(true, inner));
             }
             StoreMetrics::inc(&self.store.metrics.durable_commits, 1);
         } else {
             StoreMetrics::inc(&self.store.metrics.commits, 1);
         }
+        drop(taken);
         let next = match self.store.env.write_txn() {
             Ok(t) => t,
             Err(e) => {
@@ -632,10 +1119,18 @@ impl<'s> HeedWrite<'s> {
         Ok(())
     }
 
-    /// Empty one keyspace in O(1) (`mdb_drop` with `del = 0`). Used by
+    /// Empty one keyspace. LMDB-direct: `mdb_drop` with `del = 0`, O(1). RAM:
+    /// the table empties at once and every row it held becomes a dirty delete,
+    /// so the checkpoint loses them at the next durable cycle. Used by
     /// [`super::Writes::clear_node_local`].
     fn clear(&mut self, ks: Keyspace) -> Result<()> {
+        self.release_arena();
         let store = self.store;
+        if let Some(t) = store.ram(ks) {
+            self.usable()?;
+            t.clear();
+            return Ok(());
+        }
         let db = *store.db(ks);
         let txn = self.txn_mut()?;
         db.clear(txn).map_err(|e| err(store, e))
@@ -649,6 +1144,10 @@ impl super::Reads for HeedWrite<'_> {
 
     fn get_raw(&self, ks: Keyspace, key: &[u8]) -> Result<Option<&[u8]>> {
         self.store.check_key(ks, key)?;
+        if let Some(t) = self.store.ram(ks) {
+            self.usable()?;
+            return Ok(t.get(key).map(|v| pin_in_arena(&self.arena, v)));
+        }
         self.store
             .db(ks)
             .get(self.txn()?, key)
@@ -663,7 +1162,11 @@ impl super::Reads for HeedWrite<'_> {
         limit: usize,
         cb: &mut dyn FnMut(&[u8], &[u8]) -> bool,
     ) -> Result<usize> {
-        scan_with(self.store, self.txn()?, ks, from, prefix, limit, false, cb)
+        let txn = self.txn()?;
+        if let Some(t) = self.store.ram(ks) {
+            return ram_scan(self.store, t, ks, from, prefix, limit, false, cb);
+        }
+        scan_with(self.store, txn, ks, from, prefix, limit, false, cb)
     }
 
     fn scan_rev_raw(
@@ -674,31 +1177,48 @@ impl super::Reads for HeedWrite<'_> {
         limit: usize,
         cb: &mut dyn FnMut(&[u8], &[u8]) -> bool,
     ) -> Result<usize> {
-        scan_with(self.store, self.txn()?, ks, from, prefix, limit, true, cb)
+        let txn = self.txn()?;
+        if let Some(t) = self.store.ram(ks) {
+            return ram_scan(self.store, t, ks, from, prefix, limit, true, cb);
+        }
+        scan_with(self.store, txn, ks, from, prefix, limit, true, cb)
     }
 }
 
 impl super::Writes for HeedWrite<'_> {
     fn put_raw(&mut self, ks: Keyspace, key: &[u8], val: &[u8]) -> Result<()> {
+        self.release_arena();
         self.store.check_key(ks, key)?;
         let store = self.store;
-        let db = *store.db(ks);
         let n = (key.len() + val.len()) as u64;
-        let txn = self.txn_mut()?;
-        db.put(txn, key, val).map_err(|e| err(store, e))?;
-        StoreMetrics::inc(&self.store.metrics.rows_put, 1);
-        StoreMetrics::inc(&self.store.metrics.logical_bytes, n);
+        if let Some(t) = store.ram(ks) {
+            self.usable()?;
+            t.put(key, Arc::from(val));
+        } else {
+            let db = *store.db(ks);
+            let txn = self.txn_mut()?;
+            db.put(txn, key, val).map_err(|e| err(store, e))?;
+        }
+        StoreMetrics::inc(&store.metrics.rows_put, 1);
+        StoreMetrics::inc(&store.metrics.logical_bytes, n);
         Ok(())
     }
 
     fn del_raw(&mut self, ks: Keyspace, key: &[u8]) -> Result<bool> {
+        self.release_arena();
         self.store.check_key(ks, key)?;
         let store = self.store;
-        let db = *store.db(ks);
-        let txn = self.txn_mut()?;
-        let had = db.delete(txn, key).map_err(|e| err(store, e))?;
+        let had = if let Some(t) = store.ram(ks) {
+            self.usable()?;
+            // The removed value is freed here, outside the table's lock.
+            t.remove(key).is_some()
+        } else {
+            let db = *store.db(ks);
+            let txn = self.txn_mut()?;
+            db.delete(txn, key).map_err(|e| err(store, e))?
+        };
         if had {
-            StoreMetrics::inc(&self.store.metrics.rows_deleted, 1);
+            StoreMetrics::inc(&store.metrics.rows_deleted, 1);
         }
         Ok(had)
     }
@@ -711,6 +1231,7 @@ impl super::Writes for HeedWrite<'_> {
         limit: usize,
     ) -> Result<(usize, Option<Vec<u8>>)> {
         use super::Reads;
+        self.release_arena();
         // Collect first, delete second: the iterator borrows the transaction
         // immutably and `delete` needs it mutably. `limit` bounds the buffer,
         // which is what makes a `DeleteChunk` bounded (§5.2 rules).
@@ -745,11 +1266,14 @@ impl super::Writes for HeedWrite<'_> {
     }
 
     fn abort(&mut self) -> Result<()> {
+        self.release_arena();
         if self.poison.is_some() {
             // Nothing to throw away, and the next transaction must not make a
             // failed commit look survivable.
             return Err(self.poisoned());
         }
+        // Throws away the LMDB-direct writes only: RAM writes are not undone
+        // (module header).
         if let Some(txn) = self.txn.take() {
             txn.abort();
         }
@@ -766,6 +1290,7 @@ impl super::Writes for HeedWrite<'_> {
     }
 
     fn clear_node_local(&mut self) -> Result<()> {
+        self.release_arena();
         for ks in Keyspace::ALL {
             if ks.scope() == Scope::NodeLocal {
                 self.clear(ks)?;

@@ -529,9 +529,9 @@ impl Default for ApplyConfig {
             // one-line switch when the package lands.
             batch_counters: true,
             pending_transitions: true, // PLAN_RAFT_DRAIN_FIX P2.1: ON by default
-            // Phase A1 shadow: off by default, so an unset knob is byte-for-byte
-            // today's behaviour and no `qlog/` directory is ever created.
-            qlog: false,
+            // Phase C: the per-queue logs ARE the WAL — on by default
+            // (`QUEEN_RAFT_QLOG=0` keeps the pre-qlog raft-log path).
+            qlog: true,
             // A3b: apply owns the qlog by default (the unit-test path); the
             // `LocalReplicator` sets this true so the WRITER owns it.
             qlog_writer_external: false,
@@ -1357,11 +1357,15 @@ impl<'s, S: Store> Applier<'s, S> {
         // (NA-QLOG-I1). On the live path the external writer fsync'd this entry's
         // qlog record BEFORE the entry reached apply, so it is durable by the time
         // this index names it. Only when the qlog knob is on (else no qlog).
+        // Phase C: with the WRITER owning the queue logs, EVERY entry is in them
+        // (a `REC_ENTRY` record in each queue log it touches, fsync'd before
+        // apply), so the qlog-durable index names every entry, not only appends.
         if self.cfg.qlog
-            && c.entry
-                .effects
-                .iter()
-                .any(|e| matches!(e, Effect::Append { .. }))
+            && (self.cfg.qlog_writer_external
+                || c.entry
+                    .effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::Append { .. })))
         {
             self.last_append_index = self.last_append_index.max(c.index);
         }
@@ -1382,7 +1386,6 @@ impl<'s, S: Store> Applier<'s, S> {
         self.last_now_us = c.entry.now_us;
         self.next_pid += pids_assigned;
         self.kv_version_next += kv_versions_assigned;
-        self.writes.set_applied(c.index, c.term)?;
         self.writes
             .set_meta_i64(meta::LAST_NOW_US, c.entry.now_us)?;
         // Only when an `Append` moved it: this is a random put, and an entry
@@ -1398,6 +1401,13 @@ impl<'s, S: Store> Applier<'s, S> {
             self.writes
                 .set_meta_u64(meta::KV_VERSION_NEXT, self.kv_version_next)?;
         }
+        // Phase C: the applied index is the entry's LAST write. The hot
+        // keyspaces are RAM and LIVE (no snapshot), and the planner reads
+        // `applied_index` FIRST and folds every entry above it: an index that
+        // names this entry must imply every other write of it — above all
+        // `NEXT_PID` — is already visible, or a planner reading in between would
+        // neither fold this entry nor see its pids, and could mint a duplicate.
+        self.writes.set_applied(c.index, c.term)?;
         self.dirty = true;
         self.entries_since_commit += 1;
         self.stats.entries += 1;
@@ -1459,7 +1469,8 @@ impl<'s, S: Store> Applier<'s, S> {
                 // carried forward on every later upsert, so a configuration
                 // change (conflation, a timestamp) cannot move the seeding
                 // point of a partition this group has not touched yet.
-                let (reg_index, reg_effect) = match self.writes.group(tenant, queue, group)? {
+                let existed = self.writes.group(tenant, queue, group)?;
+                let (reg_index, reg_effect) = match &existed {
                     Some(old) => (old.reg_index, old.reg_effect),
                     None => (index, ord),
                 };
@@ -1473,6 +1484,17 @@ impl<'s, S: Store> Applier<'s, S> {
                 // PERF-D: the queue's group set changed; the append path's
                 // cached list must be rebuilt from the store next time.
                 self.invalidate_groups(tenant, queue);
+                // A NEW group with a backlog to find (`all`/`timestamp`, queue
+                // mode included) must see the partitions that PREDATE it. Their
+                // appends wrote no `pending` row for a group that did not exist,
+                // and the wildcard first contact enumerates them for ONE pop
+                // only — so every partition that pop did not claim was stranded
+                // until its next append (a push-then-consume queue drained one
+                // partition and stopped). Arm them all now: `ready_at` early is
+                // harmless (the claim re-verifies, the ring law); late strands.
+                if existed.is_none() && meta.mode != crate::rsm::effect::SubscriptionMode::New {
+                    self.arm_predating_partitions(tenant, queue, group, meta.mode, now_us)?;
+                }
                 Ok(())
             }
             Effect::GroupDelete {
@@ -1997,6 +2019,49 @@ impl<'s, S: Store> Applier<'s, S> {
     /// moved on exactly the transitions that write the row — a rebuild from
     /// `pending` reproduces it.
     #[allow(clippy::too_many_arguments)]
+    /// Arm, for a just-registered group, every partition of the queue that
+    /// already holds frames (see the `GroupUpsert` arm): one `pending` row at
+    /// `now_us` each, in pid order (deterministic, I2), and — for `all`, whose
+    /// seed is the retained floor — the group's pending counter carries the
+    /// backlog it inherited. O(partitions), once per group registration.
+    fn arm_predating_partitions(
+        &mut self,
+        tenant: &str,
+        queue: &str,
+        group: &str,
+        mode: crate::rsm::effect::SubscriptionMode,
+        now_us: i64,
+    ) -> Result<()> {
+        let mut pids: Vec<Pid> = Vec::new();
+        self.writes
+            .scan_queue_partitions(tenant, queue, None, usize::MAX, &mut |pid| {
+                pids.push(pid);
+                true
+            })?;
+        let mut inherited: i64 = 0;
+        for pid in pids {
+            let Some(p) = self.writes.partition(pid)? else {
+                continue;
+            };
+            if p.last_offset < p.log_start as i64 {
+                continue; // nothing retained to find
+            }
+            self.writes.put_pending(tenant, queue, group, pid, now_us)?;
+            self.derived
+                .set_pending(tenant, queue, group, pid, now_us, now_us);
+            if mode == crate::rsm::effect::SubscriptionMode::All {
+                inherited += p.last_offset + 1 - p.log_start as i64;
+            }
+        }
+        if inherited > 0 {
+            self.ctr_add(
+                &keys::counter_group(tenant, queue, group, Counter::Pending),
+                inherited,
+            )?;
+        }
+        Ok(())
+    }
+
     fn append_pending(
         &mut self,
         tenant: &str,

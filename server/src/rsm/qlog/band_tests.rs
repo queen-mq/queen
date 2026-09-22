@@ -509,7 +509,11 @@ fn a_cache_hit_returns_identical_bytes() {
     assert_eq!(log.read().unwrap().cache.cached_blocks(), 36);
 
     // Retention drops whole sealed files and clears the cache; the survivors
-    // still read back identically (re-read from disk).
+    // still read back identically (re-read from disk). Phase C: retention may
+    // only drop files wholly at or below the recovery floor (the store's
+    // durable index); this test is about the cache, so the floor covers
+    // everything written.
+    set.set_recovery_floor(u64::MAX);
     let dead = log
         .read()
         .unwrap()

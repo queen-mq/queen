@@ -55,6 +55,18 @@
 //! - **`MDB_PANIC`** ([`StoreError::EnvDead`]), the one code LMDB raises to
 //!   say the environment is dead.
 //!
+//! # Phase C: RAM keyspaces, LMDB as their checkpoint
+//!
+//! The hot keyspaces ([`Keyspace::is_ram`]) live in RAM, loaded in full at
+//! open; LMDB holds their CHECKPOINT, written only at the durable point
+//! ([`Writes::durable_commit`]). A plain [`Writes::commit`] commits the
+//! LMDB-direct keyspaces only, so after a crash the RAM keyspaces — `meta`
+//! and its `applied_index` included — reopen exactly at the last durable
+//! point and the WAL (the per-queue logs) replays the rest. RAM keyspaces are
+//! read LIVE (read-uncommitted) by every handle; LMDB-direct ones keep their
+//! snapshot semantics; [`Writes::abort`] does not undo RAM writes. The full
+//! contract is in [`heed_store`]'s module header.
+//!
 //! # One environment, two scopes
 //!
 //! Replicated keyspaces (§6.1) and node-local ones (§6.2, `seg_loc` and
@@ -140,6 +152,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub mod heed_store;
 pub mod keys;
+#[cfg(test)]
+mod ram_tests;
 pub mod rows;
 pub mod typed;
 
@@ -305,6 +319,26 @@ impl Keyspace {
     /// [`ALL`]: Keyspace::ALL
     pub(crate) fn slot(self) -> usize {
         self as usize
+    }
+
+    /// Phase C: served from an in-RAM table that LMDB only CHECKPOINTS at the
+    /// durable point, rather than written through the LMDB transaction. See
+    /// [`heed_store`]'s module header for the commit and isolation semantics
+    /// (RAM keyspaces are read LIVE, and reopen at the last durable point).
+    ///
+    /// EVERY keyspace, deliberately: one visibility horizon and one durability
+    /// horizon. A split (hot keyspaces in RAM, the rest committed straight to
+    /// LMDB) measurably broke both — the planner drops a landed entry from its
+    /// overlay at the LIVE applied index, so an LMDB-direct effect of an applied
+    /// but not-yet-committed entry was invisible to it (a dedup miss); and after
+    /// a crash the LMDB-direct keyspaces reopened AHEAD of the checkpoint, so
+    /// replay applied their effects twice. With every keyspace here, the store
+    /// reopens exactly at the durable point and replay from `durable_index + 1`
+    /// applies each later entry exactly once. The price is RAM for the cold
+    /// keyspaces too (the DLQ, the segment index); none is per-message on the
+    /// qlog + `DEDUP_INDEX=segment` path.
+    pub fn is_ram(self) -> bool {
+        true
     }
 }
 
@@ -764,6 +798,12 @@ impl StoreMetrics {
 /// must read its own uncommitted writes (a counter it just bumped, a dedup
 /// occurrence list it just extended) and the planner must not.
 ///
+/// PHASE C exception: a RAM keyspace ([`Keyspace::is_ram`]) is read LIVE by
+/// both handles — a read handle sees what apply wrote a moment ago, before
+/// any commit. Only the LMDB-direct keyspaces keep the snapshot above; the
+/// planner stays correct because the batcher folds every not-yet-applied
+/// entry into its overlay (§7.2).
+///
 /// The raw pair ([`Reads::get_raw`], [`Reads::scan_raw`]) is the whole
 /// surface an engine has to provide; everything typed is a provided method, so
 /// the row codecs live in one place ([`rows`]) and a second engine — if D9 is
@@ -859,14 +899,26 @@ pub trait Writes: Reads {
     /// End the transaction and start a new one. NON-DURABLE (pin 1): the
     /// bytes are in the map, readers see them, and a power loss may lose them
     /// — which is exactly what §11.3 asks for.
+    ///
+    /// Phase C: this commits the LMDB-direct keyspaces ONLY. The RAM
+    /// keyspaces are not written to LMDB here; they stay dirty until the next
+    /// [`Writes::durable_commit`], and a crash reopens them at the last one.
     fn commit(&mut self) -> Result<()>;
 
     /// End the transaction, start a new one, and make everything committed so
     /// far survive a power loss: the store half of the durable point (§11.4).
+    ///
+    /// Phase C: it first CHECKPOINTS the RAM keyspaces — every key changed
+    /// since the last durable commit is written into the transaction — so the
+    /// LMDB image of them is consistent as of this call.
     fn durable_commit(&mut self) -> Result<()>;
 
     /// Throw the open transaction away. Used by a test and by the crash paths;
     /// dropping the handle does the same.
+    ///
+    /// Phase C: RAM writes are NOT undone (they stay dirty for the next
+    /// checkpoint). Apply poisons itself and the process restarts on any
+    /// apply failure; recovery rebuilds from the checkpoint plus the WAL.
     fn abort(&mut self) -> Result<()>;
 
     /// Empty every [`Scope::NodeLocal`] keyspace. A snapshot install (§11.6,

@@ -62,11 +62,19 @@ pub const TXN_CROSS_QUEUE: u8 = 1;
 /// log of record that REPLACES the global raft log (per-queue-only, killing the
 /// second fsync). It carries the leader's `seq` and the serialized payload-free
 /// entry bytes (its effects — a push, a pop, an ack) in the `payload` slot, with
-/// `pid = base_offset = count = 0` (it indexes no partition: the message records
-/// beside it, `txn_kind ∈ {0,1}`, are what pop/dedup read). Recovery merges
-/// every queue's entry records by `seq` and applies them in that order, exactly
-/// as the raft-log replay did. `created_at_us` carries the entry's `now_us` so a
-/// replay reconstructs the entry's monotone clock without a second field.
+/// `base_offset = count = 0` (it indexes no partition: the message records
+/// beside it, `txn_kind ∈ {0,1}`, are what pop/dedup read — the index build
+/// SKIPS entry records). Recovery merges every queue's entry records by `seq`
+/// and applies them in that order, exactly as the raft-log replay did.
+/// `created_at_us` carries the entry's `now_us` so a replay reconstructs the
+/// entry's monotone clock without a second field.
+///
+/// Phase C: the `pid` slot carries `copies` — how many queue logs the writer
+/// wrote this SAME entry record to (every queue log its effects touch, or the
+/// system log). Recovery treats an entry as durable only when it finds all
+/// `copies` of it (a group whose fsyncs did not all land leaves some copies
+/// missing, and nothing of that group was acknowledged). `0` (a record written
+/// by [`encode_entry_into`] before Phase C) reads as one copy.
 pub const REC_ENTRY: u8 = 2;
 
 /// One message's hash, in bytes: the xxh3_128 of its transaction id, exactly as
@@ -108,7 +116,7 @@ pub enum RecordError {
     Truncated { need: usize, have: usize },
     /// `len` is below the fixed body or above [`MAX_RECORD_BODY`].
     BadLength(u32),
-    /// A `txn_kind` this build does not know (only 0 and 1 exist).
+    /// A `txn_kind` this build does not know (0, 1 and [`REC_ENTRY`] exist).
     BadTxnKind(u8),
     /// The declared parts (`txn` envelope + `16 * count` hashes) do not fit in
     /// the `len` the header declares.
@@ -322,13 +330,30 @@ pub fn encode_into(
 /// write of the entry bytes; the checksum covers everything after it, exactly as
 /// a message record, so a torn entry record fails the same check and is truncated.
 pub fn encode_entry_into(out: &mut Vec<u8>, seq: u64, now_us: i64, entry: &[u8]) -> usize {
+    encode_entry_copies_into(out, seq, now_us, 1, entry)
+}
+
+/// [`encode_entry_into`] with the Phase C `copies` count in the `pid` slot: the
+/// number of queue logs the writer wrote this same entry record to (see
+/// [`REC_ENTRY`]). What the log writer uses.
+pub fn encode_entry_copies_into(
+    out: &mut Vec<u8>,
+    seq: u64,
+    now_us: i64,
+    copies: u64,
+    entry: &[u8],
+) -> usize {
     let body_len = FIXED_AFTER_LEN + entry.len();
+    debug_assert!(
+        body_len <= MAX_RECORD_BODY as usize,
+        "entry record too large"
+    );
     let start = out.len();
     out.reserve(4 + body_len);
     out.extend_from_slice(&(body_len as u32).to_le_bytes());
     out.extend_from_slice(&0u64.to_le_bytes()); // checksum, filled in below
     out.extend_from_slice(&seq.to_le_bytes());
-    out.extend_from_slice(&0u64.to_le_bytes()); // pid
+    out.extend_from_slice(&copies.to_le_bytes()); // pid slot = copies (Phase C)
     out.extend_from_slice(&0u64.to_le_bytes()); // base_offset
     out.extend_from_slice(&0u32.to_le_bytes()); // count
     out.extend_from_slice(&now_us.to_le_bytes()); // created_at carries now_us
@@ -524,6 +549,25 @@ mod tests {
         assert!(rr.txn.is_none());
         assert!(rr.hashes.is_empty());
         assert_eq!(rr.payload, entry, "the entry bytes survive the round trip");
+    }
+
+    #[test]
+    fn an_entry_record_carries_its_copies_in_the_pid_slot() {
+        // Phase C: `copies` rides in the pid slot; base/count stay 0 so the
+        // record still has no hash list and indexes nothing.
+        let mut buf = Vec::new();
+        let n = encode_entry_copies_into(&mut buf, 77, 5, 3, b"entry-bytes");
+        assert_eq!(n, buf.len());
+        let rr = decode(&buf).expect("decodes");
+        assert_eq!(rr.header.txn_kind, REC_ENTRY);
+        assert_eq!(rr.header.seq, 77);
+        assert_eq!(rr.header.pid, 3, "copies");
+        assert_eq!((rr.header.base_offset, rr.header.count), (0, 0));
+        assert_eq!(rr.payload, b"entry-bytes");
+        // The pre-copies encoder writes one copy.
+        let mut one = Vec::new();
+        encode_entry_into(&mut one, 77, 5, b"entry-bytes");
+        assert_eq!(decode(&one).expect("decodes").header.pid, 1);
     }
 
     #[test]

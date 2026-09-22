@@ -331,6 +331,52 @@ path, not at apply. Design (single-node):
 A3b is a writer/consensus-core restructure whose failure mode is silent data loss
 under power failure, so it is designed and dm-flakey-verified, never rushed.
 
+### Phase C as built (2026-09-22)
+
+The "compacted offsets log" of §2 became something simpler with the same effect:
+**the queue logs are the WAL, the whole store is RAM, LMDB is a checkpoint.**
+
+- **WAL.** The writer writes every entry — payload-free, exactly the bytes the raft
+  log used to get — as a `REC_ENTRY` record into EVERY queue log the entry touches
+  (entries touching no queue go to a system log, `q0/`), next to that queue's
+  payload records, then ONE fsync of every touched log, then the hand-off to apply.
+  Pushes, pop LEASES (durable, Alice 2026-09-22), acks, creates: every answered
+  op is durable. The raft log file is no longer written on this path. A record
+  carries `copies` (how many logs got it) so replay can tell a complete entry.
+- **Store = RAM, LMDB = checkpoint.** EVERY keyspace is an in-RAM table read LIVE;
+  dirty keys are flushed to LMDB only at the durable point (~1/s), which also
+  syncs. A plain commit persists nothing. One horizon on purpose: a hot/cold split
+  (some keyspaces LMDB-direct) broke both the planner overlay (a dedup miss) and
+  recovery (double application) — measured, then removed.
+- **Recovery.** The store reopens EXACTLY at the durable checkpoint
+  (`applied == durable`); entries after it are replayed from the queue logs,
+  merged by seq, delivered only with all copies present and byte-identical; the
+  first gap is cut and its tail truncated (seqs reused). The qlog retention floor
+  never deletes a record above the checkpoint.
+- **Invariant added:** `set_applied` is an entry's LAST write (live reads: an
+  applied index must imply `NEXT_PID` etc. are visible, or a planner could mint a
+  duplicate pid).
+- **Pre-existing bug found by the gate and fixed:** a consumer group registered
+  AFTER messages were pushed only saw the partitions its first pop touched (their
+  appends wrote no `pending` row for a group that did not exist). Registering an
+  `all`/`timestamp` group now arms every partition that holds frames.
+
+**Proof.** dm-flakey power cut with NO sync right after the answers
+(`/root/raft/phasec_powerloss.sh`): 5000 acked pushes, 2000 acked consumes, 200
+leases → no acked push lost, no acked message redelivered, leases held through the
+cut until expiry then redelivered, no duplicates — PASS. Unit: the kill-9 crash
+suite (7/7), crash at a non-durable commit replays to the reference digest,
+reopen lands exactly on the checkpoint digest.
+
+**Cost (ceiling ladder, same harness as the PG baseline):** ceilings unchanged —
+FAT100 120k, A20k 80k, C1000 12k (PG: 60k / 40k / 12k). FAT100 at 60k: 83 MB/s,
+1.16 cores, 178 MB. C1000 p99 roughly doubled (fsync per group now covers
+pops/acks). The small-shape disk floor (~34 MB/s) did NOT drop with the LMDB
+churn gone. HYPOTHESIS, not yet measured: it tracks the fsync RATE (ext4 journal
+commit + the partial tail block rewritten per fdatasync, ~16 KB each), not LMDB.
+If confirmed, the lever is pre-zeroed qlog segments (PG's WAL trick) so fdatasync
+writes data only.
+
 ---
 
 ## 11. Correctness gates (non-negotiable, every phase)

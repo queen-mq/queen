@@ -68,6 +68,29 @@
 //! record in a SEALED file is corruption and is surfaced, never truncated —
 //! only the ACTIVE (last) file has a torn tail.
 //!
+//! # Phase C: the queue logs are the ONLY write-ahead log
+//!
+//! With `QUEEN_RAFT_QLOG` on, the `LocalReplicator`'s writer no longer writes
+//! the raft log. For every entry of a group it writes, into EVERY queue log the
+//! entry's effects touch, the entry's `Append` payload records (indexed, as
+//! before) followed by ONE payload-free ENTRY record ([`record::REC_ENTRY`]:
+//! `seq` = the entry index, `created_at` = the entry's `now_us`, the `pid` slot
+//! = `copies`, the number of logs that got the same record, and the exact
+//! `encode_entry_payload_free` bytes as its payload). An entry that touches no
+//! queue goes to the SYSTEM log ([`set::SYSTEM_QUEUE_ID`], `q0/`). Then ONE
+//! fsync of every touched log, and only then apply and the answer. Entry
+//! records are never indexed ([`index`] holds messages only), so no pop, dedup
+//! or claim read can see them.
+//!
+//! Recovery ([`set::QLogSet::scan_entries`]) merges every log's entry records by
+//! `seq`, dedups the copies, and delivers the gapless prefix of COMPLETE entries
+//! (all `copies` found) from the store's durable index + 1; everything at or
+//! above the first missing/incomplete seq is the unacknowledged tail of a group
+//! whose fsyncs did not all land, and [`set::QLogSet::truncate_from`] drops it
+//! ([`QLog::truncate_seq_from`]) before the writer reuses those seqs. Retention
+//! ([`QLog::unlink_dead_files`]) never drops a file holding a record above the
+//! RECOVERY FLOOR (the store's durable index, raised at each durable point).
+//!
 //! # Not this phase
 //!
 //! - transactions / present-in-all (Phase B) — the fields exist, the machinery
@@ -89,13 +112,15 @@ pub mod set;
 mod band_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wal_tests;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// The `.qlog` file header magic (§3): `QNQLOG1\0`. Distinct from the raft
@@ -201,6 +226,52 @@ pub struct RecordInput<'a> {
     pub txn: Option<TxnInput<'a>>,
     pub hashes: &'a [u8],
     pub payload: &'a [u8],
+}
+
+/// One payload-free ENTRY record to append (Phase C, [`record::REC_ENTRY`]): the
+/// log writer's copy of an entry, written into EVERY queue log the entry's
+/// effects touch (or into the system log, [`set::SYSTEM_QUEUE_ID`]). `seq` is the
+/// entry index, `now_us` the entry's clock, `copies` how many logs receive this
+/// same record, and `entry` the exact `encode_entry_payload_free` bytes the raft
+/// log used to hold. It is NOT a message: it is never indexed, so no pop, dedup
+/// or claim read can ever see it.
+#[derive(Clone, Copy, Debug)]
+pub struct EntryInput<'a> {
+    pub seq: u64,
+    pub now_us: i64,
+    pub copies: u32,
+    pub entry: &'a [u8],
+}
+
+/// One record of a mixed group ([`QLog::write_mixed`]): a message or an entry.
+/// Within one group, records must come in non-decreasing `seq` order (the writer
+/// emits each entry's payload records, then its entry record, entry by entry).
+#[derive(Clone, Copy, Debug)]
+pub enum WriteRecord<'a> {
+    Msg(RecordInput<'a>),
+    Entry(EntryInput<'a>),
+}
+
+impl WriteRecord<'_> {
+    /// The record's `seq` (the entry index it belongs to).
+    pub fn seq(&self) -> u64 {
+        match self {
+            WriteRecord::Msg(r) => r.seq,
+            WriteRecord::Entry(e) => e.seq,
+        }
+    }
+}
+
+/// One entry record read back by [`QLog::entry_records_from`] (checksum
+/// verified): what Phase C recovery merges across the queue logs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntryRecord {
+    pub seq: u64,
+    pub now_us: i64,
+    /// How many queue logs the writer wrote this entry record to (≥ 1).
+    pub copies: u32,
+    /// The payload-free entry bytes, exactly as written.
+    pub entry: Vec<u8>,
 }
 
 /// The transaction envelope of a record read back (Phase B).
@@ -318,13 +389,23 @@ pub struct FileMeta {
     pub first_seq: u64,
     /// Valid bytes on disk, the 32-byte header included.
     pub bytes: u64,
-    /// Records in the file.
+    /// MESSAGE records in the file (entry records, Phase C, are not counted:
+    /// they are not indexed).
     pub records: u64,
     /// A sealed file is immutable and has a `.qidx`; the active (last) file
     /// does not and is never sealed.
     pub sealed: bool,
+    /// Over message records only.
     pub min_created_at_us: i64,
     pub max_created_at_us: i64,
+    /// Phase C: an UPPER BOUND on the `seq` of every record (message OR entry)
+    /// in the file — what the recovery floor guards ([`QLog::unlink_dead_files`]).
+    /// Exact for the active file and for a file this process sealed; for a
+    /// sealed file found at [`QLog::open`] it is the next file's `first_seq - 1`
+    /// (a queue log's seqs never decrease, and a group is written whole into
+    /// one file after any roll, so every record of a file is below the first
+    /// record of the next). `0` for a file that holds no record.
+    pub max_seq: u64,
 }
 
 /// What [`QLog::open`] found and fixed.
@@ -380,6 +461,11 @@ pub struct QLog {
     /// PLAN_RAFT_DRAIN_FIX P3.2/P3.3: read fds + committed hash blocks, shared
     /// with in-flight reads that finish after the read guard is dropped.
     cache: Arc<ReadCache>,
+    /// Phase C recovery floor: no file holding a record with `seq >` this may
+    /// be unlinked ([`QLog::unlink_dead_files`]). A standalone log has no floor
+    /// (`u64::MAX`); a log opened by a [`set::QLogSet`] shares the set's handle,
+    /// which the apply thread raises to the durable index at each durable point.
+    floor: Arc<AtomicU64>,
 }
 
 impl QLog {
@@ -450,6 +536,8 @@ impl QLog {
                     meta.absorb(r.created_at_us);
                 }
                 meta.records = scan.records.len() as u64;
+                // Exact: the scan read every verified record (entries too).
+                meta.max_seq = scan.max_seq;
                 rec.scanned_records += scan.records.len() as u64;
                 // The durable tail (A3a): the active file is the newest, so its
                 // records dominate every sealed file's `seq`. When it holds
@@ -497,6 +585,18 @@ impl QLog {
             }
         }
 
+        // Phase C: a sealed file's `max_seq` bound. The `.qidx` does not carry
+        // `seq`, and rescanning every sealed file at boot is what the index
+        // exists to avoid; a queue log's seqs never decrease and a group lands
+        // whole in one file (the roll precedes the write), so every record of
+        // file k is below the first record of file k+1 — `first_seq(k+1) - 1`
+        // bounds file k. Only the recovery floor and the recovery scan read it.
+        for i in 0..files.len().saturating_sub(1) {
+            if files[i].sealed {
+                files[i].max_seq = files[i + 1].first_seq.saturating_sub(1);
+            }
+        }
+
         rec.files = files.len();
         rec.bytes = files.iter().map(|f| f.bytes).sum();
         rec.records = files.iter().map(|f| f.records).sum();
@@ -511,6 +611,7 @@ impl QLog {
             active_index,
             sealed,
             cache,
+            floor: Arc::new(AtomicU64::new(u64::MAX)),
         };
         tracing::info!(
             target: "rsm",
@@ -526,6 +627,18 @@ impl QLog {
 
     pub fn queue_id(&self) -> u64 {
         self.queue_id
+    }
+
+    /// Attach a shared recovery floor (Phase C): from now on no file holding a
+    /// record with `seq >` the floor's value is ever unlinked. [`set::QLogSet`]
+    /// attaches its own handle to every log it opens.
+    pub fn set_recovery_floor(&mut self, floor: Arc<AtomicU64>) {
+        self.floor = floor;
+    }
+
+    /// The current recovery floor (`u64::MAX` = none attached).
+    pub fn recovery_floor(&self) -> u64 {
+        self.floor.load(Ordering::Acquire)
     }
 
     /// The active file id, or `None` for a queue that has taken no append.
@@ -575,17 +688,29 @@ impl QLog {
     /// per durable point). A crash before the sync leaves an un-fsync'd tail that
     /// [`QLog::open`] truncates; the record was never acknowledged durable.
     pub fn write_group(&mut self, records: &[RecordInput<'_>]) -> io::Result<Vec<Loc>> {
+        let mixed: Vec<WriteRecord<'_>> = records.iter().map(|r| WriteRecord::Msg(*r)).collect();
+        self.write_mixed(&mixed)
+    }
+
+    /// [`QLog::write_group`] for a MIXED group of message and entry records
+    /// (Phase C: the log writer appends each entry's payload records and then
+    /// its payload-free entry record, entry by entry, in one `write_all`, NO
+    /// fsync). Entry records are written but never indexed. Returns every
+    /// record's position, in order. `records` must be in non-decreasing `seq`
+    /// order (the first one's `seq` names a freshly rolled file).
+    pub fn write_mixed(&mut self, records: &[WriteRecord<'_>]) -> io::Result<Vec<Loc>> {
         if records.is_empty() {
             return Ok(Vec::new());
         }
+        let first_seq = records[0].seq();
         // Ensure an active file with room. A group larger than the limit still
         // goes whole into the (freshly rolled or created) file.
         if self.active.is_none() {
-            self.create_active(FIRST_FILE_ID, records[0].seq)?;
+            self.create_active(FIRST_FILE_ID, first_seq)?;
         } else {
             let sz = self.active_len();
             if sz > FILE_HEADER_LEN && sz >= self.opts.segment_bytes {
-                self.roll(records[0].seq)?;
+                self.roll(first_seq)?;
             }
         }
 
@@ -593,42 +718,58 @@ impl QLog {
         let base = self.active_len();
         let cap = records
             .iter()
-            .map(|r| {
-                record::encoded_len(
+            .map(|w| match w {
+                WriteRecord::Msg(r) => record::encoded_len(
                     r.count,
                     r.txn.map_or(0, |t| t.participants.len()),
                     r.payload.len(),
-                )
+                ),
+                WriteRecord::Entry(e) => record::FIXED_PREFIX + e.entry.len(),
             })
             .sum();
         let mut buf: Vec<u8> = Vec::with_capacity(cap);
         let mut locs = Vec::with_capacity(records.len());
         let mut new_recs: Vec<index::Record> = Vec::with_capacity(records.len());
-        for r in records {
+        let mut max_seq = 0u64;
+        for w in records {
             let start = buf.len();
-            let txn = r.txn.map(|t| (t.gtid, t.participants));
-            let n = record::encode_into(
-                &mut buf,
-                r.seq,
-                r.pid,
-                r.base_offset,
-                r.count,
-                r.created_at_us,
-                txn,
-                r.hashes,
-                r.payload,
-            )?;
             let offset = base + start as u64;
+            max_seq = max_seq.max(w.seq());
+            match w {
+                WriteRecord::Msg(r) => {
+                    let txn = r.txn.map(|t| (t.gtid, t.participants));
+                    let n = record::encode_into(
+                        &mut buf,
+                        r.seq,
+                        r.pid,
+                        r.base_offset,
+                        r.count,
+                        r.created_at_us,
+                        txn,
+                        r.hashes,
+                        r.payload,
+                    )?;
+                    new_recs.push(index::Record {
+                        pid: r.pid,
+                        base_offset: r.base_offset,
+                        end: r.base_offset.saturating_add(r.count as u64),
+                        created_at_us: r.created_at_us,
+                        offset,
+                        count: r.count,
+                        len: n as u32,
+                    });
+                }
+                WriteRecord::Entry(e) => {
+                    record::encode_entry_copies_into(
+                        &mut buf,
+                        e.seq,
+                        e.now_us,
+                        u64::from(e.copies),
+                        e.entry,
+                    );
+                }
+            }
             locs.push(Loc { file_id, offset });
-            new_recs.push(index::Record {
-                pid: r.pid,
-                base_offset: r.base_offset,
-                end: r.base_offset.saturating_add(r.count as u64),
-                created_at_us: r.created_at_us,
-                offset,
-                count: r.count,
-                len: n as u32,
-            });
         }
 
         let f = self.active.as_mut().expect("active file");
@@ -644,7 +785,8 @@ impl QLog {
         {
             let meta = self.files.last_mut().expect("active meta");
             meta.bytes += added;
-            meta.records += records.len() as u64;
+            meta.records += new_recs.len() as u64;
+            meta.max_seq = meta.max_seq.max(max_seq);
             for r in &new_recs {
                 meta.absorb(r.created_at_us);
             }
@@ -1127,9 +1269,181 @@ impl QLog {
         Ok(())
     }
 
+    /// Phase C recovery read: every [`record::REC_ENTRY`] record of this log
+    /// with `seq >= from_seq`, in file order (= non-decreasing `seq`),
+    /// checksum-verified, with its bytes. A file whose `max_seq` is below
+    /// `from_seq` is skipped unread (a bound for a sealed file, exact for the
+    /// active one — so an idle queue costs nothing at boot); every other file is
+    /// scanned. A damaged record in a SEALED file is corruption and is surfaced;
+    /// in the active file ([`QLog::open`] already truncated its torn tail) a
+    /// record that no longer verifies ends the walk — the reopen's torn-tail
+    /// rule.
+    pub fn entry_records_from(&self, from_seq: u64) -> io::Result<Vec<EntryRecord>> {
+        let mut out: Vec<EntryRecord> = Vec::new();
+        for m in &self.files {
+            if m.max_seq < from_seq {
+                continue;
+            }
+            let path = file_path(&self.dir, m.id);
+            let (_valid, torn) = scan_records(&path, m.bytes, |h, _pos, bytes| {
+                if h.txn_kind == record::REC_ENTRY && h.seq >= from_seq {
+                    let rr = record::decode(bytes).map_err(io::Error::from)?;
+                    out.push(EntryRecord {
+                        seq: h.seq,
+                        now_us: h.created_at_us,
+                        // `pid` carries `copies`; 0 (pre-Phase-C) reads as one.
+                        copies: u32::try_from(h.pid).unwrap_or(u32::MAX).max(1),
+                        entry: rr.payload.to_vec(),
+                    });
+                }
+                Ok(())
+            })?;
+            if let Some((at, why)) = torn {
+                if m.sealed {
+                    return Err(corrupt(
+                        &path,
+                        &format!("damaged record at byte {at} of a sealed file: {why}"),
+                    ));
+                }
+                break; // the active file is the last one
+            }
+        }
+        Ok(out)
+    }
+
+    /// Phase C recovery: drop every record (message or entry) with `seq >= cut`
+    /// — the unacknowledged tail of a group whose fsyncs did not all land, so
+    /// its entries are incomplete across the queue logs (or leave a gap) and
+    /// recovery stopped before them. Their seqs are reassigned to NEW entries
+    /// from here on, so a stale record left behind would collide with them on
+    /// the next replay: it must go, durably, before the writer starts.
+    ///
+    /// Only the ACTIVE file can hold such a tail: the tail's group was written
+    /// into the then-active file (a roll precedes a group's write) and nothing
+    /// after it rolled. A sealed file holding a record at or above `cut` means an
+    /// incomplete group was sealed behind a later write — impossible unless an
+    /// fsync lied or a log was tampered with — and is refused, never guessed.
+    /// Seqs in a queue log never decrease, so the cut is a byte offset: the
+    /// first record at or above `cut`; every record after it must be at or above
+    /// `cut` too (refused otherwise). Returns the bytes dropped.
+    pub fn truncate_seq_from(&mut self, cut: u64) -> io::Result<u64> {
+        if self.files.iter().all(|m| m.max_seq < cut) {
+            return Ok(0);
+        }
+        // Sealed files: `max_seq` may be the loose `next.first_seq - 1` bound, so
+        // a file at or above the cut is checked record by record (rare: only
+        // after a crash whose incomplete group rolled this queue's log).
+        for i in 0..self.files.len() {
+            let m = self.files[i];
+            if !m.sealed || m.max_seq < cut {
+                continue;
+            }
+            let path = file_path(&self.dir, m.id);
+            let mut actual = 0u64;
+            let (_valid, torn) = scan_records(&path, m.bytes, |h, _pos, _bytes| {
+                actual = actual.max(h.seq);
+                Ok(())
+            })?;
+            if let Some((at, why)) = torn {
+                return Err(corrupt(
+                    &path,
+                    &format!("damaged record at byte {at} of a sealed file: {why}"),
+                ));
+            }
+            if actual >= cut {
+                return Err(corrupt(
+                    &path,
+                    &format!(
+                        "a SEALED file holds a record at seq {actual} >= the recovery cut {cut}: \
+                         an incomplete group was sealed behind a later write"
+                    ),
+                ));
+            }
+            self.files[i].max_seq = actual;
+        }
+        let Some(last) = self.files.last().copied() else {
+            return Ok(0);
+        };
+        if last.sealed || last.max_seq < cut {
+            return Ok(0);
+        }
+        let path = file_path(&self.dir, last.id);
+        let mut keep: Vec<index::Record> = Vec::new();
+        let mut kept_max = 0u64;
+        let mut cut_at: Option<u64> = None;
+        let mut out_of_order: Option<(u64, u64)> = None;
+        scan_records(&path, last.bytes, |h, pos, _bytes| {
+            if h.seq >= cut {
+                cut_at.get_or_insert(pos);
+            } else if cut_at.is_some() {
+                out_of_order.get_or_insert((pos, h.seq));
+            } else {
+                kept_max = kept_max.max(h.seq);
+                if h.txn_kind != record::REC_ENTRY {
+                    keep.push(index::Record::of_header(h, pos));
+                }
+            }
+            Ok(())
+        })?;
+        if let Some((pos, seq)) = out_of_order {
+            return Err(corrupt(
+                &path,
+                &format!(
+                    "record at byte {pos} (seq {seq}) follows a record at or above the \
+                     recovery cut {cut}: the log's seqs are not monotone"
+                ),
+            ));
+        }
+        let Some(at) = cut_at else {
+            self.files.last_mut().expect("active meta").max_seq = kept_max;
+            return Ok(0);
+        };
+        let dropped = last.bytes - at;
+        {
+            let f = OpenOptions::new().write(true).open(&path)?;
+            f.set_len(at)?;
+            // Durable BEFORE any new record reuses these seqs.
+            fsync_file(&f, self.opts.fsync)?;
+        }
+        if let Some(f) = self.active.as_mut() {
+            f.seek(SeekFrom::Start(at))?;
+        }
+        self.active_index.open(last.id);
+        {
+            let meta = self.files.last_mut().expect("active meta");
+            meta.bytes = at;
+            meta.records = keep.len() as u64;
+            meta.min_created_at_us = i64::MAX;
+            meta.max_created_at_us = i64::MIN;
+            meta.max_seq = kept_max;
+            for r in &keep {
+                meta.absorb(r.created_at_us);
+            }
+        }
+        for r in keep {
+            self.active_index.insert(r);
+        }
+        // Nothing dropped was ever read as committed in this process, but the
+        // cache is keyed by position-free `(pid, base)`: drop it wholesale.
+        self.cache.clear_hashes();
+        tracing::warn!(
+            target: "rsm",
+            queue = self.queue_id,
+            cut,
+            dropped_bytes = dropped,
+            "rsm qlog: dropped an unacknowledged tail at the recovery cut",
+        );
+        Ok(dropped)
+    }
+
     /// Retention, this phase: unlink WHOLE files the predicate marks dead. Only
     /// SEALED files are candidates — the active file is never unlinked. Returns
     /// how many were dropped.
+    ///
+    /// Phase C: the queue logs are the ONLY write-ahead log, so a file that
+    /// holds any record (message or entry) with `seq` above the recovery floor
+    /// ([`QLog::set_recovery_floor`], the store's durable index) is never a
+    /// candidate, whatever the predicate says — recovery replays from there.
     ///
     /// TODO(phase-C-compaction): a partially-live file (a lagging backlog, a
     /// long-retention survivor) is NOT handled here. Copying its live residue
@@ -1138,10 +1452,11 @@ impl QLog {
     /// whose every record the caller has judged dead.
     pub fn unlink_dead_files(&mut self, is_dead: impl Fn(&FileMeta) -> bool) -> io::Result<usize> {
         let active_id = self.active_index.file_id();
+        let floor = self.floor.load(Ordering::Acquire);
         let victims: Vec<u64> = self
             .files
             .iter()
-            .filter(|m| m.sealed && Some(m.id) != active_id && is_dead(m))
+            .filter(|m| m.sealed && Some(m.id) != active_id && m.max_seq <= floor && is_dead(m))
             .map(|m| m.id)
             .collect();
         if victims.is_empty() {
@@ -1182,6 +1497,7 @@ impl FileMeta {
             sealed: false,
             min_created_at_us: i64::MAX,
             max_created_at_us: i64::MIN,
+            max_seq: 0,
         }
     }
 
@@ -1600,7 +1916,9 @@ impl HashPlan {
 
 /// The outcome of scanning one `.qlog` file's records.
 struct ScanOut {
-    /// The verified records, in file order.
+    /// The verified MESSAGE records, in file order. Entry records (Phase C,
+    /// [`record::REC_ENTRY`]) are verified and counted in `max_seq` but never
+    /// indexed: they hold no partition's messages.
     records: Vec<index::Record>,
     /// The absolute byte offset just past the last verified record — what a
     /// torn active file is truncated to.
@@ -1623,15 +1941,40 @@ struct ScanOut {
 /// fails its checksum — everything after the last verified record is the torn
 /// tail (or corruption).
 fn scan_file(path: &Path, upto: u64) -> io::Result<ScanOut> {
+    let mut records: Vec<index::Record> = Vec::new();
+    let mut max_seq = 0u64;
+    let (valid_bytes, torn) = scan_records(path, upto, |header, pos, _bytes| {
+        max_seq = max_seq.max(header.seq);
+        if header.txn_kind != record::REC_ENTRY {
+            records.push(index::Record::of_header(header, pos));
+        }
+        Ok(())
+    })?;
+    Ok(ScanOut {
+        records,
+        valid_bytes,
+        torn,
+        max_seq,
+    })
+}
+
+/// The scan engine: walk a file's records from its header to `upto`, verify
+/// each, and hand every VERIFIED record to `visit(header, byte_offset,
+/// record_bytes)`. Stops at the first record that is short, has an implausible
+/// header, would overrun `upto`, or fails its checksum, and returns `(the byte
+/// offset just past the last verified record, that first failure if any)`.
+/// Everything after the last verified record is the torn tail (or, in a sealed
+/// file, corruption). An error from `visit` aborts the scan.
+fn scan_records(
+    path: &Path,
+    upto: u64,
+    mut visit: impl FnMut(&record::Header, u64, &[u8]) -> io::Result<()>,
+) -> io::Result<(u64, Option<(u64, record::RecordError)>)> {
     let f = File::open(path)?;
     let mut r = BufReader::with_capacity(1 << 16, f);
     r.seek(SeekFrom::Start(FILE_HEADER_LEN))?;
-    let mut out = ScanOut {
-        records: Vec::new(),
-        valid_bytes: FILE_HEADER_LEN,
-        torn: None,
-        max_seq: 0,
-    };
+    let mut valid_bytes = FILE_HEADER_LEN;
+    let mut torn: Option<(u64, record::RecordError)> = None;
     let mut prefix = [0u8; record::FIXED_PREFIX];
     let mut body: Vec<u8> = Vec::new();
     let mut pos = FILE_HEADER_LEN;
@@ -1639,7 +1982,7 @@ fn scan_file(path: &Path, upto: u64) -> io::Result<ScanOut> {
         match read_exact_or_less(&mut r, &mut prefix)? {
             0 => break, // clean EOF at a record boundary
             n if n < record::FIXED_PREFIX => {
-                out.torn = Some((
+                torn = Some((
                     pos,
                     record::RecordError::Truncated {
                         need: record::FIXED_PREFIX,
@@ -1653,13 +1996,13 @@ fn scan_file(path: &Path, upto: u64) -> io::Result<ScanOut> {
         let header = match record::parse_header(&prefix) {
             Ok(h) => h,
             Err(e) => {
-                out.torn = Some((pos, e));
+                torn = Some((pos, e));
                 break;
             }
         };
         let total = header.record_len();
         if pos + total as u64 > upto {
-            out.torn = Some((
+            torn = Some((
                 pos,
                 record::RecordError::Truncated {
                     need: total,
@@ -1677,7 +2020,7 @@ fn scan_file(path: &Path, upto: u64) -> io::Result<ScanOut> {
         body[..record::FIXED_PREFIX].copy_from_slice(&prefix);
         let rest = total - record::FIXED_PREFIX;
         if read_exact_or_less(&mut r, &mut body[record::FIXED_PREFIX..])? < rest {
-            out.torn = Some((
+            torn = Some((
                 pos,
                 record::RecordError::Truncated {
                     need: total,
@@ -1687,15 +2030,14 @@ fn scan_file(path: &Path, upto: u64) -> io::Result<ScanOut> {
             break;
         }
         if let Err(e) = record::verify(body, &header) {
-            out.torn = Some((pos, e));
+            torn = Some((pos, e));
             break;
         }
-        out.max_seq = out.max_seq.max(header.seq);
-        out.records.push(index::Record::of_header(&header, pos));
+        visit(&header, pos, body)?;
         pos += total as u64;
-        out.valid_bytes = pos;
+        valid_bytes = pos;
     }
-    Ok(out)
+    Ok((valid_bytes, torn))
 }
 
 // ---------------------------------------------------------------------------
