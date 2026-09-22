@@ -16,7 +16,7 @@
 
 use std::cell::RefCell;
 use std::io;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 /// Payloads shorter than this are stored raw.
 pub const MIN_BYTES: usize = 512;
@@ -113,6 +113,72 @@ pub fn compress_all(raws: &[&[u8]]) -> Vec<Option<Vec<u8>>> {
         }
     });
     out
+}
+
+/// A payload's compression started AHEAD of the write — at propose, on the
+/// codec pool — so it runs while the writer is still fsyncing the previous
+/// group, and the writer only collects the result ([`Pre::finish`]).
+pub enum Pre {
+    /// Stored raw: under [`MIN_BYTES`], or the codec is off.
+    Raw,
+    Job(mpsc::Receiver<Option<Vec<u8>>>),
+}
+
+impl Pre {
+    /// Start compressing a copy of `blob` on the pool.
+    pub fn start(blob: &[u8]) -> Pre {
+        if level() == 0 || blob.len() < MIN_BYTES {
+            return Pre::Raw;
+        }
+        let (tx, rx) = mpsc::sync_channel(1);
+        match pool().send(Job {
+            raw: blob.to_vec(),
+            tx,
+        }) {
+            Ok(()) => Pre::Job(rx),
+            Err(_) => Pre::Raw,
+        }
+    }
+
+    /// The stored form ([`compress_one`]'s answer), waiting for the job if it
+    /// is still running. A lost job stores the payload raw.
+    pub fn finish(self) -> Option<Vec<u8>> {
+        match self {
+            Pre::Raw => None,
+            Pre::Job(rx) => rx.recv().ok().flatten(),
+        }
+    }
+}
+
+struct Job {
+    raw: Vec<u8>,
+    tx: mpsc::SyncSender<Option<Vec<u8>>>,
+}
+
+/// The codec pool: `QUEEN_RAFT_QLOG_ZSTD_THREADS` (default 4) persistent
+/// threads, started on first use.
+fn pool() -> &'static mpsc::Sender<Job> {
+    static POOL: OnceLock<mpsc::Sender<Job>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<Job>();
+        let rx = Arc::new(Mutex::new(rx));
+        for i in 0..threads() {
+            let rx = rx.clone();
+            let spawned = std::thread::Builder::new()
+                .name(format!("qlog-zstd-{i}"))
+                .spawn(move || loop {
+                    let job = match rx.lock().expect("qlog zstd pool").recv() {
+                        Ok(j) => j,
+                        Err(_) => return,
+                    };
+                    let _ = job.tx.send(compress_one(&job.raw));
+                });
+            if spawned.is_err() {
+                break;
+            }
+        }
+        tx
+    })
 }
 
 thread_local! {

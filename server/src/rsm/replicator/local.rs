@@ -221,6 +221,10 @@ struct Pending {
     /// instrumentation is off (`QUEEN_RAFT_METRICS=0`), so the knob prices the
     /// clock read at propose too, not just the histogram write.
     proposed_at: Option<std::time::Instant>,
+    /// The qlog codec's work on this entry's `Append` blobs, in effect order,
+    /// started at propose so it overlaps the writer's previous fsync. Empty
+    /// off the qlog path.
+    pre: Vec<crate::rsm::qlog::codec::Pre>,
 }
 
 /// How often the writer wakes when idle, to drop log files behind a durable
@@ -598,17 +602,26 @@ impl Writer {
         // group, in effect order, compressed before the write (several threads
         // when the group is big — this thread is the serial writer). `None` =
         // store raw (small, incompressible, or the codec is off).
-        let zblobs: Vec<Option<Vec<u8>>> = {
-            let raws: Vec<&[u8]> = pending
+        let mut zblobs: Vec<Option<Vec<u8>>> = Vec::new();
+        for p in pending.iter_mut() {
+            // Started at propose (the usual case: collected here, already done
+            // while the previous group fsynced); compressed now when it was not.
+            let pre = std::mem::take(&mut p.pre);
+            let raws: Vec<&[u8]> = p
+                .entry
+                .effects
                 .iter()
-                .flat_map(|p| p.entry.effects.iter())
                 .filter_map(|eff| match eff {
                     Effect::Append { blob, .. } => Some(blob.as_slice()),
                     _ => None,
                 })
                 .collect();
-            crate::rsm::qlog::codec::compress_all(&raws)
-        };
+            if pre.len() == raws.len() {
+                zblobs.extend(pre.into_iter().map(crate::rsm::qlog::codec::Pre::finish));
+            } else {
+                zblobs.extend(crate::rsm::qlog::codec::compress_all(&raws));
+            }
+        }
         let mut zi = 0usize;
         // The records borrow `pending` (payloads/hashes), `pf` (entry bytes) and
         // `zblobs`, so the write + barrier are scoped to end BEFORE the entries
@@ -1045,6 +1058,8 @@ pub struct LocalReplicator<S: Store> {
     /// instead of the segments/LMDB, off the SAME live logs the applier appends
     /// to. Set once `open` returns.
     qlog_reader: Option<crate::rsm::qlog::set::QLogReader>,
+    /// The queue logs are the WAL, so `propose` starts the payload codec.
+    qlog_codec: bool,
 }
 
 impl<S: Store + 'static> LocalReplicator<S> {
@@ -1447,6 +1462,7 @@ impl<S: Store + 'static> LocalReplicator<S> {
             store,
             reader,
             qlog_reader,
+            qlog_codec: qlog_on,
         })
     }
 
@@ -1610,12 +1626,29 @@ impl<S: Store + 'static> Replicator for LocalReplicator<S> {
         let decoded = decode_entry(&entry)
             .map_err(|e| ProposeError::Refused(format!("proposal does not decode: {e:?}")))?;
 
+        // Start the qlog codec on the payloads now (a copy each, on the codec
+        // pool): it runs while the writer fsyncs the group ahead of this one.
+        let pre = if self.qlog_codec {
+            decoded
+                .effects
+                .iter()
+                .filter_map(|eff| match eff {
+                    crate::rsm::effect::Effect::Append { blob, .. } => {
+                        Some(crate::rsm::qlog::codec::Pre::start(blob))
+                    }
+                    _ => None,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let (done_tx, done_rx) = oneshot::channel();
         let pending = Pending {
             bytes: entry,
             entry: decoded,
             done: done_tx,
             proposed_at: crate::rsm::timing::stamp(),
+            pre,
         };
         // Enqueue BEFORE awaiting the deadline, so even a past deadline still
         // puts the entry in flight (I3: a timed-out entry may still commit).
