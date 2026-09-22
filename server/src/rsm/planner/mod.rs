@@ -87,18 +87,21 @@ use crate::rsm::store::rows::GroupRow;
 use crate::rsm::store::{keys, Keyspace, Reads, StoreError, TypedReads};
 
 pub mod ack;
+/// KV: versions from `kv_version_base + ordinal`, TTL, prefix lists,
+/// `required` (024), and the leader's expiry sweep (026). WP-2.2.
+pub mod kv;
 pub mod pop;
 pub mod push;
+
+pub use kv::{KvCommand, KvOp};
 
 // The phase-2 planner surfaces keep their place in the §3.4 module map as empty
 // inline stubs, exactly as they stood inside `rsm/mod.rs` before this WP filled
 // `planner`. The owning WP flips one to a file.
 
-/// The transaction wire: one command, all-or-nothing (Phase B).
+/// The transaction wire: one command, all-or-nothing (Phase B). Its KV leg
+/// is [`Planner::plan_kv_writes`].
 pub mod txn;
-/// KV: versions from `kv_version_base + ordinal`, TTL, prefix lists,
-/// `required` (024). WP-2.2.
-pub mod kv {}
 /// Timers: apply, fire, fail, DLQ, and the leader wheel (025). WP-2.3.
 pub mod timers {}
 /// Streams: cycle, register, state (007, 008). WP-2.4.
@@ -242,6 +245,8 @@ pub enum CommandKind {
     Renew,
     DlqHead,
     Transaction,
+    /// A KV call with at least one write (WP-2.2).
+    Kv,
 }
 
 impl CommandKind {
@@ -257,6 +262,7 @@ impl CommandKind {
             CommandKind::Renew => "renew",
             CommandKind::DlqHead => "dlq_head",
             CommandKind::Transaction => "transaction",
+            CommandKind::Kv => "kv",
         }
     }
 }
@@ -532,6 +538,11 @@ pub struct Overlay {
     /// `Append` added, merged with committed `dedup` on a probe or a resolve.
     dedup: HashMap<(Pid, [u8; 16]), Vec<DedupOccurrence>>,
     request_ids: HashMap<RequestId, Outcome>,
+    /// `(tenant, ns, key) → row` for every KV row an entry in flight (or an
+    /// earlier command of this cycle) wrote — `None` for a delete — so the
+    /// next KV write is judged against the version it left, not against the
+    /// committed one (WP-2.2; the serial point 024's row lock was).
+    kv: HashMap<(String, String, String), Option<crate::rsm::store::rows::KvRow>>,
 }
 
 /// One overlay dedup occurrence: `(offset, created_at_us)`.
@@ -554,6 +565,7 @@ impl Overlay {
             cursors: HashMap::new(),
             dedup: HashMap::new(),
             request_ids: HashMap::new(),
+            kv: HashMap::new(),
         }
     }
 
@@ -710,8 +722,31 @@ impl Overlay {
             } => {
                 self.parts.entry(*pid).or_default().watermark = Some((*log_start, *txns_start));
             }
-            Effect::KvPut { version, .. } => {
+            Effect::KvPut {
+                tenant,
+                ns,
+                key,
+                value,
+                version,
+                expires_at_us,
+                created_at_us,
+                updated_at_us,
+            } => {
                 self.next_kv_version = self.next_kv_version.max(version.saturating_add(1));
+                self.kv.insert(
+                    (tenant.clone(), ns.clone(), key.clone()),
+                    Some(crate::rsm::store::rows::KvRow {
+                        value: value.clone(),
+                        version: *version,
+                        expires_at_us: *expires_at_us,
+                        created_at_us: *created_at_us,
+                        updated_at_us: *updated_at_us,
+                    }),
+                );
+            }
+            Effect::KvDelete { tenant, ns, key } => {
+                self.kv
+                    .insert((tenant.clone(), ns.clone(), key.clone()), None);
             }
             // Everything else the phase-1 planner neither emits nor needs to see
             // through the overlay (admin deletes, timers, streams, traces): a
@@ -722,8 +757,10 @@ impl Overlay {
 
     /// Fold the current command's own effects, so the next command in the cycle
     /// sees them (§7.2). The planner calls this once a command is decided
-    /// [`Plan::Logged`]; a refused or empty command folds nothing.
-    fn apply_effects(&mut self, effects: &[Effect]) {
+    /// [`Plan::Logged`]; a refused or empty command folds nothing. `pub(crate)`
+    /// for the planners that assemble one command from several legs (the
+    /// transaction wire folds its [`Planner::plan_kv_writes`] leg with it).
+    pub(crate) fn apply_effects(&mut self, effects: &[Effect]) {
         for e in effects {
             self.fold_effect(e);
         }

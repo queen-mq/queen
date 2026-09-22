@@ -557,6 +557,93 @@ pub fn request_id_decode(b: &[u8]) -> Result<RequestIdRow, CodecError> {
 }
 
 // ---------------------------------------------------------------------------
+// kv (024, WP-2.2)
+// ---------------------------------------------------------------------------
+
+/// One `queen.kv` row as the RSM holds it. `(tenant, ns, key)` is the store key
+/// ([`super::keys::kv`]); the shard column of 024 has no counterpart (it is a
+/// Postgres contention spreader, and the expiry index replaces its one
+/// reader).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KvRow {
+    /// The value JSON, raw (the compact text the receiver serialized). `null`
+    /// is a legal value and is NOT an absent row.
+    pub value: Vec<u8>,
+    /// `kv_version_base + ordinal` of the write that produced this row (I18):
+    /// unique across the whole store and never re-issued, so a key that
+    /// expired and was recreated cannot hand an old holder its version back.
+    pub version: u64,
+    /// `None` = forever (an explicit opt-in on the wire, never a default).
+    pub expires_at_us: Option<i64>,
+    pub created_at_us: i64,
+    pub updated_at_us: i64,
+}
+
+impl KvRow {
+    /// `queen.kv_live_v1`: `expires IS NULL OR expires > now`. A row exactly at
+    /// `now` is dead for the reader AND for the sweep — one boundary for the
+    /// whole feature (§5.7).
+    pub fn live(&self, now_us: i64) -> bool {
+        self.expires_at_us.is_none_or(|e| e > now_us)
+    }
+
+    /// `queen.kv_ver_v1`: the version under the expiry rule, `0` when expired.
+    pub fn effective_version(&self, now_us: i64) -> u64 {
+        if self.live(now_us) {
+            self.version
+        } else {
+            0
+        }
+    }
+}
+
+pub fn kv_encode(k: &KvRow) -> Vec<u8> {
+    let mut w = Writer::with_capacity(48 + k.value.len());
+    head(&mut w);
+    w.blob(&k.value);
+    w.u64(k.version);
+    w.opt_i64(k.expires_at_us);
+    w.i64(k.created_at_us);
+    w.i64(k.updated_at_us);
+    w.into_inner()
+}
+
+pub fn kv_decode(b: &[u8]) -> Result<KvRow, CodecError> {
+    let mut r = Reader::new(b);
+    expect_v1(&mut r, "kv row version")?;
+    let row = KvRow {
+        value: r.blob("value")?,
+        version: r.u64("version")?,
+        expires_at_us: r.opt_i64("expires_at")?,
+        created_at_us: r.i64("created_at")?,
+        updated_at_us: r.i64("updated_at")?,
+    };
+    if !r.done() {
+        return Err(CodecError::Field("kv row trailing bytes"));
+    }
+    Ok(row)
+}
+
+/// The value of a `kv_expiry` row: the [`super::keys::kv`] key of the row it
+/// indexes, so the sweep can name the row without a reverse index.
+pub fn kv_expiry_encode(kv_key: &[u8]) -> Vec<u8> {
+    let mut w = Writer::with_capacity(8 + kv_key.len());
+    head(&mut w);
+    w.blob(kv_key);
+    w.into_inner()
+}
+
+pub fn kv_expiry_decode(b: &[u8]) -> Result<Vec<u8>, CodecError> {
+    let mut r = Reader::new(b);
+    expect_v1(&mut r, "kv_expiry row version")?;
+    let key = r.blob("kv key")?;
+    if !r.done() {
+        return Err(CodecError::Field("kv_expiry row trailing bytes"));
+    }
+    Ok(key)
+}
+
+// ---------------------------------------------------------------------------
 // node-local (§6.2)
 // ---------------------------------------------------------------------------
 

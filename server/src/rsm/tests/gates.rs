@@ -581,10 +581,11 @@ fn every_outcome_tag_pins_its_version_and_an_unknown_tag_is_named() {
         );
     }
 
-    // A typed tag no decoder exists for (6 is the first reserved for phase 2):
-    // fatal, and named as an unknown OUTCOME rather than as a version.
-    let err = decode_entry(&hand_built_entry(1, 6, VERSION_1, &[])).unwrap_err();
-    assert_eq!(err, CodecError::UnknownOutcome(6));
+    // A typed tag no decoder exists for (6 became the KV outcome in WP-2.2, so
+    // 7 is now the first still reserved for phase 2): fatal, and named as an
+    // unknown OUTCOME rather than as a version.
+    let err = decode_entry(&hand_built_entry(1, 7, VERSION_1, &[])).unwrap_err();
+    assert_eq!(err, CodecError::UnknownOutcome(7));
     assert!(err.fatal(), "{err}");
     let err = decode_entry(&hand_built_entry(
         1,

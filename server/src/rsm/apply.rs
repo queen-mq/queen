@@ -76,10 +76,11 @@
 //! # What this work package does NOT apply
 //!
 //! Phase 1 is the MESSAGE PATH (§15, WP-1.4). The store opens the twenty
-//! keyspaces of §6.1's message path; `kv`, `timers`, `streams`, `traces`,
-//! `flags`, `quotas` and `eph_config` do not exist yet, so their effect kinds
-//! answer [`ApplyError::Unsupported`] — a typed, fatal refusal that stops this
-//! node, never a skip (I16). Phase 2 adds the keyspaces and the arms together.
+//! keyspaces of §6.1's message path plus, since WP-2.2, `kv` and `kv_expiry`
+//! (the `KvPut` / `KvDelete` arms). `timers`, `streams`, `traces`, `flags`,
+//! `quotas` and `eph_config` do not exist yet, so their effect kinds answer
+//! [`ApplyError::Unsupported`] — a typed, fatal refusal that stops this node,
+//! never a skip (I16). Phase 2 adds the keyspaces and the arms together.
 
 // I2, enforced rather than reviewed: `clippy.toml` lists the clock,
 // environment and randomness calls this file may not make, `[lints.clippy]` in
@@ -1685,6 +1686,46 @@ impl<'s, S: Store> Applier<'s, S> {
                     self.writes.del_request_id(id, *at)?;
                 }
                 self.stats.rows_swept += victims.len() as u64;
+                Ok(())
+            }
+
+            // WP-2.2: KV (024). Apply knows no KV semantics (I2): the planner
+            // decided the value, the version (`kv_version_base + ordinal`,
+            // asserted by `Entry::validate` and counted by `execute`), the
+            // expiry and both stamps from the entry's `now_us`. Apply writes the
+            // row and keeps the expiry index exact — deterministic, and exactly
+            // once under replay from the durable checkpoint (Phase C reopens the
+            // store AT the checkpoint and re-applies every later entry once).
+            Effect::KvPut {
+                tenant,
+                ns,
+                key,
+                value,
+                version,
+                expires_at_us,
+                created_at_us,
+                updated_at_us,
+            } => {
+                let row = crate::rsm::store::rows::KvRow {
+                    value: value.clone(),
+                    version: *version,
+                    expires_at_us: *expires_at_us,
+                    created_at_us: *created_at_us,
+                    updated_at_us: *updated_at_us,
+                };
+                self.writes.put_kv(tenant, ns, key, &row)?;
+                Ok(())
+            }
+            // A physical delete: a client delete, a lost `expect` that still
+            // prunes an expired row (024 deletes it and answers `absent`), or
+            // one row of the leader's expiry sweep (026). A row that is already
+            // gone is a no-op, never an error — the planner decided against the
+            // same state, so only a replay could meet it, and a replay must
+            // converge.
+            Effect::KvDelete { tenant, ns, key } => {
+                if self.writes.del_kv(tenant, ns, key)?.is_none() {
+                    self.stats.missing_rows += 1;
+                }
                 Ok(())
             }
 

@@ -75,10 +75,15 @@ use crate::rsm::store::{HeedStore, Store, StoreOpts, TypedReads};
 use crate::util::{txn_hash128, uuidv7_bytes};
 
 use super::{
-    AckOut, AckReq, DepthOut, DepthReq, DlqHeadOut, DlqHeadReq, PendingReq, PopDiscoverReq, PopOut,
-    PopPinnedReq, PopReq, PushOut, PushReq, RaftHealth, RenewOut, RenewReq, ReqCtx, Rsm,
-    RsmBuildCtx, RsmError,
+    AckOut, AckReq, DepthOut, DepthReq, DlqHeadOut, DlqHeadReq, KvFailure, KvListReq, KvOut, KvReq,
+    PendingReq, PopDiscoverReq, PopOut, PopPinnedReq, PopReq, PushOut, PushReq, RaftHealth,
+    RenewOut, RenewReq, ReqCtx, Rsm, RsmBuildCtx, RsmError,
 };
+
+/// The KV receiver (WP-2.2): 024's pass 1 here, the writes through the planner,
+/// the reads off this node's applied state. A child module so it shares the
+/// facade's private plumbing (`submit`, the store handle).
+mod kv;
 
 /// The single-node node id of raft1 / embedded (D2). Membership and identity
 /// are WP-4.3's; phase 1 is one voter.
@@ -2099,6 +2104,18 @@ impl Rsm for RaftFacade {
     async fn depth(&self, _ctx: ReqCtx, _req: DepthReq) -> Result<DepthOut, RsmError> {
         // Depth is a §9.6 counter read wired by WP-2.6; not yet.
         Err(RsmError::Unsupported)
+    }
+
+    async fn kv(&self, ctx: ReqCtx, req: KvReq) -> Result<KvOut, KvFailure> {
+        self.kv_impl(ctx, req).await
+    }
+
+    async fn kv_list(&self, ctx: ReqCtx, req: KvListReq) -> Result<String, KvFailure> {
+        self.kv_list_impl(ctx, req).await
+    }
+
+    async fn kv_namespaces(&self, ctx: ReqCtx) -> Result<String, KvFailure> {
+        self.kv_namespaces_impl(ctx).await
     }
 
     fn health(&self) -> RaftHealth {

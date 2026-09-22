@@ -244,13 +244,25 @@ pub enum Keyspace {
     /// NODE-LOCAL. `(bucket, file_id) → (length at the last durable point,
     /// sealed, live bytes, snapshot references)` (§6.2, I11).
     Files,
+    /// `(tenant, ns, key) → KvRow` (024 `queen.kv`, WP-2.2). The tenant and the
+    /// namespace are escaped names and the KEY is the raw, unterminated tail, so
+    /// the keys of one namespace sort in byte order (the SQL's `COLLATE "C"`)
+    /// and a key prefix is a store-key prefix ([`keys::kv`]).
+    Kv,
+    /// `(expires_at_us, version) → kv store key`: the expiry index of [`Keyspace::Kv`]
+    /// — one row per row that carries an expiry, oldest first, so the leader's
+    /// sweep (026's `kv_expire_step_v1`) is O(expired) instead of a scan of
+    /// every key. The version is unique per write (I18), so the pair is unique.
+    KvExpiry,
 }
 
 impl Keyspace {
-    /// Every keyspace this work package opens. Phase 2 appends its own (kv,
-    /// timers, streams, traces, flags, quotas, ephemeral config); the
-    /// environment is opened with room for them ([`MAX_DBS`]).
-    pub const ALL: [Keyspace; 20] = [
+    /// Every keyspace this build opens. Phase 2 appends its own (timers,
+    /// streams, traces, flags, quotas, ephemeral config) after `kv` and
+    /// `kv_expiry`; the environment is opened with room for them ([`MAX_DBS`]).
+    /// The ORDER is [`Keyspace::slot`]'s, so a new keyspace goes at the END of
+    /// the enum and of this list alike.
+    pub const ALL: [Keyspace; 22] = [
         Keyspace::Meta,
         Keyspace::Garbage,
         Keyspace::Queues,
@@ -271,6 +283,8 @@ impl Keyspace {
         Keyspace::Counters,
         Keyspace::SegLoc,
         Keyspace::Files,
+        Keyspace::Kv,
+        Keyspace::KvExpiry,
     ];
 
     /// The LMDB database name. PERMANENT: it is what an existing data
@@ -297,6 +311,8 @@ impl Keyspace {
             Keyspace::Counters => "counters",
             Keyspace::SegLoc => "seg_loc",
             Keyspace::Files => "files",
+            Keyspace::Kv => "kv",
+            Keyspace::KvExpiry => "kv_expiry",
         }
     }
 
@@ -343,8 +359,8 @@ impl Keyspace {
 }
 
 /// `max_dbs` for the environment. LMDB fixes it at open, so it carries the
-/// whole §6.1 catalogue plus headroom: phase 2 adds `kv`, `kv_expiry`,
-/// `timers`, `timers_due`, `quotas`, `eph_config`, `streams_queries`,
+/// whole §6.1 catalogue plus headroom: phase 2 adds `kv`, `kv_expiry` (both
+/// present since WP-2.2), `timers`, `timers_due`, `quotas`, `eph_config`, `streams_queries`,
 /// `streams_state`, `flags`, `traces`, `trace_names` and `trace_expiry` to
 /// [`Keyspace`] and must not need a data-directory migration to do it.
 pub const MAX_DBS: u32 = 64;
