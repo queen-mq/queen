@@ -577,16 +577,32 @@ impl RaftFacade {
             Ok(b) => b,
             Err(e) => return Ok(fail("bad_request", &format!("bad body: {e}"))),
         };
-        if body.kv.as_ref().is_some_and(|v| !v.is_empty())
-            || body.timers.as_ref().is_some_and(|v| !v.is_empty())
-        {
+        if body.timers.as_ref().is_some_and(|v| !v.is_empty()) {
             return Ok(fail(
                 "unsupported",
-                "kv and timer riders need the raft KV/timer surfaces (Phase B2/B3), not in this build",
+                "timer riders need the raft timer surface (Phase B3), not in this build yet",
             ));
         }
+        // The KV rider, validated with the WIRE's limits (024: fewer ops, no
+        // getPrefix inside a transaction).
+        let kv_values: Vec<serde_json::Value> = body
+            .kv
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|r| serde_json::from_str(r.get()).unwrap_or(serde_json::Value::Null))
+            .collect();
+        let kv_ops = match crate::rsm::planner::kv::parse_ops(
+            &kv_values,
+            &ctx.tenant,
+            true,
+            self.store.max_key_len(),
+        ) {
+            Ok(o) => o,
+            Err(e) => return Ok(fail(e.reason, &e.detail)),
+        };
         let ops = body.operations.unwrap_or_default();
-        if ops.is_empty() {
+        if ops.is_empty() && kv_ops.is_empty() {
             return Ok(fail(
                 "bad_request",
                 "transaction requires an operations array (or a top-level kv/timers array)",
@@ -743,6 +759,11 @@ impl RaftFacade {
             }
         }
 
+        // The riders take the flat ordinals after the operations (the SQL wire's
+        // layout: operations keep their indices, the riders append).
+        let kv_base = flat;
+        flat += kv_ops.len();
+
         // The single unambiguous lease hint is every lease-less ack's worker
         // (the JS/Go builders put the pop's leaseId in `requiredLeases`).
         let unique_hint: Option<String> = {
@@ -800,6 +821,7 @@ impl RaftFacade {
             tenant: ctx.tenant.clone(),
             pushes: push_cmds,
             acks: targets,
+            kv: kv_ops.clone(),
         });
         let out = match self.submit(&ctx, cmd).await? {
             Reply::Done { outcome, .. } => crate::rsm::batcher::TxnOutcome::from_outcome(&outcome)
@@ -808,8 +830,62 @@ impl RaftFacade {
             other => return Err(reply_error(other)),
         };
 
+        // A lost `required` KV precondition rolled the whole bundle back: 024's
+        // precondition body (failedIndex in the FLAT space, kvReason, version,
+        // value), HTTP 200.
+        if let Some(f) = &out.kv.failed {
+            let detail = crate::rsm::planner::kv::precondition_detail(&kv_ops, f);
+            let mut body = serde_json::json!({
+                "transactionId": txn_id,
+                "success": false,
+                "reason": "kv_precondition",
+                "error": "QKV a required KV precondition failed; the transaction rolled back",
+                "results": [],
+                "ok": false,
+            });
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&detail) {
+                body["failedIndex"] = v
+                    .get("index")
+                    .and_then(|x| x.as_u64())
+                    .map(|n| serde_json::Value::from(kv_base + n as usize))
+                    .unwrap_or(serde_json::Value::Null);
+                body["kvReason"] = v.get("reason").cloned().unwrap_or(serde_json::Value::Null);
+                body["version"] = v.get("version").cloned().unwrap_or(serde_json::Value::Null);
+                body["value"] = v.get("value").cloned().unwrap_or(serde_json::Value::Null);
+            }
+            return Ok(super::TxnOut { body: body.to_string() });
+        }
+
         // 3. Render: one result per flat ordinal, the SQL wire's shapes.
         let mut results: Vec<serde_json::Value> = vec![serde_json::Value::Null; flat];
+        if !kv_ops.is_empty() {
+            // Deferred reads are evaluated NOW, after the entry applied (024 §6.4).
+            let store = self.store.clone();
+            let tenant = ctx.tenant.clone();
+            let ops2 = kv_ops.clone();
+            let pre = out.kv.results.clone();
+            let now = wall_micros();
+            let vals = tokio::task::spawn_blocking(move || {
+                store.read(|r| crate::rsm::planner::kv::render_call(r, &tenant, &ops2, &pre, now))
+            })
+            .await
+            .map_err(|e| RsmError::Internal(format!("txn kv render: {e}")))?
+            .map_err(|e| RsmError::Internal(format!("txn kv render: {e}")))?;
+            for (i, v) in vals.into_iter().enumerate() {
+                let mut obj = match v {
+                    serde_json::Value::Object(m) => m,
+                    other => {
+                        let mut m = serde_json::Map::new();
+                        m.insert("result".to_string(), other);
+                        m
+                    }
+                };
+                obj.insert("opIndex".to_string(), serde_json::Value::from(i));
+                obj.insert("index".to_string(), serde_json::Value::from(kv_base + i));
+                obj.insert("type".to_string(), serde_json::Value::String("kv".into()));
+                results[kv_base + i] = serde_json::Value::Object(obj);
+            }
+        }
         let mut verdict_mid: Vec<Option<String>> = vec![None; pushes.len()];
         for (g, members) in push_members.iter().enumerate() {
             for (k, &i) in members.iter().enumerate() {

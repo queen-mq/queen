@@ -13,16 +13,18 @@
 //! `success:false`). The overlay is restored on refusal so a rolled-back bundle
 //! leaves no phantom state for later commands of the same cycle.
 
-use crate::rsm::entry::{AckOutcome, Outcome, Placeholder, PushOutcome, PushVerdict, RequestId};
+use crate::rsm::entry::{
+    AckOutcome, KvOutcome, Outcome, Placeholder, PushOutcome, PushVerdict, RequestId,
+};
 
-use super::{AckTarget, Overlay, Plan, Planned, Planner, PushCommand, Refusal};
+use super::{AckTarget, KvOp, Overlay, Plan, Planned, Planner, PushCommand, Refusal};
 use crate::rsm::store::Reads;
 
 /// The placeholder tag of a transaction outcome (reserved range, §5.4).
 pub const TXN_OUTCOME_TAG: u16 = 0xF001;
 
-/// One transaction: every push group and every ack target of the bundle.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One transaction: every push group, ack target and KV op of the bundle.
+#[derive(Clone, Debug, PartialEq)]
 pub struct TxnCommand {
     pub request_id: RequestId,
     pub tenant: String,
@@ -31,6 +33,8 @@ pub struct TxnCommand {
     pub pushes: Vec<PushCommand>,
     /// One per (pid, group, worker), like a batch ack.
     pub acks: Vec<AckTarget>,
+    /// The `kv` rider, validated with the wire's limits (`parse_ops(.., true, ..)`).
+    pub kv: Vec<KvOp>,
 }
 
 /// The decoded transaction outcome: per push group, per ack target.
@@ -38,6 +42,9 @@ pub struct TxnCommand {
 pub struct TxnOutcome {
     pub pushes: Vec<PushOutcome>,
     pub acks: AckOutcome,
+    /// The KV rider's verdicts, or the ONE lost `required` precondition that
+    /// rolled the whole bundle back (then nothing was logged).
+    pub kv: KvOutcome,
 }
 
 impl TxnOutcome {
@@ -54,6 +61,9 @@ impl TxnOutcome {
         let a = Outcome::Ack(self.acks).encode();
         body.extend_from_slice(&(a.len() as u32).to_le_bytes());
         body.extend_from_slice(&a);
+        let k = Outcome::Kv(self.kv).encode();
+        body.extend_from_slice(&(k.len() as u32).to_le_bytes());
+        body.extend_from_slice(&k);
         Placeholder::new(TXN_OUTCOME_TAG, crate::rsm::effect::VERSION_1, body)
             .map(Outcome::Placeholder)
             .map_err(|e| Refusal::retry("internal", format!("txn outcome: {e:?}")))
@@ -86,7 +96,13 @@ impl TxnOutcome {
             Outcome::Ack(a) => a,
             _ => return None,
         };
-        Some(TxnOutcome { pushes, acks })
+        at += len;
+        let len = u32_at(&mut at)?;
+        let kv = match Outcome::decode(b.get(at..at + len)?).ok()? {
+            Outcome::Kv(k) => k,
+            _ => return None,
+        };
+        Some(TxnOutcome { pushes, acks, kv })
     }
 }
 
@@ -159,6 +175,34 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             ov.apply_effects(&effs);
             effects.extend(effs);
             out.acks.results.push(res);
+        }
+
+        // The KV rider last (024's order: the bundle's messages, then its keys).
+        // A lost `required` precondition aborts the WHOLE bundle: nothing is
+        // logged, the overlay is restored, and the answer carries the one
+        // failed precondition so the receiver renders 024's detail.
+        if !cmd.kv.is_empty() {
+            let kvp = match self.plan_kv_writes(ov, &cmd.tenant, &cmd.kv) {
+                Ok(p) => p,
+                Err(r) => return refuse(ov, r),
+            };
+            if let Some(f) = kvp.failed {
+                *ov = saved.clone();
+                let failed = TxnOutcome {
+                    kv: KvOutcome {
+                        results: Vec::new(),
+                        failed: Some(f),
+                    },
+                    ..TxnOutcome::default()
+                };
+                return failed.into_outcome().map(Plan::Empty);
+            }
+            ov.apply_effects(&kvp.effects);
+            effects.extend(kvp.effects);
+            out.kv = KvOutcome {
+                results: kvp.results,
+                failed: None,
+            };
         }
 
         let outcome = match out.into_outcome() {

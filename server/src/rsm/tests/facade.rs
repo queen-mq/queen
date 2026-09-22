@@ -859,3 +859,61 @@ async fn a_transaction_acks_the_input_and_pushes_the_output_all_or_nothing() {
     );
     facade.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_transaction_carries_a_kv_rider_all_or_nothing() {
+    // Phase B4: the `kv` rider rides the SAME entry as the bundle's messages.
+    let dir = scratch("txn-kv");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+
+    // ---- commit: a push and a KV put in one bundle ------------------------------
+    let ok = txn(
+        &facade,
+        serde_json::json!({
+            "operations": [{"type": "push", "items": [{"queue": "kvq", "payload": {"a": 1}, "transactionId": "k1"}]}],
+            "kv": [{"op": "put", "ns": "st", "key": "cursor", "value": {"at": 1}, "ttlSeconds": 600}]
+        }),
+    )
+    .await;
+    assert_eq!(ok["success"], true, "{ok}");
+    let res = ok["results"].as_array().expect("results");
+    assert_eq!(res.len(), 2, "{ok}");
+    assert_eq!(res[0]["type"], "push");
+    assert_eq!(res[1]["type"], "kv", "{ok}");
+    assert_eq!(res[1]["index"], 1, "riders take the flat ordinals after the operations");
+    assert_eq!(res[1]["opIndex"], 0);
+    let got = txn(
+        &facade,
+        serde_json::json!({"kv": [{"op": "get", "ns": "st", "key": "cursor"}]}),
+    )
+    .await;
+    assert_eq!(got["success"], true, "{got}");
+    assert_eq!(got["results"][0]["found"], true, "{got}");
+    assert_eq!(got["results"][0]["value"], serde_json::json!({"at": 1}), "{got}");
+
+    // ---- rollback: a REQUIRED CAS that loses aborts the whole bundle ------------
+    let lost = txn(
+        &facade,
+        serde_json::json!({
+            "operations": [{"type": "push", "items": [{"queue": "kvq2", "payload": {"b": 1}, "transactionId": "k2"}]}],
+            "kv": [{"op": "put", "ns": "st", "key": "cursor", "value": {"at": 2}, "ttlSeconds": 600,
+                    "expect": 999999, "required": true}]
+        }),
+    )
+    .await;
+    assert_eq!(lost["success"], false, "{lost}");
+    assert_eq!(lost["reason"], "kv_precondition", "{lost}");
+    assert_eq!(lost["failedIndex"], 1, "the failed op in the FLAT space: {lost}");
+    assert_eq!(
+        pop_q(&facade, "kvq2").await["messages"].as_array().map(|m| m.len()),
+        Some(0),
+        "the rolled-back bundle's push never landed"
+    );
+    let still = txn(
+        &facade,
+        serde_json::json!({"kv": [{"op": "get", "ns": "st", "key": "cursor"}]}),
+    )
+    .await;
+    assert_eq!(still["results"][0]["value"], serde_json::json!({"at": 1}), "{still}");
+    facade.shutdown().await;
+}
