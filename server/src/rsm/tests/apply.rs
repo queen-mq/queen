@@ -1812,8 +1812,9 @@ fn time_never_goes_backwards() {
 
 #[test]
 fn a_kind_this_build_cannot_apply_stops_the_node() {
-    // I16: never skipped. Phase 2 brings the `kv` keyspace and the arm
-    // together; until then the node refuses rather than dropping a committed
+    // I16: never skipped. Phase 2 brings each keyspace and its arm together
+    // (WP-2.2 did it for `kv`, WP-2.3 for `timers`; streams are still
+    // missing); until then the node refuses rather than dropping a committed
     // effect on the floor.
     let node = Node::new("unsupported");
     let (mut a, _) = Applier::open(
@@ -1825,15 +1826,10 @@ fn a_kind_this_build_cannot_apply_stops_the_node() {
     )
     .expect("open");
     let c = Build::new(BASE_US, 1, 0)
-        .cmd(vec![Effect::KvPut {
-            tenant: TENANT.into(),
-            ns: "n".into(),
+        .cmd(vec![Effect::StreamsStateDelete {
+            query_id: uuid(0x90),
+            pid: 1,
             key: "k".into(),
-            value: b"1".to_vec(),
-            version: 1,
-            expires_at_us: None,
-            created_at_us: BASE_US,
-            updated_at_us: BASE_US,
         }])
         .at(1, 1);
     match a.apply(&c) {

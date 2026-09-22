@@ -26,8 +26,8 @@ use crate::rsm::entry::{Entry, Outcome, RequestId};
 use crate::rsm::planner::timers::{FireReport, TimerFireConfig, TimersCommand};
 use crate::rsm::planner::{
     AckCommand, AckItem, AckPositionalCommand, AckStatus, AckTarget, DlqHeadCommand, DlqSnapshot,
-    NackCommand, Overlay, Plan, PlanConfig, Planned, Planner, PopCommand, PushCommand, PushItem,
-    RenewCommand, SubIntent,
+    KvCommand, NackCommand, Overlay, Plan, PlanConfig, Planned, Planner, PopCommand, PushCommand,
+    PushItem, RenewCommand, SubIntent,
 };
 use crate::rsm::state::{Committed, Derived};
 use crate::rsm::store::keys::Counter;
@@ -94,6 +94,14 @@ pub enum Cmd {
     Nack(NackCommand),
     Renew(RenewCommand),
     DlqHead(DlqHeadCommand),
+    /// A KV call (WP-2.2).
+    Kv(KvCommand),
+    /// One leader KV expiry step, planned exactly as the batcher plans it (a
+    /// command of its own, `Outcome::Empty`, logged only when it deletes).
+    KvSweep {
+        id: u64,
+        limit: usize,
+    },
     /// WP-2.3: a timers call (schedule / cancel).
     Timers(TimersCommand),
 }
@@ -108,6 +116,8 @@ impl Cmd {
             Cmd::Nack(c) => c.request_id,
             Cmd::Renew(c) => c.request_id,
             Cmd::DlqHead(c) => c.request_id,
+            Cmd::Kv(c) => c.request_id,
+            Cmd::KvSweep { id, .. } => rid(*id),
             Cmd::Timers(c) => c.request_id,
         }
     }
@@ -123,6 +133,19 @@ impl Cmd {
             Cmd::Nack(c) => p.plan_nack(ov, c),
             Cmd::Renew(c) => p.plan_renew(ov, c),
             Cmd::DlqHead(c) => p.plan_dlq_head(ov, c),
+            Cmd::Kv(c) => p.plan_kv(ov, c),
+            Cmd::KvSweep { limit, .. } => {
+                let effects = p.plan_kv_sweep(ov, *limit)?;
+                if effects.is_empty() {
+                    Ok(Plan::Empty(Outcome::Empty))
+                } else {
+                    ov.apply_effects(&effects);
+                    Ok(Plan::Logged {
+                        effects,
+                        outcome: Outcome::Empty,
+                    })
+                }
+            }
             Cmd::Timers(c) => p.plan_timers(ov, c),
         }
     }

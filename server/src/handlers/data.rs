@@ -5691,6 +5691,12 @@ pub async fn handle_transaction(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     body: Bytes,
 ) -> Response {
+    // Phase B — raft mode routes the transaction to the facade (one command,
+    // one entry, all-or-nothing; crash-atomic by the queue-log WAL).
+    if st.storage.is_raft() {
+        let _ = &authed;
+        return crate::handlers::raft::dispatch_transaction(&st, tenant.as_str(), body).await;
+    }
     let root: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),

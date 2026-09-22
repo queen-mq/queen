@@ -354,6 +354,18 @@ pub struct AckOut {
     pub body: String,
 }
 
+/// A transaction bundle — `POST /api/v1/transaction` (Phase B): the raw body.
+#[derive(Clone, Debug)]
+pub struct TxnReq {
+    pub raw: Vec<u8>,
+}
+
+/// A transaction outcome: the rendered response body (HTTP 200 either way).
+#[derive(Clone, Debug)]
+pub struct TxnOut {
+    pub body: String,
+}
+
 /// A renew outcome: the rendered response body.
 #[derive(Clone, Debug)]
 pub struct RenewOut {
@@ -423,6 +435,59 @@ pub struct TimerReadOut {
 }
 
 // ---------------------------------------------------------------------------
+// KV (024, WP-2.2).
+// ---------------------------------------------------------------------------
+
+/// A KV call — `POST /api/v1/kv` and the three path routes — as the HTTP layer
+/// hands it over: the op array, exactly as `kv_apply_v1` would have received
+/// it. The tenant is on the [`ReqCtx`] and is never read from an op (024 §6.1
+/// point 6).
+#[derive(Clone, Debug)]
+pub struct KvReq {
+    pub ops: Vec<serde_json::Value>,
+}
+
+/// The answer to a KV call: one element per op, index-aligned, in 024's
+/// shapes (§6.4).
+#[derive(Clone, Debug)]
+pub struct KvOut {
+    pub results: Vec<serde_json::Value>,
+}
+
+/// The console's page read (`POST /api/v1/resources/kv/list`,
+/// `kv_list_v1`): every field already resolved by the HTTP layer except the
+/// limit, which the store side clamps (its one home).
+#[derive(Clone, Debug)]
+pub struct KvListReq {
+    pub namespace: String,
+    pub prefix: String,
+    /// The exclusive cursor; `None` (or empty) for the first page.
+    pub after: Option<String>,
+    pub limit: Option<i64>,
+    pub keys_only: bool,
+    pub include_expired: bool,
+}
+
+/// Why a KV call did not produce an answer array.
+#[derive(Clone, Debug)]
+pub enum KvFailure {
+    /// 024's shape and size refusals: `status` 400 (SQLSTATE 22023) or 413
+    /// (22001), `reason` the SP's stable MESSAGE (`kv_bad_namespace`, …),
+    /// `detail` its DETAIL (it names only what the caller sent).
+    Invalid {
+        status: u16,
+        reason: String,
+        detail: String,
+    },
+    /// A write that lost its precondition with `"required": true` (024's
+    /// 23514): nothing was written, and the answer is a 200 built from this
+    /// DETAIL JSON (cut at 4096 characters like the SP's).
+    Precondition { detail: String },
+    /// Anything the facade itself answers (retry, no leader, timeout, …).
+    Rsm(RsmError),
+}
+
+// ---------------------------------------------------------------------------
 // Health (§14.1).
 // ---------------------------------------------------------------------------
 
@@ -485,6 +550,8 @@ pub trait Rsm: Send + Sync {
     async fn ack(&self, ctx: ReqCtx, req: AckReq) -> Result<AckOut, RsmError>;
     /// `POST /api/v1/lease/:leaseId/extend`.
     async fn renew(&self, ctx: ReqCtx, req: RenewReq) -> Result<RenewOut, RsmError>;
+    /// `POST /api/v1/transaction` (Phase B): push + ack all-or-nothing.
+    async fn transaction(&self, ctx: ReqCtx, req: TxnReq) -> Result<TxnOut, RsmError>;
     /// The head of a group's DLQ stream (005), read on the ack path.
     async fn dlq_head(&self, ctx: ReqCtx, req: DlqHeadReq) -> Result<DlqHeadOut, RsmError>;
     /// A cheap indexed pending probe for the long-poll gate (§9.5). A local
@@ -492,6 +559,25 @@ pub trait Rsm: Send + Sync {
     async fn has_pending(&self, ctx: ReqCtx, req: PendingReq) -> Result<bool, RsmError>;
     /// Queue depth (pending count) for the addressed scope.
     async fn depth(&self, ctx: ReqCtx, req: DepthReq) -> Result<DepthOut, RsmError>;
+
+    /// A KV call (024 `kv_apply_v1`, HTTP surface: `getPrefix` allowed, the
+    /// HTTP budgets). The default is the un-ported answer, so a facade that
+    /// does not serve KV needs no code for it.
+    async fn kv(&self, _ctx: ReqCtx, _req: KvReq) -> Result<KvOut, KvFailure> {
+        Err(KvFailure::Rsm(RsmError::Unsupported))
+    }
+
+    /// The console's page of one namespace (`kv_list_v1`): the JSON object
+    /// `{rows, truncated, nextAfter, bytes}`, rendered.
+    async fn kv_list(&self, _ctx: ReqCtx, _req: KvListReq) -> Result<String, KvFailure> {
+        Err(KvFailure::Rsm(RsmError::Unsupported))
+    }
+
+    /// The console's namespace selector (`kv_namespaces_v1`): the JSON array
+    /// `[{namespace, keys}]`, rendered.
+    async fn kv_namespaces(&self, _ctx: ReqCtx) -> Result<String, KvFailure> {
+        Err(KvFailure::Rsm(RsmError::Unsupported))
+    }
 
     /// `POST /api/v1/timers` and the cancel route (WP-2.3): schedule,
     /// reschedule and cancel in ONE command (025 `log_timers_apply_v1`). The
@@ -581,6 +667,9 @@ impl Rsm for NotReady {
         Err(RsmError::Unsupported)
     }
     async fn renew(&self, _ctx: ReqCtx, _req: RenewReq) -> Result<RenewOut, RsmError> {
+        Err(RsmError::Unsupported)
+    }
+    async fn transaction(&self, _ctx: ReqCtx, _req: TxnReq) -> Result<TxnOut, RsmError> {
         Err(RsmError::Unsupported)
     }
     async fn dlq_head(&self, _ctx: ReqCtx, _req: DlqHeadReq) -> Result<DlqHeadOut, RsmError> {

@@ -60,7 +60,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         Ok(Plan::logged(effects, outcome))
     }
 
-    fn ack_target(
+    pub(super) fn ack_target(
         &self,
         ov: &Overlay,
         target: &AckTarget,
