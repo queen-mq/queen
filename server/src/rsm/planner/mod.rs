@@ -73,6 +73,10 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
+
+use smallvec::SmallVec;
+
+use crate::rsm::fasthash::FxBuild;
 use std::rc::Rc;
 
 use crate::rsm::dedup::{
@@ -534,25 +538,27 @@ pub struct Overlay {
     max_now_us: i64,
     /// The greatest `created_at` any folded `Append` carried.
     max_created_at_us: i64,
-    queues: HashMap<(String, String), Option<QueueConfig>>,
-    groups: HashMap<(String, String, String), Option<GroupRow>>,
-    pids_by_key: HashMap<(String, String, String), Pid>,
-    parts: HashMap<Pid, OverlayPart>,
-    cursors: HashMap<(Pid, String), Option<CursorRow>>,
+    queues: HashMap<(String, String), Option<QueueConfig>, FxBuild>,
+    groups: HashMap<(String, String, String), Option<GroupRow>, FxBuild>,
+    pids_by_key: HashMap<(String, String, String), Pid, FxBuild>,
+    parts: HashMap<Pid, OverlayPart, FxBuild>,
+    cursors: HashMap<(Pid, String), Option<CursorRow>, FxBuild>,
     /// `(pid, hash) → [(offset, created_at)]`: the occurrences an overlay
     /// `Append` added, merged with committed `dedup` on a probe or a resolve.
-    dedup: HashMap<(Pid, [u8; 16]), Vec<DedupOccurrence>>,
-    request_ids: HashMap<RequestId, Outcome>,
+    /// Rebuilt every cycle from every in-flight entry: one key per in-flight
+    /// message, so the value keeps its (almost always single) occurrence inline.
+    dedup: HashMap<(Pid, [u8; 16]), SmallVec<[DedupOccurrence; 1]>, FxBuild>,
+    request_ids: HashMap<RequestId, Outcome, FxBuild>,
     /// `(tenant, ns, key) → row` for every KV row an entry in flight (or an
     /// earlier command of this cycle) wrote — `None` for a delete — so the
     /// next KV write is judged against the version it left, not against the
     /// committed one (WP-2.2; the serial point 024's row lock was).
-    kv: HashMap<(String, String, String), Option<crate::rsm::store::rows::KvRow>>,
+    kv: HashMap<(String, String, String), Option<crate::rsm::store::rows::KvRow>, FxBuild>,
     /// `(tenant, queue, timer_key) → what the in-flight entries did to it`
     /// (WP-2.3). The overlay's view wins over committed state per key, which
     /// is what keeps a timer whose fire entry is still in flight from firing
     /// a second time in the next cycle (exactly-once in effect).
-    timers: HashMap<(String, String, String), TimerOverlay>,
+    timers: HashMap<(String, String, String), TimerOverlay, FxBuild>,
 }
 
 /// One timer as the in-flight entries left it, relative to committed state.
@@ -585,15 +591,15 @@ impl Overlay {
             cycle_kv_base: committed_kv_version_next,
             max_now_us: 0,
             max_created_at_us: 0,
-            queues: HashMap::new(),
-            groups: HashMap::new(),
-            pids_by_key: HashMap::new(),
-            parts: HashMap::new(),
-            cursors: HashMap::new(),
-            dedup: HashMap::new(),
-            request_ids: HashMap::new(),
-            kv: HashMap::new(),
-            timers: HashMap::new(),
+            queues: HashMap::default(),
+            groups: HashMap::default(),
+            pids_by_key: HashMap::default(),
+            parts: HashMap::default(),
+            cursors: HashMap::default(),
+            dedup: HashMap::default(),
+            request_ids: HashMap::default(),
+            kv: HashMap::default(),
+            timers: HashMap::default(),
         }
     }
 
@@ -718,6 +724,7 @@ impl Overlay {
                     hs.push(h);
                 }
                 let end = base_offset + count as u64 - 1;
+                self.dedup.reserve(count);
                 for (i, h) in hs.iter().enumerate() {
                     self.dedup
                         .entry((*pid, *h))

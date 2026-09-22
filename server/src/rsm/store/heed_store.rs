@@ -200,7 +200,7 @@ struct RamRows {
     /// The keys changed since the last checkpoint. A key here whose value is
     /// absent from `map` is a delete. Only the apply thread (the one writer)
     /// touches it; readers never do.
-    dirty: HashSet<RamKey>,
+    dirty: HashSet<RamKey, crate::rsm::fasthash::FxBuild>,
 }
 
 /// One RAM keyspace: the live rows and their dirty set (module header).
@@ -215,7 +215,7 @@ impl RamTable {
                 // The rows come in key order off an LMDB cursor, so the
                 // collect's sort is a single linear pass before the bulk build.
                 map: rows.into_iter().collect(),
-                dirty: HashSet::new(),
+                dirty: HashSet::default(),
             }),
         }
     }
@@ -293,7 +293,7 @@ impl RamTable {
     }
 
     /// Take the dirty set, leaving an empty one (O(1) under the lock).
-    fn take_dirty(&self) -> HashSet<RamKey> {
+    fn take_dirty(&self) -> HashSet<RamKey, crate::rsm::fasthash::FxBuild> {
         std::mem::take(&mut self.write().dirty)
     }
 

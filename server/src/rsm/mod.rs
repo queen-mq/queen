@@ -159,12 +159,12 @@ pub mod identity {}
 /// Owner: WP-4.7.
 pub mod digest {}
 
+/// Crash points (§13.5), from the pgless `native/faults.rs`. Owner: WP-1.8.
 /// The node-local metrics store (D17): `system_metrics`, `worker_metrics`,
 /// `worker_metrics_summary`, `queue_lag_metrics`, `queue_parked_replica` and
 /// `retention_history`, none of them replicated. Owner: WP-2.8.
 pub mod local_metrics {}
-
-/// Crash points (§13.5), from the pgless `native/faults.rs`. Owner: WP-1.8.
+pub mod fasthash;
 pub mod faults;
 
 /// Node-local timing metrics (O18, D17, PERF-1): the lock-free `queen_raft_*`

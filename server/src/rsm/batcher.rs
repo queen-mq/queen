@@ -1125,6 +1125,14 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
         };
 
         loop {
+            // Take every command that has already arrived BEFORE planning. The
+            // biased select below reaches the command channel last, so without
+            // this a cycle plans on a partial queue while the channel fills:
+            // faster cycles → smaller entries → more result wakes → even less
+            // intake (measured: 1024-deep channel full, submit waits 6-110 ms).
+            while let Ok(more) = st.cmd_rx.try_recv() {
+                st.queue.push_back(more);
+            }
             while st.can_plan() {
                 st.plan_cycle().await;
             }
@@ -1492,6 +1500,15 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         // encode fails only the commands that went into it, and nothing is
         // half-answered. `encode_entry` re-runs `Entry::validate` (§5.1).
         let encoded = match &out.entry {
+            // The backend takes the planned entry (queue-log path): validate it
+            // instead of encoding every payload byte on this serial task.
+            Some(entry) if !self.repl.wants_bytes() => match entry.validate() {
+                Ok(()) => Some(Bytes::new()),
+                Err(e) => {
+                    self.route_encode_failure(out.slots, replies, received, &e);
+                    return;
+                }
+            },
             Some(entry) => match encode_entry(entry) {
                 Ok(bytes) => Some(Bytes::from(bytes)),
                 Err(e) => {
@@ -1722,6 +1739,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         waiters: Vec<Waiter>,
         bytes: Bytes,
     ) {
+        let planned = entry.clone();
         self.inflight.push_back(InFlightEntry {
             seq,
             index,
@@ -1742,7 +1760,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         let deadline = Instant::now() + Duration::from_millis(self.cfg.propose_ms);
         // Own the replicator inside the future so it is `'static`; `propose`
         // borrows `&self` only for the length of the call.
-        let mut fut = Box::pin(async move { repl.propose(bytes, deadline).await });
+        let mut fut = Box::pin(async move { repl.propose_entry(bytes, planned, deadline).await });
 
         // Drive the future to its first suspension INLINE, so the log submission
         // happens now, in plan order, on this one task. The no-op waker never

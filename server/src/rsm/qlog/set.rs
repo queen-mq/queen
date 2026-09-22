@@ -602,15 +602,16 @@ impl QLogSet {
     /// only.
     pub fn sync(&mut self) -> io::Result<()> {
         let dirty = std::mem::take(&mut self.dirty);
+        // READ-PARALLELISM FIX: the fsync used to run under the queue's WRITE
+        // lock (`log.write().sync()`), which froze all of a hot queue's pop
+        // readers for the fsync's whole duration (FAT100: 64 consumers starved
+        // → 34k/s, 2M backlog). Instead: clone the active fd under a brief READ
+        // lock (concurrent with the pop reads), release, and fsync OUTSIDE any
+        // lock. The fsync flushes the inode regardless of the fd; the single
+        // writer never rolls between the clone and the fsync, so the clone is
+        // the current active file. Pop reads now proceed during the fsync.
+        let mut handles: Vec<std::fs::File> = Vec::with_capacity(dirty.len());
         for qid in dirty {
-            // READ-PARALLELISM FIX: the fsync used to run under the queue's WRITE
-            // lock (`log.write().sync()`), which froze all of a hot queue's pop
-            // readers for the fsync's whole duration (FAT100: 64 consumers starved
-            // → 34k/s, 2M backlog). Instead: clone the active fd under a brief READ
-            // lock (concurrent with the pop reads), release, and fsync OUTSIDE any
-            // lock. The fsync flushes the inode regardless of the fd; the single
-            // writer never rolls between the clone and the fsync, so the clone is
-            // the current active file. Pop reads now proceed during the fsync.
             let arc = self
                 .logs
                 .read()
@@ -618,17 +619,35 @@ impl QLogSet {
                 .get(&qid)
                 .cloned();
             if let Some(log) = arc {
-                let handle = log.read().expect("qlog poisoned").active_clone()?;
-                if let Some(f) = handle {
-                    crate::rsm::qlog::fsync_file(&f, self.opts.fsync)?;
+                if let Some(f) = log.read().expect("qlog poisoned").active_clone()? {
+                    handles.push(f);
                 }
             }
         }
-        // Every queue `flush` wrote was marked dirty and is now fsync'd, so
-        // everything written is durable: the A3a durable index catches up to the
-        // written watermark. If a `sync` above returned early on an I/O error the
-        // applier poisons and never records the index, so this line is reached
-        // only when the whole set is durable.
+        // The dirty logs are independent files: fsync them CONCURRENTLY, so the
+        // durable point costs the slowest fsync, not their sum (3 hot queues
+        // made log_fsync 6 → 13.5 ms per group when they ran one after another).
+        let mode = self.opts.fsync;
+        match handles.as_slice() {
+            [] => {}
+            [one] => crate::rsm::qlog::fsync_file(one, mode)?,
+            [first, rest @ ..] => std::thread::scope(|s| -> io::Result<()> {
+                let joins: Vec<std::thread::ScopedJoinHandle<'_, io::Result<()>>> = rest
+                    .iter()
+                    .map(|f| s.spawn(move || crate::rsm::qlog::fsync_file(f, mode)))
+                    .collect();
+                let mut res = crate::rsm::qlog::fsync_file(first, mode);
+                for j in joins {
+                    let r = j
+                        .join()
+                        .unwrap_or_else(|_| Err(io::Error::other("qlog fsync thread panicked")));
+                    if res.is_ok() {
+                        res = r;
+                    }
+                }
+                res
+            })?,
+        }
         self.durable_seq = self.written_seq;
         Ok(())
     }

@@ -1273,6 +1273,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "smallvec",
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",

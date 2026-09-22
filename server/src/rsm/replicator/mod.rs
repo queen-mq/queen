@@ -248,6 +248,27 @@ pub trait Replicator: Send + Sync + 'static {
     /// the openraft backend runs at pipeline=1.
     async fn propose(&self, entry: Bytes, deadline: Instant) -> Result<AppliedAt, ProposeError>;
 
+    /// Whether [`Replicator::propose_entry`] needs the encoded bytes. `false`
+    /// lets the batcher skip encoding the entry on its serial task (it runs
+    /// `Entry::validate` instead): the local replicator on the queue-log path
+    /// takes the planned entry itself and never writes the encoded form.
+    fn wants_bytes(&self) -> bool {
+        true
+    }
+
+    /// [`Replicator::propose`] with the planned entry in hand, so a backend
+    /// that keeps the entry need not decode `entry` again. The default ignores
+    /// `planned`. Same submission-ordering contract as `propose`.
+    async fn propose_entry(
+        &self,
+        entry: Bytes,
+        planned: std::sync::Arc<crate::rsm::entry::Entry>,
+        deadline: Instant,
+    ) -> Result<AppliedAt, ProposeError> {
+        let _ = planned;
+        self.propose(entry, deadline).await
+    }
+
     fn role(&self) -> Role;
 
     fn watch_role(&self) -> tokio::sync::watch::Receiver<Role>;

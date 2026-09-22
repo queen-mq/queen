@@ -64,6 +64,7 @@ server = ["dep:rust-embed", "dep:tracing-subscriber", "axum/http1", "axum/tokio"
 disallowed_methods = "allow"
 
 [dependencies]
+smallvec = "1"
 tokio = { version = "1", features = ["full"] }
 # Lean by default: the embedded facade and the handlers need only axum's core
 # extractor/response types plus Query. The hyper/http1 serve stack is pulled in

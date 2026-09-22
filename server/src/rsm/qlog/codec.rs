@@ -125,14 +125,16 @@ pub enum Pre {
 }
 
 impl Pre {
-    /// Start compressing a copy of `blob` on the pool.
-    pub fn start(blob: &[u8]) -> Pre {
-        if level() == 0 || blob.len() < MIN_BYTES {
+    /// Start compressing the blob of `entry.effects[eff]` (an `Append`) on the
+    /// pool. The job shares the entry (no copy of the payload).
+    pub fn start_append(entry: &Arc<crate::rsm::entry::Entry>, eff: usize) -> Pre {
+        if level() == 0 || append_blob(entry, eff).len() < MIN_BYTES {
             return Pre::Raw;
         }
         let (tx, rx) = mpsc::sync_channel(1);
         match pool().send(Job {
-            raw: blob.to_vec(),
+            entry: entry.clone(),
+            eff,
             tx,
         }) {
             Ok(()) => Pre::Job(rx),
@@ -151,8 +153,16 @@ impl Pre {
 }
 
 struct Job {
-    raw: Vec<u8>,
+    entry: Arc<crate::rsm::entry::Entry>,
+    eff: usize,
     tx: mpsc::SyncSender<Option<Vec<u8>>>,
+}
+
+fn append_blob(entry: &crate::rsm::entry::Entry, eff: usize) -> &[u8] {
+    match entry.effects.get(eff) {
+        Some(crate::rsm::effect::Effect::Append { blob, .. }) => blob,
+        _ => &[],
+    }
 }
 
 /// The codec pool: `QUEEN_RAFT_QLOG_ZSTD_THREADS` (default 4) persistent
@@ -171,7 +181,7 @@ fn pool() -> &'static mpsc::Sender<Job> {
                         Ok(j) => j,
                         Err(_) => return,
                     };
-                    let _ = job.tx.send(compress_one(&job.raw));
+                    let _ = job.tx.send(compress_one(append_blob(&job.entry, job.eff)));
                 });
             if spawned.is_err() {
                 break;

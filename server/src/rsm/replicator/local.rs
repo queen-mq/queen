@@ -214,7 +214,13 @@ impl Notify for ReplNotify {
 /// One proposal on its way to the log.
 struct Pending {
     bytes: Bytes,
-    entry: crate::rsm::entry::Entry,
+    /// The entry's size for the writer's group cap and metrics: `bytes.len()`,
+    /// or an estimate of the payload when `propose_entry` sent no bytes.
+    size: usize,
+    /// Shared with the batcher's in-flight list on the `propose_entry` path (no
+    /// decode, no payload copy); replaced by the payload-free form after the
+    /// queue-log write.
+    entry: Arc<crate::rsm::entry::Entry>,
     done: oneshot::Sender<AppliedAt>,
     /// When `propose` submitted this (PERF-1): the `proposed_to_committed`
     /// histogram measures from here to the group's fsync. `None` when the
@@ -320,12 +326,12 @@ impl Writer {
             }
             let mut bytes: usize = pending
                 .iter()
-                .map(|p| p.bytes.len() + super::log::FRAME_OVERHEAD)
+                .map(|p| p.size + super::log::FRAME_OVERHEAD)
                 .sum();
             while pending.len() < GROUP_COMMIT_MAX && bytes < GROUP_COMMIT_BYTES {
                 match rx.try_recv() {
                     Ok(p) => {
-                        bytes += p.bytes.len() + super::log::FRAME_OVERHEAD;
+                        bytes += p.size + super::log::FRAME_OVERHEAD;
                         pending.push(p);
                     }
                     Err(TryRecvError::Empty) => break,
@@ -371,7 +377,7 @@ impl Writer {
         // PERF-1/PERF-G: group size and the writer-pickup leg, before any write.
         if crate::rsm::timing::enabled() {
             let tm = crate::rsm::timing::metrics();
-            let group_bytes: u64 = pending.iter().map(|p| p.bytes.len() as u64).sum();
+            let group_bytes: u64 = pending.iter().map(|p| p.size as u64).sum();
             tm.group_entries.record(pending.len() as u64);
             tm.group_bytes.record(group_bytes);
             // proposed → the writer dequeued this group and is about to write it
@@ -389,7 +395,7 @@ impl Writer {
         let trace = crate::rsm::timing::cycle_trace_enabled();
         let group_len = pending.len();
         let group_bytes_t: u64 = if trace {
-            pending.iter().map(|p| p.bytes.len() as u64).sum()
+            pending.iter().map(|p| p.size as u64).sum()
         } else {
             0
         };
@@ -768,8 +774,10 @@ impl Writer {
         // computed from the length on BOTH paths and the digest is replay-stable
         // (I2). Cheap: the entry carries no payload.
         for (p, bytes) in pending.iter_mut().zip(pf.iter()) {
-            p.entry = decode_entry(bytes)
-                .map_err(|e| io::Error::other(format!("payload-free entry re-decode: {e:?}")))?;
+            p.entry =
+                Arc::new(decode_entry(bytes).map_err(|e| {
+                    io::Error::other(format!("payload-free entry re-decode: {e:?}"))
+                })?);
         }
         Ok(())
     }
@@ -865,7 +873,8 @@ fn handoff_group(
         let committed = Committed {
             index,
             term: LOG_TERM,
-            entry: p.entry,
+            // Unique by now (the payload-free replacement, or a decoded entry).
+            entry: Arc::try_unwrap(p.entry).unwrap_or_else(|a| (*a).clone()),
         };
         // PERF-1: mark the channel depth so the apply thread can read it.
         crate::rsm::timing::apply_channel_send();
@@ -910,7 +919,7 @@ impl Syncer {
             let (group_len, group_bytes_t) = if trace {
                 (
                     pending.len(),
-                    pending.iter().map(|p| p.bytes.len() as u64).sum::<u64>(),
+                    pending.iter().map(|p| p.size as u64).sum::<u64>(),
                 )
             } else {
                 (0, 0)
@@ -1613,28 +1622,39 @@ fn wait_until_applied(
     }
 }
 
-#[async_trait]
-impl<S: Store + 'static> Replicator for LocalReplicator<S> {
-    async fn propose(&self, entry: Bytes, deadline: Instant) -> Result<AppliedAt, ProposeError> {
-        if let Some(why) = self.shared.is_poisoned() {
-            return Err(ProposeError::Fatal(why));
-        }
-        // Decode once, for the `Committed` the writer hands to apply. The bytes
-        // themselves go to the log unchanged. A proposal a valid batcher built
-        // always decodes; a failure is a caller bug, refused (not fatal to the
-        // node).
-        let decoded = decode_entry(&entry)
-            .map_err(|e| ProposeError::Refused(format!("proposal does not decode: {e:?}")))?;
+/// `QUEEN_RAFT_PROPOSE_ENTRY` (default on): on the queue-log path the batcher
+/// hands the planned entry over instead of encoding it for a decode here.
+/// `0` restores the encode + decode path (an A/B switch).
+fn propose_entry_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("QUEEN_RAFT_PROPOSE_ENTRY").as_deref(),
+            Ok("0") | Ok("false") | Ok("off")
+        )
+    })
+}
 
-        // Start the qlog codec on the payloads now (a copy each, on the codec
-        // pool): it runs while the writer fsyncs the group ahead of this one.
+impl<S: Store + 'static> LocalReplicator<S> {
+    /// Hand one entry to the log writer and wait for it to apply. Runs its
+    /// synchronous prefix (up to the channel send) in the caller's first poll,
+    /// which is what makes the log index follow the submission order.
+    async fn submit(
+        &self,
+        entry: Bytes,
+        decoded: Arc<crate::rsm::entry::Entry>,
+        deadline: Instant,
+    ) -> Result<AppliedAt, ProposeError> {
+        // Start the qlog codec on the payloads now (on the codec pool, sharing
+        // the entry): it runs while the writer fsyncs the group ahead of this one.
         let pre = if self.qlog_codec {
             decoded
                 .effects
                 .iter()
-                .filter_map(|eff| match eff {
-                    crate::rsm::effect::Effect::Append { blob, .. } => {
-                        Some(crate::rsm::qlog::codec::Pre::start(blob))
+                .enumerate()
+                .filter_map(|(i, eff)| match eff {
+                    crate::rsm::effect::Effect::Append { .. } => {
+                        Some(crate::rsm::qlog::codec::Pre::start_append(&decoded, i))
                     }
                     _ => None,
                 })
@@ -1643,7 +1663,22 @@ impl<S: Store + 'static> Replicator for LocalReplicator<S> {
             Vec::new()
         };
         let (done_tx, done_rx) = oneshot::channel();
+        let size = if entry.is_empty() {
+            decoded
+                .effects
+                .iter()
+                .map(|eff| match eff {
+                    crate::rsm::effect::Effect::Append { blob, hashes, .. } => {
+                        blob.len() + hashes.len() + 64
+                    }
+                    _ => 64,
+                })
+                .sum()
+        } else {
+            entry.len()
+        };
         let pending = Pending {
+            size,
             bytes: entry,
             entry: decoded,
             done: done_tx,
@@ -1671,6 +1706,49 @@ impl<S: Store + 'static> Replicator for LocalReplicator<S> {
             // holds it and does not plan the next cycle until then.
             Err(_elapsed) => Err(ProposeError::Timeout),
         }
+    }
+}
+
+#[async_trait]
+impl<S: Store + 'static> Replicator for LocalReplicator<S> {
+    async fn propose(&self, entry: Bytes, deadline: Instant) -> Result<AppliedAt, ProposeError> {
+        if let Some(why) = self.shared.is_poisoned() {
+            return Err(ProposeError::Fatal(why));
+        }
+        // Decode once, for the `Committed` the writer hands to apply. The bytes
+        // themselves go to the log unchanged. A proposal a valid batcher built
+        // always decodes; a failure is a caller bug, refused (not fatal to the
+        // node).
+        let decoded = decode_entry(&entry)
+            .map_err(|e| ProposeError::Refused(format!("proposal does not decode: {e:?}")))?;
+
+        // Start the qlog codec on the payloads now (a copy each, on the codec
+        // pool): it runs while the writer fsyncs the group ahead of this one.
+        self.submit(entry, Arc::new(decoded), deadline).await
+    }
+
+    /// On the queue-log path the writer stores the planned entry itself and
+    /// never writes the encoded form: the batcher may skip the encode.
+    fn wants_bytes(&self) -> bool {
+        !self.qlog_codec || !propose_entry_on()
+    }
+
+    async fn propose_entry(
+        &self,
+        entry: Bytes,
+        planned: Arc<crate::rsm::entry::Entry>,
+        deadline: Instant,
+    ) -> Result<AppliedAt, ProposeError> {
+        if let Some(why) = self.shared.is_poisoned() {
+            return Err(ProposeError::Fatal(why));
+        }
+        if !self.qlog_codec || !propose_entry_on() {
+            // The raft-log path writes the encoded bytes: keep `propose`.
+            return self.propose(entry, deadline).await;
+        }
+        // The planned entry IS the entry (no decode, no payload copy); it is
+        // submitted in this first poll, so the index order is the plan order.
+        self.submit(entry, planned, deadline).await
     }
 
     fn role(&self) -> Role {
