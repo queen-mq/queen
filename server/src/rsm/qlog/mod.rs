@@ -104,6 +104,7 @@
 //!   per log, and committed hash blocks too — PLAN_RAFT_DRAIN_FIX P3, see
 //!   [`ReadCache`].)
 
+pub mod codec;
 pub mod index;
 pub mod record;
 pub mod set;
@@ -276,6 +277,9 @@ pub struct EntryInput<'a> {
 #[derive(Clone, Copy, Debug)]
 pub enum WriteRecord<'a> {
     Msg(RecordInput<'a>),
+    /// A message record whose `payload` is ALREADY zstd-compressed
+    /// ([`codec::compress_one`]); written with [`record::FLAG_PAYLOAD_ZSTD`].
+    Zstd(RecordInput<'a>),
     Entry(EntryInput<'a>),
 }
 
@@ -283,7 +287,7 @@ impl WriteRecord<'_> {
     /// The record's `seq` (the entry index it belongs to).
     pub fn seq(&self) -> u64 {
         match self {
-            WriteRecord::Msg(r) => r.seq,
+            WriteRecord::Msg(r) | WriteRecord::Zstd(r) => r.seq,
             WriteRecord::Entry(e) => e.seq,
         }
     }
@@ -773,7 +777,7 @@ impl QLog {
         let cap = records
             .iter()
             .map(|w| match w {
-                WriteRecord::Msg(r) => record::encoded_len(
+                WriteRecord::Msg(r) | WriteRecord::Zstd(r) => record::encoded_len(
                     r.count,
                     r.txn.map_or(0, |t| t.participants.len()),
                     r.payload.len(),
@@ -790,9 +794,9 @@ impl QLog {
             let offset = base + start as u64;
             max_seq = max_seq.max(w.seq());
             match w {
-                WriteRecord::Msg(r) => {
+                WriteRecord::Msg(r) | WriteRecord::Zstd(r) => {
                     let txn = r.txn.map(|t| (t.gtid, t.participants));
-                    let n = record::encode_into(
+                    let n = record::encode_msg_into(
                         &mut buf,
                         r.seq,
                         r.pid,
@@ -802,6 +806,7 @@ impl QLog {
                         txn,
                         r.hashes,
                         r.payload,
+                        matches!(w, WriteRecord::Zstd(_)),
                     )?;
                     new_recs.push(index::Record {
                         pid: r.pid,
@@ -1036,7 +1041,7 @@ impl QLog {
         let mut buf = vec![0u8; total];
         f.read_exact_at(&mut buf, offset)?;
         let rr = record::decode(&buf).map_err(io::Error::from)?;
-        Ok(owned_from(&rr))
+        owned_from(&rr)
     }
 
     /// Locate `(pid, offset)` and read the record there, checking that the
@@ -1395,7 +1400,7 @@ impl QLog {
             }
             let path = file_path(&self.dir, m.id);
             let (_valid, torn) = scan_records(&path, m.bytes, |h, _pos, bytes| {
-                if h.txn_kind == record::REC_ENTRY && h.seq >= from_seq {
+                if h.kind() == record::REC_ENTRY && h.seq >= from_seq {
                     let rr = record::decode(bytes).map_err(io::Error::from)?;
                     out.push(EntryRecord {
                         seq: h.seq,
@@ -1488,7 +1493,7 @@ impl QLog {
                 out_of_order.get_or_insert((pos, h.seq));
             } else {
                 kept_max = kept_max.max(h.seq);
-                if h.txn_kind != record::REC_ENTRY {
+                if h.kind() != record::REC_ENTRY {
                     keep.push(index::Record::of_header(h, pos));
                 }
             }
@@ -1630,8 +1635,16 @@ fn scan_entry(file_id: u64, r: &index::Record) -> ScanEntry {
     }
 }
 
-fn owned_from(rr: &record::RecordRef<'_>) -> OwnedRecord {
-    OwnedRecord {
+/// The owned form of a verified record. THE decode point for message payloads:
+/// a [`record::FLAG_PAYLOAD_ZSTD`] payload is decompressed here, so every
+/// reader sees the raw frames.
+fn owned_from(rr: &record::RecordRef<'_>) -> io::Result<OwnedRecord> {
+    let payload = if rr.header.payload_zstd() {
+        codec::decompress(rr.payload)?
+    } else {
+        rr.payload.to_vec()
+    };
+    Ok(OwnedRecord {
         seq: rr.header.seq,
         pid: rr.header.pid,
         base_offset: rr.header.base_offset,
@@ -1642,8 +1655,8 @@ fn owned_from(rr: &record::RecordRef<'_>) -> OwnedRecord {
             participants: t.participants(),
         }),
         hashes: rr.hashes.to_vec(),
-        payload: rr.payload.to_vec(),
-    }
+        payload,
+    })
 }
 
 /// Band frames in the [`CommittedFrame`] shape (hash blocks copied out of the
@@ -1701,7 +1714,7 @@ fn read_located_in(f: &File, dir: &Path, loc: &Located) -> io::Result<OwnedRecor
             ),
         ));
     }
-    Ok(owned_from(&rr))
+    owned_from(&rr)
 }
 
 /// PLAN_RAFT_DRAIN_FIX P3.2: the hash block of one located record from ONLY its
@@ -2055,7 +2068,7 @@ fn scan_file(path: &Path, upto: u64) -> io::Result<ScanOut> {
     let mut max_seq = 0u64;
     let (valid_bytes, torn) = scan_records(path, upto, |header, pos, _bytes| {
         max_seq = max_seq.max(header.seq);
-        if header.txn_kind != record::REC_ENTRY {
+        if header.kind() != record::REC_ENTRY {
             records.push(index::Record::of_header(header, pos));
         }
         Ok(())

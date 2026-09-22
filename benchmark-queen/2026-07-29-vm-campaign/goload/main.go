@@ -60,6 +60,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"math"
@@ -557,6 +558,7 @@ func runOpenLoopMode(args []string) {
 	popTimeout := fs.Int("pop-timeout", 2000, "pop long-poll timeout ms (used when -pop-wait)")
 	payloadBytes := fs.Int("payload", 256, "payload size in bytes")
 	payloadRandom := fs.Bool("payload-random", false, "incompressible payloads: every message of a push batch carries distinct random base64 (64-batch pool rotated per push); the default strings.Repeat(\"x\") compresses to nothing")
+	payloadJSON := fs.Bool("payload-json", false, "realistic JSON event payloads: every message distinct (ids, timestamps, phone, price, random-word text padded to ~-payload bytes; 64-batch pool rotated per push). Compresses like real traffic, conservatively (the text is random words)")
 	durationSec := fs.Int("duration", 0, "run duration seconds (0 = run until SIGINT)")
 	idleConns := fs.Int("idle-conns", 2048, "MaxIdleConnsPerHost for the client (keep-alive pool; size near max-inflight to avoid churn)")
 	reportSec := fs.Int("report", 5, "report interval seconds")
@@ -635,6 +637,26 @@ func runOpenLoopMode(args []string) {
 				batch[j] = map[string]interface{}{"data": string(buf), "src": "goload-ol"}
 			}
 			payloadPool[b] = batch
+		}
+	}
+	if *payloadJSON {
+		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+		payloadPool = make([][]interface{}, 64)
+		total, n := 0, 0
+		for b := range payloadPool {
+			batch := make([]interface{}, *pushBatch)
+			for j := range batch {
+				ev := jsonEvent(rng, *payloadBytes)
+				if raw, err := json.Marshal(ev); err == nil {
+					total += len(raw)
+					n++
+				}
+				batch[j] = ev
+			}
+			payloadPool[b] = batch
+		}
+		if n > 0 {
+			fmt.Printf("  payload-json: avg %d B per message (target %d)\n", total/n, *payloadBytes)
 		}
 	}
 	nextPayloads := func() []interface{} {
@@ -1184,4 +1206,51 @@ func avgAckMs(ackLatUs, ackCalls *int64) float64 {
 		return 0
 	}
 	return float64(atomic.LoadInt64(ackLatUs)) / float64(calls) / 1000.0
+}
+
+// jsonWords is a fixed vocabulary of random lowercase words for -payload-json.
+var jsonWords = func() []string {
+	rng := rand.New(rand.NewSource(7))
+	w := make([]string, 3000)
+	for i := range w {
+		b := make([]byte, 2+rng.Intn(8))
+		for k := range b {
+			b[k] = byte('a' + rng.Intn(26))
+		}
+		w[i] = string(b)
+	}
+	return w
+}()
+
+// jsonEvent builds one realistic event payload of roughly `size` JSON bytes:
+// distinct ids, timestamps, a phone number and a price, then random-word text
+// to reach the size (nothing is padded with repeated bytes).
+func jsonEvent(rng *rand.Rand, size int) map[string]interface{} {
+	uuid := func() string {
+		return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", rng.Uint32(), rng.Intn(1<<16), rng.Intn(1<<16), rng.Intn(1<<16), rng.Int63n(1<<48))
+	}
+	types := []string{"message.created", "message.delivered", "reservation.updated", "rate.changed", "conversation.assigned"}
+	chans := []string{"whatsapp", "email", "sms", "booking", "expedia", "airbnb"}
+	ev := map[string]interface{}{
+		"id":             uuid(),
+		"type":           types[rng.Intn(len(types))],
+		"tenantId":       fmt.Sprintf("t-%04d", 1+rng.Intn(300)),
+		"propertyId":     1000 + rng.Intn(99000),
+		"conversationId": uuid(),
+		"channel":        chans[rng.Intn(len(chans))],
+		"createdAt":      time.Unix(1758500000+rng.Int63n(86400), rng.Int63n(1e9)).UTC().Format("2006-01-02T15:04:05.000Z"),
+		"from":           fmt.Sprintf("+39%010d", rng.Int63n(10000000000)),
+		"price":          float64(4000+rng.Intn(86000)) / 100,
+		"currency":       "EUR",
+	}
+	base, _ := json.Marshal(ev)
+	var sb strings.Builder
+	for len(base)+sb.Len()+10 < size {
+		if sb.Len() > 0 {
+			sb.WriteByte(' ')
+		}
+		sb.WriteString(jsonWords[rng.Intn(len(jsonWords))])
+	}
+	ev["text"] = sb.String()
+	return ev
 }

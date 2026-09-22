@@ -594,16 +594,32 @@ impl Writer {
                     .map_err(|e| io::Error::other(format!("payload-free entry encode: {e:?}")))?,
             );
         }
-        // The records borrow `pending` (payloads/hashes) and `pf` (entry bytes),
-        // so the write + barrier are scoped to end BEFORE the entries are
-        // rewritten below.
+        // The node-local payload codec (qlog::codec): every `Append` blob of the
+        // group, in effect order, compressed before the write (several threads
+        // when the group is big — this thread is the serial writer). `None` =
+        // store raw (small, incompressible, or the codec is off).
+        let zblobs: Vec<Option<Vec<u8>>> = {
+            let raws: Vec<&[u8]> = pending
+                .iter()
+                .flat_map(|p| p.entry.effects.iter())
+                .filter_map(|eff| match eff {
+                    Effect::Append { blob, .. } => Some(blob.as_slice()),
+                    _ => None,
+                })
+                .collect();
+            crate::rsm::qlog::codec::compress_all(&raws)
+        };
+        let mut zi = 0usize;
+        // The records borrow `pending` (payloads/hashes), `pf` (entry bytes) and
+        // `zblobs`, so the write + barrier are scoped to end BEFORE the entries
+        // are rewritten below.
         {
             let q = self.qlog.as_mut().expect("qlog on");
             let lookup = q.lookup.clone();
             let mut by_qid: std::collections::BTreeMap<u64, Vec<WriteRecord<'_>>> =
                 std::collections::BTreeMap::new();
             let mut touched: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
-            let mut msgs: Vec<(u64, RecordInput<'_>)> = Vec::new();
+            let mut msgs: Vec<(u64, WriteRecord<'_>)> = Vec::new();
             for (i, p) in pending.iter().enumerate() {
                 let seq = first_index + i as u64;
                 touched.clear();
@@ -661,17 +677,24 @@ impl Writer {
                                     ))
                                 })?;
                             touched.insert(qid);
+                            let z = zblobs[zi].as_deref();
+                            zi += 1;
+                            let r = RecordInput {
+                                seq,
+                                pid: *pid,
+                                base_offset: *base_offset,
+                                count: *count,
+                                created_at_us: *created_at_us,
+                                txn: None,
+                                hashes,
+                                payload: z.unwrap_or(blob),
+                            };
                             msgs.push((
                                 qid,
-                                RecordInput {
-                                    seq,
-                                    pid: *pid,
-                                    base_offset: *base_offset,
-                                    count: *count,
-                                    created_at_us: *created_at_us,
-                                    txn: None,
-                                    hashes,
-                                    payload: blob,
+                                if z.is_some() {
+                                    WriteRecord::Zstd(r)
+                                } else {
+                                    WriteRecord::Msg(r)
                                 },
                             ));
                         }
@@ -686,7 +709,7 @@ impl Writer {
                 // entry record — so an entry record found on disk implies every
                 // payload record of that entry in the same log precedes it.
                 for (qid, r) in msgs.drain(..) {
-                    by_qid.entry(qid).or_default().push(WriteRecord::Msg(r));
+                    by_qid.entry(qid).or_default().push(r);
                 }
                 for qid in &touched {
                     by_qid

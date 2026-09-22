@@ -544,8 +544,9 @@ pub enum Effect {
     PartitionDelete { pid: Pid },
 
     /// Messages appended to a partition (003, 005 txn, 007 sink, 025 fire,
-    /// 016 DLQ move). The blob is the packed, zstd'd frames — the exact bytes
-    /// `queen.log_segments.blob` holds — and `hashes` is `16 * count` bytes in
+    /// 016 DLQ move). The blob is the survivors' packed frames, concatenated
+    /// and RAW (the queue log may store it zstd-compressed — a node-local codec,
+    /// `qlog::codec`, never part of the entry) — and `hashes` is `16 * count` bytes in
     /// frame order (the xxh3_128 of each frame's transaction id), which the
     /// dedup index and ack-by-hash both read. The POSITION the bytes end up
     /// at is node-local and never appears here (D8, I7).

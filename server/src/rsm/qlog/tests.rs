@@ -585,6 +585,69 @@ fn prealloc_zero_run_is_cut_at_roll_and_reopen() {
 }
 
 #[test]
+fn zstd_records_read_back_raw_and_survive_reopen() {
+    // A codec-compressed record (WriteRecord::Zstd) is flagged on disk and
+    // decompressed at the one decode point: every read sees the raw frames.
+    use super::{codec, WriteRecord};
+    let td = TmpDir::new("zstd");
+    let opts = QLogOptions::testing(1 << 20);
+    let raws: Vec<Vec<u8>> = (0..6u64)
+        .map(|i| {
+            let mut v = Vec::new();
+            for j in 0..40 {
+                v.extend_from_slice(
+                    format!("{{\"n\":{i},\"j\":{j},\"kind\":\"order.created\"}}").as_bytes(),
+                );
+            }
+            v
+        })
+        .collect();
+    let hs: Vec<Vec<u8>> = (0..6u64).map(|i| hashes(i, 40)).collect();
+    {
+        let (mut q, _) = QLog::open(td.path(), 9, opts).unwrap();
+        for i in 0..6u64 {
+            let z = codec::compress_one(&raws[i as usize]);
+            let stored = z.as_deref().unwrap_or(&raws[i as usize]);
+            let r = RecordInput {
+                seq: i + 1,
+                pid: 4,
+                base_offset: i * 40,
+                count: 40,
+                created_at_us: 1_000 + i as i64,
+                txn: None,
+                hashes: &hs[i as usize],
+                payload: stored,
+            };
+            // Alternate compressed and raw records in one file.
+            let w = if i % 2 == 0 && z.is_some() {
+                WriteRecord::Zstd(r)
+            } else {
+                WriteRecord::Msg(RecordInput {
+                    payload: &raws[i as usize],
+                    ..r
+                })
+            };
+            q.write_mixed(&[w]).unwrap();
+        }
+        q.sync().unwrap();
+        for i in 0..6u64 {
+            let got = q.read_owned(4, i * 40 + 3).unwrap().expect("record");
+            assert_eq!(got.payload, raws[i as usize], "record {i}");
+            assert_eq!(q.read_hashes(4, i * 40).unwrap().unwrap(), hs[i as usize]);
+        }
+    }
+    let (q, rep) = QLog::open(td.path(), 9, opts).unwrap();
+    assert!(!rep.truncated_tail);
+    assert_eq!(rep.records, 6);
+    for i in 0..6u64 {
+        assert_eq!(
+            q.read_payload(4, i * 40).unwrap().unwrap(),
+            raws[i as usize]
+        );
+    }
+}
+
+#[test]
 fn qidx_rebuild_by_scan_equals_the_written_one() {
     let td = TmpDir::new("rebuild");
     let opts = QLogOptions::testing(300);

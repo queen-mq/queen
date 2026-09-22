@@ -573,11 +573,18 @@ fn dir_contains(dir: &Path, needle: &[u8]) -> bool {
 /// (`log/`) and PRESENT in the qlog (`qlog/`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_payload_lives_once_in_the_qlog_not_the_raft_log() {
-    // 4 KiB of a magic run that cannot occur by chance in the entry metadata.
-    let magic: Vec<u8> =
-        std::iter::repeat_n([0xDEu8, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE], 512)
-            .flatten()
-            .collect();
+    // 4 KiB of a pseudo-random run that cannot occur by chance in the entry
+    // metadata — and is incompressible, so the qlog's zstd codec stores it raw
+    // and the byte search below still finds it.
+    let mut x: u64 = 0xDEAD_BEEF_CAFE_BABE;
+    let magic: Vec<u8> = (0..4096)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 24) as u8
+        })
+        .collect();
     let dir = scratch("repl-payload-once");
     {
         let store = Arc::new(HeedStore::open(&dir.join("store"), &store_opts()).expect("store"));

@@ -10,6 +10,10 @@
 //! hashes[16*count] | payload
 //! ```
 //!
+//! The high bit of `txn_kind` is a flag, not a kind: [`FLAG_PAYLOAD_ZSTD`]
+//! marks a message record whose payload is stored zstd-compressed (the log
+//! writer's node-local codec, [`super::codec`]). [`Header::kind`] masks it off.
+//!
 //! Little-endian throughout, hand-rolled in the style of
 //! `segments/frame.rs` and the pgless `native/record.rs`: no serde on disk,
 //! every field written in one place and read in one place.
@@ -76,6 +80,10 @@ pub const TXN_CROSS_QUEUE: u8 = 1;
 /// missing, and nothing of that group was acknowledged). `0` (a record written
 /// by [`encode_entry_into`] before Phase C) reads as one copy.
 pub const REC_ENTRY: u8 = 2;
+
+/// High bit of `txn_kind`: the payload is zstd-compressed. Only message records
+/// carry it; the kind is `txn_kind & !FLAG_PAYLOAD_ZSTD` ([`Header::kind`]).
+pub const FLAG_PAYLOAD_ZSTD: u8 = 0x80;
 
 /// One message's hash, in bytes: the xxh3_128 of its transaction id, exactly as
 /// [`crate::rsm::segments::frame::HASH_LEN`].
@@ -196,6 +204,16 @@ pub struct Header {
 }
 
 impl Header {
+    /// The record kind (`txn_kind` without its flag bit).
+    pub fn kind(&self) -> u8 {
+        self.txn_kind & !FLAG_PAYLOAD_ZSTD
+    }
+
+    /// Whether the payload is stored zstd-compressed.
+    pub fn payload_zstd(&self) -> bool {
+        self.txn_kind & FLAG_PAYLOAD_ZSTD != 0
+    }
+
     /// Total bytes of the record, `len` field included.
     pub fn record_len(&self) -> usize {
         4 + self.body_len as usize
@@ -279,6 +297,35 @@ pub fn encode_into(
     hashes: &[u8],
     payload: &[u8],
 ) -> Result<usize, RecordError> {
+    encode_msg_into(
+        out,
+        seq,
+        pid,
+        base_offset,
+        count,
+        created_at_us,
+        txn,
+        hashes,
+        payload,
+        false,
+    )
+}
+
+/// [`encode_into`] with the [`FLAG_PAYLOAD_ZSTD`] bit: `payload_zstd` says the
+/// `payload` bytes are already zstd-compressed.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_msg_into(
+    out: &mut Vec<u8>,
+    seq: u64,
+    pid: u64,
+    base_offset: u64,
+    count: u32,
+    created_at_us: i64,
+    txn: Option<(u128, &[u64])>,
+    hashes: &[u8],
+    payload: &[u8],
+    payload_zstd: bool,
+) -> Result<usize, RecordError> {
     if hashes.len() != count as usize * HASH_LEN {
         return Err(RecordError::HashStride {
             count,
@@ -307,7 +354,11 @@ pub fn encode_into(
     out.extend_from_slice(&base_offset.to_le_bytes());
     out.extend_from_slice(&count.to_le_bytes());
     out.extend_from_slice(&created_at_us.to_le_bytes());
-    out.push(txn_kind);
+    out.push(if payload_zstd {
+        txn_kind | FLAG_PAYLOAD_ZSTD
+    } else {
+        txn_kind
+    });
     if let Some((gtid, parts)) = txn {
         out.extend_from_slice(&gtid.to_le_bytes());
         out.extend_from_slice(&(parts.len() as u16).to_le_bytes());
@@ -432,7 +483,7 @@ pub fn hashes_prefix_len(count: u32) -> usize {
 /// it (position, `len`, `pid`, `base_offset`, `count`).
 pub fn hashes_from_prefix(buf: &[u8]) -> Result<Option<(Header, &[u8])>, RecordError> {
     let header = parse_header(buf)?;
-    match header.txn_kind {
+    match header.kind() {
         // REC_ENTRY carries count 0: an empty hash block.
         TXN_NONE | REC_ENTRY => {
             let end = FIXED_PREFIX + header.hashes_len();
@@ -477,7 +528,7 @@ pub fn decode(buf: &[u8]) -> Result<RecordRef<'_>, RecordError> {
     // variable tail. Each step is bounded against `total`, so a lie that
     // survived the checksum (it cannot) still could not index out of the frame.
     let mut off = FIXED_PREFIX;
-    let txn = match header.txn_kind {
+    let txn = match header.kind() {
         // REC_ENTRY: a payload-free entry record (per-queue-only log of record).
         // No txn envelope; count is 0 so the hash list is empty and `payload`
         // below is the whole entry-bytes tail. It is NOT a message — the index
