@@ -465,6 +465,67 @@ impl Quotas {
             .store(crate::util::now_epoch_ms(), Ordering::Relaxed);
     }
 
+    /// Update one durable RSM grant without replacing every other tenant's
+    /// snapshot.  The admin endpoint calls this only after its replicated
+    /// `QuotaSet` has applied; boot uses the ordinary wholesale refresh.
+    pub fn upsert_limits(&self, tenant: &str, limits: Limits) {
+        let measure = match self.snapshot.read() {
+            Ok(g) => g.get(tenant).map(|s| s.measure).unwrap_or_default(),
+            Err(p) => p
+                .into_inner()
+                .get(tenant)
+                .map(|s| s.measure)
+                .unwrap_or_default(),
+        };
+        match self.snapshot.write() {
+            Ok(mut g) => {
+                g.insert(
+                    tenant.to_string(),
+                    Snap {
+                        limits: Some(limits),
+                        measure,
+                    },
+                );
+                self.known.store(g.len() as i64, Ordering::Relaxed);
+            }
+            Err(p) => {
+                let mut g = p.into_inner();
+                g.insert(
+                    tenant.to_string(),
+                    Snap {
+                        limits: Some(limits),
+                        measure,
+                    },
+                );
+                self.known.store(g.len() as i64, Ordering::Relaxed);
+            }
+        }
+        self.refreshed_ms
+            .store(crate::util::now_epoch_ms(), Ordering::Relaxed);
+    }
+
+    pub fn remove_tenant(&self, tenant: &str) {
+        match self.snapshot.write() {
+            Ok(mut g) => {
+                g.remove(tenant);
+                self.known.store(g.len() as i64, Ordering::Relaxed);
+            }
+            Err(p) => {
+                let mut g = p.into_inner();
+                g.remove(tenant);
+                self.known.store(g.len() as i64, Ordering::Relaxed);
+            }
+        }
+        match self.live.lock() {
+            Ok(mut g) => {
+                g.remove(tenant);
+            }
+            Err(p) => {
+                p.into_inner().remove(tenant);
+            }
+        }
+    }
+
     /// Is any tenant at or above the watermark? The sweeper reads this to decide
     /// whether the rollup runs on its slow clock or on the refresh clock (§9.3).
     pub fn hot(&self) -> bool {

@@ -106,6 +106,10 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
     // Same env-driven defaults as the binary (QUEEN_* tuning knobs keep
     // working), with the BrokerConfig fields winning over env where set.
     let mut cfg = config::load();
+    if let Some(dir) = &bc.raft_dir {
+        cfg.storage = config::StorageMode::Raft;
+        cfg.raft_dir = dir.display().to_string();
+    }
 
     // Env knobs that only make sense with the HTTP surface are ignored
     // embedded — say so instead of silently dropping them.

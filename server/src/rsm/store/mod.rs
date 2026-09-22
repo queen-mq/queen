@@ -263,6 +263,22 @@ pub enum Keyspace {
     /// the RSM twin of 025's generated `visible_at` column and its only index.
     /// The leader's fire step walks it from the front while `due_us <= now`.
     TimersDue,
+    /// `(tenant, query_id) → StreamsQueryRow` (`queen_streams.queries`).
+    StreamsQueries,
+    /// `(query_id, pid, key) → StreamsStateRow` (`queen_streams.state`).
+    StreamsState,
+    /// `flag name → JSON` (`queen.system_state`).
+    Flags,
+    /// `(quota kind, tenant) → QuotaGrant`.
+    Quotas,
+    /// `(tenant, queue) → ephemeral queue options JSON`.
+    EphConfig,
+    /// `(tenant, pid?, transaction, sequence) → TraceEvent`.
+    Traces,
+    /// `(tenant, trace name, created_at, trace_id) → primary trace key`.
+    TraceNames,
+    /// `(created_at, trace_id) → primary trace key`.
+    TraceExpiry,
 }
 
 impl Keyspace {
@@ -271,7 +287,7 @@ impl Keyspace {
     /// (WP-2.2), `timers` and `timers_due` (WP-2.3); the environment is opened
     /// with room for them ([`MAX_DBS`]). The ORDER is [`Keyspace::slot`]'s, so
     /// a new keyspace goes at the END of the enum and of this list alike.
-    pub const ALL: [Keyspace; 24] = [
+    pub const ALL: [Keyspace; 32] = [
         Keyspace::Meta,
         Keyspace::Garbage,
         Keyspace::Queues,
@@ -296,6 +312,14 @@ impl Keyspace {
         Keyspace::KvExpiry,
         Keyspace::Timers,
         Keyspace::TimersDue,
+        Keyspace::StreamsQueries,
+        Keyspace::StreamsState,
+        Keyspace::Flags,
+        Keyspace::Quotas,
+        Keyspace::EphConfig,
+        Keyspace::Traces,
+        Keyspace::TraceNames,
+        Keyspace::TraceExpiry,
     ];
 
     /// The LMDB database name. PERMANENT: it is what an existing data
@@ -326,6 +350,14 @@ impl Keyspace {
             Keyspace::KvExpiry => "kv_expiry",
             Keyspace::Timers => "timers",
             Keyspace::TimersDue => "timers_due",
+            Keyspace::StreamsQueries => "streams_queries",
+            Keyspace::StreamsState => "streams_state",
+            Keyspace::Flags => "flags",
+            Keyspace::Quotas => "quotas",
+            Keyspace::EphConfig => "eph_config",
+            Keyspace::Traces => "traces",
+            Keyspace::TraceNames => "trace_names",
+            Keyspace::TraceExpiry => "trace_expiry",
         }
     }
 

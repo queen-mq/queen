@@ -3,7 +3,7 @@
 //!
 //! WP-1.7a routed the message path to the [`super::NotReady`] stub through a
 //! builder hook ([`super::set_builder`]); this module fills that hook. One
-//! [`RaftFacade`] owns the whole single-node RSM of phase 1:
+//! [`RaftFacade`] owns the whole single-node RSM through phase 2:
 //!
 //! - a [`HeedStore`] (D9), opened at `<data_dir>/store`;
 //! - a [`LocalReplicator`] (§12.2) over `<data_dir>/log` and `<data_dir>/seg`,
@@ -25,29 +25,21 @@
 //! that. A pop's payload bytes are read from THIS node's own segment files after
 //! the claim applied locally (D7).
 //!
-//! # Phase-1 scope and the deliberate simplifications
+//! Phase 2 adds transactions, KV, timers, streams, administration, dashboard
+//! reads, retention, metrics and compaction to that same committed-state seam.
+//! Producer subjects come only from validated auth, queue-configured payloads
+//! are encrypted before they reach either payload log and decrypted at reads,
+//! and forced-DLQ rows carry the original message id and payload snapshot.
 //!
-//! This is the message path of §15's phase 1 (push, the three pops, ack, renew,
-//! the DLQ handoff on the ack). It is faithful where the wire and the dedup
-//! semantics are load-bearing, and it takes three documented shortcuts a later
-//! WP closes, none of which the SDKs parse strictly:
+//! One wire representation remains intentionally Raft-native:
 //!
 //! - **`partitionId` is the numeric pid** (decimal), not a uuid: the RSM has no
 //!   uuid→pid index, and the ack must map the wire `partitionId` back to a pid
 //!   AND to a queue, both of which the pid gives directly (`partition(pid)`).
 //!   Every SDK treats `partitionId` as an opaque string (the C1/C-SQS notes in
 //!   `handlers/data.rs`), so this is behaviourally transparent within a raft
-//!   deployment; a uuid-shaped id waits on that index.
-//! - **no producer subject / trace id / encryption on the push frame**: the
-//!   dispatch does not thread the validated subject in yet, and phase-1 queues
-//!   are unencrypted; the frame carries the payload and the txn only.
-//! - **the forced-DLQ handoff files the row with the transaction id but WITHOUT
-//!   the poison payload or message id**: the ack wire carries the `transactionId`
-//!   verbatim, so the receiver stamps it onto the [`DlqSnapshot`] and the dead
-//!   letter is identifiable (its `txn` is set, never blank). The full O20
-//!   pre-read — resolving the txn hash to its committed offset to read the frame
-//!   bytes and the message id off this node's own files — is the ack-registry's
-//!   job (a later WP); until then `payload` is empty and `message_id` is `None`.
+//!   deployment. Read/admin endpoints accept both this decimal form and the
+//!   UUID exposed by resource views.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -74,20 +66,21 @@ use crate::rsm::qlog::set::QLogReader;
 use crate::rsm::replicator::local::{LocalReplicator, OpenConfig, Waker};
 use crate::rsm::replicator::Replicator;
 use crate::rsm::segments;
-use crate::rsm::store::{HeedStore, Store, StoreOpts, TypedReads};
+use crate::rsm::store::{HeedStore, Reads, Store, StoreOpts, TypedReads};
 use crate::util::{txn_hash128, uuidv7_bytes};
 
 use super::{
-    AckOut, AckReq, DepthOut, DepthReq, DlqHeadOut, DlqHeadReq, KvFailure, KvListReq, KvOut, KvReq,
-    PendingReq, PopDiscoverReq, PopOut, PopPinnedReq, PopReq, PushOut, PushReq, RaftHealth,
-    RenewOut, RenewReq, ReqCtx, Rsm, RsmBuildCtx, RsmError, TimerPeekReq, TimerReadOut,
-    TimersCountReq, TimersListReq, TimersOut, TimersReq,
+    AckOut, AckReq, ApiOut, ApiReq, DepthOut, DepthReq, DlqHeadOut, DlqHeadReq, KvFailure,
+    KvListReq, KvOut, KvReq, PendingReq, PopDiscoverReq, PopOptions, PopOut, PopPinnedReq, PopReq,
+    PushOut, PushReq, RaftHealth, RenewOut, RenewReq, ReqCtx, Rsm, RsmBuildCtx, RsmError,
+    TimerPeekReq, TimerReadOut, TimersCountReq, TimersListReq, TimersOut, TimersReq,
 };
 
 /// The KV receiver (WP-2.2): 024's pass 1 here, the writes through the planner,
 /// the reads off this node's applied state. A child module so it shares the
 /// facade's private plumbing (`submit`, the store handle).
 mod kv;
+mod phase2;
 
 /// The single-node node id of raft1 / embedded (D2). Membership and identity
 /// are WP-4.3's; phase 1 is one voter.
@@ -193,7 +186,7 @@ static POP_SUBMIT_MIN: std::sync::LazyLock<Duration> = std::sync::LazyLock::new(
 // The facade
 // ---------------------------------------------------------------------------
 
-/// The real [`Rsm`] of phase 1.
+/// The real single-node [`Rsm`] through phase 2.
 pub struct RaftFacade {
     /// The ordered store (D9), shared with the batcher's planning reads and the
     /// apply thread's writes.
@@ -209,6 +202,12 @@ pub struct RaftFacade {
     /// payload from the queue log instead of the segments; the segments are still
     /// written (removed in A3), so off-vs-on is byte-identical.
     qlog_reader: Option<QLogReader>,
+    /// Persistent node-local metrics/history (`<data_dir>/local.db`, D17).
+    local_metrics: Arc<crate::rsm::local_metrics::LocalMetrics>,
+    /// At-rest payload cipher shared by push, transaction, timers, pop, and
+    /// management reads. Queue policy remains replicated in `QueueConfig`;
+    /// only key material is node-local configuration.
+    encryption: Arc<crate::encryption::Encryption>,
     /// The command channel the batcher drains (§7.1). Bounded; back-pressure
     /// reaches the receiver.
     cmd_tx: CommandTx,
@@ -224,6 +223,10 @@ pub struct RaftFacade {
     /// `PopWildcard` command onto the single serial batcher pipeline. Resolved
     /// once at open.
     pop_fastpath_empty: bool,
+    data_dir: PathBuf,
+    storage_full: std::sync::atomic::AtomicBool,
+    disk_high_pct: f64,
+    disk_low_pct: f64,
 }
 
 /// Wall micros for the PERF-J fastpath's `ready_at` comparison. A coarse hint —
@@ -253,7 +256,61 @@ fn env_flag(name: &str, default_on: bool) -> bool {
         .unwrap_or(default_on)
 }
 
+fn env_pct(name: &str, default: f64) -> f64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| (1.0..=100.0).contains(v))
+        .unwrap_or(default)
+}
+
+#[cfg(unix)]
+fn filesystem_used_pct(path: &std::path::Path) -> Option<f64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is NUL-terminated and `statvfs` initializes `stat` on 0.
+    if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: the successful call above initialized every field.
+    let stat = unsafe { stat.assume_init() };
+    let total = stat.f_blocks as f64 * stat.f_frsize as f64;
+    let available = stat.f_bavail as f64 * stat.f_frsize as f64;
+    (total > 0.0).then_some((total - available) * 100.0 / total)
+}
+
+#[cfg(not(unix))]
+fn filesystem_used_pct(_path: &std::path::Path) -> Option<f64> {
+    None
+}
+
 impl RaftFacade {
+    #[cfg(test)]
+    pub(crate) fn set_encryption_for_test(
+        &mut self,
+        encryption: Arc<crate::encryption::Encryption>,
+    ) {
+        self.encryption = encryption;
+    }
+
+    fn storage_pressure(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        let map_pct = self.store.map_usage().pct();
+        let disk_pct = filesystem_used_pct(&self.data_dir).unwrap_or(0.0);
+        let was_full = self.storage_full.load(Ordering::Relaxed);
+        let full = if was_full {
+            map_pct >= crate::rsm::store::MAP_LOW_PCT || disk_pct >= self.disk_low_pct
+        } else {
+            map_pct >= crate::rsm::store::MAP_HIGH_PCT || disk_pct >= self.disk_high_pct
+        };
+        if full != was_full {
+            self.storage_full.store(full, Ordering::Relaxed);
+            tracing::warn!(target:"rsm", full, map_pct, disk_pct, "raft storage pressure changed");
+        }
+        full
+    }
+
     /// Open the whole RSM at `ctx.data_dir` (§11.1). Blocking boot I/O; called
     /// once, from the storage seam (`build_raft_state`) inside the runtime.
     pub fn open(ctx: &RsmBuildCtx) -> Result<RaftFacade, String> {
@@ -294,6 +351,8 @@ impl RaftFacade {
         // Phase A2: the per-queue-log reader (or `None` when `QUEEN_RAFT_QLOG` is
         // off), published by the apply thread alongside the segment reader.
         let qlog_reader = repl.qlog_reader();
+        let local_metrics = crate::rsm::local_metrics::open(dir.join("local.db"))
+            .map_err(|e| format!("open local metrics at {}/local.db: {e}", dir.display()))?;
 
         // PERF-E `DEDUP_INDEX=segment`: the planner serves the committed dedup
         // authority from the segments, so hand the batcher a cloned segment
@@ -317,11 +376,17 @@ impl RaftFacade {
             repl,
             reader,
             qlog_reader,
+            local_metrics,
+            encryption: crate::encryption::Encryption::from_env(),
             cmd_tx,
             notifier: ctx.notifier.clone(),
             gates,
             batcher_join,
             pop_fastpath_empty: env_flag("QUEEN_RAFT_POP_FASTPATH_EMPTY", true),
+            data_dir: dir,
+            storage_full: std::sync::atomic::AtomicBool::new(false),
+            disk_high_pct: env_pct("QUEEN_RAFT_DISK_HIGH_PCT", 85.0),
+            disk_low_pct: env_pct("QUEEN_RAFT_DISK_LOW_PCT", 80.0),
         })
     }
 
@@ -336,11 +401,17 @@ impl RaftFacade {
             repl,
             reader,
             qlog_reader,
+            local_metrics: _,
+            encryption: _,
             cmd_tx,
             notifier: _,
             gates: _,
             batcher_join,
             pop_fastpath_empty: _,
+            data_dir: _,
+            storage_full: _,
+            disk_high_pct: _,
+            disk_low_pct: _,
         } = self;
         drop(cmd_tx); // the batcher sees a closed channel, drains, and exits
         let _ = batcher_join.await; // its Arc<repl>/Arc<store> drop here
@@ -402,6 +473,9 @@ impl RaftFacade {
     /// Submit one command and await its [`Reply`] under the context deadline
     /// (I15). A closed channel or an elapsed deadline is a retryable failure.
     async fn submit(&self, ctx: &ReqCtx, command: Command) -> Result<Reply, RsmError> {
+        if command.grows_storage() && self.storage_pressure() {
+            return Err(RsmError::StorageFull);
+        }
         let (sub, rx) = Submission::new(command);
         // The bounded channel absorbs back-pressure; a full channel waits, up to
         // the deadline.
@@ -606,7 +680,10 @@ impl RaftFacade {
             .iter()
             .map(|r| serde_json::from_str(r.get()).unwrap_or(serde_json::Value::Null))
             .collect();
-        let timer_ops = match crate::rsm::planner::timers::parse_timer_ops(&timer_values, None) {
+        let mut timer_ops = match crate::rsm::planner::timers::parse_timer_ops(
+            &timer_values,
+            ctx.producer_sub.as_deref(),
+        ) {
             Ok(o) => o,
             Err(e) => return Ok(fail("bad_request", &e.message)),
         };
@@ -634,6 +711,22 @@ impl RaftFacade {
                 "bad_request",
                 "transaction requires an operations array (or a top-level kv/timers array)",
             ));
+        }
+        let mut queue_names = std::collections::BTreeSet::new();
+        for op in &ops {
+            if let Some(queue) = op.queue.as_deref() {
+                queue_names.insert(queue.to_string());
+            }
+            for item in op.items.as_deref().unwrap_or_default() {
+                queue_names.insert(item.queue.as_ref().to_string());
+            }
+        }
+        for op in &timer_ops {
+            queue_names.insert(op.queue().to_string());
+        }
+        let encrypted_queues = self.encrypted_queues(&ctx.tenant, queue_names).await?;
+        if let Err(error) = self.encrypt_timer_ops(&mut timer_ops, &encrypted_queues) {
+            return Ok(fail("bad_request", &error));
         }
         let mut hints: Vec<String> = body
             .required_leases
@@ -673,8 +766,13 @@ impl RaftFacade {
          -> Result<(), RsmError> {
             let mid = uuidv7_bytes();
             let mid_str = uuid_bytes_to_string(&mid);
-            let txn = txn_in.map(str::to_string).unwrap_or_else(|| mid_str.clone());
-            let partition = partition.filter(|p| !p.is_empty()).unwrap_or("Default").to_string();
+            let txn = txn_in
+                .map(str::to_string)
+                .unwrap_or_else(|| mid_str.clone());
+            let partition = partition
+                .filter(|p| !p.is_empty())
+                .unwrap_or("Default")
+                .to_string();
             super::check_message_key_names(&ctx.tenant, queue, None, Some(&partition))?;
             let key = (queue.to_string(), partition.clone(), txn.clone());
             let follower_of = seen.get(&key).copied();
@@ -682,13 +780,18 @@ impl RaftFacade {
             let frame = if follower_of.is_none() {
                 seen.insert(key, idx);
                 groups.push(queue, &partition, idx);
+                let (payload, encrypted) = self.encode_payload(
+                    encrypted_queues.contains(queue),
+                    payload.get().as_bytes(),
+                    queue,
+                );
                 pack_frames(&[FrameIn {
                     message_id: mid,
                     txn: &txn,
                     trace_id: None,
-                    producer_sub: None,
-                    payload: payload.get().as_bytes(),
-                    encrypted: false,
+                    producer_sub: ctx.producer_sub.as_deref(),
+                    payload: &payload,
+                    encrypted,
                 }])
             } else {
                 Vec::new()
@@ -722,7 +825,10 @@ impl RaftFacade {
                         }
                     } else {
                         let (Some(q), Some(pl)) = (op.queue.as_deref(), op.payload) else {
-                            return Ok(fail("bad_request", "a push operation needs queue and payload"));
+                            return Ok(fail(
+                                "bad_request",
+                                "a push operation needs queue and payload",
+                            ));
                         };
                         add_push(
                             q,
@@ -780,7 +886,9 @@ impl RaftFacade {
                 other => {
                     return Ok(fail(
                         "bad_request",
-                        &format!("transaction supports only push and ack operations, got `{other}`"),
+                        &format!(
+                            "transaction supports only push and ack operations, got `{other}`"
+                        ),
                     ))
                 }
             }
@@ -833,14 +941,29 @@ impl RaftFacade {
                 }
             }
             let store = self.store.clone();
+            let reader = self.reader.clone();
+            let qlog_reader = self.qlog_reader.clone();
+            let encryption = self.encryption.clone();
             let tenant = ctx.tenant.clone();
-            let (t, _per_item, bad) = tokio::task::spawn_blocking(move || {
-                resolve_ack_targets(&store, &tenant, &group, flats)
+            let resolved = tokio::task::spawn_blocking(move || {
+                resolve_ack_targets(
+                    &store,
+                    &reader,
+                    qlog_reader.as_ref(),
+                    &encryption,
+                    &tenant,
+                    &group,
+                    flats,
+                )
             })
             .await
             .map_err(|e| RsmError::Internal(format!("txn ack resolve: {e}")))?;
+            let (t, _per_item, bad) = resolved.map_err(RsmError::Internal)?;
             if let Some((_, why)) = bad.first() {
-                return Ok(fail("rejected_ack", &format!("QTXN {why}; the transaction rolled back")));
+                return Ok(fail(
+                    "rejected_ack",
+                    &format!("QTXN {why}; the transaction rolled back"),
+                ));
             }
             targets.extend(t);
         }
@@ -852,10 +975,14 @@ impl RaftFacade {
             acks: targets,
             kv: kv_ops.clone(),
             timers: timer_ops,
+            extra_effects: Vec::new(),
+            allow_duplicate: false,
         });
         let out = match self.submit(&ctx, cmd).await? {
             Reply::Done { outcome, .. } => crate::rsm::batcher::TxnOutcome::from_outcome(&outcome)
-                .ok_or_else(|| RsmError::Internal("transaction got a non-transaction outcome".into()))?,
+                .ok_or_else(|| {
+                    RsmError::Internal("transaction got a non-transaction outcome".into())
+                })?,
             Reply::Refused(r) => return Ok(fail(&r.code, &r.message)),
             other => return Err(reply_error(other)),
         };
@@ -883,7 +1010,9 @@ impl RaftFacade {
                 body["version"] = v.get("version").cloned().unwrap_or(serde_json::Value::Null);
                 body["value"] = v.get("value").cloned().unwrap_or(serde_json::Value::Null);
             }
-            return Ok(super::TxnOut { body: body.to_string() });
+            return Ok(super::TxnOut {
+                body: body.to_string(),
+            });
         }
 
         // 3. Render: one result per flat ordinal, the SQL wire's shapes.
@@ -957,8 +1086,14 @@ impl RaftFacade {
                 }
             };
             obj.insert("opIndex".to_string(), serde_json::Value::from(i));
-            obj.insert("index".to_string(), serde_json::Value::from(timers_base + i));
-            obj.insert("type".to_string(), serde_json::Value::String("timer".into()));
+            obj.insert(
+                "index".to_string(),
+                serde_json::Value::from(timers_base + i),
+            );
+            obj.insert(
+                "type".to_string(),
+                serde_json::Value::String("timer".into()),
+            );
             if timers_base + i < results.len() {
                 results[timers_base + i] = serde_json::Value::Object(obj);
             }
@@ -1013,6 +1148,7 @@ struct PushResolved {
     message_id: String,
     txn: String,
     queue: String,
+    partition: String,
     /// `None` for a survivor; `Some(leader index into the flat results)` for an
     /// intra-request follower (postgres `resolve_push_followers`).
     follower_of: Option<usize>,
@@ -1031,6 +1167,100 @@ struct PushItemOut {
 }
 
 impl RaftFacade {
+    /// Resolve the replicated queue encryption policy without touching the
+    /// legacy Postgres pool. The read is kept off the async runtime because an
+    /// LMDB page fault is blocking I/O (I15).
+    async fn encrypted_queues(
+        &self,
+        tenant: &str,
+        queues: std::collections::BTreeSet<String>,
+    ) -> Result<std::collections::BTreeSet<String>, RsmError> {
+        if queues.is_empty() || !self.encryption.is_enabled() {
+            return Ok(std::collections::BTreeSet::new());
+        }
+        let store = self.store.clone();
+        let tenant = tenant.to_string();
+        tokio::task::spawn_blocking(move || {
+            store.read(|r| {
+                let mut enabled = std::collections::BTreeSet::new();
+                for queue in queues {
+                    if r.queue(&tenant, &queue)?
+                        .is_some_and(|cfg| cfg.encryption_enabled)
+                    {
+                        enabled.insert(queue);
+                    }
+                }
+                Ok(enabled)
+            })
+        })
+        .await
+        .map_err(|e| RsmError::Internal(format!("queue encryption read task: {e}")))?
+        .map_err(|e| {
+            if e.retryable() {
+                RsmError::Retry { leader_hint: None }
+            } else {
+                RsmError::Internal(format!("queue encryption read: {e}"))
+            }
+        })
+    }
+
+    /// Encrypt one JSON payload when the replicated queue policy requires it.
+    /// Crypto failure follows the established Queen contract: log and store
+    /// plaintext rather than acknowledging a message that was not stored.
+    fn encode_payload(&self, encrypt: bool, raw: &[u8], queue: &str) -> (Vec<u8>, bool) {
+        if encrypt {
+            if let Some(payload) = self.encryption.encrypt(raw) {
+                return (payload, true);
+            }
+            tracing::warn!(target: "push", queue, "encryption failed; stored plaintext");
+        }
+        (raw.to_vec(), false)
+    }
+
+    /// Apply the same queue-at-rest policy to scheduled messages. The timer
+    /// row stores a fully packed frame, so encryption happens before planning
+    /// and the eventual fire remains deterministic.
+    fn encrypt_timer_ops(
+        &self,
+        ops: &mut [TimerOp],
+        encrypted_queues: &std::collections::BTreeSet<String>,
+    ) -> Result<(), String> {
+        for op in ops {
+            let TimerOp::Schedule(schedule) = op else {
+                continue;
+            };
+            if !encrypted_queues.contains(&schedule.queue) {
+                continue;
+            }
+            if schedule.encrypted {
+                return Err(format!(
+                    "queue `{}` encrypts at rest, so `encrypted` is set by the broker and must not be supplied",
+                    schedule.queue
+                ));
+            }
+            let packed = {
+                let frames = unpack_frames_ref(&schedule.frame)
+                    .ok_or_else(|| "the prepared timer frame is malformed".to_string())?;
+                let frame = frames
+                    .first()
+                    .ok_or_else(|| "the prepared timer frame is empty".to_string())?;
+                let (payload, encrypted) =
+                    self.encode_payload(true, frame.payload, &schedule.queue);
+                schedule.encrypted = encrypted;
+                pack_frames(&[FrameIn {
+                    message_id: frame.message_id,
+                    txn: frame.txn,
+                    trace_id: frame.trace_id,
+                    producer_sub: frame.producer_sub,
+                    payload: &payload,
+                    encrypted,
+                }])
+            };
+            schedule.frame = packed;
+        }
+        Ok(())
+    }
+
     async fn push_impl(&self, ctx: ReqCtx, req: PushReq) -> Result<PushOut, RsmError> {
         // PERF-J: the push-only HTTP-boundary split. `_t_prep` covers the
         // pre-submit work (parse + resolve + pack); `submit_ns` accumulates the
@@ -1046,6 +1276,15 @@ impl RaftFacade {
         if body.items.is_empty() {
             return Ok(PushOut { body: "[]".into() });
         }
+        let encrypted_queues = self
+            .encrypted_queues(
+                &ctx.tenant,
+                body.items
+                    .iter()
+                    .map(|item| item.queue.as_ref().to_string())
+                    .collect(),
+            )
+            .await?;
 
         // 1. Resolve every input item and collapse intra-request duplicates by
         //    (queue, partition, txn), so the planner is never handed two frames
@@ -1088,13 +1327,18 @@ impl RaftFacade {
             };
             let hash = txn_hash128(&txn);
             let frame = if follower_of.is_none() {
+                let (payload, encrypted) = self.encode_payload(
+                    encrypted_queues.contains(&queue),
+                    it.payload.get().as_bytes(),
+                    &queue,
+                );
                 pack_frames(&[FrameIn {
                     message_id: mid,
                     txn: &txn,
                     trace_id: None,
-                    producer_sub: None,
-                    payload: it.payload.get().as_bytes(),
-                    encrypted: false,
+                    producer_sub: ctx.producer_sub.as_deref(),
+                    payload: &payload,
+                    encrypted,
                 }])
             } else {
                 Vec::new()
@@ -1106,6 +1350,7 @@ impl RaftFacade {
                 message_id: mid_str,
                 txn,
                 queue,
+                partition,
                 follower_of,
                 hash,
                 frame,
@@ -1164,6 +1409,7 @@ impl RaftFacade {
         //    Rejected marks that group's items "error" (a push answers 201 with
         //    per-item statuses).
         let mut out: Vec<Option<PushItemOut>> = vec![None; resolved.len()];
+        let mut duplicate_ids: Vec<(usize, Pid, u64)> = Vec::new();
         for (members, rx) in rxs {
             let reply = match tokio::time::timeout(ctx.deadline.remaining(), rx).await {
                 Ok(Ok(r)) => r,
@@ -1184,7 +1430,8 @@ impl RaftFacade {
                         let r = &resolved[flat];
                         let (status, offset) = match verdicts.get(k) {
                             Some(PushVerdict::Created { offset, .. }) => ("queued", Some(*offset)),
-                            Some(PushVerdict::Duplicate { offset, .. }) => {
+                            Some(PushVerdict::Duplicate { pid, offset }) => {
+                                duplicate_ids.push((flat, *pid, *offset));
                                 ("duplicate", Some(*offset))
                             }
                             Some(PushVerdict::Refused { .. }) | None => ("error", None),
@@ -1228,6 +1475,38 @@ impl RaftFacade {
                 .record_dur(t.elapsed());
         }
 
+        // A duplicate returns the ORIGINAL message id, not the id minted for
+        // this rejected attempt. The replicated verdict carries its original
+        // offset; resolve the immutable frame locally after apply (D7).
+        if !duplicate_ids.is_empty() {
+            let store = self.store.clone();
+            let reader = self.reader.clone();
+            let qlog = self.qlog_reader.clone();
+            let tenant = ctx.tenant.clone();
+            let lookup: Vec<_> = duplicate_ids
+                .iter()
+                .map(|(flat, pid, offset)| {
+                    (
+                        *flat,
+                        *pid,
+                        *offset,
+                        resolved[*flat].queue.clone(),
+                        resolved[*flat].partition.clone(),
+                    )
+                })
+                .collect();
+            let ids = tokio::task::spawn_blocking(move || {
+                resolve_duplicate_message_ids(&store, &reader, qlog.as_ref(), &tenant, &lookup)
+            })
+            .await
+            .map_err(|e| RsmError::Internal(format!("duplicate id task: {e}")))??;
+            for (flat, id) in ids {
+                if let Some(item) = &mut out[flat] {
+                    item.message_id = id;
+                }
+            }
+        }
+
         // 4. Followers inherit the leader's id, status ("duplicate") and offset
         //    (C1). A follower whose leader errored is an error too.
         for i in 0..resolved.len() {
@@ -1264,6 +1543,61 @@ impl RaftFacade {
             body: render_push(&out),
         })
     }
+}
+
+type DuplicateIdLookup = (usize, Pid, u64, String, String);
+
+fn resolve_duplicate_message_ids(
+    store: &HeedStore,
+    reader: &segments::Reader,
+    qlog: Option<&QLogReader>,
+    tenant: &str,
+    lookups: &[DuplicateIdLookup],
+) -> Result<Vec<(usize, String)>, RsmError> {
+    let mut out = Vec::with_capacity(lookups.len());
+    for (flat, pid, offset, queue, partition) in lookups {
+        let blob = match qlog {
+            Some(qlog) => qlog
+                .read_owned(QLogReader::queue_id_of(tenant, queue), *pid, *offset)
+                .map_err(|e| RsmError::Internal(format!("duplicate qlog read: {e}")))?
+                .map(|r| (r.base_offset, r.payload)),
+            None => {
+                let sealed = store
+                    .read(|r| {
+                        let mut files = Vec::new();
+                        r.scan_partition_files(*pid, usize::MAX, &mut |file| {
+                            files.push(file);
+                            true
+                        })?;
+                        Ok(files)
+                    })
+                    .map_err(|e| RsmError::Internal(format!("duplicate file read: {e}")))?;
+                reader
+                    .read_at(bucket_of(tenant, queue, partition), *pid, *offset, &sealed)
+                    .map_err(|e| RsmError::Internal(format!("duplicate segment read: {e}")))?
+                    .map(|r| (r.base_offset, r.blob))
+            }
+        };
+        let Some((base, blob)) = blob else {
+            return Err(RsmError::Internal(format!(
+                "duplicate payload is missing at pid {pid} offset {offset}"
+            )));
+        };
+        let frames = unpack_frames_ref(&blob).ok_or_else(|| {
+            RsmError::Internal(format!(
+                "duplicate payload is corrupt at pid {pid} offset {offset}"
+            ))
+        })?;
+        let frame = frames
+            .get(offset.saturating_sub(base) as usize)
+            .ok_or_else(|| {
+                RsmError::Internal(format!(
+                    "duplicate offset {offset} is outside its record at pid {pid}"
+                ))
+            })?;
+        out.push((*flat, uuid_bytes_to_string(&frame.message_id)));
+    }
+    Ok(out)
 }
 
 /// `[{index, message_id, transaction_id, queueName, status, offset?}]`, input
@@ -1363,18 +1697,39 @@ impl RaftFacade {
         auto_ack: bool,
         wait: bool,
         wildcard_create: bool,
+        options: PopOptions,
     ) -> Result<PopOut, RsmError> {
         let group = group_opt.unwrap_or_else(|| QUEUE_MODE_GROUP.to_string());
-        // Queue mode seeds `all`; a named group defaults to `new` (§8, 004). A
-        // richer subscriptionMode is threaded by a later WP.
+        // Queue mode always seeds `all`. Named groups carry the receiver's
+        // normalized subscription intent and persist it on first contact.
         let sub = if group == QUEUE_MODE_GROUP {
             SubIntent::default() // mode "" → seed at the floor (all)
         } else {
             SubIntent {
-                mode: "new".into(),
-                from_us: None,
-                now: false,
+                mode: options.subscription_mode.clone(),
+                from_us: options.subscription_from_us,
+                now: options.subscription_from_now,
             }
+        };
+        let lease_seconds = if options.lease_seconds > 0 {
+            options.lease_seconds
+        } else if queue.is_empty() {
+            // Discovery can span queues. Its Postgres implementation resolves
+            // each queue independently; the current command has one field, so
+            // use the implicit-queue default unless the caller overrides it.
+            60
+        } else {
+            let store = self.store.clone();
+            let tenant = ctx.tenant.clone();
+            let queue = queue.clone();
+            tokio::task::spawn_blocking(move || {
+                store.read(|r| Ok(r.queue(&tenant, &queue)?.map(|q| q.lease_time)))
+            })
+            .await
+            .map_err(|e| RsmError::Internal(format!("pop queue config task: {e}")))?
+            .map_err(|e| RsmError::Internal(format!("pop queue config: {e}")))?
+            .unwrap_or(60)
+            .max(1)
         };
         let worker = uuid_bytes_to_string(&uuidv7_bytes());
         let budget = batch.min(i32::MAX as u32) as i32;
@@ -1413,11 +1768,11 @@ impl RaftFacade {
                 max_parts: if partition.is_some() {
                     1
                 } else {
-                    batch.clamp(1, 64) as i32
+                    options.max_parts.clamp(1, 64) as i32
                 },
-                lease_seconds: 60,
+                lease_seconds,
                 auto_ack,
-                conflate: false,
+                conflate: group != QUEUE_MODE_GROUP && options.conflate,
                 sub: sub.clone(),
                 skip_window_debounce: false,
                 namespace: namespace.clone(),
@@ -1509,6 +1864,7 @@ impl RaftFacade {
         let store = self.store.clone();
         let reader = self.reader.clone();
         let qlog_reader = self.qlog_reader.clone();
+        let encryption = self.encryption.clone();
         let tenant = ctx.tenant.clone();
         let queue = queue.to_string();
         let group = group.to_string();
@@ -1524,6 +1880,7 @@ impl RaftFacade {
                 &store,
                 &reader,
                 qlog_reader.as_ref(),
+                &encryption,
                 &tenant,
                 &queue,
                 &group,
@@ -1561,6 +1918,7 @@ fn render_pop_blocking(
     store: &HeedStore,
     reader: &segments::Reader,
     qlog_reader: Option<&QLogReader>,
+    encryption: &crate::encryption::Encryption,
     tenant: &str,
     top_queue: &str,
     group: &str,
@@ -1589,11 +1947,26 @@ fn render_pop_blocking(
             break;
         }
     }
-    let missing = claims.iter().filter(|c| !infos.contains_key(&c.pid)).count();
+    let missing = claims
+        .iter()
+        .filter(|c| !infos.contains_key(&c.pid))
+        .count();
     if missing > 0 {
         crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.render_part_missing, missing as u64);
     }
-    render_pop_body(qlog_reader, reader, tenant, top_queue, group, worker, auto_ack, claims, deadline, &infos)
+    render_pop_body(
+        qlog_reader,
+        reader,
+        encryption,
+        tenant,
+        top_queue,
+        group,
+        worker,
+        auto_ack,
+        claims,
+        deadline,
+        &infos,
+    )
 }
 
 /// Fill `infos` with the committed partition row + sealed files of every claim
@@ -1639,6 +2012,7 @@ fn render_part_infos(
 fn render_pop_body(
     qlog_reader: Option<&QLogReader>,
     reader: &segments::Reader,
+    encryption: &crate::encryption::Encryption,
     tenant: &str,
     top_queue: &str,
     group: &str,
@@ -1751,10 +2125,15 @@ fn render_pop_body(
                         None => out.push_str("null"),
                     }
                     out.push_str(",\"data\":");
-                    if fr.payload.is_empty() {
+                    let decrypted = fr
+                        .encrypted
+                        .then(|| encryption.decrypt_payload_bytes(fr.payload))
+                        .flatten();
+                    let payload = decrypted.as_deref().unwrap_or(fr.payload);
+                    if payload.is_empty() {
                         out.push_str("null");
                     } else {
-                        push_utf8(&mut out, fr.payload);
+                        push_utf8(&mut out, payload);
                     }
                     out.push_str(",\"producerSub\":");
                     match &fr.producer_sub {
@@ -1905,13 +2284,25 @@ impl RaftFacade {
         // Group by (pid, worker) into AckTargets. Read each pid's (tenant,
         // queue) once. A pid with no row is a per-item error.
         let store = self.store.clone();
+        let reader = self.reader.clone();
+        let qlog_reader = self.qlog_reader.clone();
+        let encryption = self.encryption.clone();
         let tenant = ctx.tenant.clone();
         let group = req.group.clone();
-        let (targets, per_item, more_bad) = tokio::task::spawn_blocking(move || {
-            resolve_ack_targets(&store, &tenant, &group, flats)
+        let resolved = tokio::task::spawn_blocking(move || {
+            resolve_ack_targets(
+                &store,
+                &reader,
+                qlog_reader.as_ref(),
+                &encryption,
+                &tenant,
+                &group,
+                flats,
+            )
         })
         .await
         .map_err(|e| RsmError::Internal(format!("ack resolve task: {e}")))?;
+        let (targets, per_item, more_bad) = resolved.map_err(RsmError::Internal)?;
         bad.extend(more_bad);
 
         let txns: Vec<String> = raw_items.iter().map(|r| r.0.clone()).collect();
@@ -1959,77 +2350,194 @@ struct AckPerItem {
     status: AckStatus,
 }
 
+struct AckSnapshotWork {
+    input: usize,
+    target: usize,
+    item: usize,
+    pid: Pid,
+    queue: String,
+    partition: String,
+    from: u64,
+    to: u64,
+    sealed: Vec<u32>,
+    hash: [u8; 16],
+    txn: String,
+}
+
 /// Group resolved acks by (pid, worker), reading each pid's queue once.
 fn resolve_ack_targets(
     store: &HeedStore,
+    reader: &segments::Reader,
+    qlog_reader: Option<&QLogReader>,
+    encryption: &crate::encryption::Encryption,
     tenant: &str,
     group: &str,
     flats: Vec<AckFlat>,
-) -> (Vec<AckTarget>, Vec<AckPerItem>, Vec<(usize, String)>) {
+) -> Result<(Vec<AckTarget>, Vec<AckPerItem>, Vec<(usize, String)>), String> {
     let mut targets: Vec<AckTarget> = Vec::new();
     let mut per_item: Vec<AckPerItem> = Vec::new();
     let mut bad: Vec<(usize, String)> = Vec::new();
+    let mut snapshot_work: Vec<AckSnapshotWork> = Vec::new();
     // (pid, worker) → target index.
     let mut index: std::collections::HashMap<(Pid, String), usize> =
         std::collections::HashMap::new();
 
-    let read = store.read(|r| {
-        for f in &flats {
-            let Some(part) = r.partition(f.pid)? else {
-                bad.push((f.index, format!("no partition {}", f.pid)));
-                continue;
-            };
-            let key = (f.pid, f.worker.clone());
-            let ti = match index.get(&key) {
-                Some(&ti) => ti,
-                None => {
-                    let ti = targets.len();
-                    targets.push(AckTarget {
-                        pid: f.pid,
-                        tenant: tenant.to_string(),
-                        queue: part.queue.clone(),
-                        group: group.to_string(),
-                        worker: f.worker.clone(),
-                        items: Vec::new(),
-                    });
-                    index.insert(key, ti);
-                    ti
-                }
-            };
-            let hash = txn_hash128(&f.txn);
-            // A signal that may file a dead letter carries the receiver's
-            // snapshot (O7/O20). The full pre-read of the poison frame is a
-            // later WP; what the ack wire gives us for free is the txn, so the
-            // filed row is identifiable instead of blank (its `payload` and
-            // `message_id` stay empty until the offset→frame resolve lands).
-            let snapshot =
-                matches!(f.status, AckStatus::Dlq | AckStatus::Failed).then(|| DlqSnapshot {
+    store
+        .read(|r| {
+            for f in &flats {
+                let Some(part) = r.partition(f.pid)? else {
+                    bad.push((f.index, format!("no partition {}", f.pid)));
+                    continue;
+                };
+                let key = (f.pid, f.worker.clone());
+                let ti = match index.get(&key) {
+                    Some(&ti) => ti,
+                    None => {
+                        let ti = targets.len();
+                        targets.push(AckTarget {
+                            pid: f.pid,
+                            tenant: tenant.to_string(),
+                            queue: part.queue.clone(),
+                            group: group.to_string(),
+                            worker: f.worker.clone(),
+                            items: Vec::new(),
+                        });
+                        index.insert(key, ti);
+                        ti
+                    }
+                };
+                let hash = txn_hash128(&f.txn);
+                // O20: a signal carries the original frame snapshot so the DLQ
+                // write and cursor advance remain one replicated entry. Populate
+                // it after this short store read from the node-local payload log.
+                let signal = matches!(f.status, AckStatus::Dlq | AckStatus::Failed);
+                let snapshot = signal.then(|| DlqSnapshot {
                     message_id: None,
                     txn: f.txn.clone(),
                     payload: Vec::new(),
                 });
-            targets[ti].items.push(AckItem {
-                hash,
-                status: f.status,
-                error: f.error.clone(),
-                snapshot,
-            });
-            per_item.push(AckPerItem {
-                index: f.index,
-                target: ti,
-                hash,
-                status: f.status,
-            });
+                let item = targets[ti].items.len();
+                targets[ti].items.push(AckItem {
+                    hash,
+                    status: f.status,
+                    error: f.error.clone(),
+                    snapshot,
+                });
+                if signal {
+                    if let Some(cur) = r.cursor(f.pid, group)? {
+                        if let Some(to) = cur.batch_end {
+                            let from = (cur.committed + 1).max(part.log_start as i64).max(0) as u64;
+                            let mut sealed = Vec::new();
+                            r.scan_partition_files(f.pid, usize::MAX, &mut |file| {
+                                sealed.push(file);
+                                true
+                            })?;
+                            snapshot_work.push(AckSnapshotWork {
+                                input: f.index,
+                                target: ti,
+                                item,
+                                pid: f.pid,
+                                queue: part.queue.clone(),
+                                partition: part.partition.clone(),
+                                from,
+                                to,
+                                sealed,
+                                hash,
+                                txn: f.txn.clone(),
+                            });
+                        }
+                    }
+                }
+                per_item.push(AckPerItem {
+                    index: f.index,
+                    target: ti,
+                    hash,
+                    status: f.status,
+                });
+            }
+            Ok(())
+        })
+        .map_err(|e| format!("ack resolve read: {e}"))?;
+
+    for work in snapshot_work {
+        match read_dlq_snapshot(reader, qlog_reader, encryption, tenant, &work) {
+            Ok(Some(snapshot)) => targets[work.target].items[work.item].snapshot = Some(snapshot),
+            Ok(None) => {
+                // The planner will classify an unknown/stale hash without ever
+                // consuming the placeholder. A live signal whose frame really
+                // disappeared is reported by the payload readers as an error.
+            }
+            Err(e) => {
+                return Err(format!("ack snapshot for item {}: {e}", work.input));
+            }
         }
-        Ok(())
-    });
-    if let Err(e) = read {
-        bad.push((usize::MAX, format!("ack resolve read: {e}")));
     }
-    (targets, per_item, bad)
+    Ok((targets, per_item, bad))
 }
 
-/// `[{index, transactionId, success, error, leaseReleased, dlq}]`, input order
+fn read_dlq_snapshot(
+    reader: &segments::Reader,
+    qlog_reader: Option<&QLogReader>,
+    encryption: &crate::encryption::Encryption,
+    tenant: &str,
+    work: &AckSnapshotWork,
+) -> Result<Option<DlqSnapshot>, String> {
+    let mut off = work.from;
+    while off <= work.to {
+        let record = match qlog_reader {
+            Some(qlog) => {
+                let qid = QLogReader::queue_id_of(tenant, &work.queue);
+                qlog.read_owned(qid, work.pid, off)
+                    .map_err(|e| format!("qlog read pid {} offset {off}: {e}", work.pid))?
+                    .map(|r| (r.base_offset, r.count, r.payload))
+            }
+            None => reader
+                .read_at(
+                    bucket_of(tenant, &work.queue, &work.partition),
+                    work.pid,
+                    off,
+                    &work.sealed,
+                )
+                .map_err(|e| format!("segment read pid {} offset {off}: {e}", work.pid))?
+                .map(|r| (r.base_offset, r.count, r.blob)),
+        };
+        let Some((base, count, blob)) = record else {
+            return Ok(None);
+        };
+        let frames = unpack_frames_ref(&blob)
+            .ok_or_else(|| format!("invalid packed frames at pid {} offset {base}", work.pid))?;
+        for (i, frame) in frames.iter().enumerate() {
+            let message_offset = base + i as u64;
+            if message_offset < work.from || message_offset > work.to {
+                continue;
+            }
+            if txn_hash128(frame.txn) == work.hash && frame.txn == work.txn {
+                let payload = if frame.encrypted {
+                    encryption
+                        .decrypt_payload_bytes(frame.payload)
+                        .unwrap_or_else(|| frame.payload.to_vec())
+                } else {
+                    frame.payload.to_vec()
+                };
+                return Ok(Some(DlqSnapshot {
+                    message_id: Some(frame.message_id),
+                    txn: frame.txn.to_string(),
+                    payload,
+                }));
+            }
+        }
+        off = base.saturating_add(count as u64);
+        if count == 0 {
+            return Err(format!(
+                "zero-frame payload record at pid {} offset {base}",
+                work.pid
+            ));
+        }
+    }
+    Ok(None)
+}
+
+/// `[{index, transactionId, success, error, leaseReleased, dlq, noop}]`, input order
 /// (`handlers/data.rs` ack wire). The group is applied by the caller.
 fn render_ack(
     txns: &[String],
@@ -2054,38 +2562,61 @@ fn render_ack(
         if let Some(msg) = bad_msg {
             out.push_str(",\"success\":false,\"error\":\"");
             crate::fusion::json_escape_into(&mut out, msg);
-            out.push_str("\",\"leaseReleased\":false,\"dlq\":false}");
+            out.push_str("\",\"leaseReleased\":false,\"dlq\":false,\"noop\":false}");
             continue;
         }
-        let (success, lease_released, dlq) =
-            match item.and_then(|p| Some((p, results.get(p.target)?))) {
-                Some((p, res)) => {
-                    let stale = res.stale_hashes.contains(&p.hash);
-                    // Per-item DLQ, NOT `res.dlq > 0` broadcast to the whole target
-                    // (the batch-ack mis-attribution R-101 leaves us to guard here).
-                    // `res.dlq` is a COUNT — the outcome shape carries no per-item
-                    // DLQ set — so a completed ack that shares a (partition, lease)
-                    // target with a sibling that DID dead-letter must not inherit
-                    // its flag. An item reads `dlq:true` only when its target filed
-                    // a dead letter AND this item itself carried a DLQ-eligible
-                    // signal; `res.dlq == 0` (e.g. a `failed` whose retry budget
-                    // remained, so it was released to redeliver) reads false for
-                    // every item. RESIDUAL, owed to R-101's shape refinement: two+
-                    // signal items on ONE target with `res.dlq == 1` see the head
-                    // (lowest-offset) one filed, but the receiver holds no offsets
-                    // in this AckResult shape and marks each signal item — the
-                    // per-item DLQ set the outcome must carry to disambiguate.
-                    let dlq = res.dlq > 0 && matches!(p.status, AckStatus::Dlq | AckStatus::Failed);
-                    (!stale, res.lease_released, dlq)
-                }
-                None => (true, false, false),
-            };
+        let (success, lease_released, dlq, noop, error) = match item
+            .and_then(|p| Some((p, results.get(p.target)?)))
+        {
+            Some((p, res)) => {
+                let stale = res.stale_hashes.contains(&p.hash);
+                let noop = res.noop_hashes.contains(&p.hash);
+                // Per-item DLQ, NOT `res.dlq > 0` broadcast to the whole target
+                // (the batch-ack mis-attribution R-101 leaves us to guard here).
+                // `res.dlq` is a COUNT — the outcome shape carries no per-item
+                // DLQ set — so a completed ack that shares a (partition, lease)
+                // target with a sibling that DID dead-letter must not inherit
+                // its flag. An item reads `dlq:true` only when its target filed
+                // a dead letter AND this item itself carried a DLQ-eligible
+                // signal; `res.dlq == 0` (e.g. a `failed` whose retry budget
+                // remained, so it was released to redeliver) reads false for
+                // every item. RESIDUAL, owed to R-101's shape refinement: two+
+                // signal items on ONE target with `res.dlq == 1` see the head
+                // (lowest-offset) one filed, but the receiver holds no offsets
+                // in this AckResult shape and marks each signal item — the
+                // per-item DLQ set the outcome must carry to disambiguate.
+                let dlq = res.dlq > 0 && matches!(p.status, AckStatus::Dlq | AckStatus::Failed);
+                let error = if stale && !matches!(p.status, AckStatus::Ok) {
+                    Some(
+                            "transaction is unresolvable, already committed, or acknowledgment is stale",
+                        )
+                } else if stale {
+                    Some(
+                            "transaction is unresolvable, already committed, or acknowledgment is stale",
+                        )
+                } else {
+                    None
+                };
+                (!stale, res.lease_released, dlq, noop, error)
+            }
+            None => (true, false, false, false, None),
+        };
         out.push_str(",\"success\":");
         out.push_str(if success { "true" } else { "false" });
-        out.push_str(",\"error\":null,\"leaseReleased\":");
+        out.push_str(",\"error\":");
+        if let Some(error) = error {
+            out.push('"');
+            crate::fusion::json_escape_into(&mut out, error);
+            out.push('"');
+        } else {
+            out.push_str("null");
+        }
+        out.push_str(",\"leaseReleased\":");
         out.push_str(if lease_released { "true" } else { "false" });
         out.push_str(",\"dlq\":");
         out.push_str(if dlq { "true" } else { "false" });
+        out.push_str(",\"noop\":");
+        out.push_str(if noop { "true" } else { "false" });
         out.push('}');
     }
     out.push(']');
@@ -2169,13 +2700,21 @@ impl RaftFacade {
     /// committed and applied (I4). A retry of the same request id is answered
     /// from the recorded outcome (D6, I6).
     async fn timers_apply_impl(&self, ctx: ReqCtx, req: TimersReq) -> Result<TimersOut, RsmError> {
-        let ops = parse_timer_ops(&req.ops, req.producer_sub.as_deref())
+        let mut ops = parse_timer_ops(&req.ops, req.producer_sub.as_deref())
             .map_err(|e| timers_bad_request(e.message))?;
         if ops.is_empty() {
             return Ok(TimersOut {
                 results: Vec::new(),
             });
         }
+        let encrypted_queues = self
+            .encrypted_queues(
+                &ctx.tenant,
+                ops.iter().map(|op| op.queue().to_string()).collect(),
+            )
+            .await?;
+        self.encrypt_timer_ops(&mut ops, &encrypted_queues)
+            .map_err(timers_bad_request)?;
         for op in &ops {
             // (tenant, queue, timer_key) is the `timers` key; the schedule's
             // (tenant, queue, partition) becomes `partitions_by_key` at the
@@ -2322,6 +2861,152 @@ impl RaftFacade {
 
 #[async_trait]
 impl Rsm for RaftFacade {
+    fn bootstrap(&self) -> super::RsmBootstrap {
+        match self.store.read(|r| {
+            let flag = |key: &str, default: bool| -> crate::rsm::store::Result<bool> {
+                Ok(r.flag(key)?
+                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                    .and_then(|v| v.get("enabled").and_then(serde_json::Value::as_bool))
+                    .unwrap_or(default))
+            };
+            let mut ephemeral_configs = Vec::new();
+            r.scan_eph_configs(usize::MAX, &mut |tenant, queue, row| {
+                if let Ok(options) = serde_json::from_slice(&row.options) {
+                    ephemeral_configs.push((tenant.to_string(), queue.to_string(), options));
+                }
+                true
+            })?;
+            let now_us = wall_micros();
+            let mut grants = Vec::new();
+            let mut bad_quota = false;
+            r.scan_raw(
+                crate::rsm::store::Keyspace::Quotas,
+                &[],
+                &[],
+                usize::MAX,
+                &mut |key, value| {
+                    if let (Some((kind, tenant)), Ok(grant)) = (
+                        crate::rsm::store::keys::quota_parts(key),
+                        crate::rsm::store::rows::quota_decode(value),
+                    ) {
+                        grants.push((kind, tenant, grant));
+                    } else {
+                        bad_quota = true;
+                        return false;
+                    }
+                    true
+                },
+            )?;
+            if bad_quota {
+                return Err(crate::rsm::store::StoreError::corrupt(
+                    crate::rsm::store::Keyspace::Quotas,
+                    "quota row",
+                ));
+            }
+            let mut kv_grants = Vec::new();
+            let mut ephemeral_grants = Vec::new();
+            for (kind, tenant, grant) in grants {
+                match kind {
+                    crate::rsm::effect::QuotaKind::Kv => {
+                        let mut kv_rows = 0i64;
+                        let mut kv_bytes = 0i64;
+                        r.scan_kv_tenant(&tenant, usize::MAX, &mut |_ns, _key, row| {
+                            if row.live(now_us) {
+                                kv_rows += 1;
+                                kv_bytes = kv_bytes.saturating_add(row.value.len() as i64);
+                            }
+                            true
+                        })?;
+                        let mut timer_rows = 0i64;
+                        r.scan_raw(
+                            crate::rsm::store::Keyspace::Timers,
+                            &crate::rsm::store::keys::queues_prefix(&tenant),
+                            &crate::rsm::store::keys::queues_prefix(&tenant),
+                            usize::MAX,
+                            &mut |_key, _value| {
+                                timer_rows += 1;
+                                true
+                            },
+                        )?;
+                        kv_grants.push((tenant, grant, kv_rows, kv_bytes, timer_rows));
+                    }
+                    crate::rsm::effect::QuotaKind::Ephemeral => {
+                        ephemeral_grants.push((tenant, grant));
+                    }
+                    crate::rsm::effect::QuotaKind::Streams => {}
+                }
+            }
+            Ok(super::RsmBootstrap {
+                startup_error: None,
+                maintenance: flag("maintenance_mode", false)?,
+                pop_maintenance: flag("pop_maintenance_mode", false)?,
+                kv_enabled: flag(crate::switches::Switches::KEY_KV, true)?,
+                timers_schedule_enabled: flag(
+                    crate::switches::Switches::KEY_TIMERS_SCHEDULE,
+                    true,
+                )?,
+                timers_fire_enabled: flag(crate::switches::Switches::KEY_TIMERS_FIRE, true)?,
+                ephemeral_enabled: flag(crate::switches::Switches::KEY_EPHEMERAL, true)?,
+                ephemeral_configs,
+                kv_grants,
+                ephemeral_grants,
+            })
+        }) {
+            Ok(bootstrap) => bootstrap,
+            Err(error) => super::RsmBootstrap {
+                startup_error: Some(error.to_string()),
+                ..super::RsmBootstrap::default()
+            },
+        }
+    }
+
+    fn prometheus(&self) -> String {
+        let mut out = String::new();
+        out.push_str("# HELP queen_raft_store_operations_total Embedded-store operations by kind\n# TYPE queen_raft_store_operations_total counter\n");
+        for (kind, value) in self.store.metrics().snapshot() {
+            out.push_str(&format!(
+                "queen_raft_store_operations_total{{kind=\"{kind}\"}} {value}\n"
+            ));
+        }
+        let map = self.store.map_usage();
+        out.push_str("# HELP queen_raft_store_map_bytes LMDB map capacity and use\n# TYPE queen_raft_store_map_bytes gauge\n");
+        out.push_str(&format!(
+            "queen_raft_store_map_bytes{{kind=\"capacity\"}} {}\nqueen_raft_store_map_bytes{{kind=\"used\"}} {}\n",
+            map.map_bytes, map.used_bytes
+        ));
+        out.push_str("# HELP queen_raft_store_readers LMDB reader slots\n# TYPE queen_raft_store_readers gauge\n");
+        out.push_str(&format!(
+            "queen_raft_store_readers{{kind=\"used\"}} {}\nqueen_raft_store_readers{{kind=\"limit\"}} {}\n",
+            map.readers_in_use, map.max_readers
+        ));
+
+        let repl = self.repl.metrics();
+        out.push_str("# HELP queen_raft_index Raft/RSM indexes\n# TYPE queen_raft_index gauge\n");
+        for (kind, value) in [
+            ("log", repl.last_log_index),
+            ("committed", repl.committed_index),
+            ("applied", repl.applied_index),
+            ("durable", repl.durable_index),
+        ] {
+            out.push_str(&format!("queen_raft_index{{kind=\"{kind}\"}} {value}\n"));
+        }
+        out.push_str("# HELP queen_raft_inflight Entries committed or proposed but not applied\n# TYPE queen_raft_inflight gauge\n");
+        out.push_str(&format!("queen_raft_inflight {}\n", repl.inflight));
+        out.push_str("# HELP queen_raft_proposals_total Proposals accepted since open\n# TYPE queen_raft_proposals_total counter\n");
+        out.push_str(&format!("queen_raft_proposals_total {}\n", repl.proposals));
+        out.push_str("# HELP queen_raft_log_storage Queue-log files and bytes\n# TYPE queen_raft_log_storage gauge\n");
+        out.push_str(&format!(
+            "queen_raft_log_storage{{kind=\"files\"}} {}\nqueen_raft_log_storage{{kind=\"bytes\"}} {}\n",
+            repl.log_files, repl.log_bytes
+        ));
+        out.push_str("# HELP queen_raft_storage_full Disk/map admission gate\n# TYPE queen_raft_storage_full gauge\n");
+        out.push_str(&format!(
+            "queen_raft_storage_full {}\n",
+            u8::from(self.storage_full.load(std::sync::atomic::Ordering::Relaxed))
+        ));
+        out
+    }
+
     async fn push(&self, ctx: ReqCtx, req: PushReq) -> Result<PushOut, RsmError> {
         self.push_impl(ctx, req).await
     }
@@ -2338,6 +3023,7 @@ impl Rsm for RaftFacade {
             req.auto_ack,
             req.wait,
             true,
+            req.options,
         )
         .await
     }
@@ -2354,6 +3040,7 @@ impl Rsm for RaftFacade {
             req.auto_ack,
             req.wait,
             false,
+            req.options,
         )
         .await
     }
@@ -2370,6 +3057,7 @@ impl Rsm for RaftFacade {
             req.auto_ack,
             req.wait,
             false,
+            req.options,
         )
         .await
     }
@@ -2378,7 +3066,11 @@ impl Rsm for RaftFacade {
         self.ack_impl(ctx, req).await
     }
 
-    async fn transaction(&self, ctx: ReqCtx, req: super::TxnReq) -> Result<super::TxnOut, RsmError> {
+    async fn transaction(
+        &self,
+        ctx: ReqCtx,
+        req: super::TxnReq,
+    ) -> Result<super::TxnOut, RsmError> {
         self.txn_impl(ctx, req).await
     }
 
@@ -2398,9 +3090,29 @@ impl Rsm for RaftFacade {
         Ok(true)
     }
 
-    async fn depth(&self, _ctx: ReqCtx, _req: DepthReq) -> Result<DepthOut, RsmError> {
-        // Depth is a §9.6 counter read wired by WP-2.6; not yet.
-        Err(RsmError::Unsupported)
+    async fn depth(&self, ctx: ReqCtx, req: DepthReq) -> Result<DepthOut, RsmError> {
+        let store = self.store.clone();
+        let tenant = ctx.tenant;
+        let queue = req.queue.clone();
+        let now = wall_micros();
+        let result = tokio::task::spawn_blocking(move || {
+            store.read(|r| phase2::depth_json(r, &tenant, &req.queue, req.group.as_deref(), now))
+        })
+        .await
+        .map_err(|e| RsmError::Internal(format!("depth read: {e}")))?
+        .map_err(read_error)?;
+        let Some(value) = result else {
+            return Err(RsmError::Rejected {
+                code: "queue_not_found".to_string(),
+                message: format!("queue '{}' not found", queue),
+            });
+        };
+        Ok(DepthOut {
+            pending: value
+                .get("pending")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+        })
     }
 
     async fn kv(&self, ctx: ReqCtx, req: KvReq) -> Result<KvOut, KvFailure> {
@@ -2433,6 +3145,10 @@ impl Rsm for RaftFacade {
         req: TimersCountReq,
     ) -> Result<TimerReadOut, RsmError> {
         self.timers_count_impl(ctx, req).await
+    }
+
+    async fn api(&self, ctx: ReqCtx, req: ApiReq) -> Result<ApiOut, RsmError> {
+        self.api_impl(ctx, req).await
     }
 
     fn health(&self) -> RaftHealth {

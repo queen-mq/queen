@@ -886,6 +886,7 @@ pub(super) async fn pop_all(f: &RaftFacade, queue: &str) -> Vec<Value> {
                 auto_ack: true,
                 wait: false,
                 timeout_ms: 1000,
+                options: Default::default(),
             },
         )
         .await

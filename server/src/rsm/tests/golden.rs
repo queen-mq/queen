@@ -60,6 +60,7 @@ fn fixture(kind: Kind) -> &'static [u8] {
         Kind::RequestIdsExpire => include_bytes!("golden/effect_request_ids_expire.bin"),
         Kind::ClusterVersionSet => include_bytes!("golden/effect_cluster_version_set.bin"),
         Kind::MembershipNote => include_bytes!("golden/effect_membership_note.bin"),
+        Kind::TenantPurge => include_bytes!("golden/effect_tenant_purge.bin"),
     }
 }
 

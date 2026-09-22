@@ -275,6 +275,10 @@ pub struct BrokerConfig {
     /// Emit the periodic `rates`/`sizes` aggregate log blocks via `tracing`.
     /// Default true (inert without a subscriber).
     pub log_reports: bool,
+    /// Run on the single-node RSM at this durable data directory, without
+    /// connecting to Postgres. `None` keeps the normal Postgres backend (unless
+    /// `QUEEN_STORAGE=raft` is selected in the environment).
+    pub raft_dir: Option<PathBuf>,
 }
 
 /// Same defaults as [`BrokerConfig::new`] — the derive would silently flip
@@ -303,6 +307,7 @@ impl BrokerConfig {
             stats_refresh: true,
             system_metrics: true,
             log_reports: true,
+            raft_dir: None,
         }
     }
 
@@ -370,6 +375,13 @@ impl BrokerConfig {
 
     pub fn log_reports(mut self, on: bool) -> Self {
         self.log_reports = on;
+        self
+    }
+
+    /// Select the single-node Raft/RSM backend and its required durable data
+    /// directory (PLAN_RAFT WP-2.10).
+    pub fn raft(mut self, data_dir: impl Into<PathBuf>) -> Self {
+        self.raft_dir = Some(data_dir.into());
         self
     }
 }

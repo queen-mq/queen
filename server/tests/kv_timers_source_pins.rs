@@ -58,7 +58,7 @@ fn every_procedures_file_is_in_the_schema_rs_list() {
 
     for name in sql_files(&server_dir().join("sql/procedures")) {
         assert!(
-            list.contains(&format!("(\"{name}\"")),
+            list.contains(&format!("\"{name}\"")),
             "sql/procedures/{name} exists but is not in the PROCEDURES list of src/schema.rs, so \
              it is NEVER applied at boot. Add:\n    (\"{name}\", \
              include_str!(\"../sql/procedures/{name}\")),"

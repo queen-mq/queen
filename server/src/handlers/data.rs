@@ -223,11 +223,24 @@ pub async fn handle_push(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     body: Bytes,
 ) -> Response {
+    // Producer identity is server-owned: only the validated JWT subject is
+    // forwarded to either storage backend, never a body-supplied field.
+    let producer_sub = authed.0.filter(|s| !s.is_empty());
     // PLAN_RAFT.md WP-1.7 — in raft mode the receiver routes to the state
     // machine facade instead of the Postgres pool. The guard is first, so the
     // Postgres path below is byte-identical in `storage = postgres`.
     if st.storage.is_raft() {
-        return crate::handlers::raft::dispatch_push(&st, tenant.as_str(), body).await;
+        // D19/O10: Raft has no node-local spool. A maintenance push is refused
+        // explicitly so a successful response can never mean "buffered on one
+        // voter" and disappear on failover.
+        if st.maintenance.load(Ordering::Relaxed) {
+            return json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{\"success\":false,\"error\":\"maintenance\"}".to_string(),
+            );
+        }
+        return crate::handlers::raft::dispatch_push(&st, tenant.as_str(), producer_sub, body)
+            .await;
     }
     let parsed: PushBody = match serde_json::from_slice(&body) {
         Ok(p) => p,
@@ -259,8 +272,6 @@ pub async fn handle_push(
 
     // producer_sub is stamped ONLY from the validated JWT `sub` (never the body).
     // Computed up front so the maintenance-buffer path can carry it too.
-    let producer_sub = authed.0.filter(|s| !s.is_empty());
-
     // RUSTFIX item 17: maintenance mode diverts EVERY push to the file buffer
     // (parity with push.cpp:307-359) — nothing reaches queen.log_segments; the
     // background drain replays on disable. Return 201 with per-item
@@ -878,15 +889,48 @@ pub async fn handle_pop(
     // PLAN_RAFT.md WP-1.7 — raft mode routes the wildcard pop to the facade.
     // Guard first; the Postgres path below is untouched in `storage = postgres`.
     if st.storage.is_raft() {
+        let batch = p.batch.unwrap_or(200);
+        let auto_ack = p.auto_ack.unwrap_or(false);
+        if let Some(r) = conflation_refusal(p.conflation, p.consumer_group.is_some(), auto_ack) {
+            return r;
+        }
+        if st.pop_maintenance.load(Ordering::Relaxed) {
+            return if p.conflation == Some(true) {
+                json(StatusCode::OK, POP_PAUSED_CONFLATING.to_string())
+            } else {
+                json(StatusCode::NO_CONTENT, POP_PAUSED.to_string())
+            };
+        }
+        let from = p.subscription_from.as_deref();
+        let conflate = p.conflation == Some(true) && p.consumer_group.is_some();
         return crate::handlers::raft::dispatch_pop(
             &st,
             tenant.as_str(),
             queue,
             p.consumer_group.clone(),
-            p.batch.unwrap_or(200),
-            p.auto_ack.unwrap_or(false),
+            batch,
+            auto_ack,
             p.wait.unwrap_or(false),
             p.timeout.unwrap_or(st.pop_default_timeout_ms),
+            crate::rsm::facade::PopOptions {
+                max_parts: if conflate {
+                    p.partitions.unwrap_or(batch).clamp(1, 64) as u32
+                } else {
+                    p.partitions.unwrap_or(1).clamp(1, 64) as u32
+                },
+                lease_seconds: p.lease_seconds.unwrap_or(0),
+                subscription_mode: p
+                    .subscription_mode
+                    .as_deref()
+                    .map(crate::config::normalize_subscription_mode)
+                    .unwrap_or_else(|| st.default_subscription_mode.clone()),
+                subscription_from_us: from
+                    .filter(|v| !v.eq_ignore_ascii_case("now"))
+                    .and_then(crate::util::parse_iso_ms)
+                    .map(|ms| ms.saturating_mul(1_000)),
+                subscription_from_now: from.is_some_and(|v| v.eq_ignore_ascii_case("now")),
+                conflate,
+            },
         )
         .await;
     }
@@ -2669,16 +2713,44 @@ pub async fn handle_pop_partition(
 ) -> Response {
     // PLAN_RAFT.md WP-1.7 — raft mode routes the pinned pop to the facade.
     if st.storage.is_raft() {
+        let batch = p.batch.unwrap_or(200);
+        let auto_ack = p.auto_ack.unwrap_or(false);
+        if let Some(r) = conflation_refusal(p.conflation, p.consumer_group.is_some(), auto_ack) {
+            return r;
+        }
+        if st.pop_maintenance.load(Ordering::Relaxed) {
+            return if p.conflation == Some(true) {
+                json(StatusCode::OK, POP_PAUSED_CONFLATING.to_string())
+            } else {
+                json(StatusCode::NO_CONTENT, POP_PAUSED.to_string())
+            };
+        }
+        let from = p.subscription_from.as_deref();
         return crate::handlers::raft::dispatch_pop_partition(
             &st,
             tenant.as_str(),
             queue,
             partition,
             p.consumer_group.clone(),
-            p.batch.unwrap_or(200),
-            p.auto_ack.unwrap_or(false),
+            batch,
+            auto_ack,
             p.wait.unwrap_or(false),
             p.timeout.unwrap_or(st.pop_default_timeout_ms),
+            crate::rsm::facade::PopOptions {
+                max_parts: 1,
+                lease_seconds: p.lease_seconds.unwrap_or(0),
+                subscription_mode: p
+                    .subscription_mode
+                    .as_deref()
+                    .map(crate::config::normalize_subscription_mode)
+                    .unwrap_or_else(|| st.default_subscription_mode.clone()),
+                subscription_from_us: from
+                    .filter(|v| !v.eq_ignore_ascii_case("now"))
+                    .and_then(crate::util::parse_iso_ms)
+                    .map(|ms| ms.saturating_mul(1_000)),
+                subscription_from_now: from.is_some_and(|v| v.eq_ignore_ascii_case("now")),
+                conflate: p.conflation == Some(true) && p.consumer_group.is_some(),
+            },
         )
         .await;
     }
@@ -2920,30 +2992,65 @@ pub async fn handle_pop_discover(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     Query(p): Query<PopDiscoverParams>,
 ) -> Response {
-    // PLAN_RAFT.md WP-1.7 — raft mode routes the discovery pop to the facade.
-    if st.storage.is_raft() {
-        return crate::handlers::raft::dispatch_pop_discover(
-            &st,
-            tenant.as_str(),
-            p.namespace.clone().unwrap_or_default(),
-            p.task.clone().unwrap_or_default(),
-            p.consumer_group.clone(),
-            p.batch.unwrap_or(200),
-            p.auto_ack.unwrap_or(false),
-            p.wait.unwrap_or(false),
-            p.timeout.unwrap_or(st.pop_default_timeout_ms),
-        )
-        .await;
-    }
-    let namespace = p.namespace.unwrap_or_default();
-    let task = p.task.unwrap_or_default();
-    if namespace.is_empty() && task.is_empty() {
+    if p.namespace.as_deref().unwrap_or_default().is_empty()
+        && p.task.as_deref().unwrap_or_default().is_empty()
+    {
         return json(
             StatusCode::BAD_REQUEST,
             "{\"success\":false,\"error\":\"namespace or task is required\",\"messages\":[]}"
                 .to_string(),
         );
     }
+    // PLAN_RAFT.md WP-1.7 — raft mode routes the discovery pop to the facade.
+    if st.storage.is_raft() {
+        let batch = p.batch.unwrap_or(200);
+        let auto_ack = p.auto_ack.unwrap_or(false);
+        if let Some(r) = conflation_refusal(p.conflation, p.consumer_group.is_some(), auto_ack) {
+            return r;
+        }
+        if st.pop_maintenance.load(Ordering::Relaxed) {
+            return if p.conflation == Some(true) {
+                json(StatusCode::OK, POP_PAUSED_CONFLATING.to_string())
+            } else {
+                json(StatusCode::NO_CONTENT, POP_PAUSED.to_string())
+            };
+        }
+        let from = p.subscription_from.as_deref();
+        let conflate = p.conflation == Some(true) && p.consumer_group.is_some();
+        return crate::handlers::raft::dispatch_pop_discover(
+            &st,
+            tenant.as_str(),
+            p.namespace.clone().unwrap_or_default(),
+            p.task.clone().unwrap_or_default(),
+            p.consumer_group.clone(),
+            batch,
+            auto_ack,
+            p.wait.unwrap_or(false),
+            p.timeout.unwrap_or(st.pop_default_timeout_ms),
+            crate::rsm::facade::PopOptions {
+                max_parts: if conflate {
+                    p.partitions.unwrap_or(batch).clamp(1, 64) as u32
+                } else {
+                    p.partitions.unwrap_or(1).clamp(1, 64) as u32
+                },
+                lease_seconds: p.lease_seconds.unwrap_or(0),
+                subscription_mode: p
+                    .subscription_mode
+                    .as_deref()
+                    .map(crate::config::normalize_subscription_mode)
+                    .unwrap_or_else(|| st.default_subscription_mode.clone()),
+                subscription_from_us: from
+                    .filter(|v| !v.eq_ignore_ascii_case("now"))
+                    .and_then(crate::util::parse_iso_ms)
+                    .map(|ms| ms.saturating_mul(1_000)),
+                subscription_from_now: from.is_some_and(|v| v.eq_ignore_ascii_case("now")),
+                conflate,
+            },
+        )
+        .await;
+    }
+    let namespace = p.namespace.unwrap_or_default();
+    let task = p.task.unwrap_or_default();
     let batch = p.batch.unwrap_or(200);
     let auto_ack = p.auto_ack.unwrap_or(false);
     let wait = p.wait.unwrap_or(false);
@@ -5691,11 +5798,18 @@ pub async fn handle_transaction(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     body: Bytes,
 ) -> Response {
+    // As on the standalone push path, identity comes only from validated auth.
+    let producer_sub = authed.0.filter(|s| !s.is_empty());
     // Phase B — raft mode routes the transaction to the facade (one command,
     // one entry, all-or-nothing; crash-atomic by the queue-log WAL).
     if st.storage.is_raft() {
-        let _ = &authed;
-        return crate::handlers::raft::dispatch_transaction(&st, tenant.as_str(), body).await;
+        return crate::handlers::raft::dispatch_transaction(
+            &st,
+            tenant.as_str(),
+            producer_sub,
+            body,
+        )
+        .await;
     }
     let root: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -5704,8 +5818,6 @@ pub async fn handle_transaction(
     let txn_id = uuid_bytes_to_string(&uuidv7_bytes());
     // Authenticated producer identity (JWT sub), stamped onto every pushed frame
     // when auth is enabled. None when auth is disabled or the token had no sub.
-    let producer_sub = authed.0.filter(|s| !s.is_empty());
-
     // ---------------------------------------------------------- riders (§8.2)
     // Read BEFORE `operations`, because a KV-only bundle legitimately carries no
     // `operations` at all and must not be refused by a guard written when push

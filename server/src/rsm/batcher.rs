@@ -81,8 +81,9 @@ use crate::rsm::planner::timers::{TimerFireConfig, TimersCommand};
 pub use crate::rsm::planner::txn::{TxnCommand, TxnOutcome};
 use crate::rsm::planner::Refusal;
 use crate::rsm::planner::{
-    AckCommand, AckPositionalCommand, CommandKind, DlqHeadCommand, KvCommand, Lookup, NackCommand,
-    Overlay, Plan, PlanConfig, Planned, Planner, PopCommand, PushCommand, RenewCommand,
+    AckCommand, AckPositionalCommand, CommandKind, DlqHeadCommand, EffectsCommand, KvCommand,
+    Lookup, NackCommand, Overlay, Plan, PlanConfig, Planned, Planner, PopCommand, PushCommand,
+    RenewCommand,
 };
 use crate::rsm::qlog::set::QLogReader;
 use crate::rsm::replicator::{AppliedAt, NodeId, ProposeError, Replicator, Role};
@@ -160,6 +161,11 @@ pub struct BatcherConfig {
     pub timer_tick_ms: u64,
     /// The fire step's bounds and backoff.
     pub timer_fire: TimerFireConfig,
+    /// Leader-only retention, trace-expiry and delete-resume cadence. `0`
+    /// disables it (the programmatic test default); real nodes enable it from
+    /// `RETENTION_INTERVAL`.
+    pub maintenance_every_ms: u64,
+    pub maintenance: crate::rsm::maintenance::Config,
 }
 
 impl Default for BatcherConfig {
@@ -180,6 +186,8 @@ impl Default for BatcherConfig {
             kv_sweep_limit: crate::rsm::planner::kv::SWEEP_LIMIT_DEFAULT,
             timer_tick_ms: 0,
             timer_fire: TimerFireConfig::default(),
+            maintenance_every_ms: 0,
+            maintenance: crate::rsm::maintenance::Config::default(),
         }
     }
 }
@@ -252,6 +260,26 @@ impl BatcherConfig {
                 .and_then(|v| v.trim().parse::<u64>().ok())
                 .unwrap_or(TIMER_TICK_MS_DEFAULT),
             timer_fire: TimerFireConfig::from_env(),
+            maintenance_every_ms: std::env::var("RETENTION_INTERVAL")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(5_000)
+                .max(1),
+            maintenance: crate::rsm::maintenance::Config {
+                row_limit: num("RETENTION_BATCH_SIZE", d.maintenance.row_limit as u64) as usize,
+                trace_retention_s: num(
+                    "QUEEN_RAFT_TRACE_RETENTION_S",
+                    d.maintenance.trace_retention_s as u64,
+                ) as i64,
+                partition_cleanup_enabled: flag(
+                    "QUEEN_PARTITION_CLEANUP_ENABLED",
+                    d.maintenance.partition_cleanup_enabled,
+                ),
+                partition_cleanup_days: num(
+                    "PARTITION_CLEANUP_DAYS",
+                    d.maintenance.partition_cleanup_days as u64,
+                ) as i64,
+            },
         }
     }
 }
@@ -282,9 +310,41 @@ pub enum Command {
     /// Timer schedules and cancels (025 `log_timers_apply_v1`, WP-2.3). The
     /// FIRE is not a command: it is the driver's own leader-loop step.
     Timers(TimersCommand),
+    /// Deterministic Phase-2 metadata/control effects.
+    Effects(EffectsCommand),
 }
 
 impl Command {
+    /// Whether §11.8 must refuse this command while a node is above the disk
+    /// high-water mark. Deletes, acknowledgements and admin cleanup continue.
+    pub(crate) fn grows_storage(&self) -> bool {
+        use crate::rsm::planner::timers::TimerOp;
+        use crate::rsm::planner::KvOp;
+        let kv_grows = |ops: &[KvOp]| {
+            ops.iter()
+                .any(|op| matches!(op, KvOp::Put { .. } | KvOp::Incr { .. }))
+        };
+        let timers_grow = |ops: &[TimerOp]| ops.iter().any(|op| matches!(op, TimerOp::Schedule(_)));
+        let effects_grow = |effects: &[Effect]| {
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::TraceAppend { .. }))
+        };
+        match self {
+            Command::Push(_) => true,
+            Command::Transaction(c) => {
+                !c.pushes.is_empty()
+                    || kv_grows(&c.kv)
+                    || timers_grow(&c.timers)
+                    || effects_grow(&c.extra_effects)
+            }
+            Command::Kv(c) => kv_grows(&c.ops),
+            Command::Timers(c) => timers_grow(&c.ops),
+            Command::Effects(c) => effects_grow(&c.effects),
+            _ => false,
+        }
+    }
+
     /// The request id the receiver minted once (D6), reused across forwarding
     /// retries.
     pub fn request_id(&self) -> RequestId {
@@ -301,6 +361,7 @@ impl Command {
             Command::Transaction(c) => c.request_id,
             Command::Kv(c) => c.request_id,
             Command::Timers(c) => c.request_id,
+            Command::Effects(c) => c.request_id,
         }
     }
 
@@ -319,6 +380,7 @@ impl Command {
             Command::Transaction(_) => CommandKind::Transaction,
             Command::Kv(_) => CommandKind::Kv,
             Command::Timers(_) => CommandKind::Timers,
+            Command::Effects(_) => CommandKind::Effects,
         }
     }
 
@@ -342,9 +404,16 @@ impl Command {
                     .iter()
                     .map(|p| p.items.iter().map(|i| i.frame.len() + 16).sum::<usize>() + 64)
                     .sum::<usize>()
-                    + c.acks.iter().map(|t| t.items.len() * 48 + 64).sum::<usize>()
+                    + c.acks
+                        .iter()
+                        .map(|t| t.items.len() * 48 + 64)
+                        .sum::<usize>()
                     + c.kv.len() * 128
                     + c.timers.iter().map(|t| t.size_hint()).sum::<usize>()
+                    + c.extra_effects
+                        .iter()
+                        .map(|e| e.encode_body().len() + 8)
+                        .sum::<usize>()
                     + 64
             }
             Command::Kv(c) => {
@@ -360,6 +429,13 @@ impl Command {
                     + 64
             }
             Command::Timers(c) => c.ops.iter().map(|o| o.size_hint()).sum::<usize>() + 64,
+            Command::Effects(c) => {
+                c.effects
+                    .iter()
+                    .map(|e| e.encode_body().len() + 8)
+                    .sum::<usize>()
+                    + 64
+            }
             _ => 128,
         }
     }
@@ -374,8 +450,10 @@ impl Command {
             Command::Transaction(c) => {
                 c.pushes.iter().map(|p| p.items.len() as u64).sum::<u64>()
                     + c.acks.iter().map(|t| t.items.len() as u64).sum::<u64>()
+                    + c.extra_effects.len() as u64
             }
             Command::Timers(c) => c.ops.len().max(1) as u64,
+            Command::Effects(c) => c.effects.len().max(1) as u64,
             _ => 1,
         }
     }
@@ -406,6 +484,7 @@ impl Command {
             // shared logs (024 §13.5).
             Command::Kv(c) => (&c.tenant, ""),
             Command::Timers(c) => (&c.tenant, c.ops.first().map_or("", |o| o.queue())),
+            Command::Effects(c) => (&c.tenant, ""),
         }
     }
 
@@ -426,6 +505,7 @@ impl Command {
             Command::Transaction(c) => p.plan_transaction(ov, c),
             Command::Kv(c) => p.plan_kv(ov, c),
             Command::Timers(c) => p.plan_timers(ov, c),
+            Command::Effects(c) => p.plan_effects(ov, c),
         }
     }
 }
@@ -723,6 +803,8 @@ struct PlanOutput {
     fired: bool,
     /// ...and hit one of its bounds: more timers are due now.
     fire_more: bool,
+    maintained: bool,
+    maintenance_more: bool,
 }
 
 /// The leader-loop step that fires due timers (WP-2.3): plan it against the
@@ -794,6 +876,7 @@ fn plan_cycle_blocking<S: Store>(
     expire_window_us: Option<i64>,
     kv_sweep_limit: Option<usize>,
     fire: Option<TimerFireConfig>,
+    maintenance: Option<crate::rsm::maintenance::Config>,
 ) -> crate::rsm::store::Result<PlanOutput> {
     // P4: the rings this batch's wildcard pops walk — the only part of
     // `Derived` the planner reads. A discovery pop spans queues: every ring.
@@ -849,6 +932,29 @@ fn plan_cycle_blocking<S: Store>(
         // the `.seg` files (same committed bound, same O(claimed) walk). `None`
         // leaves the segment path untouched.
         planner.set_qlog_reader(qlog_reader.clone());
+
+        // Queue-log files are node-local and are therefore reclaimed outside
+        // replicated apply.  Use only watermarks from this committed read;
+        // effects planned below become eligible on a later maintenance pass.
+        // A local I/O failure must not reject unrelated client commands: keep
+        // the replicated retention loop moving and retry the file sweep.
+        if maintenance.is_some() {
+            if let Some(qlogs) = qlog_reader.as_ref() {
+                match crate::rsm::maintenance::reclaim_qlogs(r, qlogs) {
+                    Ok(n) if n > 0 => tracing::info!(
+                        target: "rsm",
+                        files = n,
+                        "rsm qlog retention reclaimed sealed files"
+                    ),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(
+                        target: "rsm",
+                        error = %e,
+                        "rsm qlog retention will retry"
+                    ),
+                }
+            }
+        }
 
         let mut entry = Entry::new(now_us, ov.cycle_pid_base(), ov.cycle_kv_base());
         let mut slots: Vec<Slot> = Vec::with_capacity(batch.len());
@@ -944,6 +1050,26 @@ fn plan_cycle_blocking<S: Store>(
             None => false,
         };
 
+        // WP-2.7/2.8: bounded leader-only retention, trace expiry and
+        // crash-resumable admin garbage. It is a normal command in this entry,
+        // so every watermark/delete has the same commit and replay guarantees
+        // as a client write.
+        let maintained = maintenance.is_some();
+        let mut maintenance_more = false;
+        if let Some(mcfg) = maintenance.as_ref() {
+            let planned = crate::rsm::maintenance::plan(r, now_us, mcfg)?;
+            maintenance_more = planned.more;
+            if !planned.effects.is_empty() {
+                let id = crate::util::uuidv7_bytes();
+                if entry
+                    .add_command(id, Outcome::Empty, planned.effects.clone())
+                    .is_ok()
+                {
+                    ov.apply_effects(&planned.effects);
+                }
+            }
+        }
+
         // WP-2.2 KV expiry sweep (026's `kv_expire_step_v1` as a leader loop):
         // one bounded step, planned AFTER this cycle's commands so it sees
         // their writes in the overlay (a key a command just rewrote is not
@@ -996,6 +1122,8 @@ fn plan_cycle_blocking<S: Store>(
             kv_swept,
             fired,
             fire_more,
+            maintained,
+            maintenance_more,
         })
     })
 }
@@ -1082,6 +1210,10 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
         let mut timer_tick =
             tokio::time::interval(Duration::from_millis(self.cfg.timer_tick_ms.max(1)));
         timer_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let maintenance_on = self.cfg.maintenance_every_ms > 0;
+        let mut maintenance_tick =
+            tokio::time::interval(Duration::from_millis(self.cfg.maintenance_every_ms.max(1)));
+        maintenance_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         // Capture what the watch and metrics say BEFORE the fields move into
         // `RunState`.
@@ -1118,6 +1250,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             expire_due: false,
             kv_sweep_due: false,
             timers_due: false,
+            maintenance_due: maintenance_on,
             stopped: false,
             wake_reason: "init",
             wake_seq: 0,
@@ -1170,6 +1303,10 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                 _ = timer_tick.tick(), if timers_on => {
                     st.note_wake("timers");
                     st.timers_due = true;
+                }
+                _ = maintenance_tick.tick(), if maintenance_on => {
+                    st.note_wake("maintenance");
+                    st.maintenance_due = true;
                 }
                 _ = tokio::time::sleep(Duration::from_millis(HOLD_POLL_MS)),
                     if st.holding_until.is_some() =>
@@ -1247,6 +1384,8 @@ struct RunState<S: Store, R: Replicator> {
     /// WP-2.3: the timer tick fired (or the last fire step hit a bound), so
     /// the next cycle runs the fire step even with no command to plan.
     timers_due: bool,
+    /// WP-2.7: retention / trace expiry / garbage continuation is due.
+    maintenance_due: bool,
     stopped: bool,
     /// PERF-K trace: what the last `select!` wake was (`arrival` / `result` /
     /// `applied_notify` / `expire` / `kv_sweep` / `timers` / `hold` / `role`), for the
@@ -1275,7 +1414,11 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             && self.holding_until.is_none()
             && self.unresolved() < self.cfg.pipeline
             && (!self.queue.is_empty()
-                || ((self.expire_due || self.kv_sweep_due || self.timers_due) && !self.closing))
+                || ((self.expire_due
+                    || self.kv_sweep_due
+                    || self.timers_due
+                    || self.maintenance_due)
+                    && !self.closing))
     }
 
     fn should_exit(&self) -> bool {
@@ -1323,7 +1466,8 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 || batch
                     .iter()
                     .any(|s| matches!(s.command, Command::Timers(_))));
-        if batch.is_empty() && !expire && !kv_sweep && !fire {
+        let maintenance = self.maintenance_due && !self.closing;
+        if batch.is_empty() && !expire && !kv_sweep && !fire && !maintenance {
             return;
         }
         // PERF-K trace: capture the before-state and the inter-cycle gap now
@@ -1422,6 +1566,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         let reader = self.reader.clone();
         let qlog_reader = self.qlog_reader.clone();
         let fire_cfg = fire.then(|| self.cfg.timer_fire.clone());
+        let maintenance_cfg = maintenance.then(|| self.cfg.maintenance.clone());
 
         let planned = tokio::task::spawn_blocking(move || {
             plan_cycle_blocking(
@@ -1436,6 +1581,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 expire_window_us,
                 kv_sweep_limit,
                 fire_cfg,
+                maintenance_cfg,
             )
         })
         .await;
@@ -1449,6 +1595,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             }
             if fire {
                 self.timers_due = false;
+            }
+            if maintenance {
+                self.maintenance_due = false;
             }
         }
         let out = match planned {
@@ -1484,6 +1633,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             // A step that hit a bound runs again at once; otherwise the next
             // tick does.
             self.timers_due = out.fire_more;
+        }
+        if out.maintained {
+            self.maintenance_due = out.maintenance_more;
         }
 
         // §13.5 `planner.planned`: effects and outcomes exist in the overlay;

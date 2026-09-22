@@ -5,11 +5,9 @@
 //! reached: the handlers take their existing Postgres path. In
 //! `QUEEN_STORAGE=raft` the receiver does its pre-work (§9.1) and hands a typed
 //! command to this facade instead of a pooled connection. The facade is the
-//! trait; WP-1.7c swaps the real [`Rsm`] implementation in behind the
-//! [`build`] hook, and until then [`NotReady`] answers every mutating command
-//! with [`RsmError::Unsupported`] (rendered `503 raft_phase1_unsupported` by
-//! the handler layer), so the whole message path can be ROUTED now and wired
-//! later.
+//! trait; [`build`] installs the real phase-2 implementation at the composition
+//! root. [`NotReady`] remains only as the explicit bootstrap/test fallback and
+//! answers with [`RsmError::Unsupported`].
 //!
 //! This module is deliberately free of `axum`: it speaks domain types and
 //! [`RsmError`], and the HTTP layer (`handlers/raft.rs`) owns the mapping to
@@ -147,6 +145,9 @@ pub struct ReqCtx {
     pub tenant: String,
     pub request_id: [u8; 16],
     pub deadline: Deadline,
+    /// Authenticated JWT subject stamped by producer-facing writes. It is
+    /// never populated from a request body.
+    pub producer_sub: Option<String>,
 }
 
 impl ReqCtx {
@@ -156,7 +157,13 @@ impl ReqCtx {
             tenant: tenant.into(),
             request_id: uuidv7_bytes(),
             deadline,
+            producer_sub: None,
         }
+    }
+
+    pub fn with_producer_sub(mut self, producer_sub: Option<String>) -> Self {
+        self.producer_sub = producer_sub.filter(|s| !s.is_empty());
+        self
     }
 }
 
@@ -267,6 +274,7 @@ pub struct PopReq {
     pub auto_ack: bool,
     pub wait: bool,
     pub timeout_ms: u64,
+    pub options: PopOptions,
 }
 
 /// A pinned (single-partition) pop — `.../partition/:partition`.
@@ -279,6 +287,7 @@ pub struct PopPinnedReq {
     pub auto_ack: bool,
     pub wait: bool,
     pub timeout_ms: u64,
+    pub options: PopOptions,
 }
 
 /// A discovery pop — `GET /api/v1/pop` (namespace/task, no queue in the path).
@@ -291,6 +300,26 @@ pub struct PopDiscoverReq {
     pub auto_ack: bool,
     pub wait: bool,
     pub timeout_ms: u64,
+    pub options: PopOptions,
+}
+
+/// Pop semantics carried by the HTTP query in addition to the basic batch and
+/// wait controls. Keeping them together makes it harder for a new pop entry
+/// point to silently drop subscription, lease, or conflation semantics.
+#[derive(Clone, Debug, Default)]
+pub struct PopOptions {
+    /// Maximum partitions a wildcard/discovery pop may claim. `0` means one.
+    pub max_parts: u32,
+    /// Per-request lease override. `0` resolves from the queue configuration.
+    pub lease_seconds: i32,
+    /// Canonical `new` or `all` for a newly registered named group.
+    pub subscription_mode: String,
+    /// Explicit subscription timestamp, already parsed by the HTTP receiver.
+    pub subscription_from_us: Option<i64>,
+    /// The literal `subscriptionFrom=now` intent.
+    pub subscription_from_now: bool,
+    /// Requested last-value delivery policy; persisted on first registration.
+    pub conflate: bool,
 }
 
 /// An ack / nack (single or batch): the receiver's raw body plus the resolved
@@ -434,6 +463,73 @@ pub struct TimerReadOut {
     pub body: String,
 }
 
+/// The remaining Queen HTTP surface as a transport-neutral request. Keeping
+/// this at the facade boundary lets the Raft router serve the exact public
+/// paths without giving handlers access to the ordered store or the planner.
+#[derive(Clone, Debug)]
+pub struct ApiReq {
+    pub method: String,
+    pub path: String,
+    pub query: Option<String>,
+    pub body: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ApiOut {
+    pub status: u16,
+    pub body: String,
+    pub content_type: &'static str,
+}
+
+/// Replicated control-plane values needed before the raft router starts
+/// accepting traffic. The RAM switches and ephemeral rings are caches of this
+/// state, never a second authority.
+#[derive(Clone, Debug)]
+pub struct RsmBootstrap {
+    /// Fatal durable-state read failure discovered before the listener opens.
+    /// The composition root refuses boot instead of silently using defaults.
+    pub startup_error: Option<String>,
+    pub maintenance: bool,
+    pub pop_maintenance: bool,
+    pub kv_enabled: bool,
+    pub timers_schedule_enabled: bool,
+    pub timers_fire_enabled: bool,
+    pub ephemeral_enabled: bool,
+    pub ephemeral_configs: Vec<(String, String, serde_json::Value)>,
+    /// Durable grants restored before the HTTP listener opens.  KV tuples also
+    /// carry the exact live occupancy at this checkpoint, which seeds the
+    /// existing admission gate's measurement.
+    pub kv_grants: Vec<(String, crate::rsm::effect::QuotaGrant, i64, i64, i64)>,
+    pub ephemeral_grants: Vec<(String, crate::rsm::effect::QuotaGrant)>,
+}
+
+impl Default for RsmBootstrap {
+    fn default() -> Self {
+        Self {
+            startup_error: None,
+            maintenance: false,
+            pop_maintenance: false,
+            kv_enabled: true,
+            timers_schedule_enabled: true,
+            timers_fire_enabled: true,
+            ephemeral_enabled: true,
+            ephemeral_configs: Vec::new(),
+            kv_grants: Vec::new(),
+            ephemeral_grants: Vec::new(),
+        }
+    }
+}
+
+impl ApiOut {
+    pub fn json(status: u16, body: impl Into<String>) -> Self {
+        ApiOut {
+            status,
+            body: body.into(),
+            content_type: "application/json",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // KV (024, WP-2.2).
 // ---------------------------------------------------------------------------
@@ -538,6 +634,10 @@ impl RaftHealth {
 /// builder hook returns.
 #[async_trait]
 pub trait Rsm: Send + Sync {
+    /// Values restored from the applied state before the HTTP listener opens.
+    fn bootstrap(&self) -> RsmBootstrap {
+        RsmBootstrap::default()
+    }
     /// `POST /api/v1/push`.
     async fn push(&self, ctx: ReqCtx, req: PushReq) -> Result<PushOut, RsmError>;
     /// `GET /api/v1/pop/queue/:queue` (wildcard over the queue's partitions).
@@ -606,8 +706,21 @@ pub trait Rsm: Send + Sync {
         Err(RsmError::Unsupported)
     }
 
+    /// Phase-2 admin/read/streams surface. Implementations return the final
+    /// wire status/body so the Postgres and RSM internals remain separated.
+    async fn api(&self, _ctx: ReqCtx, _req: ApiReq) -> Result<ApiOut, RsmError> {
+        Err(RsmError::Unsupported)
+    }
+
     /// The `/health` raft block (§14.1). Cheap and non-async: a node-local read.
     fn health(&self) -> RaftHealth;
+
+    /// Node-local Raft/store metric families appended to the ordinary process
+    /// exporter.  Kept on the facade seam so the HTTP layer never reaches into
+    /// a concrete storage implementation.
+    fn prometheus(&self) -> String {
+        String::new()
+    }
 
     /// The notifier long-poll pops park on (§9.5). The apply thread wakes it
     /// after applying `Append`s and cursor releases; the receiver parks a

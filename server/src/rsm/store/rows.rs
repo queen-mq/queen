@@ -19,8 +19,8 @@
 //! the silent divergence I16 forbids.
 
 use crate::rsm::effect::{
-    CodecError, CursorRow, GarbageScope, GroupMeta, Pid, QueueConfig, Reader, SubscriptionMode,
-    TimerRow, Writer,
+    CodecError, CursorRow, GarbageScope, GroupMeta, Pid, QueueConfig, QuotaGrant, Reader,
+    StreamsQueryRow, SubscriptionMode, TimerRow, TraceEvent, Writer,
 };
 
 /// The row layout this build writes. A field added to a row is a new version,
@@ -766,6 +766,188 @@ pub fn timer_decode(b: &[u8]) -> Result<TimerRow, CodecError> {
         return Err(CodecError::Field("timer row trailing bytes"));
     }
     Ok(row)
+}
+
+// ---------------------------------------------------------------------------
+// phase-2 control plane
+// ---------------------------------------------------------------------------
+
+pub fn streams_query_encode(q: &StreamsQueryRow) -> Vec<u8> {
+    let mut w = Writer::with_capacity(96);
+    head(&mut w);
+    w.str(&q.name);
+    w.str(&q.source_queue);
+    w.opt_str(q.sink_queue.as_deref());
+    w.str(&q.config_hash);
+    w.i64(q.created_at_us);
+    w.i64(q.updated_at_us);
+    w.into_inner()
+}
+
+pub fn streams_query_decode(b: &[u8]) -> Result<StreamsQueryRow, CodecError> {
+    let mut r = Reader::new(b);
+    expect_v1(&mut r, "streams query row version")?;
+    let row = StreamsQueryRow {
+        name: r.str("name")?,
+        source_queue: r.str("source_queue")?,
+        sink_queue: r.opt_str("sink_queue")?,
+        config_hash: r.str("config_hash")?,
+        created_at_us: r.i64("created_at_us")?,
+        updated_at_us: r.i64("updated_at_us")?,
+    };
+    if !r.done() {
+        return Err(CodecError::Field("streams query row trailing bytes"));
+    }
+    Ok(row)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamsStateRow {
+    pub value: Vec<u8>,
+    pub updated_at_us: i64,
+}
+
+pub fn streams_state_encode(s: &StreamsStateRow) -> Vec<u8> {
+    let mut w = Writer::with_capacity(16 + s.value.len());
+    head(&mut w);
+    w.blob(&s.value);
+    w.i64(s.updated_at_us);
+    w.into_inner()
+}
+
+pub fn streams_state_decode(b: &[u8]) -> Result<StreamsStateRow, CodecError> {
+    let mut r = Reader::new(b);
+    expect_v1(&mut r, "streams state row version")?;
+    let row = StreamsStateRow {
+        value: r.blob("value")?,
+        updated_at_us: r.i64("updated_at_us")?,
+    };
+    if !r.done() {
+        return Err(CodecError::Field("streams state row trailing bytes"));
+    }
+    Ok(row)
+}
+
+pub fn quota_encode(q: &QuotaGrant) -> Vec<u8> {
+    let mut w = Writer::with_capacity(80);
+    head(&mut w);
+    w.bool(q.enabled);
+    w.opt_i64(q.max_rows);
+    w.opt_i64(q.max_bytes);
+    w.opt_i64(q.max_timers);
+    w.opt_i64(q.max_timer_horizon_s);
+    w.opt_i32(q.max_reads_per_sec);
+    w.opt_i32(q.max_writes_per_sec);
+    w.opt_i32(q.max_queues);
+    w.opt_i32(q.max_msgs_per_sec);
+    w.opt_i64(q.max_queries);
+    w.i64(q.updated_at_us);
+    w.into_inner()
+}
+
+pub fn quota_decode(b: &[u8]) -> Result<QuotaGrant, CodecError> {
+    let mut r = Reader::new(b);
+    expect_v1(&mut r, "quota row version")?;
+    let row = QuotaGrant {
+        enabled: r.bool("enabled")?,
+        max_rows: r.opt_i64("max_rows")?,
+        max_bytes: r.opt_i64("max_bytes")?,
+        max_timers: r.opt_i64("max_timers")?,
+        max_timer_horizon_s: r.opt_i64("max_timer_horizon_s")?,
+        max_reads_per_sec: r.opt_i32("max_reads_per_sec")?,
+        max_writes_per_sec: r.opt_i32("max_writes_per_sec")?,
+        max_queues: r.opt_i32("max_queues")?,
+        max_msgs_per_sec: r.opt_i32("max_msgs_per_sec")?,
+        max_queries: r.opt_i64("max_queries")?,
+        updated_at_us: r.i64("updated_at_us")?,
+    };
+    if !r.done() {
+        return Err(CodecError::Field("quota row trailing bytes"));
+    }
+    Ok(row)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EphConfigRow {
+    pub options: Vec<u8>,
+    pub updated_at_us: i64,
+}
+
+pub fn eph_config_encode(e: &EphConfigRow) -> Vec<u8> {
+    let mut w = Writer::with_capacity(16 + e.options.len());
+    head(&mut w);
+    w.blob(&e.options);
+    w.i64(e.updated_at_us);
+    w.into_inner()
+}
+
+pub fn eph_config_decode(b: &[u8]) -> Result<EphConfigRow, CodecError> {
+    let mut r = Reader::new(b);
+    expect_v1(&mut r, "ephemeral config row version")?;
+    let row = EphConfigRow {
+        options: r.blob("options")?,
+        updated_at_us: r.i64("updated_at_us")?,
+    };
+    if !r.done() {
+        return Err(CodecError::Field("ephemeral config row trailing bytes"));
+    }
+    Ok(row)
+}
+
+pub fn trace_encode(t: &TraceEvent) -> Vec<u8> {
+    let mut w = Writer::with_capacity(160 + t.data.len());
+    head(&mut w);
+    w.bytes16(&t.trace_id);
+    w.str(&t.tenant);
+    w.opt_u64(t.pid);
+    w.opt_bytes16(t.message_id.as_ref());
+    w.str(&t.txn);
+    w.opt_str(t.consumer_group.as_deref());
+    w.str(&t.event_type);
+    w.blob(&t.data);
+    w.opt_str(t.worker.as_deref());
+    w.u32(t.names.len() as u32);
+    for name in &t.names {
+        w.str(name);
+    }
+    w.i64(t.created_at_us);
+    w.into_inner()
+}
+
+pub fn trace_decode(b: &[u8]) -> Result<TraceEvent, CodecError> {
+    let mut r = Reader::new(b);
+    expect_v1(&mut r, "trace row version")?;
+    let trace_id = r.bytes16("trace_id")?;
+    let tenant = r.str("tenant")?;
+    let pid = r.opt_u64("pid")?;
+    let message_id = r.opt_bytes16("message_id")?;
+    let txn = r.str("txn")?;
+    let consumer_group = r.opt_str("consumer_group")?;
+    let event_type = r.str("event_type")?;
+    let data = r.blob("data")?;
+    let worker = r.opt_str("worker")?;
+    let name_count = r.u32("name count")? as usize;
+    let mut names = Vec::with_capacity(name_count);
+    for _ in 0..name_count {
+        names.push(r.str("trace name")?);
+    }
+    let created_at_us = r.i64("created_at_us")?;
+    if !r.done() {
+        return Err(CodecError::Field("trace row trailing bytes"));
+    }
+    Ok(TraceEvent {
+        trace_id,
+        tenant,
+        pid,
+        message_id,
+        txn,
+        consumer_group,
+        event_type,
+        data,
+        worker,
+        names,
+        created_at_us,
+    })
 }
 
 /// One segment file as this node knows it (§6.2, I11).

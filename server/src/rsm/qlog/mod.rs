@@ -97,8 +97,6 @@
 //!   does not;
 //! - removing the segments / the raft-log blob (A3) — both still written and the
 //!   fallback when the knob is off;
-//! - compaction of partially-live files (Phase C) — [`QLog::unlink_dead_files`]
-//!   drops WHOLE dead files only; see the `TODO(phase-C-compaction)` there;
 //! - parallel per-queue writers (Phase E) — one writer per queue is fine;
 //! - read deadlines — I15 deadlines are a later concern. (Read fds ARE cached
 //!   per log, and committed hash blocks too — PLAN_RAFT_DRAIN_FIX P3, see
@@ -523,6 +521,11 @@ impl QLog {
         std::fs::create_dir_all(&dir)?;
         let mut ids = scan_ids(&dir)?;
         ids.sort_unstable();
+        // A crash before the final compaction rename can leave only the private
+        // rewrite file. It was never published, so reopening discards it.
+        for id in &ids {
+            remove_if_present(&compact_path(&dir, *id))?;
+        }
 
         let mut rec = QLogRecovery::default();
 
@@ -1551,7 +1554,7 @@ impl QLog {
         Ok(dropped)
     }
 
-    /// Retention, this phase: unlink WHOLE files the predicate marks dead. Only
+    /// Retention: unlink WHOLE files the predicate marks dead. Only
     /// SEALED files are candidates — the active file is never unlinked. Returns
     /// how many were dropped.
     ///
@@ -1560,11 +1563,6 @@ impl QLog {
     /// ([`QLog::set_recovery_floor`], the store's durable index) is never a
     /// candidate, whatever the predicate says — recovery replays from there.
     ///
-    /// TODO(phase-C-compaction): a partially-live file (a lagging backlog, a
-    /// long-retention survivor) is NOT handled here. Copying its live residue
-    /// forward and dropping the old file — or `fallocate` hole-punching a
-    /// block-aligned dead run — is Phase C (§3.3). This phase drops only files
-    /// whose every record the caller has judged dead.
     pub fn unlink_dead_files(&mut self, is_dead: impl Fn(&FileMeta) -> bool) -> io::Result<usize> {
         let active_id = self.active_index.file_id();
         let floor = self.floor.load(Ordering::Acquire);
@@ -1600,6 +1598,163 @@ impl QLog {
         );
         Ok(victims.len())
     }
+
+    /// Reclaim sealed files below their partitions' `txns_start` watermarks.
+    /// Fully-dead files are unlinked; partially-live files are rewritten
+    /// atomically with only their live message records. Entry records are safe
+    /// to omit once the whole file is at or below the recovery floor: the
+    /// durable store already covers those entries.
+    ///
+    /// The txns watermark, rather than
+    /// `log_start`, is the safe boundary for a queue log: each record carries
+    /// both the payload and the hash list used by dedup/ack-by-hash, and the
+    /// latter deliberately outlives payload retention (D10).
+    ///
+    /// A pid absent from `txns_starts` has already been removed from committed
+    /// state, so its records are dead. The recovery-floor guard excludes every
+    /// file recovery may still need, and the active file is never rewritten.
+    /// Thus a stale maintenance read can only retain bytes longer; it cannot
+    /// remove bytes that committed state still names.
+    pub fn unlink_below_txns(
+        &mut self,
+        txns_starts: &std::collections::HashMap<u64, u64>,
+    ) -> io::Result<usize> {
+        let floor = self.floor.load(Ordering::Acquire);
+        let active = self.active_index.file_id();
+        let eligible: Vec<u64> = self
+            .files
+            .iter()
+            .filter(|meta| meta.sealed && Some(meta.id) != active && meta.max_seq <= floor)
+            .map(|meta| meta.id)
+            .collect();
+        let mut dead = std::collections::BTreeSet::new();
+        let mut partial = Vec::new();
+        for id in eligible {
+            let Some(view) = self.sealed.get(&id) else {
+                continue;
+            };
+            let mut live = 0usize;
+            let mut dead_records = 0usize;
+            let mut live_bytes = FILE_HEADER_LEN;
+            for record in view.records() {
+                if record_is_dead(&record, txns_starts) {
+                    dead_records += 1;
+                } else {
+                    live += 1;
+                    live_bytes = live_bytes.saturating_add(u64::from(record.len));
+                }
+            }
+            if live == 0 {
+                dead.insert(id);
+            } else {
+                let old_bytes = self
+                    .files
+                    .iter()
+                    .find(|meta| meta.id == id)
+                    .map_or(live_bytes, |meta| meta.bytes);
+                // Even with no expired message, payload-free recovery entries
+                // below the durable floor are reclaimable.
+                if dead_records > 0 || live_bytes < old_bytes {
+                    partial.push(id);
+                }
+            }
+        }
+
+        let mut changed = 0usize;
+        for id in partial {
+            self.compact_file_below_txns(id, txns_starts)?;
+            changed += 1;
+        }
+        changed += self.unlink_dead_files(|meta| dead.contains(&meta.id))?;
+        Ok(changed)
+    }
+
+    /// Crash-safe copy-forward compaction of one sealed, durable file. The
+    /// qlog replacement and its index are atomic renames. If a crash lands
+    /// between them, open detects the length mismatch and rebuilds the index by
+    /// scanning the checksum-protected qlog.
+    fn compact_file_below_txns(
+        &mut self,
+        id: u64,
+        txns_starts: &std::collections::HashMap<u64, u64>,
+    ) -> io::Result<()> {
+        let src = file_path(&self.dir, id);
+        let tmp = compact_path(&self.dir, id);
+        remove_if_present(&tmp)?;
+
+        let mut header = [0u8; FILE_HEADER_LEN as usize];
+        File::open(&src)?.read_exact(&mut header)?;
+        let mut out = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .read(true)
+            .open(&tmp)?;
+        out.write_all(&header)?;
+        let mut at = FILE_HEADER_LEN;
+        let mut records = Vec::new();
+        let upto = std::fs::metadata(&src)?.len();
+        let (_valid, torn) = scan_records(&src, upto, |header, _old_at, bytes| {
+            if header.kind() != record::REC_ENTRY {
+                let idx = index::Record::of_header(header, at);
+                if !record_is_dead(&idx, txns_starts) {
+                    out.write_all(bytes)?;
+                    records.push(idx);
+                    at = at.saturating_add(bytes.len() as u64);
+                }
+            }
+            Ok(())
+        })?;
+        if let Some((pos, why)) = torn {
+            return Err(corrupt(
+                &src,
+                &format!("damaged record at byte {pos} of compacted sealed file: {why}"),
+            ));
+        }
+        fsync_file(&out, self.opts.fsync)?;
+        drop(out);
+
+        index::sort_records(&mut records);
+        // Publish the new index first. While this method owns the queue's write
+        // lock, readers still use the old mmap. A crash here leaves a length
+        // mismatch and open rebuilds the old file's index.
+        write_qidx(&self.dir, id, at, &records)?;
+        let view = index::View::open(&qidx_path(&self.dir, id), Some(at))?;
+        crate::rsm::faults::hit("compaction.copied");
+        std::fs::rename(&tmp, &src)?;
+
+        self.cache.forget_file(id);
+        self.cache.clear_hashes();
+        self.sealed.insert(id, view);
+        if let Some(meta) = self.files.iter_mut().find(|meta| meta.id == id) {
+            meta.bytes = at;
+            meta.records = records.len() as u64;
+            meta.min_created_at_us = i64::MAX;
+            meta.max_created_at_us = i64::MIN;
+            for record in &records {
+                meta.absorb(record.created_at_us);
+            }
+        }
+        crate::rsm::faults::hit("compaction.loc_committed");
+        sync_dir(&self.dir)?;
+        tracing::debug!(
+            target: "rsm",
+            queue = self.queue_id,
+            file = id,
+            bytes = at,
+            records = records.len(),
+            "rsm qlog sealed file compacted",
+        );
+        Ok(())
+    }
+}
+
+fn record_is_dead(
+    record: &index::Record,
+    txns_starts: &std::collections::HashMap<u64, u64>,
+) -> bool {
+    txns_starts
+        .get(&record.pid)
+        .map_or(true, |start| record.end <= *start)
 }
 
 impl FileMeta {
@@ -2185,6 +2340,10 @@ fn qidx_path(dir: &Path, id: u64) -> PathBuf {
 
 fn qidx_tmp_path(dir: &Path, id: u64) -> PathBuf {
     dir.join(format!("r{id:08}.qidx.tmp"))
+}
+
+fn compact_path(dir: &Path, id: u64) -> PathBuf {
+    dir.join(format!("r{id:08}.qlog.compact.tmp"))
 }
 
 /// Every `rNNNNNNNN.qlog` id in `dir`.

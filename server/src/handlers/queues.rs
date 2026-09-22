@@ -46,6 +46,17 @@ pub async fn handle_configure(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     body: Bytes,
 ) -> Response {
+    if st.storage.is_raft() {
+        return crate::handlers::raft::dispatch_api(
+            &st,
+            tenant.as_str(),
+            "POST",
+            "/api/v1/configure",
+            None,
+            body,
+        )
+        .await;
+    }
     let root: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
@@ -223,6 +234,17 @@ pub async fn handle_delete_queue(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     Path(queue): Path<String>,
 ) -> Response {
+    if st.storage.is_raft() {
+        return crate::handlers::raft::dispatch_api(
+            &st,
+            tenant.as_str(),
+            "DELETE",
+            &format!("/api/v1/resources/queues/{queue}"),
+            None,
+            Bytes::new(),
+        )
+        .await;
+    }
     let client = match st.pool.get().await {
         Ok(c) => c,
         Err(_) => {

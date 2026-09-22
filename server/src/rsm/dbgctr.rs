@@ -68,12 +68,18 @@ pub fn maybe_dump<R: TypedReads + ?Sized>(r: &R, now_us: i64) {
     let Some(every) = *EVERY_MS else { return };
     let now_ms = now_us / 1000;
     let last = LAST_MS.load(Relaxed);
-    if now_ms - last < every || LAST_MS.compare_exchange(last, now_ms, Relaxed, Relaxed).is_err() {
+    if now_ms - last < every
+        || LAST_MS
+            .compare_exchange(last, now_ms, Relaxed, Relaxed)
+            .is_err()
+    {
         return;
     }
     // The planner now builds only the rings it walks (P4): the dump builds its
     // own full view.
-    let Ok(full) = Derived::rebuild_rings(r, now_us, None) else { return };
+    let Ok(full) = Derived::rebuild_rings(r, now_us, None) else {
+        return;
+    };
     let derived = &full;
     // (tenant, queue, group) -> pid -> pending ready_at
     let mut pend: BTreeMap<(String, String, String), BTreeMap<u64, i64>> = BTreeMap::new();
@@ -90,11 +96,14 @@ pub fn maybe_dump<R: TypedReads + ?Sized>(r: &R, now_us: i64) {
             true
         });
         let ring = derived.ring(t, q, g);
-        let (mut leased, mut leased_bl, mut free_bl, mut caught, mut free_bl_parts) = (0u64, 0i64, 0i64, 0u64, 0u64);
+        let (mut leased, mut leased_bl, mut free_bl, mut caught, mut free_bl_parts) =
+            (0u64, 0i64, 0i64, 0u64, 0u64);
         let (mut in_ring, mut leased_in_ring, mut max_lease_age_ms) = (0u64, 0u64, 0i64);
         let mut rows: Vec<(i64, u64, bool, i64, i64)> = Vec::new(); // backlog, pid, leased, lease_age_ms, ready_in_ms
         for pid in &pids {
-            let Ok(Some(p)) = r.partition(*pid) else { continue };
+            let Ok(Some(p)) = r.partition(*pid) else {
+                continue;
+            };
             let cur = r.cursor(*pid, g).ok().flatten();
             let committed = cur.as_ref().map(|c| c.committed).unwrap_or(-1);
             let backlog = (p.last_offset - committed).max(0);
@@ -107,7 +116,10 @@ pub fn maybe_dump<R: TypedReads + ?Sized>(r: &R, now_us: i64) {
                 .filter(|_| live)
                 .map(|a| (now_us - a) / 1000)
                 .unwrap_or(0);
-            let ready_in_ms = pmap.get(pid).map(|at| (at - now_us) / 1000).unwrap_or(i64::MIN);
+            let ready_in_ms = pmap
+                .get(pid)
+                .map(|at| (at - now_us) / 1000)
+                .unwrap_or(i64::MIN);
             let ringed = ring.is_some_and(|rg| rg.contains(*pid));
             if ringed {
                 in_ring += 1;
@@ -132,8 +144,15 @@ pub fn maybe_dump<R: TypedReads + ?Sized>(r: &R, now_us: i64) {
             .iter()
             .take(10)
             .map(|(bl, pid, l, age, rin)| {
-                let rin_s = if *rin == i64::MIN { "none".to_string() } else { rin.to_string() };
-                format!("{pid}:bl={bl}:leased={}:age={age}ms:readyIn={rin_s}ms", *l as u8)
+                let rin_s = if *rin == i64::MIN {
+                    "none".to_string()
+                } else {
+                    rin.to_string()
+                };
+                format!(
+                    "{pid}:bl={bl}:leased={}:age={age}ms:readyIn={rin_s}ms",
+                    *l as u8
+                )
             })
             .collect();
         eprintln!(

@@ -48,6 +48,8 @@
 //! | `durable.store_committed` | [`apply`] the durable point is complete | I11 |
 //! | `gc.before_unlink` | [`apply`] a file is unreferenced, still on disk | I10 |
 //! | `gc.after_unlink` | [`apply`] the file is unlinked | I10 |
+//! | `compaction.copied` | live qlog records and index copied, old qlog still authoritative | I7, I10 |
+//! | `compaction.loc_committed` | compacted qlog published, old bytes not yet directory-synced | I7, I10 |
 //!
 //! The two `qlog.*` points are NOT §13.5: they are the `ALICE_PGLESS_NEWARCH.md`
 //! §5 crash cells that prove the double-write kill (A3b) is durable. They now
@@ -102,6 +104,8 @@ pub const POINTS: &[&str] = &[
     // GC
     "gc.before_unlink",
     "gc.after_unlink",
+    "compaction.copied",
+    "compaction.loc_committed",
     // segment-layer roll tests (R-107; not in the §13.5 HTTP matrix)
     "seg.rolled",
     "seg.qidx_written",
@@ -247,6 +251,16 @@ mod tests {
         // `points.py` MUST list the same two names (the catalogue contract).
         for p in ["qlog.record_written", "qlog.record_fsynced"] {
             assert!(POINTS.contains(&p), "qlog point {p} is not registered");
+        }
+    }
+
+    #[test]
+    fn the_phase_two_compaction_points_are_registered() {
+        for p in ["compaction.copied", "compaction.loc_committed"] {
+            assert!(
+                POINTS.contains(&p),
+                "compaction point {p} is not registered"
+            );
         }
     }
 

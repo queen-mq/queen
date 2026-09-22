@@ -13,6 +13,7 @@
 //! `success:false`). The overlay is restored on refusal so a rolled-back bundle
 //! leaves no phantom state for later commands of the same cycle.
 
+use crate::rsm::effect::Effect;
 use crate::rsm::entry::{
     AckOutcome, KvOutcome, Outcome, Placeholder, PushOutcome, PushVerdict, RequestId,
 };
@@ -37,6 +38,14 @@ pub struct TxnCommand {
     pub kv: Vec<KvOp>,
     /// The `timers` rider (schedules and cancels, `parse_timer_ops`).
     pub timers: Vec<super::timers::TimerOp>,
+    /// Deterministic riders that must commit with the transaction. Streams
+    /// uses this for state cells; keeping them on the transaction command is
+    /// what makes source ack + sink append + state update one log entry.
+    pub extra_effects: Vec<Effect>,
+    /// DLQ replay is the one transaction-shaped operation where a duplicate
+    /// destination is a successful no-op: the source row must remain in DLQ.
+    /// Public transactions keep their all-or-nothing QDUP refusal.
+    pub allow_duplicate: bool,
 }
 
 /// The decoded transaction outcome: per push group, per ack target.
@@ -78,7 +87,9 @@ impl TxnOutcome {
     }
 
     pub fn from_outcome(o: &Outcome) -> Option<TxnOutcome> {
-        let Outcome::Placeholder(p) = o else { return None };
+        let Outcome::Placeholder(p) = o else {
+            return None;
+        };
         if p.tag() != TXN_OUTCOME_TAG {
             return None;
         }
@@ -153,6 +164,14 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 .iter()
                 .find(|v| matches!(v, PushVerdict::Duplicate { .. }))
             {
+                if cmd.allow_duplicate {
+                    out.pushes.push(o);
+                    let outcome = match out.into_outcome() {
+                        Ok(o) => o,
+                        Err(r) => return refuse(ov, r),
+                    };
+                    return Ok(Plan::Empty(outcome));
+                }
                 return refuse(
                     ov,
                     Refusal::client(
@@ -231,6 +250,11 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             };
             effects.extend(effs);
             out.timers = results.iter().map(|r| r.to_json()).collect();
+        }
+
+        if !cmd.extra_effects.is_empty() {
+            ov.apply_effects(&cmd.extra_effects);
+            effects.extend(cmd.extra_effects.clone());
         }
 
         let outcome = match out.into_outcome() {

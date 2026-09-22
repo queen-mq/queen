@@ -3,7 +3,7 @@
 #
 # This is the whole point of G-2 ("no Postgres in raft mode"): there is no `pg`
 # service here at all. The broker boots on the replicated state machine
-# (LocalReplicator, phase 1) with its data directory on a named volume, and the
+# (LocalReplicator, phase 2) with its data directory on a named volume, and the
 # runner reaches it by service name on the project's private network exactly as
 # the `single` stack does — nothing binds a host port.
 #
@@ -16,11 +16,9 @@
 #
 # QUEEN_TEST_STORAGE=raft is the lane signal the runner reads (test-v2/run.js and
 # the per-language entrypoints): it turns OFF the direct-Postgres setup/cleanup
-# (there is none) and turns ON the phase-1 skip set — every test that needs a
-# route the raft broker does not serve yet (queue admin/configure, transaction,
-# kv, timers, streams, consumer-group admin, dashboard/analytics reads) is
-# skipped LOUDLY, printed with its reason, so the RAFT PARITY gate compares only
-# the message-path tests both lanes actually run (§13.3, WP-1.9).
+# (there is none). The public Phase-2 API suite runs unchanged; only tests that
+# directly inspect private Postgres tables are skipped and printed with their
+# reason.
 #
 # Bring up via test/run.sh (which sets QUEEN_RUNNER_IMAGE). Standalone example:
 #   QUEEN_RUNNER_IMAGE=queen-test-runner-js \
@@ -39,11 +37,11 @@ services:
       # on an empty value); it lives on the `raftdata` volume below.
       QUEEN_RAFT_DIR: /var/lib/queen/raft
       PORT: "6632"
-      # Phase 1 is one voter (embedded/single-node = 1 voter, D2), so there is no
+      # Phase 2 is one voter (embedded/single-node = 1 voter, D2), so there is no
       # peer traffic and no QUEEN_RAFT_SECRET is required (multi-node refuses to
       # boot without one, D12; a single voter does not).
       #
-      # Tenancy stays OFF on raft1: there is no raft-tenanted lane in phase 1
+      # Tenancy stays OFF on raft1: the single-node Phase-2 lane is not tenanted
       # (§13.3 lists raft3-tenanted for later), and the message path the gate
       # compares is tenant-agnostic here (one runner, default tenant).
       QUEEN_TENANCY_HEADER: "false"
@@ -61,7 +59,7 @@ services:
       QUEEN_HTTP_URL: http://broker:6632
       QUEEN_WAIT_URLS: http://broker:6632/health
       # The lane signal. Every runner reads this: skip the Postgres setup/cleanup
-      # (there is no database) and apply the phase-1 skip set, loudly.
+      # (there is no database) and apply the Raft compatibility skip set, loudly.
       QUEEN_TEST_STORAGE: raft
       # No QUEEN_PG_* here on purpose: a raft broker has no Postgres, and a runner
       # that tries to open a cleanup pool on this network would hang then fail.

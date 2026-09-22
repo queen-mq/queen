@@ -574,7 +574,11 @@ impl HeedStore {
     /// The keys taken are appended to `taken` BEFORE they are written, so a
     /// caller whose cycle fails at any later step (a put here, the commit, the
     /// sync) can hand them back with [`HeedStore::restore_dirty`].
-    fn drain_dirty(&self, txn: &mut RwTxn<'_>, taken: &mut Vec<(usize, Vec<RamKey>)>) -> Result<()> {
+    fn drain_dirty(
+        &self,
+        txn: &mut RwTxn<'_>,
+        taken: &mut Vec<(usize, Vec<RamKey>)>,
+    ) -> Result<()> {
         for ks in Keyspace::ALL {
             let Some(t) = self.ram(ks) else { continue };
             let set = t.take_dirty();

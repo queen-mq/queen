@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	queen "github.com/smartpricing/queen/clients/client-go"
 	"github.com/jackc/pgx/v5/pgxpool"
+	queen "github.com/smartpricing/queen/clients/client-go"
 )
 
 var (
@@ -33,9 +33,12 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	// Connect to database for cleanup (optional)
+	// Connect to database for cleanup (optional). Raft intentionally has no
+	// Postgres; its test volume is fresh and removed after the lane.
 	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
+	if os.Getenv("QUEEN_TEST_STORAGE") == "raft" {
+		dbURL = ""
+	} else if dbURL == "" {
 		// Build from components
 		host := getEnvOrDefault("PG_HOST", "localhost")
 		port := getEnvOrDefault("PG_PORT", "5432")
@@ -46,8 +49,9 @@ func TestMain(m *testing.M) {
 	}
 
 	ctx := context.Background()
-	dbPool, err = pgxpool.New(ctx, dbURL)
-	if err != nil {
+	if dbURL == "" {
+		fmt.Println("Raft lane: no Postgres cleanup (fresh test volume)")
+	} else if dbPool, err = pgxpool.New(ctx, dbURL); err != nil {
 		fmt.Printf("Warning: Failed to connect to database: %v\n", err)
 		// Continue without DB - some tests may fail
 	} else {

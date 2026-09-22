@@ -5,8 +5,10 @@ set -eu
 # conftest reads QUEEN_SERVER_URL; the streams tests read QUEEN_URL. Set both.
 export QUEEN_SERVER_URL="$QUEEN_HTTP_URL"
 export QUEEN_URL="$QUEEN_HTTP_URL"
-export PG_HOST="$QUEEN_PG_HOST" PG_PORT="$QUEEN_PG_PORT" \
-       PG_DB="$QUEEN_PG_DB" PG_USER="$QUEEN_PG_USER" PG_PASSWORD="$QUEEN_PG_PASSWORD"
+if [ "${QUEEN_TEST_STORAGE:-}" != "raft" ]; then
+  export PG_HOST="$QUEEN_PG_HOST" PG_PORT="$QUEEN_PG_PORT" \
+         PG_DB="$QUEEN_PG_DB" PG_USER="$QUEEN_PG_USER" PG_PASSWORD="$QUEEN_PG_PASSWORD"
+fi
 
 /usr/local/bin/wait-for-broker
 

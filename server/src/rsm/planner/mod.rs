@@ -255,6 +255,9 @@ pub enum CommandKind {
     Kv,
     /// `POST /api/v1/timers` and the cancel route (025 `log_timers_apply_v1`).
     Timers,
+    /// Phase-2 commands whose receiver has already produced deterministic,
+    /// self-contained effects (flags, traces, grants and control metadata).
+    Effects,
 }
 
 impl CommandKind {
@@ -272,6 +275,7 @@ impl CommandKind {
             CommandKind::Transaction => "transaction",
             CommandKind::Kv => "kv",
             CommandKind::Timers => "timers",
+            CommandKind::Effects => "effects",
         }
     }
 }
@@ -482,6 +486,17 @@ pub struct DlqHeadCommand {
     pub offset: u64,
     pub error: String,
     pub snapshot: DlqSnapshot,
+}
+
+/// A deterministic Phase-2 mutation which requires no semantic read while it
+/// is planned. Effects that allocate pids/KV versions or depend on current
+/// state must keep their dedicated planner; this lane is for whole-row
+/// overwrites, deletes and append-only metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectsCommand {
+    pub request_id: RequestId,
+    pub tenant: String,
+    pub effects: Vec<Effect>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1035,6 +1050,14 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
 
     pub fn committed(&self) -> &Committed<'a, R> {
         &self.committed
+    }
+
+    pub fn plan_effects(&self, ov: &mut Overlay, c: &EffectsCommand) -> Planned {
+        if c.effects.is_empty() {
+            return Ok(Plan::Empty(Outcome::Empty));
+        }
+        ov.apply_effects(&c.effects);
+        Ok(Plan::logged(c.effects.clone(), Outcome::Empty))
     }
 
     fn reads(&self) -> &'a R {

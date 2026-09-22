@@ -106,6 +106,20 @@ pub struct EntryScan {
 /// the pool's / the batcher's).
 type SharedLogs = Arc<RwLock<BTreeMap<u64, Arc<RwLock<QLog>>>>>;
 
+#[derive(Default)]
+struct SharedTotals {
+    files: AtomicU64,
+    bytes: AtomicU64,
+}
+
+fn replace_total(total: &AtomicU64, before: u64, after: u64) {
+    if after >= before {
+        total.fetch_add(after - before, Ordering::AcqRel);
+    } else {
+        total.fetch_sub(before - after, Ordering::AcqRel);
+    }
+}
+
 /// One `Append` buffered until the next flush, OWNING its bytes.
 ///
 /// The effect's `hashes`/`blob` are borrowed from the entry and go away when
@@ -159,10 +173,10 @@ pub struct QLogSet {
     /// store's durable index at open and raises it at every durable point.
     floor: Arc<AtomicU64>,
     /// Files / valid bytes across every open log (the replicator's `log_files` /
-    /// `log_bytes` metrics once the queue logs are the WAL). Maintained by the
-    /// write paths as deltas, recomputed at reopen and truncation.
-    total_files: u64,
-    total_bytes: u64,
+    /// `log_bytes` metrics once the queue logs are the WAL). Shared with the
+    /// maintenance reader because retention may compact a log off the writer
+    /// thread.
+    totals: Arc<SharedTotals>,
 }
 
 impl QLogSet {
@@ -180,8 +194,7 @@ impl QLogSet {
             written_seq: 0,
             durable_seq: 0,
             floor: Arc::new(AtomicU64::new(0)),
-            total_files: 0,
-            total_bytes: 0,
+            totals: Arc::new(SharedTotals::default()),
         }
     }
 
@@ -205,7 +218,10 @@ impl QLogSet {
 
     /// `(files, valid bytes)` across every open log.
     pub fn totals(&self) -> (u64, u64) {
-        (self.total_files, self.total_bytes)
+        (
+            self.totals.files.load(Ordering::Acquire),
+            self.totals.bytes.load(Ordering::Acquire),
+        )
     }
 
     /// The A3a durable index: the highest record `seq` fsync'd by
@@ -247,6 +263,7 @@ impl QLogSet {
         QLogReader {
             logs: self.logs.clone(),
             floor: self.floor.clone(),
+            totals: self.totals.clone(),
         }
     }
 
@@ -460,8 +477,8 @@ impl QLogSet {
             files += g.file_count() as u64;
             bytes += g.bytes();
         }
-        self.total_files = files;
-        self.total_bytes = bytes;
+        self.totals.files.store(files, Ordering::Release);
+        self.totals.bytes.store(bytes, Ordering::Release);
     }
 
     /// Run one write against `qid`'s log (opened lazily), keeping the running
@@ -478,8 +495,8 @@ impl QLogSet {
         let res = write(&mut g);
         let (f1, b1) = (g.file_count() as u64, g.bytes());
         drop(g);
-        self.total_files = (self.total_files + f1).saturating_sub(f0);
-        self.total_bytes = (self.total_bytes + b1).saturating_sub(b0);
+        replace_total(&self.totals.files, f0, f1);
+        replace_total(&self.totals.bytes, b0, b1);
         res?;
         self.dirty.insert(qid);
         Ok(())
@@ -677,7 +694,11 @@ impl QLogSet {
     /// (§3.3), a later phase.
     pub fn remove(&mut self, tenant: &str, queue: &str) {
         let qid = Self::queue_id_of(tenant, queue);
-        self.logs.write().expect("qlog set poisoned").remove(&qid);
+        if let Some(log) = self.logs.write().expect("qlog set poisoned").remove(&qid) {
+            let log = log.read().expect("qlog poisoned");
+            replace_total(&self.totals.files, log.file_count() as u64, 0);
+            replace_total(&self.totals.bytes, log.bytes(), 0);
+        }
         self.pending.remove(&qid);
         self.dirty.remove(&qid);
     }
@@ -705,6 +726,9 @@ pub struct QLogReader {
     /// The set's recovery floor (Phase C), shared: see
     /// [`QLogReader::set_recovery_floor`].
     floor: Arc<AtomicU64>,
+    /// Running qlog sizes, shared with the writer so copy-forward retention is
+    /// visible to the replicator metrics without waiting for another append.
+    totals: Arc<SharedTotals>,
 }
 
 impl QLogReader {
@@ -729,6 +753,28 @@ impl QLogReader {
     /// The shared floor handle itself, for a caller that wants to hold it.
     pub fn recovery_floor_handle(&self) -> Arc<AtomicU64> {
         self.floor.clone()
+    }
+
+    /// Node-local retention for one queue.  The committed RSM watermarks are
+    /// supplied by the leader maintenance read; the queue lock serializes the
+    /// unlink with appends and readers.  Missing queues are a cheap no-op.
+    pub fn reclaim_below_txns(
+        &self,
+        queue_id: u64,
+        txns_starts: &std::collections::HashMap<u64, u64>,
+    ) -> io::Result<usize> {
+        match self.log(queue_id) {
+            Some(log) => {
+                let mut log = log.write().expect("qlog poisoned");
+                let (files_before, bytes_before) = (log.file_count() as u64, log.bytes());
+                let result = log.unlink_below_txns(txns_starts);
+                let (files_after, bytes_after) = (log.file_count() as u64, log.bytes());
+                replace_total(&self.totals.files, files_before, files_after);
+                replace_total(&self.totals.bytes, bytes_before, bytes_after);
+                result
+            }
+            None => Ok(0),
+        }
     }
 
     /// The open log for `queue_id`, or `None` when the applier has never written

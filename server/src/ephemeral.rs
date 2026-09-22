@@ -2541,6 +2541,52 @@ impl Ephemeral {
         }
     }
 
+    /// Apply one RSM-backed grant after its `QuotaSet` commits, without
+    /// revoking unrelated tenants (the periodic SQL refresh is wholesale;
+    /// this control-plane path is deliberately incremental).
+    pub fn upsert_grant(&self, row: Grant) {
+        let mut m = self.tenants.lock().unwrap();
+        if !m.contains_key(&row.tenant) && m.len() >= self.knobs.max_tenants {
+            return;
+        }
+        let burst = self.knobs.burst;
+        let e = m.entry(row.tenant).or_insert_with(|| TenantUsage {
+            bytes: Budget::new(0),
+            queues: AtomicI64::new(0),
+            queues_cap: AtomicI64::new(0),
+            granted: AtomicBool::new(false),
+            enabled: AtomicBool::new(true),
+            rate_per_s: AtomicU32::new(0),
+            rate: Mutex::new(RateBucket::new(burst)),
+        });
+        e.granted.store(true, Ordering::Relaxed);
+        e.enabled.store(row.enabled, Ordering::Relaxed);
+        e.bytes.set_cap(row.max_bytes.unwrap_or(0).max(0));
+        e.queues_cap
+            .store(row.max_queues.unwrap_or(0).max(0), Ordering::Relaxed);
+        e.rate_per_s.store(
+            row.max_msgs_per_sec.unwrap_or(0).clamp(0, u32::MAX as i64) as u32,
+            Ordering::Relaxed,
+        );
+    }
+
+    pub fn remove_tenant(&self, tenant: &str) {
+        let prefix = format!("{tenant}\u{1f}");
+        let victims: Vec<String> = self
+            .queues
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|key| key.starts_with(&prefix))
+            .cloned()
+            .collect();
+        for key in victims {
+            let queue = key.strip_prefix(&prefix).unwrap_or(&key);
+            self.remove(tenant, queue);
+        }
+        self.tenants.lock().unwrap().remove(tenant);
+    }
+
     /// The `n` heaviest tenants by ephemeral bytes, plus how many there are in
     /// total. `(tenant, bytes, queues, cap)`.
     ///
@@ -2676,7 +2722,7 @@ fn parse_grants(txt: &str) -> Vec<Grant> {
 /// back rows that a FUTURE broker version may have written with options this one
 /// does not know. Refusing them would make a rolling downgrade lose the whole
 /// queue's configuration instead of the one option it cannot honour.
-fn parse_options(v: &serde_json::Value) -> QueueOptions {
+pub(crate) fn parse_stored_options(v: &serde_json::Value) -> QueueOptions {
     let mut o = QueueOptions::default();
     let g = |k: &str| v.get(k).and_then(|x| x.as_i64());
     o.max_bytes = g("maxBytes");
@@ -2759,7 +2805,10 @@ pub async fn refresh_once(
             let Some(queue) = row.get("queue").and_then(|x| x.as_str()) else {
                 continue;
             };
-            let opts = row.get("options").map(parse_options).unwrap_or_default();
+            let opts = row
+                .get("options")
+                .map(parse_stored_options)
+                .unwrap_or_default();
             // `declared = true` vivifies the queue EMPTY (§1.2): the
             // configuration is what survives a restart, never the contents.
             eph.set_config(&t, queue, opts, true);
@@ -2817,7 +2866,10 @@ pub async fn reload_config(
         return Ok(false);
     };
     let v: serde_json::Value = serde_json::from_str(&txt).map_err(|e| e.to_string())?;
-    let opts = v.get("options").map(parse_options).unwrap_or_default();
+    let opts = v
+        .get("options")
+        .map(parse_stored_options)
+        .unwrap_or_default();
     eph.set_config(tenant, queue, opts, true);
     Ok(true)
 }

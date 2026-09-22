@@ -15,11 +15,14 @@
 //! A row that does not decode is [`StoreError::Corrupt`]: fatal for this node,
 //! never skipped (see [`super::rows`]).
 
-use crate::rsm::effect::{CursorRow, Pid, QueueConfig, TimerRow};
+use crate::rsm::effect::{
+    CursorRow, Pid, QueueConfig, QuotaGrant, QuotaKind, StreamsQueryRow, TimerRow, TraceEvent,
+};
 
 use super::keys::{self, Counter};
 use super::rows::{
-    self, DlqRow, FileRow, GarbageRow, GroupRow, KvRow, PartitionRow, RequestIdRow, SegLocRow,
+    self, DlqRow, EphConfigRow, FileRow, GarbageRow, GroupRow, KvRow, PartitionRow, RequestIdRow,
+    SegLocRow, StreamsStateRow,
 };
 use super::{Keyspace, Reads, Result, StoreError, Writes};
 
@@ -716,6 +719,140 @@ pub trait TypedReads: Reads {
         }
     }
 
+    // ----------------------------------------------------- phase-2 control
+
+    fn streams_query(&self, tenant: &str, query_id: &[u8; 16]) -> Result<Option<StreamsQueryRow>> {
+        let k = keys::streams_query(tenant, query_id);
+        decode(
+            Keyspace::StreamsQueries,
+            self.get_raw(Keyspace::StreamsQueries, &k)?,
+            rows::streams_query_decode,
+        )
+    }
+
+    fn scan_streams_queries(
+        &self,
+        tenant: &str,
+        limit: usize,
+        cb: &mut dyn FnMut([u8; 16], StreamsQueryRow) -> bool,
+    ) -> Result<usize> {
+        let prefix = keys::streams_queries_prefix(tenant);
+        let mut err = None;
+        let n = self.scan_raw(
+            Keyspace::StreamsQueries,
+            &prefix,
+            &prefix,
+            limit,
+            &mut |k, v| match (
+                keys::streams_query_id_of(k, prefix.len()),
+                rows::streams_query_decode(v),
+            ) {
+                (Some(id), Ok(row)) => cb(id, row),
+                _ => {
+                    err = Some(StoreError::corrupt(Keyspace::StreamsQueries, "query row"));
+                    false
+                }
+            },
+        )?;
+        match err {
+            Some(e) => Err(e),
+            None => Ok(n),
+        }
+    }
+
+    fn streams_state(
+        &self,
+        query_id: &[u8; 16],
+        pid: Pid,
+        key: &str,
+    ) -> Result<Option<StreamsStateRow>> {
+        let k = keys::streams_state(query_id, pid, key);
+        decode(
+            Keyspace::StreamsState,
+            self.get_raw(Keyspace::StreamsState, &k)?,
+            rows::streams_state_decode,
+        )
+    }
+
+    fn flag(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .get_raw(Keyspace::Flags, &keys::flag(name))?
+            .map(ToOwned::to_owned))
+    }
+
+    fn quota(&self, kind: QuotaKind, tenant: &str) -> Result<Option<QuotaGrant>> {
+        let k = keys::quota(kind, tenant);
+        decode(
+            Keyspace::Quotas,
+            self.get_raw(Keyspace::Quotas, &k)?,
+            rows::quota_decode,
+        )
+    }
+
+    fn eph_config(&self, tenant: &str, queue: &str) -> Result<Option<EphConfigRow>> {
+        let k = keys::eph_config(tenant, queue);
+        decode(
+            Keyspace::EphConfig,
+            self.get_raw(Keyspace::EphConfig, &k)?,
+            rows::eph_config_decode,
+        )
+    }
+
+    fn scan_eph_configs(
+        &self,
+        limit: usize,
+        cb: &mut dyn FnMut(&str, &str, EphConfigRow) -> bool,
+    ) -> Result<usize> {
+        let mut err = None;
+        let n = self.scan_raw(Keyspace::EphConfig, &[], &[], limit, &mut |k, v| {
+            let parsed = (|| {
+                let (tenant, at) = keys::read_name(k, 0)?;
+                let (queue, _) = keys::read_name(k, at)?;
+                Some((tenant, queue))
+            })();
+            match (parsed, rows::eph_config_decode(v)) {
+                (Some((tenant, queue)), Ok(row)) => cb(&tenant, &queue, row),
+                _ => {
+                    err = Some(StoreError::corrupt(
+                        Keyspace::EphConfig,
+                        "ephemeral config row",
+                    ));
+                    false
+                }
+            }
+        })?;
+        match err {
+            Some(e) => Err(e),
+            None => Ok(n),
+        }
+    }
+
+    fn scan_traces(
+        &self,
+        limit: usize,
+        cb: &mut dyn FnMut(&[u8], TraceEvent) -> bool,
+    ) -> Result<usize> {
+        let mut err = None;
+        let n =
+            self.scan_raw(
+                Keyspace::Traces,
+                &[],
+                &[],
+                limit,
+                &mut |k, v| match rows::trace_decode(v) {
+                    Ok(row) => cb(k, row),
+                    Err(e) => {
+                        err = Some(StoreError::corrupt(Keyspace::Traces, format!("{e}")));
+                        false
+                    }
+                },
+            )?;
+        match err {
+            Some(e) => Err(e),
+            None => Ok(n),
+        }
+    }
+
     // ----------------------------------------------------------- node-local
 
     fn seg_loc(&self, pid: Pid, base_offset: u64) -> Result<Option<SegLocRow>> {
@@ -1085,6 +1222,66 @@ pub trait TypedWrites: Writes {
         self.del_raw(Keyspace::TimersDue, &due)?;
         let k = keys::timers(tenant, queue, key);
         self.del_raw(Keyspace::Timers, &k)
+    }
+
+    // ----------------------------------------------------- phase-2 control
+
+    fn put_streams_query(
+        &mut self,
+        tenant: &str,
+        query_id: &[u8; 16],
+        row: &StreamsQueryRow,
+    ) -> Result<()> {
+        self.put_raw(
+            Keyspace::StreamsQueries,
+            &keys::streams_query(tenant, query_id),
+            &rows::streams_query_encode(row),
+        )
+    }
+
+    fn put_streams_state(
+        &mut self,
+        query_id: &[u8; 16],
+        pid: Pid,
+        key: &str,
+        row: &StreamsStateRow,
+    ) -> Result<()> {
+        self.put_raw(
+            Keyspace::StreamsState,
+            &keys::streams_state(query_id, pid, key),
+            &rows::streams_state_encode(row),
+        )
+    }
+
+    fn del_streams_state(&mut self, query_id: &[u8; 16], pid: Pid, key: &str) -> Result<bool> {
+        self.del_raw(
+            Keyspace::StreamsState,
+            &keys::streams_state(query_id, pid, key),
+        )
+    }
+
+    fn put_flag(&mut self, name: &str, value: &[u8]) -> Result<()> {
+        self.put_raw(Keyspace::Flags, &keys::flag(name), value)
+    }
+
+    fn put_quota(&mut self, kind: QuotaKind, tenant: &str, row: &QuotaGrant) -> Result<()> {
+        self.put_raw(
+            Keyspace::Quotas,
+            &keys::quota(kind, tenant),
+            &rows::quota_encode(row),
+        )
+    }
+
+    fn put_eph_config(&mut self, tenant: &str, queue: &str, row: &EphConfigRow) -> Result<()> {
+        self.put_raw(
+            Keyspace::EphConfig,
+            &keys::eph_config(tenant, queue),
+            &rows::eph_config_encode(row),
+        )
+    }
+
+    fn del_eph_config(&mut self, tenant: &str, queue: &str) -> Result<bool> {
+        self.del_raw(Keyspace::EphConfig, &keys::eph_config(tenant, queue))
     }
 
     // ----------------------------------------------------------- node-local

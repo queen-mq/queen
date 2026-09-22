@@ -1,5 +1,5 @@
 //! `handlers/raft.rs` — the raft-mode wiring of the storage seam (PLAN_RAFT.md
-//! WP-1.7a).
+//! WP-1.7a, expanded by Phase 2).
 //!
 //! Three things live here:
 //!
@@ -8,14 +8,9 @@
 //!    `handle_lease_extend`) branch here at their very top when
 //!    `st.storage.is_raft()`. Each does the pool-free receiver pre-work of §9.1
 //!    (the request id, the per-request deadline, and the R-108 name-length
-//!    guard) and hands a typed command to `st.rsm` (rsm/facade.rs). WP-1.7a's
-//!    facade is the `NotReady` stub, so a mutating command comes back
-//!    `RsmError::Unsupported` → `503 raft_phase1_unsupported`; WP-1.7c swaps the
-//!    real state machine in behind the builder hook and this file does not
-//!    change. The heavier pre-work (fusion packing, encryption, the repack after
-//!    a duplicate verdict, and long-poll parking on the facade's notifier) is
-//!    marked and owed to WP-1.7c — running it against a stub that answers 503
-//!    before it matters would only burn CPU.
+//!    guard) and hands a typed command to `st.rsm` (rsm/facade.rs). The receiver
+//!    threads validated producer identity into the facade; the facade owns
+//!    frame packing, encryption, dedup repacking, and long-poll parking.
 //!
 //! 2. **Raft-mode `/health`, `/metrics/prometheus`, `/stats/refresh`**: the
 //!    Postgres variants of these touch `pool.get()`, which must never happen in
@@ -27,8 +22,8 @@
 //!
 //! 3. **The composition roots** `build_raft_state` (the raft `AppState`, no
 //!    Postgres connect and no schema apply) and `build_raft_router` (the router:
-//!    ported routes to the real handlers, un-ported `/api` and `/streams` routes
-//!    to a `503 raft_phase1_unsupported` fallback). `build_raft_state` is shared
+//!    hot routes to the typed handlers and the rest of `/api` and `/streams` to
+//!    the generic Phase-2 facade adapter). `build_raft_state` is shared
 //!    by `main.rs` (the binary), `embedded/boot.rs` and the seam test, so the
 //!    one raft `AppState` shape cannot drift between them.
 
@@ -40,8 +35,8 @@ use axum::response::{IntoResponse, Response};
 use super::{json, AppState};
 use crate::config::{Config, StorageMode};
 use crate::rsm::facade::{
-    self, AckReq, Deadline, DepthReq, DlqHeadReq, PopDiscoverReq, PopPinnedReq, PopReq, PushReq,
-    RenewReq, ReqCtx, RsmError,
+    self, AckReq, Deadline, DepthReq, DlqHeadReq, PopDiscoverReq, PopOptions, PopPinnedReq, PopReq,
+    PushReq, RenewReq, ReqCtx, RsmError,
 };
 
 // ---------------------------------------------------------------------------
@@ -100,6 +95,7 @@ pub(crate) fn err_response(e: RsmError) -> Response {
 
 /// The response for a route that raft phase 1 does not serve. Named so the
 /// fallback and any explicit un-ported route read the same.
+#[allow(dead_code)]
 pub(crate) fn unsupported() -> Response {
     err_response(RsmError::Unsupported)
 }
@@ -121,6 +117,7 @@ fn deadline_for(timeout_ms: u64) -> Deadline {
 pub(crate) async fn dispatch_push(
     st: &AppState,
     tenant: &str,
+    producer_sub: Option<String>,
     body: axum::body::Bytes,
 ) -> Response {
     // Name-length guard: parse ONLY the item queue/partition names, borrowed,
@@ -150,7 +147,8 @@ pub(crate) async fn dispatch_push(
             }
         }
     }
-    let ctx = ReqCtx::new(tenant, deadline_for(st.pop_default_timeout_ms));
+    let ctx = ReqCtx::new(tenant, deadline_for(st.pop_default_timeout_ms))
+        .with_producer_sub(producer_sub);
     // PERF-J: the whole push handler, push-only. Compared to goload's per-request
     // latency this isolates the server-side cost from the loader / axum-accept /
     // auth+tenant middleware wrapper (the ~200 ms C1000 gap PERF-J localizes).
@@ -179,6 +177,7 @@ pub(crate) async fn dispatch_pop(
     auto_ack: bool,
     wait: bool,
     timeout_ms: u64,
+    options: PopOptions,
 ) -> Response {
     if let Err(e) = facade::check_message_key_names(tenant, &queue, group.as_deref(), None) {
         return err_response(e);
@@ -191,6 +190,7 @@ pub(crate) async fn dispatch_pop(
         auto_ack,
         wait,
         timeout_ms,
+        options,
     };
     // NOTE(WP-1.7c): on an empty claim with `wait`, park on `st.rsm.notifier()`
     // and re-poll (§9.5). The stub never returns Ok, so there is nothing to park
@@ -222,6 +222,7 @@ pub(crate) async fn dispatch_pop_partition(
     auto_ack: bool,
     wait: bool,
     timeout_ms: u64,
+    options: PopOptions,
 ) -> Response {
     if let Err(e) =
         facade::check_message_key_names(tenant, &queue, group.as_deref(), Some(&partition))
@@ -237,6 +238,7 @@ pub(crate) async fn dispatch_pop_partition(
         auto_ack,
         wait,
         timeout_ms,
+        options,
     };
     match st.rsm.pop_pinned(ctx, req).await {
         Ok(out) => json(StatusCode::OK, out.body),
@@ -256,6 +258,7 @@ pub(crate) async fn dispatch_pop_discover(
     auto_ack: bool,
     wait: bool,
     timeout_ms: u64,
+    options: PopOptions,
 ) -> Response {
     // The discovery selectors (namespace/task) are not store keys, but the
     // consumer group is; bound it (queue empty — discovery has none in the path).
@@ -271,6 +274,7 @@ pub(crate) async fn dispatch_pop_discover(
         auto_ack,
         wait,
         timeout_ms,
+        options,
     };
     match st.rsm.pop_discover(ctx, req).await {
         Ok(out) => json(StatusCode::OK, out.body),
@@ -303,9 +307,11 @@ pub(crate) async fn dispatch_ack(st: &AppState, tenant: &str, body: axum::body::
 pub(crate) async fn dispatch_transaction(
     st: &AppState,
     tenant: &str,
+    producer_sub: Option<String>,
     body: axum::body::Bytes,
 ) -> Response {
-    let ctx = ReqCtx::new(tenant, deadline_for(st.stmt_timeout.as_millis() as u64));
+    let ctx = ReqCtx::new(tenant, deadline_for(st.stmt_timeout.as_millis() as u64))
+        .with_producer_sub(producer_sub);
     let req = crate::rsm::facade::TxnReq { raw: body.to_vec() };
     match st.rsm.transaction(ctx, req).await {
         Ok(out) => json(StatusCode::OK, out.body),
@@ -431,12 +437,49 @@ pub(crate) async fn handle_prometheus(
     // (all-zero) until the pipeline has done work, and skipped entirely when
     // QUEEN_RAFT_METRICS is off.
     crate::rsm::timing::render_prometheus(&mut body);
+    body.push_str(&st.rsm.prometheus());
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
         body,
     )
         .into_response()
+}
+
+/// `GET /metrics` in raft mode. Process metrics remain local and the database
+/// block is replaced by state-machine role/readiness data (§14.6).
+pub(crate) async fn handle_metrics(
+    axum::extract::State(st): axum::extract::State<Arc<AppState>>,
+) -> Response {
+    let snap = st.metrics.snapshot();
+    let health = st.rsm.health();
+    let out = serde_json::json!({
+        "uptime": st.metrics.uptime_seconds(),
+        "requests": {
+            "total": snap.push_requests + snap.pop_requests + snap.ack_requests,
+            "rate": 0,
+        },
+        "messages": {
+            "total": snap.push_messages + snap.pop_messages + snap.ack_messages,
+            "rate": 0,
+        },
+        "memory": {
+            "rss": st.metrics.resident_bytes(),
+            "heapTotal": 0, "heapUsed": 0, "external": 0, "arrayBuffers": 0,
+        },
+        "cpu": { "user": 0, "system": 0 },
+        "engine": "raft",
+        "raft": {
+            "role": health.role,
+            "leader": health.leader_known,
+            "term": health.term,
+            "applied": health.applied,
+            "commit": health.commit,
+            "lag": health.lag_ms,
+            "storageReady": health.storage_ready,
+        }
+    });
+    json(StatusCode::OK, out.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -495,6 +538,10 @@ pub(crate) fn build_raft_state_with(
             notifier: notifier.clone(),
         }),
     };
+    let bootstrap = rsm.bootstrap();
+    if let Some(error) = bootstrap.startup_error.as_deref() {
+        return Err(format!("raft bootstrap state: {error}"));
+    }
 
     let fusion = crate::fusion::Fusion::new(
         cfg.fusion_shards,
@@ -560,6 +607,52 @@ pub(crate) fn build_raft_state_with(
         },
         metrics.clone(),
     );
+    ephemeral.apply_grants(
+        bootstrap
+            .ephemeral_grants
+            .iter()
+            .map(|(tenant, grant)| crate::ephemeral::Grant {
+                tenant: tenant.clone(),
+                enabled: grant.enabled,
+                max_bytes: grant.max_bytes,
+                max_queues: grant.max_queues.map(i64::from),
+                max_msgs_per_sec: grant.max_msgs_per_sec.map(i64::from),
+            })
+            .collect(),
+    );
+    for (tenant, queue, options) in &bootstrap.ephemeral_configs {
+        ephemeral.set_config(
+            tenant,
+            queue,
+            crate::ephemeral::parse_stored_options(options),
+            true,
+        );
+    }
+    let switches = crate::switches::Switches::new();
+    switches.set_kv(bootstrap.kv_enabled);
+    switches.set_timers_schedule(bootstrap.timers_schedule_enabled);
+    switches.set_timers_fire(bootstrap.timers_fire_enabled);
+    switches.set_ephemeral(bootstrap.ephemeral_enabled);
+
+    let quota = crate::quota::from_config(cfg);
+    quota.refresh(
+        bootstrap
+            .kv_grants
+            .iter()
+            .map(
+                |(tenant, grant, kv_rows, kv_bytes, timer_rows)| crate::quota::TenantRow {
+                    tenant: tenant.clone(),
+                    limits: Some(quota_limits(grant)),
+                    measure: crate::quota::Measure {
+                        kv_rows: *kv_rows,
+                        kv_bytes: *kv_bytes,
+                        timer_rows: *timer_rows,
+                        computed_at_ms: crate::util::now_epoch_ms(),
+                    },
+                },
+            )
+            .collect(),
+    );
 
     Ok(Arc::new(AppState {
         pool,
@@ -581,10 +674,10 @@ pub(crate) fn build_raft_state_with(
         lease_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         encryption,
         enc_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-        maintenance: std::sync::atomic::AtomicBool::new(false),
-        pop_maintenance: std::sync::atomic::AtomicBool::new(false),
-        quota: crate::quota::from_config(cfg),
-        switches: crate::switches::Switches::new(),
+        maintenance: std::sync::atomic::AtomicBool::new(bootstrap.maintenance),
+        pop_maintenance: std::sync::atomic::AtomicBool::new(bootstrap.pop_maintenance),
+        quota,
+        switches,
         kv_pressure: std::sync::atomic::AtomicU32::new(0),
         kv_standalone_shed_after: cfg.kv_standalone_shed_after,
         notifier,
@@ -610,10 +703,9 @@ pub(crate) fn build_raft_state_with(
 
 /// The raft-mode router (server target only). Ported routes go to the real
 /// handlers — the message-path ones branch to the facade via their
-/// storage-aware guard — and every un-ported `/api` or `/streams` route answers
-/// `503 raft_phase1_unsupported` through the fallback (never 500, never a
-/// panic). Auth and tenancy layers are applied exactly as the Postgres router
-/// does.
+/// storage-aware guard — and the remaining `/api` or `/streams` routes go
+/// through the generic Phase-2 adapter. Auth and tenancy layers are applied
+/// exactly as the Postgres router does.
 #[cfg(feature = "server")]
 pub(crate) fn build_raft_router(
     state: Arc<AppState>,
@@ -667,7 +759,7 @@ pub(crate) fn build_raft_router(
         )
         // ---------------------------------------------- observability (no pool)
         .route("/health", get(handle_health))
-        .route("/metrics", get(super::handle_metrics))
+        .route("/metrics", get(handle_metrics))
         .route("/metrics/prometheus", get(handle_prometheus))
         .route("/status", get(super::handle_status))
         .route("/api/v1/stats/refresh", post(handle_stats_refresh))
@@ -691,7 +783,18 @@ pub(crate) fn build_raft_router(
             "/api/v1/ephemeral/queues/:queue/depth",
             get(super::handle_ephemeral_depth),
         )
-        // Un-ported /api and /streams → 503; everything else → the SPA/static.
+        // The internal mesh fallback and its local stats never touch Postgres.
+        .route("/internal/api/notify", post(crate::internal::handle_notify))
+        .route(
+            "/internal/api/shared-state/stats",
+            get(crate::internal::handle_shared_state_stats),
+        )
+        .route(
+            "/internal/api/inter-instance/stats",
+            get(crate::internal::handle_inter_instance_stats),
+        )
+        // Phase-2 /api and /streams are served by the generic RSM facade;
+        // everything else falls through to the SPA/static handler.
         .fallback(raft_fallback)
         .layer(axum::extract::DefaultBodyLimit::max(
             std::env::var("QUEEN_MAX_BODY_BYTES")
@@ -712,18 +815,261 @@ pub(crate) fn build_raft_router(
         .with_state(state)
 }
 
-/// The fallback for the raft router: any `/api/` or `/streams/` route that phase
-/// 1 does not serve answers `503 raft_phase1_unsupported` (transaction,
-/// streams, configure beyond implicit creation, admin, analytics, …; KV is
-/// served since WP-2.2 and timers since WP-2.3); anything else is the dashboard
-/// SPA / static assets.
+/// The fallback for the raft router: `/api/` and `/streams/` are delegated to
+/// the generic Phase-2 facade, which returns the endpoint's normal response or
+/// a JSON 404. Anything else is the dashboard SPA / static assets.
 #[cfg(feature = "server")]
-async fn raft_fallback(method: Method, uri: Uri) -> Response {
+async fn raft_fallback(
+    axum::extract::State(st): axum::extract::State<Arc<AppState>>,
+    axum::extract::Extension(tenant): axum::extract::Extension<crate::tenant::Tenant>,
+    method: Method,
+    uri: Uri,
+    body: axum::body::Bytes,
+) -> Response {
     let path = uri.path();
     if path.starts_with("/api/") || path.starts_with("/streams/") {
-        return unsupported();
+        return dispatch_api(
+            &st,
+            tenant.as_str(),
+            method.as_str(),
+            path,
+            uri.query(),
+            body,
+        )
+        .await;
     }
     super::handle_static(method, uri).await
+}
+
+/// Shared Phase-2 HTTP/embedded adapter. The regular raft fallback and the
+/// storage-aware legacy handlers both use this path, so embedded mode cannot
+/// accidentally reach a Postgres pool for a ported operation.
+pub(crate) async fn dispatch_api(
+    st: &Arc<AppState>,
+    tenant: &str,
+    method: &str,
+    path: &str,
+    query: Option<&str>,
+    body: axum::body::Bytes,
+) -> Response {
+    let ctx = ReqCtx::new(tenant, deadline_for(st.pop_default_timeout_ms));
+    let req = crate::rsm::facade::ApiReq {
+        method: method.to_string(),
+        path: path.to_string(),
+        query: query.map(str::to_string),
+        body: body.to_vec(),
+    };
+    match st.rsm.api(ctx, req).await {
+        Ok(out) => {
+            let status =
+                StatusCode::from_u16(out.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            if status.is_success() {
+                apply_local_control(st, method, path, query, tenant, &body);
+            }
+            (status, [(header::CONTENT_TYPE, out.content_type)], out.body).into_response()
+        }
+        Err(e) => err_response(e),
+    }
+}
+
+pub(crate) fn query_string(params: &std::collections::HashMap<String, String>) -> String {
+    let mut pairs: Vec<_> = params.iter().collect();
+    pairs.sort_by(|a, b| a.0.cmp(b.0));
+    pairs
+        .into_iter()
+        .map(|(key, value)| format!("{}={}", percent_encode(key), percent_encode(value)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+#[cfg(feature = "server")]
+fn apply_local_control(
+    st: &AppState,
+    method: &str,
+    path: &str,
+    query: Option<&str>,
+    tenant: &str,
+    body: &[u8],
+) {
+    use std::sync::atomic::Ordering;
+    let parsed = || serde_json::from_slice::<serde_json::Value>(body).ok();
+    match (method, path) {
+        ("POST", "/api/v1/system/maintenance") => {
+            if let Some(v) = parsed().and_then(|v| v.get("enabled").and_then(|x| x.as_bool())) {
+                st.maintenance.store(v, Ordering::Relaxed);
+            }
+        }
+        ("POST", "/api/v1/system/maintenance/pop") => {
+            if let Some(v) = parsed().and_then(|v| v.get("enabled").and_then(|x| x.as_bool())) {
+                st.pop_maintenance.store(v, Ordering::Relaxed);
+            }
+        }
+        ("POST", "/api/v1/system/kv-timers") => {
+            if let Some(v) = parsed() {
+                if let Some(x) = v.get("kv").and_then(|x| x.as_bool()) {
+                    st.switches.set_kv(x);
+                }
+                if let Some(x) = v.get("timersSchedule").and_then(|x| x.as_bool()) {
+                    st.switches.set_timers_schedule(x);
+                }
+                if let Some(x) = v.get("timersFire").and_then(|x| x.as_bool()) {
+                    st.switches.set_timers_fire(x);
+                }
+            }
+        }
+        ("POST", "/api/v1/system/ephemeral") => {
+            if let Some(v) = parsed().and_then(|v| v.get("enabled").and_then(|x| x.as_bool())) {
+                st.switches.set_ephemeral(v);
+            }
+        }
+        ("POST", "/api/v1/ephemeral/configure") => {
+            if let Some(v) = parsed() {
+                if let Some(queue) = v.get("queue").and_then(|x| x.as_str()) {
+                    let options = v
+                        .get("options")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    st.ephemeral.set_config(
+                        tenant,
+                        queue,
+                        crate::ephemeral::parse_stored_options(&options),
+                        true,
+                    );
+                }
+            }
+        }
+        ("POST", "/api/v1/resources/quota")
+        | ("POST", "/api/v1/system/quota")
+        | ("POST", "/api/v1/system/quotas") => {
+            if let Some(v) = parsed() {
+                let target = v
+                    .get("tenant")
+                    .or_else(|| v.get("tenantId"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or(tenant);
+                let grant = quota_grant_from_json(&v);
+                match v.get("kind").and_then(|x| x.as_str()) {
+                    Some("kv") => st.quota.upsert_limits(target, quota_limits(&grant)),
+                    Some("ephemeral") => st.ephemeral.upsert_grant(crate::ephemeral::Grant {
+                        tenant: target.to_string(),
+                        enabled: grant.enabled,
+                        max_bytes: grant.max_bytes,
+                        max_queues: grant.max_queues.map(i64::from),
+                        max_msgs_per_sec: grant.max_msgs_per_sec.map(i64::from),
+                    }),
+                    _ => {}
+                }
+            }
+        }
+        ("DELETE", "/api/v1/resources/tenant") => {
+            let target = parsed()
+                .and_then(|v| {
+                    v.get("tenant")
+                        .or_else(|| v.get("tenantId"))
+                        .and_then(|x| x.as_str())
+                        .map(str::to_string)
+                })
+                .or_else(|| query_param(query, "tenant"))
+                .or_else(|| query_param(query, "tenantId"))
+                .unwrap_or_else(|| tenant.to_string());
+            st.quota.remove_tenant(&target);
+            st.ephemeral.remove_tenant(&target);
+        }
+        ("DELETE", p) if p.starts_with("/api/v1/ephemeral/queue/") => {
+            let queue = &p["/api/v1/ephemeral/queue/".len()..];
+            st.ephemeral.remove(tenant, queue);
+        }
+        _ => {}
+    }
+}
+
+fn query_param(query: Option<&str>, wanted: &str) -> Option<String> {
+    for pair in query.unwrap_or("").split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if percent_decode(key) == wanted {
+            return Some(percent_decode(value));
+        }
+    }
+    None
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'+' {
+            out.push(b' ');
+            i += 1;
+        } else if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let nibble = |byte: u8| match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                b'A'..=b'F' => Some(byte - b'A' + 10),
+                _ => None,
+            };
+            if let (Some(high), Some(low)) = (nibble(bytes[i + 1]), nibble(bytes[i + 2])) {
+                out.push(high * 16 + low);
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(byte as char);
+        } else {
+            use std::fmt::Write;
+            let _ = write!(&mut out, "%{byte:02X}");
+        }
+    }
+    out
+}
+
+fn quota_limits(grant: &crate::rsm::effect::QuotaGrant) -> crate::quota::Limits {
+    crate::quota::Limits {
+        enabled: grant.enabled,
+        max_rows: grant.max_rows,
+        max_bytes: grant.max_bytes,
+        max_timers: grant.max_timers,
+        max_timer_horizon_s: grant.max_timer_horizon_s,
+        max_reads_per_sec: grant.max_reads_per_sec.and_then(|n| u32::try_from(n).ok()),
+        max_writes_per_sec: grant.max_writes_per_sec.and_then(|n| u32::try_from(n).ok()),
+    }
+}
+
+fn quota_grant_from_json(v: &serde_json::Value) -> crate::rsm::effect::QuotaGrant {
+    let i64v = |camel: &str, snake: &str| {
+        v.get(camel)
+            .or_else(|| v.get(snake))
+            .and_then(serde_json::Value::as_i64)
+    };
+    crate::rsm::effect::QuotaGrant {
+        enabled: v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true),
+        max_rows: i64v("maxRows", "max_rows"),
+        max_bytes: i64v("maxBytes", "max_bytes"),
+        max_timers: i64v("maxTimers", "max_timers"),
+        max_timer_horizon_s: i64v("maxTimerHorizonSeconds", "max_timer_horizon_s"),
+        max_reads_per_sec: i64v("maxReadsPerSecond", "max_reads_per_sec")
+            .and_then(|n| i32::try_from(n).ok()),
+        max_writes_per_sec: i64v("maxWritesPerSecond", "max_writes_per_sec")
+            .and_then(|n| i32::try_from(n).ok()),
+        max_queues: i64v("maxQueues", "max_queues").and_then(|n| i32::try_from(n).ok()),
+        max_msgs_per_sec: i64v("maxMessagesPerSecond", "max_msgs_per_sec")
+            .and_then(|n| i32::try_from(n).ok()),
+        max_queries: i64v("maxQueries", "max_queries"),
+        updated_at_us: 0,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1216,19 +1562,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unported_route_is_503_static_route_is_not() {
-        // The fallback: /api and /streams paths that phase 1 does not serve are a
-        // clean 503 (never 500, never a panic).
+    async fn phase2_fallback_serves_api_and_unknown_routes_are_404() {
+        use crate::rsm::facade::real::RaftFacade;
+        use crate::rsm::facade::{Rsm, RsmBuildCtx};
+
+        std::env::set_var("QUEEN_RAFT_MAP_BYTES", (256usize << 20).to_string());
+        let dir = std::env::temp_dir().join(format!(
+            "queen-raft-phase2-fallback-{}-{}",
+            std::process::id(),
+            crate::util::uuidv7_bytes()[15]
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let facade = Arc::new(
+            RaftFacade::open(&RsmBuildCtx {
+                data_dir: dir.display().to_string(),
+                notifier: crate::notify::Notifier::new(false),
+            })
+            .expect("open the facade"),
+        );
+        let rsm: Arc<dyn Rsm> = facade.clone();
+        let st = super::build_raft_state_with(&raft_config(), Some(rsm)).expect("raft state");
         let resp = super::raft_fallback(
+            State(st.clone()),
+            Extension(Tenant::default_tenant()),
             axum::http::Method::GET,
-            "/api/v1/resources/queues".parse().unwrap(),
+            "/api/v1/does-not-exist".parse().unwrap(),
+            Bytes::new(),
         )
         .await;
         let (status, text) = body_of(resp).await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert!(
-            text.contains("raft_phase1_unsupported"),
-            "fallback body: {text}"
-        );
+        assert_eq!(status, StatusCode::NOT_FOUND, "{text}");
+        assert!(text.contains("not found"), "fallback body: {text}");
+
+        drop(st);
+        if let Ok(f) = Arc::try_unwrap(facade) {
+            f.shutdown().await;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

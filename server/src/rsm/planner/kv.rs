@@ -1460,8 +1460,8 @@ pub fn ts_jsonb(us: i64) -> String {
     out
 }
 
-/// A `timestamptz` the way `kv_list_v1` answers it: `to_char(… AT TIME ZONE
-/// 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`, always six fractional digits.
+/// A `timestamptz` the way `kv_list_v1` answers it after converting to UTC:
+/// `YYYY-MM-DDTHH:MI:SS.USZ`, always with six fractional digits.
 pub fn ts_list(us: i64) -> String {
     let (y, mo, d, h, mi, s, frac) = split_us(us);
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{frac:06}Z")

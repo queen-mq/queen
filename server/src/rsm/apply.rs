@@ -194,6 +194,9 @@ pub enum ApplyError {
     /// it is fatal for the node (the authoritative store/segments already
     /// committed; the node stops and replays from its durable point).
     Qlog(std::io::Error),
+    /// The node-local observability journal could not be opened. Queue state is
+    /// untouched, but Phase 2 requires this store for retention/dashboard data.
+    LocalMetrics(std::io::Error),
 }
 
 impl ApplyError {
@@ -263,6 +266,7 @@ impl std::fmt::Display for ApplyError {
                 "apply: I11: the store and the segment files disagree: {detail}"
             ),
             ApplyError::Qlog(e) => write!(f, "apply: qlog (shadow): {e}"),
+            ApplyError::LocalMetrics(e) => write!(f, "apply: local metrics: {e}"),
         }
     }
 }
@@ -819,6 +823,8 @@ pub struct Applier<'s, S: Store> {
     /// it owns [`Applier::segments`]; it holds no threads, so dropping it (on
     /// shutdown, or when the applier is dropped) just closes the file handles.
     qlog: Option<QLogSet>,
+    /// Node-local D17 history, shared with the facade for dashboard reads.
+    local_metrics: Arc<crate::rsm::local_metrics::LocalMetrics>,
     derived: Derived,
     cfg: ApplyConfig,
     notify: Arc<dyn Notify>,
@@ -1036,6 +1042,11 @@ impl<'s, S: Store> Applier<'s, S> {
             segments.retain_active_hashes(true);
         }
         let derived = store.read(|r| Derived::rebuild(r, last_now_us))?;
+        let data_dir = seg_root
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let local_metrics = crate::rsm::local_metrics::open(data_dir.join("local.db"))
+            .map_err(ApplyError::LocalMetrics)?;
         let rings = derived.rings_len();
         let leases = derived.lease_count();
         let writes = store.write()?;
@@ -1045,6 +1056,7 @@ impl<'s, S: Store> Applier<'s, S> {
             writes,
             segments,
             qlog,
+            local_metrics,
             derived,
             counters: CounterCache::new(cfg.batch_counters),
             groups_cache: HashMap::new(),
@@ -1628,7 +1640,7 @@ impl<'s, S: Store> Applier<'s, S> {
                 pid,
                 log_start,
                 txns_start,
-            } => self.watermark(*pid, *log_start, *txns_start),
+            } => self.watermark(*pid, *log_start, *txns_start, now_us),
 
             Effect::GarbageAdd {
                 pids,
@@ -1756,6 +1768,7 @@ impl<'s, S: Store> Applier<'s, S> {
                 self.writes.set_meta_blob(&key, &w.into_inner())?;
                 Ok(())
             }
+            Effect::TenantPurge { tenant } => self.tenant_purge(tenant),
 
             // Timers (025, WP-2.3). Plain overwrites of one row and its
             // fire-order index entry, from values the planner computed — no
@@ -1809,9 +1822,157 @@ impl<'s, S: Store> Applier<'s, S> {
                 Ok(())
             }
 
-            // Phase 2's other keyspaces do not exist in this build. I16: a kind
-            // this node cannot apply stops it; it is never stepped over.
-            other => Err(ApplyError::Unsupported { kind: other.kind() }),
+            Effect::StreamsQueryUpsert {
+                query_id,
+                tenant,
+                row,
+            } => {
+                self.writes.put_streams_query(tenant, query_id, row)?;
+                Ok(())
+            }
+            Effect::StreamsStatePut {
+                query_id,
+                pid,
+                key,
+                value,
+                updated_at_us,
+            } => {
+                self.writes.put_streams_state(
+                    query_id,
+                    *pid,
+                    key,
+                    &rows::StreamsStateRow {
+                        value: value.clone(),
+                        updated_at_us: *updated_at_us,
+                    },
+                )?;
+                Ok(())
+            }
+            Effect::StreamsStateDelete { query_id, pid, key } => {
+                if !self.writes.del_streams_state(query_id, *pid, key)? {
+                    self.stats.missing_rows += 1;
+                }
+                Ok(())
+            }
+
+            Effect::TraceAppend { event } => {
+                // Sequence is assigned by apply, not the planner: all voters
+                // see the same ordered prefix and therefore choose the same
+                // next value. The secondary indexes carry the primary key so
+                // expiry can delete the complete event atomically.
+                let prefix = keys::trace_prefix(&event.tenant, event.pid, &event.txn);
+                let mut seq = 0u64;
+                self.writes.scan_raw(
+                    Keyspace::Traces,
+                    &prefix,
+                    &prefix,
+                    usize::MAX,
+                    &mut |k, _| {
+                        if let Some(n) = keys::trace_seq_of(k) {
+                            seq = seq.max(n.saturating_add(1));
+                        }
+                        true
+                    },
+                )?;
+                let primary = keys::trace(&event.tenant, event.pid, &event.txn, seq);
+                self.writes
+                    .put_raw(Keyspace::Traces, &primary, &rows::trace_encode(event))?;
+                for name in &event.names {
+                    self.writes.put_raw(
+                        Keyspace::TraceNames,
+                        &keys::trace_name(
+                            &event.tenant,
+                            name,
+                            event.created_at_us,
+                            &event.trace_id,
+                        ),
+                        &primary,
+                    )?;
+                }
+                self.writes.put_raw(
+                    Keyspace::TraceExpiry,
+                    &keys::trace_expiry(event.created_at_us, &event.trace_id),
+                    &primary,
+                )?;
+                Ok(())
+            }
+            Effect::TraceExpire { cutoff_us } => {
+                let mut indexed: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+                self.writes.scan_raw(
+                    Keyspace::TraceExpiry,
+                    &[],
+                    &[],
+                    usize::MAX,
+                    &mut |expiry_key, primary| {
+                        if keys::trace_expiry_created_of(expiry_key)
+                            .is_none_or(|created| created >= *cutoff_us)
+                        {
+                            return false;
+                        }
+                        indexed.push((expiry_key.to_vec(), primary.to_vec()));
+                        true
+                    },
+                )?;
+                for (expiry_key, primary) in indexed {
+                    let Some(raw) = self.writes.get_raw(Keyspace::Traces, &primary)? else {
+                        self.writes.del_raw(Keyspace::TraceExpiry, &expiry_key)?;
+                        self.stats.missing_rows += 1;
+                        continue;
+                    };
+                    let event = rows::trace_decode(raw)
+                        .map_err(|e| StoreError::corrupt(Keyspace::Traces, format!("{e}")))?;
+                    for name in &event.names {
+                        self.writes.del_raw(
+                            Keyspace::TraceNames,
+                            &keys::trace_name(
+                                &event.tenant,
+                                name,
+                                event.created_at_us,
+                                &event.trace_id,
+                            ),
+                        )?;
+                    }
+                    self.writes.del_raw(Keyspace::Traces, &primary)?;
+                    self.writes.del_raw(Keyspace::TraceExpiry, &expiry_key)?;
+                    self.stats.rows_swept += 1;
+                }
+                Ok(())
+            }
+
+            Effect::FlagSet { key, value } => {
+                self.writes.put_flag(key, value)?;
+                Ok(())
+            }
+            Effect::QuotaSet {
+                kind,
+                tenant,
+                grant,
+            } => {
+                self.writes.put_quota(*kind, tenant, grant)?;
+                Ok(())
+            }
+            Effect::EphemeralConfigSet {
+                tenant,
+                queue,
+                options,
+                updated_at_us,
+            } => {
+                self.writes.put_eph_config(
+                    tenant,
+                    queue,
+                    &rows::EphConfigRow {
+                        options: options.clone(),
+                        updated_at_us: *updated_at_us,
+                    },
+                )?;
+                Ok(())
+            }
+            Effect::EphemeralConfigDelete { tenant, queue } => {
+                if !self.writes.del_eph_config(tenant, queue)? {
+                    self.stats.missing_rows += 1;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -2320,7 +2481,7 @@ impl<'s, S: Store> Applier<'s, S> {
     /// ack-by-hash below the cursor (005) still read them inside the txns
     /// window (D10). Each frame is therefore released TWICE, once per
     /// watermark, and only the second release lets its file die (§11.7).
-    fn watermark(&mut self, pid: Pid, log_start: u64, txns_start: u64) -> Result<()> {
+    fn watermark(&mut self, pid: Pid, log_start: u64, txns_start: u64, now_us: i64) -> Result<()> {
         let Some(mut p) = self.writes.partition(pid)? else {
             self.stats.missing_rows += 1;
             return Ok(());
@@ -2343,6 +2504,8 @@ impl<'s, S: Store> Applier<'s, S> {
         }
         let tenant = p.tenant.clone();
         let queue = p.queue.clone();
+        let old_log_start = p.log_start;
+        let old_txns_start = p.txns_start;
 
         // 1. The payload: every frame whose base crossed `log_start` this
         //    time. Its bytes stop being retained; its `seg_loc` row stays,
@@ -2408,6 +2571,16 @@ impl<'s, S: Store> Applier<'s, S> {
         p.log_start = log_start;
         p.txns_start = txns_start;
         self.writes.put_partition(pid, &p)?;
+        self.local_metrics.record_retention(
+            now_us,
+            &tenant,
+            &queue,
+            pid,
+            old_log_start,
+            log_start,
+            old_txns_start,
+            txns_start,
+        );
         Ok(())
     }
 
@@ -2488,6 +2661,129 @@ impl<'s, S: Store> Applier<'s, S> {
     }
 
     // -- deletes -----------------------------------------------------------
+
+    /// Remove every name-keyed resource owned by a tenant in this store
+    /// transaction. Partition-owned rows have already been made unreachable
+    /// with `GarbageAdd` in the same entry and are reclaimed by bounded
+    /// `DeleteChunk` entries. Keeping this as one effect is what makes a crash
+    /// incapable of exposing a tenant with only half of its metadata removed.
+    fn tenant_purge(&mut self, tenant: &str) -> Result<()> {
+        let mut queues = Vec::new();
+        self.writes
+            .scan_queues(tenant, usize::MAX, &mut |queue, _| {
+                queues.push(queue.to_string());
+                true
+            })?;
+
+        // Collect the rows whose secondary indexes need their old values
+        // before deleting any queue metadata.
+        let mut kv = Vec::new();
+        self.writes
+            .scan_kv_tenant(tenant, usize::MAX, &mut |ns, key, _| {
+                kv.push((ns.to_string(), key.to_string()));
+                true
+            })?;
+        let timer_prefix = keys::queues_prefix(tenant);
+        let mut timers = Vec::new();
+        let mut timer_bad = false;
+        self.writes.scan_raw(
+            Keyspace::Timers,
+            &timer_prefix,
+            &timer_prefix,
+            usize::MAX,
+            &mut |key, value| match (keys::timers_parts(key), rows::timer_decode(value)) {
+                (Some((t, queue, timer_key)), Ok(row)) if t == tenant => {
+                    timers.push((queue, timer_key, row));
+                    true
+                }
+                _ => {
+                    timer_bad = true;
+                    false
+                }
+            },
+        )?;
+        if timer_bad {
+            return Err(StoreError::corrupt(Keyspace::Timers, "timer row").into());
+        }
+
+        let mut query_ids = Vec::new();
+        self.writes
+            .scan_streams_queries(tenant, usize::MAX, &mut |id, _| {
+                query_ids.push(id);
+                true
+            })?;
+
+        let trace_prefix = keys::queues_prefix(tenant);
+        let mut traces = Vec::new();
+        let mut trace_bad = false;
+        self.writes.scan_raw(
+            Keyspace::Traces,
+            &trace_prefix,
+            &trace_prefix,
+            usize::MAX,
+            &mut |primary, value| match rows::trace_decode(value) {
+                Ok(event) if event.tenant == tenant => {
+                    traces.push((primary.to_vec(), event));
+                    true
+                }
+                _ => {
+                    trace_bad = true;
+                    false
+                }
+            },
+        )?;
+        if trace_bad {
+            return Err(StoreError::corrupt(Keyspace::Traces, "trace row").into());
+        }
+
+        for queue in &queues {
+            self.queue_delete(tenant, queue)?;
+        }
+        for (ns, key) in &kv {
+            self.writes.del_kv(tenant, ns, key)?;
+        }
+        for (queue, key, row) in &timers {
+            self.writes.del_timer(tenant, queue, key, row)?;
+        }
+        for query_id in &query_ids {
+            self.sweep(
+                Keyspace::StreamsState,
+                &keys::streams_query_state_prefix(query_id),
+            )?;
+            self.writes.del_raw(
+                Keyspace::StreamsQueries,
+                &keys::streams_query(tenant, query_id),
+            )?;
+        }
+        self.sweep(Keyspace::EphConfig, &keys::eph_config_prefix(tenant))?;
+        for kind in [
+            crate::rsm::effect::QuotaKind::Kv,
+            crate::rsm::effect::QuotaKind::Ephemeral,
+            crate::rsm::effect::QuotaKind::Streams,
+        ] {
+            self.writes
+                .del_raw(Keyspace::Quotas, &keys::quota(kind, tenant))?;
+        }
+        for (primary, event) in traces {
+            for name in &event.names {
+                self.writes.del_raw(
+                    Keyspace::TraceNames,
+                    &keys::trace_name(tenant, name, event.created_at_us, &event.trace_id),
+                )?;
+            }
+            self.writes.del_raw(
+                Keyspace::TraceExpiry,
+                &keys::trace_expiry(event.created_at_us, &event.trace_id),
+            )?;
+            self.writes.del_raw(Keyspace::Traces, &primary)?;
+        }
+        // Safety sweeps cover stale rows left by an interrupted old build.
+        self.sweep(Keyspace::TraceNames, &keys::queues_prefix(tenant))?;
+        self.ctr_sweep(&keys::counter_queue_tenant_prefix(tenant))?;
+        self.ctr_sweep(&keys::counter_group_tenant_prefix(tenant))?;
+        self.ctr_sweep(&keys::counter_tenant_prefix(tenant))?;
+        Ok(())
+    }
 
     /// A queue delete (013): the NAME-keyed rows go at once, as one
     /// transaction, exactly as the SQL does — so the name is reusable

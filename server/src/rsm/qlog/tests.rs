@@ -999,6 +999,53 @@ fn unlink_dead_by_created_at_window() {
     assert!(q.files().iter().all(|f| f.max_created_at_us >= 10_000));
 }
 
+#[test]
+fn reclaim_below_txns_compacts_mixed_sealed_files() {
+    let td = TmpDir::new("unlink-watermarks");
+    let opts = QLogOptions::testing(300);
+    let (mut q, _) = QLog::open(td.path(), 1, opts).unwrap();
+    for i in 0..20u64 {
+        append_one(&mut q, i + 1, 10 + (i % 2), i / 2, 10_000 + i as i64);
+    }
+    let before = q.file_count();
+    assert!(before >= 3);
+
+    let mut starts = std::collections::HashMap::new();
+    starts.insert(10, u64::MAX);
+    starts.insert(11, 0);
+    let bytes_before = q.bytes();
+    let changed = q.unlink_below_txns(&starts).unwrap();
+    assert!(changed > 0, "mixed files are compacted");
+    assert_eq!(q.file_count(), before, "partial compaction keeps file ids");
+    assert!(
+        q.bytes() < bytes_before,
+        "expired records release disk bytes"
+    );
+    let mut expired_gone = 0;
+    for offset in 0..10 {
+        if q.read_payload(10, offset).unwrap().is_none() {
+            expired_gone += 1;
+        }
+        assert!(
+            q.read_payload(11, offset).unwrap().is_some(),
+            "live pid 11 offset {offset} survives"
+        );
+    }
+    assert!(expired_gone > 0, "sealed expired records are gone");
+
+    drop(q);
+    let (mut q, recovery) = QLog::open(td.path(), 1, opts).unwrap();
+    assert!(!recovery.truncated_tail, "compacted files reopen cleanly");
+    for offset in 0..10 {
+        assert!(q.read_payload(11, offset).unwrap().is_some());
+    }
+
+    starts.insert(11, u64::MAX);
+    let dropped = q.unlink_below_txns(&starts).unwrap();
+    assert!(dropped > 0);
+    assert_eq!(q.file_count(), 1, "the active file is never reclaimed");
+}
+
 // ---------------------------------------------------------------------------
 // Empty / degenerate
 // ---------------------------------------------------------------------------

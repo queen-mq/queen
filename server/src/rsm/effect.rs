@@ -120,6 +120,10 @@ pub enum Kind {
     RequestIdsExpire = 29,
     ClusterVersionSet = 30,
     MembershipNote = 31,
+    /// Remove every tenant-name-keyed row in one apply transaction. The
+    /// tenant's partition-owned rows are retired separately through the
+    /// bounded `GarbageAdd` / `DeleteChunk` protocol.
+    TenantPurge = 32,
 }
 
 impl Kind {
@@ -158,6 +162,7 @@ impl Kind {
             29 => Kind::RequestIdsExpire,
             30 => Kind::ClusterVersionSet,
             31 => Kind::MembershipNote,
+            32 => Kind::TenantPurge,
             _ => return None,
         })
     }
@@ -197,12 +202,13 @@ impl Kind {
             Kind::RequestIdsExpire => "request_ids_expire",
             Kind::ClusterVersionSet => "cluster_version_set",
             Kind::MembershipNote => "membership_note",
+            Kind::TenantPurge => "tenant_purge",
         }
     }
 
     /// Every kind, in id order. The golden test walks this, so a kind added
     /// without a fixture fails the build.
-    pub const ALL: [Kind; 32] = [
+    pub const ALL: [Kind; 33] = [
         Kind::Noop,
         Kind::QueueUpsert,
         Kind::QueueDelete,
@@ -235,6 +241,7 @@ impl Kind {
         Kind::RequestIdsExpire,
         Kind::ClusterVersionSet,
         Kind::MembershipNote,
+        Kind::TenantPurge,
     ];
 }
 
@@ -741,6 +748,11 @@ pub enum Effect {
         disk_uuid: [u8; 16],
         address: String,
     },
+
+    /// Atomically remove every name-keyed resource owned by `tenant` (031).
+    /// Partition-owned rows are already hidden by `GarbageAdd` in the same
+    /// entry and are reclaimed by bounded `DeleteChunk` entries.
+    TenantPurge { tenant: String },
 }
 
 /// The counter an effect consumes from the entry header's bases (I18, §5.1).
@@ -790,6 +802,7 @@ impl Effect {
             Effect::RequestIdsExpire { .. } => Kind::RequestIdsExpire,
             Effect::ClusterVersionSet { .. } => Kind::ClusterVersionSet,
             Effect::MembershipNote { .. } => Kind::MembershipNote,
+            Effect::TenantPurge { .. } => Kind::TenantPurge,
         }
     }
 
@@ -838,6 +851,7 @@ impl Effect {
             | Kind::RequestIdsExpire
             | Kind::ClusterVersionSet
             | Kind::MembershipNote => VERSION_1,
+            Kind::TenantPurge => VERSION_1,
         }
     }
 
@@ -888,6 +902,7 @@ impl Effect {
             | Effect::RequestIdsExpire { .. }
             | Effect::ClusterVersionSet { .. }
             | Effect::MembershipNote { .. } => Assigns::Nothing,
+            Effect::TenantPurge { .. } => Assigns::Nothing,
         }
     }
 
@@ -1277,6 +1292,7 @@ impl Effect {
                 w.bytes16(disk_uuid);
                 w.str(address);
             }
+            Effect::TenantPurge { tenant } => w.str(tenant),
         }
         w.into_inner()
     }
@@ -1604,6 +1620,9 @@ impl Effect {
                 generation: r.u64("generation")?,
                 disk_uuid: r.bytes16("disk_uuid")?,
                 address: r.str("address")?,
+            },
+            Kind::TenantPurge => Effect::TenantPurge {
+                tenant: r.str("tenant")?,
             },
         };
         if !r.done() {

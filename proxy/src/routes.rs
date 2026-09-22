@@ -135,6 +135,8 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
     if p.starts_with("/api/v1/migration")
         || p.starts_with("/api/v1/system")
         || p.starts_with("/internal")
+        || p == "/api/v1/resources/tenant"
+        || p == "/api/v1/resources/quota"
         || p == "/api/v1/stats/refresh"
         || p == "/metrics"
         || p == "/status"
@@ -595,6 +597,14 @@ mod tests {
         assert_eq!(
             classify(&Method::GET, "/api/v1/resources/queues"),
             RouteClass::Read
+        );
+        assert_eq!(
+            classify(&Method::DELETE, "/api/v1/resources/tenant"),
+            RouteClass::Blocked
+        );
+        assert_eq!(
+            classify(&Method::POST, "/api/v1/resources/quota"),
+            RouteClass::Blocked
         );
         assert_eq!(classify(&Method::POST, "/api/v1/unknown"), RouteClass::Blocked);
         // system aggregates are operator-class: closed to every tenant

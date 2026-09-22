@@ -27,7 +27,7 @@
 //! such a key with [`super::StoreError::KeyTooLong`] rather than truncating
 //! it; see the note in `super`'s header.
 
-use crate::rsm::effect::Pid;
+use crate::rsm::effect::{Pid, QuotaKind};
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -301,6 +301,14 @@ pub fn dlq_prefix(tenant: &str, queue: &str) -> Vec<u8> {
     queues(tenant, queue)
 }
 
+/// `(tenant, queue, dlq_id)` of a [`dlq`] key.
+pub fn dlq_parts(k: &[u8]) -> Option<(String, String, [u8; 16])> {
+    let (tenant, at) = read_name(k, 0)?;
+    let (queue, at) = read_name(k, at)?;
+    let id = k.get(at..at + 16)?.try_into().ok()?;
+    (at + 16 == k.len()).then_some((tenant, queue, id))
+}
+
 /// `(pid, group, offset)` → dlq_id: the second index of §6.1's `dlq`. The
 /// offset is signed because a timer's dead letter files at −1 (025).
 pub fn dlq_by_pos(p: Pid, group: &str, offset: i64) -> Vec<u8> {
@@ -462,6 +470,30 @@ pub fn counter_partition_prefix(p: Pid) -> Vec<u8> {
     k
 }
 
+/// Every queue counter belonging to one tenant.
+pub fn counter_queue_tenant_prefix(tenant: &str) -> Vec<u8> {
+    let mut k = with(tenant.len() + 3);
+    counter_head(&mut k, CounterScope::Queue);
+    push_name(&mut k, tenant);
+    k
+}
+
+/// Every tenant counter belonging to one tenant.
+pub fn counter_tenant_prefix(tenant: &str) -> Vec<u8> {
+    let mut k = with(tenant.len() + 3);
+    counter_head(&mut k, CounterScope::Tenant);
+    push_name(&mut k, tenant);
+    k
+}
+
+/// Every consumer-group counter belonging to one tenant.
+pub fn counter_group_tenant_prefix(tenant: &str) -> Vec<u8> {
+    let mut k = with(tenant.len() + 3);
+    counter_head(&mut k, CounterScope::Group);
+    push_name(&mut k, tenant);
+    k
+}
+
 // ---------------------------------------------------------------------------
 // kv (024, WP-2.2)
 // ---------------------------------------------------------------------------
@@ -578,6 +610,14 @@ pub fn timers_key_of(k: &[u8], prefix_len: usize) -> Option<String> {
     Some(read_name(k, prefix_len)?.0)
 }
 
+/// `(tenant, queue, timer_key)` of a timer primary key.
+pub fn timers_parts(k: &[u8]) -> Option<(String, String, String)> {
+    let (tenant, at) = read_name(k, 0)?;
+    let (queue, at) = read_name(k, at)?;
+    let (key, at) = read_name(k, at)?;
+    (at == k.len()).then_some((tenant, queue, key))
+}
+
 /// `(due_us, tenant, queue, timer_key)` → (): the fire order, earliest first.
 /// Signed (a `delayMs` in the past is legal and yields a due instant below
 /// any real clock only in a test, but the order must hold through zero).
@@ -597,6 +637,151 @@ pub fn timers_due_parts(k: &[u8]) -> Option<(i64, String, String, String)> {
     let (q, at) = read_name(k, at)?;
     let (key, _) = read_name(k, at)?;
     Some((due, t, q, key))
+}
+
+// ---------------------------------------------------------------------------
+// phase-2 control plane
+// ---------------------------------------------------------------------------
+
+/// `(tenant, query_id)`; tenant is part of the key so query ids cannot cross
+/// the authentication boundary even when a caller supplies an id.
+pub fn streams_query(tenant: &str, query_id: &[u8; 16]) -> Vec<u8> {
+    let mut k = with(tenant.len() + 18);
+    push_name(&mut k, tenant);
+    k.extend_from_slice(query_id);
+    k
+}
+
+pub fn streams_queries_prefix(tenant: &str) -> Vec<u8> {
+    let mut k = with(tenant.len() + 2);
+    push_name(&mut k, tenant);
+    k
+}
+
+pub fn streams_query_id_of(k: &[u8], prefix_len: usize) -> Option<[u8; 16]> {
+    k.get(prefix_len..prefix_len + 16)?.try_into().ok()
+}
+
+/// `(query_id, pid, key)`; query ids are globally unique UUIDs and the query
+/// row carries the tenant boundary.
+pub fn streams_state(query_id: &[u8; 16], p: Pid, key: &str) -> Vec<u8> {
+    let mut k = with(26 + key.len());
+    k.extend_from_slice(query_id);
+    push_u64(&mut k, p);
+    push_name(&mut k, key);
+    k
+}
+
+pub fn streams_state_prefix(query_id: &[u8; 16], p: Pid) -> Vec<u8> {
+    let mut k = with(24);
+    k.extend_from_slice(query_id);
+    push_u64(&mut k, p);
+    k
+}
+
+pub fn streams_query_state_prefix(query_id: &[u8; 16]) -> Vec<u8> {
+    query_id.to_vec()
+}
+
+pub fn streams_state_parts(k: &[u8]) -> Option<([u8; 16], Pid, String)> {
+    let query_id = k.get(..16)?.try_into().ok()?;
+    let pid = read_u64(k, 16)?;
+    let (key, _) = read_name(k, 24)?;
+    Some((query_id, pid, key))
+}
+
+pub fn streams_state_key_of(k: &[u8]) -> Option<String> {
+    Some(read_name(k, 24)?.0)
+}
+
+pub fn flag(name: &str) -> Vec<u8> {
+    let mut k = with(name.len() + 2);
+    push_name(&mut k, name);
+    k
+}
+
+pub fn quota(kind: QuotaKind, tenant: &str) -> Vec<u8> {
+    let mut k = with(tenant.len() + 3);
+    k.push(kind as u8);
+    push_name(&mut k, tenant);
+    k
+}
+
+pub fn quota_parts(k: &[u8]) -> Option<(QuotaKind, String)> {
+    let kind = QuotaKind::from_u8(*k.first()?)?;
+    let (tenant, end) = read_name(k, 1)?;
+    (end == k.len()).then_some((kind, tenant))
+}
+
+pub fn eph_config(tenant: &str, queue: &str) -> Vec<u8> {
+    queues(tenant, queue)
+}
+
+pub fn eph_config_prefix(tenant: &str) -> Vec<u8> {
+    queues_prefix(tenant)
+}
+
+fn push_optional_pid(out: &mut Vec<u8>, p: Option<Pid>) {
+    match p {
+        Some(p) => {
+            out.push(1);
+            push_u64(out, p);
+        }
+        None => {
+            out.push(0);
+            push_u64(out, 0);
+        }
+    }
+}
+
+/// Primary trace order: `(tenant, pid?, transaction, sequence)`.
+pub fn trace(tenant: &str, p: Option<Pid>, txn: &str, seq: u64) -> Vec<u8> {
+    let mut k = with(tenant.len() + txn.len() + 21);
+    push_name(&mut k, tenant);
+    push_optional_pid(&mut k, p);
+    push_name(&mut k, txn);
+    push_u64(&mut k, seq);
+    k
+}
+
+pub fn trace_prefix(tenant: &str, p: Option<Pid>, txn: &str) -> Vec<u8> {
+    let mut k = with(tenant.len() + txn.len() + 13);
+    push_name(&mut k, tenant);
+    push_optional_pid(&mut k, p);
+    push_name(&mut k, txn);
+    k
+}
+
+pub fn trace_seq_of(k: &[u8]) -> Option<u64> {
+    read_u64(k, k.len().checked_sub(8)?)
+}
+
+/// Secondary index used by `/traces/by-name/:name`.
+pub fn trace_name(tenant: &str, name: &str, created_at_us: i64, trace_id: &[u8; 16]) -> Vec<u8> {
+    let mut k = with(tenant.len() + name.len() + 28);
+    push_name(&mut k, tenant);
+    push_name(&mut k, name);
+    push_i64(&mut k, created_at_us);
+    k.extend_from_slice(trace_id);
+    k
+}
+
+pub fn trace_name_prefix(tenant: &str, name: &str) -> Vec<u8> {
+    let mut k = with(tenant.len() + name.len() + 4);
+    push_name(&mut k, tenant);
+    push_name(&mut k, name);
+    k
+}
+
+pub fn trace_expiry(created_at_us: i64, trace_id: &[u8; 16]) -> Vec<u8> {
+    let mut k = with(24);
+    push_i64(&mut k, created_at_us);
+    k.extend_from_slice(trace_id);
+    k
+}
+
+pub fn trace_expiry_created_of(k: &[u8]) -> Option<i64> {
+    read_i64(k, 0)
 }
 
 // ---------------------------------------------------------------------------

@@ -249,6 +249,17 @@ pub async fn handle_delete_message(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     Path((partition_id, transaction_id)): Path<(String, String)>,
 ) -> Response {
+    if st.storage.is_raft() {
+        return crate::handlers::raft::dispatch_api(
+            &st,
+            tenant.as_str(),
+            "DELETE",
+            &format!("/api/v1/messages/{partition_id}/{transaction_id}"),
+            None,
+            Bytes::new(),
+        )
+        .await;
+    }
     let client = match st.pool.get().await {
         Ok(c) => c,
         Err(_) => {
@@ -727,6 +738,17 @@ pub async fn handle_dlq_replay(
     Path(dlq_id): Path<String>,
     body: Bytes,
 ) -> Response {
+    if st.storage.is_raft() {
+        return crate::handlers::raft::dispatch_api(
+            &st,
+            tenant.as_str(),
+            "POST",
+            &format!("/api/v1/dlq/{dlq_id}/replay"),
+            None,
+            body,
+        )
+        .await;
+    }
     let (queue_override, partition_override) = match parse_replay_overrides(&body) {
         Ok(v) => v,
         // The `{success:false, error, message}` shape the rest of this file uses
@@ -834,6 +856,17 @@ pub async fn handle_retry_message(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     Path((partition_id, transaction_id)): Path<(String, String)>,
 ) -> Response {
+    if st.storage.is_raft() {
+        return crate::handlers::raft::dispatch_api(
+            &st,
+            tenant.as_str(),
+            "POST",
+            &format!("/api/v1/messages/{partition_id}/{transaction_id}/retry"),
+            None,
+            Bytes::new(),
+        )
+        .await;
+    }
     // Refused, not written, while the push switch is on — the section header
     // says why a move may neither be spooled nor write past it. Before the pool
     // is taken, exactly as on the id-addressed route.
@@ -1104,6 +1137,18 @@ pub async fn handle_dlq(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
+    if st.storage.is_raft() {
+        let query = crate::handlers::raft::query_string(&params);
+        return crate::handlers::raft::dispatch_api(
+            &st,
+            tenant.as_str(),
+            "GET",
+            "/api/v1/dlq",
+            Some(&query),
+            Bytes::new(),
+        )
+        .await;
+    }
     let mut filters = filters_from_query(&params, &["queue", "consumerGroup"]);
     filters.insert(
         "limit".to_string(),
@@ -1167,6 +1212,18 @@ pub async fn handle_purge_dlq(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
+    if st.storage.is_raft() {
+        let query = crate::handlers::raft::query_string(&params);
+        return crate::handlers::raft::dispatch_api(
+            &st,
+            tenant.as_str(),
+            "DELETE",
+            "/api/v1/dlq",
+            Some(&query),
+            Bytes::new(),
+        )
+        .await;
+    }
     let queue = match params.get("queue").filter(|value| !value.is_empty()) {
         Some(queue) => queue,
         None => {

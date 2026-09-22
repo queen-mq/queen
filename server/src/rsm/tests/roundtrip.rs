@@ -61,6 +61,7 @@ fn kind_ids_are_stable_and_bijective() {
         (29, Kind::RequestIdsExpire),
         (30, Kind::ClusterVersionSet),
         (31, Kind::MembershipNote),
+        (32, Kind::TenantPurge),
     ];
     assert_eq!(
         expected.len(),
@@ -127,6 +128,7 @@ fn every_kind_pins_its_catalogue_version() {
         (Kind::RequestIdsExpire, VERSION_1),
         (Kind::ClusterVersionSet, VERSION_1),
         (Kind::MembershipNote, VERSION_1),
+        (Kind::TenantPurge, VERSION_1),
     ];
     assert_eq!(
         expected.len(),

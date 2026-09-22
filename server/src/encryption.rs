@@ -26,6 +26,11 @@ pub struct Encryption {
 }
 
 impl Encryption {
+    #[cfg(test)]
+    pub(crate) fn for_test(key: [u8; 32]) -> Arc<Encryption> {
+        Arc::new(Encryption { key: Some(key) })
+    }
+
     pub fn from_env() -> Arc<Encryption> {
         let hex = std::env::var("QUEEN_ENCRYPTION_KEY").unwrap_or_default();
         if hex.is_empty() {

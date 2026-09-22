@@ -68,6 +68,9 @@ pub async fn handle_status() -> Response {
 // original populated only the `database` block from the pool; the rest were
 // literal 0. We populate uptime/requests/messages/memory as a safe superset.
 pub async fn handle_metrics(State(st): State<Arc<AppState>>) -> Response {
+    if st.storage.is_raft() {
+        return crate::handlers::raft::handle_metrics(State(st)).await;
+    }
     let snap = st.metrics.snapshot();
     let ps = st.pool.status();
     let out = serde_json::json!({
@@ -160,6 +163,9 @@ pub async fn handle_status_queues(
 // -------------------------------------------------------------------- GET /health
 // 200 when a trivial DB round-trip succeeds, 503 otherwise.
 pub async fn handle_health(State(st): State<Arc<AppState>>) -> Response {
+    if st.storage.is_raft() {
+        return crate::handlers::raft::handle_health(State(st)).await;
+    }
     let healthy = match st.pool.get().await {
         Ok(c) => db::ping(&c).await.is_ok(),
         Err(_) => false,
@@ -348,6 +354,9 @@ fn format_db_prometheus(txt: &str, out: &mut String) {
 // get_prometheus_metrics_v1. DB block is best-effort — the in-process gauges are
 // always emitted even if the DB read fails.
 pub async fn handle_prometheus(State(st): State<Arc<AppState>>) -> Response {
+    if st.storage.is_raft() {
+        return crate::handlers::raft::handle_prometheus(State(st)).await;
+    }
     let mut body = st.metrics.prometheus();
     let adm = st.admission.snapshot();
     body.push_str("# HELP queen_admission_budget Write-transaction admission budget\n# TYPE queen_admission_budget gauge\n");

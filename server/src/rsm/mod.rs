@@ -66,6 +66,8 @@
 pub mod effect;
 pub mod entry;
 pub mod facade;
+pub mod local_metrics;
+pub mod maintenance;
 
 // ---------------------------------------------------------------------------
 // The map as stubs. One line each, replaced by the owning WP (see the header).
@@ -160,10 +162,6 @@ pub mod identity {}
 pub mod digest {}
 
 /// Crash points (§13.5), from the pgless `native/faults.rs`. Owner: WP-1.8.
-/// The node-local metrics store (D17): `system_metrics`, `worker_metrics`,
-/// `worker_metrics_summary`, `queue_lag_metrics`, `queue_parked_replica` and
-/// `retention_history`, none of them replicated. Owner: WP-2.8.
-pub mod local_metrics {}
 pub mod fasthash;
 pub mod faults;
 

@@ -1811,12 +1811,12 @@ fn time_never_goes_backwards() {
 }
 
 #[test]
-fn a_kind_this_build_cannot_apply_stops_the_node() {
-    // I16: never skipped. Phase 2 brings each keyspace and its arm together
-    // (WP-2.2 did it for `kv`, WP-2.3 for `timers`; streams are still
-    // missing); until then the node refuses rather than dropping a committed
-    // effect on the floor.
-    let node = Node::new("unsupported");
+fn a_phase_two_kind_is_applied_not_skipped() {
+    // Phase 2 closes the old Unsupported arm for every catalogue kind. A
+    // missing streams cell is the effect's replay-safe no-op, not a reason to
+    // reject the committed entry. Unknown wire kinds are still refused by the
+    // decoder tests before an Effect can reach apply (I16).
+    let node = Node::new("phase2-kind");
     let (mut a, _) = Applier::open(
         node.store(),
         &node.seg_dir(),
@@ -1832,10 +1832,7 @@ fn a_kind_this_build_cannot_apply_stops_the_node() {
             key: "k".into(),
         }])
         .at(1, 1);
-    match a.apply(&c) {
-        Err(e @ ApplyError::Unsupported { .. }) => assert!(e.fatal()),
-        other => panic!("expected an unsupported kind, got {other:?}"),
-    }
+    assert!(matches!(a.apply(&c), Ok(Applied::Executed { effects: 1 })));
 }
 
 // ---------------------------------------------------------------------------
@@ -4482,8 +4479,14 @@ fn a_plain_commit_records_no_unbarriered_tail() {
     let mut node = Node::at(dir.clone());
     {
         let (mut a, rec) = open_at(&node);
-        assert_eq!(rec.segments.synced, 0, "nothing above the checkpoint is kept: {rec:?}");
-        assert!(rec.segments.verified.is_empty(), "nothing is verified-and-kept: {rec:?}");
+        assert_eq!(
+            rec.segments.synced, 0,
+            "nothing above the checkpoint is kept: {rec:?}"
+        );
+        assert!(
+            rec.segments.verified.is_empty(),
+            "nothing is verified-and-kept: {rec:?}"
+        );
         assert!(
             !rec.segments.truncated.is_empty() || !rec.segments.deleted.is_empty(),
             "the unbarriered tail must be cut: {rec:?}"
@@ -4495,7 +4498,11 @@ fn a_plain_commit_records_no_unbarriered_tail() {
     let node = Node::at(dir);
     let (_a, rec) = open_at(&node);
     assert_eq!(
-        (rec.segments.synced, rec.segments.verified.len(), rec.segments.truncated.len()),
+        (
+            rec.segments.synced,
+            rec.segments.verified.len(),
+            rec.segments.truncated.len()
+        ),
         (0, 0, 0),
         "a second boot repeated recovery work: {rec:?}",
     );
@@ -5126,7 +5133,10 @@ fn a_tail_above_the_last_durable_point_is_dropped_not_trusted() {
         .join(format!("f{file_id:010}.seg"));
     let mut bytes = std::fs::read(&path).expect("the segment file");
     let at = (from + 40) as usize;
-    assert!(at < to as usize, "a frame above the durable point to damage");
+    assert!(
+        at < to as usize,
+        "a frame above the durable point to damage"
+    );
     bytes[at] ^= 0xFF;
     std::fs::write(&path, &bytes).expect("damage the frame");
 
@@ -5468,7 +5478,8 @@ fn a_group_registered_after_the_messages_sees_every_partition() {
         Arc::new(crate::rsm::apply::NoNotify),
     )
     .expect("open");
-    a.apply(&setup_entry(3, &[], queue_config(BASE_US))).expect("setup");
+    a.apply(&setup_entry(3, &[], queue_config(BASE_US)))
+        .expect("setup");
     for p in 0..3u64 {
         a.apply(
             &Build::new(BASE_US + 10 + p as i64, 4, 100 + p * 10)
@@ -5508,7 +5519,12 @@ fn a_group_registered_after_the_messages_sees_every_partition() {
                 );
             }
             assert_eq!(
-                r.counter_at(&keys::counter_group(TENANT, QUEUE, "late", Counter::Pending))?,
+                r.counter_at(&keys::counter_group(
+                    TENANT,
+                    QUEUE,
+                    "late",
+                    Counter::Pending
+                ))?,
                 3,
                 "the group inherits the retained backlog"
             );
@@ -5516,7 +5532,9 @@ fn a_group_registered_after_the_messages_sees_every_partition() {
         })
         .expect("read");
     assert_eq!(
-        a.derived().ring(TENANT, QUEUE, "late").map(|r| r.live_len()),
+        a.derived()
+            .ring(TENANT, QUEUE, "late")
+            .map(|r| r.live_len()),
         Some(3),
         "all three partitions are in the live ring"
     );

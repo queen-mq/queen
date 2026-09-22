@@ -24,7 +24,9 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::rsm::facade::real::RaftFacade;
-use crate::rsm::facade::{AckReq, Deadline, PopReq, PushReq, RenewReq, ReqCtx, Rsm, RsmBuildCtx};
+use crate::rsm::facade::{
+    AckReq, ApiReq, Deadline, PopReq, PushReq, RenewReq, ReqCtx, Rsm, RsmBuildCtx,
+};
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -48,7 +50,10 @@ fn build_ctx(dir: &Path) -> RsmBuildCtx {
 }
 
 fn ctx() -> ReqCtx {
-    ReqCtx::new("default", Deadline::after(Duration::from_secs(5)))
+    ReqCtx::new(
+        crate::config::DEFAULT_TENANT,
+        Deadline::after(Duration::from_secs(5)),
+    )
 }
 
 fn parse(body: &str) -> Value {
@@ -116,6 +121,7 @@ async fn push_pop_renew_ack_render_end_to_end() {
                 auto_ack: false,
                 wait: false,
                 timeout_ms: 1000,
+                options: Default::default(),
             },
         )
         .await
@@ -154,6 +160,32 @@ async fn push_pop_renew_ack_render_end_to_end() {
     let rn = parse(&renew.body);
     assert_eq!(rn["success"], true, "renew of a live lease: {}", renew.body);
     assert!(rn["renewed"].as_i64().unwrap_or(0) >= 1);
+
+    // An unknown transaction is a resolved request with a negative verdict,
+    // not a successful noop. Keep the wording both SDK conformance suites use
+    // as their retry-safety signal.
+    let unknown = facade
+        .ack(
+            ctx(),
+            AckReq {
+                queue: Some("orders".into()),
+                group: "__QUEUE_MODE__".into(),
+                raw: format!(
+                    r#"{{"transactionId":"ghost","partitionId":"{partition_id}","status":"completed","leaseId":"{lease_id}"}}"#
+                )
+                .into_bytes(),
+            },
+        )
+        .await
+        .expect("unknown ack");
+    let unknown = parse(&unknown.body);
+    assert_eq!(unknown[0]["success"], false, "{unknown}");
+    assert!(
+        unknown[0]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("unresolv")),
+        "{unknown}"
+    );
 
     // ---- ack all three -------------------------------------------------------
     let ack_body = format!(
@@ -199,6 +231,7 @@ async fn push_pop_renew_ack_render_end_to_end() {
                 auto_ack: false,
                 wait: false,
                 timeout_ms: 1000,
+                options: Default::default(),
             },
         )
         .await
@@ -238,6 +271,10 @@ async fn a_retry_with_the_same_transaction_id_is_a_duplicate() {
         second.body
     );
     assert_eq!(s[0]["offset"].as_u64(), Some(0), "the original offset");
+    assert_eq!(
+        s[0]["message_id"], f[0]["message_id"],
+        "a duplicate reports the original message id"
+    );
 
     facade.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
@@ -283,6 +320,7 @@ async fn a_restart_recovers_the_pushed_state() {
                     auto_ack: true,
                     wait: false,
                     timeout_ms: 1000,
+                    options: Default::default(),
                 },
             )
             .await
@@ -339,6 +377,7 @@ async fn a_mixed_batch_ack_flags_dlq_per_item_not_per_target() {
                 auto_ack: false,
                 wait: false,
                 timeout_ms: 1000,
+                options: Default::default(),
             },
         )
         .await
@@ -400,11 +439,8 @@ async fn a_mixed_batch_ack_flags_dlq_per_item_not_per_target() {
 }
 
 /// A forced-DLQ ack files a dead letter that carries the transaction id off the
-/// ack wire. The WP's ack render passed `snapshot: None` for every item, so the
-/// row was filed with a BLANK txn (and message id / payload) — the refutation's
-/// content-less dead letter. The payload and message id still wait on the
-/// offset→frame pre-read (a later WP), but the txn is on the wire verbatim and
-/// must reach the row so the dead letter is identifiable.
+/// ack wire and the original frame snapshot. DLQ replay must reproduce the
+/// original payload rather than a content-less message.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_forced_dlq_ack_files_the_transaction_id() {
     let dir = scratch("dlq-txn");
@@ -431,6 +467,7 @@ async fn a_forced_dlq_ack_files_the_transaction_id() {
                 auto_ack: false,
                 wait: false,
                 timeout_ms: 1000,
+                options: Default::default(),
             },
         )
         .await
@@ -465,6 +502,244 @@ async fn a_forced_dlq_ack_files_the_transaction_id() {
         dlq[0].txn, "tx-poison",
         "the filed dead letter carries the txn, not a blank string"
     );
+    assert!(
+        dlq[0].message_id.is_some(),
+        "the original message id is kept"
+    );
+    assert_eq!(dlq[0].payload, br#"{"bad":true}"#);
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn phase_two_admin_detail_and_stream_state_accept_the_raft_partition_id() {
+    let dir = scratch("phase2-api");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    let call = |method: &str, path: &str, body: Value| ApiReq {
+        method: method.to_string(),
+        path: path.to_string(),
+        query: None,
+        body: serde_json::to_vec(&body).unwrap(),
+    };
+
+    let configured = facade
+        .api(
+            ctx(),
+            call(
+                "POST",
+                "/api/v1/configure",
+                serde_json::json!({
+                    "queue":"stream-source",
+                    "namespace":"phase2",
+                    "task":"state",
+                    "options":{"leaseTime":17,"retryLimit":2}
+                }),
+            ),
+        )
+        .await
+        .expect("configure");
+    assert_eq!(configured.status, 200, "{}", configured.body);
+
+    facade
+        .push(
+            ctx(),
+            PushReq {
+                raw: br#"{"items":[{"queue":"stream-source","payload":{"n":1},"transactionId":"stream-tx"}]}"#
+                    .to_vec(),
+            },
+        )
+        .await
+        .expect("push");
+    let popped = facade
+        .pop_wildcard(
+            ctx(),
+            PopReq {
+                queue: "stream-source".into(),
+                group: Some("stream-group".into()),
+                batch: 1,
+                auto_ack: false,
+                wait: false,
+                timeout_ms: 1_000,
+                options: crate::rsm::facade::PopOptions {
+                    subscription_mode: "all".into(),
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .expect("pop");
+    let pop = parse(&popped.body);
+    let pid = pop["partitionId"].as_str().expect("numeric pid");
+    assert!(pid.parse::<u64>().is_ok(), "Raft partition id: {pid}");
+
+    let detail = facade
+        .api(
+            ctx(),
+            call(
+                "GET",
+                &format!("/api/v1/messages/{pid}/stream-tx"),
+                Value::Null,
+            ),
+        )
+        .await
+        .expect("message detail");
+    assert_eq!(detail.status, 200, "{}", detail.body);
+    let detail = parse(&detail.body);
+    assert_eq!(detail["queueConfig"]["leaseTime"], 17);
+    assert_eq!(detail["namespace"], "phase2");
+    assert_eq!(detail["task"], "state");
+
+    let registered = facade
+        .api(
+            ctx(),
+            call(
+                "POST",
+                "/streams/v1/queries",
+                serde_json::json!({
+                    "name":"phase2-stream",
+                    "source_queue":"stream-source",
+                    "sink_queue":"stream-sink",
+                    "config_hash":"hash-1"
+                }),
+            ),
+        )
+        .await
+        .expect("register stream");
+    assert_eq!(registered.status, 200, "{}", registered.body);
+    let qid = parse(&registered.body)["query_id"]
+        .as_str()
+        .expect("query id")
+        .to_string();
+
+    let cycle = facade
+        .api(
+            ctx(),
+            call(
+                "POST",
+                "/streams/v1/cycle",
+                serde_json::json!({
+                    "query_id":qid.clone(),
+                    "partition_id":pid,
+                    "consumer_group":"stream-group",
+                    "state_ops":[{"type":"upsert","key":"count","value":{"n":1}}],
+                    "push_items":[],
+                    "ack":null
+                }),
+            ),
+        )
+        .await
+        .expect("stream cycle");
+    assert_eq!(cycle.status, 200, "{}", cycle.body);
+    assert_eq!(parse(&cycle.body)["success"], true, "{}", cycle.body);
+
+    let state = facade
+        .api(
+            ctx(),
+            call(
+                "POST",
+                "/streams/v1/state/get",
+                serde_json::json!({"query_id":qid,"partition_id":pid,"keys":["count"]}),
+            ),
+        )
+        .await
+        .expect("stream state");
+    assert_eq!(state.status, 200, "{}", state.body);
+    assert_eq!(parse(&state.body)["rows"][0]["value"]["n"], 1);
+
+    let raft_status = facade
+        .api(ctx(), call("GET", "/api/v1/raft/status", Value::Null))
+        .await
+        .expect("raft status");
+    assert_eq!(raft_status.status, 200, "{}", raft_status.body);
+    assert_eq!(parse(&raft_status.body)["role"], "leader");
+
+    let postgres_stats = facade
+        .api(
+            ctx(),
+            call("GET", "/api/v1/analytics/postgres-stats", Value::Null),
+        )
+        .await
+        .expect("Postgres compatibility stats");
+    assert_eq!(postgres_stats.status, 200, "{}", postgres_stats.body);
+    assert_eq!(parse(&postgres_stats.body)["database"], "raft");
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn raft_push_stamps_authenticated_subject_and_round_trips_encrypted_payload() {
+    let dir = scratch("encrypted-producer");
+    let mut facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    facade.set_encryption_for_test(crate::encryption::Encryption::for_test([7; 32]));
+    let configured = facade
+        .api(
+            ctx(),
+            ApiReq {
+                method: "POST".into(),
+                path: "/api/v1/configure".into(),
+                query: None,
+                body: serde_json::to_vec(&serde_json::json!({
+                    "queue":"secret",
+                    "options":{"encryptionEnabled":true}
+                }))
+                .unwrap(),
+            },
+        )
+        .await
+        .expect("configure encrypted queue");
+    assert_eq!(configured.status, 200, "{}", configured.body);
+
+    facade
+        .push(
+            ctx().with_producer_sub(Some("alice-producer".into())),
+            PushReq {
+                raw: br#"{"items":[{"queue":"secret","payload":{"secret":42},"transactionId":"enc-1","producerSub":"attacker"}]}"#
+                    .to_vec(),
+            },
+        )
+        .await
+        .expect("encrypted push");
+    let popped = facade
+        .pop_wildcard(
+            ctx(),
+            PopReq {
+                queue: "secret".into(),
+                group: None,
+                batch: 1,
+                auto_ack: true,
+                wait: false,
+                timeout_ms: 1_000,
+                options: Default::default(),
+            },
+        )
+        .await
+        .expect("encrypted pop");
+    let pop = parse(&popped.body);
+    assert_eq!(pop["messages"][0]["data"]["secret"], 42, "{pop}");
+    assert_eq!(
+        pop["messages"][0]["producerSub"], "alice-producer",
+        "body spoofing never wins: {pop}"
+    );
+
+    let pid = pop["partitionId"].as_str().expect("partition id");
+    let detail = facade
+        .api(
+            ctx(),
+            ApiReq {
+                method: "GET".into(),
+                path: format!("/api/v1/messages/{pid}/enc-1"),
+                query: None,
+                body: Vec::new(),
+            },
+        )
+        .await
+        .expect("encrypted message detail");
+    let detail = parse(&detail.body);
+    assert_eq!(detail["data"]["secret"], 42, "{detail}");
+    assert_eq!(detail["producerSub"], "alice-producer", "{detail}");
+    assert_eq!(detail["isEncrypted"], true, "{detail}");
 
     facade.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
@@ -483,7 +758,7 @@ async fn timing_histograms_are_reachable_and_nonzero() {
     let dir = scratch("timing");
     let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
 
-    // -- push three messages (payload bytes → segment write_all) --------------
+    // -- push three messages (payload bytes → qlog write/fsync) ----------------
     let push = facade
         .push(
             ctx(),
@@ -511,6 +786,7 @@ async fn timing_histograms_are_reachable_and_nonzero() {
                 auto_ack: false,
                 wait: false,
                 timeout_ms: 1000,
+                options: Default::default(),
             },
         )
         .await
@@ -545,7 +821,7 @@ async fn timing_histograms_are_reachable_and_nonzero() {
 
     let m = timing::metrics();
     // Every stage the cycle drives must have recorded at least once.
-    let checks: [(&str, u64); 12] = [
+    let checks: [(&str, u64); 11] = [
         ("plan", m.plan.snapshot().count),
         ("drain_commands", m.drain_commands.snapshot().count),
         ("drain_messages", m.drain_messages.snapshot().count),
@@ -561,7 +837,6 @@ async fn timing_histograms_are_reachable_and_nonzero() {
         ("log_fsync", m.log_fsync.snapshot().count),
         ("group_entries", m.group_entries.snapshot().count),
         ("apply_entry", m.apply_entry.snapshot().count),
-        ("apply_segment", m.apply_segment.snapshot().count),
         (
             "apply_channel_depth",
             m.apply_channel_depth.snapshot().count,
@@ -728,6 +1003,7 @@ async fn pop_q(facade: &RaftFacade, q: &str) -> Value {
                 auto_ack: false,
                 wait: false,
                 timeout_ms: 1000,
+                options: Default::default(),
             },
         )
         .await
@@ -771,8 +1047,15 @@ async fn a_transaction_acks_the_input_and_pushes_the_output_all_or_nothing() {
         .await
         .expect("push");
     let pop = pop_q(&facade, "inq").await;
-    assert_eq!(pop["messages"].as_array().map(|m| m.len()), Some(2), "{pop}");
-    let pid = pop["partitionId"].as_str().expect("partitionId").to_string();
+    assert_eq!(
+        pop["messages"].as_array().map(|m| m.len()),
+        Some(2),
+        "{pop}"
+    );
+    let pid = pop["partitionId"]
+        .as_str()
+        .expect("partitionId")
+        .to_string();
     let lease = pop["leaseId"].as_str().expect("leaseId").to_string();
 
     // ---- commit: ack both inputs, push one output -------------------------------
@@ -798,7 +1081,9 @@ async fn a_transaction_acks_the_input_and_pushes_the_output_all_or_nothing() {
     assert_eq!(outm.len(), 1, "the output is poppable: {out}");
     assert_eq!(outm[0]["data"]["sum"], 3);
     assert_eq!(
-        pop_q(&facade, "inq").await["messages"].as_array().map(|m| m.len()),
+        pop_q(&facade, "inq").await["messages"]
+            .as_array()
+            .map(|m| m.len()),
         Some(0),
         "the inputs were consumed by the same bundle"
     );
@@ -808,13 +1093,17 @@ async fn a_transaction_acks_the_input_and_pushes_the_output_all_or_nothing() {
         .push(
             ctx(),
             PushReq {
-                raw: br#"{"items":[{"queue":"inq","payload":{"n":3},"transactionId":"t3"}]}"#.to_vec(),
+                raw: br#"{"items":[{"queue":"inq","payload":{"n":3},"transactionId":"t3"}]}"#
+                    .to_vec(),
             },
         )
         .await
         .expect("push t3");
     let pop3 = pop_q(&facade, "inq").await;
-    let pid3 = pop3["partitionId"].as_str().expect("partitionId").to_string();
+    let pid3 = pop3["partitionId"]
+        .as_str()
+        .expect("partitionId")
+        .to_string();
     let lease3 = pop3["leaseId"].as_str().expect("leaseId").to_string();
     let dup = txn(
         &facade,
@@ -826,7 +1115,10 @@ async fn a_transaction_acks_the_input_and_pushes_the_output_all_or_nothing() {
         }),
     )
     .await;
-    assert_eq!(dup["success"], false, "a duplicate push rolls the bundle back: {dup}");
+    assert_eq!(
+        dup["success"], false,
+        "a duplicate push rolls the bundle back: {dup}"
+    );
     assert_eq!(dup["reason"], "duplicate", "{dup}");
     // The ack of t3 did not happen: the same ack in a clean bundle still succeeds.
     let retry = txn(
@@ -838,7 +1130,10 @@ async fn a_transaction_acks_the_input_and_pushes_the_output_all_or_nothing() {
         }),
     )
     .await;
-    assert_eq!(retry["success"], true, "the rolled-back ack is still owed: {retry}");
+    assert_eq!(
+        retry["success"], true,
+        "the rolled-back ack is still owed: {retry}"
+    );
 
     // ---- rollback on a REJECTED ack: the bundle's push must NOT appear ---------
     let bad = txn(
@@ -851,9 +1146,14 @@ async fn a_transaction_acks_the_input_and_pushes_the_output_all_or_nothing() {
         }),
     )
     .await;
-    assert_eq!(bad["success"], false, "a rejected ack rolls the bundle back: {bad}");
     assert_eq!(
-        pop_q(&facade, "outq").await["messages"].as_array().map(|m| m.len()),
+        bad["success"], false,
+        "a rejected ack rolls the bundle back: {bad}"
+    );
+    assert_eq!(
+        pop_q(&facade, "outq").await["messages"]
+            .as_array()
+            .map(|m| m.len()),
         Some(0),
         "the rolled-back push never reached the output queue"
     );
@@ -880,7 +1180,10 @@ async fn a_transaction_carries_a_kv_rider_all_or_nothing() {
     assert_eq!(res.len(), 2, "{ok}");
     assert_eq!(res[0]["type"], "push");
     assert_eq!(res[1]["type"], "kv", "{ok}");
-    assert_eq!(res[1]["index"], 1, "riders take the flat ordinals after the operations");
+    assert_eq!(
+        res[1]["index"], 1,
+        "riders take the flat ordinals after the operations"
+    );
     assert_eq!(res[1]["opIndex"], 0);
     let got = txn(
         &facade,
@@ -889,7 +1192,11 @@ async fn a_transaction_carries_a_kv_rider_all_or_nothing() {
     .await;
     assert_eq!(got["success"], true, "{got}");
     assert_eq!(got["results"][0]["found"], true, "{got}");
-    assert_eq!(got["results"][0]["value"], serde_json::json!({"at": 1}), "{got}");
+    assert_eq!(
+        got["results"][0]["value"],
+        serde_json::json!({"at": 1}),
+        "{got}"
+    );
 
     // ---- rollback: a REQUIRED CAS that loses aborts the whole bundle ------------
     let lost = txn(
@@ -903,9 +1210,14 @@ async fn a_transaction_carries_a_kv_rider_all_or_nothing() {
     .await;
     assert_eq!(lost["success"], false, "{lost}");
     assert_eq!(lost["reason"], "kv_precondition", "{lost}");
-    assert_eq!(lost["failedIndex"], 1, "the failed op in the FLAT space: {lost}");
     assert_eq!(
-        pop_q(&facade, "kvq2").await["messages"].as_array().map(|m| m.len()),
+        lost["failedIndex"], 1,
+        "the failed op in the FLAT space: {lost}"
+    );
+    assert_eq!(
+        pop_q(&facade, "kvq2").await["messages"]
+            .as_array()
+            .map(|m| m.len()),
         Some(0),
         "the rolled-back bundle's push never landed"
     );
@@ -914,7 +1226,11 @@ async fn a_transaction_carries_a_kv_rider_all_or_nothing() {
         serde_json::json!({"kv": [{"op": "get", "ns": "st", "key": "cursor"}]}),
     )
     .await;
-    assert_eq!(still["results"][0]["value"], serde_json::json!({"at": 1}), "{still}");
+    assert_eq!(
+        still["results"][0]["value"],
+        serde_json::json!({"at": 1}),
+        "{still}"
+    );
     facade.shutdown().await;
 }
 
@@ -965,7 +1281,9 @@ async fn a_transaction_schedules_a_timer_that_fires_only_if_it_commits() {
     assert_eq!(bad["success"], false, "{bad}");
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
-        pop_q(&facade, "tq2").await["messages"].as_array().map(|m| m.len()),
+        pop_q(&facade, "tq2").await["messages"]
+            .as_array()
+            .map(|m| m.len()),
         Some(0),
         "the rolled-back timer never fires"
     );

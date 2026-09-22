@@ -77,6 +77,17 @@ pub async fn handle_get_maintenance(State(st): State<Arc<AppState>>) -> Response
 
 // POST /api/v1/system/maintenance {enabled:bool} — toggle push maintenance.
 pub async fn handle_set_maintenance(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
+    if st.storage.is_raft() {
+        return crate::handlers::raft::dispatch_api(
+            &st,
+            crate::config::DEFAULT_TENANT,
+            "POST",
+            "/api/v1/system/maintenance",
+            None,
+            body,
+        )
+        .await;
+    }
     let b: MaintenanceBody = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),

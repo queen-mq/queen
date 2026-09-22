@@ -39,6 +39,10 @@ async def db_pool():
     httpx.MockTransport). Degrading to None keeps those runnable on a laptop
     and leaves the DB-backed tests to fail on their own terms.
     """
+    if os.environ.get("QUEEN_TEST_STORAGE") == "raft":
+        print("Raft lane: no Postgres cleanup (fresh test volume)")
+        yield None
+        return
     try:
         pool = await asyncpg.create_pool(**TEST_CONFIG["db_config"])
     except Exception as error:
@@ -145,4 +149,3 @@ async def cleanup_test_data(db_pool):
     
     # Cleanup after tests (commented out for debugging)
     # await cleanup()
-

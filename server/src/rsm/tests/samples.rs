@@ -332,6 +332,7 @@ pub fn effect_sample(kind: Kind) -> Effect {
             disk_uuid: uuid(0xb0),
             address: "queen-mq-2.queen-mq:6634".into(),
         },
+        Kind::TenantPurge => Effect::TenantPurge { tenant: T0.into() },
     }
 }
 
