@@ -19,7 +19,7 @@ use crate::rsm::effect::{CursorRow, Pid, QueueConfig};
 
 use super::keys::{self, Counter};
 use super::rows::{
-    self, DlqRow, FileRow, GarbageRow, GroupRow, PartitionRow, RequestIdRow, SegLocRow,
+    self, DlqRow, FileRow, GarbageRow, GroupRow, KvRow, PartitionRow, RequestIdRow, SegLocRow,
 };
 use super::{Keyspace, Reads, Result, StoreError, Writes};
 
@@ -465,6 +465,137 @@ pub trait TypedReads: Reads {
         }
     }
 
+    // ------------------------------------------------------------------- kv
+
+    /// One KV row, expired or not: liveness is the CALLER's predicate
+    /// ([`KvRow::live`]), because the sweep and the console read expired rows
+    /// that every other reader treats as absent (024 §5.7).
+    fn kv(&self, tenant: &str, ns: &str, key: &str) -> Result<Option<KvRow>> {
+        let k = keys::kv(tenant, ns, key);
+        if k.len() > self.max_key_len() {
+            // A key the store could never hold is a key that is not there. The
+            // writers refuse it before apply (R-108); a read must not turn it
+            // into a `KeyTooLong`.
+            return Ok(None);
+        }
+        decode(
+            Keyspace::Kv,
+            self.get_raw(Keyspace::Kv, &k)?,
+            rows::kv_decode,
+        )
+    }
+
+    /// The rows of one namespace whose key starts with `key_prefix`, in key
+    /// BYTE order (024's `COLLATE "C"`), starting strictly after `after` when it
+    /// is given — the exclusive keyset cursor of getPrefix and of the console
+    /// list. `cb(key, row)`; expired rows are passed too (see [`TypedReads::kv`]).
+    ///
+    /// A prefix or a cursor longer than any storable key is not an error: the
+    /// prefix matches nothing, and the cursor resumes at the first storable key
+    /// above it ([`super::resume_after`] of its longest storable prefix).
+    fn scan_kv(
+        &self,
+        tenant: &str,
+        ns: &str,
+        key_prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+        cb: &mut dyn FnMut(&str, KvRow) -> bool,
+    ) -> Result<usize> {
+        let max = self.max_key_len();
+        let base = keys::kv_ns_prefix(tenant, ns);
+        let mut prefix = base.clone();
+        prefix.extend_from_slice(key_prefix.as_bytes());
+        if prefix.len() > max {
+            return Ok(0);
+        }
+        let from: Vec<u8> = match after {
+            Some(a) => {
+                let full = keys::kv(tenant, ns, a);
+                let cut = &full[..full.len().min(max)];
+                match super::resume_after(cut, max) {
+                    Some(f) => f,
+                    None => return Ok(0),
+                }
+            }
+            None => Vec::new(),
+        };
+        let mut err: Option<StoreError> = None;
+        let n = self.scan_raw(Keyspace::Kv, &from, &prefix, limit, &mut |k, v| {
+            let key = match k.get(base.len()..).map(std::str::from_utf8) {
+                Some(Ok(s)) => s,
+                _ => {
+                    err = Some(StoreError::corrupt(Keyspace::Kv, "kv key tail"));
+                    return false;
+                }
+            };
+            match rows::kv_decode(v) {
+                Ok(row) => cb(key, row),
+                Err(e) => {
+                    err = Some(StoreError::corrupt(Keyspace::Kv, format!("{e}")));
+                    false
+                }
+            }
+        })?;
+        match err {
+            Some(e) => Err(e),
+            None => Ok(n),
+        }
+    }
+
+    /// Every row of one tenant, namespace by namespace, in key order:
+    /// `cb(ns, key, row)`. Θ(keys of the tenant), like 024's
+    /// `kv_namespaces_v1`, which is its one reader.
+    fn scan_kv_tenant(
+        &self,
+        tenant: &str,
+        limit: usize,
+        cb: &mut dyn FnMut(&str, &str, KvRow) -> bool,
+    ) -> Result<usize> {
+        let prefix = keys::kv_tenant_prefix(tenant);
+        let mut err: Option<StoreError> = None;
+        let n = self.scan_raw(Keyspace::Kv, &[], &prefix, limit, &mut |k, v| {
+            let Some((_t, ns, key)) = keys::kv_parts(k) else {
+                err = Some(StoreError::corrupt(Keyspace::Kv, "kv key"));
+                return false;
+            };
+            match rows::kv_decode(v) {
+                Ok(row) => cb(&ns, &key, row),
+                Err(e) => {
+                    err = Some(StoreError::corrupt(Keyspace::Kv, format!("{e}")));
+                    false
+                }
+            }
+        })?;
+        match err {
+            Some(e) => Err(e),
+            None => Ok(n),
+        }
+    }
+
+    /// The expiry index, oldest first: `cb(expires_at_us, version, kv_key)`.
+    fn scan_kv_expiry(
+        &self,
+        limit: usize,
+        cb: &mut dyn FnMut(i64, u64, &[u8]) -> bool,
+    ) -> Result<usize> {
+        let mut err: Option<StoreError> = None;
+        let n = self.scan_raw(Keyspace::KvExpiry, &[], &[], limit, &mut |k, v| match (
+            keys::kv_expiry_parts(k),
+            rows::kv_expiry_decode(v),
+        ) {
+            (Some((at, version)), Ok(kv_key)) => cb(at, version, &kv_key),
+            _ => {
+                err = Some(StoreError::corrupt(Keyspace::KvExpiry, "kv_expiry row"));
+                false
+            }
+        })?;
+        match err {
+            Some(e) => Err(e),
+            None => Ok(n),
+        }
+    }
+
     // ------------------------------------------------------------- counters
 
     /// A counter, `0` when it has never been written (D16).
@@ -785,6 +916,42 @@ pub trait TypedWrites: Writes {
         self.del_raw(Keyspace::RequestExpiry, &k)?;
         let k = keys::request_ids(id);
         self.del_raw(Keyspace::RequestIds, &k)
+    }
+
+    // ------------------------------------------------------------------- kv
+
+    /// Write a KV row AND keep its expiry index exact: the old row's index
+    /// entry goes, the new one's (if it expires) comes. One call, like
+    /// [`TypedWrites::put_dlq`], so a row and its index can never disagree.
+    fn put_kv(&mut self, tenant: &str, ns: &str, key: &str, row: &KvRow) -> Result<()> {
+        let k = keys::kv(tenant, ns, key);
+        if let Some(old) = self.kv(tenant, ns, key)? {
+            if let Some(at) = old.expires_at_us {
+                self.del_raw(Keyspace::KvExpiry, &keys::kv_expiry(at, old.version))?;
+            }
+        }
+        self.put_raw(Keyspace::Kv, &k, &rows::kv_encode(row))?;
+        if let Some(at) = row.expires_at_us {
+            self.put_raw(
+                Keyspace::KvExpiry,
+                &keys::kv_expiry(at, row.version),
+                &rows::kv_expiry_encode(&k),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Remove a KV row and its expiry index entry; the row that was there, if
+    /// any.
+    fn del_kv(&mut self, tenant: &str, ns: &str, key: &str) -> Result<Option<KvRow>> {
+        let Some(old) = self.kv(tenant, ns, key)? else {
+            return Ok(None);
+        };
+        if let Some(at) = old.expires_at_us {
+            self.del_raw(Keyspace::KvExpiry, &keys::kv_expiry(at, old.version))?;
+        }
+        self.del_raw(Keyspace::Kv, &keys::kv(tenant, ns, key))?;
+        Ok(Some(old))
     }
 
     // ------------------------------------------------------------- counters

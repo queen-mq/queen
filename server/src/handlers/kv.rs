@@ -564,8 +564,9 @@ async fn apply_ops(
     // Rung 5 (§12.1), before everything else this function does with a
     // connection: a cell whose pool is refusing sheds the CONVENIENCE surface and
     // keeps the transaction working. Reads are not shed — they are the cheap half
-    // and the one an idempotency marker cannot do without.
-    if write && standalone_shed(st) {
+    // and the one an idempotency marker cannot do without. The rung is a
+    // POOL signal, so it does not exist in raft mode (no pool is ever dialled).
+    if write && !st.storage.is_raft() && standalone_shed(st) {
         st.metrics
             .kvt
             .kv_read_rejected(crate::metrics::KvReject::Pool);
@@ -613,6 +614,15 @@ async fn apply_ops(
         .filter_map(|o| o.get("value"))
         .map(|v| v.to_string().len() as u64)
         .sum();
+
+    // PLAN_RAFT.md WP-2.2 — raft mode routes the call to the state machine
+    // facade instead of a pooled connection. Everything above this line — the
+    // edge ceilings, the ladder, the metric labels — is shared, so the two
+    // storage classes cannot disagree on who gets through; below it the answer
+    // is the stored procedure's, element for element.
+    if st.storage.is_raft() {
+        return raft_apply(st, tenant, ops, add_rows, add_bytes, &kinds, bytes_in).await;
+    }
 
     let ops_json = Value::Array(ops).to_string();
 
@@ -696,6 +706,104 @@ async fn apply_ops(
             // over-counting blocks early while under-counting blocks late — only
             // the second is unsafe (§9.3).
             Err(unavailable("kv_timeout"))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Raft mode (PLAN_RAFT.md WP-2.2).
+//
+// The same wire contract, answered by the state machine: 024's pass 1 runs at
+// the facade's receiver, the writes are planned serially and answered once
+// their entry is committed and applied here, the reads come off this node's
+// applied state. The error taxonomy maps one to one onto the SQLSTATE rows
+// above — 400 on shape, 413 on size, 200 on a lost `required` precondition,
+// 503 + Retry-After on a cell condition — so no client can tell which storage
+// class answered.
+// ---------------------------------------------------------------------------
+
+/// A refusal that never reached a verdict, rendered in this file's envelope.
+fn raft_failure(f: crate::rsm::facade::KvFailure) -> Response {
+    use crate::rsm::facade::{KvFailure, RsmError};
+    match f {
+        KvFailure::Invalid {
+            status,
+            reason,
+            detail,
+        } => {
+            if status == 413 {
+                json(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    err("payload_too_large", Some(&reason), Some(&detail)),
+                )
+            } else {
+                json(
+                    StatusCode::BAD_REQUEST,
+                    err("kv_bad_request", Some(&reason), Some(&detail)),
+                )
+            }
+        }
+        KvFailure::Precondition { detail } => precondition_200(Some(&detail)),
+        // Transient, and not the tenant's doing: the class 40/08/53 row.
+        KvFailure::Rsm(RsmError::Timeout) => unavailable("kv_timeout"),
+        KvFailure::Rsm(RsmError::Retry { .. }) => unavailable("kv_retry"),
+        KvFailure::Rsm(RsmError::NoLeader) => unavailable("kv_no_leader"),
+        KvFailure::Rsm(RsmError::Rejected { code, message }) => json(
+            StatusCode::BAD_REQUEST,
+            err("kv_bad_request", Some(&code), Some(&message)),
+        ),
+        KvFailure::Rsm(RsmError::Internal(m)) => json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            err("kv_error", Some(&m), None),
+        ),
+        // The un-ported stub, a full disk, an over-long name: the raft
+        // layer's own answers, as every other raft route renders them.
+        KvFailure::Rsm(e) => crate::handlers::raft::err_response(e),
+    }
+}
+
+/// [`apply_ops`]'s raft leg: the call through the facade, with the metrics and
+/// the quota bookkeeping the Postgres leg keeps.
+async fn raft_apply(
+    st: &Arc<AppState>,
+    tenant: &str,
+    ops: Vec<Value>,
+    add_rows: i64,
+    add_bytes: i64,
+    kinds: &[crate::metrics::KvOp],
+    bytes_in: u64,
+) -> Result<Vec<Value>, Response> {
+    use crate::rsm::facade::{Deadline, KvFailure, KvReq, ReqCtx, RsmError};
+    let ctx = ReqCtx::new(tenant, Deadline::after(st.stmt_timeout));
+    let t0 = std::time::Instant::now();
+    let res = st.rsm.kv(ctx, KvReq { ops }).await;
+    // One duration per call, shared out over its ops (see `apply_ops`).
+    let ms = t0.elapsed().as_secs_f64() * 1000.0 / (kinds.len().max(1) as f64);
+    match res {
+        Ok(out) => {
+            record_results(st, &out.results, ms, bytes_in);
+            Ok(out.results)
+        }
+        Err(f) => {
+            let outcome = if matches!(f, KvFailure::Precondition { .. }) {
+                // A lost precondition is a VERDICT, not a fault (§8.3).
+                crate::metrics::KvResult::Rejected
+            } else {
+                crate::metrics::KvResult::Error
+            };
+            record_all(st, kinds, outcome, ms);
+            // Nothing was written — refund the charge — EXCEPT when the
+            // outcome is unknown: a timeout or a retry may have committed, and
+            // over-counting blocks early where under-counting blocks late
+            // (§9.3), the same rule as the Postgres leg's timeout.
+            let unknown = matches!(
+                f,
+                KvFailure::Rsm(RsmError::Timeout) | KvFailure::Rsm(RsmError::Retry { .. })
+            );
+            if !unknown {
+                st.quota.refund(tenant, add_rows, add_bytes, 0);
+            }
+            Err(raft_failure(f))
         }
     }
 }
@@ -1198,6 +1306,16 @@ pub async fn handle_kv_namespaces(
         return resp;
     }
 
+    // PLAN_RAFT.md WP-2.2 — raft mode reads this node's applied state.
+    if st.storage.is_raft() {
+        use crate::rsm::facade::{Deadline, ReqCtx};
+        let ctx = ReqCtx::new(tenant.as_str(), Deadline::after(st.stmt_timeout));
+        return match st.rsm.kv_namespaces(ctx).await {
+            Ok(txt) => json(StatusCode::OK, format!("{{\"namespaces\":{txt}}}")),
+            Err(f) => raft_failure(f),
+        };
+    }
+
     let client = match console_client(&st).await {
         Ok(c) => c,
         Err(resp) => return resp,
@@ -1244,6 +1362,25 @@ pub async fn handle_kv_list(
         Ok(v) => v,
         Err(e) => return bad_request("kv_bad_body", &e.to_string()),
     };
+
+    // PLAN_RAFT.md WP-2.2 — raft mode pages this node's applied state; the
+    // body resolves exactly as it does for the Postgres leg.
+    if st.storage.is_raft() {
+        use crate::rsm::facade::{Deadline, KvListReq, ReqCtx};
+        let ctx = ReqCtx::new(tenant.as_str(), Deadline::after(st.stmt_timeout));
+        let list = KvListReq {
+            namespace: req.namespace.clone(),
+            prefix: req.prefix().to_string(),
+            after: req.after().map(str::to_string),
+            limit: req.limit().map(i64::from),
+            keys_only: req.keys_only(),
+            include_expired: req.include_expired(),
+        };
+        return match st.rsm.kv_list(ctx, list).await {
+            Ok(txt) => json(StatusCode::OK, txt),
+            Err(f) => raft_failure(f),
+        };
+    }
 
     let client = match console_client(&st).await {
         Ok(c) => c,

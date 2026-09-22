@@ -79,8 +79,8 @@ use crate::rsm::effect::{Effect, Pid};
 use crate::rsm::entry::{encode_entry, Entry, Outcome, RequestId};
 use crate::rsm::planner::Refusal;
 use crate::rsm::planner::{
-    AckCommand, AckPositionalCommand, CommandKind, DlqHeadCommand, Lookup, NackCommand, Overlay,
-    Plan, PlanConfig, Planned, Planner, PopCommand, PushCommand, RenewCommand,
+    AckCommand, AckPositionalCommand, CommandKind, DlqHeadCommand, KvCommand, Lookup, NackCommand,
+    Overlay, Plan, PlanConfig, Planned, Planner, PopCommand, PushCommand, RenewCommand,
 };
 use crate::rsm::qlog::set::QLogReader;
 use crate::rsm::replicator::{AppliedAt, NodeId, ProposeError, Replicator, Role};
@@ -141,6 +141,13 @@ pub struct BatcherConfig {
     /// `QUEEN_RAFT_DRAIN_GREEDY` (PERF-L): pull the whole channel into one
     /// batch before planning, so one entry carries many commands.
     pub drain_greedy: bool,
+    /// `QUEEN_RAFT_KV_SWEEP_MS` (WP-2.2, 026's cadence role): how often the
+    /// leader plans one bounded KV expiry step. Reads never wait for it — an
+    /// expired key reads as absent at once (§5.7) — so this only bounds how
+    /// long a dead row keeps its RAM.
+    pub kv_sweep_every_ms: u64,
+    /// `QUEEN_RAFT_KV_SWEEP_LIMIT`: the most rows one step deletes.
+    pub kv_sweep_limit: usize,
 }
 
 impl Default for BatcherConfig {
@@ -157,6 +164,8 @@ impl Default for BatcherConfig {
             driver_notify: true,
             push_priority: true,
             drain_greedy: true,
+            kv_sweep_every_ms: 1_000,
+            kv_sweep_limit: crate::rsm::planner::kv::SWEEP_LIMIT_DEFAULT,
         }
     }
 }
@@ -216,6 +225,8 @@ impl BatcherConfig {
             driver_notify: flag("QUEEN_RAFT_DRIVER_NOTIFY", d.driver_notify),
             push_priority: flag("QUEEN_RAFT_PUSH_PRIORITY", d.push_priority),
             drain_greedy: flag("QUEEN_RAFT_DRAIN_GREEDY", d.drain_greedy),
+            kv_sweep_every_ms: num("QUEEN_RAFT_KV_SWEEP_MS", d.kv_sweep_every_ms),
+            kv_sweep_limit: num("QUEEN_RAFT_KV_SWEEP_LIMIT", d.kv_sweep_limit as u64) as usize,
         }
     }
 }
@@ -239,6 +250,8 @@ pub enum Command {
     Nack(NackCommand),
     Renew(RenewCommand),
     DlqHead(DlqHeadCommand),
+    /// A KV call carrying at least one write (024, WP-2.2).
+    Kv(KvCommand),
 }
 
 impl Command {
@@ -255,6 +268,7 @@ impl Command {
             Command::Nack(c) => c.request_id,
             Command::Renew(c) => c.request_id,
             Command::DlqHead(c) => c.request_id,
+            Command::Kv(c) => c.request_id,
         }
     }
 
@@ -270,6 +284,7 @@ impl Command {
             Command::Nack(_) => CommandKind::Nack,
             Command::Renew(_) => CommandKind::Renew,
             Command::DlqHead(_) => CommandKind::DlqHead,
+            Command::Kv(_) => CommandKind::Kv,
         }
     }
 
@@ -288,6 +303,18 @@ impl Command {
                     + 32
             }
             Command::DlqHead(c) => c.snapshot.payload.len() + 128,
+            Command::Kv(c) => {
+                c.ops
+                    .iter()
+                    .map(|op| match op {
+                        crate::rsm::planner::KvOp::Put { value, key, .. } => {
+                            value.len() + key.len() + 96
+                        }
+                        _ => 96,
+                    })
+                    .sum::<usize>()
+                    + 64
+            }
             _ => 128,
         }
     }
@@ -319,6 +346,9 @@ impl Command {
             Command::Nack(c) => (&c.tenant, &c.queue),
             Command::Renew(_) => ("", ""),
             Command::DlqHead(c) => (&c.tenant, &c.queue),
+            // No queue; never a namespace or a key either — names stay out of
+            // shared logs (024 §13.5).
+            Command::Kv(c) => (&c.tenant, ""),
         }
     }
 
@@ -336,6 +366,7 @@ impl Command {
             Command::Nack(c) => p.plan_nack(ov, c),
             Command::Renew(c) => p.plan_renew(ov, c),
             Command::DlqHead(c) => p.plan_dlq_head(ov, c),
+            Command::Kv(c) => p.plan_kv(ov, c),
         }
     }
 }
@@ -626,6 +657,9 @@ struct PlanOutput {
     slots: Vec<Slot>,
     /// The request-id expiry step (§10.1) was included in `entry`.
     expired: bool,
+    /// The KV expiry sweep (WP-2.2) ran this cycle — whether or not it found
+    /// anything due, so the driver clears its flag either way.
+    kv_swept: bool,
 }
 
 /// Plan one cycle inside ONE store read transaction (I15: on the blocking
@@ -644,6 +678,7 @@ fn plan_cycle_blocking<S: Store>(
     cfg: PlanConfig,
     wall_us: i64,
     expire_window_us: Option<i64>,
+    kv_sweep_limit: Option<usize>,
 ) -> crate::rsm::store::Result<PlanOutput> {
     // P4: the rings this batch's wildcard pops walk — the only part of
     // `Derived` the planner reads. A discovery pop spans queues: every ring.
@@ -784,6 +819,27 @@ fn plan_cycle_blocking<S: Store>(
                 .record_dur(start.elapsed());
         }
 
+        // WP-2.2 KV expiry sweep (026's `kv_expire_step_v1` as a leader loop):
+        // one bounded step, planned AFTER this cycle's commands so it sees
+        // their writes in the overlay (a key a command just rewrote is not
+        // swept), and one command with its own minted id, answered by nobody.
+        // A store refusal skips the step until the next tick.
+        let mut kv_swept = false;
+        if let Some(limit) = kv_sweep_limit {
+            kv_swept = true;
+            if let Ok(effects) = planner.plan_kv_sweep(&ov, limit) {
+                if !effects.is_empty() {
+                    let id = crate::util::uuidv7_bytes();
+                    if entry
+                        .add_command(id, Outcome::Empty, effects.clone())
+                        .is_ok()
+                    {
+                        ov.apply_effects(&effects);
+                    }
+                }
+            }
+        }
+
         // §10.1 request-id expiry: a leader-loop step is one command with its
         // own minted id (see `Entry::validate`), answered by nobody.
         let mut expired = false;
@@ -812,6 +868,7 @@ fn plan_cycle_blocking<S: Store>(
             entry,
             slots,
             expired,
+            kv_swept,
         })
     })
 }
@@ -886,6 +943,11 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
         // The first tick fires immediately; swallow it so the driver does not
         // propose an expiry step before it has done any work.
         expire.tick().await;
+        // WP-2.2: the KV expiry sweep's cadence, on the same pattern.
+        let mut kv_sweep =
+            tokio::time::interval(Duration::from_millis(self.cfg.kv_sweep_every_ms.max(1)));
+        kv_sweep.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        kv_sweep.tick().await;
 
         // Capture what the watch and metrics say BEFORE the fields move into
         // `RunState`.
@@ -920,6 +982,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             paused: !role.is_leader(),
             closing: false,
             expire_due: false,
+            kv_sweep_due: false,
             stopped: false,
             wake_reason: "init",
             wake_seq: 0,
@@ -956,6 +1019,10 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                 _ = expire.tick() => {
                     st.note_wake("expire");
                     st.expire_due = true;
+                }
+                _ = kv_sweep.tick() => {
+                    st.note_wake("kv_sweep");
+                    st.kv_sweep_due = true;
                 }
                 _ = tokio::time::sleep(Duration::from_millis(HOLD_POLL_MS)),
                     if st.holding_until.is_some() =>
@@ -1027,6 +1094,9 @@ struct RunState<S: Store, R: Replicator> {
     paused: bool,
     closing: bool,
     expire_due: bool,
+    /// WP-2.2: the KV expiry sweep is due (set by its tick, cleared once a
+    /// cycle has run it).
+    kv_sweep_due: bool,
     stopped: bool,
     /// PERF-K trace: what the last `select!` wake was (`arrival` / `result` /
     /// `applied_notify` / `expire` / `hold` / `role`), for the `CYCLETRACE`
@@ -1054,7 +1124,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             && !self.paused
             && self.holding_until.is_none()
             && self.unresolved() < self.cfg.pipeline
-            && (!self.queue.is_empty() || (self.expire_due && !self.closing))
+            && (!self.queue.is_empty() || ((self.expire_due || self.kv_sweep_due) && !self.closing))
     }
 
     fn should_exit(&self) -> bool {
@@ -1093,7 +1163,8 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     async fn plan_cycle(&mut self) {
         let batch = self.drain_batch();
         let expire = self.expire_due && !self.closing;
-        if batch.is_empty() && !expire {
+        let kv_sweep = self.kv_sweep_due && !self.closing;
+        if batch.is_empty() && !expire && !kv_sweep {
             return;
         }
         // PERF-K trace: capture the before-state and the inter-cycle gap now
@@ -1185,6 +1256,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
 
         let wall_us = now_micros();
         let expire_window_us = expire.then(|| self.cfg.request_id_window_s as i64 * 1_000_000);
+        let kv_sweep_limit = kv_sweep.then_some(self.cfg.kv_sweep_limit);
         let store = self.store.clone();
         let cfg = self.cfg.plan.clone();
         let front = self.front.clone();
@@ -1202,10 +1274,16 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 cfg,
                 wall_us,
                 expire_window_us,
+                kv_sweep_limit,
             )
         })
         .await;
 
+        // The KV sweep is best-effort and self-rescheduling: a cycle that could
+        // not plan leaves it to the next tick rather than spinning on it.
+        if kv_sweep && !matches!(planned, Ok(Ok(_))) {
+            self.kv_sweep_due = false;
+        }
         let out = match planned {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => {
@@ -1231,6 +1309,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
 
         if out.expired {
             self.expire_due = false;
+        }
+        if out.kv_swept {
+            self.kv_sweep_due = false;
         }
 
         // §13.5 `planner.planned`: effects and outcomes exist in the overlay;

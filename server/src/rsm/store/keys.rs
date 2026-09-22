@@ -463,6 +463,80 @@ pub fn counter_partition_prefix(p: Pid) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// kv (024, WP-2.2)
+// ---------------------------------------------------------------------------
+
+/// `(tenant, ns)`: every key of one namespace, in key byte order.
+pub fn kv_ns_prefix(tenant: &str, ns: &str) -> Vec<u8> {
+    let mut k = with(tenant.len() + ns.len() + 4);
+    push_name(&mut k, tenant);
+    push_name(&mut k, ns);
+    k
+}
+
+/// `(tenant)`: every key of every namespace of one tenant, namespace by
+/// namespace (the console's namespace selector walks it).
+pub fn kv_tenant_prefix(tenant: &str) -> Vec<u8> {
+    let mut k = with(tenant.len() + 2);
+    push_name(&mut k, tenant);
+    k
+}
+
+/// `(tenant, ns, key)`. The tenant and the namespace are escaped and
+/// terminated like every other name; the KEY is the raw, UNTERMINATED tail.
+/// That is what makes the SQL's two ordering promises structural here:
+///
+/// - inside one namespace the store order IS the byte order of the key
+///   strings — `COLLATE "C"`, the order getPrefix pages in and the order its
+///   `after` cursor is exclusive in;
+/// - a key PREFIX is a store-key prefix (`kv_ns_prefix ‖ prefix`), so a prefix
+///   read is one range scan, with no escaping in the way and no metacharacter
+///   (024's `starts_with`, never a LIKE).
+///
+/// The tail needs no terminator because nothing follows it, and no escape
+/// because the prefix before it is self-delimiting.
+pub fn kv(tenant: &str, ns: &str, key: &str) -> Vec<u8> {
+    let mut k = kv_ns_prefix(tenant, ns);
+    k.extend_from_slice(key.as_bytes());
+    k
+}
+
+/// The length [`kv`] would produce, without building it: the planner and the
+/// receiver refuse a key the store could never hold BEFORE it reaches apply
+/// (R-108), where a `KeyTooLong` would stop the node.
+pub fn kv_len(tenant: &str, ns: &str, key: &str) -> usize {
+    fn name_len(s: &str) -> usize {
+        s.len() + s.bytes().filter(|b| *b == 0).count() + 2
+    }
+    name_len(tenant) + name_len(ns) + key.len()
+}
+
+/// `(tenant, ns, key)` of a [`kv`] key.
+pub fn kv_parts(k: &[u8]) -> Option<(String, String, String)> {
+    let (tenant, at) = read_name(k, 0)?;
+    let (ns, at) = read_name(k, at)?;
+    let key = std::str::from_utf8(k.get(at..)?).ok()?.to_string();
+    Some((tenant, ns, key))
+}
+
+/// `(expires_at_us, version)` → the [`kv`] key: the expiry index, oldest
+/// first. The version is unique per write (`kv_version_base + ordinal`, I18),
+/// so two rows expiring in the same microsecond never share an index key.
+pub fn kv_expiry(expires_at_us: i64, version: u64) -> Vec<u8> {
+    let mut k = with(16);
+    push_i64(&mut k, expires_at_us);
+    push_u64(&mut k, version);
+    k
+}
+
+pub fn kv_expiry_parts(k: &[u8]) -> Option<(i64, u64)> {
+    if k.len() != 16 {
+        return None;
+    }
+    Some((read_i64(k, 0)?, read_u64(k, 8)?))
+}
+
+// ---------------------------------------------------------------------------
 // node-local (§6.2)
 // ---------------------------------------------------------------------------
 
@@ -608,6 +682,30 @@ mod tests {
             request_expiry_parts(&request_expiry(-7, &id)),
             Some((-7, id))
         );
+    }
+
+    #[test]
+    fn kv_keys_order_by_key_bytes_inside_a_namespace() {
+        // COLLATE "C": byte order, and a namespace never bleeds into its
+        // neighbour ("a" vs "ab") nor a tenant into another.
+        let mut keys = vec!["b", "a", "a%b", "a%bc", "ab", "a_b", "\u{e9}", "Z"];
+        let mut enc: Vec<(Vec<u8>, &str)> = keys.iter().map(|k| (kv("t", "ns", k), *k)).collect();
+        enc.sort();
+        keys.sort();
+        assert_eq!(enc.iter().map(|(_, k)| *k).collect::<Vec<_>>(), keys);
+        assert!(!kv("t", "ab", "x").starts_with(&kv_ns_prefix("t", "a")));
+        assert!(!kv("tt", "a", "x").starts_with(&kv_tenant_prefix("t")));
+        assert!(kv("t", "a", "x").starts_with(&kv_tenant_prefix("t")));
+        // A key prefix is a store-key prefix.
+        assert!(kv("t", "ns", "order/9f1/items").starts_with(&kv("t", "ns", "order/")));
+        assert_eq!(kv_len("t", "ns", "order/9"), kv("t", "ns", "order/9").len());
+        assert_eq!(kv_len("t\0", "ns", "k"), kv("t\0", "ns", "k").len());
+        assert_eq!(
+            kv_parts(&kv("t", "ns", "a/b")),
+            Some(("t".into(), "ns".into(), "a/b".into()))
+        );
+        assert_eq!(kv_expiry_parts(&kv_expiry(-3, 9)), Some((-3, 9)));
+        assert!(kv_expiry(1, u64::MAX) < kv_expiry(2, 0), "oldest first");
     }
 
     #[test]

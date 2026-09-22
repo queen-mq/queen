@@ -97,7 +97,12 @@ mod tag {
     pub const ACK: u16 = 3;
     pub const RENEW: u16 = 4;
     pub const DLQ_HEAD: u16 = 5;
-    // 6..=0xEFFF: reserved for the typed outcomes of phase 2 (transaction, KV,
+    /// WP-2.2: the KV surface (024). The first typed outcome of phase 2. A new
+    /// TAG, not a new shape of an old one, so it is minted at catalogue
+    /// version 1 like every outcome this build knows: a build without it stops
+    /// on [`super::CodecError::UnknownOutcome`] (I16) rather than misreading it.
+    pub const KV: u16 = 6;
+    // 7..=0xEFFF: reserved for the typed outcomes of phase 2 (transaction,
     // timers, streams, admin).
     /// The first tag a [`super::Placeholder`] may carry.
     pub const PLACEHOLDER_MIN: u16 = 0xF000;
@@ -112,8 +117,8 @@ mod tag {
 /// number arrived.
 fn outcome_tag_is_known(tag: u16) -> bool {
     match tag {
-        tag::EMPTY | tag::PUSH | tag::POP | tag::ACK | tag::RENEW | tag::DLQ_HEAD => true,
-        // 6..=0xEFFF are reserved for the typed outcomes of phase 2 and do not
+        tag::EMPTY | tag::PUSH | tag::POP | tag::ACK | tag::RENEW | tag::DLQ_HEAD | tag::KV => true,
+        // 7..=0xEFFF are reserved for the typed outcomes of phase 2 and do not
         // exist yet; the placeholder range does.
         other => other >= tag::PLACEHOLDER_MIN,
     }
@@ -134,7 +139,7 @@ fn outcome_tag_is_known(tag: u16) -> bool {
 /// versions whose decoder is compiled in beside the new one, one tag at a time.
 fn outcome_version_is_known(tag: u16, version: u16) -> bool {
     match tag {
-        tag::EMPTY | tag::PUSH | tag::POP | tag::ACK | tag::RENEW | tag::DLQ_HEAD => {
+        tag::EMPTY | tag::PUSH | tag::POP | tag::ACK | tag::RENEW | tag::DLQ_HEAD | tag::KV => {
             version == super::effect::VERSION_1
         }
         other if other >= tag::PLACEHOLDER_MIN => version == super::effect::VERSION_1,
@@ -162,6 +167,9 @@ pub enum Outcome {
     Renew(RenewOutcome),
     /// `log_dlq_head_v1` (005).
     DlqHead(DlqHeadOutcome),
+    /// `kv_apply_v1` (024), WP-2.2: per-op verdicts, index-aligned with the
+    /// call's ops.
+    Kv(KvOutcome),
     /// The generic placeholder for the commands phase 1 does not plan
     /// (transactions, KV, timers, streams, admin). The planner that owns a
     /// surface replaces its uses with a typed variant at a tag below
@@ -321,6 +329,213 @@ pub struct DlqHeadOutcome {
     pub lease_released: bool,
 }
 
+/// The closed `reason` taxonomy of a KV write that did not apply (024 §5.3,
+/// §5.4). Permanent codes: the byte is in recorded outcomes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum KvReason {
+    /// `expect:0` (putIfAbsent) against a live row, or delete `expect:0`.
+    Exists = 0,
+    /// `expect:N>0` (or a plain delete) against an absent or expired row.
+    Absent = 1,
+    /// `expect:N>0` against a live row at another version.
+    Version = 2,
+    /// `incr` past `min`/`max`.
+    Limit = 3,
+    /// `incr` over a LIVE non-numeric value.
+    Type = 4,
+}
+
+impl KvReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KvReason::Exists => "exists",
+            KvReason::Absent => "absent",
+            KvReason::Version => "version",
+            KvReason::Limit => "limit",
+            KvReason::Type => "type",
+        }
+    }
+
+    fn from_u8(v: u8) -> Option<KvReason> {
+        Some(match v {
+            0 => KvReason::Exists,
+            1 => KvReason::Absent,
+            2 => KvReason::Version,
+            3 => KvReason::Limit,
+            4 => KvReason::Type,
+            _ => return None,
+        })
+    }
+}
+
+/// A row as a plan-time `get` saw it (see [`KvOpOutcome::Got`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KvGot {
+    /// The value JSON, raw.
+    pub value: Vec<u8>,
+    pub version: u64,
+    pub expires_at_us: Option<i64>,
+    pub updated_at_us: i64,
+}
+
+/// A KV write's verdict (put, putIfAbsent, delete, incr — 024's uniform
+/// return, WITH the current value and version even when it did not apply).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KvWrite {
+    pub applied: bool,
+    /// `None` exactly when `applied`.
+    pub reason: Option<KvReason>,
+    /// The value the answer carries, as JSON text: a loser's CURRENT live
+    /// value, the value an applied delete removed, an incr's resulting (or,
+    /// refused, current) number. `None` renders the op's OWN value for an
+    /// applied put (the receiver holds it; it is not copied into the log) and
+    /// JSON `null` everywhere else.
+    pub value: Option<Vec<u8>>,
+    /// The version the answer carries: the new one for an applied write, the
+    /// removed row's for an applied delete, the effective current one (0 =
+    /// absent or expired) for a loser.
+    pub version: u64,
+}
+
+/// One op of a KV call, as the planner decided it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KvOpOutcome {
+    /// A read the RECEIVER evaluates against its own applied state once the
+    /// entry has applied (get, getMany, getPrefix). Read results are payload,
+    /// and payload never rides in an outcome (D7, §5.4) — it would be written
+    /// into the log and kept in `request_ids` for the whole retry window.
+    Deferred,
+    /// A single-key `get` that a write of the SAME key follows in the call's
+    /// apply order: 024 evaluates it BEFORE that write, which a read after
+    /// apply could no longer reproduce, so its answer is fixed at plan time.
+    /// `None` = not found (absent or expired).
+    Got(Option<KvGot>),
+    Write(KvWrite),
+}
+
+/// A write that lost its precondition with `"required": true` (024 §6.1 point
+/// 5): the WHOLE call wrote nothing, and the answer is 024's DETAIL — the
+/// receiver adds `op`, `ns` and `key` from the op at `index`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KvPrecondition {
+    /// The op's position in the call (0-based, input order).
+    pub index: u32,
+    pub reason: KvReason,
+    pub version: u64,
+    /// As [`KvWrite::value`]: `None` renders JSON `null`.
+    pub value: Option<Vec<u8>>,
+}
+
+/// `kv_apply_v1`'s answer (024 §6.4): index-aligned with the call's ops, or the
+/// one lost `required` precondition that aborted the call.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct KvOutcome {
+    /// Empty when `failed` is set.
+    pub results: Vec<KvOpOutcome>,
+    pub failed: Option<KvPrecondition>,
+}
+
+fn write_opt_blob(w: &mut Writer, v: Option<&[u8]>) {
+    match v {
+        Some(b) => {
+            w.u8(1);
+            w.blob(b);
+        }
+        None => w.u8(0),
+    }
+}
+
+fn read_opt_blob(r: &mut Reader<'_>, f: &'static str) -> Result<Option<Vec<u8>>, CodecError> {
+    match r.u8(f)? {
+        0 => Ok(None),
+        1 => Ok(Some(r.blob(f)?)),
+        _ => Err(CodecError::Field(f)),
+    }
+}
+
+fn read_kv_reason(r: &mut Reader<'_>) -> Result<KvReason, CodecError> {
+    KvReason::from_u8(r.u8("kv reason")?).ok_or(CodecError::Field("kv reason"))
+}
+
+impl KvOutcome {
+    fn encode_into(&self, w: &mut Writer) {
+        w.u32(self.results.len() as u32);
+        for res in &self.results {
+            match res {
+                KvOpOutcome::Deferred => w.u8(0),
+                KvOpOutcome::Got(None) => w.u8(1),
+                KvOpOutcome::Got(Some(g)) => {
+                    w.u8(2);
+                    w.blob(&g.value);
+                    w.u64(g.version);
+                    w.opt_i64(g.expires_at_us);
+                    w.i64(g.updated_at_us);
+                }
+                KvOpOutcome::Write(k) => {
+                    w.u8(3);
+                    w.bool(k.applied);
+                    w.u8(k.reason.map(|r| r as u8).unwrap_or(0xFF));
+                    write_opt_blob(w, k.value.as_deref());
+                    w.u64(k.version);
+                }
+            }
+        }
+        match &self.failed {
+            None => w.u8(0),
+            Some(f) => {
+                w.u8(1);
+                w.u32(f.index);
+                w.u8(f.reason as u8);
+                w.u64(f.version);
+                write_opt_blob(w, f.value.as_deref());
+            }
+        }
+    }
+
+    fn decode_from(r: &mut Reader<'_>) -> Result<KvOutcome, CodecError> {
+        let n = r.u32("kv results")?;
+        let mut results = Vec::with_capacity(r.cap_hint(n, 1));
+        for _ in 0..n {
+            results.push(match r.u8("kv result kind")? {
+                0 => KvOpOutcome::Deferred,
+                1 => KvOpOutcome::Got(None),
+                2 => KvOpOutcome::Got(Some(KvGot {
+                    value: r.blob("kv got value")?,
+                    version: r.u64("kv got version")?,
+                    expires_at_us: r.opt_i64("kv got expires_at")?,
+                    updated_at_us: r.i64("kv got updated_at")?,
+                })),
+                3 => {
+                    let applied = r.bool("kv applied")?;
+                    let reason = match r.u8("kv reason")? {
+                        0xFF => None,
+                        v => Some(KvReason::from_u8(v).ok_or(CodecError::Field("kv reason"))?),
+                    };
+                    KvOpOutcome::Write(KvWrite {
+                        applied,
+                        reason,
+                        value: read_opt_blob(r, "kv value")?,
+                        version: r.u64("kv version")?,
+                    })
+                }
+                _ => return Err(CodecError::Field("kv result kind")),
+            });
+        }
+        let failed = match r.u8("kv failed")? {
+            0 => None,
+            1 => Some(KvPrecondition {
+                index: r.u32("kv failed index")?,
+                reason: read_kv_reason(r)?,
+                version: r.u64("kv failed version")?,
+                value: read_opt_blob(r, "kv failed value")?,
+            }),
+            _ => return Err(CodecError::Field("kv failed")),
+        };
+        Ok(KvOutcome { results, failed })
+    }
+}
+
 impl Outcome {
     fn tag(&self) -> u16 {
         match self {
@@ -330,6 +545,7 @@ impl Outcome {
             Outcome::Ack(_) => tag::ACK,
             Outcome::Renew(_) => tag::RENEW,
             Outcome::DlqHead(_) => tag::DLQ_HEAD,
+            Outcome::Kv(_) => tag::KV,
             Outcome::Placeholder(p) => p.tag(),
         }
     }
@@ -351,7 +567,8 @@ impl Outcome {
             | Outcome::Pop(_)
             | Outcome::Ack(_)
             | Outcome::Renew(_)
-            | Outcome::DlqHead(_) => super::effect::VERSION_1,
+            | Outcome::DlqHead(_)
+            | Outcome::Kv(_) => super::effect::VERSION_1,
             Outcome::Placeholder(p) => p.version(),
         }
     }
@@ -456,6 +673,7 @@ impl Outcome {
                 w.i64(d.committed);
                 w.bool(d.lease_released);
             }
+            Outcome::Kv(k) => k.encode_into(&mut w),
             Outcome::Placeholder(p) => {
                 return p.body().to_vec();
             }
@@ -557,6 +775,7 @@ impl Outcome {
                 committed: r.i64("committed")?,
                 lease_released: r.bool("lease_released")?,
             }),
+            tag::KV => Outcome::Kv(KvOutcome::decode_from(&mut r)?),
             other => return Err(CodecError::UnknownOutcome(other)),
         };
         if !r.done() {

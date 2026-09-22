@@ -608,6 +608,23 @@ pub(crate) fn build_raft_router(
             "/api/v1/lease/:leaseId/extend",
             post(super::handle_lease_extend),
         )
+        // --------------------------------------------- kv → facade (WP-2.2)
+        // The handlers are the Postgres ones: each branches to the facade after
+        // the shared edge ceilings and ladder. Registered exactly as main.rs
+        // does — the static console paths are under `/api/v1/resources`, and
+        // no literal segment may ever sit under `/api/v1/kv/:ns/`.
+        .route("/api/v1/kv", post(super::handle_kv_batch))
+        .route(
+            "/api/v1/kv/:ns/*key",
+            get(super::handle_kv_get)
+                .put(super::handle_kv_put)
+                .delete(super::handle_kv_delete),
+        )
+        .route(
+            "/api/v1/resources/kv/namespaces",
+            get(super::handle_kv_namespaces),
+        )
+        .route("/api/v1/resources/kv/list", post(super::handle_kv_list))
         // ---------------------------------------------- observability (no pool)
         .route("/health", get(handle_health))
         .route("/metrics", get(super::handle_metrics))
@@ -656,9 +673,9 @@ pub(crate) fn build_raft_router(
 }
 
 /// The fallback for the raft router: any `/api/` or `/streams/` route that phase
-/// 1 does not serve answers `503 raft_phase1_unsupported` (transaction, KV,
-/// timers, streams, configure beyond implicit creation, admin, analytics, …);
-/// anything else is the dashboard SPA / static assets.
+/// 1 does not serve answers `503 raft_phase1_unsupported` (transaction, timers,
+/// streams, configure beyond implicit creation, admin, analytics, …; KV is
+/// served since WP-2.2); anything else is the dashboard SPA / static assets.
 #[cfg(feature = "server")]
 async fn raft_fallback(method: Method, uri: Uri) -> Response {
     let path = uri.path();
@@ -806,6 +823,186 @@ mod tests {
             text.contains("\"storageReady\":false"),
             "phase-1 storage is not ready: {text}"
         );
+    }
+
+    /// PLAN_RAFT.md WP-2.2: the KV routes, through the REAL handlers, answered
+    /// by the REAL state machine. The builder hook is not registered in the
+    /// unit-test binary (the seam tests above keep the stub), so the facade is
+    /// swapped into a raft `AppState` by hand. Every answer here is the wire
+    /// answer the Postgres class gives for the same call.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn kv_routes_are_served_by_the_state_machine_in_raft_mode() {
+        use std::collections::HashMap;
+
+        use crate::rsm::facade::real::RaftFacade;
+        use crate::rsm::facade::RsmBuildCtx;
+
+        std::env::set_var("QUEEN_RAFT_MAP_BYTES", (256usize << 20).to_string());
+        let dir = std::env::temp_dir().join(format!("queen-raft-kv-routes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let facade = Arc::new(
+            RaftFacade::open(&RsmBuildCtx {
+                data_dir: dir.display().to_string(),
+                notifier: crate::notify::Notifier::new(false),
+            })
+            .expect("open the facade"),
+        );
+        let mut s = Arc::try_unwrap(raft_state())
+            .ok()
+            .expect("a fresh raft state has one owner");
+        s.rsm = facade.clone();
+        let st = Arc::new(s);
+        let t = || Extension(Tenant::default_tenant());
+        let q = || Query(HashMap::<String, String>::new());
+        let path = |k: &str| Path(("orders".to_string(), k.to_string()));
+
+        // PUT /api/v1/kv/:ns/*key — a key with slashes.
+        let (status, text) = body_of(
+            super::super::handle_kv_put(
+                State(st.clone()),
+                t(),
+                path("order/9f1/items"),
+                q(),
+                Bytes::from_static(br#"{"value":{"n":1},"ttlSeconds":60}"#),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let put: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(put["applied"], true, "{text}");
+        let v = put["version"].as_u64().expect("version");
+
+        // GET: the element, and the ETag of its version.
+        let resp =
+            super::super::handle_kv_get(State(st.clone()), t(), path("order/9f1/items"), q()).await;
+        let etag = resp
+            .headers()
+            .get(axum::http::header::ETAG)
+            .map(|h| h.to_str().unwrap().to_string());
+        let (status, text) = body_of(resp).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert_eq!(etag.as_deref(), Some(format!("\"{v}\"").as_str()));
+        let got: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(got["found"], true);
+        assert_eq!(got["value"], serde_json::json!({"n":1}));
+
+        // A miss is 200 with found:false and no ETag.
+        let resp = super::super::handle_kv_get(State(st.clone()), t(), path("nope"), q()).await;
+        assert!(resp.headers().get(axum::http::header::ETAG).is_none());
+        let (status, text) = body_of(resp).await;
+        assert_eq!(
+            (status, text.contains("\"found\":false")),
+            (StatusCode::OK, true),
+            "{text}"
+        );
+
+        // POST /api/v1/kv: the batch envelope, a CAS loser answered 200.
+        let body = format!(
+            r#"{{"operations":[
+                {{"op":"put","ns":"orders","key":"order/9f1/items","value":2,"ttlSeconds":60,"expect":{}}},
+                {{"op":"incr","ns":"ctr","key":"hits","delta":1,"forever":true}},
+                {{"op":"getPrefix","ns":"orders","prefix":"order/"}}
+            ]}}"#,
+            v + 1000
+        );
+        let (status, text) =
+            body_of(super::super::handle_kv_batch(State(st.clone()), t(), Bytes::from(body)).await)
+                .await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let b: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let r = b["results"].as_array().expect("results");
+        assert_eq!(r[0]["applied"], false);
+        assert_eq!(r[0]["reason"], "version");
+        assert_eq!(r[0]["value"], serde_json::json!({"n":1}));
+        assert_eq!(r[1]["value"], 1);
+        assert_eq!(r[2]["rows"][0]["key"], "order/9f1/items");
+
+        // 024's shape refusal: 400 with the stable reason.
+        let (status, text) = body_of(
+            super::super::handle_kv_batch(
+                State(st.clone()),
+                t(),
+                Bytes::from_static(br#"[{"op":"put","ns":"orders","key":"k","value":1}]"#),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+        assert!(text.contains("\"error\":\"kv_bad_request\""), "{text}");
+        assert!(text.contains("kv_expiry_not_specified"), "{text}");
+
+        // A lost `required` precondition: 200, ok:false, the DETAIL's fields.
+        let (status, text) = body_of(
+            super::super::handle_kv_batch(
+                State(st.clone()),
+                t(),
+                Bytes::from_static(
+                    br#"[{"op":"putIfAbsent","ns":"orders","key":"order/9f1/items","value":0,"forever":true,"required":true}]"#,
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let p: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(p["ok"], false);
+        assert_eq!(p["reason"], "kv_precondition");
+        assert_eq!(p["failedIndex"], 0);
+        assert_eq!(p["kvReason"], "exists");
+        assert_eq!(p["version"].as_u64(), Some(v));
+
+        // The console reads.
+        let (status, text) =
+            body_of(super::super::handle_kv_namespaces(State(st.clone()), t(), q()).await).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let ns: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            ns,
+            serde_json::json!({"namespaces":[
+                {"namespace":"ctr","keys":1},{"namespace":"orders","keys":1}]})
+        );
+        let (status, text) = body_of(
+            super::super::handle_kv_list(
+                State(st.clone()),
+                t(),
+                q(),
+                Bytes::from_static(br#"{"namespace":"orders","includeExpired":true}"#),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let l: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(l["rows"][0]["key"], "order/9f1/items");
+        assert_eq!(l["rows"][0]["expired"], false);
+        assert!(l["rows"][0]["expiresAt"].as_str().unwrap().ends_with('Z'));
+
+        // DELETE, then the key is gone.
+        let (status, text) = body_of(
+            super::super::handle_kv_delete(
+                State(st.clone()),
+                t(),
+                path("order/9f1/items"),
+                q(),
+                Bytes::new(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert!(text.contains("\"applied\":true"), "{text}");
+        let (_, text) = body_of(
+            super::super::handle_kv_get(State(st.clone()), t(), path("order/9f1/items"), q()).await,
+        )
+        .await;
+        assert!(text.contains("\"found\":false"), "{text}");
+
+        drop(st);
+        if let Ok(f) = Arc::try_unwrap(facade) {
+            f.shutdown().await;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
