@@ -147,6 +147,33 @@ pub const DEFAULT_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 /// into its own file.
 const MIN_SEGMENT_BYTES: u64 = FILE_HEADER_LEN + 1;
 
+/// Zero-filled preallocation ahead of the active file's logical end. On
+/// ext4/xfs an `fdatasync` that grows the file (new size, newly allocated
+/// blocks) commits the filesystem journal: ~24 KB of device writes and a second
+/// cache flush per call, measured at 62% of all device bytes on a 1000-partition
+/// queue. An `fdatasync` that overwrites already-written blocks inside the
+/// file's size commits nothing. `fallocate` does not help: the first write into
+/// an unwritten extent converts it, which is itself a journaled change, so the
+/// run is written with real zeros. Zeros cost one extra write of every log byte,
+/// so preallocation pays only while the log's bytes-per-sync is under about one
+/// journal commit — it is adaptive, per log, and off under [`Fsync::Off`].
+const PREALLOC_CHUNK: u64 = 1024 * 1024;
+
+/// The zero run's size: [`PREALLOC_CHUNK`], or `QUEEN_RAFT_QLOG_PREALLOC_KB`
+/// (0 = never preallocate). The run is refilled when less than a quarter of it
+/// is left ahead of the logical end.
+fn prealloc_chunk() -> u64 {
+    static CHUNK: OnceLock<u64> = OnceLock::new();
+    *CHUNK.get_or_init(|| {
+        std::env::var("QUEEN_RAFT_QLOG_PREALLOC_KB")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map_or(PREALLOC_CHUNK, |kb| kb * 1024)
+    })
+}
+/// Preallocate only while the log's bytes-per-sync estimate is below this.
+const PREALLOC_MAX_BYTES_PER_SYNC: u64 = 32 * 1024;
+
 /// How the group fsync reaches the platter. Mirrors
 /// [`crate::rsm::replicator::log::Fsync`] and
 /// [`crate::rsm::segments::FsyncMode`], with a test-only `Off`.
@@ -466,6 +493,20 @@ pub struct QLog {
     /// (`u64::MAX`); a log opened by a [`set::QLogSet`] shares the set's handle,
     /// which the apply thread raises to the durable index at each durable point.
     floor: Arc<AtomicU64>,
+    /// The active file's physical end when a zero-filled preallocation runs past
+    /// its logical end (`files.last().bytes`); at or below the logical end when
+    /// there is none. Reset whenever the active file is created, cut or reopened.
+    prealloc_end: u64,
+    /// Syncs of this log: bumped by [`QLog::sync`] and by
+    /// [`QLog::active_clone`] (the set's out-of-lock fsync), hence atomic.
+    syncs: AtomicU64,
+    /// `syncs` and `written_total` when the bytes-per-sync estimate last moved.
+    seen_syncs: u64,
+    written_at_seen: u64,
+    /// Bytes appended to this log since open, across rolls.
+    written_total: u64,
+    /// EWMA of bytes appended per sync; 0 until the first sync is seen.
+    bytes_per_sync: u64,
 }
 
 impl QLog {
@@ -523,7 +564,12 @@ impl QLog {
                     let f = OpenOptions::new().write(true).open(&path)?;
                     f.set_len(scan.valid_bytes)?;
                     fsync_file(&f, opts.fsync)?;
-                    rec.truncated_tail = true;
+                    // A zero length word where the next record would start is
+                    // the preallocated run (or a record that never reached the
+                    // disk): cut it all the same, but it is not a torn record.
+                    let zero_tail =
+                        matches!(scan.torn, Some((_, record::RecordError::BadLength(0))));
+                    rec.truncated_tail |= !zero_tail;
                 }
                 let mut fh = OpenOptions::new().read(true).write(true).open(&path)?;
                 fh.seek(SeekFrom::Start(scan.valid_bytes))?;
@@ -602,6 +648,8 @@ impl QLog {
         rec.records = files.iter().map(|f| f.records).sum();
 
         let cache = Arc::new(ReadCache::new(dir.clone()));
+        // The active file was just cut to its last verified record.
+        let prealloc_end = files.last().map_or(0, |m| m.bytes);
         let qlog = QLog {
             dir,
             queue_id,
@@ -612,6 +660,12 @@ impl QLog {
             sealed,
             cache,
             floor: Arc::new(AtomicU64::new(u64::MAX)),
+            prealloc_end,
+            syncs: AtomicU64::new(0),
+            seen_syncs: 0,
+            written_at_seen: 0,
+            written_total: 0,
+            bytes_per_sync: 0,
         };
         tracing::info!(
             target: "rsm",
@@ -774,6 +828,7 @@ impl QLog {
 
         let f = self.active.as_mut().expect("active file");
         f.write_all(&buf)?;
+        self.prealloc_after_write(base + buf.len() as u64, buf.len() as u64)?;
 
         // Bookkeeping advances only after the write returns (the sync is
         // separate — [`QLog::sync`]). Recovery rebuilds the real valid length
@@ -803,7 +858,48 @@ impl QLog {
     /// only the active file's tail is ever un-synced.
     pub fn sync(&mut self) -> io::Result<()> {
         if let Some(f) = self.active.as_ref() {
+            self.syncs.fetch_add(1, Ordering::Relaxed);
             fsync_file(f, self.opts.fsync)?;
+        }
+        Ok(())
+    }
+
+    /// After a write that moved the logical end to `end` (`added` bytes):
+    /// refresh the bytes-per-sync estimate, then, while it is small, keep at
+    /// a quarter of [`prealloc_chunk`] zero-filled past `end` so the next
+    /// syncs overwrite blocks the file already has (see [`PREALLOC_CHUNK`]).
+    /// The zeros are written with `pwrite`, so the append cursor stays at `end`.
+    fn prealloc_after_write(&mut self, end: u64, added: u64) -> io::Result<()> {
+        let syncs = self.syncs.load(Ordering::Relaxed);
+        if syncs > self.seen_syncs {
+            // Every byte counted here was written before those syncs ran.
+            let per =
+                ((self.written_total - self.written_at_seen) / (syncs - self.seen_syncs)).max(1);
+            self.bytes_per_sync = if self.bytes_per_sync == 0 {
+                per
+            } else {
+                ((3 * self.bytes_per_sync + per) / 4).max(1)
+            };
+            self.seen_syncs = syncs;
+            self.written_at_seen = self.written_total;
+        }
+        self.written_total += added;
+        let chunk = prealloc_chunk();
+        if chunk == 0
+            || self.opts.fsync == Fsync::Off
+            || self.bytes_per_sync == 0
+            || self.bytes_per_sync >= PREALLOC_MAX_BYTES_PER_SYNC
+            || end + chunk / 4 <= self.prealloc_end
+        {
+            return Ok(());
+        }
+        // No run past the roll size: the next write rolls there anyway.
+        let target = (end + chunk).min(self.opts.segment_bytes.max(end));
+        let from = self.prealloc_end.max(end);
+        if target > from {
+            let f = self.active.as_ref().expect("active file");
+            zero_fill(f, from, target)?;
+            self.prealloc_end = target;
         }
         Ok(())
     }
@@ -817,7 +913,11 @@ impl QLog {
     /// written yet.
     pub(crate) fn active_clone(&self) -> io::Result<Option<File>> {
         match self.active.as_ref() {
-            Some(f) => Ok(Some(f.try_clone()?)),
+            Some(f) => {
+                // The caller takes this handle to fsync it: count the sync.
+                self.syncs.fetch_add(1, Ordering::Relaxed);
+                Ok(Some(f.try_clone()?))
+            }
             None => Ok(None),
         }
     }
@@ -845,6 +945,7 @@ impl QLog {
         let mut f = OpenOptions::new().read(true).write(true).open(&path)?;
         f.seek(SeekFrom::Start(FILE_HEADER_LEN))?;
         self.active = Some(f);
+        self.prealloc_end = FILE_HEADER_LEN;
         self.files.push(FileMeta::empty(id, first_seq));
         self.active_index.open(id);
         Ok(())
@@ -862,6 +963,14 @@ impl QLog {
         // reach the platter — otherwise its unsynced tail would seal, and a power
         // loss would corrupt it. A no-op under `Fsync::Off`.
         if let Some(f) = self.active.as_ref() {
+            // A sealed file ends at its last record: cut the zero run first (the
+            // `.qidx` indexes exactly the logical length, and a sealed file's
+            // scan treats anything past its last record as corruption). The
+            // size change rides the same fsync.
+            let logical = self.files.last().expect("active meta").bytes;
+            if self.prealloc_end > logical {
+                f.set_len(logical)?;
+            }
             fsync_file(f, self.opts.fsync)?;
         }
         let (old_id, old_bytes) = {
@@ -1405,6 +1514,7 @@ impl QLog {
             // Durable BEFORE any new record reuses these seqs.
             fsync_file(&f, self.opts.fsync)?;
         }
+        self.prealloc_end = at;
         if let Some(f) = self.active.as_mut() {
             f.seek(SeekFrom::Start(at))?;
         }
@@ -2158,7 +2268,7 @@ fn corrupt(path: &Path, what: &str) -> io::Error {
 }
 
 // ---------------------------------------------------------------------------
-// Fsync: F_FULLFSYNC on macOS, plain fsync elsewhere
+// Fsync: F_FULLFSYNC on macOS, fdatasync elsewhere
 // ---------------------------------------------------------------------------
 
 pub(crate) fn fsync_file(f: &File, mode: Fsync) -> io::Result<()> {
@@ -2189,5 +2299,21 @@ extern "C" {
 
 #[cfg(not(target_os = "macos"))]
 fn full_fsync(f: &File) -> io::Result<()> {
-    f.sync_all()
+    // fdatasync: still commits what reading the data back needs (size, block
+    // allocation) but not mtime/ctime — with a preallocated run, a sync that
+    // only overwrites existing blocks commits no journal transaction.
+    f.sync_data()
+}
+
+/// Write zeros over `[from, to)` with positional writes (the file cursor is
+/// untouched).
+fn zero_fill(f: &File, from: u64, to: u64) -> io::Result<()> {
+    static ZEROS: [u8; 64 * 1024] = [0u8; 64 * 1024];
+    let mut at = from;
+    while at < to {
+        let n = ((to - at) as usize).min(ZEROS.len());
+        f.write_all_at(&ZEROS[..n], at)?;
+        at += n as u64;
+    }
+    Ok(())
 }

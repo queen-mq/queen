@@ -372,10 +372,24 @@ reopen lands exactly on the checkpoint digest.
 FAT100 120k, A20k 80k, C1000 12k (PG: 60k / 40k / 12k). FAT100 at 60k: 83 MB/s,
 1.16 cores, 178 MB. C1000 p99 roughly doubled (fsync per group now covers
 pops/acks). The small-shape disk floor (~34 MB/s) did NOT drop with the LMDB
-churn gone. HYPOTHESIS, not yet measured: it tracks the fsync RATE (ext4 journal
-commit + the partial tail block rewritten per fdatasync, ~16 KB each), not LMDB.
-If confirmed, the lever is pre-zeroed qlog segments (PG's WAL trick) so fdatasync
-writes data only.
+churn gone. MEASURED (2026-09-22, jbd2 transactions + /proc/PID/io + strace): it
+was the ext4 journal. Every qlog sync grew the file, so each one committed a
+journal transaction: C1000 1032 commits/s = 20.4 of 32.7 MB/s. `fdatasync` alone
+changes nothing (1113/s: growing the file is metadata `fdatasync` must commit).
+The fix is a zero-filled run ahead of the qlog's logical end (1 MB, refilled at
+¼) plus `fdatasync`. A sync now overwrites blocks the file already has and
+commits no journal. The run is adaptive per log: on only while the log's
+bytes-per-sync is under 32 KB, cut at roll and at reopen. Result on the same
+open-loop shapes: journal 1032 → 5/s (C1000), 810 → 14/s (A20k). A single sync
+drops from 0.8–1.0 ms to 0.18–0.21 ms p50. Whole-run e2e p50 goes 3.1 → 1.45 ms
+(C1000) and 3.8 → 1.9 ms (A20k); ack avg halves. p99 stays within run-to-run
+noise (A20k old 18–25 ms, new 22–23 ms; C1000 about +3 ms). Device bytes fall
+less than the journal share: C1000 32.7 → 22.3 MB/s, A20k 31.5 → 27.9. Faster
+syncs mean about twice as many (803 → 1516/s), each rewriting a whole 4 KB tail
+page for about 2 KB of new data, and the zeros cost one extra write of the log.
+FAT100 (about 214 KB per sync) keeps preallocation off and is unchanged. A 128 KB
+run was measured too: it adds journal commits (32/94 per s) with no p99 gain.
+`QUEEN_RAFT_QLOG_PREALLOC_KB` overrides the run size; 0 turns it off.
 
 ---
 

@@ -533,6 +533,58 @@ fn roll_seal_reopen_reads_everything() {
 }
 
 #[test]
+fn prealloc_zero_run_is_cut_at_roll_and_reopen() {
+    // Small synced appends switch the zero-filled run on; it must never leak
+    // into a sealed file, a reopen, or a read.
+    let td = TmpDir::new("prealloc");
+    let opts = QLogOptions::testing_durable(64 * 1024, Fsync::Data);
+    let qid = 5;
+    let n = 600u64;
+    {
+        let (mut q, _) = QLog::open(td.path(), qid, opts).unwrap();
+        fill(&mut q, 3, 20);
+        let active = q.files().last().unwrap().clone();
+        let phys = std::fs::metadata(qlog_file(td.path(), qid, active.id))
+            .unwrap()
+            .len();
+        assert!(
+            phys > active.bytes,
+            "no zero run ahead ({phys} <= {})",
+            active.bytes
+        );
+        for i in 20..n {
+            append_one(&mut q, i, 3, i, 1_000 + i as i64);
+        }
+        assert!(q.file_count() >= 2, "fixture did not roll");
+        for f in q.files().iter().filter(|f| f.sealed) {
+            let len = std::fs::metadata(qlog_file(td.path(), qid, f.id))
+                .unwrap()
+                .len();
+            assert_eq!(len, f.bytes, "sealed file {} keeps a zero tail", f.id);
+        }
+    }
+    let (mut q, rep) = QLog::open(td.path(), qid, opts).unwrap();
+    assert!(!rep.truncated_tail, "a zero run is not a torn tail");
+    assert_eq!(rep.records, n);
+    assert_eq!(rep.rebuilt_indexes, 0);
+    let active = q.files().last().unwrap().clone();
+    let phys = std::fs::metadata(qlog_file(td.path(), qid, active.id))
+        .unwrap()
+        .len();
+    assert_eq!(phys, active.bytes, "reopen must cut the zero run");
+    for i in n..n + 50 {
+        append_one(&mut q, i, 3, i, 1_000 + i as i64);
+    }
+    for i in 0..n + 50 {
+        assert_eq!(
+            q.read_payload(3, i).unwrap(),
+            Some(payload(i, 96)),
+            "offset {i}"
+        );
+    }
+}
+
+#[test]
 fn qidx_rebuild_by_scan_equals_the_written_one() {
     let td = TmpDir::new("rebuild");
     let opts = QLogOptions::testing(300);
