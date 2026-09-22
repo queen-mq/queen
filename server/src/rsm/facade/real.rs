@@ -63,6 +63,9 @@ use crate::rsm::apply::SystemClock;
 use crate::rsm::batcher::{Batcher, BatcherConfig, Command, CommandTx, Reply, Submission};
 use crate::rsm::effect::{Pid, QueueConfig};
 use crate::rsm::entry::{Outcome, PopClaim, PushVerdict, RequestId};
+use crate::rsm::planner::timers::{
+    list_limit, list_row_json, parse_timer_ops, peek_json, timers_results, TimerOp, TimersCommand,
+};
 use crate::rsm::planner::{
     bucket_of, AckCommand, AckItem, AckStatus, AckTarget, DlqSnapshot, PopCommand, PushCommand,
     PushItem, RenewCommand, SubIntent,
@@ -77,7 +80,8 @@ use crate::util::{txn_hash128, uuidv7_bytes};
 use super::{
     AckOut, AckReq, DepthOut, DepthReq, DlqHeadOut, DlqHeadReq, PendingReq, PopDiscoverReq, PopOut,
     PopPinnedReq, PopReq, PushOut, PushReq, RaftHealth, RenewOut, RenewReq, ReqCtx, Rsm,
-    RsmBuildCtx, RsmError,
+    RsmBuildCtx, RsmError, TimerPeekReq, TimerReadOut, TimersCountReq, TimersListReq, TimersOut,
+    TimersReq,
 };
 
 /// The single-node node id of raft1 / embedded (D2). Membership and identity
@@ -248,6 +252,13 @@ impl RaftFacade {
     /// Open the whole RSM at `ctx.data_dir` (§11.1). Blocking boot I/O; called
     /// once, from the storage seam (`build_raft_state`) inside the runtime.
     pub fn open(ctx: &RsmBuildCtx) -> Result<RaftFacade, String> {
+        RaftFacade::open_with(ctx, BatcherConfig::from_env())
+    }
+
+    /// [`RaftFacade::open`] with an explicit batcher configuration instead of
+    /// the environment's — the tests' seam (a fast timer tick, the injected
+    /// fire failure), never the boot path's.
+    pub fn open_with(ctx: &RsmBuildCtx, batcher_cfg: BatcherConfig) -> Result<RaftFacade, String> {
         let dir = PathBuf::from(&ctx.data_dir);
         if ctx.data_dir.trim().is_empty() {
             return Err("QUEEN_RAFT_DIR is required in raft mode (§11.1)".into());
@@ -284,7 +295,7 @@ impl RaftFacade {
         // reader (the default modes never read it). Phase A2: also hand it the
         // qlog reader, so with the knob on the planner reads that authority from
         // the queue log instead.
-        let batcher = Batcher::new(store.clone(), repl.clone(), BatcherConfig::from_env())
+        let batcher = Batcher::new(store.clone(), repl.clone(), batcher_cfg)
             .with_reader(reader.clone())
             .with_qlog_reader(qlog_reader.clone());
         let (cmd_tx, batcher_join) = batcher.spawn();
@@ -464,33 +475,11 @@ fn derived_request_id(base: RequestId, ordinal: u32) -> RequestId {
 
 /// The config an implicitly-created queue gets, from the `queen.queues` DDL
 /// defaults (`server/sql/schema.sql`). The planner stamps `created_at_us`; the
-/// receiver mints the id.
+/// receiver mints the id. ONE definition, shared with the timer fire's own
+/// implicit creation (`planner::timers::implicit_queue_config`), so a queue
+/// born from a fired timer is configured exactly like one born from a push.
 fn default_queue_config() -> QueueConfig {
-    QueueConfig {
-        id: uuidv7_bytes(),
-        namespace: None,
-        task: None,
-        priority: 0,
-        lease_time: 60,
-        retry_limit: 3,
-        retry_delay: 1000,
-        ttl: 3600,
-        dead_letter_queue: true,
-        dlq_after_max_retries: true,
-        delayed_processing: 0,
-        window_buffer: 0,
-        retention_seconds: 0,
-        completed_retention_seconds: 0,
-        retention_enabled: false,
-        encryption_enabled: false,
-        max_wait_time_seconds: 0,
-        max_queue_size: 0,
-        min_pop_wait_time: 0,
-        dedup_window_seconds: 3600,
-        retention_sink_hold: String::new(),
-        retention_sink_hold_max_seconds: 0,
-        created_at_us: 0,
-    }
+    crate::rsm::planner::timers::implicit_queue_config()
 }
 
 /// The store options, honouring `QUEEN_RAFT_MAP_BYTES` (the boot path is exempt
@@ -1665,6 +1654,181 @@ impl RaftFacade {
 }
 
 // ---------------------------------------------------------------------------
+// Timers (WP-2.3, 025)
+// ---------------------------------------------------------------------------
+
+/// A store error on a timer read: retryable ones are a 503 the client retries,
+/// anything else a broker fault.
+fn read_error(e: crate::rsm::store::StoreError) -> RsmError {
+    if e.retryable() {
+        RsmError::Retry { leader_hint: None }
+    } else {
+        RsmError::Internal(format!("timer read: {e}"))
+    }
+}
+
+fn timers_bad_request(message: impl Into<String>) -> RsmError {
+    RsmError::Rejected {
+        code: "timers_bad_request".into(),
+        message: message.into(),
+    }
+}
+
+impl RaftFacade {
+    /// The receiver of a timers call: 025's validation and the frame packing
+    /// (O20 — the planner never packs), the R-108 key bound, then ONE
+    /// [`Command::Timers`] under the request's id, answered once its entry is
+    /// committed and applied (I4). A retry of the same request id is answered
+    /// from the recorded outcome (D6, I6).
+    async fn timers_apply_impl(&self, ctx: ReqCtx, req: TimersReq) -> Result<TimersOut, RsmError> {
+        let ops = parse_timer_ops(&req.ops, req.producer_sub.as_deref())
+            .map_err(|e| timers_bad_request(e.message))?;
+        if ops.is_empty() {
+            return Ok(TimersOut {
+                results: Vec::new(),
+            });
+        }
+        for op in &ops {
+            // (tenant, queue, timer_key) is the `timers` key; the schedule's
+            // (tenant, queue, partition) becomes `partitions_by_key` at the
+            // fire, and must be storable NOW rather than fail at the fire.
+            super::check_message_key_names(&ctx.tenant, op.queue(), None, Some(op.key()))?;
+            if let TimerOp::Schedule(s) = op {
+                super::check_message_key_names(&ctx.tenant, &s.queue, None, Some(&s.partition))?;
+            }
+        }
+        let cmd = Command::Timers(TimersCommand {
+            request_id: ctx.request_id,
+            tenant: ctx.tenant.clone(),
+            ops,
+        });
+        match self.submit(&ctx, cmd).await? {
+            Reply::Done { outcome, .. } => match timers_results(&outcome) {
+                Some(results) => Ok(TimersOut { results }),
+                None => Err(RsmError::Internal(format!(
+                    "timers got a non-timers outcome: {outcome:?}"
+                ))),
+            },
+            other => Err(reply_error(other)),
+        }
+    }
+
+    /// Run one committed-state read on the blocking pool (I15), under the
+    /// request deadline. Timer reads are LOCAL reads: the RAM keyspaces are
+    /// live, so a read after an answered schedule sees it (read-your-writes on
+    /// this node).
+    async fn timer_read<F>(&self, ctx: &ReqCtx, f: F) -> Result<TimerReadOut, RsmError>
+    where
+        F: FnOnce(&HeedStore) -> Result<String, RsmError> + Send + 'static,
+    {
+        let store = self.store.clone();
+        let task = tokio::task::spawn_blocking(move || f(&store));
+        match tokio::time::timeout(ctx.deadline.remaining(), task).await {
+            Ok(Ok(Ok(body))) => Ok(TimerReadOut { body }),
+            Ok(Ok(Err(e))) => Err(e),
+            Ok(Err(join)) => Err(RsmError::Internal(format!("timer read task: {join}"))),
+            Err(_) => Err(RsmError::Timeout),
+        }
+    }
+
+    async fn timer_peek_impl(
+        &self,
+        ctx: ReqCtx,
+        req: TimerPeekReq,
+    ) -> Result<TimerReadOut, RsmError> {
+        if req.queue.is_empty() || req.timer_key.is_empty() {
+            return Err(timers_bad_request(
+                "QTIMER peek needs a queue and a timerKey",
+            ));
+        }
+        super::check_message_key_names(&ctx.tenant, &req.queue, None, Some(&req.timer_key))?;
+        let tenant = ctx.tenant.clone();
+        self.timer_read(&ctx, move |store| {
+            store
+                .read(|r| {
+                    let row = r.timer(&tenant, &req.queue, &req.timer_key)?;
+                    Ok(peek_json(&req.queue, &req.timer_key, row.as_ref()).to_string())
+                })
+                .map_err(read_error)
+        })
+        .await
+    }
+
+    async fn timers_list_impl(
+        &self,
+        ctx: ReqCtx,
+        req: TimersListReq,
+    ) -> Result<TimerReadOut, RsmError> {
+        if req.queue.is_empty() {
+            return Err(timers_bad_request("QTIMER list needs a queue"));
+        }
+        super::check_message_key_names(&ctx.tenant, &req.queue, None, req.after.as_deref())?;
+        let tenant = ctx.tenant.clone();
+        let limit = list_limit(req.limit);
+        self.timer_read(&ctx, move |store| {
+            store
+                .read(|r| {
+                    // LIMIT n + 1: the probe row decides `truncated` without a
+                    // second read (025 `list_v1`).
+                    let mut rows: Vec<serde_json::Value> = Vec::with_capacity(limit + 1);
+                    r.scan_timers(
+                        &tenant,
+                        &req.queue,
+                        req.after.as_deref(),
+                        limit + 1,
+                        &mut |key, row| {
+                            rows.push(list_row_json(&req.queue, key, &row));
+                            true
+                        },
+                    )?;
+                    let truncated = rows.len() > limit;
+                    rows.truncate(limit);
+                    let next_after = if truncated {
+                        rows.last()
+                            .and_then(|r| r.get("timerKey").cloned())
+                            .unwrap_or(serde_json::Value::Null)
+                    } else {
+                        serde_json::Value::Null
+                    };
+                    let mut m = serde_json::Map::new();
+                    m.insert("rows".into(), serde_json::Value::Array(rows));
+                    m.insert("truncated".into(), serde_json::Value::Bool(truncated));
+                    m.insert("nextAfter".into(), next_after);
+                    Ok(serde_json::Value::Object(m).to_string())
+                })
+                .map_err(read_error)
+        })
+        .await
+    }
+
+    async fn timers_count_impl(
+        &self,
+        ctx: ReqCtx,
+        req: TimersCountReq,
+    ) -> Result<TimerReadOut, RsmError> {
+        if req.queue.is_empty() {
+            return Err(timers_bad_request("QTIMER count needs a queue"));
+        }
+        if req.prefix.is_empty() {
+            return Err(timers_bad_request("QTIMER count needs a non-empty prefix"));
+        }
+        if req.prefix.len() > 128 {
+            return Err(timers_bad_request("QTIMER count prefix exceeds 128 bytes"));
+        }
+        let tenant = ctx.tenant.clone();
+        self.timer_read(&ctx, move |store| {
+            store
+                .read(|r| {
+                    let n = r.count_timers_with_prefix(&tenant, &req.queue, &req.prefix)?;
+                    Ok(format!("{{\"count\":{n}}}"))
+                })
+                .map_err(read_error)
+        })
+        .await
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The Rsm impl
 // ---------------------------------------------------------------------------
 
@@ -1745,6 +1909,26 @@ impl Rsm for RaftFacade {
     async fn depth(&self, _ctx: ReqCtx, _req: DepthReq) -> Result<DepthOut, RsmError> {
         // Depth is a §9.6 counter read wired by WP-2.6; not yet.
         Err(RsmError::Unsupported)
+    }
+
+    async fn timers_apply(&self, ctx: ReqCtx, req: TimersReq) -> Result<TimersOut, RsmError> {
+        self.timers_apply_impl(ctx, req).await
+    }
+
+    async fn timer_peek(&self, ctx: ReqCtx, req: TimerPeekReq) -> Result<TimerReadOut, RsmError> {
+        self.timer_peek_impl(ctx, req).await
+    }
+
+    async fn timers_list(&self, ctx: ReqCtx, req: TimersListReq) -> Result<TimerReadOut, RsmError> {
+        self.timers_list_impl(ctx, req).await
+    }
+
+    async fn timers_count(
+        &self,
+        ctx: ReqCtx,
+        req: TimersCountReq,
+    ) -> Result<TimerReadOut, RsmError> {
+        self.timers_count_impl(ctx, req).await
     }
 
     fn health(&self) -> RaftHealth {

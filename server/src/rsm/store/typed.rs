@@ -15,7 +15,7 @@
 //! A row that does not decode is [`StoreError::Corrupt`]: fatal for this node,
 //! never skipped (see [`super::rows`]).
 
-use crate::rsm::effect::{CursorRow, Pid, QueueConfig};
+use crate::rsm::effect::{CursorRow, Pid, QueueConfig, TimerRow};
 
 use super::keys::{self, Counter};
 use super::rows::{
@@ -493,6 +493,98 @@ pub trait TypedReads: Reads {
         self.counter_at(&keys::counter_group(tenant, queue, group, c))
     }
 
+    // --------------------------------------------------------------- timers
+
+    /// One timer (025 PK `(tenant, queue, timer_key)`).
+    fn timer(&self, tenant: &str, queue: &str, key: &str) -> Result<Option<TimerRow>> {
+        let k = keys::timers(tenant, queue, key);
+        decode(
+            Keyspace::Timers,
+            self.get_raw(Keyspace::Timers, &k)?,
+            rows::timer_decode,
+        )
+    }
+
+    /// One queue's timers in timer-key BYTE order, starting strictly AFTER
+    /// `after` when given (025 `log_timers_list_v1`'s exclusive keyset cursor).
+    fn scan_timers(
+        &self,
+        tenant: &str,
+        queue: &str,
+        after: Option<&str>,
+        limit: usize,
+        cb: &mut dyn FnMut(&str, TimerRow) -> bool,
+    ) -> Result<usize> {
+        let prefix = keys::timers_prefix(tenant, queue);
+        let from = match after {
+            // The smallest key strictly above `after` inside this queue.
+            Some(a) => {
+                match super::resume_after(&keys::timers(tenant, queue, a), self.max_key_len()) {
+                    Some(f) => f,
+                    None => return Ok(0),
+                }
+            }
+            None => prefix.clone(),
+        };
+        let mut err: Option<StoreError> = None;
+        let n = self.scan_raw(Keyspace::Timers, &from, &prefix, limit, &mut |k, v| {
+            let name = match keys::timers_key_of(k, prefix.len()) {
+                Some(n) => n,
+                None => {
+                    err = Some(StoreError::corrupt(Keyspace::Timers, "timer key"));
+                    return false;
+                }
+            };
+            match rows::timer_decode(v) {
+                Ok(row) => cb(&name, row),
+                Err(e) => {
+                    err = Some(StoreError::corrupt(Keyspace::Timers, format!("{e}")));
+                    false
+                }
+            }
+        })?;
+        match err {
+            Some(e) => Err(e),
+            None => Ok(n),
+        }
+    }
+
+    /// Exactly how many of one queue's timers have a key starting with the
+    /// LITERAL `prefix` (025 `log_timers_count_v1`): a prefix range walk, no
+    /// row decoded.
+    fn count_timers_with_prefix(&self, tenant: &str, queue: &str, prefix: &str) -> Result<u64> {
+        let p = keys::timers_key_prefix(tenant, queue, prefix);
+        let mut n = 0u64;
+        self.scan_raw(Keyspace::Timers, &p, &p, usize::MAX, &mut |_k, _v| {
+            n += 1;
+            true
+        })?;
+        Ok(n)
+    }
+
+    /// The fire order: `(due_us, tenant, queue, timer_key)`, earliest first,
+    /// at most `limit` entries, until `cb` returns false.
+    fn scan_timers_due(
+        &self,
+        limit: usize,
+        cb: &mut dyn FnMut(i64, &str, &str, &str) -> bool,
+    ) -> Result<usize> {
+        let mut err: Option<StoreError> = None;
+        let n = self.scan_raw(Keyspace::TimersDue, &[], &[], limit, &mut |k, _v| {
+            match keys::timers_due_parts(k) {
+                Some((due, t, q, key)) => cb(due, &t, &q, &key),
+                None => {
+                    err = Some(StoreError::corrupt(Keyspace::TimersDue, "timers_due key"));
+                    false
+                }
+            }
+        })?;
+        match err {
+            Some(e) => Err(e),
+            None => Ok(n),
+        }
+    }
+
     // ----------------------------------------------------------- node-local
 
     fn seg_loc(&self, pid: Pid, base_offset: u64) -> Result<Option<SegLocRow>> {
@@ -800,6 +892,32 @@ pub trait TypedWrites: Writes {
 
     fn set_counter(&mut self, key: &[u8], v: i64) -> Result<()> {
         self.put_raw(Keyspace::Counters, key, &rows::i64_encode(v))
+    }
+
+    // --------------------------------------------------------------- timers
+
+    /// Write a timer row AND its fire-order index entry, replacing the old
+    /// index entry when the row already existed (its due instant may move).
+    /// One call, because a row whose `timers_due` entry names a different
+    /// instant is a timer the fire step would visit at the wrong time.
+    fn put_timer(&mut self, tenant: &str, queue: &str, key: &str, row: &TimerRow) -> Result<()> {
+        if let Some(old) = self.timer(tenant, queue, key)? {
+            let old_due = keys::timers_due(rows::timer_due_us(&old), tenant, queue, key);
+            self.del_raw(Keyspace::TimersDue, &old_due)?;
+        }
+        let k = keys::timers(tenant, queue, key);
+        self.put_raw(Keyspace::Timers, &k, &rows::timer_encode(row))?;
+        let due = keys::timers_due(rows::timer_due_us(row), tenant, queue, key);
+        self.put_raw(Keyspace::TimersDue, &due, rows::UNIT)
+    }
+
+    /// Remove a timer row and its fire-order index entry. `row` is the row as
+    /// stored (its due instant names the index entry).
+    fn del_timer(&mut self, tenant: &str, queue: &str, key: &str, row: &TimerRow) -> Result<bool> {
+        let due = keys::timers_due(rows::timer_due_us(row), tenant, queue, key);
+        self.del_raw(Keyspace::TimersDue, &due)?;
+        let k = keys::timers(tenant, queue, key);
+        self.del_raw(Keyspace::Timers, &k)
     }
 
     // ----------------------------------------------------------- node-local

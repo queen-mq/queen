@@ -244,13 +244,23 @@ pub enum Keyspace {
     /// NODE-LOCAL. `(bucket, file_id) → (length at the last durable point,
     /// sealed, live bytes, snapshot references)` (§6.2, I11).
     Files,
+    /// `(tenant, queue, timer_key) → TimerRow` (025 `queen.log_timers`, WP-2.3).
+    /// Keyed by NAMES like the SQL table: a timer names its destination queue
+    /// and partition, which are born at the fire, never at the schedule.
+    Timers,
+    /// `(due_us, tenant, queue, timer_key) → ()`: the fire order. `due_us` is
+    /// the row's effective visibility (`deliver_at`, pushed out by a backoff),
+    /// the RSM twin of 025's generated `visible_at` column and its only index.
+    /// The leader's fire step walks it from the front while `due_us <= now`.
+    TimersDue,
 }
 
 impl Keyspace {
-    /// Every keyspace this work package opens. Phase 2 appends its own (kv,
-    /// timers, streams, traces, flags, quotas, ephemeral config); the
-    /// environment is opened with room for them ([`MAX_DBS`]).
-    pub const ALL: [Keyspace; 20] = [
+    /// Every keyspace this build opens. Phase 2 appends its own (kv, streams,
+    /// traces, flags, quotas, ephemeral config) AT THE END, because
+    /// [`Keyspace::slot`] is the position in this array; the environment is
+    /// opened with room for them ([`MAX_DBS`]). Timers (WP-2.3) are the first.
+    pub const ALL: [Keyspace; 22] = [
         Keyspace::Meta,
         Keyspace::Garbage,
         Keyspace::Queues,
@@ -271,6 +281,8 @@ impl Keyspace {
         Keyspace::Counters,
         Keyspace::SegLoc,
         Keyspace::Files,
+        Keyspace::Timers,
+        Keyspace::TimersDue,
     ];
 
     /// The LMDB database name. PERMANENT: it is what an existing data
@@ -297,6 +309,8 @@ impl Keyspace {
             Keyspace::Counters => "counters",
             Keyspace::SegLoc => "seg_loc",
             Keyspace::Files => "files",
+            Keyspace::Timers => "timers",
+            Keyspace::TimersDue => "timers_due",
         }
     }
 
@@ -344,9 +358,10 @@ impl Keyspace {
 
 /// `max_dbs` for the environment. LMDB fixes it at open, so it carries the
 /// whole §6.1 catalogue plus headroom: phase 2 adds `kv`, `kv_expiry`,
-/// `timers`, `timers_due`, `quotas`, `eph_config`, `streams_queries`,
-/// `streams_state`, `flags`, `traces`, `trace_names` and `trace_expiry` to
-/// [`Keyspace`] and must not need a data-directory migration to do it.
+/// `timers`, `timers_due` (WP-2.3, landed), `quotas`, `eph_config`,
+/// `streams_queries`, `streams_state`, `flags`, `traces`, `trace_names` and
+/// `trace_expiry` to [`Keyspace`] and must not need a data-directory migration
+/// to do it.
 pub const MAX_DBS: u32 = 64;
 
 // ---------------------------------------------------------------------------

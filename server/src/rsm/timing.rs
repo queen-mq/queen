@@ -331,7 +331,7 @@ pub struct HistSnapshot {
 // The registry
 // ---------------------------------------------------------------------------
 
-const KIND_COUNT: usize = 9;
+const KIND_COUNT: usize = 10;
 
 const ALL_KINDS: [CommandKind; KIND_COUNT] = [
     CommandKind::Push,
@@ -343,6 +343,7 @@ const ALL_KINDS: [CommandKind; KIND_COUNT] = [
     CommandKind::Nack,
     CommandKind::Renew,
     CommandKind::DlqHead,
+    CommandKind::Timers,
 ];
 
 #[inline]
@@ -357,6 +358,7 @@ fn kind_index(k: CommandKind) -> usize {
         CommandKind::Nack => 6,
         CommandKind::Renew => 7,
         CommandKind::DlqHead => 8,
+        CommandKind::Timers => 9,
     }
 }
 

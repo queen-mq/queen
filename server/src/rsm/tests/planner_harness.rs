@@ -23,6 +23,7 @@ use crate::rsm::apply::{Applier, Committed as ApplyCommitted, NoNotify, StateDig
 use crate::rsm::dedup::DedupFront;
 use crate::rsm::effect::{CursorRow, Pid, QueueConfig};
 use crate::rsm::entry::{Entry, Outcome, RequestId};
+use crate::rsm::planner::timers::{FireReport, TimerFireConfig, TimersCommand};
 use crate::rsm::planner::{
     AckCommand, AckItem, AckPositionalCommand, AckStatus, AckTarget, DlqHeadCommand, DlqSnapshot,
     NackCommand, Overlay, Plan, PlanConfig, Planned, Planner, PopCommand, PushCommand, PushItem,
@@ -93,6 +94,8 @@ pub enum Cmd {
     Nack(NackCommand),
     Renew(RenewCommand),
     DlqHead(DlqHeadCommand),
+    /// WP-2.3: a timers call (schedule / cancel).
+    Timers(TimersCommand),
 }
 
 impl Cmd {
@@ -105,6 +108,7 @@ impl Cmd {
             Cmd::Nack(c) => c.request_id,
             Cmd::Renew(c) => c.request_id,
             Cmd::DlqHead(c) => c.request_id,
+            Cmd::Timers(c) => c.request_id,
         }
     }
 
@@ -119,6 +123,7 @@ impl Cmd {
             Cmd::Nack(c) => p.plan_nack(ov, c),
             Cmd::Renew(c) => p.plan_renew(ov, c),
             Cmd::DlqHead(c) => p.plan_dlq_head(ov, c),
+            Cmd::Timers(c) => p.plan_timers(ov, c),
         }
     }
 }
@@ -377,7 +382,19 @@ impl Cell {
 
     /// Plan and apply one cycle of commands.
     pub fn run(&mut self, cmds: &[Cmd]) -> Cycle {
-        let (results, entry, now) = self.plan_cycle(cmds);
+        self.run_fire(cmds, None).0
+    }
+
+    /// Plan and apply one cycle: the commands, then — with `fire` — the
+    /// timer fire step exactly as the batcher runs it (after the commands, as
+    /// ONE command with its own id). Returns the cycle, the fire report, and
+    /// the fire command's effects (empty when nothing fired).
+    pub fn run_fire(
+        &mut self,
+        cmds: &[Cmd],
+        fire: Option<&TimerFireConfig>,
+    ) -> (Cycle, FireReport, Vec<crate::rsm::effect::Effect>) {
+        let (results, entry, now, report, fired) = self.plan_cycle_fire(cmds, fire);
         let logged = entry.is_some();
         if let Some(entry) = entry {
             self.index += 1;
@@ -395,11 +412,51 @@ impl Cell {
                 .expect("apply");
             a.durable_point().expect("durable point");
         }
-        Cycle {
-            results,
-            now_us: now,
-            logged,
-        }
+        (
+            Cycle {
+                results,
+                now_us: now,
+                logged,
+            },
+            report,
+            fired,
+        )
+    }
+
+    /// Plan a cycle (commands + fire step) WITHOUT applying it: the entry it
+    /// would propose, for the tests that fold it into a later overlay
+    /// themselves (an entry still in flight).
+    pub fn plan_entry(&self, cmds: &[Cmd], fire: Option<&TimerFireConfig>) -> Option<Entry> {
+        self.plan_cycle_fire(cmds, fire).1
+    }
+
+    /// Plan the fire step over committed state plus an overlay that folded
+    /// `in_flight` (the entries a batcher still has in its pipeline).
+    pub fn plan_fire_over(
+        &self,
+        in_flight: &[Entry],
+        fire: &TimerFireConfig,
+    ) -> (FireReport, Vec<crate::rsm::effect::Effect>) {
+        let wall = self.wall;
+        self.node
+            .store()
+            .read(|r| {
+                let d0 = Derived::default();
+                let base = Committed::new(r, &d0).plan_now(wall)?;
+                let d = Derived::rebuild(r, base)?;
+                let committed = Committed::new(r, &d);
+                let mut ov = Overlay::new(r.next_pid()?, r.kv_version_next()?);
+                for e in in_flight {
+                    ov.ingest_entry(e);
+                }
+                let now = ov.plan_now(&committed, wall).expect("plan now");
+                ov.mark_cycle_start();
+                let planner =
+                    Planner::new(committed, now, PlanConfig::default(), &self.front, None);
+                let (effects, report) = planner.plan_timer_fire(&mut ov, fire).expect("fire");
+                Ok((report, effects))
+            })
+            .expect("plan fire read")
     }
 
     /// Run one command, returning its plan.
@@ -417,6 +474,22 @@ impl Cell {
     }
 
     fn plan_cycle(&self, cmds: &[Cmd]) -> (Vec<Planned>, Option<Entry>, i64) {
+        let (results, entry, now, _, _) = self.plan_cycle_fire(cmds, None);
+        (results, entry, now)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn plan_cycle_fire(
+        &self,
+        cmds: &[Cmd],
+        fire: Option<&TimerFireConfig>,
+    ) -> (
+        Vec<Planned>,
+        Option<Entry>,
+        i64,
+        FireReport,
+        Vec<crate::rsm::effect::Effect>,
+    ) {
         let wall = self.wall;
         self.node
             .store()
@@ -458,7 +531,28 @@ impl Cell {
                         any = true;
                     }
                 }
-                Ok((results, if any { Some(entry) } else { None }, now))
+                // WP-2.3: the fire step, after the commands, as the batcher
+                // runs it — one command with its own id, answered by nobody.
+                let mut report = FireReport::default();
+                let mut fired = Vec::new();
+                if let Some(fcfg) = fire {
+                    let (effects, rep) = planner.plan_timer_fire(&mut ov, fcfg).expect("fire step");
+                    report = rep;
+                    if !effects.is_empty() {
+                        fired = effects.clone();
+                        entry
+                            .add_command(crate::util::uuidv7_bytes(), Outcome::Empty, effects)
+                            .expect("add fire command");
+                        any = true;
+                    }
+                }
+                Ok((
+                    results,
+                    if any { Some(entry) } else { None },
+                    now,
+                    report,
+                    fired,
+                ))
             })
             .expect("plan cycle read")
     }

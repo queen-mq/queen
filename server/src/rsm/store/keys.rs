@@ -463,6 +463,69 @@ pub fn counter_partition_prefix(p: Pid) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// timers (025, WP-2.3)
+// ---------------------------------------------------------------------------
+
+/// `(tenant, queue, timer_key)`: the primary key of `queen.log_timers`. The
+/// escaped names keep BYTE order, so a keyset walk over one queue's timers is
+/// 025's `ORDER BY timer_key COLLATE "C"`.
+pub fn timers(tenant: &str, queue: &str, key: &str) -> Vec<u8> {
+    let mut k = with(tenant.len() + queue.len() + key.len() + 6);
+    push_name(&mut k, tenant);
+    push_name(&mut k, queue);
+    push_name(&mut k, key);
+    k
+}
+
+/// Every timer of one queue, in timer-key byte order.
+pub fn timers_prefix(tenant: &str, queue: &str) -> Vec<u8> {
+    queues(tenant, queue)
+}
+
+/// The scan prefix of every timer of one queue whose key STARTS WITH `prefix`
+/// (025 `log_timers_count_v1`): the queue prefix plus the escaped prefix bytes
+/// WITHOUT a terminator, so `starts_with` on the encoded key is `starts_with`
+/// on the name (a NUL is escaped the same way inside and outside the prefix).
+pub fn timers_key_prefix(tenant: &str, queue: &str, prefix: &str) -> Vec<u8> {
+    let mut k = timers_prefix(tenant, queue);
+    for &b in prefix.as_bytes() {
+        if b == 0x00 {
+            k.push(0x00);
+            k.push(0xFF);
+        } else {
+            k.push(b);
+        }
+    }
+    k
+}
+
+/// The timer key of a `timers` key, given the length of its queue prefix.
+pub fn timers_key_of(k: &[u8], prefix_len: usize) -> Option<String> {
+    Some(read_name(k, prefix_len)?.0)
+}
+
+/// `(due_us, tenant, queue, timer_key)` → (): the fire order, earliest first.
+/// Signed (a `delayMs` in the past is legal and yields a due instant below
+/// any real clock only in a test, but the order must hold through zero).
+pub fn timers_due(due_us: i64, tenant: &str, queue: &str, key: &str) -> Vec<u8> {
+    let mut k = with(tenant.len() + queue.len() + key.len() + 14);
+    push_i64(&mut k, due_us);
+    push_name(&mut k, tenant);
+    push_name(&mut k, queue);
+    push_name(&mut k, key);
+    k
+}
+
+/// `(due_us, tenant, queue, timer_key)` of a `timers_due` key.
+pub fn timers_due_parts(k: &[u8]) -> Option<(i64, String, String, String)> {
+    let due = read_i64(k, 0)?;
+    let (t, at) = read_name(k, 8)?;
+    let (q, at) = read_name(k, at)?;
+    let (key, _) = read_name(k, at)?;
+    Some((due, t, q, key))
+}
+
+// ---------------------------------------------------------------------------
 // node-local (§6.2)
 // ---------------------------------------------------------------------------
 
@@ -608,6 +671,30 @@ mod tests {
             request_expiry_parts(&request_expiry(-7, &id)),
             Some((-7, id))
         );
+    }
+
+    #[test]
+    fn timer_keys_decode_and_order_by_due_then_name() {
+        let k = timers_due(-5, "t", "q", "a\0b");
+        assert_eq!(
+            timers_due_parts(&k),
+            Some((-5, "t".into(), "q".into(), "a\0b".into()))
+        );
+        // Earlier due first, whatever the names.
+        assert!(timers_due(1, "z", "z", "z") < timers_due(2, "a", "a", "a"));
+        assert!(timers_due(-1, "z", "z", "z") < timers_due(0, "a", "a", "a"));
+        // Same due: name order.
+        assert!(timers_due(7, "t", "q", "a") < timers_due(7, "t", "q", "b"));
+        let tk = timers("t", "q", "laravel:job-1");
+        assert!(tk.starts_with(&timers_prefix("t", "q")));
+        assert!(tk.starts_with(&timers_key_prefix("t", "q", "laravel:")));
+        assert!(!tk.starts_with(&timers_key_prefix("t", "q", "laravel:x")));
+        assert_eq!(
+            timers_key_of(&tk, timers_prefix("t", "q").len()),
+            Some("laravel:job-1".into())
+        );
+        // A prefix never reaches into the next queue.
+        assert!(!timers("t", "qq", "a").starts_with(&timers_key_prefix("t", "q", "")));
     }
 
     #[test]

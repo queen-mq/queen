@@ -76,10 +76,11 @@
 //! # What this work package does NOT apply
 //!
 //! Phase 1 is the MESSAGE PATH (§15, WP-1.4). The store opens the twenty
-//! keyspaces of §6.1's message path; `kv`, `timers`, `streams`, `traces`,
-//! `flags`, `quotas` and `eph_config` do not exist yet, so their effect kinds
-//! answer [`ApplyError::Unsupported`] — a typed, fatal refusal that stops this
-//! node, never a skip (I16). Phase 2 adds the keyspaces and the arms together.
+//! keyspaces of §6.1's message path plus `timers`/`timers_due` (WP-2.3, whose
+//! three kinds are applied below); `kv`, `streams`, `traces`, `flags`,
+//! `quotas` and `eph_config` do not exist yet, so their effect kinds answer
+//! [`ApplyError::Unsupported`] — a typed, fatal refusal that stops this node,
+//! never a skip (I16). Phase 2 adds the keyspaces and the arms together.
 
 // I2, enforced rather than reviewed: `clippy.toml` lists the clock,
 // environment and randomness calls this file may not make, `[lints.clippy]` in
@@ -1714,8 +1715,60 @@ impl<'s, S: Store> Applier<'s, S> {
                 Ok(())
             }
 
-            // Phase 2's keyspaces do not exist in this build. I16: a kind this
-            // node cannot apply stops it; it is never stepped over.
+            // Timers (025, WP-2.3). Plain overwrites of one row and its
+            // fire-order index entry, from values the planner computed — no
+            // clock here (I2): `deliver_at` and every backoff instant travel in
+            // the effect. A fire is NOT a timer kind: it is the push's `Append`
+            // plus a `TimerDelete` (or `TimerBackoff`) in the same entry, so the
+            // message and the timer's removal land together or not at all.
+            Effect::TimerUpsert {
+                tenant,
+                queue,
+                key,
+                row,
+            } => {
+                self.writes.put_timer(tenant, queue, key, row)?;
+                Ok(())
+            }
+            Effect::TimerDelete { tenant, queue, key } => {
+                // A cancel racing a fire planned in the same pipeline is refused
+                // by the planner's overlay, so a missing row here is only a
+                // replay-safe no-op, counted like every other one.
+                match self.writes.timer(tenant, queue, key)? {
+                    Some(old) => {
+                        self.writes.del_timer(tenant, queue, key, &old)?;
+                    }
+                    None => self.stats.missing_rows += 1,
+                }
+                Ok(())
+            }
+            Effect::TimerBackoff {
+                tenant,
+                queue,
+                key,
+                visible_at_us,
+                attempts,
+                last_error,
+                updated_at_us,
+            } => {
+                match self.writes.timer(tenant, queue, key)? {
+                    Some(mut row) => {
+                        // 025 `log_timers_fail_v1`: a new visibility, the attempt
+                        // count the planner decided (unchanged on a transient
+                        // failure), the error. The row stays cancellable.
+                        row.visible_at_us = Some(*visible_at_us);
+                        row.attempts = *attempts;
+                        row.last_error = last_error.clone();
+                        row.updated_at_us = *updated_at_us;
+                        self.writes.put_timer(tenant, queue, key, &row)?;
+                    }
+                    None => self.stats.missing_rows += 1,
+                }
+                Ok(())
+            }
+
+            // Phase 2's other keyspaces do not exist in this build. I16: a kind
+            // this node cannot apply stops it; it is never stepped over.
             other => Err(ApplyError::Unsupported { kind: other.kind() }),
         }
     }

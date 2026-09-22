@@ -89,6 +89,9 @@ use crate::rsm::store::{keys, Keyspace, Reads, StoreError, TypedReads};
 pub mod ack;
 pub mod pop;
 pub mod push;
+/// Timers: schedule/cancel, the fire step, backoff and the `__timer__` DLQ
+/// (025). WP-2.3.
+pub mod timers;
 
 // The phase-2 planner surfaces keep their place in the §3.4 module map as empty
 // inline stubs, exactly as they stood inside `rsm/mod.rs` before this WP filled
@@ -99,8 +102,6 @@ pub mod txn {}
 /// KV: versions from `kv_version_base + ordinal`, TTL, prefix lists,
 /// `required` (024). WP-2.2.
 pub mod kv {}
-/// Timers: apply, fire, fail, DLQ, and the leader wheel (025). WP-2.3.
-pub mod timers {}
 /// Streams: cycle, register, state (007, 008). WP-2.4.
 pub mod streams {}
 /// Admin: configure, deletes, consumer groups, messages, flags, quotas
@@ -241,6 +242,8 @@ pub enum CommandKind {
     Nack,
     Renew,
     DlqHead,
+    /// `POST /api/v1/timers` and the cancel route (025 `log_timers_apply_v1`).
+    Timers,
 }
 
 impl CommandKind {
@@ -255,6 +258,7 @@ impl CommandKind {
             CommandKind::Nack => "nack",
             CommandKind::Renew => "renew",
             CommandKind::DlqHead => "dlq_head",
+            CommandKind::Timers => "timers",
         }
     }
 }
@@ -530,6 +534,28 @@ pub struct Overlay {
     /// `Append` added, merged with committed `dedup` on a probe or a resolve.
     dedup: HashMap<(Pid, [u8; 16]), Vec<DedupOccurrence>>,
     request_ids: HashMap<RequestId, Outcome>,
+    /// `(tenant, queue, timer_key) → what the in-flight entries did to it`
+    /// (WP-2.3). The overlay's view wins over committed state per key, which
+    /// is what keeps a timer whose fire entry is still in flight from firing
+    /// a second time in the next cycle (exactly-once in effect).
+    timers: HashMap<(String, String, String), TimerOverlay>,
+}
+
+/// One timer as the in-flight entries left it, relative to committed state.
+#[derive(Clone, Debug)]
+enum TimerOverlay {
+    /// Upserted (schedule, reschedule) — the whole row.
+    Row(crate::rsm::effect::TimerRow),
+    /// Deleted (cancel, delivered, dead-lettered).
+    Deleted,
+    /// Backed off on top of whatever committed state holds (the row itself
+    /// was never folded): apply patches the stored row the same way.
+    Backoff {
+        visible_at_us: i64,
+        attempts: i32,
+        last_error: Option<String>,
+        updated_at_us: i64,
+    },
 }
 
 /// One overlay dedup occurrence: `(offset, created_at_us)`.
@@ -552,6 +578,7 @@ impl Overlay {
             cursors: HashMap::new(),
             dedup: HashMap::new(),
             request_ids: HashMap::new(),
+            timers: HashMap::new(),
         }
     }
 
@@ -711,9 +738,56 @@ impl Overlay {
             Effect::KvPut { version, .. } => {
                 self.next_kv_version = self.next_kv_version.max(version.saturating_add(1));
             }
+            // Timers (WP-2.3): the planner reads them through the overlay for
+            // the schedule/cancel verdicts and the fire step's candidate set.
+            Effect::TimerUpsert {
+                tenant,
+                queue,
+                key,
+                row,
+            } => {
+                self.timers.insert(
+                    (tenant.clone(), queue.clone(), key.clone()),
+                    TimerOverlay::Row(row.clone()),
+                );
+            }
+            Effect::TimerDelete { tenant, queue, key } => {
+                self.timers.insert(
+                    (tenant.clone(), queue.clone(), key.clone()),
+                    TimerOverlay::Deleted,
+                );
+            }
+            Effect::TimerBackoff {
+                tenant,
+                queue,
+                key,
+                visible_at_us,
+                attempts,
+                last_error,
+                updated_at_us,
+            } => {
+                let k = (tenant.clone(), queue.clone(), key.clone());
+                let next = match self.timers.remove(&k) {
+                    Some(TimerOverlay::Row(mut row)) => {
+                        row.visible_at_us = Some(*visible_at_us);
+                        row.attempts = *attempts;
+                        row.last_error = last_error.clone();
+                        row.updated_at_us = *updated_at_us;
+                        TimerOverlay::Row(row)
+                    }
+                    Some(TimerOverlay::Deleted) => TimerOverlay::Deleted,
+                    Some(TimerOverlay::Backoff { .. }) | None => TimerOverlay::Backoff {
+                        visible_at_us: *visible_at_us,
+                        attempts: *attempts,
+                        last_error: last_error.clone(),
+                        updated_at_us: *updated_at_us,
+                    },
+                };
+                self.timers.insert(k, next);
+            }
             // Everything else the phase-1 planner neither emits nor needs to see
-            // through the overlay (admin deletes, timers, streams, traces): a
-            // later phase folds what its planner reads.
+            // through the overlay (admin deletes, streams, traces): a later
+            // phase folds what its planner reads.
             _ => {}
         }
     }
