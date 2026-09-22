@@ -508,6 +508,356 @@ fn store_opts_from_env() -> StoreOpts {
 }
 
 // ---------------------------------------------------------------------------
+// Transaction (Phase B)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct TxnBodyIn<'a> {
+    #[serde(borrow, default)]
+    operations: Option<Vec<TxnOpIn<'a>>>,
+    #[serde(default, rename = "requiredLeases")]
+    required_leases: Option<Vec<String>>,
+    #[serde(borrow, default)]
+    kv: Option<Vec<&'a RawValue>>,
+    #[serde(borrow, default)]
+    timers: Option<Vec<&'a RawValue>>,
+}
+
+/// One `operations` element: a push (with `items`, or one item inline) or an ack.
+#[derive(Deserialize)]
+struct TxnOpIn<'a> {
+    #[serde(default, rename = "type")]
+    ty: String,
+    #[serde(borrow, default)]
+    items: Option<Vec<PushItemIn<'a>>>,
+    #[serde(borrow, default)]
+    queue: Option<std::borrow::Cow<'a, str>>,
+    #[serde(borrow, default)]
+    partition: Option<std::borrow::Cow<'a, str>>,
+    #[serde(borrow, default)]
+    payload: Option<&'a RawValue>,
+    #[serde(default, rename = "transactionId")]
+    transaction_id: Option<String>,
+    #[serde(default, rename = "partitionId")]
+    partition_id: Option<String>,
+    #[serde(default, rename = "consumerGroup")]
+    consumer_group: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default, rename = "leaseId")]
+    lease_id: Option<String>,
+}
+
+impl RaftFacade {
+    /// `POST /api/v1/transaction`: every push and ack of the bundle in ONE
+    /// `Transaction` command → ONE entry, all-or-nothing (planner/txn.rs), crash-
+    /// atomic across queue logs by Phase C's present-in-all replay. The wire
+    /// contract is the SQL wire transaction's: HTTP 200, `success` + a flat
+    /// `results` array on commit; `success:false` + `reason` on a rollback.
+    async fn txn_impl(&self, ctx: ReqCtx, req: super::TxnReq) -> Result<super::TxnOut, RsmError> {
+        let txn_id = uuid_bytes_to_string(&uuidv7_bytes());
+        let fail = |reason: &str, err: &str| super::TxnOut {
+            body: serde_json::json!({
+                "transactionId": txn_id,
+                "success": false,
+                "reason": reason,
+                "error": err,
+                "results": [],
+            })
+            .to_string(),
+        };
+        let body: TxnBodyIn = match serde_json::from_slice(&req.raw) {
+            Ok(b) => b,
+            Err(e) => return Ok(fail("bad_request", &format!("bad body: {e}"))),
+        };
+        if body.kv.as_ref().is_some_and(|v| !v.is_empty())
+            || body.timers.as_ref().is_some_and(|v| !v.is_empty())
+        {
+            return Ok(fail(
+                "unsupported",
+                "kv and timer riders need the raft KV/timer surfaces (Phase B2/B3), not in this build",
+            ));
+        }
+        let ops = body.operations.unwrap_or_default();
+        if ops.is_empty() {
+            return Ok(fail(
+                "bad_request",
+                "transaction requires an operations array (or a top-level kv/timers array)",
+            ));
+        }
+        let mut hints: Vec<String> = body
+            .required_leases
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        // 1. Flatten. Pushes resolve exactly like `push_impl` (minted id, txn,
+        //    default partition, intra-bundle same-txn collapse); acks are kept
+        //    per consumer group for target resolution.
+        struct TxnPush {
+            flat: usize,
+            message_id: String,
+            txn: String,
+            queue: String,
+            follower_of: Option<usize>, // index into `pushes`
+            hash: [u8; 16],
+            frame: Vec<u8>,
+        }
+        let mut pushes: Vec<TxnPush> = Vec::new();
+        let mut seen: std::collections::HashMap<(String, String, String), usize> =
+            std::collections::HashMap::new();
+        let mut groups: indexed_groups::Groups = indexed_groups::Groups::new();
+        // consumer group → its ack flats
+        let mut acks_by_group: std::collections::BTreeMap<String, Vec<AckFlat>> =
+            std::collections::BTreeMap::new();
+        let mut ack_txn: Vec<(usize, String, AckStatus)> = Vec::new();
+        let mut flat = 0usize;
+
+        let mut add_push = |queue: &str,
+                            partition: Option<&str>,
+                            payload: &RawValue,
+                            txn_in: Option<&str>,
+                            flat: usize,
+                            pushes: &mut Vec<TxnPush>|
+         -> Result<(), RsmError> {
+            let mid = uuidv7_bytes();
+            let mid_str = uuid_bytes_to_string(&mid);
+            let txn = txn_in.map(str::to_string).unwrap_or_else(|| mid_str.clone());
+            let partition = partition.filter(|p| !p.is_empty()).unwrap_or("Default").to_string();
+            super::check_message_key_names(&ctx.tenant, queue, None, Some(&partition))?;
+            let key = (queue.to_string(), partition.clone(), txn.clone());
+            let follower_of = seen.get(&key).copied();
+            let idx = pushes.len();
+            let frame = if follower_of.is_none() {
+                seen.insert(key, idx);
+                groups.push(queue, &partition, idx);
+                pack_frames(&[FrameIn {
+                    message_id: mid,
+                    txn: &txn,
+                    trace_id: None,
+                    producer_sub: None,
+                    payload: payload.get().as_bytes(),
+                    encrypted: false,
+                }])
+            } else {
+                Vec::new()
+            };
+            pushes.push(TxnPush {
+                flat,
+                message_id: mid_str,
+                hash: txn_hash128(&txn),
+                txn,
+                queue: queue.to_string(),
+                follower_of,
+                frame,
+            });
+            Ok(())
+        };
+
+        for op in &ops {
+            match op.ty.as_str() {
+                "push" => {
+                    if let Some(items) = &op.items {
+                        for it in items {
+                            add_push(
+                                it.queue.as_ref(),
+                                it.partition.as_deref(),
+                                it.payload,
+                                it.transaction_id.as_deref(),
+                                flat,
+                                &mut pushes,
+                            )?;
+                            flat += 1;
+                        }
+                    } else {
+                        let (Some(q), Some(pl)) = (op.queue.as_deref(), op.payload) else {
+                            return Ok(fail("bad_request", "a push operation needs queue and payload"));
+                        };
+                        add_push(
+                            q,
+                            op.partition.as_deref(),
+                            pl,
+                            op.transaction_id.as_deref(),
+                            flat,
+                            &mut pushes,
+                        )?;
+                        flat += 1;
+                    }
+                }
+                "ack" => {
+                    let txn = op.transaction_id.clone().unwrap_or_default();
+                    let group = op
+                        .consumer_group
+                        .clone()
+                        .filter(|g| !g.is_empty())
+                        .unwrap_or_else(|| QUEUE_MODE_GROUP.to_string());
+                    let status = ack_status_of(op.status.as_deref());
+                    let lease = op.lease_id.clone().filter(|l| !l.is_empty());
+                    if let Some(l) = &lease {
+                        hints.push(l.clone());
+                    }
+                    let pid = match op.partition_id.as_deref().unwrap_or("").parse::<u64>() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            return Ok(fail("bad_request", "partitionId is not a partition id"))
+                        }
+                    };
+                    acks_by_group.entry(group).or_default().push(AckFlat {
+                        index: flat,
+                        txn: txn.clone(),
+                        pid,
+                        worker: lease.unwrap_or_default(),
+                        status,
+                        error: op.error.clone(),
+                    });
+                    ack_txn.push((flat, txn, status));
+                    flat += 1;
+                }
+                "kv" | "timer" | "timers" => {
+                    return Ok(fail(
+                        "bad_request",
+                        "kv and timer operations are TOP-LEVEL arrays of the request \
+                         (\"kv\":[...], \"timers\":[...]), never elements of `operations`",
+                    ))
+                }
+                "" => {
+                    return Ok(fail(
+                        "bad_request",
+                        "every transaction operation needs a `type` of push or ack",
+                    ))
+                }
+                other => {
+                    return Ok(fail(
+                        "bad_request",
+                        &format!("transaction supports only push and ack operations, got `{other}`"),
+                    ))
+                }
+            }
+        }
+
+        // The single unambiguous lease hint is every lease-less ack's worker
+        // (the JS/Go builders put the pop's leaseId in `requiredLeases`).
+        let unique_hint: Option<String> = {
+            let mut it = hints.iter();
+            match it.next() {
+                Some(first) if it.all(|h| h == first) => Some(first.clone()),
+                _ => None,
+            }
+        };
+
+        // 2. The command: one PushCommand per (queue, partition), one ack
+        //    target per (pid, group, worker).
+        let mut push_cmds: Vec<PushCommand> = Vec::with_capacity(groups.len());
+        let mut push_members: Vec<Vec<usize>> = Vec::with_capacity(groups.len());
+        for (ordinal, g) in groups.iter().enumerate() {
+            push_cmds.push(PushCommand {
+                request_id: derived_request_id(ctx.request_id, ordinal as u32),
+                tenant: ctx.tenant.clone(),
+                queue: g.queue.clone(),
+                partition: g.partition.clone(),
+                items: g
+                    .members
+                    .iter()
+                    .map(|&i| PushItem {
+                        hash: pushes[i].hash,
+                        frame: pushes[i].frame.clone(),
+                    })
+                    .collect(),
+                create_cfg: default_queue_config(),
+            });
+            push_members.push(g.members.clone());
+        }
+        let mut targets: Vec<AckTarget> = Vec::new();
+        for (group, mut flats) in acks_by_group {
+            if let Some(h) = &unique_hint {
+                for f in flats.iter_mut().filter(|f| f.worker.is_empty()) {
+                    f.worker = h.clone();
+                }
+            }
+            let store = self.store.clone();
+            let tenant = ctx.tenant.clone();
+            let (t, _per_item, bad) = tokio::task::spawn_blocking(move || {
+                resolve_ack_targets(&store, &tenant, &group, flats)
+            })
+            .await
+            .map_err(|e| RsmError::Internal(format!("txn ack resolve: {e}")))?;
+            if let Some((_, why)) = bad.first() {
+                return Ok(fail("rejected_ack", &format!("QTXN {why}; the transaction rolled back")));
+            }
+            targets.extend(t);
+        }
+
+        let cmd = Command::Transaction(crate::rsm::batcher::TxnCommand {
+            request_id: ctx.request_id,
+            tenant: ctx.tenant.clone(),
+            pushes: push_cmds,
+            acks: targets,
+        });
+        let out = match self.submit(&ctx, cmd).await? {
+            Reply::Done { outcome, .. } => crate::rsm::batcher::TxnOutcome::from_outcome(&outcome)
+                .ok_or_else(|| RsmError::Internal("transaction got a non-transaction outcome".into()))?,
+            Reply::Refused(r) => return Ok(fail(&r.code, &r.message)),
+            other => return Err(reply_error(other)),
+        };
+
+        // 3. Render: one result per flat ordinal, the SQL wire's shapes.
+        let mut results: Vec<serde_json::Value> = vec![serde_json::Value::Null; flat];
+        let mut verdict_mid: Vec<Option<String>> = vec![None; pushes.len()];
+        for (g, members) in push_members.iter().enumerate() {
+            for (k, &i) in members.iter().enumerate() {
+                let created = matches!(
+                    out.pushes.get(g).and_then(|o| o.items.get(k)),
+                    Some(PushVerdict::Created { .. })
+                );
+                verdict_mid[i] = Some(pushes[i].message_id.clone());
+                results[pushes[i].flat] = serde_json::json!({
+                    "index": pushes[i].flat,
+                    "type": "push",
+                    "success": created,
+                    "transactionId": pushes[i].txn,
+                    "messageId": pushes[i].message_id,
+                    "queueName": pushes[i].queue,
+                });
+            }
+        }
+        for p in &pushes {
+            if let Some(leader) = p.follower_of {
+                results[p.flat] = serde_json::json!({
+                    "index": p.flat,
+                    "type": "push",
+                    "success": true,
+                    "transactionId": p.txn,
+                    "messageId": verdict_mid[leader].clone().unwrap_or_default(),
+                    "queueName": p.queue,
+                    "duplicate": true,
+                });
+            }
+        }
+        for (i, txn, status) in ack_txn {
+            results[i] = serde_json::json!({
+                "index": i,
+                "type": "ack",
+                "success": true,
+                "transactionId": txn,
+                "error": serde_json::Value::Null,
+                "dlq": matches!(status, AckStatus::Dlq),
+            });
+        }
+        Ok(super::TxnOut {
+            body: serde_json::json!({
+                "transactionId": txn_id,
+                "success": true,
+                "results": results,
+            })
+            .to_string(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Push
 // ---------------------------------------------------------------------------
 
@@ -1724,6 +2074,10 @@ impl Rsm for RaftFacade {
 
     async fn ack(&self, ctx: ReqCtx, req: AckReq) -> Result<AckOut, RsmError> {
         self.ack_impl(ctx, req).await
+    }
+
+    async fn transaction(&self, ctx: ReqCtx, req: super::TxnReq) -> Result<super::TxnOut, RsmError> {
+        self.txn_impl(ctx, req).await
     }
 
     async fn renew(&self, ctx: ReqCtx, req: RenewReq) -> Result<RenewOut, RsmError> {

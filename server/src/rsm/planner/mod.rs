@@ -94,8 +94,8 @@ pub mod push;
 // inline stubs, exactly as they stood inside `rsm/mod.rs` before this WP filled
 // `planner`. The owning WP flips one to a file.
 
-/// The transaction wire: one command, the SQL's lock order (005). WP-2.1.
-pub mod txn {}
+/// The transaction wire: one command, all-or-nothing (Phase B).
+pub mod txn;
 /// KV: versions from `kv_version_base + ordinal`, TTL, prefix lists,
 /// `required` (024). WP-2.2.
 pub mod kv {}
@@ -241,6 +241,7 @@ pub enum CommandKind {
     Nack,
     Renew,
     DlqHead,
+    Transaction,
 }
 
 impl CommandKind {
@@ -255,6 +256,7 @@ impl CommandKind {
             CommandKind::Nack => "nack",
             CommandKind::Renew => "renew",
             CommandKind::DlqHead => "dlq_head",
+            CommandKind::Transaction => "transaction",
         }
     }
 }

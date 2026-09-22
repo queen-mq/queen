@@ -354,6 +354,18 @@ pub struct AckOut {
     pub body: String,
 }
 
+/// A transaction bundle — `POST /api/v1/transaction` (Phase B): the raw body.
+#[derive(Clone, Debug)]
+pub struct TxnReq {
+    pub raw: Vec<u8>,
+}
+
+/// A transaction outcome: the rendered response body (HTTP 200 either way).
+#[derive(Clone, Debug)]
+pub struct TxnOut {
+    pub body: String,
+}
+
 /// A renew outcome: the rendered response body.
 #[derive(Clone, Debug)]
 pub struct RenewOut {
@@ -435,6 +447,8 @@ pub trait Rsm: Send + Sync {
     async fn ack(&self, ctx: ReqCtx, req: AckReq) -> Result<AckOut, RsmError>;
     /// `POST /api/v1/lease/:leaseId/extend`.
     async fn renew(&self, ctx: ReqCtx, req: RenewReq) -> Result<RenewOut, RsmError>;
+    /// `POST /api/v1/transaction` (Phase B): push + ack all-or-nothing.
+    async fn transaction(&self, ctx: ReqCtx, req: TxnReq) -> Result<TxnOut, RsmError>;
     /// The head of a group's DLQ stream (005), read on the ack path.
     async fn dlq_head(&self, ctx: ReqCtx, req: DlqHeadReq) -> Result<DlqHeadOut, RsmError>;
     /// A cheap indexed pending probe for the long-poll gate (§9.5). A local
@@ -504,6 +518,9 @@ impl Rsm for NotReady {
         Err(RsmError::Unsupported)
     }
     async fn renew(&self, _ctx: ReqCtx, _req: RenewReq) -> Result<RenewOut, RsmError> {
+        Err(RsmError::Unsupported)
+    }
+    async fn transaction(&self, _ctx: ReqCtx, _req: TxnReq) -> Result<TxnOut, RsmError> {
         Err(RsmError::Unsupported)
     }
     async fn dlq_head(&self, _ctx: ReqCtx, _req: DlqHeadReq) -> Result<DlqHeadOut, RsmError> {

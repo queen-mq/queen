@@ -716,3 +716,146 @@ fn perf1_instrumentation_overhead() {
         cpu_per_s_at_a20k_us / 1_000_000.0 * 100.0,
     );
 }
+
+async fn pop_q(facade: &RaftFacade, q: &str) -> Value {
+    let p = facade
+        .pop_wildcard(
+            ctx(),
+            PopReq {
+                queue: q.into(),
+                group: None,
+                batch: 10,
+                auto_ack: false,
+                wait: false,
+                timeout_ms: 1000,
+            },
+        )
+        .await
+        .expect("pop");
+    if p.empty {
+        serde_json::json!({"messages": []})
+    } else {
+        parse(&p.body)
+    }
+}
+
+async fn txn(facade: &RaftFacade, body: Value) -> Value {
+    let out = facade
+        .transaction(
+            ctx(),
+            crate::rsm::facade::TxnReq {
+                raw: body.to_string().into_bytes(),
+            },
+        )
+        .await
+        .expect("transaction");
+    parse(&out.body)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_transaction_acks_the_input_and_pushes_the_output_all_or_nothing() {
+    // Phase B: consume-transform-produce in ONE bundle — one command, one entry.
+    let dir = scratch("txn");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    facade
+        .push(
+            ctx(),
+            PushReq {
+                raw: br#"{"items":[
+                    {"queue":"inq","payload":{"n":1},"transactionId":"t1"},
+                    {"queue":"inq","payload":{"n":2},"transactionId":"t2"}
+                ]}"#
+                .to_vec(),
+            },
+        )
+        .await
+        .expect("push");
+    let pop = pop_q(&facade, "inq").await;
+    assert_eq!(pop["messages"].as_array().map(|m| m.len()), Some(2), "{pop}");
+    let pid = pop["partitionId"].as_str().expect("partitionId").to_string();
+    let lease = pop["leaseId"].as_str().expect("leaseId").to_string();
+
+    // ---- commit: ack both inputs, push one output -------------------------------
+    let ok = txn(
+        &facade,
+        serde_json::json!({
+            "operations": [
+                {"type": "ack", "transactionId": "t1", "partitionId": pid, "leaseId": lease},
+                {"type": "ack", "transactionId": "t2", "partitionId": pid, "leaseId": lease},
+                {"type": "push", "items": [{"queue": "outq", "payload": {"sum": 3}, "transactionId": "o1"}]}
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(ok["success"], true, "{ok}");
+    let res = ok["results"].as_array().expect("results");
+    assert_eq!(res.len(), 3, "{ok}");
+    assert_eq!(res[0]["type"], "ack");
+    assert_eq!(res[2]["type"], "push");
+    assert_eq!(res[2]["success"], true, "{ok}");
+    let out = pop_q(&facade, "outq").await;
+    let outm = out["messages"].as_array().expect("messages");
+    assert_eq!(outm.len(), 1, "the output is poppable: {out}");
+    assert_eq!(outm[0]["data"]["sum"], 3);
+    assert_eq!(
+        pop_q(&facade, "inq").await["messages"].as_array().map(|m| m.len()),
+        Some(0),
+        "the inputs were consumed by the same bundle"
+    );
+
+    // ---- rollback on a DUPLICATE push: the bundle's ack must NOT apply ---------
+    facade
+        .push(
+            ctx(),
+            PushReq {
+                raw: br#"{"items":[{"queue":"inq","payload":{"n":3},"transactionId":"t3"}]}"#.to_vec(),
+            },
+        )
+        .await
+        .expect("push t3");
+    let pop3 = pop_q(&facade, "inq").await;
+    let pid3 = pop3["partitionId"].as_str().expect("partitionId").to_string();
+    let lease3 = pop3["leaseId"].as_str().expect("leaseId").to_string();
+    let dup = txn(
+        &facade,
+        serde_json::json!({
+            "operations": [
+                {"type": "ack", "transactionId": "t3", "partitionId": pid3, "leaseId": lease3},
+                {"type": "push", "items": [{"queue": "outq", "payload": {"again": true}, "transactionId": "o1"}]}
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(dup["success"], false, "a duplicate push rolls the bundle back: {dup}");
+    assert_eq!(dup["reason"], "duplicate", "{dup}");
+    // The ack of t3 did not happen: the same ack in a clean bundle still succeeds.
+    let retry = txn(
+        &facade,
+        serde_json::json!({
+            "operations": [
+                {"type": "ack", "transactionId": "t3", "partitionId": pid3, "leaseId": lease3}
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(retry["success"], true, "the rolled-back ack is still owed: {retry}");
+
+    // ---- rollback on a REJECTED ack: the bundle's push must NOT appear ---------
+    let bad = txn(
+        &facade,
+        serde_json::json!({
+            "operations": [
+                {"type": "push", "items": [{"queue": "outq", "payload": {"ghost": true}, "transactionId": "o2"}]},
+                {"type": "ack", "transactionId": "t1", "partitionId": pid, "leaseId": "not-my-lease"}
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(bad["success"], false, "a rejected ack rolls the bundle back: {bad}");
+    assert_eq!(
+        pop_q(&facade, "outq").await["messages"].as_array().map(|m| m.len()),
+        Some(0),
+        "the rolled-back push never reached the output queue"
+    );
+    facade.shutdown().await;
+}

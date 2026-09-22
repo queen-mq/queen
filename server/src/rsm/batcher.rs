@@ -82,6 +82,7 @@ use crate::rsm::planner::{
     AckCommand, AckPositionalCommand, CommandKind, DlqHeadCommand, Lookup, NackCommand, Overlay,
     Plan, PlanConfig, Planned, Planner, PopCommand, PushCommand, RenewCommand,
 };
+pub use crate::rsm::planner::txn::{TxnCommand, TxnOutcome};
 use crate::rsm::qlog::set::QLogReader;
 use crate::rsm::replicator::{AppliedAt, NodeId, ProposeError, Replicator, Role};
 use crate::rsm::segments::Reader;
@@ -239,6 +240,8 @@ pub enum Command {
     Nack(NackCommand),
     Renew(RenewCommand),
     DlqHead(DlqHeadCommand),
+    /// Phase B: push + ack all-or-nothing in ONE entry.
+    Transaction(TxnCommand),
 }
 
 impl Command {
@@ -255,6 +258,7 @@ impl Command {
             Command::Nack(c) => c.request_id,
             Command::Renew(c) => c.request_id,
             Command::DlqHead(c) => c.request_id,
+            Command::Transaction(c) => c.request_id,
         }
     }
 
@@ -270,6 +274,7 @@ impl Command {
             Command::Nack(_) => CommandKind::Nack,
             Command::Renew(_) => CommandKind::Renew,
             Command::DlqHead(_) => CommandKind::DlqHead,
+            Command::Transaction(_) => CommandKind::Transaction,
         }
     }
 
@@ -288,6 +293,14 @@ impl Command {
                     + 32
             }
             Command::DlqHead(c) => c.snapshot.payload.len() + 128,
+            Command::Transaction(c) => {
+                c.pushes
+                    .iter()
+                    .map(|p| p.items.iter().map(|i| i.frame.len() + 16).sum::<usize>() + 64)
+                    .sum::<usize>()
+                    + c.acks.iter().map(|t| t.items.len() * 48 + 64).sum::<usize>()
+                    + 64
+            }
             _ => 128,
         }
     }
@@ -298,6 +311,10 @@ impl Command {
         match self {
             Command::Push(c) => c.items.len() as u64,
             Command::Ack(c) => c.targets.iter().map(|t| t.items.len() as u64).sum(),
+            Command::Transaction(c) => {
+                c.pushes.iter().map(|p| p.items.len() as u64).sum::<u64>()
+                    + c.acks.iter().map(|t| t.items.len() as u64).sum::<u64>()
+            }
             _ => 1,
         }
     }
@@ -319,6 +336,11 @@ impl Command {
             Command::Nack(c) => (&c.tenant, &c.queue),
             Command::Renew(_) => ("", ""),
             Command::DlqHead(c) => (&c.tenant, &c.queue),
+            Command::Transaction(c) => c
+                .pushes
+                .first()
+                .map(|p| (p.tenant.as_str(), p.queue.as_str()))
+                .unwrap_or((c.tenant.as_str(), "")),
         }
     }
 
@@ -336,6 +358,7 @@ impl Command {
             Command::Nack(c) => p.plan_nack(ov, c),
             Command::Renew(c) => p.plan_renew(ov, c),
             Command::DlqHead(c) => p.plan_dlq_head(ov, c),
+            Command::Transaction(c) => p.plan_transaction(ov, c),
         }
     }
 }

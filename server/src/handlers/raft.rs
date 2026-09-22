@@ -298,6 +298,21 @@ pub(crate) async fn dispatch_ack(st: &AppState, tenant: &str, body: axum::body::
     }
 }
 
+/// `POST /api/v1/transaction` (Phase B): the whole bundle to the facade, which
+/// renders the SQL wire transaction's body (HTTP 200 on commit AND on rollback).
+pub(crate) async fn dispatch_transaction(
+    st: &AppState,
+    tenant: &str,
+    body: axum::body::Bytes,
+) -> Response {
+    let ctx = ReqCtx::new(tenant, deadline_for(st.stmt_timeout.as_millis() as u64));
+    let req = crate::rsm::facade::TxnReq { raw: body.to_vec() };
+    match st.rsm.transaction(ctx, req).await {
+        Ok(out) => json(StatusCode::OK, out.body),
+        Err(e) => err_response(e),
+    }
+}
+
 /// Extract the consumer group from an ack body (single or batch) without the
 /// private `AckSingle`/`AckBatch` types: read the `consumerGroup` key
 /// generically, defaulting to the queue-mode group the handlers use.
