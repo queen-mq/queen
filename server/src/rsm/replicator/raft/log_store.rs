@@ -23,12 +23,25 @@
 //!   fsynced. openraft calls it optional; a lost or torn copy only means the
 //!   node re-applies less at restart and catches up once it commits again.
 //!
+//! # What stays readable, and for how long
+//!
+//! openraft may read any entry above the last one it PURGED — to apply it, or
+//! to send it to a follower that is behind. So queue-log retention reclaims
+//! only files wholly at or below BOTH the store's durable index (recovery
+//! replays above it) and the purge point ([`FloorGate`]). openraft purges only
+//! entries a snapshot covers, and the replicator decides when
+//! ([`super`]'s purge driver): after every live follower has them.
+//!
+//! An entry in memory has its payloads. One read back from the queue logs has
+//! only its payload-free record; [`LogStore::read_range`] restores its payloads
+//! from the message records (rehydration), so a follower always receives the
+//! full entry.
+//!
 //! # The store's checkpoint is the snapshot
 //!
 //! The store reopens exactly at its last durable point, and recovery replays
-//! the entries above it from the queue logs. So at open the entries at or below
-//! the store's applied index are reported PURGED, and the state machine's
-//! snapshot is that checkpoint ([`super::state_machine`]).
+//! the entries above it from the queue logs; the state machine's snapshot is
+//! that checkpoint ([`super::state_machine`], [`super::snapshot`]).
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -37,6 +50,7 @@ use std::io::{self, Write};
 use std::ops::{Bound, RangeBounds};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver as StdReceiver, Sender as StdSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -69,6 +83,62 @@ const GROUP_MAX_BYTES: usize = 4 * 1024 * 1024;
 struct Persisted {
     vote: Option<Vote>,
     purged: Option<LogId>,
+    /// `1`: retention has never reclaimed an entry above `purged`
+    /// ([`FloorGate`]). `0` (a directory from the single-voter replicator
+    /// before the cluster step): entries at or below the store's applied index
+    /// may be gone, so they are treated as purged.
+    #[serde(default)]
+    floor_v: u8,
+}
+
+const FLOOR_V: u8 = 1;
+
+/// Which queue-log files retention may reclaim: those wholly at or below both
+/// the store's durable index and the last entry openraft purged. Shared by
+/// the apply thread's notifier (durable points) and the log store (purges).
+pub(crate) struct FloorGate {
+    durable: AtomicU64,
+    /// RSM index of the last purged entry, `0` for none.
+    purged: AtomicU64,
+    /// The queue logs' recovery floor.
+    floor: Arc<AtomicU64>,
+}
+
+impl FloorGate {
+    fn new(floor: Arc<AtomicU64>, durable: u64, purged: u64) -> Arc<FloorGate> {
+        let g = Arc::new(FloorGate {
+            durable: AtomicU64::new(durable),
+            purged: AtomicU64::new(purged),
+            floor,
+        });
+        g.raise();
+        g
+    }
+
+    /// The store made `index` durable.
+    pub(crate) fn durable(&self, index: u64) {
+        self.durable.fetch_max(index, Ordering::AcqRel);
+        self.raise();
+    }
+
+    /// openraft purged every entry up to RSM index `index`.
+    pub(crate) fn purged(&self, index: u64) {
+        self.purged.fetch_max(index, Ordering::AcqRel);
+        self.raise();
+    }
+
+    /// The store's durable index as last reported.
+    pub(crate) fn durable_index(&self) -> u64 {
+        self.durable.load(Ordering::Acquire)
+    }
+
+    fn raise(&self) {
+        let f = self
+            .durable
+            .load(Ordering::Acquire)
+            .min(self.purged.load(Ordering::Acquire));
+        self.floor.fetch_max(f, Ordering::AcqRel);
+    }
 }
 
 /// The poison flag shared with the replicator: set once, by the first fatal
@@ -77,9 +147,11 @@ pub(crate) type Poison = Arc<Mutex<Option<String>>>;
 
 /// The in-memory side of the log.
 struct Mem {
-    /// openraft index → entry, for every entry above the store's applied
-    /// index that has not been evicted since.
+    /// openraft index → entry, for every entry that has not been evicted
+    /// since it was appended (or recovered above the store's applied index).
     cache: BTreeMap<u64, REntry>,
+    /// What the cached entries hold in memory (payloads and wire bytes).
+    cache_bytes: usize,
     /// The first index the log holds when it holds any: entries below it were
     /// purged or never existed (an empty log may begin anywhere).
     start: u64,
@@ -102,6 +174,21 @@ struct Inner {
     writer_tx: Mutex<Option<StdSender<Cmd>>>,
     reader: QLogReader,
     poison: Poison,
+    gate: Arc<FloorGate>,
+    /// Above this many cached bytes, applied entries are evicted even if a
+    /// follower still needs them (it then reads them back from disk).
+    cache_cap: usize,
+}
+
+/// `QUEEN_RAFT_LOG_CACHE_MB` (default 512): see [`Inner::cache_cap`].
+pub(crate) fn cache_cap_from_env() -> usize {
+    std::env::var("QUEEN_RAFT_LOG_CACHE_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(512)
+        .max(1)
+        * 1024
+        * 1024
 }
 
 /// openraft's [`RaftLogStorage`] and [`RaftLogReader`] over the queue logs.
@@ -127,6 +214,8 @@ pub(crate) struct OpenCfg {
     /// `meta::QLOG_DURABLE_INDEX`: the reopened queue logs must not be behind it.
     pub qlog_durable_index: u64,
     pub poison: Poison,
+    /// See [`Inner::cache_cap`].
+    pub cache_cap: usize,
 }
 
 /// What [`LogStore::open`] recovered.
@@ -139,6 +228,9 @@ pub(crate) struct Opened {
     pub recovered: u64,
     /// Nothing was ever written: no vote, no entry, nothing applied.
     pub fresh: bool,
+    /// The retention floor's two inputs; the apply thread's notifier reports
+    /// durable points to it.
+    pub gate: Arc<FloorGate>,
 }
 
 impl LogStore {
@@ -158,11 +250,37 @@ impl LogStore {
                 cfg.qlog_durable_index
             )));
         }
-        set.set_recovery_floor(cfg.durable_index);
+        // What openraft may still read starts right after the purge point. A
+        // directory from before the retention gate (`floor_v` 0) may have lost
+        // entries at or below the store's applied index: those count as purged.
+        let legacy = cfg.state_dir.join(STATE_FILE).exists() && persisted.floor_v < FLOOR_V;
+        let purged = if legacy {
+            max_log_id(persisted.purged, cfg.applied)
+        } else {
+            persisted.purged
+        };
+        let gate = FloorGate::new(
+            set.recovery_floor_handle(),
+            cfg.durable_index,
+            purged.map_or(0, |p| rsm_index(p.index)),
+        );
+        if legacy || !cfg.state_dir.join(STATE_FILE).exists() {
+            let state = Persisted {
+                vote: persisted.vote,
+                purged,
+                floor_v: FLOOR_V,
+            };
+            write_atomic(
+                &cfg.state_dir,
+                STATE_FILE,
+                &serde_json::to_vec(&state).map_err(io::Error::other)?,
+            )?;
+        }
 
-        // Replay every complete entry above the store's durable point. Entries
-        // at or below the store's applied index are reported purged (the store
-        // IS the snapshot); the ones above are openraft's live log.
+        // Replay every complete entry above the store's durable point. The ones
+        // above the store's applied index are openraft's unapplied log and are
+        // kept in memory; those between the purge point and the applied index
+        // stay on disk and are read back on demand.
         let applied_index = cfg.applied.as_ref().map(|l| l.index);
         let mut pid_qid = std::collections::HashMap::new();
         let mut cache: BTreeMap<u64, REntry> = BTreeMap::new();
@@ -195,17 +313,14 @@ impl LogStore {
             );
         }
 
-        let purged = max_log_id(persisted.purged, cfg.applied);
-        let last_log_id = max_log_id(last, purged);
+        let last_log_id = max_log_id(max_log_id(last, cfg.applied), purged);
         let fresh = persisted.vote.is_none() && last_log_id.is_none();
         let reader = set.reader();
-        let start = cache
-            .keys()
-            .next()
-            .copied()
-            .unwrap_or_else(|| purged.map_or(0, |p| p.index + 1));
+        let start = purged.map_or(0, |p| p.index + 1);
+        let cache_bytes = cache.values().map(entry_mem).sum();
         let mem = Mem {
             cache,
+            cache_bytes,
             start,
             last_log_id,
             purged,
@@ -240,12 +355,15 @@ impl LogStore {
                     writer_tx: Mutex::new(Some(tx)),
                     reader: reader.clone(),
                     poison: cfg.poison,
+                    gate: gate.clone(),
+                    cache_cap: cfg.cache_cap,
                 }),
             },
             writer: join,
             reader,
             recovered,
             fresh,
+            gate,
         })
     }
 
@@ -260,17 +378,35 @@ impl LogStore {
         self.inner.mem.lock().expect("log mem").last_log_id
     }
 
-    /// Entries in memory (a gauge).
-    pub(crate) fn cached(&self) -> usize {
-        self.inner.mem.lock().expect("log mem").cache.len()
+    /// Entries in memory and their bytes (gauges).
+    pub(crate) fn cached(&self) -> (usize, usize) {
+        let m = self.inner.mem.lock().expect("log mem");
+        (m.cache.len(), m.cache_bytes)
     }
 
-    /// Drop the in-memory copy of every entry at or below `raft_index`: apply
-    /// has consumed them. They stay in the queue logs.
-    pub(crate) fn evict_applied(&self, raft_index: u64) {
+    /// Drop the in-memory copy of every entry at or below `applied` (openraft
+    /// indexes) that every live follower also has (`replicated`): they stay in
+    /// the queue logs and are read back from there if anyone asks. Over the
+    /// cache cap, everything applied goes regardless of the followers.
+    pub(crate) fn evict(&self, applied: u64, replicated: u64) {
         let mut m = self.inner.mem.lock().expect("log mem");
-        let keep = m.cache.split_off(&(raft_index + 1));
-        m.cache = keep;
+        let upto = if m.cache_bytes > self.inner.cache_cap {
+            applied
+        } else {
+            applied.min(replicated)
+        };
+        if m.cache.first_key_value().is_none_or(|(k, _)| *k > upto) {
+            return;
+        }
+        let keep = m.cache.split_off(&(upto.saturating_add(1)));
+        let gone = std::mem::replace(&mut m.cache, keep);
+        let freed: usize = gone.values().map(entry_mem).sum();
+        m.cache_bytes = m.cache_bytes.saturating_sub(freed);
+    }
+
+    /// The retention floor's inputs.
+    pub(crate) fn gate(&self) -> &Arc<FloorGate> {
+        &self.inner.gate
     }
 
     fn send(&self, cmd: Cmd) -> io::Result<()> {
@@ -286,7 +422,8 @@ impl LogStore {
     }
 
     /// Every entry with an openraft index in `[start, end)` the log holds, in
-    /// order: the in-memory window, and the queue logs below it.
+    /// order: the queue logs below the in-memory window (payloads restored),
+    /// then the window.
     fn read_range(&self, start: u64, end: u64) -> io::Result<Vec<REntry>> {
         let (disk_end, from_cache, start) = {
             let m = self.inner.mem.lock().expect("log mem");
@@ -321,12 +458,63 @@ impl LogStore {
             )));
         }
         let mut out = Vec::with_capacity(recs.len() + from_cache.len());
-        for rec in &recs {
-            out.push(entry_of_record(rec)?.0);
+        for (rec, qids) in &recs {
+            out.push(rehydrate(&self.inner.reader, rec, qids)?);
         }
         out.extend(from_cache);
         Ok(out)
     }
+}
+
+/// What a cached entry holds in memory.
+fn entry_mem(e: &REntry) -> usize {
+    match &e.payload {
+        EntryPayload::Normal(app) => app.mem_bytes(),
+        _ => 64,
+    }
+}
+
+/// An entry read back from the queue logs, whole: its payload-free record plus
+/// every `Append` payload from the message record that holds it — in one of
+/// the queue logs holding a copy of the entry (`qids`), since an `Append`
+/// always touches its own queue's log.
+fn rehydrate(reader: &QLogReader, rec: &EntryRecord, qids: &[u64]) -> io::Result<REntry> {
+    use crate::rsm::effect::Effect;
+    let (mut entry, pf) = entry_of_record(rec)?;
+    let Some(pf) = pf else {
+        return Ok(entry);
+    };
+    let mut full = (*pf).clone();
+    for eff in full.effects.iter_mut() {
+        let Effect::Append {
+            pid,
+            base_offset,
+            count,
+            blob,
+            ..
+        } = eff
+        else {
+            continue;
+        };
+        let mut found = None;
+        for qid in qids {
+            if let Some(r) = reader.read_owned(*qid, *pid, *base_offset)? {
+                if r.seq == rec.seq && r.base_offset == *base_offset && r.count == *count {
+                    found = Some(r);
+                    break;
+                }
+            }
+        }
+        let r = found.ok_or_else(|| {
+            io::Error::other(format!(
+                "entry {}: the payload of pid {pid} offset {base_offset} is not in its queue log",
+                rec.seq
+            ))
+        })?;
+        *blob = r.payload;
+    }
+    entry.payload = EntryPayload::Normal(AppEntry::rehydrated(Arc::new(full), pf));
+    Ok(entry)
 }
 
 /// The later of two optional log ids.
@@ -379,6 +567,29 @@ fn entry_of_record(rec: &EntryRecord) -> io::Result<(REntry, Option<Arc<Entry>>)
     ))
 }
 
+/// After a snapshot replaced the data directory (at boot, before the log
+/// opens): every entry up to the snapshot's `purged` is gone from this node's
+/// log, the vote stays, and the commit point is unknown again.
+pub(crate) fn state_after_snapshot(state_dir: &Path, purged: Option<LogId>) -> io::Result<()> {
+    fs::create_dir_all(state_dir)?;
+    let old = read_state(state_dir)?;
+    let state = Persisted {
+        vote: old.vote,
+        purged: max_log_id(old.purged, purged),
+        floor_v: FLOOR_V,
+    };
+    write_atomic(
+        state_dir,
+        STATE_FILE,
+        &serde_json::to_vec(&state).map_err(io::Error::other)?,
+    )?;
+    match fs::remove_file(state_dir.join(COMMITTED_FILE)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    Ok(())
+}
+
 fn read_state(dir: &Path) -> io::Result<Persisted> {
     match fs::read(dir.join(STATE_FILE)) {
         Ok(b) => serde_json::from_slice(&b)
@@ -399,7 +610,7 @@ fn read_committed(dir: &Path) -> Option<LogId> {
 }
 
 /// Replace `dir/name` durably: a temporary file, fsync, rename, directory fsync.
-fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let tmp = dir.join(format!("{name}.tmp"));
     {
         let mut f = File::create(&tmp)?;
@@ -460,6 +671,7 @@ impl RaftLogStorage<TypeConfig> for LogStore {
             Persisted {
                 vote: m.vote,
                 purged: m.purged,
+                floor_v: FLOOR_V,
             }
         };
         let (tx, rx) = oneshot::channel();
@@ -512,7 +724,10 @@ impl RaftLogStorage<TypeConfig> for LogStore {
                     )));
                 }
                 next += 1;
-                m.cache.insert(e.log_id.index, e.clone());
+                m.cache_bytes += entry_mem(e);
+                if let Some(old) = m.cache.insert(e.log_id.index, e.clone()) {
+                    m.cache_bytes = m.cache_bytes.saturating_sub(entry_mem(&old));
+                }
                 m.last_log_id = Some(e.log_id);
             }
         }
@@ -527,6 +742,8 @@ impl RaftLogStorage<TypeConfig> for LogStore {
                 return Ok(());
             }
             let removed = m.cache.split_off(&cut);
+            let freed: usize = removed.values().map(entry_mem).sum();
+            m.cache_bytes = m.cache_bytes.saturating_sub(freed);
             m.last_log_id = max_log_id(last_log_id, m.purged);
             // A partition created by an entry that is being thrown away must not
             // keep routing its pid (a new leader may give that pid to another
@@ -564,20 +781,26 @@ impl RaftLogStorage<TypeConfig> for LogStore {
             m.purged = Some(log_id);
             m.start = m.start.max(log_id.index + 1);
             let keep = m.cache.split_off(&(log_id.index + 1));
-            m.cache = keep;
+            let gone = std::mem::replace(&mut m.cache, keep);
+            let freed: usize = gone.values().map(entry_mem).sum();
+            m.cache_bytes = m.cache_bytes.saturating_sub(freed);
             if m.last_log_id.is_none_or(|l| l < log_id) {
                 m.last_log_id = Some(log_id);
             }
             Persisted {
                 vote: m.vote,
                 purged: m.purged,
+                floor_v: FLOOR_V,
             }
         };
-        // The queue logs keep the records: their own retention reclaims files.
         let (tx, rx) = oneshot::channel();
         self.send(Cmd::Persist { state, done: tx })?;
         rx.await
-            .map_err(|_| io::Error::other("the raft log writer stopped before the purge"))?
+            .map_err(|_| io::Error::other("the raft log writer stopped before the purge"))??;
+        // Durable: retention may now reclaim the files wholly at or below it
+        // (and the store's durable index).
+        self.inner.gate.purged(rsm_index(log_id.index));
+        Ok(())
     }
 }
 
@@ -843,7 +1066,7 @@ impl Writer {
             } => {
                 let res = match self.poisoned() {
                     Some(why) => Err(io::Error::other(why)),
-                    None => self.q.set.truncate_from(from_seq).map(|dropped| {
+                    None => self.q.set.truncate_from_across(from_seq).map(|dropped| {
                         for pid in forget_pids {
                             self.q.pid_qid.remove(&pid);
                         }

@@ -369,6 +369,22 @@ impl RaftFacade {
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("create raft data dir {}: {e}", dir.display()))?;
 
+        // `QUEEN_RAFT_REPLICATOR`: the local replicator (default) or openraft;
+        // `QUEEN_RAFT_PEERS`: a cluster (openraft only).
+        let kind = ReplicatorKind::from_env()?;
+        let cluster = crate::rsm::replicator::raft::ClusterConfig::from_env()?;
+        let node_id = cluster.as_ref().map_or(NODE_ID, |c| c.node_id);
+        let ocfg = OpenConfig::new(node_id, dir.clone());
+        if kind == ReplicatorKind::Raft {
+            // A snapshot received before the last exit replaces the store and
+            // the queue logs now, before either is opened.
+            crate::rsm::replicator::raft::snapshot::apply_pending(
+                &dir,
+                crate::rsm::replicator::raft::qlog_options(&ocfg),
+            )
+            .map_err(|e| format!("install the received snapshot in {}: {e}", dir.display()))?;
+        }
+
         let store = Arc::new(
             HeedStore::open(&dir.join("store"), &store_opts_from_env())
                 .map_err(|e| format!("open store at {}/store: {e}", dir.display()))?,
@@ -379,15 +395,16 @@ impl RaftFacade {
             notifier: ctx.notifier.clone(),
             gates: gates.clone(),
         });
-        // `QUEEN_RAFT_REPLICATOR`: the local replicator (default) or openraft.
-        let kind = ReplicatorKind::from_env()?;
         let repl = Arc::new(
-            NodeReplicator::open(
+            NodeReplicator::open_with(
                 kind,
                 store.clone(),
-                OpenConfig::new(NODE_ID, dir.clone()),
+                ocfg,
+                cluster,
                 waker,
                 Arc::new(SystemClock),
+                // The binary exits to load a received snapshot; tests reopen.
+                storage_pressure_enabled,
             )
             .map_err(|e| {
                 format!(
@@ -3283,6 +3300,18 @@ impl Rsm for RaftFacade {
 
     async fn api(&self, ctx: ReqCtx, req: ApiReq) -> Result<ApiOut, RsmError> {
         self.api_impl(ctx, req).await
+    }
+
+    fn route(&self) -> crate::rsm::facade::Route {
+        use crate::rsm::facade::Route;
+        use crate::rsm::replicator::Role;
+        match self.repl.role() {
+            Role::Leader { .. } | Role::Stopped => Route::Local,
+            _ => match self.repl.leader_http() {
+                Some(addr) => Route::Leader(addr),
+                None => Route::NoLeader,
+            },
+        }
     }
 
     fn health(&self) -> RaftHealth {

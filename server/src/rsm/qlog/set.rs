@@ -179,6 +179,9 @@ pub struct QLogSet {
     totals: Arc<SharedTotals>,
     /// Fair starting point for the globally bounded local-GC step.
     reclaim_queue_cursor: Arc<AtomicU64>,
+    /// While non-zero, retention unlinks and rewrites nothing
+    /// ([`QLogReader::pause_reclaim`]): a snapshot is linking the files.
+    reclaim_paused: Arc<AtomicU64>,
 }
 
 impl QLogSet {
@@ -198,6 +201,7 @@ impl QLogSet {
             floor: Arc::new(AtomicU64::new(0)),
             totals: Arc::new(SharedTotals::default()),
             reclaim_queue_cursor: Arc::new(AtomicU64::new(0)),
+            reclaim_paused: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -268,6 +272,8 @@ impl QLogSet {
             floor: self.floor.clone(),
             totals: self.totals.clone(),
             reclaim_queue_cursor: self.reclaim_queue_cursor.clone(),
+            reclaim_paused: self.reclaim_paused.clone(),
+            root: self.root.clone(),
         }
     }
 
@@ -468,6 +474,28 @@ impl QLogSet {
         let mut dropped = 0u64;
         for log in logs {
             dropped += log.write().expect("qlog poisoned").truncate_seq_from(cut)?;
+        }
+        self.recompute_totals();
+        Ok(dropped)
+    }
+
+    /// A Raft truncation of every log at `cut`: [`QLog::truncate_seq_from_across`]
+    /// (a conflicting suffix or the tail above a snapshot may sit in a sealed
+    /// file). Returns the bytes dropped.
+    pub fn truncate_from_across(&mut self, cut: u64) -> io::Result<u64> {
+        let logs: Vec<Arc<RwLock<QLog>>> = self
+            .logs
+            .read()
+            .expect("qlog set poisoned")
+            .values()
+            .cloned()
+            .collect();
+        let mut dropped = 0u64;
+        for log in logs {
+            dropped += log
+                .write()
+                .expect("qlog poisoned")
+                .truncate_seq_from_across(cut)?;
         }
         self.recompute_totals();
         Ok(dropped)
@@ -734,9 +762,35 @@ pub struct QLogReader {
     /// visible to the replicator metrics without waiting for another append.
     totals: Arc<SharedTotals>,
     reclaim_queue_cursor: Arc<AtomicU64>,
+    /// Shared with the set: see [`QLogReader::pause_reclaim`].
+    reclaim_paused: Arc<AtomicU64>,
+    /// `<data_dir>/qlog`, for a snapshot that links the files.
+    root: PathBuf,
+}
+
+/// Retention stays paused while one of these is alive.
+pub struct ReclaimPause(Arc<AtomicU64>);
+
+impl Drop for ReclaimPause {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl QLogReader {
+    /// Pause retention (no file is unlinked or rewritten) until the guard is
+    /// dropped: a snapshot links every file and needs them to stay put. A
+    /// retention step already running finishes its one file first.
+    pub fn pause_reclaim(&self) -> ReclaimPause {
+        self.reclaim_paused.fetch_add(1, Ordering::AcqRel);
+        ReclaimPause(self.reclaim_paused.clone())
+    }
+
+    /// `<data_dir>/qlog`.
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
     /// Phase C: raise the queue logs' RECOVERY FLOOR to `durable_index` — the
     /// index the store's last durable point covers. The queue logs are the only
     /// write-ahead log, so recovery replays every entry above the store's
@@ -778,6 +832,12 @@ impl QLogReader {
         txns_starts: &std::collections::HashMap<u64, u64>,
         max_files: usize,
     ) -> io::Result<ReclaimProgress> {
+        if self.reclaim_paused.load(Ordering::Acquire) > 0 {
+            return Ok(ReclaimProgress {
+                more: true,
+                ..ReclaimProgress::default()
+            });
+        }
         match self.log(queue_id) {
             Some(log) => {
                 let Ok(mut log) = log.try_write() else {
@@ -822,31 +882,33 @@ impl QLogReader {
     /// that is missing or incomplete; the caller decides whether a short answer
     /// is an error. Reads every candidate file of every log: a rare path (a
     /// follower catching up from before this node's window), never the hot one.
-    pub fn entry_records_range(&self, from_seq: u64, end_seq: u64) -> io::Result<Vec<EntryRecord>> {
+    pub fn entry_records_range(
+        &self,
+        from_seq: u64,
+        end_seq: u64,
+    ) -> io::Result<Vec<(EntryRecord, Vec<u64>)>> {
         let from_seq = from_seq.max(1);
         if from_seq >= end_seq {
             return Ok(Vec::new());
         }
-        let logs: Vec<Arc<RwLock<QLog>>> = self
+        let logs: Vec<(u64, Arc<RwLock<QLog>>)> = self
             .logs
             .read()
             .expect("qlog set poisoned")
-            .values()
-            .cloned()
+            .iter()
+            .map(|(qid, l)| (*qid, l.clone()))
             .collect();
-        let mut merged: BTreeMap<u64, (EntryRecord, u32)> = BTreeMap::new();
-        for log in logs {
+        // seq -> (the record, the queue logs holding a copy of it)
+        let mut merged: BTreeMap<u64, (EntryRecord, Vec<u64>)> = BTreeMap::new();
+        for (qid, log) in logs {
             let recs = log
                 .read()
                 .expect("qlog poisoned")
-                .entry_records_from(from_seq)?;
+                .entry_records_between(from_seq, end_seq)?;
             for r in recs {
-                if r.seq >= end_seq {
-                    break;
-                }
                 match merged.entry(r.seq) {
                     std::collections::btree_map::Entry::Vacant(v) => {
-                        v.insert((r, 1));
+                        v.insert((r, vec![qid]));
                     }
                     std::collections::btree_map::Entry::Occupied(mut o) => {
                         if o.get().0 != r {
@@ -858,18 +920,18 @@ impl QLogReader {
                                 ),
                             ));
                         }
-                        o.get_mut().1 += 1;
+                        o.get_mut().1.push(qid);
                     }
                 }
             }
         }
         let mut out = Vec::with_capacity(merged.len());
         let mut next = from_seq;
-        for (seq, (rec, found)) in merged {
-            if seq != next || found < rec.copies {
+        for (seq, (rec, qids)) in merged {
+            if seq != next || (qids.len() as u32) < rec.copies {
                 break;
             }
-            out.push(rec);
+            out.push((rec, qids));
             next += 1;
         }
         Ok(out)

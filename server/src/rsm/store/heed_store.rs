@@ -522,6 +522,33 @@ impl HeedStore {
         &self.dir
     }
 
+    /// Copy the committed LMDB image into `dir/data.mdb` — one read
+    /// transaction, so the copy is consistent — fsync it, and return the
+    /// copy's checkpoint `(applied_index, applied_term)`: the state another
+    /// node reopens at from this copy (the snapshot of a Raft cluster). The
+    /// RAM keyspaces are in the image as of the last durable point, the
+    /// LMDB-direct ones possibly ahead of it, exactly as after a crash.
+    pub fn copy_checkpoint(&self, dir: &Path) -> Result<(u64, u64)> {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| StoreError::Io(format!("{}: {e}", dir.display())))?;
+        let path = dir.join("data.mdb");
+        let _ = std::fs::remove_file(&path);
+        // COMPACTING: LMDB's plain copy takes the writer mutex to read the meta
+        // pages, and the apply thread holds a write transaction almost always,
+        // so it would starve. The compacting copy walks one read transaction.
+        let file = self
+            .env
+            .copy_to_path(&path, heed::CompactionOption::Enabled)
+            .map_err(|e| StoreError::Mdb(format!("copy the store to {}: {e}", path.display())))?;
+        file.sync_all()
+            .map_err(|e| StoreError::Io(format!("sync {}: {e}", path.display())))?;
+        drop(file);
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+        read_checkpoint_meta(dir)
+    }
+
     /// Close the environment and wait until LMDB has really let go of the
     /// directory.
     ///
@@ -717,6 +744,10 @@ impl Store for HeedStore {
                 detail: e.to_string(),
             }
         })
+    }
+
+    fn copy_checkpoint(&self, dir: &Path) -> Result<(u64, u64)> {
+        HeedStore::copy_checkpoint(self, dir)
     }
 }
 
@@ -1314,4 +1345,51 @@ impl super::Writes for HeedWrite<'_> {
         }
         Ok(())
     }
+}
+
+/// The `(applied_index, applied_term)` of the LMDB image in `dir` (a store
+/// directory that is NOT open in this process), read without loading it: a
+/// read-only environment and two `meta` keys. `(0, 0)` when there is no image.
+pub fn read_checkpoint_meta(dir: &Path) -> Result<(u64, u64)> {
+    let data = dir.join("data.mdb");
+    let used = match std::fs::metadata(&data) {
+        Ok(m) => m.len() as usize,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(e) => return Err(StoreError::Io(format!("{}: {e}", data.display()))),
+    };
+    let map = (used + 2 * MAP_ROUND).div_ceil(MAP_ROUND) * MAP_ROUND;
+    let mut o = EnvOpenOptions::new();
+    o.map_size(map);
+    o.max_dbs(MAX_DBS);
+    // SAFETY: a read-only, lock-free open of a copy nobody else writes.
+    unsafe { o.flags(EnvFlags::READ_ONLY | EnvFlags::NO_LOCK) };
+    let env: Env<WithTls> = unsafe { o.open(dir) }
+        .map_err(|e| StoreError::Mdb(format!("open {} read-only: {e}", dir.display())))?;
+    let out = (|| {
+        let r = env
+            .read_txn()
+            .map_err(|e| StoreError::Mdb(format!("read {}: {e}", dir.display())))?;
+        let db: Option<Database<Bytes, Bytes>> = env
+            .open_database(&r, Some(Keyspace::Meta.name()))
+            .map_err(|e| StoreError::Mdb(format!("open meta in {}: {e}", dir.display())))?;
+        let Some(db) = db else {
+            return Ok((0, 0));
+        };
+        let get = |key: &[u8]| -> Result<u64> {
+            match db
+                .get(&r, key)
+                .map_err(|e| StoreError::Mdb(format!("read meta in {}: {e}", dir.display())))?
+            {
+                Some(v) => super::rows::u64_decode(v)
+                    .map_err(|_| StoreError::corrupt(Keyspace::Meta, "u64")),
+                None => Ok(0),
+            }
+        };
+        Ok((
+            get(super::meta::APPLIED_INDEX)?,
+            get(super::meta::APPLIED_TERM)?,
+        ))
+    })();
+    env.prepare_for_closing().wait();
+    out
 }

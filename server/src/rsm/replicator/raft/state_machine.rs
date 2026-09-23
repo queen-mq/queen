@@ -12,9 +12,12 @@
 //!
 //! The store's durable checkpoint is the snapshot: the store reopens exactly
 //! there and the entries above it replay from the queue logs. Building one is
-//! therefore free — a [`Checkpoint`] naming the applied log id. Moving one to
-//! another node (and installing it) needs the snapshot transport of the
-//! multi-node step and is refused until then.
+//! therefore free — a [`Checkpoint`] naming the log id of the store's DURABLE
+//! index, which is what lets openraft purge the log behind it. Sending one to a
+//! follower copies the checkpoint and the queue logs ([`super::snapshot`]);
+//! installing one replaces this node's data directory, which cannot be done
+//! under a running apply thread: [`QueenSm::install_snapshot`] asks for a
+//! restart, and the next boot swaps the received snapshot in.
 
 use std::io;
 use std::path::PathBuf;
@@ -28,7 +31,7 @@ use openraft::{EntryPayload, OptionalSend, RaftSnapshotBuilder};
 use tokio::sync::oneshot;
 
 use super::types::{
-    applied_log_id, rsm_index, term_of, LogId, SnapshotMeta, StoredMembership, TypeConfig,
+    applied_log_id, log_id, rsm_index, term_of, LogId, SnapshotMeta, StoredMembership, TypeConfig,
 };
 use super::{LogStore, Shared};
 use crate::rsm::apply::Committed;
@@ -39,7 +42,8 @@ use crate::rsm::store::{Store, TypedReads};
 pub type Snapshot = openraft::alias::SnapshotOf<TypeConfig, Checkpoint>;
 
 /// A snapshot: the store's state at `last_log_id`. It carries no bytes; the
-/// store and the queue logs on this node ARE the snapshot.
+/// store and the queue logs on this node ARE the snapshot, copied when one is
+/// sent.
 #[derive(Clone, Debug)]
 pub struct Checkpoint {
     pub last_log_id: Option<LogId>,
@@ -50,9 +54,12 @@ const MEMBERSHIP_FILE: &str = "membership.json";
 /// The pieces of the state machine that outlive one openraft call.
 struct Parts<S: Store> {
     store: Arc<S>,
-    membership: Mutex<StoredMembership>,
+    /// The latest applied membership, and the ones before it (newest last):
+    /// a snapshot below the latest one names the membership of its own index.
+    membership: Mutex<Vec<StoredMembership>>,
     membership_path: PathBuf,
     current: Mutex<Option<Snapshot>>,
+    shared: Arc<Shared>,
 }
 
 impl<S: Store> Parts<S> {
@@ -64,12 +71,40 @@ impl<S: Store> Parts<S> {
         Ok(applied_log_id(index, term))
     }
 
+    fn latest_membership(&self) -> StoredMembership {
+        self.membership
+            .lock()
+            .expect("membership")
+            .last()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// A checkpoint at the store's durable index: everything at or below it is
+    /// in the store's image on disk, so openraft may purge it.
     fn build(&self) -> io::Result<Snapshot> {
-        let last_log_id = self.applied()?;
+        let durable = self.shared.durable();
+        let last_log_id = match durable {
+            0 => None,
+            d => Some(log_id(
+                self.shared.term_at(d).ok_or_else(|| {
+                    io::Error::other(format!("the term of durable index {d} is unknown"))
+                })?,
+                d - 1,
+            )),
+        };
+        let last_membership = {
+            let hist = self.membership.lock().expect("membership");
+            hist.iter()
+                .rev()
+                .find(|m| m.log_id() <= &last_log_id)
+                .cloned()
+                .unwrap_or_else(|| hist.first().cloned().unwrap_or_default())
+        };
         let snap = Snapshot {
             meta: SnapshotMeta {
                 last_log_id,
-                last_membership: self.membership.lock().expect("membership").clone(),
+                last_membership,
             },
             snapshot: Checkpoint { last_log_id },
         };
@@ -95,7 +130,7 @@ impl<S: Store + 'static> QueenSm<S> {
         log: LogStore,
     ) -> io::Result<QueenSm<S>> {
         let membership_path = state_dir.join(MEMBERSHIP_FILE);
-        let membership = match std::fs::read(&membership_path) {
+        let membership: StoredMembership = match std::fs::read(&membership_path) {
             Ok(b) => serde_json::from_slice(&b).map_err(|e| {
                 io::Error::other(format!("raft/{MEMBERSHIP_FILE} does not parse: {e}"))
             })?,
@@ -105,9 +140,10 @@ impl<S: Store + 'static> QueenSm<S> {
         Ok(QueenSm {
             parts: Arc::new(Parts {
                 store,
-                membership: Mutex::new(membership),
+                membership: Mutex::new(vec![membership]),
                 membership_path,
                 current: Mutex::new(None),
+                shared: shared.clone(),
             }),
             apply_tx,
             shared,
@@ -135,7 +171,11 @@ impl<S: Store + 'static> QueenSm<S> {
         }
         std::fs::rename(&tmp, &self.parts.membership_path)?;
         std::fs::File::open(&dir)?.sync_all()?;
-        *self.parts.membership.lock().expect("membership") = m;
+        let mut hist = self.parts.membership.lock().expect("membership");
+        hist.push(m);
+        if hist.len() > 4 {
+            hist.remove(0);
+        }
         Ok(())
     }
 
@@ -162,10 +202,7 @@ impl<S: Store + 'static> RaftStateMachine<TypeConfig> for QueenSm<S> {
     type SnapshotBuilder = SnapshotBuilder<S>;
 
     async fn applied_state(&mut self) -> Result<(Option<LogId>, StoredMembership), io::Error> {
-        Ok((
-            self.parts.applied()?,
-            self.parts.membership.lock().expect("membership").clone(),
-        ))
+        Ok((self.parts.applied()?, self.parts.latest_membership()))
     }
 
     async fn apply<Strm>(&mut self, mut entries: Strm) -> Result<(), io::Error>
@@ -228,7 +265,7 @@ impl<S: Store + 'static> RaftStateMachine<TypeConfig> for QueenSm<S> {
             }
         }
         if let Some(l) = last {
-            self.log.evict_applied(l);
+            self.log.evict(l, self.shared.replicated());
         }
         Ok(())
     }
@@ -239,18 +276,30 @@ impl<S: Store + 'static> RaftStateMachine<TypeConfig> for QueenSm<S> {
         }
     }
 
+    /// The received snapshot is already on disk, staged, with its marker
+    /// written ([`super::snapshot::receive`]); it replaces the data directory
+    /// at the next boot. Stop here: openraft must not apply anything more to
+    /// the store this snapshot replaces.
     async fn install_snapshot(
         &mut self,
-        _meta: &SnapshotMeta,
+        meta: &SnapshotMeta,
         _snapshot: Self::SnapshotData,
     ) -> Result<(), io::Error> {
-        Err(io::Error::other(
-            "installing a snapshot needs the snapshot transport (multi-node), not built yet",
-        ))
+        let why = format!(
+            "installing the snapshot at {:?}: the node restarts to load it",
+            meta.last_log_id
+        );
+        self.shared.restart.request(why.clone());
+        Err(io::Error::other(why))
     }
 
     async fn get_current_snapshot(&mut self) -> Result<Option<Snapshot>, io::Error> {
-        Ok(self.parts.current.lock().expect("snapshot").clone())
+        let current = self.parts.current.lock().expect("snapshot").clone();
+        match current {
+            Some(s) => Ok(Some(s)),
+            // After a restart: the store's checkpoint is still the snapshot.
+            None => self.parts.build().map(Some),
+        }
     }
 }
 

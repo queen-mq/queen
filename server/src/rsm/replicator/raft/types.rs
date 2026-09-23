@@ -19,7 +19,38 @@ use crate::rsm::entry::{decode_entry, encode_entry, encode_entry_payload_free, E
 use crate::rsm::qlog::codec::Pre;
 
 pub type NodeId = u64;
-pub type Node = openraft::BasicNode;
+pub type Node = QueenNode;
+
+/// A cluster member's two addresses. The Raft RPCs go to `raft`; a follower
+/// forwards the client requests it receives to the leader's `http`.
+///
+/// `addr` is accepted for `raft` so a membership written as openraft's
+/// `BasicNode` (the single-voter replicator before the cluster step) still
+/// reads.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueenNode {
+    /// `host:port` of the node's Raft RPC listener.
+    #[serde(default, alias = "addr")]
+    pub raft: String,
+    /// `host:port` of the node's client API.
+    #[serde(default)]
+    pub http: String,
+}
+
+impl QueenNode {
+    pub fn new(raft: impl Into<String>, http: impl Into<String>) -> QueenNode {
+        QueenNode {
+            raft: raft.into(),
+            http: http.into(),
+        }
+    }
+}
+
+impl fmt::Display for QueenNode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "raft={} http={}", self.raft, self.http)
+    }
+}
 
 openraft::declare_raft_types!(
     /// Queen's openraft types. The application data is one planned [`Entry`]
@@ -84,6 +115,9 @@ struct AppEntryInner {
     /// The qlog codec work started at propose (it overlaps the previous
     /// fsync); taken once, by the writer.
     pre: Mutex<Vec<Pre>>,
+    /// The full entry's wire encoding, made once and shared by every follower
+    /// the entry is sent to (and every resend).
+    wire: OnceLock<bytes::Bytes>,
 }
 
 impl AppEntry {
@@ -94,6 +128,7 @@ impl AppEntry {
             full: Some(full),
             payload_free: OnceLock::new(),
             pre: Mutex::new(pre),
+            wire: OnceLock::new(),
         }))
     }
 
@@ -105,7 +140,66 @@ impl AppEntry {
             full: None,
             payload_free: pf,
             pre: Mutex::new(Vec::new()),
+            wire: OnceLock::new(),
         }))
+    }
+
+    /// An entry read back from the queue logs with its payloads restored
+    /// ([`super::log_store`]'s rehydration): both forms are known.
+    pub fn rehydrated(full: Arc<Entry>, payload_free: Arc<Entry>) -> AppEntry {
+        let pf = OnceLock::new();
+        let _ = pf.set(payload_free);
+        AppEntry(Arc::new(AppEntryInner {
+            full: Some(full),
+            payload_free: pf,
+            pre: Mutex::new(Vec::new()),
+            wire: OnceLock::new(),
+        }))
+    }
+
+    /// An entry received from the leader: its wire bytes decoded (the codec
+    /// checks the checksum and every field).
+    pub fn from_wire(bytes: &[u8]) -> std::io::Result<AppEntry> {
+        let e = decode_entry(bytes).map_err(|e| {
+            std::io::Error::other(format!("replicated entry does not decode: {e:?}"))
+        })?;
+        Ok(AppEntry::proposed(Arc::new(e), Vec::new()))
+    }
+
+    /// The full entry's wire bytes, encoded once. A payload-free entry has
+    /// none: sending it would store 4-byte lengths as payloads on a follower,
+    /// so it is an error here, never silent data loss.
+    pub fn wire(&self) -> std::io::Result<bytes::Bytes> {
+        if let Some(b) = self.0.wire.get() {
+            return Ok(b.clone());
+        }
+        let full =
+            self.0.full.as_ref().ok_or_else(|| {
+                std::io::Error::other("a payload-free entry cannot be replicated")
+            })?;
+        let bytes = bytes::Bytes::from(
+            encode_entry(full)
+                .map_err(|e| std::io::Error::other(format!("entry encode: {e:?}")))?,
+        );
+        let _ = self.0.wire.set(bytes.clone());
+        Ok(bytes)
+    }
+
+    /// The payload bytes this entry holds in memory (a cache gauge).
+    pub fn mem_bytes(&self) -> usize {
+        use crate::rsm::effect::Effect;
+        let blobs = |e: &Entry| -> usize {
+            e.effects
+                .iter()
+                .map(|eff| match eff {
+                    Effect::Append { blob, hashes, .. } => blob.len() + hashes.len() + 64,
+                    _ => 64,
+                })
+                .sum()
+        };
+        let full = self.0.full.as_ref().map(|e| blobs(e)).unwrap_or(0);
+        let wire = self.0.wire.get().map(|b| b.len()).unwrap_or(0);
+        full.max(64) + wire
     }
 
     /// The entry with its payloads, when this node has it.
@@ -171,10 +265,7 @@ impl fmt::Display for AppEntry {
 /// here makes that a transport error, never silent data loss.
 impl Serialize for AppEntry {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let full = self.0.full.as_ref().ok_or_else(|| {
-            serde::ser::Error::custom("a payload-free entry cannot be replicated")
-        })?;
-        let bytes = encode_entry(full).map_err(|e| serde::ser::Error::custom(format!("{e:?}")))?;
+        let bytes = self.wire().map_err(serde::ser::Error::custom)?;
         s.serialize_bytes(&bytes)
     }
 }

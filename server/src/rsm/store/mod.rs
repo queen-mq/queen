@@ -1053,6 +1053,11 @@ pub trait Store: Send + Sync {
     /// open write transaction. The durable point (§11.4) uses
     /// [`Writes::durable_commit`]; this is for a caller that holds no handle.
     fn force_sync(&self) -> Result<()>;
+
+    /// Copy the committed image into `dir` (a new directory), consistent as of
+    /// one transaction, and return the copy's `(applied_index, applied_term)`:
+    /// the state another node reopens at from it (a Raft snapshot).
+    fn copy_checkpoint(&self, dir: &std::path::Path) -> Result<(u64, u64)>;
 }
 
 #[cfg(test)]

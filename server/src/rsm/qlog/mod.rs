@@ -1421,6 +1421,51 @@ impl QLog {
     /// in the active file ([`QLog::open`] already truncated its torn tail) a
     /// record that no longer verifies ends the walk — the reopen's torn-tail
     /// rule.
+    /// The entry records with `from_seq <= seq < end_seq`, in file order: the
+    /// bounded twin of [`QLog::entry_records_from`] for a live read of a window
+    /// (a follower catching up), which reads only the files that can hold it.
+    pub fn entry_records_between(
+        &self,
+        from_seq: u64,
+        end_seq: u64,
+    ) -> io::Result<Vec<EntryRecord>> {
+        let mut out: Vec<EntryRecord> = Vec::new();
+        for m in &self.files {
+            if m.max_seq < from_seq {
+                continue;
+            }
+            // Seqs never decrease in a queue log: a file created for a seq at or
+            // past the end holds nothing below it, and neither does any later one.
+            if m.first_seq >= end_seq {
+                break;
+            }
+            let path = file_path(&self.dir, m.id);
+            let (_valid, torn) = scan_records(&path, m.bytes, |h, _pos, bytes| {
+                if h.kind() == record::REC_ENTRY && h.seq >= from_seq && h.seq < end_seq {
+                    let rr = record::decode(bytes).map_err(io::Error::from)?;
+                    out.push(EntryRecord {
+                        seq: h.seq,
+                        now_us: h.created_at_us,
+                        copies: u32::try_from(h.pid).unwrap_or(u32::MAX).max(1),
+                        term: h.base_offset,
+                        entry: rr.payload.to_vec(),
+                    });
+                }
+                Ok(())
+            })?;
+            if let Some((at, why)) = torn {
+                if m.sealed {
+                    return Err(corrupt(
+                        &path,
+                        &format!("damaged record at byte {at} of a sealed file: {why}"),
+                    ));
+                }
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     pub fn entry_records_from(&self, from_seq: u64) -> io::Result<Vec<EntryRecord>> {
         let mut out: Vec<EntryRecord> = Vec::new();
         for m in &self.files {
@@ -1453,6 +1498,90 @@ impl QLog {
             }
         }
         Ok(out)
+    }
+
+    /// A Raft truncation: drop every record with `seq >= cut`, WHEREVER it is.
+    ///
+    /// Unlike the recovery cut ([`QLog::truncate_seq_from`]), a conflicting
+    /// suffix a new leader overrules, or the tail above a received snapshot,
+    /// may have been sealed behind a roll. Seqs never decrease in a queue log,
+    /// so every file after the first one holding a record at or above `cut` is
+    /// dropped whole, that file is cut at the record, its index is dropped (it
+    /// becomes the active file), and the log is reopened from disk exactly as
+    /// at boot. Returns the bytes dropped.
+    pub fn truncate_seq_from_across(&mut self, cut: u64) -> io::Result<u64> {
+        // The first sealed file holding a record at or above the cut.
+        let mut hit: Option<(usize, u64)> = None;
+        for i in 0..self.files.len() {
+            let m = self.files[i];
+            if !m.sealed || m.max_seq < cut {
+                continue;
+            }
+            let path = file_path(&self.dir, m.id);
+            let mut at: Option<u64> = None;
+            let (_valid, torn) = scan_records(&path, m.bytes, |h, pos, _bytes| {
+                if h.seq >= cut {
+                    at.get_or_insert(pos);
+                }
+                Ok(())
+            })?;
+            if let Some((pos, why)) = torn {
+                return Err(corrupt(
+                    &path,
+                    &format!("damaged record at byte {pos} of a sealed file: {why}"),
+                ));
+            }
+            if let Some(at) = at {
+                hit = Some((i, at));
+                break;
+            }
+        }
+        let Some((i, at)) = hit else {
+            // Only the active file can hold the suffix: the ordinary cut.
+            return self.truncate_seq_from(cut);
+        };
+        let mut dropped = 0u64;
+        for m in self.files[i + 1..].to_vec() {
+            dropped += m.bytes;
+            self.sealed.remove(&m.id);
+            self.cache.forget_file(m.id);
+            remove_if_present(&file_path(&self.dir, m.id))?;
+            remove_if_present(&qidx_path(&self.dir, m.id))?;
+            remove_if_present(&qidx_tmp_path(&self.dir, m.id))?;
+        }
+        let m = self.files[i];
+        {
+            let f = OpenOptions::new()
+                .write(true)
+                .open(file_path(&self.dir, m.id))?;
+            f.set_len(at)?;
+            fsync_file(&f, self.opts.fsync)?;
+        }
+        dropped += m.bytes.saturating_sub(at);
+        self.sealed.remove(&m.id);
+        self.cache.forget_file(m.id);
+        remove_if_present(&qidx_path(&self.dir, m.id))?;
+        remove_if_present(&qidx_tmp_path(&self.dir, m.id))?;
+        sync_dir(&self.dir)?;
+        let root = self
+            .dir
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| io::Error::other("a queue log directory has no parent"))?;
+        let floor = self.floor.clone();
+        // Close this file handle before the reopen takes its own.
+        self.active = None;
+        let (mut fresh, _) = QLog::open(&root, self.queue_id, self.opts)?;
+        fresh.set_recovery_floor(floor);
+        *self = fresh;
+        tracing::warn!(
+            target: "rsm",
+            queue = self.queue_id,
+            cut,
+            dropped_bytes = dropped,
+            "rsm qlog: truncated a suffix across a sealed file",
+        );
+        Ok(dropped)
     }
 
     /// Phase C recovery: drop every record (message or entry) with `seq >= cut`

@@ -827,6 +827,12 @@ pub(crate) fn build_raft_router(
             authenticator,
             crate::auth::auth_middleware,
         ))
+        // Outermost: a follower hands the request to the leader untouched,
+        // before auth or tenancy spend anything on it.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            forward_to_leader,
+        ))
         .with_state(state)
 }
 
@@ -851,6 +857,125 @@ async fn admit_edge(req: axum::extract::Request, next: axum::middleware::Next) -
         Err(o) => err_response(RsmError::Overloaded {
             retry_after_s: o.retry_after_s,
         }),
+    }
+}
+
+/// Marks a request a follower already forwarded: it is served where it lands.
+#[cfg(feature = "server")]
+pub(crate) const FORWARDED_HEADER: &str = "x-queen-forwarded";
+
+/// How long a forwarded request may take at the leader (a long-poll pop is
+/// capped at 60 s there).
+#[cfg(feature = "server")]
+const FORWARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// A follower of a raft cluster forwards every `/api/` and `/streams/` request
+/// to the leader, so a client may talk to any node. A request that was already
+/// forwarded once is served here whatever the role (the facade then answers a
+/// retry naming the leader), so no loop can form while nodes disagree on who
+/// leads. With no leader known the answer is a 503 the client retries.
+#[cfg(feature = "server")]
+async fn forward_to_leader(
+    axum::extract::State(st): axum::extract::State<Arc<AppState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = req.uri().path();
+    let forwardable = path.starts_with("/api/") || path.starts_with("/streams/");
+    if !forwardable || req.headers().contains_key(FORWARDED_HEADER) {
+        return next.run(req).await;
+    }
+    match st.rsm.route() {
+        facade::Route::Local => next.run(req).await,
+        facade::Route::NoLeader => err_response(RsmError::NoLeader),
+        facade::Route::Leader(addr) => forward(&addr, req).await,
+    }
+}
+
+#[cfg(feature = "server")]
+fn is_hop_by_hop(name: &header::HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "host"
+    )
+}
+
+/// Relay `req` to the leader at `addr` and its answer back, both streamed.
+#[cfg(feature = "server")]
+async fn forward(addr: &str, req: axum::extract::Request) -> Response {
+    use std::sync::OnceLock;
+    type Client = hyper_util::client::legacy::Client<
+        hyper_util::client::legacy::connect::HttpConnector,
+        axum::body::Body,
+    >;
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    let client = CLIENT.get_or_init(|| {
+        let mut c = hyper_util::client::legacy::connect::HttpConnector::new();
+        c.set_nodelay(true);
+        c.set_connect_timeout(Some(std::time::Duration::from_secs(2)));
+        hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+            .pool_max_idle_per_host(256)
+            .build::<_, axum::body::Body>(c)
+    });
+    let unavailable = |why: String| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [
+                (header::CONTENT_TYPE, "application/json".to_string()),
+                (header::RETRY_AFTER, "1".to_string()),
+            ],
+            serde_json::json!({ "error": why, "code": "retry" }).to_string(),
+        )
+            .into_response()
+    };
+    let (mut parts, body) = req.into_parts();
+    let pq = parts
+        .uri
+        .path_and_query()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_else(|| "/".into());
+    parts.uri = match format!("http://{addr}{pq}").parse() {
+        Ok(u) => u,
+        Err(e) => return unavailable(format!("leader address {addr}: {e}")),
+    };
+    parts.version = axum::http::Version::HTTP_11;
+    let names: Vec<header::HeaderName> = parts
+        .headers
+        .keys()
+        .filter(|n| is_hop_by_hop(n))
+        .cloned()
+        .collect();
+    for n in names {
+        parts.headers.remove(&n);
+    }
+    parts
+        .headers
+        .insert(FORWARDED_HEADER, axum::http::HeaderValue::from_static("1"));
+    let upstream = axum::http::Request::from_parts(parts, body);
+    match tokio::time::timeout(FORWARD_TIMEOUT, client.request(upstream)).await {
+        Ok(Ok(resp)) => {
+            let (mut parts, body) = resp.into_parts();
+            let names: Vec<header::HeaderName> = parts
+                .headers
+                .keys()
+                .filter(|n| is_hop_by_hop(n))
+                .cloned()
+                .collect();
+            for n in names {
+                parts.headers.remove(&n);
+            }
+            Response::from_parts(parts, axum::body::Body::new(body))
+        }
+        Ok(Err(e)) => unavailable(format!("the leader at {addr} is unreachable: {e}")),
+        Err(_) => unavailable(format!("the leader at {addr} did not answer in time")),
     }
 }
 

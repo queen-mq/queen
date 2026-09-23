@@ -640,11 +640,28 @@ impl RaftHealth {
 /// `#[async_trait]` boxes the returned futures so the facade can live behind an
 /// `Arc<dyn Rsm>` (the same pattern as the `Replicator` seam), which is what the
 /// builder hook returns.
+/// Where a client request is served (a raft cluster forwards a follower's
+/// requests to the leader).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// Here: this node leads (or runs alone).
+    Local,
+    /// At the leader's client API (`host:port`).
+    Leader(String),
+    /// Nowhere yet: no leader is known (an election is running).
+    NoLeader,
+}
+
 #[async_trait]
 pub trait Rsm: Send + Sync {
     /// Values restored from the applied state before the HTTP listener opens.
     fn bootstrap(&self) -> RsmBootstrap {
         RsmBootstrap::default()
+    }
+
+    /// Where a client request is served right now.
+    fn route(&self) -> Route {
+        Route::Local
     }
     /// `POST /api/v1/push`.
     async fn push(&self, ctx: ReqCtx, req: PushReq) -> Result<PushOut, RsmError>;

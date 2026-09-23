@@ -1573,6 +1573,10 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             next_index,
             holding_until: None,
             paused: !role.is_leader(),
+            planning_term: match role {
+                Role::Leader { term } => Some(term),
+                _ => None,
+            },
             closing: false,
             expire_due: false,
             kv_sweep_due: false,
@@ -1753,6 +1757,11 @@ struct RunState<S: Store, R: Replicator> {
     /// This node is not the leader (a `NotLeader`/`OutcomeUnknown`, or a role
     /// watch that reported a follower): plan nothing until it is leader again.
     paused: bool,
+    /// The term the planning base belongs to. A `Leader` role of another term
+    /// is a regain even when no non-leader role was observed in between (the
+    /// role watch keeps only the latest value): another leader may have
+    /// committed entries this node never planned.
+    planning_term: Option<u64>,
     closing: bool,
     expire_due: bool,
     /// WP-2.2: the KV expiry sweep is due (set by its tick, cleared once a
@@ -1794,7 +1803,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     fn start_qlog_gc(&self) {
         use std::sync::atomic::Ordering;
 
-        if self.paused || self.closing {
+        // Node-local: every node of a cluster reclaims its own queue logs, the
+        // followers included (the retention floor keeps what the log needs).
+        if self.closing {
             return;
         }
         let Some(qlogs) = self.qlog_reader.clone() else {
@@ -2539,8 +2550,14 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     /// The role watch changed.
     fn on_role(&mut self, role: Role) {
         match role {
-            Role::Leader { .. } => {
+            Role::Leader { term } => {
+                if !self.paused && self.planning_term != Some(term) {
+                    // Leadership was lost and regained between two looks at
+                    // the role: everything in flight belongs to the old term.
+                    self.lose_leadership(None);
+                }
                 if self.paused {
+                    self.planning_term = Some(term);
                     // I13: a new leader plans only after applying the first
                     // entry of its own term. On a single node with the
                     // LocalReplicator the term never changes, so this is the

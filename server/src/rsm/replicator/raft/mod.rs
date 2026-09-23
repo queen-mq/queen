@@ -8,10 +8,20 @@
 //!   write and the same single fsync the local replicator does, the entry
 //!   record now carrying its term;
 //! - its **state machine** is the apply thread ([`state_machine::QueenSm`]);
-//! - its **snapshot** is the store's durable checkpoint.
+//! - its **snapshot** is the store's durable checkpoint, copied with the queue
+//!   logs when a follower needs one ([`snapshot`]).
 //!
-//! openraft runs on a runtime of its own (`queen-raft-*` threads), so request
-//! handling load never delays an election or a commit.
+//! openraft runs on a runtime of its own (`queen-raft-*` threads), with the
+//! Raft RPC server of a cluster node, so request handling load never delays an
+//! election or a commit.
+//!
+//! # One node or a cluster
+//!
+//! Without `QUEEN_RAFT_PEERS` the node is a single voter with no network. With
+//! it ([`cluster::ClusterConfig`]) the node serves the Raft RPCs on
+//! `QUEEN_RAFT_LISTEN` and reaches its peers over HTTP ([`network`]). Only the
+//! leader plans and proposes; a follower's facade forwards client requests to
+//! the leader (`handlers/raft.rs`).
 //!
 //! # Proposals and the plan order (I5, WP-1.11 F-1)
 //!
@@ -29,16 +39,23 @@
 //! (`last_log_index + 1`) is exact: nothing but the batcher appends while this
 //! node leads.
 //!
-//! # Scope
+//! # The log's life
 //!
-//! Single-voter clusters. The network ([`network::NoNetwork`]) and the
-//! snapshot transfer are the multi-node step; the storage, the state machine,
-//! recovery, votes and membership are complete here.
+//! An entry stays in memory until it is applied here AND every live follower
+//! has it (or the cache is over its cap), then lives on in the queue logs. A
+//! background step (the purge driver in [`watch`]) builds a snapshot at the
+//! store's durable index and lets openraft purge the log behind it — but never
+//! past what a live follower still needs. Retention reclaims queue-log files
+//! only below the purge point ([`log_store::FloorGate`]). A follower that was
+//! away for longer than `QUEEN_RAFT_PURGE_HOLD_S` gets a snapshot instead.
 
+pub mod cluster;
 pub(crate) mod log_store;
 mod network;
+pub mod snapshot;
 pub(crate) mod state_machine;
 pub mod types;
+mod wire;
 
 use std::collections::{BTreeMap, HashMap};
 use std::io;
@@ -51,16 +68,18 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use bytes::Bytes;
 use openraft::async_runtime::WatchReceiver;
-use openraft::errors::ClientWriteError;
+use openraft::errors::{ClientWriteError, InitializeError, RaftError};
 use openraft::impls::ProgressResponder;
 use openraft::raft::ReadPolicy;
 use openraft::{ChangeMembers, ServerState, SnapshotPolicy};
 use tokio::sync::{mpsc, oneshot, watch, Notify as ApplyWake};
 
-use self::log_store::{LogStore, OpenCfg, Poison};
-use self::network::NoNetwork;
+pub use self::cluster::ClusterConfig;
+use self::log_store::{FloorGate, LogStore, OpenCfg, Poison};
+use self::network::{HttpNetwork, NoNetwork};
+use self::snapshot::{RecvCtx, Restart, SendCtx};
 use self::state_machine::QueenSm;
-use self::types::{applied_log_id, rsm_index, term_of, AppEntry, Node, TypeConfig};
+use self::types::{applied_log_id, rsm_index, term_of, AppEntry, Node, QueenNode, TypeConfig};
 use super::local::{OpenConfig, PartitionLookup, Waker};
 use super::{
     AppliedAt, Membership, MembershipChange, NodeId, ProposeError, ReplError, ReplMetrics,
@@ -71,7 +90,7 @@ use crate::rsm::qlog::set::{QLogReader, QLogSet};
 use crate::rsm::segments;
 use crate::rsm::store::{Store, TypedReads};
 
-type RaftHandle<S> = openraft::Raft<TypeConfig, QueenSm<S>>;
+pub(crate) type RaftHandle<S> = openraft::Raft<TypeConfig, QueenSm<S>>;
 type WriteResponder = openraft::alias::WriteResponderOf<TypeConfig>;
 
 /// State shared by the replicator, the state machine and the apply thread's
@@ -87,11 +106,53 @@ pub(crate) struct Shared {
     waiters: Mutex<HashMap<u64, oneshot::Sender<AppliedAt>>>,
     /// Pulsed when the applied index advances (the batcher's driver-notify).
     applied_notify: Arc<ApplyWake>,
+    /// On the leader: the openraft index every live follower has replicated
+    /// (the cache keeps entries above it). `u64::MAX` otherwise.
+    replicated: AtomicU64,
+    /// RSM index → term, at every index where the applied term changed: the
+    /// term of the store's durable index, for a snapshot.
+    terms: Mutex<BTreeMap<u64, u64>>,
+    last_term: AtomicU64,
+    /// Set when a received snapshot waits for a restart.
+    restart: Arc<Restart>,
+    /// The leader's client address while another node leads, kept by the
+    /// watch task: a follower forwards every client request there.
+    leader_http: std::sync::RwLock<Option<Arc<str>>>,
 }
 
 impl Shared {
     fn poisoned(&self) -> Option<String> {
         self.poison.lock().expect("poison").clone()
+    }
+
+    pub(crate) fn replicated(&self) -> u64 {
+        self.replicated.load(Ordering::Acquire)
+    }
+
+    /// The store's durable index as last reported.
+    pub(crate) fn durable(&self) -> u64 {
+        self.durable_index.load(Ordering::Acquire)
+    }
+
+    /// The term of the entry at RSM index `index` (at or above the store's
+    /// applied index at open, and applied since).
+    pub(crate) fn term_at(&self, index: u64) -> Option<u64> {
+        self.terms
+            .lock()
+            .expect("terms")
+            .range(..=index)
+            .next_back()
+            .map(|(_, t)| *t)
+    }
+
+    fn note_term(&self, index: u64, term: u64) {
+        if self.last_term.swap(term, Ordering::AcqRel) != term {
+            let mut t = self.terms.lock().expect("terms");
+            t.insert(index, term);
+            while t.len() > 1024 {
+                t.pop_first();
+            }
+        }
     }
 }
 
@@ -101,13 +162,14 @@ impl Shared {
 struct RaftNotify {
     shared: Arc<Shared>,
     waker: Arc<dyn Waker>,
-    qlog_floor: Arc<AtomicU64>,
+    gate: Arc<FloorGate>,
 }
 
 impl Notify for RaftNotify {
     fn applied(&self, index: u64, term: u64, _commands: &[crate::rsm::entry::CommandRecord]) {
         self.shared.applied_index.fetch_max(index, Ordering::AcqRel);
         self.shared.applied_term.store(term, Ordering::Release);
+        self.shared.note_term(index, term);
         if let Some(tx) = self.shared.waiters.lock().expect("waiters").remove(&index) {
             let _ = tx.send(AppliedAt { index, term });
         }
@@ -120,8 +182,9 @@ impl Notify for RaftNotify {
 
     fn durable(&self, index: u64) {
         self.shared.durable_index.fetch_max(index, Ordering::AcqRel);
-        // The queue logs may now give up files wholly at or below `index`.
-        self.qlog_floor.fetch_max(index, Ordering::AcqRel);
+        // The queue logs may now give up files wholly at or below `index` —
+        // and below what openraft purged.
+        self.gate.durable(index);
     }
 }
 
@@ -137,27 +200,38 @@ struct Submit {
     responder: WriteResponder,
 }
 
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(default)
+}
+
 /// `QUEEN_RAFT_ELECTION_MS` / `QUEEN_RAFT_HEARTBEAT_MS`: openraft's timers.
-fn raft_config() -> io::Result<Arc<openraft::Config>> {
-    fn num(name: &str, default: u64) -> u64 {
-        std::env::var(name)
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(default)
-    }
-    let election = num("QUEEN_RAFT_ELECTION_MS", 150);
+/// A cluster defaults to a 100 ms heartbeat and a 1-2 s election timeout
+/// (a leader under a disk stall is not deposed by a slow fsync); a single
+/// voter elects itself at once.
+fn raft_config(cluster: bool) -> io::Result<Arc<openraft::Config>> {
+    let (hb, el) = if cluster { (100, 1000) } else { (50, 150) };
+    let election = env_u64("QUEEN_RAFT_ELECTION_MS", el);
     let config = openraft::Config {
         cluster_name: "queen".to_string(),
-        heartbeat_interval: num("QUEEN_RAFT_HEARTBEAT_MS", 50),
+        heartbeat_interval: env_u64("QUEEN_RAFT_HEARTBEAT_MS", hb),
         election_timeout_min: election,
         election_timeout_max: election * 2,
-        // The store's checkpoint is the snapshot: nothing to build on a
-        // schedule.
+        // Snapshots are built by the purge driver, never on a schedule.
         snapshot_policy: SnapshotPolicy::Never,
         // A restarted node always runs an election, so a new term's blank entry
         // commits (and applies) everything its log holds before it plans.
         enable_leader_restore: Some(false),
+        // A partitioned node that comes back does not depose a healthy leader.
+        enable_pre_vote: Some(cluster),
+        // Entries are batches (up to the batcher's byte cap each); the wire
+        // cuts a request at wire::MAX_APPEND_BYTES too.
+        max_payload_entries: 64,
+        // A snapshot is streamed whole; the transport has its own deadline.
+        install_snapshot_timeout: 3_600_000,
         ..Default::default()
     };
     Ok(Arc::new(config.validate().map_err(|e| {
@@ -189,6 +263,217 @@ fn role_of(m: &openraft::RaftMetrics<TypeConfig>) -> Role {
     }
 }
 
+/// The background step's knobs.
+struct WatchOpts {
+    /// Exit the process when a received snapshot needs a restart (the binary;
+    /// tests reopen the node instead).
+    exit_on_restart: bool,
+    /// `QUEEN_RAFT_PURGE_HOLD_S` (default 600): how long a follower that makes
+    /// no progress still holds the log back from being purged.
+    hold: Duration,
+    /// `QUEEN_RAFT_LOG_KEEP` (default 4096): entries kept below the purge point
+    /// anyway, for a follower a moment behind.
+    keep: u64,
+    /// Purge in steps of at least this many entries.
+    batch: u64,
+}
+
+/// How a node runs beyond its [`OpenConfig`]. [`RaftOpts::from_env`] is the
+/// binary's; a test sets what it exercises.
+#[derive(Clone, Debug)]
+pub struct RaftOpts {
+    /// Exit the process when a received snapshot needs a restart to be loaded
+    /// (the binary). Otherwise the node just stops and
+    /// [`RaftReplicator::restart_requested`] says why.
+    pub exit_on_restart: bool,
+    /// `QUEEN_RAFT_PURGE_HOLD_S` (default 600 s): how long a follower that
+    /// makes no progress still holds the log back from being purged.
+    pub purge_hold: Duration,
+    /// `QUEEN_RAFT_LOG_KEEP` (default 4096): entries kept below the purge point
+    /// anyway, for a follower a moment behind.
+    pub log_keep: u64,
+    /// Purge in steps of at least this many entries (1024).
+    pub purge_batch: u64,
+    /// `QUEEN_RAFT_LOG_CACHE_MB` (default 512 MiB): over this many cached
+    /// bytes, applied entries leave memory even if a follower still needs them.
+    pub cache_cap: usize,
+}
+
+impl RaftOpts {
+    pub fn from_env(exit_on_restart: bool) -> RaftOpts {
+        RaftOpts {
+            exit_on_restart,
+            purge_hold: Duration::from_secs(env_u64("QUEEN_RAFT_PURGE_HOLD_S", 600)),
+            log_keep: env_u64("QUEEN_RAFT_LOG_KEEP", 4096),
+            purge_batch: 1024,
+            cache_cap: log_store::cache_cap_from_env(),
+        }
+    }
+}
+
+impl WatchOpts {
+    fn of(o: &RaftOpts) -> WatchOpts {
+        WatchOpts {
+            exit_on_restart: o.exit_on_restart,
+            hold: o.purge_hold,
+            keep: o.log_keep,
+            batch: o.purge_batch.max(1),
+        }
+    }
+}
+
+/// On the leader: the openraft index every LIVE follower has replicated. A
+/// follower is live while it is caught up, or answered a heartbeat or made
+/// progress within `hold` — one that is up but behind (catching up, or
+/// installing a snapshot) keeps the log it still needs, so the purge never
+/// overtakes a follower that is working to catch up. `u64::MAX` when this
+/// node is not leading (or leads alone).
+fn replicated_floor(
+    m: &openraft::RaftMetrics<TypeConfig>,
+    seen: &mut HashMap<NodeId, (Option<u64>, Instant)>,
+    hold: Duration,
+) -> u64 {
+    let Some(rep) = &m.replication else {
+        seen.clear();
+        return u64::MAX;
+    };
+    let now = Instant::now();
+    let mut floor = u64::MAX;
+    for (id, matched) in rep.iter() {
+        if *id == m.id {
+            continue;
+        }
+        let idx = matched.as_ref().map(|l| l.index);
+        let e = seen.entry(*id).or_insert((idx, now));
+        if e.0 != idx {
+            *e = (idx, now);
+        }
+        let caught_up = idx.is_some() && idx == m.last_log_index;
+        let acked = m
+            .heartbeat
+            .as_ref()
+            .and_then(|h| h.get(id))
+            .and_then(|t| t.as_ref())
+            .is_some_and(|t| openraft::Instant::elapsed(&**t) < hold);
+        if caught_up || acked || now.duration_since(e.1) < hold {
+            floor = floor.min(idx.unwrap_or(0));
+        }
+    }
+    seen.retain(|id, _| rep.contains_key(id));
+    floor
+}
+
+/// One purge-driver step: snapshot at the store's durable index, then purge
+/// the log up to it — never past what a live follower needs, and keeping
+/// `keep` entries below that anyway.
+async fn purge_step<S: Store + 'static>(
+    raft: &RaftHandle<S>,
+    shared: &Shared,
+    m: &openraft::RaftMetrics<TypeConfig>,
+    floor: u64,
+    opts: &WatchOpts,
+) {
+    let Some(applied) = m.last_applied.as_ref().map(|l| l.index) else {
+        return;
+    };
+    let durable = shared.durable();
+    if durable == 0 {
+        return;
+    }
+    let upto = (durable - 1)
+        .min(applied)
+        .min(floor)
+        .saturating_sub(opts.keep);
+    let next = m.purged.as_ref().map_or(0, |p| p.index + 1);
+    if upto < next + opts.batch {
+        return;
+    }
+    match m.snapshot.as_ref().map(|s| s.index) {
+        Some(s) if s >= upto => {
+            if let Err(e) = raft.trigger().purge_log(upto).await {
+                tracing::warn!(target: "rsm", error = %e, "raft purge");
+            }
+        }
+        // The purge follows on the next step, once the snapshot is built.
+        _ => {
+            if let Err(e) = raft.trigger().snapshot().await {
+                tracing::warn!(target: "rsm", error = %e, "raft snapshot");
+            }
+        }
+    }
+}
+
+/// The background task of a node: the role watch (I13), the followers'
+/// progress (cache eviction), the purge driver, and the restart a received
+/// snapshot needs.
+async fn watch<S: Store + 'static>(
+    raft: RaftHandle<S>,
+    shared: Arc<Shared>,
+    log: LogStore,
+    role_tx: watch::Sender<Role>,
+    opts: WatchOpts,
+) {
+    let mut metrics = raft.metrics();
+    let mut tick = tokio::time::interval(Duration::from_millis(500));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut seen: HashMap<NodeId, (Option<u64>, Instant)> = HashMap::new();
+    loop {
+        let m = metrics.borrow_watched().clone();
+        let role = role_of(&m);
+        let leader_http: Option<Arc<str>> = m
+            .current_leader
+            .filter(|l| *l != m.id)
+            .and_then(|l| {
+                m.membership_config
+                    .membership()
+                    .get_node(&l)
+                    .map(|n| n.http.clone())
+            })
+            .filter(|h| !h.is_empty())
+            .map(Arc::from);
+        {
+            let mut cur = shared.leader_http.write().expect("leader_http");
+            if *cur != leader_http {
+                *cur = leader_http;
+            }
+        }
+        role_tx.send_if_modified(|r| {
+            if *r != role {
+                *r = role;
+                true
+            } else {
+                false
+            }
+        });
+        if role == Role::Stopped {
+            if let Some(why) = shared.restart.requested() {
+                if opts.exit_on_restart {
+                    tracing::error!(target: "rsm", why, "raft: the process exits to load a received snapshot");
+                    std::process::exit(75);
+                }
+                tracing::warn!(target: "rsm", why, "raft: a received snapshot waits for a restart");
+            }
+            break;
+        }
+        let floor = replicated_floor(&m, &mut seen, opts.hold);
+        let before = shared.replicated.swap(floor, Ordering::AcqRel);
+        if floor != before {
+            if let Some(la) = m.last_applied.as_ref() {
+                log.evict(la.index, floor);
+            }
+        }
+        tokio::select! {
+            r = metrics.changed() => {
+                if r.is_err() {
+                    let _ = role_tx.send(Role::Stopped);
+                    break;
+                }
+            }
+            _ = tick.tick() => purge_step(&raft, &shared, &m, floor, &opts).await,
+        }
+    }
+}
+
 /// The openraft replicator. See the module header.
 pub struct RaftReplicator<S: Store + 'static> {
     shared: Arc<Shared>,
@@ -203,24 +488,67 @@ pub struct RaftReplicator<S: Store + 'static> {
     reader: segments::Reader,
     qlog_reader: QLogReader,
     qlog_codec: bool,
+    /// Stops the Raft RPC server (a cluster node).
+    server_stop: Option<oneshot::Sender<()>>,
+}
+
+/// The queue logs' options: the segment roll size and fsync mode.
+pub fn qlog_options(cfg: &OpenConfig) -> crate::rsm::qlog::QLogOptions {
+    crate::rsm::qlog::QLogOptions {
+        segment_bytes: cfg.seg_opts.segment_bytes,
+        fsync: match cfg.seg_opts.fsync {
+            segments::FsyncMode::Full => crate::rsm::qlog::Fsync::Full,
+            segments::FsyncMode::Data => crate::rsm::qlog::Fsync::Data,
+        },
+    }
+}
+
+/// The network a node runs.
+enum Net {
+    None(NoNetwork),
+    Http(HttpNetwork),
 }
 
 impl<S: Store + 'static> RaftReplicator<S> {
-    /// Open the node: recover the log from the queue logs, start the apply
-    /// thread and openraft, and return once this node leads with everything in
-    /// its log applied. A boot call (blocking I/O); never on a runtime worker
-    /// that must stay responsive.
+    /// Open a single voter. See [`RaftReplicator::open_with`].
     pub fn open(
         store: Arc<S>,
         cfg: OpenConfig,
         waker: Arc<dyn Waker>,
         clock: Arc<dyn apply::Clock>,
     ) -> io::Result<RaftReplicator<S>> {
+        RaftReplicator::open_with(store, cfg, None, waker, clock, RaftOpts::from_env(false))
+    }
+
+    /// Open the node: recover the log from the queue logs, start the apply
+    /// thread and openraft (and, for a node of `cluster`, the Raft RPC
+    /// server). A single voter returns once it leads with everything in its log
+    /// applied; a cluster node once a leader is known (or after 30 s: its
+    /// peers may still be starting). A boot call (blocking I/O); never on a
+    /// runtime worker that must stay responsive.
+    ///
+    /// `opts`: see [`RaftOpts`].
+    pub fn open_with(
+        store: Arc<S>,
+        cfg: OpenConfig,
+        cluster: Option<ClusterConfig>,
+        waker: Arc<dyn Waker>,
+        clock: Arc<dyn apply::Clock>,
+        opts: RaftOpts,
+    ) -> io::Result<RaftReplicator<S>> {
         let mut apply_cfg = cfg.apply_cfg;
         if !apply_cfg.qlog {
             return Err(io::Error::other(
                 "the openraft replicator keeps its log in the queue logs: QUEEN_RAFT_QLOG must be on",
             ));
+        }
+        if let Some(c) = &cluster {
+            if c.node_id != cfg.node_id {
+                return Err(io::Error::other(format!(
+                    "the cluster config is for node {}, the node is {}",
+                    c.node_id, cfg.node_id
+                )));
+            }
         }
         let data_dir = cfg
             .seg_root
@@ -248,13 +576,20 @@ impl<S: Store + 'static> RaftReplicator<S> {
             )));
         }
 
-        let qopts = crate::rsm::qlog::QLogOptions {
-            segment_bytes: cfg.seg_opts.segment_bytes,
-            fsync: match cfg.seg_opts.fsync {
-                segments::FsyncMode::Full => crate::rsm::qlog::Fsync::Full,
-                segments::FsyncMode::Data => crate::rsm::qlog::Fsync::Data,
-            },
+        // The Raft RPC listener first: a taken port fails the open, not a task.
+        #[cfg(feature = "server")]
+        let listener = match &cluster {
+            Some(c) => Some(network::bind(&c.listen)?),
+            None => None,
         };
+        #[cfg(not(feature = "server"))]
+        if cluster.is_some() {
+            return Err(io::Error::other(
+                "a raft cluster needs the `server` feature (the Raft RPC server)",
+            ));
+        }
+
+        let qopts = qlog_options(&cfg);
         let store_for_lookup = store.clone();
         let lookup: PartitionLookup = Arc::new(move |pid| {
             store_for_lookup
@@ -276,10 +611,12 @@ impl<S: Store + 'static> RaftReplicator<S> {
             applied: applied_log_id(applied, term),
             qlog_durable_index: qlog_durable,
             poison: poison.clone(),
+            cache_cap: opts.cache_cap,
         })?;
         let log = opened.store;
         let mut writer_join = Some(opened.writer);
 
+        let restart = Arc::new(Restart::default());
         let shared = Arc::new(Shared {
             node_id: cfg.node_id,
             applied_index: AtomicU64::new(applied),
@@ -289,6 +626,15 @@ impl<S: Store + 'static> RaftReplicator<S> {
             poison,
             waiters: Mutex::new(HashMap::new()),
             applied_notify: Arc::new(ApplyWake::new()),
+            replicated: AtomicU64::new(u64::MAX),
+            terms: Mutex::new(if applied > 0 {
+                BTreeMap::from([(applied, term)])
+            } else {
+                BTreeMap::new()
+            }),
+            last_term: AtomicU64::new(term),
+            restart: restart.clone(),
+            leader_http: std::sync::RwLock::new(None),
         });
 
         // The apply thread: the queue logs are written by our log writer, never
@@ -298,7 +644,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
         let notify: Arc<dyn Notify> = Arc::new(RaftNotify {
             shared: shared.clone(),
             waker,
-            qlog_floor: opened.reader.recovery_floor_handle(),
+            gate: opened.gate.clone(),
         });
         let reader_sink: Arc<OnceLock<segments::Reader>> = Arc::new(OnceLock::new());
         let mut apply_join = Some(apply::spawn_with_reader(
@@ -354,7 +700,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
             Ok(sm) => sm,
             Err(e) => return Err(fail(e, None, &mut writer_join, &mut apply_join, &log)),
         };
-        let config = match raft_config() {
+        let config = match raft_config(cluster.is_some()) {
             Ok(c) => c,
             Err(e) => return Err(fail(e, None, &mut writer_join, &mut apply_join, &log)),
         };
@@ -368,6 +714,22 @@ impl<S: Store + 'static> RaftReplicator<S> {
             Err(e) => return Err(fail(e, None, &mut writer_join, &mut apply_join, &log)),
         };
 
+        let net = match &cluster {
+            None => Net::None(NoNetwork),
+            Some(c) => Net::Http(HttpNetwork::new(
+                c.token.clone(),
+                Arc::new(SendCtx::new(
+                    data_dir.clone(),
+                    store.clone(),
+                    opened.reader.clone(),
+                )),
+            )),
+        };
+        let members: BTreeMap<NodeId, Node> = match &cluster {
+            Some(c) => c.members.clone(),
+            None => BTreeMap::from([(cfg.node_id, QueenNode::default())]),
+        };
+
         // openraft is built and initialized on a plain thread, never inside the
         // caller's runtime (a `block_on` there would panic).
         let node_id = cfg.node_id;
@@ -377,15 +739,26 @@ impl<S: Store + 'static> RaftReplicator<S> {
         let built: io::Result<RaftHandle<S>> = std::thread::scope(|s| {
             s.spawn(move || {
                 handle.block_on(async move {
-                    let raft = openraft::Raft::new(node_id, config, NoNetwork, log_for_raft, sm)
-                        .await
-                        .map_err(|e| io::Error::other(format!("openraft start: {e}")))?;
+                    let raft = match net {
+                        Net::None(n) => {
+                            openraft::Raft::new(node_id, config, n, log_for_raft, sm).await
+                        }
+                        Net::Http(n) => {
+                            openraft::Raft::new(node_id, config, n, log_for_raft, sm).await
+                        }
+                    }
+                    .map_err(|e| io::Error::other(format!("openraft start: {e}")))?;
                     if fresh {
-                        let members: BTreeMap<NodeId, Node> =
-                            BTreeMap::from([(node_id, Node::default())]);
-                        raft.initialize(members)
-                            .await
-                            .map_err(|e| io::Error::other(format!("openraft initialize: {e}")))?;
+                        // Every node of a new cluster initializes with the same
+                        // members; one that already heard from a peer is not
+                        // allowed to, which is fine.
+                        match raft.initialize(members).await {
+                            Ok(()) => {}
+                            Err(RaftError::APIError(InitializeError::NotAllowed(_))) => {}
+                            Err(e) => {
+                                return Err(io::Error::other(format!("openraft initialize: {e}")))
+                            }
+                        }
                     }
                     Ok(raft)
                 })
@@ -406,26 +779,36 @@ impl<S: Store + 'static> RaftReplicator<S> {
             }
         };
 
-        // The role watch, derived from openraft's metrics.
+        // The Raft RPC server.
+        #[allow(unused_mut)]
+        let mut server_stop = None;
+        #[cfg(feature = "server")]
+        if let (Some(listener), Some(c)) = (listener, &cluster) {
+            let (stop_tx, stop_rx) = oneshot::channel::<()>();
+            server_stop = Some(stop_tx);
+            let state = network::RpcState {
+                raft: raft.clone(),
+                token: c.token.clone().map(Arc::from),
+                snap: Arc::new(RecvCtx {
+                    data_dir: data_dir.clone(),
+                    restart: restart.clone(),
+                }),
+            };
+            let _guard = rt.enter();
+            rt.spawn(network::serve(listener, state, async move {
+                let _ = stop_rx.await;
+            }));
+        }
+
+        // The role watch, the followers' progress and the purge driver.
         let (role_tx, role_rx) = watch::channel(Role::Candidate);
-        let mut metrics = raft.metrics();
-        rt.spawn(async move {
-            loop {
-                let role = role_of(&metrics.borrow_watched());
-                role_tx.send_if_modified(|r| {
-                    if *r != role {
-                        *r = role;
-                        true
-                    } else {
-                        false
-                    }
-                });
-                if role == Role::Stopped || metrics.changed().await.is_err() {
-                    let _ = role_tx.send(Role::Stopped);
-                    break;
-                }
-            }
-        });
+        rt.spawn(watch(
+            raft.clone(),
+            shared.clone(),
+            log.clone(),
+            role_tx,
+            WatchOpts::of(&opts),
+        ));
 
         // The submitter: proposals reach openraft in the order the batcher
         // first-polled them.
@@ -441,15 +824,23 @@ impl<S: Store + 'static> RaftReplicator<S> {
             }
         });
 
-        // Wait until this node leads with everything applied (I13).
-        let end = Instant::now() + cfg.replay_deadline;
+        // A single voter: wait until it leads with everything applied (I13). A
+        // cluster node: until a leader is known, for a while.
+        let end = Instant::now()
+            + if cluster.is_some() {
+                cfg.replay_deadline.min(Duration::from_secs(30))
+            } else {
+                cfg.replay_deadline
+            };
         loop {
             let role = *role_rx.borrow();
-            match role {
-                Role::Leader { .. } => break,
+            let ready = match role {
+                Role::Leader { .. } => true,
+                Role::Follower { leader: Some(_) } => cluster.is_some(),
                 Role::Stopped => {
                     let why = shared
                         .poisoned()
+                        .or_else(|| restart.requested())
                         .unwrap_or_else(|| "openraft stopped during recovery".into());
                     return Err(fail(
                         io::Error::other(why),
@@ -459,9 +850,16 @@ impl<S: Store + 'static> RaftReplicator<S> {
                         &log,
                     ));
                 }
-                _ => {}
+                _ => false,
+            };
+            if ready {
+                break;
             }
             if Instant::now() >= end {
+                if cluster.is_some() {
+                    tracing::warn!(target: "rsm", node = node_id, role = ?role, "raft: no leader yet; serving 503 until one is elected");
+                    break;
+                }
                 return Err(fail(
                     io::Error::other(format!(
                         "the node did not become a ready leader within {:?} (role {role:?})",
@@ -479,6 +877,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
         tracing::info!(
             target: "rsm",
             node = node_id,
+            cluster = cluster.as_ref().map(|c| c.members.len()).unwrap_or(1),
             store_applied = applied,
             store_durable = durable,
             recovered = opened.recovered,
@@ -501,7 +900,38 @@ impl<S: Store + 'static> RaftReplicator<S> {
             reader,
             qlog_reader: opened.reader,
             qlog_codec: true,
+            server_stop,
         })
+    }
+
+    /// The HTTP address of the leader when another node leads (a follower
+    /// forwards client requests there). `None` when this node leads, no
+    /// leader is known, or the leader's address is not in the membership.
+    pub fn leader_http(&self) -> Option<String> {
+        self.shared
+            .leader_http
+            .read()
+            .expect("leader_http")
+            .as_deref()
+            .map(str::to_string)
+    }
+
+    /// Why this node stopped to restart, if it did (a received snapshot).
+    pub fn restart_requested(&self) -> Option<String> {
+        self.shared.restart.requested()
+    }
+
+    /// Entries in memory and their bytes.
+    pub fn log_cache(&self) -> (usize, usize) {
+        self.log.cached()
+    }
+
+    /// The RSM index of the last entry openraft purged (0 for none).
+    pub fn purged_index(&self) -> u64 {
+        self.metrics_now()
+            .and_then(|m| m.purged)
+            .map(|p| rsm_index(p.index))
+            .unwrap_or(0)
     }
 
     /// The node id.
@@ -533,6 +963,9 @@ impl<S: Store + 'static> RaftReplicator<S> {
 
     fn stop(&mut self) -> io::Result<ApplyStats> {
         self.submit_tx.take();
+        if let Some(stop) = self.server_stop.take() {
+            let _ = stop.send(());
+        }
         if let Some(rt) = self.rt.take() {
             shutdown_raft(rt, self.raft.take());
         }
@@ -603,6 +1036,14 @@ fn wait_reader(
             ));
         }
         std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// A member's addresses from `raft_addr/http_addr` (or a bare Raft address).
+fn node_of_addr(addr: &str) -> Node {
+    match addr.split_once('/') {
+        Some((raft, http)) => QueenNode::new(raft.trim(), http.trim()),
+        None => QueenNode::new(addr.trim(), ""),
     }
 }
 
@@ -774,7 +1215,7 @@ impl<S: Store + 'static> Replicator for RaftReplicator<S> {
             .ok_or_else(|| repl_err("openraft stopped"))?;
         match change {
             MembershipChange::AddLearner { node, addr } => raft
-                .add_learner(node, Node { addr }, true)
+                .add_learner(node, node_of_addr(&addr), true)
                 .await
                 .map(|_| ())
                 .map_err(repl_err),
