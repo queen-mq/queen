@@ -321,3 +321,134 @@ Same config, same 5-minute run at 200k:
 
 Deferred unplanned: 7–89% before, 1–3% after. Planner load is now flat for the
 whole run instead of climbing.
+
+## 13. Backpressure: a push admission budget (2026-09-23)
+
+Branch `bench/collapse`: `3d43ac23`, `5ba5834d`, `d1fd6f8b` (not merged into
+`raft`). `rsm::` + `handlers::` 655 green.
+
+**How it works (`d1fd6f8b`):**
+
+1. A byte budget, 64 MB by default (`QUEEN_RAFT_ADMIT_MAX_MB`, 0 = off), covers
+   push and transaction bodies from admission until their reply.
+2. The push and transaction routes take their share at the HTTP edge, sized by
+   `Content-Length`, BEFORE the body is read. A waiting push holds only its
+   connection: its bytes stay in the kernel socket, and TCP slows the sender.
+3. When the budget is full, a push waits up to 15 s ±25%
+   (`QUEEN_RAFT_ADMIT_HOLD_MS`), then gets `429` with a `Retry-After` of
+   1–5 s. Acks and pops never wait.
+4. Metrics: `queen_raft_admit_bytes{kind=cap|held}`,
+   `queen_raft_admit_waiting`, `queen_raft_admit_total{outcome=waited|refused}`.
+
+**Test:** 300k msg/s offered (above the ~200k ceiling), the §2 shape, 180 s;
+the loader keeps at most 20,000 requests in flight and sheds the rest.
+
+| | budget off | v1: gate after the body read, 5 s hold, `Retry-After: 5` | v2 (`d1fd6f8b`): edge gate, jittered |
+|---|---|---|---|
+| RSS at 180 s | **10.0 GB, still rising** | 6.0 GB | **5.3 GB** (peak 5.5) |
+| seconds with pops < 50k msg/s | 0 | **14** | 0 |
+| backlog at the end | 0 | **6.4M** | 0 |
+| push / ack, last 60 s | 188k / 190k | 264k / 193k | 178k / 180k |
+| 429s | 0 | 47,465 | 1,246 |
+| loader errors, push / ack | 0 / 0 | 207 / 12,200 | 27 / 1,600 |
+| accept-queue overflows | not measured | not measured | 49 |
+
+**Why v1 failed:** requests that queued together were refused together. The
+SDKs retry a 429 by themselves (Go: up to 10 attempts, honoring
+`Retry-After`), so they came back together about 5 s later. Every wave
+reconnected thousands of sockets at once into a 128-slot accept queue, and
+pops and acks stalled for 2–4 s.
+
+**What is still open:**
+
+- **A waiting push costs ~70 KB of broker RAM.** Measured with 5,000 waiting
+  connections: 66 KB with headers only, 74 KB with the body sent. That is
+  hyper, axum and tokio state, not the body. At 20k waiting pushes it adds up to
+  ~1.4 GB. The limit is the clients' concurrency, not the budget.
+- **The listen backlog is 128** (`ss -ltn`: `LISTEN 0 128`), the Rust
+  default; `somaxconn` is 4096.
+- **A waiting push whose client disconnects stays** until its hold expires.
+- **RSS grows ~8.5 MB/s at ~200k msg/s even at balanced load.** In the §12
+  run it went 0.5 → 3.1 GB and kept rising after the 300 s retention started
+  deleting files. That is ≈ 43 B per message, and an OOM on this 15 GB VM after
+  ~30 minutes. The budget neither causes nor fixes it; the structure that grows
+  is not identified yet.
+
+## 14. Why RSS grows ~8.5 MB/s at 200k: the request-outcome log (2026-09-23)
+
+Branch `bench/collapse` `045c7853`, which adds the gauges used here:
+`queen_raft_store_ram_rows{ks,kind}`, `queen_malloc_bytes` (glibc
+`mallinfo2`, `QUEEN_DEBUG_MALLINFO=1`), and feature `jemalloc-prof` (jemalloc
+with its heap profiler). Two 6-minute runs at 200k msg/s, balanced (push = ack
+= 200k/s, max lag 44k), the §2 shape:
+
+| | system allocator (glibc) | jemalloc + heap profiler |
+|---|---|---|
+| RSS growth, 30 s → end | +8.7 MB/s (0.78 → 3.61 GB) | +8.8 MB/s (→ 3.34 GB) |
+| heap in use / free in the allocator | +6.7 MB/s / flat at ~0.4 GB | — |
+| `request_ids` rows | +5,884/s, 2.1M at 6 min | +5,927/s, 2.1M at 6 min |
+| `seg_loc` rows | +1,980/s, 716k at 6 min | +1,980/s, 717k at 6 min |
+| new heap, 41 s → 356 s, by call site | — | **97.9%** apply thread writing RAM-store rows (`apply → put_raw`); planner 1.5%, queue-log hash reads 0.4% |
+
+The allocator's free space is flat, so this is live data, not fragmentation.
+The heap is ~1.2 KB per request id.
+
+**The mechanism:**
+
+1. Every command gets a request id the broker mints itself (`ReqCtx::new`).
+   Clients never see it. Its outcome (per-item push/ack/pop results) is written
+   to the RAM keyspaces `request_ids` + `request_expiry`, so that a retried
+   command can be answered from the log. The retries in question are the
+   broker's own forwarding and leader-change retries.
+2. The outcomes live `QUEEN_RAFT_REQUEST_ID_WINDOW_S` = **600 s**.
+3. Expiry runs every **10 s** (`request_expire_every_ms`, not a knob) and
+   retires at most **4,096** rows per step (`REQUEST_EXPIRE_LIMIT`, a
+   replicated constant by design). That is ~410 rows/s against ~5,900
+   commands/s at 200k msg/s.
+
+So the table grows at full speed for the first 10 minutes (to ~4 GB), and after
+that it keeps growing at ~5,500 rows/s (~6.5 MB/s), for ever. On this 15 GB VM
+that is an OOM kill after roughly 35 minutes. `raft` has the same settings
+(`batcher.rs` 600 s / 10 s, `apply.rs` 4096).
+
+**Fix options:**
+
+1. **Make the expiry keep up (needed in every case).** When a step retires a
+   full 4,096, send the next one in the next cycle instead of 10 s later. This
+   only changes timing on the leader; the replicated 4,096-per-step rule stays.
+2. **Shorten the window (decision D6).** Nothing waits 600 s for these ids:
+   the retries they serve end within seconds (5 s propose deadline). At 200k
+   msg/s, 600 s is ~4 GB of RAM at a steady state; 60 s is ~0.4 GB.
+3. Later: store less per outcome.
+
+`seg_loc` (one row per queue-log record, removed when retention moves the
+partition watermark) was not trimmed within 6 minutes, even though retention is
+300 s. It is small (~0.2 MB/s), but a longer run has to show that it levels off.
+
+## 15. The fix: expiry keeps up, window 60 s (2026-09-23)
+
+Branch `bench/collapse` `4fb435b3` (not in `raft` yet). `rsm::` + `handlers::`
+656 green. The new test `a_request_id_expiry_backlog_clears_after_one_tick`
+fails on the old cadence (6,145 outcomes left) and passes with the fix.
+
+1. A `RequestIdsExpire` step that finds a full `REQUEST_EXPIRE_LIMIT` past the
+   cutoff in the committed store runs again in the next cycle, not at the next
+   10 s tick. Only the leader's cadence changes; what a step retires does not
+   (I2).
+2. `QUEEN_RAFT_REQUEST_ID_WINDOW_S` defaults to 60 s (was 600).
+
+Same shape, 200k msg/s balanced (push = ack = 200k/s in both), glibc gauges.
+The run was stopped at 279 s once the curve was flat:
+
+| t | RSS before → after | heap in use before → after | request-id rows before → after |
+|---|---|---|---|
+| 60 s | 1.04 → 0.76 GB | 0.65 → 0.54 GB | 314k → 340k |
+| 120 s | 1.56 → 1.46 GB | 1.02 → 0.71 GB | 671k → 370k |
+| 240 s | 2.58 → **1.65 GB** | 1.82 → **0.66 GB** | 1,387k → **367k** |
+| slope from 150 s | **+8.6 → +0.6 MB/s** | **+6.8 → −0.7 MB/s** | +5,879/s → flat |
+
+After the fix, RSS is ~1.0 GB of anonymous memory plus ~0.65 GB of file-backed
+pages (the mapped store and index files, which the kernel can reclaim). What
+is left: `seg_loc` still grows ~2k rows/s (550k at 279 s), about +0.3 MB/s
+of anonymous memory. It should stop when retention trims it; that needs a run
+longer than 5 minutes.
