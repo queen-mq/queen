@@ -117,10 +117,11 @@ Each of those closes the connection if sent anyway, which is Apache Kafka's own
 answer to an unparseable request and unreachable for a client that read
 ApiVersions. Two consequences worth knowing before you meet them:
 
-- **The idempotence window is in memory and per facade.** A facade restart, an
-  eviction (65 536 tracked producer-partitions) or a connection landing on
-  another facade costs at-least-once for at most the five in-flight batches.
-  Real Kafka persists producer state in the log; this does not.
+- **The idempotence window is in memory and per facade** — for the standalone
+  facade. A facade restart, an eviction (65 536 tracked producer-partitions) or
+  a connection landing on another facade costs at-least-once for at most the
+  five in-flight batches. In-process in a raft broker the window is in the log
+  and survives all three (see above).
 - **A config alter needs a topic this facade created.** Queen's
   `POST /api/v1/configure` is a whole-row upsert over nineteen columns and
   thirteen of them have no HTTP read, so the facade keeps its own record of the
@@ -165,6 +166,35 @@ three:
   broker keeps serving. A serve loop that ends is restarted with the child
   supervisor's ladder (1s doubling to 30s). `GET /status` reports it under
   `kafka` with `"mode": "in-process"`.
+
+In-process, the records themselves take a TYPED path (`queen::KafkaLog`,
+server/src/rsm/kafka_batch.rs) instead of the JSON envelope:
+
+- **Produce** appends each partition's RecordBatch v2 bytes VERBATIM as one
+  Queen append: the broker stamps each batch's base offset (outside the CRC, so
+  nothing is recompressed) and stores the client's own bytes. Transactional
+  produce is unchanged: staged here, written by EndTxn's bundle.
+- **Fetch** returns the stored batches as they are, interleaved in offset order
+  with whatever a Queen producer pushed to the same partition (encoded as
+  before). A fetch of one topic long-polls on that topic's own wake.
+- **Queen readers** — a native pop, `POST /api/v1/fetch`, the message browser,
+  a dead letter — see each Kafka record as the same `{"k","v","h","t"}`
+  envelope the JSON path stored, with the transaction id `kafka:<offset>`
+  (reserved), which is what a native consumer acks it by.
+- **The idempotent producer's window lives in the log**, not in this process:
+  one replicated KV row per partition and producer, checked and advanced in
+  the same entry as the append. A resend after a broker restart is still the
+  duplicate it is.
+- **This facade's own KV** — committed offsets, topic records, the node
+  registry — goes to the state machine without the tenant KV rate limit
+  (`QUEEN_KV_WRITE_RATE`), so a consumer group commits at its own pace.
+- A queue encrypted at rest stores Kafka records as encrypted envelopes, as
+  before: a verbatim batch would be plaintext.
+- **The verbatim append and the direct KV run on the raft leader only.** On a
+  follower both go through the broker's router, which forwards them to the
+  leader: records are stored as envelopes (every reader handles both) and the
+  idempotence window is this facade's in-memory one, as standalone. Fetch
+  reads the local replica on every node.
 
 ## Cluster mode
 

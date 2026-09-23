@@ -79,8 +79,23 @@ broker's axum `Router` called as a service, spawned onto the broker runtime
 `queen_kafka::boot` (`Config` + `serve`). Feature `kafka` (default on); the
 release profile unwinds and `obs::install_panic_hook` aborts off the
 `queen-kafka` threads (W1 for this one facade). Explicit `QUEEN_URL` stays on
-HTTP. The Postgres boot keeps the child. Step 5 (offsets as raft commands) is
-not done.
+HTTP. The Postgres boot keeps the child.
+
+**Status (2026-09-23, phase 2 of the Kafka-on-raft plan): typed record path.**
+Produce appends RecordBatch v2 bytes verbatim (one `Append` per partition,
+riding a `PushCommand` whose single item starts with the `FF FF FF FF` magic,
+planned by `rsm/planner/kafka.rs`: offsets stamped outside the CRC, synthetic
+per-record hashes `kafka:<offset>` so native pop/ack work unchanged); Fetch
+serves the stored bytes (`Rsm::kafka_read`), single-topic fetches park on the
+queue gate. The idempotent-producer window moved into the log (KV row
+`qk:seq:<pid>:<producer>` written in the append's entry). The facade's KV calls
+skip the router and the KV rate ladder (`handlers::facade_kv`). Both the
+verbatim append and the direct KV run on the raft leader only; a follower goes
+through the router, which forwards to the leader. Not done: step 5 proper —
+committed offsets as native consumer-group cursors (with commit metadata on the
+cursor row) instead of `qk:group:` KV rows, approved 2026-09-23 and waiting for
+the lanes rework; S3-sink cursors; transactions still use the facade stage +
+EndTxn bundle.
 
 ### W3 — Proxy data plane into the broker
 - **Auth:** API keys (hashed, RAM lookup) and JWT verification, with a cache of

@@ -583,6 +583,7 @@ mod tests {
                 high_watermark: 91,
                 log_start_offset: 12,
                 error: error.clone(),
+                chunks: Vec::new(),
             };
             api.reply_fetch(vec![entry.clone(), entry]);
             let resp = handle(
@@ -633,6 +634,7 @@ mod tests {
             high_watermark: 4,
             log_start_offset: 0,
             error: None,
+            chunks: Vec::new(),
         }]);
         let resp = handle(&f, &request(&[("orders", &[(0, LATEST)])]), None).await;
         assert_eq!(answer(&resp, "orders", 0).offset, 4);
@@ -836,6 +838,7 @@ mod tests {
             high_watermark: 5,
             log_start_offset: 1,
             error: Some("SOMETHING_NEW".to_string()),
+            chunks: Vec::new(),
         }]);
         let resp = handle(&f, &request(&[("orders", &[(0, LATEST)])]), None).await;
         let p = answer(&resp, "orders", 0);

@@ -163,6 +163,15 @@ enum Slot {
         len: usize,
         seq: Option<idempotent::Pending>,
     },
+    /// This partition's batches, appended VERBATIM through the typed record
+    /// path of a broker in this process ([`crate::queen::KafkaLog`]): part
+    /// `index` of the request's one append call, `records` records long.
+    /// `seq` is the idempotent window's pending entry, as for [`Slot::Push`].
+    Append {
+        index: usize,
+        records: usize,
+        seq: Option<idempotent::Pending>,
+    },
     /// Nothing to write: the entry carried no records at all.
     Empty,
     /// An idempotent producer resent a batch this facade has already appended.
@@ -295,6 +304,13 @@ async fn build(facade: &Facade, req: &ProduceRequest, token: Option<&str>) -> Pr
     };
 
     let mut items: Vec<PushItem> = Vec::new();
+    // The typed path's parts: filled only when a broker in this process offers
+    // one ([`Facade::log`]). A transactional entry never lands here — its
+    // records are staged and written by EndTxn's bundle.
+    let mut appends: Vec<queen::AppendPart> = Vec::new();
+    // Decided once per request: a node that stops leading mid-request answers
+    // the typed append retriable, and the client's retry takes the JSON path.
+    let verbatim = facade.log.as_ref().is_some_and(|l| l.appends_here());
     let mut slots: Vec<Vec<Slot>> = Vec::with_capacity(req.topic_data.len());
     {
         // ONE budget for the request, not one per batch or one per partition: a
@@ -312,7 +328,17 @@ async fn build(facade: &Facade, req: &ProduceRequest, token: Option<&str>) -> Pr
                 topic
                     .partition_data
                     .iter()
-                    .map(|p| stage(&mut items, name, plan, p, &budget, &idem))
+                    .map(|p| {
+                        stage(
+                            &mut items,
+                            verbatim.then_some(&mut appends),
+                            name,
+                            plan,
+                            p,
+                            &budget,
+                            &idem,
+                        )
+                    })
                     .collect(),
             );
         }
@@ -327,8 +353,19 @@ async fn build(facade: &Facade, req: &ProduceRequest, token: Option<&str>) -> Pr
     } else {
         Some(facade.queen.push(&items, token).await)
     };
+    // ...and the verbatim parts, in ONE typed call. Both can be present only
+    // when an entry the typed path could not take shares a request with one it
+    // could; today every non-transactional entry goes one way or the other.
+    let typed = match (facade.log.as_ref().filter(|_| verbatim), appends.is_empty()) {
+        (_, true) => None,
+        (Some(log), false) => Some(log.append(appends, token).await),
+        // Unreachable: parts are only collected when the log is there.
+        (None, false) => Some(Err(queen::Error::Transport(
+            "records were staged for a typed append with no typed log".to_string(),
+        ))),
+    };
 
-    render(req, &slots, pushed.as_ref(), &idem)
+    render(req, &slots, pushed.as_ref(), typed.as_ref(), &idem)
 }
 
 // --------------------------------------------------------------------- topics
@@ -411,6 +448,7 @@ async fn topic_plans<'a>(
 /// the request's remaining decompression allowance, and it is spent here.
 fn stage(
     items: &mut Vec<PushItem>,
+    appends: Option<&mut Vec<queen::AppendPart>>,
     topic: &str,
     plan: Plan,
     p: &PartitionProduceData,
@@ -500,13 +538,22 @@ fn stage(
         tracing::warn!(target: "kafka", topic, partition = p.index, %why, "refusing a record batch");
         return Slot::Reject(error, why);
     }
+    // On the verbatim path the WINDOW IS THE LOG's (server/src/rsm/kafka_batch.rs):
+    // durable, replicated and checked in the same entry as the append, so this
+    // process's copy is not consulted — a restart here must not refuse a
+    // producer the log still knows.
+    let verbatim = appends.is_some() && idem.txn.is_none();
     // The idempotent producer's sequence window, checked HERE — on the headers,
     // before the batch is decompressed and before the record count is charged
     // against the request's budget — because a duplicate is answered without
     // decoding a byte of it and a gap is refused without decoding a byte of it.
     // This is the place `refuse` used to answer UNSUPPORTED_FOR_MESSAGE_FORMAT
     // from ([`crate::idempotent`]).
-    let seq = match idem.producers.check(idem.tenant, topic, p.index, &infos) {
+    let seq = match if verbatim {
+        idempotent::Verdict::NotIdempotent
+    } else {
+        idem.producers.check(idem.tenant, topic, p.index, &infos)
+    } {
         idempotent::Verdict::NotIdempotent => None,
         idempotent::Verdict::Accept(pending) => Some(pending),
         idempotent::Verdict::Duplicate(base) => {
@@ -550,6 +597,31 @@ fn stage(
             ResponseError::MessageTooLarge,
             format!("the record count this request declares is not one it may decode: {why}"),
         );
+    }
+
+    // Phase 2: a broker in this process stores the batches VERBATIM
+    // ([`crate::queen::KafkaLog`]). Nothing is decompressed or re-encoded here:
+    // the headers above are all the append needs — the CRCs are checked, the
+    // flags refused, the producer window consulted, and the record count is
+    // what the broker numbers; it stamps each batch's base offset itself. A
+    // transactional entry stays on the stage path below: its write is EndTxn's.
+    if let Some(appends) = appends.filter(|_| idem.txn.is_none()) {
+        if declared == 0 {
+            return Slot::Empty;
+        }
+        let index = appends.len();
+        appends.push(queen::AppendPart {
+            queue: topic.to_string(),
+            partition: p.index.to_string(),
+            batches: raw.clone(),
+            // Bounded by the request's record budget (MAX_RECORDS_PER_REQUEST).
+            records: u32::try_from(declared).unwrap_or(u32::MAX),
+        });
+        return Slot::Append {
+            index,
+            records: declared,
+            seq,
+        };
     }
 
     let batches = match decompress::decode_all(&mut raw.clone(), budget) {
@@ -801,8 +873,17 @@ fn render(
     req: &ProduceRequest,
     slots: &[Vec<Slot>],
     pushed: Option<&queen::Result<Vec<Pushed>>>,
+    typed: Option<&queen::Result<Vec<queen::Result<i64>>>>,
     idem: &Idem<'_>,
 ) -> ProduceResponse {
+    // The longest wait any refusal asked for: the push's, the append call's, or
+    // one appended part's (a full admission budget answers per part).
+    let mut throttle_hint: Option<i32> = None;
+    let mut note = |e: &queen::Error| {
+        if let Some(t) = throttle::for_error(e) {
+            throttle_hint = Some(throttle_hint.map_or(t, |h| h.max(t)));
+        }
+    };
     let mut responses = Vec::with_capacity(req.topic_data.len());
     for (topic, row) in req.topic_data.iter().zip(slots) {
         let name = topic.name.0.as_str();
@@ -823,6 +904,50 @@ fn render(
                 // window remembers the sentinel rather than a place in a log
                 // nothing has been appended to.
                 Slot::Staged => appended(p.index, NO_OFFSET),
+                Slot::Append {
+                    index,
+                    records,
+                    seq,
+                } => match typed {
+                    Some(Ok(results)) => match results.get(*index) {
+                        Some(Ok(base)) => {
+                            // As for a Push run: the window advances only once
+                            // the log has numbered the batch.
+                            if let Some(pending) = seq {
+                                idem.producers.commit(pending, *base, *records);
+                            }
+                            appended(p.index, *base)
+                        }
+                        Some(Err(e)) => {
+                            note(e);
+                            rejected(
+                                p.index,
+                                append_error(e),
+                                &queen::wire_reason_of(&format!("append failed: {e}")),
+                            )
+                        }
+                        None => rejected(
+                            p.index,
+                            ResponseError::UnknownServerError,
+                            "the typed append answered no result for this partition",
+                        ),
+                    },
+                    Some(Err(e)) => {
+                        note(e);
+                        rejected(
+                            p.index,
+                            kafka_error(e),
+                            &queen::wire_reason_of(&format!("append failed: {e}")),
+                        )
+                    }
+                    // Unreachable: an Append slot exists only when a part was
+                    // collected, and collected parts are always appended.
+                    None => rejected(
+                        p.index,
+                        ResponseError::UnknownServerError,
+                        "records were staged but never appended",
+                    ),
+                },
                 Slot::Push { start, len, seq } => match pushed {
                     // `get` and not an index: a handler must not panic on
                     // anything a broker answered, however wrong it is.
@@ -913,9 +1038,16 @@ fn render(
     // auto-create refused by the same cap is answered LEADER_NOT_AVAILABLE with
     // no throttle, because the plan pass keeps no error to read it from, and a
     // producer that has to create a topic is retrying on its own timer anyway.
+    if let Some(Err(e)) = typed {
+        tracing::error!(target: "kafka", error = %e, "produce append failed");
+    }
     let throttle = pushed
         .and_then(|r| r.as_ref().err())
         .and_then(throttle::for_error);
+    let throttle = match (throttle, throttle_hint) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    };
     ProduceResponse::default()
         .with_responses(responses)
         .with_throttle_time_ms(throttle.unwrap_or(0))
@@ -1046,6 +1178,31 @@ fn unnumbered(i: usize, item: &Pushed) -> NoBase {
             item.status
         ))
     }
+}
+
+/// The Kafka error of one refused typed append. The log refuses the idempotent
+/// producer's cases with the Kafka error's own NAME as the code (the window is
+/// the log's on the verbatim path), and those answers must reach the producer
+/// as those codes — its recovery depends on them. Everything else maps as any
+/// failed call to Queen does.
+fn append_error(e: &queen::Error) -> ResponseError {
+    if let queen::Error::Status {
+        code: 400, body, ..
+    } = e
+    {
+        let named = serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string));
+        match named.as_deref() {
+            Some("OUT_OF_ORDER_SEQUENCE_NUMBER") => return ResponseError::OutOfOrderSequenceNumber,
+            Some("INVALID_PRODUCER_EPOCH") => return ResponseError::InvalidProducerEpoch,
+            Some("DUPLICATE_SEQUENCE_NUMBER") => return ResponseError::DuplicateSequenceNumber,
+            Some("INVALID_RECORD") => return ResponseError::InvalidRecord,
+            Some("bad_batch") => return ResponseError::CorruptMessage,
+            _ => {}
+        }
+    }
+    kafka_error(e)
 }
 
 /// The closest Kafka error for a failed call to Queen.
@@ -1308,6 +1465,115 @@ mod tests {
     /// The payload of push item `i`, decoded back through the envelope.
     fn payload(api: &FakeQueen, i: usize) -> Decoded {
         crate::records::decode(&api.pushed()[i].payload, None)
+    }
+
+    // ------------------------------------------------ the verbatim path (P2)
+
+    /// A facade with a typed log beside the JSON double.
+    fn facade_with_log(
+        queues: &[(&str, i64)],
+    ) -> (Facade, Arc<FakeQueen>, Arc<crate::queen::testing::FakeLog>) {
+        let (f, api) = facade(queues, 8);
+        let log = Arc::new(crate::queen::testing::FakeLog::default());
+        let f = f.with_log(Some(Arc::clone(&log) as Arc<dyn crate::queen::KafkaLog>));
+        (f, api, log)
+    }
+
+    /// With a typed log, a Produce hands each partition's batches over as the
+    /// bytes they are — nothing decoded, nothing pushed — and answers each
+    /// partition the base offset the log numbered it at.
+    #[tokio::test]
+    async fn a_verbatim_produce_hands_the_raw_batches_over() {
+        let (f, api, log) = facade_with_log(&[("orders", 4)]);
+        let two = batch(
+            &[record(Some(b"a"), b"one"), record(None, b"two")],
+            Compression::Lz4,
+        );
+        let one = batch(&[record(None, b"three")], Compression::None);
+        let req = request(&[("orders", &[(1, two.clone()), (3, one.clone())])]);
+        let resp = handle(&f, &req, None).await.expect("answered");
+
+        assert!(
+            api.pushed().is_empty(),
+            "nothing went through the JSON push"
+        );
+        let parts = log.appended.lock().unwrap().clone();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].batches, two, "the bytes as the client sent them");
+        assert_eq!(parts[0].partition, "1");
+        assert_eq!(parts[0].records, 2);
+        assert_eq!(parts[1].batches, one);
+        assert_eq!(parts[1].records, 1);
+        assert_eq!(answer(&resp, "orders", 1).base_offset, 0);
+        assert_eq!(answer(&resp, "orders", 3).base_offset, 0);
+
+        let again = handle(&f, &simple("orders", 1, &[record(None, b"4")]), None)
+            .await
+            .unwrap();
+        assert_eq!(answer(&again, "orders", 1).base_offset, 2);
+    }
+
+    /// On the verbatim path the idempotent window is the LOG's: the facade
+    /// forwards a resend, and answers what the log answers — the original base
+    /// for a duplicate, the Kafka code it names for a refusal.
+    #[tokio::test]
+    async fn a_verbatim_idempotent_resend_is_the_logs_to_decide() {
+        let (f, _, log) = facade_with_log(&[("orders", 1)]);
+        let req = simple("orders", 0, &[idempotent_record(7, 0, 0)]);
+        let first = handle(&f, &req, None).await.unwrap();
+        // The broker's verdict on the resend: a duplicate, at the original base.
+        *log.append_answer.lock().unwrap() = Some(Ok(vec![Ok(0)]));
+        let resent = handle(&f, &req, None).await.unwrap();
+        assert_eq!(answer(&first, "orders", 0).error_code, 0);
+        assert_eq!(answer(&resent, "orders", 0).error_code, 0);
+        assert_eq!(answer(&resent, "orders", 0).base_offset, 0);
+        assert_eq!(
+            log.appended.lock().unwrap().len(),
+            2,
+            "both went to the log"
+        );
+
+        // A gap the log refuses reaches the producer as its own code.
+        *log.append_answer.lock().unwrap() = Some(Ok(vec![Err(crate::queen::Error::status(
+            400,
+            "{\"error\":\"gap\",\"code\":\"OUT_OF_ORDER_SEQUENCE_NUMBER\"}",
+        ))]));
+        let gap = handle(
+            &f,
+            &simple("orders", 0, &[idempotent_record(7, 0, 9)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            answer(&gap, "orders", 0).error_code,
+            ResponseError::OutOfOrderSequenceNumber.code()
+        );
+    }
+
+    /// A refused part is that partition's error, mapped as any Queen error is;
+    /// the other partitions of the request still land.
+    #[tokio::test]
+    async fn a_refused_part_is_that_partitions_error() {
+        let (f, _, log) = facade_with_log(&[("orders", 2)]);
+        *log.append_answer.lock().unwrap() = Some(Ok(vec![
+            Err(crate::queen::Error::status(
+                507,
+                "{\"error\":\"storage full\"}",
+            )),
+            Ok(41),
+        ]));
+        let req = request(&[(
+            "orders",
+            &[
+                (0, batch(&[record(None, b"x")], Compression::None)),
+                (1, batch(&[record(None, b"y")], Compression::None)),
+            ],
+        )]);
+        let resp = handle(&f, &req, None).await.unwrap();
+        assert_ne!(answer(&resp, "orders", 0).error_code, 0);
+        assert_eq!(answer(&resp, "orders", 1).error_code, 0);
+        assert_eq!(answer(&resp, "orders", 1).base_offset, 41);
     }
 
     // --------------------------------------------------------- the happy path
@@ -2098,6 +2364,7 @@ mod tests {
         let budget = decompress::Budget::new(MAX_DECOMPRESSED_BYTES, MAX_RECORDS_PER_REQUEST);
         let slot = stage(
             &mut items,
+            None,
             "orders",
             Plan::Serve(4),
             &txn_entry(0, &[txn_record(7, 0, 0, b"a"), txn_record(7, 0, 1, b"b")]),
@@ -2127,6 +2394,7 @@ mod tests {
         let budget = decompress::Budget::new(MAX_DECOMPRESSED_BYTES, MAX_RECORDS_PER_REQUEST);
         match stage(
             &mut items,
+            None,
             "orders",
             Plan::Serve(4),
             &txn_entry(1, &[txn_record(7, 0, 0, b"a")]),
@@ -2154,6 +2422,7 @@ mod tests {
         assert!(matches!(
             stage(
                 &mut items,
+                None,
                 "orders",
                 Plan::Serve(4),
                 &entry,
@@ -2164,6 +2433,7 @@ mod tests {
         ));
         match stage(
             &mut items,
+            None,
             "orders",
             Plan::Serve(4),
             &entry,
@@ -2205,6 +2475,7 @@ mod tests {
         let budget = decompress::Budget::new(MAX_DECOMPRESSED_BYTES, MAX_RECORDS_PER_REQUEST);
         match stage(
             &mut items,
+            None,
             "orders",
             Plan::Serve(4),
             &txn_entry(0, &[txn_record(7, 0, 0, b"a")]),
@@ -2229,6 +2500,7 @@ mod tests {
         let budget = decompress::Budget::new(MAX_DECOMPRESSED_BYTES, MAX_RECORDS_PER_REQUEST);
         match stage(
             &mut items,
+            None,
             "orders",
             Plan::Serve(4),
             &txn_entry(0, &[txn_record(7, 0, 0, &[0u8; 64])]),
@@ -2257,6 +2529,7 @@ mod tests {
         let budget = decompress::Budget::new(MAX_DECOMPRESSED_BYTES, MAX_RECORDS_PER_REQUEST);
         match stage(
             &mut items,
+            None,
             "orders",
             Plan::Serve(4),
             &txn_entry(0, &[txn_record(7, 0, 0, &[0u8; 64])]),
@@ -2293,6 +2566,7 @@ mod tests {
             .with_records(Some(raw));
         match stage(
             &mut items,
+            None,
             "orders",
             Plan::Serve(4),
             &p,
@@ -2325,6 +2599,7 @@ mod tests {
             .with_records(Some(raw));
         match stage(
             &mut items,
+            None,
             "orders",
             Plan::Serve(4),
             &p,
@@ -2358,6 +2633,7 @@ mod tests {
         assert!(matches!(
             stage(
                 &mut items,
+                None,
                 "orders",
                 Plan::Serve(4),
                 &entry(0),
@@ -2369,6 +2645,7 @@ mod tests {
         assert!(matches!(
             stage(
                 &mut items,
+                None,
                 "orders",
                 Plan::Serve(4),
                 &entry(1),
@@ -2398,6 +2675,7 @@ mod tests {
         assert!(matches!(
             stage(
                 &mut items,
+                None,
                 "orders",
                 Plan::Serve(4),
                 &entry(0),
@@ -2409,6 +2687,7 @@ mod tests {
         assert!(matches!(
             stage(
                 &mut items,
+                None,
                 "orders",
                 Plan::Serve(4),
                 &entry(1),

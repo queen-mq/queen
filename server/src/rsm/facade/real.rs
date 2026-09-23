@@ -82,6 +82,7 @@ use super::{
 /// The KV receiver (WP-2.2): 024's pass 1 here, the writes through the planner,
 /// the reads off this node's applied state. A child module so it shares the
 /// facade's private plumbing (`submit`, the store handle).
+mod kafka;
 mod kv;
 mod phase2;
 
@@ -1709,6 +1710,14 @@ fn resolve_duplicate_message_ids(
                 "duplicate payload is missing at pid {pid} offset {offset}"
             )));
         };
+        if crate::rsm::kafka_batch::is_kafka(&blob) {
+            // The reserved `kafka:<offset>` id of a stored Kafka record.
+            out.push((
+                *flat,
+                uuid_bytes_to_string(&crate::rsm::kafka_batch::message_id(*pid, *offset)),
+            ));
+            continue;
+        }
         let frames = unpack_frames_ref(&blob).ok_or_else(|| {
             RsmError::Internal(format!(
                 "duplicate payload is corrupt at pid {pid} offset {offset}"
@@ -2287,6 +2296,44 @@ fn render_pop_body(
                     out.push('}');
                     count += 1;
                 }
+            } else if crate::rsm::kafka_batch::is_kafka(&blob) {
+                // Stored Kafka batches (phase 2): one message per record, the
+                // envelope the JSON path stores as its data, the synthetic id
+                // its ack resolves by ([`crate::rsm::kafka_batch`]).
+                let views = crate::rsm::kafka_batch::queen_view(&blob, claim.pid).map_err(|e| {
+                    format!("pop of a Kafka batch at pid {} off {base}: {e}", claim.pid)
+                })?;
+                for v in views {
+                    let msg_off = v.offset;
+                    if msg_off < off || msg_off < claim.start_offset || msg_off > claim.end_offset {
+                        continue;
+                    }
+                    if count > 0 {
+                        out.push(',');
+                    }
+                    out.push_str("{\"id\":\"");
+                    crate::frames::uuid_hex_into(&mut out, &v.message_id);
+                    out.push_str("\",\"transactionId\":\"");
+                    crate::fusion::json_escape_into(&mut out, &v.txn);
+                    out.push_str("\",\"traceId\":null,\"data\":");
+                    push_utf8(&mut out, &v.payload);
+                    out.push_str(",\"producerSub\":null,\"createdAt\":\"");
+                    out.push_str(&seg_created);
+                    out.push_str("\",\"partitionId\":\"");
+                    crate::fusion::json_escape_into(&mut out, &partition_id);
+                    out.push_str("\",\"partition\":\"");
+                    crate::fusion::json_escape_into(&mut out, &info.name);
+                    out.push_str("\",\"leaseId\":\"");
+                    crate::fusion::json_escape_into(&mut out, lease_id);
+                    out.push_str("\",\"consumerGroup\":\"");
+                    crate::fusion::json_escape_into(&mut out, group);
+                    out.push_str("\",\"deliveryAttempt\":");
+                    out.push_str(&attempt.to_string());
+                    out.push_str(",\"offset\":");
+                    out.push_str(&msg_off.to_string());
+                    out.push('}');
+                    count += 1;
+                }
             }
             // Advance past this whole segment; a claim range is a run of segments.
             off = base + frame_count as u64;
@@ -2647,6 +2694,36 @@ fn read_dlq_snapshot(
         let Some((base, count, blob)) = record else {
             return Ok(None);
         };
+        if crate::rsm::kafka_batch::is_kafka(&blob) {
+            // A Kafka record: its synthetic id is its offset, so it is found by
+            // offset rather than by walking hashes.
+            let views = crate::rsm::kafka_batch::queen_view(&blob, work.pid).map_err(|e| {
+                format!(
+                    "dlq read of a Kafka batch at pid {} offset {base}: {e}",
+                    work.pid
+                )
+            })?;
+            for v in views {
+                if v.offset < work.from || v.offset > work.to {
+                    continue;
+                }
+                if txn_hash128(&v.txn) == work.hash && v.txn == work.txn {
+                    return Ok(Some(DlqSnapshot {
+                        message_id: Some(v.message_id),
+                        txn: v.txn,
+                        payload: v.payload,
+                    }));
+                }
+            }
+            off = base.saturating_add(count as u64);
+            if count == 0 {
+                return Err(format!(
+                    "zero-record Kafka record at pid {} offset {base}",
+                    work.pid
+                ));
+            }
+            continue;
+        }
         let frames = unpack_frames_ref(&blob)
             .ok_or_else(|| format!("invalid packed frames at pid {} offset {base}", work.pid))?;
         for (i, frame) in frames.iter().enumerate() {
@@ -3006,6 +3083,25 @@ impl RaftFacade {
 
 #[async_trait]
 impl Rsm for RaftFacade {
+    async fn kafka_append(
+        &self,
+        ctx: ReqCtx,
+        parts: Vec<crate::rsm::facade::KafkaAppendReq>,
+    ) -> Result<Vec<Result<u64, RsmError>>, RsmError> {
+        self.kafka_append_impl(ctx, parts).await
+    }
+
+    async fn kafka_read(
+        &self,
+        ctx: ReqCtx,
+        asks: Vec<crate::rsm::facade::KafkaReadReq>,
+        max_wait_ms: u64,
+        min_bytes: usize,
+    ) -> Result<Vec<crate::rsm::facade::KafkaReadOut>, RsmError> {
+        self.kafka_read_impl(ctx, asks, max_wait_ms, min_bytes)
+            .await
+    }
+
     fn bootstrap(&self) -> super::RsmBootstrap {
         match self.store.read(|r| {
             let flag = |key: &str, default: bool| -> crate::rsm::store::Result<bool> {

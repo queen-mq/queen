@@ -35,6 +35,7 @@ pub mod queen;
 pub mod records;
 pub mod sasl;
 pub mod secret;
+pub mod stored;
 pub mod throttle;
 pub mod tls;
 pub mod topic_config;
@@ -145,6 +146,12 @@ pub struct Facade {
     lanes: Arc<Lanes>,
     /// Listener policy, read by [`conn`] and by nothing downstream of it.
     pub policy: Policy,
+    /// The TYPED record path ([`queen::KafkaLog`]) of a broker this facade
+    /// shares a process with, or `None` — the standalone binary, or a broker
+    /// reached over HTTP. When set, a non-transactional Produce appends its
+    /// batches verbatim and a Fetch serves them back as stored; everything else
+    /// still goes through [`Facade::queen`].
+    pub log: Option<Arc<dyn queen::KafkaLog>>,
 }
 
 /// What the listener does to a connection before a handler ever sees it.
@@ -233,6 +240,7 @@ impl Facade {
             txns: Arc::clone(&self.txns),
             lanes: Arc::clone(&self.lanes),
             policy: self.policy,
+            log: self.log.clone(),
         }
     }
 
@@ -271,6 +279,7 @@ impl Facade {
             txns: Arc::clone(&self.txns),
             lanes: Arc::clone(&self.lanes),
             policy: self.policy,
+            log: self.log.clone(),
         }
     }
 
@@ -482,7 +491,14 @@ impl Facade {
             // is a constant an operator cannot move.
             txns,
             policy,
+            log: None,
         }
+    }
+
+    /// This facade with a typed record path ([`Facade::log`]).
+    pub fn with_log(mut self, log: Option<Arc<dyn queen::KafkaLog>>) -> Facade {
+        self.log = log;
+        self
     }
 }
 

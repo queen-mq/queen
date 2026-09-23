@@ -1884,6 +1884,7 @@ dependencies = [
  "http-body-util",
  "hyper-util",
  "jsonwebtoken",
+ "kafka-protocol",
  "libc",
  "memmap2",
  "openraft",

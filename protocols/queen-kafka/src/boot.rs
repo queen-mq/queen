@@ -583,7 +583,9 @@ impl Config {
 
 /// Run the facade until `stop` resolves (or the accept loop ends), then hand
 /// this node's registry row back. `api` is the Queen client, over HTTP or
-/// in-process; `via` names which, for the boot line only.
+/// in-process; `via` names which, for the boot line only. `log` is the typed
+/// record path of a broker sharing this process ([`queen::KafkaLog`]), or
+/// `None`.
 ///
 /// Every failure the binary used to exit(1) on — certificate material that
 /// does not load, a node id another process holds, a Kafka port that cannot be
@@ -592,6 +594,7 @@ pub async fn serve(
     cfg: Config,
     api: Arc<dyn queen::QueenApi>,
     via: &'static str,
+    log: Option<Arc<dyn queen::KafkaLog>>,
     stop: impl std::future::Future<Output = &'static str>,
 ) -> Result<(), String> {
     // The TLS material is read and PARSED here rather than on the first
@@ -713,27 +716,30 @@ pub async fn serve(
     let txns = Arc::new(txn::Txns::new(cfg.txns));
     tokio::spawn(txn::sweep_loop(Arc::clone(&txns)));
 
-    let facade = Arc::new(Facade::new(
-        cfg.advertised_host.clone(),
-        cfg.advertised_port,
-        cluster,
-        cfg.default_partitions,
-        cfg.queen_token.clone(),
-        // One client object for both paths: it owns the connection pool, and
-        // the metadata calls and the data calls are the same HTTP to the same
-        // broker.
-        api,
-        // Empty at boot, and that is the whole of the restart story: a facade
-        // that comes back knows no members, tells the survivors so, and they
-        // rejoin — the same sequence a Kafka broker failover produces. What
-        // they resume FROM is in Queen and was never here.
-        Coordinator::new(cfg.groups),
-        // Empty at boot for the same reason and with a louder consequence: a
-        // transaction open across a restart is one the client is told about,
-        // fatally (`crate::txn`).
-        Arc::clone(&txns),
-        cfg.policy,
-    ));
+    let facade = Arc::new(
+        Facade::new(
+            cfg.advertised_host.clone(),
+            cfg.advertised_port,
+            cluster,
+            cfg.default_partitions,
+            cfg.queen_token.clone(),
+            // One client object for both paths: it owns the connection pool, and
+            // the metadata calls and the data calls are the same HTTP to the same
+            // broker.
+            api,
+            // Empty at boot, and that is the whole of the restart story: a facade
+            // that comes back knows no members, tells the survivors so, and they
+            // rejoin — the same sequence a Kafka broker failover produces. What
+            // they resume FROM is in Queen and was never here.
+            Coordinator::new(cfg.groups),
+            // Empty at boot for the same reason and with a louder consequence: a
+            // transaction open across a restart is one the client is told about,
+            // fatally (`crate::txn`).
+            Arc::clone(&txns),
+            cfg.policy,
+        )
+        .with_log(log),
+    );
 
     let listener = match tokio::net::TcpListener::bind(&cfg.listen_addr).await {
         Ok(l) => l,

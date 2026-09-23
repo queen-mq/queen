@@ -90,7 +90,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    if let Err(e) = boot::serve(cfg, api, "http", stop_signal()).await {
+    if let Err(e) = boot::serve(cfg, api, "http", None, stop_signal()).await {
         tracing::error!(target: "boot", "FATAL: {e}");
         std::process::exit(1);
     }

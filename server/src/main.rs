@@ -1765,6 +1765,10 @@ async fn run_raft(cfg: config::Config) {
         Err(e) => obs::fatal(format!("raft state init failed: {e}")),
     };
 
+    // The typed Kafka record path reaches the state machine directly
+    // (kafka_inproc.rs), so it keeps its own handles on it and on auth.
+    #[cfg(feature = "kafka")]
+    let (kafka_rsm, kafka_auth) = (state.rsm.clone(), authenticator.clone());
     let app = handlers::raft::build_raft_router(state, authenticator, cfg.tenancy_header);
 
     let addr = config::host_port(&cfg.bind_addr, &cfg.port);
@@ -1786,8 +1790,16 @@ async fn run_raft(cfg: config::Config) {
     // The Kafka facade starts once the router exists and the HTTP listener is
     // bound; its transport is a clone of the same router (kafka_inproc.rs).
     #[cfg(feature = "kafka")]
-    let kafka =
-        kafka_cfg.map(|k| kafka_inproc::start(&cfg.kafka_facade, k, app.clone(), &cfg.port));
+    let kafka = kafka_cfg.map(|k| {
+        kafka_inproc::start(
+            &cfg.kafka_facade,
+            k,
+            app.clone(),
+            &cfg.port,
+            kafka_rsm,
+            kafka_auth,
+        )
+    });
 
     if let Err(e) = axum::serve(listener, app)
         .tcp_nodelay(true)

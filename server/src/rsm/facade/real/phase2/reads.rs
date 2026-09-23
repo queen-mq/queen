@@ -1011,7 +1011,43 @@ pub(super) fn walk_records(
             off += 1;
             continue;
         };
-        if let Some(frames) = unpack_frames_ref(&blob) {
+        if crate::rsm::kafka_batch::is_kafka(&blob) {
+            // Stored Kafka batches (phase 2): one message per record, the
+            // envelope as its payload — what the JSON path would have stored.
+            let views = crate::rsm::kafka_batch::queen_view(&blob, part.pid).map_err(|e| {
+                RsmError::Internal(format!(
+                    "Kafka batch at pid {} offset {base}: {e}",
+                    part.pid
+                ))
+            })?;
+            for v in views {
+                if v.offset < off || v.offset >= high {
+                    continue;
+                }
+                let rec = Record {
+                    queue: part.row.queue.clone(),
+                    partition: part.row.partition.clone(),
+                    partition_id: part.row.uuid,
+                    offset: v.offset,
+                    segment_base: base,
+                    frame_idx: (v.offset - base) as usize,
+                    created_at_us: created,
+                    id: v.message_id,
+                    txn: v.txn,
+                    trace_id: None,
+                    producer_sub: None,
+                    payload: v.payload,
+                    encrypted: false,
+                };
+                n += 1;
+                if !cb(rec) {
+                    return Ok(());
+                }
+                if n >= limit {
+                    break;
+                }
+            }
+        } else if let Some(frames) = unpack_frames_ref(&blob) {
             for (i, f) in frames.into_iter().enumerate() {
                 let pos = base + i as u64;
                 if pos < off || pos >= high {

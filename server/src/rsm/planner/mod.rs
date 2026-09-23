@@ -94,6 +94,8 @@ use crate::rsm::store::rows::GroupRow;
 use crate::rsm::store::{keys, Keyspace, Reads, StoreError, TypedReads};
 
 pub mod ack;
+/// A Kafka append (phase 2): one partition's batches stored verbatim.
+pub mod kafka;
 /// KEEP_OVERLAY: the overlay kept between cycles on the planner thread.
 pub(crate) mod kept;
 /// KV: versions from `kv_version_base + ordinal`, TTL, prefix lists,

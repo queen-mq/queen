@@ -46,11 +46,15 @@ use std::time::{Duration, Instant};
 use futures_util::FutureExt;
 use queen_kafka::boot;
 use queen_kafka::queen::{
-    BoxFuture, HttpQueen, LocalDispatch, LocalRequest, LocalResponse, QueenApi,
+    self as kq, BoxFuture, HttpQueen, KafkaLog, LocalDispatch, LocalRequest, LocalResponse,
+    QueenApi,
 };
 use tower::ServiceExt;
 
 use crate::config::KafkaFacadeConfig;
+use crate::rsm::facade::{
+    Deadline, KafkaAppendReq, KafkaChunk, KafkaReadReq, ReqCtx, Rsm, RsmError,
+};
 
 /// The facade runtime's thread name. It MUST start with one of
 /// [`crate::obs::UNWIND_THREAD_PREFIXES`], or a facade panic aborts the broker.
@@ -75,16 +79,82 @@ const MAX_BLOCKING_THREADS: usize = 64;
 struct RouterDispatch {
     router: axum::Router,
     broker: tokio::runtime::Handle,
+    /// The state machine and the authenticator, for the one route answered
+    /// without the router: the facade's own KV ([`crate::handlers::facade_kv`]).
+    kv: Option<(Arc<dyn Rsm>, Arc<crate::auth::Authenticator>)>,
+}
+
+/// How long one of the facade's KV calls may take, as over HTTP.
+const KV_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The facade's KV call without the router: authorized as the route, then
+/// straight to the state machine (see [`crate::handlers::facade_kv`]).
+async fn direct_kv(
+    rsm: Arc<dyn Rsm>,
+    auth: Arc<crate::auth::Authenticator>,
+    req: LocalRequest,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err((status, why)) = crate::auth::authorize_route(
+        &auth,
+        &axum::http::Method::POST,
+        "/api/v1/kv",
+        req.bearer.as_deref(),
+    )
+    .await
+    {
+        return (status, format!("{{\"error\":\"{why}\"}}")).into_response();
+    }
+    let ops = match req
+        .body
+        .as_deref()
+        .map(serde_json::from_str::<serde_json::Value>)
+    {
+        Some(Ok(serde_json::Value::Object(mut o))) => match o.remove("operations") {
+            Some(serde_json::Value::Array(ops)) => ops,
+            _ => {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "{\"error\":\"kv_bad_body\"}",
+                )
+                    .into_response()
+            }
+        },
+        Some(Ok(serde_json::Value::Array(ops))) => ops,
+        _ => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                "{\"error\":\"kv_bad_body\"}",
+            )
+                .into_response()
+        }
+    };
+    let tenant = crate::tenant::Tenant::default_tenant().as_str().to_string();
+    crate::handlers::facade_kv(rsm, tenant, ops, KV_BUDGET).await
 }
 
 impl LocalDispatch for RouterDispatch {
     fn call(&self, req: LocalRequest) -> BoxFuture<'static, Result<LocalResponse, String>> {
         let router = self.router.clone();
+        let kv = self.kv.clone();
         let task = self.broker.spawn(async move {
-            let request = build_request(req)?;
-            let response = match router.oneshot(request).await {
-                Ok(r) => r,
-                Err(never) => match never {},
+            let response = match kv {
+                // Only where the state machine takes writes: a follower's KV
+                // goes through the router, which forwards it to the leader.
+                Some((rsm, auth))
+                    if req.method == "POST"
+                        && req.path == "/api/v1/kv"
+                        && rsm.route() == crate::rsm::facade::Route::Local =>
+                {
+                    direct_kv(rsm, auth, req).await
+                }
+                _ => {
+                    let request = build_request(req)?;
+                    match router.oneshot(request).await {
+                        Ok(r) => r,
+                        Err(never) => match never {},
+                    }
+                }
             };
             let status = response.status().as_u16();
             let retry_after = response
@@ -133,6 +203,180 @@ fn build_request(req: LocalRequest) -> Result<axum::http::Request<axum::body::Bo
     builder
         .body(body)
         .map_err(|e| format!("in-process request for {}: {e}", req.path))
+}
+
+// ---------------------------------------------------------------------------
+// The typed record path (phase 2): Produce and Fetch without the JSON.
+// ---------------------------------------------------------------------------
+
+/// Budget of one typed append, the facade's own budget for a call to Queen.
+const APPEND_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// [`KafkaLog`] over the state machine: a Produce's batches appended verbatim,
+/// a Fetch answered with the stored bytes ([`crate::rsm::kafka_batch`]). Each
+/// call is authorized exactly as the router would authorize the route it
+/// stands for (`POST /api/v1/push`, `POST /api/v1/fetch`), then spawned onto
+/// the broker runtime like every [`RouterDispatch`] call. The tenant is the
+/// one an in-process request resolves to: no proxy header travels here.
+struct RsmLog {
+    rsm: Arc<dyn Rsm>,
+    auth: Arc<crate::auth::Authenticator>,
+    broker: tokio::runtime::Handle,
+}
+
+impl RsmLog {
+    async fn ctx(
+        auth: &crate::auth::Authenticator,
+        path: &str,
+        token: Option<&str>,
+        budget: std::time::Duration,
+    ) -> Result<ReqCtx, kq::Error> {
+        let sub = crate::auth::authorize_route(auth, &axum::http::Method::POST, path, token)
+            .await
+            .map_err(|(status, why)| {
+                kq::Error::status(status.as_u16(), format!("{{\"error\":\"{why}\"}}"))
+            })?;
+        Ok(ReqCtx::new(
+            crate::tenant::Tenant::default_tenant().as_str(),
+            Deadline::after(budget),
+        )
+        .with_producer_sub(sub))
+    }
+}
+
+/// An [`RsmError`] as the status the router renders for it
+/// (`handlers::raft::err_response`), so the facade maps it to the Kafka error
+/// and the throttle it maps an HTTP answer to.
+fn rsm_error(e: RsmError) -> kq::Error {
+    let (code, retry_after_s): (u16, Option<u64>) = match &e {
+        RsmError::Unsupported | RsmError::Retry { .. } | RsmError::NoLeader | RsmError::Timeout => {
+            (503, Some(1))
+        }
+        RsmError::NameTooLong { .. } => (413, None),
+        RsmError::StorageFull => (507, None),
+        RsmError::Overloaded { retry_after_s } => (429, Some(*retry_after_s)),
+        RsmError::Rejected { .. } => (400, None),
+        RsmError::Internal(_) => (500, None),
+    };
+    // A refusal names ITS OWN code (the planner's — for a Kafka append, the
+    // Kafka error's name), exactly as `err_response` renders it; every other
+    // variant its stable static one.
+    let named = match &e {
+        RsmError::Rejected { code, .. } => code.clone(),
+        other => other.code().to_string(),
+    };
+    kq::Error::Status {
+        code,
+        body: serde_json::json!({"error": e.to_string(), "code": named}).to_string(),
+        retry_after_ms: retry_after_s.map(|s| s as i64 * 1000),
+    }
+}
+
+/// A Queen-pushed payload as the JSON fetch renders it (`payload_json`).
+fn payload_value(b: &[u8]) -> serde_json::Value {
+    if b.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(b)
+            .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(b).into_owned()))
+    }
+}
+
+impl KafkaLog for RsmLog {
+    fn appends_here(&self) -> bool {
+        self.rsm.route() == crate::rsm::facade::Route::Local
+    }
+
+    fn append<'a>(
+        &'a self,
+        parts: Vec<kq::AppendPart>,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, kq::Result<Vec<kq::Result<i64>>>> {
+        let rsm = Arc::clone(&self.rsm);
+        let auth = Arc::clone(&self.auth);
+        let token = token.map(str::to_string);
+        let task = self.broker.spawn(async move {
+            let ctx = Self::ctx(&auth, "/api/v1/push", token.as_deref(), APPEND_BUDGET).await?;
+            let reqs = parts
+                .into_iter()
+                .map(|p| KafkaAppendReq {
+                    queue: p.queue,
+                    partition: p.partition,
+                    batches: p.batches,
+                })
+                .collect();
+            let answers = rsm.kafka_append(ctx, reqs).await.map_err(rsm_error)?;
+            Ok(answers
+                .into_iter()
+                .map(|a| a.map(|base| base as i64).map_err(rsm_error))
+                .collect())
+        });
+        Box::pin(async move {
+            task.await
+                .map_err(|e| kq::Error::Transport(format!("the typed append task ended: {e}")))?
+        })
+    }
+
+    fn read<'a>(
+        &'a self,
+        entries: &'a [kq::FetchEntry],
+        max_wait_ms: i64,
+        min_bytes: i64,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, kq::Result<Vec<kq::Fetched>>> {
+        let rsm = Arc::clone(&self.rsm);
+        let auth = Arc::clone(&self.auth);
+        let token = token.map(str::to_string);
+        let asks: Vec<KafkaReadReq> = entries
+            .iter()
+            .map(|e| KafkaReadReq {
+                queue: e.queue.clone(),
+                partition: e.partition.clone(),
+                offset: e.offset,
+                max_bytes: e.max_bytes.clamp(1, 8 << 20) as usize,
+            })
+            .collect();
+        let wait = max_wait_ms.max(0) as u64;
+        let budget = std::time::Duration::from_millis(wait) + APPEND_BUDGET;
+        let task = self.broker.spawn(async move {
+            let ctx = Self::ctx(&auth, "/api/v1/fetch", token.as_deref(), budget).await?;
+            let outs = rsm
+                .kafka_read(ctx, asks, wait, min_bytes.max(0) as usize)
+                .await
+                .map_err(rsm_error)?;
+            Ok(outs
+                .into_iter()
+                .map(|o| kq::Fetched {
+                    records: Vec::new(),
+                    high_watermark: o.high_watermark,
+                    log_start_offset: o.log_start,
+                    error: o.error.map(str::to_string),
+                    chunks: o
+                        .chunks
+                        .into_iter()
+                        .map(|c| match c {
+                            KafkaChunk::Batches(b) => kq::FetchChunk::Batches(b),
+                            KafkaChunk::Messages(m) => kq::FetchChunk::Records(
+                                m.into_iter()
+                                    .map(|(offset, created_at_us, payload)| kq::FetchedRecord {
+                                        offset: offset as i64,
+                                        payload: payload_value(&payload),
+                                        ts: Some(crate::rsm::planner::timers::iso_us(
+                                            created_at_us,
+                                        )),
+                                    })
+                                    .collect(),
+                            ),
+                        })
+                        .collect(),
+                })
+                .collect())
+        });
+        Box::pin(async move {
+            task.await
+                .map_err(|e| kq::Error::Transport(format!("the typed read task ended: {e}")))?
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +438,8 @@ pub fn start(
     cfg: boot::Config,
     router: axum::Router,
     own_port: &str,
+    rsm: Arc<dyn Rsm>,
+    auth: Arc<crate::auth::Authenticator>,
 ) -> Arc<InProcess> {
     let explicit_url = std::env::var("QUEEN_URL")
         .ok()
@@ -218,10 +464,21 @@ pub fn start(
             Arc::new(HttpQueen::local(Arc::new(RouterDispatch {
                 router,
                 broker: tokio::runtime::Handle::current(),
+                kv: Some((Arc::clone(&rsm), Arc::clone(&auth))),
             }))),
             "in-process",
         ),
     };
+    // The typed record path only when the facade talks to THIS broker: an
+    // explicit QUEEN_URL means another hop (the Cloud proxy) must see every
+    // record, so Produce and Fetch stay on its HTTP API.
+    let log: Option<Arc<dyn KafkaLog>> = (via == "in-process").then(|| {
+        Arc::new(RsmLog {
+            rsm,
+            auth,
+            broker: tokio::runtime::Handle::current(),
+        }) as Arc<dyn KafkaLog>
+    });
 
     let threads = worker_threads();
     let status = Arc::new(Status::new(&cfg, via, threads));
@@ -251,7 +508,7 @@ pub fn start(
         // Inside the unwind prefix: the supervisor itself is facade code.
         .name(format!("{THREAD_NAME}-main"))
         .spawn(move || {
-            runtime.block_on(supervise(cfg, api, via, stop_rx, status));
+            runtime.block_on(supervise(cfg, api, via, log, stop_rx, status));
             // Connection tasks still open are dropped here: the process is
             // stopping and their clients reconnect elsewhere or later.
             runtime.shutdown_timeout(Duration::from_millis(500));
@@ -292,6 +549,7 @@ async fn supervise(
     cfg: boot::Config,
     api: Arc<dyn QueenApi>,
     via: &'static str,
+    log: Option<Arc<dyn KafkaLog>>,
     stop: tokio::sync::watch::Receiver<bool>,
     status: Arc<Status>,
 ) {
@@ -307,10 +565,15 @@ async fn supervise(
             let _ = until.wait_for(|stopping| *stopping).await;
             "broker shutdown"
         };
-        let outcome =
-            AssertUnwindSafe(boot::serve(cfg.clone(), Arc::clone(&api), via, stop_signal))
-                .catch_unwind()
-                .await;
+        let outcome = AssertUnwindSafe(boot::serve(
+            cfg.clone(),
+            Arc::clone(&api),
+            via,
+            log.clone(),
+            stop_signal,
+        ))
+        .catch_unwind()
+        .await;
         if *stop.borrow() {
             break;
         }
@@ -459,6 +722,35 @@ mod tests {
         assert!(!crate::obs::panic_may_unwind(None));
     }
 
+    /// A planner refusal reaches the facade under its own code — the Kafka
+    /// error name the produce handler maps (45, 46, 47) — not the generic one.
+    #[test]
+    fn a_refusal_keeps_its_own_code() {
+        let e = rsm_error(RsmError::Rejected {
+            code: "OUT_OF_ORDER_SEQUENCE_NUMBER".into(),
+            message: "gap".into(),
+        });
+        match e {
+            kq::Error::Status { code, body, .. } => {
+                assert_eq!(code, 400);
+                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(v["code"], "OUT_OF_ORDER_SEQUENCE_NUMBER");
+            }
+            other => panic!("{other:?}"),
+        }
+        match rsm_error(RsmError::Overloaded { retry_after_s: 3 }) {
+            kq::Error::Status {
+                code,
+                retry_after_ms,
+                ..
+            } => {
+                assert_eq!(code, 429);
+                assert_eq!(retry_after_ms, Some(3000));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     /// The leftover-child-mode QUEEN_URL is recognised; a real proxy is not.
     #[test]
     fn a_queen_url_naming_this_broker_is_recognised() {
@@ -501,6 +793,105 @@ mod tests {
         assert!(get.headers().get("content-length").is_none());
     }
 
+    fn auth_off() -> Arc<crate::auth::Authenticator> {
+        crate::auth::Authenticator::new(crate::config::AuthConfig {
+            enabled: false,
+            algorithm: "HS256".into(),
+            secret: String::new(),
+            public_key: String::new(),
+            jwks_url: String::new(),
+            jwks_refresh_interval_seconds: 3600,
+            jwks_request_timeout_ms: 5000,
+            issuer: String::new(),
+            audience: String::new(),
+            clock_skew_seconds: 30,
+            skip_paths: Vec::new(),
+            roles_claim: "role".into(),
+            roles_array_claim: "roles".into(),
+            role_admin: "admin".into(),
+            role_read_write: "read-write".into(),
+            role_read_only: "read-only".into(),
+            role_write_only: "write-only".into(),
+        })
+    }
+
+    /// The facade's own KV goes straight to the state machine — no router,
+    /// hence no rate ladder — and answers the route's own shapes: the results
+    /// on success, the precondition verdict as the 200 the facade reads it as.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_facades_kv_is_answered_by_the_state_machine_directly() {
+        std::env::set_var("QUEEN_RAFT_MAP_BYTES", (256usize << 20).to_string());
+        let dir = std::env::temp_dir().join(format!("queen-kinproc-kv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let facade = crate::rsm::facade::real::RaftFacade::open(&crate::rsm::facade::RsmBuildCtx {
+            data_dir: dir.display().to_string(),
+            notifier: crate::notify::Notifier::new(false),
+        })
+        .expect("open facade");
+        let rsm: Arc<dyn Rsm> = Arc::new(facade);
+        let dispatch = RouterDispatch {
+            // Nothing may reach the router: it has no routes at all.
+            router: axum::Router::new(),
+            broker: tokio::runtime::Handle::current(),
+            kv: Some((Arc::clone(&rsm), auth_off())),
+        };
+        let ops = vec![
+            queen_kafka::queen::KvOp::put(
+                "queen-kafka",
+                "qk:group:g:t:0",
+                serde_json::json!({"offset": 5}),
+            ),
+            queen_kafka::queen::KvOp::GetMany {
+                ns: "queen-kafka".into(),
+                keys: vec!["qk:group:g:t:0".into()],
+            },
+        ];
+        let body = serde_json::json!({ "operations": ops }).to_string();
+        let answer = dispatch
+            .call(LocalRequest {
+                method: "POST",
+                path: "/api/v1/kv".into(),
+                host: None,
+                bearer: None,
+                body: Some(body),
+            })
+            .await
+            .unwrap();
+        assert_eq!(answer.status, 200, "{}", answer.body);
+        let v: serde_json::Value = serde_json::from_str(&answer.body).unwrap();
+        let results = v["results"].as_array().expect("results");
+        assert_eq!(results.len(), 2, "{}", answer.body);
+        assert!(
+            results.iter().any(|r| r["rows"][0]["value"]["offset"] == 5),
+            "the put is read back: {}",
+            answer.body
+        );
+
+        // Through the facade's own client, as the offsets code calls it: a
+        // lost precondition is the Precondition error, not a status.
+        let client = queen_kafka::queen::HttpQueen::local(Arc::new(RouterDispatch {
+            router: axum::Router::new(),
+            broker: tokio::runtime::Handle::current(),
+            kv: Some((Arc::clone(&rsm), auth_off())),
+        }));
+        let lost = client
+            .kv(
+                &[queen_kafka::queen::KvOp::fence(
+                    "queen-kafka",
+                    "qk:group:g:t:0",
+                    serde_json::json!({"offset": 6}),
+                    999_999,
+                )],
+                None,
+            )
+            .await;
+        assert!(
+            matches!(lost, Err(queen_kafka::queen::Error::Precondition { .. })),
+            "{lost:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// End to end over a real router: the dispatch answers what the router
     /// answers, status, `Retry-After` and body, and runs it on the broker's
     /// runtime even when called from another one.
@@ -538,6 +929,7 @@ mod tests {
         let dispatch = RouterDispatch {
             router,
             broker: broker.handle().clone(),
+            kv: None,
         };
         let facade = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)

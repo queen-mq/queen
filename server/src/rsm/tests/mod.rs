@@ -39,6 +39,8 @@ mod batcher;
 mod columns;
 mod dedup_txns;
 mod facade;
+#[cfg(feature = "kafka")]
+mod facade_kafka;
 mod facade_kv;
 mod fuzz;
 mod gates;
