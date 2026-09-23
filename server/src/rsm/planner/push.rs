@@ -100,7 +100,11 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         // ---- assemble the append: survivors' frames concatenated (O20), their
         // hashes concatenated in frame order (16 B each, the codec asserts the
         // stride).
-        let mut blob: Vec<u8> = Vec::new();
+        // Pre-sized: growing the blob frame by frame reallocated and copied it
+        // ~7 times per 100-frame push (realloc + growth were ~35% of planner
+        // CPU in a 200k profile).
+        let blob_len: usize = survivors.iter().map(|&i| cmd.items[i].frame.len()).sum();
+        let mut blob: Vec<u8> = Vec::with_capacity(blob_len);
         let mut hashes: Vec<u8> = Vec::with_capacity(survivors.len() * 16);
         for &i in &survivors {
             blob.extend_from_slice(&cmd.items[i].frame);

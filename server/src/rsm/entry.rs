@@ -830,6 +830,15 @@ impl Entry {
         }
     }
 
+    /// [`Entry::new`] pre-sized for a cycle of `commands` commands (about three
+    /// effects each), so the planner does not regrow both vectors per cycle.
+    pub fn with_capacity(now_us: i64, pid_base: u64, kv_version_base: u64, commands: usize) -> Entry {
+        let mut e = Entry::new(now_us, pid_base, kv_version_base);
+        e.commands.reserve(commands);
+        e.effects.reserve(commands.saturating_mul(3));
+        e
+    }
+
     /// Append a planned command with its effects, keeping `kinds_version` and
     /// the command's span right. The ONLY way the planner should build an
     /// entry: spans stay contiguous and cover every effect by construction.

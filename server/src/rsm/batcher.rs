@@ -933,7 +933,8 @@ fn plan_cycle_blocking<S: Store>(
         // leaves the segment path untouched.
         planner.set_qlog_reader(qlog_reader.clone());
 
-        let mut entry = Entry::new(now_us, ov.cycle_pid_base(), ov.cycle_kv_base());
+        let mut entry =
+            Entry::with_capacity(now_us, ov.cycle_pid_base(), ov.cycle_kv_base(), batch.len());
         let mut slots: Vec<Slot> = Vec::with_capacity(batch.len());
         // Ids already logged into THIS entry, so a same-cycle retry becomes a
         // second waiter rather than a second command (§5.4; `Entry::validate`

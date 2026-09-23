@@ -966,7 +966,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     ) -> Result<Vec<SegH>, Refusal> {
         let budget = budget.max(1) as i64;
         let fresh = |c: i64| deadline.is_none_or(|d| c <= d);
-        let mut out: Vec<SegH> = Vec::new();
+        let mut out: Vec<SegH> = Vec::with_capacity(8);
         let mut avail: i64 = 0;
 
         let mut stop = false;
@@ -1119,8 +1119,13 @@ fn delivered_from_gathered(segs: &[SegH], lo: u64, hi: u64) -> Vec<[u8; 16]> {
     if hi < lo {
         return Vec::new();
     }
-    let mut seen: std::collections::BTreeSet<[u8; 16]> = std::collections::BTreeSet::new();
-    let mut out: Vec<[u8; 16]> = Vec::new();
+    // Pre-sized, and a hash set instead of a B-tree (only membership is used;
+    // `out` keeps the first-seen order): one allocation each instead of a node
+    // or a regrow every few hashes on a 1000-message claim.
+    let span = ((hi - lo) as usize).saturating_add(1).min(1 << 16);
+    let mut seen: std::collections::HashSet<[u8; 16], crate::rsm::fasthash::FxBuild> =
+        std::collections::HashSet::with_capacity_and_hasher(span, Default::default());
+    let mut out: Vec<[u8; 16]> = Vec::with_capacity(span);
     for s in segs {
         let Some(hashes) = &s.hashes else { continue };
         for (i, h) in hashes.iter().enumerate() {
