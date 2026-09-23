@@ -1214,6 +1214,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             None
         };
         let mut st = RunState {
+            planner_thread: PlannerThread::spawn(),
             store: self.store,
             repl: self.repl,
             cfg: self.cfg,
@@ -1334,7 +1335,46 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
 
 // The driver's live state. A struct so the `select!` arms borrow disjoint
 // channel fields while the handlers take `&mut self` afterwards.
+/// ONE dedicated OS thread (`queen-planner`) that runs every planning cycle, in
+/// place of a hop onto the shared blocking pool (where the planner ran on a
+/// different pool thread almost every cycle — 53 threads in a 20 s profile —
+/// and shared the pool with every facade store read). A fixed thread gives it
+/// warm caches, its own scheduler statistics, and a home for state kept
+/// between cycles. Jobs run strictly one at a time, in submission order.
+struct PlannerThread {
+    tx: std::sync::mpsc::Sender<Box<dyn FnOnce() + Send>>,
+}
+
+impl PlannerThread {
+    fn spawn() -> PlannerThread {
+        let (tx, rx) = std::sync::mpsc::channel::<Box<dyn FnOnce() + Send>>();
+        std::thread::Builder::new()
+            .name("queen-planner".into())
+            .spawn(move || {
+                while let Ok(job) = rx.recv() {
+                    job();
+                }
+            })
+            .expect("spawn the queen-planner thread");
+        PlannerThread { tx }
+    }
+
+    /// Run `f` on the planner thread; the result comes back on the returned
+    /// channel (closed without a value if the thread is gone).
+    fn run<T: Send + 'static>(
+        &self,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> tokio::sync::oneshot::Receiver<T> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = self.tx.send(Box::new(move || {
+            let _ = tx.send(f());
+        }));
+        rx
+    }
+}
+
 struct RunState<S: Store, R: Replicator> {
+    planner_thread: PlannerThread,
     store: Arc<S>,
     repl: Arc<R>,
     cfg: BatcherConfig,
@@ -1595,9 +1635,10 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         let fire_cfg = fire.then(|| self.cfg.timer_fire.clone());
         let maintenance_cfg = maintenance.then(|| self.cfg.maintenance.clone());
 
-        let planned = tokio::task::spawn_blocking(move || {
+        let planned = self.planner_thread.run(move || {
             let w0 = Instant::now();
             let c0 = crate::rsm::timing::thread_cpu_ns();
+            let q0 = crate::rsm::timing::thread_runq_ns();
             let r = plan_cycle_blocking(
                 &*store,
                 &front,
@@ -1617,10 +1658,13 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 tm.plan_whole_wall.record_dur(w0.elapsed());
                 tm.plan_whole_cpu
                     .record(crate::rsm::timing::thread_cpu_ns().saturating_sub(c0));
+                tm.plan_whole_runq
+                    .record(crate::rsm::timing::thread_runq_ns().saturating_sub(q0));
             }
             r
         })
-        .await;
+        .await
+        .map_err(|_| "the queen-planner thread is gone".to_string());
 
         // The KV sweep and the timer fire are best-effort and self-rescheduling:
         // a cycle that could not plan leaves them to their next tick rather

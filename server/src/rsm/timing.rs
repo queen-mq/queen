@@ -458,6 +458,10 @@ pub struct RsmMetrics {
     /// command loop, leader steps) — wall and thread CPU (ns).
     pub plan_whole_wall: Histogram,
     pub plan_whole_cpu: Histogram,
+    /// MEASURE: the planning call's time waiting on a run queue for a core
+    /// (`/proc/thread-self/schedstat` field 2, ns). Wall − CPU − this = time
+    /// blocked (locks, I/O, page faults).
+    pub plan_whole_runq: Histogram,
     /// MEASURE: commands drained into a cycle but deferred unplanned by the
     /// `plan_budget_ms` cut (raw count per cycle).
     pub plan_deferred: Histogram,
@@ -641,11 +645,12 @@ pub fn render_prometheus(out: &mut String) {
     let m = metrics();
 
     // Latency summaries (ns → seconds).
-    let lat: [(&str, &str, &Histogram); 24] = [
+    let lat: [(&str, &str, &Histogram); 25] = [
         ("queen_raft_plan_seconds", "Planner cycle duration", &m.plan),
         ("queen_raft_plan_cpu_seconds", "Planner command loop, thread CPU time", &m.plan_cpu),
         ("queen_raft_plan_whole_wall_seconds", "Whole plan_cycle_blocking call, wall", &m.plan_whole_wall),
         ("queen_raft_plan_whole_cpu_seconds", "Whole plan_cycle_blocking call, thread CPU", &m.plan_whole_cpu),
+        ("queen_raft_plan_whole_runq_seconds", "Whole plan_cycle_blocking call, run-queue wait", &m.plan_whole_runq),
         (
             "queen_raft_push_h_total_seconds",
             "PERF-J: whole raft push handler (entry to response), push-only",
@@ -1044,4 +1049,13 @@ pub fn thread_cpu_ns() -> u64 {
     // SAFETY: `ts` is a valid, writable timespec for the call's duration.
     unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+}
+
+/// MEASURE: this thread's cumulative run-queue wait in ns (field 2 of
+/// `/proc/thread-self/schedstat`); 0 where the file does not exist.
+pub fn thread_runq_ns() -> u64 {
+    std::fs::read_to_string("/proc/thread-self/schedstat")
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(1).and_then(|v| v.parse().ok()))
+        .unwrap_or(0)
 }
