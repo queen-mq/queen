@@ -1339,6 +1339,24 @@ impl RaftFacade {
         // pre-submit work (parse + resolve + pack); `submit_ns` accumulates the
         // `cmd_tx.send` await (channel back-pressure, which `arrival_to_proposed`
         // cannot see because it stamps just before the send).
+        // Admission (crate::rsm::admit), BEFORE the parse: a push that must wait
+        // holds only its raw body, never its parsed items and frames. Held for
+        // the whole push (parse, pack, submit, replies), sized by the raw body.
+        // Measured 2026-09-23 at 300k msg/s offered: with pushes gated only
+        // after parsing (and in fact not at all — pushes bypass `submit`),
+        // ~20k parsed requests waited for channel room and RSS reached 10 GB.
+        let _admitted = match &self.admit {
+            Some(gate) => {
+                Some(
+                    gate.admit(req.raw.len())
+                        .await
+                        .map_err(|o| RsmError::Overloaded {
+                            retry_after_s: o.retry_after_s,
+                        })?,
+                )
+            }
+            None => None,
+        };
         let _t_prep = crate::rsm::timing::stamp();
         let mut _submit_ns: u64 = 0;
         let body: PushBodyIn =

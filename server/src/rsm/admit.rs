@@ -1,6 +1,8 @@
-//! Push admission: a byte budget for the storage-growing commands (pushes,
-//! push-carrying transactions, KV puts, timer schedules) that are on their way
-//! through the serial planner.
+//! Push admission: a byte budget for the storage-growing commands on their way
+//! through the serial planner. A push takes permits for its RAW request body at
+//! the very start of `push_impl` — before it is parsed — and keeps them until
+//! its replies arrive; transactions, KV puts and timer schedules take permits
+//! for their estimated size in `submit`.
 //!
 //! Without it, an offered rate above the planner's ceiling piled request bodies
 //! up in RAM until the kernel killed the broker (measured 2026-09-22/23 at
@@ -12,7 +14,7 @@
 //! it refused with `429` + `Retry-After`, which protects the broker from
 //! senders that never slow down. Drain work (acks, pops) never takes permits.
 //!
-//! `QUEEN_RAFT_ADMIT_MAX_MB` (default 256; 0 = off) and
+//! `QUEEN_RAFT_ADMIT_MAX_MB` (default 64; 0 = off) and
 //! `QUEEN_RAFT_ADMIT_HOLD_MS` (default 5000).
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,7 +23,10 @@ use std::time::Duration;
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-const DEFAULT_MAX_MB: u64 = 256;
+/// In raw request bytes: a parsed push costs several times its wire size, so
+/// 64 MB of wire is roughly half a GB in flight (~2,000 pushes of 100 x 300 B,
+/// far more concurrency than 300k msg/s needs).
+const DEFAULT_MAX_MB: u64 = 64;
 const DEFAULT_HOLD_MS: u64 = 5_000;
 
 /// Commands admitted after waiting for room / refused after the hold.
