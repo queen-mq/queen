@@ -620,7 +620,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         key: &str,
     ) -> Result<Option<TimerRow>, Refusal> {
         let tk = (tenant.to_string(), queue.to_string(), key.to_string());
-        match ov.timers.get(&tk) {
+        match ov.timers.get(&tk).map(|slot| &slot.v) {
             Some(TimerOverlay::Row(r)) => Ok(Some(r.clone())),
             Some(TimerOverlay::Deleted) => Ok(None),
             Some(TimerOverlay::Backoff {
@@ -832,8 +832,8 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         }
         // The overlay's own view: only a due row is cloned (an in-flight
         // schedule can carry a large frame and is usually not due yet).
-        for (tk, st) in ov.timers.iter() {
-            let row = match st {
+        for (tk, slot) in ov.timers.iter() {
+            let row = match &slot.v {
                 TimerOverlay::Deleted => None,
                 TimerOverlay::Row(r) => (timer_due_us(r) <= now).then(|| r.clone()),
                 // due = max(visible_at, deliver_at) >= visible_at.

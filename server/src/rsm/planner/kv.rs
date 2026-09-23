@@ -935,7 +935,7 @@ impl Overlay {
     fn kv_row(&self, tenant: &str, ns: &str, key: &str) -> Option<Option<KvRow>> {
         self.kv
             .get(&(tenant.to_string(), ns.to_string(), key.to_string()))
-            .cloned()
+            .map(|t| t.v.clone())
     }
 }
 

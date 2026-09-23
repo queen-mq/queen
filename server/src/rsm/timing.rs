@@ -543,6 +543,19 @@ pub struct RsmMetrics {
     pub kinds: KindCounters,
     /// Commands whose per-command planning crossed the slow threshold (O18).
     pub slow_commands: AtomicU64,
+    /// KEEP_OVERLAY, per cycle: the kept overlay advanced past what landed /
+    /// built from scratch with nothing kept (first cycle, new epoch, periodic
+    /// reset, knob off) / a kept overlay that could not be advanced, rebuilt /
+    /// not kept after the cycle (its folds did not match its entry) / different
+    /// from a rebuild under `QUEEN_RAFT_KEEP_OVERLAY_VERIFY`.
+    pub keep_advanced: AtomicU64,
+    pub keep_rebuilt: AtomicU64,
+    pub keep_fallback: AtomicU64,
+    pub keep_poisoned: AtomicU64,
+    pub keep_mismatch: AtomicU64,
+    /// KEEP_OVERLAY: kept rings scanned from `pending` (first use or after a
+    /// drop), the only `pending` scans the kept path makes.
+    pub ring_loads: AtomicU64,
     pub apply_stats: ApplyStatsMirror,
     /// A monotone counter incremented per apply-channel receive, so the
     /// exporter can show the apply-thread receive rate alongside the depth.
@@ -838,6 +851,28 @@ pub fn render_prometheus(out: &mut String) {
     out.push_str(&format!(
         "queen_raft_slow_commands_total {}\n",
         m.slow_commands.load(Ordering::Relaxed)
+    ));
+    out.push_str(
+        "# HELP queen_raft_keep_overlay_total Planning cycles by what the kept overlay did\n",
+    );
+    out.push_str("# TYPE queen_raft_keep_overlay_total counter\n");
+    for (outcome, c) in [
+        ("advanced", &m.keep_advanced),
+        ("rebuilt", &m.keep_rebuilt),
+        ("fallback", &m.keep_fallback),
+        ("poisoned", &m.keep_poisoned),
+        ("mismatch", &m.keep_mismatch),
+    ] {
+        out.push_str(&format!(
+            "queen_raft_keep_overlay_total{{outcome=\"{outcome}\"}} {}\n",
+            c.load(Ordering::Relaxed)
+        ));
+    }
+    out.push_str("# HELP queen_raft_plan_ring_loads_total Kept rings scanned from pending\n");
+    out.push_str("# TYPE queen_raft_plan_ring_loads_total counter\n");
+    out.push_str(&format!(
+        "queen_raft_plan_ring_loads_total {}\n",
+        m.ring_loads.load(Ordering::Relaxed)
     ));
     out.push_str("# HELP queen_raft_apply_receives_total Apply-channel receives\n");
     out.push_str("# TYPE queen_raft_apply_receives_total counter\n");

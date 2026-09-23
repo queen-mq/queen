@@ -706,6 +706,6 @@ fn release_lease(cur: &mut CursorRow) {
 impl Overlay {
     /// The cursor rows this cycle's overlay set or deleted, for the renew walk.
     fn cursors_iter(&self) -> impl Iterator<Item = (&(Pid, String), &Option<CursorRow>)> {
-        self.cursors.iter()
+        self.cursors.iter().map(|(k, t)| (k, &t.v))
     }
 }

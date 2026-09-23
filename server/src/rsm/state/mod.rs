@@ -37,13 +37,17 @@
 //!
 //! The rings have TWO readers, and both reduce to the `pending` keyspace:
 //!
-//! - **the planner** does not read the live rings at all. Every plan cycle it
-//!   calls [`Derived::rebuild`] over the committed `pending` keyspace (see
-//!   `rsm/batcher.rs`), landing a partition READY when `ready_at ≤ now` and
-//!   DEFERRED otherwise — so time-based promotion (a lease expiring, a
-//!   `delayed_processing`/`window_buffer` visibility deadline passing) is FREE
-//!   for the planner: the next rebuild picks it up. The wildcard pop then walks
-//!   that fresh ring and re-verifies each candidate against the cursor row.
+//! - **the planner** does not read the live rings at all. It reads the rings of
+//!   the groups its batch pops as a rebuild over the committed `pending`
+//!   keyspace would build them at the cycle's instant, landing a partition
+//!   READY when `ready_at ≤ now` and DEFERRED otherwise — so time-based
+//!   promotion (a lease expiring, a `delayed_processing`/`window_buffer`
+//!   visibility deadline passing) is FREE for the planner. With the knob off
+//!   that is literally [`Derived::rebuild_rings`] every cycle (see
+//!   `rsm/batcher.rs`); with KEEP_OVERLAY it is [`PlanRings`], a mirror of the
+//!   same rows kept on the planner thread and re-read per landed entry, which
+//!   offers the same pids in the same order. The wildcard pop then walks that
+//!   ring and re-verifies each candidate against the cursor row.
 //! - **the parked long-poll's `has_pending` gate** (§9.5) reads the LIVE ring
 //!   on the apply thread ([`Committed::has_claimable_pending`]). The live ring
 //!   only moves on events, so the apply loop calls
@@ -701,6 +705,481 @@ impl Derived {
 }
 
 // ---------------------------------------------------------------------------
+// The planner's kept rings (KEEP_OVERLAY)
+// ---------------------------------------------------------------------------
+
+/// The planner's mirror of `pending` for the rings its wildcard pops walk,
+/// KEPT across planning cycles on the planner thread instead of being rebuilt
+/// from a `pending` scan every cycle ([`Derived::rebuild_rings`]).
+///
+/// # The same answer as a rebuild
+///
+/// A rebuild at instant `now` lands each `pending` row of a (tenant, queue,
+/// group) READY when `ready_at <= now` and DEFERRED otherwise, pushing the
+/// ready ones in `pending` key order — pid order, the pid being the key's
+/// big-endian tail — so [`ReadyIndex::walk`] offers exactly the ready pids in
+/// ascending order. A [`PlanRing`] holds the same rows (`pid → ready_at`) with
+/// the ready ones in a `BTreeSet`, so [`PlanRings::walk`] offers the same pids
+/// in the same order, and [`PlanRings::promote`] moves a deferred row to ready
+/// once the cycle's `now` reaches it, as the next rebuild would.
+///
+/// # Kept in step, per landed entry
+///
+/// Only apply writes `pending`, and only while executing an entry's effects.
+/// So the mirror stays equal to the rows by re-reading, when an entry LANDS
+/// (its index is at or below the planning read's applied index — apply writes
+/// that index last, so every row the entry wrote is visible), exactly the rows
+/// its effects can have written ([`PlanRings::advance`]): a cursor write's own
+/// row, an append's row in every kept ring of its queue, a partition delete's
+/// rows; a group or queue delete, a registration (which arms every predating
+/// partition) or a tenant purge drops the rings it touches, to be scanned
+/// afresh when next needed. Every effect kind is named in that match, so a new
+/// kind is a compile error there rather than a silent drift. Anything it
+/// cannot account for — a gap in the landed indexes, a partition row it can no
+/// longer find, the applied index going back — drops every ring.
+///
+/// The store is read LIVE (Phase C), so a rebuild can also see the rows of an
+/// entry apply is executing right now, which the mirror only re-reads once
+/// that entry lands: the two can differ for rows of entries still in flight.
+/// Those entries are in the overlay, and the ring is a hint the claim
+/// re-verifies (the module header), so this is at most one cycle of lag,
+/// never a stranded partition. With apply quiescent between cycles (the gate
+/// test) the mirror equals the rebuild exactly.
+#[derive(Debug, Default)]
+pub struct PlanRings {
+    /// tenant → queue → group → ring. `BTreeMap`s: nothing here may depend on
+    /// hash-map order.
+    rings: BTreeMap<String, BTreeMap<String, BTreeMap<String, PlanRing>>>,
+    /// The instant the rings are promoted to.
+    now_us: i64,
+    /// Every entry at or below this index is reflected in the rings.
+    landed_to: u64,
+    /// `pid → (tenant, queue)`, read once from the partition row (a partition
+    /// never changes queue, and pids are never reused).
+    queue_of: HashMap<Pid, (String, String), crate::rsm::fasthash::FxBuild>,
+    /// Rings scanned from `pending` (first use, or again after a drop).
+    pub loads: u64,
+    /// Times every ring was dropped because an entry could not be accounted
+    /// for.
+    pub drops: u64,
+}
+
+/// One kept ring: the `pending` rows of one (tenant, queue, group).
+#[derive(Debug, Default)]
+struct PlanRing {
+    /// `pid → ready_at`: the rows, exactly.
+    at: HashMap<Pid, i64, crate::rsm::fasthash::FxBuild>,
+    /// The pids with `ready_at <= now`, in pid order: what the walk offers.
+    ready: BTreeSet<Pid>,
+    /// `(ready_at, pid)` for the rest, deadline first.
+    deferred: BTreeSet<(i64, Pid)>,
+    /// The last cycle whose batch walked this ring (idle rings are evicted).
+    last_used: u64,
+}
+
+impl PlanRing {
+    /// Mirror one `pending` row: `Some(ready_at)` written, `None` deleted.
+    fn set(&mut self, pid: Pid, at: Option<i64>, now_us: i64) {
+        if let Some(old) = self.at.remove(&pid) {
+            if !self.ready.remove(&pid) {
+                self.deferred.remove(&(old, pid));
+            }
+        }
+        if let Some(at) = at {
+            self.at.insert(pid, at);
+            if at <= now_us {
+                self.ready.insert(pid);
+            } else {
+                self.deferred.insert((at, pid));
+            }
+        }
+    }
+
+    fn promote(&mut self, now_us: i64) {
+        while let Some(&(at, pid)) = self.deferred.first() {
+            if at > now_us {
+                break;
+            }
+            self.deferred.pop_first();
+            self.ready.insert(pid);
+        }
+    }
+
+    /// Re-split every row at `now_us` (the clock moved BACK: a promotion is not
+    /// undoable incrementally).
+    fn resplit(&mut self, now_us: i64) {
+        self.ready.clear();
+        self.deferred.clear();
+        for (&pid, &at) in &self.at {
+            if at <= now_us {
+                self.ready.insert(pid);
+            } else {
+                self.deferred.insert((at, pid));
+            }
+        }
+    }
+}
+
+impl PlanRings {
+    /// An empty mirror that has accounted for every entry up to `landed_to`.
+    pub fn new(landed_to: u64, now_us: i64) -> PlanRings {
+        PlanRings {
+            now_us,
+            landed_to,
+            ..PlanRings::default()
+        }
+    }
+
+    /// Drop every ring (and the pid cache): each is scanned afresh on next use.
+    pub fn clear(&mut self) {
+        self.rings.clear();
+        self.queue_of.clear();
+        self.drops += 1;
+    }
+
+    /// Account for every entry that landed since the last cycle and promote the
+    /// rings to `now_us`. `folded` is the batcher's in-flight list (index order,
+    /// the index each entry occupies); `applied` is the planning read's applied
+    /// index. Every index in `(landed_to, applied]` must be in `folded`: an
+    /// entry leaves it only after a cycle has seen it land, so a gap means one
+    /// was never accounted for, and every ring is dropped.
+    pub fn advance<R: Reads + ?Sized>(
+        &mut self,
+        reads: &R,
+        folded: &[(u64, std::sync::Arc<crate::rsm::entry::Entry>)],
+        applied: u64,
+        now_us: i64,
+    ) -> Result<()> {
+        if applied < self.landed_to {
+            // The applied index went back (a restore): nothing here holds.
+            self.clear();
+        } else if applied > self.landed_to && !self.rings.is_empty() {
+            let mut next = self.landed_to + 1;
+            let mut accounted = true;
+            for (index, e) in folded {
+                if *index < next {
+                    continue;
+                }
+                if *index > applied || *index != next {
+                    break;
+                }
+                next += 1;
+                if !self.land(reads, e)? {
+                    accounted = false;
+                    break;
+                }
+            }
+            if !accounted || next != applied + 1 {
+                self.clear();
+            }
+        }
+        self.landed_to = applied;
+        self.promote(now_us);
+        Ok(())
+    }
+
+    /// Re-read every `pending` row one landed entry's effects can have written,
+    /// in the kept rings. `false` when it cannot tell which rows those are.
+    fn land<R: Reads + ?Sized>(&mut self, reads: &R, e: &crate::rsm::entry::Entry) -> Result<bool> {
+        use crate::rsm::effect::Effect;
+        for eff in &e.effects {
+            match eff {
+                // An append arms its partition for every group of the queue.
+                Effect::Append { pid, .. } => {
+                    if !self.reread_partition(reads, *pid, None)? {
+                        return Ok(false);
+                    }
+                }
+                // A partition delete (and a garbage chunk) only drops rows, so
+                // a partition whose row is already gone needs no queue: the
+                // rings that hold it are the only ones it can change.
+                Effect::PartitionDelete { pid } => {
+                    if !self.reread_partition(reads, *pid, None)? {
+                        self.reread_where_held(reads, *pid)?;
+                    }
+                }
+                Effect::DeleteChunk { pids, .. } => {
+                    for pid in pids {
+                        if !self.reread_partition(reads, *pid, None)? {
+                            self.reread_where_held(reads, *pid)?;
+                        }
+                    }
+                }
+                // A cursor write puts or deletes its own (group, pid) row.
+                Effect::CursorSet { pid, group, .. } | Effect::CursorDelete { pid, group } => {
+                    if !self.reread_partition(reads, *pid, Some(group))? {
+                        return Ok(false);
+                    }
+                }
+                // A registration arms every predating partition, a group
+                // delete sweeps the group: scan the ring afresh on next use.
+                Effect::GroupUpsert {
+                    tenant,
+                    queue,
+                    group,
+                    ..
+                }
+                | Effect::GroupDelete {
+                    tenant,
+                    queue,
+                    group,
+                } => {
+                    if let Some(qs) = self.rings.get_mut(tenant) {
+                        if let Some(gs) = qs.get_mut(queue) {
+                            gs.remove(group);
+                        }
+                    }
+                }
+                Effect::QueueDelete { tenant, queue } => {
+                    if let Some(qs) = self.rings.get_mut(tenant) {
+                        qs.remove(queue);
+                    }
+                }
+                Effect::TenantPurge { tenant } => {
+                    self.rings.remove(tenant);
+                }
+                // Never a `pending` row (apply's arms for these write none).
+                Effect::Noop
+                | Effect::QueueUpsert { .. }
+                | Effect::PartitionCreate { .. }
+                | Effect::DlqInsert { .. }
+                | Effect::DlqDelete { .. }
+                | Effect::Watermark { .. }
+                | Effect::KvPut { .. }
+                | Effect::KvDelete { .. }
+                | Effect::TimerUpsert { .. }
+                | Effect::TimerDelete { .. }
+                | Effect::TimerBackoff { .. }
+                | Effect::StreamsQueryUpsert { .. }
+                | Effect::StreamsStatePut { .. }
+                | Effect::StreamsStateDelete { .. }
+                | Effect::TraceAppend { .. }
+                | Effect::TraceExpire { .. }
+                | Effect::FlagSet { .. }
+                | Effect::QuotaSet { .. }
+                | Effect::EphemeralConfigSet { .. }
+                | Effect::EphemeralConfigDelete { .. }
+                | Effect::GarbageAdd { .. }
+                | Effect::RequestIdsExpire { .. }
+                | Effect::ClusterVersionSet { .. }
+                | Effect::MembershipNote { .. } => {}
+            }
+        }
+        Ok(true)
+    }
+
+    /// Re-read `pid`'s rows in the kept rings of its queue — every group's, or
+    /// only `group`'s. `false` when the partition's queue cannot be found (its
+    /// row is gone before this node ever resolved it).
+    fn reread_partition<R: Reads + ?Sized>(
+        &mut self,
+        reads: &R,
+        pid: Pid,
+        group: Option<&str>,
+    ) -> Result<bool> {
+        if !self.queue_of.contains_key(&pid) {
+            let Some(row) = reads.partition(pid)? else {
+                return Ok(false);
+            };
+            if self.queue_of.len() >= 1 << 20 {
+                self.queue_of.clear();
+            }
+            self.queue_of.insert(pid, (row.tenant, row.queue));
+        }
+        let (tenant, queue) = &self.queue_of[&pid];
+        let Some(groups) = self.rings.get_mut(tenant).and_then(|qs| qs.get_mut(queue)) else {
+            return Ok(true);
+        };
+        let now = self.now_us;
+        match group {
+            Some(g) => {
+                if let Some(ring) = groups.get_mut(g) {
+                    ring.set(pid, reads.pending_at(tenant, queue, g, pid)?, now);
+                }
+            }
+            None => {
+                for (g, ring) in groups.iter_mut() {
+                    ring.set(pid, reads.pending_at(tenant, queue, g, pid)?, now);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// Re-read `pid`'s row in every kept ring that holds it (a deletion of a
+    /// partition whose queue is no longer readable: it can only remove rows).
+    fn reread_where_held<R: Reads + ?Sized>(&mut self, reads: &R, pid: Pid) -> Result<()> {
+        let now = self.now_us;
+        for (t, qs) in self.rings.iter_mut() {
+            for (q, gs) in qs.iter_mut() {
+                for (g, ring) in gs.iter_mut() {
+                    if ring.at.contains_key(&pid) {
+                        ring.set(pid, reads.pending_at(t, q, g, pid)?, now);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Move every row whose `ready_at` the clock has reached to ready. A clock
+    /// that went back re-splits every ring, as a rebuild at that instant would.
+    pub fn promote(&mut self, now_us: i64) {
+        let back = now_us < self.now_us;
+        for qs in self.rings.values_mut() {
+            for gs in qs.values_mut() {
+                for ring in gs.values_mut() {
+                    if back {
+                        ring.resplit(now_us);
+                    } else {
+                        ring.promote(now_us);
+                    }
+                }
+            }
+        }
+        self.now_us = now_us;
+    }
+
+    /// Make sure the ring of `(tenant, queue, group)` is kept, scanning its
+    /// `pending` rows the first time; mark it used by `cycle`.
+    pub fn ensure<R: Reads + ?Sized>(
+        &mut self,
+        reads: &R,
+        key: &RingKey,
+        cycle: u64,
+    ) -> Result<()> {
+        let (t, q, g) = key;
+        let now = self.now_us;
+        let gs = self
+            .rings
+            .entry(t.clone())
+            .or_default()
+            .entry(q.clone())
+            .or_default();
+        if let Some(ring) = gs.get_mut(g) {
+            ring.last_used = cycle;
+            return Ok(());
+        }
+        let mut ring = PlanRing {
+            last_used: cycle,
+            ..PlanRing::default()
+        };
+        let prefix = crate::rsm::store::keys::pending_prefix(t, q, g);
+        reads.scan_pending(&prefix, usize::MAX, &mut |tt, qq, gg, pid, ready_at| {
+            if tt != t || qq != q || gg != g {
+                return false; // past this group's rows
+            }
+            ring.set(pid, Some(ready_at), now);
+            true
+        })?;
+        gs.insert(g.clone(), ring);
+        self.loads += 1;
+        Ok(())
+    }
+
+    /// Forget every ring no batch has walked since `before`.
+    pub fn evict_idle(&mut self, before: u64) {
+        for qs in self.rings.values_mut() {
+            for gs in qs.values_mut() {
+                gs.retain(|_, ring| ring.last_used >= before);
+            }
+            qs.retain(|_, gs| !gs.is_empty());
+        }
+        self.rings.retain(|_, qs| !qs.is_empty());
+    }
+
+    /// The kept ring keys, in key order.
+    pub fn keys(&self) -> Vec<RingKey> {
+        let mut out = Vec::new();
+        for (t, qs) in &self.rings {
+            for (q, gs) in qs {
+                for g in gs.keys() {
+                    out.push((t.clone(), q.clone(), g.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    fn ring(&self, tenant: &str, queue: &str, group: &str) -> Option<&PlanRing> {
+        self.rings.get(tenant)?.get(queue)?.get(group)
+    }
+
+    /// Whether the ring of `(tenant, queue, group)` is kept.
+    pub fn has(&self, tenant: &str, queue: &str, group: &str) -> bool {
+        self.ring(tenant, queue, group).is_some()
+    }
+
+    /// The ready pids, in pid order — the same walk, with the same `limit`
+    /// semantics, as [`ReadyIndex::walk`] over a fresh rebuild.
+    pub fn walk(
+        &self,
+        tenant: &str,
+        queue: &str,
+        group: &str,
+        limit: usize,
+        cb: &mut dyn FnMut(Pid) -> bool,
+    ) -> usize {
+        let Some(ring) = self.ring(tenant, queue, group) else {
+            return 0;
+        };
+        let mut n = 0;
+        for pid in ring.ready.iter() {
+            n += 1;
+            if !cb(*pid) || n >= limit {
+                break;
+            }
+        }
+        n
+    }
+
+    /// `(ready in walk order, deferred count, next deadline, rows)` of one kept
+    /// ring — for the equivalence check against a rebuild.
+    pub fn snapshot(&self, tenant: &str, queue: &str, group: &str) -> Option<RingSnapshot> {
+        let ring = self.ring(tenant, queue, group)?;
+        let mut rows: Vec<(Pid, i64)> = ring.at.iter().map(|(p, a)| (*p, *a)).collect();
+        rows.sort_unstable();
+        Some(RingSnapshot {
+            ready: ring.ready.iter().copied().collect(),
+            deferred: ring.deferred.len(),
+            next_deadline: ring.deferred.first().map(|(at, _)| *at),
+            rows,
+        })
+    }
+}
+
+/// One ring as the planner can observe it (the equivalence check).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RingSnapshot {
+    /// The ready pids in walk order.
+    pub ready: Vec<Pid>,
+    pub deferred: usize,
+    pub next_deadline: Option<i64>,
+    /// The `pending` rows mirrored, pid order (empty when not observable).
+    pub rows: Vec<(Pid, i64)>,
+}
+
+impl RingSnapshot {
+    /// The same view of a ring a rebuild produced (`rows` left empty: a
+    /// [`ReadyIndex`] does not keep them).
+    pub fn of_rebuild(ring: Option<&ReadyIndex>) -> RingSnapshot {
+        let mut ready = Vec::new();
+        if let Some(r) = ring {
+            r.walk(usize::MAX, &mut |pid| {
+                ready.push(pid);
+                true
+            });
+        }
+        RingSnapshot {
+            ready,
+            deferred: ring.map_or(0, |r| r.deferred_len()),
+            next_deadline: ring.and_then(|r| r.next_deadline()),
+            rows: Vec::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The committed view
 // ---------------------------------------------------------------------------
 
@@ -713,11 +1192,32 @@ impl Derived {
 pub struct Committed<'a, R: Reads + ?Sized> {
     reads: &'a R,
     derived: &'a Derived,
+    /// KEEP_OVERLAY: the planner thread's kept rings. When `Some`, the
+    /// candidate walk reads them instead of `derived`'s rings.
+    plan_rings: Option<&'a PlanRings>,
 }
 
 impl<'a, R: Reads + ?Sized> Committed<'a, R> {
     pub fn new(reads: &'a R, derived: &'a Derived) -> Committed<'a, R> {
-        Committed { reads, derived }
+        Committed {
+            reads,
+            derived,
+            plan_rings: None,
+        }
+    }
+
+    /// A view whose candidate walk reads the planner's kept rings (KEEP_OVERLAY)
+    /// — every ring a wildcard pop of this cycle walks must be kept in them.
+    pub fn with_plan_rings(
+        reads: &'a R,
+        derived: &'a Derived,
+        rings: &'a PlanRings,
+    ) -> Committed<'a, R> {
+        Committed {
+            reads,
+            derived,
+            plan_rings: Some(rings),
+        }
     }
 
     /// The raw handle, for a read this view has no typed name for yet.
@@ -803,6 +1303,13 @@ impl<'a, R: Reads + ?Sized> Committed<'a, R> {
         limit: usize,
         cb: &mut dyn FnMut(Pid) -> bool,
     ) -> usize {
+        if let Some(rings) = self.plan_rings {
+            debug_assert!(
+                rings.has(tenant, queue, group),
+                "a walked ring is not kept: the batcher ensures every ring of the batch"
+            );
+            return rings.walk(tenant, queue, group, limit, cb);
+        }
         match self.derived.ring(tenant, queue, group) {
             Some(r) => r.walk(limit, cb),
             None => 0,

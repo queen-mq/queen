@@ -43,6 +43,7 @@ mod facade_kv;
 mod fuzz;
 mod gates;
 mod golden;
+mod keep_overlay;
 mod kv;
 mod kv_crash;
 mod planner_ack;

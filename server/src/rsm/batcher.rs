@@ -7,10 +7,14 @@
 //! # The cycle (§7.1)
 //!
 //! One cycle is: drain the command channel up to the caps and the planning
-//! budget (O17); rebuild the overlay from committed bases plus the entries
-//! still in flight, in index order ([`Overlay::ingest_entry`]); mark the cycle
-//! start so the entry gets the `pid_base`/`kv_version_base` apply will assert
-//! against `meta` (I18); for each command look the request id up (§5.4, I6) and,
+//! budget (O17); bring the overlay to committed bases plus the entries still
+//! in flight, in index order — the one the planner thread KEPT from the last
+//! cycle, minus the entries that have landed since (KEEP_OVERLAY,
+//! [`crate::rsm::planner::kept`]), or one rebuilt from scratch
+//! ([`Overlay::ingest_entry`]) with the knob off and on every fallback; mark
+//! the cycle start so the entry gets the `pid_base`/`kv_version_base` apply
+//! will assert against `meta` (I18); for each command look the request id up
+//! (§5.4, I6) and,
 //! on a miss, plan it, folding its effects into the overlay so the next command
 //! in the cycle sees them; build ONE [`Entry`], encode it (a fallible step:
 //! [`encode_entry`] re-runs [`Entry::validate`], so an entry that cannot encode
@@ -56,8 +60,9 @@
 //! # Threads (I15)
 //!
 //! `run` is one tokio task. The planning step — a store read transaction and
-//! the pure planner — runs on the blocking pool ([`tokio::task::spawn_blocking`]),
-//! so no store call ever blocks a tokio worker. Each entry's `propose` is
+//! the pure planner — runs on ONE dedicated thread (`queen-planner`), so no
+//! store call ever blocks a tokio worker; that thread also owns what planning
+//! keeps between cycles (KEEP_OVERLAY), with no lock. Each entry's `propose` is
 //! SUBMITTED to the replicator inline, on this one driver task and in plan
 //! order (so the log index follows the `now_us` stamp order — WP-1.11 F-1,
 //! I5), and only its wait for local apply is spawned, so up to `pipeline`
@@ -77,6 +82,7 @@ use tokio::time::MissedTickBehavior;
 use crate::rsm::dedup::DedupFront;
 use crate::rsm::effect::{Effect, Pid};
 use crate::rsm::entry::{encode_entry, Entry, Outcome, RequestId};
+use crate::rsm::planner::kept::KeptOverlay;
 use crate::rsm::planner::timers::{TimerFireConfig, TimersCommand};
 pub use crate::rsm::planner::txn::{TxnCommand, TxnOutcome};
 use crate::rsm::planner::Refusal;
@@ -88,7 +94,7 @@ use crate::rsm::planner::{
 use crate::rsm::qlog::set::QLogReader;
 use crate::rsm::replicator::{AppliedAt, NodeId, ProposeError, Replicator, Role};
 use crate::rsm::segments::Reader;
-use crate::rsm::state::{Committed, Derived};
+use crate::rsm::state::{Committed, Derived, PlanRings, RingKey, RingSnapshot};
 use crate::rsm::store::{Reads, Store, TypedReads};
 
 /// How often the driver polls the applied index while it holds the pipeline on
@@ -166,6 +172,16 @@ pub struct BatcherConfig {
     /// `RETENTION_INTERVAL`.
     pub maintenance_every_ms: u64,
     pub maintenance: crate::rsm::maintenance::Config,
+    /// `QUEEN_RAFT_KEEP_OVERLAY` (default on): the planner thread keeps the
+    /// overlay and the wildcard rings BETWEEN cycles and updates them per
+    /// landed entry ([`crate::rsm::planner::kept`], [`PlanRings`]). Off: every
+    /// cycle rebuilds both from scratch, the path before the knob.
+    pub keep_overlay: bool,
+    /// `QUEEN_RAFT_KEEP_OVERLAY_VERIFY` (default off): also rebuild the overlay
+    /// the old way every cycle and compare. A difference is logged and counted
+    /// (`queen_raft_keep_overlay_total{outcome="mismatch"}`) and the rebuild is
+    /// what plans. A diagnostic: it costs the rebuild it exists to save.
+    pub keep_overlay_verify: bool,
 }
 
 impl Default for BatcherConfig {
@@ -188,6 +204,8 @@ impl Default for BatcherConfig {
             timer_fire: TimerFireConfig::default(),
             maintenance_every_ms: 0,
             maintenance: crate::rsm::maintenance::Config::default(),
+            keep_overlay: true,
+            keep_overlay_verify: false,
         }
     }
 }
@@ -280,6 +298,16 @@ impl BatcherConfig {
                     d.maintenance.partition_cleanup_days as u64,
                 ) as i64,
             },
+            keep_overlay: flag("QUEEN_RAFT_KEEP_OVERLAY", d.keep_overlay),
+            // Off unless explicitly turned on: only "1"/"true"/"on"/"yes".
+            keep_overlay_verify: std::env::var("QUEEN_RAFT_KEEP_OVERLAY_VERIFY")
+                .map(|v| {
+                    matches!(
+                        v.trim().to_ascii_lowercase().as_str(),
+                        "1" | "true" | "on" | "yes"
+                    )
+                })
+                .unwrap_or(false),
         }
     }
 }
@@ -790,9 +818,11 @@ fn proposed_arrivals(
 }
 
 /// What one blocking cycle produced.
-struct PlanOutput {
-    store_applied: u64,
-    entry: Option<Entry>,
+pub(crate) struct PlanOutput {
+    pub(crate) store_applied: u64,
+    /// Shared with the kept overlay (KEEP_OVERLAY), which holds the entries it
+    /// has folded until they land.
+    pub(crate) entry: Option<Arc<Entry>>,
     slots: Vec<Slot>,
     /// The request-id expiry step (§10.1) was included in `entry`.
     expired: bool,
@@ -858,15 +888,149 @@ fn plan_fire_step<R: Reads + ?Sized>(
     }
 }
 
-/// Plan one cycle inside ONE store read transaction (I15: on the blocking
-/// pool). `folded` are the in-flight entries, in index order, with the index
-/// each occupies; `batch` are the drained commands, in order.
-// The cycle inputs are eight scalars/handles the driver has already gathered;
+/// KEEP_OVERLAY verify: the first difference between a kept ring and what a
+/// rebuild from `pending` offers at `now_us` — the walk, the deferred rows, the
+/// next deadline, and the rows themselves — or `None`.
+fn ring_diff<R: Reads + ?Sized>(
+    r: &R,
+    rings: &PlanRings,
+    key: &RingKey,
+    now_us: i64,
+) -> crate::rsm::store::Result<Option<String>> {
+    let (t, q, g) = key;
+    let Some(mut got) = rings.snapshot(t, q, g) else {
+        return Ok(Some("not kept".into()));
+    };
+    let mut rows: Vec<(Pid, i64)> = Vec::new();
+    let prefix = crate::rsm::store::keys::pending_prefix(t, q, g);
+    r.scan_pending(&prefix, usize::MAX, &mut |tt, qq, gg, pid, at| {
+        if tt != t || qq != q || gg != g {
+            return false;
+        }
+        rows.push((pid, at));
+        true
+    })?;
+    if got.rows != rows {
+        return Ok(Some(format!(
+            "rows: kept {:?} vs pending {rows:?}",
+            got.rows
+        )));
+    }
+    got.rows = Vec::new();
+    let d = Derived::rebuild_rings(r, now_us, Some(std::slice::from_ref(key)))?;
+    let want = RingSnapshot::of_rebuild(d.ring(t, q, g));
+    if got != want {
+        return Ok(Some(format!("kept {got:?} vs rebuilt {want:?}")));
+    }
+    Ok(None)
+}
+
+/// KEEP_OVERLAY: drop the kept state every this many cycles and rebuild it —
+/// a bound on how long any drift nothing detected could live (a few seconds
+/// at full load; one rebuild each time, the cost every cycle paid before).
+pub(crate) const KEEP_RESET_EVERY: u64 = 1 << 14;
+/// Every this many cycles, forget the kept rings no batch has walked for
+/// [`RING_IDLE_CYCLES`]: they are scanned afresh if a pop comes back.
+const RING_EVICT_EVERY: u64 = 1 << 10;
+const RING_IDLE_CYCLES: u64 = 1 << 12;
+/// The most verify mismatches [`KeepStats`] remembers.
+const KEEP_MISMATCH_KEEP: usize = 16;
+
+/// How one cycle treats the state the planner thread keeps (KEEP_OVERLAY).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct KeepCfg {
+    /// [`BatcherConfig::keep_overlay`]. Off: the overlay and the rings are
+    /// rebuilt from scratch every cycle and nothing is kept.
+    pub(crate) enabled: bool,
+    /// The driver's epoch. It moves whenever the in-flight list stops being
+    /// "the entries this thread planned, minus the ones that landed" — a lost
+    /// leadership drains it, an entry that was planned but never proposed, a
+    /// cycle that failed — and a state kept under another epoch is dropped.
+    pub(crate) epoch: u64,
+    /// [`BatcherConfig::keep_overlay_verify`]: compare with the old path's
+    /// rebuild every cycle; plan from the rebuild when they differ.
+    pub(crate) verify: bool,
+    /// Also compare every kept ring with a rebuild from `pending`. Exact only
+    /// while apply is quiescent between cycles (the store is read live), so it
+    /// is for the tests.
+    pub(crate) verify_rings: bool,
+    /// Drop the kept state every this many cycles (`0` = never).
+    pub(crate) reset_every: u64,
+}
+
+impl KeepCfg {
+    /// The old path: rebuild everything every cycle.
+    pub(crate) fn off() -> KeepCfg {
+        KeepCfg {
+            enabled: false,
+            epoch: 0,
+            verify: false,
+            verify_rings: false,
+            reset_every: 0,
+        }
+    }
+}
+
+/// What the kept path did, for the tests and the metrics.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct KeepStats {
+    /// Cycles that advanced a kept overlay.
+    pub(crate) kept: u64,
+    /// Cycles that built the overlay from scratch with nothing kept (the first
+    /// cycle, a new epoch, a periodic reset, the knob off).
+    pub(crate) rebuilt: u64,
+    /// Kept overlays that could not be advanced (rebuilt that cycle).
+    pub(crate) fallbacks: u64,
+    /// Cycles whose own folds did not match their entry: not kept.
+    pub(crate) poisoned: u64,
+    /// Verify mismatches, the first [`KEEP_MISMATCH_KEEP`].
+    pub(crate) mismatches: Vec<String>,
+}
+
+impl KeepStats {
+    fn mismatch(&mut self, what: String) {
+        tracing::error!(target: "rsm", what, "KEEP_OVERLAY verify: the kept state differs from a rebuild");
+        crate::rsm::timing::metrics()
+            .keep_mismatch
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if self.mismatches.len() < KEEP_MISMATCH_KEEP {
+            self.mismatches.push(what);
+        }
+    }
+}
+
+/// What the `queen-planner` thread keeps between cycles (KEEP_OVERLAY): the
+/// overlay with the in-flight entries it folded, and the wildcard rings. Owned
+/// by that one thread, so it takes no lock.
+#[derive(Default)]
+pub(crate) struct PlannerState {
+    overlay: Option<KeptOverlay>,
+    rings: Option<PlanRings>,
+    epoch: u64,
+    cycles: u64,
+    pub(crate) stats: KeepStats,
+}
+
+impl PlannerState {
+    /// `(rings scanned from pending, times every ring was dropped)` by the
+    /// kept rings in hand (tests).
+    pub(crate) fn ring_stats(&self) -> (u64, u64) {
+        self.rings.as_ref().map_or((0, 0), |r| (r.loads, r.drops))
+    }
+}
+
+/// Plan one cycle inside ONE store read transaction (I15: on the planner
+/// thread). `folded` are the in-flight entries, in index order, with the index
+/// each occupies; `batch` are the drained commands, in order; `state` is what
+/// the planner thread keeps between cycles (KEEP_OVERLAY).
+// The cycle inputs are the scalars/handles the driver has already gathered;
 // bundling them into a struct buys nothing at the single call site.
 #[allow(clippy::too_many_arguments)]
-fn plan_cycle_blocking<S: Store>(
+pub(crate) fn plan_cycle_blocking<S: Store>(
     store: &S,
     front: &DedupFront,
+    state: &mut PlannerState,
+    keep: KeepCfg,
     reader: Option<Reader>,
     qlog_reader: Option<QLogReader>,
     folded: Vec<(u64, Arc<Entry>)>,
@@ -880,11 +1044,11 @@ fn plan_cycle_blocking<S: Store>(
 ) -> crate::rsm::store::Result<PlanOutput> {
     // P4: the rings this batch's wildcard pops walk — the only part of
     // `Derived` the planner reads. A discovery pop spans queues: every ring.
-    let ring_keys: Option<Vec<crate::rsm::state::RingKey>> =
+    let ring_keys: Option<Vec<RingKey>> =
         if batch.iter().any(|c| matches!(c, Command::PopDiscover(_))) {
             None
         } else {
-            let mut keys: Vec<crate::rsm::state::RingKey> = batch
+            let mut keys: Vec<RingKey> = batch
                 .iter()
                 .filter_map(|c| match c {
                     Command::PopWildcard(p) => {
@@ -897,6 +1061,30 @@ fn plan_cycle_blocking<S: Store>(
             keys.dedup();
             Some(keys)
         };
+
+    // KEEP_OVERLAY: a state kept under another epoch (or with the knob off) is
+    // gone, and every `reset_every` cycles it is rebuilt whatever it says.
+    if !keep.enabled || state.epoch != keep.epoch {
+        state.overlay = None;
+        state.rings = None;
+        state.epoch = keep.epoch;
+    }
+    state.cycles += 1;
+    let cycle_no = state.cycles;
+    if keep.reset_every > 0 && cycle_no.is_multiple_of(keep.reset_every) {
+        state.overlay = None;
+        state.rings = None;
+    }
+    // Taken OUT for the cycle: only a cycle that reaches its end puts them
+    // back, so an error part-way (a store read refused, a panic) leaves
+    // nothing half-advanced for the next one — it rebuilds.
+    let prior = state.overlay.take();
+    let mut rings = if keep.enabled {
+        state.rings.take()
+    } else {
+        None
+    };
+
     store.read(|r| {
         let store_applied = r.applied_index()?;
         let base_pid = r.next_pid()?;
@@ -906,26 +1094,105 @@ fn plan_cycle_blocking<S: Store>(
         // base the overlay lifts above.
         let empty = Derived::default();
         let base_now = Committed::new(r, &empty).plan_now(wall_us)?;
-        let derived = Derived::rebuild_rings(r, base_now, ring_keys.as_deref())?;
         crate::rsm::dbgctr::maybe_dump(r, base_now);
-        let committed = Committed::new(r, &derived);
 
-        // Fold every in-flight entry the committed read does not yet reflect
-        // (§7.2). Its own `Overlay::plan_now` lifts the stamp above every folded
-        // `now_us` and `created_at`, so the effects a folded append carries stay
+        // The overlay (§7.2): every in-flight entry the committed read does not
+        // yet reflect, folded. KEEP_OVERLAY advances the kept one past the
+        // entries that landed; the old path — the only one with the knob off,
+        // and every fallback — rebuilds it from the in-flight list. Either way
+        // its `Overlay::plan_now` lifts the stamp above every folded `now_us`
+        // and `created_at`, so the effects a folded append carries stay
         // monotone (I5).
-        let mut ov = Overlay::new(base_pid, base_kv);
-        for (index, e) in &folded {
-            if *index > store_applied {
-                ov.ingest_entry(e);
+        let tm = crate::rsm::timing::metrics();
+        let metrics_on = crate::rsm::timing::enabled();
+        let bump = |c: &std::sync::atomic::AtomicU64| {
+            if metrics_on {
+                c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        };
+        let mut kept = match prior.map(|k| k.advance(&folded, store_applied, base_pid, base_kv)) {
+            Some(Ok(k)) => {
+                state.stats.kept += 1;
+                bump(&tm.keep_advanced);
+                k
+            }
+            Some(Err(why)) => {
+                state.stats.fallbacks += 1;
+                bump(&tm.keep_fallback);
+                tracing::debug!(target: "rsm", why, "KEEP_OVERLAY: the kept overlay is rebuilt");
+                KeptOverlay::rebuild(&folded, store_applied, base_pid, base_kv)
+            }
+            None => {
+                state.stats.rebuilt += 1;
+                bump(&tm.keep_rebuilt);
+                KeptOverlay::rebuild(&folded, store_applied, base_pid, base_kv)
+            }
+        };
+        if keep.enabled && keep.verify {
+            let reference = KeptOverlay::rebuild(&folded, store_applied, base_pid, base_kv);
+            if let Some(what) = kept.diff(&reference) {
+                state
+                    .stats
+                    .mismatch(format!("cycle {cycle_no}: overlay: {what}"));
+                kept = reference;
             }
         }
+
+        // The rings this batch's wildcard pops walk. KEEP_OVERLAY keeps them
+        // and re-reads, per landed entry, the `pending` rows it wrote
+        // ([`PlanRings::advance`]); a ring is scanned only the first time a
+        // batch needs it. The old path — the knob off, and a discovery pop,
+        // which spans every ring — rebuilds them from `pending`.
+        if keep.enabled {
+            let pr = rings.get_or_insert_with(|| PlanRings::new(store_applied, base_now));
+            let loads0 = pr.loads;
+            pr.advance(r, &folded, store_applied, base_now)?;
+            if let Some(keys) = &ring_keys {
+                for k in keys {
+                    pr.ensure(r, k, cycle_no)?;
+                }
+            }
+            if cycle_no.is_multiple_of(RING_EVICT_EVERY) {
+                pr.evict_idle(cycle_no.saturating_sub(RING_IDLE_CYCLES));
+            }
+            if metrics_on && pr.loads > loads0 {
+                tm.ring_loads
+                    .fetch_add(pr.loads - loads0, std::sync::atomic::Ordering::Relaxed);
+            }
+            if keep.verify_rings {
+                for key in pr.keys() {
+                    if let Some(what) = ring_diff(r, pr, &key, base_now)? {
+                        state
+                            .stats
+                            .mismatch(format!("cycle {cycle_no}: ring {key:?}: {what}"));
+                    }
+                }
+            }
+        }
+        let kept_rings = keep.enabled && ring_keys.is_some();
+        let derived = if kept_rings {
+            Derived::default()
+        } else {
+            Derived::rebuild_rings(r, base_now, ring_keys.as_deref())?
+        };
+        let committed = match rings.as_ref() {
+            Some(pr) if kept_rings => Committed::with_plan_rings(r, &derived, pr),
+            _ => Committed::new(r, &derived),
+        };
+
+        // The cycle's own folds carry its tag; each step below checks it folded
+        // exactly the effects it added to the entry, so the kept overlay is the
+        // fold of the entry and nothing else (`poisoned` otherwise: not kept).
+        let cycle_tag = kept.begin_cycle();
+        let mut poisoned = false;
+        let ov = kept.overlay_mut();
         let now_us = ov
             .plan_now(&committed, wall_us)
             // A store error under the clock read: fail the whole cycle
             // retryably (I14).
             .map_err(|_| crate::rsm::store::StoreError::Io("clock read".into()))?;
         ov.mark_cycle_start();
+        let cycle_folds0 = ov.folds();
         let mut planner = Planner::new(committed, now_us, cfg.clone(), front, reader.clone());
         // Phase A2: when the qlog knob is on, the planner reads the committed
         // `DEDUP_INDEX=segment` dedup authority from the per-queue log instead of
@@ -962,7 +1229,8 @@ fn plan_cycle_blocking<S: Store>(
             // are off), so the ablation prices the whole per-command O18 leg —
             // the two clock reads and the record — not just the histogram write.
             let cmd_started = crate::rsm::timing::stamp();
-            let slot = match planner.lookup_request_id(&ov, &id) {
+            let (folds0, effects0) = (ov.folds(), entry.effects.len());
+            let slot = match planner.lookup_request_id(ov, &id) {
                 Err(refusal) => Slot::Immediate(Reply::Refused(refusal)),
                 Ok(Lookup::Committed(outcome)) => {
                     Slot::Immediate(Reply::Done { outcome, at: None })
@@ -971,7 +1239,7 @@ fn plan_cycle_blocking<S: Store>(
                     request_id: id,
                     outcome,
                 },
-                Ok(Lookup::Miss) => match cmd.plan(&planner, &mut ov) {
+                Ok(Lookup::Miss) => match cmd.plan(&planner, ov) {
                     Ok(Plan::Logged { effects, outcome }) => {
                         match entry.add_command(id, outcome, effects) {
                             Ok(()) => {
@@ -989,6 +1257,12 @@ fn plan_cycle_blocking<S: Store>(
                     Err(refusal) => Slot::Immediate(Reply::Refused(refusal)),
                 },
             };
+            // A command folds exactly what it logs: a refused or empty one
+            // folds nothing (a refused transaction restores the overlay). One
+            // that folded and was not logged left effects in the overlay that
+            // no entry carries; the old path dropped them with the cycle's
+            // overlay, a kept one would carry them on — so it is not kept.
+            poisoned |= ov.folds() - folds0 != (entry.effects.len() - effects0) as u64;
             slots.push(slot);
             if let Some(cmd_started) = cmd_started {
                 let dur = cmd_started.elapsed();
@@ -1031,10 +1305,12 @@ fn plan_cycle_blocking<S: Store>(
         // The two leader steps touch disjoint state (timers and the messages
         // they push; KV rows), so their relative order is immaterial.
         let fired = fire.is_some();
+        let (folds0, effects0) = (ov.folds(), entry.effects.len());
         let fire_more = match fire.as_ref() {
-            Some(fcfg) => plan_fire_step(&planner, &mut ov, &mut entry, fcfg),
+            Some(fcfg) => plan_fire_step(&planner, ov, &mut entry, fcfg),
             None => false,
         };
+        poisoned |= ov.folds() - folds0 != (entry.effects.len() - effects0) as u64;
 
         // WP-2.7/2.8: bounded leader-only retention, trace expiry and
         // crash-resumable admin garbage. It is a normal command in this entry,
@@ -1064,7 +1340,7 @@ fn plan_cycle_blocking<S: Store>(
         let mut kv_swept = false;
         if let Some(limit) = kv_sweep_limit {
             kv_swept = true;
-            if let Ok(effects) = planner.plan_kv_sweep(&ov, limit) {
+            if let Ok(effects) = planner.plan_kv_sweep(ov, limit) {
                 if !effects.is_empty() {
                     let id = crate::util::uuidv7_bytes();
                     if entry
@@ -1078,28 +1354,52 @@ fn plan_cycle_blocking<S: Store>(
         }
 
         // §10.1 request-id expiry: a leader-loop step is one command with its
-        // own minted id (see `Entry::validate`), answered by nobody.
+        // own minted id (see `Entry::validate`), answered by nobody. Its one
+        // effect is folded too — the fold reads nothing from it; it only keeps
+        // the count of folded effects equal to the entry's.
         let mut expired = false;
         if let Some(window_us) = expire_window_us {
             let cutoff = now_us.saturating_sub(window_us);
             let id = crate::util::uuidv7_bytes();
+            let effects = vec![Effect::RequestIdsExpire { cutoff_us: cutoff }];
             if entry
-                .add_command(
-                    id,
-                    Outcome::Empty,
-                    vec![Effect::RequestIdsExpire { cutoff_us: cutoff }],
-                )
+                .add_command(id, Outcome::Empty, effects.clone())
                 .is_ok()
             {
+                ov.apply_effects(&effects);
                 expired = true;
             }
         }
+        // The cycle as a whole: its overlay holds the fold of its entry, and
+        // nothing else (the per-step checks above make this the sum of them).
+        poisoned |= ov.folds() - cycle_folds0 != entry.effects.len() as u64;
+        drop(planner);
 
         let entry = if entry.commands.is_empty() {
             None
         } else {
-            Some(entry)
+            Some(Arc::new(entry))
         };
+
+        // KEEP_OVERLAY: keep the overlay — now carrying this cycle's entry as in
+        // flight — and the rings for the next cycle. An overlay that folded
+        // anything its entry does not carry, or whose build met a request id
+        // twice, is dropped: the next cycle rebuilds.
+        if keep.enabled {
+            let mut keep_it = !poisoned && kept.exact();
+            if keep_it {
+                if let Some(e) = &entry {
+                    keep_it = kept.push_entry(e.clone(), cycle_tag).is_ok();
+                }
+            }
+            if keep_it {
+                state.overlay = Some(kept);
+            } else {
+                state.stats.poisoned += 1;
+                bump(&tm.keep_poisoned);
+            }
+            state.rings = rings;
+        }
         Ok(PlanOutput {
             store_applied,
             entry,
@@ -1243,6 +1543,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             wake_reason: "init",
             wake_seq: 0,
             last_cycle_at: None,
+            plan_epoch: 0,
         };
 
         loop {
@@ -1341,34 +1642,40 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
 /// different pool thread almost every cycle — 53 threads in a 20 s profile —
 /// and shared the pool with every facade store read). A fixed thread gives it
 /// warm caches, its own scheduler statistics, and a home for state kept
-/// between cycles. Jobs run strictly one at a time, in submission order.
+/// between cycles: the [`PlannerState`] lives on its stack and every job gets
+/// it by `&mut` (KEEP_OVERLAY). Jobs run strictly one at a time, in submission
+/// order.
 struct PlannerThread {
-    tx: std::sync::mpsc::Sender<Box<dyn FnOnce() + Send>>,
+    tx: std::sync::mpsc::Sender<PlannerJob>,
 }
+
+type PlannerJob = Box<dyn FnOnce(&mut PlannerState) + Send>;
 
 impl PlannerThread {
     fn spawn() -> PlannerThread {
-        let (tx, rx) = std::sync::mpsc::channel::<Box<dyn FnOnce() + Send>>();
+        let (tx, rx) = std::sync::mpsc::channel::<PlannerJob>();
         std::thread::Builder::new()
             .name("queen-planner".into())
             .spawn(move || {
+                let mut state = PlannerState::default();
                 while let Ok(job) = rx.recv() {
-                    job();
+                    job(&mut state);
                 }
             })
             .expect("spawn the queen-planner thread");
         PlannerThread { tx }
     }
 
-    /// Run `f` on the planner thread; the result comes back on the returned
-    /// channel (closed without a value if the thread is gone).
+    /// Run `f` on the planner thread, with its kept state; the result comes
+    /// back on the returned channel (closed without a value if the thread is
+    /// gone).
     fn run<T: Send + 'static>(
         &self,
-        f: impl FnOnce() -> T + Send + 'static,
+        f: impl FnOnce(&mut PlannerState) -> T + Send + 'static,
     ) -> tokio::sync::oneshot::Receiver<T> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let _ = self.tx.send(Box::new(move || {
-            let _ = tx.send(f());
+        let _ = self.tx.send(Box::new(move |state: &mut PlannerState| {
+            let _ = tx.send(f(state));
         }));
         rx
     }
@@ -1427,9 +1734,21 @@ struct RunState<S: Store, R: Replicator> {
     wake_seq: u64,
     /// PERF-K trace: when the previous cycle ran, for the inter-cycle gap.
     last_cycle_at: Option<Instant>,
+    /// KEEP_OVERLAY ([`KeepCfg::epoch`]): moved by everything that makes the
+    /// in-flight list stop being "what the planner thread planned, minus what
+    /// landed" — a lost leadership (the pipeline is drained), a planned entry
+    /// that is never proposed (it failed to encode), a failed cycle. The
+    /// planner thread drops a state kept under an older epoch.
+    plan_epoch: u64,
 }
 
 impl<S: Store + 'static, R: Replicator> RunState<S, R> {
+    /// KEEP_OVERLAY: whatever the planner thread kept is no longer about the
+    /// in-flight list the next cycle will hand it.
+    fn invalidate_kept(&mut self) {
+        self.plan_epoch = self.plan_epoch.wrapping_add(1);
+    }
+
     fn start_qlog_gc(&self) {
         use std::sync::atomic::Ordering;
 
@@ -1635,37 +1954,48 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         let qlog_reader = self.qlog_reader.clone();
         let fire_cfg = fire.then(|| self.cfg.timer_fire.clone());
         let maintenance_cfg = maintenance.then(|| self.cfg.maintenance.clone());
+        let keep = KeepCfg {
+            enabled: self.cfg.keep_overlay,
+            epoch: self.plan_epoch,
+            verify: self.cfg.keep_overlay_verify,
+            verify_rings: false,
+            reset_every: KEEP_RESET_EVERY,
+        };
 
-        let planned = self.planner_thread.run(move || {
-            let w0 = Instant::now();
-            let c0 = crate::rsm::timing::thread_cpu_ns();
-            let q0 = crate::rsm::timing::thread_runq_ns();
-            let r = plan_cycle_blocking(
-                &*store,
-                &front,
-                reader,
-                qlog_reader,
-                folded,
-                commands,
-                cfg,
-                wall_us,
-                expire_window_us,
-                kv_sweep_limit,
-                fire_cfg,
-                maintenance_cfg,
-            );
-            if crate::rsm::timing::enabled() {
-                let tm = crate::rsm::timing::metrics();
-                tm.plan_whole_wall.record_dur(w0.elapsed());
-                tm.plan_whole_cpu
-                    .record(crate::rsm::timing::thread_cpu_ns().saturating_sub(c0));
-                tm.plan_whole_runq
-                    .record(crate::rsm::timing::thread_runq_ns().saturating_sub(q0));
-            }
-            r
-        })
-        .await
-        .map_err(|_| "the queen-planner thread is gone".to_string());
+        let planned = self
+            .planner_thread
+            .run(move |state| {
+                let w0 = Instant::now();
+                let c0 = crate::rsm::timing::thread_cpu_ns();
+                let q0 = crate::rsm::timing::thread_runq_ns();
+                let r = plan_cycle_blocking(
+                    &*store,
+                    &front,
+                    state,
+                    keep,
+                    reader,
+                    qlog_reader,
+                    folded,
+                    commands,
+                    cfg,
+                    wall_us,
+                    expire_window_us,
+                    kv_sweep_limit,
+                    fire_cfg,
+                    maintenance_cfg,
+                );
+                if crate::rsm::timing::enabled() {
+                    let tm = crate::rsm::timing::metrics();
+                    tm.plan_whole_wall.record_dur(w0.elapsed());
+                    tm.plan_whole_cpu
+                        .record(crate::rsm::timing::thread_cpu_ns().saturating_sub(c0));
+                    tm.plan_whole_runq
+                        .record(crate::rsm::timing::thread_runq_ns().saturating_sub(q0));
+                }
+                r
+            })
+            .await
+            .map_err(|_| "the queen-planner thread is gone".to_string());
 
         // The KV sweep and the timer fire are best-effort and self-rescheduling:
         // a cycle that could not plan leaves them to their next tick rather
@@ -1686,7 +2016,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             Ok(Err(e)) => {
                 // The store could not answer: refuse the whole batch retryably
                 // (I14) and try again next tick. The expiry step, if it was
-                // due, stays due.
+                // due, stays due. (The planner thread kept nothing from a cycle
+                // that failed; the epoch says so too.)
+                self.invalidate_kept();
                 for reply in replies {
                     let _ =
                         reply.send(Reply::Refused(Refusal::retry("unavailable", e.to_string())));
@@ -1694,6 +2026,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 return;
             }
             Err(join) => {
+                self.invalidate_kept();
                 for reply in replies {
                     let _ = reply.send(Reply::Refused(Refusal::retry(
                         "unavailable",
@@ -1869,7 +2202,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     .drain_to_propose
                     .record_dur(started.elapsed());
             }
-            self.propose(seq, index, Arc::new(entry), waiters, bytes);
+            self.propose(seq, index, entry, waiters, bytes);
         } else {
             debug_assert!(waiters.is_empty(), "no entry but waiters were attached");
         }
@@ -1912,6 +2245,8 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         err: &crate::rsm::effect::CodecError,
     ) {
         tracing::error!(target: "rsm", error = ?err, "batcher entry failed to encode; refusing its commands");
+        // The planner thread kept this entry as in flight; it never will be.
+        self.invalidate_kept();
         for ((slot, reply), arrived) in slots
             .into_iter()
             .zip(replies.into_iter())
@@ -2115,6 +2450,8 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         }
         self.holding_until = None;
         self.paused = true;
+        // The pipeline is gone, and with it every entry the kept overlay holds.
+        self.invalidate_kept();
     }
 
     /// The role watch changed.
@@ -2135,10 +2472,13 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     // is guaranteed to hold complete. A single-node
                     // LocalReplicator never regains, so this is inert in phase 1.
                     self.front.reset();
+                    // KEEP_OVERLAY: and plan from state rebuilt under the new term.
+                    self.invalidate_kept();
                 }
             }
             Role::Stopped => {
                 self.stopped = true;
+                self.invalidate_kept();
             }
             _ => {
                 // Follower / Learner / Candidate: drop the overlay, fail

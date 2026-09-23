@@ -93,7 +93,51 @@ pub fn txn_hash128(txn: &str) -> [u8; 16] {
 static LAST_MS: AtomicU64 = AtomicU64::new(0);
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(test)]
+thread_local! {
+    /// TEST ONLY: while `Some(n)`, [`uuidv7_bytes`] on this thread returns a
+    /// counter-derived id (see [`deterministic_uuids`]).
+    static TEST_UUIDS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// TEST ONLY: until the guard drops, [`uuidv7_bytes`] on THIS thread returns
+/// ids derived from a counter starting at `seed` — increasing, version and
+/// variant bits set — instead of random ones. The KEEP_OVERLAY gate plans one
+/// command stream twice (the knob on, then off) and compares the proposed
+/// entries byte for byte; the planner mints uuids (partitions, groups, dead
+/// letters, leader-step request ids), so both runs must mint the same ones.
+#[cfg(test)]
+pub fn deterministic_uuids(seed: u64) -> DeterministicUuids {
+    TEST_UUIDS.with(|c| c.set(Some(seed)));
+    DeterministicUuids
+}
+
+/// Restores random uuids on this thread when dropped.
+#[cfg(test)]
+pub struct DeterministicUuids;
+
+#[cfg(test)]
+impl Drop for DeterministicUuids {
+    fn drop(&mut self) {
+        TEST_UUIDS.with(|c| c.set(None));
+    }
+}
+
 pub fn uuidv7_bytes() -> [u8; 16] {
+    #[cfg(test)]
+    if let Some(n) = TEST_UUIDS.with(|c| {
+        let v = c.get();
+        if let Some(x) = v {
+            c.set(Some(x.wrapping_add(1)));
+        }
+        v
+    }) {
+        let mut b = [0u8; 16];
+        b[0..8].copy_from_slice(&0x0190_0000_0000_7000u64.to_be_bytes());
+        b[8..16].copy_from_slice(&(n & 0x3fff_ffff_ffff_ffff).to_be_bytes());
+        b[8] |= 0x80;
+        return b;
+    }
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()

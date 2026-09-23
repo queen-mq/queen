@@ -55,9 +55,12 @@
 //! # The cycle, and who calls what
 //!
 //! The batcher (WP-1.6b) owns the [`Overlay`] across the bounded pipeline (D4,
-//! four entries in flight). Per cycle it: builds an `Overlay` from committed
-//! bases and folds every in-flight entry into it ([`Overlay::ingest_entry`]),
-//! marks the cycle start ([`Overlay::mark_cycle_start`]) so the entry it is
+//! four entries in flight). Per cycle it: brings an `Overlay` to committed
+//! bases plus every in-flight entry — the one its planner thread kept from the
+//! last cycle with the entries that landed taken out ([`kept`], KEEP_OVERLAY),
+//! or one built from scratch by folding every in-flight entry into it
+//! ([`Overlay::ingest_entry`]) — then marks the cycle start
+//! ([`Overlay::mark_cycle_start`]) so the entry it is
 //! about to build gets the right `pid_base`/`kv_version_base`, then for each
 //! drained command looks the request id up ([`Planner::lookup_request_id`],
 //! §5.4) and, on a miss, calls the matching `plan_*`. A [`Plan::Logged`] is
@@ -91,6 +94,8 @@ use crate::rsm::store::rows::GroupRow;
 use crate::rsm::store::{keys, Keyspace, Reads, StoreError, TypedReads};
 
 pub mod ack;
+/// KEEP_OVERLAY: the overlay kept between cycles on the planner thread.
+pub(crate) mod kept;
 /// KV: versions from `kv_version_base + ordinal`, TTL, prefix lists,
 /// `required` (024), and the leader's expiry sweep (026). WP-2.2.
 pub mod kv;
@@ -508,29 +513,49 @@ pub struct EffectsCommand {
 // The overlay
 // ---------------------------------------------------------------------------
 
+/// One overlay value and the TAG of the fold that wrote it last — the entry in
+/// flight it came from (KEEP_OVERLAY, [`kept`]). When that entry lands, the
+/// value goes only if no later entry has overwritten it (the tag still names
+/// the landed entry); the planner reads `v` and never looks at the tag.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Tagged<V> {
+    v: V,
+    tag: u64,
+}
+
 /// One `Append` the overlay remembers: its offset range, its stamp, and the
 /// per-frame hashes in frame order (for the delivered set and the dedup probe).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct OverlayAppend {
     base: u64,
     end: u64,
     created_at_us: i64,
     hashes: Vec<[u8; 16]>,
+    /// The fold that added it (KEEP_OVERLAY): its landing removes it.
+    tag: u64,
 }
 
 /// A partition as the overlay knows it, relative to committed state.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct OverlayPart {
     /// `Some` when a `PartitionCreate` for this pid is in the overlay: committed
-    /// state has no row for it, so the merged view is built from this.
-    created: Option<CreatedPart>,
+    /// state has no row for it, so the merged view is built from this. It MUST
+    /// go when the create lands (KEEP_OVERLAY): the flag is not idempotent.
+    created: Option<Tagged<CreatedPart>>,
     appends: Vec<OverlayAppend>,
     /// A `Watermark` in the overlay (retention in flight): `(log_start,
     /// txns_start)`.
-    watermark: Option<(u64, u64)>,
+    watermark: Option<Tagged<(u64, u64)>>,
 }
 
-#[derive(Clone, Debug)]
+impl OverlayPart {
+    /// Nothing in flight names this partition any more.
+    fn is_empty(&self) -> bool {
+        self.created.is_none() && self.appends.is_empty() && self.watermark.is_none()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct CreatedPart {
     uuid: [u8; 16],
     tenant: String,
@@ -548,6 +573,11 @@ struct CreatedPart {
 /// (I18): the batcher marks the cycle start after folding the in-flight
 /// entries, and the entry it then builds carries [`Overlay::cycle_pid_base`] /
 /// [`Overlay::cycle_kv_base`].
+///
+/// KEEP_OVERLAY ([`kept`]): every contribution carries the TAG of the fold
+/// that wrote it (one tag per entry), so the planner thread can keep ONE
+/// overlay across cycles and take out exactly what an entry put in when it
+/// lands, instead of rebuilding it from every in-flight entry each cycle.
 #[derive(Clone, Debug)]
 pub struct Overlay {
     next_pid: u64,
@@ -558,31 +588,53 @@ pub struct Overlay {
     max_now_us: i64,
     /// The greatest `created_at` any folded `Append` carried.
     max_created_at_us: i64,
-    queues: HashMap<(String, String), Option<QueueConfig>, FxBuild>,
-    groups: HashMap<(String, String, String), Option<GroupRow>, FxBuild>,
-    pids_by_key: HashMap<(String, String, String), Pid, FxBuild>,
+    queues: HashMap<(String, String), Tagged<Option<QueueConfig>>, FxBuild>,
+    groups: HashMap<(String, String, String), Tagged<Option<GroupRow>>, FxBuild>,
+    pids_by_key: HashMap<(String, String, String), Tagged<Pid>, FxBuild>,
     parts: HashMap<Pid, OverlayPart, FxBuild>,
-    cursors: HashMap<(Pid, String), Option<CursorRow>, FxBuild>,
+    cursors: HashMap<(Pid, String), Tagged<Option<CursorRow>>, FxBuild>,
     /// `(pid, hash) → [(offset, created_at)]`: the occurrences an overlay
     /// `Append` added, merged with committed `dedup` on a probe or a resolve.
-    /// Rebuilt every cycle from every in-flight entry: one key per in-flight
-    /// message, so the value keeps its (almost always single) occurrence inline.
+    /// One key per in-flight message, so the value keeps its (almost always
+    /// single) occurrence inline. No tag: an occurrence's offset is unique in
+    /// its partition, so a landed `Append` removes exactly its own.
     dedup: HashMap<(Pid, [u8; 16]), SmallVec<[DedupOccurrence; 1]>, FxBuild>,
-    request_ids: HashMap<RequestId, Outcome, FxBuild>,
+    request_ids: HashMap<RequestId, Tagged<Outcome>, FxBuild>,
     /// `(tenant, ns, key) → row` for every KV row an entry in flight (or an
     /// earlier command of this cycle) wrote — `None` for a delete — so the
     /// next KV write is judged against the version it left, not against the
     /// committed one (WP-2.2; the serial point 024's row lock was).
-    kv: HashMap<(String, String, String), Option<crate::rsm::store::rows::KvRow>, FxBuild>,
+    kv: HashMap<(String, String, String), Tagged<Option<crate::rsm::store::rows::KvRow>>, FxBuild>,
     /// `(tenant, queue, timer_key) → what the in-flight entries did to it`
     /// (WP-2.3). The overlay's view wins over committed state per key, which
     /// is what keeps a timer whose fire entry is still in flight from firing
     /// a second time in the next cycle (exactly-once in effect).
-    timers: HashMap<(String, String, String), TimerOverlay, FxBuild>,
+    timers: HashMap<(String, String, String), TimerSlot, FxBuild>,
+    /// The tag every fold stamps now (KEEP_OVERLAY): one per in-flight entry,
+    /// and the cycle's own for the commands planned into the entry being built.
+    tag: u64,
+    /// Every effect ever folded into this overlay, counted (KEEP_OVERLAY): the
+    /// batcher checks a cycle folded exactly the effects its entry carries.
+    folds: u64,
+}
+
+/// One timer key's overlay state and the tags that decide what a landing does
+/// to it. A `TimerBackoff` PATCHES whatever an earlier fold left, so unlike the
+/// last-writer-wins maps its value can depend on an earlier entry: `base` is
+/// the tag of the fold the current value's derivation starts at (a schedule, a
+/// delete, or a backoff over nothing), `last` the tag of the last fold. When
+/// entry `T` lands: `last == T` → nothing later touched the key, drop it;
+/// `base <= T < last` → the value was derived THROUGH `T`, re-fold it from the
+/// entries still in flight; `base > T` → it never depended on `T`, keep it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TimerSlot {
+    v: TimerOverlay,
+    last: u64,
+    base: u64,
 }
 
 /// One timer as the in-flight entries left it, relative to committed state.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum TimerOverlay {
     /// Upserted (schedule, reschedule) — the whole row.
     Row(crate::rsm::effect::TimerRow),
@@ -600,6 +652,22 @@ enum TimerOverlay {
 
 /// One overlay dedup occurrence: `(offset, created_at_us)`.
 type DedupOccurrence = (u64, i64);
+
+/// Frame `i`'s hash in an `Append`'s `hashes`, exactly as the fold reads it (a
+/// short blob yields a zero hash rather than a panic), so the KEEP_OVERLAY
+/// landing takes out exactly the keys the fold put in.
+fn frame_hash(hashes: &[u8], i: usize) -> [u8; 16] {
+    let mut h = [0u8; 16];
+    if let Some(slice) = hashes.get(i * 16..i * 16 + 16) {
+        h.copy_from_slice(slice);
+    }
+    h
+}
+
+/// The per-frame hashes of an `Append`, in frame order ([`frame_hash`]).
+fn append_hashes(hashes: &[u8], count: usize) -> Vec<[u8; 16]> {
+    (0..count).map(|i| frame_hash(hashes, i)).collect()
+}
 
 impl Overlay {
     /// A fresh overlay over committed bases (before any in-flight entry).
@@ -620,23 +688,42 @@ impl Overlay {
             request_ids: HashMap::default(),
             kv: HashMap::default(),
             timers: HashMap::default(),
+            tag: 0,
+            folds: 0,
         }
     }
 
     /// Fold an entry still in flight into the overlay: its effects (so a later
     /// command sees them) and its request ids (so a retry of one in flight is
     /// found, §5.4). Call once per in-flight entry, in index order, before
-    /// [`Overlay::mark_cycle_start`].
+    /// [`Overlay::mark_cycle_start`]. Everything it folds carries the current
+    /// tag ([`Overlay::set_tag`]).
     pub fn ingest_entry(&mut self, e: &Entry) {
         self.max_now_us = self.max_now_us.max(e.now_us);
         for eff in &e.effects {
             self.fold_effect(eff);
         }
+        let tag = self.tag;
         for c in &e.commands {
             self.request_ids
                 .entry(c.request_id)
-                .or_insert_with(|| c.outcome.clone());
+                .or_insert_with(|| Tagged {
+                    v: c.outcome.clone(),
+                    tag,
+                });
         }
+    }
+
+    /// The tag every later fold stamps on what it writes (KEEP_OVERLAY): the
+    /// in-flight entry being ingested, or the entry the current cycle builds.
+    pub(crate) fn set_tag(&mut self, tag: u64) {
+        self.tag = tag;
+    }
+
+    /// How many effects this overlay has folded so far (KEEP_OVERLAY): the
+    /// batcher's proof that a cycle folded exactly what its entry carries.
+    pub(crate) fn folds(&self) -> u64 {
+        self.folds
     }
 
     /// Snapshot the running bases as the bases of the entry the batcher is about
@@ -669,19 +756,28 @@ impl Overlay {
     }
 
     fn request_id(&self, id: &RequestId) -> Option<&Outcome> {
-        self.request_ids.get(id)
+        self.request_ids.get(id).map(|t| &t.v)
     }
 
     /// Fold one effect into the overlay indexes. Used for in-flight entries and,
     /// via [`Overlay::apply_effects`], for the current cycle's own effects.
+    /// Everything it writes carries the current tag.
     fn fold_effect(&mut self, eff: &Effect) {
+        self.folds += 1;
+        let tag = self.tag;
         match eff {
             Effect::QueueUpsert { tenant, queue, cfg } => {
-                self.queues
-                    .insert((tenant.clone(), queue.clone()), Some(cfg.clone()));
+                self.queues.insert(
+                    (tenant.clone(), queue.clone()),
+                    Tagged {
+                        v: Some(cfg.clone()),
+                        tag,
+                    },
+                );
             }
             Effect::QueueDelete { tenant, queue } => {
-                self.queues.insert((tenant.clone(), queue.clone()), None);
+                self.queues
+                    .insert((tenant.clone(), queue.clone()), Tagged { v: None, tag });
             }
             Effect::GroupUpsert {
                 tenant,
@@ -691,11 +787,14 @@ impl Overlay {
             } => {
                 self.groups.insert(
                     (tenant.clone(), queue.clone(), group.clone()),
-                    Some(GroupRow {
-                        meta: meta.clone(),
-                        reg_index: 0,
-                        reg_effect: 0,
-                    }),
+                    Tagged {
+                        v: Some(GroupRow {
+                            meta: meta.clone(),
+                            reg_index: 0,
+                            reg_effect: 0,
+                        }),
+                        tag,
+                    },
                 );
             }
             Effect::GroupDelete {
@@ -703,8 +802,10 @@ impl Overlay {
                 queue,
                 group,
             } => {
-                self.groups
-                    .insert((tenant.clone(), queue.clone(), group.clone()), None);
+                self.groups.insert(
+                    (tenant.clone(), queue.clone(), group.clone()),
+                    Tagged { v: None, tag },
+                );
             }
             Effect::PartitionCreate {
                 pid,
@@ -714,14 +815,19 @@ impl Overlay {
                 partition,
                 created_at_us,
             } => {
-                self.pids_by_key
-                    .insert((tenant.clone(), queue.clone(), partition.clone()), *pid);
-                self.parts.entry(*pid).or_default().created = Some(CreatedPart {
-                    uuid: *uuid,
-                    tenant: tenant.clone(),
-                    queue: queue.clone(),
-                    partition: partition.clone(),
-                    created_at_us: *created_at_us,
+                self.pids_by_key.insert(
+                    (tenant.clone(), queue.clone(), partition.clone()),
+                    Tagged { v: *pid, tag },
+                );
+                self.parts.entry(*pid).or_default().created = Some(Tagged {
+                    v: CreatedPart {
+                        uuid: *uuid,
+                        tenant: tenant.clone(),
+                        queue: queue.clone(),
+                        partition: partition.clone(),
+                        created_at_us: *created_at_us,
+                    },
+                    tag,
                 });
                 self.next_pid = self.next_pid.max(pid.saturating_add(1));
                 self.max_created_at_us = self.max_created_at_us.max(*created_at_us);
@@ -735,14 +841,7 @@ impl Overlay {
                 ..
             } => {
                 let count = *count as usize;
-                let mut hs: Vec<[u8; 16]> = Vec::with_capacity(count);
-                for i in 0..count {
-                    let mut h = [0u8; 16];
-                    if let Some(slice) = hashes.get(i * 16..i * 16 + 16) {
-                        h.copy_from_slice(slice);
-                    }
-                    hs.push(h);
-                }
+                let hs = append_hashes(hashes, count);
                 let end = base_offset + count as u64 - 1;
                 self.dedup.reserve(count);
                 for (i, h) in hs.iter().enumerate() {
@@ -760,22 +859,32 @@ impl Overlay {
                         end,
                         created_at_us: *created_at_us,
                         hashes: hs,
+                        tag,
                     });
                 self.max_created_at_us = self.max_created_at_us.max(*created_at_us);
             }
             Effect::CursorSet { pid, group, row } => {
-                self.cursors
-                    .insert((*pid, group.clone()), Some(row.clone()));
+                self.cursors.insert(
+                    (*pid, group.clone()),
+                    Tagged {
+                        v: Some(row.clone()),
+                        tag,
+                    },
+                );
             }
             Effect::CursorDelete { pid, group } => {
-                self.cursors.insert((*pid, group.clone()), None);
+                self.cursors
+                    .insert((*pid, group.clone()), Tagged { v: None, tag });
             }
             Effect::Watermark {
                 pid,
                 log_start,
                 txns_start,
             } => {
-                self.parts.entry(*pid).or_default().watermark = Some((*log_start, *txns_start));
+                self.parts.entry(*pid).or_default().watermark = Some(Tagged {
+                    v: (*log_start, *txns_start),
+                    tag,
+                });
             }
             Effect::KvPut {
                 tenant,
@@ -790,21 +899,43 @@ impl Overlay {
                 self.next_kv_version = self.next_kv_version.max(version.saturating_add(1));
                 self.kv.insert(
                     (tenant.clone(), ns.clone(), key.clone()),
-                    Some(crate::rsm::store::rows::KvRow {
-                        value: value.clone(),
-                        version: *version,
-                        expires_at_us: *expires_at_us,
-                        created_at_us: *created_at_us,
-                        updated_at_us: *updated_at_us,
-                    }),
+                    Tagged {
+                        v: Some(crate::rsm::store::rows::KvRow {
+                            value: value.clone(),
+                            version: *version,
+                            expires_at_us: *expires_at_us,
+                            created_at_us: *created_at_us,
+                            updated_at_us: *updated_at_us,
+                        }),
+                        tag,
+                    },
                 );
             }
             Effect::KvDelete { tenant, ns, key } => {
-                self.kv
-                    .insert((tenant.clone(), ns.clone(), key.clone()), None);
+                self.kv.insert(
+                    (tenant.clone(), ns.clone(), key.clone()),
+                    Tagged { v: None, tag },
+                );
             }
             // Timers (WP-2.3): the planner reads them through the overlay for
             // the schedule/cancel verdicts and the fire step's candidate set.
+            Effect::TimerUpsert { .. }
+            | Effect::TimerDelete { .. }
+            | Effect::TimerBackoff { .. } => {
+                self.fold_timer(eff, tag);
+            }
+            // Everything else the phase-1 planner neither emits nor needs to see
+            // through the overlay (admin deletes, streams, traces): a later
+            // phase folds what its planner reads.
+            _ => {}
+        }
+    }
+
+    /// Fold one timer effect under `tag` (see [`TimerSlot`] for what `base` and
+    /// `last` record). Shared with the KEEP_OVERLAY re-fold of a key whose
+    /// value was derived through an entry that landed.
+    fn fold_timer(&mut self, eff: &Effect, tag: u64) {
+        match eff {
             Effect::TimerUpsert {
                 tenant,
                 queue,
@@ -813,13 +944,21 @@ impl Overlay {
             } => {
                 self.timers.insert(
                     (tenant.clone(), queue.clone(), key.clone()),
-                    TimerOverlay::Row(row.clone()),
+                    TimerSlot {
+                        v: TimerOverlay::Row(row.clone()),
+                        last: tag,
+                        base: tag,
+                    },
                 );
             }
             Effect::TimerDelete { tenant, queue, key } => {
                 self.timers.insert(
                     (tenant.clone(), queue.clone(), key.clone()),
-                    TimerOverlay::Deleted,
+                    TimerSlot {
+                        v: TimerOverlay::Deleted,
+                        last: tag,
+                        base: tag,
+                    },
                 );
             }
             Effect::TimerBackoff {
@@ -832,27 +971,53 @@ impl Overlay {
                 updated_at_us,
             } => {
                 let k = (tenant.clone(), queue.clone(), key.clone());
+                let fresh = || TimerOverlay::Backoff {
+                    visible_at_us: *visible_at_us,
+                    attempts: *attempts,
+                    last_error: last_error.clone(),
+                    updated_at_us: *updated_at_us,
+                };
                 let next = match self.timers.remove(&k) {
-                    Some(TimerOverlay::Row(mut row)) => {
+                    // Patched: the value still depends on the fold that wrote
+                    // the row (or the delete), so the chain keeps its base.
+                    Some(TimerSlot {
+                        v: TimerOverlay::Row(mut row),
+                        base,
+                        ..
+                    }) => {
                         row.visible_at_us = Some(*visible_at_us);
                         row.attempts = *attempts;
                         row.last_error = last_error.clone();
                         row.updated_at_us = *updated_at_us;
-                        TimerOverlay::Row(row)
+                        TimerSlot {
+                            v: TimerOverlay::Row(row),
+                            last: tag,
+                            base,
+                        }
                     }
-                    Some(TimerOverlay::Deleted) => TimerOverlay::Deleted,
-                    Some(TimerOverlay::Backoff { .. }) | None => TimerOverlay::Backoff {
-                        visible_at_us: *visible_at_us,
-                        attempts: *attempts,
-                        last_error: last_error.clone(),
-                        updated_at_us: *updated_at_us,
+                    Some(TimerSlot {
+                        v: TimerOverlay::Deleted,
+                        base,
+                        ..
+                    }) => TimerSlot {
+                        v: TimerOverlay::Deleted,
+                        last: tag,
+                        base,
+                    },
+                    // A backoff over a backoff (or over nothing) replaces it
+                    // whole: a new chain starts here.
+                    Some(TimerSlot {
+                        v: TimerOverlay::Backoff { .. },
+                        ..
+                    })
+                    | None => TimerSlot {
+                        v: fresh(),
+                        last: tag,
+                        base: tag,
                     },
                 };
                 self.timers.insert(k, next);
             }
-            // Everything else the phase-1 planner neither emits nor needs to see
-            // through the overlay (admin deletes, streams, traces): a later
-            // phase folds what its planner reads.
             _ => {}
         }
     }
@@ -1099,8 +1264,8 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         tenant: &str,
         queue: &str,
     ) -> Result<Option<QueueConfig>, Refusal> {
-        if let Some(v) = ov.queues.get(&(tenant.to_string(), queue.to_string())) {
-            return Ok(v.clone());
+        if let Some(t) = ov.queues.get(&(tenant.to_string(), queue.to_string())) {
+            return Ok(t.v.clone());
         }
         self.committed.queue(tenant, queue).map_err(store_err)
     }
@@ -1112,11 +1277,11 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         queue: &str,
         group: &str,
     ) -> Result<Option<GroupRow>, Refusal> {
-        if let Some(v) = ov
+        if let Some(t) = ov
             .groups
             .get(&(tenant.to_string(), queue.to_string(), group.to_string()))
         {
-            return Ok(v.clone());
+            return Ok(t.v.clone());
         }
         self.committed
             .group(tenant, queue, group)
@@ -1130,11 +1295,11 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         queue: &str,
         partition: &str,
     ) -> Result<Option<Pid>, Refusal> {
-        if let Some(pid) =
+        if let Some(t) =
             ov.pids_by_key
                 .get(&(tenant.to_string(), queue.to_string(), partition.to_string()))
         {
-            return Ok(Some(*pid));
+            return Ok(Some(t.v));
         }
         self.committed
             .pid_of(tenant, queue, partition)
@@ -1155,7 +1320,10 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             mut txns_start,
             mut last_created,
             created_at,
-        ) = match (&committed, overlay.and_then(|o| o.created.as_ref())) {
+        ) = match (
+            &committed,
+            overlay.and_then(|o| o.created.as_ref()).map(|c| &c.v),
+        ) {
             (Some(p), _) => (
                 p.uuid,
                 p.tenant.clone(),
@@ -1185,7 +1353,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 last_offset = last.end as i64;
                 last_created = last.created_at_us;
             }
-            if let Some((ls, ts)) = o.watermark {
+            if let Some(Tagged { v: (ls, ts), .. }) = o.watermark {
                 log_start = ls;
                 txns_start = ts;
             }
@@ -1205,8 +1373,8 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     }
 
     fn cursor(&self, ov: &Overlay, pid: Pid, group: &str) -> Result<Option<CursorRow>, Refusal> {
-        if let Some(v) = ov.cursors.get(&(pid, group.to_string())) {
-            return Ok(v.clone());
+        if let Some(t) = ov.cursors.get(&(pid, group.to_string())) {
+            return Ok(t.v.clone());
         }
         self.committed.cursor(pid, group).map_err(store_err)
     }
