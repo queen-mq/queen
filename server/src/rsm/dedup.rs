@@ -1299,7 +1299,11 @@ impl DedupFront {
             }
             Seed::Complete(hashes) => {
                 let mut pf = PartFront::seeded();
-                let newest = hashes.iter().map(|sh| sh.created_us).max().unwrap_or(floor_us);
+                let newest = hashes
+                    .iter()
+                    .map(|sh| sh.created_us)
+                    .max()
+                    .unwrap_or(floor_us);
                 let slice_us = gen_slice_us(newest, floor_us);
                 for sh in hashes {
                     if sh.created_us < floor_us {
@@ -1507,6 +1511,71 @@ mod tests {
         let x = (n.wrapping_mul(0x9E37_79B9_7F4A_7C15)) as u128
             | ((n.wrapping_mul(0xD1B5_4A32_D192_ED03) as u128) << 64);
         x.to_le_bytes()
+    }
+
+    #[test]
+    fn generations_close_by_time_so_bands_stay_within_a_slice() {
+        // The 2026-09-23 collapse shape: one hot partition at 1,000 msg/s with a
+        // 60 s dedup window, for 300 s. Count-only generations let one span
+        // ~262 s, so a "maybe" band read minutes of records; sliced, a
+        // generation spans at most window/4 and bands stay narrow.
+        let f = DedupFront::new(true, 64 << 20);
+        f.note_created(9);
+        let window_us: i64 = 60_000_000;
+        let slice_us = window_us / FRONT_GEN_SLICES;
+        let t0: i64 = 1_000_000_000_000;
+        let n: u64 = 300_000; // 300 s at 1,000/s
+        for i in 0..n {
+            let created = t0 + (i as i64) * 1_000;
+            f.insert(9, &fh(i), i - (i % 100), i, created, created - window_us);
+        }
+        let now = t0 + (n as i64) * 1_000;
+        let floor = now - window_us;
+        {
+            let parts = f.parts.lock().unwrap();
+            let pf = parts.get(&9).expect("partition tracked");
+            assert!(!pf.fallback, "must not fall back");
+            for g in &pf.gens {
+                let span = g.max_created_us - g.min_created_us;
+                assert!(
+                    span < slice_us,
+                    "generation spans {span} us > slice {slice_us}"
+                );
+            }
+            // Aged to roughly window + one slice of history.
+            assert!(
+                pf.gens.len() <= (FRONT_GEN_SLICES as usize) + 2,
+                "{} gens",
+                pf.gens.len()
+            );
+        }
+        // A duplicate of a recent message: its band covers at most one slice of
+        // offsets (1,000 msg/s x 15 s) plus one append.
+        let mut ranges = Vec::new();
+        let v = f.probe_plan(9, &fh(n - 10), floor, &mut ranges);
+        assert!(
+            matches!(v, ProbeVerdict::Ranges),
+            "a recent hash must probe"
+        );
+        for (lo, hi) in &ranges {
+            assert!(
+                hi - lo <= 15_000 + 100,
+                "band {lo}..{hi} wider than one slice"
+            );
+        }
+        // No false negatives anywhere in the window.
+        for i in (n - 59_000)..n {
+            assert!(
+                f.should_probe(9, &fh(i), floor),
+                "in-window hash {i} skipped"
+            );
+        }
+        // Bounded memory: well under a MiB for ~75 s of 1,000/s at 2 B/hash.
+        assert!(
+            f.stats().bytes < (1 << 20),
+            "front holds {} bytes",
+            f.stats().bytes
+        );
     }
 
     #[test]
