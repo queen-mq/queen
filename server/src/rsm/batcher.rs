@@ -427,7 +427,7 @@ impl Command {
     /// for cutting the drain at `batch_max_bytes` BEFORE planning. The exact
     /// bound is the codec's ([`encode_entry`]); this only decides how many
     /// commands share one cycle.
-    fn size_hint(&self) -> usize {
+    pub(crate) fn size_hint(&self) -> usize {
         match self {
             Command::Push(c) => c.items.iter().map(|i| i.frame.len() + 16).sum::<usize>() + 64,
             Command::Ack(c) => {

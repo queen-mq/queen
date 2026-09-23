@@ -193,6 +193,9 @@ pub enum RsmError {
     },
     /// The cell is above the disk high-water mark (§11.8) → `507 storage_full`.
     StorageFull,
+    /// The push admission budget stayed full for the whole hold
+    /// ([`crate::rsm::admit`]) → `429 overloaded` + `Retry-After`.
+    Overloaded { retry_after_s: u64 },
     /// The command's deadline elapsed before it could be answered (I15).
     Timeout,
     /// A non-retryable, whole-command refusal from the planner (§5.4, I14): a
@@ -215,6 +218,7 @@ impl RsmError {
             RsmError::NoLeader => "no_leader",
             RsmError::NameTooLong { .. } => "name_too_long",
             RsmError::StorageFull => "storage_full",
+            RsmError::Overloaded { .. } => "overloaded",
             RsmError::Timeout => "timeout",
             RsmError::Rejected { .. } => "rejected",
             RsmError::Internal(_) => "internal",
@@ -239,6 +243,10 @@ impl std::fmt::Display for RsmError {
                 "{field} name is {len} bytes; the composite store key limit leaves {limit} bytes for names"
             ),
             RsmError::StorageFull => write!(f, "storage is full on at least one node"),
+            RsmError::Overloaded { retry_after_s } => write!(
+                f,
+                "the broker is over its push admission budget; retry after {retry_after_s} s"
+            ),
             RsmError::Timeout => write!(f, "the request deadline elapsed"),
             RsmError::Rejected { message, .. } => write!(f, "{message}"),
             RsmError::Internal(m) => write!(f, "{m}"),

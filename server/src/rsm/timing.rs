@@ -921,6 +921,7 @@ pub fn render_prometheus(out: &mut String) {
         ));
     }
     crate::rsm::dbgctr::render(out);
+    crate::rsm::admit::render(out);
 }
 
 fn render_summary(

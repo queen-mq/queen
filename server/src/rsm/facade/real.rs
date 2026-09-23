@@ -225,6 +225,8 @@ pub struct RaftFacade {
     /// `PopWildcard` command onto the single serial batcher pipeline. Resolved
     /// once at open.
     pop_fastpath_empty: bool,
+    /// Push admission budget ([`crate::rsm::admit`]); `None` when disabled.
+    admit: Option<crate::rsm::admit::AdmitGate>,
     data_dir: PathBuf,
     storage_full: std::sync::atomic::AtomicBool,
     storage_pressure_enabled: bool,
@@ -420,6 +422,7 @@ impl RaftFacade {
             gates,
             batcher_join,
             pop_fastpath_empty: env_flag("QUEEN_RAFT_POP_FASTPATH_EMPTY", true),
+            admit: crate::rsm::admit::AdmitGate::from_env(),
             data_dir: dir,
             storage_full: std::sync::atomic::AtomicBool::new(false),
             storage_pressure_enabled,
@@ -453,6 +456,7 @@ impl RaftFacade {
             gates: _,
             batcher_join,
             pop_fastpath_empty: _,
+            admit: _,
             data_dir: _,
             storage_full: _,
             storage_pressure_enabled: _,
@@ -524,6 +528,17 @@ impl RaftFacade {
         if command.grows_storage() && self.storage_pressure() {
             return Err(RsmError::StorageFull);
         }
+        // Held until the reply arrives (or the deadline passes): the command's
+        // bytes count against the admission budget while it is in the pipeline.
+        let _admitted =
+            match (&self.admit, command.grows_storage()) {
+                (Some(gate), true) => Some(gate.admit(command.size_hint()).await.map_err(|o| {
+                    RsmError::Overloaded {
+                        retry_after_s: o.retry_after_s,
+                    }
+                })?),
+                _ => None,
+            };
         let (sub, rx) = Submission::new(command);
         // The bounded channel absorbs back-pressure; a full channel waits, up to
         // the deadline.
