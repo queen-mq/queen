@@ -1,0 +1,22 @@
+
+=== window A (30-120 s, clean): 91 s ===
+throughput: push 199980/s, ack 200270/s, backlog slope +9/s (end 1700), push p50 43.5 ms, p99 137.2 ms, ack round trip 41.5 ms
+broker: 4.50 cores, RSS 1393 MB, disk 63.3 MB/s, alive=alive
+batcher cycle (drain->propose, wall): 541 cycles/s, 1.43 ms each, 77% of wall; queue wait 1.6 ms
+planner, whole call: wall 1.16 ms/cycle (69% of wall) vs CPU 0.93 ms/cycle (55%) -> CPU/wall = 0.80
+planner, command loop: wall 0.94 ms/cycle (56%) vs CPU 0.75 ms/cycle (45%) -> CPU/wall = 0.79
+outside the planner call (encode, routing, propose, handoff): 0.27 ms/cycle
+planner OFF-CPU per call: 0.23 ms = run-queue wait (waiting for a core) 0.10 ms + blocked (locks, I/O, faults) 0.14 ms
+planner thread over the window: on-CPU 57% of wall, run-queue 8%, voluntary switches 4050/s, involuntary 320/s
+commands drained 10170/s, deferred unplanned by the 5 ms budget 2883/s = 28.3% of drained (4.8 per cycle)
+
+=== window B (120-290 s): 171 s ===
+throughput: push 199620/s, ack 198850/s, backlog slope +22700/s (end 3747300), push p50 45.1 ms, p99 150.5 ms, ack round trip 41.1 ms
+broker: 4.23 cores, RSS 6161 MB, disk 56.3 MB/s, alive=alive
+batcher cycle (drain->propose, wall): 401 cycles/s, 2.06 ms each, 83% of wall; queue wait 72.1 ms
+planner, whole call: wall 1.73 ms/cycle (76% of wall) vs CPU 1.42 ms/cycle (62%) -> CPU/wall = 0.82
+planner, command loop: wall 1.46 ms/cycle (64%) vs CPU 1.20 ms/cycle (53%) -> CPU/wall = 0.82
+outside the planner call (encode, routing, propose, handoff): 0.33 ms/cycle
+planner OFF-CPU per call: 0.31 ms = run-queue wait (waiting for a core) 0.13 ms + blocked (locks, I/O, faults) 0.18 ms
+planner thread over the window: on-CPU 64% of wall, run-queue 8%, voluntary switches 3691/s, involuntary 271/s
+commands drained 12351/s, deferred unplanned by the 5 ms budget 6628/s = 53.7% of drained (15.2 per cycle)

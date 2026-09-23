@@ -1,0 +1,20 @@
+
+=== window A (30-120 s, clean): 91 s ===
+throughput: push 199950/s, ack 199930/s, backlog slope +35/s (end 3600), push p50 46.9 ms, p99 129.0 ms, ack round trip 58.4 ms
+broker: 4.30 cores, RSS 1545 MB, disk 53.5 MB/s, alive=alive
+batcher cycle (drain->propose, wall): 271 cycles/s, 3.27 ms each, 89% of wall; queue wait 1.3 ms
+planner, whole call: wall 2.86 ms/cycle (82% of wall) vs CPU 2.00 ms/cycle (58%) -> CPU/wall = 0.70
+planner, command loop: wall 2.46 ms/cycle (71%) vs CPU 1.70 ms/cycle (49%) -> CPU/wall = 0.69
+outside the planner call (encode, routing, propose, pool hop): 0.41 ms/cycle
+commands drained 19632/s, deferred unplanned by the 5 ms budget 12847/s = 65.4% of drained (44.6 per cycle)
+
+=== window B (120-290 s, includes the 20 s perf capture): 173 s ===
+throughput: push 199730/s, ack 198280/s, backlog slope +29460/s (end 4862100), push p50 48.4 ms, p99 140.3 ms, ack round trip 56.7 ms
+broker: 4.07 cores, RSS 6883 MB, disk 51.3 MB/s, alive=alive
+batcher cycle (drain->propose, wall): 235 cycles/s, 3.85 ms each, 91% of wall; queue wait 87.6 ms
+planner, whole call: wall 3.39 ms/cycle (84% of wall) vs CPU 2.47 ms/cycle (62%) -> CPU/wall = 0.73
+planner, command loop: wall 2.99 ms/cycle (74%) vs CPU 2.18 ms/cycle (54%) -> CPU/wall = 0.73
+outside the planner call (encode, routing, propose, pool hop): 0.47 ms/cycle
+commands drained 14494/s, deferred unplanned by the 5 ms budget 9182/s = 63.4% of drained (36.9 per cycle)
+samples total=10755 planner=0 (0.0% of the process)
+planner samples ran on 0 distinct threads; top: 

@@ -1,0 +1,71 @@
+samples total=10755 planner=1373 (12.8% of the process)
+planner samples ran on 53 distinct threads; top: 1258579:40, 1258605:37, 1258603:36, 1258598:35, 1258607:35
+
+-- self (leaf) share of planner samples --
+ 30.8%  [unknown]
+  6.9%  ::maybe
+  6.3%  ::insert
+  4.4%  cfree
+  4.1%  malloc
+  4.0%  ::reserve_rehash::
+  3.5%  ::fold_effect
+  3.4%  ::get
+  2.9%  ::plan_push
+  1.7%  ::probe_plan
+  1.7%  ::hash_one::
+  1.7%  realloc
+  1.3%  quicksort::quicksort::
+  1.2%  ptr::drop_glue::
+  1.2%  
+  0.9%  raw::poll::
+  0.9%  ::cursor
+  0.9%  ::partition
+  0.8%  store::rows::partition_decode
+  0.7%  ::ack_target
+  0.7%  str::converts::from_utf8
+  0.6%  ::plan_pop_over_queue
+  0.5%  ::write
+  0.5%  ::clone
+  0.4%  ::vec_bytes16
+
+-- inclusive share of planner samples --
+100.0%  
+100.0%  raw::poll::
+100.0%  [unknown]
+100.0%  backtrace::__rust_begin_short_backtrace::
+100.0%  ::new::thread_start
+ 38.4%  ::plan::
+ 35.8%  ::plan_push
+ 31.8%  ::plan_pop_over_queue
+ 19.3%  ::claim_one
+ 19.1%  ::finish_grow
+ 18.1%  realloc
+ 11.9%  cfree
+ 11.6%  reserve::do_reserve_and_handle::
+ 11.3%  ::partition
+  9.9%  ::probe_plan
+  9.9%  ::fold_effect
+  8.4%  ::insert
+  7.9%  malloc
+  7.8%  ::grow_one
+  7.6%  ::maybe
+  7.6%  ptr::drop_glue::
+  7.4%  ::get_raw
+  6.3%  planner::pop::delivered_from_gathered
+  6.0%  ::ack_target
+  6.0%  ::rebuild_rings::
+  6.0%  store::heed_store::ram_scan
+  6.0%  ::scan_pending
+  5.8%  ::scan_pending::{closure#0}
+  5.4%  ::reserve_rehash::
+  5.2%  ::get
+  4.7%  entry_SYSCALL_64_after_hwframe
+  4.7%  do_syscall_64
+  4.4%  x64_sys_call
+  4.3%  ::cursor
+  4.3%  common_interrupt
+  4.3%  asm_common_interrupt
+  4.2%  handle_softirqs
+  4.2%  __irq_exit_rcu
+  4.2%  irq_exit_rcu
+  3.9%  net_rx_action

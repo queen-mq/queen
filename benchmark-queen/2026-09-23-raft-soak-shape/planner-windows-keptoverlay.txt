@@ -1,0 +1,24 @@
+
+=== window A (30-120 s, clean): 91 s ===
+throughput: push 199990/s, ack 200300/s, backlog slope -9/s (end 100), push p50 42.0 ms, p99 130.8 ms, ack round trip 40.5 ms
+broker: 4.42 cores, RSS 1408 MB, disk 64.6 MB/s, alive=alive
+batcher cycle (drain->propose, wall): 603 cycles/s, 1.21 ms each, 73% of wall; queue wait 1.7 ms
+planner, whole call: wall 0.95 ms/cycle (64% of wall) vs CPU 0.75 ms/cycle (50%) -> CPU/wall = 0.79
+planner, command loop: wall 0.84 ms/cycle (56%) vs CPU 0.66 ms/cycle (44%) -> CPU/wall = 0.78
+outside the planner call (encode, routing, propose, handoff): 0.26 ms/cycle
+planner OFF-CPU per call: 0.20 ms = run-queue wait (waiting for a core) 0.09 ms + blocked (locks, I/O, faults) 0.12 ms
+planner thread over the window: on-CPU 52% of wall, run-queue 8%, voluntary switches 3885/s, involuntary 303/s
+kept overlay counters over the window: keep_overlay_total{outcome="advanced"}=673.1/s, keep_overlay_total{outcome="fallback"}=0.0/s, keep_overlay_total{outcome="mismatch"}=0.0/s, keep_overlay_total{outcome="poisoned"}=0.0/s, keep_overlay_total{outcome="rebuilt"}=0.0/s, plan_ring_loads_total=0.0/s
+commands drained 9837/s, deferred unplanned by the 5 ms budget 2542/s = 25.8% of drained (3.8 per cycle)
+
+=== window B (120-290 s): 171 s ===
+throughput: push 199700/s, ack 199270/s, backlog slope +18982/s (end 3132700), push p50 44.3 ms, p99 144.4 ms, ack round trip 39.6 ms
+broker: 4.19 cores, RSS 6033 MB, disk 59.1 MB/s, alive=alive
+batcher cycle (drain->propose, wall): 477 cycles/s, 1.66 ms each, 79% of wall; queue wait 68.1 ms
+planner, whole call: wall 1.35 ms/cycle (71% of wall) vs CPU 1.10 ms/cycle (58%) -> CPU/wall = 0.81
+planner, command loop: wall 1.22 ms/cycle (64%) vs CPU 0.99 ms/cycle (52%) -> CPU/wall = 0.81
+outside the planner call (encode, routing, propose, handoff): 0.31 ms/cycle
+planner OFF-CPU per call: 0.25 ms = run-queue wait (waiting for a core) 0.11 ms + blocked (locks, I/O, faults) 0.15 ms
+planner thread over the window: on-CPU 60% of wall, run-queue 8%, voluntary switches 3684/s, involuntary 275/s
+kept overlay counters over the window: keep_overlay_total{outcome="advanced"}=525.9/s, keep_overlay_total{outcome="fallback"}=0.0/s, keep_overlay_total{outcome="mismatch"}=0.0/s, keep_overlay_total{outcome="poisoned"}=0.0/s, keep_overlay_total{outcome="rebuilt"}=0.0/s, plan_ring_loads_total=0.0/s
+commands drained 11684/s, deferred unplanned by the 5 ms budget 5769/s = 49.4% of drained (11.0 per cycle)
