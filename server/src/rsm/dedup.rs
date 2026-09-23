@@ -870,6 +870,22 @@ const FRONT_GEN_CAP_MIN: usize = 4096;
 /// generations.
 const FRONT_GEN_CAP_MAX: usize = 1 << 20;
 const FRONT_GEN_TIER: usize = 8;
+/// A generation also closes once it spans this fraction of the dedup window
+/// (`FRONT_GEN_SLICES` slices per window, never under `FRONT_GEN_SLICE_MIN_US`).
+/// Closing by count alone let one generation of a hot partition span minutes
+/// (262k hashes at 1,000 msg/s = ~262 s): every "maybe" then read the committed
+/// records of that whole span, and its false-positive rate climbed as it sat
+/// near full. Measured 2026-09-23 at 200k msg/s over 200 partitions: dedup band
+/// reads grew from 20k to 282k records/s between t=200 s and t=300 s and
+/// collapsed the serial planner. Sliced, a band covers at most one slice.
+const FRONT_GEN_SLICES: i64 = 4;
+const FRONT_GEN_SLICE_MIN_US: i64 = 250_000;
+
+/// The time slice a generation may span for a window ending at `created_us`
+/// whose floor is `floor_us`.
+fn gen_slice_us(created_us: i64, floor_us: i64) -> i64 {
+    (created_us.saturating_sub(floor_us) / FRONT_GEN_SLICES).max(FRONT_GEN_SLICE_MIN_US)
+}
 /// Default global cap in MiB (`QUEEN_RAFT_DEDUP_FRONT_MB`). 512 MiB fronts
 /// ~256 M in-window hashes at 2 B each before any partition falls back.
 pub const FRONT_DEFAULT_CAP_MB: usize = 512;
@@ -889,6 +905,9 @@ struct FrontGen {
     len: usize,
     cap: usize,
     max_created_us: i64,
+    /// The earliest `created_us` inserted (i64::MAX while empty): the start of
+    /// the time slice this generation covers.
+    min_created_us: i64,
     /// The smallest append BASE offset any hash in this generation came from,
     /// and the largest message offset — the `[min_base, max_off]` band the txns
     /// range scan walks on a "maybe" (PERF-E). `min_base` (not the first
@@ -909,6 +928,7 @@ impl FrontGen {
             len: 0,
             cap,
             max_created_us: i64::MIN,
+            min_created_us: i64::MAX,
             min_base: u64::MAX,
             max_off: 0,
         }
@@ -933,6 +953,9 @@ impl FrontGen {
         self.len += 1;
         if created_us > self.max_created_us {
             self.max_created_us = created_us;
+        }
+        if created_us < self.min_created_us {
+            self.min_created_us = created_us;
         }
         if base_off < self.min_base {
             self.min_base = base_off;
@@ -1021,19 +1044,33 @@ impl PartFront {
         out.len() > before
     }
 
-    fn needs_new_gen(&self) -> bool {
+    fn needs_new_gen(&self, created_us: i64, slice_us: i64) -> bool {
         match self.gens.back() {
-            Some(g) => g.len >= g.cap,
+            Some(g) => {
+                g.len >= g.cap
+                    || (g.len > 0 && created_us.saturating_sub(g.min_created_us) >= slice_us)
+            }
             None => true,
         }
     }
 
+    /// Capacity of the generation the next roll opens: tier up (×8) when the
+    /// current one filled by count; when it closed by time, fit the successor
+    /// to the rate it observed (×1.25, rounded up to a power of two) so slices
+    /// of a steady stream do not keep tiering up into the byte cap.
+    fn next_gen_cap(&self) -> usize {
+        match self.gens.back() {
+            Some(g) if g.len >= g.cap => (g.cap * FRONT_GEN_TIER).min(FRONT_GEN_CAP_MAX),
+            Some(g) => (g.len + g.len / 4)
+                .next_power_of_two()
+                .clamp(FRONT_GEN_CAP_MIN, FRONT_GEN_CAP_MAX),
+            None if self.gen_next_cap == 0 => FRONT_GEN_CAP_MIN,
+            None => self.gen_next_cap,
+        }
+    }
+
     fn next_gen_bytes(&self) -> usize {
-        let cap = if self.gen_next_cap == 0 {
-            FRONT_GEN_CAP_MIN
-        } else {
-            self.gen_next_cap
-        };
+        let cap = self.next_gen_cap();
         // `cap × 16 bits`, rounded to whole 512-bit blocks, plus the header.
         let cap = cap.max(32);
         (cap / 32) * 8 * 8 + FRONT_BYTES_PER_GEN
@@ -1042,16 +1079,20 @@ impl PartFront {
     /// Insert `h` (from append `base_off`, at message offset `msg_off`), opening
     /// (and tiering) a new generation when the current is full. Returns the
     /// bytes added (a new generation's, else 0).
-    fn insert(&mut self, h: u128, base_off: u64, msg_off: u64, created_us: i64) -> usize {
+    fn insert(
+        &mut self,
+        h: u128,
+        base_off: u64,
+        msg_off: u64,
+        created_us: i64,
+        slice_us: i64,
+    ) -> usize {
         let mut added = 0;
-        if self.needs_new_gen() {
-            let cap = if self.gen_next_cap == 0 {
-                FRONT_GEN_CAP_MIN
-            } else {
-                self.gen_next_cap
-            };
+        if self.needs_new_gen(created_us, slice_us) {
+            let cap = self.next_gen_cap();
             let g = FrontGen::new(cap);
-            self.gen_next_cap = (g.cap * FRONT_GEN_TIER).min(FRONT_GEN_CAP_MAX);
+            // Remembered for a roll that finds no generation (all aged out).
+            self.gen_next_cap = cap;
             added = g.bytes();
             self.bytes += added;
             self.gens.push_back(g);
@@ -1258,12 +1299,14 @@ impl DedupFront {
             }
             Seed::Complete(hashes) => {
                 let mut pf = PartFront::seeded();
+                let newest = hashes.iter().map(|sh| sh.created_us).max().unwrap_or(floor_us);
+                let slice_us = gen_slice_us(newest, floor_us);
                 for sh in hashes {
                     if sh.created_us < floor_us {
                         continue; // out of window: never a duplicate, skip
                     }
                     let cap = self.byte_cap as u64;
-                    if pf.needs_new_gen()
+                    if pf.needs_new_gen(sh.created_us, slice_us)
                         && self.total_bytes.load(Ordering::Relaxed) + pf.next_gen_bytes() as u64
                             > cap
                     {
@@ -1277,6 +1320,7 @@ impl DedupFront {
                         sh.base_off,
                         sh.msg_off,
                         sh.created_us,
+                        slice_us,
                     );
                     if added > 0 {
                         self.total_bytes.fetch_add(added as u64, Ordering::Relaxed);
@@ -1391,7 +1435,8 @@ impl DedupFront {
         if freed > 0 {
             self.total_bytes.fetch_sub(freed as u64, Ordering::Relaxed);
         }
-        if pf.needs_new_gen() {
+        let slice_us = gen_slice_us(created_us, floor_us);
+        if pf.needs_new_gen(created_us, slice_us) {
             let cap = self.byte_cap as u64;
             if self.total_bytes.load(Ordering::Relaxed) + pf.next_gen_bytes() as u64 > cap {
                 let freed = pf.mark_fallback();
@@ -1399,7 +1444,7 @@ impl DedupFront {
                 return;
             }
         }
-        let added = pf.insert(h, base_off, msg_off, created_us);
+        let added = pf.insert(h, base_off, msg_off, created_us, slice_us);
         if added > 0 {
             self.total_bytes.fetch_add(added as u64, Ordering::Relaxed);
         }

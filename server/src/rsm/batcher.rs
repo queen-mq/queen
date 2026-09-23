@@ -150,6 +150,15 @@ pub struct BatcherConfig {
     /// `QUEEN_RAFT_DRAIN_GREEDY` (PERF-L): pull the whole channel into one
     /// batch before planning, so one entry carries many commands.
     pub drain_greedy: bool,
+    /// `QUEEN_RAFT_DRAIN_LANE` (default on): every non-push command (acks, pops,
+    /// renewals, nacks, transactions, timers, KV) waits in a priority lane that
+    /// each cycle drains BEFORE any push, and a budget-cut command returns to the
+    /// front of its own lane. Measured 2026-09-23 at 200k msg/s: with one FIFO
+    /// queue, budget-cut pushes went back to its front and each 4 MB drain filled
+    /// with them, so pops waited behind them past their long-poll deadline and
+    /// consumption fell to zero while pushes kept landing. Draining first keeps
+    /// the work that empties the system ahead of the work that fills it.
+    pub drain_lane: bool,
     /// `QUEEN_RAFT_KV_SWEEP_MS` (WP-2.2, 026's cadence role): how often the
     /// leader plans one bounded KV expiry step. Reads never wait for it — an
     /// expired key reads as absent at once (§5.7) — so this only bounds how
@@ -198,6 +207,7 @@ impl Default for BatcherConfig {
             driver_notify: true,
             push_priority: true,
             drain_greedy: true,
+            drain_lane: true,
             kv_sweep_every_ms: 1_000,
             kv_sweep_limit: crate::rsm::planner::kv::SWEEP_LIMIT_DEFAULT,
             timer_tick_ms: 0,
@@ -270,6 +280,7 @@ impl BatcherConfig {
             driver_notify: flag("QUEEN_RAFT_DRIVER_NOTIFY", d.driver_notify),
             push_priority: flag("QUEEN_RAFT_PUSH_PRIORITY", d.push_priority),
             drain_greedy: flag("QUEEN_RAFT_DRAIN_GREEDY", d.drain_greedy),
+            drain_lane: flag("QUEEN_RAFT_DRAIN_LANE", d.drain_lane),
             kv_sweep_every_ms: num("QUEEN_RAFT_KV_SWEEP_MS", d.kv_sweep_every_ms),
             kv_sweep_limit: num("QUEEN_RAFT_KV_SWEEP_LIMIT", d.kv_sweep_limit as u64) as usize,
             // `0` is honoured here (firing off), unlike the other numeric knobs.
@@ -1528,6 +1539,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             result_rx,
             applied_notify,
             queue: VecDeque::new(),
+            lane: VecDeque::new(),
             inflight: VecDeque::new(),
             next_seq: 1,
             next_index,
@@ -1553,7 +1565,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             // faster cycles → smaller entries → more result wakes → even less
             // intake (measured: 1024-deep channel full, submit waits 6-110 ms).
             while let Ok(more) = st.cmd_rx.try_recv() {
-                st.queue.push_back(more);
+                st.enqueue(more);
             }
             while st.can_plan() {
                 st.plan_cycle().await;
@@ -1608,7 +1620,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                     st.note_wake("arrival");
                     match maybe {
                         Some(sub) => {
-                            st.queue.push_back(sub);
+                            st.enqueue(sub);
                             // PERF-L level-1 fusion: pull everything already
                             // queued in the channel into this cycle's batch so
                             // one log entry (hence one fsync) carries many
@@ -1616,7 +1628,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                             // preserved; drain_batch still applies the caps.
                             if st.cfg.drain_greedy {
                                 while let Ok(more) = st.cmd_rx.try_recv() {
-                                    st.queue.push_back(more);
+                                    st.enqueue(more);
                                 }
                             }
                         }
@@ -1702,6 +1714,8 @@ struct RunState<S: Store, R: Replicator> {
     /// or `None` when the knob is off or the backend does not expose it.
     applied_notify: Option<Arc<Notify>>,
     queue: VecDeque<Submission>,
+    /// The priority lane (`drain_lane`): non-push commands, drained first.
+    lane: VecDeque<Submission>,
     inflight: VecDeque<InFlightEntry>,
     next_seq: u64,
     next_index: u64,
@@ -1795,12 +1809,37 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             .count()
     }
 
+    /// Queue a submission at the back of its lane: pushes in `queue`, every
+    /// other command in the priority `lane` (when `drain_lane` is on).
+    fn enqueue(&mut self, sub: Submission) {
+        if self.cfg.drain_lane && !matches!(sub.command, Command::Push(_)) {
+            self.lane.push_back(sub);
+        } else {
+            self.queue.push_back(sub);
+        }
+    }
+
+    /// Put a submission back at the FRONT of its lane (a budget-cut deferral,
+    /// an orphan-release nack): it is the next of its kind to be planned.
+    fn requeue_front(&mut self, sub: Submission) {
+        if self.cfg.drain_lane && !matches!(sub.command, Command::Push(_)) {
+            self.lane.push_front(sub);
+        } else {
+            self.queue.push_front(sub);
+        }
+    }
+
+    /// Commands waiting in both lanes.
+    fn queued(&self) -> usize {
+        self.queue.len() + self.lane.len()
+    }
+
     fn can_plan(&self) -> bool {
         !self.stopped
             && !self.paused
             && self.holding_until.is_none()
             && self.unresolved() < self.cfg.pipeline
-            && (!self.queue.is_empty()
+            && (self.queued() > 0
                 || ((self.expire_due
                     || self.kv_sweep_due
                     || self.timers_due
@@ -1811,7 +1850,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     fn should_exit(&self) -> bool {
         self.stopped
             || (self.closing
-                && self.queue.is_empty()
+                && self.queued() == 0
                 && self.unresolved() == 0
                 && self.holding_until.is_none())
     }
@@ -1823,18 +1862,22 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     fn drain_batch(&mut self) -> Vec<Submission> {
         let mut batch = Vec::new();
         let mut bytes = 0usize;
-        while let Some(front) = self.queue.front() {
-            if batch.len() >= self.cfg.batch_max_cmds {
-                break;
+        let (max_cmds, max_bytes) = (self.cfg.batch_max_cmds, self.cfg.batch_max_bytes);
+        // The priority lane first (empty when `drain_lane` is off), then pushes.
+        for q in [&mut self.lane, &mut self.queue] {
+            while let Some(front) = q.front() {
+                if batch.len() >= max_cmds {
+                    break;
+                }
+                let hint = front.command.size_hint();
+                if !batch.is_empty() && bytes + hint > max_bytes {
+                    break;
+                }
+                bytes += hint;
+                batch.push(q.pop_front().unwrap());
             }
-            let hint = front.command.size_hint();
-            if !batch.is_empty() && bytes + hint > self.cfg.batch_max_bytes {
-                break;
-            }
-            bytes += hint;
-            batch.push(self.queue.pop_front().unwrap());
         }
-        if self.cfg.push_priority && batch.len() > 1 {
+        if self.cfg.push_priority && !self.cfg.drain_lane && batch.len() > 1 {
             batch = interleave_push_first(batch);
         }
         batch
@@ -1874,7 +1917,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 self.unresolved(),
                 self.inflight.len(),
                 gap,
-                self.queue.len(),
+                self.queued(),
             )
         } else {
             (0, 0, 0, 0, 0)
@@ -2171,7 +2214,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
 
         // Return budget-cut commands to the front of the queue, in order.
         for sub in deferred.into_iter().rev() {
-            self.queue.push_front(sub);
+            self.requeue_front(sub);
         }
 
         if let (Some(bytes), Some(entry)) = (encoded, out.entry) {
@@ -2221,7 +2264,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 if has_entry { 1 } else { 0 },
                 tr_entry_cmds,
                 tr_qbefore,
-                self.queue.len(),
+                self.queued(),
                 tr_unresolved0,
                 self.unresolved(),
                 tr_inflight0,
@@ -2251,7 +2294,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         {
             match slot {
                 // PERF-J: keep the original arrival on the requeued tail.
-                Slot::Deferred(command) => self.queue.push_front(Submission {
+                Slot::Deferred(command) => self.requeue_front(Submission {
                     command: *command,
                     reply,
                     received_at: arrived,
@@ -2600,7 +2643,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 group,
                 worker,
             }));
-            self.queue.push_front(sub);
+            self.requeue_front(sub);
         }
     }
 
@@ -2609,7 +2652,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         for mut e in self.inflight.drain(..) {
             e.fail(hint);
         }
-        while let Some(sub) = self.queue.pop_front() {
+        while let Some(sub) = self.lane.pop_front().or_else(|| self.queue.pop_front()) {
             let _ = sub.reply.send(Reply::Retry { hint });
         }
     }
