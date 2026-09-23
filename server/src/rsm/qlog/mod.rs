@@ -266,6 +266,9 @@ pub struct EntryInput<'a> {
     pub seq: u64,
     pub now_us: i64,
     pub copies: u32,
+    /// The Raft term of the entry (openraft log storage); `0` on the local
+    /// replicator. Stored in the record's `base_offset` slot.
+    pub term: u64,
     pub entry: &'a [u8],
 }
 
@@ -299,6 +302,8 @@ pub struct EntryRecord {
     pub now_us: i64,
     /// How many queue logs the writer wrote this entry record to (≥ 1).
     pub copies: u32,
+    /// The Raft term the record carries (`0` from the local replicator).
+    pub term: u64,
     /// The payload-free entry bytes, exactly as written.
     pub entry: Vec<u8>,
 }
@@ -842,11 +847,12 @@ impl QLog {
                     });
                 }
                 WriteRecord::Entry(e) => {
-                    record::encode_entry_copies_into(
+                    record::encode_entry_record_into(
                         &mut buf,
                         e.seq,
                         e.now_us,
                         u64::from(e.copies),
+                        e.term,
                         e.entry,
                     );
                 }
@@ -1430,6 +1436,7 @@ impl QLog {
                         now_us: h.created_at_us,
                         // `pid` carries `copies`; 0 (pre-Phase-C) reads as one.
                         copies: u32::try_from(h.pid).unwrap_or(u32::MAX).max(1),
+                        term: h.base_offset,
                         entry: rr.payload.to_vec(),
                     });
                 }

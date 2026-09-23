@@ -263,7 +263,7 @@ struct SyncJob {
 
 /// Resolve a `pid` to its `queue_id` from the committed partition catalog (a
 /// store read), for the writer's `pid -> queue_id` map miss (A3b).
-type PartitionLookup = Arc<dyn Fn(u64) -> io::Result<Option<u64>> + Send + Sync>;
+pub(crate) type PartitionLookup = Arc<dyn Fn(u64) -> io::Result<Option<u64>> + Send + Sync>;
 
 /// The log-native WRITE side the writer owns when `QUEEN_RAFT_QLOG` is on
 /// (`ALICE_PGLESS_NEWARCH.md` A3b, the double-write kill; Phase C, the queue
@@ -273,22 +273,261 @@ type PartitionLookup = Arc<dyn Fn(u64) -> io::Result<Option<u64>> + Send + Sync>
 /// every touched log ONCE, and only then hands the group to apply. The raft log
 /// is not written on this path: the queue logs alone recover every
 /// acknowledged entry.
-struct QlogWrite {
+pub(crate) struct QlogWrite {
     /// The per-queue logs (opened + reconciled at boot, moved here). The single
     /// WRITER of them; the facade + planner read the SAME logs through a shared
     /// `QLogReader` the boot published.
-    set: QLogSet,
+    pub(crate) set: QLogSet,
     /// `pid -> queue_id`, so the writer routes an `Append` to its queue's log
     /// without a name lookup. Seeded at boot from the raft-log replay window
     /// (partitions created between the store's durable point and the log tip),
     /// maintained here from `PartitionCreate`/`PartitionDelete`, and filled on a
     /// miss from the committed partition catalog via [`QlogWrite::lookup`].
-    pid_qid: HashMap<u64, u64>,
+    pub(crate) pid_qid: HashMap<u64, u64>,
     /// Resolve `pid -> queue_id` from the committed partition catalog (a store
     /// read), for a partition created before the last restart — its create was
     /// truncated from the replay window, but its row is committed, so a map miss
     /// can only be such a partition and this read always finds it.
-    lookup: PartitionLookup,
+    pub(crate) lookup: PartitionLookup,
+}
+
+impl QlogWrite {
+    /// Write one group into the queue logs and fsync it — THE write-ahead
+    /// barrier on both replicators. For each item, in order: its `Append`
+    /// payload records into each payload's queue log, then one entry record
+    /// (with `copies`, and the item's `seq` and `term`) into every queue log
+    /// its effects touch, or into the system log ([`SYSTEM_QUEUE_ID`]) when it
+    /// touches none (and always for a [`GroupBody::Raw`] record). One `write`
+    /// per touched log, then ONE `sync` of every touched log; only then may the
+    /// caller acknowledge the group. Recovery keeps the complete, gapless
+    /// prefix (every copy of an entry present), so a crash anywhere before the
+    /// sync leaves nothing half-acknowledged. On return every
+    /// [`GroupBody::Entry`] holds its PAYLOAD-FREE decode.
+    pub(crate) fn write_group(&mut self, items: &mut [GroupItem]) -> io::Result<()> {
+        use crate::rsm::effect::Effect;
+        // The payload-free bytes of every entry, encoded from the ORIGINAL entry
+        // (the payloads are still in it) — the entry records carry these.
+        let mut pf: Vec<Vec<u8>> = Vec::with_capacity(items.len());
+        for it in items.iter() {
+            match &it.body {
+                GroupBody::Entry { entry, .. } => {
+                    pf.push(encode_entry_payload_free(entry).map_err(|e| {
+                        io::Error::other(format!("payload-free entry encode: {e:?}"))
+                    })?)
+                }
+                GroupBody::Raw { bytes, .. } => pf.push(bytes.clone()),
+            }
+        }
+        // The node-local payload codec (qlog::codec): every `Append` blob of the
+        // group, in effect order, compressed before the write (several threads
+        // when the group is big — this thread is the serial writer). `None` =
+        // store raw (small, incompressible, or the codec is off).
+        let mut zblobs: Vec<Option<Vec<u8>>> = Vec::new();
+        for it in items.iter_mut() {
+            let GroupBody::Entry { entry, pre } = &mut it.body else {
+                continue;
+            };
+            // Started at propose (the usual case: collected here, already done
+            // while the previous group fsynced); compressed now when it was not.
+            let pre = std::mem::take(pre);
+            let raws: Vec<&[u8]> = entry
+                .effects
+                .iter()
+                .filter_map(|eff| match eff {
+                    Effect::Append { blob, .. } => Some(blob.as_slice()),
+                    _ => None,
+                })
+                .collect();
+            if pre.len() == raws.len() {
+                zblobs.extend(pre.into_iter().map(crate::rsm::qlog::codec::Pre::finish));
+            } else {
+                zblobs.extend(crate::rsm::qlog::codec::compress_all(&raws));
+            }
+        }
+        let mut zi = 0usize;
+        // The records borrow `items` (payloads/hashes), `pf` (entry bytes) and
+        // `zblobs`, so the write + barrier are scoped to end BEFORE the entries
+        // are rewritten below.
+        {
+            let q = self;
+            let lookup = q.lookup.clone();
+            let mut by_qid: std::collections::BTreeMap<u64, Vec<WriteRecord<'_>>> =
+                std::collections::BTreeMap::new();
+            let mut touched: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+            let mut msgs: Vec<(u64, WriteRecord<'_>)> = Vec::new();
+            for (i, it) in items.iter().enumerate() {
+                let seq = it.seq;
+                touched.clear();
+                msgs.clear();
+                let (entry, now_us) = match &it.body {
+                    GroupBody::Entry { entry, .. } => (Some(entry), entry.now_us),
+                    GroupBody::Raw { now_us, .. } => (None, *now_us),
+                };
+                let mut unresolved = entry.is_none();
+                for eff in entry.map(|e| e.effects.as_slice()).unwrap_or(&[]) {
+                    match eff {
+                        Effect::QueueUpsert { tenant, queue, .. }
+                        | Effect::QueueDelete { tenant, queue }
+                        | Effect::GroupUpsert { tenant, queue, .. }
+                        | Effect::GroupDelete { tenant, queue, .. }
+                        | Effect::DlqInsert { tenant, queue, .. }
+                        | Effect::DlqDelete { tenant, queue, .. } => {
+                            touched.insert(QLogSet::queue_id_of(tenant, queue));
+                        }
+                        Effect::PartitionCreate {
+                            pid, tenant, queue, ..
+                        } => {
+                            let qid = QLogSet::queue_id_of(tenant, queue);
+                            q.pid_qid.insert(*pid, qid);
+                            touched.insert(qid);
+                        }
+                        Effect::PartitionDelete { pid } => {
+                            match resolve_qid(&mut q.pid_qid, &lookup, *pid)? {
+                                Some(qid) => {
+                                    touched.insert(qid);
+                                }
+                                None => unresolved = true,
+                            }
+                            q.pid_qid.remove(pid);
+                        }
+                        Effect::CursorSet { pid, .. }
+                        | Effect::CursorDelete { pid, .. }
+                        | Effect::Watermark { pid, .. } => {
+                            match resolve_qid(&mut q.pid_qid, &lookup, *pid)? {
+                                Some(qid) => {
+                                    touched.insert(qid);
+                                }
+                                None => unresolved = true,
+                            }
+                        }
+                        Effect::Append {
+                            pid,
+                            base_offset,
+                            count,
+                            created_at_us,
+                            hashes,
+                            blob,
+                            ..
+                        } => {
+                            let qid =
+                                resolve_qid(&mut q.pid_qid, &lookup, *pid)?.ok_or_else(|| {
+                                    io::Error::other(format!(
+                                        "qlog route: no partition row for pid {pid}"
+                                    ))
+                                })?;
+                            touched.insert(qid);
+                            let z = zblobs[zi].as_deref();
+                            zi += 1;
+                            let r = RecordInput {
+                                seq,
+                                pid: *pid,
+                                base_offset: *base_offset,
+                                count: *count,
+                                created_at_us: *created_at_us,
+                                txn: None,
+                                hashes,
+                                payload: z.unwrap_or(blob),
+                            };
+                            msgs.push((
+                                qid,
+                                if z.is_some() {
+                                    WriteRecord::Zstd(r)
+                                } else {
+                                    WriteRecord::Msg(r)
+                                },
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                if touched.is_empty() || unresolved {
+                    touched.insert(SYSTEM_QUEUE_ID);
+                }
+                let copies = touched.len() as u32;
+                // Each log: this entry's payload records (effect order), then its
+                // entry record — so an entry record found on disk implies every
+                // payload record of that entry in the same log precedes it.
+                for (qid, r) in msgs.drain(..) {
+                    by_qid.entry(qid).or_default().push(r);
+                }
+                for qid in &touched {
+                    by_qid
+                        .entry(*qid)
+                        .or_default()
+                        .push(WriteRecord::Entry(EntryInput {
+                            seq,
+                            now_us,
+                            copies,
+                            term: it.term,
+                            entry: &pf[i],
+                        }));
+                }
+            }
+            // One write per touched log (page cache, no fsync yet). Every log
+            // written is marked dirty, so the sync below covers a group of pops
+            // and acks exactly as it covers pushes.
+            for (qid, records) in &by_qid {
+                q.set.write_mixed_for_qid(*qid, records)?;
+            }
+            // `qlog.record_written` (and its raft-era twin `log.appended`): the
+            // group is in the page cache, not fsynced, nothing answered. A kill
+            // here keeps the page cache and the group replays; a power loss may
+            // keep any subset — recovery keeps the complete gapless prefix.
+            crate::rsm::faults::hit("qlog.record_written");
+            crate::rsm::faults::hit("log.appended");
+            // THE BARRIER: every touched queue log, once. Timed into `log_fsync`
+            // (PERF-1), which keeps meaning "the WAL barrier" on this path.
+            let s0 = crate::rsm::timing::stamp();
+            q.set.sync()?;
+            if let Some(s0) = s0 {
+                crate::rsm::timing::metrics()
+                    .log_fsync
+                    .record_dur(s0.elapsed());
+            }
+            // `qlog.record_fsynced` (and `log.flushed`): the group is durable in
+            // the queue logs and not yet applied; it WILL replay on restart.
+            crate::rsm::faults::hit("qlog.record_fsynced");
+            crate::rsm::faults::hit("log.flushed");
+        }
+        // Hand apply the PAYLOAD-FREE form — each `Append`'s `blob` is the
+        // payload's 4-byte frame length — byte-identical to what a replay from the
+        // queue logs hands it, so `RetainedBytes` (a REPLICATED counter) is
+        // computed from the length on BOTH paths and the digest is replay-stable
+        // (I2). Cheap: the entry carries no payload.
+        for (it, bytes) in items.iter_mut().zip(pf.iter()) {
+            if let GroupBody::Entry { entry, .. } = &mut it.body {
+                *entry = Arc::new(decode_entry(bytes).map_err(|e| {
+                    io::Error::other(format!("payload-free entry re-decode: {e:?}"))
+                })?);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One entry of a queue-log write group — what the local writer and the
+/// openraft log storage both hand [`QlogWrite::write_group`].
+pub(crate) struct GroupItem {
+    /// The record `seq`: the entry's index in the log.
+    pub(crate) seq: u64,
+    /// The Raft term (`0` on the local replicator), stored in each entry record.
+    pub(crate) term: u64,
+    pub(crate) body: GroupBody,
+}
+
+/// What a [`GroupItem`] carries.
+pub(crate) enum GroupBody {
+    /// An application entry: every `Append` payload goes to its queue's log
+    /// and one payload-free entry record to every log its effects touch. After
+    /// the write, `entry` is REPLACED by its payload-free decode — the exact
+    /// form a replay hands apply (the I2 `RetainedBytes` rule).
+    Entry {
+        entry: Arc<crate::rsm::entry::Entry>,
+        pre: Vec<crate::rsm::qlog::codec::Pre>,
+    },
+    /// A consensus-internal record (an openraft blank or membership entry):
+    /// its bytes are written verbatim as one entry record in the system log.
+    Raw { now_us: i64, bytes: Vec<u8> },
 }
 
 struct Writer {
@@ -594,190 +833,28 @@ impl Writer {
     /// Each `p.entry` is then replaced by its payload-free decode, so apply sees
     /// LIVE exactly the form a replay hands it (the I2 `RetainedBytes` rule).
     fn write_qlog_group(&mut self, pending: &mut [Pending], first_index: u64) -> io::Result<()> {
-        use crate::rsm::effect::Effect;
-        // The payload-free bytes of every entry, encoded from the ORIGINAL entry
-        // (the payloads are still in it) — the entry records carry these.
-        let mut pf: Vec<Vec<u8>> = Vec::with_capacity(pending.len());
-        for p in pending.iter() {
-            pf.push(
-                encode_entry_payload_free(&p.entry)
-                    .map_err(|e| io::Error::other(format!("payload-free entry encode: {e:?}")))?,
-            );
-        }
-        // The node-local payload codec (qlog::codec): every `Append` blob of the
-        // group, in effect order, compressed before the write (several threads
-        // when the group is big — this thread is the serial writer). `None` =
-        // store raw (small, incompressible, or the codec is off).
-        let mut zblobs: Vec<Option<Vec<u8>>> = Vec::new();
-        for p in pending.iter_mut() {
-            // Started at propose (the usual case: collected here, already done
-            // while the previous group fsynced); compressed now when it was not.
-            let pre = std::mem::take(&mut p.pre);
-            let raws: Vec<&[u8]> = p
-                .entry
-                .effects
-                .iter()
-                .filter_map(|eff| match eff {
-                    Effect::Append { blob, .. } => Some(blob.as_slice()),
-                    _ => None,
-                })
-                .collect();
-            if pre.len() == raws.len() {
-                zblobs.extend(pre.into_iter().map(crate::rsm::qlog::codec::Pre::finish));
-            } else {
-                zblobs.extend(crate::rsm::qlog::codec::compress_all(&raws));
+        // The shared group write (`QlogWrite::write_group`), with the index the
+        // writer assigns and term 0 (the local replicator has no terms).
+        let mut items: Vec<GroupItem> = pending
+            .iter_mut()
+            .enumerate()
+            .map(|(i, p)| GroupItem {
+                seq: first_index + i as u64,
+                term: 0,
+                body: GroupBody::Entry {
+                    entry: p.entry.clone(),
+                    pre: std::mem::take(&mut p.pre),
+                },
+            })
+            .collect();
+        self.qlog
+            .as_mut()
+            .expect("qlog on")
+            .write_group(&mut items)?;
+        for (p, it) in pending.iter_mut().zip(items) {
+            if let GroupBody::Entry { entry, .. } = it.body {
+                p.entry = entry;
             }
-        }
-        let mut zi = 0usize;
-        // The records borrow `pending` (payloads/hashes), `pf` (entry bytes) and
-        // `zblobs`, so the write + barrier are scoped to end BEFORE the entries
-        // are rewritten below.
-        {
-            let q = self.qlog.as_mut().expect("qlog on");
-            let lookup = q.lookup.clone();
-            let mut by_qid: std::collections::BTreeMap<u64, Vec<WriteRecord<'_>>> =
-                std::collections::BTreeMap::new();
-            let mut touched: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
-            let mut msgs: Vec<(u64, WriteRecord<'_>)> = Vec::new();
-            for (i, p) in pending.iter().enumerate() {
-                let seq = first_index + i as u64;
-                touched.clear();
-                msgs.clear();
-                let mut unresolved = false;
-                for eff in &p.entry.effects {
-                    match eff {
-                        Effect::QueueUpsert { tenant, queue, .. }
-                        | Effect::QueueDelete { tenant, queue }
-                        | Effect::GroupUpsert { tenant, queue, .. }
-                        | Effect::GroupDelete { tenant, queue, .. }
-                        | Effect::DlqInsert { tenant, queue, .. }
-                        | Effect::DlqDelete { tenant, queue, .. } => {
-                            touched.insert(QLogSet::queue_id_of(tenant, queue));
-                        }
-                        Effect::PartitionCreate {
-                            pid, tenant, queue, ..
-                        } => {
-                            let qid = QLogSet::queue_id_of(tenant, queue);
-                            q.pid_qid.insert(*pid, qid);
-                            touched.insert(qid);
-                        }
-                        Effect::PartitionDelete { pid } => {
-                            match resolve_qid(&mut q.pid_qid, &lookup, *pid)? {
-                                Some(qid) => {
-                                    touched.insert(qid);
-                                }
-                                None => unresolved = true,
-                            }
-                            q.pid_qid.remove(pid);
-                        }
-                        Effect::CursorSet { pid, .. }
-                        | Effect::CursorDelete { pid, .. }
-                        | Effect::Watermark { pid, .. } => {
-                            match resolve_qid(&mut q.pid_qid, &lookup, *pid)? {
-                                Some(qid) => {
-                                    touched.insert(qid);
-                                }
-                                None => unresolved = true,
-                            }
-                        }
-                        Effect::Append {
-                            pid,
-                            base_offset,
-                            count,
-                            created_at_us,
-                            hashes,
-                            blob,
-                            ..
-                        } => {
-                            let qid =
-                                resolve_qid(&mut q.pid_qid, &lookup, *pid)?.ok_or_else(|| {
-                                    io::Error::other(format!(
-                                        "qlog route: no partition row for pid {pid}"
-                                    ))
-                                })?;
-                            touched.insert(qid);
-                            let z = zblobs[zi].as_deref();
-                            zi += 1;
-                            let r = RecordInput {
-                                seq,
-                                pid: *pid,
-                                base_offset: *base_offset,
-                                count: *count,
-                                created_at_us: *created_at_us,
-                                txn: None,
-                                hashes,
-                                payload: z.unwrap_or(blob),
-                            };
-                            msgs.push((
-                                qid,
-                                if z.is_some() {
-                                    WriteRecord::Zstd(r)
-                                } else {
-                                    WriteRecord::Msg(r)
-                                },
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-                if touched.is_empty() || unresolved {
-                    touched.insert(SYSTEM_QUEUE_ID);
-                }
-                let copies = touched.len() as u32;
-                // Each log: this entry's payload records (effect order), then its
-                // entry record — so an entry record found on disk implies every
-                // payload record of that entry in the same log precedes it.
-                for (qid, r) in msgs.drain(..) {
-                    by_qid.entry(qid).or_default().push(r);
-                }
-                for qid in &touched {
-                    by_qid
-                        .entry(*qid)
-                        .or_default()
-                        .push(WriteRecord::Entry(EntryInput {
-                            seq,
-                            now_us: p.entry.now_us,
-                            copies,
-                            entry: &pf[i],
-                        }));
-                }
-            }
-            // One write per touched log (page cache, no fsync yet). Every log
-            // written is marked dirty, so the sync below covers a group of pops
-            // and acks exactly as it covers pushes.
-            for (qid, records) in &by_qid {
-                q.set.write_mixed_for_qid(*qid, records)?;
-            }
-            // `qlog.record_written` (and its raft-era twin `log.appended`): the
-            // group is in the page cache, not fsynced, nothing answered. A kill
-            // here keeps the page cache and the group replays; a power loss may
-            // keep any subset — recovery keeps the complete gapless prefix.
-            crate::rsm::faults::hit("qlog.record_written");
-            crate::rsm::faults::hit("log.appended");
-            // THE BARRIER: every touched queue log, once. Timed into `log_fsync`
-            // (PERF-1), which keeps meaning "the WAL barrier" on this path.
-            let s0 = crate::rsm::timing::stamp();
-            q.set.sync()?;
-            if let Some(s0) = s0 {
-                crate::rsm::timing::metrics()
-                    .log_fsync
-                    .record_dur(s0.elapsed());
-            }
-            // `qlog.record_fsynced` (and `log.flushed`): the group is durable in
-            // the queue logs and not yet applied; it WILL replay on restart.
-            crate::rsm::faults::hit("qlog.record_fsynced");
-            crate::rsm::faults::hit("log.flushed");
-        }
-        // Hand apply the PAYLOAD-FREE form — each `Append`'s `blob` is the
-        // payload's 4-byte frame length — byte-identical to what a replay from the
-        // queue logs hands it, so `RetainedBytes` (a REPLICATED counter) is
-        // computed from the length on BOTH paths and the digest is replay-stable
-        // (I2). Cheap: the entry carries no payload.
-        for (p, bytes) in pending.iter_mut().zip(pf.iter()) {
-            p.entry =
-                Arc::new(decode_entry(bytes).map_err(|e| {
-                    io::Error::other(format!("payload-free entry re-decode: {e:?}"))
-                })?);
         }
         Ok(())
     }
@@ -809,7 +886,7 @@ impl Writer {
 /// `pid -> queue_id` for the writer's routing: the map, else the committed
 /// partition catalog (a partition created before the last restart), memoized.
 /// `None` when neither knows the pid (a partition already deleted).
-fn resolve_qid(
+pub(crate) fn resolve_qid(
     map: &mut HashMap<u64, u64>,
     lookup: &PartitionLookup,
     pid: u64,
@@ -1558,7 +1635,7 @@ impl<S: Store> Drop for LocalReplicator<S> {
 }
 
 /// Decode one replayed entry (raft log or queue-log entry record).
-fn decode_replayed(index: u64, body: &[u8]) -> io::Result<Entry> {
+pub(crate) fn decode_replayed(index: u64, body: &[u8]) -> io::Result<Entry> {
     decode_entry(body).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1572,7 +1649,7 @@ fn decode_replayed(index: u64, body: &[u8]) -> io::Result<Entry> {
 /// the store's durable point are not in the committed catalog the writer's
 /// on-demand lookup reads, so without this the first live append to one after
 /// boot could not be routed.
-fn seed_pid_qid_from(map: &mut HashMap<u64, u64>, entry: &Entry) {
+pub(crate) fn seed_pid_qid_from(map: &mut HashMap<u64, u64>, entry: &Entry) {
     for eff in &entry.effects {
         match eff {
             crate::rsm::effect::Effect::PartitionCreate {

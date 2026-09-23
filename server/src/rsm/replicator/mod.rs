@@ -1,10 +1,11 @@
 //! The consensus seam (PLAN_RAFT.md §12.1): the [`Replicator`] trait the rest
 //! of the RSM talks to, the [`StateMachine`] trait the apply side presents, and
-//! the errors between them. Phases 1–2 use [`local::LocalReplicator`] (a single
-//! node, its own write-ahead log, no network); phase 3 adds the openraft
-//! adapter behind the SAME trait (`raft`, WP-3.1). The rest of the node — the
-//! batcher (§7.1, WP-1.6b), the forwarder (§9.2), the reads (§9.4) — cannot
-//! tell one from the other.
+//! the errors between them. Two backends implement it: [`local::LocalReplicator`]
+//! (a single node, no consensus protocol) and [`raft::RaftReplicator`]
+//! (openraft's protocol over the same queue logs and apply thread);
+//! [`node::NodeReplicator`] picks one at boot (`QUEEN_RAFT_REPLICATOR`). The
+//! rest of the node — the batcher (§7.1), the forwarder (§9.2), the reads
+//! (§9.4) — cannot tell one from the other.
 //!
 //! # What phase 1 wires, and one honest deviation
 //!
@@ -49,10 +50,11 @@ use bytes::Bytes;
 pub mod fake;
 pub mod local;
 pub mod log;
+pub mod node;
 
-/// The openraft adapter (§12.3), phase 3. WP-3.1 fills this in behind the same
-/// [`Replicator`] trait.
-pub mod raft {}
+/// The openraft replicator: openraft's protocol over the queue logs and the
+/// apply thread, behind the same [`Replicator`] trait (see its module header).
+pub mod raft;
 
 // Callers reach the concrete types by their module path, the way the rest of
 // `rsm` does (`rsm::apply::Applier`, `rsm::store::HeedStore`): `local`, `fake`
@@ -235,17 +237,12 @@ pub trait Replicator: Send + Sync + 'static {
     /// its first `.await`; there first-poll order IS the index order. That is one
     /// valid realization of the guarantee above, not the guarantee itself.
     ///
-    /// PHASE-3 OBLIGATION (not discharged here). The openraft adapter (WP-3.x)
-    /// MUST demonstrate it honours this index ordering under a pipeline-of-4 with
-    /// backpressure, or discharge it explicitly (an in-adapter sequence number,
-    /// or serialized `client_write` submission). It cannot simply inherit the
-    /// `LocalReplicator` sync-prefix trick: openraft assigns indexes in the order
-    /// `RaftCore` receives client writes on its internal channel, and there is no
-    /// guarantee `client_write`'s enqueue completes before its first suspension
-    /// under backpressure, so a concurrently-spawned propose could enqueue out of
-    /// first-poll order and reintroduce F-1. The pipeline of 4 was never measured
-    /// on openraft (S3 memo, deferred to WP-3.x); until the adapter proves this,
-    /// the openraft backend runs at pipeline=1.
+    /// [`raft::RaftReplicator`] meets the contract explicitly: it cannot rely
+    /// on `client_write` enqueueing before its first suspension, so its
+    /// `propose_entry` pushes the entry onto an unbounded channel in the
+    /// first-poll synchronous prefix and ONE submitter task hands the entries
+    /// to openraft in channel order. The batcher also checks every answer
+    /// against the index it predicted and stops on a mismatch.
     async fn propose(&self, entry: Bytes, deadline: Instant) -> Result<AppliedAt, ProposeError>;
 
     /// Whether [`Replicator::propose_entry`] needs the encoded bytes. `false`

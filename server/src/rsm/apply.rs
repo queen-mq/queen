@@ -1287,6 +1287,12 @@ impl<'s, S: Store> Applier<'s, S> {
                 got: c.index,
             });
         }
+        // A consensus-internal entry (an openraft blank or membership entry,
+        // `Entry::noop`): nothing to validate, no clock and no bases to check.
+        // `execute` advances the applied index and term only.
+        if c.entry.is_noop() {
+            return Ok(None);
+        }
         // I16: an unknown kind, an unknown catalogue version or a span that
         // does not cover the effects stops this node here, before a single row
         // is written.
@@ -1323,6 +1329,9 @@ impl<'s, S: Store> Applier<'s, S> {
     /// the wakes. Every refusal from here leaves a prefix behind and poisons
     /// the applier (see [`Applier::apply`]).
     fn execute(&mut self, c: &Committed) -> Result<Applied> {
+        if c.entry.is_noop() {
+            return self.execute_noop(c);
+        }
         let mut wakes: Vec<(String, String, Option<String>)> = Vec::new();
         let mut pids_assigned = 0u64;
         let mut kv_versions_assigned = 0u64;
@@ -1451,6 +1460,26 @@ impl<'s, S: Store> Applier<'s, S> {
         Ok(Applied::Executed {
             effects: c.entry.effects.len(),
         })
+    }
+
+    /// [`Entry::noop`]: the applied index and term move, in the same store
+    /// transaction discipline as any entry (`set_applied` is its only write),
+    /// and the waiter on this index is answered. No clock moves — `last_now_us`
+    /// stays what the last real entry set, so the next one is judged against it.
+    fn execute_noop(&mut self, c: &Committed) -> Result<Applied> {
+        // The writer put this entry's record into the system log before apply
+        // saw it, so the qlog-durable index may name it (Phase C).
+        if self.cfg.qlog && self.cfg.qlog_writer_external {
+            self.last_append_index = self.last_append_index.max(c.index);
+        }
+        self.applied_index = c.index;
+        self.applied_term = c.term;
+        self.writes.set_applied(c.index, c.term)?;
+        self.dirty = true;
+        self.entries_since_commit += 1;
+        self.stats.entries += 1;
+        self.notify.applied(c.index, c.term, &[]);
+        Ok(Applied::Executed { effects: 0 })
     }
 
     // -- one effect --------------------------------------------------------

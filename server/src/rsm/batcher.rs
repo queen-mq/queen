@@ -2397,14 +2397,27 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         match res {
             Ok(at) => {
                 if let Some(e) = self.inflight.iter_mut().find(|e| e.seq == seq) {
+                    // The overlay fold, the drop gate and the applied-index
+                    // wake all use the index this driver predicted for the
+                    // entry. A backend that put it anywhere else (openraft
+                    // appending an entry of its own while this node leads)
+                    // would make them wrong, so it is a stop, never a fix-up.
+                    if e.index != at.index {
+                        tracing::error!(
+                            target: "rsm",
+                            predicted = e.index,
+                            actual = at.index,
+                            "an entry landed at another index than planned; the driver stops",
+                        );
+                        self.stopped = true;
+                        return;
+                    }
                     // PERF-G: the applied-index wake may already have resolved
                     // this entry (driver-notify). The forwarding task's late Ok
                     // is then a no-op.
                     if e.resolved.is_some() {
                         return;
                     }
-                    // The predicted index is confirmed; trust the library's.
-                    e.index = at.index;
                     if let Some(at0) = e.proposed_at {
                         crate::rsm::timing::metrics()
                             .propose_roundtrip

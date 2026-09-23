@@ -94,6 +94,7 @@ fn ent(seq: u64, copies: u32, bytes: &[u8]) -> WriteRecord<'_> {
         seq,
         now_us: 1_000 + seq as i64,
         copies,
+        term: 0,
         entry: bytes,
     })
 }

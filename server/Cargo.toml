@@ -154,6 +154,13 @@ http-body-util = "0.1"
 # writes the bytes the rsm codec produces. C-2 holds (pure Rust + a C
 # compiler for the LMDB sources, no cmake); C-3 checked at 1.88 by the spike.
 heed = { version = "0.22", default-features = false }
+# Consensus: openraft supplies the Raft protocol ONLY (elections, terms, commit
+# rules, membership). Its log storage is implemented on the queue logs
+# (rsm/replicator/raft/log_store.rs): no raft-log, no second write-ahead log.
+# Pinned to the git commit carrying `LogEntryDiscarded` (GH#2095); 0.10 is
+# still alpha on crates.io (checked 2026-09-23).
+openraft = { git = "https://github.com/databendlabs/openraft.git", rev = "54094270ede0b8a2eb6ed6ae990edc6ca19d98ec", features = ["serde", "type-alias"] }
+futures-util = "0.3"
 # The segment index of a SEALED segment file (§6.1 amendment, §11.2): one
 # immutable `.qidx` beside the file, binary-searched in place. mmap is what
 # keeps that read O(log n) with no per-partition RAM, which is I8.

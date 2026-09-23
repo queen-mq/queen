@@ -34,7 +34,7 @@
 //! | `dedup` | the dedup index, option (a) lean encoding (D10) | WP-1.2 |
 //! | `batcher` | cycle driver: drain, plan, propose, await apply (§7.1) | WP-1.6 |
 //! | `replicator` | the consensus seam: trait + `local` + `raft` (§12.1) | WP-1.6, WP-3.1 |
-//! | `raftlog` | consensus log storage (§12.3) | WP-3.2 |
+//! | `replicator::raft` | openraft: its log storage on the queue logs, its state machine the apply thread | done |
 //! | `snapshot` | durable point, manifest, transfer, install (§11.6) | WP-4.6 |
 //! | `net` | port 6634: framing, handshake, connection pools (§12.5) | WP-4.1 |
 //! | `forward` | receiver → leader commands, hold, retries (§9.2) | WP-4.2 |
@@ -121,14 +121,10 @@ pub mod dedup;
 /// plan, propose, wait for local apply, clear the overlay. Owner: WP-1.6.
 pub mod batcher;
 
-/// The consensus seam (§12.1): the `Replicator` trait, `local` (phases 1–2,
-/// no network) and `raft` (the openraft adapter, phase 3).
-/// Owners: WP-1.6, WP-3.1.
+/// The consensus seam (§12.1): the `Replicator` trait, `local` (one node, no
+/// consensus protocol), `raft` (openraft over the queue logs) and `node` (the
+/// boot-time choice between them).
 pub mod replicator;
-
-/// Consensus log storage (§12.3): raft-log 0.4.6 behind the library's traits,
-/// with a durable `save_committed` (S3 plan change 5). Owner: WP-3.2.
-pub mod raftlog {}
 
 /// Durable point, manifest, transfer and the atomic `CURRENT`-flip install
 /// (§11.6, I17). Owner: WP-4.6.

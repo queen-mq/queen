@@ -394,6 +394,21 @@ pub fn encode_entry_copies_into(
     copies: u64,
     entry: &[u8],
 ) -> usize {
+    encode_entry_record_into(out, seq, now_us, copies, 0, entry)
+}
+
+/// [`encode_entry_copies_into`] plus the Raft `term` of the entry, carried in
+/// the `base_offset` slot (an entry record indexes no partition, so the slot is
+/// otherwise always 0). The openraft log storage needs every entry's log id —
+/// `(term, index)` — back at recovery; the local replicator writes `0`.
+pub fn encode_entry_record_into(
+    out: &mut Vec<u8>,
+    seq: u64,
+    now_us: i64,
+    copies: u64,
+    term: u64,
+    entry: &[u8],
+) -> usize {
     let body_len = FIXED_AFTER_LEN + entry.len();
     debug_assert!(
         body_len <= MAX_RECORD_BODY as usize,
@@ -405,7 +420,7 @@ pub fn encode_entry_copies_into(
     out.extend_from_slice(&0u64.to_le_bytes()); // checksum, filled in below
     out.extend_from_slice(&seq.to_le_bytes());
     out.extend_from_slice(&copies.to_le_bytes()); // pid slot = copies (Phase C)
-    out.extend_from_slice(&0u64.to_le_bytes()); // base_offset
+    out.extend_from_slice(&term.to_le_bytes()); // base_offset slot = the Raft term
     out.extend_from_slice(&0u32.to_le_bytes()); // count
     out.extend_from_slice(&now_us.to_le_bytes()); // created_at carries now_us
     out.push(REC_ENTRY);

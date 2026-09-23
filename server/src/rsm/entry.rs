@@ -818,6 +818,21 @@ pub struct Entry {
 
 impl Entry {
     /// An empty entry stamped for one planning cycle.
+    /// An entry that carries nothing: no command and no effect. The openraft
+    /// replicator hands apply one for every consensus-internal log entry (a
+    /// leader's blank entry, a membership change), so the applied index stays
+    /// gapless. Apply advances `applied_index` and `applied_term` and does
+    /// nothing else ([`Entry::is_noop`]). The batcher never proposes one: an
+    /// entry is only built when a command was logged.
+    pub fn noop() -> Entry {
+        Entry::new(0, 0, 0)
+    }
+
+    /// Whether this is a [`Entry::noop`]: no command and no effect.
+    pub fn is_noop(&self) -> bool {
+        self.commands.is_empty() && self.effects.is_empty()
+    }
+
     pub fn new(now_us: i64, pid_base: u64, kv_version_base: u64) -> Entry {
         Entry {
             format: ENTRY_FORMAT,

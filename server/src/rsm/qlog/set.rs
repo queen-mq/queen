@@ -755,6 +755,14 @@ impl QLogReader {
         self.floor.load(Ordering::Acquire)
     }
 
+    /// `(files, valid bytes)` across every open log.
+    pub fn totals(&self) -> (u64, u64) {
+        (
+            self.totals.files.load(Ordering::Acquire),
+            self.totals.bytes.load(Ordering::Acquire),
+        )
+    }
+
     /// The shared floor handle itself, for a caller that wants to hold it.
     pub fn recovery_floor_handle(&self) -> Arc<AtomicU64> {
         self.floor.clone()
@@ -805,6 +813,66 @@ impl QLogReader {
     pub(crate) fn advance_reclaim_queue_cursor(&self, queue_id: u64) {
         self.reclaim_queue_cursor
             .store(queue_id.wrapping_add(1), Ordering::Release);
+    }
+
+    /// The consensus-log read below the openraft storage's in-memory window:
+    /// every COMPLETE entry record with `from_seq <= seq < end_seq`, merged
+    /// across every queue log (the system log included) in `seq` order — the
+    /// live-read twin of [`QLogSet::scan_entries`]. It stops at the first seq
+    /// that is missing or incomplete; the caller decides whether a short answer
+    /// is an error. Reads every candidate file of every log: a rare path (a
+    /// follower catching up from before this node's window), never the hot one.
+    pub fn entry_records_range(&self, from_seq: u64, end_seq: u64) -> io::Result<Vec<EntryRecord>> {
+        let from_seq = from_seq.max(1);
+        if from_seq >= end_seq {
+            return Ok(Vec::new());
+        }
+        let logs: Vec<Arc<RwLock<QLog>>> = self
+            .logs
+            .read()
+            .expect("qlog set poisoned")
+            .values()
+            .cloned()
+            .collect();
+        let mut merged: BTreeMap<u64, (EntryRecord, u32)> = BTreeMap::new();
+        for log in logs {
+            let recs = log
+                .read()
+                .expect("qlog poisoned")
+                .entry_records_from(from_seq)?;
+            for r in recs {
+                if r.seq >= end_seq {
+                    break;
+                }
+                match merged.entry(r.seq) {
+                    std::collections::btree_map::Entry::Vacant(v) => {
+                        v.insert((r, 1));
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut o) => {
+                        if o.get().0 != r {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!(
+                                    "the copies of entry {} disagree across the queue logs",
+                                    r.seq
+                                ),
+                            ));
+                        }
+                        o.get_mut().1 += 1;
+                    }
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(merged.len());
+        let mut next = from_seq;
+        for (seq, (rec, found)) in merged {
+            if seq != next || found < rec.copies {
+                break;
+            }
+            out.push(rec);
+            next += 1;
+        }
+        Ok(out)
     }
 
     /// The open log for `queue_id`, or `None` when the applier has never written

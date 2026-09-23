@@ -249,3 +249,75 @@ entries). `rsm::` 537 green. Raw: `planner-windows-keptoverlay.txt`.
   ceiling on this box is set by that trigger plus the missing backpressure, not by
   planner cost. Hunt the trigger and add push backpressure before lanes; lanes
   would buy at most ~1.3–1.5× before the writer binds.
+
+## 11. The ~4-minute collapse: root cause (2026-09-23)
+
+Five-minute runs at 200k from a worktree off `raft` `278d523c`, sampling every
+second (broker stage timings, debug counters, kernel memory/reclaim/PSI, disk).
+
+**Ruled out:** page-cache pressure — with a 12.5 GB file pre-loaded into the page
+cache (0.3 GB free from the start) the broker ran 165 s balanced; during the
+normal collapse there were no disk reads, no direct reclaim and ~0% memory
+pressure. Gradual planner slowdown — a planner-thread-only profile at t=200–210 s
+looked like the one at t=55–65 s (57% vs 63% busy).
+
+**Cause: the push dedup probe.** On a filter "maybe", the planner builds the
+partition's committed dedup view by walking **every retained record from
+offset 0** with its hashes (`build_committed_txns_rows` →
+`committed_frames(.., from_base 0, ..)`), not just the 60 s dedup window.
+
+| t (s) | dedup builds/s | records read per build | records read/s | planner busy | backlog |
+|---|---|---|---|---|---|
+| 50–100 | 200–400 | 190–330 | 64–74k | 70% | small (earlier episode, recovered) |
+| 110–150 | 0–2 | 220–1,040 | < 3k | 55–58% | small |
+| 200 | 13 | 1,548 | 20k | 63% | 1k |
+| 230 | 31 | 1,845 | 57k | 73% | 7k |
+| 250 | 55 | 2,048 | 113k | 84% | 20k |
+| 270 | 81 | 2,240 | 180k | 92% | 148k |
+| 300 | 113 | 2,489 | 282k | 95% | 4.2M, acks 0 |
+
+- **Records per build grow linearly with run time** (~10 per second = the
+  partition's retained record count at 1,000 msg/s and 100 per push), until
+  retention (300 s) would cap them.
+- **Builds per second rise as the current filter generation fills**: a
+  generation's false-positive rate climbs toward full. The earlier episode
+  (40–100 s) was the full 32k-hash generation; it ended when that generation
+  aged out of the 60 s window (~97 s). The next generation holds 262k hashes and
+  takes ~262 s to fill at 1,000 msg/s per partition, so "maybe"s climb again from
+  ~150 s. All 200 partitions fill in step (uniform load), so the timing repeats
+  run after run (225–270 s).
+- Both factors grow at once, so dedup work grows super-linearly until it exceeds
+  the serial planner's headroom (~220–250 s). Then the amplifier from §10 takes
+  over: the 5 ms budget cut plus push-first ordering defers every ack and pop,
+  consumption falls to 0, and without backpressure the backlog grows unbounded.
+
+**Fix directions:** (1) bound the build to the dedup window instead of offset 0;
+(2) keep the filter's false-positive rate flat — seal generations by time, not
+only by count; (3) extend the per-partition build across cycles instead of
+rebuilding it every cycle. Independently: backpressure, and ack/pop not
+starving behind pushes under the budget cut.
+
+## 12. The fix (2026-09-23): the collapse is gone
+
+Branch `bench/collapse` (worktree `/Users/alice/Work/queen-collapse`), on `raft`
+`278d523c`: `75bd62ea` + test `6c7c1bd5`. `rsm::` 537 green plus a new test at
+the collapse load (1,000 msg/s into one partition for 300 s, 60 s window).
+
+1. **Dedup filter generations close after a slice of the window** (window/4,
+   ≥ 250 ms), not only when full; a time-closed generation sizes its successor
+   to the rate it saw. A "maybe" band now covers at most one slice.
+2. **Priority lane (`QUEEN_RAFT_DRAIN_LANE`, default on):** acks, pops,
+   renewals, nacks, transactions, timers and KV are drained before any push; a
+   budget-cut command returns to the front of its own lane.
+
+Same config, same 5-minute run at 200k:
+
+| t (s) | backlog before → after | ack/s before → after | planner busy before → after | dedup records read/s before → after | queue wait before → after |
+|---|---|---|---|---|---|
+| 70 | 3.7k → 1.7k | 200k → 199k | 70% → 58% | 69.7k → 8.1k | 1.7 → 1.7 ms |
+| 230 | 7.0k → 4.9k | 229k → 192k | 73% → 61% | 56.8k → 2.0k | 2.1 → 1.7 ms |
+| 270 | 148k → 3.4k | 143k → 199k | 92% → 62% | 180k → 2.1k | 122 → 1.9 ms |
+| 310 | **5.4M → 4.1k** | **0 → 195k** | 94% → 62% | 291k → 2.1k | **974 → 1.7 ms** |
+
+Deferred unplanned: 7–89% before, 1–3% after. Planner load is now flat for the
+whole run instead of climbing.

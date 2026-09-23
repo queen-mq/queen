@@ -65,7 +65,8 @@ use crate::rsm::planner::{
     PushItem, RenewCommand, SubIntent,
 };
 use crate::rsm::qlog::set::QLogReader;
-use crate::rsm::replicator::local::{LocalReplicator, OpenConfig, Waker};
+use crate::rsm::replicator::local::{OpenConfig, Waker};
+use crate::rsm::replicator::node::{NodeReplicator, ReplicatorKind};
 use crate::rsm::replicator::Replicator;
 use crate::rsm::segments;
 use crate::rsm::store::{rows, HeedStore, Reads, Store, StoreOpts, TypedReads};
@@ -196,7 +197,7 @@ pub struct RaftFacade {
     /// The single-node consensus + apply thread (§12.2). Held for `role`,
     /// `metrics` and `applied_index`; also the sole owner of the apply/writer
     /// threads, joined when the facade drops.
-    repl: Arc<LocalReplicator<HeedStore>>,
+    repl: Arc<NodeReplicator<HeedStore>>,
     /// The segment reader for pop payloads (§7.5), off the live file set.
     reader: segments::Reader,
     /// The per-queue-log reader for pop payloads (Phase A2, `QUEEN_RAFT_QLOG`),
@@ -375,14 +376,23 @@ impl RaftFacade {
             notifier: ctx.notifier.clone(),
             gates: gates.clone(),
         });
+        // `QUEEN_RAFT_REPLICATOR`: the local replicator (default) or openraft.
+        let kind = ReplicatorKind::from_env()?;
         let repl = Arc::new(
-            LocalReplicator::open(
+            NodeReplicator::open(
+                kind,
                 store.clone(),
                 OpenConfig::new(NODE_ID, dir.clone()),
                 waker,
                 Arc::new(SystemClock),
             )
-            .map_err(|e| format!("open the local replicator at {}: {e}", dir.display()))?,
+            .map_err(|e| {
+                format!(
+                    "open the {} replicator at {}: {e}",
+                    kind.name(),
+                    dir.display()
+                )
+            })?,
         );
         let reader = repl.reader();
         // Phase A2: the per-queue-log reader (or `None` when `QUEEN_RAFT_QLOG` is
@@ -405,6 +415,7 @@ impl RaftFacade {
             target: "rsm",
             dir = %dir.display(),
             applied = repl.applied_index(),
+            replicator = repl.kind().name(),
             "raft facade open (WP-1.7c)",
         );
 

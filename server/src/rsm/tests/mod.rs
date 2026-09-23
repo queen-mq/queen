@@ -55,6 +55,7 @@ mod pop_bounded;
 mod qlog_read;
 mod qlog_shadow;
 mod qlog_wal;
+mod raft;
 mod replicator;
 mod replicator_crash;
 mod roundtrip;
