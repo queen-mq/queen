@@ -452,6 +452,15 @@ pub struct RsmMetrics {
     // -- batcher / planner (latency, ns) --
     /// Whole planning cycle on the blocking pool.
     pub plan: Histogram,
+    /// MEASURE: thread CPU time of the same command loop `plan` times (ns).
+    pub plan_cpu: Histogram,
+    /// MEASURE: the whole `plan_cycle_blocking` call (overlay and ring rebuild,
+    /// command loop, leader steps) — wall and thread CPU (ns).
+    pub plan_whole_wall: Histogram,
+    pub plan_whole_cpu: Histogram,
+    /// MEASURE: commands drained into a cycle but deferred unplanned by the
+    /// `plan_budget_ms` cut (raw count per cycle).
+    pub plan_deferred: Histogram,
     /// A command's arrival on the facade channel → its entry proposed.
     pub arrival_to_proposed: Histogram,
     /// PERF-G split of `arrival_to_proposed`, leg 1: a command's arrival on the
@@ -632,8 +641,11 @@ pub fn render_prometheus(out: &mut String) {
     let m = metrics();
 
     // Latency summaries (ns → seconds).
-    let lat: [(&str, &str, &Histogram); 21] = [
+    let lat: [(&str, &str, &Histogram); 24] = [
         ("queen_raft_plan_seconds", "Planner cycle duration", &m.plan),
+        ("queen_raft_plan_cpu_seconds", "Planner command loop, thread CPU time", &m.plan_cpu),
+        ("queen_raft_plan_whole_wall_seconds", "Whole plan_cycle_blocking call, wall", &m.plan_whole_wall),
+        ("queen_raft_plan_whole_cpu_seconds", "Whole plan_cycle_blocking call, thread CPU", &m.plan_whole_cpu),
         (
             "queen_raft_push_h_total_seconds",
             "PERF-J: whole raft push handler (entry to response), push-only",
@@ -740,7 +752,12 @@ pub fn render_prometheus(out: &mut String) {
     }
 
     // Size summaries (raw counts).
-    let sizes: [(&str, &str, &Histogram); 5] = [
+    let sizes: [(&str, &str, &Histogram); 6] = [
+        (
+            "queen_raft_plan_deferred",
+            "Commands drained but deferred unplanned by the plan budget cut",
+            &m.plan_deferred,
+        ),
         (
             "queen_raft_drain_commands",
             "Drain size in commands",
@@ -1016,4 +1033,15 @@ mod tests {
         assert_eq!(s.p50, 0);
         assert_eq!(s.max, 0);
     }
+}
+
+/// MEASURE: this thread's CPU time, in nanoseconds (`CLOCK_THREAD_CPUTIME_ID`).
+pub fn thread_cpu_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid, writable timespec for the call's duration.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }

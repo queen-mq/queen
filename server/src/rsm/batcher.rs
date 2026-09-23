@@ -941,6 +941,7 @@ fn plan_cycle_blocking<S: Store>(
         let mut seen: HashMap<RequestId, ()> = HashMap::new();
         let batch_len = batch.len() as u64;
         let start = Instant::now();
+        let loop_cpu0 = crate::rsm::timing::thread_cpu_ns();
         let budget = Duration::from_millis(cfg.plan_budget_ms);
         let mut cut = false;
 
@@ -1012,9 +1013,16 @@ fn plan_cycle_blocking<S: Store>(
             cut = start.elapsed() > budget;
         }
         if crate::rsm::timing::enabled() {
-            crate::rsm::timing::metrics()
-                .plan
-                .record_dur(start.elapsed());
+            let tm = crate::rsm::timing::metrics();
+            tm.plan.record_dur(start.elapsed());
+            tm.plan_cpu
+                .record(crate::rsm::timing::thread_cpu_ns().saturating_sub(loop_cpu0));
+            tm.plan_deferred.record(
+                slots
+                    .iter()
+                    .filter(|s| matches!(s, Slot::Deferred(_)))
+                    .count() as u64,
+            );
         }
 
         // WP-2.3 timer fire: after the commands (a cancel or a reschedule
@@ -1588,7 +1596,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         let maintenance_cfg = maintenance.then(|| self.cfg.maintenance.clone());
 
         let planned = tokio::task::spawn_blocking(move || {
-            plan_cycle_blocking(
+            let w0 = Instant::now();
+            let c0 = crate::rsm::timing::thread_cpu_ns();
+            let r = plan_cycle_blocking(
                 &*store,
                 &front,
                 reader,
@@ -1601,7 +1611,14 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 kv_sweep_limit,
                 fire_cfg,
                 maintenance_cfg,
-            )
+            );
+            if crate::rsm::timing::enabled() {
+                let tm = crate::rsm::timing::metrics();
+                tm.plan_whole_wall.record_dur(w0.elapsed());
+                tm.plan_whole_cpu
+                    .record(crate::rsm::timing::thread_cpu_ns().saturating_sub(c0));
+            }
+            r
         })
         .await;
 
