@@ -686,6 +686,18 @@ impl Store for HeedStore {
         }
     }
 
+    fn ram_stats(&self) -> Vec<(&'static str, usize, usize)> {
+        Keyspace::ALL
+            .iter()
+            .filter_map(|ks| {
+                self.ram(*ks).map(|t| {
+                    let g = t.read();
+                    (ks.name(), g.map.len(), g.dirty.len())
+                })
+            })
+            .collect()
+    }
+
     fn max_key_len(&self) -> usize {
         self.max_key
     }

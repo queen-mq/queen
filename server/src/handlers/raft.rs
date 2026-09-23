@@ -53,6 +53,9 @@ pub(crate) fn err_response(e: RsmError) -> Response {
         RsmError::NoLeader => (StatusCode::SERVICE_UNAVAILABLE, Some(1)),
         RsmError::NameTooLong { .. } => (StatusCode::PAYLOAD_TOO_LARGE, None),
         RsmError::StorageFull => (StatusCode::INSUFFICIENT_STORAGE, None),
+        RsmError::Overloaded { retry_after_s } => {
+            (StatusCode::TOO_MANY_REQUESTS, Some(*retry_after_s))
+        }
         RsmError::Timeout => (StatusCode::SERVICE_UNAVAILABLE, Some(1)),
         RsmError::Rejected { .. } => (StatusCode::BAD_REQUEST, None),
         RsmError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, None),
@@ -722,7 +725,10 @@ pub(crate) fn build_raft_router(
 
     axum::Router::new()
         // ------------------------------------------------ message path → facade
-        .route("/api/v1/push", post(super::handle_push))
+        .route(
+            "/api/v1/push",
+            post(super::handle_push).layer(axum::middleware::from_fn(admit_edge)),
+        )
         .route("/api/v1/pop", get(super::handle_pop_discover))
         .route("/api/v1/pop/queue/:queue", get(super::handle_pop))
         .route(
@@ -732,7 +738,10 @@ pub(crate) fn build_raft_router(
         .route("/api/v1/ack", post(super::handle_ack))
         .route("/api/v1/ack/batch", post(super::handle_ack_batch))
         // Phase B: the wire transaction → one facade command, all-or-nothing.
-        .route("/api/v1/transaction", post(super::handle_transaction))
+        .route(
+            "/api/v1/transaction",
+            post(super::handle_transaction).layer(axum::middleware::from_fn(admit_edge)),
+        )
         .route(
             "/api/v1/lease/:leaseId/extend",
             post(super::handle_lease_extend),
@@ -819,6 +828,30 @@ pub(crate) fn build_raft_router(
             crate::auth::auth_middleware,
         ))
         .with_state(state)
+}
+
+/// Push admission at the HTTP edge ([`crate::rsm::admit`]): the permits are
+/// sized by `Content-Length` and taken BEFORE the body is read, so a push that
+/// waits for room holds only its connection — its bytes stay in the socket and
+/// TCP slows the sender. Inside auth and tenancy (an unauthenticated request
+/// never takes budget); the facade sees the request as already admitted.
+#[cfg(feature = "server")]
+async fn admit_edge(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let Some(gate) = crate::rsm::admit::global() else {
+        return next.run(req).await;
+    };
+    let bytes = req
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(crate::rsm::admit::UNKNOWN_LEN_BYTES);
+    match gate.admit(bytes).await {
+        Ok(_admitted) => crate::rsm::admit::pre_admitted_scope(next.run(req)).await,
+        Err(o) => err_response(RsmError::Overloaded {
+            retry_after_s: o.retry_after_s,
+        }),
+    }
 }
 
 /// The fallback for the raft router: `/api/` and `/streams/` are delegated to

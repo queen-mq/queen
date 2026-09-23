@@ -88,6 +88,10 @@ pub mod planner;
 /// recovery (§11.5) and local file GC (§11.7). Owner: WP-1.4.
 pub mod apply;
 
+/// Push admission: the byte budget that holds, then refuses, storage-growing
+/// commands when the planner falls behind.
+pub mod admit;
+
 /// The committed view: store reads plus the RAM-derived indexes of §6.3
 /// (ready rings, deadline heaps, hot caches, timer wheel, notifiers).
 /// Owner: WP-1.2.

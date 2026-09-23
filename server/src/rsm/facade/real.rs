@@ -226,6 +226,9 @@ pub struct RaftFacade {
     /// `PopWildcard` command onto the single serial batcher pipeline. Resolved
     /// once at open.
     pop_fastpath_empty: bool,
+    /// Push admission budget ([`crate::rsm::admit`], one per process);
+    /// `None` when disabled.
+    admit: Option<&'static crate::rsm::admit::AdmitGate>,
     data_dir: PathBuf,
     storage_full: std::sync::atomic::AtomicBool,
     storage_pressure_enabled: bool,
@@ -431,6 +434,7 @@ impl RaftFacade {
             gates,
             batcher_join,
             pop_fastpath_empty: env_flag("QUEEN_RAFT_POP_FASTPATH_EMPTY", true),
+            admit: crate::rsm::admit::global(),
             data_dir: dir,
             storage_full: std::sync::atomic::AtomicBool::new(false),
             storage_pressure_enabled,
@@ -464,6 +468,7 @@ impl RaftFacade {
             gates: _,
             batcher_join,
             pop_fastpath_empty: _,
+            admit: _,
             data_dir: _,
             storage_full: _,
             storage_pressure_enabled: _,
@@ -535,6 +540,21 @@ impl RaftFacade {
         if command.grows_storage() && self.storage_pressure() {
             return Err(RsmError::StorageFull);
         }
+        // Held until the reply arrives (or the deadline passes): the command's
+        // bytes count against the admission budget while it is in the pipeline.
+        // A request the HTTP edge admitted already holds its permits.
+        let _admitted =
+            match (
+                self.admit,
+                command.grows_storage() && !crate::rsm::admit::pre_admitted(),
+            ) {
+                (Some(gate), true) => Some(gate.admit(command.size_hint()).await.map_err(|o| {
+                    RsmError::Overloaded {
+                        retry_after_s: o.retry_after_s,
+                    }
+                })?),
+                _ => None,
+            };
         let (sub, rx) = Submission::new(command);
         // The bounded channel absorbs back-pressure; a full channel waits, up to
         // the deadline.
@@ -1335,6 +1355,23 @@ impl RaftFacade {
         // pre-submit work (parse + resolve + pack); `submit_ns` accumulates the
         // `cmd_tx.send` await (channel back-pressure, which `arrival_to_proposed`
         // cannot see because it stamps just before the send).
+        // Admission (crate::rsm::admit) for callers the HTTP edge did not
+        // admit, BEFORE the parse: a push that must wait holds only its raw
+        // body, never its parsed items and frames. Held for the whole push
+        // (parse, pack, submit, replies), sized by the raw body. Pushes bypass
+        // `submit`, so this is their only facade gate.
+        let _admitted = match self.admit.filter(|_| !crate::rsm::admit::pre_admitted()) {
+            Some(gate) => {
+                Some(
+                    gate.admit(req.raw.len())
+                        .await
+                        .map_err(|o| RsmError::Overloaded {
+                            retry_after_s: o.retry_after_s,
+                        })?,
+                )
+            }
+            None => None,
+        };
         let _t_prep = crate::rsm::timing::stamp();
         let mut _submit_ns: u64 = 0;
         let body: PushBodyIn =
@@ -3065,6 +3102,12 @@ impl Rsm for RaftFacade {
             "queen_raft_store_map_bytes{{kind=\"capacity\"}} {}\nqueen_raft_store_map_bytes{{kind=\"used\"}} {}\n",
             map.map_bytes, map.used_bytes
         ));
+        out.push_str("# HELP queen_raft_store_ram_rows Rows per RAM keyspace: live, and keys dirty since the last checkpoint\n# TYPE queen_raft_store_ram_rows gauge\n");
+        for (ks, live, dirty) in self.store.ram_stats() {
+            out.push_str(&format!(
+                "queen_raft_store_ram_rows{{ks=\"{ks}\",kind=\"live\"}} {live}\nqueen_raft_store_ram_rows{{ks=\"{ks}\",kind=\"dirty\"}} {dirty}\n"
+            ));
+        }
         out.push_str("# HELP queen_raft_store_readers LMDB reader slots\n# TYPE queen_raft_store_readers gauge\n");
         out.push_str(&format!(
             "queen_raft_store_readers{{kind=\"used\"}} {}\nqueen_raft_store_readers{{kind=\"limit\"}} {}\n",
