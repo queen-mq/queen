@@ -1967,7 +1967,6 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             .run(move |state| {
                 let w0 = Instant::now();
                 let c0 = crate::rsm::timing::thread_cpu_ns();
-                let q0 = crate::rsm::timing::thread_runq_ns();
                 let r = plan_cycle_blocking(
                     &*store,
                     &front,
@@ -1989,8 +1988,6 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     tm.plan_whole_wall.record_dur(w0.elapsed());
                     tm.plan_whole_cpu
                         .record(crate::rsm::timing::thread_cpu_ns().saturating_sub(c0));
-                    tm.plan_whole_runq
-                        .record(crate::rsm::timing::thread_runq_ns().saturating_sub(q0));
                 }
                 r
             })
