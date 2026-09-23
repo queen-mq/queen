@@ -120,9 +120,14 @@ pub struct BatcherConfig {
     /// `QUEEN_RAFT_PROPOSE_MS` (D13): the deadline handed to every `propose`.
     pub propose_ms: u64,
     /// `QUEEN_RAFT_REQUEST_ID_WINDOW_S` (D6): how long outcomes live, and the
-    /// age past which the expiry step retires them.
+    /// age past which the expiry step retires them. Default 60 s: the ids are
+    /// minted by the receiver and serve its own forwarding and leader-change
+    /// retries, which end within seconds. At 600 s the outcomes of ~5,900
+    /// commands/s (200k msg/s) held ~4 GB of RAM (measured 2026-09-23).
     pub request_id_window_s: u64,
-    /// The cadence of the §10.1 request-id expiry step.
+    /// The cadence of the §10.1 request-id expiry step. A step that finds a
+    /// full [`crate::rsm::apply::REQUEST_EXPIRE_LIMIT`] past the cutoff runs
+    /// again in the next cycle rather than at the next tick.
     pub request_expire_every_ms: u64,
     /// The channel depth the facade feeds (§9.1). Back-pressure lands on the
     /// receiver, which holds or refuses per D13.
@@ -200,7 +205,7 @@ impl Default for BatcherConfig {
             batch_max_cmds: crate::rsm::entry::BATCH_MAX_CMDS_DEFAULT,
             batch_max_bytes: crate::rsm::entry::BATCH_MAX_BYTES_DEFAULT,
             propose_ms: 5000,
-            request_id_window_s: 600,
+            request_id_window_s: 60,
             request_expire_every_ms: 10_000,
             command_queue_depth: 1024,
             plan: PlanConfig::default(),
@@ -837,6 +842,9 @@ pub(crate) struct PlanOutput {
     slots: Vec<Slot>,
     /// The request-id expiry step (§10.1) was included in `entry`.
     expired: bool,
+    /// ...and the committed store held a full step's worth past the cutoff:
+    /// more are due now.
+    expire_more: bool,
     /// The KV expiry sweep (WP-2.2) ran this cycle — whether or not it found
     /// anything due, so the driver clears its flag either way.
     kv_swept: bool,
@@ -1369,6 +1377,7 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
         // effect is folded too — the fold reads nothing from it; it only keeps
         // the count of folded effects equal to the entry's.
         let mut expired = false;
+        let mut expire_more = false;
         if let Some(window_us) = expire_window_us {
             let cutoff = now_us.saturating_sub(window_us);
             let id = crate::util::uuidv7_bytes();
@@ -1379,6 +1388,24 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
             {
                 ov.apply_effects(&effects);
                 expired = true;
+                // One step retires at most REQUEST_EXPIRE_LIMIT outcomes. When
+                // the committed store holds that many past the cutoff, the next
+                // step runs in the next cycle, not at the next tick: one step
+                // per 10 s tick (~410 outcomes/s) never caught up with ~5,900
+                // commands/s, and the table grew without bound (measured
+                // 2026-09-23). Only the leader's cadence changes; what a step
+                // retires does not (I2). Steps still in flight are not seen
+                // here, so up to a pipeline's worth may find nothing.
+                let limit = crate::rsm::apply::REQUEST_EXPIRE_LIMIT;
+                let mut past = 0usize;
+                r.scan_request_expiry(limit, &mut |at, _| {
+                    if at >= cutoff {
+                        return false;
+                    }
+                    past += 1;
+                    true
+                })?;
+                expire_more = past >= limit;
             }
         }
         // The cycle as a whole: its overlay holds the fold of its entry, and
@@ -1416,6 +1443,7 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
             entry,
             slots,
             expired,
+            expire_more,
             kv_swept,
             fired,
             fire_more,
@@ -2078,7 +2106,8 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         };
 
         if out.expired {
-            self.expire_due = false;
+            // A step that found a full limit's worth runs again at once.
+            self.expire_due = out.expire_more;
         }
         if out.kv_swept {
             self.kv_sweep_due = false;

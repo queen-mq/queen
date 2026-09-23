@@ -577,6 +577,81 @@ fn digest_and_close(store: Arc<HeedStore>) -> apply::StateDigest {
     d
 }
 
+/// The request-id expiry keeps up with a backlog. One step retires at most
+/// `REQUEST_EXPIRE_LIMIT` outcomes, and it used to run once per tick: at
+/// ~5,900 commands/s against ~410 retired/s the table grew without bound
+/// (measured 2026-09-23). A step that finds a full limit's worth past the
+/// cutoff now runs again in the next cycle, so a backlog of 2.5 limits clears
+/// after ONE tick, before the next.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_request_id_expiry_backlog_clears_after_one_tick() {
+    let dir = scratch("expire-backlog");
+    let store = Arc::new(HeedStore::open(&dir.join("store"), &store_opts()).expect("store"));
+    let repl = Arc::new(open_repl(&dir, store.clone()));
+    let tick = Duration::from_secs(3);
+    let bcfg = BatcherConfig {
+        pipeline: 4,
+        propose_ms: 5_000,
+        // Every logged outcome is past the cutoff as soon as it is logged.
+        request_id_window_s: 0,
+        request_expire_every_ms: tick.as_millis() as u64,
+        ..BatcherConfig::default()
+    };
+    let started = Instant::now();
+    let batcher = Batcher::new(store.clone(), repl.clone(), bcfg);
+    let (tx, handle) = batcher.spawn();
+
+    let limit = apply::REQUEST_EXPIRE_LIMIT;
+    let n = limit * 5 / 2;
+    let mut replies = Vec::with_capacity(n);
+    for i in 0..n {
+        let txn = format!("m{i}");
+        let (sub, rx) = Submission::new(push(10_000 + i as u64, "q", "p0", &[txn.as_str()]));
+        tx.send(sub).await.expect("send command");
+        replies.push(rx);
+    }
+    for rx in replies {
+        let reply = rx.await.expect("await reply");
+        let _ = done(&reply);
+    }
+    let logged = |store: &HeedStore| {
+        store
+            .read(|r| {
+                let mut c = 0usize;
+                r.scan_request_expiry(usize::MAX, &mut |_, _| {
+                    c += 1;
+                    true
+                })?;
+                Ok(c)
+            })
+            .expect("read")
+    };
+    assert!(
+        started.elapsed() < tick,
+        "the pushes must land before the first tick (took {:?})",
+        started.elapsed()
+    );
+    assert!(logged(&store) >= n, "every push logged its outcome");
+
+    // After the first tick and before the second, the whole backlog is gone
+    // (one step per tick would still hold n - limit = 1.5 limits).
+    let deadline = started + tick * 2 - Duration::from_millis(300);
+    let mut left = logged(&store);
+    while left >= limit && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        left = logged(&store);
+    }
+    assert!(
+        left < limit,
+        "{left} outcomes left before the second tick: the expiry did not keep up"
+    );
+
+    drop(tx);
+    let _ = handle.await;
+    drop(repl);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn end_to_end_push_pop_ack_then_restart_and_recover() {
     let dir = scratch("e2e");
