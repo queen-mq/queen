@@ -991,3 +991,226 @@ async fn a_transaction_that_answers_no_kv_results_is_an_error_not_a_commit() {
         .unwrap_err();
     assert!(e.to_string().contains("kv operation 0"), "{e}");
 }
+
+// ------------------------------------------------ the in-process transport
+//
+// A broker that runs this facade in its own process (single binary,
+// server/src/kafka_inproc.rs) hands every call to its router through a
+// `LocalDispatch` instead of a socket. The contract is PARITY: the same method,
+// path, bearer, `Host` and body as the HTTP client, and the same reading of the
+// answer — so every test above keeps meaning what it says in-process. These pin
+// that by running each call through BOTH transports against the same canned
+// answer and comparing what each asked and what each concluded.
+
+use queen_kafka::queen::{LocalDispatch, LocalRequest, LocalResponse};
+
+/// A dispatch that records every request and answers from a script, in order.
+struct Recorder {
+    replies: Mutex<std::collections::VecDeque<std::result::Result<LocalResponse, String>>>,
+    seen: Mutex<Vec<LocalRequest>>,
+}
+
+impl Recorder {
+    fn new(replies: Vec<Canned>) -> Arc<Recorder> {
+        Arc::new(Recorder {
+            replies: Mutex::new(
+                replies
+                    .into_iter()
+                    .map(|c| {
+                        Ok(LocalResponse {
+                            status: c.status,
+                            retry_after: c
+                                .extra
+                                .strip_prefix("Retry-After:")
+                                .map(|v| v.trim().to_string()),
+                            body: c.body.to_string(),
+                        })
+                    })
+                    .collect(),
+            ),
+            seen: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn seen(&self) -> Vec<LocalRequest> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+impl LocalDispatch for Recorder {
+    fn call(
+        &self,
+        req: LocalRequest,
+    ) -> queen_kafka::queen::BoxFuture<'static, std::result::Result<LocalResponse, String>> {
+        self.seen.lock().unwrap().push(req);
+        let reply = self
+            .replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Err("the recorder ran out of replies".into()));
+        Box::pin(async move { reply })
+    }
+}
+
+/// What one HTTP request looked like, in the local request's own terms.
+fn as_local(s: &Seen) -> (String, String, Option<String>, Option<String>, String) {
+    let mut parts = s.line.split(' ');
+    let method = parts.next().unwrap_or_default().to_string();
+    let path = parts.next().unwrap_or_default().to_string();
+    (
+        method,
+        path,
+        s.authorization
+            .as_deref()
+            .and_then(|a| a.strip_prefix("Bearer "))
+            .map(str::to_string),
+        None,
+        s.body.clone(),
+    )
+}
+
+fn local_shape(r: &LocalRequest) -> (String, String, Option<String>, Option<String>, String) {
+    (
+        r.method.to_string(),
+        r.path.clone(),
+        r.bearer.clone(),
+        r.host.clone(),
+        r.body.clone().unwrap_or_default(),
+    )
+}
+
+/// Every route this facade calls, through both transports: same request, same
+/// verdict. `host` is compared separately (the HTTP client always sends the
+/// URL's authority; the local one sends a `Host` only when one was scoped).
+#[tokio::test]
+async fn the_local_transport_asks_and_reads_exactly_what_http_does() {
+    let kv_ops = vec![
+        KvOp::put(
+            "queen-kafka",
+            "qk:group:g:orders:0",
+            serde_json::json!({"offset": 41, "metadata": "batch-7", "ts": 1_787_824_800_500i64}),
+        ),
+        KvOp::GetMany {
+            ns: "queen-kafka".into(),
+            keys: vec!["qk:group:g:orders:0".into(), "qk:group:g:orders:1".into()],
+        },
+    ];
+    let options = serde_json::json!({"retentionEnabled": true, "retentionSeconds": 60});
+    let script = || {
+        vec![
+            Canned::new(200, LIST_BODY),
+            Canned::new(200, CONFIGURE_BODY),
+            Canned::new(200, CONFIGURE_BODY),
+            Canned::new(200, DELETE_BODY),
+            Canned::new(201, PUSH_BODY),
+            Canned::new(200, FETCH_BODY),
+            Canned::new(200, KV_BODY),
+            Canned::new(200, TXN_BODY),
+            Canned::new(200, r#"{"tenant":"acme","sub":"svc"}"#),
+        ]
+    };
+    async fn run_all(api: &HttpQueen, kv_ops: &[KvOp], options: &serde_json::Value) -> Vec<String> {
+        let t = Some("tenant-token");
+        vec![
+            format!("{:?}", api.list_queues(t).await.map(|q| q.len())),
+            format!("{:?}", api.create_queue("orders", t).await),
+            format!("{:?}", api.create_queue_with("orders", options, t).await),
+            format!("{:?}", api.delete_queue("orders", t).await),
+            format!("{:?}", api.push(&items(), t).await),
+            format!("{:?}", api.fetch(&entries(), 500, 1, t).await),
+            format!("{:?}", api.kv(kv_ops, t).await),
+            format!(
+                "{:?}",
+                api.transaction(&items(), &[fence(), offset_put()], t).await
+            ),
+            format!("{:?}", api.identity(t).await),
+        ]
+    }
+
+    let (base, http_seen) = stub(script()).await;
+    let http = HttpQueen::new(&base).unwrap();
+    let http_out = run_all(&http, &kv_ops, &options).await;
+
+    let recorder = Recorder::new(script());
+    let local = HttpQueen::local(Arc::clone(&recorder) as Arc<dyn LocalDispatch>);
+    assert!(local.is_local() && !http.is_local());
+    let local_out = run_all(&local, &kv_ops, &options).await;
+
+    assert_eq!(
+        http_out, local_out,
+        "the two transports read the answers differently"
+    );
+    let http_seen: Vec<_> = http_seen.lock().unwrap().iter().map(as_local).collect();
+    let local_seen: Vec<_> = recorder.seen().iter().map(local_shape).collect();
+    assert_eq!(http_seen.len(), 9);
+    assert_eq!(
+        http_seen, local_seen,
+        "the two transports asked differently"
+    );
+}
+
+/// A 429's `Retry-After` survives the local trip into the Kafka throttle,
+/// exactly as it does over HTTP.
+#[tokio::test]
+async fn a_local_429_carries_its_retry_after_into_the_kafka_throttle() {
+    let recorder = Recorder::new(vec![Canned {
+        status: 429,
+        body: r#"{"error":"overloaded","code":"overloaded"}"#,
+        extra: "Retry-After: 5",
+    }]);
+    let api = HttpQueen::local(recorder as Arc<dyn LocalDispatch>);
+    let err = api.list_queues(None).await.unwrap_err();
+    assert_eq!(err.retry_after_ms(), Some(5_000));
+    assert_eq!(queen_kafka::throttle::for_error(&err), Some(5_000));
+    assert!(err.to_string().contains("429"), "{err}");
+}
+
+/// A dispatch that produced no answer is a transport failure, not a panic and
+/// not a status.
+#[tokio::test]
+async fn a_local_call_with_no_answer_is_a_transport_error() {
+    let recorder = Recorder::new(vec![]);
+    let api = HttpQueen::local(recorder as Arc<dyn LocalDispatch>);
+    let err = api.list_queues(None).await.unwrap_err();
+    assert!(
+        matches!(err, queen_kafka::queen::Error::Transport(_)),
+        "{err:?}"
+    );
+}
+
+/// The budgets are the HTTP client's: a broker that never answers costs a
+/// call its timeout, never a hung Kafka connection.
+#[tokio::test(start_paused = true)]
+async fn a_local_call_that_never_answers_times_out() {
+    struct Silent;
+    impl LocalDispatch for Silent {
+        fn call(
+            &self,
+            _req: LocalRequest,
+        ) -> queen_kafka::queen::BoxFuture<'static, std::result::Result<LocalResponse, String>>
+        {
+            Box::pin(std::future::pending())
+        }
+    }
+    let api = HttpQueen::local(Arc::new(Silent));
+    let err = api.fetch(&entries(), 500, 1, None).await.unwrap_err();
+    assert!(
+        matches!(&err, queen_kafka::queen::Error::Transport(m) if m.contains("timed out")),
+        "{err:?}"
+    );
+}
+
+/// `with_host` scopes the local client exactly as it scopes the HTTP one.
+#[tokio::test]
+async fn a_host_scoped_local_client_sends_exactly_that_host() {
+    let recorder = Recorder::new(vec![Canned::new(200, LIST_BODY)]);
+    let api = HttpQueen::local(Arc::clone(&recorder) as Arc<dyn LocalDispatch>);
+    let scoped = api.with_host("t1.kafka.example.com").unwrap();
+    scoped.list_queues(Some("tok")).await.unwrap();
+    let seen = recorder.seen();
+    assert_eq!(seen[0].host.as_deref(), Some("t1.kafka.example.com"));
+    assert_eq!(seen[0].bearer.as_deref(), Some("tok"));
+    assert_eq!(seen[0].method, "GET");
+    assert_eq!(seen[0].body, None);
+}

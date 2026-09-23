@@ -361,7 +361,7 @@ const MAX_CONFIGURABLE_MS: u64 = 3_600_000;
 impl GroupConfig {
     /// Resolve the group knobs from the environment, loudly.
     ///
-    /// Same rule as every other knob in this binary (main.rs): a value that
+    /// Same rule as every other knob in this binary (boot.rs): a value that
     /// does not parse is a boot failure and not a silent fall back to the
     /// default, because the default is not there to paper over a typo.
     pub fn resolve(get: &dyn Fn(&str) -> Option<String>) -> Result<GroupConfig, String> {
@@ -1101,7 +1101,7 @@ mod tests {
         assert_eq!(cfg.min_session_timeout, Duration::from_millis(1_000));
 
         for bad in ["-1", "3 seconds", "1e3", "4000000", ""] {
-            // An empty value is unset, not zero — same rule as main.rs.
+            // An empty value is unset, not zero — same rule as boot.rs.
             let got = resolve(&[("QUEEN_KAFKA_GROUP_MIN_SESSION_TIMEOUT_MS", bad)]);
             if bad.is_empty() {
                 assert_eq!(

@@ -1,0 +1,584 @@
+//! IN-PROCESS MODE for the Kafka wire facade (PLAN_SINGLE_BINARY.md W2).
+//!
+//! In raft mode, `QUEEN_KAFKA_EMBEDDED=true` runs the `queen-kafka` library
+//! INSIDE this broker process — one binary, one process, no child to spawn or
+//! supervise (the Postgres boot keeps the child of `kafka_facade.rs`). The
+//! facade reads exactly the environment the child read (`QUEEN_KAFKA_*`,
+//! `QUEEN_TOKEN`), through the same [`queen_kafka::boot::Config`], so every
+//! knob keeps its documented meaning.
+//!
+//! ## Threads
+//! The facade's own work — accepting, decoding and encoding the Kafka wire, the
+//! record envelope, compression — runs on a dedicated multi-thread tokio
+//! runtime whose threads are named `queen-kafka` (`QUEEN_KAFKA_THREADS`, default
+//! `min(4, cores / 2)`, at least 1). Every call INTO the broker is spawned onto
+//! the broker's own runtime ([`RouterDispatch`]), so broker code never runs on a
+//! facade thread and a Kafka load spike cannot occupy the broker's workers with
+//! protocol work. What the two share is the state machine itself: a Kafka
+//! produce is a push command like any other.
+//!
+//! ## The Queen API, minus the socket
+//! The facade still speaks Queen's HTTP API — routes, JSON, status codes — but
+//! its transport is the broker's axum `Router`, called as a service. Routing,
+//! auth, tenancy, push admission (`admit_edge`, which turns a full budget into a
+//! 429 the facade answers as `throttle_time_ms`) and follower forwarding are the
+//! ones every HTTP client meets; TCP, HTTP/1 framing and the reqwest client are
+//! gone. The typed calls that skip the JSON too are the next step, not this one.
+//!
+//! An EXPLICIT `QUEEN_URL` keeps the facade on HTTP to that URL: that is the
+//! Cloud hairpin through the proxy (authentication, tenant scoping, quotas and
+//! metering on every Kafka request), and bypassing it in-process would bypass
+//! all four. Only the child process goes away in that case.
+//!
+//! ## Blast radius
+//! A panic on a `queen-kafka` thread kills the task it happened in — one Kafka
+//! connection — and nothing else ([`crate::obs::install_panic_hook`] aborts the
+//! process for a panic on any OTHER thread, as `panic = "abort"` did). A facade
+//! whose serve loop ends (a panic in the accept loop, a listener error) is
+//! restarted with the child supervisor's ladder: 1s doubling to 30s, reset
+//! after an hour of healthy running. Clients reconnect and resume from offsets
+//! that live in Queen, exactly as they did across a child restart.
+
+use std::panic::AssertUnwindSafe;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use futures_util::FutureExt;
+use queen_kafka::boot;
+use queen_kafka::queen::{
+    BoxFuture, HttpQueen, LocalDispatch, LocalRequest, LocalResponse, QueenApi,
+};
+use tower::ServiceExt;
+
+use crate::config::KafkaFacadeConfig;
+
+/// The facade runtime's thread name. It MUST start with one of
+/// [`crate::obs::UNWIND_THREAD_PREFIXES`], or a facade panic aborts the broker.
+const THREAD_NAME: &str = "queen-kafka";
+
+/// Restart ladder, the same as the child supervisor's (kafka_facade.rs).
+const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
+const BACKOFF_MAX: Duration = Duration::from_secs(30);
+const HEALTHY_RUN: Duration = Duration::from_secs(3600);
+
+/// Blocking threads of the facade runtime. The facade itself blocks nowhere;
+/// the cap is a ceiling on what a misbehaving dependency could spawn.
+const MAX_BLOCKING_THREADS: usize = 64;
+
+// ---------------------------------------------------------------------------
+// The transport: the broker's router, called as a service.
+// ---------------------------------------------------------------------------
+
+/// [`LocalDispatch`] over the broker's router. Each call is SPAWNED onto the
+/// broker runtime and awaited from the facade runtime, so the handler, the
+/// middleware and every blocking read they make run on broker threads.
+struct RouterDispatch {
+    router: axum::Router,
+    broker: tokio::runtime::Handle,
+}
+
+impl LocalDispatch for RouterDispatch {
+    fn call(&self, req: LocalRequest) -> BoxFuture<'static, Result<LocalResponse, String>> {
+        let router = self.router.clone();
+        let task = self.broker.spawn(async move {
+            let request = build_request(req)?;
+            let response = match router.oneshot(request).await {
+                Ok(r) => r,
+                Err(never) => match never {},
+            };
+            let status = response.status().as_u16();
+            let retry_after = response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .map_err(|e| format!("in-process response body: {e}"))?;
+            Ok(LocalResponse {
+                status,
+                retry_after,
+                body: String::from_utf8_lossy(&bytes).into_owned(),
+            })
+        });
+        Box::pin(async move {
+            task.await
+                .map_err(|e| format!("the broker task serving an in-process call ended: {e}"))?
+        })
+    }
+}
+
+/// The HTTP request the facade would have sent, as an axum request: the same
+/// method, path, `Host`, bearer, `Content-Type` and `Content-Length` (the last
+/// one is what push admission sizes its permits by).
+fn build_request(req: LocalRequest) -> Result<axum::http::Request<axum::body::Body>, String> {
+    use axum::http::header;
+    let mut builder = axum::http::Request::builder()
+        .method(req.method)
+        .uri(req.path.as_str())
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(host) = &req.host {
+        builder = builder.header(header::HOST, host.as_str());
+    }
+    if let Some(token) = &req.bearer {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    let body = match req.body {
+        Some(b) => {
+            builder = builder.header(header::CONTENT_LENGTH, b.len());
+            axum::body::Body::from(b)
+        }
+        None => axum::body::Body::empty(),
+    };
+    builder
+        .body(body)
+        .map_err(|e| format!("in-process request for {}: {e}", req.path))
+}
+
+// ---------------------------------------------------------------------------
+// Boot.
+// ---------------------------------------------------------------------------
+
+/// Resolve the facade's configuration from the environment. Called at BOOT,
+/// before the listener binds, so the knob with no default
+/// (`QUEEN_KAFKA_ADVERTISED_ADDR`) fails the broker's boot with the facade's
+/// own sentence — the same contract as the child mode's preflight.
+pub fn preflight() -> Result<boot::Config, String> {
+    boot::Config::from_env()
+}
+
+/// Whether a normalized `QUEEN_URL` names this broker's own listener: a
+/// loopback or wildcard host on `own_port`. That is almost always a leftover
+/// from the child mode (whose QUEEN_URL was the broker's loopback), and it
+/// quietly trades the in-process transport for HTTP to itself.
+fn points_at_self(queen_url: &str, own_port: &str) -> bool {
+    let rest = queen_url
+        .strip_prefix("http://")
+        .or_else(|| queen_url.strip_prefix("https://"))
+        .unwrap_or(queen_url);
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let Some((host, port)) = authority.rsplit_once(':') else {
+        return false;
+    };
+    port == own_port.trim()
+        && matches!(
+            host.trim_matches(|c| c == '[' || c == ']'),
+            "localhost" | "127.0.0.1" | "::1" | "0.0.0.0" | "::"
+        )
+}
+
+/// `QUEEN_KAFKA_THREADS`, default `min(4, cores / 2)`, at least 1.
+fn worker_threads() -> usize {
+    let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
+    let default = (cores / 2).clamp(1, 4);
+    std::env::var("QUEEN_KAFKA_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| (1..=256).contains(n))
+        .unwrap_or(default)
+}
+
+/// A running in-process facade: what `run_raft` holds to stop it.
+pub struct InProcess {
+    stop: tokio::sync::watch::Sender<bool>,
+    done: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    grace: Duration,
+}
+
+/// Start the facade on its own runtime, with `router` as its Queen transport
+/// (unless `QUEEN_URL` is set explicitly — see the module header). Must be
+/// called from the broker runtime: calls are spawned onto the runtime current
+/// here.
+pub fn start(
+    knobs: &KafkaFacadeConfig,
+    cfg: boot::Config,
+    router: axum::Router,
+    own_port: &str,
+) -> Arc<InProcess> {
+    let explicit_url = std::env::var("QUEEN_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    if explicit_url.is_some() && points_at_self(cfg.queen_url(), own_port) {
+        tracing::warn!(
+            target: "kafka",
+            queen_url = %cfg.queen_url(),
+            "QUEEN_URL points at this broker itself, so the in-process Kafka facade will \
+             call its own HTTP listener instead of the router; unset QUEEN_URL unless a \
+             proxy is meant to sit in between"
+        );
+    }
+    let (api, via): (Arc<dyn QueenApi>, &'static str) = match explicit_url {
+        Some(_) => match HttpQueen::new(cfg.queen_url()) {
+            Ok(http) => (Arc::new(http), "http (explicit QUEEN_URL)"),
+            // Unreachable in practice: `Config::from_env` already normalized
+            // and validated this URL.
+            Err(e) => crate::obs::fatal(format!("QUEEN_KAFKA_EMBEDDED=true: {e}")),
+        },
+        None => (
+            Arc::new(HttpQueen::local(Arc::new(RouterDispatch {
+                router,
+                broker: tokio::runtime::Handle::current(),
+            }))),
+            "in-process",
+        ),
+    };
+
+    let threads = worker_threads();
+    let status = Arc::new(Status::new(&cfg, via, threads));
+    let _ = STATUS.set(Arc::clone(&status));
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(threads)
+        .max_blocking_threads(MAX_BLOCKING_THREADS)
+        .thread_name(THREAD_NAME)
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => crate::obs::fatal(format!("cannot build the Kafka facade runtime: {e}")),
+    };
+    tracing::info!(
+        target: "kafka",
+        transport = via,
+        threads,
+        listen = %cfg.listen_addr(),
+        advertised = %cfg.advertised(),
+        "starting the Kafka facade in-process"
+    );
+    let spawned = std::thread::Builder::new()
+        // Inside the unwind prefix: the supervisor itself is facade code.
+        .name(format!("{THREAD_NAME}-main"))
+        .spawn(move || {
+            runtime.block_on(supervise(cfg, api, via, stop_rx, status));
+            // Connection tasks still open are dropped here: the process is
+            // stopping and their clients reconnect elsewhere or later.
+            runtime.shutdown_timeout(Duration::from_millis(500));
+            let _ = done_tx.send(());
+        });
+    if let Err(e) = spawned {
+        crate::obs::fatal(format!("cannot start the Kafka facade thread: {e}"));
+    }
+    Arc::new(InProcess {
+        stop: stop_tx,
+        done: Mutex::new(Some(done_rx)),
+        grace: Duration::from_millis(knobs.shutdown_grace_ms),
+    })
+}
+
+impl InProcess {
+    /// Stop accepting, let the facade hand back what it holds (a cluster-mode
+    /// registry row), and wait for it — bounded by
+    /// `QUEEN_KAFKA_SHUTDOWN_GRACE_MS`, the same window the child had.
+    pub async fn shutdown(&self) {
+        let _ = self.stop.send(true);
+        let done = self.done.lock().ok().and_then(|mut d| d.take());
+        if let Some(done) = done {
+            if tokio::time::timeout(self.grace, done).await.is_err() {
+                tracing::warn!(
+                    target: "shutdown",
+                    grace_ms = self.grace.as_millis() as u64,
+                    "the in-process Kafka facade did not stop inside its grace window"
+                );
+            }
+        }
+    }
+}
+
+/// Run the facade until the broker stops it, restarting it when its serve loop
+/// ends on its own.
+async fn supervise(
+    cfg: boot::Config,
+    api: Arc<dyn QueenApi>,
+    via: &'static str,
+    stop: tokio::sync::watch::Receiver<bool>,
+    status: Arc<Status>,
+) {
+    let mut backoff = BACKOFF_INITIAL;
+    loop {
+        if *stop.borrow() {
+            break;
+        }
+        let started = Instant::now();
+        status.running();
+        let mut until = stop.clone();
+        let stop_signal = async move {
+            let _ = until.wait_for(|stopping| *stopping).await;
+            "broker shutdown"
+        };
+        let outcome =
+            AssertUnwindSafe(boot::serve(cfg.clone(), Arc::clone(&api), via, stop_signal))
+                .catch_unwind()
+                .await;
+        if *stop.borrow() {
+            break;
+        }
+        let reason = match outcome {
+            Ok(Ok(())) => "the accept loop ended".to_string(),
+            Ok(Err(e)) => e,
+            Err(payload) => format!("panicked: {}", panic_text(payload.as_ref())),
+        };
+        if started.elapsed() >= HEALTHY_RUN {
+            backoff = BACKOFF_INITIAL;
+        }
+        status.exited(&reason, backoff);
+        tracing::error!(
+            target: "kafka",
+            reason = %reason,
+            backoff_ms = backoff.as_millis() as u64,
+            "the in-process Kafka facade stopped; restarting it"
+        );
+        let mut until = stop.clone();
+        tokio::select! {
+            _ = tokio::time::sleep(backoff) => {}
+            _ = until.wait_for(|stopping| *stopping) => break,
+        }
+        backoff = (backoff * 2).min(BACKOFF_MAX);
+    }
+    status.stopped();
+}
+
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "<non-string panic payload>".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// /status
+// ---------------------------------------------------------------------------
+
+static STATUS: OnceLock<Arc<Status>> = OnceLock::new();
+
+struct Status {
+    transport: &'static str,
+    threads: usize,
+    listen: String,
+    advertised: String,
+    clustered: bool,
+    inner: Mutex<StatusInner>,
+}
+
+struct StatusInner {
+    phase: &'static str,
+    since: Instant,
+    restarts: u64,
+    last_exit: Option<String>,
+    backoff_ms: u64,
+}
+
+impl Status {
+    fn new(cfg: &boot::Config, transport: &'static str, threads: usize) -> Status {
+        Status {
+            transport,
+            threads,
+            listen: cfg.listen_addr().to_string(),
+            advertised: cfg.advertised(),
+            clustered: cfg.clustered(),
+            inner: Mutex::new(StatusInner {
+                phase: "starting",
+                since: Instant::now(),
+                restarts: 0,
+                last_exit: None,
+                backoff_ms: 0,
+            }),
+        }
+    }
+
+    fn with(&self, f: impl FnOnce(&mut StatusInner)) {
+        if let Ok(mut g) = self.inner.lock() {
+            f(&mut g);
+        }
+    }
+
+    fn running(&self) {
+        self.with(|s| {
+            if s.phase == "backoff" {
+                s.restarts += 1;
+            }
+            s.phase = "running";
+            s.since = Instant::now();
+            s.backoff_ms = 0;
+        });
+    }
+
+    fn exited(&self, reason: &str, backoff: Duration) {
+        self.with(|s| {
+            s.phase = "backoff";
+            s.since = Instant::now();
+            s.last_exit = Some(reason.chars().take(512).collect());
+            s.backoff_ms = backoff.as_millis() as u64;
+        });
+    }
+
+    fn stopped(&self) {
+        self.with(|s| {
+            s.phase = "stopped";
+            s.since = Instant::now();
+        });
+    }
+}
+
+/// The `kafka` block of `GET /status` when the facade runs in-process, or
+/// `None` when it does not.
+pub fn status_value() -> Option<serde_json::Value> {
+    let st = STATUS.get()?;
+    let g = st.inner.lock().ok()?;
+    Some(serde_json::json!({
+        "mode": "in-process",
+        "transport": st.transport,
+        "phase": g.phase,
+        "threads": st.threads,
+        "listen": st.listen,
+        "advertised": st.advertised,
+        "clustered": st.clustered,
+        "restarts": g.restarts,
+        "lastExit": g.last_exit,
+        "uptimeMs": if g.phase == "running" { g.since.elapsed().as_millis() as u64 } else { 0 },
+        "backoffMs": g.backoff_ms,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The facade's threads must be ones the panic hook lets unwind, or a
+    /// facade panic would abort the broker.
+    #[test]
+    fn the_facade_threads_are_the_ones_allowed_to_unwind() {
+        assert!(crate::obs::panic_may_unwind(Some(THREAD_NAME)));
+        assert!(crate::obs::panic_may_unwind(Some(&format!(
+            "{THREAD_NAME}-main"
+        ))));
+        assert!(!crate::obs::panic_may_unwind(Some("tokio-runtime-worker")));
+        assert!(!crate::obs::panic_may_unwind(Some("queen-rsm-log")));
+        assert!(!crate::obs::panic_may_unwind(None));
+    }
+
+    /// The leftover-child-mode QUEEN_URL is recognised; a real proxy is not.
+    #[test]
+    fn a_queen_url_naming_this_broker_is_recognised() {
+        assert!(points_at_self("http://127.0.0.1:6632", "6632"));
+        assert!(points_at_self("http://localhost:6632/", "6632"));
+        assert!(points_at_self("http://[::1]:6632", "6632"));
+        assert!(!points_at_self("http://127.0.0.1:6633", "6632"));
+        assert!(!points_at_self("https://proxy.cell-1.example:443", "6632"));
+        assert!(!points_at_self("http://10.0.0.7:6632", "6632"));
+    }
+
+    /// The request the router sees is the one HTTP would have carried.
+    #[test]
+    fn a_local_request_becomes_the_http_request_it_stands_for() {
+        let req = build_request(LocalRequest {
+            method: "POST",
+            path: "/api/v1/push".into(),
+            host: Some("t1.example".into()),
+            bearer: Some("tok".into()),
+            body: Some("{\"items\":[]}".into()),
+        })
+        .unwrap();
+        assert_eq!(req.method(), axum::http::Method::POST);
+        assert_eq!(req.uri().path(), "/api/v1/push");
+        let h = req.headers();
+        assert_eq!(h["host"], "t1.example");
+        assert_eq!(h["authorization"], "Bearer tok");
+        assert_eq!(h["content-type"], "application/json");
+        assert_eq!(h["content-length"], "12");
+
+        let get = build_request(LocalRequest {
+            method: "GET",
+            path: "/api/v1/resources/queues".into(),
+            host: None,
+            bearer: None,
+            body: None,
+        })
+        .unwrap();
+        assert!(get.headers().get("authorization").is_none());
+        assert!(get.headers().get("content-length").is_none());
+    }
+
+    /// End to end over a real router: the dispatch answers what the router
+    /// answers, status, `Retry-After` and body, and runs it on the broker's
+    /// runtime even when called from another one.
+    #[test]
+    fn the_dispatch_answers_what_the_router_answers_from_another_runtime() {
+        use axum::routing::{get, post};
+        let broker = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let router = axum::Router::new()
+            .route(
+                "/api/v1/echo",
+                post(|headers: axum::http::HeaderMap, body: String| async move {
+                    let auth = headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    let thread = std::thread::current().name().unwrap_or("").to_string();
+                    format!("{auth}|{body}|{thread}")
+                }),
+            )
+            .route(
+                "/api/v1/busy",
+                get(|| async {
+                    axum::response::Response::builder()
+                        .status(429)
+                        .header("retry-after", "3")
+                        .body(axum::body::Body::from("{\"error\":\"busy\"}"))
+                        .unwrap()
+                }),
+            );
+        let dispatch = RouterDispatch {
+            router,
+            broker: broker.handle().clone(),
+        };
+        let facade = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name(THREAD_NAME)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (echo, busy) = facade.block_on(async {
+            let echo = dispatch
+                .call(LocalRequest {
+                    method: "POST",
+                    path: "/api/v1/echo".into(),
+                    host: None,
+                    bearer: Some("tok".into()),
+                    body: Some("hello".into()),
+                })
+                .await
+                .unwrap();
+            let busy = dispatch
+                .call(LocalRequest {
+                    method: "GET",
+                    path: "/api/v1/busy".into(),
+                    host: None,
+                    bearer: None,
+                    body: None,
+                })
+                .await
+                .unwrap();
+            (echo, busy)
+        });
+        assert_eq!(echo.status, 200);
+        let mut parts = echo.body.split('|');
+        assert_eq!(parts.next(), Some("Bearer tok"));
+        assert_eq!(parts.next(), Some("hello"));
+        let thread = parts.next().unwrap_or_default();
+        assert!(
+            !thread.starts_with(THREAD_NAME),
+            "the handler ran on a facade thread ({thread})"
+        );
+        assert_eq!(busy.status, 429);
+        assert_eq!(busy.retry_after.as_deref(), Some("3"));
+        assert_eq!(busy.body, "{\"error\":\"busy\"}");
+    }
+}

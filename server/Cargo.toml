@@ -49,8 +49,13 @@ required-features = ["server"]
 # byte-identical to the pre-feature layout. `server` covers what only the HTTP
 # broker needs: the axum serve stack, the embedded dashboard, and the process
 # tracing subscriber. The embedded library path (queen::Broker) never needs it.
-default = ["server"]
+default = ["server", "kafka"]
 server = ["dep:rust-embed", "dep:tracing-subscriber", "axum/http1", "axum/tokio"]
+# The Kafka wire facade linked INTO the broker (PLAN_SINGLE_BINARY.md W2,
+# src/kafka_inproc.rs): with QUEEN_KAFKA_EMBEDDED=true in raft mode it runs on
+# its own tokio runtime inside this process and reaches the broker through the
+# router, with no child process and no socket. Off, the binary has no Kafka code.
+kafka = ["server", "dep:queen-kafka", "dep:tower"]
 # jemalloc + heap profiler as the process allocator, for memory hunts
 # (`MALLOC_CONF=prof:true,...`). Never in a release build.
 jemalloc-prof = ["dep:tikv-jemallocator"]
@@ -170,9 +175,22 @@ futures-util = "0.3"
 # immutable `.qidx` beside the file, binary-searched in place. mmap is what
 # keeps that read O(log n) with no per-partition RAM, which is I8.
 memmap2 = "0.9"
+# The Kafka facade, in-process (feature `kafka`). Its own Cargo.toml documents
+# its dependency choices (kafka-protocol, the four codecs, reqwest for the
+# explicit-QUEEN_URL case on rustls+ring, so no second TLS backend and no cmake).
+queen-kafka = { path = "../protocols/queen-kafka", optional = true }
+# `ServiceExt::oneshot`: the in-process facade calls the axum Router as a
+# service. Already in the tree through axum; named for the one trait.
+tower = { version = "0.5", default-features = false, features = ["util"], optional = true }
 
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+# UNWIND, with the abort kept by policy: obs::install_panic_hook aborts the
+# process on a panic in ANY thread except the in-process facades' own runtimes
+# (thread names in obs::UNWIND_THREAD_PREFIXES), where the panicking task dies
+# alone. Every broker thread — planner, writer, apply, raft, HTTP — still
+# crashes and replays from durable state exactly as under panic = "abort"
+# (PLAN_SINGLE_BINARY.md W1).
+panic = "unwind"

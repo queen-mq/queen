@@ -21,6 +21,7 @@
 //! as the `throttle_time_ms` every Kafka client already backs off on —
 //! [`throttle`]).
 
+pub mod boot;
 pub mod cluster;
 pub mod conn;
 pub mod coordinator;
@@ -51,7 +52,7 @@ use std::sync::{Arc, Mutex};
 /// ## One per CONNECTION, derived from one per process
 ///
 /// Until M5 there was one of these for the whole process. There still is — the
-/// root, built in `main.rs` — but a connection now has things of its own that a
+/// root, built in `boot.rs` — but a connection now has things of its own that a
 /// handler has to see: the credential SASL/PLAIN presented, and the Host that
 /// connection's calls to Queen must carry ([`tls`]). Rather than thread those
 /// through every handler signature, a connection gets its own `Facade`
@@ -67,7 +68,7 @@ use std::sync::{Arc, Mutex};
 pub struct Facade {
     /// The host and port handed to clients as the address of THIS node — node 0
     /// on its own, `QUEEN_KAFKA_NODE_ID` in a cluster. Validated at boot
-    /// (main.rs): the classic Kafka footgun is advertising something clients
+    /// (boot.rs): the classic Kafka footgun is advertising something clients
     /// cannot reach, which fails only *after* a successful bootstrap.
     pub advertised_host: String,
     pub advertised_port: u16,

@@ -71,6 +71,17 @@ with zero 503 `raft_phase1_unsupported`.
 lane all pass in-process. The perf campaign is rerun: the facade cost on top of
 the broker was 43% of broker CPU, and it should drop.
 
+**Status (2026-09-23, branch `kafka-inproc`): Kafka steps 1-4 done, raft mode.**
+`queen::HttpQueen` got a transport (`Http` | `Local(LocalDispatch)`) instead of a
+second impl, so every call site stays shared; the in-process dispatch is the
+broker's axum `Router` called as a service, spawned onto the broker runtime
+(server/src/kafka_inproc.rs). The boot moved from queen-kafka's `main.rs` into
+`queen_kafka::boot` (`Config` + `serve`). Feature `kafka` (default on); the
+release profile unwinds and `obs::install_panic_hook` aborts off the
+`queen-kafka` threads (W1 for this one facade). Explicit `QUEEN_URL` stays on
+HTTP. The Postgres boot keeps the child. Step 5 (offsets as raft commands) is
+not done.
+
 ### W3 — Proxy data plane into the broker
 - **Auth:** API keys (hashed, RAM lookup) and JWT verification, with a cache of
   verified callers (port `cache.rs`). The tenant comes from the verified caller.

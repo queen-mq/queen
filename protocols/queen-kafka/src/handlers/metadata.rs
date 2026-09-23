@@ -134,7 +134,7 @@ const INTERNAL_PREFIX: &str = "__";
 /// Ceiling on the width advertised for ONE topic, whatever Queen reports.
 ///
 /// It is also the ceiling `QUEEN_KAFKA_DEFAULT_PARTITIONS` is validated against
-/// at boot (main.rs), and the same number for the same reason: 100k lanes is a
+/// at boot (boot.rs), and the same number for the same reason: 100k lanes is a
 /// ~2.6 MB partition array in every Metadata response, which is already absurd
 /// and is the last order of magnitude before the answer stops being an answer.
 /// The configured default cannot exceed it; a queue's LIVE lane count can, and
@@ -890,12 +890,12 @@ mod tests {
     }
 
     /// `QUEEN_KAFKA_DEFAULT_PARTITIONS` is validated at boot against this same
-    /// number (main.rs), so a configured width can never be one the metadata
+    /// number (boot.rs), so a configured width can never be one the metadata
     /// path would then clamp behind the operator's back.
     #[test]
     fn the_boot_knob_and_the_clamp_are_the_same_ceiling() {
-        const MAIN: &str = include_str!("../main.rs");
-        assert!(MAIN
+        const BOOT: &str = include_str!("../boot.rs");
+        assert!(BOOT
             .contains("const MAX_DEFAULT_PARTITIONS: u32 = metadata::MAX_ADVERTISED_PARTITIONS;"));
         assert_eq!(
             advertised_partitions(0, MAX_ADVERTISED_PARTITIONS),

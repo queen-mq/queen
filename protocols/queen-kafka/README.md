@@ -146,6 +146,26 @@ QUEEN_KAFKA_ADVERTISED_ADDR=localhost:9092 \
 `QUEEN_KAFKA_ADVERTISED_ADDR` is required: it is the address clients are told
 to connect back to, and getting it wrong is the classic Kafka footgun.
 
+### In-process, inside a raft broker
+
+A broker in raft mode (`QUEEN_STORAGE=raft`) with `QUEEN_KAFKA_EMBEDDED=true`
+runs this library inside its own process (server/src/kafka_inproc.rs): no
+child, no second binary, no loopback socket. The configuration is the same
+environment, read by the same `queen_kafka::boot::Config`; the differences are
+three:
+
+- **Transport.** Calls to Queen are the same routes and JSON, handed to the
+  broker's router in-process (`queen::LocalDispatch`) instead of over HTTP.
+  An explicit `QUEEN_URL` keeps HTTP to that URL, which is the Cloud hairpin
+  through the proxy.
+- **Threads.** The facade runs on its own tokio runtime, threads named
+  `queen-kafka` (`QUEEN_KAFKA_THREADS`, default `min(4, cores / 2)`); every
+  call into the broker runs on the broker's runtime.
+- **Blast radius.** A panic on a facade thread kills that task only; the
+  broker keeps serving. A serve loop that ends is restarted with the child
+  supervisor's ladder (1s doubling to 30s). `GET /status` reports it under
+  `kafka` with `"mode": "in-process"`.
+
 ## Cluster mode
 
 **One facade needs none of this and is unchanged by all of it.** With

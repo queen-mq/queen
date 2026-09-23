@@ -1018,16 +1018,68 @@ pub trait QueenApi: Send + Sync + 'static {
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// The real client. One `reqwest::Client` for the process: it owns the
-/// connection pool, and the facade's whole traffic to Queen is a handful of
-/// admin calls per metadata refresh.
+/// One Queen API call handed to a broker running in the SAME process: exactly
+/// the method, path, `Host`, bearer and JSON body [`HttpQueen`] would put on the
+/// wire, minus the socket. The broker side (server/src/kafka_inproc.rs) runs it
+/// through its own router, so routing, auth, tenancy and push admission are the
+/// ones every HTTP client meets — only TCP and HTTP framing are skipped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalRequest {
+    /// `GET`, `POST` or `DELETE`.
+    pub method: &'static str,
+    /// The path, exactly as the HTTP client would request it.
+    pub path: String,
+    /// The `Host` header, when [`QueenApi::with_host`] set one.
+    pub host: Option<String>,
+    /// The bearer token, without the `Bearer ` prefix. Never logged.
+    pub bearer: Option<String>,
+    /// The JSON body; `None` for a GET or a DELETE.
+    pub body: Option<String>,
+}
+
+/// What the broker answered to a [`LocalRequest`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalResponse {
+    pub status: u16,
+    /// The `Retry-After` header as the broker wrote it, when it wrote one.
+    pub retry_after: Option<String>,
+    pub body: String,
+}
+
+/// The in-process transport. A broker that runs this facade inside its own
+/// process implements it over its router. `Err` is a call that produced no
+/// answer at all (the broker task died): the local twin of a reset connection,
+/// and reported as [`Error::Transport`].
+pub trait LocalDispatch: Send + Sync + 'static {
+    fn call(
+        &self,
+        req: LocalRequest,
+    ) -> BoxFuture<'static, std::result::Result<LocalResponse, String>>;
+}
+
+/// Where a call goes: over HTTP to `QUEEN_URL`, or to the broker this facade
+/// shares a process with.
+#[derive(Clone)]
+enum Transport {
+    Http {
+        /// `QUEEN_URL`, without a trailing slash (see [`normalize_base_url`]).
+        base: String,
+        http: reqwest::Client,
+    },
+    Local(Arc<dyn LocalDispatch>),
+}
+
+/// The real client. It speaks Queen's HTTP API — the routes, the JSON and the
+/// status codes — over one of two transports: a `reqwest::Client` (one for the
+/// process: it owns the connection pool) or, when the facade runs inside the
+/// broker, a [`LocalDispatch`] that hands the same request to the broker's
+/// router without a socket. Every call site below is transport-blind, which is
+/// what keeps the two byte-identical in what they ask and how they read it.
 pub struct HttpQueen {
-    /// `QUEEN_URL`, without a trailing slash (see [`normalize_base_url`]).
-    base: String,
     /// The `Host` header every call sends, when it is not the one the URL
     /// implies. See [`HttpQueen::with_host`].
     host: Option<String>,
-    http: reqwest::Client,
+    transport: Transport,
 }
 
 impl HttpQueen {
@@ -1039,34 +1091,100 @@ impl HttpQueen {
             .build()
             .map_err(|e| format!("cannot build the HTTP client for QUEEN_URL={base}: {e}"))?;
         Ok(HttpQueen {
-            base,
             host: None,
-            http,
+            transport: Transport::Http { base, http },
         })
     }
 
-    fn request(
+    /// The in-process client: every call goes to `dispatch` instead of a
+    /// socket, with the same budgets the HTTP client applies.
+    pub fn local(dispatch: Arc<dyn LocalDispatch>) -> HttpQueen {
+        HttpQueen {
+            host: None,
+            transport: Transport::Local(dispatch),
+        }
+    }
+
+    /// Whether this client reaches Queen without leaving the process.
+    pub fn is_local(&self) -> bool {
+        matches!(self.transport, Transport::Local(_))
+    }
+
+    /// One call. `timeout` overrides the client's default budget
+    /// ([`REQUEST_TIMEOUT`]); only Fetch sets it (see `fetch_timeout`).
+    async fn call(
         &self,
-        method: reqwest::Method,
+        method: &'static str,
         path: &str,
         token: Option<&str>,
-    ) -> reqwest::RequestBuilder {
-        let req = self
-            .http
-            .request(method, format!("{}{path}", self.base))
-            .header(reqwest::header::CONTENT_TYPE, "application/json");
-        // Set explicitly, which is what stops hyper filling it in from the
-        // URL's authority — it only adds a `Host` that is not already there.
-        let req = match &self.host {
-            Some(h) => req.header(reqwest::header::HOST, h.as_str()),
-            None => req,
-        };
-        // Bearer, matching what the broker's auth layer extracts
-        // (server/src/auth.rs::extract_bearer). Per call, never on the client:
-        // see the module header.
-        match token {
-            Some(t) => req.bearer_auth(t),
-            None => req,
+        body: Option<String>,
+        timeout: Option<Duration>,
+    ) -> Result<String> {
+        match &self.transport {
+            Transport::Http { base, http } => {
+                let method = match method {
+                    "GET" => reqwest::Method::GET,
+                    "POST" => reqwest::Method::POST,
+                    "DELETE" => reqwest::Method::DELETE,
+                    other => return Err(Error::Transport(format!("unsupported method {other}"))),
+                };
+                let req = http
+                    .request(method, format!("{base}{path}"))
+                    .header(reqwest::header::CONTENT_TYPE, "application/json");
+                // Set explicitly, which is what stops hyper filling it in from
+                // the URL's authority — it only adds a `Host` that is not
+                // already there.
+                let req = match &self.host {
+                    Some(h) => req.header(reqwest::header::HOST, h.as_str()),
+                    None => req,
+                };
+                // Bearer, matching what the broker's auth layer extracts
+                // (server/src/auth.rs::extract_bearer). Per call, never on the
+                // client: see the module header.
+                let req = match token {
+                    Some(t) => req.bearer_auth(t),
+                    None => req,
+                };
+                let req = match body {
+                    Some(b) => req.body(b),
+                    None => req,
+                };
+                let req = match timeout {
+                    Some(t) => req.timeout(t),
+                    None => req,
+                };
+                Self::send(req).await
+            }
+            Transport::Local(dispatch) => {
+                let budget = timeout.unwrap_or(REQUEST_TIMEOUT);
+                let req = LocalRequest {
+                    method,
+                    path: path.to_string(),
+                    host: self.host.clone(),
+                    bearer: token.map(str::to_string),
+                    body,
+                };
+                let answer = tokio::time::timeout(budget, dispatch.call(req))
+                    .await
+                    .map_err(|_| {
+                        Error::Transport(format!(
+                            "in-process call to {path} timed out after {} ms",
+                            budget.as_millis()
+                        ))
+                    })?
+                    .map_err(Error::Transport)?;
+                if !(200..300).contains(&answer.status) {
+                    return Err(Error::Status {
+                        code: answer.status,
+                        body: answer.body,
+                        retry_after_ms: answer
+                            .retry_after
+                            .as_deref()
+                            .and_then(parse_retry_after_ms),
+                    });
+                }
+                Ok(answer.body)
+            }
         }
     }
 
@@ -1101,13 +1219,13 @@ impl HttpQueen {
 /// SLEEPS for, and a misread date is a consumer parked for hours. `None` is not
 /// a loss — [`crate::throttle`] has a default for exactly this.
 fn retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<i64> {
-    let seconds: i64 = headers
-        .get(reqwest::header::RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
+    parse_retry_after_ms(headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?)
+}
+
+/// The value half of [`retry_after_ms`], shared with the in-process transport,
+/// which gets the header as a string rather than as a `HeaderMap`.
+fn parse_retry_after_ms(value: &str) -> Option<i64> {
+    let seconds: i64 = value.trim().parse().ok()?;
     // A negative or absurd value is a broker saying something this cannot use.
     // `checked_mul` because seconds came off the wire.
     seconds.checked_mul(1_000).filter(|ms| *ms >= 0)
@@ -1149,9 +1267,9 @@ impl QueenApi for HttpQueen {
             // auto-create path, every time) is a partition count from before the
             // queue existed. The enriched form costs a pass over the tenant's
             // partitions, which is what the TTL below is for.
-            let body =
-                Self::send(self.request(reqwest::Method::GET, "/api/v1/resources/queues", token))
-                    .await?;
+            let body = self
+                .call("GET", "/api/v1/resources/queues", token, None, None)
+                .await?;
             let parsed: QueueListBody =
                 serde_json::from_str(&body).map_err(|e| Error::Body(e.to_string()))?;
             Ok(parsed.queues)
@@ -1165,11 +1283,9 @@ impl QueenApi for HttpQueen {
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let payload = serde_json::json!({ "queue": name }).to_string();
-            let body = Self::send(
-                self.request(reqwest::Method::POST, "/api/v1/configure", token)
-                    .body(payload),
-            )
-            .await?;
+            let body = self
+                .call("POST", "/api/v1/configure", token, Some(payload), None)
+                .await?;
             // handle_configure surfaces a stored-procedure failure as a non-2xx,
             // but the SP can also echo `{"error":…}` inside a 200 — the handler
             // only re-maps it when it parses (server/src/handlers/queues.rs,
@@ -1206,11 +1322,15 @@ impl QueenApi for HttpQueen {
                 payload.extend(bag.iter().map(|(k, v)| (k.clone(), v.clone())));
             }
             payload.insert("queue".into(), serde_json::json!(name));
-            let body = Self::send(
-                self.request(reqwest::Method::POST, "/api/v1/configure", token)
-                    .body(serde_json::Value::Object(payload).to_string()),
-            )
-            .await?;
+            let body = self
+                .call(
+                    "POST",
+                    "/api/v1/configure",
+                    token,
+                    Some(serde_json::Value::Object(payload).to_string()),
+                    None,
+                )
+                .await?;
             // The same two checks `create_queue` makes, and for the same
             // reason: `handle_configure` surfaces a stored-procedure failure as
             // a non-2xx, but the SP can also echo `{"error":…}` inside a 200.
@@ -1242,7 +1362,7 @@ impl QueenApi for HttpQueen {
             // that a future relaxation of the name rule cannot become a path
             // traversal.
             let path = format!("/api/v1/resources/queues/{}", encode_segment(name));
-            let body = Self::send(self.request(reqwest::Method::DELETE, &path, token)).await?;
+            let body = self.call("DELETE", &path, token, None, None).await?;
             let parsed: DeleteQueueBody =
                 serde_json::from_str(&body).map_err(|e| Error::Body(e.to_string()))?;
             if let Some(e) = parsed.error.filter(|e| !e.is_null()) {
@@ -1262,11 +1382,9 @@ impl QueenApi for HttpQueen {
         Box::pin(async move {
             let payload = serde_json::to_string(&PushBody { items })
                 .map_err(|e| Error::Body(format!("cannot serialize the push body: {e}")))?;
-            let body = Self::send(
-                self.request(reqwest::Method::POST, "/api/v1/push", token)
-                    .body(payload),
-            )
-            .await?;
+            let body = self
+                .call("POST", "/api/v1/push", token, Some(payload), None)
+                .await?;
             align_push_results(&body, items.len())
         })
     }
@@ -1285,14 +1403,17 @@ impl QueenApi for HttpQueen {
                 min_bytes,
             })
             .map_err(|e| Error::Body(format!("cannot serialize the fetch body: {e}")))?;
-            let body = Self::send(
-                self.request(reqwest::Method::POST, "/api/v1/fetch", token)
-                    .body(payload)
-                    // The ONE call that overrides the client's budget. See
-                    // `fetch_timeout`.
-                    .timeout(fetch_timeout(max_wait_ms)),
-            )
-            .await?;
+            // The ONE call that overrides the client's budget. See
+            // `fetch_timeout`.
+            let body = self
+                .call(
+                    "POST",
+                    "/api/v1/fetch",
+                    token,
+                    Some(payload),
+                    Some(fetch_timeout(max_wait_ms)),
+                )
+                .await?;
             align_fetch_results(&body, entries)
         })
     }
@@ -1308,11 +1429,9 @@ impl QueenApi for HttpQueen {
             // is learned once (server/src/handlers/kv.rs).
             let payload = serde_json::to_string(&KvBody { operations: ops })
                 .map_err(|e| Error::Body(format!("cannot serialize the kv body: {e}")))?;
-            let body = Self::send(
-                self.request(reqwest::Method::POST, "/api/v1/kv", token)
-                    .body(payload),
-            )
-            .await?;
+            let body = self
+                .call("POST", "/api/v1/kv", token, Some(payload), None)
+                .await?;
             align_kv_results(&body, ops.len())
         })
     }
@@ -1328,12 +1447,9 @@ impl QueenApi for HttpQueen {
     /// asking again.
     fn identity<'a>(&'a self, token: Option<&'a str>) -> BoxFuture<'a, Result<Option<String>>> {
         Box::pin(async move {
-            let body = Self::send(self.request(
-                reqwest::Method::GET,
-                crate::identity::IDENTITY_PATH,
-                token,
-            ))
-            .await?;
+            let body = self
+                .call("GET", crate::identity::IDENTITY_PATH, token, None, None)
+                .await?;
             Ok(crate::identity::tenant_of(&body))
         })
     }
@@ -1363,25 +1479,22 @@ impl QueenApi for HttpQueen {
                 kv,
             })
             .map_err(|e| Error::Body(format!("cannot serialize the transaction body: {e}")))?;
-            let body = Self::send(
-                self.request(reqwest::Method::POST, "/api/v1/transaction", token)
-                    .body(payload),
-            )
-            .await?;
+            let body = self
+                .call("POST", "/api/v1/transaction", token, Some(payload), None)
+                .await?;
             align_transaction_results(&body, items.len(), kv.len())
         })
     }
 
-    /// A second handle on the SAME `reqwest::Client`, differing only in the
-    /// `Host` header it writes. Cloning the client is what makes this cheap
-    /// enough to do per SNI name: a `reqwest::Client` clone shares the
-    /// connection pool, the DNS cache and the TLS session cache with the
-    /// original, so a hundred hostnames are still one pool.
+    /// A second handle on the SAME transport, differing only in the `Host`
+    /// header it writes. Cloning the client is what makes this cheap enough to
+    /// do per SNI name: a `reqwest::Client` clone shares the connection pool,
+    /// the DNS cache and the TLS session cache with the original, so a hundred
+    /// hostnames are still one pool (and a local dispatch is one `Arc`).
     fn with_host(&self, host: &str) -> Option<Arc<dyn QueenApi>> {
         Some(Arc::new(HttpQueen {
-            base: self.base.clone(),
             host: Some(host.to_string()),
-            http: self.http.clone(),
+            transport: self.transport.clone(),
         }))
     }
 }

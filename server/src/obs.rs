@@ -4,7 +4,7 @@
 //! timestamps, no levels, and the Helm-injected `LOG_LEVEL` was never read. This
 //! module installs a `tracing` subscriber whose `EnvFilter` finally honours
 //! `RUST_LOG`/`LOG_LEVEL`, a panic hook that turns a silent task death into a
-//! structured ERROR (see the `panic = "abort"` note below), a single load-safe
+//! structured ERROR (see the panic-policy note below), a single load-safe
 //! sampling primitive (`Sampler`, generalising `ack_registry::maybe_report`), and
 //! the periodic `rates` / `sizes` aggregate reporters.
 //!
@@ -13,14 +13,21 @@
 //! broker-generated UTC timestamp and a subsystem `target`, and (by the WHERE
 //! rule) at least one of queue/partition/group/worker/peer/offset.
 //!
-//! ## panic = "abort"
-//! `Cargo.toml` sets `panic = "abort"` for release, so a panic in any of the ~8
-//! detached background loops aborts the WHOLE process (it does not "keep serving
-//! minus one subsystem" — that is only the dev/unwind build). In-process
-//! catch-and-restart therefore cannot work under the production profile; the
-//! correct, mode-independent fix is a panic HOOK that emits a structured ERROR
-//! (the std hook runs before the abort). k8s then restarts the pod and
-//! `file_buffer::startup_recovery` drains any spooled data.
+//! ## Panic policy: abort, except inside an in-process facade
+//! A panic in any broker thread — the ~8 detached background loops, a request
+//! handler, the raft planner/writer/apply — aborts the WHOLE process: it does not
+//! "keep serving minus one subsystem". k8s then restarts the pod, the state
+//! machine replays from durable state and `file_buffer::startup_recovery` drains
+//! any spooled data. That used to be `panic = "abort"` in `Cargo.toml`; since the
+//! Kafka facade runs IN-PROCESS (src/kafka_inproc.rs, PLAN_SINGLE_BINARY.md W1)
+//! the release profile unwinds and [`install_panic_hook`] calls `abort` itself,
+//! for every thread whose name does not start with one of
+//! [`UNWIND_THREAD_PREFIXES`]. On those — the facade's own runtime — a panic
+//! unwinds and kills only the task it happened in (a Kafka connection), which is
+//! the blast radius the child process used to give. Broker code never runs on a
+//! facade thread: every call into the broker is spawned onto the broker runtime.
+//! A debug build keeps unwinding everywhere, as it did before (only the release
+//! profile ever had `panic = "abort"`).
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -75,9 +82,21 @@ pub fn init() {
     }
 }
 
-/// Turn a silent background-task / request panic into a structured ERROR before
-/// the process aborts (see the module note on `panic = "abort"`). Chains the
-/// previous hook so backtraces still print.
+/// Thread-name prefixes on which a panic UNWINDS instead of aborting: the
+/// in-process facades' runtimes (src/kafka_inproc.rs names its threads with
+/// this prefix). Everything else aborts — see the module note.
+pub const UNWIND_THREAD_PREFIXES: &[&str] = &["queen-kafka"];
+
+/// Whether a panic on the thread named `name` may unwind (see
+/// [`UNWIND_THREAD_PREFIXES`]). An unnamed thread aborts.
+pub fn panic_may_unwind(name: Option<&str>) -> bool {
+    name.is_some_and(|n| UNWIND_THREAD_PREFIXES.iter().any(|p| n.starts_with(p)))
+}
+
+/// Turn a silent background-task / request panic into a structured ERROR, then
+/// ABORT the process unless the panicking thread belongs to an in-process
+/// facade (see the module note on the panic policy). Chains the previous hook
+/// so backtraces still print.
 pub fn install_panic_hook() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -91,17 +110,30 @@ pub fn install_panic_hook() {
             .map(|s| s.to_string())
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "<non-string panic payload>".to_string());
-        let thread = std::thread::current()
-            .name()
-            .unwrap_or("unnamed")
-            .to_string();
-        tracing::error!(
-            target: "panic",
-            location = %location,
-            thread = %thread,
-            "task panicked (process will abort under panic=abort): {msg}"
-        );
+        let current = std::thread::current();
+        let thread = current.name().unwrap_or("unnamed").to_string();
+        let facade = panic_may_unwind(current.name());
+        if facade {
+            tracing::error!(
+                target: "panic",
+                location = %location,
+                thread = %thread,
+                "facade task panicked (only this task dies; the broker keeps serving): {msg}"
+            );
+        } else {
+            tracing::error!(
+                target: "panic",
+                location = %location,
+                thread = %thread,
+                "task panicked (a release build aborts the process): {msg}"
+            );
+        }
         prev(info);
+        // A debug build unwinds everywhere, as it always did (it never had
+        // `panic = "abort"`); a release build aborts off the facade threads.
+        if !facade && !cfg!(debug_assertions) {
+            std::process::abort();
+        }
     }));
 }
 

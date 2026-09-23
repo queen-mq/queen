@@ -237,7 +237,7 @@ pub async fn handle(
         // `advertised_partitions` clamps silently, so a number that arrived past
         // the ceiling would be stored, then quietly answered as something else
         // for the life of the topic. `QUEEN_KAFKA_DEFAULT_PARTITIONS` gets a
-        // hard boot error for the same number (main.rs); this is the wire's.
+        // hard boot error for the same number (boot.rs); this is the wire's.
         if topic.num_partitions > MAX_ADVERTISED_PARTITIONS as i32 {
             results.push(errored(
                 name,
