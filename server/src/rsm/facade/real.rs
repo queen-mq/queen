@@ -225,8 +225,9 @@ pub struct RaftFacade {
     /// `PopWildcard` command onto the single serial batcher pipeline. Resolved
     /// once at open.
     pop_fastpath_empty: bool,
-    /// Push admission budget ([`crate::rsm::admit`]); `None` when disabled.
-    admit: Option<crate::rsm::admit::AdmitGate>,
+    /// Push admission budget ([`crate::rsm::admit`], one per process);
+    /// `None` when disabled.
+    admit: Option<&'static crate::rsm::admit::AdmitGate>,
     data_dir: PathBuf,
     storage_full: std::sync::atomic::AtomicBool,
     storage_pressure_enabled: bool,
@@ -422,7 +423,7 @@ impl RaftFacade {
             gates,
             batcher_join,
             pop_fastpath_empty: env_flag("QUEEN_RAFT_POP_FASTPATH_EMPTY", true),
-            admit: crate::rsm::admit::AdmitGate::from_env(),
+            admit: crate::rsm::admit::global(),
             data_dir: dir,
             storage_full: std::sync::atomic::AtomicBool::new(false),
             storage_pressure_enabled,
@@ -530,8 +531,12 @@ impl RaftFacade {
         }
         // Held until the reply arrives (or the deadline passes): the command's
         // bytes count against the admission budget while it is in the pipeline.
+        // A request the HTTP edge admitted already holds its permits.
         let _admitted =
-            match (&self.admit, command.grows_storage()) {
+            match (
+                self.admit,
+                command.grows_storage() && !crate::rsm::admit::pre_admitted(),
+            ) {
                 (Some(gate), true) => Some(gate.admit(command.size_hint()).await.map_err(|o| {
                     RsmError::Overloaded {
                         retry_after_s: o.retry_after_s,
@@ -1339,13 +1344,12 @@ impl RaftFacade {
         // pre-submit work (parse + resolve + pack); `submit_ns` accumulates the
         // `cmd_tx.send` await (channel back-pressure, which `arrival_to_proposed`
         // cannot see because it stamps just before the send).
-        // Admission (crate::rsm::admit), BEFORE the parse: a push that must wait
-        // holds only its raw body, never its parsed items and frames. Held for
-        // the whole push (parse, pack, submit, replies), sized by the raw body.
-        // Measured 2026-09-23 at 300k msg/s offered: with pushes gated only
-        // after parsing (and in fact not at all — pushes bypass `submit`),
-        // ~20k parsed requests waited for channel room and RSS reached 10 GB.
-        let _admitted = match &self.admit {
+        // Admission (crate::rsm::admit) for callers the HTTP edge did not
+        // admit, BEFORE the parse: a push that must wait holds only its raw
+        // body, never its parsed items and frames. Held for the whole push
+        // (parse, pack, submit, replies), sized by the raw body. Pushes bypass
+        // `submit`, so this is their only facade gate.
+        let _admitted = match self.admit.filter(|_| !crate::rsm::admit::pre_admitted()) {
             Some(gate) => {
                 Some(
                     gate.admit(req.raw.len())
