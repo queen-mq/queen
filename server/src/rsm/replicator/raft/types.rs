@@ -15,8 +15,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use serde::de::{Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::rsm::entry::{decode_entry, encode_entry, encode_entry_payload_free, Entry};
-use crate::rsm::qlog::codec::Pre;
+use bytes::Bytes;
+
+use crate::rsm::entry::{decode_entry, encode_entry_payload_free, Entry};
+use crate::rsm::qlog::codec::{Pre, StoredPayload};
 
 pub type NodeId = u64;
 pub type Node = QueenNode;
@@ -100,65 +102,114 @@ pub fn applied_log_id(applied_index: u64, applied_term: u64) -> Option<LogId> {
 
 /// What openraft carries as application data: one [`Entry`].
 ///
-/// Cloning is a reference count. The planned entry (with its payloads) is
-/// `full`; the PAYLOAD-FREE form apply needs (each `Append` blob replaced by
-/// its 4-byte frame length, the form a replay from the queue logs produces)
-/// is set by the log writer once the group holding the entry is fsynced, or
-/// at recovery. An entry read back from the queue logs has no `full` form:
-/// its payloads live only in the message records.
+/// Cloning is a reference count. An entry has one of two shapes:
+///
+/// - **full**: the planned entry with its payloads, on the leader that
+///   proposed it. Before it reaches openraft the proposer awaits the qlog codec
+///   on its `Append` blobs ([`AppEntry::settle_codec`]), so the leader's writer
+///   and every follower get the same stored bytes and nobody compresses twice.
+/// - **stored**: the PAYLOAD-FREE entry, its encoding (the queue logs' entry
+///   record) and every `Append` payload exactly as the leader stored it
+///   (compressed or raw) — what a follower receives ([`AppEntry::from_stored_wire`])
+///   and what a node reads back from its queue logs to send to a follower that
+///   is behind. Written as it is: no encode, no codec.
+///
+/// The payload-free form apply takes is set by the log writer once the group
+/// holding the entry is fsynced, or at construction for a stored entry. An
+/// entry recovered from the queue logs at boot has only that form.
 #[derive(Clone)]
 pub struct AppEntry(Arc<AppEntryInner>);
 
 struct AppEntryInner {
     full: Option<Arc<Entry>>,
     payload_free: OnceLock<Arc<Entry>>,
+    /// The payload-free encoding, once known (a stored entry has it from the
+    /// start; a full entry's is made once, for the wire).
+    pf_bytes: OnceLock<Bytes>,
     /// The qlog codec work started at propose (it overlaps the previous
-    /// fsync); taken once, by the writer.
+    /// fsync); taken once, by [`AppEntry::settle_codec`] or the writer.
     pre: Mutex<Vec<Pre>>,
-    /// The full entry's wire encoding, made once and shared by every follower
+    /// A full entry's `Append` blobs in stored form, in effect order (`None` =
+    /// stored raw): set by [`AppEntry::settle_codec`].
+    z: OnceLock<Arc<Vec<Option<Bytes>>>>,
+    /// A stored entry's `Append` payloads, in effect order.
+    stored: Option<Arc<Vec<StoredPayload>>>,
+    /// The wire encoding (stored form), made once and shared by every follower
     /// the entry is sent to (and every resend).
-    wire: OnceLock<bytes::Bytes>,
+    wire: OnceLock<Bytes>,
+}
+
+fn appends_of(e: &Entry) -> usize {
+    e.effects
+        .iter()
+        .filter(|eff| matches!(eff, crate::rsm::effect::Effect::Append { .. }))
+        .count()
 }
 
 impl AppEntry {
+    fn with(
+        full: Option<Arc<Entry>>,
+        pf: Option<Arc<Entry>>,
+        pf_bytes: Option<Bytes>,
+        pre: Vec<Pre>,
+        stored: Option<Arc<Vec<StoredPayload>>>,
+        wire: Option<Bytes>,
+    ) -> AppEntry {
+        let payload_free = OnceLock::new();
+        if let Some(pf) = pf {
+            let _ = payload_free.set(pf);
+        }
+        let pfb = OnceLock::new();
+        if let Some(b) = pf_bytes {
+            let _ = pfb.set(b);
+        }
+        let w = OnceLock::new();
+        if let Some(b) = wire {
+            let _ = w.set(b);
+        }
+        AppEntry(Arc::new(AppEntryInner {
+            full,
+            payload_free,
+            pf_bytes: pfb,
+            pre: Mutex::new(pre),
+            z: OnceLock::new(),
+            stored,
+            wire: w,
+        }))
+    }
+
     /// A proposal: the planned entry and the codec work already started on
     /// its payloads.
     pub fn proposed(full: Arc<Entry>, pre: Vec<Pre>) -> AppEntry {
-        AppEntry(Arc::new(AppEntryInner {
-            full: Some(full),
-            payload_free: OnceLock::new(),
-            pre: Mutex::new(pre),
-            wire: OnceLock::new(),
-        }))
+        AppEntry::with(Some(full), None, None, pre, None, None)
     }
 
     /// An entry recovered from the queue logs: payload-free only.
     pub fn recovered(payload_free: Arc<Entry>) -> AppEntry {
-        let pf = OnceLock::new();
-        let _ = pf.set(payload_free);
-        AppEntry(Arc::new(AppEntryInner {
-            full: None,
-            payload_free: pf,
-            pre: Mutex::new(Vec::new()),
-            wire: OnceLock::new(),
-        }))
+        AppEntry::with(None, Some(payload_free), None, Vec::new(), None, None)
     }
 
-    /// An entry read back from the queue logs with its payloads restored
-    /// ([`super::log_store`]'s rehydration): both forms are known.
-    pub fn rehydrated(full: Arc<Entry>, payload_free: Arc<Entry>) -> AppEntry {
-        let pf = OnceLock::new();
-        let _ = pf.set(payload_free);
-        AppEntry(Arc::new(AppEntryInner {
-            full: Some(full),
-            payload_free: pf,
-            pre: Mutex::new(Vec::new()),
-            wire: OnceLock::new(),
-        }))
+    /// An entry in stored form: its payload-free decode and encoding, and every
+    /// `Append` payload as stored. `wire`, when given, is its wire encoding.
+    pub fn stored(
+        payload_free: Arc<Entry>,
+        pf_bytes: Bytes,
+        payloads: Vec<StoredPayload>,
+        wire: Option<Bytes>,
+    ) -> AppEntry {
+        AppEntry::with(
+            None,
+            Some(payload_free),
+            Some(pf_bytes),
+            Vec::new(),
+            Some(Arc::new(payloads)),
+            wire,
+        )
     }
 
-    /// An entry received from the leader: its wire bytes decoded (the codec
-    /// checks the checksum and every field).
+    /// An entry received from the leader in the LEGACY wire form (the full
+    /// entry, raw payloads): its bytes decoded (the codec checks the checksum
+    /// and every field).
     pub fn from_wire(bytes: &[u8]) -> std::io::Result<AppEntry> {
         let e = decode_entry(bytes).map_err(|e| {
             std::io::Error::other(format!("replicated entry does not decode: {e:?}"))
@@ -166,23 +217,182 @@ impl AppEntry {
         Ok(AppEntry::proposed(Arc::new(e), Vec::new()))
     }
 
-    /// The full entry's wire bytes, encoded once. A payload-free entry has
-    /// none: sending it would store 4-byte lengths as payloads on a follower,
-    /// so it is an error here, never silent data loss.
-    pub fn wire(&self) -> std::io::Result<bytes::Bytes> {
+    /// An entry received from the leader in stored form:
+    ///
+    /// ```text
+    /// pf_len:u32 | payload-free entry | n:u32 | n × ( zstd:u8 | len:u32 | bytes )
+    /// ```
+    ///
+    /// The payloads are slices of `bytes` (no copy). The payload-free entry is
+    /// decoded (checksum and fields checked) and must hold exactly `n` appends.
+    pub fn from_stored_wire(bytes: Bytes) -> std::io::Result<AppEntry> {
+        let bad = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, m.to_string());
+        let mut at = 0usize;
+        let take = |at: &mut usize, n: usize| -> std::io::Result<std::ops::Range<usize>> {
+            let end = at
+                .checked_add(n)
+                .filter(|e| *e <= bytes.len())
+                .ok_or_else(|| bad("stored entry truncated"))?;
+            let r = *at..end;
+            *at = end;
+            Ok(r)
+        };
+        let u32_at = |at: &mut usize| -> std::io::Result<u32> {
+            let r = take(at, 4)?;
+            Ok(u32::from_le_bytes(bytes[r].try_into().expect("4 bytes")))
+        };
+        let pf_len = u32_at(&mut at)? as usize;
+        let pf_bytes = bytes.slice(take(&mut at, pf_len)?);
+        let pf = decode_entry(&pf_bytes).map_err(|e| {
+            std::io::Error::other(format!("replicated entry does not decode: {e:?}"))
+        })?;
+        let n = u32_at(&mut at)? as usize;
+        if n != appends_of(&pf) {
+            return Err(bad("stored entry: payload count differs from its appends"));
+        }
+        let mut payloads = Vec::with_capacity(n);
+        for _ in 0..n {
+            let r = take(&mut at, 1)?;
+            let zstd = match bytes[r.start] {
+                0 => false,
+                1 => true,
+                _ => return Err(bad("stored entry: bad payload flag")),
+            };
+            let len = u32_at(&mut at)? as usize;
+            payloads.push(StoredPayload {
+                zstd,
+                bytes: bytes.slice(take(&mut at, len)?),
+            });
+        }
+        if at != bytes.len() {
+            return Err(bad("stored entry has trailing bytes"));
+        }
+        Ok(AppEntry::stored(Arc::new(pf), pf_bytes, payloads, Some(bytes)))
+    }
+
+    /// Await the codec work on a full entry's payloads (started at propose, on
+    /// the codec pool) and keep the stored form. The proposer calls it before
+    /// the entry reaches openraft, in proposal order. A no-op for a stored
+    /// entry or when already settled.
+    pub async fn settle_codec(&self) {
+        let Some(full) = self.0.full.as_ref() else {
+            return;
+        };
+        if self.0.z.get().is_some() {
+            return;
+        }
+        let pre = std::mem::take(&mut *self.0.pre.lock().expect("pre lock"));
+        let n = appends_of(full);
+        let z: Vec<Option<Bytes>> = if pre.len() == n {
+            for p in &pre {
+                p.wait().await;
+            }
+            pre.into_iter()
+                .map(|p| p.finish().map(Bytes::from))
+                .collect()
+        } else {
+            vec![None; n]
+        };
+        let _ = self.0.z.set(Arc::new(z));
+    }
+
+    /// A full entry's settled stored forms ([`AppEntry::settle_codec`]).
+    pub fn z(&self) -> Option<Arc<Vec<Option<Bytes>>>> {
+        self.0.z.get().cloned()
+    }
+
+    /// A stored entry's parts: the payload-free entry, its encoding and the
+    /// payloads.
+    pub fn stored_parts(&self) -> Option<(Arc<Entry>, Bytes, Arc<Vec<StoredPayload>>)> {
+        let stored = self.0.stored.as_ref()?;
+        Some((
+            self.0.payload_free.get()?.clone(),
+            self.0.pf_bytes.get()?.clone(),
+            stored.clone(),
+        ))
+    }
+
+    /// Whether this node holds the entry's payloads (full or stored).
+    pub fn has_payloads(&self) -> bool {
+        self.0.full.is_some() || self.0.stored.is_some()
+    }
+
+    /// The wire bytes, in stored form, encoded once. A full entry's payloads
+    /// go as the codec left them (raw when it was never settled — always a
+    /// valid stored form). A payload-free entry has none: sending it would
+    /// store 4-byte lengths as payloads on a follower, so it is an error here,
+    /// never silent data loss.
+    pub fn wire(&self) -> std::io::Result<Bytes> {
+        use crate::rsm::effect::Effect;
         if let Some(b) = self.0.wire.get() {
             return Ok(b.clone());
         }
-        let full =
-            self.0.full.as_ref().ok_or_else(|| {
-                std::io::Error::other("a payload-free entry cannot be replicated")
-            })?;
-        let bytes = bytes::Bytes::from(
-            encode_entry(full)
-                .map_err(|e| std::io::Error::other(format!("entry encode: {e:?}")))?,
-        );
+        let pf_bytes = self.pf_bytes()?;
+        let mut out: Vec<u8>;
+        if let Some(full) = self.0.full.as_ref() {
+            let z = self.0.z.get();
+            let blobs: Vec<&[u8]> = full
+                .effects
+                .iter()
+                .filter_map(|eff| match eff {
+                    Effect::Append { blob, .. } => Some(blob.as_slice()),
+                    _ => None,
+                })
+                .collect();
+            let size: usize = blobs.iter().map(|b| b.len() + 5).sum();
+            out = Vec::with_capacity(8 + pf_bytes.len() + size);
+            out.extend_from_slice(&(pf_bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(&pf_bytes);
+            out.extend_from_slice(&(blobs.len() as u32).to_le_bytes());
+            for (i, raw) in blobs.iter().enumerate() {
+                match z.and_then(|z| z.get(i).cloned().flatten()) {
+                    Some(zb) => {
+                        out.push(1);
+                        out.extend_from_slice(&(zb.len() as u32).to_le_bytes());
+                        out.extend_from_slice(&zb);
+                    }
+                    None => {
+                        out.push(0);
+                        out.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+                        out.extend_from_slice(raw);
+                    }
+                }
+            }
+        } else if let Some(stored) = self.0.stored.as_ref() {
+            let size: usize = stored.iter().map(|p| p.bytes.len() + 5).sum();
+            out = Vec::with_capacity(8 + pf_bytes.len() + size);
+            out.extend_from_slice(&(pf_bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(&pf_bytes);
+            out.extend_from_slice(&(stored.len() as u32).to_le_bytes());
+            for p in stored.iter() {
+                out.push(u8::from(p.zstd));
+                out.extend_from_slice(&(p.bytes.len() as u32).to_le_bytes());
+                out.extend_from_slice(&p.bytes);
+            }
+        } else {
+            return Err(std::io::Error::other(
+                "a payload-free entry cannot be replicated",
+            ));
+        }
+        let bytes = Bytes::from(out);
         let _ = self.0.wire.set(bytes.clone());
         Ok(bytes)
+    }
+
+    /// The payload-free encoding (made once from the full entry when needed).
+    fn pf_bytes(&self) -> std::io::Result<Bytes> {
+        if let Some(b) = self.0.pf_bytes.get() {
+            return Ok(b.clone());
+        }
+        let full = self.0.full.as_ref().ok_or_else(|| {
+            std::io::Error::other("a payload-free entry cannot be replicated")
+        })?;
+        let b = Bytes::from(
+            encode_entry_payload_free(full)
+                .map_err(|e| std::io::Error::other(format!("payload-free encode: {e:?}")))?,
+        );
+        let _ = self.0.pf_bytes.set(b.clone());
+        Ok(b)
     }
 
     /// The payload bytes this entry holds in memory (a cache gauge).
@@ -198,11 +408,23 @@ impl AppEntry {
                 .sum()
         };
         let full = self.0.full.as_ref().map(|e| blobs(e)).unwrap_or(0);
+        let z: usize = self
+            .0
+            .z
+            .get()
+            .map(|z| z.iter().flatten().map(|b| b.len()).sum())
+            .unwrap_or(0);
+        let stored: usize = self
+            .0
+            .stored
+            .as_ref()
+            .map(|s| s.iter().map(|p| p.bytes.len() + 16).sum())
+            .unwrap_or(0);
         let wire = self.0.wire.get().map(|b| b.len()).unwrap_or(0);
-        full.max(64) + wire
+        (full + z + stored).max(64) + wire
     }
 
-    /// The entry with its payloads, when this node has it.
+    /// The entry with its payloads, when this node proposed it.
     pub fn full(&self) -> Option<&Arc<Entry>> {
         self.0.full.as_ref()
     }
@@ -224,11 +446,9 @@ impl AppEntry {
         if let Some(pf) = self.0.payload_free.get() {
             return Ok(pf.clone());
         }
-        let full = self.0.full.as_ref().ok_or_else(|| {
+        let bytes = self.pf_bytes().map_err(|_| {
             std::io::Error::other("an application entry has neither a full nor a payload-free form")
         })?;
-        let bytes = encode_entry_payload_free(full)
-            .map_err(|e| std::io::Error::other(format!("payload-free encode: {e:?}")))?;
         let pf = Arc::new(
             decode_entry(&bytes)
                 .map_err(|e| std::io::Error::other(format!("payload-free decode: {e:?}")))?,
@@ -240,7 +460,7 @@ impl AppEntry {
     fn summary(&self) -> (usize, usize, bool) {
         let e = self.0.full.as_ref().or_else(|| self.0.payload_free.get());
         match e {
-            Some(e) => (e.commands.len(), e.effects.len(), self.0.full.is_some()),
+            Some(e) => (e.commands.len(), e.effects.len(), self.has_payloads()),
             None => (0, 0, false),
         }
     }
@@ -293,8 +513,8 @@ impl<'de> Deserialize<'de> for AppEntry {
             }
         }
         let bytes = d.deserialize_bytes(V)?;
-        let e = decode_entry(&bytes).map_err(|e| serde::de::Error::custom(format!("{e:?}")))?;
-        Ok(AppEntry::proposed(Arc::new(e), Vec::new()))
+        AppEntry::from_stored_wire(Bytes::from(bytes))
+            .map_err(|e| serde::de::Error::custom(e.to_string()))
     }
 }
 

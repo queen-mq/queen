@@ -329,6 +329,28 @@ pub struct OwnedRecord {
     pub payload: Vec<u8>,
 }
 
+/// A message record as it is stored: its payload is NOT decompressed (a leader
+/// re-sends it to a follower in this form, [`codec::StoredPayload`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredRecord {
+    pub seq: u64,
+    pub pid: u64,
+    pub base_offset: u64,
+    pub count: u32,
+    pub zstd: bool,
+    pub payload: Vec<u8>,
+}
+
+/// A group encoded for one position of the active file (the writer's second
+/// phase, [`QLog::encode_group`]): the bytes, each record's position, and the
+/// index rows the message records get once published.
+pub(crate) struct EncodedGroup {
+    buf: Vec<u8>,
+    locs: Vec<Loc>,
+    new_recs: Vec<index::Record>,
+    max_seq: u64,
+}
+
 /// Where one appended record landed: what a caller indexes it by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Loc {
@@ -788,9 +810,21 @@ impl QLog {
         if records.is_empty() {
             return Ok(Vec::new());
         }
-        let first_seq = records[0].seq();
-        // Ensure an active file with room. A group larger than the limit still
-        // goes whole into the (freshly rolled or created) file.
+        let (file_id, base) = self.prepare_write(records[0].seq())?;
+        let group = Self::encode_group(records, file_id, base)?;
+        self.active
+            .as_ref()
+            .expect("active file")
+            .write_all_at(&group.buf, base)?;
+        self.publish_write(base, group)
+    }
+
+    /// A write's first phase: make sure an active file with room exists for a
+    /// group whose first record carries `first_seq` — create it, or roll the
+    /// full one — and answer where the group goes, `(file id, logical end)`. A
+    /// group larger than the limit still goes whole into the (freshly rolled or
+    /// created) file.
+    pub(crate) fn prepare_write(&mut self, first_seq: u64) -> io::Result<(u64, u64)> {
         if self.active.is_none() {
             self.create_active(FIRST_FILE_ID, first_seq)?;
         } else {
@@ -799,9 +833,38 @@ impl QLog {
                 self.roll(first_seq)?;
             }
         }
+        Ok(self.write_target())
+    }
 
-        let file_id = self.files.last().expect("active meta").id;
-        let base = self.active_len();
+    /// Whether the next group goes into the active file as it stands (no
+    /// create, no roll): then [`QLog::write_target`] is where.
+    pub(crate) fn write_ready(&self) -> bool {
+        if self.active.is_none() {
+            return false;
+        }
+        let sz = self.active_len();
+        !(sz > FILE_HEADER_LEN && sz >= self.opts.segment_bytes)
+    }
+
+    /// `(active file id, logical end)`: where the next group's bytes go.
+    pub(crate) fn write_target(&self) -> (u64, u64) {
+        (self.files.last().expect("active meta").id, self.active_len())
+    }
+
+    /// A handle to the active file for a positional write made OUTSIDE the
+    /// log's lock (the writer's second phase).
+    pub(crate) fn active_handle(&self) -> io::Result<File> {
+        self.active.as_ref().expect("active file").try_clone()
+    }
+
+    /// A write's second phase, needing neither the log nor its lock: encode a
+    /// group bound for `(file_id, base)` into one buffer, with each record's
+    /// position and the index rows its message records get.
+    pub(crate) fn encode_group(
+        records: &[WriteRecord<'_>],
+        file_id: u64,
+        base: u64,
+    ) -> io::Result<EncodedGroup> {
         let cap = records
             .iter()
             .map(|w| match w {
@@ -859,31 +922,41 @@ impl QLog {
             }
             locs.push(Loc { file_id, offset });
         }
+        Ok(EncodedGroup {
+            buf,
+            locs,
+            new_recs,
+            max_seq,
+        })
+    }
 
-        let f = self.active.as_mut().expect("active file");
-        f.write_all(&buf)?;
-        self.prealloc_after_write(base + buf.len() as u64, buf.len() as u64)?;
-
-        // Bookkeeping advances only after the write returns (the sync is
-        // separate — [`QLog::sync`]). Recovery rebuilds the real valid length
-        // from the bytes on disk, so if a crash lands before the sync, the
-        // un-fsync'd tail is truncated and the records are simply unanswered
-        // (their propose never returned, or the authoritative segment/store the
-        // A2 shadow rides did not commit them).
-        let added = buf.len() as u64;
+    /// A write's third phase: the group's bytes are in the active file at
+    /// `base` (written by the caller, possibly outside the lock); advance the
+    /// logical end, index the message records — only now can a reader find
+    /// them — and keep the preallocated run ahead.
+    ///
+    /// Bookkeeping advances only after the write returned (the sync is separate
+    /// — [`QLog::sync`]). Recovery rebuilds the real valid length from the bytes
+    /// on disk, so if a crash lands before the sync, the un-fsync'd tail is
+    /// truncated and the records are simply unanswered (their propose never
+    /// returned, or the authoritative segment/store the A2 shadow rides did not
+    /// commit them).
+    pub(crate) fn publish_write(&mut self, base: u64, group: EncodedGroup) -> io::Result<Vec<Loc>> {
+        let added = group.buf.len() as u64;
+        self.prealloc_after_write(base + added, added)?;
         {
             let meta = self.files.last_mut().expect("active meta");
             meta.bytes += added;
-            meta.records += new_recs.len() as u64;
-            meta.max_seq = meta.max_seq.max(max_seq);
-            for r in &new_recs {
+            meta.records += group.new_recs.len() as u64;
+            meta.max_seq = meta.max_seq.max(group.max_seq);
+            for r in &group.new_recs {
                 meta.absorb(r.created_at_us);
             }
         }
-        for r in new_recs {
+        for r in group.new_recs {
             self.active_index.insert(r);
         }
-        Ok(locs)
+        Ok(group.locs)
     }
 
     /// Fsync the active file, making every record [`QLog::write_group`] wrote
@@ -1098,6 +1171,41 @@ impl QLog {
     /// no live file holds it. Unlike [`QLog::read_payload`] it returns the
     /// header too (`base_offset`, `count`, `created_at_us`), which the pop render
     /// needs to unpack and stamp the frame exactly as the segment read did.
+    /// [`QLog::read_owned`] without the decode: the payload as stored.
+    pub fn read_stored(&self, pid: u64, offset: u64) -> io::Result<Option<StoredRecord>> {
+        let Some(loc) = self.locate(pid, offset) else {
+            return Ok(None);
+        };
+        let f = self.cache.file(loc.file_id)?;
+        if (loc.len as usize) < record::FIXED_PREFIX {
+            return Err(corrupt(
+                &file_path(&self.dir, loc.file_id),
+                "located len is shorter than a record header",
+            ));
+        }
+        let mut buf = vec![0u8; loc.len as usize];
+        f.read_exact_at(&mut buf, loc.offset)?;
+        let rr = record::decode(&buf).map_err(io::Error::from)?;
+        if rr.header.record_len() != loc.len as usize {
+            return Err(corrupt(
+                &file_path(&self.dir, loc.file_id),
+                &format!(
+                    "located len {} != record len {}",
+                    loc.len,
+                    rr.header.record_len()
+                ),
+            ));
+        }
+        Ok(Some(StoredRecord {
+            seq: rr.header.seq,
+            pid: rr.header.pid,
+            base_offset: rr.header.base_offset,
+            count: rr.header.count,
+            zstd: rr.header.payload_zstd(),
+            payload: rr.payload.to_vec(),
+        }))
+    }
+
     pub fn read_owned(&self, pid: u64, offset: u64) -> io::Result<Option<OwnedRecord>> {
         match self.locate(pid, offset) {
             Some(loc) => Ok(Some(self.read_located(&loc)?)),
@@ -1112,13 +1220,40 @@ impl QLog {
     /// then a binary search of the sealed files. A `Hole` in a file's span means
     /// no other file can hold it (retention deleted it).
     fn locate_record(&self, pid: u64, offset: u64) -> Option<(u64, index::Record)> {
+        self.locate_record_hinted(pid, offset, None)
+    }
+
+    /// [`QLog::locate_record`] for a FORWARD walk: `hint` is the sealed file the
+    /// walk's previous record came from, so the next one is in it or a newer
+    /// file. Without a hint (or when it misses) the sealed files are probed
+    /// NEWEST first: a partition's offsets only grow with the file id, so a file
+    /// whose span for `pid` ends at or below `offset` ([`index::Probe::After`])
+    /// proves no older file holds it either. A claim near the tail — the common
+    /// case — touches one or two files instead of every file retention still
+    /// keeps (the probe per sealed file was the lanes' hottest code at 850k
+    /// msg/s, and grew with the file count).
+    fn locate_record_hinted(
+        &self,
+        pid: u64,
+        offset: u64,
+        hint: Option<u64>,
+    ) -> Option<(u64, index::Record)> {
         if let Some((file_id, r)) = self.active_index.probe(pid, offset) {
             return Some((file_id, r));
         }
-        for (file_id, view) in &self.sealed {
+        if let Some(h) = hint {
+            for (file_id, view) in self.sealed.range(h..) {
+                match view.probe(pid, offset) {
+                    index::Probe::Hit(r) => return Some((*file_id, r)),
+                    index::Probe::Hole => return None,
+                    _ => {}
+                }
+            }
+        }
+        for (file_id, view) in self.sealed.iter().rev() {
             match view.probe(pid, offset) {
                 index::Probe::Hit(r) => return Some((*file_id, r)),
-                index::Probe::Hole => return None,
+                index::Probe::Hole | index::Probe::After => return None,
                 _ => {}
             }
         }
@@ -1173,10 +1308,12 @@ impl QLog {
         cb: &mut dyn FnMut(u64, u64, i64, Option<Vec<u8>>) -> bool,
     ) -> io::Result<()> {
         let mut cur = from_offset;
+        let mut hint: Option<u64> = None;
         while cur < committed_end {
-            let Some((file_id, rec)) = self.locate_record(pid, cur) else {
+            let Some((file_id, rec)) = self.locate_record_hinted(pid, cur, hint) else {
                 break; // past the committed tail (the range is contiguous)
             };
+            hint = Some(file_id);
             if rec.end > committed_end {
                 break; // uncommitted record: the overlay covers it (the invariant)
             }
@@ -1244,11 +1381,18 @@ impl QLog {
                 }
             }
         }
-        for (file_id, view) in &self.sealed {
-            for r in view.records_of(pid) {
+        // Newest first, stopping at the first file whose records of `pid` all
+        // end at or below `from_base`: offsets only grow with the file id.
+        for (file_id, view) in self.sealed.iter().rev() {
+            let recs = view.records_of(pid);
+            let all_below = !recs.is_empty() && recs.iter().all(|r| r.end <= from_base);
+            for r in recs {
                 if r.end > from_base && r.end <= committed_end {
                     cand.entry(r.base_offset).or_insert((*file_id, r));
                 }
+            }
+            if all_below {
+                break;
             }
         }
         self.hash_plan(cand.into_values(), with_hashes, CachePut::IfRoom)
@@ -1302,7 +1446,12 @@ impl QLog {
                         }
                     }
                 }
-                for (file_id, view) in &self.sealed {
+                // Newest first; a file whose records of `pid` all end at or
+                // below `lo` ends the walk (older files are older still).
+                for (file_id, view) in self.sealed.iter().rev() {
+                    if view.pid_end(pid).is_some_and(|end| end <= lo) {
+                        break;
+                    }
                     for r in view.records_overlapping(pid, lo, hi) {
                         if r.end <= committed_end {
                             cand.entry(r.base_offset).or_insert((*file_id, r));
@@ -1336,12 +1485,23 @@ impl QLog {
         }
         let mut misses: Vec<usize> = Vec::new();
         {
-            let hc = self.cache.hashes.lock().expect("qlog hash cache poisoned");
+            // The candidates are one partition's: one shard, one lock (a stray
+            // other pid is looked up in its own shard).
+            let first = cand.first().map(|(_, r)| r.pid).unwrap_or(0);
+            let shard = |pid: u64| pid % HASH_SHARDS as u64;
+            let hc = self.cache.hash_shard(first).lock().expect("qlog hash cache poisoned");
             for (file_id, r) in &cand {
+                // Same shard: the guard already held (a second lock of it would
+                // deadlock); another shard: its own short lock.
+                let hit = if shard(r.pid) == shard(first) {
+                    hc.map.get(&(r.pid, r.base_offset)).cloned()
+                } else {
+                    self.cache.hash_get(r.pid, r.base_offset)
+                };
                 let slot = if r.count == 0 {
                     Slot::Shape
-                } else if let Some(h) = hc.map.get(&(r.pid, r.base_offset)) {
-                    Slot::Hit(h.clone())
+                } else if let Some(h) = hit {
+                    Slot::Hit(h)
                 } else {
                     misses.push(items.len());
                     Slot::Miss(*file_id, None)
@@ -2184,8 +2344,15 @@ enum CachePut {
 struct ReadCache {
     dir: PathBuf,
     fds: Mutex<HashMap<u64, Arc<File>>>,
-    hashes: Mutex<HashCache>,
+    /// Sharded by partition ([`HASH_SHARDS`]): the planner lanes of one queue
+    /// (lane = pid mod lanes) and its pop readers took ONE mutex per log — a
+    /// measured wait inside the lanes' critical path at 850k msg/s.
+    hashes: Vec<Mutex<HashCache>>,
 }
+
+/// Hash-cache shards per log. A multiple of the usual lane counts, so the
+/// lanes of one queue never share a shard.
+const HASH_SHARDS: usize = 16;
 
 #[derive(Default)]
 struct HashCache {
@@ -2200,7 +2367,9 @@ impl ReadCache {
         ReadCache {
             dir,
             fds: Mutex::new(HashMap::new()),
-            hashes: Mutex::new(HashCache::default()),
+            hashes: (0..HASH_SHARDS)
+                .map(|_| Mutex::new(HashCache::default()))
+                .collect(),
         }
     }
 
@@ -2250,8 +2419,13 @@ impl ReadCache {
         }
     }
 
+    /// The hash-cache shard holding `pid`'s blocks.
+    fn hash_shard(&self, pid: u64) -> &Mutex<HashCache> {
+        &self.hashes[(pid % HASH_SHARDS as u64) as usize]
+    }
+
     fn hash_get(&self, pid: u64, base_offset: u64) -> Option<Arc<[u8]>> {
-        self.hashes
+        self.hash_shard(pid)
             .lock()
             .expect("qlog hash cache poisoned")
             .map
@@ -2266,10 +2440,13 @@ impl ReadCache {
             return;
         }
         let cap = hash_cache_cap();
-        // Declared before the guard so a cleared cache is freed after the unlock.
+        // Declared before the guards so a cleared shard is freed after its unlock.
         let mut evicted: Vec<HashCache> = Vec::new();
-        let mut hc = self.hashes.lock().expect("qlog hash cache poisoned");
         for (pid, base, h) in blocks {
+            let mut hc = self
+                .hash_shard(*pid)
+                .lock()
+                .expect("qlog hash cache poisoned");
             let add = h.len() + HASH_CACHE_ENTRY_OVERHEAD;
             if add > cap || hc.map.contains_key(&(*pid, *base)) {
                 continue;
@@ -2290,24 +2467,24 @@ impl ReadCache {
             hc.bytes += add;
             HASH_BYTES_CACHED.fetch_add(add, Ordering::Relaxed);
         }
-        drop(hc);
         drop(evicted);
     }
 
     /// Free every cached hash block of this log (retention).
     fn clear_hashes(&self) {
-        let old = std::mem::take(&mut *self.hashes.lock().expect("qlog hash cache poisoned"));
-        HASH_BYTES_CACHED.fetch_sub(old.bytes, Ordering::Relaxed);
+        for shard in &self.hashes {
+            let old = std::mem::take(&mut *shard.lock().expect("qlog hash cache poisoned"));
+            HASH_BYTES_CACHED.fetch_sub(old.bytes, Ordering::Relaxed);
+        }
     }
 
     /// Hash blocks this log holds (tests).
     #[cfg(test)]
     fn cached_blocks(&self) -> usize {
         self.hashes
-            .lock()
-            .expect("qlog hash cache poisoned")
-            .map
-            .len()
+            .iter()
+            .map(|h| h.lock().expect("qlog hash cache poisoned").map.len())
+            .sum()
     }
 }
 
@@ -2315,11 +2492,11 @@ impl Drop for ReadCache {
     fn drop(&mut self) {
         let fds = self.fds.get_mut().unwrap_or_else(|p| p.into_inner()).len();
         FDS_CACHED.fetch_sub(fds, Ordering::Relaxed);
-        let bytes = self
+        let bytes: usize = self
             .hashes
-            .get_mut()
-            .unwrap_or_else(|p| p.into_inner())
-            .bytes;
+            .iter_mut()
+            .map(|h| h.get_mut().unwrap_or_else(|p| p.into_inner()).bytes)
+            .sum();
         HASH_BYTES_CACHED.fetch_sub(bytes, Ordering::Relaxed);
     }
 }

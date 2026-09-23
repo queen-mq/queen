@@ -173,7 +173,7 @@ impl Default for PlanConfig {
 /// A whole-command refusal: no effects, no outcome recorded, an error answer to
 /// the client (§5.4, I14). `retryable` is what the receiver turns into a 5xx
 /// the SDK retries with the SAME request id (D6) versus a 4xx it does not.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Refusal {
     pub code: String,
     pub message: String,
@@ -310,17 +310,18 @@ pub enum Lookup {
 /// packs). `frame` is the exact bytes this one message contributes to a segment
 /// blob; the `Append` blob is the survivors' frames concatenated, so a
 /// duplicate is dropped by leaving its frame out, never by repacking.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PushItem {
     /// `xxh3_128` of the transaction id, the dedup key and the `Append` hash.
     pub hash: [u8; 16],
+    #[serde(with = "serde_bytes")]
     pub frame: Vec<u8>,
 }
 
 /// `POST /api/v1/push` for one partition (003). The receiver has already
 /// resolved the queue's config (for the implicit-creation case) and packed each
 /// message.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PushCommand {
     pub request_id: RequestId,
     pub tenant: String,
@@ -334,7 +335,7 @@ pub struct PushCommand {
 
 /// The subscription intent a pop carries for a group with no stored policy
 /// (004 ≈320): the pop-carried `sub_mode`/`sub_from` fall-back.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct SubIntent {
     /// `""`, `"new"`, `"all"`, or `"timestamp"`.
     pub mode: String,
@@ -348,7 +349,7 @@ pub struct SubIntent {
 /// A pop of one named partition (`log_pop_specific_v1`), the whole queue by
 /// wildcard (`log_pop_wildcard_*_v1`), or a discovery group across a namespace
 /// or task (`log_pop_discover_*_v1`). One struct, three entry points.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PopCommand {
     pub request_id: RequestId,
     pub tenant: String,
@@ -381,11 +382,16 @@ pub struct PopCommand {
     /// be answered in time, so a request that timed out while queued behind
     /// the pipeline never leaves an orphaned lease (PLAN_RAFT_DRAIN_FIX P1.2).
     pub deadline_us: i64,
+    /// A long-poll pop: an empty answer parks and re-polls on the next wake,
+    /// so with lanes an empty result in one lane is final; a pop that does not
+    /// wait is re-planned with every partition in view (`batcher_lanes`).
+    #[serde(default)]
+    pub wait: bool,
 }
 
 /// The status an ack item carries (005). `Ok` covers the SQL's
 /// completed/success/acked/ok/"".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AckStatus {
     Ok,
     Failed,
@@ -397,15 +403,16 @@ pub enum AckStatus {
 /// planner can file the DLQ in the same entry (O7) without decompressing
 /// anything (O20). The receiver resolves the acked hash to its offset in its own
 /// committed files and reads the frame out before forwarding.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct DlqSnapshot {
     pub message_id: Option<[u8; 16]>,
     pub txn: String,
+    #[serde(with = "serde_bytes")]
     pub payload: Vec<u8>,
 }
 
 /// One item of a hash-resolved ack (005).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct AckItem {
     pub hash: [u8; 16],
     pub status: AckStatus,
@@ -416,7 +423,7 @@ pub struct AckItem {
 }
 
 /// One `(pid, group)` target of an ack (005). A batch acks several.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct AckTarget {
     pub pid: Pid,
     pub tenant: String,
@@ -429,7 +436,7 @@ pub struct AckTarget {
 }
 
 /// `POST /api/v1/ack`, `/ack/batch` (005 `log_ack_by_hash_v1` / `log_ack_multi_v1`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct AckCommand {
     pub request_id: RequestId,
     pub targets: Vec<AckTarget>,
@@ -438,7 +445,7 @@ pub struct AckCommand {
 /// A positional ack of ONE leased batch (`log_ack_v1` / `log_ack_at_v1`): the
 /// receiver advances the cursor to an absolute offset it computed from the
 /// delivered batch.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct AckPositionalCommand {
     pub request_id: RequestId,
     pub pid: Pid,
@@ -461,7 +468,7 @@ pub struct AckPositionalCommand {
 
 /// Release a worker's lease on a `(pid, group)` without moving the cursor — the
 /// nack the whole batch redelivers from.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct NackCommand {
     pub request_id: RequestId,
     pub pid: Pid,
@@ -474,7 +481,7 @@ pub struct NackCommand {
 /// `POST /api/v1/lease/:leaseId/extend` (`log_renew_lease_v1`). Renews EVERY
 /// live lease of the worker: the planner walks `leases_by_worker` in key order
 /// (never a hash map, §8), so the effect list is deterministic.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RenewCommand {
     pub request_id: RequestId,
     pub worker: String,
@@ -484,7 +491,7 @@ pub struct RenewCommand {
 /// `log_dlq_head_v1` as a standalone command: file the poison HEAD frame the
 /// receiver snapshotted, advance past it, release the lease. Used when the DLQ
 /// handoff was not folded into the ack (the `/dlq` replay-then-die path).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct DlqHeadCommand {
     pub request_id: RequestId,
     pub pid: Pid,
@@ -502,7 +509,7 @@ pub struct DlqHeadCommand {
 /// is planned. Effects that allocate pids/KV versions or depend on current
 /// state must keep their dedicated planner; this lane is for whole-row
 /// overwrites, deletes and append-only metadata.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct EffectsCommand {
     pub request_id: RequestId,
     pub tenant: String,
@@ -610,6 +617,20 @@ pub struct Overlay {
     /// is what keeps a timer whose fire entry is still in flight from firing
     /// a second time in the next cycle (exactly-once in effect).
     timers: HashMap<(String, String, String), TimerSlot, FxBuild>,
+    /// Pids a delete in flight takes away: a queue delete's or a tenant
+    /// purge's `GarbageAdd`, retention's `PartitionDelete`. The planner ignores
+    /// them from the entry that deletes them, as it ignores committed garbage
+    /// (§5.2): once that entry applies, a chunk may already have removed the
+    /// partition row, and an `Append` or a `CursorSet` to it is fatal in apply.
+    gone: HashMap<Pid, Tagged<()>, FxBuild>,
+    /// `(tenant, queue)` of a `QueueDelete` in flight. Its partition names and
+    /// its groups are swept when it applies, so the committed ones are dead
+    /// already; only what the overlay writes after it counts (a push that
+    /// re-creates the queue gets a new partition).
+    dropped_queues: HashMap<(String, String), Tagged<()>, FxBuild>,
+    /// The tenant of a `TenantPurge` in flight: as `dropped_queues` for every
+    /// queue of the tenant, and its KV rows and timers too.
+    purged_tenants: HashMap<String, Tagged<()>, FxBuild>,
     /// The tag every fold stamps now (KEEP_OVERLAY): one per in-flight entry,
     /// and the cycle's own for the commands planned into the entry being built.
     tag: u64,
@@ -688,6 +709,9 @@ impl Overlay {
             request_ids: HashMap::default(),
             kv: HashMap::default(),
             timers: HashMap::default(),
+            gone: HashMap::default(),
+            dropped_queues: HashMap::default(),
+            purged_tenants: HashMap::default(),
             tag: 0,
             folds: 0,
         }
@@ -778,6 +802,29 @@ impl Overlay {
             Effect::QueueDelete { tenant, queue } => {
                 self.queues
                     .insert((tenant.clone(), queue.clone()), Tagged { v: None, tag });
+                self.drop_names(tenant, Some(queue));
+                self.dropped_queues
+                    .insert((tenant.clone(), queue.clone()), Tagged { v: (), tag });
+            }
+            Effect::TenantPurge { tenant } => {
+                self.queues.retain(|(t, _), _| t != tenant);
+                self.drop_names(tenant, None);
+                self.kv.retain(|(t, _, _), _| t != tenant);
+                self.timers.retain(|(t, _, _), _| t != tenant);
+                self.purged_tenants
+                    .insert(tenant.clone(), Tagged { v: (), tag });
+            }
+            // A group delete (014) keeps the partition: only its `(pid, group)`
+            // rows go.
+            Effect::GarbageAdd { pids, scope, .. }
+                if !matches!(scope, crate::rsm::effect::GarbageScope::Group { .. }) =>
+            {
+                for pid in pids {
+                    self.gone.insert(*pid, Tagged { v: (), tag });
+                }
+            }
+            Effect::PartitionDelete { pid } => {
+                self.gone.insert(*pid, Tagged { v: (), tag });
             }
             Effect::GroupUpsert {
                 tenant,
@@ -924,11 +971,51 @@ impl Overlay {
             | Effect::TimerBackoff { .. } => {
                 self.fold_timer(eff, tag);
             }
-            // Everything else the phase-1 planner neither emits nor needs to see
-            // through the overlay (admin deletes, streams, traces): a later
-            // phase folds what its planner reads.
+            // Everything else the planner neither emits nor needs to see through
+            // the overlay (a delete's chunks, streams, traces): a later phase
+            // folds what its planner reads.
             _ => {}
         }
+    }
+
+    /// A queue delete (`Some(queue)`) or a tenant purge (`None`) sweeps the
+    /// partition names and the groups it covers when it applies: whatever an
+    /// earlier fold wrote for them is dead with the committed ones, and the
+    /// tombstone the caller records hides those. A later fold writes them anew.
+    fn drop_names(&mut self, tenant: &str, queue: Option<&str>) {
+        let hit = |t: &str, q: &str| t == tenant && queue.is_none_or(|x| x == q);
+        self.pids_by_key.retain(|(t, q, _), _| !hit(t, q));
+        self.groups.retain(|(t, q, _), _| !hit(t, q));
+    }
+
+    /// A pid a delete in flight takes away.
+    fn is_gone(&self, pid: Pid) -> bool {
+        !self.gone.is_empty() && self.gone.contains_key(&pid)
+    }
+
+    /// Whether a delete in flight dropped the queue's names and groups: its
+    /// own `QueueDelete`, or a purge of its tenant.
+    fn queue_dropped(&self, tenant: &str, queue: &str) -> bool {
+        if self.dropped_queues.is_empty() && self.purged_tenants.is_empty() {
+            return false;
+        }
+        self.purged_tenants.contains_key(tenant)
+            || self
+                .dropped_queues
+                .contains_key(&(tenant.to_string(), queue.to_string()))
+    }
+
+    /// Whether a purge of the tenant is in flight: its committed KV rows and
+    /// timers are dead already.
+    pub(crate) fn tenant_purged(&self, tenant: &str) -> bool {
+        !self.purged_tenants.is_empty() && self.purged_tenants.contains_key(tenant)
+    }
+
+    /// Whether anything in flight (or planned this cycle) names the partition:
+    /// an append, a create, a watermark. The leader's retention reads only
+    /// committed state, and must not delete a partition a push just wrote.
+    pub(crate) fn touches_partition(&self, pid: Pid) -> bool {
+        self.parts.contains_key(&pid)
     }
 
     /// Fold one timer effect under `tag` (see [`TimerSlot`] for what `base` and
@@ -1226,8 +1313,151 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         if c.effects.is_empty() {
             return Ok(Plan::Empty(Outcome::Empty));
         }
-        ov.apply_effects(&c.effects);
-        Ok(Plan::logged(c.effects.clone(), Outcome::Empty))
+        // A cursor the receiver wrote from committed state (a seek) names
+        // partitions it read before this was planned. One a delete in flight
+        // takes away, or one being chunk-deleted, would reach apply after its
+        // row is gone — fatal there. Refused whole and retryable: the retry
+        // reads the partitions again.
+        for e in &c.effects {
+            if let Effect::CursorSet { pid, .. } = e {
+                if self.partition(ov, *pid)?.is_none() {
+                    return Err(Refusal::retry(
+                        "partition_gone",
+                        format!("partition {pid} is gone or being deleted"),
+                    ));
+                }
+            }
+        }
+        let mut effects = c.effects.clone();
+        self.cover_dropped_partitions(ov, &mut effects)?;
+        ov.apply_effects(&effects);
+        Ok(Plan::logged(effects, Outcome::Empty))
+    }
+
+    /// A queue delete or a tenant purge takes away every partition of what it
+    /// drops, and the receiver named them from committed state BEFORE the
+    /// command was planned. A partition created since — still in flight, or
+    /// committed after that read — loses its names with the queue but would
+    /// never become garbage: its rows and payload would stay for ever, and
+    /// nothing could read its messages. Every live partition the command does
+    /// not name joins its `GarbageAdd` and its first `DeleteChunk`; the chunks
+    /// that follow (the receiver's, or the leader's resume) finish them.
+    fn cover_dropped_partitions(
+        &self,
+        ov: &Overlay,
+        effects: &mut Vec<Effect>,
+    ) -> Result<(), Refusal> {
+        use crate::rsm::effect::GarbageScope;
+        let mut drops: Vec<(&str, Option<&str>)> = Vec::new();
+        let mut scope = GarbageScope::Queue;
+        for e in effects.iter() {
+            match e {
+                Effect::QueueDelete { tenant, queue } => drops.push((tenant, Some(queue))),
+                Effect::TenantPurge { tenant } => {
+                    drops.push((tenant, None));
+                    scope = GarbageScope::Tenant;
+                }
+                _ => {}
+            }
+        }
+        if drops.is_empty() {
+            return Ok(());
+        }
+        let named: std::collections::HashSet<Pid> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::GarbageAdd { pids, scope, .. }
+                    if !matches!(scope, GarbageScope::Group { .. }) =>
+                {
+                    Some(pids.iter().copied())
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let mut missing: Vec<Pid> = Vec::new();
+        for (tenant, queue) in drops {
+            for pid in self.live_partitions(ov, tenant, queue)? {
+                if !named.contains(&pid) && !missing.contains(&pid) {
+                    missing.push(pid);
+                }
+            }
+        }
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let wide = |s: &GarbageScope| !matches!(s, GarbageScope::Group { .. });
+        match effects
+            .iter_mut()
+            .find(|e| matches!(e, Effect::GarbageAdd { scope, .. } if wide(scope)))
+        {
+            Some(Effect::GarbageAdd { pids, .. }) => pids.extend_from_slice(&missing),
+            _ => effects.push(Effect::GarbageAdd {
+                pids: missing.clone(),
+                scope: scope.clone(),
+                deleted_at_us: self.now_us,
+            }),
+        }
+        match effects
+            .iter_mut()
+            .find(|e| matches!(e, Effect::DeleteChunk { scope, .. } if wide(scope)))
+        {
+            Some(Effect::DeleteChunk { pids, .. }) => pids.extend_from_slice(&missing),
+            _ => effects.push(Effect::DeleteChunk {
+                pids: missing,
+                scope,
+                resume: Vec::new(),
+                limit: 1_000,
+            }),
+        }
+        Ok(())
+    }
+
+    /// Every partition of a queue (`Some`) or of a whole tenant (`None`) that
+    /// is live in the merged view: committed and not garbage or going away,
+    /// or created in flight. In pid order.
+    fn live_partitions(
+        &self,
+        ov: &Overlay,
+        tenant: &str,
+        queue: Option<&str>,
+    ) -> Result<Vec<Pid>, Refusal> {
+        let mut queues: Vec<String> = Vec::new();
+        match queue {
+            Some(q) => queues.push(q.to_string()),
+            None => {
+                self.reads()
+                    .scan_queues(tenant, usize::MAX, &mut |name, _| {
+                        queues.push(name.to_string());
+                        true
+                    })
+                    .map_err(store_err)?;
+            }
+        }
+        let mut pids: BTreeSet<Pid> = BTreeSet::new();
+        for q in &queues {
+            let mut found: Vec<Pid> = Vec::new();
+            self.reads()
+                .scan_queue_partitions(tenant, q, None, usize::MAX, &mut |pid| {
+                    found.push(pid);
+                    true
+                })
+                .map_err(store_err)?;
+            for pid in found {
+                if self.partition(ov, pid)?.is_some() {
+                    pids.insert(pid);
+                }
+            }
+        }
+        for (pid, part) in &ov.parts {
+            if let Some(c) = &part.created {
+                if c.v.tenant == tenant && queue.is_none_or(|q| c.v.queue == q) && !ov.is_gone(*pid)
+                {
+                    pids.insert(*pid);
+                }
+            }
+        }
+        Ok(pids.into_iter().collect())
     }
 
     fn reads(&self) -> &'a R {
@@ -1257,7 +1487,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     // ---- merged reads -----------------------------------------------------
 
     /// The effective queue config: overlay upsert (or tombstone → gone), else
-    /// committed.
+    /// committed — unless a purge of the tenant is in flight.
     fn queue_cfg(
         &self,
         ov: &Overlay,
@@ -1266,6 +1496,9 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     ) -> Result<Option<QueueConfig>, Refusal> {
         if let Some(t) = ov.queues.get(&(tenant.to_string(), queue.to_string())) {
             return Ok(t.v.clone());
+        }
+        if ov.tenant_purged(tenant) {
+            return Ok(None);
         }
         self.committed.queue(tenant, queue).map_err(store_err)
     }
@@ -1283,11 +1516,17 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         {
             return Ok(t.v.clone());
         }
+        if ov.queue_dropped(tenant, queue) {
+            return Ok(None);
+        }
         self.committed
             .group(tenant, queue, group)
             .map_err(store_err)
     }
 
+    /// The live pid of a partition NAME. A name a delete in flight sweeps
+    /// resolves to nothing, so a push re-creates the partition with a new pid
+    /// instead of appending to one that is going away.
     fn pid_of(
         &self,
         ov: &Overlay,
@@ -1295,20 +1534,37 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         queue: &str,
         partition: &str,
     ) -> Result<Option<Pid>, Refusal> {
-        if let Some(t) =
-            ov.pids_by_key
-                .get(&(tenant.to_string(), queue.to_string(), partition.to_string()))
-        {
-            return Ok(Some(t.v));
-        }
-        self.committed
-            .pid_of(tenant, queue, partition)
-            .map_err(store_err)
+        let pid = match ov.pids_by_key.get(&(
+            tenant.to_string(),
+            queue.to_string(),
+            partition.to_string(),
+        )) {
+            Some(t) => Some(t.v),
+            None if ov.queue_dropped(tenant, queue) => None,
+            None => self
+                .committed
+                .pid_of(tenant, queue, partition)
+                .map_err(store_err)?,
+        };
+        Ok(pid.filter(|p| !ov.is_gone(*p)))
     }
 
-    /// The merged partition view, or `None` when the pid is unknown or garbage.
+    /// The merged partition view, or `None` when the pid is unknown, garbage,
+    /// or taken away by a delete in flight.
     fn partition(&self, ov: &Overlay, pid: Pid) -> Result<Option<PartView>, Refusal> {
+        if ov.is_gone(pid) {
+            return Ok(None);
+        }
         let committed = self.committed.partition(pid).map_err(store_err)?;
+        // Every committed partition predates the entries in flight, so one of a
+        // queue a delete in flight drops is going away with it — named in the
+        // delete's garbage or not.
+        if committed
+            .as_ref()
+            .is_some_and(|p| ov.queue_dropped(&p.tenant, &p.queue))
+        {
+            return Ok(None);
+        }
         let overlay = ov.parts.get(&pid);
         let (
             uuid,
@@ -1373,6 +1629,9 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     }
 
     fn cursor(&self, ov: &Overlay, pid: Pid, group: &str) -> Result<Option<CursorRow>, Refusal> {
+        if ov.is_gone(pid) {
+            return Ok(None);
+        }
         if let Some(t) = ov.cursors.get(&(pid, group.to_string())) {
             return Ok(t.v.clone());
         }

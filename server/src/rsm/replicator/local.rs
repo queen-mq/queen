@@ -67,6 +67,7 @@ use tokio::sync::Notify as ApplyWake;
 
 use crate::rsm::apply::{self, ApplyConfig, ApplyStats, Committed, Notify};
 use crate::rsm::entry::{decode_entry, encode_entry_payload_free, Entry};
+use crate::rsm::qlog::codec::StoredPayload;
 use crate::rsm::qlog::set::{QLogSet, SYSTEM_QUEUE_ID};
 use crate::rsm::qlog::{EntryInput, RecordInput, WriteRecord};
 use crate::rsm::segments;
@@ -254,9 +255,12 @@ struct SyncJob {
     pending: Vec<Pending>,
     first_index: u64,
     /// The raft-log barrier still owed for this group; `None` on the Phase C
-    /// queue-log path, where the writer already fsynced every touched queue log
-    /// (the only barrier) and the syncer only hands the group on, in order.
+    /// queue-log path.
     handle: Option<SyncHandle>,
+    /// The queue-log barrier still owed for this group (Phase C): the logs its
+    /// write touched, fsynced by the syncer while the writer writes the next
+    /// group.
+    qlog: Option<(crate::rsm::qlog::set::QLogSyncer, crate::rsm::qlog::set::SyncTicket)>,
     log_files: u64,
     log_bytes: u64,
 }
@@ -293,78 +297,141 @@ pub(crate) struct QlogWrite {
 
 impl QlogWrite {
     /// Write one group into the queue logs and fsync it — THE write-ahead
-    /// barrier on both replicators. For each item, in order: its `Append`
-    /// payload records into each payload's queue log, then one entry record
-    /// (with `copies`, and the item's `seq` and `term`) into every queue log
-    /// its effects touch, or into the system log ([`SYSTEM_QUEUE_ID`]) when it
-    /// touches none (and always for a [`GroupBody::Raw`] record). One `write`
-    /// per touched log, then ONE `sync` of every touched log; only then may the
-    /// caller acknowledge the group. Recovery keeps the complete, gapless
-    /// prefix (every copy of an entry present), so a crash anywhere before the
-    /// sync leaves nothing half-acknowledged. On return every
-    /// [`GroupBody::Entry`] holds its PAYLOAD-FREE decode.
+    /// barrier on both replicators: [`QlogWrite::write_group_nosync`], then one
+    /// fsync of every log it wrote. Only then may the caller acknowledge the
+    /// group. On return every [`GroupBody::Entry`] holds its PAYLOAD-FREE
+    /// decode.
     pub(crate) fn write_group(&mut self, items: &mut [GroupItem]) -> io::Result<()> {
+        let t = self.write_group_nosync(items)?;
+        // THE BARRIER: every touched queue log, once. Timed into `log_fsync`
+        // (PERF-1), which keeps meaning "the WAL barrier" on this path.
+        let s0 = crate::rsm::timing::stamp();
+        self.set.syncer().sync(&t)?;
+        if let Some(s0) = s0 {
+            crate::rsm::timing::metrics()
+                .log_fsync
+                .record_dur(s0.elapsed());
+        }
+        self.set.note_durable(t.seq);
+        // `qlog.record_fsynced` (and `log.flushed`): the group is durable in
+        // the queue logs and not yet applied; it WILL replay on restart.
+        crate::rsm::faults::hit("qlog.record_fsynced");
+        crate::rsm::faults::hit("log.flushed");
+        Ok(())
+    }
+
+    /// Write one group into the queue logs WITHOUT the fsync, and return what
+    /// the fsync must cover. For each item, in order: its `Append` payload
+    /// records into each payload's log, then one entry record (with `copies`,
+    /// and the item's `seq` and `term`) into every log its effects touch, or
+    /// into the system log ([`SYSTEM_QUEUE_ID`]) when it touches none (and
+    /// always for a [`GroupBody::Raw`] record). One `write` per touched log;
+    /// the logs of different LANES are written on parallel threads (a log is
+    /// one lane of one queue, [`QLogSet::log_id_for`]). Nothing may be
+    /// acknowledged before the returned ticket is fsynced; recovery keeps the
+    /// complete, gapless prefix (every copy of an entry present), so a crash
+    /// anywhere before that leaves nothing half-acknowledged. The caller may
+    /// write the NEXT group while another thread fsyncs this one: each log still
+    /// receives its records in `seq` order. On return every
+    /// [`GroupBody::Entry`] holds its PAYLOAD-FREE decode.
+    pub(crate) fn write_group_nosync(
+        &mut self,
+        items: &mut [GroupItem],
+    ) -> io::Result<crate::rsm::qlog::set::SyncTicket> {
         use crate::rsm::effect::Effect;
-        // The payload-free bytes of every entry, encoded from the ORIGINAL entry
-        // (the payloads are still in it) — the entry records carry these.
-        let mut pf: Vec<Vec<u8>> = Vec::with_capacity(items.len());
+        use crate::rsm::qlog::set::lane_log_id;
+        // The payload-free bytes of every entry — the entry records carry
+        // these: encoded from the ORIGINAL entry (its payloads are still in
+        // it), or as received (a follower's stored-form entry).
+        let mut pf: Vec<Bytes> = Vec::with_capacity(items.len());
         for it in items.iter() {
             match &it.body {
                 GroupBody::Entry { entry, .. } => {
-                    pf.push(encode_entry_payload_free(entry).map_err(|e| {
+                    pf.push(Bytes::from(encode_entry_payload_free(entry).map_err(|e| {
                         io::Error::other(format!("payload-free entry encode: {e:?}"))
-                    })?)
+                    })?))
                 }
-                GroupBody::Raw { bytes, .. } => pf.push(bytes.clone()),
+                GroupBody::Stored { pf: b, .. } => pf.push(b.clone()),
+                GroupBody::Raw { bytes, .. } => pf.push(Bytes::copy_from_slice(bytes)),
             }
         }
         // The node-local payload codec (qlog::codec): every `Append` blob of the
-        // group, in effect order, compressed before the write (several threads
-        // when the group is big — this thread is the serial writer). `None` =
-        // store raw (small, incompressible, or the codec is off).
-        let mut zblobs: Vec<Option<Vec<u8>>> = Vec::new();
+        // group's full entries, in effect order — already compressed (a raft
+        // leader awaited it before proposing), started at propose, or
+        // compressed now. `None` = store raw. A stored-form entry needs none.
+        let mut zblobs: Vec<Option<Bytes>> = Vec::new();
         for it in items.iter_mut() {
-            let GroupBody::Entry { entry, pre } = &mut it.body else {
+            let GroupBody::Entry { entry, pre, z } = &mut it.body else {
                 continue;
             };
-            // Started at propose (the usual case: collected here, already done
-            // while the previous group fsynced); compressed now when it was not.
-            let pre = std::mem::take(pre);
-            let raws: Vec<&[u8]> = entry
+            let n = entry
                 .effects
                 .iter()
-                .filter_map(|eff| match eff {
-                    Effect::Append { blob, .. } => Some(blob.as_slice()),
-                    _ => None,
-                })
-                .collect();
-            if pre.len() == raws.len() {
-                zblobs.extend(pre.into_iter().map(crate::rsm::qlog::codec::Pre::finish));
+                .filter(|eff| matches!(eff, Effect::Append { .. }))
+                .count();
+            if let Some(z) = z.take().filter(|z| z.len() == n) {
+                zblobs.extend(z.iter().cloned());
+                continue;
+            }
+            let pre = std::mem::take(pre);
+            if pre.len() == n {
+                zblobs.extend(
+                    pre.into_iter()
+                        .map(|p| crate::rsm::qlog::codec::Pre::finish(p).map(Bytes::from)),
+                );
             } else {
-                zblobs.extend(crate::rsm::qlog::codec::compress_all(&raws));
+                let raws: Vec<&[u8]> = entry
+                    .effects
+                    .iter()
+                    .filter_map(|eff| match eff {
+                        Effect::Append { blob, .. } => Some(blob.as_slice()),
+                        _ => None,
+                    })
+                    .collect();
+                zblobs.extend(
+                    crate::rsm::qlog::codec::compress_all(&raws)
+                        .into_iter()
+                        .map(|o| o.map(Bytes::from)),
+                );
             }
         }
+        let lanes = self.set.lanes();
         let mut zi = 0usize;
-        // The records borrow `items` (payloads/hashes), `pf` (entry bytes) and
-        // `zblobs`, so the write + barrier are scoped to end BEFORE the entries
-        // are rewritten below.
+        let mut max_seq = 0u64;
+        // Every log written, with its lane.
+        let mut lane_of_log: HashMap<u64, u64> = HashMap::new();
+        // The records borrow `items` (hashes, blobs, stored payloads), `pf`
+        // (entry bytes) and `zblobs`, so the writes are scoped to end BEFORE the
+        // entries are rewritten below.
         {
-            let q = self;
+            let q = &mut *self;
             let lookup = q.lookup.clone();
-            let mut by_qid: std::collections::BTreeMap<u64, Vec<WriteRecord<'_>>> =
+            let mut by_log: std::collections::BTreeMap<u64, Vec<WriteRecord<'_>>> =
                 std::collections::BTreeMap::new();
             let mut touched: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
             let mut msgs: Vec<(u64, WriteRecord<'_>)> = Vec::new();
             for (i, it) in items.iter().enumerate() {
                 let seq = it.seq;
+                max_seq = max_seq.max(seq);
                 touched.clear();
                 msgs.clear();
-                let (entry, now_us) = match &it.body {
-                    GroupBody::Entry { entry, .. } => (Some(entry), entry.now_us),
-                    GroupBody::Raw { now_us, .. } => (None, *now_us),
-                };
-                let mut unresolved = entry.is_none();
-                for eff in entry.map(|e| e.effects.as_slice()).unwrap_or(&[]) {
+                let (effects, now_us, stored): (&[Effect], i64, Option<&[StoredPayload]>) =
+                    match &it.body {
+                        GroupBody::Entry { entry, .. } => {
+                            (entry.effects.as_slice(), entry.now_us, None)
+                        }
+                        GroupBody::Stored {
+                            entry, payloads, ..
+                        } => (
+                            entry.effects.as_slice(),
+                            entry.now_us,
+                            Some(payloads.as_slice()),
+                        ),
+                        GroupBody::Raw { now_us, .. } => (&[], *now_us, None),
+                    };
+                let mut unresolved = matches!(it.body, GroupBody::Raw { .. });
+                let mut si = 0usize;
+                for eff in effects {
                     match eff {
                         Effect::QueueUpsert { tenant, queue, .. }
                         | Effect::QueueDelete { tenant, queue }
@@ -372,19 +439,27 @@ impl QlogWrite {
                         | Effect::GroupDelete { tenant, queue, .. }
                         | Effect::DlqInsert { tenant, queue, .. }
                         | Effect::DlqDelete { tenant, queue, .. } => {
-                            touched.insert(QLogSet::queue_id_of(tenant, queue));
+                            let log = QLogSet::queue_id_of(tenant, queue);
+                            lane_of_log.insert(log, 0);
+                            touched.insert(log);
                         }
                         Effect::PartitionCreate {
                             pid, tenant, queue, ..
                         } => {
                             let qid = QLogSet::queue_id_of(tenant, queue);
                             q.pid_qid.insert(*pid, qid);
-                            touched.insert(qid);
+                            let lane = pid % lanes;
+                            let log = lane_log_id(qid, lane);
+                            lane_of_log.insert(log, lane);
+                            touched.insert(log);
                         }
                         Effect::PartitionDelete { pid } => {
                             match resolve_qid(&mut q.pid_qid, &lookup, *pid)? {
                                 Some(qid) => {
-                                    touched.insert(qid);
+                                    let lane = pid % lanes;
+                                    let log = lane_log_id(qid, lane);
+                                    lane_of_log.insert(log, lane);
+                                    touched.insert(log);
                                 }
                                 None => unresolved = true,
                             }
@@ -395,7 +470,10 @@ impl QlogWrite {
                         | Effect::Watermark { pid, .. } => {
                             match resolve_qid(&mut q.pid_qid, &lookup, *pid)? {
                                 Some(qid) => {
-                                    touched.insert(qid);
+                                    let lane = pid % lanes;
+                                    let log = lane_log_id(qid, lane);
+                                    lane_of_log.insert(log, lane);
+                                    touched.insert(log);
                                 }
                                 None => unresolved = true,
                             }
@@ -415,9 +493,29 @@ impl QlogWrite {
                                         "qlog route: no partition row for pid {pid}"
                                     ))
                                 })?;
-                            touched.insert(qid);
-                            let z = zblobs[zi].as_deref();
-                            zi += 1;
+                            let lane = pid % lanes;
+                            let log = lane_log_id(qid, lane);
+                            lane_of_log.insert(log, lane);
+                            touched.insert(log);
+                            let (zstd, payload): (bool, &[u8]) = match stored {
+                                Some(sp) => {
+                                    let p = sp.get(si).ok_or_else(|| {
+                                        io::Error::other(format!(
+                                            "entry {seq}: fewer stored payloads than appends"
+                                        ))
+                                    })?;
+                                    si += 1;
+                                    (p.zstd, p.bytes.as_ref())
+                                }
+                                None => {
+                                    let z = zblobs[zi].as_deref();
+                                    zi += 1;
+                                    match z {
+                                        Some(z) => (true, z),
+                                        None => (false, blob.as_slice()),
+                                    }
+                                }
+                            };
                             let r = RecordInput {
                                 seq,
                                 pid: *pid,
@@ -426,11 +524,11 @@ impl QlogWrite {
                                 created_at_us: *created_at_us,
                                 txn: None,
                                 hashes,
-                                payload: z.unwrap_or(blob),
+                                payload,
                             };
                             msgs.push((
-                                qid,
-                                if z.is_some() {
+                                log,
+                                if zstd {
                                     WriteRecord::Zstd(r)
                                 } else {
                                     WriteRecord::Msg(r)
@@ -440,19 +538,28 @@ impl QlogWrite {
                         _ => {}
                     }
                 }
+                if let Some(sp) = stored {
+                    if si != sp.len() {
+                        return Err(io::Error::other(format!(
+                            "entry {seq}: {} stored payloads for {si} appends",
+                            sp.len()
+                        )));
+                    }
+                }
                 if touched.is_empty() || unresolved {
+                    lane_of_log.insert(SYSTEM_QUEUE_ID, 0);
                     touched.insert(SYSTEM_QUEUE_ID);
                 }
                 let copies = touched.len() as u32;
                 // Each log: this entry's payload records (effect order), then its
                 // entry record — so an entry record found on disk implies every
                 // payload record of that entry in the same log precedes it.
-                for (qid, r) in msgs.drain(..) {
-                    by_qid.entry(qid).or_default().push(r);
+                for (log, r) in msgs.drain(..) {
+                    by_log.entry(log).or_default().push(r);
                 }
-                for qid in &touched {
-                    by_qid
-                        .entry(*qid)
+                for log in &touched {
+                    by_log
+                        .entry(*log)
                         .or_default()
                         .push(WriteRecord::Entry(EntryInput {
                             seq,
@@ -463,37 +570,60 @@ impl QlogWrite {
                         }));
                 }
             }
-            // One write per touched log (page cache, no fsync yet). Every log
-            // written is marked dirty, so the sync below covers a group of pops
-            // and acks exactly as it covers pushes.
-            for (qid, records) in &by_qid {
-                q.set.write_mixed_for_qid(*qid, records)?;
+            // One write per touched log (page cache, no fsync yet), the lanes
+            // in parallel. Every log written is marked dirty, so the fsync
+            // covers a group of pops and acks exactly as it covers pushes.
+            let mut per_lane: std::collections::BTreeMap<u64, Vec<(u64, &Vec<WriteRecord<'_>>)>> =
+                std::collections::BTreeMap::new();
+            for (log, records) in &by_log {
+                per_lane
+                    .entry(lane_of_log.get(log).copied().unwrap_or(0))
+                    .or_default()
+                    .push((*log, records));
             }
+            let set = &q.set;
+            let write_lane = |logs: &[(u64, &Vec<WriteRecord<'_>>)]| -> io::Result<()> {
+                for (log, records) in logs {
+                    set.write_mixed_shared(*log, records)?;
+                }
+                Ok(())
+            };
+            let mut lanes_iter = per_lane.values();
+            match per_lane.len() {
+                0 => {}
+                1 => write_lane(lanes_iter.next().expect("one lane"))?,
+                _ => std::thread::scope(|s| -> io::Result<()> {
+                    let first = lanes_iter.next().expect("a lane");
+                    let joins: Vec<std::thread::ScopedJoinHandle<'_, io::Result<()>>> = lanes_iter
+                        .map(|logs| s.spawn(move || write_lane(logs)))
+                        .collect();
+                    let mut res = write_lane(first);
+                    for j in joins {
+                        let r = j.join().unwrap_or_else(|_| {
+                            Err(io::Error::other("qlog lane writer panicked"))
+                        });
+                        if res.is_ok() {
+                            res = r;
+                        }
+                    }
+                    res
+                })?,
+            }
+            let written: Vec<u64> = by_log.keys().copied().collect();
+            q.set.note_written(written, max_seq);
             // `qlog.record_written` (and its raft-era twin `log.appended`): the
             // group is in the page cache, not fsynced, nothing answered. A kill
             // here keeps the page cache and the group replays; a power loss may
             // keep any subset — recovery keeps the complete gapless prefix.
             crate::rsm::faults::hit("qlog.record_written");
             crate::rsm::faults::hit("log.appended");
-            // THE BARRIER: every touched queue log, once. Timed into `log_fsync`
-            // (PERF-1), which keeps meaning "the WAL barrier" on this path.
-            let s0 = crate::rsm::timing::stamp();
-            q.set.sync()?;
-            if let Some(s0) = s0 {
-                crate::rsm::timing::metrics()
-                    .log_fsync
-                    .record_dur(s0.elapsed());
-            }
-            // `qlog.record_fsynced` (and `log.flushed`): the group is durable in
-            // the queue logs and not yet applied; it WILL replay on restart.
-            crate::rsm::faults::hit("qlog.record_fsynced");
-            crate::rsm::faults::hit("log.flushed");
         }
         // Hand apply the PAYLOAD-FREE form — each `Append`'s `blob` is the
         // payload's 4-byte frame length — byte-identical to what a replay from the
         // queue logs hands it, so `RetainedBytes` (a REPLICATED counter) is
         // computed from the length on BOTH paths and the digest is replay-stable
-        // (I2). Cheap: the entry carries no payload.
+        // (I2). Cheap: the entry carries no payload. A stored-form entry already
+        // is that form.
         for (it, bytes) in items.iter_mut().zip(pf.iter()) {
             if let GroupBody::Entry { entry, .. } = &mut it.body {
                 *entry = Arc::new(decode_entry(bytes).map_err(|e| {
@@ -501,7 +631,7 @@ impl QlogWrite {
                 })?);
             }
         }
-        Ok(())
+        Ok(self.set.take_ticket())
     }
 }
 
@@ -524,6 +654,18 @@ pub(crate) enum GroupBody {
     Entry {
         entry: Arc<crate::rsm::entry::Entry>,
         pre: Vec<crate::rsm::qlog::codec::Pre>,
+        /// The stored form of every `Append` blob, in effect order, when it is
+        /// already known (a raft leader awaited it before proposing, and sent
+        /// the same bytes to its followers). `None` = use `pre`, or compress.
+        z: Option<Arc<Vec<Option<Bytes>>>>,
+    },
+    /// An application entry as a follower received it: the PAYLOAD-FREE entry
+    /// and its encoding (the entry record), plus every `Append` payload
+    /// exactly as the leader stored it. Written as is: no encode, no codec.
+    Stored {
+        entry: Arc<crate::rsm::entry::Entry>,
+        pf: Bytes,
+        payloads: Arc<Vec<StoredPayload>>,
     },
     /// A consensus-internal record (an openraft blank or membership entry):
     /// its bytes are written verbatim as one entry record in the system log.
@@ -705,6 +847,7 @@ impl Writer {
                     pending,
                     first_index,
                     handle: Some(handle),
+                    qlog: None,
                     log_files: self.log.file_count() as u64,
                     log_bytes: self.log.bytes(),
                 };
@@ -736,10 +879,16 @@ impl Writer {
     ) -> bool {
         let first_index = self.next_index;
         let started = trace.then(Instant::now);
-        if let Err(e) = self.write_qlog_group(&mut pending, first_index) {
-            self.fail(&format!("local qlog write failed: {e}"), pending);
-            return false;
-        }
+        // Pipelined: write only; the syncer fsyncs this group while the next
+        // one is written. Direct: write and fsync here.
+        let pipelined = matches!(self.sink, WriterSink::Pipelined(_));
+        let ticket = match self.write_qlog_group(&mut pending, first_index, !pipelined) {
+            Ok(t) => t,
+            Err(e) => {
+                self.fail(&format!("local qlog write failed: {e}"), pending);
+                return false;
+            }
+        };
         // Indexes are consumed only once the group is durable: a failed write
         // poisoned the node above, so no index is ever handed out twice.
         self.next_index = first_index + pending.len() as u64;
@@ -769,10 +918,12 @@ impl Writer {
                 true
             }
             WriterSink::Pipelined(job_tx) => {
+                let syncer = self.qlog.as_ref().expect("qlog on").set.syncer();
                 let job = SyncJob {
                     pending,
                     first_index,
                     handle: None,
+                    qlog: ticket.map(|t| (syncer, t)),
                     log_files: files,
                     log_bytes: bytes,
                 };
@@ -832,7 +983,12 @@ impl Writer {
     ///
     /// Each `p.entry` is then replaced by its payload-free decode, so apply sees
     /// LIVE exactly the form a replay hands it (the I2 `RetainedBytes` rule).
-    fn write_qlog_group(&mut self, pending: &mut [Pending], first_index: u64) -> io::Result<()> {
+    fn write_qlog_group(
+        &mut self,
+        pending: &mut [Pending],
+        first_index: u64,
+        sync: bool,
+    ) -> io::Result<Option<crate::rsm::qlog::set::SyncTicket>> {
         // The shared group write (`QlogWrite::write_group`), with the index the
         // writer assigns and term 0 (the local replicator has no terms).
         let mut items: Vec<GroupItem> = pending
@@ -844,19 +1000,23 @@ impl Writer {
                 body: GroupBody::Entry {
                     entry: p.entry.clone(),
                     pre: std::mem::take(&mut p.pre),
+                    z: None,
                 },
             })
             .collect();
-        self.qlog
-            .as_mut()
-            .expect("qlog on")
-            .write_group(&mut items)?;
+        let q = self.qlog.as_mut().expect("qlog on");
+        let ticket = if sync {
+            q.write_group(&mut items)?;
+            None
+        } else {
+            Some(q.write_group_nosync(&mut items)?)
+        };
         for (p, it) in pending.iter_mut().zip(items) {
             if let GroupBody::Entry { entry, .. } = it.body {
                 p.entry = entry;
             }
         }
-        Ok(())
+        Ok(ticket)
     }
 
     /// The log write itself failed: drop the pending waiters (their proposes
@@ -990,6 +1150,7 @@ impl Syncer {
                 pending,
                 first_index,
                 handle,
+                qlog,
                 log_files,
                 log_bytes,
             } = job;
@@ -1002,9 +1163,23 @@ impl Syncer {
                 (0, 0)
             };
             let fsync_started = trace.then(Instant::now);
-            // `None`: the Phase C queue-log path, whose writer already ran the
-            // barrier (every touched queue log fsynced); this thread only keeps
-            // the hand-off in index order.
+            // Phase C: the queue-log barrier of this group — every log its write
+            // touched — while the writer writes the next group.
+            if let Some((syncer, ticket)) = qlog {
+                let s0 = crate::rsm::timing::stamp();
+                if let Err(e) = syncer.sync(&ticket) {
+                    drop(pending);
+                    self.poison(&format!("local qlog fsync failed: {e}"));
+                    return;
+                }
+                if let Some(s0) = s0 {
+                    crate::rsm::timing::metrics()
+                        .log_fsync
+                        .record_dur(s0.elapsed());
+                }
+                crate::rsm::faults::hit("qlog.record_fsynced");
+                crate::rsm::faults::hit("log.flushed");
+            }
             if let Some(handle) = handle {
                 if let Err(e) = handle.sync() {
                     // The barrier failed: the group is NOT durable. Drop its
@@ -1071,13 +1246,13 @@ pub struct OpenConfig {
     /// How long `open` waits for apply to replay the log after the store's
     /// durable index (§11.5). Boot only.
     pub replay_deadline: Duration,
-    /// `QUEEN_RAFT_WRITER_PIPELINE` (PERF-G, **default OFF** — the round-3 A/B
-    /// showed it regresses push p50, see [`writer_pipeline_from_env`]): run the
-    /// log write and its group fsync on two threads, so the writer forms and
-    /// writes group N+1 while the syncer fsyncs group N. Entries are still
-    /// acknowledged only after their own group's fsync (I4), and the syncer
-    /// processes groups in index order (so apply sees them in order). Off (the
-    /// default): the single-thread write-then-fsync writer.
+    /// `QUEEN_RAFT_WRITER_PIPELINE` (default ON, see
+    /// [`writer_pipeline_from_env`]): run the log write and its group fsync on
+    /// two threads, so the writer forms and writes group N+1 while the syncer
+    /// fsyncs group N. Entries are still acknowledged only after their own
+    /// group's fsync (I4), and the syncer processes groups in index order (so
+    /// apply sees them in order). Off: the single-thread write-then-fsync
+    /// writer.
     pub writer_pipeline: bool,
 }
 
@@ -1097,7 +1272,12 @@ impl OpenConfig {
     }
 }
 
-/// Resolve `QUEEN_RAFT_WRITER_PIPELINE`. **Default OFF (PERF-G round 3):** the
+/// Resolve `QUEEN_RAFT_WRITER_PIPELINE`. **Default ON since the queue logs
+/// became the WAL**: on that path the writer used to fsync inside the group
+/// write, so the pipeline overlapped nothing; now the syncer fsyncs group N
+/// while the writer writes group N+1 (and a raft follower's writer does the
+/// same). `0`/`false`/`off`/`no` turns it off. History, measured on the raft-log
+/// path before Phase C (PERF-G round 3): the
 /// laptop A/B showed the write/fsync pipeline REGRESSES push p50 (10.3 → 14.1 ms
 /// at A20k, both channel shapes) because the two-thread split cannot beat the
 /// inline writer's natural group-commit batching, and the finer `writer_pickup`
@@ -1107,15 +1287,15 @@ impl OpenConfig {
 /// pipeline cannot shorten. It only helps a box whose fsync is expensive enough
 /// to make the writer queue behind it AND whose extra fsyncs are cheap — neither
 /// holds here. Kept as a knob (`=1` turns it on) and proven I2-transparent, for
-/// a box where the trade-off flips. Only "1"/"true"/"on"/"yes" turns it on.
+/// a box where the trade-off flips.
 /// `pub(crate)` so the replicator tests build an `OpenConfig` honouring the knob.
 pub(crate) fn writer_pipeline_from_env() -> bool {
     match std::env::var("QUEEN_RAFT_WRITER_PIPELINE") {
-        Ok(v) => matches!(
+        Ok(v) => !matches!(
             v.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "on" | "yes"
+            "0" | "false" | "off" | "no"
         ),
-        Err(_) => false,
+        Err(_) => true,
     }
 }
 
@@ -1400,9 +1580,13 @@ impl<S: Store + 'static> LocalReplicator<S> {
             })?;
             // (c) Everything at or above the cut is an unacknowledged tail (a
             //     group whose fsyncs did not all land): drop it, durably, before
-            //     the writer hands those seqs to new entries.
+            //     the writer hands those seqs to new entries. The tail may sit in
+            //     a SEALED file: while the syncer fsynced a group, the writer's
+            //     next group can roll a log (the roll fsyncs and seals the file
+            //     holding that group's records), and another lane's log may not
+            //     have been fsynced yet — so the cut goes across sealed files.
             let cut = scan.next_seq;
-            let dropped = set.truncate_from(cut)?;
+            let dropped = set.truncate_from_across(cut)?;
             if scan.stopped.is_some() || dropped > 0 {
                 tracing::warn!(
                     target: "rsm",

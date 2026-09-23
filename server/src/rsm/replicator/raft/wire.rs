@@ -9,9 +9,12 @@
 //! n × ( term:u64 | index:u64 | kind:u8 | len:u32 | bytes )
 //! ```
 //!
-//! `kind` is 0 for an application entry, 1 for a blank entry, 2 for a
-//! membership entry (its bytes are the membership as JSON). Every integer is
-//! little-endian. Every other message is JSON: they are small.
+//! `kind` is 3 for an application entry in stored form (the payload-free
+//! entry plus every payload as the leader's queue log stores it, compressed or
+//! raw: [`AppEntry::from_stored_wire`]), 1 for a blank entry, 2 for a
+//! membership entry (its bytes are the membership as JSON). Kind 0, the full
+//! entry with raw payloads, is still read. Every integer is little-endian.
+//! Every other message is JSON: they are small.
 
 use std::io;
 
@@ -26,6 +29,7 @@ const VERSION: u8 = 1;
 const KIND_APP: u8 = 0;
 const KIND_BLANK: u8 = 1;
 const KIND_MEMBERSHIP: u8 = 2;
+const KIND_APP_STORED: u8 = 3;
 
 /// The largest AppendEntries body the sender builds. A request over it is cut
 /// at an entry boundary (at least one entry always goes) and the rest follows
@@ -59,7 +63,7 @@ pub fn encode_append(req: &AppendEntriesRequest<TypeConfig>) -> io::Result<(Vec<
     let mut total = 0usize;
     for e in &req.entries {
         let (kind, bytes) = match &e.payload {
-            EntryPayload::Normal(app) => (KIND_APP, app.wire()?),
+            EntryPayload::Normal(app) => (KIND_APP_STORED, app.wire()?),
             EntryPayload::Blank => (KIND_BLANK, Bytes::new()),
             EntryPayload::Membership(m) => (
                 KIND_MEMBERSHIP,
@@ -131,7 +135,8 @@ impl<'a> Cursor<'a> {
 
 /// Decode an AppendEntries body. Every application entry is decoded by the RSM
 /// codec, which verifies its checksum and fields.
-pub fn decode_append(b: &[u8]) -> io::Result<AppendEntriesRequest<TypeConfig>> {
+pub fn decode_append(body: &Bytes) -> io::Result<AppendEntriesRequest<TypeConfig>> {
+    let b: &[u8] = body;
     let mut c = Cursor { b, at: 0 };
     let v = c.u8()?;
     if v != VERSION {
@@ -148,8 +153,12 @@ pub fn decode_append(b: &[u8]) -> io::Result<AppendEntriesRequest<TypeConfig>> {
         let index = c.u64()?;
         let kind = c.u8()?;
         let len = c.u32()? as usize;
+        let from = c.at;
         let bytes = c.take(len)?;
         let payload = match kind {
+            KIND_APP_STORED => EntryPayload::Normal(AppEntry::from_stored_wire(
+                body.slice(from..from + len),
+            )?),
             KIND_APP => EntryPayload::Normal(AppEntry::from_wire(bytes)?),
             KIND_BLANK => EntryPayload::Blank,
             KIND_MEMBERSHIP => {

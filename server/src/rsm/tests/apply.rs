@@ -180,6 +180,10 @@ pub fn cfg() -> ApplyConfig {
         gc_per_pass: 32,
         idle_tick_ms: 2,
         durable_async: true,
+        // The async durable point is on across the suite: every test that runs
+        // the apply loop (`apply::spawn`) takes its points through the
+        // checkpoint thread, as the shipped binary does.
+        checkpoint_async: true,
         // PERF-C: exercise write coalescing across the whole apply suite; the
         // pool is off here (no writer-thread churn per test), and covered by
         // its own tests that set `apply_writers`.
@@ -5538,4 +5542,181 @@ fn a_group_registered_after_the_messages_sees_every_partition() {
         Some(3),
         "all three partitions are in the live ring"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The async durable point (QUEEN_RAFT_CHECKPOINT_ASYNC): apply takes the cut,
+// another thread writes it, and only the written cut is durable
+// ---------------------------------------------------------------------------
+
+/// Roll enough 8 KiB files on pid 1 that retention can free sealed ones, and
+/// return the next index.
+fn roll_files(a: &mut Applier<'_, HeedStore>) -> u64 {
+    a.apply(
+        &Build::new(BASE_US, 1, 0)
+            .cmd(vec![Effect::PartitionCreate {
+                pid: 1,
+                uuid: uuid(1),
+                tenant: TENANT.into(),
+                queue: QUEUE.into(),
+                partition: "p0".into(),
+                created_at_us: BASE_US,
+            }])
+            .at(1, 1),
+    )
+    .expect("apply");
+    let mut index = 2u64;
+    for n in 0..24u64 {
+        a.apply(
+            &Build::new(BASE_US + 10 + n as i64, 2, 100 + n * 10)
+                .cmd(vec![Effect::Append {
+                    pid: 1,
+                    bucket: 1,
+                    base_offset: n,
+                    count: 1,
+                    created_at_us: BASE_US + 10 + n as i64,
+                    hashes: hashes(500 + n, 1),
+                    blob: vec![9; 700],
+                }])
+                .at(index, 1),
+        )
+        .expect("apply");
+        index += 1;
+    }
+    index
+}
+
+#[test]
+fn an_async_point_is_durable_and_unlinks_only_once_its_cut_is_written() {
+    use crate::rsm::apply::PointStart;
+    let dir = tmp_dir("ckpt-async");
+    let mut node = Node::at(dir.clone());
+    let (mut a, _) = open_at(&node);
+    let mut index = roll_files(&mut a);
+    a.durable_point().expect("durable point");
+    let durable_before = a.durable_index();
+
+    // Retention frees every sealed file; GC phase one takes their rows.
+    a.apply(
+        &Build::new(BASE_US + 1000, 2, 9000)
+            .cmd(vec![Effect::Watermark {
+                pid: 1,
+                log_start: 24,
+                txns_start: 24,
+            }])
+            .at(index, 1),
+    )
+    .expect("apply");
+    index += 1;
+    a.gc_pass().expect("gc");
+    let sealed_before = a
+        .segments_mut()
+        .files()
+        .into_iter()
+        .filter(|(_, _, m)| m.sealed)
+        .count();
+    assert!(sealed_before > 0, "the appends must have rolled files");
+    let unlinked_before = a.stats().files_unlinked;
+
+    // First half: the cut. Nothing is durable yet and nothing is unlinked.
+    let (mut cut, at) = match a.begin_checkpoint().expect("begin") {
+        PointStart::Cut(cut, at) => (cut, at),
+        PointStart::Inline(_) => panic!("an all-RAM store cuts"),
+    };
+    assert_eq!(at, index - 1);
+    assert!(a.checkpoint_in_flight());
+    assert_eq!(a.durable_index(), durable_before);
+    assert_eq!(a.stats().files_unlinked, unlinked_before);
+
+    // Apply carries on while the cut is written.
+    a.apply(
+        &Build::new(BASE_US + 2000, 2, 9100)
+            .cmd(vec![Effect::Append {
+                pid: 1,
+                bucket: 1,
+                base_offset: 24,
+                count: 1,
+                created_at_us: BASE_US + 2000,
+                hashes: hashes(900, 1),
+                blob: vec![7; 100],
+            }])
+            .at(index, 1),
+    )
+    .expect("apply while the cut is written");
+    index += 1;
+
+    // Second half: the thread wrote it.
+    node.store().write_cut(&mut cut).expect("write the cut");
+    drop(cut);
+    a.checkpoint_done(at, Ok(())).expect("done");
+    assert!(!a.checkpoint_in_flight());
+    assert_eq!(a.durable_index(), at);
+    assert!(
+        a.stats().files_unlinked > unlinked_before,
+        "the freed files go once the cut that stopped naming them is durable"
+    );
+
+    // A crash now: the node reopens AT the cut (the entry applied after it is
+    // not in the checkpoint), and replaying that entry brings it back level.
+    let digest_at_cut_plus_one = node.digest();
+    drop(a);
+    node.close();
+    let node = Node::at(dir.clone());
+    let (mut b, rec) = open_at(&node);
+    assert_eq!(rec.applied_index, at);
+    assert_eq!(rec.durable_index, at);
+    b.apply(
+        &Build::new(BASE_US + 2000, 2, 9100)
+            .cmd(vec![Effect::Append {
+                pid: 1,
+                bucket: 1,
+                base_offset: 24,
+                count: 1,
+                created_at_us: BASE_US + 2000,
+                hashes: hashes(900, 1),
+                blob: vec![7; 100],
+            }])
+            .at(index - 1, 1),
+    )
+    .expect("replay the entry after the cut");
+    assert_eq!(
+        node.digest(),
+        digest_at_cut_plus_one,
+        "the reopened node plus the replayed tail is the node that crashed"
+    );
+}
+
+#[test]
+fn an_async_point_whose_cut_fails_reports_nothing_and_stops_the_node() {
+    use crate::rsm::apply::PointStart;
+    let node = Node::new("ckpt-async-fail");
+    let (mut a, _) = open_at(&node);
+    let index = roll_files(&mut a);
+    let durable_before = a.durable_index();
+    let (mut cut, at) = match a.begin_checkpoint().expect("begin") {
+        PointStart::Cut(cut, at) => (cut, at),
+        PointStart::Inline(_) => panic!("an all-RAM store cuts"),
+    };
+    node.store().fail_next_sync();
+    let e = node.store().write_cut(&mut cut).unwrap_err();
+    node.store().restore_cut(cut);
+    let refused = a.checkpoint_done(at, Err(e)).unwrap_err();
+    assert!(refused.lost_durable_point(), "{refused}");
+    assert_eq!(a.durable_index(), durable_before, "no durable index reported");
+    assert_eq!(a.stats().durable_points_failed, 1);
+    // The node stops: nothing else is applied.
+    let next = a.apply(
+        &Build::new(BASE_US + 3000, 2, 9500)
+            .cmd(vec![Effect::Append {
+                pid: 1,
+                bucket: 1,
+                base_offset: 24,
+                count: 1,
+                created_at_us: BASE_US + 3000,
+                hashes: hashes(950, 1),
+                blob: vec![1; 10],
+            }])
+            .at(index, 1),
+    );
+    assert!(next.is_err(), "a node whose durable point failed applies nothing");
 }

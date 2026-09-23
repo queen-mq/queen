@@ -110,7 +110,7 @@ const SEC_US: i64 = 1_000_000;
 /// decimal arithmetic and the shortest rendering; [`KvNum::Dec`] is exactly
 /// that while the value fits an `i128` mantissa with at most 38 fractional
 /// digits. Beyond it the arithmetic falls back to `f64` ([`KvNum::Float`]).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq)]
 pub enum KvNum {
     /// `mantissa / 10^scale`, normalized (no trailing fractional zero).
     Dec(i128, u32),
@@ -258,7 +258,7 @@ impl KvNum {
 
 /// The one expiry declaration every write carries (024 §5.1): EXACTLY ONE of
 /// `ttlSeconds` (an integer > 0) and `forever: true`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KvExpiry {
     TtlSeconds(i64),
     Forever,
@@ -276,7 +276,7 @@ impl KvExpiry {
 
 /// One validated op of a KV call (024's seven names, five code paths:
 /// `putIfAbsent` is `Put` with `if_absent`, which desugars to `expect: 0`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub enum KvOp {
     Get {
         ns: String,
@@ -299,6 +299,7 @@ pub enum KvOp {
         ns: String,
         key: String,
         /// The value JSON, compact.
+        #[serde(with = "serde_bytes")]
         value: Vec<u8>,
         expiry: KvExpiry,
         expect: Option<u64>,
@@ -406,7 +407,7 @@ pub fn apply_order(ops: &[KvOp]) -> Vec<usize> {
 /// A KV call for the planner: the receiver has validated every op
 /// ([`parse_ops`]) and it carries at least one write (a read-only call never
 /// enters the planner).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct KvCommand {
     pub request_id: RequestId,
     pub tenant: String,
@@ -951,6 +952,10 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     ) -> Result<Option<KvRow>, Refusal> {
         if let Some(v) = ov.kv_row(tenant, ns, key) {
             return Ok(v);
+        }
+        // A purge in flight deletes every row of the tenant when it applies.
+        if ov.tenant_purged(tenant) {
+            return Ok(None);
         }
         self.reads().kv(tenant, ns, key).map_err(store_err)
     }

@@ -1322,3 +1322,106 @@ async fn a_transaction_schedules_a_timer_that_fires_only_if_it_commits() {
     );
     facade.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn an_autopilot_pop_fills_its_batch_from_several_sparse_partitions() {
+    let dir = scratch("autopilot");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    // Eight sparse partitions, three messages each.
+    for p in 0..8 {
+        let items: Vec<String> = (0..3)
+            .map(|i| {
+                format!(
+                    r#"{{"queue":"ap","partition":"p{p}","payload":{{"n":{i}}},"transactionId":"ap-{p}-{i}"}}"#
+                )
+            })
+            .collect();
+        facade
+            .push(
+                ctx(),
+                PushReq {
+                    raw: format!(r#"{{"items":[{}]}}"#, items.join(",")).into_bytes(),
+                },
+            )
+            .await
+            .expect("push");
+    }
+    let pop = |auto: bool| {
+        let facade = &facade;
+        async move {
+            let out = facade
+                .pop_wildcard(
+                    ctx(),
+                    PopReq {
+                        queue: "ap".into(),
+                        group: Some("apg".into()),
+                        batch: 200,
+                        auto_ack: false,
+                        wait: false,
+                        timeout_ms: 2_000,
+                        options: crate::rsm::facade::PopOptions {
+                            subscription_mode: "all".into(),
+                            max_parts: 1,
+                            auto_parts: auto,
+                            auto_batch: auto,
+                            ..Default::default()
+                        },
+                    },
+                )
+                .await
+                .expect("pop");
+            parse(&out.body)
+        }
+    };
+
+    // A pop that did not opt in: one partition, no echo.
+    let manual = pop(false).await;
+    assert_eq!(manual["messages"].as_array().map(Vec::len), Some(3));
+    assert!(manual.get("autopilot").is_none(), "no echo without the opt-in");
+
+    // Opted in: seven partitions are ready and one pop is live, so the width
+    // covers all of them and one pop collects 7 x 3 messages. A cold lane's
+    // batch is the minimum, 100.
+    let auto = pop(true).await;
+    assert_eq!(auto["autopilot"]["partitions"], 7, "{auto}");
+    assert_eq!(auto["autopilot"]["batch"], 100, "{auto}");
+    let msgs = auto["messages"].as_array().expect("messages");
+    assert_eq!(msgs.len(), 21, "{auto}");
+    let lease = auto["leaseId"].as_str().expect("lease").to_string();
+
+    // Its ack is a drain sample for the lane's next batch.
+    let acks: Vec<String> = msgs
+        .iter()
+        .map(|m| {
+            format!(
+                r#"{{"transactionId":"{}","partitionId":"{}","status":"completed","leaseId":"{lease}"}}"#,
+                m["transactionId"].as_str().expect("txn"),
+                m["partitionId"].as_str().expect("pid"),
+            )
+        })
+        .collect();
+    let acked = facade
+        .ack(
+            ctx(),
+            AckReq {
+                queue: Some("ap".into()),
+                group: "apg".into(),
+                raw: format!(r#"{{"acknowledgments":[{}]}}"#, acks.join(",")).into_bytes(),
+            },
+        )
+        .await
+        .expect("ack");
+    let res = parse(&acked.body);
+    assert!(
+        res.as_array().is_some_and(|a| a.iter().all(|r| r["success"] == true)),
+        "{res}"
+    );
+    // Nothing is ready now: the width falls back to one, the batch keeps a
+    // sample (at least the minimum).
+    let after = pop(true).await;
+    assert_eq!(after["messages"].as_array().map(Vec::len), Some(0), "{after}");
+    assert!(after["autopilot"]["batch"].as_u64().unwrap_or(0) >= 100, "{after}");
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

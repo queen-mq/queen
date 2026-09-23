@@ -106,6 +106,9 @@ pub(crate) struct Shared {
     waiters: Mutex<HashMap<u64, oneshot::Sender<AppliedAt>>>,
     /// Pulsed when the applied index advances (the batcher's driver-notify).
     applied_notify: Arc<ApplyWake>,
+    /// The applied index, for every waiter at once ([`RaftReplicator::wait_applied`]:
+    /// `applied_notify` wakes ONE waiter per pulse, the batcher's).
+    applied_watch: watch::Sender<u64>,
     /// On the leader: the openraft index every live follower has replicated
     /// (the cache keeps entries above it). `u64::MAX` otherwise.
     replicated: AtomicU64,
@@ -118,6 +121,45 @@ pub(crate) struct Shared {
     /// The leader's client address while another node leads, kept by the
     /// watch task: a follower forwards every client request there.
     leader_http: std::sync::RwLock<Option<Arc<str>>>,
+    /// The leader's Raft RPC address while another node leads: where a
+    /// follower sends its prepared commands and read-index requests.
+    leader_raft: std::sync::RwLock<Option<Arc<str>>>,
+    /// Plans a follower's prepared command on this node (set by the facade).
+    remote: Arc<std::sync::OnceLock<RemoteHandler>>,
+}
+
+/// Plans one follower's prepared command on the leader and answers the encoded
+/// reply (the facade's; the body carries its own deadline).
+pub type RemoteHandler = Arc<
+    dyn Fn(
+            bytes::Bytes,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<bytes::Bytes, String>> + Send>,
+        > + Send
+        + Sync,
+>;
+
+/// Why a call to the leader did not get an answer.
+#[derive(Debug)]
+pub enum RemoteError {
+    /// No leader is known (an election), or this node is not in a cluster.
+    NoLeader,
+    /// The leader could not be reached or did not answer: retry.
+    Transport(String),
+}
+
+/// `QUEEN_RAFT_CLIENT_OFFLOAD` (default on): a follower serves its clients
+/// itself — parses, prepares, sends the leader only the prepared command, and
+/// renders the answer from its own state — instead of proxying the whole HTTP
+/// request to the leader.
+pub fn client_offload_from_env() -> bool {
+    match std::env::var("QUEEN_RAFT_CLIENT_OFFLOAD") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        Err(_) => true,
+    }
 }
 
 impl Shared {
@@ -174,6 +216,7 @@ impl Notify for RaftNotify {
             let _ = tx.send(AppliedAt { index, term });
         }
         self.shared.applied_notify.notify_one();
+        self.shared.applied_watch.send_replace(index);
     }
 
     fn wake(&self, tenant: &str, queue: &str, group: Option<&str>) {
@@ -276,6 +319,9 @@ struct WatchOpts {
     keep: u64,
     /// Purge in steps of at least this many entries.
     batch: u64,
+    /// The member this group would rather have lead ([`ClusterConfig::for_group`]):
+    /// a leader that is not it hands leadership over once it is caught up.
+    preferred: Option<NodeId>,
 }
 
 /// How a node runs beyond its [`OpenConfig`]. [`RaftOpts::from_env`] is the
@@ -318,6 +364,7 @@ impl WatchOpts {
             hold: o.purge_hold,
             keep: o.log_keep,
             batch: o.purge_batch.max(1),
+            preferred: None,
         }
     }
 }
@@ -417,24 +464,34 @@ async fn watch<S: Store + 'static>(
     let mut tick = tokio::time::interval(Duration::from_millis(500));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut seen: HashMap<NodeId, (Option<u64>, Instant)> = HashMap::new();
+    let mut last_handoff: Option<Instant> = None;
     loop {
         let m = metrics.borrow_watched().clone();
         let role = role_of(&m);
-        let leader_http: Option<Arc<str>> = m
+        let leader_node = m
             .current_leader
             .filter(|l| *l != m.id)
-            .and_then(|l| {
-                m.membership_config
-                    .membership()
-                    .get_node(&l)
-                    .map(|n| n.http.clone())
-            })
+            .and_then(|l| m.membership_config.membership().get_node(&l).cloned());
+        let leader_http: Option<Arc<str>> = leader_node
+            .as_ref()
+            .map(|n| n.http.clone())
+            .filter(|h| !h.is_empty())
+            .map(Arc::from);
+        let leader_raft: Option<Arc<str>> = leader_node
+            .as_ref()
+            .map(|n| n.raft.clone())
             .filter(|h| !h.is_empty())
             .map(Arc::from);
         {
             let mut cur = shared.leader_http.write().expect("leader_http");
             if *cur != leader_http {
                 *cur = leader_http;
+            }
+        }
+        {
+            let mut cur = shared.leader_raft.write().expect("leader_raft");
+            if *cur != leader_raft {
+                *cur = leader_raft;
             }
         }
         role_tx.send_if_modified(|r| {
@@ -469,7 +526,48 @@ async fn watch<S: Store + 'static>(
                     break;
                 }
             }
-            _ = tick.tick() => purge_step(&raft, &shared, &m, floor, &opts).await,
+            _ = tick.tick() => {
+                purge_step(&raft, &shared, &m, floor, &opts).await;
+                prefer_step(&raft, &m, &opts, &mut last_handoff).await;
+            }
+        }
+    }
+}
+
+/// Several groups per process spread their leaders over the nodes: a leader
+/// that is not its group's preferred member hands leadership to it once that
+/// member has every entry but a few (at most one attempt per 10 s, so a
+/// preferred node that keeps failing does not keep the group without a
+/// leader).
+async fn prefer_step<S: Store + 'static>(
+    raft: &RaftHandle<S>,
+    m: &openraft::RaftMetrics<TypeConfig>,
+    opts: &WatchOpts,
+    last: &mut Option<Instant>,
+) {
+    let Some(pref) = opts.preferred else {
+        return;
+    };
+    if pref == m.id || m.state != ServerState::Leader {
+        return;
+    }
+    if last.is_some_and(|t| t.elapsed() < Duration::from_secs(10)) {
+        return;
+    }
+    let Some(rep) = &m.replication else {
+        return;
+    };
+    let matched = rep.get(&pref).and_then(|l| l.as_ref()).map(|l| l.index);
+    let last_index = m.last_log_index.unwrap_or(0);
+    if matched.is_some_and(|i| i + 64 >= last_index) {
+        *last = Some(Instant::now());
+        match raft.trigger().transfer_leader(pref).await {
+            Ok(()) => tracing::info!(
+                target: "rsm",
+                to = pref,
+                "raft: handing leadership to this group's preferred node",
+            ),
+            Err(e) => tracing::warn!(target: "rsm", to = pref, error = %e, "raft: leadership hand-off"),
         }
     }
 }
@@ -490,6 +588,9 @@ pub struct RaftReplicator<S: Store + 'static> {
     qlog_codec: bool,
     /// Stops the Raft RPC server (a cluster node).
     server_stop: Option<oneshot::Sender<()>>,
+    /// A cluster node's client for its own calls to the leader (prepared
+    /// commands, read index), and the cluster token.
+    rpc: Option<(network::HttpClient, Option<Arc<str>>)>,
 }
 
 /// The queue logs' options: the segment roll size and fsync mode.
@@ -626,6 +727,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
             poison,
             waiters: Mutex::new(HashMap::new()),
             applied_notify: Arc::new(ApplyWake::new()),
+            applied_watch: watch::channel(0).0,
             replicated: AtomicU64::new(u64::MAX),
             terms: Mutex::new(if applied > 0 {
                 BTreeMap::from([(applied, term)])
@@ -635,6 +737,8 @@ impl<S: Store + 'static> RaftReplicator<S> {
             last_term: AtomicU64::new(term),
             restart: restart.clone(),
             leader_http: std::sync::RwLock::new(None),
+            leader_raft: std::sync::RwLock::new(None),
+            remote: Arc::new(std::sync::OnceLock::new()),
         });
 
         // The apply thread: the queue logs are written by our log writer, never
@@ -793,12 +897,20 @@ impl<S: Store + 'static> RaftReplicator<S> {
                     data_dir: data_dir.clone(),
                     restart: restart.clone(),
                 }),
+                remote: shared.remote.clone(),
             };
             let _guard = rt.enter();
             rt.spawn(network::serve(listener, state, async move {
                 let _ = stop_rx.await;
             }));
         }
+
+        // A cluster node's own calls to the leader (prepared commands, read
+        // index): one pooled client.
+        let rpc = cluster
+            .as_ref()
+            .filter(|c| c.members.len() > 1)
+            .map(|c| (network::http_client(), c.token.clone().map(Arc::from)));
 
         // The role watch, the followers' progress and the purge driver.
         let (role_tx, role_rx) = watch::channel(Role::Candidate);
@@ -807,15 +919,21 @@ impl<S: Store + 'static> RaftReplicator<S> {
             shared.clone(),
             log.clone(),
             role_tx,
-            WatchOpts::of(&opts),
+            WatchOpts {
+                preferred: cluster.as_ref().and_then(|c| c.preferred_leader),
+                ..WatchOpts::of(&opts)
+            },
         ));
 
         // The submitter: proposals reach openraft in the order the batcher
-        // first-polled them.
+        // first-polled them. Each one's payload compression (started on the
+        // codec pool at propose) is awaited first, in that order, so the
+        // leader's writer and every follower get the same stored bytes.
         let (submit_tx, mut submit_rx) = mpsc::unbounded_channel::<Submit>();
         let r2 = raft.clone();
         rt.spawn(async move {
             while let Some(s) = submit_rx.recv().await {
+                s.app.settle_codec().await;
                 if r2.client_write_ff(s.app, Some(s.responder)).await.is_err() {
                     // openraft stopped: every later proposal sees its responder
                     // dropped, and the role watch reports `Stopped`.
@@ -901,7 +1019,106 @@ impl<S: Store + 'static> RaftReplicator<S> {
             qlog_reader: opened.reader,
             qlog_codec: true,
             server_stop,
+            rpc,
         })
+    }
+
+    /// Install the handler that plans a follower's prepared command on this
+    /// node (the facade, once it exists). Set once.
+    pub fn set_remote_handler(&self, h: RemoteHandler) {
+        let _ = self.shared.remote.set(h);
+    }
+
+    /// Whether this node is part of a multi-node cluster (it has peers to
+    /// send prepared commands to).
+    pub fn is_cluster(&self) -> bool {
+        self.rpc.is_some()
+    }
+
+    /// The Raft RPC address of the leader when another node leads.
+    pub fn leader_raft(&self) -> Option<String> {
+        self.shared
+            .leader_raft
+            .read()
+            .expect("leader_raft")
+            .as_deref()
+            .map(str::to_string)
+    }
+
+    /// POST `body` to the leader's `path` (`/raft/v1/...`) and return the
+    /// answer's bytes.
+    async fn call_leader(
+        &self,
+        path: &str,
+        content_type: &str,
+        body: bytes::Bytes,
+        ttl: Duration,
+    ) -> Result<bytes::Bytes, RemoteError> {
+        let Some((client, token)) = self.rpc.as_ref() else {
+            return Err(RemoteError::NoLeader);
+        };
+        let Some(addr) = self.leader_raft() else {
+            return Err(RemoteError::NoLeader);
+        };
+        let url = format!("http://{addr}{path}");
+        network::post(
+            client,
+            &url,
+            token.as_deref(),
+            content_type,
+            axum::body::Body::from(body),
+            ttl,
+        )
+        .await
+        .map_err(|e| match e {
+            network::Fail::Unreachable(m) | network::Fail::Network(m) => RemoteError::Transport(m),
+        })
+    }
+
+    /// Send a prepared command to the leader; the answer is the encoded reply.
+    pub async fn forward_command(
+        &self,
+        body: bytes::Bytes,
+        ttl: Duration,
+    ) -> Result<bytes::Bytes, RemoteError> {
+        self.call_leader("/raft/v1/submit", "application/octet-stream", body, ttl)
+            .await
+    }
+
+    /// The leader's read index (RSM numbering) for a linearizable read here.
+    pub async fn leader_read_index(&self, ttl: Duration) -> Result<u64, RemoteError> {
+        let b = self
+            .call_leader(
+                "/raft/v1/read_index",
+                "application/json",
+                bytes::Bytes::new(),
+                ttl,
+            )
+            .await?;
+        #[derive(serde::Deserialize)]
+        struct Read {
+            index: u64,
+        }
+        serde_json::from_slice::<Read>(&b)
+            .map(|r| r.index)
+            .map_err(|e| RemoteError::Transport(format!("read index answer: {e}")))
+    }
+
+    /// Wait until this node has applied `index`; `false` at the deadline.
+    pub async fn wait_applied(&self, index: u64, deadline: Instant) -> bool {
+        let mut rx = self.shared.applied_watch.subscribe();
+        loop {
+            if self.shared.applied_index.load(Ordering::Acquire) >= index {
+                return true;
+            }
+            match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), rx.changed())
+                .await
+            {
+                Ok(Ok(())) => {}
+                // The node stopped, or the deadline passed.
+                _ => return self.shared.applied_index.load(Ordering::Acquire) >= index,
+            }
+        }
     }
 
     /// The HTTP address of the leader when another node leads (a follower
@@ -1157,6 +1374,25 @@ impl<S: Store + 'static> Replicator for RaftReplicator<S> {
         let Some(raft) = self.raft.as_ref() else {
             return Err(ProposeError::Fatal("openraft stopped".into()));
         };
+        // A follower serving its own clients asks the leader for the read
+        // index and waits until it has applied that far itself.
+        if self.is_cluster()
+            && client_offload_from_env()
+            && !matches!(*self.role_rx.borrow(), Role::Leader { .. })
+        {
+            let ttl = deadline.saturating_duration_since(Instant::now());
+            let index = match self.leader_read_index(ttl).await {
+                Ok(i) => i,
+                Err(RemoteError::NoLeader) => {
+                    return Err(ProposeError::NotLeader { hint: None });
+                }
+                Err(RemoteError::Transport(m)) => return Err(ProposeError::Refused(m)),
+            };
+            if !self.wait_applied(index, deadline).await {
+                return Err(ProposeError::Timeout);
+            }
+            return Ok(index);
+        }
         let read = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
             raft.ensure_linearizable(ReadPolicy::ReadIndex),

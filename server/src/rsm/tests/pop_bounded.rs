@@ -60,6 +60,7 @@ fn cfg_for(delayed: i32) -> QueueConfig {
 
 fn wildcard(id: u64, group: &str, worker: &str, f: impl FnOnce(&mut PopCommand)) -> Cmd {
     let mut c = PopCommand {
+        wait: false,
         request_id: rid(id),
         tenant: TENANT.to_string(),
         queue: QUEUE.to_string(),
@@ -94,6 +95,7 @@ fn pinned(
     f: impl FnOnce(&mut PopCommand),
 ) -> Cmd {
     let mut c = PopCommand {
+        wait: false,
         request_id: rid(id),
         tenant: TENANT.to_string(),
         queue: QUEUE.to_string(),

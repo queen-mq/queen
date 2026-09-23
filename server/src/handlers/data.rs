@@ -903,6 +903,10 @@ pub async fn handle_pop(
         }
         let from = p.subscription_from.as_deref();
         let conflate = p.conflation == Some(true) && p.consumer_group.is_some();
+        // POP AUTOPILOT on raft (rsm/facade/autopilot.rs): the same opt-in as
+        // the Postgres engine, per dimension; a conflating pop is exempt (its
+        // `partitions` is the message budget, not a width).
+        let autopilot = p.autopilot == Some(true) && !conflate;
         return crate::handlers::raft::dispatch_pop(
             &st,
             tenant.as_str(),
@@ -913,6 +917,8 @@ pub async fn handle_pop(
             p.wait.unwrap_or(false),
             p.timeout.unwrap_or(st.pop_default_timeout_ms),
             crate::rsm::facade::PopOptions {
+                auto_parts: autopilot && p.partitions.is_none(),
+                auto_batch: autopilot && p.batch.is_none(),
                 max_parts: if conflate {
                     p.partitions.unwrap_or(batch).clamp(1, 64) as u32
                 } else {
@@ -2737,6 +2743,8 @@ pub async fn handle_pop_partition(
             p.wait.unwrap_or(false),
             p.timeout.unwrap_or(st.pop_default_timeout_ms),
             crate::rsm::facade::PopOptions {
+                auto_parts: false,
+                auto_batch: false,
                 max_parts: 1,
                 lease_seconds: p.lease_seconds.unwrap_or(0),
                 subscription_mode: p
@@ -3028,6 +3036,8 @@ pub async fn handle_pop_discover(
             p.wait.unwrap_or(false),
             p.timeout.unwrap_or(st.pop_default_timeout_ms),
             crate::rsm::facade::PopOptions {
+                auto_parts: false,
+                auto_batch: false,
                 max_parts: if conflate {
                     p.partitions.unwrap_or(batch).clamp(1, 64) as u32
                 } else {

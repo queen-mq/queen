@@ -63,6 +63,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::os::unix::fs::FileExt;
 use std::sync::{Arc, RwLock};
 
 use crate::rsm::qlog::{
@@ -182,6 +183,128 @@ pub struct QLogSet {
     /// While non-zero, retention unlinks and rewrites nothing
     /// ([`QLogReader::pause_reclaim`]): a snapshot is linking the files.
     reclaim_paused: Arc<AtomicU64>,
+    /// How many LANES each queue's records are split into: a partition's
+    /// records live in its lane's log ([`QLogSet::log_id_for`]), and the lanes
+    /// of one group are written in parallel. Fixed when the directory is
+    /// created (`qlog/LANES`); shared with every reader.
+    lanes: Arc<AtomicU64>,
+}
+
+/// The file under the queue-log root that fixes the directory's lane count.
+pub const LANES_FILE: &str = "LANES";
+
+/// The most lanes a directory may have.
+pub const MAX_LANES: u64 = 64;
+
+/// `QUEEN_QLOG_LANES`: how many queue-log lanes a NEW data directory gets
+/// (default 1). An existing directory keeps the count it was created with.
+/// Separate from the planner's lanes (`QUEEN_LANES`): every lane log a group
+/// touches is one more fsync per group, which on a single disk costs more than
+/// the parallel write gains unless the device has the IOPS to spare.
+pub fn lanes_from_env() -> u64 {
+    std::env::var("QUEEN_QLOG_LANES")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(1)
+        .clamp(1, MAX_LANES)
+}
+
+/// What one group's writes left to fsync: every log written, and the highest
+/// record `seq` among them. The writer takes it ([`QLogSet::take_ticket`]); a
+/// [`QLogSyncer`] fsyncs it, on another thread if the caller wants the next
+/// group's writes to overlap this fsync.
+#[derive(Clone, Debug, Default)]
+pub struct SyncTicket {
+    pub qids: Vec<u64>,
+    pub seq: u64,
+}
+
+/// A cloneable handle that fsyncs the logs a [`SyncTicket`] names.
+#[derive(Clone)]
+pub struct QLogSyncer {
+    logs: SharedLogs,
+    mode: crate::rsm::qlog::Fsync,
+}
+
+impl QLogSyncer {
+    /// Fsync every log in `t`, concurrently: the slowest fsync, not the sum.
+    /// Each log's active file is cloned under a brief READ lock and fsynced
+    /// outside any lock, so pop reads proceed during the fsync. A writer may
+    /// roll a log between the clone and the fsync: the roll itself fsyncs the
+    /// file it seals before it switches, so whichever file was cloned, every
+    /// byte written before this call is durable when it returns.
+    pub fn sync(&self, t: &SyncTicket) -> io::Result<()> {
+        let mut handles: Vec<std::fs::File> = Vec::with_capacity(t.qids.len());
+        for qid in &t.qids {
+            let arc = self
+                .logs
+                .read()
+                .expect("qlog set poisoned")
+                .get(qid)
+                .cloned();
+            if let Some(log) = arc {
+                if let Some(f) = log.read().expect("qlog poisoned").active_clone()? {
+                    handles.push(f);
+                }
+            }
+        }
+        let mode = self.mode;
+        match handles.as_slice() {
+            [] => Ok(()),
+            [one] => crate::rsm::qlog::fsync_file(one, mode),
+            [first, rest @ ..] => std::thread::scope(|s| -> io::Result<()> {
+                let joins: Vec<std::thread::ScopedJoinHandle<'_, io::Result<()>>> = rest
+                    .iter()
+                    .map(|f| s.spawn(move || crate::rsm::qlog::fsync_file(f, mode)))
+                    .collect();
+                let mut res = crate::rsm::qlog::fsync_file(first, mode);
+                for j in joins {
+                    let r = j
+                        .join()
+                        .unwrap_or_else(|_| Err(io::Error::other("qlog fsync thread panicked")));
+                    if res.is_ok() {
+                        res = r;
+                    }
+                }
+                res
+            }),
+        }
+    }
+}
+
+/// The log id of `lane` of the queue `queue_id`. Lane 0 IS the queue's id, so a
+/// one-lane directory is laid out exactly as before lanes; any other lane gets
+/// its own stable id (never the system log's 0).
+pub fn lane_log_id(queue_id: u64, lane: u64) -> u64 {
+    if lane == 0 {
+        return queue_id;
+    }
+    let mut b = [0u8; 16];
+    b[..8].copy_from_slice(&queue_id.to_le_bytes());
+    b[8..].copy_from_slice(&lane.to_le_bytes());
+    match xxhash_rust::xxh3::xxh3_64(&b) {
+        SYSTEM_QUEUE_ID => 1,
+        h => h,
+    }
+}
+
+fn read_lanes_file(root: &std::path::Path) -> io::Result<Option<u64>> {
+    match std::fs::read_to_string(root.join(LANES_FILE)) {
+        Ok(s) => s
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|n| (1..=MAX_LANES).contains(n))
+            .map(Some)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}: not a lane count: {s:?}", root.join(LANES_FILE).display()),
+                )
+            }),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 impl QLogSet {
@@ -202,7 +325,72 @@ impl QLogSet {
             totals: Arc::new(SharedTotals::default()),
             reclaim_queue_cursor: Arc::new(AtomicU64::new(0)),
             reclaim_paused: Arc::new(AtomicU64::new(0)),
+            lanes: Arc::new(AtomicU64::new(1)),
         }
+    }
+
+    /// This directory's lane count (1 until [`QLogSet::reopen_all`] reads it).
+    pub fn lanes(&self) -> u64 {
+        self.lanes.load(Ordering::Acquire)
+    }
+
+    /// Fix the lane count of a set that has not been reopened (tests, and a
+    /// caller that creates a fresh directory itself).
+    pub fn set_lanes(&self, n: u64) {
+        self.lanes.store(n.clamp(1, MAX_LANES), Ordering::Release);
+    }
+
+    /// The log that holds partition `pid`'s records in queue `queue_id`.
+    pub fn log_id_for(&self, queue_id: u64, pid: u64) -> u64 {
+        lane_log_id(queue_id, pid % self.lanes())
+    }
+
+    /// The lane of partition `pid` (its log is `lane_log_id(queue, lane)`).
+    pub fn lane_of(&self, pid: u64) -> u64 {
+        pid % self.lanes()
+    }
+
+    /// Read `qlog/LANES`, or create it: a new directory takes `QUEEN_QLOG_LANES`, an
+    /// existing one without the file was written with one lane.
+    fn load_lanes(&self) -> io::Result<()> {
+        let n = match read_lanes_file(&self.root)? {
+            Some(n) => n,
+            None => {
+                let existing = match std::fs::read_dir(&self.root) {
+                    Ok(rd) => rd.filter_map(|e| e.ok()).any(|e| {
+                        e.file_name()
+                            .to_str()
+                            .and_then(|n| n.strip_prefix('q'))
+                            .is_some_and(|r| r.parse::<u64>().is_ok())
+                    }),
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+                    Err(e) => return Err(e),
+                };
+                let n = if existing { 1 } else { lanes_from_env() };
+                std::fs::create_dir_all(&self.root)?;
+                let tmp = self.root.join(format!("{LANES_FILE}.tmp"));
+                {
+                    use std::io::Write;
+                    let mut f = std::fs::File::create(&tmp)?;
+                    f.write_all(format!("{n}\n").as_bytes())?;
+                    f.sync_all()?;
+                }
+                std::fs::rename(&tmp, self.root.join(LANES_FILE))?;
+                std::fs::File::open(&self.root)?.sync_all()?;
+                n
+            }
+        };
+        let env = lanes_from_env();
+        if std::env::var("QUEEN_QLOG_LANES").is_ok() && env != n {
+            tracing::warn!(
+                target: "rsm",
+                dir_lanes = n,
+                env_lanes = env,
+                "QUEEN_QLOG_LANES differs from the queue-log directory's lane count; the directory's wins",
+            );
+        }
+        self.lanes.store(n, Ordering::Release);
+        Ok(())
     }
 
     /// The shared recovery-floor handle (Phase C). Whoever learns a new durable
@@ -274,6 +462,15 @@ impl QLogSet {
             reclaim_queue_cursor: self.reclaim_queue_cursor.clone(),
             reclaim_paused: self.reclaim_paused.clone(),
             root: self.root.clone(),
+            lanes: self.lanes.clone(),
+        }
+    }
+
+    /// A handle that fsyncs this set's logs from another thread.
+    pub fn syncer(&self) -> QLogSyncer {
+        QLogSyncer {
+            logs: self.logs.clone(),
+            mode: self.opts.fsync,
         }
     }
 
@@ -289,6 +486,7 @@ impl QLogSet {
     /// this seeds `written_seq`/`durable_seq` so the next commit's recorded index
     /// never goes backwards over the reopened tail.
     pub fn reopen_all(&mut self) -> io::Result<u64> {
+        self.load_lanes()?;
         let rd = match std::fs::read_dir(&self.root) {
             Ok(rd) => rd,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
@@ -550,7 +748,8 @@ impl QLogSet {
         hashes: &[u8],
         payload: &[u8],
     ) {
-        let qid = Self::queue_id_of(tenant, queue);
+        // The partition's lane log of its queue, as the writer routes it.
+        let qid = self.log_id_for(Self::queue_id_of(tenant, queue), pid);
         self.pending.entry(qid).or_default().push(Buffered {
             seq,
             pid,
@@ -644,60 +843,80 @@ impl QLogSet {
         Ok(())
     }
 
+    /// [`QLogSet::write_mixed_for_qid`] through a shared reference, for the
+    /// writer's per-lane threads: one log is only ever written by one of them
+    /// (its lane's), and its own lock serializes it anyway. The caller records
+    /// the written logs afterwards ([`QLogSet::note_written`]).
+    pub fn write_mixed_shared(&self, qid: u64, records: &[WriteRecord<'_>]) -> io::Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let log = self.get_or_open(qid)?;
+        // Phase one: where the group goes. With room in the active file (the
+        // common case) the READ lock is enough — shared with the planner lanes
+        // and the pop readers; creating or rolling a file takes the write lock.
+        let (f0, b0, file_id, base, fd) = {
+            let g = log.read().expect("qlog poisoned");
+            let (f0, b0) = (g.file_count() as u64, g.bytes());
+            if g.write_ready() {
+                let (id, base) = g.write_target();
+                (f0, b0, id, base, g.active_handle()?)
+            } else {
+                drop(g);
+                let mut w = log.write().expect("qlog poisoned");
+                let (id, base) = w.prepare_write(records[0].seq())?;
+                (f0, b0, id, base, w.active_handle()?)
+            }
+        };
+        // Phase two, with NO lock: encode the group and write its bytes at the
+        // logical end. This thread is the log's only writer, so nothing moves
+        // that end meanwhile, and no reader can reach the bytes before phase
+        // three indexes them. It used to run under the write lock — ~1 ms per
+        // multi-MB group during which every claim walk, dedup probe and pop
+        // render of the queue waited (the lanes' lock waits at 850k msg/s).
+        let group = QLog::encode_group(records, file_id, base)?;
+        fd.write_all_at(&group.buf, base)?;
+        drop(fd);
+        // Phase three: publish, under a short write lock.
+        let mut g = log.write().expect("qlog poisoned");
+        let res = g.publish_write(base, group).map(|_| ());
+        let (f1, b1) = (g.file_count() as u64, g.bytes());
+        drop(g);
+        replace_total(&self.totals.files, f0, f1);
+        replace_total(&self.totals.bytes, b0, b1);
+        res
+    }
+
+    /// Record logs written by [`QLogSet::write_mixed_shared`]: they are dirty
+    /// until the next sync, and `max_seq` advances the written watermark.
+    pub fn note_written(&mut self, qids: impl IntoIterator<Item = u64>, max_seq: u64) {
+        self.dirty.extend(qids);
+        self.written_seq = self.written_seq.max(max_seq);
+    }
+
+    /// Everything written since the last ticket, for a [`QLogSyncer`]. The logs
+    /// stop being dirty here: whoever holds the ticket owns their fsync.
+    pub fn take_ticket(&mut self) -> SyncTicket {
+        SyncTicket {
+            qids: std::mem::take(&mut self.dirty).into_iter().collect(),
+            seq: self.written_seq,
+        }
+    }
+
+    /// A ticket's fsync returned: its records are durable.
+    pub fn note_durable(&mut self, seq: u64) {
+        self.durable_seq = self.durable_seq.max(seq);
+    }
+
     /// Fsync every queue written since the last sync (§5: a durable point leaves
     /// every buffered record fsync'd). One fsync per touched queue, batched across
     /// the entries since the last durable point — the qlog twin of the segment
     /// durable point, not a per-entry barrier. Apply calls it at the durable point
     /// only.
     pub fn sync(&mut self) -> io::Result<()> {
-        let dirty = std::mem::take(&mut self.dirty);
-        // READ-PARALLELISM FIX: the fsync used to run under the queue's WRITE
-        // lock (`log.write().sync()`), which froze all of a hot queue's pop
-        // readers for the fsync's whole duration (FAT100: 64 consumers starved
-        // → 34k/s, 2M backlog). Instead: clone the active fd under a brief READ
-        // lock (concurrent with the pop reads), release, and fsync OUTSIDE any
-        // lock. The fsync flushes the inode regardless of the fd; the single
-        // writer never rolls between the clone and the fsync, so the clone is
-        // the current active file. Pop reads now proceed during the fsync.
-        let mut handles: Vec<std::fs::File> = Vec::with_capacity(dirty.len());
-        for qid in dirty {
-            let arc = self
-                .logs
-                .read()
-                .expect("qlog set poisoned")
-                .get(&qid)
-                .cloned();
-            if let Some(log) = arc {
-                if let Some(f) = log.read().expect("qlog poisoned").active_clone()? {
-                    handles.push(f);
-                }
-            }
-        }
-        // The dirty logs are independent files: fsync them CONCURRENTLY, so the
-        // durable point costs the slowest fsync, not their sum (3 hot queues
-        // made log_fsync 6 → 13.5 ms per group when they ran one after another).
-        let mode = self.opts.fsync;
-        match handles.as_slice() {
-            [] => {}
-            [one] => crate::rsm::qlog::fsync_file(one, mode)?,
-            [first, rest @ ..] => std::thread::scope(|s| -> io::Result<()> {
-                let joins: Vec<std::thread::ScopedJoinHandle<'_, io::Result<()>>> = rest
-                    .iter()
-                    .map(|f| s.spawn(move || crate::rsm::qlog::fsync_file(f, mode)))
-                    .collect();
-                let mut res = crate::rsm::qlog::fsync_file(first, mode);
-                for j in joins {
-                    let r = j
-                        .join()
-                        .unwrap_or_else(|_| Err(io::Error::other("qlog fsync thread panicked")));
-                    if res.is_ok() {
-                        res = r;
-                    }
-                }
-                res
-            })?,
-        }
-        self.durable_seq = self.written_seq;
+        let t = self.take_ticket();
+        self.syncer().sync(&t)?;
+        self.note_durable(t.seq);
         Ok(())
     }
 
@@ -725,14 +944,17 @@ impl QLogSet {
     /// handle and buffer; unlinking the on-disk `q<id>/` directory is retention
     /// (§3.3), a later phase.
     pub fn remove(&mut self, tenant: &str, queue: &str) {
-        let qid = Self::queue_id_of(tenant, queue);
-        if let Some(log) = self.logs.write().expect("qlog set poisoned").remove(&qid) {
-            let log = log.read().expect("qlog poisoned");
-            replace_total(&self.totals.files, log.file_count() as u64, 0);
-            replace_total(&self.totals.bytes, log.bytes(), 0);
+        let queue_id = Self::queue_id_of(tenant, queue);
+        for lane in 0..self.lanes() {
+            let qid = lane_log_id(queue_id, lane);
+            if let Some(log) = self.logs.write().expect("qlog set poisoned").remove(&qid) {
+                let log = log.read().expect("qlog poisoned");
+                replace_total(&self.totals.files, log.file_count() as u64, 0);
+                replace_total(&self.totals.bytes, log.bytes(), 0);
+            }
+            self.pending.remove(&qid);
+            self.dirty.remove(&qid);
         }
-        self.pending.remove(&qid);
-        self.dirty.remove(&qid);
     }
 
     /// The open log for a queue id, for the read-match / reopen tests. Test-only:
@@ -766,6 +988,8 @@ pub struct QLogReader {
     reclaim_paused: Arc<AtomicU64>,
     /// `<data_dir>/qlog`, for a snapshot that links the files.
     root: PathBuf,
+    /// Shared with the set: see [`QLogSet::lanes`].
+    lanes: Arc<AtomicU64>,
 }
 
 /// Retention stays paused while one of these is alive.
@@ -937,6 +1161,36 @@ impl QLogReader {
         Ok(out)
     }
 
+    /// This directory's lane count.
+    pub fn lanes(&self) -> u64 {
+        self.lanes.load(Ordering::Acquire)
+    }
+
+    /// The log that holds partition `pid`'s records in queue `queue_id`.
+    pub fn log_id_for(&self, queue_id: u64, pid: u64) -> u64 {
+        lane_log_id(queue_id, pid % self.lanes())
+    }
+
+    /// The open log holding `pid`'s records of queue `queue_id`.
+    fn log_for(&self, queue_id: u64, pid: u64) -> Option<Arc<RwLock<QLog>>> {
+        self.log(self.log_id_for(queue_id, pid))
+    }
+
+    /// The record holding `(pid, offset)` in the log `log_id` exactly as it is
+    /// stored (a zstd payload stays compressed): what a leader re-sends to a
+    /// follower that is behind.
+    pub fn read_stored_in(
+        &self,
+        log_id: u64,
+        pid: u64,
+        offset: u64,
+    ) -> io::Result<Option<crate::rsm::qlog::StoredRecord>> {
+        match self.log(log_id) {
+            Some(l) => l.read().expect("qlog poisoned").read_stored(pid, offset),
+            None => Ok(None),
+        }
+    }
+
     /// The open log for `queue_id`, or `None` when the applier has never written
     /// (or has removed) that queue. Clones the inner `Arc` so the caller reads
     /// without holding the map lock across the read.
@@ -957,7 +1211,7 @@ impl QLogReader {
         pid: u64,
         offset: u64,
     ) -> io::Result<Option<OwnedRecord>> {
-        match self.log(queue_id) {
+        match self.log_for(queue_id, pid) {
             Some(l) => l.read().expect("qlog poisoned").read_owned(pid, offset),
             None => Ok(None),
         }
@@ -977,7 +1231,7 @@ impl QLogReader {
         want_hashes: bool,
         cb: &mut dyn FnMut(u64, u64, i64, Option<Vec<u8>>) -> bool,
     ) -> io::Result<()> {
-        match self.log(queue_id) {
+        match self.log_for(queue_id, pid) {
             Some(l) => l.read().expect("qlog poisoned").claim_walk(
                 pid,
                 from_offset,
@@ -1006,7 +1260,7 @@ impl QLogReader {
         committed_end: u64,
         with_hashes: bool,
     ) -> io::Result<Vec<CommittedFrame>> {
-        match self.log(queue_id) {
+        match self.log_for(queue_id, pid) {
             Some(l) => {
                 let plan = l.read().expect("qlog poisoned").committed_frames_plan(
                     pid,
@@ -1032,7 +1286,7 @@ impl QLogReader {
         bands: &[(u64, u64)],
         committed_end: u64,
     ) -> io::Result<Vec<BandFrame>> {
-        match self.log(queue_id) {
+        match self.log_for(queue_id, pid) {
             Some(l) => {
                 let plan = l
                     .read()

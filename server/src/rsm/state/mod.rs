@@ -762,6 +762,9 @@ pub struct PlanRings {
     /// Times every ring was dropped because an entry could not be accounted
     /// for.
     pub drops: u64,
+    /// `(lane, lanes)`: a lane's rings hold only its own partitions
+    /// (`pid % lanes == lane`), the ones only it may claim.
+    lane: Option<(u64, u64)>,
 }
 
 /// One kept ring: the `pending` rows of one (tenant, queue, group).
@@ -821,6 +824,26 @@ impl PlanRing {
 }
 
 impl PlanRings {
+    /// Keep only lane `lane`'s partitions (of `lanes`) from now on.
+    pub fn set_lane(&mut self, lane: u64, lanes: u64) {
+        self.lane = (lanes > 1).then_some((lane, lanes));
+    }
+
+    fn owns(&self, pid: Pid) -> bool {
+        self.lane.is_none_or(|(l, n)| pid % n == l)
+    }
+
+    /// How many partitions of `key` are ready now (0 when the ring is not
+    /// kept): a lane's hint to the router.
+    pub fn ready_len(&self, key: &RingKey) -> usize {
+        let (t, q, g) = key;
+        self.rings
+            .get(t)
+            .and_then(|qs| qs.get(q))
+            .and_then(|gs| gs.get(g))
+            .map_or(0, |r| r.ready.len())
+    }
+
     /// An empty mirror that has accounted for every entry up to `landed_to`.
     pub fn new(landed_to: u64, now_us: i64) -> PlanRings {
         PlanRings {
@@ -977,6 +1000,10 @@ impl PlanRings {
         pid: Pid,
         group: Option<&str>,
     ) -> Result<bool> {
+        if !self.owns(pid) {
+            // Another lane's partition: never in these rings.
+            return Ok(true);
+        }
         if !self.queue_of.contains_key(&pid) {
             let Some(row) = reads.partition(pid)? else {
                 return Ok(false);
@@ -1065,11 +1092,14 @@ impl PlanRings {
             ..PlanRing::default()
         };
         let prefix = crate::rsm::store::keys::pending_prefix(t, q, g);
+        let lane = self.lane;
         reads.scan_pending(&prefix, usize::MAX, &mut |tt, qq, gg, pid, ready_at| {
             if tt != t || qq != q || gg != g {
                 return false; // past this group's rows
             }
-            ring.set(pid, Some(ready_at), now);
+            if lane.is_none_or(|(l, n)| pid % n == l) {
+                ring.set(pid, Some(ready_at), now);
+            }
             true
         })?;
         gs.insert(g.clone(), ring);

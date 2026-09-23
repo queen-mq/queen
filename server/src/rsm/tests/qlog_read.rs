@@ -443,8 +443,8 @@ fn a_reopened_qlog_serves_the_same_reads() {
 
     // The map was rebuilt at open, before any new write.
     for &pid in &pids {
-        let qid = part_ctx(node.store(), pid).queue_id;
-        assert!(ql.has_queue(qid), "queue {qid} not reopened for pid {pid}");
+        let qid = ql.log_id_for(part_ctx(node.store(), pid).queue_id, pid);
+        assert!(ql.has_queue(qid), "queue log {qid} not reopened for pid {pid}");
     }
 
     // The reads still match the segment reader after the restart: the active

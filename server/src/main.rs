@@ -89,6 +89,16 @@ use axum::Router;
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+/// The process allocator: mimalloc. A push's payload is allocated on an HTTP
+/// worker and freed on the planner's lane threads; glibc malloc takes the
+/// allocating arena's lock for every such free, and at a few hundred
+/// thousand messages a second the lanes spent most of their time blocked on
+/// it (measured 2026-09-23: 62% of a lane's wall off-CPU in `cfree`).
+/// mimalloc hands a cross-thread free back without a lock.
+#[cfg(not(feature = "jemalloc-prof"))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// The accept backlog asked of the kernel, which caps it at
 /// `net.core.somaxconn` (4096 on current kernels).
 const LISTEN_BACKLOG: u32 = 4096;

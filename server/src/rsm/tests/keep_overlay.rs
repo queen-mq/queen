@@ -18,8 +18,13 @@
 //!    transactions (committed, rolled back on a duplicate, DLQ-replay ones
 //!    that answer empty), KV puts, incrs, deletes and the expiry sweep, timer
 //!    schedules and cancels with a fire step whose fires fail, back off and
-//!    dead-letter, group deletes, watermarks, same-cycle retries and
-//!    request-id replays of commands in flight, committed, or expired. The
+//!    dead-letter, group deletes, watermarks, queue deletes and tenant purges
+//!    built as the facade builds them (garbage and a first chunk in one entry)
+//!    and resumed chunk by chunk, retention's partition deletes, same-cycle
+//!    retries and request-id replays of commands in flight, committed, or
+//!    expired. Every entry is applied by the real applier, so a command
+//!    planned against a partition a delete in flight takes away (an append or
+//!    a cursor on a missing row, fatal in apply) fails the gate too. The
 //!    gate asserts it proposed every effect kind it names. The entries land
 //!    OUT OF STEP with planning: between cycles a random number of the oldest
 //!    unapplied entries is applied (none, some, all), and an entry that landed
@@ -51,7 +56,7 @@ use crate::rsm::batcher::{
     plan_cycle_blocking, Command, KeepCfg, KeepStats, PlanOutput, PlannerState,
 };
 use crate::rsm::dedup::DedupFront;
-use crate::rsm::effect::{Effect, Pid, QueueConfig};
+use crate::rsm::effect::{Effect, GarbageScope, Pid, QueueConfig};
 use crate::rsm::entry::{encode_entry, Entry, Outcome, RequestId};
 use crate::rsm::planner::kv::parse_ops;
 use crate::rsm::planner::timers::{parse_timer_ops, TimerFireConfig, TimersCommand};
@@ -61,7 +66,7 @@ use crate::rsm::planner::{
     EffectsCommand, KvCommand, NackCommand, PlanConfig, PopCommand, PushCommand, PushItem,
     RenewCommand, SubIntent,
 };
-use crate::rsm::store::{Store, TypedReads};
+use crate::rsm::store::{keys, rows, Keyspace, Reads, Store, TypedReads};
 
 use super::apply::{cfg, seg_opts, Node};
 use super::planner_harness::{qcfg, BASE_US, TENANT};
@@ -238,6 +243,7 @@ impl Workload {
     fn pop_base(&mut self, queue: &str) -> PopCommand {
         let auto_ack = self.rng.chance(15);
         PopCommand {
+            wait: false,
             request_id: self.id(),
             tenant: TENANT.to_string(),
             queue: queue.to_string(),
@@ -535,6 +541,122 @@ impl Workload {
         }))
     }
 
+    /// A queue delete as the facade builds it (`api_delete_queue`): the pids
+    /// read from committed state, their `GarbageAdd` and a first chunk in the
+    /// same entry. The chunk is small, so a partition often outlives it and a
+    /// resume finishes it. One in four is a purge of the whole tenant
+    /// (`api_delete_tenant`).
+    fn queue_delete(&mut self, store: &crate::rsm::store::HeedStore) -> Command {
+        let purge = self.rng.chance(25);
+        let queue = self.rng.pick(&QUEUES).to_string();
+        let pids = store
+            .read(|r| {
+                let mut queues = Vec::new();
+                if purge {
+                    r.scan_queues(TENANT, usize::MAX, &mut |q, _| {
+                        queues.push(q.to_string());
+                        true
+                    })?;
+                } else {
+                    queues.push(queue.clone());
+                }
+                let mut pids = Vec::new();
+                for q in &queues {
+                    r.scan_queue_partitions(TENANT, q, None, usize::MAX, &mut |pid| {
+                        pids.push(pid);
+                        true
+                    })?;
+                }
+                Ok(pids)
+            })
+            .expect("read the partitions to delete");
+        let (head, scope) = if purge {
+            (
+                Effect::TenantPurge {
+                    tenant: TENANT.to_string(),
+                },
+                GarbageScope::Tenant,
+            )
+        } else {
+            (
+                Effect::QueueDelete {
+                    tenant: TENANT.to_string(),
+                    queue,
+                },
+                GarbageScope::Queue,
+            )
+        };
+        let mut effects = vec![head];
+        if !pids.is_empty() {
+            effects.push(Effect::GarbageAdd {
+                pids: pids.clone(),
+                scope: scope.clone(),
+                deleted_at_us: BASE_US,
+            });
+            effects.push(Effect::DeleteChunk {
+                pids,
+                scope,
+                resume: Vec::new(),
+                limit: 1 + self.rng.below(24) as u32,
+            });
+        }
+        Command::Effects(EffectsCommand {
+            request_id: self.id(),
+            tenant: TENANT.to_string(),
+            effects,
+        })
+    }
+
+    /// Retention's partition delete (006) of a partition the workload made.
+    fn partition_delete(&mut self) -> Option<Command> {
+        let mut pids: Vec<Pid> = self.pid_queue.keys().copied().collect();
+        if pids.is_empty() {
+            return None;
+        }
+        pids.sort_unstable();
+        let pid = pids[self.rng.below(pids.len() as u64) as usize];
+        Some(Command::Effects(EffectsCommand {
+            request_id: self.id(),
+            tenant: TENANT.to_string(),
+            effects: vec![Effect::PartitionDelete { pid }],
+        }))
+    }
+
+    /// The resume of the deletes still open in committed state (the facade's
+    /// chunk loop, the leader's maintenance): one small chunk per marker, in
+    /// the marker's own scope.
+    fn delete_resume(&mut self, store: &crate::rsm::store::HeedStore) -> Option<Command> {
+        let markers = store
+            .read(|r| {
+                let mut out: Vec<(Pid, GarbageScope)> = Vec::new();
+                r.scan_raw(Keyspace::Garbage, &[], &[], 8, &mut |k, v| {
+                    if let (Some(pid), Ok(row)) = (keys::pid_of(k), rows::garbage_decode(v)) {
+                        out.push((pid, row.scope));
+                    }
+                    true
+                })?;
+                Ok(out)
+            })
+            .expect("read the garbage markers");
+        if markers.is_empty() {
+            return None;
+        }
+        let effects = markers
+            .into_iter()
+            .map(|(pid, scope)| Effect::DeleteChunk {
+                pids: vec![pid],
+                scope,
+                resume: Vec::new(),
+                limit: 1 + self.rng.below(24) as u32,
+            })
+            .collect();
+        Some(Command::Effects(EffectsCommand {
+            request_id: self.id(),
+            tenant: TENANT.to_string(),
+            effects,
+        }))
+    }
+
     /// One cycle's batch.
     fn batch(&mut self, store: &crate::rsm::store::HeedStore) -> Vec<Command> {
         let n = 1 + self.rng.below(7);
@@ -555,6 +677,9 @@ impl Workload {
                 82..=86 => Some(self.timers()),
                 87 => Some(self.group_delete()),
                 88..=89 => self.watermark_cmd(store),
+                90..=91 => Some(self.queue_delete(store)),
+                92 => self.partition_delete(),
+                93 => self.delete_resume(store),
                 // A replay of anything submitted before: in flight, committed,
                 // or never logged — the request-id lookup decides. (Not the raw
                 // effects: once the short request-id window below has expired
@@ -615,6 +740,18 @@ impl Workload {
                         h.copy_from_slice(&hashes[i * 16..i * 16 + 16]);
                         self.hashes.insert((*pid, base_offset + i as u64), h);
                     }
+                }
+                // Gone for the watermarks; acks, nacks and renews of their
+                // leases still come, and must find nothing to move.
+                Effect::GarbageAdd { pids, scope, .. }
+                    if !matches!(scope, GarbageScope::Group { .. }) =>
+                {
+                    for pid in pids {
+                        self.pid_queue.remove(pid);
+                    }
+                }
+                Effect::PartitionDelete { pid } => {
+                    self.pid_queue.remove(pid);
                 }
                 _ => {}
             }
@@ -909,11 +1046,16 @@ fn run(tag: &str, seed: u64, keep: KeepCfg, front: DedupFront, cycles: usize) ->
 
 /// The effect kinds a gate run must have proposed at least once, or it did not
 /// exercise what it claims to.
-const COVERED: [&str; 14] = [
+const COVERED: [&str; 19] = [
     "QueueUpsert",
+    "QueueDelete",
+    "TenantPurge",
+    "GarbageAdd",
+    "DeleteChunk",
     "GroupUpsert",
     "GroupDelete",
     "PartitionCreate",
+    "PartitionDelete",
     "Append",
     "CursorSet",
     "DlqInsert",

@@ -506,8 +506,14 @@ pub struct RsmMetrics {
     /// Store commit duration (§11.3).
     pub store_commit: Histogram,
     // -- durable point (§11.4) --
-    /// Whole durable point.
+    /// Whole durable point ON THE APPLY THREAD: the inline point, or with
+    /// `QUEEN_RAFT_CHECKPOINT_ASYNC` only its preparation and the cut.
     pub durable_point: Histogram,
+    /// The async durable point's store half on the checkpoint thread: the cut
+    /// written into LMDB, committed and synced.
+    pub checkpoint_write: Histogram,
+    /// Rows per checkpoint cut (raw count).
+    pub checkpoint_rows: Histogram,
     /// The segment-file fsync portion.
     pub durable_seg_fsync: Histogram,
     /// The directory fsync portion.
@@ -654,7 +660,7 @@ pub fn render_prometheus(out: &mut String) {
     let m = metrics();
 
     // Latency summaries (ns → seconds).
-    let lat: [(&str, &str, &Histogram); 24] = [
+    let lat: [(&str, &str, &Histogram); 25] = [
         ("queen_raft_plan_seconds", "Planner cycle duration", &m.plan),
         (
             "queen_raft_plan_cpu_seconds",
@@ -757,6 +763,11 @@ pub fn render_prometheus(out: &mut String) {
             &m.durable_point,
         ),
         (
+            "queen_raft_checkpoint_write_seconds",
+            "Async durable point: the checkpoint cut written, committed and synced (checkpoint thread)",
+            &m.checkpoint_write,
+        ),
+        (
             "queen_raft_durable_seg_fsync_seconds",
             "Durable point segment-file fsync duration",
             &m.durable_seg_fsync,
@@ -777,7 +788,7 @@ pub fn render_prometheus(out: &mut String) {
     }
 
     // Size summaries (raw counts).
-    let sizes: [(&str, &str, &Histogram); 6] = [
+    let sizes: [(&str, &str, &Histogram); 7] = [
         (
             "queen_raft_plan_deferred",
             "Commands drained but deferred unplanned by the plan budget cut",
@@ -808,10 +819,32 @@ pub fn render_prometheus(out: &mut String) {
             "Apply channel depth at receive",
             &m.apply_channel_depth,
         ),
+        (
+            "queen_raft_checkpoint_rows",
+            "Rows per async checkpoint cut",
+            &m.checkpoint_rows,
+        ),
     ];
     for (name, help, h) in sizes {
         render_summary(out, name, help, &h.snapshot(), 1.0, false);
     }
+
+    // The queue-log codec's early start (qlog::codec::precompress).
+    let (early_waiting, early_hits) = crate::rsm::qlog::codec::early_stats();
+    out.push_str(
+        "# HELP queen_raft_qlog_early_codec_hits_total Append blobs whose compression the facade started before planning\n",
+    );
+    out.push_str("# TYPE queen_raft_qlog_early_codec_hits_total counter\n");
+    out.push_str(&format!(
+        "queen_raft_qlog_early_codec_hits_total {early_hits}\n"
+    ));
+    out.push_str(
+        "# HELP queen_raft_qlog_early_codec_waiting Early compression jobs not yet taken by a proposal\n",
+    );
+    out.push_str("# TYPE queen_raft_qlog_early_codec_waiting gauge\n");
+    out.push_str(&format!(
+        "queen_raft_qlog_early_codec_waiting {early_waiting}\n"
+    ));
 
     // Per-kind planner counters (O18).
     out.push_str("# HELP queen_raft_planner_commands_total Commands planned, by kind\n");

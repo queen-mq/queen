@@ -15,8 +15,11 @@
 //! buys 2.45x for 1.7x the CPU); 0 turns the codec off.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Payloads shorter than this are stored raw.
 pub const MIN_BYTES: usize = 512;
@@ -117,45 +120,118 @@ pub fn compress_all(raws: &[&[u8]]) -> Vec<Option<Vec<u8>>> {
 
 /// A payload's compression started AHEAD of the write — at propose, on the
 /// codec pool — so it runs while the writer is still fsyncing the previous
-/// group, and the writer only collects the result ([`Pre::finish`]).
+/// group, and the writer only collects the result ([`Pre::finish`]). The raft
+/// submitter awaits it instead ([`Pre::wait`]): a leader ships the stored form
+/// to its followers, so they never compress.
 pub enum Pre {
     /// Stored raw: under [`MIN_BYTES`], or the codec is off.
     Raw,
-    Job(mpsc::Receiver<Option<Vec<u8>>>),
+    Job(Arc<Slot>),
+}
+
+/// Where a pool job leaves its answer: read by a blocking writer thread or by
+/// an async task, whichever asks.
+pub struct Slot {
+    done: Mutex<Option<Option<Vec<u8>>>>,
+    cv: std::sync::Condvar,
+    notify: tokio::sync::Notify,
+}
+
+impl Slot {
+    fn new() -> Arc<Slot> {
+        Arc::new(Slot {
+            done: Mutex::new(None),
+            cv: std::sync::Condvar::new(),
+            notify: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn put(&self, z: Option<Vec<u8>>) {
+        *self.done.lock().expect("qlog zstd slot") = Some(z);
+        self.cv.notify_all();
+        // A permit is stored when nobody waits yet, so a later `wait` returns.
+        self.notify.notify_one();
+    }
+
+    fn take_blocking(&self) -> Option<Vec<u8>> {
+        let mut g = self.done.lock().expect("qlog zstd slot");
+        loop {
+            if let Some(z) = g.take() {
+                return z;
+            }
+            g = self.cv.wait(g).expect("qlog zstd slot");
+        }
+    }
+
+    fn ready(&self) -> bool {
+        self.done.lock().expect("qlog zstd slot").is_some()
+    }
 }
 
 impl Pre {
     /// Start compressing the blob of `entry.effects[eff]` (an `Append`) on the
-    /// pool. The job shares the entry (no copy of the payload).
+    /// pool. The job shares the entry (no copy of the payload). A blob the
+    /// facade already started compressing ([`precompress`]) takes that job
+    /// instead, so its result is usually ready before the writer asks.
     pub fn start_append(entry: &Arc<crate::rsm::entry::Entry>, eff: usize) -> Pre {
-        if level() == 0 || append_blob(entry, eff).len() < MIN_BYTES {
+        let blob = append_blob(entry, eff);
+        if level() == 0 || blob.len() < MIN_BYTES {
             return Pre::Raw;
         }
-        let (tx, rx) = mpsc::sync_channel(1);
+        if let Some(slot) = take_early(blob) {
+            EARLY_HITS.fetch_add(1, Ordering::Relaxed);
+            return Pre::Job(slot);
+        }
+        let slot = Slot::new();
         match pool().send(Job {
-            entry: entry.clone(),
-            eff,
-            tx,
+            input: JobInput::Append {
+                entry: entry.clone(),
+                eff,
+            },
+            slot: slot.clone(),
         }) {
-            Ok(()) => Pre::Job(rx),
+            Ok(()) => Pre::Job(slot),
             Err(_) => Pre::Raw,
         }
     }
 
     /// The stored form ([`compress_one`]'s answer), waiting for the job if it
-    /// is still running. A lost job stores the payload raw.
+    /// is still running. A lost job stores the payload raw. Blocking: writer
+    /// threads only.
     pub fn finish(self) -> Option<Vec<u8>> {
         match self {
             Pre::Raw => None,
-            Pre::Job(rx) => rx.recv().ok().flatten(),
+            Pre::Job(slot) => slot.take_blocking(),
+        }
+    }
+
+    /// Wait (async) until the job has answered; [`Pre::finish`] then returns at
+    /// once.
+    pub async fn wait(&self) {
+        let Pre::Job(slot) = self else { return };
+        loop {
+            let notified = slot.notify.notified();
+            if slot.ready() {
+                return;
+            }
+            notified.await;
         }
     }
 }
 
+enum JobInput {
+    /// An `Append` of a proposed entry (shared, no copy).
+    Append {
+        entry: Arc<crate::rsm::entry::Entry>,
+        eff: usize,
+    },
+    /// A push group's frames, concatenated by the facade before planning.
+    Raw(Vec<u8>),
+}
+
 struct Job {
-    entry: Arc<crate::rsm::entry::Entry>,
-    eff: usize,
-    tx: mpsc::SyncSender<Option<Vec<u8>>>,
+    input: JobInput,
+    slot: Arc<Slot>,
 }
 
 fn append_blob(entry: &crate::rsm::entry::Entry, eff: usize) -> &[u8] {
@@ -181,7 +257,11 @@ fn pool() -> &'static mpsc::Sender<Job> {
                         Ok(j) => j,
                         Err(_) => return,
                     };
-                    let _ = job.tx.send(compress_one(append_blob(&job.entry, job.eff)));
+                    let z = match &job.input {
+                        JobInput::Append { entry, eff } => compress_one(append_blob(entry, *eff)),
+                        JobInput::Raw(raw) => compress_one(raw),
+                    };
+                    job.slot.put(z);
                 });
             if spawned.is_err() {
                 break;
@@ -189,6 +269,111 @@ fn pool() -> &'static mpsc::Sender<Job> {
         }
         tx
     })
+}
+
+// ---------------------------------------------------------------------------
+// Compression ahead of planning: the log writer never waits for zstd
+// ---------------------------------------------------------------------------
+
+/// Blobs whose compression the FACADE started when a push arrived, keyed by
+/// the xxh3-128 of their raw bytes. A push group's `Append` blob is its
+/// frames concatenated in order whenever every frame survives dedup (the
+/// planner concatenates the survivors, O20), so the facade can start the job
+/// while the command still waits for its planning cycle; the proposer takes it
+/// for a byte-identical blob ([`Pre::start_append`]) and the writer finds the
+/// stored form ready instead of blocking on the pool — measured at 83% of the
+/// writer's waits at 300k msg/s. Content-addressed, so a stale or reused key
+/// can only ever hand back the compression of the very same bytes. A blob with
+/// no entry (a partial dedup, a follower's command, the codec off) is
+/// compressed at propose as before; an entry nobody takes (a duplicate, a
+/// refusal, a retry) leaves after [`EARLY_TTL`].
+const EARLY_SHARDS: usize = 64;
+/// How long an untaken early job is kept.
+const EARLY_TTL: Duration = Duration::from_secs(10);
+/// A shard is swept of expired entries when it holds this many.
+const EARLY_SWEEP_AT: usize = 32;
+/// Early jobs waiting at most (all shards): past it the facade starts none.
+/// A steady state holds about push rate x queueing time (~100 at 3k pushes/s);
+/// the cap only bites when takes stop — a burst of all-duplicate pushes, whose
+/// blobs never become an `Append` — and bounds that memory at a few tens of MB.
+const EARLY_MAX: usize = 4096;
+
+struct Early {
+    slot: Arc<Slot>,
+    at: Instant,
+}
+
+static EARLY_LIVE: AtomicUsize = AtomicUsize::new(0);
+static EARLY_HITS: AtomicUsize = AtomicUsize::new(0);
+
+fn early() -> &'static [Mutex<HashMap<u128, Early>>] {
+    static SHARDS: OnceLock<Vec<Mutex<HashMap<u128, Early>>>> = OnceLock::new();
+    SHARDS.get_or_init(|| (0..EARLY_SHARDS).map(|_| Mutex::new(HashMap::new())).collect())
+}
+
+fn early_shard(key: u128) -> &'static Mutex<HashMap<u128, Early>> {
+    &early()[(key as usize) % EARLY_SHARDS]
+}
+
+/// Start compressing `raw` — a push group's frames, concatenated — on the
+/// codec pool now, for the `Append` it becomes (see [`EARLY_SHARDS`]). A no-op
+/// when the codec is off or the blob would be stored raw anyway.
+pub fn precompress(raw: Vec<u8>) {
+    if level() == 0 || raw.len() < MIN_BYTES || EARLY_LIVE.load(Ordering::Relaxed) >= EARLY_MAX {
+        return;
+    }
+    let key = xxhash_rust::xxh3::xxh3_128(&raw);
+    let slot = Slot::new();
+    if pool()
+        .send(Job {
+            input: JobInput::Raw(raw),
+            slot: slot.clone(),
+        })
+        .is_err()
+    {
+        return;
+    }
+    let now = Instant::now();
+    let mut g = early_shard(key).lock().expect("qlog early shard");
+    if g.len() >= EARLY_SWEEP_AT {
+        let before = g.len();
+        g.retain(|_, e| now.duration_since(e.at) < EARLY_TTL);
+        EARLY_LIVE.fetch_sub(before - g.len(), Ordering::Relaxed);
+    }
+    if g.insert(key, Early { slot, at: now }).is_none() {
+        EARLY_LIVE.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// The early job for a blob byte-identical to one [`precompress`] was given.
+fn take_early(blob: &[u8]) -> Option<Arc<Slot>> {
+    if EARLY_LIVE.load(Ordering::Relaxed) == 0 {
+        return None;
+    }
+    let key = xxhash_rust::xxh3::xxh3_128(blob);
+    let e = early_shard(key)
+        .lock()
+        .expect("qlog early shard")
+        .remove(&key)?;
+    EARLY_LIVE.fetch_sub(1, Ordering::Relaxed);
+    Some(e.slot)
+}
+
+/// `(early jobs waiting, early jobs taken)` since start, for the metrics.
+pub fn early_stats() -> (usize, usize) {
+    (
+        EARLY_LIVE.load(Ordering::Relaxed),
+        EARLY_HITS.load(Ordering::Relaxed),
+    )
+}
+
+/// One `Append`'s payload as a queue log stores it: zstd (the record carries
+/// [`super::record::FLAG_PAYLOAD_ZSTD`]) or raw. A leader sends this form to
+/// its followers, which write it as they receive it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredPayload {
+    pub zstd: bool,
+    pub bytes: bytes::Bytes,
 }
 
 thread_local! {
@@ -255,6 +440,51 @@ mod tests {
             })
             .collect();
         assert!(compress_one(&random).is_none(), "incompressible stays raw");
+    }
+
+    fn entry_with_append(blob: Vec<u8>) -> Arc<crate::rsm::entry::Entry> {
+        let mut e = crate::rsm::entry::Entry::new(1, 0, 0);
+        e.effects.push(crate::rsm::effect::Effect::Append {
+            pid: 1,
+            bucket: 0,
+            base_offset: 0,
+            count: 1,
+            created_at_us: 1,
+            hashes: vec![0; 16],
+            blob,
+        });
+        Arc::new(e)
+    }
+
+    #[test]
+    fn an_early_job_serves_only_a_byte_identical_blob() {
+        // A unique blob, so parallel tests cannot share its key.
+        let mut raw = json_batch(120);
+        raw.extend_from_slice(format!("{:?}", std::thread::current().id()).as_bytes());
+        raw.extend_from_slice(&std::process::id().to_le_bytes());
+        precompress(raw.clone());
+
+        // A blob that differs in one byte never gets it.
+        let mut other = raw.clone();
+        other[10] ^= 1;
+        let e_other = entry_with_append(other.clone());
+        let z_other = Pre::start_append(&e_other, 0).finish().expect("compressed");
+        assert_eq!(decompress(&z_other).unwrap(), other);
+
+        // The identical blob takes the early job — once.
+        let e = entry_with_append(raw.clone());
+        let hits0 = early_stats().1;
+        let pre = Pre::start_append(&e, 0);
+        assert!(early_stats().1 > hits0, "the early job was taken");
+        assert!(take_early(&raw).is_none(), "an early job is taken once");
+        let z = pre.finish().expect("compressed");
+        assert_eq!(decompress(&z).unwrap(), raw);
+        assert_eq!(Some(z), compress_one(&raw), "the same stored form as at propose");
+
+        // Small blobs are never kept.
+        let small = b"tiny".to_vec();
+        precompress(small.clone());
+        assert!(take_early(&small).is_none());
     }
 
     #[test]

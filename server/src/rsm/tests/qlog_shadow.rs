@@ -197,6 +197,11 @@ fn run_to_digest(node: &Node, entries: &[Committed], qlog_on: bool) -> StateDige
 fn qlog_shadow_write_is_byte_identical_to_the_effect() {
     let (entries, expected) = build_workload();
     let node = Node::new("qlog-match");
+    // The workload is sized to roll a file of ONE queue log: pin one lane, so
+    // `QUEEN_QLOG_LANES` does not spread it over several logs that never roll.
+    let qroot = node.seg_dir().parent().expect("data dir").join("qlog");
+    std::fs::create_dir_all(&qroot).expect("qlog dir");
+    std::fs::write(qroot.join(crate::rsm::qlog::set::LANES_FILE), b"1\n").expect("LANES");
     let mut a = open_applier(&node, true);
 
     for (i, c) in entries.iter().enumerate() {
@@ -212,7 +217,7 @@ fn qlog_shadow_write_is_byte_identical_to_the_effect() {
 
     let set = a.qlog().expect("shadow qlog is on");
     for e in &expected {
-        let qid = QLogSet::queue_id_of(TENANT, e.queue);
+        let qid = set.log_id_for(QLogSet::queue_id_of(TENANT, e.queue), e.pid);
         let log = set
             .log(qid)
             .unwrap_or_else(|| panic!("no qlog opened for queue {}", e.queue));

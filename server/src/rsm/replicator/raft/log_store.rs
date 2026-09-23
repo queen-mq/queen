@@ -300,8 +300,9 @@ impl LogStore {
         })?;
         // Everything at or above the cut belongs to a group whose fsyncs did
         // not all land: never acknowledged, so dropped before its indexes are
-        // reused.
-        let dropped = set.truncate_from(scan.next_seq)?;
+        // reused. Across sealed files: a roll during the next group's write
+        // may have sealed a file holding part of an unacknowledged group.
+        let dropped = set.truncate_from_across(scan.next_seq)?;
         if scan.stopped.is_some() || dropped > 0 {
             tracing::warn!(
                 target: "rsm",
@@ -334,6 +335,22 @@ impl LogStore {
             .write(true)
             .open(cfg.state_dir.join(COMMITTED_FILE))?;
         let (tx, rx) = std::sync::mpsc::channel::<Cmd>();
+        let (sync_tx, syncer, committed_file) =
+            if crate::rsm::replicator::local::writer_pipeline_from_env() {
+                let (stx, srx) = std::sync::mpsc::sync_channel::<SyncMsg>(0);
+                let syncer = Syncer {
+                    syncer: set.syncer(),
+                    committed_file,
+                    poison: cfg.poison.clone(),
+                };
+                let join = std::thread::Builder::new()
+                    .name("queen-raft-sync".into())
+                    .spawn(move || syncer.run(srx))
+                    .map_err(|e| io::Error::other(format!("spawn the raft log syncer: {e}")))?;
+                (Some(stx), Some(join), None)
+            } else {
+                (None, None, Some(committed_file))
+            };
         let writer = Writer {
             q: QlogWrite {
                 set,
@@ -343,6 +360,8 @@ impl LogStore {
             state_dir: cfg.state_dir,
             committed_file,
             poison: cfg.poison.clone(),
+            sync_tx,
+            syncer,
         };
         let join = std::thread::Builder::new()
             .name("queen-raft-log".into())
@@ -475,30 +494,31 @@ fn entry_mem(e: &REntry) -> usize {
 }
 
 /// An entry read back from the queue logs, whole: its payload-free record plus
-/// every `Append` payload from the message record that holds it — in one of
-/// the queue logs holding a copy of the entry (`qids`), since an `Append`
-/// always touches its own queue's log.
-fn rehydrate(reader: &QLogReader, rec: &EntryRecord, qids: &[u64]) -> io::Result<REntry> {
+/// every `Append` payload AS STORED (still compressed) from the message record
+/// that holds it — in one of the logs holding a copy of the entry (`logs`),
+/// since an `Append` always touches its own lane's log. The result is a
+/// stored-form entry: sent to a follower as it is, never recompressed.
+fn rehydrate(reader: &QLogReader, rec: &EntryRecord, logs: &[u64]) -> io::Result<REntry> {
     use crate::rsm::effect::Effect;
+    use crate::rsm::qlog::codec::StoredPayload;
     let (mut entry, pf) = entry_of_record(rec)?;
     let Some(pf) = pf else {
         return Ok(entry);
     };
-    let mut full = (*pf).clone();
-    for eff in full.effects.iter_mut() {
+    let mut payloads = Vec::new();
+    for eff in pf.effects.iter() {
         let Effect::Append {
             pid,
             base_offset,
             count,
-            blob,
             ..
         } = eff
         else {
             continue;
         };
         let mut found = None;
-        for qid in qids {
-            if let Some(r) = reader.read_owned(*qid, *pid, *base_offset)? {
+        for log in logs {
+            if let Some(r) = reader.read_stored_in(*log, *pid, *base_offset)? {
                 if r.seq == rec.seq && r.base_offset == *base_offset && r.count == *count {
                     found = Some(r);
                     break;
@@ -511,9 +531,17 @@ fn rehydrate(reader: &QLogReader, rec: &EntryRecord, qids: &[u64]) -> io::Result
                 rec.seq
             ))
         })?;
-        *blob = r.payload;
+        payloads.push(StoredPayload {
+            zstd: r.zstd,
+            bytes: bytes::Bytes::from(r.payload),
+        });
     }
-    entry.payload = EntryPayload::Normal(AppEntry::rehydrated(Arc::new(full), pf));
+    entry.payload = EntryPayload::Normal(AppEntry::stored(
+        pf,
+        bytes::Bytes::from(rec.entry.clone()),
+        payloads,
+        None,
+    ));
     Ok(entry)
 }
 
@@ -848,9 +876,8 @@ impl Cmd {
 /// The payload bytes an entry brings to a group (the cap's estimate).
 fn entry_size(e: &REntry) -> usize {
     match &e.payload {
-        EntryPayload::Normal(app) => app
-            .full()
-            .map(|f| {
+        EntryPayload::Normal(app) => {
+            if let Some(f) = app.full() {
                 f.effects
                     .iter()
                     .map(|eff| match eff {
@@ -860,8 +887,14 @@ fn entry_size(e: &REntry) -> usize {
                         _ => 64,
                     })
                     .sum()
-            })
-            .unwrap_or(64),
+            } else if let Some((pf, pfb, payloads)) = app.stored_parts() {
+                pfb.len()
+                    + pf.effects.len() * 16
+                    + payloads.iter().map(|p| p.bytes.len()).sum::<usize>()
+            } else {
+                64
+            }
+        }
         _ => 64,
     }
 }
@@ -869,8 +902,120 @@ fn entry_size(e: &REntry) -> usize {
 struct Writer {
     q: QlogWrite,
     state_dir: PathBuf,
+    /// Written here only when there is no syncer; otherwise the syncer owns it.
+    committed_file: Option<File>,
+    poison: Poison,
+    /// The fsync half (`QUEEN_RAFT_WRITER_PIPELINE`, default on): this thread
+    /// writes group N+1 while the syncer fsyncs group N and answers openraft.
+    /// A rendezvous channel, so the writer never runs more than one group
+    /// ahead of the fsync.
+    sync_tx: Option<std::sync::mpsc::SyncSender<SyncMsg>>,
+    syncer: Option<JoinHandle<()>>,
+}
+
+/// What the writer hands its syncer, in order.
+enum SyncMsg {
+    /// A written group: fsync its logs, then answer openraft.
+    Group {
+        ticket: crate::rsm::qlog::set::SyncTicket,
+        items: Vec<GroupItem>,
+        apps: Vec<Option<AppEntry>>,
+        callbacks: Vec<IOFlushed<TypeConfig>>,
+    },
+    /// The commit point, written after every earlier group is durable.
+    Committed(Option<LogId>),
+    /// Answered once every earlier message is done (before a truncation or a
+    /// vote write, which must follow every earlier append).
+    Barrier(std::sync::mpsc::SyncSender<()>),
+}
+
+struct Syncer {
+    syncer: crate::rsm::qlog::set::QLogSyncer,
     committed_file: File,
     poison: Poison,
+}
+
+impl Syncer {
+    fn run(mut self, rx: StdReceiver<SyncMsg>) {
+        for msg in rx {
+            match msg {
+                SyncMsg::Group {
+                    ticket,
+                    items,
+                    apps,
+                    callbacks,
+                } => {
+                    let poisoned = self.poison.lock().expect("poison").clone();
+                    let res = match poisoned {
+                        Some(why) => Err(io::Error::other(why)),
+                        None => {
+                            let s0 = crate::rsm::timing::stamp();
+                            let r = self.syncer.sync(&ticket);
+                            if let Some(s0) = s0 {
+                                crate::rsm::timing::metrics()
+                                    .log_fsync
+                                    .record_dur(s0.elapsed());
+                            }
+                            r
+                        }
+                    };
+                    match res {
+                        Ok(()) => {
+                            crate::rsm::faults::hit("qlog.record_fsynced");
+                            crate::rsm::faults::hit("log.flushed");
+                            finish_group(&items, apps, callbacks);
+                        }
+                        Err(e) => {
+                            let why = format!("raft log fsync failed: {e}");
+                            set_poison(&self.poison, why.clone());
+                            for cb in callbacks {
+                                cb.io_completed(Err(io::Error::other(why.clone())));
+                            }
+                        }
+                    }
+                }
+                SyncMsg::Committed(c) => write_committed_to(&mut self.committed_file, c),
+                SyncMsg::Barrier(done) => {
+                    let _ = done.send(());
+                }
+            }
+        }
+    }
+}
+
+/// A group is durable: record each entry's payload-free form and answer
+/// openraft, in order.
+fn finish_group(
+    items: &[GroupItem],
+    apps: Vec<Option<AppEntry>>,
+    callbacks: Vec<IOFlushed<TypeConfig>>,
+) {
+    for (it, app) in items.iter().zip(apps) {
+        if let (GroupBody::Entry { entry, .. }, Some(app)) = (&it.body, app) {
+            app.set_payload_free(entry.clone());
+        }
+    }
+    for cb in callbacks {
+        cb.io_completed(Ok(()));
+    }
+}
+
+fn set_poison(poison: &Poison, why: String) {
+    let mut g = poison.lock().expect("poison");
+    if g.is_none() {
+        tracing::error!(target: "rsm", why = %why, "raft log writer poisoned; node stops");
+        *g = Some(why);
+    }
+}
+
+/// The commit point, in place and without fsync (see the module header).
+fn write_committed_to(file: &mut File, committed: Option<LogId>) {
+    if let Ok(mut b) = serde_json::to_vec(&committed) {
+        b.push(b'\n');
+        let _ = file
+            .write_all_at(&b, 0)
+            .and_then(|()| file.set_len(b.len() as u64));
+    }
 }
 
 impl Writer {
@@ -921,6 +1066,21 @@ impl Writer {
                 break;
             }
         }
+        // Let the syncer drain what it holds, then stop it.
+        self.sync_tx.take();
+        if let Some(j) = self.syncer.take() {
+            let _ = j.join();
+        }
+    }
+
+    /// Wait until the syncer has finished every group handed to it.
+    fn drain_syncer(&self) {
+        if let Some(tx) = &self.sync_tx {
+            let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+            if tx.send(SyncMsg::Barrier(done_tx)).is_ok() {
+                let _ = done_rx.recv();
+            }
+        }
     }
 
     fn poisoned(&self) -> Option<String> {
@@ -928,11 +1088,7 @@ impl Writer {
     }
 
     fn set_poison(&self, why: String) {
-        let mut g = self.poison.lock().expect("poison");
-        if g.is_none() {
-            tracing::error!(target: "rsm", why = %why, "raft log writer poisoned; node stops");
-            *g = Some(why);
-        }
+        set_poison(&self.poison, why);
     }
 
     /// Write and fsync the pending appends as ONE group, then answer openraft.
@@ -957,23 +1113,36 @@ impl Writer {
                 let term = term_of(&e.log_id);
                 match e.payload {
                     EntryPayload::Normal(app) => {
-                        match app.full() {
-                            Some(full) => {
-                                items.push(GroupItem {
-                                    seq,
-                                    term,
-                                    body: GroupBody::Entry {
-                                        entry: full.clone(),
-                                        pre: app.take_pre(),
-                                    },
-                                });
-                                apps.push(Some(app));
-                            }
-                            None => {
-                                failed.get_or_insert_with(|| {
-                                format!("entry {seq} reached the raft log writer without its payloads")
+                        if let Some(full) = app.full() {
+                            items.push(GroupItem {
+                                seq,
+                                term,
+                                body: GroupBody::Entry {
+                                    entry: full.clone(),
+                                    pre: app.take_pre(),
+                                    z: app.z(),
+                                },
                             });
-                            }
+                            apps.push(Some(app));
+                        } else if let Some((entry, pf, payloads)) = app.stored_parts() {
+                            // Received (or read back) in stored form: written as
+                            // is, and its payload-free form is already set.
+                            items.push(GroupItem {
+                                seq,
+                                term,
+                                body: GroupBody::Stored {
+                                    entry,
+                                    pf,
+                                    payloads,
+                                },
+                            });
+                            apps.push(None);
+                        } else {
+                            failed.get_or_insert_with(|| {
+                                format!(
+                                    "entry {seq} reached the raft log writer without its payloads"
+                                )
+                            });
                         }
                     }
                     EntryPayload::Blank => {
@@ -1026,33 +1195,50 @@ impl Writer {
                                 _ => 0,
                             })
                             .sum::<u64>(),
+                        GroupBody::Stored { payloads, .. } => {
+                            payloads.iter().map(|p| p.bytes.len() as u64).sum()
+                        }
                         GroupBody::Raw { bytes, .. } => bytes.len() as u64,
                     })
                     .sum(),
             );
         }
-        let result = match failed {
-            Some(why) => Err(io::Error::other(why)),
-            None => self.q.write_group(&mut items),
-        };
-        match result {
-            Ok(()) => {
-                for (it, app) in items.iter().zip(apps) {
-                    if let (GroupBody::Entry { entry, .. }, Some(app)) = (&it.body, app) {
-                        app.set_payload_free(entry.clone());
+        if let Some(why) = failed {
+            return self.fail_group(why, callbacks);
+        }
+        // Pipelined: write, then hand the fsync and the answers to the syncer
+        // (blocking until it is done with the previous group). Otherwise write
+        // and fsync here.
+        if let Some(tx) = &self.sync_tx {
+            match self.q.write_group_nosync(&mut items) {
+                Ok(ticket) => {
+                    let msg = SyncMsg::Group {
+                        ticket,
+                        items,
+                        apps,
+                        callbacks,
+                    };
+                    if let Err(std::sync::mpsc::SendError(msg)) = tx.send(msg) {
+                        let SyncMsg::Group { callbacks, .. } = msg else {
+                            unreachable!()
+                        };
+                        self.fail_group("the raft log syncer stopped".into(), callbacks);
                     }
                 }
-                for cb in callbacks {
-                    cb.io_completed(Ok(()));
-                }
+                Err(e) => self.fail_group(format!("raft log write failed: {e}"), callbacks),
             }
-            Err(e) => {
-                let why = format!("raft log write failed: {e}");
-                self.set_poison(why.clone());
-                for cb in callbacks {
-                    cb.io_completed(Err(io::Error::other(why.clone())));
-                }
-            }
+            return;
+        }
+        match self.q.write_group(&mut items) {
+            Ok(()) => finish_group(&items, apps, callbacks),
+            Err(e) => self.fail_group(format!("raft log write failed: {e}"), callbacks),
+        }
+    }
+
+    fn fail_group(&self, why: String, callbacks: Vec<IOFlushed<TypeConfig>>) {
+        self.set_poison(why.clone());
+        for cb in callbacks {
+            cb.io_completed(Err(io::Error::other(why.clone())));
         }
     }
 
@@ -1064,6 +1250,8 @@ impl Writer {
                 forget_pids,
                 done,
             } => {
+                // Every earlier append is fsynced and answered first.
+                self.drain_syncer();
                 let res = match self.poisoned() {
                     Some(why) => Err(io::Error::other(why)),
                     None => self.q.set.truncate_from_across(from_seq).map(|dropped| {
@@ -1084,6 +1272,7 @@ impl Writer {
                 let _ = done.send(res);
             }
             Cmd::Persist { state, done } => {
+                self.drain_syncer();
                 let res = match self.poisoned() {
                     Some(why) => Err(io::Error::other(why)),
                     None => serde_json::to_vec(&state)
@@ -1099,14 +1288,15 @@ impl Writer {
         }
     }
 
-    /// The commit point, in place and without fsync (see the module header).
+    /// The commit point, in place and without fsync (see the module header),
+    /// after every group already written is durable.
     fn write_committed(&mut self, committed: Option<LogId>) {
-        if let Ok(mut b) = serde_json::to_vec(&committed) {
-            b.push(b'\n');
-            let _ = self
-                .committed_file
-                .write_all_at(&b, 0)
-                .and_then(|()| self.committed_file.set_len(b.len() as u64));
+        match (&self.sync_tx, self.committed_file.as_mut()) {
+            (Some(tx), _) => {
+                let _ = tx.send(SyncMsg::Committed(committed));
+            }
+            (None, Some(f)) => write_committed_to(f, committed),
+            (None, None) => {}
         }
     }
 }

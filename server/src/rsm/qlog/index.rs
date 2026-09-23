@@ -374,6 +374,13 @@ impl View {
         out
     }
 
+    /// The end (exclusive offset) of `pid`'s last record in this file, `None`
+    /// when the file holds none of it. O(log n).
+    pub fn pid_end(&self, pid: u64) -> Option<u64> {
+        let (lo, hi) = self.span_of(pid);
+        (lo < hi).then(|| self.record(hi - 1).end)
+    }
+
     /// The half-open range of records belonging to `pid`.
     fn span_of(&self, pid: u64) -> (usize, usize) {
         let lo = self.partition_point(|r| r.pid < pid);

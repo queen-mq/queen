@@ -80,6 +80,7 @@ fn push(id: u64, queue: &str, partition: &str, txns: &[&str]) -> Command {
 
 fn pop_pinned(id: u64, queue: &str, partition: &str, group: &str, worker: &str) -> Command {
     Command::PopPinned(PopCommand {
+        wait: false,
         request_id: rid(id),
         tenant: TENANT.to_string(),
         queue: queue.to_string(),

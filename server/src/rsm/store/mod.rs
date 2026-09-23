@@ -975,6 +975,26 @@ pub trait Writes: Reads {
     /// LMDB image of them is consistent as of this call.
     fn durable_commit(&mut self) -> Result<()>;
 
+    /// The durable point split in two (`QUEEN_RAFT_CHECKPOINT_ASYNC`): take
+    /// the checkpoint CUT here — every RAM row changed since the last
+    /// checkpoint, with its value as of this call — and leave writing it to
+    /// [`Store::write_cut`], on another thread, while the writer carries on.
+    /// Only the single writer takes a cut, between entries, so the cut is the
+    /// consistent image of the store at this point.
+    ///
+    /// `None` when this store cannot split the point (a keyspace written
+    /// through the engine directly, or a store that syncs every commit): the
+    /// caller runs [`Writes::durable_commit`] instead. The default is `None`.
+    fn take_cut(&mut self) -> Result<Option<CheckpointCut>> {
+        Ok(None)
+    }
+
+    /// Whether [`Writes::take_cut`] can answer `Some` (asked before the caller
+    /// prepares a point it would otherwise commit inline).
+    fn can_cut(&self) -> bool {
+        false
+    }
+
     /// Throw the open transaction away. Used by a test and by the crash paths;
     /// dropping the handle does the same.
     ///
@@ -1058,6 +1078,38 @@ pub trait Store: Send + Sync {
     /// one transaction, and return the copy's `(applied_index, applied_term)`:
     /// the state another node reopens at from it (a Raft snapshot).
     fn copy_checkpoint(&self, dir: &std::path::Path) -> Result<(u64, u64)>;
+
+    /// Write a cut taken by [`Writes::take_cut`] and make it survive a power
+    /// loss: one engine transaction with every row of the cut, its commit, and
+    /// the environment sync — the store half of the durable point, run on the
+    /// checkpoint thread. Cuts must be written in the order they were taken,
+    /// one at a time. An error is [`StoreError::CommitFailed`] `{ durable:
+    /// true }`: the point did not happen, and the caller reports no durable
+    /// index for it and hands the cut back ([`Store::restore_cut`]).
+    fn write_cut(&self, _cut: &mut CheckpointCut) -> Result<()> {
+        Err(StoreError::Io("this store takes no checkpoint cut".into()))
+    }
+
+    /// Put the rows of a cut that was NOT written back into the dirty sets, so
+    /// the next checkpoint still carries them.
+    fn restore_cut(&self, _cut: CheckpointCut) {}
+}
+
+/// A checkpoint cut ([`Writes::take_cut`]): every RAM row changed since the
+/// last checkpoint and its value at the cut (`None` = deleted), keyspace by
+/// keyspace (put in key order by [`Store::write_cut`], off the writer). The values are shared (`Arc`), so a cut costs
+/// one reference count per row, and a later write to a row replaces the map's
+/// value without touching the cut's.
+pub struct CheckpointCut {
+    pub(crate) rows: Vec<(Keyspace, Vec<(std::sync::Arc<[u8]>, Option<std::sync::Arc<[u8]>>)>)>,
+    pub(crate) keys: usize,
+}
+
+impl CheckpointCut {
+    /// Rows in the cut.
+    pub fn keys(&self) -> usize {
+        self.keys
+    }
 }
 
 #[cfg(test)]

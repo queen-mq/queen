@@ -33,6 +33,10 @@ pub struct ClusterConfig {
     pub members: BTreeMap<NodeId, QueenNode>,
     /// The shared secret every Raft RPC carries (`x-queen-raft-token`).
     pub token: Option<String>,
+    /// The member this group would rather have lead (several groups per
+    /// process spread their leaders over the nodes, [`ClusterConfig::for_group`]).
+    /// `None`: whoever wins the election leads.
+    pub preferred_leader: Option<NodeId>,
 }
 
 pub const TOKEN_HEADER: &str = "x-queen-raft-token";
@@ -104,6 +108,43 @@ impl ClusterConfig {
             listen,
             members,
             token,
+            preferred_leader: None,
+        })
+    }
+
+    /// The configuration of Raft group `group` (of several in one process,
+    /// `QUEEN_RAFT_GROUPS`): every Raft address — the listen address and each
+    /// member's — moves to its port + `group`, the client addresses stay (one
+    /// HTTP server serves every group), and the group prefers the member at
+    /// position `group mod n` (by id) as its leader, so the groups' leaders
+    /// spread over the nodes. Group 0 keeps the addresses as configured.
+    pub fn for_group(&self, group: usize) -> Result<ClusterConfig, String> {
+        let shift = |addr: &str| -> Result<String, String> {
+            if group == 0 {
+                return Ok(addr.to_string());
+            }
+            let (host, port) = addr
+                .rsplit_once(':')
+                .ok_or_else(|| format!("raft address `{addr}` has no port"))?;
+            let port: u16 = port
+                .parse()
+                .map_err(|_| format!("raft address `{addr}`: bad port"))?;
+            let port = port
+                .checked_add(group as u16)
+                .ok_or_else(|| format!("raft address `{addr}`: port + {group} overflows"))?;
+            Ok(format!("{host}:{port}"))
+        };
+        let mut members = BTreeMap::new();
+        for (id, n) in &self.members {
+            members.insert(*id, QueenNode::new(shift(&n.raft)?, n.http.clone()));
+        }
+        let ids: Vec<NodeId> = self.members.keys().copied().collect();
+        Ok(ClusterConfig {
+            node_id: self.node_id,
+            listen: shift(&self.listen)?,
+            members,
+            token: self.token.clone(),
+            preferred_leader: (ids.len() > 1).then(|| ids[group % ids.len()]),
         })
     }
 }

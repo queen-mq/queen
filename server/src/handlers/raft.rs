@@ -123,33 +123,11 @@ pub(crate) async fn dispatch_push(
     producer_sub: Option<String>,
     body: axum::body::Bytes,
 ) -> Response {
-    // Name-length guard: parse ONLY the item queue/partition names, borrowed,
-    // skipping the payload. serde ignores the unknown fields (payload, txn, ...)
-    // without building a `serde_json::Value` tree, so this no longer pays the
-    // per-message allocator cost the fat-batch profile charged to
-    // `Value::deserialize` (PERF-N). A body that will not parse is a 400 the same
-    // as the Postgres handler's own first step; the facade re-checks per item.
-    #[derive(serde::Deserialize)]
-    struct NameGuardItem<'a> {
-        #[serde(borrow, default)]
-        queue: Option<&'a str>,
-        #[serde(borrow, default)]
-        partition: Option<&'a str>,
-    }
-    #[derive(serde::Deserialize)]
-    struct NameGuardBody<'a> {
-        #[serde(borrow, default)]
-        items: Vec<NameGuardItem<'a>>,
-    }
-    if let Ok(v) = serde_json::from_slice::<NameGuardBody>(&body) {
-        for it in &v.items {
-            if let Err(e) =
-                facade::check_message_key_names(tenant, it.queue.unwrap_or(""), None, it.partition)
-            {
-                return err_response(e);
-            }
-        }
-    }
+    // The name-length guard (R-108) runs inside the facade's own parse of the
+    // body, per item, before anything is submitted: a second parse here only
+    // to read the names cost a full scan of every payload (measured
+    // 2026-09-23: serde_json `ignore_value`/`skip_to_escape` among the top
+    // HTTP-side symbols at 400k msg/s).
     let ctx = ReqCtx::new(tenant, deadline_for(st.pop_default_timeout_ms))
         .with_producer_sub(producer_sub);
     // PERF-J: the whole push handler, push-only. Compared to goload's per-request
