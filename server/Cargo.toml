@@ -51,6 +51,9 @@ required-features = ["server"]
 # tracing subscriber. The embedded library path (queen::Broker) never needs it.
 default = ["server"]
 server = ["dep:rust-embed", "dep:tracing-subscriber", "axum/http1", "axum/tokio"]
+# jemalloc + heap profiler as the process allocator, for memory hunts
+# (`MALLOC_CONF=prof:true,...`). Never in a release build.
+jemalloc-prof = ["dep:tikv-jemallocator"]
 
 [lints.clippy]
 # PLAN_RAFT.md I2 (WP-1.4). `clippy.toml` lists the clock, environment and
@@ -108,6 +111,8 @@ jsonwebtoken = "9"
 # getrusage(2) for cross-platform process CPU + RSS in the metrics collector
 # (syscollect.rs). Tiny, ubiquitous, no_std-friendly FFI shim only.
 libc = "0.2"
+# Memory hunts only (feature `jemalloc-prof`): jemalloc with its heap profiler.
+tikv-jemallocator = { version = "0.6", optional = true, features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
 # Embed the built Vue dashboard (webapp/dist) into the binary so the broker
 # serves the SPA with zero external files — single self-contained binary.
 # Optional: only the `server` feature serves the dashboard; an embedding

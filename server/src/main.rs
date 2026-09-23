@@ -82,6 +82,41 @@ use axum::routing::{get, post};
 pub const VERSION: &str = env!("QUEEN_VERSION");
 use axum::Router;
 
+/// Memory hunts only (`--features jemalloc-prof`): jemalloc with its heap
+/// profiler as the process allocator. `MALLOC_CONF=prof:true,...` turns the
+/// profiler on at start; the default build keeps the system allocator.
+#[cfg(feature = "jemalloc-prof")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// The accept backlog asked of the kernel, which caps it at
+/// `net.core.somaxconn` (4096 on current kernels).
+const LISTEN_BACKLOG: u32 = 4096;
+
+/// Bind an HTTP listener with a real accept backlog. `TcpListener::bind` asks
+/// for 128 (mio copies the standard library's value; `ss -ltn` on the VM showed
+/// `LISTEN 0 128`), and a burst of reconnects overflows that: the kernel drops
+/// the handshakes and the clients stall on retransmits for seconds (measured
+/// 2026-09-23, 2.3M `ListenOverflows` on the benchmark broker).
+async fn bind_listener(addr: &str) -> std::io::Result<tokio::net::TcpListener> {
+    let mut last = None;
+    for sa in tokio::net::lookup_host(addr).await? {
+        let sock = if sa.is_ipv4() {
+            tokio::net::TcpSocket::new_v4()?
+        } else {
+            tokio::net::TcpSocket::new_v6()?
+        };
+        sock.set_reuseaddr(true)?;
+        match sock.bind(sa) {
+            Ok(()) => return sock.listen(LISTEN_BACKLOG),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "no address to bind")
+    }))
+}
+
 use handlers::AppState;
 
 /// Drop a queue's cached lease time + encryption flag after a peer's config change.
@@ -1523,7 +1558,7 @@ async fn main() {
     }
 
     let addr = config::host_port(&cfg.bind_addr, &cfg.port);
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
+    let listener = match bind_listener(&addr).await {
         Ok(l) => l,
         Err(e) => obs::fatal(format!("cannot bind {addr}: {e}")),
     };
@@ -1705,7 +1740,7 @@ async fn run_raft(cfg: config::Config) {
     let app = handlers::raft::build_raft_router(state, authenticator, cfg.tenancy_header);
 
     let addr = config::host_port(&cfg.bind_addr, &cfg.port);
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
+    let listener = match bind_listener(&addr).await {
         Ok(l) => l,
         Err(e) => obs::fatal(format!("cannot bind {addr}: {e}")),
     };

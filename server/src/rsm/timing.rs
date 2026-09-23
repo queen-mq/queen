@@ -922,7 +922,47 @@ pub fn render_prometheus(out: &mut String) {
     }
     crate::rsm::dbgctr::render(out);
     crate::rsm::admit::render(out);
+    render_mallinfo(out);
 }
+
+/// glibc heap totals across every arena, for memory hunts
+/// (`QUEEN_DEBUG_MALLINFO=1`): what the program holds (`in_use` + `mmap`)
+/// against what the allocator took from the kernel (`arena` + `mmap`).
+/// `mallinfo2` walks each arena's free lists under its lock, so it is off by
+/// default.
+#[cfg(all(
+    target_os = "linux",
+    target_env = "gnu",
+    not(feature = "jemalloc-prof")
+))]
+fn render_mallinfo(out: &mut String) {
+    use std::fmt::Write;
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("QUEEN_DEBUG_MALLINFO").is_ok_and(|v| v.trim() == "1")) {
+        return;
+    }
+    // SAFETY: mallinfo2 takes no arguments and only reads allocator state.
+    let m = unsafe { libc::mallinfo2() };
+    let _ = writeln!(
+        out,
+        "# HELP queen_malloc_bytes glibc heap: in use, free inside the arenas, arena total, mmapped chunks\n# TYPE queen_malloc_bytes gauge"
+    );
+    for (kind, v) in [
+        ("in_use", m.uordblks),
+        ("free", m.fordblks),
+        ("arena", m.arena),
+        ("mmap", m.hblkhd),
+    ] {
+        let _ = writeln!(out, "queen_malloc_bytes{{kind=\"{kind}\"}} {v}");
+    }
+}
+
+#[cfg(not(all(
+    target_os = "linux",
+    target_env = "gnu",
+    not(feature = "jemalloc-prof")
+)))]
+fn render_mallinfo(_out: &mut String) {}
 
 fn render_summary(
     out: &mut String,

@@ -3091,6 +3091,12 @@ impl Rsm for RaftFacade {
             "queen_raft_store_map_bytes{{kind=\"capacity\"}} {}\nqueen_raft_store_map_bytes{{kind=\"used\"}} {}\n",
             map.map_bytes, map.used_bytes
         ));
+        out.push_str("# HELP queen_raft_store_ram_rows Rows per RAM keyspace: live, and keys dirty since the last checkpoint\n# TYPE queen_raft_store_ram_rows gauge\n");
+        for (ks, live, dirty) in self.store.ram_stats() {
+            out.push_str(&format!(
+                "queen_raft_store_ram_rows{{ks=\"{ks}\",kind=\"live\"}} {live}\nqueen_raft_store_ram_rows{{ks=\"{ks}\",kind=\"dirty\"}} {dirty}\n"
+            ));
+        }
         out.push_str("# HELP queen_raft_store_readers LMDB reader slots\n# TYPE queen_raft_store_readers gauge\n");
         out.push_str(&format!(
             "queen_raft_store_readers{{kind=\"used\"}} {}\nqueen_raft_store_readers{{kind=\"limit\"}} {}\n",

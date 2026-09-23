@@ -1039,6 +1039,13 @@ pub trait Store: Send + Sync {
     /// §11.8: what this node reports in `Status`.
     fn map_usage(&self) -> MapUsage;
 
+    /// Per RAM keyspace: its name, its live rows, and its keys dirty since the
+    /// last checkpoint (for the memory gauges). Empty for a store without RAM
+    /// keyspaces.
+    fn ram_stats(&self) -> Vec<(&'static str, usize, usize)> {
+        Vec::new()
+    }
+
     /// The longest key this build accepts (LMDB: 511 B by default).
     fn max_key_len(&self) -> usize;
 
