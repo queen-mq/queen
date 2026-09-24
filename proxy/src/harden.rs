@@ -359,6 +359,15 @@ pub async fn client_ip_mw(
                 if https {
                     req.extensions_mut().insert(ViaHttps);
                 }
+                // What the handlers read (the cookie `Secure` flag, the OAuth
+                // redirect URI) is what this edge verified, never a
+                // client-supplied `X-Forwarded-Proto`.
+                let verified = is_https(req.extensions());
+                let h = req.headers_mut();
+                h.remove("x-forwarded-proto");
+                if verified {
+                    h.insert("x-forwarded-proto", axum::http::HeaderValue::from_static("https"));
+                }
             }
             None => {
                 if !NO_PEER_WARNED.swap(true, Ordering::Relaxed) {
@@ -2195,6 +2204,33 @@ mod tests {
             format!("{peer}:5555").parse().unwrap(),
         ));
         r
+    }
+
+    #[tokio::test]
+    async fn forwarded_proto_is_what_the_edge_verified() {
+        let app = edge(100.0, 100.0).data_plane(Router::new().route(
+            "/p",
+            post(|h: HeaderMap| async move {
+                h.get("x-forwarded-proto")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("-")
+                    .to_string()
+            }),
+        ));
+        let proto = |peer: &'static str, hdrs: &'static [(&'static str, &'static str)]| {
+            let app = app.clone();
+            async move {
+                let resp = app.oneshot(req("POST", "/p", peer, hdrs, "")).await.unwrap();
+                let b = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
+                String::from_utf8_lossy(&b).to_string()
+            }
+        };
+        // A direct client cannot claim HTTPS (it would mint Secure cookies and
+        // https redirect URIs over plain HTTP).
+        assert_eq!(proto("203.0.113.9", &[("x-forwarded-proto", "https")]).await, "-");
+        // A trusted proxy can.
+        assert_eq!(proto("10.0.0.2", &[("x-forwarded-proto", "https")]).await, "https");
+        assert_eq!(proto("10.0.0.2", &[("x-forwarded-proto", "http")]).await, "-");
     }
 
     #[tokio::test]

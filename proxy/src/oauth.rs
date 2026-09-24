@@ -641,7 +641,8 @@ async fn google_start(
         params.push(("hd", only));
     }
     let url = format!("{GOOGLE_AUTHORIZE_URL}?{}", qs(&params));
-    redirect(StatusCode::FOUND, &url, None)
+    let bind = state_cookie(&st, &headers, &nonce, STATE_TTL_S as u64);
+    redirect(StatusCode::FOUND, &url, Some(&bind))
 }
 
 async fn google_callback(
@@ -664,6 +665,9 @@ async fn google_callback(
     let Some((nonce, next)) = verify_state(state_key(), &state) else {
         return err_400("invalid_state", "state failed verification");
     };
+    if !state_bound(&st, &headers, &nonce) {
+        return err_400("invalid_state", "state was not issued to this browser");
+    }
     let Some(code) = q.code else {
         return err_400("invalid_request", "missing authorization code");
     };
@@ -907,7 +911,8 @@ async fn github_start(
             ("state", &state),
         ])
     );
-    redirect(StatusCode::FOUND, &url, None)
+    let bind = state_cookie(&st, &headers, &nonce, STATE_TTL_S as u64);
+    redirect(StatusCode::FOUND, &url, Some(&bind))
 }
 
 async fn github_callback(
@@ -927,9 +932,12 @@ async fn github_callback(
     let Some(state) = q.state else {
         return err_400("invalid_state", "missing state");
     };
-    let Some((_nonce, next)) = verify_state(state_key(), &state) else {
+    let Some((nonce, next)) = verify_state(state_key(), &state) else {
         return err_400("invalid_state", "state failed verification");
     };
+    if !state_bound(&st, &headers, &nonce) {
+        return err_400("invalid_state", "state was not issued to this browser");
+    }
     let Some(code) = q.code else {
         return err_400("invalid_request", "missing authorization code");
     };
@@ -1352,6 +1360,39 @@ fn build_session_cookie(
         c.push_str("; Secure");
     }
     c
+}
+
+/// The cookie that binds an OAuth flow to the browser that started it: the
+/// start sets it to the state's nonce, the callback requires it. Without it a
+/// signed state is a bearer value, and a callback URL carrying someone else's
+/// code and state logs this browser into THEIR account (login CSRF).
+/// Host-only, and `__Host-` when secure; `SameSite=Lax` so the provider's
+/// top-level redirect back carries it.
+fn state_cookie_name(st: &St, secure: bool) -> String {
+    if secure {
+        format!("__Host-{}_oauth", st.cfg.cookie_name)
+    } else {
+        format!("{}_oauth", st.cfg.cookie_name)
+    }
+}
+
+fn state_cookie(st: &St, headers: &HeaderMap, nonce: &str, max_age_s: u64) -> String {
+    let secure = cookie_is_secure(st, headers);
+    build_session_cookie(&state_cookie_name(st, secure), nonce, None, secure, max_age_s)
+}
+
+fn state_bound(st: &St, headers: &HeaderMap, nonce: &str) -> bool {
+    cookie_carries(&state_cookie_name(st, cookie_is_secure(st, headers)), headers, nonce)
+}
+
+fn cookie_carries(name: &str, headers: &HeaderMap, nonce: &str) -> bool {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|raw| raw.split(';'))
+        .filter_map(|kv| kv.split_once('='))
+        .any(|(k, v)| k.trim() == name && !nonce.is_empty() && v.trim() == nonce)
 }
 
 fn session_cookie(st: &St, headers: &HeaderMap, token: &str) -> String {
@@ -1838,6 +1879,20 @@ mod tests {
     }
 
     // --- signed state -------------------------------------------------------
+
+    #[test]
+    fn a_state_is_bound_to_the_browser_that_started_the_flow() {
+        let mut h = HeaderMap::new();
+        h.insert(header::COOKIE, HeaderValue::from_static("a=1; __Host-q_oauth=n1; b=2"));
+        assert!(cookie_carries("__Host-q_oauth", &h, "n1"));
+        // Someone else's callback URL: a valid signed state, another nonce.
+        assert!(!cookie_carries("__Host-q_oauth", &h, "n2"));
+        // No cookie at all (the victim never started a flow).
+        assert!(!cookie_carries("__Host-q_oauth", &HeaderMap::new(), "n1"));
+        // A same-valued cookie under another name does not count.
+        assert!(!cookie_carries("q_oauth", &h, "n1"));
+        assert!(!cookie_carries("__Host-q_oauth", &h, ""));
+    }
 
     #[test]
     fn state_roundtrip_ok() {

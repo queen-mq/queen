@@ -427,8 +427,8 @@ mod server {
             match &self.token {
                 None => Ok(()),
                 Some(want) => {
-                    let got = headers.get(TOKEN_HEADER).and_then(|v| v.to_str().ok());
-                    if got == Some(want.as_ref()) {
+                    let got = headers.get(TOKEN_HEADER).map(|v| v.as_bytes());
+                    if got.is_some_and(|g| token_eq(g, want.as_bytes())) {
                         Ok(())
                     } else {
                         Err((StatusCode::UNAUTHORIZED, "bad raft token").into_response())
@@ -437,6 +437,47 @@ mod server {
             }
         }
     }
+
+    /// Compare a presented token with the cluster's without an early exit on
+    /// the first differing byte (the length is not secret).
+    fn token_eq(got: &[u8], want: &[u8]) -> bool {
+        if got.len() != want.len() {
+            return false;
+        }
+        let diff = got.iter().zip(want).fold(0u8, |d, (a, b)| d | (a ^ b));
+        std::hint::black_box(diff) == 0
+    }
+
+    /// Every RPC: the token is checked from the headers before the body is
+    /// read, and the handler runs as non-core work — the listener shares the
+    /// `queen-raft` runtime, whose threads are core, and a panic in one RPC
+    /// (a decode, a dashboard gather) must kill that request, not the node.
+    async fn guard<S: Store + 'static>(
+        State(st): State<Arc<RpcState<S>>>,
+        req: axum::extract::Request,
+        next: axum::middleware::Next,
+    ) -> Response {
+        if let Err(r) = st.check(req.headers()) {
+            return r;
+        }
+        crate::obs::panic_policy::non_core(next.run(req)).await
+    }
+
+    /// Body cap of the RPCs that carry log entries or a client command (an
+    /// append, a follower's prepared command): one entry can be as large as a
+    /// client request (`QUEEN_MAX_BODY_BYTES`) and an append carries up to
+    /// [`wire::MAX_APPEND_BYTES`], never fewer than one entry.
+    fn entry_body_cap() -> usize {
+        let client = std::env::var("QUEEN_MAX_BODY_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
+        2 * client.max(wire::MAX_APPEND_BYTES) + (1 << 20)
+    }
+
+    /// Body cap of the control RPCs (vote, pre-vote, transfer, read index,
+    /// dashboard gather).
+    const CONTROL_BODY_CAP: usize = 1 << 20;
 
     fn json_answer<T: serde::Serialize>(v: &T) -> Response {
         match serde_json::to_vec(v) {
@@ -456,12 +497,8 @@ mod server {
 
     async fn append<S: Store + 'static>(
         State(st): State<Arc<RpcState<S>>>,
-        headers: HeaderMap,
         body: Bytes,
     ) -> Response {
-        if let Err(r) = st.check(&headers) {
-            return r;
-        }
         let req = match wire::decode_append(&body) {
             Ok(r) => r,
             Err(e) => return bad_request(e),
@@ -471,12 +508,8 @@ mod server {
 
     async fn vote<S: Store + 'static>(
         State(st): State<Arc<RpcState<S>>>,
-        headers: HeaderMap,
         body: Bytes,
     ) -> Response {
-        if let Err(r) = st.check(&headers) {
-            return r;
-        }
         match serde_json::from_slice::<VoteRequest<TypeConfig>>(&body) {
             Ok(req) => json_answer(&st.raft.vote(req).await),
             Err(e) => bad_request(e),
@@ -485,12 +518,8 @@ mod server {
 
     async fn prevote<S: Store + 'static>(
         State(st): State<Arc<RpcState<S>>>,
-        headers: HeaderMap,
         body: Bytes,
     ) -> Response {
-        if let Err(r) = st.check(&headers) {
-            return r;
-        }
         match serde_json::from_slice::<VoteRequest<TypeConfig>>(&body) {
             Ok(req) => json_answer(&st.raft.pre_vote(req).await),
             Err(e) => bad_request(e),
@@ -499,12 +528,8 @@ mod server {
 
     async fn transfer<S: Store + 'static>(
         State(st): State<Arc<RpcState<S>>>,
-        headers: HeaderMap,
         body: Bytes,
     ) -> Response {
-        if let Err(r) = st.check(&headers) {
-            return r;
-        }
         match serde_json::from_slice::<TransferLeaderRequest<TypeConfig>>(&body) {
             Ok(req) => {
                 let res: Result<_, RaftError<TypeConfig>> = st
@@ -524,12 +549,8 @@ mod server {
     /// the reply then says so and the follower retries elsewhere).
     async fn submit<S: Store + 'static>(
         State(st): State<Arc<RpcState<S>>>,
-        headers: HeaderMap,
         body: Bytes,
     ) -> Response {
-        if let Err(r) = st.check(&headers) {
-            return r;
-        }
         let Some(h) = st.remote.get().cloned() else {
             return (StatusCode::SERVICE_UNAVAILABLE, "no facade on this node yet").into_response();
         };
@@ -549,12 +570,8 @@ mod server {
     /// out; never on the message path.
     async fn local<S: Store + 'static>(
         State(st): State<Arc<RpcState<S>>>,
-        headers: HeaderMap,
         body: Bytes,
     ) -> Response {
-        if let Err(r) = st.check(&headers) {
-            return r;
-        }
         let Some(h) = st.local.get().cloned() else {
             return (StatusCode::SERVICE_UNAVAILABLE, "no facade on this node yet").into_response();
         };
@@ -570,11 +587,7 @@ mod server {
     /// applied before it reads.
     async fn read_index<S: Store + 'static>(
         State(st): State<Arc<RpcState<S>>>,
-        headers: HeaderMap,
     ) -> Response {
-        if let Err(r) = st.check(&headers) {
-            return r;
-        }
         match st
             .raft
             .ensure_linearizable(openraft::raft::ReadPolicy::ReadIndex)
@@ -595,12 +608,8 @@ mod server {
 
     async fn snapshot<S: Store + 'static>(
         State(st): State<Arc<RpcState<S>>>,
-        headers: HeaderMap,
         body: Body,
     ) -> Response {
-        if let Err(r) = st.check(&headers) {
-            return r;
-        }
         match super::super::snapshot::receive(&st.snap, &st.raft, body).await {
             Ok(res) => json_answer(&res),
             Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -630,19 +639,38 @@ mod server {
                 return;
             }
         };
+        if state.token.is_none() {
+            if let Ok(a) = listener.local_addr() {
+                if !a.ip().is_loopback() {
+                    tracing::warn!(
+                        target: "rsm",
+                        addr = %a,
+                        "the raft RPC listener is reachable beyond loopback without \
+                         QUEEN_RAFT_TOKEN: anyone who can reach it can vote, append and \
+                         install snapshots"
+                    );
+                }
+            }
+        }
+        let state = Arc::new(state);
+        use axum::extract::DefaultBodyLimit;
         let router = axum::Router::new()
             .route("/raft/v1/append", post(append::<S>))
-            .route("/raft/v1/vote", post(vote::<S>))
-            .route("/raft/v1/prevote", post(prevote::<S>))
-            .route("/raft/v1/transfer", post(transfer::<S>))
-            .route("/raft/v1/snapshot", post(snapshot::<S>))
             .route("/raft/v1/submit", post(submit::<S>))
-            .route("/raft/v1/read_index", post(read_index::<S>))
-            .route("/raft/v1/local", post(local::<S>))
-            // Peers are trusted and an append is capped by the sender
-            // (wire::MAX_APPEND_BYTES); a snapshot is streamed.
-            .layer(axum::extract::DefaultBodyLimit::disable())
-            .with_state(Arc::new(state));
+            .layer(DefaultBodyLimit::max(entry_body_cap()))
+            .merge(
+                axum::Router::new()
+                    .route("/raft/v1/vote", post(vote::<S>))
+                    .route("/raft/v1/prevote", post(prevote::<S>))
+                    .route("/raft/v1/transfer", post(transfer::<S>))
+                    .route("/raft/v1/read_index", post(read_index::<S>))
+                    .route("/raft/v1/local", post(local::<S>))
+                    .layer(DefaultBodyLimit::max(CONTROL_BODY_CAP)),
+            )
+            // A snapshot is streamed to disk (the `Body` extractor has no cap).
+            .merge(axum::Router::new().route("/raft/v1/snapshot", post(snapshot::<S>)))
+            .layer(axum::middleware::from_fn_with_state(state.clone(), guard::<S>))
+            .with_state(state);
         if let Err(e) = axum::serve(listener, router)
             .with_graceful_shutdown(shutdown)
             .await
