@@ -42,6 +42,7 @@ QUERY_ID = f"streams.e2e.{int(time.time() * 1000)}"
 
 NUM_PARTITIONS = 50
 MESSAGES_PER_PARTITION = 200
+TOTAL_MESSAGES = NUM_PARTITIONS * MESSAGES_PER_PARTITION
 # Use a short window so the test exercises window-close within a sensible
 # total runtime (~15s). The original JS variant used 60s + a long-running
 # producer; reduced here for CI-friendly turnaround while preserving the

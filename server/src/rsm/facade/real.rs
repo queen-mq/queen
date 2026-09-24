@@ -870,6 +870,56 @@ impl RaftFacade {
         matches!(res, Ok(Ok(true)))
     }
 
+    /// [`resolve_ack_targets`] on the blocking pool (I15). A cluster node
+    /// resolves from its own store, which may not hold yet a partition that
+    /// another node created and already answered for (a push through one node,
+    /// a pop through a second, the ack through this one): the item failed for
+    /// good as "no partition" (measured: 1 ack in 80 across two followers). On
+    /// such a miss the node takes the read barrier and resolves once more; a
+    /// hit costs nothing extra.
+    async fn resolve_acks(
+        &self,
+        ctx: &ReqCtx,
+        group: &str,
+        flats: Vec<AckFlat>,
+    ) -> Result<AckResolution, RsmError> {
+        let (first, flats) = self.resolve_acks_once(ctx, group, flats).await?;
+        let missed = matches!(&first, Ok((_, _, bad))
+            if bad.iter().any(|(_, why)| why.starts_with(NO_PARTITION)));
+        if self.offload && missed && self.linearizable(ctx).await.is_ok() {
+            return Ok(self.resolve_acks_once(ctx, group, flats).await?.0);
+        }
+        Ok(first)
+    }
+
+    async fn resolve_acks_once(
+        &self,
+        ctx: &ReqCtx,
+        group: &str,
+        flats: Vec<AckFlat>,
+    ) -> Result<(AckResolution, Vec<AckFlat>), RsmError> {
+        let store = self.store.clone();
+        let reader = self.reader.clone();
+        let qlog_reader = self.qlog_reader.clone();
+        let encryption = self.encryption.clone();
+        let tenant = ctx.tenant.clone();
+        let group = group.to_string();
+        tokio::task::spawn_blocking(move || {
+            let resolved = resolve_ack_targets(
+                &store,
+                &reader,
+                qlog_reader.as_ref(),
+                &encryption,
+                &tenant,
+                &group,
+                &flats,
+            );
+            (resolved, flats)
+        })
+        .await
+        .map_err(|e| RsmError::Internal(format!("ack resolve task: {e}")))
+    }
+
     /// Every dead letter this node has filed, decoded off the committed store.
     /// Test-only: the facade exposes no DLQ read endpoint in phase 1 (§9.6), so
     /// the ack-path DLQ tests read the rows directly here.
@@ -898,6 +948,12 @@ impl RaftFacade {
 /// How much earlier than its caller's deadline a follower's forwarded pop stops
 /// claiming (on top of the planner's own reply margin): the leader's answer
 /// still has to cross back, apply on this node, and be rendered.
+///
+/// Capped at a quarter of the time the pop has left. Whole, it swallowed short
+/// long-polls: with the planner's 50 ms a follower pop with `timeout=300` never
+/// claimed at all (the Rust streams runner polls every 300 ms: 4 of 39 tests
+/// passed against a follower, 39 against the leader). A claim this node then
+/// fails to apply in time is handed back (`release_unanswered`).
 const FOLLOWER_POP_MARGIN: Duration = Duration::from_millis(250);
 
 /// A pop's rendered answer, with the autopilot's choice echoed when it made
@@ -1320,24 +1376,7 @@ impl RaftFacade {
                     f.worker = h.clone();
                 }
             }
-            let store = self.store.clone();
-            let reader = self.reader.clone();
-            let qlog_reader = self.qlog_reader.clone();
-            let encryption = self.encryption.clone();
-            let tenant = ctx.tenant.clone();
-            let resolved = tokio::task::spawn_blocking(move || {
-                resolve_ack_targets(
-                    &store,
-                    &reader,
-                    qlog_reader.as_ref(),
-                    &encryption,
-                    &tenant,
-                    &group,
-                    flats,
-                )
-            })
-            .await
-            .map_err(|e| RsmError::Internal(format!("txn ack resolve: {e}")))?;
+            let resolved = self.resolve_acks(&ctx, &group, flats).await?;
             let (t, _per_item, bad) = resolved.map_err(RsmError::Internal)?;
             if let Some((_, why)) = bad.first() {
                 return Ok(fail(
@@ -2269,16 +2308,19 @@ impl RaftFacade {
             // P1.2: the planner refuses to claim once nobody can receive the answer.
             // A follower serving its own client also has to apply the claim and
             // render it after the leader answers, so it asks the leader to stop
-            // claiming a little earlier (`FOLLOWER_POP_MARGIN`).
-            let mut deadline_us = wall_micros()
-                .saturating_add(ctx.deadline.remaining().as_micros().min(i64::MAX as u128) as i64);
+            // claiming a little earlier (`FOLLOWER_POP_MARGIN`, at most a quarter
+            // of what is left).
+            let remaining = ctx.deadline.remaining();
+            let mut deadline_us =
+                wall_micros().saturating_add(remaining.as_micros().min(i64::MAX as u128) as i64);
             if self.offload
                 && !matches!(
                     self.repl.role(),
                     crate::rsm::replicator::Role::Leader { .. }
                 )
             {
-                deadline_us = deadline_us.saturating_sub(FOLLOWER_POP_MARGIN.as_micros() as i64);
+                let margin = FOLLOWER_POP_MARGIN.min(remaining / 4);
+                deadline_us = deadline_us.saturating_sub(margin.as_micros() as i64);
             }
             let (attempt_budget, attempt_parts) = if auto {
                 let ready = if !options.auto_parts {
@@ -2351,12 +2393,29 @@ impl RaftFacade {
             // same empty handling below (long-poll park or empty render); a push
             // that lands meanwhile re-arms the ring and wakes the park, so no
             // claim is stranded (§9.5).
+            //
+            // The check reads THIS node's state, which in a cluster may not yet
+            // hold an ack or a push another node already answered. A long-poll
+            // is woken when that entry applies here. A no-wait pop answers
+            // once: before it answers empty it takes the read barrier and looks
+            // again, or it answers a false empty (measured: pop here, ack on
+            // another node, pop here again — 3 in 40 empty). A pop that finds
+            // work pays nothing extra. Sending no-wait pops to the planner
+            // instead is slower where it matters: the Rust
+            // `concurrent_consumers_never_deliver_the_same_message_twice` got
+            // 144-175 of its 200 messages through in its 6 s with the fast
+            // path off.
             let claims = if self.pop_fastpath_empty
                 && !woke
                 && matches!(command, Command::PopWildcard(_))
                 && self
                     .wildcard_would_be_empty(&ctx.tenant, &queue, &group)
                     .await
+                && (wait
+                    || (self.linearizable(ctx).await.is_ok()
+                        && self
+                            .wildcard_would_be_empty(&ctx.tenant, &queue, &group)
+                            .await))
             {
                 Vec::new()
             } else {
@@ -2942,25 +3001,7 @@ impl RaftFacade {
 
         // Group by (pid, worker) into AckTargets. Read each pid's (tenant,
         // queue) once. A pid with no row is a per-item error.
-        let store = self.store.clone();
-        let reader = self.reader.clone();
-        let qlog_reader = self.qlog_reader.clone();
-        let encryption = self.encryption.clone();
-        let tenant = ctx.tenant.clone();
-        let group = req.group.clone();
-        let resolved = tokio::task::spawn_blocking(move || {
-            resolve_ack_targets(
-                &store,
-                &reader,
-                qlog_reader.as_ref(),
-                &encryption,
-                &tenant,
-                &group,
-                flats,
-            )
-        })
-        .await
-        .map_err(|e| RsmError::Internal(format!("ack resolve task: {e}")))?;
+        let resolved = self.resolve_acks(&ctx, &req.group, flats).await?;
         let (targets, per_item, more_bad) = resolved.map_err(RsmError::Internal)?;
         bad.extend(more_bad);
 
@@ -3052,6 +3093,13 @@ struct AckSnapshotWork {
     txn: String,
 }
 
+/// What [`resolve_ack_targets`] answers: the targets, the per-item map and the
+/// items that failed to resolve (index, reason); `Err` is a store failure.
+type AckResolution = Result<(Vec<AckTarget>, Vec<AckPerItem>, Vec<(usize, String)>), String>;
+
+/// The reason an ack item names a partition this node's store does not hold.
+const NO_PARTITION: &str = "no partition";
+
 /// Group resolved acks by (pid, worker), reading each pid's queue once.
 fn resolve_ack_targets(
     store: &HeedStore,
@@ -3060,8 +3108,8 @@ fn resolve_ack_targets(
     encryption: &crate::encryption::Encryption,
     tenant: &str,
     group: &str,
-    flats: Vec<AckFlat>,
-) -> Result<(Vec<AckTarget>, Vec<AckPerItem>, Vec<(usize, String)>), String> {
+    flats: &[AckFlat],
+) -> AckResolution {
     let mut targets: Vec<AckTarget> = Vec::new();
     let mut per_item: Vec<AckPerItem> = Vec::new();
     let mut bad: Vec<(usize, String)> = Vec::new();
@@ -3087,7 +3135,7 @@ fn resolve_ack_targets(
                     parts.insert(f.pid, row);
                 }
                 let Some(part) = parts.get(&f.pid).and_then(|p| p.as_ref()) else {
-                    bad.push((f.index, format!("no partition {}", f.pid)));
+                    bad.push((f.index, format!("{NO_PARTITION} {}", f.pid)));
                     continue;
                 };
                 // A partitionId is a small dense integer: never trust it as an
@@ -3482,12 +3530,14 @@ impl RaftFacade {
 
     /// Run one committed-state read on the blocking pool (I15), under the
     /// request deadline. Timer reads are LOCAL reads: the RAM keyspaces are
-    /// live, so a read after an answered schedule sees it (read-your-writes on
-    /// this node).
+    /// live, so a read after an answered schedule sees it. The read barrier
+    /// first makes that hold across a cluster too: a schedule another node
+    /// answered is applied here before the read.
     async fn timer_read<F>(&self, ctx: &ReqCtx, f: F) -> Result<TimerReadOut, RsmError>
     where
         F: FnOnce(&HeedStore) -> Result<String, RsmError> + Send + 'static,
     {
+        self.linearizable(ctx).await?;
         let store = self.store.clone();
         let task = tokio::task::spawn_blocking(move || f(&store));
         match tokio::time::timeout(ctx.deadline.remaining(), task).await {

@@ -38,16 +38,19 @@ pub fn now_epoch_ms() -> i64 {
         .unwrap_or(0)
 }
 
-// Parse the SPs' UTC timestamp text ('YYYY-MM-DD"T"HH24:MI:SS[.fraction]"Z"')
-// to epoch milliseconds without a date-time dependency. Used to compute
-// per-message pop lag (age at delivery) from PopSeg.created_at. Returns None
-// on any shape mismatch — lag is best-effort instrumentation, never an error.
+// Parse an ISO 8601 / RFC 3339 timestamp ('YYYY-MM-DD"T"HH:MM:SS[.fraction]
+// [Z | ±HH:MM | ±HHMM | ±HH]', 't' or a space accepted for the 'T') to epoch
+// milliseconds, UTC, without a date-time dependency. No designator means UTC.
+// The SPs' text always ends in "Z"; a client's timestamp (subscriptionFrom, a
+// seek, `since`) may carry its local offset, which is applied: 10:25:00+02:00
+// is 08:25:00Z (ignoring it put a Go client's `time.Now()` two hours in the
+// future). The fraction is truncated to ms. Returns None on any shape mismatch.
 pub fn parse_iso_ms(s: &str) -> Option<i64> {
     let b = s.as_bytes();
     if b.len() < 19
         || b[4] != b'-'
         || b[7] != b'-'
-        || b[10] != b'T'
+        || !matches!(b[10], b'T' | b't' | b' ')
         || b[13] != b':'
         || b[16] != b':'
     {
@@ -56,16 +59,45 @@ pub fn parse_iso_ms(s: &str) -> Option<i64> {
     let num = |r: std::ops::Range<usize>| -> Option<i64> { s.get(r)?.parse::<i64>().ok() };
     let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
     let (hh, mm, ss) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    let mut rest = &b[19..];
     // Fractional seconds: any number of digits after '.', truncated to ms.
     let mut frac_ms: i64 = 0;
-    if b.len() > 19 && b[19] == b'.' {
-        let digits: String = s[20..].chars().take_while(|c| c.is_ascii_digit()).collect();
-        if !digits.is_empty() {
-            let v = digits.parse::<i64>().ok()?;
-            let scale = 10_i64.pow(digits.len() as u32);
-            frac_ms = v * 1000 / scale;
+    if let Some((b'.', tail)) = rest.split_first() {
+        let n = tail.iter().take_while(|c| c.is_ascii_digit()).count();
+        for i in 0..3 {
+            frac_ms = frac_ms * 10 + tail[..n].get(i).map_or(0, |c| i64::from(c - b'0'));
         }
+        rest = &tail[n..];
     }
+    // The designator: nothing or "Z" is UTC; an offset is taken back off.
+    let two = |p: &[u8]| -> Option<i64> {
+        match p {
+            [h, l] if h.is_ascii_digit() && l.is_ascii_digit() => {
+                Some(i64::from(h - b'0') * 10 + i64::from(l - b'0'))
+            }
+            _ => None,
+        }
+    };
+    let offset_min = match rest {
+        [] | [b'Z' | b'z'] => 0,
+        [sign @ (b'+' | b'-'), off @ ..] => {
+            let (oh, om) = match off {
+                [_, _] => (two(off)?, 0),
+                [_, _, _, _] => (two(&off[..2])?, two(&off[2..])?),
+                [_, _, b':', _, _] => (two(&off[..2])?, two(&off[3..])?),
+                _ => return None,
+            };
+            if oh > 23 || om > 59 {
+                return None;
+            }
+            if *sign == b'-' {
+                -(oh * 60 + om)
+            } else {
+                oh * 60 + om
+            }
+        }
+        _ => return None,
+    };
     // days_from_civil (Howard Hinnant): days since 1970-01-01 for a proleptic
     // Gregorian date.
     let y_adj = if m <= 2 { y - 1 } else { y };
@@ -75,7 +107,8 @@ pub fn parse_iso_ms(s: &str) -> Option<i64> {
     let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
     let days = era * 146097 + doe - 719468;
-    Some(((days * 24 + hh) * 60 + mm) * 60_000 + ss * 1000 + frac_ms)
+    let local_ms = ((days * 24 + hh) * 60 + mm) * 60_000 + ss * 1000 + frac_ms;
+    Some(local_ms - offset_min * 60_000)
 }
 
 // Log-engine txn fingerprint (doc 18 §3): xxh3_128 of the txn id's utf8 bytes,
@@ -196,6 +229,72 @@ mod tests {
                 0x5f, 0x9c
             ]
         );
+    }
+
+    // Reference values from Python's datetime.fromisoformat.
+    #[test]
+    fn parse_iso_ms_applies_the_offset() {
+        let utc = Some(1_790_238_300_000);
+        assert_eq!(parse_iso_ms("2026-09-24T08:25:00Z"), utc);
+        assert_eq!(parse_iso_ms("2026-09-24T08:25:00z"), utc);
+        assert_eq!(
+            parse_iso_ms("2026-09-24T08:25:00"),
+            utc,
+            "no designator is UTC"
+        );
+        assert_eq!(parse_iso_ms("2026-09-24T08:25:00+00:00"), utc);
+        assert_eq!(parse_iso_ms("2026-09-24T08:25:00-00:00"), utc);
+        // What Go's time.Now().Format(time.RFC3339) sends from Rome in summer.
+        assert_eq!(parse_iso_ms("2026-09-24T10:25:00+02:00"), utc);
+        assert_eq!(parse_iso_ms("2026-09-24T10:25:00+0200"), utc);
+        assert_eq!(parse_iso_ms("2026-09-24T10:25:00+02"), utc);
+        assert_eq!(parse_iso_ms("2026-09-24T03:55:00-04:30"), utc);
+        assert_eq!(parse_iso_ms("2026-09-24t10:25:00+02:00"), utc);
+        assert_eq!(parse_iso_ms("2026-09-24 10:25:00+02:00"), utc);
+        // The offset crosses the day and the year.
+        assert_eq!(
+            parse_iso_ms("2026-01-01T01:00:00+02:00"),
+            Some(1_767_222_000_000)
+        );
+        assert_eq!(parse_iso_ms("1970-01-01T00:00:00Z"), Some(0));
+    }
+
+    #[test]
+    fn parse_iso_ms_truncates_the_fraction_to_ms() {
+        assert_eq!(
+            parse_iso_ms("2026-09-24T10:25:00.123456+02:00"),
+            Some(1_790_238_300_123)
+        );
+        assert_eq!(
+            parse_iso_ms("2026-09-24T08:25:00.5Z"),
+            Some(1_790_238_300_500)
+        );
+        assert_eq!(
+            parse_iso_ms("2026-09-24T08:25:00.Z"),
+            Some(1_790_238_300_000)
+        );
+        // More digits than an i64 holds: truncated, not an overflow.
+        assert_eq!(
+            parse_iso_ms("2026-09-24T08:25:00.12345678901234567890123Z"),
+            Some(1_790_238_300_123)
+        );
+    }
+
+    #[test]
+    fn parse_iso_ms_refuses_what_it_cannot_place() {
+        for s in [
+            "2026-09-24",
+            "2026-09-24X08:25:00Z",
+            "2026-09-24T08:25:00+2:00",
+            "2026-09-24T08:25:00+02:0",
+            "2026-09-24T08:25:00+24:00",
+            "2026-09-24T08:25:00+02:60",
+            "2026-09-24T08:25:00+02:00:00",
+            "2026-09-24T08:25:00Zjunk",
+            "2026-09-24T08:25:00 UTC",
+        ] {
+            assert_eq!(parse_iso_ms(s), None, "{s}");
+        }
     }
 
     #[test]

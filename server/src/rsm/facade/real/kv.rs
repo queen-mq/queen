@@ -90,6 +90,11 @@ impl RaftFacade {
             }
             o.results
         } else {
+            // A call with a write reads after its own entry applied here, which
+            // covers everything committed before it. A read-only call has no
+            // entry: wait for the cluster's read index instead, or it can miss
+            // a write another node already answered.
+            self.linearizable(&ctx).await.map_err(KvFailure::Rsm)?;
             vec![KvOpOutcome::Deferred; ops.len()]
         };
 
@@ -116,6 +121,7 @@ impl RaftFacade {
             .map(|l| l.clamp(1, kvp::PREFIX_CAP as i64) as usize)
             .unwrap_or(kvp::PREFIX_DEFAULT);
         let after = req.after.filter(|a| !a.is_empty());
+        self.linearizable(&ctx).await.map_err(KvFailure::Rsm)?;
         self.kv_read(&ctx, move |r, tenant, now| {
             let page = kvp::page_of(
                 r,
@@ -143,6 +149,7 @@ impl RaftFacade {
 
     /// `GET /api/v1/resources/kv/namespaces` (`kv_namespaces_v1`).
     pub(super) async fn kv_namespaces_impl(&self, ctx: ReqCtx) -> Result<String, KvFailure> {
+        self.linearizable(&ctx).await.map_err(KvFailure::Rsm)?;
         self.kv_read(&ctx, |r, tenant, _now| {
             Ok(kvp::namespaces_of(r, tenant)?.to_string())
         })
