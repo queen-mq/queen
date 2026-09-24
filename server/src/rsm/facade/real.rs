@@ -2233,12 +2233,29 @@ impl RaftFacade {
             // same empty handling below (long-poll park or empty render); a push
             // that lands meanwhile re-arms the ring and wakes the park, so no
             // claim is stranded (§9.5).
+            //
+            // The check reads THIS node's state, which in a cluster may not yet
+            // hold an ack or a push another node already answered. A long-poll
+            // is woken when that entry applies here. A no-wait pop answers
+            // once: before it answers empty it takes the read barrier and looks
+            // again, or it answers a false empty (measured: pop here, ack on
+            // another node, pop here again — 3 in 40 empty). A pop that finds
+            // work pays nothing extra. Sending no-wait pops to the planner
+            // instead is slower where it matters: the Rust
+            // `concurrent_consumers_never_deliver_the_same_message_twice` got
+            // 144-175 of its 200 messages through in its 6 s with the fast
+            // path off.
             let claims = if self.pop_fastpath_empty
                 && !woke
                 && matches!(command, Command::PopWildcard(_))
                 && self
                     .wildcard_would_be_empty(&ctx.tenant, &queue, &group)
                     .await
+                && (wait
+                    || (self.linearizable(ctx).await.is_ok()
+                        && self
+                            .wildcard_would_be_empty(&ctx.tenant, &queue, &group)
+                            .await))
             {
                 Vec::new()
             } else {
@@ -3293,12 +3310,14 @@ impl RaftFacade {
 
     /// Run one committed-state read on the blocking pool (I15), under the
     /// request deadline. Timer reads are LOCAL reads: the RAM keyspaces are
-    /// live, so a read after an answered schedule sees it (read-your-writes on
-    /// this node).
+    /// live, so a read after an answered schedule sees it. The read barrier
+    /// first makes that hold across a cluster too: a schedule another node
+    /// answered is applied here before the read.
     async fn timer_read<F>(&self, ctx: &ReqCtx, f: F) -> Result<TimerReadOut, RsmError>
     where
         F: FnOnce(&HeedStore) -> Result<String, RsmError> + Send + 'static,
     {
+        self.linearizable(ctx).await?;
         let store = self.store.clone();
         let task = tokio::task::spawn_blocking(move || f(&store));
         match tokio::time::timeout(ctx.deadline.remaining(), task).await {

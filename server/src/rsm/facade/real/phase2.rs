@@ -145,7 +145,12 @@ impl RaftFacade {
         }
     }
 
-    async fn linearizable(&self, ctx: &ReqCtx) -> Result<(), RsmError> {
+    /// Wait until this node has applied everything the cluster had committed
+    /// when the read began (a no-op on a single node). In a cluster every node
+    /// serves its own clients and a write waits only for the node that took it,
+    /// so a read from local state without this can miss a write another node
+    /// already answered.
+    pub(super) async fn linearizable(&self, ctx: &ReqCtx) -> Result<(), RsmError> {
         self.repl
             .read_barrier(ctx.deadline.instant())
             .await
@@ -606,6 +611,7 @@ impl RaftFacade {
         queue: &str,
         query: Option<&str>,
     ) -> Result<ApiOut, RsmError> {
+        self.linearizable(&ctx).await?;
         let group = query_value(query, "group");
         let store = self.store.clone();
         let tenant = ctx.tenant.clone();
