@@ -360,12 +360,25 @@ pub fn start_background(st: &St) {
 /// operator APIs, the console SPA, and — as the fallback — the data-plane
 /// gateway in front of the broker plus the auth-gated dashboard.
 pub fn router(st: St) -> Router {
-    Router::new()
+    router_with(st, None)
+}
+
+/// [`router`] with the W7 edge (PLAN_SINGLE_BINARY.md): the web routers
+/// (OAuth, console, operator) get the cookie-plane rules — web rate limit,
+/// CORS, CSRF, small body cap — and the whole surface the data-plane ones —
+/// per-IP limit, head limits, timeouts, security headers. The single binary
+/// always passes one; the standalone proxy keeps its historical surface.
+pub fn router_with(st: St, edge: Option<&crate::harden::Edge>) -> Router {
+    let web = |r: Router<St>| match edge {
+        Some(e) => e.web_plane(r),
+        None => r,
+    };
+    let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/.well-known/jwks.json", get(jwks))
-        .nest("/auth", oauth::router())
-        .nest("/api/console", console::router())
-        .nest("/api/operator", operator::router())
+        .nest("/auth", web(oauth::router()))
+        .nest("/api/console", web(console::router()))
+        .nest("/api/operator", web(operator::router()))
         .nest("/api/cp", crate::cp::router())
         // three routes, not a bare wildcard: /console/*path alone does not
         // match "/console/" (empty remainder) under axum 0.7's matchit
@@ -378,7 +391,11 @@ pub fn router(st: St) -> Router {
         // the BROKER's own embedded webapp answer — unauthenticated and
         // tenant-unaware. See webapp.rs.
         .fallback(webapp::route_fallback)
-        .with_state(st)
+        .with_state(st);
+    match edge {
+        Some(e) => e.data_plane(app),
+        None => app,
+    }
 }
 
 /// What the broker hands the proxy when it runs it in-process
@@ -399,7 +416,7 @@ pub struct Embedded {
 /// serves the returned router (it replaces the broker's own router on the
 /// public port). Configured from the same `QUEEN_PROXY_*` environment as the
 /// standalone proxy; `PXDB_*` is ignored.
-pub fn build_embedded(e: Embedded) -> (St, Router) {
+pub fn build_embedded(e: Embedded) -> Result<(St, Router), String> {
     let cfg = config::Config::load();
     let store = crate::store::Store::Kv(e.kv);
     let upstream = crate::upstream::Upstream::InProcess(e.broker);
@@ -458,9 +475,13 @@ pub fn build_embedded(e: Embedded) -> (St, Router) {
             }
         });
     }
-    let app = router(st.clone());
+    // W7: the single binary is internet-facing; its whole surface goes
+    // through the edge (harden.rs). A bad edge setting refuses the boot.
+    let edge = crate::harden::Edge::from_env().map_err(|e| format!("edge settings: {e}"))?;
+    tracing::info!(target: "proxy", "{}", edge.describe());
+    let app = router_with(st.clone(), Some(&edge));
     tracing::info!(target: "proxy", "proxy embedded in the broker (state: replicated KV)");
-    (st, app)
+    Ok((st, app))
 }
 
 /// First boot of a single-binary node, idempotent and safe on every node at

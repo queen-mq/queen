@@ -1765,7 +1765,10 @@ async fn run_raft(cfg: config::Config) {
             auth::Authenticator::new(inner_auth),
             true,
         );
-        let (proxy, public) = proxy_embed::public_router(state.rsm.clone(), inner);
+        let (proxy, public) = match proxy_embed::public_router(state.rsm.clone(), inner) {
+            Ok(v) => v,
+            Err(e) => obs::fatal(format!("single binary: {e}")),
+        };
         embedded_proxy = Some(proxy);
         tracing::info!(target: "boot", "single binary: proxy in-process on the public port");
         public
@@ -1789,7 +1792,12 @@ async fn run_raft(cfg: config::Config) {
          un-ported routes answer 503 raft_phase1_unsupported until WP-1.7c)"
     );
 
-    if let Err(e) = axum::serve(listener, app)
+    if embedded_proxy.is_some() {
+        // W7: TLS, connection limits and the peer address for the edge.
+        if let Err(e) = proxy_embed::serve(listener, app).await {
+            obs::fatal(format!("single binary: {e}"));
+        }
+    } else if let Err(e) = axum::serve(listener, app)
         .tcp_nodelay(true)
         .with_graceful_shutdown(obs::shutdown_signal())
         .await

@@ -128,19 +128,43 @@ async fn login_page(State(st): State<St>, Query(q): Query<StartQuery>) -> Respon
 async fn login_post(
     State(st): State<St>,
     headers: HeaderMap,
+    peer: Option<axum::Extension<crate::harden::ClientIp>>,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    let ip = client_ip(&headers);
-    if let Err(retry) = throttle(&ip) {
-        return errors::err_429(errors::CODE_RATE_LIMITED, retry, "too many login attempts");
-    }
     let next = safe_next(form.next.as_deref());
+    // Behind the W7 edge (the single binary) the client IP is the resolved
+    // peer (XFF only from trusted proxies) and the guard backs off per IP AND
+    // per account; the standalone keeps its per-IP throttle.
+    let Some(axum::Extension(crate::harden::ClientIp(ip))) = peer else {
+        let ip = client_ip(&headers);
+        if let Err(retry) = throttle(&ip) {
+            return errors::err_429(errors::CODE_RATE_LIMITED, retry, "too many login attempts");
+        }
+        return match verify_local(&st, &form.email, &form.password).await {
+            Some(user) => establish_session(&st, &headers, user, &next).await,
+            None => html(
+                StatusCode::UNAUTHORIZED,
+                render_login(&st, &next, Some("Invalid email or password.")),
+            ),
+        };
+    };
+    let guard = crate::harden::LoginGuard::global();
+    let account = form.email.trim().to_ascii_lowercase();
+    if let Err(retry) = guard.check(ip, &account) {
+        return errors::err_429(errors::CODE_RATE_LIMITED, retry.secs(), "too many login attempts");
+    }
     match verify_local(&st, &form.email, &form.password).await {
-        Some(user) => establish_session(&st, &headers, user, &next).await,
-        None => html(
-            StatusCode::UNAUTHORIZED,
-            render_login(&st, &next, Some("Invalid email or password.")),
-        ),
+        Some(user) => {
+            guard.record_success(ip, &account);
+            establish_session(&st, &headers, user, &next).await
+        }
+        None => {
+            guard.record_failure(ip, &account);
+            html(
+                StatusCode::UNAUTHORIZED,
+                render_login(&st, &next, Some("Invalid email or password.")),
+            )
+        }
     }
 }
 

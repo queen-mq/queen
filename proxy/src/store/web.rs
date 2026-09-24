@@ -41,7 +41,7 @@ use uuid::Uuid;
 
 use super::kv::{self, Doc, Expect, KvBackend, KvError, Ttl};
 use super::schema::{
-    self, ns, ApiKeyDoc, CellDoc, ClusterDoc, IdentityDoc, OperationDoc, OutboxDoc, PlanDoc, QueueDoc, RevokedDoc,
+    self, ns, ApiKeyDoc, CellDoc, ClusterDoc, IdentityDoc, OperationDoc, OutboxDoc, PlanDoc, QueueDoc,
     RoleDoc, TenantDoc, UsageDoc, UserDoc,
 };
 use super::Store;
@@ -4056,8 +4056,8 @@ mod tests {
         let (tenant, user) = (uid(&a, "tenant_id"), uid(&a, "user_id"));
         let exp = wall_us() / 1_000_000 + 3_600;
         revoke_session(&st, " jti-1 ", exp, user).await.unwrap();
-        let d = kv::get::<RevokedDoc>(m.as_ref(), ns::REVOKED, "#jti-1").await.unwrap().unwrap().value;
-        assert_eq!(d, RevokedDoc { jti: "jti-1".into(), expires_at_us: exp * 1_000_000 });
+        let d = kv::get::<crate::store::schema::RevokedDoc>(m.as_ref(), ns::REVOKED, "#jti-1").await.unwrap().unwrap().value;
+        assert_eq!(d, crate::store::schema::RevokedDoc { jti: "jti-1".into(), expires_at_us: exp * 1_000_000 });
         revoke_session(&st, "jti-1", exp, user).await.unwrap(); // a double logout is fine
         assert_eq!(ops_of(&st, tenant).await[..2], ["session_revoked", "session_revoked"]);
 

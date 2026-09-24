@@ -84,7 +84,10 @@ impl KvBackend for RsmKv {
 
 /// The public router of a single-binary node: the proxy in front of
 /// `broker` (the inner broker router: tenancy on, broker JWT off, no socket).
-pub fn public_router(rsm: Arc<dyn Rsm>, broker: Router) -> (queen_proxy::state::St, Router) {
+pub fn public_router(
+    rsm: Arc<dyn Rsm>,
+    broker: Router,
+) -> Result<(queen_proxy::state::St, Router), String> {
     let (st, proxy) = queen_proxy::app::build_embedded(queen_proxy::app::Embedded {
         kv: Arc::new(RsmKv::new(rsm)),
         broker: broker.clone(),
@@ -94,7 +97,7 @@ pub fn public_router(rsm: Arc<dyn Rsm>, broker: Router) -> (queen_proxy::state::
                 .and_then(|v| v.trim().parse().ok())
                 .unwrap_or(1),
         ),
-    });
+    })?;
     let inner = queen_proxy::upstream::Upstream::InProcess(broker);
     let passthrough = move |req: Request<Body>| {
         let inner = inner.clone();
@@ -110,7 +113,18 @@ pub fn public_router(rsm: Arc<dyn Rsm>, broker: Router) -> (queen_proxy::state::
         .route("/metrics", any(passthrough.clone()))
         .route("/metrics/prometheus", any(passthrough))
         .merge(proxy);
-    (st, router)
+    Ok((st, router))
+}
+
+/// Serve the single binary's public router: TLS when `QUEEN_TLS_CERT` /
+/// `QUEEN_TLS_KEY` are set, the edge's connection limits
+/// (`QUEEN_EDGE_*`), the peer address every per-IP rule keys on.
+pub async fn serve(listener: tokio::net::TcpListener, app: Router) -> Result<(), String> {
+    let tls = queen_proxy::harden::tls_config_from_env("QUEEN")?;
+    let opts = queen_proxy::harden::ServeOptions::from_env()?;
+    tracing::info!(target: "boot", tls = tls.is_some(), "public listener (hardened)");
+    queen_proxy::harden::serve(listener, app, tls, opts, crate::obs::shutdown_signal()).await;
+    Ok(())
 }
 
 /// A 503 for a public request while the embedded proxy is not ready.
