@@ -22,7 +22,8 @@
 //!
 //! Nothing on the request path waits for the database. A miss is decided in
 //! memory and the queue row that records it is coalesced per (cluster, queue)
-//! for `spawn_persister`, which writes one UNNEST upsert per tick. The 2026-08-22
+//! for `spawn_persister`, which writes one UNNEST upsert per tick (or, inside
+//! the broker, one KV batch per ~120 rows: `store::data`). The 2026-08-22
 //! soak ran the old shape -- one synchronous upsert per new (queue, partition),
 //! awaited before the push was forwarded -- to 743 149 writes during a
 //! partition-creation ramp, on the Postgres the data path was saturating.
@@ -34,6 +35,9 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::state::ClusterCtx;
+use crate::store::data::{self, ReconcileTarget};
+use crate::store::Store;
+use crate::upstream::Upstream;
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
 /// Cadence of the coalesced queue-row write (QUEEN_PROXY_REGISTRY_PERSIST_MS).
@@ -78,16 +82,6 @@ enum Inventory {
     Unreachable,
 }
 
-/// queen_proxy.queues.partitions_count is INTEGER (001_init.sql), while
-/// partition counts are carried as i64 throughout this module. Binding the i64
-/// straight into the statement makes tokio-postgres reject EVERY upsert with
-/// "error serializing parameter 2", which is how the table stayed permanently
-/// empty — silently, since both write paths only warn. Narrow at the bind sites
-/// and keep the in-process arithmetic in i64.
-fn clamp_partitions(n: i64) -> i32 {
-    n.clamp(0, i32::MAX as i64) as i32
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum Admit {
     Allowed,
@@ -116,7 +110,11 @@ struct ClusterRegistry {
 }
 
 pub struct Registry {
-    db: Option<deadpool_postgres::Pool>,
+    /// Where the queue rows live: pxdb, the broker's KV, or nowhere.
+    store: Store,
+    /// Inside the broker: the in-process router the reconciler asks for the
+    /// queue inventory instead of opening a socket to `cells.base_url`.
+    inventory: Option<Upstream>,
     known: Arc<RwLock<HashMap<Uuid, ClusterRegistry>>>,
     /// Clusters whose `known` entry has been bootstrapped from the DB at
     /// least once -- separate from `known.contains_key` because an entry
@@ -137,15 +135,32 @@ pub struct Registry {
 }
 
 impl Registry {
+    /// The standalone proxy's constructor: pxdb, or none (dev-static).
     pub fn new(db: Option<deadpool_postgres::Pool>) -> Registry {
+        Registry::with_store(db.map(Store::Pg).unwrap_or(Store::None))
+    }
+
+    /// Any store: the single binary hands the broker's KV here.
+    pub fn with_store(store: Store) -> Registry {
         Registry {
-            db,
+            store,
+            inventory: None,
             known: Arc::new(RwLock::new(HashMap::new())),
             loaded: Arc::new(RwLock::new(HashSet::new())),
             over_storage: Arc::new(RwLock::new(HashSet::new())),
             retained: Arc::new(RwLock::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Ask `upstream` (when it is in-process) for the queue inventory rather
+    /// than the cell's `base_url` over a socket. Without it the reconciler
+    /// fetches over plain HTTP, as the standalone proxy always has.
+    pub fn with_inventory(mut self, upstream: Upstream) -> Registry {
+        if upstream.in_process() {
+            self.inventory = Some(upstream);
+        }
+        self
     }
 
     /// Called with every (queue, partition) named in a produce/configure request.
@@ -216,28 +231,16 @@ impl Registry {
             return;
         }
         let mut cr = ClusterRegistry::default();
-        if let Some(pool) = &self.db {
-            match pool.get().await {
-                Ok(client) => {
-                    let cluster_id_str = cluster_id.to_string();
-                    let stmt = "SELECT name, partitions_count FROM queen_proxy.queues \
-                                WHERE cluster_id = $1::text::uuid AND deleted_at IS NULL";
-                    match client.query(stmt, &[&cluster_id_str]).await {
-                        Ok(rows) => {
-                            for r in rows {
-                                let name: String = r.get(0);
-                                let count: i32 = r.get(1);
-                                cr.queue_names.insert(name.clone());
-                                cr.db_partition_floor.insert(name, count as i64);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(cluster = %cluster_id, error = %e, "registry: lazy-load query failed");
-                        }
+        if self.store.is_some() {
+            match data::live_queues(&self.store, cluster_id).await {
+                Ok(rows) => {
+                    for (name, count) in rows {
+                        cr.queue_names.insert(name.clone());
+                        cr.db_partition_floor.insert(name, count);
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(cluster = %cluster_id, error = %e, "registry: lazy-load pool.get failed");
+                    tracing::warn!(cluster = %cluster_id, error = %e, "registry: lazy-load failed");
                 }
             }
         }
@@ -253,7 +256,7 @@ impl Registry {
     /// one queue is one row in the next flush, not 5 000 upserts on the
     /// request path. No-op without a pxdb (dev-static).
     fn enqueue_persist(&self, cluster_id: Uuid, queue: &str, partitions_count: i64) {
-        if self.db.is_none() {
+        if !self.store.is_some() {
             return;
         }
         let mut pending = self.pending.lock().unwrap();
@@ -265,10 +268,11 @@ impl Registry {
     /// writes whatever `admit` coalesced since the last tick as ONE statement.
     /// Called from main.rs next to `spawn_reconciler`. No-op without a pxdb.
     pub fn spawn_persister(&self) {
-        let Some(pool) = self.db.clone() else {
+        if !self.store.is_some() {
             tracing::info!("registry persister: no pxdb configured, skipping (dev-static mode)");
             return;
-        };
+        }
+        let store = self.store.clone();
         let pending = self.pending.clone();
         tokio::spawn(async move {
             let interval = Duration::from_millis(
@@ -279,15 +283,15 @@ impl Registry {
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
-                flush_pending(&pool, &pending).await;
+                flush_pending(&store, &pending).await;
             }
         });
     }
 
     /// Shutdown counterpart of the periodic flush (main.rs bounds it).
     pub async fn drain(&self) {
-        if let Some(pool) = &self.db {
-            flush_pending(pool, &self.pending).await;
+        if self.store.is_some() {
+            flush_pending(&self.store, &self.pending).await;
         }
     }
 
@@ -341,10 +345,12 @@ impl Registry {
     }
 
     pub fn spawn_reconciler(&self) {
-        let Some(pool) = self.db.clone() else {
+        if !self.store.is_some() {
             tracing::info!("registry reconciler: no pxdb configured, skipping (dev-static mode)");
             return;
-        };
+        }
+        let store = self.store.clone();
+        let inventory = self.inventory.clone();
         let known = self.known.clone();
         let over_storage = self.over_storage.clone();
         let retained = self.retained.clone();
@@ -358,7 +364,7 @@ impl Registry {
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
-                reconcile_once(&pool, &known, &over_storage, &retained).await;
+                reconcile_once(&store, inventory.as_ref(), &known, &over_storage, &retained).await;
             }
         });
     }
@@ -387,17 +393,10 @@ fn invalidate_cluster(
 
 type Pending = Mutex<HashMap<(Uuid, String), i64>>;
 
-/// One multi-row upsert per flush. Arrays bind as text/int4 and cast in SQL
-/// (no uuid feature on tokio-postgres, like every other query in this crate);
-/// `GREATEST` keeps the row a floor that only the reconciler, which knows the
-/// broker's true count, ever lowers. Each (cluster, name) appears at most once
-/// per batch (it is the map key), which `ON CONFLICT DO UPDATE` requires.
-const PERSIST_SQL: &str = "INSERT INTO queen_proxy.queues(cluster_id, name, partitions_count) \
-    SELECT c::uuid, n, p FROM UNNEST($1::text[], $2::text[], $3::int4[]) AS t(c, n, p) \
-    ON CONFLICT (cluster_id, name) WHERE deleted_at IS NULL \
-    DO UPDATE SET partitions_count = GREATEST(queen_proxy.queues.partitions_count, EXCLUDED.partitions_count)";
-
-async fn flush_pending(pool: &deadpool_postgres::Pool, pending: &Pending) {
+/// One write per flush (`store::data::persist_queue_floors`: the UNNEST
+/// upsert with GREATEST, so the row is a floor that only the reconciler, which
+/// knows the broker's true count, ever lowers).
+async fn flush_pending(store: &Store, pending: &Pending) {
     let batch: HashMap<(Uuid, String), i64> = {
         let mut p = pending.lock().unwrap();
         if p.is_empty() {
@@ -405,23 +404,9 @@ async fn flush_pending(pool: &deadpool_postgres::Pool, pending: &Pending) {
         }
         std::mem::take(&mut *p)
     };
-    let mut ids = Vec::with_capacity(batch.len());
-    let mut names = Vec::with_capacity(batch.len());
-    let mut counts = Vec::with_capacity(batch.len());
-    for ((cluster_id, name), count) in &batch {
-        ids.push(cluster_id.to_string());
-        names.push(name.clone());
-        counts.push(clamp_partitions(*count));
-    }
-    let written = match pool.get().await {
-        Ok(client) => client
-            .execute(PERSIST_SQL, &[&ids, &names, &counts])
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string()),
-        Err(e) => Err(e.to_string()),
-    };
-    match written {
+    let rows: Vec<(Uuid, String, i64)> =
+        batch.iter().map(|((cluster_id, name), count)| (*cluster_id, name.clone(), *count)).collect();
+    match data::persist_queue_floors(store, &rows).await {
         Ok(()) => tracing::debug!(rows = batch.len(), "registry: queue rows persisted"),
         Err(e) => {
             tracing::warn!(rows = batch.len(), error = %e, "registry: queue persist failed; retrying next tick");
@@ -438,21 +423,17 @@ async fn flush_pending(pool: &deadpool_postgres::Pool, pending: &Pending) {
 
 // ------------------------------------------------------------- reconciler
 
-struct ReconcileTarget {
-    cluster_id: Uuid,
-    broker_tenant: String,
-    base_url: String,
-    cell_secret: Option<String>,
-    max_retained_bytes: Option<i64>,
-}
-
 async fn reconcile_once(
-    pool: &deadpool_postgres::Pool,
+    store: &Store,
+    inventory: Option<&Upstream>,
     known: &Arc<RwLock<HashMap<Uuid, ClusterRegistry>>>,
     over_storage: &Arc<RwLock<HashSet<Uuid>>>,
     retained: &Arc<RwLock<HashMap<Uuid, i64>>>,
 ) {
-    let targets = match load_targets(pool).await {
+    // Reconcile everything not being torn down -- push_blocked clusters
+    // especially still need this loop: it's the only thing that re-evaluates
+    // their byte count, so skipping them would make the block permanent.
+    let targets = match data::reconcile_targets(store).await {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!(error = %e, "registry reconciler: failed to list clusters, skipping cycle");
@@ -460,44 +441,13 @@ async fn reconcile_once(
         }
     };
     for target in targets {
-        reconcile_cluster(pool, known, over_storage, retained, &target).await;
+        reconcile_cluster(store, inventory, known, over_storage, retained, &target).await;
     }
-}
-
-async fn load_targets(pool: &deadpool_postgres::Pool) -> Result<Vec<ReconcileTarget>, String> {
-    let client = pool.get().await.map_err(|e| format!("pool.get: {e}"))?;
-    // Reconcile everything not being torn down -- push_blocked clusters
-    // especially still need this loop: it's the only thing that re-evaluates
-    // their byte count, so skipping them would make the block permanent.
-    let stmt = "SELECT c.id::text, c.broker_tenant_uuid::text, ce.base_url, ce.cell_secret, \
-                       p.max_retained_bytes, (c.limit_overrides)::text \
-                FROM queen_proxy.clusters c \
-                JOIN queen_proxy.cells  ce ON ce.id = c.cell_id \
-                JOIN queen_proxy.plans  p  ON p.id = c.plan_id \
-                WHERE c.status <> 'deleting'";
-    let rows = client.query(stmt, &[]).await.map_err(|e| format!("query: {e}"))?;
-
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let id_str: String = row.get(0);
-        let Ok(cluster_id) = Uuid::parse_str(&id_str) else {
-            tracing::warn!(id = %id_str, "registry reconciler: unparseable cluster id, skipping");
-            continue;
-        };
-        let broker_tenant: String = row.get(1);
-        let base_url: String = row.get(2);
-        let cell_secret: Option<String> = row.get(3);
-        let max_retained_plan: Option<i64> = row.get(4);
-        let overrides_json: String = row.get(5);
-        let overrides: serde_json::Value = serde_json::from_str(&overrides_json).unwrap_or(serde_json::Value::Null);
-        let max_retained_bytes = crate::cache::override_or(&overrides, "max_retained_bytes", max_retained_plan);
-        out.push(ReconcileTarget { cluster_id, broker_tenant, base_url, cell_secret, max_retained_bytes });
-    }
-    Ok(out)
 }
 
 async fn reconcile_cluster(
-    pool: &deadpool_postgres::Pool,
+    store: &Store,
+    inventory: Option<&Upstream>,
     known: &Arc<RwLock<HashMap<Uuid, ClusterRegistry>>>,
     over_storage: &Arc<RwLock<HashSet<Uuid>>>,
     retained: &Arc<RwLock<HashMap<Uuid, i64>>>,
@@ -516,7 +466,11 @@ async fn reconcile_cluster(
         headers.push(("Authorization", auth.as_str()));
     }
 
-    let body = match get_json_with_headers(&url, &headers, RECONCILE_HTTP_TIMEOUT).await {
+    let fetched = match inventory {
+        Some(upstream) => get_json_in_process(upstream, &url, &headers, RECONCILE_HTTP_TIMEOUT).await,
+        None => get_json_with_headers(&url, &headers, RECONCILE_HTTP_TIMEOUT).await,
+    };
+    let body = match fetched {
         Ok(v) => v,
         Err(e) => {
             // Resilience requirement: cell down -> log and skip, never
@@ -530,17 +484,13 @@ async fn reconcile_cluster(
         return;
     };
 
-    let client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(cluster = %target.cluster_id, error = %e, "registry reconciler: pool.get failed, skipping DB sync this cycle");
-            return;
-        }
-    };
-
     let mut seen_names: Vec<String> = Vec::with_capacity(queues.len());
     let mut total_bytes: i64 = 0;
     let mut bytes_found = false;
+    // (name, broker count) per listed queue, and the ones whose row must be
+    // rewritten.
+    let mut listed: Vec<(String, i64)> = Vec::with_capacity(queues.len());
+    let mut changed: Vec<(String, i64)> = Vec::new();
 
     for q in queues {
         let Some(name) = q.get("name").and_then(|n| n.as_str()) else { continue };
@@ -572,23 +522,40 @@ async fn reconcile_cluster(
                 .is_some_and(|&known_count| known_count == partitions)
         };
         if !unchanged {
-            let cluster_id_str = target.cluster_id.to_string();
-            let count = clamp_partitions(partitions);
-            let stmt = "INSERT INTO queen_proxy.queues(cluster_id, name, partitions_count) \
-                        VALUES ($1::text::uuid, $2, $3) \
-                        ON CONFLICT (cluster_id, name) WHERE deleted_at IS NULL \
-                        DO UPDATE SET partitions_count = EXCLUDED.partitions_count";
-            if let Err(e) = client.execute(stmt, &[&cluster_id_str, &name, &count]).await {
-                tracing::warn!(cluster = %target.cluster_id, queue = %name, error = %e, "registry reconciler: queue upsert failed");
-                // Not remembered as written: the next cycle must try again.
-                continue;
-            }
+            changed.push((name.clone(), partitions));
         }
+        listed.push((name, partitions));
+    }
 
+    let written = match data::reconcile_queue_counts(store, target.cluster_id, &changed).await {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!(cluster = %target.cluster_id, error = %e, "registry reconciler: pool.get failed, skipping DB sync this cycle");
+            return;
+        }
+    };
+    let failed: HashSet<&str> = changed
+        .iter()
+        .zip(written.iter())
+        .filter_map(|((name, _), res)| match res {
+            Ok(()) => None,
+            Err(e) => {
+                tracing::warn!(cluster = %target.cluster_id, queue = %name, error = %e, "registry reconciler: queue upsert failed");
+                Some(name.as_str())
+            }
+        })
+        .collect();
+    {
         let mut map = known.write().unwrap();
         let cr = map.entry(target.cluster_id).or_default();
-        cr.queue_names.insert(name.clone());
-        cr.db_partition_floor.insert(name, partitions);
+        for (name, partitions) in &listed {
+            // Not remembered as written: the next cycle must try again.
+            if failed.contains(name.as_str()) {
+                continue;
+            }
+            cr.queue_names.insert(name.clone());
+            cr.db_partition_floor.insert(name.clone(), *partitions);
+        }
     }
 
     // PLAN_KV_TIMERS.md §9.8 P2. `queen.kv` and `queen.log_timers` have no
@@ -635,12 +602,9 @@ async fn reconcile_cluster(
     // rows are what re-seeds `db_partition_floor` after a proxy restart
     // (module doc), so losing them loses the partition-cap floor. Which answers
     // are trustworthy enough to delete on is `Inventory`'s whole subject.
-    let inventory = Inventory::Confirmed { empty: seen_names.is_empty() };
-    if sweep_allowed(inventory) {
-        let cluster_id_str = target.cluster_id.to_string();
-        let sweep_stmt = "UPDATE queen_proxy.queues SET deleted_at = now() \
-                           WHERE cluster_id = $1::text::uuid AND deleted_at IS NULL AND NOT (name = ANY($2))";
-        if let Err(e) = client.execute(sweep_stmt, &[&cluster_id_str, &seen_names]).await {
+    let listing = Inventory::Confirmed { empty: seen_names.is_empty() };
+    if sweep_allowed(listing) {
+        if let Err(e) = data::sweep_deleted_queues(store, target.cluster_id, &seen_names).await {
             tracing::warn!(cluster = %target.cluster_id, error = %e, "registry reconciler: deleted-queue sweep failed");
         } else {
             // The swept rows are gone: forget their floor too, so a queue
@@ -760,6 +724,40 @@ fn skip_without_inventory(target: &ReconcileTarget, cause: &str) {
 }
 
 // --------------------------------------------------- minimal headered GET
+
+/// The same GET through the broker router this proxy runs inside (single
+/// binary): no socket, `url`'s path only. Same timeout, size cap and 2xx rule
+/// as the socket path.
+async fn get_json_in_process(
+    upstream: &Upstream,
+    url: &str,
+    headers: &[(&str, &str)],
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    let path = url
+        .strip_prefix("http://")
+        .and_then(|rest| rest.find('/').map(|i| &rest[i..]))
+        .unwrap_or("/");
+    let mut req = axum::http::Request::builder().method("GET").uri(path).header("accept", "application/json");
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let req = req.body(axum::body::Body::empty()).map_err(|e| format!("request: {e}"))?;
+    let fetched = async {
+        let resp = upstream.call(req).await?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(format!("http status {status}"));
+        }
+        axum::body::to_bytes(resp.into_body(), MAX_RECONCILE_RESPONSE_BYTES)
+            .await
+            .map_err(|e| format!("read: {e}"))
+    };
+    let body = tokio::time::timeout(timeout, fetched)
+        .await
+        .map_err(|_| format!("timeout after {}ms", timeout.as_millis()))??;
+    serde_json::from_slice(&body).map_err(|e| format!("json parse: {e}"))
+}
 
 /// Minimal plaintext HTTP/1.1 GET with custom headers, for the broker
 /// resources/queues call (needs x-queen-tenant + Authorization).
@@ -1166,5 +1164,92 @@ mod tests {
         let mut got = reg.retained_totals();
         got.sort();
         assert_eq!(got, vec![(a, 4_096), (b, 0)]);
+    }
+
+    // ---- the single binary: queue rows in the broker's KV ----
+
+    async fn kv_cluster() -> (Store, Uuid) {
+        let store = Store::Kv(Arc::new(crate::store::memkv::MemKv::new()));
+        data::seed_default_plans(&store).await.unwrap();
+        let cell = data::upsert_cell(
+            &store,
+            &data::CellSpec {
+                slug: "local".into(),
+                region: "eu".into(),
+                base_url: "http://127.0.0.1:1".into(),
+                class: "shared".into(),
+                capacity_slots: 1,
+                cell_secret: None,
+            },
+        )
+        .await
+        .unwrap();
+        let out = data::bootstrap_tenant(
+            &store,
+            &data::Bootstrap {
+                tenant_slug: "acme".into(),
+                cluster_slug: "acme".into(),
+                plan_code: "free".into(),
+                cell: Some(cell),
+                admin_email: "a@acme.io".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        (store, Uuid::parse_str(out["cluster_id"].as_str().unwrap()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn kv_rows_survive_a_restart_as_the_partition_floor() {
+        let (store, cluster) = kv_cluster().await;
+        let mut ctx = test_ctx(Some(2), Some(3));
+        ctx.cluster_id = cluster;
+        let reg = Registry::with_store(store.clone());
+        for p in 0..3 {
+            assert_eq!(reg.admit(&ctx, "orders", &format!("p{p}")).await, Admit::Allowed);
+        }
+        assert_eq!(reg.admit(&ctx, "shipments", "p0").await, Admit::Allowed);
+        reg.drain().await;
+        assert!(reg.pending.lock().unwrap().is_empty(), "flushed to the kv");
+
+        // A fresh process: no partition names, but the floor and the queue
+        // names come back from the store, so a restart bypasses no cap.
+        let reg2 = Registry::with_store(store);
+        assert_eq!(reg2.admit(&ctx, "orders", "p9").await, Admit::OverPartitions { max: 3 });
+        assert_eq!(reg2.admit(&ctx, "invoices", "p0").await, Admit::OverQueues { max: 2 });
+    }
+
+    #[tokio::test]
+    async fn the_reconciler_reads_the_inventory_in_process_and_writes_the_kv() {
+        let (store, cluster) = kv_cluster().await;
+        data::persist_queue_floors(&store, &[(cluster, "orders".into(), 1), (cluster, "gone".into(), 1)])
+            .await
+            .unwrap();
+        data::set_limit_override(&store, cluster, Some(&serde_json::json!({"max_retained_bytes": 1000})))
+            .await
+            .unwrap();
+        let router = axum::Router::new().route(
+            "/api/v1/resources/queues",
+            axum::routing::get(|headers: axum::http::HeaderMap| async move {
+                // the tenant header is what scopes the broker's listing
+                assert!(headers.contains_key("x-queen-tenant"));
+                axum::Json(serde_json::json!({
+                    "queues": [
+                        {"name": "orders", "partitions": 4, "retainedBytes": 900},
+                        {"name": "fresh", "partitions": 2, "retainedBytes": 200}
+                    ],
+                    "kvBytes": 0, "timerBytes": 0
+                }))
+            }),
+        );
+        let reg = Registry::with_store(store.clone()).with_inventory(Upstream::InProcess(router));
+        reconcile_once(&reg.store, reg.inventory.as_ref(), &reg.known, &reg.over_storage, &reg.retained).await;
+
+        let mut live = data::live_queues(&store, cluster).await.unwrap();
+        live.sort();
+        assert_eq!(live, vec![("fresh".to_string(), 2), ("orders".to_string(), 4)], "set, created, swept");
+        assert_eq!(reg.retained_totals(), vec![(cluster, 1100)]);
+        assert_eq!(reg.over_storage(), vec![cluster], "the override's cap, not the plan's");
     }
 }
