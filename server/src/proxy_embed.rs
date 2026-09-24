@@ -88,6 +88,12 @@ pub fn public_router(rsm: Arc<dyn Rsm>, broker: Router) -> (queen_proxy::state::
     let (st, proxy) = queen_proxy::app::build_embedded(queen_proxy::app::Embedded {
         kv: Arc::new(RsmKv::new(rsm)),
         broker: broker.clone(),
+        node: crate::rsm::dashboard::node_label(
+            std::env::var("QUEEN_RAFT_NODE_ID")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(1),
+        ),
     });
     let inner = queen_proxy::upstream::Upstream::InProcess(broker);
     let passthrough = move |req: Request<Body>| {

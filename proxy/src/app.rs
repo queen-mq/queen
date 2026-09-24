@@ -354,6 +354,7 @@ pub fn router(st: St) -> Router {
         .nest("/auth", oauth::router())
         .nest("/api/console", console::router())
         .nest("/api/operator", operator::router())
+        .nest("/api/cp", crate::cp::router())
         // three routes, not a bare wildcard: /console/*path alone does not
         // match "/console/" (empty remainder) under axum 0.7's matchit
         .route("/console", get(console::spa))
@@ -376,6 +377,9 @@ pub struct Embedded {
     /// The broker router the data plane relays to: tenancy on, reachable
     /// only through this call.
     pub broker: Router,
+    /// This node's stable label (its per-node usage rows): the broker passes
+    /// its raft node's name.
+    pub node: String,
 }
 
 /// The single binary: the proxy's state over the broker's KV, relaying
@@ -390,7 +394,8 @@ pub fn build_embedded(e: Embedded) -> (St, Router) {
     let cache = cache::ClusterCache::with_store(&cfg, store.clone());
     let limits = limits::Limits::new(&cfg);
     let meter = Arc::new(meter::Meter::new(&cfg));
-    meter.spawn_flush(None);
+    // Each node writes its own usage rows (store/usage.rs); readers sum nodes.
+    meter.spawn_flush_store(&store, &e.node);
     // The reconciler reads the queue inventory through the in-process router.
     let registry = registry::Registry::with_store(store.clone()).with_inventory(upstream.clone());
     let keys = auth::Keys::from_config(&cfg);
@@ -461,6 +466,14 @@ pub fn build_embedded(e: Embedded) -> (St, Router) {
 pub async fn seed_embedded(st: &St) -> Result<(), String> {
     use crate::store::data;
     let kv = st.store.kv().ok_or("not the single binary")?;
+    // W5: a node started with `PXDB_*` imports the standalone proxy's
+    // Postgres into the KV once (idempotent; a finished import is a no-op).
+    // Set it on ONE node, after stopping the standalone proxy.
+    if let Some(px) = &st.cfg.pxdb {
+        let pool = db::create_pool(px).await.map_err(|e| format!("import: pxdb: {e}"))?;
+        let report = crate::store::import::import_from_pg(&pool, kv.as_ref(), "imported").await?;
+        tracing::info!(target: "proxy", report = ?report, "proxy state imported from Postgres");
+    }
     crate::store::seed::seed(kv.as_ref()).await.map_err(|e| e.to_string())?;
     data::seed_default_plans(&st.store).await.map_err(|e| e.to_string())?;
     let cell = data::upsert_cell(

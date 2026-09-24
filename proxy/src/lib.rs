@@ -9,6 +9,8 @@ pub mod auth;
 pub mod cache;
 pub mod config;
 pub mod console;
+/// The control-plane API for deployments without a SQL console.
+pub mod cp;
 pub mod db;
 pub mod errors;
 pub mod gateway;
