@@ -28,6 +28,7 @@ pub mod import;
 pub mod kv;
 pub mod memkv;
 pub mod schema;
+pub mod seed;
 pub mod usage;
 pub mod web;
 

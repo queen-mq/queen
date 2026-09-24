@@ -420,6 +420,26 @@ pub fn build_embedded(e: Embedded) -> (St, Router) {
         keys,
     });
     start_background(&st);
+    // First boot: plans, this cell, the layout version (store/seed.rs). The
+    // KV answers once a leader is elected; retry until then.
+    if let Some(kv) = st.store.kv().cloned() {
+        tokio::spawn(async move {
+            let mut wait = std::time::Duration::from_millis(200);
+            loop {
+                match crate::store::seed::seed(kv.as_ref()).await {
+                    Ok(wrote) => {
+                        tracing::info!(target: "proxy", wrote, "proxy state seeded");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::debug!(target: "proxy", error = %e, "proxy seed: KV not ready");
+                        tokio::time::sleep(wait).await;
+                        wait = (wait * 2).min(std::time::Duration::from_secs(5));
+                    }
+                }
+            }
+        });
+    }
     let app = router(st.clone());
     tracing::info!(target: "proxy", "proxy embedded in the broker (state: replicated KV)");
     (st, app)
