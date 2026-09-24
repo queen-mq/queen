@@ -815,6 +815,56 @@ impl RaftFacade {
         matches!(res, Ok(Ok(true)))
     }
 
+    /// [`resolve_ack_targets`] on the blocking pool (I15). A cluster node
+    /// resolves from its own store, which may not hold yet a partition that
+    /// another node created and already answered for (a push through one node,
+    /// a pop through a second, the ack through this one): the item failed for
+    /// good as "no partition" (measured: 1 ack in 80 across two followers). On
+    /// such a miss the node takes the read barrier and resolves once more; a
+    /// hit costs nothing extra.
+    async fn resolve_acks(
+        &self,
+        ctx: &ReqCtx,
+        group: &str,
+        flats: Vec<AckFlat>,
+    ) -> Result<AckResolution, RsmError> {
+        let (first, flats) = self.resolve_acks_once(ctx, group, flats).await?;
+        let missed = matches!(&first, Ok((_, _, bad))
+            if bad.iter().any(|(_, why)| why.starts_with(NO_PARTITION)));
+        if self.offload && missed && self.linearizable(ctx).await.is_ok() {
+            return Ok(self.resolve_acks_once(ctx, group, flats).await?.0);
+        }
+        Ok(first)
+    }
+
+    async fn resolve_acks_once(
+        &self,
+        ctx: &ReqCtx,
+        group: &str,
+        flats: Vec<AckFlat>,
+    ) -> Result<(AckResolution, Vec<AckFlat>), RsmError> {
+        let store = self.store.clone();
+        let reader = self.reader.clone();
+        let qlog_reader = self.qlog_reader.clone();
+        let encryption = self.encryption.clone();
+        let tenant = ctx.tenant.clone();
+        let group = group.to_string();
+        tokio::task::spawn_blocking(move || {
+            let resolved = resolve_ack_targets(
+                &store,
+                &reader,
+                qlog_reader.as_ref(),
+                &encryption,
+                &tenant,
+                &group,
+                &flats,
+            );
+            (resolved, flats)
+        })
+        .await
+        .map_err(|e| RsmError::Internal(format!("ack resolve task: {e}")))
+    }
+
     /// Every dead letter this node has filed, decoded off the committed store.
     /// Test-only: the facade exposes no DLQ read endpoint in phase 1 (§9.6), so
     /// the ack-path DLQ tests read the rows directly here.
@@ -1259,24 +1309,7 @@ impl RaftFacade {
                     f.worker = h.clone();
                 }
             }
-            let store = self.store.clone();
-            let reader = self.reader.clone();
-            let qlog_reader = self.qlog_reader.clone();
-            let encryption = self.encryption.clone();
-            let tenant = ctx.tenant.clone();
-            let resolved = tokio::task::spawn_blocking(move || {
-                resolve_ack_targets(
-                    &store,
-                    &reader,
-                    qlog_reader.as_ref(),
-                    &encryption,
-                    &tenant,
-                    &group,
-                    flats,
-                )
-            })
-            .await
-            .map_err(|e| RsmError::Internal(format!("txn ack resolve: {e}")))?;
+            let resolved = self.resolve_acks(&ctx, &group, flats).await?;
             let (t, _per_item, bad) = resolved.map_err(RsmError::Internal)?;
             if let Some((_, why)) = bad.first() {
                 return Ok(fail(
@@ -2809,25 +2842,7 @@ impl RaftFacade {
 
         // Group by (pid, worker) into AckTargets. Read each pid's (tenant,
         // queue) once. A pid with no row is a per-item error.
-        let store = self.store.clone();
-        let reader = self.reader.clone();
-        let qlog_reader = self.qlog_reader.clone();
-        let encryption = self.encryption.clone();
-        let tenant = ctx.tenant.clone();
-        let group = req.group.clone();
-        let resolved = tokio::task::spawn_blocking(move || {
-            resolve_ack_targets(
-                &store,
-                &reader,
-                qlog_reader.as_ref(),
-                &encryption,
-                &tenant,
-                &group,
-                flats,
-            )
-        })
-        .await
-        .map_err(|e| RsmError::Internal(format!("ack resolve task: {e}")))?;
+        let resolved = self.resolve_acks(&ctx, &req.group, flats).await?;
         let (targets, per_item, more_bad) = resolved.map_err(RsmError::Internal)?;
         bad.extend(more_bad);
 
@@ -2891,6 +2906,13 @@ struct AckSnapshotWork {
     txn: String,
 }
 
+/// What [`resolve_ack_targets`] answers: the targets, the per-item map and the
+/// items that failed to resolve (index, reason); `Err` is a store failure.
+type AckResolution = Result<(Vec<AckTarget>, Vec<AckPerItem>, Vec<(usize, String)>), String>;
+
+/// The reason an ack item names a partition this node's store does not hold.
+const NO_PARTITION: &str = "no partition";
+
 /// Group resolved acks by (pid, worker), reading each pid's queue once.
 fn resolve_ack_targets(
     store: &HeedStore,
@@ -2899,8 +2921,8 @@ fn resolve_ack_targets(
     encryption: &crate::encryption::Encryption,
     tenant: &str,
     group: &str,
-    flats: Vec<AckFlat>,
-) -> Result<(Vec<AckTarget>, Vec<AckPerItem>, Vec<(usize, String)>), String> {
+    flats: &[AckFlat],
+) -> AckResolution {
     let mut targets: Vec<AckTarget> = Vec::new();
     let mut per_item: Vec<AckPerItem> = Vec::new();
     let mut bad: Vec<(usize, String)> = Vec::new();
@@ -2926,7 +2948,7 @@ fn resolve_ack_targets(
                     parts.insert(f.pid, row);
                 }
                 let Some(part) = parts.get(&f.pid).and_then(|p| p.as_ref()) else {
-                    bad.push((f.index, format!("no partition {}", f.pid)));
+                    bad.push((f.index, format!("{NO_PARTITION} {}", f.pid)));
                     continue;
                 };
                 let same_as_last = last.is_some_and(|(lfi, _, _)| {
