@@ -1,25 +1,23 @@
 //! CreatePartitions (key 37), v0-v3 — `kafka-topics.sh --alter --partitions N`.
 //!
-//! ## This is an advertised REFUSAL, and two thirds of it are Apache Kafka's
+//! ## An increase raises the topic's declared width
 //!
-//! Queen declares no width per queue. `POST /api/v1/configure` takes nineteen
-//! option keys and `partitions` is not one of them, `queen.queues` has no such
-//! column, and a lane comes into existence only when something is pushed to it
-//! (`003_log_push.sql`). The width this facade advertises is
+//! Queen declares no width per queue: a lane comes into existence only when
+//! something is pushed to it, and the width this facade advertises is
 //! `max(live lanes, the topic's declared floor or QUEEN_KAFKA_DEFAULT_PARTITIONS)`
-//! ([`metadata::advertised_partitions`]).
+//! ([`metadata::advertised_partitions`]). CreateTopics declares the floor; an
+//! INCREASE here raises it, in the same record ([`crate::topic_record`]), which
+//! is Apache Kafka's own answer to `kafka-topics.sh --alter --partitions`: the
+//! topic is wider from the next Metadata on, and keys hash onto the new width.
+//! (It was an advertised refusal until 2026-09-24; tools that grow a topic in
+//! chunks — kload creates 100k partitions 5000 at a time — could not run.)
 //!
-//! A topic CAN now carry its own floor — but it is written once, by CreateTopics
-//! ([`super::create_topics`]), and this API is not that writer. Making it one
-//! would turn a ratified divergence from the oracle into a conformance, which is
-//! a decision and not a refactor: `compat/differential` classifies the increase
-//! case as a deliberate deviation, and two of the three answers below are
-//! byte-identical to apache/kafka. So this stays an answered refusal, and only
-//! the sentence it answers with changed.
+//! Only a topic this facade TRACKS can be widened: one with a record pinned to
+//! the queue that is there now. Any other topic is refused with a sentence
+//! naming the fix, because a floor written for a queue the facade did not create
+//! would be a second record of a width nothing else declared.
 //!
-//! Advertising a refusal is normally against `versions::ADVERTISED`'s own rule.
-//! It is right here because two of the three answers are not refusals of a
-//! capability at all, they are the oracle's own answers, byte for byte:
+//! The other two answers are the oracle's own, byte for byte:
 //!
 //!   * `count == current` — *"Topic already has N partition(s)."*
 //!   * `count < current` — a DECREASE, which a real broker refuses too:
@@ -30,15 +28,6 @@
 //! (`ReplicationControlManager`), not copied out of a document. The KRaft
 //! wording is NOT the ZooKeeper-era wording that the same case produced in
 //! older brokers, which is why they were measured rather than recalled.
-//!
-//! Only the third case — an increase — is a genuine capability gap, and it gets
-//! a sentence of the facade's own that says what to do instead. The alternative,
-//! no row in the table at all, would give `kafka-topics.sh --alter --partitions`
-//! an `UnsupportedVersionException`, which reads as *"upgrade your broker"* —
-//! the wrong diagnosis in all three cases, and wrong for the commonest one of
-//! all: a provisioner declaring 12 partitions against a facade whose default is
-//! 1024 is a DECREASE, where this answer is indistinguishable from a real
-//! broker's.
 //!
 //! ## There is no separate "below 1" case, and that is measured too
 //!
@@ -56,16 +45,11 @@
 //! INVALID_REPLICA_ASSIGNMENT, and the byte-identity above is worth more than
 //! the more specific complaint in a case no client produces.
 //!
-//! ## Nothing is written, ever
+//! ## What is written
 //!
-//! No Queen call but the catalog LIST, which asks "do you have this topic",
-//! not "may I write over it" — so a cached list up to one TTL old costs a
-//! client a retry at worst, the same argument `handlers::describe_configs`
-//! makes. `validate_only` therefore changes nothing about the answer, and is
-//! honoured by construction rather than by a branch.
-//!
-//! `timeout_ms` is not acted on, for the same reason `handlers::create_topics`'
-//! is not: there is no asynchronous work here to bound.
+//! One `put` per widened topic, all in one KV batch, and nothing for any other
+//! answer. `validate_only` runs every check and writes nothing. `timeout_ms` is
+//! not acted on: there is no asynchronous work to bound.
 //!
 //! ## Cluster mode: no gate
 //!
@@ -84,11 +68,7 @@ use kafka_protocol::messages::{CreatePartitionsRequest, CreatePartitionsResponse
 use kafka_protocol::protocol::StrBytes;
 
 use crate::handlers::metadata;
-use crate::{queen, throttle, Facade};
-
-/// The live width inputs for every topic this request names — lane count and
-/// declared floor — or the one refusal every topic gets when the list failed.
-type Catalog = Result<HashMap<String, (i64, Option<u32>)>, (ResponseError, String)>;
+use crate::{queen, throttle, topic_record, Facade};
 
 pub async fn handle(
     facade: &Facade,
@@ -99,15 +79,15 @@ pub async fn handle(
 
     // The catalog, at most ONCE for the request, and not at all for a request
     // that names no topic. The live lane count is half of the width every
-    // answer below is computed against.
+    // answer below is computed against; the queue id pins a widened record.
     let catalog = if req.topics.is_empty() {
         Ok(HashMap::new())
     } else {
         match facade.catalog.list(token).await {
             Ok(queues) => Ok(queues
                 .iter()
-                .map(|q| (q.name.clone(), (q.partitions, q.floor)))
-                .collect::<HashMap<String, (i64, Option<u32>)>>()),
+                .map(|q| (q.name.clone(), (q.partitions, q.floor, q.id.clone())))
+                .collect::<HashMap<String, (i64, Option<u32>, Option<String>)>>()),
             Err(e) => {
                 tracing::warn!(
                     target: "kafka",
@@ -120,36 +100,123 @@ pub async fn handle(
         }
     };
 
-    let results = req
+    let decisions: Vec<Decision> = req
         .topics
         .iter()
         .map(|t| one(facade, t, &catalog))
+        .collect();
+
+    // The increases: each topic's record, widened, in ONE batch.
+    let wanted: Vec<String> = decisions
+        .iter()
+        .filter_map(|d| match d {
+            Decision::Increase { name, .. } => Some(name.clone()),
+            Decision::Answer(_) => None,
+        })
+        .collect();
+    let records = if wanted.is_empty() {
+        Ok(HashMap::new())
+    } else {
+        topic_record::load_many(facade.queen.as_ref(), &wanted, token).await
+    };
+    let mut writes: Vec<(String, topic_record::Record)> = Vec::new();
+    let mut results: Vec<Option<CreatePartitionsTopicResult>> = Vec::new();
+    for d in decisions {
+        results.push(match d {
+            Decision::Answer(a) => Some(a),
+            Decision::Increase { name, qid, count } => match &records {
+                Err(e) => {
+                    throttle_ms = throttle::longest(throttle_ms, throttle::for_error(e));
+                    let (code, why) = failed(e);
+                    Some(answer(&name, Some(code), Some(why)))
+                }
+                Ok(records) => match records.get(&name).filter(|r| r.describes(qid.as_deref())) {
+                    Some(record) => {
+                        if !req.validate_only {
+                            writes.push((
+                                name.clone(),
+                                record.clone().with_partitions(Some(count as u32)),
+                            ));
+                        }
+                        // Answered after the write lands (below).
+                        None
+                    }
+                    None => Some(answer(
+                        &name,
+                        Some(ResponseError::InvalidPartitions),
+                        Some(format!(
+                            "{name} was not created through this facade, so it has no declared \
+                             width to raise: its width is max(live lanes, \
+                             QUEEN_KAFKA_DEFAULT_PARTITIONS). Recreate it with CreateTopics \
+                             `numPartitions`, or produce to the higher lanes directly."
+                        )),
+                    )),
+                },
+            },
+        });
+    }
+    let written = if writes.is_empty() {
+        Ok(())
+    } else {
+        topic_record::store_many(facade.queen.as_ref(), &writes, token).await
+    };
+    if written.is_ok() && !writes.is_empty() {
+        // The next Metadata from THIS node reports the new width at once; the
+        // other nodes of a cluster within one catalog TTL.
+        facade.catalog.invalidate(token).await;
+    }
+    let results = req
+        .topics
+        .iter()
+        .zip(results)
+        .map(|(t, r)| match r {
+            Some(r) => r,
+            None => match &written {
+                Ok(()) => answer(t.name.0.as_str(), None, None),
+                Err(e) => {
+                    let (code, why) = failed(e);
+                    answer(t.name.0.as_str(), Some(code), Some(why))
+                }
+            },
+        })
         .collect();
     CreatePartitionsResponse::default()
         .with_throttle_time_ms(throttle_ms.unwrap_or(0))
         .with_results(results)
 }
 
-/// One requested topic's answer.
-fn one(
-    facade: &Facade,
-    t: &CreatePartitionsTopic,
-    catalog: &Catalog,
-) -> CreatePartitionsTopicResult {
+/// The live width inputs for every topic this request names — lane count,
+/// declared floor and queue id — or the one refusal every topic gets when the
+/// list failed.
+type Catalog = Result<HashMap<String, (i64, Option<u32>, Option<String>)>, (ResponseError, String)>;
+
+/// One topic's answer, or the increase it asks for.
+enum Decision {
+    Answer(CreatePartitionsTopicResult),
+    Increase {
+        name: String,
+        qid: Option<String>,
+        count: i32,
+    },
+}
+
+/// One requested topic's decision.
+fn one(facade: &Facade, t: &CreatePartitionsTopic, catalog: &Catalog) -> Decision {
     let name = t.name.0.as_str();
+    let refuse = |e, m| Decision::Answer(answer(name, Some(e), m));
 
     // The name rule every non-Metadata API applies, in the one code they may
     // answer: a `__`-prefixed or illegal name is a topic this facade does not
     // have. No message, because the oracle sends none for this code either.
     if let Some(e) = metadata::not_a_topic_here(name) {
-        return answer(name, Some(e), None);
+        return refuse(e, None);
     }
     let live = match catalog {
         Ok(live) => live,
-        Err((e, why)) => return answer(name, Some(*e), Some(why.clone())),
+        Err((e, why)) => return refuse(*e, Some(why.clone())),
     };
-    let Some((lanes, floor)) = live.get(name) else {
-        return answer(name, Some(ResponseError::UnknownTopicOrPartition), None);
+    let Some((lanes, floor, qid)) = live.get(name) else {
+        return refuse(ResponseError::UnknownTopicOrPartition, None);
     };
 
     let current =
@@ -159,16 +226,14 @@ fn one(
     // The oracle's own two sentences, in the oracle's own order. Recorded off
     // apache/kafka:3.9.1; see the module header.
     if wanted == current {
-        return answer(
-            name,
-            Some(ResponseError::InvalidPartitions),
+        return refuse(
+            ResponseError::InvalidPartitions,
             Some(format!("Topic already has {current} partition(s).")),
         );
     }
     if wanted < current {
-        return answer(
-            name,
-            Some(ResponseError::InvalidPartitions),
+        return refuse(
+            ResponseError::InvalidPartitions,
             Some(format!(
                 "The topic {name} currently has {current} partition(s); {wanted} would not be an \
                  increase."
@@ -182,9 +247,8 @@ fn one(
     // so an explicit placement is an operator instruction this facade would
     // otherwise discard in silence.
     if t.assignments.as_ref().is_some_and(|a| !a.is_empty()) {
-        return answer(
-            name,
-            Some(ResponseError::InvalidReplicaAssignment),
+        return refuse(
+            ResponseError::InvalidReplicaAssignment,
             Some(
                 "this facade is one logical broker and places no partition on any node, so a \
                  manual replica assignment cannot be honoured. Omit `assignments`"
@@ -192,20 +256,20 @@ fn one(
             ),
         );
     }
-
-    answer(
-        name,
-        Some(ResponseError::InvalidPartitions),
-        Some(format!(
-            "Queen declares no width per queue: a partition exists once something has been \
-             written to it, and the width this facade advertises is max(live lanes, the topic's \
-             own declared floor or QUEEN_KAFKA_DEFAULT_PARTITIONS), which is {current} for \
-             {name}. A floor is declared once, by CreateTopics `numPartitions`, and this API \
-             does not change it. Recreate the topic with the width you want, raise \
-             QUEEN_KAFKA_DEFAULT_PARTITIONS (it applies to every topic that declared none), \
-             or produce to the higher lanes directly."
-        )),
-    )
+    if wanted as i64 > i64::from(metadata::MAX_ADVERTISED_PARTITIONS) {
+        return refuse(
+            ResponseError::InvalidPartitions,
+            Some(format!(
+                "{wanted} partitions is past this facade's ceiling of {} per topic",
+                metadata::MAX_ADVERTISED_PARTITIONS
+            )),
+        );
+    }
+    Decision::Increase {
+        name: name.to_string(),
+        qid: qid.clone(),
+        count: wanted,
+    }
 }
 
 fn answer(
@@ -332,20 +396,51 @@ mod tests {
         }
     }
 
-    /// The one genuine capability gap, and the one sentence that is the
-    /// facade's own: it must name the broker knob, because that is the only
-    /// thing the operator can actually do.
+    /// An increase of a topic this facade created raises its declared width:
+    /// the record is rewritten, and the next Metadata reports the new count.
     #[tokio::test]
-    async fn an_increase_names_the_broker_knob() {
+    async fn an_increase_of_a_tracked_topic_raises_its_width() {
         let (f, api) = facade_and_queen(&[("orders", 4)]);
-        let result = &handle(&f, &request(&[("orders", 999_999)]), None)
+        let record =
+            topic_record::Record::new(None, serde_json::Map::new()).with_partitions(Some(4));
+        topic_record::store(api.as_ref(), "orders", &record, None)
             .await
-            .results[0];
+            .unwrap();
+        let result = &handle(&f, &request(&[("orders", 12)]), None).await.results[0];
+        assert_eq!(result.error_code, 0, "{:?}", message(result));
+        let stored = api
+            .kv_get(crate::offsets::NAMESPACE, &topic_record::key("orders"))
+            .unwrap();
+        assert_eq!(stored["partitions"], 12);
+        assert!(
+            api.configured().is_empty(),
+            "a width is not a /configure option"
+        );
+    }
+
+    /// A topic this facade did not create has no declared width to raise: the
+    /// refusal names the knob and the two things that do work.
+    #[tokio::test]
+    async fn an_increase_of_an_untracked_topic_names_the_way_out() {
+        let (f, api) = facade_and_queen(&[("orders", 4)]);
+        let result = &handle(&f, &request(&[("orders", 8)]), None).await.results[0];
         assert_eq!(result.error_code, ResponseError::InvalidPartitions.code());
         let m = message(result);
         assert!(m.contains("QUEEN_KAFKA_DEFAULT_PARTITIONS"), "{m}");
         assert!(m.contains("produce to the higher lanes directly"), "{m}");
         assert!(api.configured().is_empty());
+    }
+
+    /// Past the per-topic ceiling Metadata could not advertise is refused
+    /// before anything is read.
+    #[tokio::test]
+    async fn an_increase_past_the_ceiling_is_refused() {
+        let (f, _api) = facade_and_queen(&[("orders", 4)]);
+        let result = &handle(&f, &request(&[("orders", 999_999)]), None)
+            .await
+            .results[0];
+        assert_eq!(result.error_code, ResponseError::InvalidPartitions.code());
+        assert!(message(result).contains("ceiling"), "{}", message(result));
     }
 
     /// An explicit placement on an increase is refused by name — the same
@@ -410,7 +505,8 @@ mod tests {
         assert_eq!(api.list_count(), 1);
     }
 
-    /// `validate_only` changes nothing, because nothing is ever written — and
+    /// `validate_only` writes nothing — here the topic is untracked, so it is
+    /// the same refusal — and
     /// the response is still fully formed, which is what a client reads.
     #[tokio::test]
     async fn validate_only_changes_nothing_and_still_answers() {

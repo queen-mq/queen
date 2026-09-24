@@ -102,7 +102,13 @@ function parseAdvertised(text) {
 // set and every consume-transform-produce loop sets it. InitProducerId's 0-4 is
 // untouched: M9 changed what that handler does with a transactional id, not
 // what is advertised.
-const ADVERTISED_FINGERPRINT = "40da963cf0ec746c";
+// 2026-09-24: ONE row appended — DescribeLogDirs 1-4 — and moved out of
+// ABSENT. Thirty-three rows. It answers only where it is true: a facade running
+// inside a raft broker, whose data directory holds every partition. And
+// CreatePartitions stopped being a refusal for an increase: it raises a tracked
+// topic's declared width, which is what `kafka-topics.sh --alter --partitions`
+// and kload's chunked creation need.
+const ADVERTISED_FINGERPRINT = "109b216bd2ff3a35";
 
 /** One sentence per API: what the boundary is, not what the API does. */
 const WINDOW_REASON = {
@@ -157,7 +163,9 @@ const WINDOW_REASON = {
   IncrementalAlterConfigs:
     "The whole schema window (v1 is the flexible encoding and adds no field), and the key that matters: `kafka-configs.sh --alter` has sent this since Kafka 2.3 and has no fallback to the deprecated key 33, so this is what an operator's command actually lands on. What it can write is bounded by what the facade can write LOSSLESSLY. Queen's configure route is a whole-row upsert whose columns mostly cannot be read back, so an alter lands only on a topic this facade created and every other topic is refused with the reason.",
   CreatePartitions:
-    "The whole schema window; nothing varies inside it but the flexible encoding (v2). What is advertised is a REFUSAL. Queen declares no width per queue — a partition exists once something has been written to it — and while a topic may carry its own width floor, that floor is declared ONCE, at CreateTopics, and this API is not that writer. Two of the three answers are Apache Kafka's own sentences byte for byte, since a DECREASE and an EQUAL count are refused by a real broker too, and only an increase is a capability gap. The alternative, no row at all, would tell an operator to upgrade their broker, which is the wrong diagnosis in all three cases.",
+    "The whole schema window; nothing varies inside it but the flexible encoding (v2). An INCREASE raises the topic's declared width — the floor CreateTopics wrote — for a topic this facade tracks, so the next Metadata reports the new count and keys hash onto it, as on Apache Kafka. A DECREASE and an EQUAL count are refused with Apache Kafka's own sentences byte for byte, and a topic the facade did not create is refused with the knob that governs its width.",
+  DescribeLogDirs:
+    "Floor: v1, since KIP-896 dropped v0. Ceiling: the schema's v4, whose volume sizes are answered -1. It answers only where it is true: a facade running inside a raft broker lists that node's data directory with every partition of every topic, because every voter holds every partition, each with the bytes the node's store counts for it. Over HTTP the facade knows nothing of the broker's storage and answers no directory at all.",
   AddPartitionsToTxn:
     "Ceiling: v4 is a DIFFERENT REQUEST, not a wider one. The flat (transactional_id, producer_id, producer_epoch, topics) of v0-v3 becomes a `transactions[]` array with a `verify_only` flag — KIP-890's coordinator-to-partition-leader verification, which a client never sends and only another broker does. Floor: the schema's own, since KIP-896 dropped nothing here.",
   AddOffsetsToTxn:
@@ -193,7 +201,6 @@ const ABSENT = [
   ["ConsumerGroupHeartbeat", "The KIP-848 broker-side rebalance protocol.", "Excluded by plan; groups use the classic Join/Sync protocol."],
   ["DeleteRecords", "Truncates a partition below an offset. `kafka-delete-records.sh`, and the \"Clear messages\" button in kafka-ui and AKHQ.", "Queen has no truncate-to-offset primitive: a queue's log start moves by retention and by dropping the queue, both time-driven. Implementing it would mean reporting a low watermark that did not move, which is a fabricated value a tool would act on. DeleteTopics then CreateTopics is the workaround, and both work."],
   ["OffsetForLeaderEpoch", "Detects log truncation after a leader change.", "Every leader epoch this facade reports is -1, in Metadata, in ListOffsets, in OffsetFetch and in every record batch, so a consumer's subscription state never holds one and the request is never built. No tool sends it directly, and the cost of the absence is nothing measurable."],
-  ["DescribeLogDirs", "Per-partition storage sizes. `kafka-log-dirs.sh`, and the Size column in kafka-ui.", "Queen's storage is Postgres segments; there are no log directories, and answering would mean inventing a path and per-partition byte sizes. The best future candidate of the absences: retained bytes are real and already on the queue listing, so honest sizes under one synthetic log dir are possible once Queen reports them per partition rather than per queue. Until then kafka-ui renders the page with a blank Size column."],
   ["CreateDelegationToken", "Mints a broker-signed token from an authenticated principal.", "A delegation token is derived from a SCRAM principal and signed with a cluster secret. This facade mints no credentials; Queen does. `kafka-delegation-tokens.sh` fails, and nothing in the client matrix uses it."],
   ["RenewDelegationToken", "Extends a delegation token's life.", "Same reason."],
   ["ExpireDelegationToken", "Revokes a delegation token early.", "Same reason."],

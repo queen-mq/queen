@@ -186,19 +186,6 @@ queen-kafka = { path = "../protocols/queen-kafka", optional = true }
 # service. Already in the tree through axum; named for the one trait.
 tower = { version = "0.5", default-features = false, features = ["util"], optional = true }
 
-[dev-dependencies]
-# The in-process Kafka path's tests (src/rsm/tests/facade_kafka.rs) build real
-# RecordBatch v2 bytes the way a client does. Same pin and codecs as
-# protocols/queen-kafka, so nothing new enters the lock.
-kafka-protocol = { version = "0.18", default-features = false, features = [
-    "broker",
-    "client",
-    "gzip",
-    "snappy",
-    "lz4",
-    "zstd",
-] }
-
 [profile.release]
 opt-level = 3
 lto = "thin"

@@ -406,7 +406,8 @@ pub async fn handle(
     // never name a leader that is missing from its own broker list.
     let placement = facade
         .cluster
-        .placement(&facade.advertised_host, facade.advertised_port);
+        .placement(&facade.advertised_host, facade.advertised_port)
+        .replicated(facade.raft.as_ref().is_some_and(|r| r.voters > 1));
 
     let topics = match requested_names(req, api_version) {
         None => listing(facade, &placement, catalog.as_deref().map(|q| &q[..])),
@@ -793,7 +794,8 @@ fn topic(placement: &Placement, name: &str, planned: Plan) -> MetadataResponseTo
         Plan::Serve(partitions) => base.with_partitions(
             (0..partitions)
                 .map(|index| {
-                    let leader = placement.leader_of(name, index);
+                    let replicas = placement.replicas_of(name, index);
+                    let leader = replicas[0];
                     MetadataResponsePartition::default()
                         .with_partition_index(index)
                         .with_leader_id(leader.into())
@@ -802,10 +804,11 @@ fn topic(placement: &Placement, name: &str, planned: Plan) -> MetadataResponseTo
                         // epoch would invite clients to run truncation detection
                         // against a value nothing here maintains.
                         .with_leader_epoch(-1)
-                        // The leader alone, and not the live set: see the
-                        // module header. Replication is Postgres's business.
-                        .with_replica_nodes(vec![leader.into()])
-                        .with_isr_nodes(vec![leader.into()])
+                        // The leader alone, unless the facade runs inside a
+                        // raft broker: then every live node, which is where
+                        // every partition's log is (see the module header).
+                        .with_replica_nodes(replicas.iter().map(|&n| n.into()).collect())
+                        .with_isr_nodes(replicas.iter().map(|&n| n.into()).collect())
                         .with_offline_replicas(vec![])
                 })
                 .collect(),

@@ -437,19 +437,11 @@ async fn call(
     min_bytes: i64,
     token: Option<&str>,
 ) -> Vec<queen::Result<Fetched>> {
-    // The typed read of a broker in this process when there is one: it
-    // answers the same bounds and markers, with the log as stored batches
-    // ([`queen::Fetched::chunks`]) rather than JSON records.
-    let answered = match &facade.log {
-        Some(log) => log.read(chunk, max_wait_ms, min_bytes, token).await,
-        None => {
-            facade
-                .queen
-                .fetch(chunk, max_wait_ms, min_bytes, token)
-                .await
-        }
-    };
-    match answered {
+    match facade
+        .queen
+        .fetch(chunk, max_wait_ms, min_bytes, token)
+        .await
+    {
         Ok(answers) if answers.len() == chunk.len() => answers.into_iter().map(Ok).collect(),
         // `queen::align_fetch_results` already refuses a misaligned answer;
         // this is the same refusal at the chunk boundary, so a short answer
@@ -509,7 +501,6 @@ async fn bounds_only(
                 high_watermark: f.high_watermark,
                 log_start_offset: f.log_start_offset,
                 error,
-                chunks: Vec::new(),
             };
         }
     }
@@ -536,16 +527,7 @@ fn carried_bytes(f: &Fetched) -> usize {
             _ => 8,
         }
     }
-    let records: usize = f.records.iter().map(|r| json_bytes(&r.payload)).sum();
-    let chunks: usize = f
-        .chunks
-        .iter()
-        .map(|c| match c {
-            queen::FetchChunk::Batches(b) => b.len(),
-            queen::FetchChunk::Records(r) => r.iter().map(|r| json_bytes(&r.payload)).sum(),
-        })
-        .sum();
-    records + chunks
+    f.records.iter().map(|r| json_bytes(&r.payload)).sum()
 }
 
 // -------------------------------------------------------------------- answers
@@ -767,8 +749,6 @@ impl Failures {
 fn served(topic: &str, index: i32, f: &Fetched, left: &mut usize) -> PartitionData {
     let records = if *left == 0 {
         Bytes::new()
-    } else if !f.chunks.is_empty() {
-        chunked(topic, index, &f.chunks, *left)
     } else {
         batch(topic, index, &f.records, *left)
     };
@@ -788,41 +768,6 @@ fn served(topic: &str, index: i32, f: &Fetched, left: &mut usize) -> PartitionDa
         // empty list says so in a shape every client already walks.
         .with_aborted_transactions(Some(Vec::new()))
         .with_records(Some(records))
-}
-
-/// The typed read's answer ([`queen::Fetched::chunks`]) as one partition's
-/// records: every stored batch exactly as it was appended — the producer's own
-/// bytes with the broker's offsets stamped in — and every run of Queen-pushed
-/// records encoded by [`batch`], in the log's own order.
-///
-/// Budgeted like [`batch`]: the FIRST chunk always goes, whatever its size, so
-/// a batch bigger than the whole response is delivered rather than asked for
-/// for ever (KIP-74); after that a chunk that does not fit ends the answer, and
-/// the consumer resumes at the first offset it did not get.
-fn chunked(topic: &str, index: i32, chunks: &[queen::FetchChunk], budget: usize) -> Bytes {
-    let mut out = bytes::BytesMut::new();
-    for chunk in chunks {
-        let room = budget.saturating_sub(out.len());
-        match chunk {
-            queen::FetchChunk::Batches(b) => {
-                if !out.is_empty() && b.len() > room {
-                    break;
-                }
-                out.extend_from_slice(b);
-            }
-            queen::FetchChunk::Records(r) => {
-                if !out.is_empty() && room == 0 {
-                    break;
-                }
-                let encoded = batch(topic, index, r, room.max(1));
-                if encoded.is_empty() {
-                    break;
-                }
-                out.extend_from_slice(&encoded);
-            }
-        }
-    }
-    out.freeze()
 }
 
 /// A partition that was not read and is not an error either: the throttle
@@ -1245,89 +1190,6 @@ mod tests {
     /// A fetch from partway through the log starts where it was asked to, and
     /// the batch's base offset is that record's.
     #[tokio::test]
-    async fn a_typed_read_serves_stored_batches_byte_for_byte() {
-        // A stored batch at offsets 10..=11 (what the broker stamped), then two
-        // Queen-pushed messages at 12 and 13.
-        let stored = {
-            let recs: Vec<Record> = (0..2)
-                .map(|i| Record {
-                    transactional: false,
-                    control: false,
-                    delete_horizon: false,
-                    partition_leader_epoch: -1,
-                    producer_id: NO_PRODUCER_ID,
-                    producer_epoch: NO_PRODUCER_EPOCH,
-                    timestamp_type: TimestampType::Creation,
-                    offset: 10 + i,
-                    sequence: (9 + i) as i32,
-                    timestamp: 1_756_000_000_000,
-                    key: None,
-                    value: Some(Bytes::from(format!("kafka-{i}"))),
-                    headers: IndexMap::new(),
-                })
-                .collect();
-            let mut out = BytesMut::new();
-            kafka_protocol::records::RecordBatchEncoder::encode(
-                &mut out,
-                recs.iter(),
-                &kafka_protocol::records::RecordEncodeOptions {
-                    version: 2,
-                    compression: kafka_protocol::records::Compression::Lz4,
-                },
-            )
-            .unwrap();
-            out.freeze()
-        };
-        let (f, api) = facade(&[("orders", 1)]);
-        let log = Arc::new(crate::queen::testing::FakeLog::default());
-        *log.reads.lock().unwrap() = vec![Fetched {
-            high_watermark: 14,
-            log_start_offset: 10,
-            chunks: vec![
-                queen::FetchChunk::Batches(stored.clone()),
-                queen::FetchChunk::Records(vec![
-                    FetchedRecord {
-                        offset: 12,
-                        payload: json!({"n": 12}),
-                        ts: Some("2026-09-23T10:00:00.000000Z".into()),
-                    },
-                    FetchedRecord {
-                        offset: 13,
-                        payload: json!({"n": 13}),
-                        ts: Some("2026-09-23T10:00:00.000000Z".into()),
-                    },
-                ]),
-            ],
-            ..Fetched::default()
-        }];
-        let f = f.with_log(Some(log as Arc<dyn crate::queen::KafkaLog>));
-
-        let resp = handle(&f, &request(&[("orders", &[(0, 10)])]), None).await;
-        let p = answer(&resp, "orders", 0);
-        assert_eq!(p.error_code, 0);
-        assert_eq!(p.high_watermark, 14);
-        assert_eq!(p.log_start_offset, 10);
-        let raw = p.records.clone().unwrap();
-        assert_eq!(
-            &raw[..stored.len()],
-            &stored[..],
-            "the stored batch goes out as the bytes it is"
-        );
-        let got = records(p);
-        assert_eq!(
-            got.iter().map(|r| r.offset).collect::<Vec<_>>(),
-            [10, 11, 12, 13]
-        );
-        assert_eq!(got[1].value, Some(Bytes::from_static(b"kafka-1")));
-        assert_eq!(got[2].value, Some(Bytes::from_static(b"{\"n\":12}")));
-        assert_eq!(
-            api.fetches.lock().unwrap().len(),
-            0,
-            "nothing went through the JSON fetch"
-        );
-    }
-
-    #[tokio::test]
     async fn a_fetch_from_the_middle_starts_at_the_offset_it_asked_for() {
         let (f, api) = facade(&[("orders", 1)]);
         let payloads: Vec<serde_json::Value> = (0..5)
@@ -1511,7 +1373,6 @@ mod tests {
             high_watermark: 106,
             log_start_offset: 100,
             error: None,
-            chunks: Vec::new(),
         }]);
 
         let resp = handle(&f, &request(&[("orders", &[(0, 100)])]), None).await;
@@ -1559,7 +1420,6 @@ mod tests {
             high_watermark: far + 1,
             log_start_offset: 0,
             error: None,
-            chunks: Vec::new(),
         }]);
 
         let resp = handle(&f, &request(&[("orders", &[(0, 0)])]), None).await;
@@ -1628,7 +1488,6 @@ mod tests {
             high_watermark: 1,
             log_start_offset: 0,
             error: None,
-            chunks: Vec::new(),
         }]);
         let resp = handle(&f, &request(&[("orders", &[(0, 0)])]), None).await;
         assert_eq!(
@@ -1967,7 +1826,6 @@ mod tests {
             high_watermark: 0,
             log_start_offset: 0,
             error: Some("SOMETHING_NEW".to_string()),
-            chunks: Vec::new(),
         }]);
         let resp = handle(&f, &request(&[("orders", &[(0, 0)])]), None).await;
         assert_eq!(

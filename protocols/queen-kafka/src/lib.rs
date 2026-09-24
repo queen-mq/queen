@@ -35,7 +35,6 @@ pub mod queen;
 pub mod records;
 pub mod sasl;
 pub mod secret;
-pub mod stored;
 pub mod throttle;
 pub mod tls;
 pub mod topic_config;
@@ -146,12 +145,21 @@ pub struct Facade {
     lanes: Arc<Lanes>,
     /// Listener policy, read by [`conn`] and by nothing downstream of it.
     pub policy: Policy,
-    /// The TYPED record path ([`queen::KafkaLog`]) of a broker this facade
-    /// shares a process with, or `None` — the standalone binary, or a broker
-    /// reached over HTTP. When set, a non-transactional Produce appends its
-    /// batches verbatim and a Fetch serves them back as stored; everything else
-    /// still goes through [`Facade::queen`].
-    pub log: Option<Arc<dyn queen::KafkaLog>>,
+    /// The raft broker this facade runs INSIDE, or `None` when it reaches
+    /// Queen over HTTP and knows nothing of its storage. Every voter holds
+    /// every partition, and an acknowledged write is on a majority of them:
+    /// what Metadata's replica lists, `min.insync.replicas` and
+    /// DescribeLogDirs report.
+    pub raft: Option<RaftBroker>,
+}
+
+/// The storage of the raft broker a facade runs inside ([`Facade::raft`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaftBroker {
+    /// The voters of the raft cluster, this node included.
+    pub voters: u32,
+    /// This node's data directory: the one log directory DescribeLogDirs names.
+    pub log_dir: String,
 }
 
 /// What the listener does to a connection before a handler ever sees it.
@@ -238,9 +246,9 @@ impl Facade {
             // the byte cap on staged records is a budget for the PROCESS, so a
             // per-connection copy would be one budget per connection.
             txns: Arc::clone(&self.txns),
+            raft: self.raft.clone(),
             lanes: Arc::clone(&self.lanes),
             policy: self.policy,
-            log: self.log.clone(),
         }
     }
 
@@ -277,9 +285,9 @@ impl Facade {
             // inside the stage's own key ([`txn`]) rather than around the
             // container.
             txns: Arc::clone(&self.txns),
+            raft: self.raft.clone(),
             lanes: Arc::clone(&self.lanes),
             policy: self.policy,
-            log: self.log.clone(),
         }
     }
 
@@ -491,14 +499,20 @@ impl Facade {
             // is a constant an operator cannot move.
             txns,
             policy,
-            log: None,
+            raft: None,
         }
     }
 
-    /// This facade with a typed record path ([`Facade::log`]).
-    pub fn with_log(mut self, log: Option<Arc<dyn queen::KafkaLog>>) -> Facade {
-        self.log = log;
+    /// The same facade, running inside the raft broker `raft`.
+    pub fn with_raft(mut self, raft: Option<RaftBroker>) -> Facade {
+        self.raft = raft;
         self
+    }
+
+    /// How many replicas every acknowledged write is on: the raft majority
+    /// inside a raft broker, 1 everywhere else.
+    pub fn in_sync_replicas(&self) -> u32 {
+        self.raft.as_ref().map_or(1, |r| r.voters.max(1) / 2 + 1)
     }
 }
 

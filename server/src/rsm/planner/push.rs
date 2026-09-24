@@ -23,11 +23,6 @@ use crate::rsm::store::Reads;
 impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// Plan a push of one partition (003).
     pub fn plan_push(&self, ov: &mut Overlay, cmd: &PushCommand) -> Planned {
-        // A Kafka append rides the push command (one item, a stored Kafka
-        // payload) and is planned by its own rules: `super::kafka`.
-        if super::kafka::is_kafka_append(cmd) {
-            return self.plan_kafka_append(ov, cmd);
-        }
         if cmd.items.is_empty() {
             // Nothing to do and nothing to answer beyond an empty verdict list.
             return Ok(Plan::Empty(Outcome::Push(PushOutcome::default())));

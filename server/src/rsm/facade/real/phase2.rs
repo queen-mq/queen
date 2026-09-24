@@ -561,7 +561,8 @@ impl RaftFacade {
                 totals[2] += processing;
                 totals[3] += completed;
                 totals[4] += dead_letter;
-                retained += r.partition_counter(pid, Counter::RetainedBytes).unwrap_or(0);
+                let partition_bytes = r.partition_counter(pid, Counter::RetainedBytes).unwrap_or(0);
+                retained += partition_bytes;
                 let mut sealed = 0i64;
                 let _ = r.scan_partition_files(pid, usize::MAX, &mut |_| {
                     sealed += 1;
@@ -579,7 +580,8 @@ impl RaftFacade {
                     "cursor":{"totalConsumed":consumed,"batchesConsumed":0},
                     "lastActivity":last_activity.map(crate::rsm::planner::timers::iso_us),
                     "oldestMessage":p.oldest_live_at_us.map(crate::rsm::planner::timers::iso_us),
-                    "newestMessage":if total > 0 { Some(crate::rsm::planner::timers::iso_us(p.last_created_at_us)) } else { None }
+                    "newestMessage":if total > 0 { Some(crate::rsm::planner::timers::iso_us(p.last_created_at_us)) } else { None },
+                    "retainedBytes":partition_bytes
                 }));
                 true
             })?;

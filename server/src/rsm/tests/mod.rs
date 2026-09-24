@@ -40,8 +40,6 @@ mod columns;
 mod dedup_txns;
 mod delete_race;
 mod facade;
-#[cfg(feature = "kafka")]
-mod facade_kafka;
 mod facade_kv;
 mod fuzz;
 mod gates;

@@ -452,9 +452,6 @@ impl LanesState {
             }
         };
         Ok(match cmd {
-            // A Kafka append from an idempotent producer rewrites its window,
-            // a KV row: KV versions are handed out by control alone (I18).
-            Command::Push(c) if crate::rsm::planner::kafka::writes_kv(c) => Dest::Control,
             Command::Push(c) => match part(&c.tenant, &c.queue, &c.partition)? {
                 Some(l) => Dest::Lane(l),
                 None => Dest::Control,
@@ -639,9 +636,6 @@ fn plan_lane<S: Store>(
                                 | Effect::GroupUpsert { .. }
                                 | Effect::QueueDelete { .. }
                                 | Effect::GroupDelete { .. }
-                                // A lane's KV version would collide with
-                                // control's and fail the whole entry (I18).
-                                | Effect::KvPut { .. }
                         )
                     });
                     if catalog {

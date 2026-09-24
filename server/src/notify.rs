@@ -55,6 +55,13 @@ struct QueueGate {
     /// set by any wake/park/drain, cleared by each sweep, so a gate survives at least
     /// one full sweep after its last use. One relaxed store, never a clock read.
     used: std::sync::atomic::AtomicBool,
+    /// Kafka Fetches parked on this queue, by the partition NAME they read: an
+    /// append to partition P wakes exactly the fetches reading P, which is
+    /// Kafka's own delayed-fetch wake-up. `notify_waiters` on [`Self::notify`]
+    /// would wake every fetch of the topic on every append — 600 consumers of
+    /// one topic re-reading their partitions per append. Each fetch owns one
+    /// `Notify` registered under each of its partitions ([`PartitionWatch`]).
+    watchers: Mutex<HashMap<String, Vec<Arc<Notify>>>>,
 }
 
 pub struct Notifier {
@@ -85,6 +92,9 @@ pub struct Notifier {
     /// QUEEN_TENANCY_HEADER. OFF ⇒ only the default tenant exists, so a tenant-less
     /// peer frame resolves to it with one hash lookup instead of the fan-out.
     tenancy: bool,
+    /// [`PartitionWatch`]es alive in this process. Zero ⇒ the apply thread does
+    /// not even collect per-partition appends ([`Notifier::watches_partitions`]).
+    partition_watches: std::sync::atomic::AtomicUsize,
     /// Optional peer transport (multi-replica mode). Set once at startup.
     transport: OnceLock<Arc<MeshTransport>>,
 }
@@ -96,6 +106,7 @@ impl Notifier {
             by_queue: Mutex::new(HashMap::new()),
             any: std::sync::RwLock::new(HashMap::new()),
             tenancy,
+            partition_watches: std::sync::atomic::AtomicUsize::new(0),
             transport: OnceLock::new(),
         })
     }
@@ -123,6 +134,7 @@ impl Notifier {
             notify: Notify::new(),
             hints: Mutex::new(VecDeque::new()),
             used: std::sync::atomic::AtomicBool::new(true),
+            watchers: Mutex::new(HashMap::new()),
         });
         g.insert(qkey.to_string(), x.clone());
         drop(g);
@@ -234,6 +246,65 @@ impl Notifier {
     /// admission budget or the pool (`hotlist_pop_attempt`), so a redundant wake
     /// costs a task poll and no database work at all. That is why this is a
     /// documented follow-up and not a blocker for the autopilot.
+    /// Register a Kafka Fetch on the `(qkey, partition)`s it reads BEFORE it
+    /// reads them: an append to any of them from then on is a permit on the
+    /// watch's one `Notify`, so an append landing between the read and the park
+    /// is not lost. Dropping the watch deregisters it.
+    pub fn watch_partitions(self: &Arc<Self>, parts: &[(String, String)]) -> PartitionWatch {
+        let notify = Arc::new(Notify::new());
+        let mut by_queue: std::collections::BTreeMap<&str, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for (qkey, partition) in parts {
+            by_queue
+                .entry(qkey.as_str())
+                .or_default()
+                .push(partition.clone());
+        }
+        let mut gates = Vec::with_capacity(by_queue.len());
+        for (qkey, partitions) in by_queue {
+            let gate = self.gate(qkey);
+            {
+                let mut w = gate.watchers.lock().unwrap();
+                for p in &partitions {
+                    w.entry(p.clone()).or_default().push(notify.clone());
+                }
+            }
+            gates.push((gate, partitions));
+        }
+        self.partition_watches
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        PartitionWatch {
+            notifier: self.clone(),
+            gates,
+            notify,
+        }
+    }
+
+    /// Whether any [`PartitionWatch`] is alive: the apply thread's cheap check.
+    pub fn watches_partitions(&self) -> bool {
+        self.partition_watches
+            .load(std::sync::atomic::Ordering::Acquire)
+            > 0
+    }
+
+    /// Records were appended to `partition` of `qkey`: wake the fetches
+    /// watching exactly that partition. A queue nobody watches costs a map
+    /// lookup, and nothing at all while no watch exists anywhere.
+    pub fn wake_partition(&self, qkey: &str, partition: &str) {
+        if !self.watches_partitions() {
+            return;
+        }
+        let Some(gate) = self.existing_gate(qkey) else {
+            return;
+        };
+        let w = gate.watchers.lock().unwrap();
+        if let Some(list) = w.get(partition) {
+            for n in list {
+                n.notify_one();
+            }
+        }
+    }
+
     pub async fn wait_queue(&self, qkey: &str, dur: Duration) -> bool {
         let gate = self.gate(qkey);
         let notified = gate.notify.notified();
@@ -531,9 +602,100 @@ pub fn hint_sweeper_in_ms(delay_ms: i64) {
     sweeper_wake().hint(delay_ms);
 }
 
+/// One Kafka Fetch's registration on the partitions it reads
+/// ([`Notifier::watch_partitions`]).
+pub struct PartitionWatch {
+    notifier: Arc<Notifier>,
+    /// Each queue's gate and the partitions watched on it. The gates are held,
+    /// so none can be evicted while a fetch watches it.
+    gates: Vec<(Arc<QueueGate>, Vec<String>)>,
+    notify: Arc<Notify>,
+}
+
+impl PartitionWatch {
+    /// Park until an append to one of the watched partitions, or `dur`. True on
+    /// a wake. A wake that arrived since the last wait returns at once.
+    pub async fn wait(&self, dur: Duration) -> bool {
+        tokio::time::timeout(dur, self.notify.notified())
+            .await
+            .is_ok()
+    }
+}
+
+impl Drop for PartitionWatch {
+    fn drop(&mut self) {
+        for (gate, partitions) in &self.gates {
+            let mut w = gate.watchers.lock().unwrap();
+            for p in partitions {
+                if let Some(list) = w.get_mut(p) {
+                    list.retain(|n| !Arc::ptr_eq(n, &self.notify));
+                    if list.is_empty() {
+                        w.remove(p);
+                    }
+                }
+            }
+        }
+        self.notifier
+            .partition_watches
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --------------------------------------------- per-partition fetch watches
+
+    /// A long-poll is woken by an append to a partition it reads, and not by
+    /// one to a partition it does not.
+    #[tokio::test]
+    async fn a_partition_watch_wakes_on_its_own_partitions_only() {
+        let n = Notifier::new(false);
+        let w = n.watch_partitions(&[("q".into(), "1".into()), ("q".into(), "3".into())]);
+        n.wake_partition("q", "2");
+        assert!(
+            !w.wait(Duration::from_millis(30)).await,
+            "woken by another partition"
+        );
+        n.wake_partition("q", "3");
+        assert!(w.wait(Duration::from_secs(1)).await);
+    }
+
+    /// An append that lands between the read and the park is a permit: the
+    /// wait returns at once instead of sleeping to its cap.
+    #[tokio::test]
+    async fn an_append_before_the_park_is_not_lost() {
+        let n = Notifier::new(false);
+        let w = n.watch_partitions(&[("q".into(), "0".into())]);
+        n.wake_partition("q", "0");
+        let t = std::time::Instant::now();
+        assert!(w.wait(Duration::from_secs(5)).await);
+        assert!(t.elapsed() < Duration::from_millis(500));
+    }
+
+    /// Dropping a watch deregisters it, and with none left the apply thread
+    /// is told there is nobody to wake.
+    #[tokio::test]
+    async fn a_dropped_watch_leaves_nothing_behind() {
+        let n = Notifier::new(false);
+        assert!(!n.watches_partitions());
+        let a = n.watch_partitions(&[("q".into(), "0".into()), ("r".into(), "0".into())]);
+        let b = n.watch_partitions(&[("q".into(), "0".into())]);
+        assert!(n.watches_partitions());
+        drop(a);
+        n.wake_partition("q", "0");
+        assert!(
+            b.wait(Duration::from_secs(1)).await,
+            "b lost its registration"
+        );
+        drop(b);
+        assert!(!n.watches_partitions());
+        let g = n
+            .existing_gate("q")
+            .expect("the gate stays until the sweep");
+        assert!(g.watchers.lock().unwrap().is_empty());
+    }
 
     // ------------------------------------------------ the sweeper's wake (§7.4)
 

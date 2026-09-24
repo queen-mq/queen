@@ -120,9 +120,6 @@ pub mod qlog;
 /// `(pid, hash) → (offset, created_at)`, pruned by the txns window, whose hash
 /// lists outlive the segments retention deletes. Owner: WP-1.2.
 pub mod dedup;
-/// Kafka record batches stored verbatim (phase 2 of the Kafka-on-raft plan):
-/// the payload format, the offset stamping and the synthetic per-record ids.
-pub mod kafka_batch;
 
 /// The cycle driver (§7.1): drain the command channel under the batch caps,
 /// plan, propose, wait for local apply, clear the overlay. Owner: WP-1.6.

@@ -73,6 +73,9 @@ pub struct Config {
     /// What the listener does to a connection before a handler sees it: SASL,
     /// and SNI-derived Host forwarding.
     policy: Policy,
+    /// The raft broker running this facade in-process ([`Config::with_raft`]);
+    /// never read from the environment, because only the broker knows it.
+    raft: Option<crate::RaftBroker>,
 }
 
 /// Hand-written rather than derived, for ONE field: `queen_token` is a bearer
@@ -105,6 +108,7 @@ impl std::fmt::Debug for Config {
             .field("txns", &self.txns)
             .field("tls", &self.tls)
             .field("policy", &self.policy)
+            .field("raft", &self.raft)
             .finish()
     }
 }
@@ -444,6 +448,7 @@ impl Config {
                 forward_sni_host,
                 max_connections,
             },
+            raft: None,
         })
     }
 }
@@ -579,13 +584,22 @@ impl Config {
     pub fn clustered(&self) -> bool {
         self.node_id.is_some()
     }
+
+    /// This configuration for a facade running INSIDE a raft broker of
+    /// `voters` voters whose data directory is `log_dir`
+    /// ([`crate::Facade::raft`]).
+    pub fn with_raft(mut self, voters: u32, log_dir: &str) -> Config {
+        self.raft = Some(crate::RaftBroker {
+            voters: voters.max(1),
+            log_dir: log_dir.to_string(),
+        });
+        self
+    }
 }
 
 /// Run the facade until `stop` resolves (or the accept loop ends), then hand
 /// this node's registry row back. `api` is the Queen client, over HTTP or
-/// in-process; `via` names which, for the boot line only. `log` is the typed
-/// record path of a broker sharing this process ([`queen::KafkaLog`]), or
-/// `None`.
+/// in-process; `via` names which, for the boot line only.
 ///
 /// Every failure the binary used to exit(1) on — certificate material that
 /// does not load, a node id another process holds, a Kafka port that cannot be
@@ -594,7 +608,6 @@ pub async fn serve(
     cfg: Config,
     api: Arc<dyn queen::QueenApi>,
     via: &'static str,
-    log: Option<Arc<dyn queen::KafkaLog>>,
     stop: impl std::future::Future<Output = &'static str>,
 ) -> Result<(), String> {
     // The TLS material is read and PARSED here rather than on the first
@@ -738,7 +751,7 @@ pub async fn serve(
             Arc::clone(&txns),
             cfg.policy,
         )
-        .with_log(log),
+        .with_raft(cfg.raft.clone()),
     );
 
     let listener = match tokio::net::TcpListener::bind(&cfg.listen_addr).await {
@@ -1131,6 +1144,7 @@ mod tests {
             groups: cfg.groups,
             tls: None,
             policy: Policy::default(),
+            raft: None,
         };
         assert_eq!(cfg, expected);
     }

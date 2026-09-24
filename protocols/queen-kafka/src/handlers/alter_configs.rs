@@ -96,6 +96,8 @@ pub(crate) struct Context {
     records: Result<HashMap<String, Record>, ResponseError>,
     /// The longest `Retry-After` any of those reads carried.
     pub(crate) throttle_ms: Option<i32>,
+    /// [`Facade::in_sync_replicas`]: what `min.insync.replicas` may be set to.
+    pub(crate) isr: u32,
 }
 
 /// Read the catalog and the config records for the topic resources of one
@@ -114,6 +116,7 @@ pub(crate) async fn context(facade: &Facade, topics: &[String], token: Option<&s
             catalog: Ok(HashMap::new()),
             records: Ok(HashMap::new()),
             throttle_ms: None,
+            isr: facade.in_sync_replicas(),
         };
     }
     let mut throttle_ms: Option<i32> = None;
@@ -168,6 +171,7 @@ pub(crate) async fn context(facade: &Facade, topics: &[String], token: Option<&s
         catalog,
         records,
         throttle_ms,
+        isr: facade.in_sync_replicas(),
     }
 }
 
@@ -530,9 +534,10 @@ fn plan_topic(
 
     let mut desired = Map::new();
     for config in configs {
-        let delta = match topic_config::alter(
+        let delta = match topic_config::alter_with(
             config.name.as_str(),
             config.value.as_ref().map(|v| v.as_str()),
+            ctx.isr,
         ) {
             Ok(delta) => delta,
             Err(why) => return Verdict::Refuse(ResponseError::InvalidConfig, why),

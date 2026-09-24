@@ -637,51 +637,6 @@ impl RaftHealth {
 }
 
 // ---------------------------------------------------------------------------
-// The typed Kafka record path (phase 2 of the Kafka-on-raft plan).
-// ---------------------------------------------------------------------------
-
-/// One partition of a Kafka Produce: its RecordBatch v2 bytes, appended
-/// VERBATIM as one `Append` ([`crate::rsm::kafka_batch`]).
-#[derive(Clone, Debug)]
-pub struct KafkaAppendReq {
-    pub queue: String,
-    pub partition: String,
-    /// The batches as the client sent them; the CRCs were checked upstream.
-    pub batches: bytes::Bytes,
-}
-
-/// One partition of a Kafka Fetch.
-#[derive(Clone, Debug)]
-pub struct KafkaReadReq {
-    pub queue: String,
-    pub partition: String,
-    pub offset: i64,
-    /// The byte budget of this partition's answer (at least one chunk goes).
-    pub max_bytes: usize,
-}
-
-/// One chunk of a partition's log, in offset order.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum KafkaChunk {
-    /// One stored Kafka `Append`, from the batch that holds the fetch offset
-    /// on: the bytes a Kafka Fetch returns as they are.
-    Batches(bytes::Bytes),
-    /// Messages a Queen producer pushed: `(offset, created_at_us, payload)`.
-    Messages(Vec<(u64, i64, Vec<u8>)>),
-}
-
-/// What one [`KafkaReadReq`] answered: the bounds, always, and the log from
-/// the fetch offset. `error` is `UNKNOWN_TOPIC_OR_PARTITION` or
-/// `OFFSET_OUT_OF_RANGE`, spelled as `POST /api/v1/fetch` spells them.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct KafkaReadOut {
-    pub high_watermark: i64,
-    pub log_start: i64,
-    pub error: Option<&'static str>,
-    pub chunks: Vec<KafkaChunk>,
-}
-
-// ---------------------------------------------------------------------------
 // The facade trait.
 // ---------------------------------------------------------------------------
 
@@ -781,28 +736,6 @@ pub trait Rsm: Send + Sync {
         _ctx: ReqCtx,
         _req: TimersCountReq,
     ) -> Result<TimerReadOut, RsmError> {
-        Err(RsmError::Unsupported)
-    }
-
-    /// Append Kafka batches verbatim, one `Append` per part; one answer per
-    /// part, in part order: the offset of its first record.
-    async fn kafka_append(
-        &self,
-        _ctx: ReqCtx,
-        _parts: Vec<KafkaAppendReq>,
-    ) -> Result<Vec<Result<u64, RsmError>>, RsmError> {
-        Err(RsmError::Unsupported)
-    }
-
-    /// Read partitions for a Kafka Fetch, long-polling up to `max_wait_ms`
-    /// for `min_bytes`; one answer per request, in request order.
-    async fn kafka_read(
-        &self,
-        _ctx: ReqCtx,
-        _asks: Vec<KafkaReadReq>,
-        _max_wait_ms: u64,
-        _min_bytes: usize,
-    ) -> Result<Vec<KafkaReadOut>, RsmError> {
         Err(RsmError::Unsupported)
     }
 

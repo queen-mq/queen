@@ -143,28 +143,22 @@ func TestCreatePartitionsRefusesEqualAndNonPositiveCounts(t *testing.T) {
 	}
 }
 
-// CHECK P3. An INCREASE is the one genuine capability gap, and the message has
-// to name the knob that would actually change the width — otherwise an operator
-// reads "no" with nothing to do about it.
-func TestCreatePartitionsRefusesAnIncreaseAndNamesTheBrokerKnob(t *testing.T) {
+// CHECK P3. An INCREASE of a topic this facade tracks raises its declared width
+// (since 2026-09-24; it was an advertised refusal before): the answer is
+// success, and Metadata — the only authority on a width — reports the new count.
+func TestCreatePartitionsWidensATrackedTopic(t *testing.T) {
 	cl := newClient(t)
 	topic := newTopic(t)
 	ensureTopic(t, cl, topic)
 
-	got := createPartitions(t, cl, topic, topicWidth(t)+4, nil, false)
-	if got.ErrorCode != errInvalidPartitions {
-		t.Fatalf("an increase answered %d, want INVALID_PARTITIONS", got.ErrorCode)
+	want := topicWidth(t) + 4
+	got := createPartitions(t, cl, topic, want, nil, false)
+	if got.ErrorCode != errNone {
+		t.Fatalf("an increase answered %d (%q), want 0", got.ErrorCode, partitionsMessage(got))
 	}
-	msg := partitionsMessage(got)
-	for _, want := range []string{"QUEEN_KAFKA_DEFAULT_PARTITIONS", "produce to the higher lanes"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("the increase message does not mention %q: %q", want, msg)
-		}
-	}
-	// ...and nothing was widened. Metadata is the only authority on that.
 	md := metadataFor(t, cl, topic)
-	if got := int32(len(md.Topics[0].Partitions)); got != topicWidth(t) {
-		t.Errorf("a refused increase widened the topic to %d", got)
+	if n := int32(len(md.Topics[0].Partitions)); n != want {
+		t.Errorf("after the increase Metadata says %d partitions, want %d", n, want)
 	}
 }
 

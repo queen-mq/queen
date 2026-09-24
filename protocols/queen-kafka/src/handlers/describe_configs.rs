@@ -243,7 +243,7 @@ fn one(
                     "no such topic",
                 );
             };
-            let mut configs = topic_config::topic_configs();
+            let mut configs = topic_config::topic_configs_with(facade.in_sync_replicas());
             configs.extend(retention_row(records, topic, live_id.as_deref()));
             answered(resource, &configs, resource_keys(resource), documented)
         }

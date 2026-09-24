@@ -425,16 +425,10 @@ impl FetchedRecord {
 }
 
 /// What one entry of a fetch answered.
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Fetched {
     #[serde(default)]
     pub records: Vec<FetchedRecord>,
-    /// The TYPED read's answer ([`KafkaLog::read`]): the partition's log in
-    /// offset order, stored Kafka batches passed through as bytes and anything
-    /// a Queen producer pushed as records. Empty on the JSON path, which fills
-    /// [`Fetched::records`] instead; the fetch handler serves whichever is set.
-    #[serde(skip)]
-    pub chunks: Vec<FetchChunk>,
     /// The next offset the log will assign: `last + 1`. Reported whether or not
     /// a record came back, and reported alongside an `error` too — which is
     /// what makes an errored fetch a usable bounds probe.
@@ -966,6 +960,18 @@ pub trait QueenApi: Send + Sync + 'static {
         token: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Deleted>>;
 
+    /// The bytes each partition of `queue` holds, by partition NAME, from
+    /// `GET /api/v1/resources/queues/{queue}`: what DescribeLogDirs reports as
+    /// a partition's size. A partition the answer carries no size for is
+    /// absent; the default knows none.
+    fn partition_bytes<'a>(
+        &'a self,
+        _queue: &'a str,
+        _token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<(String, i64)>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
     /// The same Queen, reached with `host` as the HTTP `Host` header of every
     /// call — the M5 shared-host fit (`QUEEN_KAFKA_FORWARD_SNI_HOST`).
     ///
@@ -1017,70 +1023,6 @@ pub trait QueenApi: Send + Sync + 'static {
 }
 
 // --------------------------------------------------------------------- client
-
-// ------------------------------------------------------------ the typed log
-//
-// Phase 2 of the Kafka-on-raft plan. A broker that runs this facade in-process
-// (server/src/kafka_inproc.rs) offers the two calls that carry records as TYPED
-// calls: a Produce's RecordBatch v2 bytes are appended VERBATIM — one Queen
-// `Append` per partition, offsets stamped into the batch headers by the broker —
-// and a Fetch hands the stored bytes back as they are. No envelope, no base64,
-// no JSON on either side. Everything else (topics, configs, offsets, the
-// transaction bundle) still goes through [`QueenApi`].
-
-/// One partition of a Produce, as the client sent it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AppendPart {
-    pub queue: String,
-    /// The Queen partition NAME: the Kafka partition index in decimal.
-    pub partition: String,
-    /// The RecordBatch v2 bytes of this partition, exactly as the request
-    /// carried them. Every CRC has been checked by the produce handler.
-    pub batches: bytes::Bytes,
-    /// The records the batch headers declare, summed: what the append numbers.
-    pub records: u32,
-}
-
-/// One chunk of a partition's log, in offset order.
-#[derive(Debug, Clone, PartialEq)]
-pub enum FetchChunk {
-    /// One stored `Append` of Kafka batches, offsets already stamped: served
-    /// as the bytes they are. May start below the fetch offset, which every
-    /// client handles by skipping the records it did not ask for.
-    Batches(bytes::Bytes),
-    /// Messages a Queen producer pushed (or a Kafka produce stored before
-    /// batches were stored verbatim): encoded into a batch by the handler.
-    Records(Vec<FetchedRecord>),
-}
-
-/// The typed record path of a broker that shares this facade's process.
-pub trait KafkaLog: Send + Sync + 'static {
-    /// Whether an append may take the typed path NOW. A raft follower cannot
-    /// write its log; its appends go through [`QueenApi`], whose route the
-    /// broker forwards to the leader. Reads are served wherever they land.
-    fn appends_here(&self) -> bool {
-        true
-    }
-
-    /// Append each part as one `Append`; one answer per part, in part order:
-    /// the offset of the part's first record, or why it was not appended.
-    fn append<'a>(
-        &'a self,
-        parts: Vec<AppendPart>,
-        token: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<Vec<Result<i64>>>>;
-
-    /// Read each entry from its absolute offset, long-polling like
-    /// `POST /api/v1/fetch`; one answer per entry, in entry order, with
-    /// [`Fetched::chunks`] set instead of [`Fetched::records`].
-    fn read<'a>(
-        &'a self,
-        entries: &'a [FetchEntry],
-        max_wait_ms: i64,
-        min_bytes: i64,
-        token: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<Vec<Fetched>>>;
-}
 
 /// Total budget for one admin call. The Kafka connection that triggered it is
 /// muted until it answers (conn.rs: one request in flight), so an unbounded wait
@@ -1416,6 +1358,30 @@ impl QueenApi for HttpQueen {
                 )));
             }
             Ok(())
+        })
+    }
+
+    fn partition_bytes<'a>(
+        &'a self,
+        queue: &'a str,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<(String, i64)>>> {
+        Box::pin(async move {
+            let path = format!("/api/v1/resources/queues/{}", encode_segment(queue));
+            let body = self.call("GET", &path, token, None, None).await?;
+            let v: serde_json::Value =
+                serde_json::from_str(&body).map_err(|e| Error::Body(e.to_string()))?;
+            Ok(v.get("partitions")
+                .and_then(|p| p.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|p| {
+                    Some((
+                        p.get("name")?.as_str()?.to_string(),
+                        p.get("retainedBytes")?.as_i64()?,
+                    ))
+                })
+                .collect())
         })
     }
 
@@ -2554,65 +2520,6 @@ fn make_room(entries: &mut HashMap<TenantKey, Entry>, key: &TenantKey) {
 /// against something that records what it was asked rather than a broker.
 #[cfg(test)]
 pub mod testing {
-    /// A [`super::KafkaLog`] double: every append recorded, every answer
-    /// scripted. Numbers each part from a per-partition tail unless a script
-    /// says otherwise, which is what a real broker does.
-    #[derive(Default)]
-    pub struct FakeLog {
-        pub appended: std::sync::Mutex<Vec<super::AppendPart>>,
-        pub tails: std::sync::Mutex<std::collections::HashMap<(String, String), i64>>,
-        /// When set, the next append answers exactly this, whole.
-        pub append_answer: std::sync::Mutex<Option<super::Result<Vec<super::Result<i64>>>>>,
-        /// Answered to every read, entry for entry.
-        pub reads: std::sync::Mutex<Vec<super::Fetched>>,
-    }
-
-    impl super::KafkaLog for FakeLog {
-        fn append<'a>(
-            &'a self,
-            parts: Vec<super::AppendPart>,
-            _token: Option<&'a str>,
-        ) -> super::BoxFuture<'a, super::Result<Vec<super::Result<i64>>>> {
-            Box::pin(async move {
-                if let Some(scripted) = self.append_answer.lock().unwrap().take() {
-                    self.appended.lock().unwrap().extend(parts);
-                    return scripted;
-                }
-                let mut tails = self.tails.lock().unwrap();
-                let answers = parts
-                    .iter()
-                    .map(|p| {
-                        let tail = tails
-                            .entry((p.queue.clone(), p.partition.clone()))
-                            .or_insert(0);
-                        let base = *tail;
-                        *tail += p.records as i64;
-                        Ok(base)
-                    })
-                    .collect();
-                self.appended.lock().unwrap().extend(parts);
-                Ok(answers)
-            })
-        }
-
-        fn read<'a>(
-            &'a self,
-            entries: &'a [super::FetchEntry],
-            _max_wait_ms: i64,
-            _min_bytes: i64,
-            _token: Option<&'a str>,
-        ) -> super::BoxFuture<'a, super::Result<Vec<super::Fetched>>> {
-            Box::pin(async move {
-                let reads = self.reads.lock().unwrap().clone();
-                Ok(entries
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| reads.get(i).cloned().unwrap_or_default())
-                    .collect())
-            })
-        }
-    }
-
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -2686,6 +2593,9 @@ pub mod testing {
         /// exactly the arm that must hand the backoff to the client instead of
         /// looping.
         pub kv_interpose: Mutex<std::collections::VecDeque<Option<KvOp>>>,
+        /// How long every KV call takes, when set: what makes calls OVERLAP in
+        /// a test, the way raft round trips do on a live broker.
+        pub kv_delay: Mutex<Option<std::time::Duration>>,
         /// Every `POST /api/v1/transaction`, as it was sent: the records and
         /// the KV rider, together, because what M9 asserts about a commit is a
         /// property of the two ARRAYS AT ONCE — that the fence is at index 0
@@ -2810,6 +2720,7 @@ pub mod testing {
                 kv_error: Mutex::new(None),
                 floor_scan_error: Mutex::new(None),
                 kv_interpose: Mutex::new(std::collections::VecDeque::new()),
+                kv_delay: Mutex::new(None),
                 transactions: Mutex::new(Vec::new()),
                 transaction_error: Mutex::new(None),
                 kv: Mutex::new(std::collections::BTreeMap::new()),
@@ -3364,7 +3275,6 @@ pub mod testing {
                                 high_watermark: 0,
                                 log_start_offset: 0,
                                 error: Some(FETCH_ERR_UNKNOWN.to_string()),
-                                chunks: Vec::new(),
                             };
                         }
                         let empty = Lane::default();
@@ -3378,7 +3288,6 @@ pub mod testing {
                                 high_watermark: high,
                                 log_start_offset: start,
                                 error: Some(FETCH_ERR_OUT_OF_RANGE.to_string()),
-                                chunks: Vec::new(),
                             };
                         }
                         let records = lane
@@ -3397,7 +3306,6 @@ pub mod testing {
                             high_watermark: high,
                             log_start_offset: start,
                             error: None,
-                            chunks: Vec::new(),
                         }
                     })
                     .collect())
@@ -3417,6 +3325,10 @@ pub mod testing {
             token: Option<&'a str>,
         ) -> BoxFuture<'a, Result<Vec<KvAnswer>>> {
             Box::pin(async move {
+                let delay = *self.kv_delay.lock().unwrap();
+                if let Some(d) = delay {
+                    tokio::time::sleep(d).await;
+                }
                 self.tokens.lock().unwrap().push(token.map(str::to_string));
                 self.kv_calls.lock().unwrap().push(ops.to_vec());
                 if crate::topic_record::is_floor_scan(ops) {

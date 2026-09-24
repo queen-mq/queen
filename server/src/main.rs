@@ -1775,7 +1775,7 @@ async fn run_raft(cfg: config::Config) {
         Err(e) => obs::fatal(format!("raft state init failed: {e}")),
     };
 
-    // The typed Kafka record path reaches the state machine directly
+    // The Kafka facade's own KV calls reach the state machine directly
     // (kafka_inproc.rs), so it keeps its own handles on it and on auth.
     #[cfg(feature = "kafka")]
     let (kafka_rsm, kafka_auth) = (state.rsm.clone(), authenticator.clone());
@@ -1806,6 +1806,7 @@ async fn run_raft(cfg: config::Config) {
             k,
             app.clone(),
             &cfg.port,
+            &cfg.raft_dir,
             kafka_rsm,
             kafka_auth,
         )

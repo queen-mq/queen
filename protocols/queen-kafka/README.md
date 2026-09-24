@@ -40,7 +40,7 @@ it is decoded; the code is in [`examples/cross-protocol`](../../examples/cross-p
   quotas and metering; a real client proves it end to end in
   [`compat/cloud/`](compat/cloud).
 
-The advertised table is 32 API keys. The thirteen admin keys,
+The advertised table is 33 API keys. The thirteen admin keys,
 `InitProducerId` and the four transaction keys landed on 2026-08-29 and
 2026-08-30:
 
@@ -51,7 +51,7 @@ The advertised table is 32 API keys. The thirteen admin keys,
 | DescribeConfigs | 32 | v1-v4 | topics and this broker; `retention.ms` round-trips for topics this facade created |
 | AlterConfigs | 33 | v0-v2 | the deprecated FULL-REPLACEMENT form: a key the request does not name is reset to its default. Prefer key 44 |
 | IncrementalAlterConfigs | 44 | v0-v1 | the delta form, and the one `kafka-configs.sh --alter` sends. Only on topics this facade created |
-| CreatePartitions | 37 | v0-v3 | an advertised refusal: a width floor is declared once, at CreateTopics, and this API does not change it. A decrease and an equal count answer Kafka's own sentences |
+| CreatePartitions | 37 | v0-v3 | an increase raises the declared width of a topic this facade created; a decrease and an equal count answer Kafka's own sentences |
 | ListGroups | 16 | v0-v4 | live membership merged with a durable index of every group that ever committed |
 | DescribeGroups | 15 | v0-v3 | members, host, client id and the assignment |
 | DeleteGroups | 42 | v0-v2 | irreversibly removes committed offsets; refuses a group with members |
@@ -64,6 +64,7 @@ The advertised table is 32 API keys. The thirteen admin keys,
 | AddOffsetsToTxn | 25 | v0-v3 | one group per transaction, not several |
 | EndTxn | 26 | v0-v3 | commit sends the whole stage as ONE `POST /api/v1/transaction`; abort drops it and writes nothing |
 | TxnOffsetCommit | 28 | v0-v3 | v3 is the FLOOR and it is mandatory: kafka-clients throws below it whenever group metadata is set |
+| DescribeLogDirs | 35 | v1-v4 | inside a raft broker: the node's data directory, every partition and its bytes; over HTTP, no directory |
 
 ## Transactions: what works, and the boundary
 
@@ -109,7 +110,7 @@ land; AlterConsumerGroupOffsets always worked, because it rides OffsetCommit and
 needs no key of its own; the ACL APIs answer `SECURITY_DISABLED` exactly as an
 Apache Kafka with no authorizer does. What stays absent is the surface with no
 Queen primitive behind it: DeleteRecords (nothing truncates to an offset),
-DescribeLogDirs (Postgres segments, not log directories), partition reassignment
+partition reassignment
 and leader election (one logical broker, no replicas), delegation tokens and
 SCRAM (the facade mints no credentials; Queen does), and client quotas (the
 quota is per tenant, and altering one would let a tenant raise its own cap).
@@ -117,11 +118,10 @@ Each of those closes the connection if sent anyway, which is Apache Kafka's own
 answer to an unparseable request and unreachable for a client that read
 ApiVersions. Two consequences worth knowing before you meet them:
 
-- **The idempotence window is in memory and per facade** — for the standalone
-  facade. A facade restart, an eviction (65 536 tracked producer-partitions) or
-  a connection landing on another facade costs at-least-once for at most the
-  five in-flight batches. In-process in a raft broker the window is in the log
-  and survives all three (see above).
+- **The idempotence window is in memory and per facade.** A facade restart, an
+  eviction (65 536 tracked producer-partitions) or a connection landing on
+  another facade costs at-least-once for at most the five in-flight batches.
+  Real Kafka persists producer state in the log; this does not.
 - **A config alter needs a topic this facade created.** Queen's
   `POST /api/v1/configure` is a whole-row upsert over nineteen columns and
   thirteen of them have no HTTP read, so the facade keeps its own record of the
@@ -167,34 +167,22 @@ three:
   supervisor's ladder (1s doubling to 30s). `GET /status` reports it under
   `kafka` with `"mode": "in-process"`.
 
-In-process, the records themselves take a TYPED path (`queen::KafkaLog`,
-server/src/rsm/kafka_batch.rs) instead of the JSON envelope:
+Kafka records ride Queen's own pipeline: a Produce is a Queen push and a Fetch
+is `POST /api/v1/fetch`, exactly as over HTTP. (A second, Kafka-only path that
+stored batches verbatim was built and removed on 2026-09-24: every change to the
+first pipeline broke it.) What the facade can say about storage it now says
+truthfully, because it knows the raft cluster it runs in:
 
-- **Produce** appends each partition's RecordBatch v2 bytes VERBATIM as one
-  Queen append: the broker stamps each batch's base offset (outside the CRC, so
-  nothing is recompressed) and stores the client's own bytes. Transactional
-  produce is unchanged: staged here, written by EndTxn's bundle.
-- **Fetch** returns the stored batches as they are, interleaved in offset order
-  with whatever a Queen producer pushed to the same partition (encoded as
-  before). A fetch of one topic long-polls on that topic's own wake.
-- **Queen readers** — a native pop, `POST /api/v1/fetch`, the message browser,
-  a dead letter — see each Kafka record as the same `{"k","v","h","t"}`
-  envelope the JSON path stored, with the transaction id `kafka:<offset>`
-  (reserved), which is what a native consumer acks it by.
-- **The idempotent producer's window lives in the log**, not in this process:
-  one replicated KV row per partition and producer, checked and advanced in
-  the same entry as the append. A resend after a broker restart is still the
-  duplicate it is.
-- **This facade's own KV** — committed offsets, topic records, the node
-  registry — goes to the state machine without the tenant KV rate limit
-  (`QUEEN_KV_WRITE_RATE`), so a consumer group commits at its own pace.
-- A queue encrypted at rest stores Kafka records as encrypted envelopes, as
-  before: a verbatim batch would be plaintext.
-- **The verbatim append and the direct KV run on the raft leader only.** On a
-  follower both go through the broker's router, which forwards them to the
-  leader: records are stored as envelopes (every reader handles both) and the
-  idempotence window is this facade's in-memory one, as standalone. Fetch
-  reads the local replica on every node.
+- **Replication.** With `QUEEN_KAFKA_NODE_ID` set on every node, Metadata lists
+  every live node as a replica and in the ISR of every partition — every voter
+  holds every partition — and `min.insync.replicas` is accepted up to the raft
+  majority (2 of 3), the number every acknowledged write is on.
+- **Log directories.** DescribeLogDirs answers the node's raft data directory
+  with every partition and the bytes it holds (`kafka-log-dirs.sh`, a UI's size
+  column, a readiness check waiting for every replica's log).
+- **The facade's own KV** — committed offsets, topic records, the node registry
+  — goes to the state machine without the tenant KV rate limit
+  (`QUEEN_KV_WRITE_RATE`), whose 429 a client sees as COORDINATOR_NOT_AVAILABLE.
 
 ## Cluster mode
 

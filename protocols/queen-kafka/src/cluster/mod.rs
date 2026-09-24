@@ -276,6 +276,7 @@ impl Cluster {
                     incarnation: String::new(),
                 }],
                 clustered: false,
+                replicated: false,
             },
             Cluster::Enabled(s) => Placement {
                 // The last known view even when it is STALE: a Metadata that
@@ -286,6 +287,7 @@ impl Cluster {
                     .view()
                     .map_or_else(|| vec![s.me.clone()], |v| v.nodes.clone()),
                 clustered: true,
+                replicated: false,
             },
         }
     }
@@ -348,6 +350,9 @@ pub enum Owner {
 pub struct Placement {
     nodes: Vec<Node>,
     clustered: bool,
+    /// Every live node holds every partition — the facade runs inside a raft
+    /// broker of more than one voter ([`Placement::replicated`]).
+    replicated: bool,
 }
 
 impl Placement {
@@ -362,6 +367,26 @@ impl Placement {
     /// every node rather than three.
     pub fn controller(&self) -> i32 {
         self.nodes.first().map_or(SINGLE_NODE_ID, |n| n.id)
+    }
+
+    /// The same placement, with every live node a replica of every partition
+    /// when `on` and the facade is clustered. Inside a raft broker that is the
+    /// truth: each node's log holds every partition, and an acknowledged write
+    /// is on a majority of them.
+    pub fn replicated(mut self, on: bool) -> Placement {
+        self.replicated = on && self.clustered;
+        self
+    }
+
+    /// The replica list of one partition, leader first: the leader alone
+    /// unless [`Placement::replicated`], and then every live node.
+    pub fn replicas_of(&self, topic: &str, partition: i32) -> Vec<i32> {
+        let leader = self.leader_of(topic, partition);
+        let mut out = vec![leader];
+        if self.replicated {
+            out.extend(self.nodes.iter().map(|n| n.id).filter(|id| *id != leader));
+        }
+        out
     }
 
     /// The node that leads one partition. In single mode it is node 0 without

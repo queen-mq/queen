@@ -81,21 +81,22 @@ release profile unwinds and `obs::install_panic_hook` aborts off the
 `queen-kafka` threads (W1 for this one facade). Explicit `QUEEN_URL` stays on
 HTTP. The Postgres boot keeps the child.
 
-**Status (2026-09-23, phase 2 of the Kafka-on-raft plan): typed record path.**
-Produce appends RecordBatch v2 bytes verbatim (one `Append` per partition,
-riding a `PushCommand` whose single item starts with the `FF FF FF FF` magic,
-planned by `rsm/planner/kafka.rs`: offsets stamped outside the CRC, synthetic
-per-record hashes `kafka:<offset>` so native pop/ack work unchanged); Fetch
-serves the stored bytes (`Rsm::kafka_read`), single-topic fetches park on the
-queue gate. The idempotent-producer window moved into the log (KV row
-`qk:seq:<pid>:<producer>` written in the append's entry). The facade's KV calls
-skip the router and the KV rate ladder (`handlers::facade_kv`). Both the
-verbatim append and the direct KV run on the raft leader only; a follower goes
-through the router, which forwards to the leader. Not done: step 5 proper —
-committed offsets as native consumer-group cursors (with commit metadata on the
-cursor row) instead of `qk:group:` KV rows, approved 2026-09-23 and waiting for
-the lanes rework; S3-sink cursors; transactions still use the facade stage +
-EndTxn bundle.
+**Status (2026-09-24): one pipeline.** Phase 2's typed record path (Kafka
+batches stored verbatim through a Kafka-only planner branch) was built, then
+REMOVED on Alice's call: every change to Queen's own pipeline — lanes, client
+offload, raft groups — broke it silently. A Kafka produce is a Queen push and a
+Kafka fetch is `POST /api/v1/fetch`, through the in-process router. What stayed
+and is generic Queen: fetch long-polls wake per PARTITION on apply (they used to
+re-read on a 200 ms timer when no native group subscribed the queue), and the
+queue detail reports `retainedBytes` per partition. The facade, inside a raft
+cluster, reports every live node as replica and ISR, accepts
+`min.insync.replicas` up to the raft majority, answers DescribeLogDirs with the
+node's data directory, widens a tracked topic on CreatePartitions, and batches
+a group's concurrent offset commits into one fenced KV write. The facade's KV
+calls skip the router and the KV rate ladder (`handlers::facade_kv`). Not done:
+committed offsets as native consumer-group cursors (approved 2026-09-23, waiting
+for the lanes rework); S3-sink cursors; transactions still use the facade stage +
+EndTxn bundle and are refused in facade cluster mode.
 
 ### W3 — Proxy data plane into the broker
 - **Auth:** API keys (hashed, RAM lookup) and JWT verification, with a cache of

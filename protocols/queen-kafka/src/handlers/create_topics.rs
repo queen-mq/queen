@@ -162,7 +162,7 @@ pub async fn handle(
                         .to_string(),
                 )
             } else {
-                plan(t)
+                plan(t, facade.in_sync_replicas())
             };
             (t, plan)
         })
@@ -419,7 +419,7 @@ async fn record_what_was_created(
 
 /// Everything decidable about one requested topic without touching Queen: the
 /// name rule, the replica assignment, and the configs.
-fn plan(t: &CreatableTopic) -> Plan {
+fn plan(t: &CreatableTopic, isr: u32) -> Plan {
     let name = t.name.as_str();
 
     // The SAME rule Metadata applies, in the code THIS surface answers it with.
@@ -466,7 +466,7 @@ fn plan(t: &CreatableTopic) -> Plan {
         .iter()
         .map(|c| (c.name.as_str(), c.value.as_ref().map(|v| v.as_str())))
         .collect();
-    match topic_config::apply(&configs) {
+    match topic_config::apply_with(&configs, isr) {
         Ok(applied) => Plan::Create(Box::new(applied)),
         Err(why) => Plan::Reject(ResponseError::InvalidConfig, why),
     }

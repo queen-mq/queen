@@ -49,6 +49,16 @@ struct FetchBody {
     min_bytes: Option<i64>,
 }
 
+/// The partition NAME a fetch entry addresses: a string, a number spelled in
+/// decimal, or `Default`.
+fn fetch_partition_name(p: Option<&Value>) -> String {
+    match p {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        _ => "Default".to_string(),
+    }
+}
+
 #[derive(Deserialize)]
 struct FetchEntry {
     queue: String,
@@ -175,6 +185,26 @@ impl RaftFacade {
         let max_wait = request.max_wait_ms.unwrap_or(0).min(30_000);
         let min_bytes = request.min_bytes.unwrap_or(1).max(0) as usize;
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(max_wait);
+        // A long-poll watches exactly the partitions it reads, registered
+        // BEFORE the first read: apply wakes it on an append to one of them,
+        // whether or not a consumer group subscribes the queue, and an append
+        // landing between a read and the park is a permit rather than a lost
+        // wake. Before this it parked on the tenant's gate, which only native
+        // group wakes reach: a fetch of a queue nobody pops re-read on a
+        // 200 ms timer, and every append woke every fetch of the tenant.
+        let watch = (max_wait > 0 && min_bytes > 0).then(|| {
+            let parts: Vec<(String, String)> = request
+                .entries
+                .iter()
+                .map(|e| {
+                    (
+                        crate::handlers::tenant_queue_key(&ctx.tenant, &e.queue),
+                        fetch_partition_name(e.partition.as_ref()),
+                    )
+                })
+                .collect();
+            self.notifier.watch_partitions(&parts)
+        });
         loop {
             let out = self.api_fetch_once(ctx.clone(), body).await?;
             if out.status != 200 || max_wait == 0 || min_bytes == 0 {
@@ -208,10 +238,14 @@ impl RaftFacade {
             if error || bytes >= min_bytes || std::time::Instant::now() >= deadline {
                 return Ok(out);
             }
+            // Capped at a second: the wake is the fast path, and the re-read on
+            // the cap is the floor if one is ever missed.
             let wait = deadline
                 .saturating_duration_since(std::time::Instant::now())
-                .min(std::time::Duration::from_millis(200));
-            self.notifier.wait_any(&ctx.tenant, wait).await;
+                .min(std::time::Duration::from_secs(1));
+            if let Some(w) = &watch {
+                w.wait(wait).await;
+            }
         }
     }
 
@@ -234,11 +268,7 @@ impl RaftFacade {
             .entries
             .into_iter()
             .map(|e| {
-                let partition = match e.partition {
-                    Some(Value::String(s)) => s,
-                    Some(Value::Number(n)) => n.to_string(),
-                    _ => "Default".to_string(),
-                };
+                let partition = fetch_partition_name(e.partition.as_ref());
                 (
                     e.queue,
                     partition,
@@ -1011,43 +1041,7 @@ pub(super) fn walk_records(
             off += 1;
             continue;
         };
-        if crate::rsm::kafka_batch::is_kafka(&blob) {
-            // Stored Kafka batches (phase 2): one message per record, the
-            // envelope as its payload — what the JSON path would have stored.
-            let views = crate::rsm::kafka_batch::queen_view(&blob, part.pid).map_err(|e| {
-                RsmError::Internal(format!(
-                    "Kafka batch at pid {} offset {base}: {e}",
-                    part.pid
-                ))
-            })?;
-            for v in views {
-                if v.offset < off || v.offset >= high {
-                    continue;
-                }
-                let rec = Record {
-                    queue: part.row.queue.clone(),
-                    partition: part.row.partition.clone(),
-                    partition_id: part.row.uuid,
-                    offset: v.offset,
-                    segment_base: base,
-                    frame_idx: (v.offset - base) as usize,
-                    created_at_us: created,
-                    id: v.message_id,
-                    txn: v.txn,
-                    trace_id: None,
-                    producer_sub: None,
-                    payload: v.payload,
-                    encrypted: false,
-                };
-                n += 1;
-                if !cb(rec) {
-                    return Ok(());
-                }
-                if n >= limit {
-                    break;
-                }
-            }
-        } else if let Some(frames) = unpack_frames_ref(&blob) {
+        if let Some(frames) = unpack_frames_ref(&blob) {
             for (i, f) in frames.into_iter().enumerate() {
                 let pos = base + i as u64;
                 if pos < off || pos >= high {
