@@ -785,7 +785,13 @@ impl Config {
         // unexplainable failure. Boot-fatal instead, like the bind address: a
         // half-configured feature is a misconfiguration, not a degraded mode.
         let shared_hosts = normalize_shared_hosts(csv_lower("QUEEN_PROXY_SHARED_HOSTS"));
-        if !shared_hosts.is_empty() && pxdb.is_none() {
+        // The single binary keeps api_keys/cluster_roles in the broker's KV
+        // (PLAN_SINGLE_BINARY.md W3): no pxdb, and nothing missing.
+        let embedded = matches!(
+            env_str("QUEEN_PROXY_EMBEDDED", "").trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        );
+        if !shared_hosts.is_empty() && pxdb.is_none() && !embedded {
             tracing::error!(
                 hosts = ?shared_hosts,
                 "QUEEN_PROXY_SHARED_HOSTS is set but PXDB_HOST is not — a shared host resolves its \

@@ -153,11 +153,11 @@ async fn async_main(worker_threads: usize) {
         None => crate::store::Store::None,
     };
 
-    let cache = cache::ClusterCache::new(&cfg, db.clone());
+    let cache = cache::ClusterCache::with_store(&cfg, store.clone());
     let limits = limits::Limits::new(&cfg);
     let meter = Arc::new(meter::Meter::new(&cfg));
     meter.spawn_flush(db.clone());
-    let registry = registry::Registry::new(db.clone());
+    let registry = registry::Registry::with_store(store.clone());
     let keys = auth::Keys::from_config(&cfg);
 
     // Identity material that WAS supplied must be able to serve the mode it is
@@ -385,11 +385,14 @@ pub struct Embedded {
 /// standalone proxy; `PXDB_*` is ignored.
 pub fn build_embedded(e: Embedded) -> (St, Router) {
     let cfg = config::Config::load();
-    let cache = cache::ClusterCache::new(&cfg, None);
+    let store = crate::store::Store::Kv(e.kv);
+    let upstream = crate::upstream::Upstream::InProcess(e.broker);
+    let cache = cache::ClusterCache::with_store(&cfg, store.clone());
     let limits = limits::Limits::new(&cfg);
     let meter = Arc::new(meter::Meter::new(&cfg));
     meter.spawn_flush(None);
-    let registry = registry::Registry::new(None);
+    // The reconciler reads the queue inventory through the in-process router.
+    let registry = registry::Registry::with_store(store.clone()).with_inventory(upstream.clone());
     let keys = auth::Keys::from_config(&cfg);
     let boot = config::jwt_boot(config::JwtMaterial {
         // The replicated KV is the persistence a console session needs.
@@ -411,8 +414,8 @@ pub fn build_embedded(e: Embedded) -> (St, Router) {
     let st: St = Arc::new(AppState {
         cfg,
         db: None,
-        store: crate::store::Store::Kv(e.kv),
-        upstream: crate::upstream::Upstream::InProcess(e.broker),
+        store,
+        upstream,
         cache,
         limits,
         meter,
@@ -422,15 +425,13 @@ pub fn build_embedded(e: Embedded) -> (St, Router) {
     start_background(&st);
     // First boot: plans, this cell, the layout version (store/seed.rs). The
     // KV answers once a leader is elected; retry until then.
-    if let Some(kv) = st.store.kv().cloned() {
+    {
+        let st = st.clone();
         tokio::spawn(async move {
             let mut wait = std::time::Duration::from_millis(200);
             loop {
-                match crate::store::seed::seed(kv.as_ref()).await {
-                    Ok(wrote) => {
-                        tracing::info!(target: "proxy", wrote, "proxy state seeded");
-                        break;
-                    }
+                match seed_embedded(&st).await {
+                    Ok(()) => break,
                     Err(e) => {
                         tracing::debug!(target: "proxy", error = %e, "proxy seed: KV not ready");
                         tokio::time::sleep(wait).await;
@@ -443,6 +444,73 @@ pub fn build_embedded(e: Embedded) -> (St, Router) {
     let app = router(st.clone());
     tracing::info!(target: "proxy", "proxy embedded in the broker (state: replicated KV)");
     (st, app)
+}
+
+/// First boot of a single-binary node, idempotent and safe on every node at
+/// once: the layout version, the plan catalog, this cell, and — when
+/// `QUEEN_PROXY_BOOTSTRAP_TENANT` is set — one tenant with its cluster, admin
+/// and (with `QUEEN_PROXY_BOOTSTRAP_API_KEY`) a known full-scope API key:
+///
+/// | variable | meaning |
+/// |---|---|
+/// | `QUEEN_PROXY_BOOTSTRAP_TENANT` | tenant slug (cluster slug = the same) |
+/// | `QUEEN_PROXY_BOOTSTRAP_EMAIL` | admin email (default `admin@localhost`) |
+/// | `QUEEN_PROXY_BOOTSTRAP_PASSWORD` | admin password (none = OAuth/key only) |
+/// | `QUEEN_PROXY_BOOTSTRAP_PLAN` | plan code (default `dev`) |
+/// | `QUEEN_PROXY_BOOTSTRAP_API_KEY` | plaintext key to issue on that cluster |
+pub async fn seed_embedded(st: &St) -> Result<(), String> {
+    use crate::store::data;
+    let kv = st.store.kv().ok_or("not the single binary")?;
+    crate::store::seed::seed(kv.as_ref()).await.map_err(|e| e.to_string())?;
+    data::seed_default_plans(&st.store).await.map_err(|e| e.to_string())?;
+    let cell = data::upsert_cell(
+        &st.store,
+        &data::CellSpec {
+            slug: crate::store::seed::SELF_CELL.into(),
+            region: "local".into(),
+            base_url: "inprocess://self".into(),
+            class: "shared".into(),
+            capacity_slots: 0,
+            cell_secret: None,
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    if let Some(slug) = env("QUEEN_PROXY_BOOTSTRAP_TENANT") {
+        let out = data::bootstrap_tenant(
+            &st.store,
+            &data::Bootstrap {
+                tenant_slug: slug.clone(),
+                tenant_name: None,
+                cluster_slug: slug.clone(),
+                plan_code: env("QUEEN_PROXY_BOOTSTRAP_PLAN").unwrap_or_else(|| "dev".into()),
+                cell: Some(cell),
+                admin_email: env("QUEEN_PROXY_BOOTSTRAP_EMAIL").unwrap_or_else(|| "admin@localhost".into()),
+                password: env("QUEEN_PROXY_BOOTSTRAP_PASSWORD"),
+                key_name: Some("bootstrap".into()),
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        if let (Some(key), Some(cluster)) = (
+            env("QUEEN_PROXY_BOOTSTRAP_API_KEY"),
+            out.get("cluster_id")
+                .and_then(|v| v.as_str())
+                .and_then(|v| uuid::Uuid::parse_str(v).ok()),
+        ) {
+            let scopes: Vec<String> = ["produce", "consume", "admin", "read"].iter().map(|s| s.to_string()).collect();
+            match data::issue_api_key(&st.store, cluster, "bootstrap (env)", &auth::key_hash_hex(&key), &scopes).await {
+                Ok(_) => {}
+                // Already issued by an earlier boot or another node.
+                Err(data::DataError::Conflict(_)) => {}
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        tracing::info!(target: "proxy", tenant = %slug, created = out.get("api_key").is_some_and(|k| !k.is_null()), "bootstrap tenant ready");
+    }
+    tracing::info!(target: "proxy", "proxy state seeded");
+    Ok(())
 }
 
 /// Flush the proxy's in-memory usage and queue rows (the broker's shutdown
