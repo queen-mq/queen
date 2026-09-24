@@ -15,6 +15,14 @@
 //! minimal — after 3 consecutive recovery failures, sleep 30s before trying
 //! the next file, so a startup recovery pass against a still-down DB never
 //! hammers it.
+//!
+//! Two replay shapes, one file format (a row is always usage to ADD):
+//! `recover` hands a whole file to one persist call (the Postgres UPSERT,
+//! one transaction); `recover_chunked` (the broker's KV, whose atomic batch
+//! is small) hands it over a chunk at a time and records the rows already
+//! applied in a `<file>.done` sidecar, so a file that fails halfway resumes
+//! after its applied prefix instead of adding it twice. Both honour the
+//! sidecar.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -150,7 +158,7 @@ impl Spool {
         let mut consecutive = 0u32;
         let mut recovered = 0usize;
         for f in &files {
-            let rows = match read_rows(f) {
+            let rows = match read_pending_rows(f) {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(target: "spool", file = %f.display(), error = %e, "unreadable spool file; leaving in place");
@@ -164,12 +172,12 @@ impl Spool {
                 }
             };
             if rows.is_empty() {
-                let _ = fs::remove_file(f); // empty/corrupt-trailer-only file, nothing to lose
+                remove_spool_file(f); // empty/corrupt-trailer-only file, nothing to lose
                 continue;
             }
             match persist(rows).await {
                 Ok(()) => {
-                    let _ = fs::remove_file(f);
+                    remove_spool_file(f);
                     consecutive = 0;
                     recovered += 1;
                 }
@@ -187,10 +195,118 @@ impl Spool {
         tracing::info!(target: "spool", recovered, total = files.len(), "meter spool recovery done");
     }
 
+    /// `recover`, a chunk at a time: `persist` gets at most `chunk` rows per
+    /// call, and after each success the count of rows applied is recorded in
+    /// the file's `.done` sidecar, so a file that fails halfway resumes after
+    /// its applied prefix on the next startup. Same once-per-startup contract,
+    /// same circuit breaker (a failed chunk counts once and leaves the rest of
+    /// its file for the next restart).
+    pub async fn recover_chunked<F, Fut>(&self, chunk: usize, persist: F)
+    where
+        F: Fn(Vec<UsageRow>) -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
+        let files = self.list_files();
+        if files.is_empty() {
+            return;
+        }
+        tracing::info!(target: "spool", count = files.len(), "meter spool recovery starting");
+        let chunk = chunk.max(1);
+        let mut consecutive = 0u32;
+        let mut recovered = 0usize;
+        for f in &files {
+            let (done, rows) = match read_rows(f) {
+                Ok(rows) => (read_done(f).min(rows.len()), rows),
+                Err(e) => {
+                    tracing::warn!(target: "spool", file = %f.display(), error = %e, "unreadable spool file; leaving in place");
+                    consecutive += 1;
+                    if consecutive >= BREAKER_THRESHOLD {
+                        tracing::warn!(target: "spool", cooldown_s = self.cooldown.as_secs(), "meter spool circuit breaker tripped");
+                        tokio::time::sleep(self.cooldown).await;
+                        consecutive = 0;
+                    }
+                    continue;
+                }
+            };
+            let mut applied = done;
+            let mut failed = None;
+            for part in rows[done..].chunks(chunk) {
+                match persist(part.to_vec()).await {
+                    Ok(()) => {
+                        applied += part.len();
+                        if applied < rows.len() {
+                            if let Err(e) = write_done(f, applied) {
+                                tracing::warn!(target: "spool", file = %f.display(), error = %e, "could not record replay progress");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        failed = Some(e);
+                        break;
+                    }
+                }
+            }
+            match failed {
+                None => {
+                    remove_spool_file(f);
+                    consecutive = 0;
+                    recovered += 1;
+                }
+                Some(e) => {
+                    tracing::warn!(
+                        target: "spool", file = %f.display(), applied, total = rows.len(), error = %e,
+                        "spool recovery write failed; the rest will retry next restart"
+                    );
+                    consecutive += 1;
+                    if consecutive >= BREAKER_THRESHOLD {
+                        tracing::warn!(target: "spool", cooldown_s = self.cooldown.as_secs(), "meter spool circuit breaker tripped");
+                        tokio::time::sleep(self.cooldown).await;
+                        consecutive = 0;
+                    }
+                }
+            }
+        }
+        tracing::info!(target: "spool", recovered, total = files.len(), "meter spool recovery done");
+    }
+
     #[cfg(test)]
     fn new_for_test(dir: &std::path::Path, rotate_bytes: u64, cooldown: Duration) -> Spool {
         Spool::with_params(dir.to_str().unwrap(), rotate_bytes, cooldown)
     }
+}
+
+/// `<file>.done`: how many rows of `<file>` a chunked replay already applied.
+fn done_path(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(".done");
+    PathBuf::from(s)
+}
+
+fn read_done(path: &Path) -> usize {
+    fs::read_to_string(done_path(path)).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+}
+
+/// Write-then-rename, so a crash leaves the old count or the new one.
+fn write_done(path: &Path, applied: usize) -> std::io::Result<()> {
+    let done = done_path(path);
+    let mut tmp = done.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    fs::write(&tmp, applied.to_string())?;
+    fs::rename(&tmp, &done)
+}
+
+fn remove_spool_file(path: &Path) {
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_file(done_path(path));
+}
+
+/// The rows of a spool file a chunked replay has not applied yet.
+fn read_pending_rows(path: &Path) -> std::io::Result<Vec<UsageRow>> {
+    let mut rows = read_rows(path)?;
+    let done = read_done(path).min(rows.len());
+    rows.drain(..done);
+    Ok(rows)
 }
 
 fn read_rows(path: &Path) -> std::io::Result<Vec<UsageRow>> {
@@ -321,6 +437,53 @@ mod tests {
         assert!(elapsed >= cooldown, "breaker must have slept at least one cooldown, elapsed={elapsed:?}");
         // 3 failed and were left in place; the 4th succeeded and was removed.
         assert_eq!(list_buf_files(dir.path()).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn chunked_recovery_resumes_after_the_applied_prefix() {
+        let dir = tempdir();
+        let writer = Spool::new_for_test(dir.path(), ROTATE_BYTES, Duration::from_millis(1));
+        let rows: Vec<UsageRow> = (0..10).map(row).collect();
+        writer.write(&rows);
+        drop(writer);
+
+        // First startup: chunks of 3; the third chunk fails.
+        let seen: Arc<Mutex<Vec<UsageRow>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(AtomicU32::new(0));
+        let (seen2, calls2) = (seen.clone(), calls.clone());
+        let reader = Spool::new_for_test(dir.path(), ROTATE_BYTES, Duration::from_millis(1));
+        reader
+            .recover_chunked(3, move |batch| {
+                let n = calls2.fetch_add(1, Ordering::SeqCst);
+                let seen2 = seen2.clone();
+                async move {
+                    if n == 2 {
+                        return Err("broker unavailable".to_string());
+                    }
+                    seen2.lock().unwrap().extend(batch);
+                    Ok(())
+                }
+            })
+            .await;
+        assert_eq!(seen.lock().unwrap().len(), 6, "two chunks applied before the failure");
+        assert_eq!(list_buf_files(dir.path()).len(), 1, "the file stays for the next startup");
+
+        // Next startup: only the 4 rows not applied come back — with either
+        // replay shape — and the file and its sidecar are gone after.
+        let rest: Arc<Mutex<Vec<UsageRow>>> = Arc::new(Mutex::new(Vec::new()));
+        let rest2 = rest.clone();
+        reader
+            .recover(move |batch| {
+                let rest2 = rest2.clone();
+                async move {
+                    rest2.lock().unwrap().extend(batch);
+                    Ok(())
+                }
+            })
+            .await;
+        assert_eq!(*rest.lock().unwrap(), rows[6..].to_vec());
+        let left: Vec<_> = fs::read_dir(dir.path()).unwrap().flatten().collect();
+        assert!(left.is_empty(), "file and .done sidecar removed: {left:?}");
     }
 
     #[tokio::test]

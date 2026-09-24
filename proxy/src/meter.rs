@@ -5,19 +5,31 @@
 //! `record()` here just aggregates whatever Sample it's handed).
 //!
 //! In-memory per-(cluster, op, minute) aggregates, 16-way sharded by
-//! cluster_id, flushed to `queen_proxy.usage_minutes` every
-//! `cfg.meter_flush_ms` (closed minutes only — the current minute keeps
-//! accumulating), spooled to disk (spool.rs) when the flush fails, drained
-//! back on the next startup. `record()` deliberately does not log at
-//! info/debug on the hot per-request path (rates/sizes belong in aggregated
-//! blocks, not per-message lines — see obs.rs conventions).
+//! cluster_id, persisted every `cfg.meter_flush_ms`, spooled to disk
+//! (spool.rs) when they cannot be, drained back on the next startup.
+//! `record()` deliberately does not log at info/debug on the hot per-request
+//! path (rates/sizes belong in aggregated blocks, not per-message lines — see
+//! obs.rs conventions). Every statement lives in `store::usage`, which answers
+//! from either backend:
+//!
+//! - **Postgres (the standalone proxy):** closed minutes only — the current
+//!   minute keeps accumulating — ADDED to `queen_proxy.usage_minutes` by an
+//!   UPSERT and forgotten; a failed flush goes to the spool at once.
+//! - **The broker's KV (the single binary, `spawn_flush_store`):** each node
+//!   OVERWRITES its own row per (cluster, minute, op) with its cumulative
+//!   value — the open minute included, so the console and the quota see
+//!   current traffic — which makes a retried write idempotent and leaves no
+//!   row two nodes read-modify-write (store/usage.rs has the layout). A failed
+//!   flush stays in memory and is retried on the next tick (a leader election
+//!   is not worth a trip to the disk); only a long outage
+//!   (`KV_BACKLOG_MAX` closed keys) or the shutdown drain spools.
 //!
 //! Downstream of the minute aggregates, this module also drives the billing
-//! chain (`spawn_rollup`): `queen_proxy.rollup_usage_days()` folds closed days
-//! into `usage_days`, and the same tick evaluates
-//! `plans.monthly_msgs_quota` per cluster (PLAN §6.7 soft enforcement: warn
-//! event at QUOTA_WARN_PERCENT, push block at 100%). `drain()` is the
-//! shutdown counterpart to the periodic flush: it takes the open minute too.
+//! chain (`spawn_rollup`): closed days are folded into usage_days, and the
+//! same tick evaluates `plans.monthly_msgs_quota` per cluster (PLAN §6.7 soft
+//! enforcement: warn event at QUOTA_WARN_PERCENT, push block at 100%).
+//! `drain()` is the shutdown counterpart to the periodic flush: it takes the
+//! open minute too.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -29,6 +41,8 @@ use uuid::Uuid;
 
 use crate::limits::PushBlock;
 use crate::state::{OpClass, St};
+use crate::store::schema::UsageDoc;
+use crate::store::{usage, KvBackend, Store};
 
 const N_SHARDS: usize = 16;
 
@@ -55,7 +69,12 @@ const QUOTA_WARN_PERCENT: i64 = 80;
 /// How long minute-granularity usage is kept once its day has been rolled up.
 /// Minutes are the evidence behind a billing dispute, so the window is
 /// generous; usage_days keeps the totals indefinitely either way.
-const USAGE_KEEP_DAYS: u64 = 90;
+const USAGE_KEEP_DAYS: u64 = usage::USAGE_KEEP_DAYS;
+
+/// KV only: closed (cluster, op, minute) keys a node keeps in memory while
+/// the broker cannot take them, before they go to the disk spool. ~100 bytes
+/// each; the open minute is never spooled while running.
+const KV_BACKLOG_MAX: usize = 50_000;
 
 fn shard_index(id: &Uuid) -> usize {
     use std::hash::{Hash, Hasher};
@@ -78,7 +97,7 @@ pub struct Sample {
     pub bytes_out: u64,
 }
 
-#[derive(Default, Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 struct Acc {
     reqs: u64,
     msgs: u64,
@@ -86,10 +105,68 @@ struct Acc {
     bytes_out: u64,
 }
 
+impl Acc {
+    fn add(&mut self, o: &Acc) {
+        self.reqs = self.reqs.saturating_add(o.reqs);
+        self.msgs = self.msgs.saturating_add(o.msgs);
+        self.bytes_in = self.bytes_in.saturating_add(o.bytes_in);
+        self.bytes_out = self.bytes_out.saturating_add(o.bytes_out);
+    }
+
+    fn sub(&mut self, o: &Acc) {
+        self.reqs = self.reqs.saturating_sub(o.reqs);
+        self.msgs = self.msgs.saturating_sub(o.msgs);
+        self.bytes_in = self.bytes_in.saturating_sub(o.bytes_in);
+        self.bytes_out = self.bytes_out.saturating_sub(o.bytes_out);
+    }
+
+    fn is_zero(&self) -> bool {
+        *self == Acc::default()
+    }
+
+    fn from_doc(d: &UsageDoc) -> Acc {
+        Acc {
+            reqs: d.reqs.max(0) as u64,
+            msgs: d.msgs.max(0) as u64,
+            bytes_in: d.bytes_in.max(0) as u64,
+            bytes_out: d.bytes_out.max(0) as u64,
+        }
+    }
+
+    fn row(&self, key: &Key) -> UsageRow {
+        UsageRow {
+            cluster_id: key.0,
+            minute: key.2,
+            op: key.1.as_str().to_string(),
+            reqs: self.reqs,
+            msgs: self.msgs,
+            bytes_in: self.bytes_in,
+            bytes_out: self.bytes_out,
+        }
+    }
+}
+
+/// (cluster, op, minute epoch).
+type Key = (Uuid, OpClass, u64);
+
+/// One accumulator.
+#[derive(Default, Clone, Copy, Debug)]
+struct Entry {
+    /// Recorded here and not persisted yet.
+    pending: Acc,
+    /// KV only: what THIS node's row for the key holds, `pending` excluded —
+    /// set by the one seed read or by our own last successful write. `None`:
+    /// not known yet. Only this node writes the row, so once known it stays
+    /// true, and `base + pending` is always the right total to overwrite with,
+    /// however many earlier writes were lost or merely unacknowledged.
+    base: Option<Acc>,
+}
+
 /// A single closed-minute rollup, ready to flush or spool. Also the on-disk
 /// spool JSONL row shape — field names match the task's `{cluster_id,minute,
 /// op,reqs,msgs,bytes_in,bytes_out}` spec exactly, independent of the DB
-/// column names (usage_minutes.op_class, not `op`).
+/// column names (usage_minutes.op_class, not `op`). A spooled row is always
+/// usage to ADD, on either backend.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct UsageRow {
     pub cluster_id: Uuid,
@@ -101,63 +178,39 @@ pub struct UsageRow {
     pub bytes_out: u64,
 }
 
-const UPSERT_SQL: &str = "
-    INSERT INTO queen_proxy.usage_minutes (cluster_id, minute, op_class, reqs, msgs, bytes_in, bytes_out)
-    VALUES ($1::text::uuid, to_timestamp($2::bigint), $3, $4, $5, $6, $7)
-    ON CONFLICT (cluster_id, minute, op_class) DO UPDATE SET
-        reqs = queen_proxy.usage_minutes.reqs + EXCLUDED.reqs,
-        msgs = queen_proxy.usage_minutes.msgs + EXCLUDED.msgs,
-        bytes_in = queen_proxy.usage_minutes.bytes_in + EXCLUDED.bytes_in,
-        bytes_out = queen_proxy.usage_minutes.bytes_out + EXCLUDED.bytes_out";
-
-/// UPSERT one flush batch inside a single transaction (prepared statement
-/// reused per row — simple and correct for v1 cardinality: distinct
-/// (cluster, op_class) pairs closed per flush interval, not per-message).
-/// cluster_id binds as text and casts in SQL (`$1::text::uuid`) — tokio-postgres
-/// isn't built with the `with-uuid-1` feature in this crate, and this repo's
-/// established workaround (see server/ Track B notes) is the text-cast, not a
-/// new Cargo feature.
+/// The additive Postgres UPSERT (store/usage.rs has the SQL).
 async fn upsert_rows(pool: &Pool, rows: &[UsageRow]) -> Result<(), String> {
-    if rows.is_empty() {
-        return Ok(());
-    }
-    let mut client = pool.get().await.map_err(|e| format!("pool: {e}"))?;
-    let txn = client.transaction().await.map_err(|e| format!("begin: {e}"))?;
-    {
-        let stmt = txn.prepare(UPSERT_SQL).await.map_err(|e| format!("prepare: {e}"))?;
-        for r in rows {
-            let cid = r.cluster_id.to_string();
-            let minute_secs = (r.minute as i64) * 60;
-            txn.execute(
-                &stmt,
-                &[
-                    &cid,
-                    &minute_secs,
-                    &r.op,
-                    &(r.reqs as i64),
-                    &(r.msgs as i64),
-                    &(r.bytes_in as i64),
-                    &(r.bytes_out as i64),
-                ],
-            )
-            .await
-            .map_err(|e| format!("upsert: {e}"))?;
-        }
-    }
-    txn.commit().await.map_err(|e| format!("commit: {e}"))?;
-    Ok(())
+    usage::pg_add_minutes(pool, rows).await
+}
+
+/// Where the meter persists. Set once, by `spawn_flush` / `spawn_flush_store`.
+#[derive(Clone)]
+enum Sink {
+    /// Dev-static mode: usage is discarded.
+    None,
+    /// The standalone proxy's Postgres.
+    Pg(Pool),
+    /// The broker's KV: this node's rows, under `node`.
+    Kv { kv: Arc<dyn KvBackend>, node: String, keep_days: u64 },
 }
 
 pub struct Meter {
     flush_ms: u64,
-    shards: Vec<Mutex<HashMap<(Uuid, OpClass, u64), Acc>>>,
+    shards: Vec<Mutex<HashMap<Key, Entry>>>,
     spool: crate::spool::Spool,
-    /// The pool `drain()` writes through. The periodic path gets it as a
-    /// parameter (`spawn_flush`), but `drain()` is called from the shutdown
-    /// path with nothing but `&self`, so it is remembered here on the way
-    /// past. Never set == dev-static mode: drain discards, exactly like
-    /// `flush_once` does with `db: None`.
-    db: OnceLock<Option<Pool>>,
+    /// Where `drain()` writes. The periodic path gets it as a parameter
+    /// (`spawn_flush`), but `drain()` is called from the shutdown path with
+    /// nothing but `&self`, so it is remembered here on the way past. Never
+    /// set == dev-static mode: drain discards, exactly like `flush_once` does
+    /// with `db: None`.
+    sink: OnceLock<Sink>,
+    /// One KV flush at a time (the periodic loop, the shutdown drain, the
+    /// spool replay): each reads and overwrites this node's rows, and two
+    /// interleaved ones could each write a total the other has not seen.
+    flush_gate: tokio::sync::Mutex<()>,
+    /// KV only: (cluster, UTC day) the spool replay wrote to, for the next
+    /// rollup to recompute even when the day is behind its usual window.
+    reroll: Mutex<HashSet<(Uuid, i64)>>,
 }
 
 impl Meter {
@@ -166,19 +219,24 @@ impl Meter {
             flush_ms: cfg.meter_flush_ms,
             shards: (0..N_SHARDS).map(|_| Mutex::new(HashMap::new())).collect(),
             spool: crate::spool::Spool::new(&cfg.spool_dir),
-            db: OnceLock::new(),
+            sink: OnceLock::new(),
+            flush_gate: tokio::sync::Mutex::new(()),
+            reroll: Mutex::new(HashSet::new()),
         }
     }
 
     pub fn record(&self, s: Sample) {
-        let minute = now_minute_epoch();
+        self.record_at(s, now_minute_epoch());
+    }
+
+    fn record_at(&self, s: Sample, minute: u64) {
         let idx = shard_index(&s.cluster_id);
         let mut shard = self.shards[idx].lock().unwrap();
-        let acc = shard.entry((s.cluster_id, s.op, minute)).or_default();
-        acc.reqs += s.reqs;
-        acc.msgs += s.msgs;
-        acc.bytes_in += s.bytes_in;
-        acc.bytes_out += s.bytes_out;
+        let acc = &mut shard.entry((s.cluster_id, s.op, minute)).or_default().pending;
+        acc.reqs = acc.reqs.saturating_add(s.reqs);
+        acc.msgs = acc.msgs.saturating_add(s.msgs);
+        acc.bytes_in = acc.bytes_in.saturating_add(s.bytes_in);
+        acc.bytes_out = acc.bytes_out.saturating_add(s.bytes_out);
     }
 
     /// Drain every aggregate whose minute is strictly before `now_minute`
@@ -188,17 +246,9 @@ impl Meter {
         let mut rows = Vec::new();
         for shard in &self.shards {
             let mut m = shard.lock().unwrap();
-            m.retain(|key, acc| {
+            m.retain(|key, e| {
                 if key.2 < now_minute {
-                    rows.push(UsageRow {
-                        cluster_id: key.0,
-                        minute: key.2,
-                        op: key.1.as_str().to_string(),
-                        reqs: acc.reqs,
-                        msgs: acc.msgs,
-                        bytes_in: acc.bytes_in,
-                        bytes_out: acc.bytes_out,
-                    });
+                    rows.push(e.pending.row(key));
                     false // remove: drained
                 } else {
                     true // keep: still the current minute
@@ -217,17 +267,28 @@ impl Meter {
         let mut rows = Vec::new();
         for shard in &self.shards {
             let mut m = shard.lock().unwrap();
-            for (key, acc) in m.drain() {
-                rows.push(UsageRow {
-                    cluster_id: key.0,
-                    minute: key.2,
-                    op: key.1.as_str().to_string(),
-                    reqs: acc.reqs,
-                    msgs: acc.msgs,
-                    bytes_in: acc.bytes_in,
-                    bytes_out: acc.bytes_out,
-                });
+            for (key, e) in m.drain() {
+                rows.push(e.pending.row(&key));
             }
+        }
+        rows
+    }
+
+    /// KV: take what is still pending (usage to ADD), forgetting everything;
+    /// `closed_before` limits it to minutes strictly before that one.
+    fn take_pending(&self, closed_before: Option<u64>) -> Vec<UsageRow> {
+        let mut rows = Vec::new();
+        for shard in &self.shards {
+            let mut m = shard.lock().unwrap();
+            m.retain(|key, e| {
+                if closed_before.is_some_and(|b| key.2 >= b) {
+                    return true;
+                }
+                if !e.pending.is_zero() {
+                    rows.push(e.pending.row(key));
+                }
+                false
+            });
         }
         rows
     }
@@ -244,11 +305,14 @@ impl Meter {
     /// the deliberate trade: usage we can over-count once is recoverable,
     /// usage we drop is gone.
     pub async fn drain(&self) {
+        if let Some(Sink::Kv { kv, node, keep_days }) = self.sink.get() {
+            return self.drain_kv(kv.as_ref(), node, *keep_days).await;
+        }
         let rows = self.drain_all();
         if rows.is_empty() {
             return;
         }
-        let Some(pool) = self.db.get().and_then(|db| db.as_ref()) else {
+        let Some(Sink::Pg(pool)) = self.sink.get() else {
             tracing::debug!(target: "meter", rows = rows.len(), "no pxdb (dev mode); discarding usage rows on drain");
             return;
         };
@@ -266,6 +330,32 @@ impl Meter {
                     "shutdown drain timed out; spooling to disk"
                 );
                 self.spool.write(&rows);
+            }
+        }
+    }
+
+    /// KV shutdown: one last flush of everything (every minute counts as
+    /// closed now), bounded like the Postgres drain; whatever it could not
+    /// write goes to the spool as usage to add.
+    async fn drain_kv(&self, kv: &dyn KvBackend, node: &str, keep_days: u64) {
+        let res = tokio::time::timeout(DRAIN_TIMEOUT, self.flush_kv(kv, node, keep_days, u64::MAX)).await;
+        let left = self.take_pending(None);
+        match res {
+            Ok(Ok(n)) if left.is_empty() => {
+                if n > 0 {
+                    tracing::info!(target: "meter", rows = n, node, "usage drained to the kv on shutdown");
+                }
+            }
+            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
+                let why = match &res {
+                    Ok(Err(e)) => e.clone(),
+                    Err(_) => format!("timed out after {} ms", DRAIN_TIMEOUT.as_millis()),
+                    Ok(Ok(_)) => "partial".to_string(),
+                };
+                if !left.is_empty() {
+                    tracing::warn!(target: "meter", rows = left.len(), node, error = %why, "shutdown drain to the kv failed; spooling to disk");
+                    self.spool.write(&left);
+                }
             }
         }
     }
@@ -295,7 +385,10 @@ impl Meter {
     /// recovery and just drains+discards on every tick.
     pub fn spawn_flush(self: &Arc<Self>, db: Option<deadpool_postgres::Pool>) {
         // Remember the pool for `drain()`, which takes no parameters.
-        let _ = self.db.set(db.clone());
+        let _ = self.sink.set(match &db {
+            Some(pool) => Sink::Pg(pool.clone()),
+            None => Sink::None,
+        });
         let this = Arc::clone(self);
         tokio::spawn(async move {
             if let Some(pool) = db.clone() {
@@ -313,6 +406,171 @@ impl Meter {
                 this.flush_once(db.as_ref()).await;
             }
         });
+    }
+
+    /// `spawn_flush` for any [`Store`]: Postgres and none behave exactly as
+    /// `spawn_flush`; the KV (the single binary) writes this node's rows
+    /// under `node` (a label unique per process and stable across its
+    /// restarts — see `usage::node_label`). The spool is replayed first, as
+    /// usage to add.
+    pub fn spawn_flush_store(self: &Arc<Self>, store: &Store, node: &str) {
+        let kv = match store {
+            Store::Pg(pool) => return self.spawn_flush(Some(pool.clone())),
+            Store::None => return self.spawn_flush(None),
+            Store::Kv(kv) => kv.clone(),
+        };
+        let node = usage::node_label(node);
+        let keep_days = usage::keep_days_from_env();
+        let _ = self.sink.set(Sink::Kv { kv: kv.clone(), node: node.clone(), keep_days });
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            this.recover_kv(kv.clone(), node.clone(), keep_days).await;
+            tracing::info!(target: "meter", node = %node, keep_days, flush_ms = this.flush_ms, "usage metering to the kv");
+            let mut tick = tokio::time::interval(Duration::from_millis(this.flush_ms.max(100)));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut failing = false;
+            loop {
+                tick.tick().await;
+                let now_minute = now_minute_epoch();
+                match this.flush_kv(kv.as_ref(), &node, keep_days, now_minute).await {
+                    Ok(n) => {
+                        if failing {
+                            tracing::info!(target: "meter", rows = n, "usage flush to the kv recovered");
+                        }
+                        failing = false;
+                    }
+                    Err(e) => {
+                        // Once per streak: the next ticks retry the same rows.
+                        if !failing {
+                            tracing::warn!(target: "meter", error = %e, "usage flush to the kv failed; keeping it in memory to retry");
+                        }
+                        failing = true;
+                        this.spool_kv_backlog(now_minute, KV_BACKLOG_MAX);
+                    }
+                }
+            }
+        });
+    }
+
+    /// KV: overwrite this node's row of every key with pending usage with its
+    /// cumulative total (`base + pending`), the open minute included; then
+    /// forget the minutes before `now_minute` that are fully written. A key
+    /// whose base is not known yet reads this node's row first (a restart
+    /// within the minute, or a late record into a minute already forgotten).
+    /// A batch that fails keeps its keys pending for the next call; the first
+    /// error is returned after every batch was tried.
+    async fn flush_kv(&self, kv: &dyn KvBackend, node: &str, keep_days: u64, now_minute: u64) -> Result<usize, String> {
+        let _gate = self.flush_gate.lock().await;
+        let mut dirty: Vec<(Key, Acc, Option<Acc>)> = Vec::new();
+        for shard in &self.shards {
+            let m = shard.lock().unwrap();
+            dirty.extend(m.iter().filter(|(_, e)| !e.pending.is_zero()).map(|(k, e)| (*k, e.pending, e.base)));
+        }
+        let mut first_err: Option<String> = None;
+
+        let unseeded: Vec<(Uuid, u64, String)> =
+            dirty.iter().filter(|d| d.2.is_none()).map(|(k, _, _)| (k.0, k.2, k.1.as_str().to_string())).collect();
+        if !unseeded.is_empty() {
+            match usage::kv_read_own(kv, node, &unseeded).await {
+                Ok(docs) => {
+                    let mut seeds: HashMap<Key, Acc> = HashMap::with_capacity(docs.len());
+                    for (d, doc) in dirty.iter().filter(|d| d.2.is_none()).zip(docs) {
+                        seeds.insert(d.0, Acc::from_doc(&doc));
+                    }
+                    for d in dirty.iter_mut() {
+                        if let Some(b) = seeds.get(&d.0) {
+                            d.2 = Some(*b);
+                            if let Some(e) = self.shards[shard_index(&d.0 .0)].lock().unwrap().get_mut(&d.0) {
+                                e.base.get_or_insert(*b);
+                            }
+                        }
+                    }
+                }
+                Err(e) => first_err = Some(e),
+            }
+        }
+
+        // (key, pending written, total written)
+        let ready: Vec<(Key, Acc, Acc)> = dirty
+            .into_iter()
+            .filter_map(|(k, pending, base)| {
+                let mut total = base?;
+                total.add(&pending);
+                Some((k, pending, total))
+            })
+            .collect();
+        let mut written = 0usize;
+        let now_us = usage::now_us();
+        for chunk in ready.chunks(usage::KV_BATCH) {
+            let rows: Vec<UsageRow> = chunk.iter().map(|(k, _, total)| total.row(k)).collect();
+            match usage::kv_write_totals(kv, node, keep_days, &rows, now_us).await {
+                Ok(_) => {
+                    for (k, pending, total) in chunk {
+                        if let Some(e) = self.shards[shard_index(&k.0)].lock().unwrap().get_mut(k) {
+                            e.base = Some(*total);
+                            e.pending.sub(pending);
+                        }
+                    }
+                    written += chunk.len();
+                }
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+
+        for shard in &self.shards {
+            shard.lock().unwrap().retain(|k, e| k.2 >= now_minute || !e.pending.is_zero());
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(written),
+        }
+    }
+
+    /// KV, after a failed flush: when the closed minutes still waiting exceed
+    /// `max` (`KV_BACKLOG_MAX`), move them to the disk spool (as usage to add)
+    /// instead of growing without bound. Skipped while another flush holds the
+    /// gate — it may be writing those very rows.
+    fn spool_kv_backlog(&self, now_minute: u64, max: usize) {
+        let Ok(_gate) = self.flush_gate.try_lock() else { return };
+        let waiting: usize = self
+            .shards
+            .iter()
+            .map(|s| s.lock().unwrap().iter().filter(|(k, e)| k.2 < now_minute && !e.pending.is_zero()).count())
+            .sum();
+        if waiting <= max {
+            return;
+        }
+        let rows = self.take_pending(Some(now_minute));
+        tracing::warn!(target: "meter", rows = rows.len(), "kv unavailable for too long; spooling closed minutes to disk");
+        self.spool.write(&rows);
+    }
+
+    /// KV startup: replay the spool (usage to add) onto this node's rows, a
+    /// chunk per atomic write, before the first flush seeds anything.
+    async fn recover_kv(self: &Arc<Self>, kv: Arc<dyn KvBackend>, node: String, keep_days: u64) {
+        let this = Arc::clone(self);
+        self.spool
+            .recover_chunked(usage::KV_BATCH, move |rows| {
+                let (this, kv, node) = (this.clone(), kv.clone(), node.clone());
+                async move {
+                    let _gate = this.flush_gate.lock().await;
+                    let touched = usage::kv_add_minutes(kv.as_ref(), &node, keep_days, &rows, usage::now_us()).await?;
+                    this.reroll.lock().unwrap().extend(touched);
+                    Ok(())
+                }
+            })
+            .await;
+    }
+
+    /// KV: the days the spool replay wrote to, for the rollup (taken).
+    fn take_reroll(&self) -> Vec<(Uuid, i64)> {
+        self.reroll.lock().unwrap().drain().collect()
+    }
+
+    fn restore_reroll(&self, days: Vec<(Uuid, i64)>) {
+        self.reroll.lock().unwrap().extend(days);
     }
 }
 
@@ -375,12 +633,12 @@ fn quota_announcement(announced: Option<QuotaLevel>, level: QuotaLevel) -> Optio
 }
 
 /// Cross-tick memory for the monthly-quota check. Process-local: one proxy
-/// fronts one cell (PLAN §2), and every value here is re-derived from pxdb on
-/// the first tick after a restart.
+/// fronts one cell (PLAN §2), and every value here is re-derived from the
+/// store on the first tick after a restart.
 #[derive(Default)]
 struct QuotaState {
     /// UTC calendar month ("YYYY-MM") the `announced` map belongs to. A
-    /// different month from the DB resets it — that IS the monthly release.
+    /// different month from the store resets it — that IS the monthly release.
     month: String,
     /// Highest level already announced per cluster, this month.
     announced: HashMap<Uuid, QuotaLevel>,
@@ -388,40 +646,15 @@ struct QuotaState {
     blocked: HashSet<Uuid>,
 }
 
-/// Clusters with a monthly allowance, their calendar-month message count, and
-/// the month itself — one round trip. `cluster_month_msgs` is STABLE and reads
-/// usage_days plus the not-yet-rolled usage_minutes remainder (004_lifecycle),
-/// so the count includes traffic from the current minute-ish, not just what
-/// the rollup has folded in. `jsonb_exists` rather than the `?` operator so
-/// the statement carries no character that a future parameter binder might
-/// claim. Every value comes from one `now()`, so month and count cannot
-/// disagree across a boundary.
-const QUOTA_SQL: &str = "
-    SELECT c.id::text, c.tenant_id::text, c.slug,
-           p.monthly_msgs_quota, (c.limit_overrides)::text,
-           queen_proxy.cluster_month_msgs(c.id, date_trunc('month', (now() AT TIME ZONE 'UTC'))::date),
-           to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM')
-      FROM queen_proxy.clusters c
-      JOIN queen_proxy.plans p ON p.id = c.plan_id
-     WHERE c.status <> 'deleting'
-       AND (p.monthly_msgs_quota IS NOT NULL OR jsonb_exists(c.limit_overrides, 'monthly_msgs_quota'))";
-
-/// Has this exact (kind, cluster, month) event already been written? The
-/// in-process `QuotaState` covers the common case; this covers a proxy restart
-/// mid-month, which would otherwise re-announce every cluster already over the
-/// line. Best-effort by design: on a query error we let the emit proceed
-/// (a duplicate CP event beats a swallowed one).
-const OUTBOX_SEEN_SQL: &str = "
-    SELECT 1 FROM queen_proxy.outbox
-     WHERE kind = $1 AND payload->>'cluster_id' = $2 AND payload->>'month' = $3
-     LIMIT 1";
-
 /// Periodic billing driver: fold closed days into `usage_days`, then evaluate
 /// `plans.monthly_msgs_quota` (PLAN §6.7). Detached, never panics, tolerates
-/// pxdb being down by skipping the tick — a failed read is not evidence that a
-/// block may be released.
+/// the store being down by skipping the tick — a failed read is not evidence
+/// that a block may be released. Runs on `st.store`: the standalone proxy's
+/// Postgres, or (single binary) the broker's KV on every node — the rollup
+/// writes the same rows whichever node runs it, and the push blocks it sets
+/// are per process.
 pub fn spawn_rollup(st: St) {
-    if st.db.is_none() {
+    if !st.store.is_some() {
         tracing::info!(target: "meter", "usage rollup: no pxdb configured, skipping (dev-static mode)");
         return;
     }
@@ -442,31 +675,24 @@ pub fn spawn_rollup(st: St) {
         let mut quota = QuotaState::default();
         loop {
             tick.tick().await;
-            let Some(pool) = st.db.as_ref() else { return };
-            rollup_once(pool).await;
-            enforce_monthly_quota(pool, &st.limits, &mut quota, warn_percent).await;
+            rollup_once(&st.store, &st.meter).await;
+            enforce_monthly_quota(&st.store, &st.limits, &mut quota, warn_percent).await;
         }
     });
 }
 
-async fn rollup_once(pool: &Pool) {
-    let client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(target: "meter", error = %e, "usage rollup: pool.get failed, skipping cycle");
-            return;
-        }
-    };
-    // No argument: rollup_usage_days' own default (NULL) means "every closed
-    // day still in usage_minutes", which is what a periodic driver wants —
-    // late spool drains for older days get corrected on the next pass.
-    match client.query_one("SELECT queen_proxy.rollup_usage_days()", &[]).await {
-        Ok(row) => {
-            let rows: i32 = row.get(0);
+async fn rollup_once(store: &Store, meter: &Meter) {
+    let keep_days_raw = crate::config::env_u64("QUEEN_PROXY_USAGE_KEEP_DAYS", USAGE_KEEP_DAYS);
+    // Days the spool replay wrote to (KV): recomputed even when they are
+    // behind the rollup's usual window; given back when the pass fails.
+    let extra = meter.take_reroll();
+    match usage::rollup_days(store, keep_days_raw.max(1), &extra).await {
+        Ok(rows) => {
             tracing::info!(target: "meter", rows, "usage_days rollup ok");
         }
         Err(e) => {
             tracing::warn!(target: "meter", error = %e, "usage_days rollup failed; retrying next tick");
+            meter.restore_reroll(extra);
             // Pruning below only deletes minutes whose day is already rolled up,
             // so a failed rollup makes it a no-op rather than a data loss — but
             // there is nothing to gain from the round trip either.
@@ -476,14 +702,11 @@ async fn rollup_once(pool: &Pool) {
 
     // Bound usage_minutes growth. Ordered strictly after the rollup: the prune
     // is gated on the day existing in usage_days, so running it first would
-    // simply skip the days this pass just folded in.
-    let keep_days = crate::config::env_u64("QUEEN_PROXY_USAGE_KEEP_DAYS", USAGE_KEEP_DAYS) as i32;
-    match client
-        .query_one("SELECT queen_proxy.prune_usage_minutes($1)", &[&keep_days])
-        .await
-    {
-        Ok(row) => {
-            let pruned: i32 = row.get(0);
+    // simply skip the days this pass just folded in. (KV: the rows carry a
+    // TTL instead, and this is a no-op.)
+    let keep_days = keep_days_raw as i32;
+    match usage::prune_minutes(store, keep_days).await {
+        Ok(pruned) => {
             if pruned > 0 {
                 tracing::info!(target: "meter", pruned, keep_days, "usage_minutes pruned");
             }
@@ -495,19 +718,12 @@ async fn rollup_once(pool: &Pool) {
 }
 
 async fn enforce_monthly_quota(
-    pool: &Pool,
+    store: &Store,
     limits: &crate::limits::Limits,
     state: &mut QuotaState,
     warn_percent: i64,
 ) {
-    let client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(target: "meter", error = %e, "monthly quota: pool.get failed, skipping cycle");
-            return;
-        }
-    };
-    let rows = match client.query(QUOTA_SQL, &[]).await {
+    let rows = match usage::quota_rows(store).await {
         Ok(r) => r,
         Err(e) => {
             // Leave every existing decision alone: we have no evidence either
@@ -522,32 +738,20 @@ async fn enforce_monthly_quota(
     // decides. Clearing `announced` is what makes next month's first crossing
     // announce again.
     if let Some(first) = rows.first() {
-        let month: String = first.get(6);
-        if state.month != month {
-            state.month = month;
+        if state.month != first.month {
+            state.month = first.month.clone();
             state.announced.clear();
         }
     }
 
     let mut now_blocked: HashSet<Uuid> = HashSet::new();
     for row in &rows {
-        let id_str: String = row.get(0);
-        let Ok(cluster_id) = Uuid::parse_str(&id_str) else {
-            tracing::warn!(target: "meter", id = %id_str, "monthly quota: unparseable cluster id, skipping");
-            continue;
-        };
-        let tenant_id: String = row.get(1);
-        let slug: String = row.get(2);
-        let plan_quota: Option<i64> = row.get(3);
-        let overrides_json: String = row.get(4);
-        let msgs: i64 = row.get(5);
-        let month: String = row.get(6);
-
-        let overrides: serde_json::Value =
-            serde_json::from_str(&overrides_json).unwrap_or(serde_json::Value::Null);
+        let cluster_id = row.cluster_id;
+        let id_str = cluster_id.to_string();
+        let msgs = row.msgs;
         // Same three-way override rule as every other limit (cache.rs):
         // absent -> plan, JSON null -> explicitly unlimited, number -> that.
-        let Some(quota) = crate::cache::override_or(&overrides, "monthly_msgs_quota", plan_quota) else {
+        let Some(quota) = crate::cache::override_or(&row.overrides, "monthly_msgs_quota", row.plan_quota) else {
             continue; // override forced "unlimited": nothing to enforce
         };
 
@@ -561,14 +765,14 @@ async fn enforce_monthly_quota(
                 let percent = if quota > 0 { (msgs as i128) * 100 / (quota as i128) } else { 100 };
                 let payload = serde_json::json!({
                     "cluster_id": id_str,
-                    "cluster_slug": slug,
-                    "tenant_id": tenant_id,
-                    "month": month,
+                    "cluster_slug": row.slug,
+                    "tenant_id": row.tenant_id,
+                    "month": row.month,
                     "msgs": msgs,
                     "quota": quota,
                     "percent": percent as i64,
                 });
-                emit_quota_event(&client, kind, &id_str, &month, &payload).await;
+                emit_quota_event(store, kind, &id_str, &row.month, &payload).await;
             }
             state.announced.insert(cluster_id, announce);
         }
@@ -593,28 +797,21 @@ async fn enforce_monthly_quota(
     state.blocked = now_blocked;
 }
 
-async fn emit_quota_event(
-    client: &deadpool_postgres::Client,
-    kind: &str,
-    cluster_id: &str,
-    month: &str,
-    payload: &serde_json::Value,
-) {
-    match client.query_opt(OUTBOX_SEEN_SQL, &[&kind, &cluster_id, &month]).await {
-        Ok(Some(_)) => return, // already announced by a previous process
-        Ok(None) => {}
+/// Has this exact (kind, cluster, month) event already been written? The
+/// in-process `QuotaState` covers the common case; this covers a proxy restart
+/// mid-month (and, in the single binary, the other nodes), which would
+/// otherwise re-announce every cluster already over the line. Best-effort by
+/// design: on a read error we let the emit proceed (a duplicate CP event beats
+/// a swallowed one).
+async fn emit_quota_event(store: &Store, kind: &str, cluster_id: &str, month: &str, payload: &serde_json::Value) {
+    match usage::quota_event_seen(store, kind, cluster_id, month).await {
+        Ok(true) => return, // already announced by a previous process
+        Ok(false) => {}
         Err(e) => {
             tracing::warn!(target: "meter", error = %e, "monthly quota: outbox dedupe check failed; emitting anyway");
         }
     }
-    // jsonb as text + cast, the same binding workaround this crate uses for
-    // uuid ($1::text::uuid) — tokio-postgres carries neither the uuid nor the
-    // serde_json type feature here.
-    let payload_text = payload.to_string();
-    if let Err(e) = client
-        .execute("SELECT queen_proxy.emit_outbox($1, $2::text::jsonb)", &[&kind, &payload_text])
-        .await
-    {
+    if let Err(e) = usage::emit_outbox(store, kind, payload).await {
         tracing::warn!(target: "meter", kind, cluster = cluster_id, error = %e, "monthly quota: outbox emit failed");
     }
 }
@@ -908,6 +1105,292 @@ mod tests {
         assert_eq!(QuotaLevel::Under.outbox_kind(), None);
         assert_eq!(QuotaLevel::Warn.outbox_kind(), Some("cluster_monthly_quota_warning"));
         assert_eq!(QuotaLevel::Over.outbox_kind(), Some("cluster_monthly_quota_blocked"));
+    }
+
+    // ---- KV (the single binary): one row per node, cumulative, idempotent ----
+
+    use crate::store::kv::{BoxFut, KvError};
+    use crate::store::memkv::MemKv;
+    use crate::store::schema::{self, ns, ClusterDoc, OutboxDoc, PlanDoc};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn kv_meter(dir: &std::path::Path, kv: Arc<dyn KvBackend>, node: &str) -> Meter {
+        let meter = Meter::new(&cfg_with_dir(dir));
+        let _ = meter.sink.set(Sink::Kv { kv, node: node.to_string(), keep_days: 90 });
+        meter
+    }
+
+    fn push(cluster_id: Uuid, msgs: u64) -> Sample {
+        Sample { cluster_id, op: OpClass::Push, reqs: 1, msgs, bytes_in: msgs * 10, bytes_out: 0 }
+    }
+
+    async fn minute_msgs(kv: &dyn KvBackend, cluster: Uuid, minute: u64) -> i64 {
+        let m = (minute as i64) * usage::MINUTE_US;
+        usage::kv_usage_by_minute(kv, cluster, m, Some(m + usage::MINUTE_US))
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.msgs)
+            .sum()
+    }
+
+    fn in_memory(meter: &Meter) -> usize {
+        meter.shards.iter().map(|s| s.lock().unwrap().len()).sum()
+    }
+
+    /// Always "no leader".
+    struct Down;
+    impl KvBackend for Down {
+        fn kv(&self, _ops: Vec<serde_json::Value>) -> BoxFut<'_, Result<Vec<serde_json::Value>, KvError>> {
+            Box::pin(async { Err(KvError::Unavailable("no leader".into())) })
+        }
+    }
+
+    /// Applies a write, then reports it lost, `lose` times.
+    struct LostAck {
+        inner: MemKv,
+        lose: AtomicUsize,
+    }
+    impl KvBackend for LostAck {
+        fn kv(&self, ops: Vec<serde_json::Value>) -> BoxFut<'_, Result<Vec<serde_json::Value>, KvError>> {
+            Box::pin(async move {
+                let writes = ops.iter().any(|o| o["op"] == "put");
+                let out = self.inner.kv(ops).await?;
+                if writes && self.lose.load(Ordering::SeqCst) > 0 {
+                    self.lose.fetch_sub(1, Ordering::SeqCst);
+                    return Err(KvError::Unavailable("ack lost".into()));
+                }
+                Ok(out)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn kv_nodes_write_their_own_rows_and_readers_sum_them() {
+        let dir = tempdir();
+        let mem = Arc::new(MemKv::new());
+        let kv: Arc<dyn KvBackend> = mem.clone();
+        let a = kv_meter(dir.path(), kv.clone(), "node-a");
+        let b = kv_meter(dir.path(), kv.clone(), "node-b");
+        let cid = Uuid::new_v4();
+        let now = now_minute_epoch();
+        a.record_at(push(cid, 3), now);
+        b.record_at(push(cid, 4), now);
+        a.flush_kv(kv.as_ref(), "node-a", 90, now).await.unwrap();
+        b.flush_kv(kv.as_ref(), "node-b", 90, now).await.unwrap();
+        assert_eq!(minute_msgs(kv.as_ref(), cid, now).await, 7, "the open minute is written too");
+        assert_eq!(mem.keys(ns::USAGE_MIN).len(), 2, "one row per node");
+
+        // More traffic on a: ITS row is overwritten with the cumulative value.
+        a.record_at(push(cid, 5), now);
+        assert_eq!(a.flush_kv(kv.as_ref(), "node-a", 90, now).await.unwrap(), 1);
+        // Nothing new: nothing written.
+        assert_eq!(a.flush_kv(kv.as_ref(), "node-a", 90, now).await.unwrap(), 0);
+        assert_eq!(minute_msgs(kv.as_ref(), cid, now).await, 12);
+        let own = usage::kv_read_own(kv.as_ref(), "node-a", &[(cid, now, "push".to_string())]).await.unwrap();
+        assert_eq!((own[0].msgs, own[0].reqs, own[0].bytes_in), (8, 2, 80));
+
+        // The open minute stays in memory; once closed and written it goes.
+        assert_eq!(in_memory(&a), 1);
+        a.flush_kv(kv.as_ref(), "node-a", 90, now + 1).await.unwrap();
+        assert_eq!(in_memory(&a), 0);
+    }
+
+    #[tokio::test]
+    async fn kv_a_retried_write_whose_ack_was_lost_counts_once() {
+        let dir = tempdir();
+        let lost = Arc::new(LostAck { inner: MemKv::new(), lose: AtomicUsize::new(1) });
+        let kv: Arc<dyn KvBackend> = lost.clone();
+        let m = kv_meter(dir.path(), kv.clone(), "n1");
+        let cid = Uuid::new_v4();
+        let now = now_minute_epoch();
+        m.record_at(push(cid, 5), now - 1);
+        assert!(m.flush_kv(kv.as_ref(), "n1", 90, now).await.is_err(), "the ack was lost");
+        assert_eq!(in_memory(&m), 1, "a closed minute that failed is kept to retry");
+        m.record_at(push(cid, 1), now - 1); // a late record meanwhile
+        m.flush_kv(kv.as_ref(), "n1", 90, now).await.unwrap();
+        assert_eq!(minute_msgs(&lost.inner, cid, now - 1).await, 6, "5 + 1, not 5 + 5 + 1");
+        assert_eq!(in_memory(&m), 0);
+    }
+
+    #[tokio::test]
+    async fn kv_a_restart_or_a_late_record_continues_the_row() {
+        let dir = tempdir();
+        let kv: Arc<dyn KvBackend> = Arc::new(MemKv::new());
+        let cid = Uuid::new_v4();
+        let now = now_minute_epoch();
+        let first = kv_meter(dir.path(), kv.clone(), "n1");
+        first.record_at(push(cid, 3), now);
+        first.flush_kv(kv.as_ref(), "n1", 90, now).await.unwrap();
+        drop(first);
+
+        // Same node label, new process, same minute: seeded from its own row.
+        let second = kv_meter(dir.path(), kv.clone(), "n1");
+        second.record_at(push(cid, 2), now);
+        second.flush_kv(kv.as_ref(), "n1", 90, now + 1).await.unwrap();
+        assert_eq!(minute_msgs(kv.as_ref(), cid, now).await, 5);
+        assert_eq!(in_memory(&second), 0, "closed and written: forgotten");
+
+        // A record racing the minute boundary lands in the forgotten minute.
+        second.record_at(push(cid, 4), now);
+        second.flush_kv(kv.as_ref(), "n1", 90, now + 1).await.unwrap();
+        assert_eq!(minute_msgs(kv.as_ref(), cid, now).await, 9);
+    }
+
+    #[tokio::test]
+    async fn kv_drain_spools_what_the_broker_refused_and_the_next_start_adds_it() {
+        let dir = tempdir();
+        let cid = Uuid::new_v4();
+        let now = now_minute_epoch();
+        let down = kv_meter(dir.path(), Arc::new(Down), "n1");
+        down.record_at(push(cid, 4), now);
+        down.drain().await;
+        assert_eq!(in_memory(&down), 0, "the drain consumes the aggregates either way");
+        drop(down);
+        let spooled: Vec<UsageRow> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .flat_map(|e| {
+                std::fs::read_to_string(e.path())
+                    .unwrap()
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(|l| serde_json::from_str::<UsageRow>(l).unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(spooled.len(), 1);
+        assert_eq!((spooled[0].msgs, spooled[0].minute), (4, now));
+
+        // Next start, broker healthy, where this node had already written 10
+        // for that minute before the failed drain: the spool ADDS.
+        let mem = Arc::new(MemKv::new());
+        let kv: Arc<dyn KvBackend> = mem.clone();
+        let before = UsageRow { cluster_id: cid, minute: now, op: "push".into(), reqs: 1, msgs: 10, bytes_in: 0, bytes_out: 0 };
+        usage::kv_write_totals(kv.as_ref(), "n1", 90, &[before], usage::now_us()).await.unwrap();
+        let next = Arc::new(Meter::new(&cfg_with_dir(dir.path())));
+        next.recover_kv(kv.clone(), "n1".to_string(), 90).await;
+        assert_eq!(minute_msgs(kv.as_ref(), cid, now).await, 14);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "replayed files are removed");
+        let day = usage::day_of((now as i64) * usage::MINUTE_US);
+        assert_eq!(next.take_reroll(), vec![(cid, day)], "the rollup is told which day moved");
+    }
+
+    #[tokio::test]
+    async fn kv_a_long_outage_moves_closed_minutes_to_the_spool() {
+        let dir = tempdir();
+        let m = kv_meter(dir.path(), Arc::new(Down), "n1");
+        let cid = Uuid::new_v4();
+        let now = now_minute_epoch();
+        m.record_at(push(cid, 1), now - 2);
+        m.record_at(push(cid, 1), now - 1);
+        m.record_at(push(cid, 1), now);
+        assert!(m.flush_kv(&Down, "n1", 90, now).await.is_err());
+        m.spool_kv_backlog(now, 5);
+        assert_eq!(in_memory(&m), 3, "under the cap: kept in memory");
+        m.spool_kv_backlog(now, 1);
+        assert_eq!(in_memory(&m), 1, "over it: the closed minutes went to disk, the open one stays");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn kv_quota_pass_blocks_and_announces_once_across_restarts() {
+        let dir = tempdir();
+        let mem = Arc::new(MemKv::new());
+        let kv: Arc<dyn KvBackend> = mem.clone();
+        let store = Store::Kv(kv.clone());
+        let plan = PlanDoc { id: Uuid::new_v4(), code: "q".into(), monthly_msgs_quota: Some(10), ..Default::default() };
+        let cluster = ClusterDoc {
+            id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            cell_id: Uuid::new_v4(),
+            plan_id: plan.id,
+            slug: "acme".into(),
+            broker_tenant_uuid: Uuid::new_v4(),
+            status: "active".into(),
+            limit_overrides: serde_json::json!({}),
+            created_at_us: 0,
+        };
+        crate::store::kv::write(
+            kv.as_ref(),
+            vec![
+                crate::store::kv::put_op(ns::PLANS, &schema::key(plan.id), &plan, crate::store::kv::Expect::Any, crate::store::kv::Ttl::Forever, false),
+                crate::store::kv::put_op(ns::CLUSTERS, &schema::key(cluster.id), &cluster, crate::store::kv::Expect::Any, crate::store::kv::Ttl::Forever, false),
+            ],
+        )
+        .await
+        .unwrap();
+        let used = UsageRow { cluster_id: cluster.id, minute: now_minute_epoch(), op: "push".into(), reqs: 1, msgs: 12, bytes_in: 0, bytes_out: 0 };
+        usage::kv_write_totals(kv.as_ref(), "n1", 90, &[used], usage::now_us()).await.unwrap();
+
+        let limits = crate::limits::Limits::new(&cfg_with_dir(dir.path()));
+        let mut state = QuotaState::default();
+        enforce_monthly_quota(&store, &limits, &mut state, 80).await;
+        assert_eq!(limits.push_block_reason(cluster.id), Some(PushBlock::MonthlyQuota));
+
+        // A restart (or the next node): fresh memory, same store — no second event.
+        let mut fresh = QuotaState::default();
+        enforce_monthly_quota(&store, &limits, &mut fresh, 80).await;
+        let events: Vec<(String, crate::store::kv::Doc<OutboxDoc>)> =
+            crate::store::kv::scan(kv.as_ref(), ns::OUTBOX, "#").await.unwrap();
+        assert_eq!(events.len(), 1, "announced once: {events:?}");
+        let ev = &events[0].1.value;
+        assert_eq!(ev.kind, "cluster_monthly_quota_blocked");
+        assert_eq!(ev.payload["cluster_slug"], "acme");
+        assert_eq!(ev.payload["msgs"], 12);
+        assert_eq!(ev.payload["cluster_id"], cluster.id.to_string());
+    }
+
+    #[tokio::test]
+    async fn kv_rollup_once_uses_the_days_the_spool_touched() {
+        let dir = tempdir();
+        let mem = Arc::new(MemKv::new());
+        let kv: Arc<dyn KvBackend> = mem.clone();
+        let store = Store::Kv(kv.clone());
+        let meter = Meter::new(&cfg_with_dir(dir.path()));
+        let cid = Uuid::new_v4();
+        let cluster = ClusterDoc {
+            id: cid,
+            tenant_id: Uuid::new_v4(),
+            cell_id: Uuid::new_v4(),
+            plan_id: Uuid::new_v4(),
+            slug: "acme".into(),
+            broker_tenant_uuid: Uuid::new_v4(),
+            status: "active".into(),
+            limit_overrides: serde_json::json!({}),
+            created_at_us: 0,
+        };
+        crate::store::kv::write(
+            kv.as_ref(),
+            vec![crate::store::kv::put_op(ns::CLUSTERS, &schema::key(cid), &cluster, crate::store::kv::Expect::Any, crate::store::kv::Ttl::Forever, false)],
+        )
+        .await
+        .unwrap();
+        let today = usage::day_of(usage::now_us());
+        // Yesterday rolled already; day -10 got a late spool replay.
+        let y = UsageRow { cluster_id: cid, minute: ((today - 1) * 1440) as u64, op: "push".into(), reqs: 1, msgs: 1, bytes_in: 0, bytes_out: 0 };
+        let old = UsageRow { minute: ((today - 10) * 1440) as u64, msgs: 5, ..y.clone() };
+        usage::kv_write_totals(kv.as_ref(), "n1", 90, &[y, old], usage::now_us()).await.unwrap();
+        rollup_once(&store, &meter).await;
+        let day_msgs = |d: i64| {
+            let kv = kv.clone();
+            async move {
+                crate::store::kv::get::<crate::store::schema::UsageDoc>(kv.as_ref(), ns::USAGE_DAY, &usage::day_key(cid, &usage::day_str(d), "push"))
+                    .await
+                    .unwrap()
+                    .map(|d| d.value.msgs)
+            }
+        };
+        assert_eq!(day_msgs(today - 1).await, Some(1));
+        assert_eq!(day_msgs(today - 10).await, Some(5), "never rolled: the whole window is");
+        let more = UsageRow { cluster_id: cid, minute: ((today - 10) * 1440 + 1) as u64, op: "push".into(), reqs: 1, msgs: 2, bytes_in: 0, bytes_out: 0 };
+        usage::kv_write_totals(kv.as_ref(), "n2", 90, &[more], usage::now_us()).await.unwrap();
+        rollup_once(&store, &meter).await;
+        assert_eq!(day_msgs(today - 10).await, Some(5), "behind the window: untouched");
+        meter.restore_reroll(vec![(cid, today - 10)]);
+        rollup_once(&store, &meter).await;
+        assert_eq!(day_msgs(today - 10).await, Some(7));
+        assert!(meter.take_reroll().is_empty(), "consumed by the pass");
     }
 
     // Minimal local tempdir helper (no tempfile crate dependency).
