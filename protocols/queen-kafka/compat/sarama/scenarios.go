@@ -102,6 +102,7 @@ func scenarioVersions(r *runner, st *state) {
 		{42, 0, 2}, // DeleteGroups            — M7 F2; the whole schema
 		{44, 0, 1}, // IncrementalAlterConfigs — M7 F4; what kafka-configs.sh --alter sends
 		{47, 0, 0}, // OffsetDelete            — M7 F4; the whole schema is v0
+		{35, 1, 4}, // DescribeLogDirs         — 2026-09-24; inside a raft broker only
 	}
 	for _, want := range wantAPIs {
 		got, ok := adv[want.key]
@@ -113,8 +114,8 @@ func scenarioVersions(r *runner, st *state) {
 			"%s advertised v%d..v%d (want v%d..v%d)",
 			apiName(want.key), got.MinVersion, got.MaxVersion, want.min, want.max)
 	}
-	r.check(len(resp.ApiKeys) == len(wantAPIs) && len(resp.ApiKeys) == 32,
-		"exactly 32 APIs advertised and every one of them has a row above, got %d", len(resp.ApiKeys))
+	r.check(len(resp.ApiKeys) == len(wantAPIs) && len(resp.ApiKeys) == 33,
+		"exactly 33 APIs advertised and every one of them has a row above, got %d", len(resp.ApiKeys))
 
 	// The twelve keys M7 ADDED. This loop asserted their ABSENCE until F1/F2/F3
 	// and then F4 landed, and it is inverted rather than deleted because the

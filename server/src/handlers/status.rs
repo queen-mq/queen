@@ -35,6 +35,9 @@ use crate::util::uuidv7_bytes;
 // it did before the SQS facade and the S3 sink existed.
 pub async fn handle_status() -> Response {
     let kafka = crate::kafka_facade::status_value();
+    // In raft mode the facade runs in-process (kafka_inproc.rs) and reports there.
+    #[cfg(feature = "kafka")]
+    let kafka = kafka.or_else(crate::kafka_inproc::status_value);
     let sqs = crate::sqs_facade::status_value();
     let s3 = crate::s3_sink::status_value();
     if kafka.is_none() && sqs.is_none() && s3.is_none() {

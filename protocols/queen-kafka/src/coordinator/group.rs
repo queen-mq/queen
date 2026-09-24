@@ -258,6 +258,12 @@ struct Group {
     /// for, so only the clock can close it; with known members, the window
     /// closes as soon as the last of them has rejoined.
     forming: bool,
+    /// When the forming window opened, and whether a NEW member has entered
+    /// the group since the window was last (re)armed — Kafka's
+    /// `newMemberAdded`. Together they are what [`Group::extend_forming_window`]
+    /// decides with.
+    formed_from: Option<Instant>,
+    arrivals: bool,
     /// When an empty group's actor exits. Set only in Empty.
     reap_deadline: Option<Instant>,
 }
@@ -353,6 +359,8 @@ impl Group {
             pending: Vec::new(),
             join_deadline: None,
             forming: false,
+            formed_from: None,
+            arrivals: false,
             // A group nobody ever joins still exits: the actor is spawned by the
             // first request that NAMES the group, which may be a heartbeat from
             // a member of a coordinator that no longer exists.
@@ -585,6 +593,10 @@ impl Group {
         }
         let known = self.members.iter().any(|m| m.id == member_id);
         if !known {
+            // A newcomer while a group is being formed keeps the window open
+            // for one more delay. The FIRST member is not one: the group is
+            // still Empty here, and it is the join that opens the window.
+            self.arrivals |= self.forming && self.state == State::PreparingRebalance;
             self.members.push(Member {
                 id: member_id.clone(),
                 client_id: req.client_id.clone(),
@@ -690,7 +702,10 @@ impl Group {
         };
         self.state = State::PreparingRebalance;
         self.forming = forming;
-        self.join_deadline = Some(Instant::now() + window);
+        let now = Instant::now();
+        self.formed_from = forming.then_some(now);
+        self.arrivals = false;
+        self.join_deadline = Some(now + window);
         self.reap_deadline = None;
         tracing::debug!(
             target: "kafka",
@@ -713,6 +728,52 @@ impl Group {
         if !self.forming && self.members.iter().all(|m| m.joined) {
             self.complete_join();
         }
+    }
+
+    /// A forming window that has run out, and saw a newcomer while it ran, is
+    /// held open for one more [`GroupConfig::join_delay`] — up to the members'
+    /// rebalance timeout counted from the first join. `true` when it was.
+    ///
+    /// Apache Kafka's `InitialDelayedJoin`, and the half of
+    /// `group.initial.rebalance.delay.ms` a fixed window leaves out: the
+    /// documented rule is that the first rebalance "will be further delayed by
+    /// the value of group.initial.rebalance.delay.ms as new members join the
+    /// group, up to a maximum of max.poll.interval.ms". A fixed window collects
+    /// only the members that happened to arrive inside it. A fleet whose
+    /// JoinGroups spread wider than one delay — 600 consumers of a
+    /// 100,000-partition topic took five seconds to arrive on the benchmark
+    /// cluster — was formed in TWO generations: the early members were
+    /// assigned everything, and a cooperative rebalance then moved a slice of
+    /// every one of their assignments to the late ones. Kafka forms the same
+    /// fleet in one, and so does this now.
+    fn extend_forming_window(&mut self, now: Instant) -> bool {
+        if !self.forming || !std::mem::take(&mut self.arrivals) {
+            return false;
+        }
+        let Some(opened) = self.formed_from else {
+            return false;
+        };
+        let longest = self
+            .members
+            .iter()
+            .map(|m| m.rebalance_timeout)
+            .max()
+            .unwrap_or_default();
+        // From the deadline that ran out rather than from `now`: an actor that
+        // got to its timer late does not get to stretch the window by as much.
+        let ran_out = self.join_deadline.unwrap_or(now);
+        let next = (ran_out + self.cfg.join_delay).min(opened + longest);
+        if next <= now {
+            return false;
+        }
+        self.join_deadline = Some(next);
+        tracing::debug!(
+            target: "kafka",
+            group = %self.id,
+            members = self.members.len(),
+            "new members joined the forming group; its join window is extended"
+        );
+        true
     }
 
     /// The join phase is over: drop the stragglers, elect a leader, pick the
@@ -779,6 +840,8 @@ impl Group {
         self.state = State::CompletingRebalance;
         self.join_deadline = None;
         self.forming = false;
+        self.formed_from = None;
+        self.arrivals = false;
 
         // Built once and cloned for the leader alone: at 1024 members this is
         // the one allocation in the file that is a function of group size.
@@ -1026,7 +1089,9 @@ impl Group {
             );
             self.evict(&expired);
         }
-        if self.state == State::PreparingRebalance && self.join_deadline.is_some_and(|at| at <= now)
+        if self.state == State::PreparingRebalance
+            && self.join_deadline.is_some_and(|at| at <= now)
+            && !self.extend_forming_window(now)
         {
             self.complete_join();
         }
@@ -1085,6 +1150,8 @@ impl Group {
         self.protocol_type = None;
         self.join_deadline = None;
         self.forming = false;
+        self.formed_from = None;
+        self.arrivals = false;
         self.reap_deadline = Some(Instant::now() + self.cfg.empty_reap);
         tracing::debug!(
             target: "kafka",
@@ -1229,6 +1296,134 @@ mod tests {
         }
         let leaders = answers.iter().filter(|a| a.members.len() == 3).count();
         assert_eq!(leaders, 1, "exactly one member is handed the roster");
+    }
+
+    /// The state once the actor has caught up with the clock. The actor runs
+    /// an overdue timer right AFTER the command it is serving, so the first
+    /// describe can predate it and the second cannot.
+    async fn settled_state(c: &Coordinator, group: &str) -> State {
+        let _ = c.describe(group).await;
+        c.describe(group).await.expect("the group exists").state
+    }
+
+    /// A first join as [`spawn_join`], with the member's own rebalance timeout.
+    fn spawn_join_rebalancing(
+        c: &Arc<Coordinator>,
+        group: &str,
+        label: &str,
+        rebalance_ms: i32,
+    ) -> JoinHandle<JoinAnswer> {
+        let c = Arc::clone(c);
+        let (group, label) = (group.to_string(), label.to_string());
+        tokio::spawn(async move {
+            let mut req = join_request(&label, &["range"]);
+            req.rebalance_timeout_ms = rebalance_ms;
+            let minted = c.join(&group, req.clone()).await;
+            assert_eq!(minted.error, Some(ResponseError::MemberIdRequired));
+            req.member_id = minted.member_id;
+            c.join(&group, req).await
+        })
+    }
+
+    /// Kafka's rule for the FIRST rebalance of a group, the half a fixed
+    /// window leaves out: while newcomers keep arriving, the window is held
+    /// open one more delay at a time. A fleet whose joins are spread over
+    /// longer than one delay still forms in ONE generation — with a fixed
+    /// window the late members made a second, cooperative rebalance that moved
+    /// part of every early member's assignment.
+    #[tokio::test(start_paused = true)]
+    async fn a_fleet_arriving_over_several_windows_is_still_one_generation() {
+        let c = coordinator();
+        let delay = Duration::from_millis(JOIN_DELAY_MS);
+        let early = spawn_join(&c, "orders", "early");
+        wait_for_members(&c, "orders", 1).await;
+        // t = 2.5 s, inside the first window.
+        tokio::time::advance(delay * 5 / 6).await;
+        let middle = spawn_join(&c, "orders", "middle");
+        wait_for_members(&c, "orders", 2).await;
+        // t = 5 s: a fixed window closed at 3 s. This one saw a newcomer, so
+        // it runs to 6 s.
+        tokio::time::advance(delay * 5 / 6).await;
+        assert_eq!(
+            settled_state(&c, "orders").await,
+            State::PreparingRebalance,
+            "the window closed while members were still arriving"
+        );
+        let late = spawn_join(&c, "orders", "late");
+        wait_for_members(&c, "orders", 3).await;
+        // t = 8.9 s: the second window saw `late`, so there is a third, to 9 s.
+        tokio::time::advance(delay * 13 / 10).await;
+        assert_eq!(settled_state(&c, "orders").await, State::PreparingRebalance);
+        // t = 9 s and a window with no newcomer: it closes, and ONE generation
+        // holds all three.
+        tokio::time::advance(delay / 10 + Duration::from_millis(1)).await;
+        wait_for_state(&c, "orders", State::CompletingRebalance).await;
+        let answers = futures_join(vec![early, middle, late]).await;
+        for a in &answers {
+            assert_eq!(a.error, None);
+            assert_eq!(
+                a.generation, 1,
+                "the fleet was formed in more than one generation"
+            );
+        }
+        let roster = answers.iter().find(|a| !a.members.is_empty()).unwrap();
+        assert_eq!(
+            roster.members.len(),
+            3,
+            "the leader was not handed the whole fleet"
+        );
+    }
+
+    /// A lone first member is not held past one delay: the extension is for
+    /// NEWCOMERS, and the join that opens the window is not one.
+    #[tokio::test(start_paused = true)]
+    async fn a_lone_first_member_waits_one_delay_and_no_more() {
+        let c = coordinator();
+        let only = spawn_join(&c, "orders", "only");
+        wait_for_members(&c, "orders", 1).await;
+        tokio::time::advance(Duration::from_millis(JOIN_DELAY_MS - 1)).await;
+        assert_eq!(settled_state(&c, "orders").await, State::PreparingRebalance);
+        tokio::time::advance(Duration::from_millis(2)).await;
+        assert_eq!(
+            settled_state(&c, "orders").await,
+            State::CompletingRebalance
+        );
+        assert_eq!(only.await.unwrap().generation, 1);
+    }
+
+    /// ...and a fleet that never stops arriving is not held for ever: the
+    /// extensions end at the members' rebalance timeout counted from the first
+    /// join, which is the ceiling Kafka puts on them (`max.poll.interval.ms`).
+    #[tokio::test(start_paused = true)]
+    async fn the_extensions_end_at_the_rebalance_timeout() {
+        const REBALANCE: i32 = 7_000;
+        let c = coordinator();
+        let mut joins = vec![spawn_join_rebalancing(&c, "orders", "m0", REBALANCE)];
+        wait_for_members(&c, "orders", 1).await;
+        // A newcomer every two seconds: every window sees one.
+        for i in 1..4 {
+            tokio::time::advance(Duration::from_millis(2_000)).await;
+            joins.push(spawn_join_rebalancing(
+                &c,
+                "orders",
+                &format!("m{i}"),
+                REBALANCE,
+            ));
+            wait_for_members(&c, "orders", i + 1).await;
+        }
+        // t = 6.9 s: still collecting — the window arrived at 6 s had a newcomer.
+        tokio::time::advance(Duration::from_millis(900)).await;
+        assert_eq!(settled_state(&c, "orders").await, State::PreparingRebalance);
+        // t = 7 s: the ceiling, newcomer or not.
+        tokio::time::advance(Duration::from_millis(101)).await;
+        assert_eq!(
+            settled_state(&c, "orders").await,
+            State::CompletingRebalance
+        );
+        for a in futures_join(joins).await {
+            assert_eq!(a.error, None);
+            assert_eq!(a.generation, 1);
+        }
     }
 
     /// The v4 dance: an empty member id is refused WITH the id to use, and the

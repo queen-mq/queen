@@ -163,7 +163,10 @@ async fn the_queue_list_is_fetched_from_the_documented_route() {
     assert_eq!(queues[0].partitions, 12);
 
     let seen = seen.lock().unwrap().clone();
-    assert_eq!(seen[0].line, "GET /api/v1/resources/queues HTTP/1.1");
+    assert_eq!(
+        seen[0].line,
+        "GET /api/v1/resources/queues?stats=lanes HTTP/1.1"
+    );
     assert_eq!(seen[0].authorization, None, "no token, no header");
 }
 
@@ -202,6 +205,110 @@ async fn the_token_travels_as_a_bearer_header_on_each_call() {
     }
 }
 
+/// The lean list is asked for by name, and a broker that does not know the
+/// value — a Postgres broker — answers the enriched list, which reads the same.
+#[tokio::test]
+async fn the_queue_list_asks_for_lanes_only_and_reads_an_enriched_answer_the_same() {
+    const ENRICHED: &str = r#"{"queues":[{"id":"q-1","name":"orders","partitions":12,
+        "retainedBytes":4096,"messages":{"total":9},"segments":{"segments":3}}],"kvRows":7}"#;
+    let (base, seen) = stub(vec![Canned::new(200, ENRICHED)]).await;
+    let api = HttpQueen::new(&base).unwrap();
+    let queues = api.list_queues(None).await.unwrap();
+    assert_eq!(queues[0].partitions, 12);
+    assert_eq!(queues[0].id.as_deref(), Some("q-1"));
+    assert_eq!(
+        seen.lock().unwrap()[0].line,
+        "GET /api/v1/resources/queues?stats=lanes HTTP/1.1"
+    );
+}
+
+/// The raft members, as the broker reports them: the answering node, the
+/// leader, the view's age and each member's last acknowledgement — and a
+/// learner is not a voter.
+#[tokio::test]
+async fn the_raft_members_are_read_from_their_route() {
+    const MEMBERS: &str = r#"{"engine":"raft","nodeId":2,"leaderId":1,"term":7,"viewAgeMs":120,
+        "members":[
+          {"nodeId":1,"role":"voter","state":"leader","http":"10.0.0.1:6632","raft":"10.0.0.1:7400","lastAckMs":120,"local":false},
+          {"nodeId":2,"role":"voter","state":"follower","lastAckMs":180,"local":true},
+          {"nodeId":3,"role":"voter","state":"follower","lastAckMs":null},
+          {"nodeId":4,"role":"learner","state":"learner","lastAckMs":90}]}"#;
+    let (base, seen) = stub(vec![Canned::new(200, MEMBERS)]).await;
+    let api = HttpQueen::new(&base).unwrap();
+    let m = api
+        .raft_members(Some("t"))
+        .await
+        .unwrap()
+        .expect("a raft broker");
+    assert_eq!(
+        seen.lock().unwrap()[0].line,
+        "GET /api/v1/raft/liveness HTTP/1.1"
+    );
+    assert_eq!(
+        (m.node_id, m.leader_id, m.view_age_ms),
+        (2, Some(1), Some(120))
+    );
+    let got: Vec<(u64, bool, Option<u64>)> = m
+        .members
+        .iter()
+        .map(|x| (x.node_id, x.voter, x.last_ack_ms))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (1, true, Some(120)),
+            (2, true, Some(180)),
+            (3, true, None),
+            (4, false, Some(90))
+        ]
+    );
+}
+
+/// A broker without the route is not a raft broker, and that is an answer,
+/// not an error.
+#[tokio::test]
+async fn a_broker_without_raft_members_answers_none() {
+    let (base, _) = stub(vec![Canned::new(404, r#"{"code":"no_such_route"}"#)]).await;
+    let api = HttpQueen::new(&base).unwrap();
+    assert_eq!(api.raft_members(None).await.unwrap(), None);
+}
+
+/// Partition sizes come from the lean route, one counter per partition; a
+/// broker without it is asked for the full queue detail instead.
+#[tokio::test]
+async fn partition_sizes_come_from_the_lean_route_and_fall_back_to_the_detail() {
+    const SIZES: &str = r#"{"queue":"orders","partitions":{"0":10,"1":0,"7":70}}"#;
+    let (base, seen) = stub(vec![Canned::new(200, SIZES)]).await;
+    let api = HttpQueen::new(&base).unwrap();
+    let mut got = api.partition_bytes("orders", None).await.unwrap();
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            ("0".to_string(), 10),
+            ("1".to_string(), 0),
+            ("7".to_string(), 70)
+        ]
+    );
+    assert_eq!(
+        seen.lock().unwrap()[0].line,
+        "GET /api/v1/resources/queues/orders/sizes HTTP/1.1"
+    );
+
+    const DETAIL: &str = r#"{"name":"orders","partitions":[{"name":"0","retainedBytes":5},
+        {"name":"1","retainedBytes":6,"messages":{"total":1}}]}"#;
+    let (base, seen) = stub(vec![
+        Canned::new(404, r#"{"code":"no_such_route"}"#),
+        Canned::new(200, DETAIL),
+    ])
+    .await;
+    let api = HttpQueen::new(&base).unwrap();
+    let got = api.partition_bytes("orders", None).await.unwrap();
+    assert_eq!(got, [("0".to_string(), 5), ("1".to_string(), 6)]);
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen[1].line, "GET /api/v1/resources/queues/orders HTTP/1.1");
+}
+
 /// A base URL with a trailing slash must not produce `//api/v1/...`.
 #[tokio::test]
 async fn a_trailing_slash_does_not_double_up() {
@@ -210,7 +317,7 @@ async fn a_trailing_slash_does_not_double_up() {
     api.list_queues(None).await.unwrap();
     assert_eq!(
         seen.lock().unwrap()[0].line,
-        "GET /api/v1/resources/queues HTTP/1.1"
+        "GET /api/v1/resources/queues?stats=lanes HTTP/1.1"
     );
 }
 
@@ -624,7 +731,10 @@ async fn a_host_scoped_client_sends_exactly_that_host() {
     );
     // ...and the URL is unchanged: only the header moves, so the socket still
     // goes to QUEEN_URL.
-    assert_eq!(seen[0].line, "GET /api/v1/resources/queues HTTP/1.1");
+    assert_eq!(
+        seen[0].line,
+        "GET /api/v1/resources/queues?stats=lanes HTTP/1.1"
+    );
     assert_eq!(
         seen[0].authorization.as_deref(),
         Some("Bearer tenant-token")
@@ -990,4 +1100,227 @@ async fn a_transaction_that_answers_no_kv_results_is_an_error_not_a_commit() {
         .await
         .unwrap_err();
     assert!(e.to_string().contains("kv operation 0"), "{e}");
+}
+
+// ------------------------------------------------ the in-process transport
+//
+// A broker that runs this facade in its own process (single binary,
+// server/src/kafka_inproc.rs) hands every call to its router through a
+// `LocalDispatch` instead of a socket. The contract is PARITY: the same method,
+// path, bearer, `Host` and body as the HTTP client, and the same reading of the
+// answer — so every test above keeps meaning what it says in-process. These pin
+// that by running each call through BOTH transports against the same canned
+// answer and comparing what each asked and what each concluded.
+
+use queen_kafka::queen::{LocalDispatch, LocalRequest, LocalResponse};
+
+/// A dispatch that records every request and answers from a script, in order.
+struct Recorder {
+    replies: Mutex<std::collections::VecDeque<std::result::Result<LocalResponse, String>>>,
+    seen: Mutex<Vec<LocalRequest>>,
+}
+
+impl Recorder {
+    fn new(replies: Vec<Canned>) -> Arc<Recorder> {
+        Arc::new(Recorder {
+            replies: Mutex::new(
+                replies
+                    .into_iter()
+                    .map(|c| {
+                        Ok(LocalResponse {
+                            status: c.status,
+                            retry_after: c
+                                .extra
+                                .strip_prefix("Retry-After:")
+                                .map(|v| v.trim().to_string()),
+                            body: c.body.to_string(),
+                        })
+                    })
+                    .collect(),
+            ),
+            seen: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn seen(&self) -> Vec<LocalRequest> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+impl LocalDispatch for Recorder {
+    fn call(
+        &self,
+        req: LocalRequest,
+    ) -> queen_kafka::queen::BoxFuture<'static, std::result::Result<LocalResponse, String>> {
+        self.seen.lock().unwrap().push(req);
+        let reply = self
+            .replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Err("the recorder ran out of replies".into()));
+        Box::pin(async move { reply })
+    }
+}
+
+/// What one HTTP request looked like, in the local request's own terms.
+fn as_local(s: &Seen) -> (String, String, Option<String>, Option<String>, String) {
+    let mut parts = s.line.split(' ');
+    let method = parts.next().unwrap_or_default().to_string();
+    let path = parts.next().unwrap_or_default().to_string();
+    (
+        method,
+        path,
+        s.authorization
+            .as_deref()
+            .and_then(|a| a.strip_prefix("Bearer "))
+            .map(str::to_string),
+        None,
+        s.body.clone(),
+    )
+}
+
+fn local_shape(r: &LocalRequest) -> (String, String, Option<String>, Option<String>, String) {
+    (
+        r.method.to_string(),
+        r.path.clone(),
+        r.bearer.clone(),
+        r.host.clone(),
+        r.body.clone().unwrap_or_default(),
+    )
+}
+
+/// Every route this facade calls, through both transports: same request, same
+/// verdict. `host` is compared separately (the HTTP client always sends the
+/// URL's authority; the local one sends a `Host` only when one was scoped).
+#[tokio::test]
+async fn the_local_transport_asks_and_reads_exactly_what_http_does() {
+    let kv_ops = vec![
+        KvOp::put(
+            "queen-kafka",
+            "qk:group:g:orders:0",
+            serde_json::json!({"offset": 41, "metadata": "batch-7", "ts": 1_787_824_800_500i64}),
+        ),
+        KvOp::GetMany {
+            ns: "queen-kafka".into(),
+            keys: vec!["qk:group:g:orders:0".into(), "qk:group:g:orders:1".into()],
+        },
+    ];
+    let options = serde_json::json!({"retentionEnabled": true, "retentionSeconds": 60});
+    let script = || {
+        vec![
+            Canned::new(200, LIST_BODY),
+            Canned::new(200, CONFIGURE_BODY),
+            Canned::new(200, CONFIGURE_BODY),
+            Canned::new(200, DELETE_BODY),
+            Canned::new(201, PUSH_BODY),
+            Canned::new(200, FETCH_BODY),
+            Canned::new(200, KV_BODY),
+            Canned::new(200, TXN_BODY),
+            Canned::new(200, r#"{"tenant":"acme","sub":"svc"}"#),
+        ]
+    };
+    async fn run_all(api: &HttpQueen, kv_ops: &[KvOp], options: &serde_json::Value) -> Vec<String> {
+        let t = Some("tenant-token");
+        vec![
+            format!("{:?}", api.list_queues(t).await.map(|q| q.len())),
+            format!("{:?}", api.create_queue("orders", t).await),
+            format!("{:?}", api.create_queue_with("orders", options, t).await),
+            format!("{:?}", api.delete_queue("orders", t).await),
+            format!("{:?}", api.push(&items(), t).await),
+            format!("{:?}", api.fetch(&entries(), 500, 1, t).await),
+            format!("{:?}", api.kv(kv_ops, t).await),
+            format!(
+                "{:?}",
+                api.transaction(&items(), &[fence(), offset_put()], t).await
+            ),
+            format!("{:?}", api.identity(t).await),
+        ]
+    }
+
+    let (base, http_seen) = stub(script()).await;
+    let http = HttpQueen::new(&base).unwrap();
+    let http_out = run_all(&http, &kv_ops, &options).await;
+
+    let recorder = Recorder::new(script());
+    let local = HttpQueen::local(Arc::clone(&recorder) as Arc<dyn LocalDispatch>);
+    assert!(local.is_local() && !http.is_local());
+    let local_out = run_all(&local, &kv_ops, &options).await;
+
+    assert_eq!(
+        http_out, local_out,
+        "the two transports read the answers differently"
+    );
+    let http_seen: Vec<_> = http_seen.lock().unwrap().iter().map(as_local).collect();
+    let local_seen: Vec<_> = recorder.seen().iter().map(local_shape).collect();
+    assert_eq!(http_seen.len(), 9);
+    assert_eq!(
+        http_seen, local_seen,
+        "the two transports asked differently"
+    );
+}
+
+/// A 429's `Retry-After` survives the local trip into the Kafka throttle,
+/// exactly as it does over HTTP.
+#[tokio::test]
+async fn a_local_429_carries_its_retry_after_into_the_kafka_throttle() {
+    let recorder = Recorder::new(vec![Canned {
+        status: 429,
+        body: r#"{"error":"overloaded","code":"overloaded"}"#,
+        extra: "Retry-After: 5",
+    }]);
+    let api = HttpQueen::local(recorder as Arc<dyn LocalDispatch>);
+    let err = api.list_queues(None).await.unwrap_err();
+    assert_eq!(err.retry_after_ms(), Some(5_000));
+    assert_eq!(queen_kafka::throttle::for_error(&err), Some(5_000));
+    assert!(err.to_string().contains("429"), "{err}");
+}
+
+/// A dispatch that produced no answer is a transport failure, not a panic and
+/// not a status.
+#[tokio::test]
+async fn a_local_call_with_no_answer_is_a_transport_error() {
+    let recorder = Recorder::new(vec![]);
+    let api = HttpQueen::local(recorder as Arc<dyn LocalDispatch>);
+    let err = api.list_queues(None).await.unwrap_err();
+    assert!(
+        matches!(err, queen_kafka::queen::Error::Transport(_)),
+        "{err:?}"
+    );
+}
+
+/// The budgets are the HTTP client's: a broker that never answers costs a
+/// call its timeout, never a hung Kafka connection.
+#[tokio::test(start_paused = true)]
+async fn a_local_call_that_never_answers_times_out() {
+    struct Silent;
+    impl LocalDispatch for Silent {
+        fn call(
+            &self,
+            _req: LocalRequest,
+        ) -> queen_kafka::queen::BoxFuture<'static, std::result::Result<LocalResponse, String>>
+        {
+            Box::pin(std::future::pending())
+        }
+    }
+    let api = HttpQueen::local(Arc::new(Silent));
+    let err = api.fetch(&entries(), 500, 1, None).await.unwrap_err();
+    assert!(
+        matches!(&err, queen_kafka::queen::Error::Transport(m) if m.contains("timed out")),
+        "{err:?}"
+    );
+}
+
+/// `with_host` scopes the local client exactly as it scopes the HTTP one.
+#[tokio::test]
+async fn a_host_scoped_local_client_sends_exactly_that_host() {
+    let recorder = Recorder::new(vec![Canned::new(200, LIST_BODY)]);
+    let api = HttpQueen::local(Arc::clone(&recorder) as Arc<dyn LocalDispatch>);
+    let scoped = api.with_host("t1.kafka.example.com").unwrap();
+    scoped.list_queues(Some("tok")).await.unwrap();
+    let seen = recorder.seen();
+    assert_eq!(seen[0].host.as_deref(), Some("t1.kafka.example.com"));
+    assert_eq!(seen[0].bearer.as_deref(), Some("tok"));
+    assert_eq!(seen[0].method, "GET");
+    assert_eq!(seen[0].body, None);
 }

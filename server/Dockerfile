@@ -16,6 +16,10 @@ FROM rust:1-bookworm AS build
 # it earns its own layer.
 WORKDIR /src
 COPY crates ./crates
+# The Kafka facade library: a path dependency of the default `kafka` feature
+# (server/src/kafka_inproc.rs), so it must be in the context like the crate above.
+COPY protocols/queen-kafka/Cargo.toml ./protocols/queen-kafka/Cargo.toml
+COPY protocols/queen-kafka/src ./protocols/queen-kafka/src
 
 WORKDIR /src/server
 COPY server/Cargo.toml server/Cargo.lock server/build.rs server/server.json ./

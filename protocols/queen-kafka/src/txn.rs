@@ -999,7 +999,7 @@ impl Bundle {
     }
 }
 
-/// The sweep, as a task. Spawned from `main.rs` and from nothing else.
+/// The sweep, as a task. Spawned from `boot.rs` and from nothing else.
 pub async fn sweep_loop(txns: std::sync::Arc<Txns>) {
     let mut tick = tokio::time::interval(SWEEP_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

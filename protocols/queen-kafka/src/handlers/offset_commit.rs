@@ -174,6 +174,17 @@ pub async fn handle(
     req: &OffsetCommitRequest,
     token: Option<&str>,
 ) -> OffsetCommitResponse {
+    let started = std::time::Instant::now();
+    let answer = commit(facade, req, token).await;
+    crate::stats::COMMIT.record(started.elapsed());
+    answer
+}
+
+async fn commit(
+    facade: &Facade,
+    req: &OffsetCommitRequest,
+    token: Option<&str>,
+) -> OffsetCommitResponse {
     let group = req.group_id.0.as_str();
     if let Some(e) = crate::coordinator::invalid_group_id(group) {
         return refuse_all(req, e);
@@ -195,15 +206,17 @@ pub async fn handle(
     // the generation at every version this facade advertises — the "member
     // epoch" half of that name belongs to the KIP-848 protocol, which is out of
     // scope and unreachable here.
-    if let Some(e) = facade
+    let checking = std::time::Instant::now();
+    let checked = facade
         .coordinator
         .check_commit(
             group,
             req.member_id.as_str(),
             req.generation_id_or_member_epoch,
         )
-        .await
-    {
+        .await;
+    crate::stats::COMMIT_CHECK.record(checking.elapsed());
+    if let Some(e) = checked {
         tracing::debug!(
             target: "kafka",
             group,

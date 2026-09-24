@@ -134,6 +134,18 @@ impl<S: Store + 'static> NodeReplicator<S> {
         }
     }
 
+    /// Who is in the cluster and when the raft leader last heard from each
+    /// member (`GET /api/v1/raft/liveness`). A single node is a cluster of
+    /// one, heard from now.
+    pub fn members(&self) -> super::ClusterMembers {
+        match self {
+            NodeReplicator::Local(r) => {
+                super::ClusterMembers::single(r.node_id(), Replicator::metrics(r).term)
+            }
+            NodeReplicator::Raft(r) => r.members(),
+        }
+    }
+
     /// Where a follower forwards client requests: the leader's HTTP address,
     /// when another node leads. `None` on the leader, on a single node, and
     /// while no leader is known.

@@ -215,18 +215,22 @@ impl Record {
             // DescribeConfigs and refuse every alter against it.
             //
             // Range-filtered on the way IN rather than trusted, because unlike
-            // `QUEEN_KAFKA_DEFAULT_PARTITIONS` — validated at boot against the
-            // same ceiling, with a hard error — this number arrived from a
-            // client. A stored `0` or a negative would otherwise reach
-            // `advertised_partitions`, whose clamp floor is 0, and advertise a
-            // topic at zero partitions: the un-producible state the width rule
-            // exists to prevent.
+            // `QUEEN_KAFKA_DEFAULT_PARTITIONS` — validated at boot with a hard
+            // error — this number arrived from a client. A stored `0` or a
+            // negative would otherwise reach `advertised_partitions`, whose
+            // clamp floor is 0, and advertise a topic at zero partitions: the
+            // un-producible state the width rule exists to prevent.
+            //
+            // The bound is the HARD ceiling and not the running facade's
+            // `QUEEN_KAFKA_MAX_PARTITIONS`: a floor another facade stored under
+            // a higher cap is still this topic's declared width, and dropping it
+            // would narrow the topic to the default. `advertised_partitions`
+            // clamps it to what THIS facade advertises.
             partitions: v
                 .get("partitions")
                 .and_then(|p| p.as_u64())
                 .filter(|n| {
-                    (1..=u64::from(crate::handlers::metadata::MAX_ADVERTISED_PARTITIONS))
-                        .contains(n)
+                    (1..=u64::from(crate::handlers::metadata::MAX_PARTITIONS_CEILING)).contains(n)
                 })
                 .map(|n| n as u32),
         })
@@ -557,7 +561,7 @@ mod tests {
             let read = Record::from_value(&v).expect("the record is still readable");
             assert_eq!(read.partitions, None, "{bad} was stored as a floor");
         }
-        let past = json!(u64::from(crate::handlers::metadata::MAX_ADVERTISED_PARTITIONS) + 1);
+        let past = json!(u64::from(crate::handlers::metadata::MAX_PARTITIONS_CEILING) + 1);
         let v = json!({"qid": null, "set": {}, "at": 1, "partitions": past});
         assert_eq!(Record::from_value(&v).unwrap().partitions, None);
     }

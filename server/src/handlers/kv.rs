@@ -867,6 +867,31 @@ fn record_results(st: &AppState, results: &[Value], ms: f64, bytes_in: u64) {
 /// index-aligned to the input (§6.4) and an object leaves room for the
 /// call-level fields that quota and metering will want, without a second shape
 /// change on seven clients.
+/// `POST /api/v1/kv` for the in-process Kafka facade's OWN coordination keys —
+/// committed offsets, topic records, the node registry, all under `qk:` —
+/// answered by the state machine with NO rate ladder in front of it
+/// (src/kafka_inproc.rs). The in-process twin of the proxy's qk-prefix
+/// exemption: a consumer group committing at its own pace is the facade doing
+/// its job, and the tenant's KV write rate (`QUEEN_KV_WRITE_RATE`, 100/s by
+/// default) turned it into 429s a Kafka client read as COORDINATOR_NOT_AVAILABLE.
+/// The answer is byte-for-byte the route's: the same body on success, the same
+/// rendering of every failure.
+pub fn facade_kv(
+    rsm: std::sync::Arc<dyn crate::rsm::facade::Rsm>,
+    tenant: String,
+    ops: Vec<Value>,
+    budget: std::time::Duration,
+) -> impl std::future::Future<Output = Response> + Send {
+    use crate::rsm::facade::{Deadline, KvReq, ReqCtx};
+    async move {
+        let ctx = ReqCtx::new(tenant, Deadline::after(budget));
+        match rsm.kv(ctx, KvReq { ops }).await {
+            Ok(out) => batch_response(out.results),
+            Err(f) => raft_failure(f),
+        }
+    }
+}
+
 fn batch_response(results: Vec<Value>) -> Response {
     json(
         StatusCode::OK,

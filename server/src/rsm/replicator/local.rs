@@ -106,6 +106,14 @@ pub trait Waker: Send + Sync {
     fn wants_append_wakes(&self) -> bool {
         false
     }
+
+    /// See `apply::Notify::wants_appended`.
+    fn wants_appended(&self) -> bool {
+        false
+    }
+
+    /// See `apply::Notify::appended`.
+    fn appended(&self, _tenant: &str, _queue: &str, _partition: &str) {}
 }
 
 /// A waker that drops every wake. Boot before the seam, and every test that
@@ -201,6 +209,14 @@ impl Notify for ReplNotify {
 
     fn wants_append_wakes(&self) -> bool {
         self.waker.wants_append_wakes()
+    }
+
+    fn wants_appended(&self) -> bool {
+        self.waker.wants_appended()
+    }
+
+    fn appended(&self, tenant: &str, queue: &str, partition: &str) {
+        self.waker.appended(tenant, queue, partition);
     }
 
     fn durable(&self, index: u64) {

@@ -51,6 +51,11 @@ WORKDIR /usr/build/server
 # it), but cargo resolves the entire dependency graph, dev dependencies
 # included, before it compiles anything. So the path has to exist even here.
 COPY crates /usr/build/crates
+# ...and the Kafka facade library, linked into the broker by the default `kafka`
+# feature (server/src/kafka_inproc.rs, raft mode runs it in-process). A path
+# dependency like queen-protocol, so it has to be in the context here too.
+COPY protocols/queen-kafka/Cargo.toml /usr/build/protocols/queen-kafka/Cargo.toml
+COPY protocols/queen-kafka/src /usr/build/protocols/queen-kafka/src
 
 # Layer 1: manifests + build script + version file (build.rs embeds
 # server.json's version into the binary via env!("QUEEN_VERSION")).

@@ -383,6 +383,17 @@ pub trait Notify: Send + Sync {
     /// replay and lets `LocalReplicator` truncate its log behind it. Never
     /// called for a durable point that failed.
     fn durable(&self, index: u64);
+
+    /// Whether anyone listens for [`Notify::appended`]. Read once per entry;
+    /// apply collects nothing for an entry when it is `false`.
+    fn wants_appended(&self) -> bool {
+        false
+    }
+
+    /// Records were appended to `(tenant, queue, partition)` on this node:
+    /// the per-PARTITION wake a Kafka Fetch parks on. Unlike [`Notify::wake`]
+    /// it does not depend on any native consumer group being subscribed.
+    fn appended(&self, _tenant: &str, _queue: &str, _partition: &str) {}
 }
 
 /// The notifier of a node with nothing attached yet (phase 1 tests, embedded
@@ -916,6 +927,11 @@ pub struct Applier<'s, S: Store> {
     /// unlinked once it is durable and not before (I10).
     gc_inflight: BTreeSet<(u16, u32)>,
 
+    /// The `(tenant, queue, partition)` of every `Append` of the entry being
+    /// applied, for [`Notify::appended`] — collected only while
+    /// [`Notify::wants_appended`] said so for this entry.
+    appended: Option<Vec<(String, String, String)>>,
+
     stats: ApplyStats,
 }
 
@@ -1117,6 +1133,7 @@ impl<'s, S: Store> Applier<'s, S> {
             gc_deferred: BTreeSet::new(),
             ckpt_inflight: None,
             gc_inflight: BTreeSet::new(),
+            appended: None,
             stats: ApplyStats::default(),
         };
         let rec = Recovered {
@@ -1374,6 +1391,7 @@ impl<'s, S: Store> Applier<'s, S> {
             return self.execute_noop(c);
         }
         let mut wakes: Vec<(String, String, Option<String>)> = Vec::new();
+        self.appended = self.notify.wants_appended().then(Vec::new);
         let mut pids_assigned = 0u64;
         let mut kv_versions_assigned = 0u64;
         let max_created_before = self.max_created_at_us;
@@ -1481,6 +1499,15 @@ impl<'s, S: Store> Applier<'s, S> {
         // bytes of a pop's payload are already in this node's files; a reader
         // that needs the ROWS waits for the next store commit (≤ 4 ms, §11.3).
         self.notify.applied(c.index, c.term, &c.entry.commands);
+        // Per-partition append wakes (Kafka fetches), once per partition of
+        // the entry, after the answer like every wake.
+        if let Some(mut appended) = self.appended.take() {
+            appended.sort_unstable();
+            appended.dedup();
+            for (t, q, part) in &appended {
+                self.notify.appended(t, q, part);
+            }
+        }
         // One wake per EVENT (a partition made claimable for a group), in key
         // order: the raft gates release ONE parked pop per wake (PLAN_RAFT_DRAIN_FIX
         // P2.2), so an entry that armed sixteen partitions must wake sixteen
@@ -2201,6 +2228,9 @@ impl<'s, S: Store> Applier<'s, S> {
         }
         let tenant = p.tenant.clone();
         let queue = p.queue.clone();
+        if let Some(appended) = self.appended.as_mut() {
+            appended.push((tenant.clone(), queue.clone(), p.partition.clone()));
+        }
         self.writes.put_partition(pid, &p)?;
 
         // The qlog record for this `Append`. `self.qlog` is `Some` ONLY on the

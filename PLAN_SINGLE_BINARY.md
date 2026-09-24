@@ -71,6 +71,33 @@ with zero 503 `raft_phase1_unsupported`.
 lane all pass in-process. The perf campaign is rerun: the facade cost on top of
 the broker was 43% of broker CPU, and it should drop.
 
+**Status (2026-09-23, branch `kafka-inproc`): Kafka steps 1-4 done, raft mode.**
+`queen::HttpQueen` got a transport (`Http` | `Local(LocalDispatch)`) instead of a
+second impl, so every call site stays shared; the in-process dispatch is the
+broker's axum `Router` called as a service, spawned onto the broker runtime
+(server/src/kafka_inproc.rs). The boot moved from queen-kafka's `main.rs` into
+`queen_kafka::boot` (`Config` + `serve`). Feature `kafka` (default on); the
+release profile unwinds and `obs::install_panic_hook` aborts off the
+`queen-kafka` threads (W1 for this one facade). Explicit `QUEEN_URL` stays on
+HTTP. The Postgres boot keeps the child.
+
+**Status (2026-09-24): one pipeline.** Phase 2's typed record path (Kafka
+batches stored verbatim through a Kafka-only planner branch) was built, then
+REMOVED on Alice's call: every change to Queen's own pipeline — lanes, client
+offload, raft groups — broke it silently. A Kafka produce is a Queen push and a
+Kafka fetch is `POST /api/v1/fetch`, through the in-process router. What stayed
+and is generic Queen: fetch long-polls wake per PARTITION on apply (they used to
+re-read on a 200 ms timer when no native group subscribed the queue), and the
+queue detail reports `retainedBytes` per partition. The facade, inside a raft
+cluster, reports every live node as replica and ISR, accepts
+`min.insync.replicas` up to the raft majority, answers DescribeLogDirs with the
+node's data directory, widens a tracked topic on CreatePartitions, and batches
+a group's concurrent offset commits into one fenced KV write. The facade's KV
+calls skip the router and the KV rate ladder (`handlers::facade_kv`). Not done:
+committed offsets as native consumer-group cursors (approved 2026-09-23, waiting
+for the lanes rework); S3-sink cursors; transactions still use the facade stage +
+EndTxn bundle and are refused in facade cluster mode.
+
 ### W3 — Proxy data plane into the broker
 - **Auth:** API keys (hashed, RAM lookup) and JWT verification, with a cache of
   verified callers (port `cache.rs`). The tenant comes from the verified caller.

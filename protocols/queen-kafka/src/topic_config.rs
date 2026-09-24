@@ -157,6 +157,32 @@ impl Reported {
 /// isr=[0]`, so a tool computing under-replication from `min.insync.replicas=1`
 /// is right. See the module header for why the list is not longer.
 pub fn topic_configs() -> Vec<Reported> {
+    topic_configs_with(1)
+}
+
+/// [`topic_configs`] for a broker where every acknowledged write is on `isr`
+/// replicas — a raft majority when the facade runs inside a raft broker
+/// ([`crate::Facade::in_sync_replicas`]), 1 everywhere else.
+pub fn topic_configs_with(isr: u32) -> Vec<Reported> {
+    let min_insync = if isr > 1 {
+        Reported::fixed(
+            MIN_INSYNC_REPLICAS,
+            isr.to_string(),
+            Source::Default,
+            Kind::Int,
+            "The raft majority: every write this broker acknowledges is on this many nodes, \
+             and none is acknowledged with fewer. Lower values are accepted and change nothing.",
+        )
+    } else {
+        Reported::fixed(
+            MIN_INSYNC_REPLICAS,
+            "1",
+            Source::Default,
+            Kind::Int,
+            "Always 1. The facade advertises one logical broker and Metadata reports \
+             replicas=[0], isr=[0]; durability is Postgres's, not a replica count's.",
+        )
+    };
     vec![
         Reported::fixed(
             CLEANUP_POLICY,
@@ -166,14 +192,7 @@ pub fn topic_configs() -> Vec<Reported> {
             "Always `delete`. Log compaction is a stated non-goal of queen-kafka and nothing \
              compacts a Queen queue.",
         ),
-        Reported::fixed(
-            MIN_INSYNC_REPLICAS,
-            "1",
-            Source::Default,
-            Kind::Int,
-            "Always 1. The facade advertises one logical broker and Metadata reports \
-             replicas=[0], isr=[0]; durability is Postgres's, not a replica count's.",
-        ),
+        min_insync,
     ]
 }
 
@@ -258,6 +277,12 @@ pub const RETENTION_SECONDS: &str = "retentionSeconds";
 /// dropping `segment.bytes=1073741824` would be telling a client it got a
 /// setting it did not get.
 pub fn alter(name: &str, value: Option<&str>) -> Result<Delta, String> {
+    alter_with(name, value, 1)
+}
+
+/// [`alter`] on a broker whose acknowledged writes are on `isr` replicas
+/// ([`topic_configs_with`]): `min.insync.replicas` is accepted up to `isr`.
+pub fn alter_with(name: &str, value: Option<&str>, isr: u32) -> Result<Delta, String> {
     match name {
         CLEANUP_POLICY => match value.map(str::trim) {
             // The default and the only one there is.
@@ -299,6 +324,14 @@ pub fn alter(name: &str, value: Option<&str>) -> Result<Delta, String> {
         MIN_INSYNC_REPLICAS => match value.map(str::trim) {
             None => Ok(Vec::new()),
             Some("1") => Ok(Vec::new()),
+            // On a raft broker every acknowledged write is on a majority, so
+            // any value up to it is already in force.
+            Some(v) if v.parse::<u32>().is_ok_and(|n| (1..=isr).contains(&n)) => Ok(Vec::new()),
+            Some(v) if isr > 1 => Err(format!(
+                "{MIN_INSYNC_REPLICAS}={v} cannot be honoured: every write this broker \
+                 acknowledges is on a raft majority of {isr} nodes, so 1 to {isr} is what is \
+                 in force. A higher number would report a durability setting that is not"
+            )),
             Some(v) => Err(format!(
                 "{MIN_INSYNC_REPLICAS}={v} cannot be honoured: this facade advertises ONE \
                  logical broker and every Metadata answer says replicas=[0], isr=[0], so the \
@@ -403,15 +436,21 @@ pub fn absorb(options: &mut serde_json::Map<String, serde_json::Value>, delta: &
 /// which answers "this is what is in force" and calls an unset retention what
 /// it is.
 pub fn apply(configs: &[(&str, Option<&str>)]) -> Result<Applied, String> {
+    apply_with(configs, 1)
+}
+
+/// [`apply`] on a broker whose acknowledged writes are on `isr` replicas
+/// ([`topic_configs_with`]).
+pub fn apply_with(configs: &[(&str, Option<&str>)], isr: u32) -> Result<Applied, String> {
     let mut options = serde_json::Map::new();
     let mut named_retention = false;
 
     for (name, value) in configs {
-        absorb(&mut options, &alter(name, *value)?);
+        absorb(&mut options, &alter_with(name, *value, isr)?);
         named_retention |= *name == RETENTION_MS && value.is_some();
     }
 
-    let mut echo = topic_configs();
+    let mut echo = topic_configs_with(isr);
     if named_retention {
         echo.push(
             match options.get(RETENTION_SECONDS).and_then(|s| s.as_i64()) {
@@ -464,6 +503,22 @@ mod tests {
         assert_eq!(a.echo[0].value, CLEANUP_DELETE);
         assert_eq!(a.echo[1].name, MIN_INSYNC_REPLICAS);
         assert_eq!(a.echo[1].value, "1");
+    }
+
+    /// Inside a raft broker of three, every acknowledged write is on two
+    /// nodes: `min.insync.replicas` up to 2 is accepted and reported, 3 is
+    /// refused because nothing waits for a third.
+    #[test]
+    fn min_insync_replicas_follows_the_raft_majority() {
+        assert!(apply_with(&[(MIN_INSYNC_REPLICAS, Some("2"))], 2).is_ok());
+        assert!(apply_with(&[(MIN_INSYNC_REPLICAS, Some("1"))], 2).is_ok());
+        let refused = apply_with(&[(MIN_INSYNC_REPLICAS, Some("3"))], 2).expect_err("3 > 2");
+        assert!(refused.contains("raft majority"), "{refused}");
+        let echo = apply_with(&[], 2).unwrap().echo;
+        assert_eq!(echo[1].name, MIN_INSYNC_REPLICAS);
+        assert_eq!(echo[1].value, "2");
+        // ...and a facade with no raft behind it is unchanged.
+        assert!(apply(&[(MIN_INSYNC_REPLICAS, Some("2"))]).is_err());
     }
 
     #[test]

@@ -34,8 +34,8 @@ use kafka_protocol::messages::{
     AddOffsetsToTxnRequest, AddPartitionsToTxnRequest, AlterConfigsRequest, ApiKey,
     ApiVersionsRequest, CreateAclsRequest, CreatePartitionsRequest, CreateTopicsRequest,
     DeleteAclsRequest, DeleteGroupsRequest, DeleteTopicsRequest, DescribeAclsRequest,
-    DescribeConfigsRequest, DescribeGroupsRequest, EndTxnRequest, FetchRequest,
-    FindCoordinatorRequest, HeartbeatRequest, IncrementalAlterConfigsRequest,
+    DescribeConfigsRequest, DescribeGroupsRequest, DescribeLogDirsRequest, EndTxnRequest,
+    FetchRequest, FindCoordinatorRequest, HeartbeatRequest, IncrementalAlterConfigsRequest,
     InitProducerIdRequest, JoinGroupRequest, LeaveGroupRequest, ListGroupsRequest,
     ListOffsetsRequest, MetadataRequest, OffsetCommitRequest, OffsetDeleteRequest,
     OffsetFetchRequest, ProduceRequest, RequestHeader, ResponseHeader, SaslAuthenticateRequest,
@@ -49,10 +49,10 @@ use tokio_util::codec::{Encoder, LengthDelimitedCodec};
 use crate::handlers::{
     acls, add_offsets_to_txn, add_partitions_to_txn, alter_configs, api_versions,
     create_partitions, create_topics, delete_groups, delete_topics, describe_configs,
-    describe_groups, end_txn, fetch, find_coordinator, heartbeat, incremental_alter_configs,
-    init_producer_id, join_group, leave_group, list_groups, list_offsets, metadata, offset_commit,
-    offset_delete, offset_fetch, produce, sasl_authenticate, sasl_handshake, sync_group,
-    txn_offset_commit,
+    describe_groups, describe_log_dirs, end_txn, fetch, find_coordinator, heartbeat,
+    incremental_alter_configs, init_producer_id, join_group, leave_group, list_groups,
+    list_offsets, metadata, offset_commit, offset_delete, offset_fetch, produce, sasl_authenticate,
+    sasl_handshake, sync_group, txn_offset_commit,
 };
 use crate::obs::Sampler;
 use crate::sasl::SaslState;
@@ -901,6 +901,14 @@ pub async fn dispatch(conn: &mut Conn, frame: Bytes) -> Reply {
             let body = offset_delete::handle(&conn.facade, &req, conn.facade.token()).await;
             respond(key, header.correlation_id, &body, api_version)
         }
+        ApiKey::DescribeLogDirs => {
+            let req = match DescribeLogDirsRequest::decode(&mut buf, api_version) {
+                Ok(r) => r,
+                Err(e) => return Reply::Close(format!("DescribeLogDirs v{api_version} body: {e}")),
+            };
+            let body = describe_log_dirs::handle(&conn.facade, &req, conn.facade.token()).await;
+            respond(key, header.correlation_id, &body, api_version)
+        }
         // ------------------------------------------------------ M9: transactions
         //
         // Three of these four await nothing at all: a transaction's partitions,
@@ -1557,6 +1565,7 @@ mod tests {
                     // response, but a different one, and this test is about the
                     // dispatch table.
                     ApiKey::CreatePartitions => create_partitions_request(version, 1),
+                    ApiKey::DescribeLogDirs => describe_log_dirs_request(version, 1),
                     ApiKey::OffsetDelete => {
                         offset_delete_request(version, 1, &format!("walk-{version}"))
                     }
@@ -3736,6 +3745,27 @@ mod tests {
             .with_topics(vec![CreatePartitionsTopic::default()
                 .with_name(TopicName(StrBytes::from_static_str("orders")))
                 .with_count(2)])
+            .encode(&mut out, api_version)
+            .unwrap();
+        out.freeze()
+    }
+
+    /// A DescribeLogDirs for every topic, the way `kafka-log-dirs.sh
+    /// --describe` and kadm's `DescribeAllLogDirs` send one (null topics).
+    fn describe_log_dirs_request(api_version: i16, correlation_id: i32) -> Bytes {
+        let mut out = BytesMut::new();
+        RequestHeader::default()
+            .with_request_api_key(ApiKey::DescribeLogDirs as i16)
+            .with_request_api_version(api_version)
+            .with_correlation_id(correlation_id)
+            .with_client_id(Some(StrBytes::from_static_str("queen-kafka-test")))
+            .encode(
+                &mut out,
+                ApiKey::DescribeLogDirs.request_header_version(api_version),
+            )
+            .unwrap();
+        DescribeLogDirsRequest::default()
+            .with_topics(None)
             .encode(&mut out, api_version)
             .unwrap();
         out.freeze()

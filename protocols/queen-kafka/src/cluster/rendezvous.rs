@@ -115,6 +115,86 @@ pub fn partition_item(topic: &str, partition: i32) -> Vec<u8> {
     item
 }
 
+/// FNV-1a state fed segment by segment. The same bytes in the same order hash
+/// to exactly what [`fnv1a64`] gives their concatenation, which is what lets
+/// [`PartitionScorer`] skip building the buffer [`score`] builds.
+#[derive(Clone, Copy)]
+struct Fnv(u64);
+
+impl Fnv {
+    const fn new() -> Fnv {
+        Fnv(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn write(mut self, bytes: &[u8]) -> Fnv {
+        for b in bytes {
+            self.0 ^= u64::from(*b);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        self
+    }
+
+    /// `n` as ASCII decimal — the bytes `n.to_string()` would be — without the
+    /// string.
+    fn decimal(self, n: i32) -> Fnv {
+        let mut buf = [0u8; 11];
+        let mut at = buf.len();
+        let mut v = i64::from(n).unsigned_abs();
+        loop {
+            at -= 1;
+            buf[at] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        if n < 0 {
+            at -= 1;
+            buf[at] = b'-';
+        }
+        self.write(&buf[at..])
+    }
+}
+
+/// Partition leadership for ONE topic, without an allocation per partition.
+///
+/// [`winner`] over [`partition_item`] builds the item and then one buffer per
+/// node per partition — a dozen small allocations for every partition of a
+/// Metadata answer, which at a million partitions is most of the answer's cost.
+/// This hashes the identical byte stream (`<domain>\0<topic>\0<partition>\0<node>`)
+/// with the `<domain>\0<topic>\0` prefix computed once, so it names the same
+/// winner by construction; `the_scorer_names_the_same_winner_as_the_pinned_scheme`
+/// holds it to that.
+pub struct PartitionScorer {
+    prefix: Fnv,
+}
+
+impl PartitionScorer {
+    pub fn new(topic: &str) -> PartitionScorer {
+        PartitionScorer {
+            prefix: Fnv::new()
+                .write(&[DOMAIN_PARTITION, 0])
+                .write(topic.as_bytes())
+                .write(&[0]),
+        }
+    }
+
+    /// [`winner`]`(DOMAIN_PARTITION, partition_item(topic, partition), nodes)`,
+    /// with the same tie rule.
+    pub fn winner(&self, partition: i32, nodes: &[i32]) -> Option<i32> {
+        let base = self.prefix.decimal(partition).write(&[0]);
+        nodes
+            .iter()
+            .map(|id| (mix64(base.decimal(*id).0), *id))
+            .reduce(|best, next| match next.0.cmp(&best.0) {
+                std::cmp::Ordering::Greater => next,
+                std::cmp::Ordering::Equal if next.1 < best.1 => next,
+                _ => best,
+            })
+            .map(|(_, id)| id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +303,34 @@ mod tests {
             winner(DOMAIN_PARTITION, &partition_item("orders", 7), &three),
             Some(1)
         );
+    }
+
+    /// The allocation-free scorer Metadata uses at a million partitions names
+    /// the SAME leader as the pinned scheme, for every topic, partition and
+    /// live set — including the pinned rows themselves, negative numbers
+    /// (`i32::MIN` is the widest decimal there is), and sets with gaps.
+    #[test]
+    fn the_scorer_names_the_same_winner_as_the_pinned_scheme() {
+        let sets: [&[i32]; 6] = [&[1], &[1, 2], &[1, 2, 3], &[2, 3], &[1, 3, 64], &[]];
+        for topic in ["orders", "", "a.b_c-d", "qks-s3-p100k", "x"] {
+            let scorer = PartitionScorer::new(topic);
+            for partition in
+                (0..2_000).chain([99_999, 100_000, 499_999, 999_999, i32::MAX, -1, i32::MIN])
+            {
+                let item = partition_item(topic, partition);
+                for nodes in sets {
+                    assert_eq!(
+                        scorer.winner(partition, nodes),
+                        winner(DOMAIN_PARTITION, &item, nodes),
+                        "{topic}/{partition} over {nodes:?}"
+                    );
+                }
+            }
+        }
+        // The pinned leaders, through the scorer.
+        let three = [1, 2, 3];
+        assert_eq!(PartitionScorer::new("orders").winner(0, &three), Some(2));
+        assert_eq!(PartitionScorer::new("orders").winner(7, &three), Some(1));
     }
 
     /// The domain tag is not decoration: a group, a topic and a transactional

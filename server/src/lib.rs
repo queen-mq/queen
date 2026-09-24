@@ -50,6 +50,11 @@ mod internal;
 // HTTP to the broker's listener, and an embedded `queen::Broker` has no listener.
 // `handlers::status` reads its process-global, which is `None` here.
 mod kafka_facade;
+// Twin of the `mod kafka_inproc;` in main.rs: the Kafka facade run IN-PROCESS in
+// raft mode (feature `kafka`). Compiled, never started here, and its
+// process-global reads `None` for `handlers::status`.
+#[cfg(feature = "kafka")]
+mod kafka_inproc;
 // Twin of the `mod sqs_facade;` in main.rs, on the same terms as `kafka_facade`
 // above: compiled, never started, and its process-global reads `None` here.
 mod sqs_facade;

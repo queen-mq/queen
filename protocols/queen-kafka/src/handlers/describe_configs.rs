@@ -243,7 +243,7 @@ fn one(
                     "no such topic",
                 );
             };
-            let mut configs = topic_config::topic_configs();
+            let mut configs = topic_config::topic_configs_with(facade.in_sync_replicas());
             configs.extend(retention_row(records, topic, live_id.as_deref()));
             answered(resource, &configs, resource_keys(resource), documented)
         }
@@ -425,7 +425,9 @@ fn broker_configs(facade: &Facade) -> Vec<Reported> {
             kind: Kind::Int,
             read_only: true,
             documentation: "QUEEN_KAFKA_GROUP_JOIN_DELAY_MS. How long the first join of an empty \
-                            group waits for company before the join window closes.",
+                            group waits for company before the join window closes; extended by \
+                            the same again while new members keep arriving, up to their \
+                            rebalance timeout.",
         },
         Reported {
             name: "group.min.session.timeout.ms",

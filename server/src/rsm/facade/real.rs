@@ -126,6 +126,15 @@ impl Waker for NotifierWaker {
     fn wants_append_wakes(&self) -> bool {
         self.gates.pinned_total.load(std::sync::atomic::Ordering::Relaxed) > 0
     }
+
+    fn wants_appended(&self) -> bool {
+        self.notifier.watches_partitions()
+    }
+
+    fn appended(&self, tenant: &str, queue: &str, partition: &str) {
+        let qkey = crate::handlers::tenant_queue_key(tenant, queue);
+        self.notifier.wake_partition(&qkey, partition);
+    }
 }
 
 /// PLAN_RAFT_DRAIN_FIX P2.2: long-poll gates per `(tenant, queue, group)`.

@@ -118,7 +118,7 @@ fn plan_topic(ctx: &Context, topic: &str, configs: &[AlterableConfig]) -> Verdic
 
     let mut delta: topic_config::Delta = Vec::new();
     for config in configs {
-        match one(config) {
+        match one(config, ctx.isr) {
             Ok(mut entries) => delta.append(&mut entries),
             Err(refusal) => return refusal,
         }
@@ -140,13 +140,13 @@ fn plan_topic(ctx: &Context, topic: &str, configs: &[AlterableConfig]) -> Verdic
 }
 
 /// What one `(name, operation, value)` triple contributes to the delta.
-fn one(config: &AlterableConfig) -> Result<topic_config::Delta, Verdict> {
+fn one(config: &AlterableConfig, isr: u32) -> Result<topic_config::Delta, Verdict> {
     let name = config.name.as_str();
     let value = config.value.as_ref().map(|v| v.as_str());
     let refuse = |why: String| Verdict::Refuse(ResponseError::InvalidConfig, why);
 
     match config.config_operation {
-        OP_SET => topic_config::alter(name, value).map_err(refuse),
+        OP_SET => topic_config::alter_with(name, value, isr).map_err(refuse),
         // The request's `value` is IGNORED for a DELETE, which is what Kafka
         // does: the operation names the key to reset, not a value to remove.
         OP_DELETE => topic_config::reset(name).map_err(refuse),

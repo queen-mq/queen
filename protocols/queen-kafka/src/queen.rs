@@ -324,6 +324,80 @@ impl Queue {
     }
 }
 
+/// The raft cluster a broker belongs to, as `GET /api/v1/raft/liveness` reports
+/// it ([`QueenApi::raft_members`]): its members, and how long ago the raft
+/// LEADER last heard from each one. What a facade running inside a raft broker
+/// judges liveness by ([`crate::cluster::liveness`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaftMembers {
+    /// The raft node that answered — the broker this facade runs inside, when
+    /// it runs inside one.
+    pub node_id: u64,
+    /// The leader, as far as the answering node knows.
+    pub leader_id: Option<u64>,
+    /// How old the leader's observations in `members` are: 0 on the leader, the
+    /// age of the copy a follower fetched from it otherwise, `None` when the
+    /// answering node holds no copy at all (no leader yet, or never reached).
+    pub view_age_ms: Option<u64>,
+    pub members: Vec<RaftMember>,
+}
+
+/// One member of [`RaftMembers`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaftMember {
+    pub node_id: u64,
+    /// A voter — a replica every acknowledged write is on a majority of — and
+    /// not a learner.
+    pub voter: bool,
+    /// Milliseconds since the raft leader last had an RPC to this member
+    /// acknowledged, as of NOW (the view's own age already included). `None`
+    /// when there is no figure.
+    pub last_ack_ms: Option<u64>,
+}
+
+/// The wire shape of `GET /api/v1/raft/liveness`. Everything else the route
+/// reports (addresses, match index, state) is for operators and is ignored.
+#[derive(Debug, Deserialize)]
+struct RaftMembersBody {
+    #[serde(rename = "nodeId")]
+    node_id: u64,
+    #[serde(rename = "leaderId", default)]
+    leader_id: Option<u64>,
+    #[serde(rename = "viewAgeMs", default)]
+    view_age_ms: Option<u64>,
+    #[serde(default)]
+    members: Vec<RaftMemberBody>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RaftMemberBody {
+    #[serde(rename = "nodeId")]
+    node_id: u64,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(rename = "lastAckMs", default)]
+    last_ack_ms: Option<u64>,
+}
+
+impl RaftMembersBody {
+    fn into_members(self) -> RaftMembers {
+        RaftMembers {
+            node_id: self.node_id,
+            leader_id: self.leader_id,
+            view_age_ms: self.view_age_ms,
+            members: self
+                .members
+                .into_iter()
+                .map(|m| RaftMember {
+                    node_id: m.node_id,
+                    voter: m.role.as_deref() != Some("learner"),
+                    last_ack_ms: m.last_ack_ms,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// One message to write, as `POST /api/v1/push` takes it.
 ///
 /// `transactionId` is deliberately not sent. It is the broker's dedup key, and
@@ -960,6 +1034,32 @@ pub trait QueenApi: Send + Sync + 'static {
         token: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Deleted>>;
 
+    /// `GET /api/v1/raft/liveness` — the raft cluster the broker belongs to and
+    /// how long ago its leader last heard from each member
+    /// ([`crate::cluster::liveness`]). `Ok(None)` from a broker that is not a
+    /// raft broker; the default knows none.
+    fn raft_members<'a>(
+        &'a self,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Option<RaftMembers>>> {
+        let _ = token;
+        Box::pin(async { Ok(None) })
+    }
+
+    /// The bytes each partition of `queue` holds, by partition NAME: what
+    /// DescribeLogDirs reports as a partition's size. Read from
+    /// `GET /api/v1/resources/queues/{queue}/sizes`, which is one counter per
+    /// partition, falling back to the full queue detail on a broker without
+    /// that route. A partition the answer carries no size for is absent; the
+    /// default knows none.
+    fn partition_bytes<'a>(
+        &'a self,
+        _queue: &'a str,
+        _token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<(String, i64)>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
     /// The same Queen, reached with `host` as the HTTP `Host` header of every
     /// call — the M5 shared-host fit (`QUEEN_KAFKA_FORWARD_SNI_HOST`).
     ///
@@ -1018,16 +1118,68 @@ pub trait QueenApi: Send + Sync + 'static {
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// The real client. One `reqwest::Client` for the process: it owns the
-/// connection pool, and the facade's whole traffic to Queen is a handful of
-/// admin calls per metadata refresh.
+/// One Queen API call handed to a broker running in the SAME process: exactly
+/// the method, path, `Host`, bearer and JSON body [`HttpQueen`] would put on the
+/// wire, minus the socket. The broker side (server/src/kafka_inproc.rs) runs it
+/// through its own router, so routing, auth, tenancy and push admission are the
+/// ones every HTTP client meets — only TCP and HTTP framing are skipped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalRequest {
+    /// `GET`, `POST` or `DELETE`.
+    pub method: &'static str,
+    /// The path, exactly as the HTTP client would request it.
+    pub path: String,
+    /// The `Host` header, when [`QueenApi::with_host`] set one.
+    pub host: Option<String>,
+    /// The bearer token, without the `Bearer ` prefix. Never logged.
+    pub bearer: Option<String>,
+    /// The JSON body; `None` for a GET or a DELETE.
+    pub body: Option<String>,
+}
+
+/// What the broker answered to a [`LocalRequest`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalResponse {
+    pub status: u16,
+    /// The `Retry-After` header as the broker wrote it, when it wrote one.
+    pub retry_after: Option<String>,
+    pub body: String,
+}
+
+/// The in-process transport. A broker that runs this facade inside its own
+/// process implements it over its router. `Err` is a call that produced no
+/// answer at all (the broker task died): the local twin of a reset connection,
+/// and reported as [`Error::Transport`].
+pub trait LocalDispatch: Send + Sync + 'static {
+    fn call(
+        &self,
+        req: LocalRequest,
+    ) -> BoxFuture<'static, std::result::Result<LocalResponse, String>>;
+}
+
+/// Where a call goes: over HTTP to `QUEEN_URL`, or to the broker this facade
+/// shares a process with.
+#[derive(Clone)]
+enum Transport {
+    Http {
+        /// `QUEEN_URL`, without a trailing slash (see [`normalize_base_url`]).
+        base: String,
+        http: reqwest::Client,
+    },
+    Local(Arc<dyn LocalDispatch>),
+}
+
+/// The real client. It speaks Queen's HTTP API — the routes, the JSON and the
+/// status codes — over one of two transports: a `reqwest::Client` (one for the
+/// process: it owns the connection pool) or, when the facade runs inside the
+/// broker, a [`LocalDispatch`] that hands the same request to the broker's
+/// router without a socket. Every call site below is transport-blind, which is
+/// what keeps the two byte-identical in what they ask and how they read it.
 pub struct HttpQueen {
-    /// `QUEEN_URL`, without a trailing slash (see [`normalize_base_url`]).
-    base: String,
     /// The `Host` header every call sends, when it is not the one the URL
     /// implies. See [`HttpQueen::with_host`].
     host: Option<String>,
-    http: reqwest::Client,
+    transport: Transport,
 }
 
 impl HttpQueen {
@@ -1039,34 +1191,100 @@ impl HttpQueen {
             .build()
             .map_err(|e| format!("cannot build the HTTP client for QUEEN_URL={base}: {e}"))?;
         Ok(HttpQueen {
-            base,
             host: None,
-            http,
+            transport: Transport::Http { base, http },
         })
     }
 
-    fn request(
+    /// The in-process client: every call goes to `dispatch` instead of a
+    /// socket, with the same budgets the HTTP client applies.
+    pub fn local(dispatch: Arc<dyn LocalDispatch>) -> HttpQueen {
+        HttpQueen {
+            host: None,
+            transport: Transport::Local(dispatch),
+        }
+    }
+
+    /// Whether this client reaches Queen without leaving the process.
+    pub fn is_local(&self) -> bool {
+        matches!(self.transport, Transport::Local(_))
+    }
+
+    /// One call. `timeout` overrides the client's default budget
+    /// ([`REQUEST_TIMEOUT`]); only Fetch sets it (see `fetch_timeout`).
+    async fn call(
         &self,
-        method: reqwest::Method,
+        method: &'static str,
         path: &str,
         token: Option<&str>,
-    ) -> reqwest::RequestBuilder {
-        let req = self
-            .http
-            .request(method, format!("{}{path}", self.base))
-            .header(reqwest::header::CONTENT_TYPE, "application/json");
-        // Set explicitly, which is what stops hyper filling it in from the
-        // URL's authority — it only adds a `Host` that is not already there.
-        let req = match &self.host {
-            Some(h) => req.header(reqwest::header::HOST, h.as_str()),
-            None => req,
-        };
-        // Bearer, matching what the broker's auth layer extracts
-        // (server/src/auth.rs::extract_bearer). Per call, never on the client:
-        // see the module header.
-        match token {
-            Some(t) => req.bearer_auth(t),
-            None => req,
+        body: Option<String>,
+        timeout: Option<Duration>,
+    ) -> Result<String> {
+        match &self.transport {
+            Transport::Http { base, http } => {
+                let method = match method {
+                    "GET" => reqwest::Method::GET,
+                    "POST" => reqwest::Method::POST,
+                    "DELETE" => reqwest::Method::DELETE,
+                    other => return Err(Error::Transport(format!("unsupported method {other}"))),
+                };
+                let req = http
+                    .request(method, format!("{base}{path}"))
+                    .header(reqwest::header::CONTENT_TYPE, "application/json");
+                // Set explicitly, which is what stops hyper filling it in from
+                // the URL's authority — it only adds a `Host` that is not
+                // already there.
+                let req = match &self.host {
+                    Some(h) => req.header(reqwest::header::HOST, h.as_str()),
+                    None => req,
+                };
+                // Bearer, matching what the broker's auth layer extracts
+                // (server/src/auth.rs::extract_bearer). Per call, never on the
+                // client: see the module header.
+                let req = match token {
+                    Some(t) => req.bearer_auth(t),
+                    None => req,
+                };
+                let req = match body {
+                    Some(b) => req.body(b),
+                    None => req,
+                };
+                let req = match timeout {
+                    Some(t) => req.timeout(t),
+                    None => req,
+                };
+                Self::send(req).await
+            }
+            Transport::Local(dispatch) => {
+                let budget = timeout.unwrap_or(REQUEST_TIMEOUT);
+                let req = LocalRequest {
+                    method,
+                    path: path.to_string(),
+                    host: self.host.clone(),
+                    bearer: token.map(str::to_string),
+                    body,
+                };
+                let answer = tokio::time::timeout(budget, dispatch.call(req))
+                    .await
+                    .map_err(|_| {
+                        Error::Transport(format!(
+                            "in-process call to {path} timed out after {} ms",
+                            budget.as_millis()
+                        ))
+                    })?
+                    .map_err(Error::Transport)?;
+                if !(200..300).contains(&answer.status) {
+                    return Err(Error::Status {
+                        code: answer.status,
+                        body: answer.body,
+                        retry_after_ms: answer
+                            .retry_after
+                            .as_deref()
+                            .and_then(parse_retry_after_ms),
+                    });
+                }
+                Ok(answer.body)
+            }
         }
     }
 
@@ -1101,13 +1319,13 @@ impl HttpQueen {
 /// SLEEPS for, and a misread date is a consumer parked for hours. `None` is not
 /// a loss — [`crate::throttle`] has a default for exactly this.
 fn retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<i64> {
-    let seconds: i64 = headers
-        .get(reqwest::header::RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
+    parse_retry_after_ms(headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?)
+}
+
+/// The value half of [`retry_after_ms`], shared with the in-process transport,
+/// which gets the header as a string rather than as a `HeaderMap`.
+fn parse_retry_after_ms(value: &str) -> Option<i64> {
+    let seconds: i64 = value.trim().parse().ok()?;
     // A negative or absurd value is a broker saying something this cannot use.
     // `checked_mul` because seconds came off the wire.
     seconds.checked_mul(1_000).filter(|ms| *ms >= 0)
@@ -1141,17 +1359,39 @@ struct QueueListBody {
     queues: Vec<Queue>,
 }
 
+/// `GET /api/v1/resources/queues/{queue}/sizes`: retained bytes by partition
+/// name.
+#[derive(Debug, Deserialize)]
+struct SizesBody {
+    #[serde(default)]
+    partitions: HashMap<String, i64>,
+}
+
 impl QueenApi for HttpQueen {
     fn list_queues<'a>(&'a self, token: Option<&'a str>) -> BoxFuture<'a, Result<Vec<Queue>>> {
         Box::pin(async move {
             // Not `?stats=cached`: that serves `queen.stats.child_count` as of
             // the last stats refresh, which for a queue created seconds ago (the
             // auto-create path, every time) is a partition count from before the
-            // queue existed. The enriched form costs a pass over the tenant's
-            // partitions, which is what the TTL below is for.
-            let body =
-                Self::send(self.request(reqwest::Method::GET, "/api/v1/resources/queues", token))
-                    .await?;
+            // queue existed.
+            //
+            // `?stats=lanes`: a raft broker then answers the name, id and LIVE
+            // lane count of each queue and skips the per-partition statistics
+            // (cursor scans, segment files, retained bytes) and the tenant-wide
+            // KV scan the dashboard's list carries — at 500k partitions that
+            // enrichment is seconds of work per call, and this list is re-read
+            // every few seconds by every facade. A Postgres broker does not
+            // know the value and answers the enriched list as before, which is
+            // everything this reads and more.
+            let body = self
+                .call(
+                    "GET",
+                    "/api/v1/resources/queues?stats=lanes",
+                    token,
+                    None,
+                    None,
+                )
+                .await?;
             let parsed: QueueListBody =
                 serde_json::from_str(&body).map_err(|e| Error::Body(e.to_string()))?;
             Ok(parsed.queues)
@@ -1165,11 +1405,9 @@ impl QueenApi for HttpQueen {
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let payload = serde_json::json!({ "queue": name }).to_string();
-            let body = Self::send(
-                self.request(reqwest::Method::POST, "/api/v1/configure", token)
-                    .body(payload),
-            )
-            .await?;
+            let body = self
+                .call("POST", "/api/v1/configure", token, Some(payload), None)
+                .await?;
             // handle_configure surfaces a stored-procedure failure as a non-2xx,
             // but the SP can also echo `{"error":…}` inside a 200 — the handler
             // only re-maps it when it parses (server/src/handlers/queues.rs,
@@ -1206,11 +1444,15 @@ impl QueenApi for HttpQueen {
                 payload.extend(bag.iter().map(|(k, v)| (k.clone(), v.clone())));
             }
             payload.insert("queue".into(), serde_json::json!(name));
-            let body = Self::send(
-                self.request(reqwest::Method::POST, "/api/v1/configure", token)
-                    .body(serde_json::Value::Object(payload).to_string()),
-            )
-            .await?;
+            let body = self
+                .call(
+                    "POST",
+                    "/api/v1/configure",
+                    token,
+                    Some(serde_json::Value::Object(payload).to_string()),
+                    None,
+                )
+                .await?;
             // The same two checks `create_queue` makes, and for the same
             // reason: `handle_configure` surfaces a stored-procedure failure as
             // a non-2xx, but the SP can also echo `{"error":…}` inside a 200.
@@ -1229,6 +1471,64 @@ impl QueenApi for HttpQueen {
         })
     }
 
+    fn partition_bytes<'a>(
+        &'a self,
+        queue: &'a str,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<(String, i64)>>> {
+        Box::pin(async move {
+            // The lean route first: one counter per partition, ~15 bytes of
+            // JSON each. The detail below renders a dozen fields and scans the
+            // cursors and segment files of every partition — hundreds of MB at
+            // 500k partitions, for the one number this wants.
+            let lean = format!("/api/v1/resources/queues/{}/sizes", encode_segment(queue));
+            match self.call("GET", &lean, token, None, None).await {
+                Ok(body) => {
+                    let v: SizesBody =
+                        serde_json::from_str(&body).map_err(|e| Error::Body(e.to_string()))?;
+                    return Ok(v.partitions.into_iter().collect());
+                }
+                // A broker without the route.
+                Err(Error::Status { code: 404, .. }) => {}
+                Err(e) => return Err(e),
+            }
+            let path = format!("/api/v1/resources/queues/{}", encode_segment(queue));
+            let body = self.call("GET", &path, token, None, None).await?;
+            let v: serde_json::Value =
+                serde_json::from_str(&body).map_err(|e| Error::Body(e.to_string()))?;
+            Ok(v.get("partitions")
+                .and_then(|p| p.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|p| {
+                    Some((
+                        p.get("name")?.as_str()?.to_string(),
+                        p.get("retainedBytes")?.as_i64()?,
+                    ))
+                })
+                .collect())
+        })
+    }
+
+    fn raft_members<'a>(
+        &'a self,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Option<RaftMembers>>> {
+        Box::pin(async move {
+            match self
+                .call("GET", "/api/v1/raft/liveness", token, None, None)
+                .await
+            {
+                Ok(body) => serde_json::from_str::<RaftMembersBody>(&body)
+                    .map(|b| Some(b.into_members()))
+                    .map_err(|e| Error::Body(format!("raft members: {e}"))),
+                // Not a raft broker.
+                Err(Error::Status { code: 404, .. }) => Ok(None),
+                Err(e) => Err(e),
+            }
+        })
+    }
+
     fn delete_queue<'a>(
         &'a self,
         name: &'a str,
@@ -1242,7 +1542,7 @@ impl QueenApi for HttpQueen {
             // that a future relaxation of the name rule cannot become a path
             // traversal.
             let path = format!("/api/v1/resources/queues/{}", encode_segment(name));
-            let body = Self::send(self.request(reqwest::Method::DELETE, &path, token)).await?;
+            let body = self.call("DELETE", &path, token, None, None).await?;
             let parsed: DeleteQueueBody =
                 serde_json::from_str(&body).map_err(|e| Error::Body(e.to_string()))?;
             if let Some(e) = parsed.error.filter(|e| !e.is_null()) {
@@ -1262,11 +1562,9 @@ impl QueenApi for HttpQueen {
         Box::pin(async move {
             let payload = serde_json::to_string(&PushBody { items })
                 .map_err(|e| Error::Body(format!("cannot serialize the push body: {e}")))?;
-            let body = Self::send(
-                self.request(reqwest::Method::POST, "/api/v1/push", token)
-                    .body(payload),
-            )
-            .await?;
+            let body = self
+                .call("POST", "/api/v1/push", token, Some(payload), None)
+                .await?;
             align_push_results(&body, items.len())
         })
     }
@@ -1285,14 +1583,17 @@ impl QueenApi for HttpQueen {
                 min_bytes,
             })
             .map_err(|e| Error::Body(format!("cannot serialize the fetch body: {e}")))?;
-            let body = Self::send(
-                self.request(reqwest::Method::POST, "/api/v1/fetch", token)
-                    .body(payload)
-                    // The ONE call that overrides the client's budget. See
-                    // `fetch_timeout`.
-                    .timeout(fetch_timeout(max_wait_ms)),
-            )
-            .await?;
+            // The ONE call that overrides the client's budget. See
+            // `fetch_timeout`.
+            let body = self
+                .call(
+                    "POST",
+                    "/api/v1/fetch",
+                    token,
+                    Some(payload),
+                    Some(fetch_timeout(max_wait_ms)),
+                )
+                .await?;
             align_fetch_results(&body, entries)
         })
     }
@@ -1308,11 +1609,9 @@ impl QueenApi for HttpQueen {
             // is learned once (server/src/handlers/kv.rs).
             let payload = serde_json::to_string(&KvBody { operations: ops })
                 .map_err(|e| Error::Body(format!("cannot serialize the kv body: {e}")))?;
-            let body = Self::send(
-                self.request(reqwest::Method::POST, "/api/v1/kv", token)
-                    .body(payload),
-            )
-            .await?;
+            let body = self
+                .call("POST", "/api/v1/kv", token, Some(payload), None)
+                .await?;
             align_kv_results(&body, ops.len())
         })
     }
@@ -1328,12 +1627,9 @@ impl QueenApi for HttpQueen {
     /// asking again.
     fn identity<'a>(&'a self, token: Option<&'a str>) -> BoxFuture<'a, Result<Option<String>>> {
         Box::pin(async move {
-            let body = Self::send(self.request(
-                reqwest::Method::GET,
-                crate::identity::IDENTITY_PATH,
-                token,
-            ))
-            .await?;
+            let body = self
+                .call("GET", crate::identity::IDENTITY_PATH, token, None, None)
+                .await?;
             Ok(crate::identity::tenant_of(&body))
         })
     }
@@ -1363,25 +1659,22 @@ impl QueenApi for HttpQueen {
                 kv,
             })
             .map_err(|e| Error::Body(format!("cannot serialize the transaction body: {e}")))?;
-            let body = Self::send(
-                self.request(reqwest::Method::POST, "/api/v1/transaction", token)
-                    .body(payload),
-            )
-            .await?;
+            let body = self
+                .call("POST", "/api/v1/transaction", token, Some(payload), None)
+                .await?;
             align_transaction_results(&body, items.len(), kv.len())
         })
     }
 
-    /// A second handle on the SAME `reqwest::Client`, differing only in the
-    /// `Host` header it writes. Cloning the client is what makes this cheap
-    /// enough to do per SNI name: a `reqwest::Client` clone shares the
-    /// connection pool, the DNS cache and the TLS session cache with the
-    /// original, so a hundred hostnames are still one pool.
+    /// A second handle on the SAME transport, differing only in the `Host`
+    /// header it writes. Cloning the client is what makes this cheap enough to
+    /// do per SNI name: a `reqwest::Client` clone shares the connection pool,
+    /// the DNS cache and the TLS session cache with the original, so a hundred
+    /// hostnames are still one pool (and a local dispatch is one `Arc`).
     fn with_host(&self, host: &str) -> Option<Arc<dyn QueenApi>> {
         Some(Arc::new(HttpQueen {
-            base: self.base.clone(),
             host: Some(host.to_string()),
-            http: self.http.clone(),
+            transport: self.transport.clone(),
         }))
     }
 }
@@ -2444,6 +2737,9 @@ pub mod testing {
         /// exactly the arm that must hand the backoff to the client instead of
         /// looping.
         pub kv_interpose: Mutex<std::collections::VecDeque<Option<KvOp>>>,
+        /// How long every KV call takes, when set: what makes calls OVERLAP in
+        /// a test, the way raft round trips do on a live broker.
+        pub kv_delay: Mutex<Option<std::time::Duration>>,
         /// Every `POST /api/v1/transaction`, as it was sent: the records and
         /// the KV rider, together, because what M9 asserts about a commit is a
         /// property of the two ARRAYS AT ONCE — that the fence is at index 0
@@ -2479,6 +2775,19 @@ pub mod testing {
         identities: Mutex<HashMap<Option<String>, Result<Option<String>>>>,
         /// The credential every identity call was made with, in call order.
         identity_calls: Mutex<Vec<Option<String>>>,
+        /// What `GET /api/v1/raft/liveness` answers: `None` is a broker that is
+        /// not a raft broker, which is every test that does not set it.
+        pub raft_members: Mutex<Option<RaftMembers>>,
+        /// When set, every `raft_members` call fails with it.
+        pub raft_members_error: Mutex<Option<Error>>,
+        /// How many `raft_members` calls were made.
+        pub raft_member_calls: AtomicUsize,
+        /// What `partition_bytes` answers, per queue: `(lane name, bytes)`.
+        pub partition_sizes: Mutex<HashMap<String, Vec<(String, i64)>>>,
+        /// When set, EVERY KV call that writes fails with it and every read
+        /// still answers — a raft pipeline too busy for a write within its
+        /// budget, which is the shape that emptied the node registry.
+        pub kv_write_error: Mutex<Option<Error>>,
     }
 
     /// The fake key/value store, and the working copy a call applies to.
@@ -2568,6 +2877,7 @@ pub mod testing {
                 kv_error: Mutex::new(None),
                 floor_scan_error: Mutex::new(None),
                 kv_interpose: Mutex::new(std::collections::VecDeque::new()),
+                kv_delay: Mutex::new(None),
                 transactions: Mutex::new(Vec::new()),
                 transaction_error: Mutex::new(None),
                 kv: Mutex::new(std::collections::BTreeMap::new()),
@@ -2575,6 +2885,11 @@ pub mod testing {
                 kv_read_rows: Mutex::new(None),
                 identities: Mutex::new(HashMap::new()),
                 identity_calls: Mutex::new(Vec::new()),
+                raft_members: Mutex::new(None),
+                raft_members_error: Mutex::new(None),
+                raft_member_calls: AtomicUsize::new(0),
+                partition_sizes: Mutex::new(HashMap::new()),
+                kv_write_error: Mutex::new(None),
             })
         }
 
@@ -2922,6 +3237,35 @@ pub mod testing {
     }
 
     impl QueenApi for FakeQueen {
+        fn partition_bytes<'a>(
+            &'a self,
+            queue: &'a str,
+            _token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Vec<(String, i64)>>> {
+            Box::pin(async move {
+                Ok(self
+                    .partition_sizes
+                    .lock()
+                    .unwrap()
+                    .get(queue)
+                    .cloned()
+                    .unwrap_or_default())
+            })
+        }
+
+        fn raft_members<'a>(
+            &'a self,
+            _token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Option<RaftMembers>>> {
+            Box::pin(async move {
+                self.raft_member_calls.fetch_add(1, Ordering::SeqCst);
+                if let Some(e) = self.raft_members_error.lock().unwrap().clone() {
+                    return Err(e);
+                }
+                Ok(self.raft_members.lock().unwrap().clone())
+            })
+        }
+
         fn list_queues<'a>(&'a self, token: Option<&'a str>) -> BoxFuture<'a, Result<Vec<Queue>>> {
             Box::pin(async move {
                 self.lists.fetch_add(1, Ordering::SeqCst);
@@ -3172,6 +3516,10 @@ pub mod testing {
             token: Option<&'a str>,
         ) -> BoxFuture<'a, Result<Vec<KvAnswer>>> {
             Box::pin(async move {
+                let delay = *self.kv_delay.lock().unwrap();
+                if let Some(d) = delay {
+                    tokio::time::sleep(d).await;
+                }
                 self.tokens.lock().unwrap().push(token.map(str::to_string));
                 self.kv_calls.lock().unwrap().push(ops.to_vec());
                 if crate::topic_record::is_floor_scan(ops) {
@@ -3190,6 +3538,14 @@ pub mod testing {
                 }
                 if let Some(e) = self.fail.lock().unwrap().clone() {
                     return Err(Error::Transport(e));
+                }
+                if ops
+                    .iter()
+                    .any(|op| matches!(op, KvOp::Put { .. } | KvOp::Delete { .. }))
+                {
+                    if let Some(e) = self.kv_write_error.lock().unwrap().clone() {
+                        return Err(e);
+                    }
                 }
                 // The two ceilings the broker refuses the WHOLE batch over. A
                 // double that accepted them would let a caller ship a batch the

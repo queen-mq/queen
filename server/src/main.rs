@@ -31,6 +31,11 @@ mod internal;
 // `queen::Broker` has no HTTP listener to point a facade at), so the read is `None`
 // and /status renders exactly as it always did.
 mod kafka_facade;
+// IN-PROCESS MODE for the Kafka wire facade (PLAN_SINGLE_BINARY.md W2): in raft
+// mode `QUEEN_KAFKA_EMBEDDED=true` runs the queen-kafka library inside this
+// process on its own runtime, calling the broker through the router — no child.
+#[cfg(feature = "kafka")]
+mod kafka_inproc;
 // EMBEDDED MODE for the SQS/SNS wire facade (PLAN_QUEEN_SQS.md, Architecture):
 // the twin of `kafka_facade` above, spawning and supervising the queen-sqs
 // binary under `QUEEN_SQS_EMBEDDED=true`. Listed here rather than in alphabetical
@@ -1744,6 +1749,29 @@ async fn run_raft(cfg: config::Config) {
     // then returns the real `RaftFacade` instead of the phase-1 stub.
     rsm::facade::set_builder(rsm::facade::real::real_builder);
 
+    // EMBEDDED MODE for the Kafka facade, IN-PROCESS in raft mode (kafka_inproc.rs).
+    // Resolved HERE, before the state machine opens and the listener binds, for
+    // the same reason the Postgres boot resolves its child's preflight early: the
+    // one knob with no default (QUEEN_KAFKA_ADVERTISED_ADDR) is unfixable by
+    // retrying, so boot dies on it naming the fix.
+    #[cfg(feature = "kafka")]
+    let kafka_cfg = if cfg.kafka_facade.enabled {
+        match kafka_inproc::preflight() {
+            Ok(c) => Some(c),
+            Err(e) => obs::fatal(format!("QUEEN_KAFKA_EMBEDDED=true: {e}")),
+        }
+    } else {
+        None
+    };
+    #[cfg(not(feature = "kafka"))]
+    if cfg.kafka_facade.enabled {
+        tracing::warn!(
+            target: "kafka",
+            "QUEEN_KAFKA_EMBEDDED=true, but this binary was built without the `kafka` \
+             feature: no Kafka listener is started"
+        );
+    }
+
     let state = match handlers::raft::build_raft_state(&cfg) {
         Ok(s) => s,
         Err(e) => obs::fatal(format!("raft state init failed: {e}")),
@@ -1752,6 +1780,17 @@ async fn run_raft(cfg: config::Config) {
     // The event-loop lag probe and the 1 Hz parked sampler, as in the
     // Postgres boot: the raft collector flushes them with everything else.
     metrics::spawn_samplers(state.metrics.clone());
+
+    // The Kafka facade's own KV calls reach the state machine directly
+    // (kafka_inproc.rs), so it keeps its own handles on it and on auth.
+    #[cfg(feature = "kafka")]
+    let (kafka_rsm, kafka_auth) = (state.rsm.clone(), authenticator.clone());
+    // With the proxy on the public port, the facade still reaches the broker
+    // router itself, never the proxy's edge: it authenticates its own clients.
+    #[cfg(feature = "kafka")]
+    let kafka_router = proxy_embed::enabled().then(|| {
+        handlers::raft::build_raft_router(state.clone(), authenticator.clone(), cfg.tenancy_header)
+    });
 
     // The single binary (PLAN_SINGLE_BINARY.md W3/W4): the proxy fronts the
     // public port; the broker router behind it has tenancy on, the broker's
@@ -1792,6 +1831,22 @@ async fn run_raft(cfg: config::Config) {
          un-ported routes answer 503 raft_phase1_unsupported until WP-1.7c)"
     );
 
+    // The Kafka facade starts once the router exists and the HTTP listener is
+    // bound; its transport is the broker router (kafka_inproc.rs): a clone of
+    // `app`, or its own instance when the proxy fronts the public port.
+    #[cfg(feature = "kafka")]
+    let kafka = kafka_cfg.map(|k| {
+        kafka_inproc::start(
+            &cfg.kafka_facade,
+            k,
+            kafka_router.unwrap_or_else(|| app.clone()),
+            &cfg.port,
+            &cfg.raft_dir,
+            kafka_rsm,
+            kafka_auth,
+        )
+    });
+
     if embedded_proxy.is_some() {
         // W7: TLS, connection limits and the peer address for the edge.
         if let Err(e) = proxy_embed::serve(listener, app).await {
@@ -1803,6 +1858,13 @@ async fn run_raft(cfg: config::Config) {
         .await
     {
         tracing::error!(target: "boot", error = %e, "serve loop ended with error");
+    }
+    // The facade goes down with the broker, and this AWAITS it (bounded by
+    // QUEEN_KAFKA_SHUTDOWN_GRACE_MS): a cluster-mode facade hands its registry
+    // row back through the router, which still serves after the listener closed.
+    #[cfg(feature = "kafka")]
+    if let Some(k) = kafka {
+        k.shutdown().await;
     }
     // The embedded proxy's open usage minute and pending queue rows.
     if let Some(proxy) = embedded_proxy {

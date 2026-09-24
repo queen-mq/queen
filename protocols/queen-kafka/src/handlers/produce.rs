@@ -392,6 +392,7 @@ async fn topic_plans<'a>(
                     live.get(name).copied(),
                     true,
                     facade.default_partitions,
+                    facade.max_partitions,
                 ),
             ),
         })

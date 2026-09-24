@@ -598,6 +598,32 @@ fn now_secs() -> i64 {
 /// that stamps `AuthedSub(None)`. When enabled it enforces the route's required
 /// level, short-circuiting 401 (missing/invalid token) or 403 (valid token,
 /// insufficient level), and on success stamps the authenticated `sub`.
+/// The router's authorization, for a call that never became an HTTP request:
+/// the in-process Kafka facade's typed record path (src/kafka_inproc.rs). Same
+/// rules as [`auth_middleware`] for the route the call stands for — auth off,
+/// a skipped or public route, a missing or invalid bearer, a level the claims
+/// do not allow — answering the JWT subject when there is one.
+pub async fn authorize_route(
+    auth: &Authenticator,
+    method: &Method,
+    path: &str,
+    token: Option<&str>,
+) -> Result<Option<String>, (StatusCode, &'static str)> {
+    if !auth.cfg.enabled || auth.cfg.should_skip(path) {
+        return Ok(None);
+    }
+    let level = route_access_level(method, path);
+    if level == AccessLevel::Public {
+        return Ok(None);
+    }
+    let token = token.ok_or((StatusCode::UNAUTHORIZED, "Authentication required"))?;
+    let claims = auth.validate(token).await?;
+    if !auth.allows(&claims, level) {
+        return Err((StatusCode::FORBIDDEN, "Insufficient permissions"));
+    }
+    Ok((!claims.sub.is_empty()).then(|| claims.sub.clone()))
+}
+
 pub async fn auth_middleware(
     State(auth): State<Arc<Authenticator>>,
     mut req: Request,

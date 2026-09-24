@@ -47,9 +47,9 @@
 //! a create that asks for fewer than it already has is not a narrowing — it is
 //! simply not a widening. `-1` (KIP-464's "I do not care", what a modern
 //! AdminClient sends) and `0` declare nothing and keep the broker-wide default.
-//! A count past [`super::metadata::MAX_ADVERTISED_PARTITIONS`] is REFUSED rather
-//! than clamped, so the facade never stores a number it would then silently
-//! answer as something else.
+//! A count past `QUEEN_KAFKA_MAX_PARTITIONS` ([`crate::Facade::max_partitions`])
+//! is REFUSED rather than clamped, so the facade never stores a number it would
+//! then silently answer as something else.
 //!
 //! This is the ONLY writer of a floor. There is no config key for it, and
 //! neither alter path can change one — they carry it through untouched, which is
@@ -82,7 +82,7 @@ use kafka_protocol::messages::{CreateTopicsRequest, CreateTopicsResponse, TopicN
 use kafka_protocol::protocol::StrBytes;
 use std::collections::HashSet;
 
-use crate::handlers::metadata::{self, advertised_partitions, MAX_ADVERTISED_PARTITIONS};
+use crate::handlers::metadata::{self, advertised_partitions};
 use crate::topic_config::{self, Applied};
 use crate::topic_record;
 use crate::{queen, throttle, Facade};
@@ -162,7 +162,7 @@ pub async fn handle(
                         .to_string(),
                 )
             } else {
-                plan(t)
+                plan(t, facade.in_sync_replicas())
             };
             (t, plan)
         })
@@ -237,15 +237,15 @@ pub async fn handle(
         // `advertised_partitions` clamps silently, so a number that arrived past
         // the ceiling would be stored, then quietly answered as something else
         // for the life of the topic. `QUEEN_KAFKA_DEFAULT_PARTITIONS` gets a
-        // hard boot error for the same number (main.rs); this is the wire's.
-        if topic.num_partitions > MAX_ADVERTISED_PARTITIONS as i32 {
+        // hard boot error for the same number (boot.rs); this is the wire's.
+        if i64::from(topic.num_partitions) > i64::from(facade.max_partitions) {
             results.push(errored(
                 name,
                 ResponseError::InvalidPartitions,
                 format!(
-                    "numPartitions {} is past the {MAX_ADVERTISED_PARTITIONS} this facade will \
-                     advertise for one topic",
-                    topic.num_partitions
+                    "numPartitions {} is past the {} this facade will advertise for one topic \
+                     (QUEEN_KAFKA_MAX_PARTITIONS)",
+                    topic.num_partitions, facade.max_partitions
                 ),
             ));
             continue;
@@ -256,7 +256,11 @@ pub async fn handle(
         // is the floor: this topic's own if it declared one, the configured
         // default otherwise.
         let floor = requested_floor(topic.num_partitions);
-        let width = advertised_partitions(0, floor.unwrap_or(facade.default_partitions));
+        let width = advertised_partitions(
+            0,
+            floor.unwrap_or(facade.default_partitions),
+            facade.max_partitions,
+        );
         note_declared_width(&name, floor);
 
         // `validate_only`: everything above ran, nothing below does. The answer
@@ -419,7 +423,7 @@ async fn record_what_was_created(
 
 /// Everything decidable about one requested topic without touching Queen: the
 /// name rule, the replica assignment, and the configs.
-fn plan(t: &CreatableTopic) -> Plan {
+fn plan(t: &CreatableTopic, isr: u32) -> Plan {
     let name = t.name.as_str();
 
     // The SAME rule Metadata applies, in the code THIS surface answers it with.
@@ -466,7 +470,7 @@ fn plan(t: &CreatableTopic) -> Plan {
         .iter()
         .map(|c| (c.name.as_str(), c.value.as_ref().map(|v| v.as_str())))
         .collect();
-    match topic_config::apply(&configs) {
+    match topic_config::apply_with(&configs, isr) {
         Ok(applied) => Plan::Create(Box::new(applied)),
         Err(why) => Plan::Reject(ResponseError::InvalidConfig, why),
     }
@@ -820,7 +824,7 @@ mod tests {
     #[tokio::test]
     async fn a_partition_count_past_the_ceiling_is_refused() {
         let (f, api) = facade_and_queen(&[]);
-        let past = MAX_ADVERTISED_PARTITIONS as i32 + 1;
+        let past = f.max_partitions as i32 + 1;
         let r = handle(
             &f,
             &request(vec![topic("huge").with_num_partitions(past)]),
@@ -838,6 +842,52 @@ mod tests {
                 .is_none(),
             "a refused create must leave no record"
         );
+    }
+
+    /// The ceiling is the operator's (`QUEEN_KAFKA_MAX_PARTITIONS`) and its
+    /// default is past the half-million partitions a benchmark creates — the
+    /// width that used to be refused outright at 100k. The create is one KV
+    /// row whatever the width: nothing is allocated per partition.
+    #[tokio::test]
+    async fn a_half_million_partition_topic_is_created_and_a_lower_ceiling_refuses_it() {
+        let (f, api) = facade_and_queen(&[]);
+        assert_eq!(
+            f.max_partitions,
+            crate::handlers::metadata::DEFAULT_MAX_PARTITIONS
+        );
+        let r = handle(
+            &f,
+            &request(vec![topic("wide").with_num_partitions(500_000)]),
+            6,
+            None,
+        )
+        .await;
+        assert_eq!(r.topics[0].error_code, 0, "{:?}", r.topics[0].error_message);
+        assert_eq!(r.topics[0].num_partitions, 500_000);
+        assert_eq!(
+            api.kv_get(crate::offsets::NAMESPACE, &topic_record::key("wide"))
+                .unwrap()["partitions"],
+            serde_json::json!(500_000)
+        );
+
+        let (f, api) = facade_and_queen(&[]);
+        let f = f.with_limits(100_000, crate::idempotent::DEFAULT_MAX_TRACKED);
+        let r = handle(
+            &f,
+            &request(vec![topic("wide").with_num_partitions(500_000)]),
+            6,
+            None,
+        )
+        .await;
+        assert_eq!(
+            r.topics[0].error_code,
+            ResponseError::InvalidPartitions.code()
+        );
+        assert!(r.topics[0]
+            .error_message
+            .as_ref()
+            .is_some_and(|m| m.contains("QUEEN_KAFKA_MAX_PARTITIONS")));
+        assert!(api.creates.lock().unwrap().is_empty());
     }
 
     /// The create writes the facade's own record of the bag it sent

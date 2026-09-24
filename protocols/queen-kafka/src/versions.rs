@@ -275,18 +275,11 @@ pub struct Api {
 ///
 /// CreatePartitions is the whole schema window, checked the same way: every
 /// field of both request and response is marked `0-3`, so nothing varies inside
-/// it but the flexible encoding (v2), and there is nothing to cap. What it
-/// advertises is a REFUSAL, which bends this table's own rule, and the
-/// justification is that two of its three answers are Apache Kafka's own
-/// sentences byte for byte — a DECREASE and an EQUAL count are refused by a real
-/// broker too ([`crate::handlers::create_partitions`], where both strings are
-/// recorded off `apache/kafka:3.9.1` rather than recalled). Only an INCREASE is
-/// a capability gap, because Queen declares no width per queue at all. The
-/// alternative, no row, would answer `kafka-topics.sh --alter --partitions` with
-/// an UnsupportedVersionException — "upgrade your broker" — which is the wrong
-/// diagnosis in all three cases and wrong for the commonest one of them: a
-/// provisioner declaring 12 partitions against a facade whose default is 1024 is
-/// a decrease.
+/// it but the flexible encoding (v2), and there is nothing to cap. An INCREASE
+/// raises the declared width of a topic this facade tracks (since 2026-09-24);
+/// a DECREASE and an EQUAL count are refused with Apache Kafka's own sentences
+/// byte for byte ([`crate::handlers::create_partitions`], where both strings are
+/// recorded off `apache/kafka:3.9.1` rather than recalled).
 ///
 /// THE TRANSACTION APIS (M9) are four rows and one shared ceiling argument, and
 /// the argument is NOT the usual one: KIP-896 dropped no version of any of
@@ -485,8 +478,8 @@ pub const ADVERTISED: &[Api] = &[
         max: 1,
     },
     // ---- M7 F4: the two remaining admin writes. CreatePartitions is the whole
-    // schema window and answers a refusal two thirds of which is Apache Kafka's
-    // own; OffsetDelete has exactly one version. See the paragraph above.
+    // schema window (an increase raises a tracked topic's width since
+    // 2026-09-24); OffsetDelete has exactly one version. See the paragraph above.
     Api {
         key: ApiKey::CreatePartitions,
         min: 0,
@@ -520,6 +513,15 @@ pub const ADVERTISED: &[Api] = &[
         key: ApiKey::TxnOffsetCommit,
         min: 0,
         max: 3,
+    },
+    // ---- 2026-09-24: the log directories of a facade running inside a raft
+    // broker (every voter holds every partition; `handlers::describe_log_dirs`).
+    // v0 is gone since KIP-896; v4 adds the volume sizes, answered -1. Over
+    // HTTP the answer is no directory at all.
+    Api {
+        key: ApiKey::DescribeLogDirs,
+        min: 1,
+        max: 4,
     },
 ];
 
@@ -1118,12 +1120,6 @@ mod tests {
             (
                 ApiKey::OffsetForLeaderEpoch,
                 "no leader epochs to compare, so no client ever sends it",
-            ),
-            // Queen's storage is Postgres segments. Answering would mean
-            // inventing a log directory and per-partition byte sizes.
-            (
-                ApiKey::DescribeLogDirs,
-                "no log directories; retainedBytes is per queue, not per partition",
             ),
             // A delegation token is minted by the broker from a
             // SCRAM-authenticated principal. This facade mints no credentials;

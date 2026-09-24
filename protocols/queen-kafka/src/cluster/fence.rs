@@ -122,6 +122,41 @@ pub enum Verdict {
 /// In single mode this is exactly the old call — no fence operation, no extra
 /// round trip, the same body on the wire — because there is no second writer to
 /// fence against.
+///
+/// ## Concurrent commits of one group share ONE write
+///
+/// The fence serialises a group's commits in this process: the cell's lock is
+/// held across the KV call. A group whose members commit concurrently — every
+/// consumer committing after every poll, which is what an async-commit loop
+/// does — was therefore capped at one commit per KV round trip: 27 commits/s
+/// and a commit p50 of 8.3 s for 50 consumers on a three-node raft cluster
+/// (measured 2026-09-24), with the consumers stalled behind their own commits.
+///
+/// So a commit JOINS the group's queue, and whoever holds the lock writes
+/// everything queued in fenced calls of one credential each — Kafka's group
+/// coordinator batches its `__consumer_offsets` appends the same way. Every
+/// commit still gets its own per-partition results, and the queue keeps arrival
+/// order, so a later commit of a partition wins.
+///
+/// ## ...and a commit waits for ITS write, not for the queue to run dry
+///
+/// A commit returns as soon as the write that carried it is answered, and
+/// takes the lock only to write when nobody else is writing; a holder hands
+/// the lock on the moment its own commit is answered. The first shape of the
+/// queue waited for the LOCK and then for the answer: the holder drained until
+/// the queue was empty, and every other commit — its offsets already written —
+/// sat behind the lock until then. Under a steady stream of commits the queue
+/// is never empty, so every commit was held for a whole convoy: 188 ms mean
+/// and ~480 ms p99 per commit for 600 consumers on the three-node raft
+/// cluster, against 5 ms for the write that carried it (2026-09-24). A
+/// consumer that commits after every poll polls at the rate its commits come
+/// back, so the convoy was the group's consumption ceiling, and e2e latency
+/// grew with the member count and with the partitions each poll spreads over.
+///
+/// No commit is stranded by the hand-off: a queued commit's task waits on its
+/// answer OR the lock, so whenever a holder lets go — answered, or cancelled
+/// mid-write, which drops the batch it held and answers those commits
+/// `Unavailable` — a waiter takes the lock and writes the rest.
 pub async fn commit(
     api: &dyn QueenApi,
     cluster: &Cluster,
@@ -143,18 +178,144 @@ pub async fn commit(
         return Verdict::Unavailable;
     };
 
-    // Serialises the members of one group in this process, so the retry below
-    // is rare rather than routine. It is an OPTIMISATION: correctness is the
-    // retry rule, not the lock. Held only across the KV call.
     let cell = state.fences.cell(tenant, group);
-    let mut held = cell.lock().await;
+    let (done, mut answer) = tokio::sync::oneshot::channel();
+    cell.join(Job {
+        pairs: pairs.to_vec(),
+        generation,
+        token: token.map(str::to_string),
+        done,
+        joined: std::time::Instant::now(),
+    });
+    // See "a commit waits for ITS write" above. `biased`: an answer that is
+    // already here wins over a lock that is already free.
+    tokio::select! {
+        biased;
+        verdict = &mut answer => verdict.unwrap_or(Verdict::Unavailable),
+        mut held = cell.version.lock() => {
+            // Nobody else is writing, so this commit is still queued or already
+            // answered — and the drain below reaches it, because the queue is
+            // FIFO. It stops at this commit's own answer: whatever is queued
+            // behind it is written by ITS waiters, which take the lock next.
+            loop {
+                let batch = cell.take_batch();
+                if batch.is_empty() {
+                    break;
+                }
+                write_batch(api, cluster, state, &key, group, &mut held, batch).await;
+                match answer.try_recv() {
+                    Ok(verdict) => return verdict,
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                        return Verdict::Unavailable
+                    }
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+                }
+            }
+            // The queue is empty and nobody else writes: an answer that is not
+            // here now will never come.
+            answer.try_recv().unwrap_or(Verdict::Unavailable)
+        }
+    }
+}
+
+/// One commit waiting in a group's queue.
+struct Job {
+    pairs: Vec<(String, Committed)>,
+    generation: i32,
+    token: Option<String>,
+    done: tokio::sync::oneshot::Sender<Verdict>,
+    /// When it joined the queue ([`crate::stats::COMMIT_WRITTEN`]).
+    joined: std::time::Instant,
+}
+
+impl Job {
+    fn answer(self, verdict: Verdict) {
+        crate::stats::COMMIT_WRITTEN.record(self.joined.elapsed());
+        let _ = self.done.send(verdict);
+    }
+}
+
+/// One fenced write of every job in `batch` (all presented with one
+/// credential), each job answered with its own slice of the results.
+async fn write_batch(
+    api: &dyn QueenApi,
+    cluster: &Cluster,
+    state: &ClusterState,
+    key: &str,
+    group: &str,
+    held: &mut Option<i64>,
+    batch: Vec<Job>,
+) {
+    let token = batch[0].token.clone();
+    // Informational in the fence value: the newest generation among them.
+    let generation = batch.iter().map(|j| j.generation).max().unwrap_or(-1);
+    let pairs: Vec<(String, Committed)> =
+        batch.iter().flat_map(|j| j.pairs.iter().cloned()).collect();
+    crate::stats::COMMIT_BATCHES.add(1);
+    crate::stats::COMMIT_BATCH_JOBS.add(batch.len() as u64);
+    crate::stats::COMMIT_BATCH_PAIRS.add(pairs.len() as u64);
+    match fenced(
+        api,
+        cluster,
+        state,
+        key,
+        group,
+        generation,
+        &pairs,
+        token.as_deref(),
+        held,
+    )
+    .await
+    {
+        Verdict::Stored(results) => {
+            let mut results = results.into_iter();
+            for job in batch {
+                let mut mine: Vec<queen::Result<()>> =
+                    results.by_ref().take(job.pairs.len()).collect();
+                // `offsets::store` answers one result per pair; padded rather
+                // than trusted, so a short answer can never shift a partition's
+                // verdict onto another commit.
+                while mine.len() < job.pairs.len() {
+                    mine.push(Err(queen::Error::Body(
+                        "the offset store answered fewer results than it was given".to_string(),
+                    )));
+                }
+                job.answer(Verdict::Stored(mine));
+            }
+        }
+        Verdict::NotCoordinator => {
+            for job in batch {
+                job.answer(Verdict::NotCoordinator);
+            }
+        }
+        Verdict::Unavailable => {
+            for job in batch {
+                job.answer(Verdict::Unavailable);
+            }
+        }
+    }
+}
+
+/// The fenced store of one write, with THE retry rule: at most two attempts.
+#[allow(clippy::too_many_arguments)]
+async fn fenced(
+    api: &dyn QueenApi,
+    cluster: &Cluster,
+    state: &ClusterState,
+    key: &str,
+    group: &str,
+    generation: i32,
+    pairs: &[(String, Committed)],
+    token: Option<&str>,
+    held: &mut Option<i64>,
+) -> Verdict {
     let mut expect = held.unwrap_or(0);
 
     // Two attempts at most. The second one is either the same-process race
     // resolving or the takeover completing; a third would be a CAS loop.
     for attempt in 0..2 {
         let op = FenceOp {
-            key: key.clone(),
+            key: key.to_string(),
             value: value_of(state, generation),
             expect,
         };
@@ -258,8 +419,50 @@ pub struct Fences {
 }
 
 struct Held {
-    cell: Arc<AsyncMutex<Option<i64>>>,
+    cell: Arc<Cell>,
     used: u64,
+}
+
+/// One group's fence state in this process: the version it last saw, whose
+/// lock a write holds, and the commits waiting for the next write.
+struct Cell {
+    version: AsyncMutex<Option<i64>>,
+    pending: Mutex<std::collections::VecDeque<Job>>,
+}
+
+impl Cell {
+    fn new() -> Cell {
+        Cell {
+            version: AsyncMutex::new(None),
+            pending: Mutex::new(std::collections::VecDeque::new()),
+        }
+    }
+
+    fn join(&self, job: Job) {
+        self.pending
+            .lock()
+            .expect("the commit queue lock is never held across a panic")
+            .push_back(job);
+    }
+
+    /// The next write: the oldest waiting commit and every one after it
+    /// presented with the SAME credential, stopping at the first that is not —
+    /// one KV call carries one credential, and stopping (rather than skipping)
+    /// keeps arrival order across credentials too.
+    fn take_batch(&self) -> Vec<Job> {
+        let mut q = self
+            .pending
+            .lock()
+            .expect("the commit queue lock is never held across a panic");
+        let Some(first) = q.pop_front() else {
+            return Vec::new();
+        };
+        let mut batch = vec![first];
+        while q.front().is_some_and(|j| j.token == batch[0].token) {
+            batch.extend(q.pop_front());
+        }
+        batch
+    }
 }
 
 /// How many groups' fences are remembered at once. The same bound, for the same
@@ -284,9 +487,9 @@ impl Fences {
     /// The cell for one (tenant, group), made on first use.
     ///
     /// The lock here is a `std::sync::Mutex` and nothing is awaited while it is
-    /// held: the `tokio::Mutex` inside is CLONED out and this one released
-    /// before the caller waits on it.
-    fn cell(&self, tenant: &TenantKey, group: &str) -> Arc<AsyncMutex<Option<i64>>> {
+    /// held: the cell is CLONED out and this one released before the caller
+    /// waits on the cell's own lock.
+    fn cell(&self, tenant: &TenantKey, group: &str) -> Arc<Cell> {
         let now = self.clock.fetch_add(1, Ordering::Relaxed);
         let mut cells = self
             .cells
@@ -307,7 +510,7 @@ impl Fences {
             };
             cells.remove(&coldest);
         }
-        let cell = Arc::new(AsyncMutex::new(None));
+        let cell = Arc::new(Cell::new());
         cells.insert(
             key,
             Held {
@@ -391,6 +594,101 @@ mod tests {
             &offsets::key(group, "orders", partition).unwrap(),
         )
         .and_then(|v| v["offset"].as_i64())
+    }
+
+    /// Commits of one group that overlap are ONE fenced write, not one each:
+    /// the queue drains into the write of whoever holds the lock. Every commit
+    /// still gets its own results, and the later of two commits of the same
+    /// partition is the one that sticks.
+    #[tokio::test]
+    async fn overlapping_commits_of_one_group_share_one_write() {
+        let api = FakeQueen::with(&[]);
+        *api.kv_delay.lock().unwrap() = Some(std::time::Duration::from_millis(40));
+        let cluster = Arc::new(cluster(2));
+        // 20 members: 19 on their own partition, and the last one committing
+        // partition 0 again, after member 0.
+        let mut set = tokio::task::JoinSet::new();
+        for i in 0..20i32 {
+            let partition = if i == 19 { 0 } else { i };
+            let p = pairs(OWNED, &[(partition, 100 + i64::from(i))]);
+            let (api, cluster) = (api.clone(), cluster.clone());
+            set.spawn(async move {
+                // Arrival order: member i joins i ms after the first.
+                tokio::time::sleep(std::time::Duration::from_millis(i as u64)).await;
+                commit(&*api, &cluster, &TenantKey::anonymous(), OWNED, 7, &p, None).await
+            });
+        }
+        let mut verdicts = Vec::new();
+        while let Some(v) = set.join_next().await {
+            verdicts.push(v.expect("a commit task panicked"));
+        }
+        for v in &verdicts {
+            assert!(
+                matches!(v, Verdict::Stored(r) if r.len() == 1 && r[0].is_ok()),
+                "{v:?}"
+            );
+        }
+        let calls = api.kv_calls.lock().unwrap().len();
+        assert!(
+            calls < 20 / 2,
+            "20 overlapping commits took {calls} KV calls: they were not batched"
+        );
+        assert_eq!(
+            stored_offset(&api, OWNED, 0),
+            Some(119),
+            "arrival order lost"
+        );
+        assert_eq!(stored_offset(&api, OWNED, 18), Some(118));
+    }
+
+    /// A commit is answered by the write that CARRIED it, not when the group's
+    /// queue next runs dry. A group committing after every poll keeps the queue
+    /// from ever being empty; the first shape of the queue held every commit
+    /// behind the lock until it was, so the first commit of a stream waited for
+    /// the whole stream. Here: a commit every 2 ms for 400 ms against a 10 ms
+    /// write. Each must come back within the write in flight when it arrived
+    /// plus its own — and the writes must still be shared.
+    #[tokio::test(start_paused = true)]
+    async fn a_commit_waits_for_its_own_write_and_not_for_the_stream() {
+        const WRITE: std::time::Duration = std::time::Duration::from_millis(10);
+        const COMMITS: i32 = 200;
+        let api = FakeQueen::with(&[]);
+        *api.kv_delay.lock().unwrap() = Some(WRITE);
+        let cluster = Arc::new(cluster(2));
+        let mut set = tokio::task::JoinSet::new();
+        for i in 0..COMMITS {
+            let p = pairs(OWNED, &[(i, 1_000 + i64::from(i))]);
+            let (api, cluster) = (api.clone(), cluster.clone());
+            set.spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(2 * i as u64)).await;
+                let started = tokio::time::Instant::now();
+                let verdict =
+                    commit(&*api, &cluster, &TenantKey::anonymous(), OWNED, 7, &p, None).await;
+                (verdict, started.elapsed())
+            });
+        }
+        let mut slowest = std::time::Duration::ZERO;
+        while let Some(done) = set.join_next().await {
+            let (verdict, took) = done.expect("a commit task panicked");
+            assert!(
+                matches!(&verdict, Verdict::Stored(r) if r.len() == 1 && r[0].is_ok()),
+                "{verdict:?}"
+            );
+            slowest = slowest.max(took);
+        }
+        assert!(
+            slowest <= 2 * WRITE,
+            "a commit took {slowest:?} against a {WRITE:?} write: it waited for the queue, \
+             not for its write"
+        );
+        let calls = api.kv_calls.lock().unwrap().len();
+        assert!(
+            calls < COMMITS as usize / 2,
+            "{COMMITS} commits took {calls} KV calls: they were not batched"
+        );
+        for i in [0, COMMITS / 2, COMMITS - 1] {
+            assert_eq!(stored_offset(&api, OWNED, i), Some(1_000 + i64::from(i)));
+        }
     }
 
     /// Single mode sends no fence at all: one operation per partition, and the

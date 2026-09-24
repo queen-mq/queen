@@ -3,7 +3,7 @@
 //!
 //! `QUEEN_KAFKA_TLS_CERT` + `QUEEN_KAFKA_TLS_KEY` switch the Kafka port from
 //! plaintext to TLS. Both or neither, checked at boot ([`crate::Facade`]'s
-//! binary does it in `main.rs`): a half-configured listener is a
+//! binary does it in `boot.rs`): a half-configured listener is a
 //! misconfiguration worth failing on, never a silent fallback to the plaintext
 //! port — the same rule and the same pair of variables the proxy's own origin
 //! listener uses (proxy/src/config.rs `tls_material`).

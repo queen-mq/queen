@@ -66,6 +66,85 @@ impl Sampler {
     }
 }
 
+/// A latency histogram that costs four relaxed atomics per sample: count, sum,
+/// max and one power-of-two bucket of microseconds. Percentiles read off it are
+/// bucket-accurate — within a factor of two, which is the resolution the
+/// questions it answers need ("is a commit 3 ms or 300 ms, and where does the
+/// time go"). Process-wide statics, reported in `GET /status` by the broker
+/// that runs the facade in-process ([`crate::introspect`]).
+pub struct Timing {
+    count: AtomicU64,
+    sum_us: AtomicU64,
+    max_us: AtomicU64,
+    /// Bucket `i` counts samples in `[2^i, 2^(i+1))` µs (bucket 0 also takes 0).
+    buckets: [AtomicU64; 40],
+}
+
+impl Timing {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+
+    pub const fn new() -> Timing {
+        Timing {
+            count: AtomicU64::new(0),
+            sum_us: AtomicU64::new(0),
+            max_us: AtomicU64::new(0),
+            buckets: [Timing::ZERO; 40],
+        }
+    }
+
+    pub fn record(&self, d: std::time::Duration) {
+        self.record_us(d.as_micros().min(u128::from(u64::MAX)) as u64);
+    }
+
+    pub fn record_us(&self, us: u64) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.sum_us.fetch_add(us, Ordering::Relaxed);
+        self.max_us.fetch_max(us, Ordering::Relaxed);
+        let i = (u64::BITS - us.max(1).leading_zeros() - 1) as usize;
+        self.buckets[i.min(39)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `{count, meanMs, p50Ms, p99Ms, maxMs, sumUs, buckets}`; a percentile is
+    /// its bucket's upper bound. The raw sum and buckets let two snapshots be
+    /// subtracted into the figures of the interval between them.
+    pub fn snapshot(&self) -> serde_json::Value {
+        let count = self.count.load(Ordering::Relaxed);
+        let buckets: Vec<u64> = self
+            .buckets
+            .iter()
+            .map(|b| b.load(Ordering::Relaxed))
+            .collect();
+        let pct = |q: f64| -> f64 {
+            let want = ((count as f64) * q).ceil().max(1.0) as u64;
+            let mut seen = 0;
+            for (i, n) in buckets.iter().enumerate() {
+                seen += n;
+                if seen >= want {
+                    return (1u64 << (i + 1)) as f64 / 1000.0;
+                }
+            }
+            0.0
+        };
+        let ms = |us: u64| us as f64 / 1000.0;
+        serde_json::json!({
+            "count": count,
+            "meanMs": if count == 0 { 0.0 } else { ms(self.sum_us.load(Ordering::Relaxed)) / count as f64 },
+            "p50Ms": if count == 0 { 0.0 } else { pct(0.5) },
+            "p99Ms": if count == 0 { 0.0 } else { pct(0.99) },
+            "maxMs": ms(self.max_us.load(Ordering::Relaxed)),
+            "sumUs": self.sum_us.load(Ordering::Relaxed),
+            "buckets": buckets,
+        })
+    }
+}
+
+impl Default for Timing {
+    fn default() -> Timing {
+        Timing::new()
+    }
+}
+
 /// Milliseconds since the epoch, or 0 on a clock before it.
 fn now_epoch_ms() -> i64 {
     SystemTime::now()

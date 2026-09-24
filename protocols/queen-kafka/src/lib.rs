@@ -21,6 +21,7 @@
 //! as the `throttle_time_ms` every Kafka client already backs off on —
 //! [`throttle`]).
 
+pub mod boot;
 pub mod cluster;
 pub mod conn;
 pub mod coordinator;
@@ -32,12 +33,14 @@ pub mod fuzzing;
 pub mod handlers;
 pub mod idempotent;
 pub mod identity;
+pub mod introspect;
 pub mod obs;
 pub mod offsets;
 pub mod queen;
 pub mod records;
 pub mod sasl;
 pub mod secret;
+pub mod stats;
 pub mod throttle;
 pub mod tls;
 pub mod topic_config;
@@ -55,7 +58,7 @@ use std::sync::{Arc, Mutex};
 /// ## One per CONNECTION, derived from one per process
 ///
 /// Until M5 there was one of these for the whole process. There still is — the
-/// root, built in `main.rs` — but a connection now has things of its own that a
+/// root, built in `boot.rs` — but a connection now has things of its own that a
 /// handler has to see: the credential SASL/PLAIN presented, and the Host that
 /// connection's calls to Queen must carry ([`tls`]). Rather than thread those
 /// through every handler signature, a connection gets its own `Facade`
@@ -71,7 +74,7 @@ use std::sync::{Arc, Mutex};
 pub struct Facade {
     /// The host and port handed to clients as the address of THIS node — node 0
     /// on its own, `QUEEN_KAFKA_NODE_ID` in a cluster. Validated at boot
-    /// (main.rs): the classic Kafka footgun is advertising something clients
+    /// (boot.rs): the classic Kafka footgun is advertising something clients
     /// cannot reach, which fails only *after* a successful bootstrap.
     pub advertised_host: String,
     pub advertised_port: u16,
@@ -88,6 +91,9 @@ pub struct Facade {
     /// unless Queen already has more lanes than that. See
     /// [`handlers::metadata`].
     pub default_partitions: u32,
+    /// `QUEEN_KAFKA_MAX_PARTITIONS` — the widest a topic is advertised,
+    /// created or grown ([`handlers::metadata::DEFAULT_MAX_PARTITIONS`]).
+    pub max_partitions: u32,
     /// The credential every call from THIS connection reaches Queen with: the
     /// token SASL/PLAIN presented, or — on a listener with no SASL —
     /// `QUEEN_TOKEN`, which is optional because a broker with auth disabled
@@ -148,6 +154,21 @@ pub struct Facade {
     lanes: Arc<Lanes>,
     /// Listener policy, read by [`conn`] and by nothing downstream of it.
     pub policy: Policy,
+    /// The raft broker this facade runs INSIDE, or `None` when it reaches
+    /// Queen over HTTP and knows nothing of its storage. Every voter holds
+    /// every partition, and an acknowledged write is on a majority of them:
+    /// what Metadata's replica lists, `min.insync.replicas` and
+    /// DescribeLogDirs report.
+    pub raft: Option<RaftBroker>,
+}
+
+/// The storage of the raft broker a facade runs inside ([`Facade::raft`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaftBroker {
+    /// The voters of the raft cluster, this node included.
+    pub voters: u32,
+    /// This node's data directory: the one log directory DescribeLogDirs names.
+    pub log_dir: String,
 }
 
 /// What the listener does to a connection before a handler ever sees it.
@@ -222,6 +243,7 @@ impl Facade {
             advertised_port: self.advertised_port,
             cluster: self.cluster.clone(),
             default_partitions: self.default_partitions,
+            max_partitions: self.max_partitions,
             queen_token: self.queen_token.clone(),
             queen: lane.queen,
             catalog: lane.catalog,
@@ -234,6 +256,7 @@ impl Facade {
             // the byte cap on staged records is a budget for the PROCESS, so a
             // per-connection copy would be one budget per connection.
             txns: Arc::clone(&self.txns),
+            raft: self.raft.clone(),
             lanes: Arc::clone(&self.lanes),
             policy: self.policy,
         }
@@ -257,6 +280,7 @@ impl Facade {
             advertised_port: self.advertised_port,
             cluster: self.cluster.clone(),
             default_partitions: self.default_partitions,
+            max_partitions: self.max_partitions,
             queen_token: Some(token.to_string()),
             queen: Arc::clone(&self.queen),
             catalog: Arc::clone(&self.catalog),
@@ -272,6 +296,7 @@ impl Facade {
             // inside the stage's own key ([`txn`]) rather than around the
             // container.
             txns: Arc::clone(&self.txns),
+            raft: self.raft.clone(),
             lanes: Arc::clone(&self.lanes),
             policy: self.policy,
         }
@@ -470,6 +495,7 @@ impl Facade {
             advertised_port,
             cluster,
             default_partitions,
+            max_partitions: handlers::metadata::DEFAULT_MAX_PARTITIONS,
             queen_token,
             lanes: Arc::new(Lanes::new(Arc::clone(&queen), Arc::clone(&catalog))),
             queen,
@@ -485,7 +511,30 @@ impl Facade {
             // is a constant an operator cannot move.
             txns,
             policy,
+            raft: None,
         }
+    }
+
+    /// The same facade, running inside the raft broker `raft`.
+    pub fn with_raft(mut self, raft: Option<RaftBroker>) -> Facade {
+        self.raft = raft;
+        self
+    }
+
+    /// The same facade, with the two size ceilings an operator sets:
+    /// `QUEEN_KAFKA_MAX_PARTITIONS` and `QUEEN_KAFKA_MAX_PRODUCER_STATES`
+    /// ([`idempotent::Producers::with_capacity`]). The producer tracker is
+    /// replaced, so this belongs at boot, before any connection shares it.
+    pub fn with_limits(mut self, max_partitions: u32, max_producer_states: usize) -> Facade {
+        self.max_partitions = max_partitions;
+        self.producers = Arc::new(idempotent::Producers::with_capacity(max_producer_states));
+        self
+    }
+
+    /// How many replicas every acknowledged write is on: the raft majority
+    /// inside a raft broker, 1 everywhere else.
+    pub fn in_sync_replicas(&self) -> u32 {
+        self.raft.as_ref().map_or(1, |r| r.voters.max(1) / 2 + 1)
     }
 }
 

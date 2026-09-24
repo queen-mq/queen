@@ -180,6 +180,13 @@ enum Slot {
 /// `token` is the credential to reach Queen with — `QUEEN_TOKEN` at M3, the
 /// connection's own tenant token from M5 on.
 pub async fn handle(facade: &Facade, req: &FetchRequest, token: Option<&str>) -> FetchResponse {
+    let started = std::time::Instant::now();
+    let answer = fetch(facade, req, token).await;
+    crate::stats::FETCH.record(started.elapsed());
+    answer
+}
+
+async fn fetch(facade: &Facade, req: &FetchRequest, token: Option<&str>) -> FetchResponse {
     // `isolation_level` is accepted at both values and acted on at neither, and
     // that is correct rather than lax: READ_COMMITTED asks the broker to hide
     // records above the last stable offset and to list the aborted
@@ -224,6 +231,7 @@ pub async fn handle(facade: &Facade, req: &FetchRequest, token: Option<&str>) ->
     }
 
     let budget = response_budget(request_max_bytes);
+    let upstream = std::time::Instant::now();
     let read = read_all(
         facade,
         &entries,
@@ -233,6 +241,17 @@ pub async fn handle(facade: &Facade, req: &FetchRequest, token: Option<&str>) ->
         token,
     )
     .await;
+    crate::stats::FETCH_UPSTREAM.record(upstream.elapsed());
+    crate::stats::FETCH_ENTRIES.add(entries.len() as u64);
+    let records: usize = read
+        .iter()
+        .filter_map(|r| r.as_ref().ok())
+        .map(|f| f.records.len())
+        .sum();
+    crate::stats::FETCH_RECORDS.add(records as u64);
+    if records == 0 {
+        crate::stats::FETCH_EMPTY.add(1);
+    }
 
     render(req, &slots, &read, budget)
 }

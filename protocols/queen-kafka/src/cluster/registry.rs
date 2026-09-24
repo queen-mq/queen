@@ -47,6 +47,24 @@
 //! exiting would take that node's clients' produce with it for no correctness
 //! gain, and the address it advertises is no longer in anybody's view anyway.
 //!
+//! ## Inside a raft broker: a directory, not a liveness signal
+//!
+//! When the facade runs INSIDE a raft broker of more than one voter
+//! ([`ClusterState::raft_liveness`]) the row's TTL stops being how a node is
+//! judged live, because renewing it is a KV write and a KV write waits behind
+//! the data path: a leader warming 100k partitions saw its followers' renewals
+//! time out for over a minute and advertised itself as the only broker. There
+//! the row carries the `raftNode` it runs on and a long TTL
+//! ([`super::RAFT_ROW_TTL_FACTOR`]) — it is a DIRECTORY entry — and liveness is
+//! what the raft leader last heard from that raft node ([`super::liveness`]).
+//! The heartbeat splits in two ([`spawn`]): a renewer that keeps the row
+//! current, whose slowness costs nothing, and a viewer that reads the raft
+//! members and the directory — reads the local node answers, never queued
+//! behind a write — and installs the live set they describe. And a row found
+//! under this node's id at boot that was written from the SAME raft node is this
+//! broker's previous facade, taken over at once rather than watched for a TTL
+//! ([`claim`]).
+//!
 //! ## Handing the id back
 //!
 //! A row dies of its TTL, which is the right answer for a node that was killed
@@ -90,9 +108,10 @@ pub fn cluster_prefix(cluster: &str) -> String {
     format!("{KEY_PREFIX}{cluster}:")
 }
 
-/// The row this node writes for itself.
+/// The row this node writes for itself. `raftNode` only once it is known, so a
+/// facade outside raft writes exactly the row it always has.
 fn value_of(me: &Node) -> serde_json::Value {
-    json!({
+    let mut row = json!({
         "nodeId": me.id,
         "host": me.host,
         "port": me.port,
@@ -102,7 +121,16 @@ fn value_of(me: &Node) -> serde_json::Value {
             .map(|d| d.as_millis() as i64)
             .unwrap_or_default(),
         "version": env!("CARGO_PKG_VERSION"),
-    })
+    });
+    if let (Some(raft), Some(obj)) = (me.raft_node, row.as_object_mut()) {
+        obj.insert("raftNode".to_string(), json!(raft));
+    }
+    row
+}
+
+/// A duration as the whole seconds a row's TTL is written in, never 0.
+fn ttl_seconds(ttl: Duration) -> u64 {
+    ttl.as_secs().max(1)
 }
 
 /// One row, read back — or `None` when it is not one of ours.
@@ -127,6 +155,10 @@ pub fn node_of(cluster: &str, key: &str, value: &serde_json::Value) -> Option<No
             .and_then(|i| i.as_str())
             .unwrap_or_default()
             .to_string(),
+        raft_node: value
+            .get("raftNode")
+            .and_then(|r| r.as_u64())
+            .filter(|r| *r != 0),
     })
 }
 
@@ -158,13 +190,12 @@ async fn write_and_read(
     token: Option<&str>,
     expect: Option<i64>,
 ) -> queen::Result<Answered> {
-    let ttl = state.ttl.as_secs().max(1);
     let ops = [
         KvOp::put_ttl(
             NAMESPACE,
             &node_key(&state.cluster, state.me.id),
-            value_of(&state.me),
-            ttl,
+            value_of(&state.me_row()),
+            ttl_seconds(state.row_ttl()),
             expect,
         ),
         // 64 is the ceiling on a node id, so one page always covers the
@@ -263,10 +294,57 @@ pub async fn claim(
         .await
         .map_err(Refused::Unreachable)?;
     if is_ours(state, &answered) {
-        state.install(answered.nodes);
+        install_from_registry(state, answered.nodes);
         return Ok(answered.version);
     }
+    if is_predecessor(state, answered.winner.as_ref()) {
+        // Inside a raft broker a row filed under THIS broker's raft node was
+        // written by this broker's previous facade: one broker runs one facade,
+        // so it is our own corpse, not a twin, and it is taken over at once
+        // under a fence rather than watched for a TTL. The row outlives its
+        // process on purpose there (a long TTL, [`super::RAFT_ROW_TTL_FACTOR`]),
+        // so waiting for it to expire would keep a restarted node's listener
+        // closed for minutes while raft already reports it live.
+        let adopted = write_and_read(api, state, token, Some(answered.version))
+            .await
+            .map_err(Refused::Unreachable)?;
+        if adopted.applied {
+            tracing::info!(
+                target: "boot",
+                node_id = state.me.id,
+                cluster = %state.cluster,
+                raft_node = state.raft_node().unwrap_or_default(),
+                "took over this node id's registry row from the previous facade of this same \
+                 raft broker"
+            );
+            install_from_registry(state, adopted.nodes);
+            return Ok(adopted.version);
+        }
+        return watch_and_adopt(api, state, token, adopted).await;
+    }
     watch_and_adopt(api, state, token, answered).await
+}
+
+/// Whether `winner` — the row holding this node's id — was written by an
+/// earlier facade of the SAME raft broker, which can only be a process that is
+/// gone: a broker runs one facade. Never true outside raft, and never true
+/// until this node knows its raft node.
+fn is_predecessor(state: &ClusterState, winner: Option<&Node>) -> bool {
+    state.raft_liveness()
+        && state.raft_node().is_some()
+        && winner.is_some_and(|w| {
+            w.raft_node == state.raft_node() && w.incarnation != state.me.incarnation
+        })
+}
+
+/// Install the live set a registry read describes, where the registry IS the
+/// liveness signal. Inside a raft broker rows outlive their processes by
+/// design and a row is not a live node: that view comes from
+/// [`refresh_view`].
+fn install_from_registry(state: &ClusterState, nodes: Vec<Node>) {
+    if !state.raft_liveness() {
+        state.install(nodes);
+    }
 }
 
 /// The boot claim lost to a row this process did not write. That is EITHER a
@@ -338,7 +416,7 @@ async fn watch_and_adopt(
                  id is taken back. Its holder stopped without handing it over, which is what a \
                  SIGKILL, an OOM kill or a lost node looks like from here"
             );
-            state.install(answered.nodes);
+            install_from_registry(state, answered.nodes);
             return Ok(answered.version);
         }
         if answered.version != held_version {
@@ -374,7 +452,7 @@ async fn watch_and_adopt(
         "the registry row holding this node id was never refreshed while this facade watched it \
          for a whole TTL, so the id is taken over. Its holder is not heartbeating"
     );
-    state.install(answered.nodes);
+    install_from_registry(state, answered.nodes);
     Ok(answered.version)
 }
 
@@ -394,6 +472,10 @@ struct HeldState {
     /// expired under a slow tick leaves the version behind and the fact behind
     /// it standing. See [`tick`] for the one decision that turns on it.
     ever: AtomicBool,
+    /// The version of a row this node is about to TAKE OVER from its own
+    /// predecessor on the same raft broker ([`is_predecessor`]), or 0. The next
+    /// write expects it instead of `putIfAbsent`.
+    adopt: AtomicI64,
 }
 
 impl Held {
@@ -422,6 +504,17 @@ impl Held {
             self.0.ever.store(true, Ordering::Relaxed);
         }
     }
+
+    fn adopt(&self) -> Option<i64> {
+        match self.0.adopt.load(Ordering::Relaxed) {
+            0 => None,
+            v => Some(v),
+        }
+    }
+
+    fn set_adopt(&self, version: Option<i64>) {
+        self.0.adopt.store(version.unwrap_or(0), Ordering::Relaxed);
+    }
 }
 
 /// This node's place in the registry, for as long as the process wants it: the
@@ -436,7 +529,20 @@ pub struct Registration {
     state: Arc<ClusterState>,
     token: Option<String>,
     held: Held,
-    heartbeat: tokio::task::JoinHandle<()>,
+    /// The heartbeat — or, inside a raft broker, the renewer and the viewer.
+    /// Aborted when the registration is dropped as well as when it is handed
+    /// back: a facade whose serve loop ends WITHOUT a deregister (a panic the
+    /// in-process supervisor restarts) must not leave a task behind that keeps
+    /// rewriting a row under the old incarnation and fights the new one.
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
 }
 
 /// What a stop managed to do with this node's row.
@@ -466,9 +572,11 @@ impl Registration {
     /// window this cannot close — an in-flight write that reaches Queen after
     /// the abort — costs a [`Departure::NotOurs`] and a wait for the TTL, and
     /// can never delete a row that belongs to somebody else.
-    pub async fn deregister(self, budget: Duration) -> Departure {
-        self.heartbeat.abort();
-        let _ = self.heartbeat.await;
+    pub async fn deregister(mut self, budget: Duration) -> Departure {
+        for task in std::mem::take(&mut self.tasks) {
+            task.abort();
+            let _ = task.await;
+        }
         let Some(version) = self.held.get() else {
             return Departure::NothingHeld;
         };
@@ -497,6 +605,14 @@ impl Registration {
 /// It never exits on its own. A tick that fails leaves the view alone and lets
 /// the freshness gate run down, which is the correct shape: a node that cannot
 /// read the live set stops COORDINATING and keeps serving the data path.
+///
+/// Inside a raft broker ([`ClusterState::raft_liveness`]) the one call becomes
+/// two tasks, because the write and the read no longer answer the same
+/// question: a RENEWER keeps this node's directory row current (a write, which
+/// rides the pipeline and may be slow under load — nothing waits on it), and a
+/// VIEWER reads the raft members and the directory every heartbeat (reads,
+/// served by the local node, never queued behind the data path) and installs
+/// the live set they describe ([`refresh_view`]).
 pub fn spawn(
     api: Arc<dyn QueenApi>,
     state: Arc<ClusterState>,
@@ -504,29 +620,218 @@ pub fn spawn(
     version: Option<i64>,
 ) -> Registration {
     let held = Held::new(version);
-    let heartbeat = tokio::spawn({
-        let (api, state, token, held) = (
-            Arc::clone(&api),
-            Arc::clone(&state),
-            token.clone(),
-            held.clone(),
-        );
-        async move {
-            let mut ticks: u64 = 0;
-            loop {
-                tokio::time::sleep(state.heartbeat).await;
-                tick(api.as_ref(), &state, token.as_deref(), &held).await;
-                ticks += 1;
-                alone(&state, ticks);
+    let tasks = if state.raft_liveness() {
+        let renewer = tokio::spawn({
+            let (api, state, token, held) = (
+                Arc::clone(&api),
+                Arc::clone(&state),
+                token.clone(),
+                held.clone(),
+            );
+            async move {
+                loop {
+                    tokio::time::sleep(state.heartbeat).await;
+                    renew(api.as_ref(), &state, token.as_deref(), &held).await;
+                }
             }
-        }
-    });
+        });
+        let viewer = tokio::spawn({
+            let (api, state, token) = (Arc::clone(&api), Arc::clone(&state), token.clone());
+            async move {
+                let mut ticks: u64 = 0;
+                loop {
+                    tokio::time::sleep(state.heartbeat).await;
+                    refresh_view(api.as_ref(), &state, token.as_deref()).await;
+                    ticks += 1;
+                    alone(&state, ticks);
+                }
+            }
+        });
+        vec![renewer, viewer]
+    } else {
+        vec![tokio::spawn({
+            let (api, state, token, held) = (
+                Arc::clone(&api),
+                Arc::clone(&state),
+                token.clone(),
+                held.clone(),
+            );
+            async move {
+                let mut ticks: u64 = 0;
+                loop {
+                    tokio::time::sleep(state.heartbeat).await;
+                    tick(api.as_ref(), &state, token.as_deref(), &held).await;
+                    ticks += 1;
+                    alone(&state, ticks);
+                }
+            }
+        })]
+    };
     Registration {
         api,
         state,
         token,
         held,
-        heartbeat,
+        tasks,
+    }
+}
+
+/// One raft-mode renewal of this node's directory row: a write, and nothing
+/// else. The verdict rules are [`tick`]'s, with one addition — a row held by
+/// this node's own predecessor on the same raft broker is taken over on the
+/// next write, fenced on its version, instead of being a conflict.
+async fn renew(api: &dyn QueenApi, state: &ClusterState, token: Option<&str>, held: &Held) {
+    let expect = Some(held.get().or_else(|| held.adopt()).unwrap_or(0));
+    let op = KvOp::put_ttl(
+        NAMESPACE,
+        &node_key(&state.cluster, state.me.id),
+        value_of(&state.me_row()),
+        ttl_seconds(state.row_ttl()),
+        expect,
+    );
+    let write = match api.kv(&[op], token).await {
+        Ok(answers) => match answers.into_iter().next() {
+            Some(w) => w,
+            None => return,
+        },
+        Err(e) => {
+            if let Some(suppressed) = UNREACHABLE.tick_now() {
+                tracing::warn!(
+                    target: "kafka",
+                    node_id = state.me.id,
+                    cluster = %state.cluster,
+                    error = %e,
+                    suppressed,
+                    "this node's registry row could not be renewed; liveness is raft's, so this \
+                     node stays in every broker list while raft hears from it, and the row keeps \
+                     its long TTL"
+                );
+            }
+            return;
+        }
+    };
+    if write.applied == Some(true) {
+        held.set(Some(write.version));
+        held.set_adopt(None);
+        return;
+    }
+    // Expired (or deleted) under us: the next write is a `putIfAbsent`.
+    if write.reason.as_deref() == Some("absent") {
+        held.set(None);
+        held.set_adopt(None);
+        return;
+    }
+    let winner = node_of(
+        &state.cluster,
+        &node_key(&state.cluster, state.me.id),
+        &write.value,
+    );
+    if winner
+        .as_ref()
+        .is_some_and(|w| w.incarnation == state.me.incarnation)
+    {
+        held.set(Some(write.version));
+        held.set_adopt(None);
+        return;
+    }
+    if is_predecessor(state, winner.as_ref()) {
+        held.set(None);
+        held.set_adopt(Some(write.version));
+        return;
+    }
+    // Somebody else with our node id on ANOTHER broker, and they are writing:
+    // the operator error the boot fatal exists for, met at runtime.
+    held.set(None);
+    held.set_adopt(None);
+    if held.ever() {
+        state.stop_coordinating();
+    }
+    if let Some(suppressed) = CONFLICT.tick_now() {
+        tracing::error!(
+            target: "kafka",
+            node_id = state.me.id,
+            cluster = %state.cluster,
+            reason = write.reason.as_deref().unwrap_or("unknown"),
+            holder = winner.as_ref().map_or("?", |w| w.host.as_str()),
+            suppressed,
+            "another process holds QUEEN_KAFKA_NODE_ID; this facade has stopped coordinating \
+             groups and is still serving produce and fetch. Give one of the two its own id."
+        );
+    }
+}
+
+/// Read the directory: every registry row of this cluster, with no write.
+async fn read_directory(
+    api: &dyn QueenApi,
+    state: &ClusterState,
+    token: Option<&str>,
+) -> queen::Result<Vec<Node>> {
+    let ops = [KvOp::GetPrefix {
+        ns: NAMESPACE.to_string(),
+        prefix: cluster_prefix(&state.cluster),
+        limit: i64::from(MAX_NODE_ID),
+        after: None,
+    }];
+    let answers = api.kv(&ops, token).await?;
+    let read = answers
+        .first()
+        .ok_or_else(|| queen::Error::Body("the registry read answered no operation".to_string()))?;
+    Ok(read
+        .rows
+        .iter()
+        .filter_map(|row| node_of(&state.cluster, &row.key, &row.value))
+        .collect())
+}
+
+/// One raft-mode view: the broker's raft members (who the leader has heard
+/// from, and when) and the directory, judged into a live set and installed
+/// ([`super::liveness`]). Both are reads the local node answers; neither waits
+/// on a write. `false` when nothing was installed — the view is too old to
+/// judge by, the broker is not a raft broker, or a read failed — in which case
+/// the last view stands and the coordination gate runs down on its own.
+pub async fn refresh_view(api: &dyn QueenApi, state: &ClusterState, token: Option<&str>) -> bool {
+    let members = match api.raft_members(token).await {
+        Ok(Some(m)) => m,
+        Ok(None) => return false,
+        Err(e) => {
+            if let Some(suppressed) = UNREACHABLE.tick_now() {
+                tracing::warn!(
+                    target: "kafka",
+                    node_id = state.me.id,
+                    cluster = %state.cluster,
+                    error = %e,
+                    suppressed,
+                    "the raft members could not be read; this facade keeps its last view of the \
+                     cluster and stops coordinating groups once that view is a TTL old"
+                );
+            }
+            return false;
+        }
+    };
+    state.learn_raft_node(members.node_id);
+    let rows = match read_directory(api, state, token).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            if let Some(suppressed) = UNREACHABLE.tick_now() {
+                tracing::warn!(
+                    target: "kafka",
+                    node_id = state.me.id,
+                    cluster = %state.cluster,
+                    error = %e,
+                    suppressed,
+                    "the node registry could not be read; this facade keeps its last view of the \
+                     cluster and stops coordinating groups once that view is a TTL old"
+                );
+            }
+            return false;
+        }
+    };
+    match state.judge(&rows, &members) {
+        Some((live, down)) => {
+            state.install_view(live, down);
+            true
+        }
+        None => false,
     }
 }
 
@@ -664,6 +969,7 @@ mod tests {
                 host: host.to_string(),
                 port: 9092,
                 incarnation: super::super::new_incarnation(),
+                raft_node: None,
             },
             "rig".to_string(),
             Duration::from_secs(2),
@@ -689,7 +995,8 @@ mod tests {
                 id: 2,
                 host: "h".into(),
                 port: 9092,
-                incarnation: "i".into()
+                incarnation: "i".into(),
+                raft_node: None,
             })
         );
         // The id in the key and the id in the value must agree.
@@ -1232,5 +1539,336 @@ mod tests {
         assert!(api.kv_get(NAMESPACE, "qk:node:rig:2").is_some());
         tokio::time::advance(state.ttl + Duration::from_secs(1)).await;
         assert_eq!(api.kv_get(NAMESPACE, "qk:node:rig:2"), None);
+    }
+
+    // ------------------------------------------------------ inside raft broker
+
+    const TTL: Duration = Duration::from_secs(10);
+    const BEAT: Duration = Duration::from_secs(2);
+
+    fn raft_state(me: i32) -> Arc<ClusterState> {
+        ClusterState::with_raft_liveness(
+            Node {
+                id: me,
+                host: format!("kafka-{me}.example.com"),
+                port: 9092,
+                incarnation: super::super::new_incarnation(),
+                raft_node: Some(me as u64),
+            },
+            "rig".to_string(),
+            BEAT,
+            TTL,
+        )
+    }
+
+    /// A directory row as a raft-mode facade writes it: its raft node, and the
+    /// long TTL of a directory entry.
+    fn seed_raft_row(api: &FakeQueen, id: i32, incarnation: &str) {
+        api.kv_seed_ttl(
+            NAMESPACE,
+            &node_key("rig", id),
+            json!({"nodeId": id, "host": format!("kafka-{id}.example.com"), "port": 9092,
+                   "incarnation": incarnation, "raftNode": id}),
+            Some(300),
+        );
+    }
+
+    fn members(answering: u64, acks: &[(u64, u64)], view_age: u64) -> crate::queen::RaftMembers {
+        crate::queen::RaftMembers {
+            node_id: answering,
+            leader_id: Some(1),
+            view_age_ms: Some(view_age),
+            members: acks
+                .iter()
+                .map(|(id, age)| crate::queen::RaftMember {
+                    node_id: *id,
+                    voter: true,
+                    last_ack_ms: Some(*age),
+                })
+                .collect(),
+        }
+    }
+
+    fn live_ids(state: &ClusterState) -> Vec<i32> {
+        state
+            .view()
+            .map_or_else(Vec::new, |v| v.nodes.iter().map(|n| n.id).collect())
+    }
+
+    fn down_ids(state: &ClusterState) -> Vec<i32> {
+        state
+            .view()
+            .map_or_else(Vec::new, |v| v.down.iter().map(|n| n.id).collect())
+    }
+
+    /// Let the spawned heartbeat tasks run for `d` of paused time.
+    async fn run_for(d: Duration) {
+        let step = Duration::from_millis(100);
+        let mut left = d;
+        while !left.is_zero() {
+            let s = step.min(left);
+            tokio::time::advance(s).await;
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            left -= s;
+        }
+    }
+
+    /// THE regression, as the benchmark met it. Inside a raft broker every KV
+    /// write is starved — a leader warming 100k partitions answered
+    /// `kv_timeout` to the followers' registry renewals for over a minute —
+    /// and yet every node stays in every node's broker list, and keeps
+    /// coordinating, for as long as raft hears from them. The registry rows
+    /// are never rewritten in the whole window.
+    #[tokio::test(start_paused = true)]
+    async fn inside_raft_a_node_whose_registry_writes_starve_stays_live() {
+        let api = FakeQueen::with(&[]);
+        for id in 1..=3 {
+            seed_raft_row(&api, id, &format!("inc-{id}"));
+        }
+        *api.raft_members.lock().unwrap() = Some(members(2, &[(1, 30), (2, 80), (3, 120)], 150));
+        let state = raft_state(2);
+        assert!(refresh_view(&*api, &state, None).await);
+        assert_eq!(live_ids(&state), [1, 2, 3]);
+
+        *api.kv_write_error.lock().unwrap() = Some(queen::Error::Status {
+            code: 503,
+            body: r#"{"error":"kv_unavailable","reason":"kv_timeout"}"#.into(),
+            retry_after_ms: Some(1_000),
+        });
+        let registration = spawn(
+            Arc::clone(&api) as Arc<dyn QueenApi>,
+            Arc::clone(&state),
+            None,
+            None,
+        );
+        for _ in 0..30 {
+            run_for(BEAT).await;
+            assert_eq!(live_ids(&state), [1, 2, 3], "a live node was dropped");
+            assert!(down_ids(&state).is_empty());
+            assert!(state.coordinating(), "the gate closed on a busy pipeline");
+        }
+        drop(registration);
+    }
+
+    /// A node the raft leader stops hearing from leaves the live set once a
+    /// TTL of silence has passed — not on one late beat — stays a replica
+    /// (down, not forgotten), and comes back once it is heard again.
+    #[tokio::test(start_paused = true)]
+    async fn inside_raft_a_silent_node_drops_within_the_ttl_and_returns_when_heard() {
+        let api = FakeQueen::with(&[]);
+        for id in 1..=3 {
+            seed_raft_row(&api, id, &format!("inc-{id}"));
+        }
+        *api.raft_members.lock().unwrap() = Some(members(1, &[(1, 0), (2, 50), (3, 50)], 0));
+        let state = raft_state(1);
+        assert!(refresh_view(&*api, &state, None).await);
+        let registration = spawn(
+            Arc::clone(&api) as Arc<dyn QueenApi>,
+            Arc::clone(&state),
+            None,
+            None,
+        );
+
+        // Node 3 is killed: the leader's figure for it grows with the clock.
+        let killed = tokio::time::Instant::now();
+        let mut dropped_after = None;
+        for _ in 0..100 {
+            run_for(Duration::from_millis(500)).await;
+            let silent = killed.elapsed().as_millis() as u64;
+            *api.raft_members.lock().unwrap() =
+                Some(members(1, &[(1, 0), (2, 50), (3, silent)], 0));
+            if dropped_after.is_none() && !live_ids(&state).contains(&3) {
+                dropped_after = Some(killed.elapsed());
+            }
+            if silent < TTL.as_millis() as u64 {
+                assert_eq!(live_ids(&state), [1, 2, 3], "dropped after {silent} ms");
+            }
+        }
+        let dropped_after = dropped_after.expect("a dead node was never dropped");
+        assert!(
+            dropped_after <= TTL + BEAT + Duration::from_secs(1),
+            "dropped after {dropped_after:?}"
+        );
+        assert_eq!(live_ids(&state), [1, 2]);
+        assert_eq!(down_ids(&state), [3], "a dead voter is still a replica");
+
+        // Restarted: heard again at once.
+        *api.raft_members.lock().unwrap() = Some(members(1, &[(1, 0), (2, 50), (3, 40)], 0));
+        run_for(BEAT + Duration::from_millis(200)).await;
+        assert_eq!(live_ids(&state), [1, 2, 3]);
+        assert!(down_ids(&state).is_empty());
+        drop(registration);
+    }
+
+    /// A node that cannot trust its view — a follower cut off from the leader
+    /// — keeps advertising the last live set rather than every other node
+    /// looking dead from where it stands, and stops coordinating once that set
+    /// is a TTL old.
+    #[tokio::test(start_paused = true)]
+    async fn inside_raft_a_stale_view_keeps_the_last_live_set_and_closes_the_gate() {
+        let api = FakeQueen::with(&[]);
+        for id in 1..=3 {
+            seed_raft_row(&api, id, &format!("inc-{id}"));
+        }
+        *api.raft_members.lock().unwrap() = Some(members(2, &[(1, 0), (2, 0), (3, 0)], 100));
+        let state = raft_state(2);
+        assert!(refresh_view(&*api, &state, None).await);
+        let registration = spawn(
+            Arc::clone(&api) as Arc<dyn QueenApi>,
+            Arc::clone(&state),
+            None,
+            None,
+        );
+        // Cut off: the leader's figures age along with the copy.
+        *api.raft_members.lock().unwrap() =
+            Some(members(2, &[(1, 60_000), (2, 60_000), (3, 60_000)], 60_000));
+        run_for(TTL + BEAT).await;
+        assert_eq!(
+            live_ids(&state),
+            [1, 2, 3],
+            "a partitioned node shrank the cluster"
+        );
+        assert!(!state.coordinating());
+        drop(registration);
+    }
+
+    /// A raft-mode row names its raft node and carries the long TTL of a
+    /// directory entry, so a busy pipeline cannot expire it out of the
+    /// directory.
+    #[tokio::test(start_paused = true)]
+    async fn inside_raft_a_row_names_its_raft_node_and_outlives_a_stall() {
+        let api = FakeQueen::with(&[]);
+        let state = raft_state(2);
+        assert!(claim(&*api, &state, None).await.is_ok());
+        let put = api
+            .kv_ops()
+            .into_iter()
+            .find(|op| matches!(op, KvOp::Put { .. }))
+            .unwrap();
+        match put {
+            KvOp::Put {
+                value, ttl_seconds, ..
+            } => {
+                assert_eq!(value["raftNode"], 2);
+                assert_eq!(
+                    ttl_seconds,
+                    Some(TTL.as_secs() * u64::from(super::super::RAFT_ROW_TTL_FACTOR))
+                );
+            }
+            _ => unreachable!(),
+        }
+        // Outside raft the row is exactly what it always was.
+        let api = FakeQueen::with(&[]);
+        let state = unseen(2, "kafka-2.example.com");
+        assert!(claim(&*api, &state, None).await.is_ok());
+        let row = api.kv_get(NAMESPACE, "qk:node:rig:2").unwrap();
+        assert!(row.get("raftNode").is_none(), "{row}");
+    }
+
+    /// A restarted node meets its own predecessor's row — the long TTL keeps
+    /// it — and takes it over AT ONCE: the row was written from this same raft
+    /// broker, which runs one facade, so it is a corpse and not a twin. Waiting
+    /// out its TTL would keep the listener closed for minutes.
+    #[tokio::test(start_paused = true)]
+    async fn inside_raft_a_restart_takes_its_predecessors_row_over_at_once() {
+        let api = FakeQueen::with(&[]);
+        seed_raft_row(&api, 2, "the-process-that-was-killed");
+        let state = raft_state(2);
+        let started = tokio::time::Instant::now();
+        let version = match claim(&*api, &state, None).await {
+            Ok(v) => v,
+            Err(_) => panic!("a restarted node refused its own predecessor's row"),
+        };
+        assert!(version > 0);
+        assert!(
+            started.elapsed() < BEAT,
+            "it waited: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            api.kv_get(NAMESPACE, "qk:node:rig:2").unwrap()["incarnation"],
+            state.me.incarnation.as_str()
+        );
+    }
+
+    /// ...but a row of this node id written from ANOTHER raft broker is the
+    /// operator error the fatal exists for, and it is still watched: a live
+    /// twin keeps rewriting it and the boot fails.
+    #[tokio::test(start_paused = true)]
+    async fn inside_raft_a_twin_on_another_broker_is_still_fatal() {
+        let api = FakeQueen::with(&[]);
+        let write = |api: &FakeQueen| {
+            api.kv_seed_ttl(
+                NAMESPACE,
+                "qk:node:rig:2",
+                json!({"nodeId": 2, "host": "kafka-9.example.com", "port": 9092,
+                       "incarnation": "twin", "raftNode": 5}),
+                Some(300),
+            );
+        };
+        write(&api);
+        let twin = {
+            let api = Arc::clone(&api);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    write(&api);
+                }
+            })
+        };
+        let state = raft_state(2);
+        assert!(matches!(
+            claim(&*api, &state, None).await,
+            Err(Refused::Taken(_))
+        ));
+        twin.abort();
+    }
+
+    /// A node whose boot claim could not reach Queen finds its predecessor's
+    /// row at runtime and takes it over on the next renewal, fenced on the
+    /// version it found.
+    #[tokio::test(start_paused = true)]
+    async fn inside_raft_the_renewer_takes_a_predecessors_row_over() {
+        let api = FakeQueen::with(&[]);
+        seed_raft_row(&api, 2, "the-process-that-was-killed");
+        *api.raft_members.lock().unwrap() = Some(members(2, &[(1, 0), (2, 0)], 0));
+        let state = raft_state(2);
+        let registration = spawn(
+            Arc::clone(&api) as Arc<dyn QueenApi>,
+            Arc::clone(&state),
+            None,
+            None,
+        );
+        run_for(BEAT * 3).await;
+        assert_eq!(
+            api.kv_get(NAMESPACE, "qk:node:rig:2").unwrap()["incarnation"],
+            state.me.incarnation.as_str()
+        );
+        assert!(state.coordinating());
+        let departure = registration.deregister(Duration::from_secs(2)).await;
+        assert_eq!(departure, Departure::Released);
+    }
+
+    /// A registration that is dropped without a deregister — a serve loop
+    /// that panicked — takes its tasks with it, so no orphan keeps rewriting
+    /// a row under the old incarnation.
+    #[tokio::test(start_paused = true)]
+    async fn dropping_a_registration_stops_its_heartbeat() {
+        let api = FakeQueen::with(&[]);
+        let state = state_of(2);
+        let registration = spawn(
+            Arc::clone(&api) as Arc<dyn QueenApi>,
+            Arc::clone(&state),
+            None,
+            None,
+        );
+        run_for(BEAT * 2).await;
+        let calls = api.kv_calls.lock().unwrap().len();
+        assert!(calls > 0);
+        drop(registration);
+        run_for(BEAT * 5).await;
+        assert_eq!(api.kv_calls.lock().unwrap().len(), calls);
     }
 }
