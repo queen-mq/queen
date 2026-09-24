@@ -279,11 +279,11 @@ async fn me(State(st): State<St>, headers: HeaderMap) -> Response {
     // deny-lists the jti, so the deny-list has to be consulted here too
     // or a copied cookie keeps reporting a healthy session after its
     // owner signed out.
-    if st.keys.is_revoked(&st.db, &claims.jti).await {
+    if st.keys.is_revoked(&st.store, &claims.jti).await {
         return errors::err_401("invalid session");
     }
 
-    let is_operator = st.keys.is_operator(&st.db, claims.user_id).await;
+    let is_operator = st.keys.is_operator(&st.store, claims.user_id).await;
     let operator_live = st.cfg.operator_enabled && is_operator;
 
     let mut email: Option<String> = None;
@@ -414,7 +414,7 @@ async fn session_token(
     // Minting from a revoked session would hand out a NEW jti that the
     // deny-list has never seen — a logout could then be outlived by a bearer
     // derived from the dead cookie. The check has to happen before the mint.
-    if st.keys.is_revoked(&st.db, &claims.jti).await {
+    if st.keys.is_revoked(&st.store, &claims.jti).await {
         return errors::err_401("invalid session");
     }
     match st
@@ -522,7 +522,7 @@ async fn establish_handoff(
     // The handoff token's jti is the control-plane session's own, so one
     // deny-list row kills the fleet cookie and every console it opened. A
     // logged-out session must not be able to open a new one here.
-    if st.keys.is_revoked(&st.db, &jti).await {
+    if st.keys.is_revoked(&st.store, &jti).await {
         tracing::info!(target: "oauth", reason = "revoked", "console handoff refused");
         return handoff_refused();
     }

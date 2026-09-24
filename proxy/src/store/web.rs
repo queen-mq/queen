@@ -110,6 +110,18 @@ impl std::fmt::Display for WebError {
 
 impl std::error::Error for WebError {}
 
+impl From<crate::store::data::DataError> for WebError {
+    fn from(e: crate::store::data::DataError) -> WebError {
+        use crate::store::data::DataError as D;
+        match e {
+            D::Invalid(m) => WebError::Raised(m),
+            D::Conflict(m) => WebError::Conflict(m),
+            D::Unavailable(m) => WebError::Unavailable(m),
+            D::NoStore => WebError::NotConfigured,
+        }
+    }
+}
+
 impl From<KvError> for WebError {
     fn from(e: KvError) -> WebError {
         match e {
@@ -3013,29 +3025,9 @@ pub async fn grant_cluster_role(store: &Store, cluster_id: Uuid, email: &str, ro
                 .map_err(pg_err)?;
             Ok(())
         }
-        Store::Kv(kv) => retrying!(kv_grant_role_once(kv.as_ref(), cluster_id, email, role)),
+        Store::Kv(_) => crate::store::data::grant_cluster_role(store, cluster_id, email, role).await.map_err(WebError::from),
         Store::None => Err(WebError::NotConfigured),
     }
-}
-
-async fn kv_grant_role_once(kv: &dyn KvBackend, cluster_id: Uuid, email: &str, role: &str) -> Result<(), WebError> {
-    if !ROLES.contains(&role) {
-        return Err(raised(format!("grant_cluster_role: invalid role {role}")));
-    }
-    if !email.contains('@') {
-        return Err(raised(format!("grant_cluster_role: invalid email {email}")));
-    }
-    let email = email.trim().to_lowercase();
-    let Some(c) = by_id::<ClusterDoc>(kv, ns::CLUSTERS, cluster_id).await? else {
-        return Err(raised(format!("grant_cluster_role: unknown cluster {cluster_id}")));
-    };
-    let Some(u) = user_by_email(kv, &email).await? else {
-        return Err(raised(format!("grant_cluster_role: unknown user {email}")));
-    };
-    let existing = role_doc(kv, u.value.id, cluster_id).await?;
-    let mut tx = Tx::default();
-    plan_grant_role(&mut tx, &c.value, &u.value, role, existing)?;
-    commit(kv, tx).await
 }
 
 /// `queen_proxy.revoke_cluster_role(cluster, email)` (004): raises when there
@@ -3053,28 +3045,9 @@ pub async fn revoke_cluster_role(store: &Store, cluster_id: Uuid, email: &str) -
                 .map_err(pg_err)?;
             Ok(())
         }
-        Store::Kv(kv) => retrying!(kv_revoke_role_once(kv.as_ref(), cluster_id, email)),
+        Store::Kv(_) => crate::store::data::revoke_cluster_role(store, cluster_id, email).await.map_err(WebError::from),
         Store::None => Err(WebError::NotConfigured),
     }
-}
-
-async fn kv_revoke_role_once(kv: &dyn KvBackend, cluster_id: Uuid, email: &str) -> Result<(), WebError> {
-    if !email.contains('@') {
-        return Err(raised(format!("revoke_cluster_role: invalid email {email}")));
-    }
-    let email = email.trim().to_lowercase();
-    let Some(c) = by_id::<ClusterDoc>(kv, ns::CLUSTERS, cluster_id).await? else {
-        return Err(raised(format!("revoke_cluster_role: unknown cluster {cluster_id}")));
-    };
-    let Some(u) = user_by_email(kv, &email).await? else {
-        return Err(raised(format!("revoke_cluster_role: unknown user {email}")));
-    };
-    let Some(existing) = role_doc(kv, u.value.id, cluster_id).await? else {
-        return Err(raised(format!("revoke_cluster_role: user {email} has no role on cluster {cluster_id}")));
-    };
-    let mut tx = Tx::default();
-    plan_revoke_role(&mut tx, &c.value, &u.value, &existing)?;
-    commit(kv, tx).await
 }
 
 const ISSUE_KEY_SQL: &str = "SELECT queen_proxy.issue_api_key($1::text::uuid, $2, $3, $4)::text AS id";
@@ -3147,37 +3120,14 @@ pub async fn revoke_api_key(store: &Store, key_id: &str) -> Result<(), WebError>
             client.execute("SELECT queen_proxy.revoke_api_key($1::text::uuid)", &[&key_id]).await.map_err(pg_err)?;
             Ok(())
         }
-        Store::Kv(kv) => retrying!(kv_revoke_key_once(kv.as_ref(), key_id)),
+        // data.rs's write carries the cross-node cache invalidation in its
+        // batch: a revoked key stops working on every node, not just this one.
+        Store::Kv(_) => {
+            let id = uuid::Uuid::parse_str(key_id).map_err(|e| WebError::Raised(e.to_string()))?;
+            crate::store::data::revoke_api_key(store, id).await.map_err(WebError::from)
+        }
         Store::None => Err(WebError::NotConfigured),
     }
-}
-
-async fn kv_revoke_key_once(kv: &dyn KvBackend, key_id: &str) -> Result<(), WebError> {
-    let unknown = || raised(format!("revoke_api_key: unknown or already-revoked key {key_id}"));
-    let id = Uuid::parse_str(key_id).map_err(|_| WebError::Db(format!("invalid uuid {key_id:?}")))?;
-    let Some(k) = by_id::<ApiKeyDoc>(kv, ns::KEYS, id).await? else {
-        return Err(unknown());
-    };
-    if k.value.revoked_at_us.is_some() {
-        return Err(unknown());
-    }
-    let Some(c) = by_id::<ClusterDoc>(kv, ns::CLUSTERS, k.value.cluster_id).await? else {
-        return Err(unknown());
-    };
-    let mut doc = k.value.clone();
-    doc.revoked_at_us = Some(now_us());
-    let mut tx = Tx::default();
-    tx.fresh(ns::KEYS, schema::key(id), &doc, Some(k.version));
-    tx.record(&Audit {
-        tenant_id: c.value.tenant_id,
-        cluster_id: Some(c.value.id),
-        actor: "control_plane",
-        actor_id: None,
-        action: "api_key_revoked",
-        target: Some(id.to_string()),
-        meta: json!({}),
-    })?;
-    commit(kv, tx).await
 }
 
 // ---- KV planners: validate like the stored function, push its writes -------

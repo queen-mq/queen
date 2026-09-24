@@ -391,7 +391,7 @@ async fn session_principal(
     let membership = if session.operator {
         None
     } else {
-        st.keys.cluster_role(&st.db, session.claims.user_id, ctx.cluster_id).await
+        st.keys.cluster_role(&st.store, session.claims.user_id, ctx.cluster_id).await
     };
     // `cluster_exists` is true by construction: the caller already returned
     // this exact refusal for a reference that resolved to nothing, which is
@@ -409,7 +409,7 @@ async fn session_principal(
             // or a dev pxdb reset) is a dead session, not a permission
             // problem: 401 sends the SPA back to login instead of parking it
             // on a 403 it can never resolve.
-            if !st.keys.user_exists(&st.db, session.claims.user_id).await {
+            if !st.keys.user_exists(&st.store, session.claims.user_id).await {
                 return Err(errors::err_401("session no longer valid"));
             }
             tracing::debug!(
