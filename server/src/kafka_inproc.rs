@@ -513,11 +513,14 @@ impl Status {
 }
 
 /// The `kafka` block of `GET /status` when the facade runs in-process, or
-/// `None` when it does not.
+/// `None` when it does not. Beside the supervisor's phase it carries the
+/// facade's own report ([`queen_kafka::introspect`]): the live set it
+/// advertises (`cluster.live`, `cluster.down`, how it judges them), the
+/// width ceiling, and the idempotent-producer tracker's size and evictions.
 pub fn status_value() -> Option<serde_json::Value> {
     let st = STATUS.get()?;
     let g = st.inner.lock().ok()?;
-    Some(serde_json::json!({
+    let mut v = serde_json::json!({
         "mode": "in-process",
         "transport": st.transport,
         "phase": g.phase,
@@ -529,7 +532,13 @@ pub fn status_value() -> Option<serde_json::Value> {
         "lastExit": g.last_exit,
         "uptimeMs": if g.phase == "running" { g.since.elapsed().as_millis() as u64 } else { 0 },
         "backoffMs": g.backoff_ms,
-    }))
+    });
+    if let (Some(serde_json::Value::Object(facade)), Some(out)) =
+        (queen_kafka::introspect::snapshot(), v.as_object_mut())
+    {
+        out.extend(facade);
+    }
+    Some(v)
 }
 
 #[cfg(test)]

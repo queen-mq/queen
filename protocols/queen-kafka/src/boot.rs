@@ -46,6 +46,16 @@ pub struct Config {
     /// Queen and a fine lane count is what makes the mapping "Kafka partition n
     /// = Queen partition n" worth having.
     default_partitions: u32,
+    /// The widest one topic is advertised, created or grown.
+    /// `QUEEN_KAFKA_MAX_PARTITIONS`, default
+    /// [`metadata::DEFAULT_MAX_PARTITIONS`] (1,000,000), at most
+    /// [`metadata::MAX_PARTITIONS_CEILING`].
+    max_partitions: u32,
+    /// How many idempotent `(producer, partition)` sequence windows this
+    /// process keeps. `QUEEN_KAFKA_MAX_PRODUCER_STATES`, default
+    /// [`crate::idempotent::DEFAULT_MAX_TRACKED`]; see
+    /// [`crate::idempotent::Producers::with_capacity`] for the memory per entry.
+    max_producer_states: usize,
     /// `QUEEN_KAFKA_NODE_ID` — the ONE switch of cluster mode
     /// ([`crate::cluster`]). `None` is the default and is this facade's
     /// behaviour bit for bit: nothing below is read, spawned or written.
@@ -100,6 +110,8 @@ impl std::fmt::Debug for Config {
             .field("advertised_host", &self.advertised_host)
             .field("advertised_port", &self.advertised_port)
             .field("default_partitions", &self.default_partitions)
+            .field("max_partitions", &self.max_partitions)
+            .field("max_producer_states", &self.max_producer_states)
             .field("node_id", &self.node_id)
             .field("cluster", &self.cluster)
             .field("cluster_heartbeat", &self.cluster_heartbeat)
@@ -116,12 +128,6 @@ impl std::fmt::Debug for Config {
 /// Hosts that are legal to BIND and never legal to ADVERTISE. A client told to
 /// connect to a wildcard dials the wildcard.
 const WILDCARD_HOSTS: [&str; 3] = ["0.0.0.0", "::", "0000:0000:0000:0000:0000:0000:0000:0000"];
-
-/// Upper bound on `QUEEN_KAFKA_DEFAULT_PARTITIONS`, and the SAME bound the
-/// metadata handler clamps a queue's live lane count to — one number, so a
-/// configured width and a discovered one can never disagree about what is
-/// answerable. See [`metadata::MAX_ADVERTISED_PARTITIONS`].
-const MAX_DEFAULT_PARTITIONS: u32 = metadata::MAX_ADVERTISED_PARTITIONS;
 
 impl Config {
     pub fn from_env() -> Result<Config, String> {
@@ -182,27 +188,58 @@ impl Config {
             ));
         }
 
-        // Loud on a bad value rather than silently substituting the default:
-        // the default is not there to paper over a typo (same rule as the
-        // broker's boolean knobs, server/src/config.rs).
-        let default_partitions = match env("QUEEN_KAFKA_DEFAULT_PARTITIONS") {
-            None => 1024,
+        // The per-topic width ceiling, first, because the default below is
+        // bounded by it: one number for what a topic may be configured at and
+        // what the metadata handler clamps a discovered lane count to, so the
+        // two can never disagree about what is answerable. Its own ceiling is
+        // what one Metadata answer can carry ([`metadata::MAX_PARTITIONS_CEILING`]).
+        let max_partitions = match env("QUEEN_KAFKA_MAX_PARTITIONS") {
+            None => metadata::DEFAULT_MAX_PARTITIONS,
             Some(v) => match v.parse::<u32>() {
-                // The ceiling is not arbitrary: every partition of every
-                // requested topic is written out in full in every Metadata
-                // response (~34 bytes each), and clients refresh on their own
-                // timer. 100k lanes is a ~3.4 MB answer per topic — already
-                // absurd, and the last order of magnitude before a typo becomes
-                // an out-of-memory instead of an error message.
-                Ok(n) if (1..=MAX_DEFAULT_PARTITIONS).contains(&n) => n,
+                Ok(n) if (1..=metadata::MAX_PARTITIONS_CEILING).contains(&n) => n,
                 _ => {
                     return Err(format!(
-                        "QUEEN_KAFKA_DEFAULT_PARTITIONS={v} is not a partition count — \
-                         give it an integer in 1..={MAX_DEFAULT_PARTITIONS}, or unset it for 1024"
+                        "QUEEN_KAFKA_MAX_PARTITIONS={v} is not a partition count — give it an \
+                         integer in 1..={ceiling}, or unset it for {default}. The ceiling is what \
+                         ONE Metadata answer can carry: every advertised partition is written out \
+                         in full in it",
+                        ceiling = metadata::MAX_PARTITIONS_CEILING,
+                        default = metadata::DEFAULT_MAX_PARTITIONS,
                     ))
                 }
             },
         };
+
+        // Loud on a bad value rather than silently substituting the default:
+        // the default is not there to paper over a typo (same rule as the
+        // broker's boolean knobs, server/src/config.rs).
+        let default_partitions = match env("QUEEN_KAFKA_DEFAULT_PARTITIONS") {
+            None => 1024.min(max_partitions),
+            Some(v) => match v.parse::<u32>() {
+                // Every partition of a topic at this width is written out in
+                // full in every Metadata answer about it, so the width a topic
+                // gets without asking cannot be past the width it may ask for.
+                Ok(n) if (1..=max_partitions).contains(&n) => n,
+                _ => {
+                    return Err(format!(
+                        "QUEEN_KAFKA_DEFAULT_PARTITIONS={v} is not a partition count — \
+                         give it an integer in 1..={max_partitions} (QUEEN_KAFKA_MAX_PARTITIONS), \
+                         or unset it for 1024"
+                    ))
+                }
+            },
+        };
+
+        // The idempotent-producer tracker's size. A count, loud on a typo, and
+        // bounded at both ends: below the floor a handful of producers evict
+        // each other, above the ceiling a typo is an out-of-memory.
+        let max_producer_states = count(
+            "QUEEN_KAFKA_MAX_PRODUCER_STATES",
+            &env,
+            crate::idempotent::DEFAULT_MAX_TRACKED,
+            crate::idempotent::MIN_MAX_TRACKED,
+            crate::idempotent::MAX_MAX_TRACKED,
+        )?;
 
         // TLS: both paths or neither. A half-configured listener silently
         // serving plaintext is the failure this refuses — the same rule and the
@@ -436,6 +473,8 @@ impl Config {
             advertised_host,
             advertised_port,
             default_partitions,
+            max_partitions,
+            max_producer_states,
             node_id,
             cluster,
             cluster_heartbeat,
@@ -643,6 +682,8 @@ pub async fn serve(
         listen = %cfg.listen_addr,
         advertised = %format_args!("{}:{}", cfg.advertised_host, cfg.advertised_port),
         default_partitions = cfg.default_partitions,
+        max_partitions = cfg.max_partitions,
+        max_producer_states = cfg.max_producer_states,
         group_join_delay_ms = cfg.groups.join_delay.as_millis() as u64,
         tls = tls.is_some(),
         sasl = if cfg.policy.sasl_plain { "plain" } else { "none" },
@@ -664,17 +705,52 @@ pub async fn serve(
     let cluster = match cfg.node_id {
         None => Cluster::Single,
         Some(id) => {
-            let state = ClusterState::new(
-                cluster::Node {
-                    id,
-                    host: cfg.advertised_host.clone(),
-                    port: cfg.advertised_port,
-                    incarnation: cluster::new_incarnation(),
-                },
-                cfg.cluster.clone(),
-                cfg.cluster_heartbeat,
-                cfg.cluster_ttl,
-            );
+            let me = cluster::Node {
+                id,
+                host: cfg.advertised_host.clone(),
+                port: cfg.advertised_port,
+                incarnation: cluster::new_incarnation(),
+                raft_node: None,
+            };
+            // Inside a raft broker of more than one voter, who is live is what
+            // the raft leader last heard, not whose registry row is fresh
+            // (cluster::liveness): the row's renewal is a write that waits
+            // behind the data path.
+            let raft_liveness = cfg.raft.as_ref().is_some_and(|r| r.voters > 1);
+            let state = if raft_liveness {
+                ClusterState::with_raft_liveness(
+                    me,
+                    cfg.cluster.clone(),
+                    cfg.cluster_heartbeat,
+                    cfg.cluster_ttl,
+                )
+            } else {
+                ClusterState::new(
+                    me,
+                    cfg.cluster.clone(),
+                    cfg.cluster_heartbeat,
+                    cfg.cluster_ttl,
+                )
+            };
+            if raft_liveness {
+                // The raft node this facade runs on, BEFORE the claim writes a
+                // row: the row names it, and a row that does not is judged the
+                // registry's way until a renewal adds it.
+                match api.raft_members(cfg.queen_token.as_deref()).await {
+                    Ok(Some(members)) => state.learn_raft_node(members.node_id),
+                    Ok(None) => tracing::warn!(
+                        target: "boot",
+                        "the broker reports no raft membership; this facade's registry row will \
+                         carry no raft node until it does"
+                    ),
+                    Err(e) => tracing::warn!(
+                        target: "boot",
+                        error = %e,
+                        "the raft members could not be read at boot; this facade's registry row \
+                         will carry no raft node until they can"
+                    ),
+                }
+            }
             let version =
                 match registry::claim(api.as_ref(), &state, cfg.queen_token.as_deref()).await {
                     Ok(version) => Some(version),
@@ -699,6 +775,22 @@ pub async fn serve(
                         None
                     }
                 };
+            if raft_liveness {
+                // The first view, before the listener binds: a client that
+                // bootstraps against a node answering "I am the only broker"
+                // keeps that layout for its whole `metadata.max.age.ms`. The
+                // raft members a follower serves are a copy it fetches from the
+                // leader, so the first one can be a poll away; half a TTL is
+                // the most this waits, and a node that has none by then serves
+                // anyway and installs its view on the first viewer tick.
+                let deadline = tokio::time::Instant::now() + cfg.cluster_ttl / 2;
+                while !registry::refresh_view(api.as_ref(), &state, cfg.queen_token.as_deref())
+                    .await
+                    && tokio::time::Instant::now() < deadline
+                {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
             registration = Some(registry::spawn(
                 Arc::clone(&api),
                 Arc::clone(&state),
@@ -711,6 +803,8 @@ pub async fn serve(
                 cluster = %cfg.cluster,
                 heartbeat_ms = cfg.cluster_heartbeat.as_millis() as u64,
                 ttl_ms = cfg.cluster_ttl.as_millis() as u64,
+                liveness = if raft_liveness { "raft" } else { "registry" },
+                raft_node = state.raft_node().unwrap_or_default(),
                 peers = state.view().map_or(0, |v| v.nodes.len()),
                 "cluster mode is on"
             );
@@ -751,8 +845,10 @@ pub async fn serve(
             Arc::clone(&txns),
             cfg.policy,
         )
-        .with_raft(cfg.raft.clone()),
+        .with_raft(cfg.raft.clone())
+        .with_limits(cfg.max_partitions, cfg.max_producer_states),
     );
+    crate::introspect::register(&facade);
 
     let listener = match tokio::net::TcpListener::bind(&cfg.listen_addr).await {
         Ok(l) => l,
@@ -1012,7 +1108,7 @@ mod tests {
 
     #[test]
     fn a_bad_partition_count_is_loud_not_defaulted() {
-        for bad in ["0", "-1", "1024 partitions", "1e3", "4294967296", "1000000"] {
+        for bad in ["0", "-1", "1024 partitions", "1e3", "4294967296", "1000001"] {
             let err = resolve(&[
                 ("QUEEN_KAFKA_ADVERTISED_ADDR", "host:9092"),
                 ("QUEEN_KAFKA_DEFAULT_PARTITIONS", bad),
@@ -1020,6 +1116,81 @@ mod tests {
             .unwrap_err();
             assert!(
                 err.contains("QUEEN_KAFKA_DEFAULT_PARTITIONS"),
+                "{bad}: {err}"
+            );
+        }
+    }
+
+    /// The per-topic width ceiling: a million by default (the benchmark runs
+    /// 500k), the operator's to move within what one Metadata answer can
+    /// carry, and the bound the default width is checked against — so a
+    /// default can never be a width the metadata path would clamp.
+    #[test]
+    fn the_partition_ceiling_is_a_knob_and_bounds_the_default() {
+        let cfg = resolve(&[("QUEEN_KAFKA_ADVERTISED_ADDR", "host:9092")]).unwrap();
+        assert_eq!(cfg.max_partitions, 1_000_000);
+
+        let cfg = resolve(&[
+            ("QUEEN_KAFKA_ADVERTISED_ADDR", "host:9092"),
+            ("QUEEN_KAFKA_MAX_PARTITIONS", "1500000"),
+            ("QUEEN_KAFKA_DEFAULT_PARTITIONS", "1200000"),
+        ])
+        .unwrap();
+        assert_eq!(cfg.max_partitions, 1_500_000);
+        assert_eq!(cfg.default_partitions, 1_200_000);
+
+        for bad in ["0", "-1", "1500001", "many", "1e6"] {
+            let err = resolve(&[
+                ("QUEEN_KAFKA_ADVERTISED_ADDR", "host:9092"),
+                ("QUEEN_KAFKA_MAX_PARTITIONS", bad),
+            ])
+            .unwrap_err();
+            assert!(err.contains("QUEEN_KAFKA_MAX_PARTITIONS"), "{bad}: {err}");
+        }
+        // A default past a LOWERED ceiling is refused, and says which knob.
+        let err = resolve(&[
+            ("QUEEN_KAFKA_ADVERTISED_ADDR", "host:9092"),
+            ("QUEEN_KAFKA_MAX_PARTITIONS", "500"),
+            ("QUEEN_KAFKA_DEFAULT_PARTITIONS", "1024"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("QUEEN_KAFKA_DEFAULT_PARTITIONS"), "{err}");
+        assert!(err.contains("QUEEN_KAFKA_MAX_PARTITIONS"), "{err}");
+        // ...and a lowered ceiling with the default left unset lowers it too.
+        let cfg = resolve(&[
+            ("QUEEN_KAFKA_ADVERTISED_ADDR", "host:9092"),
+            ("QUEEN_KAFKA_MAX_PARTITIONS", "500"),
+        ])
+        .unwrap();
+        assert_eq!(cfg.default_partitions, 500);
+    }
+
+    /// The idempotent-producer tracker's size: millions by default, loud on a
+    /// typo, bounded at both ends.
+    #[test]
+    fn the_producer_state_cap_is_a_knob() {
+        let cfg = resolve(&[("QUEEN_KAFKA_ADVERTISED_ADDR", "host:9092")]).unwrap();
+        assert_eq!(
+            cfg.max_producer_states,
+            crate::idempotent::DEFAULT_MAX_TRACKED
+        );
+        assert!(cfg.max_producer_states >= 4_000_000);
+
+        let cfg = resolve(&[
+            ("QUEEN_KAFKA_ADVERTISED_ADDR", "host:9092"),
+            ("QUEEN_KAFKA_MAX_PRODUCER_STATES", "8000000"),
+        ])
+        .unwrap();
+        assert_eq!(cfg.max_producer_states, 8_000_000);
+
+        for bad in ["0", "1023", "67108865", "lots", "-5"] {
+            let err = resolve(&[
+                ("QUEEN_KAFKA_ADVERTISED_ADDR", "host:9092"),
+                ("QUEEN_KAFKA_MAX_PRODUCER_STATES", bad),
+            ])
+            .unwrap_err();
+            assert!(
+                err.contains("QUEEN_KAFKA_MAX_PRODUCER_STATES"),
                 "{bad}: {err}"
             );
         }
@@ -1137,6 +1308,8 @@ mod tests {
             advertised_host: "kafka.example.com".to_string(),
             advertised_port: 9092,
             default_partitions: 1024,
+            max_partitions: metadata::DEFAULT_MAX_PARTITIONS,
+            max_producer_states: crate::idempotent::DEFAULT_MAX_TRACKED,
             node_id: None,
             cluster: "queen".to_string(),
             cluster_heartbeat: Duration::from_millis(2_000),

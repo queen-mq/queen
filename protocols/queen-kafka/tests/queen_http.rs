@@ -163,7 +163,10 @@ async fn the_queue_list_is_fetched_from_the_documented_route() {
     assert_eq!(queues[0].partitions, 12);
 
     let seen = seen.lock().unwrap().clone();
-    assert_eq!(seen[0].line, "GET /api/v1/resources/queues HTTP/1.1");
+    assert_eq!(
+        seen[0].line,
+        "GET /api/v1/resources/queues?stats=lanes HTTP/1.1"
+    );
     assert_eq!(seen[0].authorization, None, "no token, no header");
 }
 
@@ -202,6 +205,110 @@ async fn the_token_travels_as_a_bearer_header_on_each_call() {
     }
 }
 
+/// The lean list is asked for by name, and a broker that does not know the
+/// value — a Postgres broker — answers the enriched list, which reads the same.
+#[tokio::test]
+async fn the_queue_list_asks_for_lanes_only_and_reads_an_enriched_answer_the_same() {
+    const ENRICHED: &str = r#"{"queues":[{"id":"q-1","name":"orders","partitions":12,
+        "retainedBytes":4096,"messages":{"total":9},"segments":{"segments":3}}],"kvRows":7}"#;
+    let (base, seen) = stub(vec![Canned::new(200, ENRICHED)]).await;
+    let api = HttpQueen::new(&base).unwrap();
+    let queues = api.list_queues(None).await.unwrap();
+    assert_eq!(queues[0].partitions, 12);
+    assert_eq!(queues[0].id.as_deref(), Some("q-1"));
+    assert_eq!(
+        seen.lock().unwrap()[0].line,
+        "GET /api/v1/resources/queues?stats=lanes HTTP/1.1"
+    );
+}
+
+/// The raft members, as the broker reports them: the answering node, the
+/// leader, the view's age and each member's last acknowledgement — and a
+/// learner is not a voter.
+#[tokio::test]
+async fn the_raft_members_are_read_from_their_route() {
+    const MEMBERS: &str = r#"{"engine":"raft","nodeId":2,"leaderId":1,"term":7,"viewAgeMs":120,
+        "members":[
+          {"nodeId":1,"role":"voter","state":"leader","http":"10.0.0.1:6632","raft":"10.0.0.1:7400","lastAckMs":120,"local":false},
+          {"nodeId":2,"role":"voter","state":"follower","lastAckMs":180,"local":true},
+          {"nodeId":3,"role":"voter","state":"follower","lastAckMs":null},
+          {"nodeId":4,"role":"learner","state":"learner","lastAckMs":90}]}"#;
+    let (base, seen) = stub(vec![Canned::new(200, MEMBERS)]).await;
+    let api = HttpQueen::new(&base).unwrap();
+    let m = api
+        .raft_members(Some("t"))
+        .await
+        .unwrap()
+        .expect("a raft broker");
+    assert_eq!(
+        seen.lock().unwrap()[0].line,
+        "GET /api/v1/raft/members HTTP/1.1"
+    );
+    assert_eq!(
+        (m.node_id, m.leader_id, m.view_age_ms),
+        (2, Some(1), Some(120))
+    );
+    let got: Vec<(u64, bool, Option<u64>)> = m
+        .members
+        .iter()
+        .map(|x| (x.node_id, x.voter, x.last_ack_ms))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (1, true, Some(120)),
+            (2, true, Some(180)),
+            (3, true, None),
+            (4, false, Some(90))
+        ]
+    );
+}
+
+/// A broker without the route is not a raft broker, and that is an answer,
+/// not an error.
+#[tokio::test]
+async fn a_broker_without_raft_members_answers_none() {
+    let (base, _) = stub(vec![Canned::new(404, r#"{"code":"no_such_route"}"#)]).await;
+    let api = HttpQueen::new(&base).unwrap();
+    assert_eq!(api.raft_members(None).await.unwrap(), None);
+}
+
+/// Partition sizes come from the lean route, one counter per partition; a
+/// broker without it is asked for the full queue detail instead.
+#[tokio::test]
+async fn partition_sizes_come_from_the_lean_route_and_fall_back_to_the_detail() {
+    const SIZES: &str = r#"{"queue":"orders","partitions":{"0":10,"1":0,"7":70}}"#;
+    let (base, seen) = stub(vec![Canned::new(200, SIZES)]).await;
+    let api = HttpQueen::new(&base).unwrap();
+    let mut got = api.partition_bytes("orders", None).await.unwrap();
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            ("0".to_string(), 10),
+            ("1".to_string(), 0),
+            ("7".to_string(), 70)
+        ]
+    );
+    assert_eq!(
+        seen.lock().unwrap()[0].line,
+        "GET /api/v1/resources/queues/orders/sizes HTTP/1.1"
+    );
+
+    const DETAIL: &str = r#"{"name":"orders","partitions":[{"name":"0","retainedBytes":5},
+        {"name":"1","retainedBytes":6,"messages":{"total":1}}]}"#;
+    let (base, seen) = stub(vec![
+        Canned::new(404, r#"{"code":"no_such_route"}"#),
+        Canned::new(200, DETAIL),
+    ])
+    .await;
+    let api = HttpQueen::new(&base).unwrap();
+    let got = api.partition_bytes("orders", None).await.unwrap();
+    assert_eq!(got, [("0".to_string(), 5), ("1".to_string(), 6)]);
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen[1].line, "GET /api/v1/resources/queues/orders HTTP/1.1");
+}
+
 /// A base URL with a trailing slash must not produce `//api/v1/...`.
 #[tokio::test]
 async fn a_trailing_slash_does_not_double_up() {
@@ -210,7 +317,7 @@ async fn a_trailing_slash_does_not_double_up() {
     api.list_queues(None).await.unwrap();
     assert_eq!(
         seen.lock().unwrap()[0].line,
-        "GET /api/v1/resources/queues HTTP/1.1"
+        "GET /api/v1/resources/queues?stats=lanes HTTP/1.1"
     );
 }
 
@@ -624,7 +731,10 @@ async fn a_host_scoped_client_sends_exactly_that_host() {
     );
     // ...and the URL is unchanged: only the header moves, so the socket still
     // goes to QUEEN_URL.
-    assert_eq!(seen[0].line, "GET /api/v1/resources/queues HTTP/1.1");
+    assert_eq!(
+        seen[0].line,
+        "GET /api/v1/resources/queues?stats=lanes HTTP/1.1"
+    );
     assert_eq!(
         seen[0].authorization.as_deref(),
         Some("Bearer tenant-token")

@@ -59,6 +59,7 @@ pub async fn handle(
                 metadata::advertised_partitions(
                     q.partitions,
                     q.floor.unwrap_or(facade.default_partitions),
+                    facade.max_partitions,
                 ),
             )
         })
@@ -92,8 +93,14 @@ pub async fn handle(
         // that topic rather than dropping it: its partitions ARE on this
         // node's disk, and a listing without them would read as missing
         // replicas.
-        let sizes: HashMap<String, i64> = match facade.queen.partition_bytes(&name, token).await {
-            Ok(v) => v.into_iter().collect(),
+        // Keyed by the Kafka partition index, parsed once per answer: a lookup
+        // per partition by a formatted `String` was an allocation per partition
+        // of a topic that can be a million wide.
+        let sizes: HashMap<i32, i64> = match facade.queen.partition_bytes(&name, token).await {
+            Ok(v) => v
+                .into_iter()
+                .filter_map(|(lane, bytes)| Some((kafka_index(&lane)?, bytes)))
+                .collect(),
             Err(e) => {
                 tracing::debug!(target: "kafka", topic = %name, error = %e, "partition sizes unavailable");
                 HashMap::new()
@@ -108,9 +115,7 @@ pub async fn handle(
                         .map(|p| {
                             DescribeLogDirsPartition::default()
                                 .with_partition_index(p)
-                                .with_partition_size(
-                                    sizes.get(&p.to_string()).copied().unwrap_or(0),
-                                )
+                                .with_partition_size(sizes.get(&p).copied().unwrap_or(0))
                                 .with_offset_lag(0)
                                 .with_is_future_key(false)
                         })
@@ -127,6 +132,21 @@ pub async fn handle(
             // v4: the volume's size is not measured here.
             .with_total_bytes(-1)
             .with_usable_bytes(-1)])
+}
+
+/// The Kafka partition index a Queen lane NAME stands for, or `None` for a
+/// lane Kafka cannot address. Canonical decimal only — `7`, never `07` or
+/// `+7` — because partition n is the lane named `n.to_string()` and nothing
+/// else ([`crate::handlers::metadata`]).
+fn kafka_index(lane: &str) -> Option<i32> {
+    let canonical = !lane.is_empty()
+        && lane.bytes().all(|b| b.is_ascii_digit())
+        && (lane == "0" || !lane.starts_with('0'));
+    if canonical {
+        lane.parse().ok()
+    } else {
+        None
+    }
 }
 
 /// What a Queen failure on the catalog read becomes: authorization by name,
@@ -192,6 +212,66 @@ mod tests {
             .map(|p| p.partition_index)
             .collect();
         assert_eq!(got, [0, 3]);
+    }
+
+    /// Each partition carries the bytes its lane holds, found by INDEX: the
+    /// lane named `3` is partition 3, and a lane Kafka cannot address — `07`,
+    /// `eu-west` — sizes nothing, rather than `07` being read as 7.
+    #[tokio::test]
+    async fn each_partition_reports_the_bytes_of_the_lane_of_its_index() {
+        let (f, api) = facade_and_queen(&[("orders", 4)]);
+        let f = raft(f);
+        api.partition_sizes.lock().unwrap().insert(
+            "orders".into(),
+            vec![
+                ("0".into(), 10),
+                ("3".into(), 30),
+                ("07".into(), 99),
+                ("eu-west".into(), 5),
+            ],
+        );
+        let resp = handle(
+            &f,
+            &DescribeLogDirsRequest::default().with_topics(None),
+            None,
+        )
+        .await;
+        let sizes: Vec<(i32, i64)> = resp.results[0].topics[0]
+            .partitions
+            .iter()
+            .map(|p| (p.partition_index, p.partition_size))
+            .collect();
+        assert_eq!(sizes, [(0, 10), (1, 0), (2, 0), (3, 30)]);
+    }
+
+    #[test]
+    fn only_a_canonical_decimal_lane_is_a_kafka_partition() {
+        assert_eq!(kafka_index("0"), Some(0));
+        assert_eq!(kafka_index("499999"), Some(499_999));
+        for not in ["", "00", "07", "+7", "-1", "7a", "eu-west", "2147483648"] {
+            assert_eq!(kafka_index(not), None, "{not}");
+        }
+    }
+
+    /// A topic at the benchmark's width is described in one pass: every
+    /// partition, each once, without one queue read per partition.
+    #[tokio::test]
+    async fn a_half_million_partition_topic_is_described_in_one_pass() {
+        let (f, api) = facade_and_queen(&[("wide", 500_000)]);
+        let f = raft(f);
+        let resp = handle(
+            &f,
+            &DescribeLogDirsRequest::default().with_topics(None),
+            None,
+        )
+        .await;
+        let partitions = &resp.results[0].topics[0].partitions;
+        assert_eq!(partitions.len(), 500_000);
+        assert!(partitions
+            .iter()
+            .enumerate()
+            .all(|(i, p)| p.partition_index == i as i32));
+        assert_eq!(api.fetches.lock().unwrap().len(), 0);
     }
 
     /// Over HTTP the facade has no log directory to describe.

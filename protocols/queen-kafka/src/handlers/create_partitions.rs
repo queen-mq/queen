@@ -219,8 +219,11 @@ fn one(facade: &Facade, t: &CreatePartitionsTopic, catalog: &Catalog) -> Decisio
         return refuse(ResponseError::UnknownTopicOrPartition, None);
     };
 
-    let current =
-        metadata::advertised_partitions(*lanes, floor.unwrap_or(facade.default_partitions));
+    let current = metadata::advertised_partitions(
+        *lanes,
+        floor.unwrap_or(facade.default_partitions),
+        facade.max_partitions,
+    );
     let wanted = t.count;
 
     // The oracle's own two sentences, in the oracle's own order. Recorded off
@@ -256,12 +259,13 @@ fn one(facade: &Facade, t: &CreatePartitionsTopic, catalog: &Catalog) -> Decisio
             ),
         );
     }
-    if wanted as i64 > i64::from(metadata::MAX_ADVERTISED_PARTITIONS) {
+    if i64::from(wanted) > i64::from(facade.max_partitions) {
         return refuse(
             ResponseError::InvalidPartitions,
             Some(format!(
-                "{wanted} partitions is past this facade's ceiling of {} per topic",
-                metadata::MAX_ADVERTISED_PARTITIONS
+                "{wanted} partitions is past this facade's ceiling of {} per topic \
+                 (QUEEN_KAFKA_MAX_PARTITIONS)",
+                facade.max_partitions
             )),
         );
     }
@@ -436,11 +440,45 @@ mod tests {
     #[tokio::test]
     async fn an_increase_past_the_ceiling_is_refused() {
         let (f, _api) = facade_and_queen(&[("orders", 4)]);
-        let result = &handle(&f, &request(&[("orders", 999_999)]), None)
+        let past = f.max_partitions as i32 + 1;
+        let result = &handle(&f, &request(&[("orders", past)]), None)
             .await
             .results[0];
         assert_eq!(result.error_code, ResponseError::InvalidPartitions.code());
         assert!(message(result).contains("ceiling"), "{}", message(result));
+        assert!(
+            message(result).contains("QUEEN_KAFKA_MAX_PARTITIONS"),
+            "{}",
+            message(result)
+        );
+    }
+
+    /// kload creates a 500k-partition topic the way Kafka's own tooling must:
+    /// a CreateTopics of 5000 and then CreatePartitions in steps of 5000. Every
+    /// step is one record rewrite — nothing per partition — and the last one
+    /// lands at half a million under the default ceiling.
+    #[tokio::test]
+    async fn a_tracked_topic_grows_to_half_a_million_in_steps() {
+        let (f, api) = facade_and_queen(&[("orders", 0)]);
+        let record =
+            topic_record::Record::new(None, serde_json::Map::new()).with_partitions(Some(5_000));
+        topic_record::store(api.as_ref(), "orders", &record, None)
+            .await
+            .unwrap();
+        for count in [10_000, 100_000, 495_000, 500_000] {
+            // The catalog caches the floor; a real client's next request is
+            // seconds later and meets a refreshed entry.
+            f.catalog.invalidate(None).await;
+            let result = &handle(&f, &request(&[("orders", count)]), None)
+                .await
+                .results[0];
+            assert_eq!(result.error_code, 0, "{count}: {:?}", message(result));
+            assert_eq!(
+                api.kv_get(crate::offsets::NAMESPACE, &topic_record::key("orders"))
+                    .unwrap()["partitions"],
+                count
+            );
+        }
     }
 
     /// An explicit placement on an increase is refused by name — the same

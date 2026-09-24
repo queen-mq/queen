@@ -77,10 +77,11 @@
 //! `max.in.flight.requests.per.connection=1`.
 
 pub mod fence;
+pub mod liveness;
 pub mod registry;
 pub mod rendezvous;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -119,6 +120,11 @@ pub struct Node {
     /// id before". Same discipline the stored procedure demands of a `version`
     /// (024_kv.sql:133-139), for the same reason.
     pub incarnation: String,
+    /// The raft node of the broker this facade runs INSIDE, when it does
+    /// ([`liveness`]): what ties a registry row to the raft member whose
+    /// heartbeats say whether it is live. `None` over HTTP, and on a row
+    /// written before its writer knew.
+    pub raft_node: Option<u64>,
 }
 
 /// The live set as of the last successful registry read.
@@ -127,6 +133,14 @@ pub struct View {
     /// Sorted by node id and deduplicated, so `nodes.first()` is the lowest
     /// live id — which is what `controller_id` is.
     pub nodes: Vec<Node>,
+    /// Registered nodes that are storage replicas of every partition but are
+    /// NOT live right now: a raft voter the leader has not heard from within
+    /// the TTL ([`liveness`]). Never this node, never a node of `nodes`, and
+    /// always empty outside a raft broker. They stay in every partition's
+    /// replica list and leave its ISR, which is how Kafka reports a broker
+    /// that is down — so a readiness check that wants the full ISR waits for
+    /// it instead of passing on the survivors.
+    pub down: Vec<Node>,
     /// [`tokio::time::Instant`], i.e. MONOTONIC. A wall clock would let an NTP
     /// step forge freshness, and freshness is what stops a partitioned node
     /// from claiming groups it can no longer see the owner of.
@@ -163,10 +177,56 @@ pub struct ClusterState {
     coordinating: AtomicBool,
     /// The per-group fence versions. See [`fence`].
     pub fences: fence::Fences,
+    /// Liveness comes from RAFT, not from the registry rows' TTL: the facade
+    /// runs inside a raft broker of more than one voter ([`liveness`]). The
+    /// registry is then a directory — who is which node, at which address, on
+    /// which raft member — and who is live is what the raft leader last heard.
+    raft: bool,
+    /// The raft node id of the broker this facade runs inside, once the broker
+    /// has said (0 until then). It never changes for the life of the process.
+    raft_node: AtomicU64,
+    /// The raft judge's memory: who was live last time, for its hysteresis.
+    judge: Mutex<liveness::Judge>,
 }
+
+/// How much longer than `QUEEN_KAFKA_CLUSTER_TTL_MS` a registry row lives when
+/// liveness comes from raft ([`ClusterState::row_ttl`]).
+///
+/// The row is then only a directory entry, and the one thing it must not do is
+/// expire because the pipeline its renewal rides is busy: that is exactly how
+/// a leader warming 100k partitions came to see itself as the only node (the
+/// followers' renewals timed out for over a minute). Thirty TTLs — five minutes
+/// at the default — outlasts any stall a live cluster survives, and still lets
+/// the row of a node that is gone for good (killed and never restarted, or
+/// restarted without the facade) leave the directory on its own. A node that is
+/// merely dead is out of the live set long before that: raft says so within
+/// one TTL.
+pub const RAFT_ROW_TTL_FACTOR: u32 = 30;
 
 impl ClusterState {
     pub fn new(me: Node, cluster: String, heartbeat: Duration, ttl: Duration) -> Arc<ClusterState> {
+        ClusterState::build(me, cluster, heartbeat, ttl, false)
+    }
+
+    /// A cluster state whose liveness comes from the raft broker the facade
+    /// runs inside ([`liveness`]).
+    pub fn with_raft_liveness(
+        me: Node,
+        cluster: String,
+        heartbeat: Duration,
+        ttl: Duration,
+    ) -> Arc<ClusterState> {
+        ClusterState::build(me, cluster, heartbeat, ttl, true)
+    }
+
+    fn build(
+        me: Node,
+        cluster: String,
+        heartbeat: Duration,
+        ttl: Duration,
+        raft: bool,
+    ) -> Arc<ClusterState> {
+        let raft_node = me.raft_node.unwrap_or(0);
         Arc::new(ClusterState {
             me,
             cluster,
@@ -175,7 +235,69 @@ impl ClusterState {
             view: Mutex::new(None),
             coordinating: AtomicBool::new(true),
             fences: fence::Fences::new(),
+            raft,
+            raft_node: AtomicU64::new(raft_node),
+            judge: Mutex::new(liveness::Judge::new(ttl)),
         })
+    }
+
+    /// Whether liveness comes from raft ([`ClusterState::with_raft_liveness`]).
+    pub fn raft_liveness(&self) -> bool {
+        self.raft
+    }
+
+    /// The raft node of this facade's broker, once known.
+    pub fn raft_node(&self) -> Option<u64> {
+        match self.raft_node.load(Ordering::Relaxed) {
+            0 => None,
+            id => Some(id),
+        }
+    }
+
+    /// Record the raft node of this facade's broker. The first answer wins: a
+    /// process runs inside ONE broker, and a later different answer can only
+    /// be a misrouted call, which must not re-file this node under another.
+    pub fn learn_raft_node(&self, id: u64) {
+        if id != 0 {
+            let _ = self
+                .raft_node
+                .compare_exchange(0, id, Ordering::Relaxed, Ordering::Relaxed);
+        }
+    }
+
+    /// This node as its registry row describes it: [`ClusterState::me`] plus
+    /// the raft node once known.
+    pub fn me_row(&self) -> Node {
+        Node {
+            raft_node: self.raft_node(),
+            ..self.me.clone()
+        }
+    }
+
+    /// The TTL this node's registry row is written with. The liveness TTL,
+    /// unless liveness comes from raft AND the row carries the raft node it is
+    /// judged by — then [`RAFT_ROW_TTL_FACTOR`] times it, because the row is a
+    /// directory entry and raft is what says the node is live. A row without
+    /// its raft node is judged by presence and keeps the short TTL.
+    pub fn row_ttl(&self) -> Duration {
+        if self.raft && self.raft_node().is_some() {
+            self.ttl * RAFT_ROW_TTL_FACTOR
+        } else {
+            self.ttl
+        }
+    }
+
+    /// The live set, from the directory rows and the raft members' view, or
+    /// `None` when that view is too old to judge by ([`liveness::Judge`]).
+    pub fn judge(
+        &self,
+        rows: &[Node],
+        members: &crate::queen::RaftMembers,
+    ) -> Option<(Vec<Node>, Vec<Node>)> {
+        self.judge
+            .lock()
+            .expect("the liveness judge lock is never held across a panic")
+            .judge(&self.me, rows, members)
     }
 
     /// The last known live set, or `None` if there has never been one.
@@ -192,18 +314,32 @@ impl ClusterState {
     /// node: a facade that is serving must be reachable in the broker list it
     /// hands out, even in the moment its own registry row is missing or has
     /// been taken by someone else.
-    pub fn install(&self, mut nodes: Vec<Node>) {
+    pub fn install(&self, nodes: Vec<Node>) {
+        self.install_view(nodes, Vec::new());
+    }
+
+    /// [`ClusterState::install`], with the registered nodes that are down
+    /// ([`View::down`]).
+    ///
+    /// THIS node is always live and always as it describes itself: an entry
+    /// for its id that came off the registry is replaced by
+    /// [`ClusterState::me`], because the row can be a predecessor's until this
+    /// process's own write lands, and the address a client is handed for this
+    /// node must be the one this node is listening on.
+    pub fn install_view(&self, mut nodes: Vec<Node>, mut down: Vec<Node>) {
+        nodes.retain(|n| n.id != self.me.id);
+        nodes.push(self.me.clone());
         nodes.sort_by_key(|n| n.id);
         nodes.dedup_by_key(|n| n.id);
-        if !nodes.iter().any(|n| n.id == self.me.id) {
-            nodes.push(self.me.clone());
-            nodes.sort_by_key(|n| n.id);
-        }
+        down.retain(|d| d.id != self.me.id && !nodes.iter().any(|n| n.id == d.id));
+        down.sort_by_key(|n| n.id);
+        down.dedup_by_key(|n| n.id);
         *self
             .view
             .lock()
             .expect("the cluster view lock is never held across a panic") = Some(Arc::new(View {
             nodes,
+            down,
             read_at: Instant::now(),
         }));
     }
@@ -268,27 +404,28 @@ impl Cluster {
     /// not in its own broker list.
     pub fn placement(&self, advertised_host: &str, advertised_port: u16) -> Placement {
         match self {
-            Cluster::Single => Placement {
-                nodes: vec![Node {
+            Cluster::Single => Placement::new(
+                vec![Node {
                     id: SINGLE_NODE_ID,
                     host: advertised_host.to_string(),
                     port: advertised_port,
                     incarnation: String::new(),
+                    raft_node: None,
                 }],
-                clustered: false,
-                replicated: false,
-            },
-            Cluster::Enabled(s) => Placement {
+                Vec::new(),
+                false,
+            ),
+            Cluster::Enabled(s) => {
                 // The last known view even when it is STALE: a Metadata that
                 // suddenly reported one broker would tell every client the
                 // cluster had shrunk, which is a far worse answer than one that
                 // is a few seconds old. With no view at all, self alone.
-                nodes: s
-                    .view()
-                    .map_or_else(|| vec![s.me.clone()], |v| v.nodes.clone()),
-                clustered: true,
-                replicated: false,
-            },
+                let (nodes, down) = s.view().map_or_else(
+                    || (vec![s.me.clone()], Vec::new()),
+                    |v| (v.nodes.clone(), v.down.iter().map(|n| n.id).collect()),
+                );
+                Placement::new(nodes, down, true)
+            }
         }
     }
 
@@ -349,16 +486,53 @@ pub enum Owner {
 /// The live set of one request, and the answers derived from it.
 pub struct Placement {
     nodes: Vec<Node>,
+    /// The live ids, sorted: what every partition's leader is hashed over.
+    /// Computed once per request rather than once per partition.
+    ids: Vec<i32>,
+    /// Registered replicas that are down ([`View::down`]), sorted.
+    down: Vec<i32>,
     clustered: bool,
     /// Every live node holds every partition — the facade runs inside a raft
     /// broker of more than one voter ([`Placement::replicated`]).
     replicated: bool,
 }
 
+/// The replicas of one partition, as a Metadata answer lists them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replicas {
+    pub leader: i32,
+    /// Leader first, then every other replica — live or down — by id.
+    pub replicas: Vec<i32>,
+    /// Leader first, then every other LIVE replica by id.
+    pub isr: Vec<i32>,
+    /// The replicas that are down, by id.
+    pub offline: Vec<i32>,
+}
+
 impl Placement {
+    fn new(nodes: Vec<Node>, down: Vec<i32>, clustered: bool) -> Placement {
+        let ids = nodes.iter().map(|n| n.id).collect();
+        Placement {
+            nodes,
+            ids,
+            down,
+            clustered,
+            replicated: false,
+        }
+    }
+
     /// Every broker to advertise.
     pub fn brokers(&self) -> &[Node] {
         &self.nodes
+    }
+
+    /// The registered replicas that are down, by id.
+    pub fn down(&self) -> &[i32] {
+        if self.replicated {
+            &self.down
+        } else {
+            &[]
+        }
     }
 
     /// The controller: the LOWEST live id, which is deterministic and needs no
@@ -369,39 +543,97 @@ impl Placement {
         self.nodes.first().map_or(SINGLE_NODE_ID, |n| n.id)
     }
 
-    /// The same placement, with every live node a replica of every partition
-    /// when `on` and the facade is clustered. Inside a raft broker that is the
-    /// truth: each node's log holds every partition, and an acknowledged write
-    /// is on a majority of them.
+    /// The same placement, with every registered node a replica of every
+    /// partition when `on` and the facade is clustered. Inside a raft broker
+    /// that is the truth: each node's log holds every partition, and an
+    /// acknowledged write is on a majority of them.
     pub fn replicated(mut self, on: bool) -> Placement {
         self.replicated = on && self.clustered;
         self
     }
 
-    /// The replica list of one partition, leader first: the leader alone
-    /// unless [`Placement::replicated`], and then every live node.
-    pub fn replicas_of(&self, topic: &str, partition: i32) -> Vec<i32> {
-        let leader = self.leader_of(topic, partition);
-        let mut out = vec![leader];
-        if self.replicated {
-            out.extend(self.nodes.iter().map(|n| n.id).filter(|id| *id != leader));
+    /// The placement of ONE topic's partitions ([`TopicPlacement`]).
+    pub fn topic(&self, topic: &str) -> TopicPlacement<'_> {
+        TopicPlacement {
+            placement: self,
+            scorer: rendezvous::PartitionScorer::new(topic),
         }
-        out
+    }
+
+    /// The replica list of one partition, leader first: the leader alone
+    /// unless [`Placement::replicated`], and then every registered node.
+    pub fn replicas_of(&self, topic: &str, partition: i32) -> Vec<i32> {
+        self.topic(topic).replicas(partition).replicas
     }
 
     /// The node that leads one partition. In single mode it is node 0 without
     /// so much as a hash, which is what keeps the response byte-identical.
     pub fn leader_of(&self, topic: &str, partition: i32) -> i32 {
-        if !self.clustered {
+        self.topic(topic).leader(partition)
+    }
+}
+
+/// [`Placement`] for one topic: the topic's hashing prefix computed once, so a
+/// Metadata answer for a million partitions costs no allocation per partition
+/// beyond the three node lists the wire format needs.
+pub struct TopicPlacement<'a> {
+    placement: &'a Placement,
+    scorer: rendezvous::PartitionScorer,
+}
+
+impl TopicPlacement<'_> {
+    /// The live node that leads `partition` (node 0 in single mode). Every
+    /// node computes the same answer from the same live set.
+    pub fn leader(&self, partition: i32) -> i32 {
+        if !self.placement.clustered {
             return SINGLE_NODE_ID;
         }
-        let ids: Vec<i32> = self.nodes.iter().map(|n| n.id).collect();
-        rendezvous::winner(
-            rendezvous::DOMAIN_PARTITION,
-            &rendezvous::partition_item(topic, partition),
-            &ids,
-        )
-        .unwrap_or(SINGLE_NODE_ID)
+        self.scorer
+            .winner(partition, &self.placement.ids)
+            .unwrap_or(SINGLE_NODE_ID)
+    }
+
+    /// The replicas of `partition`. Outside a raft broker the leader alone is
+    /// its replica and its ISR; inside one every registered node is a replica,
+    /// the live ones are the ISR, and the down ones are offline.
+    pub fn replicas(&self, partition: i32) -> Replicas {
+        let leader = self.leader(partition);
+        if !self.placement.replicated {
+            return Replicas {
+                leader,
+                replicas: vec![leader],
+                isr: vec![leader],
+                offline: Vec::new(),
+            };
+        }
+        let live = &self.placement.ids;
+        let down = &self.placement.down;
+        let mut isr = Vec::with_capacity(live.len());
+        isr.push(leader);
+        isr.extend(live.iter().copied().filter(|id| *id != leader));
+        let mut replicas = Vec::with_capacity(live.len() + down.len());
+        replicas.push(leader);
+        // Both lists are sorted, so a merge keeps the non-leader replicas in
+        // id order without sorting per partition.
+        let (mut a, mut b) = (live.iter().peekable(), down.iter().peekable());
+        loop {
+            let next = match (a.peek(), b.peek()) {
+                (Some(x), Some(y)) if x <= y => a.next(),
+                (Some(_), Some(_)) => b.next(),
+                (Some(_), None) => a.next(),
+                (None, Some(_)) => b.next(),
+                (None, None) => break,
+            };
+            if let Some(id) = next.copied().filter(|id| *id != leader) {
+                replicas.push(id);
+            }
+        }
+        Replicas {
+            leader,
+            replicas,
+            isr,
+            offline: down.clone(),
+        }
     }
 }
 
@@ -437,6 +669,7 @@ pub mod testing {
                 host: (*host).to_string(),
                 port: *port,
                 incarnation: format!("incarnation-{id}"),
+                raft_node: None,
             })
             .collect();
         let mine = nodes
@@ -606,6 +839,7 @@ mod tests {
             host: "kafka-1".into(),
             port: 9092,
             incarnation: "other".into(),
+            raft_node: None,
         }]);
         let view = state.view().unwrap();
         assert_eq!(view.ids(), [1, 2]);

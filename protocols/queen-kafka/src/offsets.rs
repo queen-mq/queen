@@ -439,7 +439,10 @@ pub async fn store(
                 .iter()
                 .map(|(key, value)| KvOp::put(NAMESPACE, key, value.to_value())),
         );
-        match api.kv(&ops, token).await {
+        let started = std::time::Instant::now();
+        let answered = api.kv(&ops, token).await;
+        crate::stats::COMMIT_KV.record(started.elapsed());
+        match answered {
             Ok(mut answers) => {
                 if fence.is_some() && !answers.is_empty() {
                     let head = answers.remove(0);

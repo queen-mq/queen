@@ -82,8 +82,8 @@
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use kafka_protocol::error::ResponseError;
 use kafka_protocol::records::BatchDecodeInfo;
@@ -103,19 +103,43 @@ use crate::obs;
 /// anything that could still be in flight, and no deeper.
 pub const WINDOW: usize = 5;
 
-/// How many `(tenant, producer, topic-partition)` entries this process tracks.
+/// How many `(tenant, producer, topic-partition)` sequence windows this process
+/// keeps when `QUEEN_KAFKA_MAX_PRODUCER_STATES` is not set.
 ///
-/// About 10 MB at the ~160 bytes an entry costs: 1024 producers over 64
-/// partitions each, or 64 producers over the full default width. Evicted least
-/// recently WRITTEN first, the same shape and the same reasoning as the SNI
-/// lane map in `lib.rs` — and an evicted entry behaves exactly like one that was
-/// never there, which the module header shows is a recoverable state rather
-/// than a silent one.
-pub const MAX_TRACKED: usize = 65_536;
+/// Sized for the shapes this facade is run at, not for a hope: every Kafka
+/// producer client keeps one sequence per partition it writes, so a node sees
+/// about as many pairs as it leads partitions times the producers writing each
+/// one. A 3-node cluster at 1M partitions with three producer fleets is ~1M
+/// pairs per node steady and ~3M on a node that briefly leads everything; 4Mi
+/// covers that with room. Past the cap the least recently WRITTEN entry is
+/// evicted, and an evicted entry behaves exactly like one that was never there,
+/// which the module header shows is a recoverable state rather than a silent
+/// one — but it costs the producer an epoch bump and a resend, so the cap is
+/// set where a healthy cluster never reaches it (the old 65,536 was reached by
+/// a 100k-partition benchmark ~30,000 times a minute).
+///
+/// Memory is paid per entry that EXISTS, not per unit of cap: [`ENTRY_BYTES`].
+pub const DEFAULT_MAX_TRACKED: usize = 4_194_304;
+
+/// The smallest `QUEEN_KAFKA_MAX_PRODUCER_STATES` accepted: below it a handful
+/// of producers writing a few hundred partitions evict each other.
+pub const MIN_MAX_TRACKED: usize = 1_024;
+
+/// The largest accepted: 64Mi entries is ~9 GB, past which the number is a typo.
+pub const MAX_MAX_TRACKED: usize = 67_108_864;
+
+/// What one tracked entry costs in resident memory, at most: its slab slot (112
+/// bytes: the five-batch window, 16 bytes per batch, plus its key and its four
+/// list links), its index entry (~26 bytes at the hash map's average load), and
+/// the slack of both growing by doubling. Measured on a release build filling
+/// a tracker the benchmark's way (150 producers, 5 batches each): 500k entries
+/// = 95 MB, 1M = 200 MB, 2M = 352 MB, 4M = 580 MB — 150 to 210 bytes an entry,
+/// so ~0.6 GB at the default cap if every entry is ever used.
+pub const ENTRY_BYTES: usize = 210;
 
 /// One line per window when the tracker is evicting, not one per produce: the
 /// cap is reached by a fleet, so a line per eviction is a line per producer per
-/// batch. See [`obs::Sampler`].
+/// batch. See [`obs::Sampler`]. The total is [`Producers::evictions`].
 static TRACK_CAP: obs::Sampler = obs::Sampler::new(60_000);
 
 /// A `transactional.id` as the FACADE reads it, with Erlang's encoding defect
@@ -211,17 +235,6 @@ struct Batch {
     base_offset: i64,
 }
 
-/// What is remembered about one `(tenant, producer, topic-partition)`.
-struct Entry {
-    /// The highest epoch seen. A batch below it is fenced; a batch above it is
-    /// a reset ([`Producers::check`]).
-    epoch: i16,
-    /// The last [`WINDOW`] batches, oldest first.
-    recent: Vec<Batch>,
-    /// The tracker's own clock at the last WRITE. The eviction order.
-    used: u64,
-}
-
 /// The scope a producer's state is filed under.
 ///
 /// The topic is part of the key and that is not an over-specification: a Kafka
@@ -312,10 +325,392 @@ pub enum Verdict {
 /// per connection and used on that one connection, while the state has to
 /// survive the `Facade` clones that `for_connection` and `authenticated_as`
 /// make.
+///
+/// ## Shaped for millions of entries
+///
+/// The map is SHARDED by the hash of the full key, each shard behind its own
+/// mutex, so two produces to different partitions almost never meet on a lock
+/// — the old single mutex was taken by every produce entry of every connection
+/// of the node. Each shard keeps its entries in a slab with two intrusive
+/// doubly-linked lists through it, and every operation is O(1) in the size of
+/// the table:
+///
+///   * the LRU, most recently written first: a write moves its entry to the
+///     front, and EVICTION unlinks the tail — no scan. (The old eviction was a
+///     `min_by_key` over the whole table under the one lock, once per new entry
+///     past the cap: at the cap every new producer-partition paid a full scan
+///     of 65,536 entries while every produce of the node waited.)
+///   * each producer's entries, so [`Producers::forget`] visits the entries it
+///     drops and nothing else. (The old `forget` was a `retain` over the whole
+///     table — and it runs on every KIP-360 epoch bump, i.e. once per eviction
+///     victim that comes back, which made the two costs compound.)
+///
+/// The cap is GLOBAL and exact: nothing is evicted while fewer than the cap are
+/// tracked, whichever shard is full. At the cap, the shard receiving the new
+/// entry gives up its own least recently written one. Keys are spread by hash,
+/// so every shard holds the same mix of cold and hot entries and the victim is
+/// the coldest of a uniform 1/N sample — the global LRU order, approximately.
+/// Small caps use fewer shards (one per [`MIN_PER_SHARD`] entries), so a small
+/// tracker is an exact LRU.
+///
+/// A key's producer and topic are interned per shard, so a slot stores two
+/// `u32`s and a partition rather than a tenant, an id and a `String`.
 pub struct Producers {
-    entries: Mutex<HashMap<Key, Entry>>,
-    /// Ticks once per write. The ordering `entries` is evicted in.
-    clock: AtomicU64,
+    shards: Box<[Mutex<Shard>]>,
+    hasher: RandomState,
+    cap: usize,
+    /// Entries tracked across every shard.
+    len: AtomicUsize,
+    /// Entries evicted for room since the process started.
+    evictions: AtomicU64,
+}
+
+/// At most this many shards: past it the contention is already gone and the
+/// per-shard LRU sample only gets smaller.
+const MAX_SHARDS: usize = 64;
+
+/// A shard is only added per this many entries of cap, so a shard's LRU is a
+/// sample worth evicting from.
+const MIN_PER_SHARD: usize = 4_096;
+
+/// The "no slot" link.
+const NIL: u32 = u32::MAX;
+
+/// One tracked window, in its shard's slab.
+struct Slot {
+    /// The last [`WINDOW`] batches, oldest first; `len` of them are real.
+    recent: [Batch; WINDOW],
+    key: SlotKey,
+    /// The shard's LRU, most recently written at the head. `next` is also the
+    /// free list's link while the slot is free.
+    prev: u32,
+    next: u32,
+    /// The other slots of this slot's producer in the shard.
+    oprev: u32,
+    onext: u32,
+    /// The highest epoch seen. A batch below it is fenced; a batch above it is
+    /// a reset ([`Producers::check`]).
+    epoch: i16,
+    len: u8,
+}
+
+impl Slot {
+    fn new(key: SlotKey, epoch: i16) -> Slot {
+        Slot {
+            recent: [Batch {
+                base_seq: 0,
+                last_seq: 0,
+                base_offset: 0,
+            }; WINDOW],
+            key,
+            prev: NIL,
+            next: NIL,
+            oprev: NIL,
+            onext: NIL,
+            epoch,
+            len: 0,
+        }
+    }
+
+    fn recent(&self) -> &[Batch] {
+        &self.recent[..usize::from(self.len)]
+    }
+
+    /// Remember one more batch, dropping the oldest once [`WINDOW`] are kept.
+    fn push(&mut self, batch: Batch) {
+        let len = usize::from(self.len);
+        if len == WINDOW {
+            self.recent.copy_within(1.., 0);
+            self.recent[WINDOW - 1] = batch;
+        } else {
+            self.recent[len] = batch;
+            self.len += 1;
+        }
+    }
+}
+
+/// A slot's key inside its shard: the interned producer and topic, and the
+/// partition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct SlotKey {
+    owner: u32,
+    topic: u32,
+    partition: i32,
+}
+
+/// One `(tenant, producer id)` of a shard, and the head of its slot list.
+struct Owner {
+    tenant: TenantKey,
+    producer_id: i64,
+    head: u32,
+    count: u32,
+}
+
+/// One topic name of a shard, and how many slots name it.
+struct Topic {
+    name: Arc<str>,
+    count: u32,
+}
+
+/// One shard: a slab of slots, the index into it, and the interned producers
+/// and topics its keys are made of.
+struct Shard {
+    index: HashMap<SlotKey, u32>,
+    slots: Vec<Slot>,
+    /// The first free slot, or [`NIL`].
+    free: u32,
+    /// The LRU's ends: most recently written, and the eviction victim.
+    head: u32,
+    tail: u32,
+    /// Producer id → its owner records (one per tenant using that id, which is
+    /// one: an id is 62 random bits).
+    owners: HashMap<i64, Vec<u32>>,
+    owner_recs: Vec<Option<Owner>>,
+    owner_free: Vec<u32>,
+    topics: HashMap<Arc<str>, u32>,
+    topic_recs: Vec<Option<Topic>>,
+    topic_free: Vec<u32>,
+}
+
+impl Shard {
+    fn new() -> Shard {
+        Shard {
+            index: HashMap::new(),
+            slots: Vec::new(),
+            free: NIL,
+            head: NIL,
+            tail: NIL,
+            owners: HashMap::new(),
+            owner_recs: Vec::new(),
+            owner_free: Vec::new(),
+            topics: HashMap::new(),
+            topic_recs: Vec::new(),
+            topic_free: Vec::new(),
+        }
+    }
+
+    fn owner_of(&self, tenant: &TenantKey, producer_id: i64) -> Option<u32> {
+        self.owners.get(&producer_id)?.iter().copied().find(|o| {
+            self.owner_recs[*o as usize]
+                .as_ref()
+                .is_some_and(|r| &r.tenant == tenant)
+        })
+    }
+
+    fn find(
+        &self,
+        tenant: &TenantKey,
+        producer_id: i64,
+        topic: &str,
+        partition: i32,
+    ) -> Option<u32> {
+        let owner = self.owner_of(tenant, producer_id)?;
+        let topic = *self.topics.get(topic)?;
+        self.index
+            .get(&SlotKey {
+                owner,
+                topic,
+                partition,
+            })
+            .copied()
+    }
+
+    fn owner_or_insert(&mut self, tenant: &TenantKey, producer_id: i64) -> u32 {
+        if let Some(o) = self.owner_of(tenant, producer_id) {
+            return o;
+        }
+        let rec = Owner {
+            tenant: tenant.clone(),
+            producer_id,
+            head: NIL,
+            count: 0,
+        };
+        let o = match self.owner_free.pop() {
+            Some(o) => {
+                self.owner_recs[o as usize] = Some(rec);
+                o
+            }
+            None => {
+                self.owner_recs.push(Some(rec));
+                (self.owner_recs.len() - 1) as u32
+            }
+        };
+        self.owners.entry(producer_id).or_default().push(o);
+        o
+    }
+
+    fn topic_or_insert(&mut self, name: &str) -> u32 {
+        if let Some(t) = self.topics.get(name) {
+            return *t;
+        }
+        let name: Arc<str> = Arc::from(name);
+        let rec = Topic {
+            name: Arc::clone(&name),
+            count: 0,
+        };
+        let t = match self.topic_free.pop() {
+            Some(t) => {
+                self.topic_recs[t as usize] = Some(rec);
+                t
+            }
+            None => {
+                self.topic_recs.push(Some(rec));
+                (self.topic_recs.len() - 1) as u32
+            }
+        };
+        self.topics.insert(name, t);
+        t
+    }
+
+    /// Add a slot for `key`, linked at the head of the LRU and of its
+    /// producer's list.
+    fn insert(&mut self, slot: Slot) -> u32 {
+        let key = slot.key;
+        let i = if self.free != NIL {
+            let i = self.free;
+            self.free = self.slots[i as usize].next;
+            self.slots[i as usize] = slot;
+            i
+        } else {
+            self.slots.push(slot);
+            (self.slots.len() - 1) as u32
+        };
+        self.index.insert(key, i);
+        self.lru_push_front(i);
+        let owner = self.owner_recs[key.owner as usize]
+            .as_mut()
+            .expect("a slot's owner record is live while the slot is");
+        let head = owner.head;
+        owner.head = i;
+        owner.count += 1;
+        {
+            let s = &mut self.slots[i as usize];
+            s.oprev = NIL;
+            s.onext = head;
+        }
+        if head != NIL {
+            self.slots[head as usize].oprev = i;
+        }
+        self.topic_recs[key.topic as usize]
+            .as_mut()
+            .expect("a slot's topic record is live while the slot is")
+            .count += 1;
+        i
+    }
+
+    fn lru_unlink(&mut self, i: u32) {
+        let (prev, next) = {
+            let s = &self.slots[i as usize];
+            (s.prev, s.next)
+        };
+        if prev != NIL {
+            self.slots[prev as usize].next = next;
+        } else {
+            self.head = next;
+        }
+        if next != NIL {
+            self.slots[next as usize].prev = prev;
+        } else {
+            self.tail = prev;
+        }
+    }
+
+    fn lru_push_front(&mut self, i: u32) {
+        let head = self.head;
+        {
+            let s = &mut self.slots[i as usize];
+            s.prev = NIL;
+            s.next = head;
+        }
+        if head != NIL {
+            self.slots[head as usize].prev = i;
+        } else {
+            self.tail = i;
+        }
+        self.head = i;
+    }
+
+    /// Move a slot that was just written to the front of the LRU.
+    fn touch(&mut self, i: u32) {
+        if self.head != i {
+            self.lru_unlink(i);
+            self.lru_push_front(i);
+        }
+    }
+
+    /// Remove one slot: from the LRU, the index, its producer's list and its
+    /// topic's count, releasing the producer and topic records it was the last
+    /// user of. O(1).
+    fn remove(&mut self, i: u32) {
+        self.lru_unlink(i);
+        let (key, oprev, onext) = {
+            let s = &self.slots[i as usize];
+            (s.key, s.oprev, s.onext)
+        };
+        self.index.remove(&key);
+        if oprev != NIL {
+            self.slots[oprev as usize].onext = onext;
+        }
+        if onext != NIL {
+            self.slots[onext as usize].oprev = oprev;
+        }
+        let owner = self.owner_recs[key.owner as usize]
+            .as_mut()
+            .expect("a slot's owner record is live while the slot is");
+        if oprev == NIL {
+            owner.head = onext;
+        }
+        owner.count -= 1;
+        if owner.count == 0 {
+            self.release_owner(key.owner);
+        }
+        self.release_topic_ref(key.topic);
+        self.slots[i as usize].next = self.free;
+        self.free = i;
+    }
+
+    fn release_owner(&mut self, o: u32) {
+        let Some(rec) = self.owner_recs[o as usize].take() else {
+            return;
+        };
+        if let Some(ids) = self.owners.get_mut(&rec.producer_id) {
+            ids.retain(|x| *x != o);
+            if ids.is_empty() {
+                self.owners.remove(&rec.producer_id);
+            }
+        }
+        self.owner_free.push(o);
+    }
+
+    fn release_topic_ref(&mut self, t: u32) {
+        let rec = self.topic_recs[t as usize]
+            .as_mut()
+            .expect("a slot's topic record is live while the slot is");
+        rec.count -= 1;
+        if rec.count == 0 {
+            let name = Arc::clone(&rec.name);
+            self.topic_recs[t as usize] = None;
+            self.topics.remove(&name);
+            self.topic_free.push(t);
+        }
+    }
+
+    /// Drop every slot of one producer, walking its own list. How many went.
+    fn forget(&mut self, tenant: &TenantKey, producer_id: i64) -> usize {
+        let Some(o) = self.owner_of(tenant, producer_id) else {
+            return 0;
+        };
+        let mut removed = 0;
+        loop {
+            let head = match self.owner_recs[o as usize].as_ref() {
+                Some(rec) if rec.head != NIL => rec.head,
+                _ => break,
+            };
+            self.remove(head);
+            removed += 1;
+        }
+        removed
+    }
 }
 
 impl Default for Producers {
@@ -325,20 +720,61 @@ impl Default for Producers {
 }
 
 impl Producers {
+    /// A tracker at [`DEFAULT_MAX_TRACKED`].
     pub fn new() -> Producers {
+        Producers::with_capacity(DEFAULT_MAX_TRACKED)
+    }
+
+    /// A tracker that keeps at most `cap` entries
+    /// (`QUEEN_KAFKA_MAX_PRODUCER_STATES`). Nothing is allocated up front:
+    /// memory grows with the entries that exist, [`ENTRY_BYTES`] each.
+    pub fn with_capacity(cap: usize) -> Producers {
+        let cap = cap.max(1);
+        let shards = (cap / MIN_PER_SHARD)
+            .next_power_of_two()
+            .clamp(1, MAX_SHARDS);
         Producers {
-            entries: Mutex::new(HashMap::new()),
-            clock: AtomicU64::new(0),
+            shards: (0..shards).map(|_| Mutex::new(Shard::new())).collect(),
+            hasher: RandomState::new(),
+            cap,
+            len: AtomicUsize::new(0),
+            evictions: AtomicU64::new(0),
         }
     }
 
-    /// How many entries are tracked right now. For tests and for the eviction
-    /// log line; nothing on a request path reads it.
-    pub fn tracked(&self) -> usize {
-        self.entries
+    /// The shard a key lives in. The same tuple TYPE is hashed on every path,
+    /// or a key would be looked for in a shard it is not in.
+    fn shard(
+        &self,
+        tenant: &TenantKey,
+        producer_id: i64,
+        topic: &str,
+        partition: i32,
+    ) -> MutexGuard<'_, Shard> {
+        let h = self
+            .hasher
+            .hash_one((tenant, producer_id, topic, partition));
+        self.shards[(h as usize) & (self.shards.len() - 1)]
             .lock()
             .expect("the producer map lock is never held across a panic")
-            .len()
+    }
+
+    /// How many entries are tracked right now.
+    pub fn tracked(&self) -> usize {
+        self.len.load(Ordering::Relaxed)
+    }
+
+    /// The most entries this tracker keeps.
+    pub fn capacity(&self) -> usize {
+        self.cap
+    }
+
+    /// How many entries have been evicted to make room since the process
+    /// started. Each one is a producer whose next batch may be answered
+    /// OUT_OF_ORDER_SEQUENCE_NUMBER and resent after an epoch bump, so on a
+    /// healthy node this stays at 0.
+    pub fn evictions(&self) -> u64 {
+        self.evictions.load(Ordering::Relaxed)
     }
 
     /// Forget everything about one producer id under one tenant.
@@ -349,12 +785,19 @@ impl Producers {
     /// path resets on a higher epoch too ([`Producers::check`]) — this is the
     /// cheaper half of the same rule, and it returns the memory rather than
     /// waiting for the LRU to.
+    ///
+    /// One visit per shard plus one per entry of THIS producer: the entries of
+    /// every other producer are never looked at.
     pub fn forget(&self, tenant: &TenantKey, producer_id: i64) {
-        let mut entries = self
-            .entries
-            .lock()
-            .expect("the producer map lock is never held across a panic");
-        entries.retain(|k, _| k.producer_id != producer_id || &k.tenant != tenant);
+        for shard in self.shards.iter() {
+            let removed = shard
+                .lock()
+                .expect("the producer map lock is never held across a panic")
+                .forget(tenant, producer_id);
+            if removed > 0 {
+                self.len.fetch_sub(removed, Ordering::Relaxed);
+            }
+        }
     }
 
     /// What to do with one `(topic, partition)` entry's batches, decided on the
@@ -422,7 +865,6 @@ impl Producers {
             partition,
         };
         let epoch = first.producer_epoch;
-        let base_seq = first.base_sequence;
         let mut offset_delta = 0i64;
         let batches: Vec<PendingBatch> = infos
             .iter()
@@ -439,108 +881,19 @@ impl Producers {
             })
             .collect();
         let accept = Verdict::Accept(Pending {
-            key: key.clone(),
+            key,
             epoch,
             batches,
         });
 
-        let entries = self
-            .entries
-            .lock()
-            .expect("the producer map lock is never held across a panic");
-        let Some(entry) = entries.get(&key) else {
-            // No entry: a fresh producer, an evicted one, or one whose facade
-            // restarted. Sequence 0 is the first of those and is accepted;
-            // anything else is the module header's caveat, and the code is
-            // chosen for the recovery it triggers rather than for its wording.
-            return if base_seq == 0 {
-                accept
-            } else {
-                Verdict::Reject(
-                    ResponseError::OutOfOrderSequenceNumber,
-                    format!(
-                        "this facade holds no sequence state for producer {} on {topic}-{partition}, \
-                         and the batch starts at sequence {base_seq} rather than 0 — bump the \
-                         producer epoch and resend (KIP-360)",
-                        first.producer_id
-                    ),
-                )
-            };
-        };
-        if epoch < entry.epoch {
-            // Fenced. Not the transactional fencing this facade refuses: a
-            // producer that bumped its own epoch and then retried a batch it had
-            // already queued at the old one.
-            return Verdict::Reject(
-                ResponseError::InvalidProducerEpoch,
-                format!(
-                    "producer {} sent epoch {epoch} for {topic}-{partition}, which is below the \
-                     epoch {} this facade has already seen",
-                    first.producer_id, entry.epoch
-                ),
-            );
-        }
-        if epoch > entry.epoch {
-            // A bump IS a reset: the producer has restarted its own sequences
-            // (`TransactionManager.resetSequenceNumbers`, called on exactly this
-            // transition), so every remembered range belongs to a session that
-            // no longer exists.
-            return accept;
-        }
-        let Some(newest) = entry.recent.last() else {
-            // An entry with an epoch and no batches: the epoch was raised by a
-            // bump and nothing has been written since. Same rule as an absent
-            // entry, minus the eviction.
-            return if base_seq == 0 {
-                accept
-            } else {
-                Verdict::Reject(
-                    ResponseError::OutOfOrderSequenceNumber,
-                    format!(
-                        "nothing has been appended for producer {} on {topic}-{partition} at epoch \
-                         {epoch}, and the batch starts at sequence {base_seq} rather than 0",
-                        first.producer_id
-                    ),
-                )
-            };
-        };
-        let expected = increment_sequence(newest.last_seq, 1);
-        if base_seq == expected {
-            return accept;
-        }
-        // A RESEND of exactly what was appended is a success carrying the
-        // offsets the original got. This row is what makes idempotence real, and
-        // it is Kafka's own behaviour rather than a convenience: a producer
-        // whose response was lost retries, and the retry must be invisible.
-        if let Some(offset) = exact_match(&entry.recent, infos) {
-            return Verdict::Duplicate(offset);
-        }
-        if is_before(base_seq, expected) {
-            // Inside or below the remembered range, but not a batch that was
-            // appended as sent — a producer that re-batched its retry, or one
-            // reaching past the five batches that are kept.
-            return Verdict::Reject(
-                ResponseError::DuplicateSequenceNumber,
-                format!(
-                    "sequence {base_seq} for producer {} on {topic}-{partition} is at or below the \
-                     last appended sequence {} and is not a batch this facade appended",
-                    first.producer_id, newest.last_seq
-                ),
-            );
-        }
-        // The gap. Refusing it and writing NOTHING is the other half of
-        // idempotence: without it, a batch that failed followed by a batch that
-        // succeeded would leave a hole, and the guarantee would be about
-        // duplicates only. This is what makes the Java client re-drain and
-        // resend in order.
-        Verdict::Reject(
-            ResponseError::OutOfOrderSequenceNumber,
-            format!(
-                "sequence {base_seq} for producer {} on {topic}-{partition} would leave a gap: the \
-                 next sequence this facade will append is {expected}",
-                first.producer_id
-            ),
-        )
+        let shard = self.shard(tenant, first.producer_id, topic, partition);
+        let entry = shard
+            .find(tenant, first.producer_id, topic, partition)
+            .map(|i| {
+                let s = &shard.slots[i as usize];
+                (s.epoch, s.recent())
+            });
+        decide(entry, infos, topic, partition, accept)
     }
 
     /// Remember an accepted run, now that the push has told us where it landed.
@@ -571,11 +924,7 @@ impl Producers {
             );
             return;
         }
-        let now = self.clock.fetch_add(1, Ordering::Relaxed);
-        let mut entries = self
-            .entries
-            .lock()
-            .expect("the producer map lock is never held across a panic");
+        let key = &pending.key;
         // One remembered range per BATCH and not one per run, because a producer
         // that retries sends the batches it sent — Kafka's own
         // `ProducerStateEntry` is per batch for the same reason.
@@ -584,53 +933,167 @@ impl Producers {
             last_seq: b.last_seq,
             base_offset: base_offset + b.offset_delta,
         });
-        if let Some(entry) = entries.get_mut(&pending.key) {
-            if pending.epoch > entry.epoch {
-                entry.epoch = pending.epoch;
-                entry.recent.clear();
+        let mut shard = self.shard(&key.tenant, key.producer_id, &key.topic, key.partition);
+        if let Some(i) = shard.find(&key.tenant, key.producer_id, &key.topic, key.partition) {
+            let slot = &mut shard.slots[i as usize];
+            if pending.epoch > slot.epoch {
+                slot.epoch = pending.epoch;
+                slot.len = 0;
             }
-            entry.recent.extend(batches);
-            while entry.recent.len() > WINDOW {
-                entry.recent.remove(0);
+            for batch in batches {
+                slot.push(batch);
             }
-            entry.used = now;
+            shard.touch(i);
             return;
         }
-        let mut recent: Vec<Batch> = batches.collect();
-        while recent.len() > WINDOW {
-            recent.remove(0);
-        }
-        // Asked before anything is inserted, so a map that is already at the cap
-        // evicts exactly one entry per new one rather than in bursts.
-        while entries.len() >= MAX_TRACKED {
-            let Some(coldest) = entries
-                .iter()
-                .min_by_key(|(_, e)| e.used)
-                .map(|(k, _)| k.clone())
-            else {
-                break;
-            };
-            entries.remove(&coldest);
+        // A new entry. Room is made FIRST, and only when the whole tracker is
+        // at its cap: nothing is evicted below it, whichever shard this is. The
+        // victim is this shard's least recently written entry — O(1), and the
+        // coldest of a uniform sample (the type header). Made before the new
+        // key's producer and topic are interned, because the victim may be the
+        // last user of either.
+        while self.len.load(Ordering::Relaxed) >= self.cap && shard.tail != NIL {
+            let victim = shard.tail;
+            shard.remove(victim);
+            self.len.fetch_sub(1, Ordering::Relaxed);
+            let total = self.evictions.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some(suppressed) = TRACK_CAP.tick_now() {
                 tracing::warn!(
                     target: "kafka",
-                    tracked = MAX_TRACKED,
+                    tracked = self.cap,
+                    evicted_total = total,
                     suppressed,
-                    "more idempotent producers than this facade keeps sequence state for; the \
-                     least recently written are being dropped and their next batch will be \
-                     answered OUT_OF_ORDER_SEQUENCE_NUMBER so the client bumps its epoch"
+                    "more idempotent producers than this facade keeps sequence state for \
+                     (QUEEN_KAFKA_MAX_PRODUCER_STATES); the least recently written are being \
+                     dropped and their next batch will be answered OUT_OF_ORDER_SEQUENCE_NUMBER \
+                     so the client bumps its epoch"
                 );
             }
         }
-        entries.insert(
-            pending.key.clone(),
-            Entry {
-                epoch: pending.epoch,
-                recent,
-                used: now,
+        let owner = shard.owner_or_insert(&key.tenant, key.producer_id);
+        let topic = shard.topic_or_insert(&key.topic);
+        let mut slot = Slot::new(
+            SlotKey {
+                owner,
+                topic,
+                partition: key.partition,
             },
+            pending.epoch,
+        );
+        for batch in batches {
+            slot.push(batch);
+        }
+        shard.insert(slot);
+        self.len.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// The verdict for one produce entry, given what is remembered for its key:
+/// `entry` is `(epoch, the remembered batches)`, or `None` when nothing is.
+/// `accept` is the answer for the batches being the next ones.
+fn decide(
+    entry: Option<(i16, &[Batch])>,
+    infos: &[BatchDecodeInfo],
+    topic: &str,
+    partition: i32,
+    accept: Verdict,
+) -> Verdict {
+    let first = &infos[0];
+    let epoch = first.producer_epoch;
+    let base_seq = first.base_sequence;
+    let Some((entry_epoch, recent)) = entry else {
+        // No entry: a fresh producer, an evicted one, or one whose facade
+        // restarted. Sequence 0 is the first of those and is accepted;
+        // anything else is the module header's caveat, and the code is
+        // chosen for the recovery it triggers rather than for its wording.
+        return if base_seq == 0 {
+            accept
+        } else {
+            Verdict::Reject(
+                ResponseError::OutOfOrderSequenceNumber,
+                format!(
+                    "this facade holds no sequence state for producer {} on {topic}-{partition}, \
+                     and the batch starts at sequence {base_seq} rather than 0 — bump the \
+                     producer epoch and resend (KIP-360)",
+                    first.producer_id
+                ),
+            )
+        };
+    };
+    if epoch < entry_epoch {
+        // Fenced. Not the transactional fencing this facade refuses: a
+        // producer that bumped its own epoch and then retried a batch it had
+        // already queued at the old one.
+        return Verdict::Reject(
+            ResponseError::InvalidProducerEpoch,
+            format!(
+                "producer {} sent epoch {epoch} for {topic}-{partition}, which is below the \
+                 epoch {entry_epoch} this facade has already seen",
+                first.producer_id
+            ),
         );
     }
+    if epoch > entry_epoch {
+        // A bump IS a reset: the producer has restarted its own sequences
+        // (`TransactionManager.resetSequenceNumbers`, called on exactly this
+        // transition), so every remembered range belongs to a session that
+        // no longer exists.
+        return accept;
+    }
+    let Some(newest) = recent.last() else {
+        // An entry with an epoch and no batches: the epoch was raised by a
+        // bump and nothing has been written since. Same rule as an absent
+        // entry, minus the eviction.
+        return if base_seq == 0 {
+            accept
+        } else {
+            Verdict::Reject(
+                ResponseError::OutOfOrderSequenceNumber,
+                format!(
+                    "nothing has been appended for producer {} on {topic}-{partition} at epoch \
+                     {epoch}, and the batch starts at sequence {base_seq} rather than 0",
+                    first.producer_id
+                ),
+            )
+        };
+    };
+    let expected = increment_sequence(newest.last_seq, 1);
+    if base_seq == expected {
+        return accept;
+    }
+    // A RESEND of exactly what was appended is a success carrying the
+    // offsets the original got. This row is what makes idempotence real, and
+    // it is Kafka's own behaviour rather than a convenience: a producer
+    // whose response was lost retries, and the retry must be invisible.
+    if let Some(offset) = exact_match(recent, infos) {
+        return Verdict::Duplicate(offset);
+    }
+    if is_before(base_seq, expected) {
+        // Inside or below the remembered range, but not a batch that was
+        // appended as sent — a producer that re-batched its retry, or one
+        // reaching past the five batches that are kept.
+        return Verdict::Reject(
+            ResponseError::DuplicateSequenceNumber,
+            format!(
+                "sequence {base_seq} for producer {} on {topic}-{partition} is at or below the \
+                 last appended sequence {} and is not a batch this facade appended",
+                first.producer_id, newest.last_seq
+            ),
+        );
+    }
+    // The gap. Refusing it and writing NOTHING is the other half of
+    // idempotence: without it, a batch that failed followed by a batch that
+    // succeeded would leave a hole, and the guarantee would be about
+    // duplicates only. This is what makes the Java client re-drain and
+    // resend in order.
+    Verdict::Reject(
+        ResponseError::OutOfOrderSequenceNumber,
+        format!(
+            "sequence {base_seq} for producer {} on {topic}-{partition} would leave a gap: the \
+             next sequence this facade will append is {expected}",
+            first.producer_id
+        ),
+    )
 }
 
 /// The base offset of a remembered run that matches `infos` batch for batch, or
@@ -1043,18 +1506,385 @@ mod tests {
         assert_eq!(last_sequence(&batch(7, 0, 10, 1)), 10);
     }
 
+    // ------------------------------------------------------------- the cap
+
+    /// A commit of `(producer, topic, partition)` at sequence 0, as a fresh
+    /// producer's first batch lands.
+    fn first_batch(p: &Producers, t: &TenantKey, id: i64, topic: &str, partition: i32) {
+        let v = accepted(p.check(t, topic, partition, &[batch(id, 0, 0, 1)]));
+        landed(p, &v, 0);
+    }
+
+    /// The slot is the bulk of an entry's memory, and ENTRY_BYTES is stated
+    /// from it: a field added to it must be paid for knowingly.
     #[test]
-    fn the_tracker_evicts_rather_than_growing_without_bound() {
-        let p = Producers::new();
-        // Not MAX_TRACKED entries — that is 65_536 allocations for a property
-        // the eviction code shows at any cap. The loop below is the SHAPE:
-        // committing more distinct producers than the map holds never grows it
-        // past the cap. Asserted at the real cap in the live rig instead.
-        for id in 0..64i64 {
-            let v = accepted(p.check(&tenant(), "orders", 0, &[batch(id + 1, 0, 0, 3)]));
-            landed(&p, &v, 100);
+    fn a_slot_is_the_size_the_memory_figure_is_stated_from() {
+        assert!(
+            std::mem::size_of::<Slot>() <= 112,
+            "{} bytes",
+            std::mem::size_of::<Slot>()
+        );
+        assert!(ENTRY_BYTES >= std::mem::size_of::<Slot>());
+    }
+
+    /// The tracker never holds more than its cap, and every entry it drops for
+    /// room is counted — the number a healthy node keeps at 0.
+    #[test]
+    fn the_tracker_never_holds_more_than_its_cap_and_counts_what_it_evicts() {
+        let p = Producers::with_capacity(MIN_MAX_TRACKED);
+        let total = MIN_MAX_TRACKED as i64 * 3;
+        for id in 0..total {
+            first_batch(&p, &tenant(), id + 1, "orders", 0);
+            assert!(p.tracked() <= MIN_MAX_TRACKED);
         }
-        assert_eq!(p.tracked(), 64);
-        assert!(p.tracked() <= MAX_TRACKED);
+        assert_eq!(p.tracked(), MIN_MAX_TRACKED);
+        assert_eq!(p.evictions(), (total as u64) - MIN_MAX_TRACKED as u64);
+        assert_eq!(p.capacity(), MIN_MAX_TRACKED);
+    }
+
+    /// Eviction takes the least recently WRITTEN entry and nothing else: an
+    /// entry that keeps being written survives any number of newcomers, and the
+    /// one that went quiet first goes first. (A small tracker is one shard, so
+    /// this is the exact LRU.)
+    #[test]
+    fn eviction_takes_the_least_recently_written_entry() {
+        let p = Producers::with_capacity(MIN_MAX_TRACKED);
+        assert_eq!(p.shards.len(), 1);
+        for id in 1..=MIN_MAX_TRACKED as i64 {
+            first_batch(&p, &tenant(), id, "orders", 0);
+        }
+        // Producer 1 keeps writing; the others are silent.
+        let mut seq = 1;
+        for newcomer in 0..(MIN_MAX_TRACKED as i64 * 2) {
+            let v = accepted(p.check(&tenant(), "orders", 0, &[batch(1, 0, seq, 1)]));
+            landed(&p, &v, i64::from(seq));
+            seq += 1;
+            first_batch(&p, &tenant(), 100_000 + newcomer, "orders", 0);
+        }
+        // Producer 1 was never evicted: its next batch is the next sequence,
+        // not the OUT_OF_ORDER a lost window would answer.
+        assert!(matches!(
+            p.check(&tenant(), "orders", 0, &[batch(1, 0, seq, 1)]),
+            Verdict::Accept(_)
+        ));
+        // Producer 2, the least recently written, went first — its resend is
+        // no longer a duplicate this facade can place.
+        assert_eq!(
+            rejection(p.check(&tenant(), "orders", 0, &[batch(2, 0, 1, 1)])),
+            ResponseError::OutOfOrderSequenceNumber
+        );
+    }
+
+    /// THE property the cap exists to keep: below it, nothing is evicted — not
+    /// in any shard, however the keys hash — so an active producer is never
+    /// answered OUT_OF_ORDER for want of room. A sharded tracker filled to
+    /// exactly its cap and written again, entry by entry, evicts nothing.
+    #[test]
+    fn an_active_producer_below_the_cap_is_never_evicted() {
+        let cap = 65_536;
+        let p = Producers::with_capacity(cap);
+        assert!(
+            p.shards.len() > 1,
+            "the property is about a SHARDED tracker"
+        );
+        // 64 producers x 1024 partitions: every entry of the cap, in use.
+        for id in 1..=64i64 {
+            for partition in 0..1024 {
+                first_batch(&p, &tenant(), id, "orders", partition);
+            }
+        }
+        assert_eq!(p.tracked(), cap);
+        for id in 1..=64i64 {
+            for partition in 0..1024 {
+                let v = accepted(p.check(&tenant(), "orders", partition, &[batch(id, 0, 1, 1)]));
+                landed(&p, &v, 1);
+            }
+        }
+        assert_eq!(p.evictions(), 0);
+        assert_eq!(p.tracked(), cap);
+    }
+
+    /// `forget` drops one producer's entries in every shard and leaves every
+    /// other producer's alone — without looking at them.
+    #[test]
+    fn forget_drops_one_producer_across_every_shard() {
+        let p = Producers::with_capacity(DEFAULT_MAX_TRACKED);
+        assert_eq!(p.shards.len(), MAX_SHARDS);
+        for partition in 0..2_000 {
+            first_batch(&p, &tenant(), 7, "orders", partition);
+            first_batch(&p, &tenant(), 8, "orders", partition);
+        }
+        assert_eq!(p.tracked(), 4_000);
+        p.forget(&tenant(), 7);
+        assert_eq!(p.tracked(), 2_000);
+        for partition in [0, 999, 1_999] {
+            assert!(matches!(
+                p.check(&tenant(), "orders", partition, &[batch(7, 0, 1, 1)]),
+                Verdict::Reject(ResponseError::OutOfOrderSequenceNumber, _)
+            ));
+            assert_eq!(
+                p.check(&tenant(), "orders", partition, &[batch(8, 0, 0, 1)]),
+                Verdict::Duplicate(0)
+            );
+        }
+        for partition in 0..2_000 {
+            first_batch(&p, &tenant(), 9, "orders", partition);
+        }
+        assert_eq!(p.tracked(), 4_000);
+    }
+
+    /// A freed slot is reused before the slab grows: a tracker whose producers
+    /// come and go stays the size of what it holds.
+    #[test]
+    fn freed_slots_are_reused_before_the_slab_grows() {
+        let p = Producers::with_capacity(MIN_MAX_TRACKED);
+        for partition in 0..1_000 {
+            first_batch(&p, &tenant(), 7, "orders", partition);
+        }
+        let slots = p.shards[0].lock().unwrap().slots.len();
+        for round in 0..20 {
+            p.forget(&tenant(), 7 + round);
+            for partition in 0..1_000 {
+                first_batch(&p, &tenant(), 8 + round, "orders", partition);
+            }
+        }
+        assert_eq!(p.shards[0].lock().unwrap().slots.len(), slots);
+        assert_eq!(p.tracked(), 1_000);
+    }
+
+    /// The interned producers and topics go with their last slot: a tracker
+    /// that has seen a million keys and dropped them holds nothing for them.
+    #[test]
+    fn eviction_and_forget_leave_no_interned_records_behind() {
+        let p = Producers::with_capacity(MIN_MAX_TRACKED);
+        for id in 1..=5_000i64 {
+            first_batch(
+                &p,
+                &tenant(),
+                id,
+                &format!("topic-{}", id % 97),
+                (id % 13) as i32,
+            );
+        }
+        {
+            let shard = p.shards[0].lock().unwrap();
+            let owners: usize = shard.owners.values().map(Vec::len).sum();
+            let live_owners = shard.owner_recs.iter().filter(|o| o.is_some()).count();
+            assert_eq!(owners, live_owners);
+            assert!(live_owners <= MIN_MAX_TRACKED);
+            assert_eq!(
+                shard.topics.len(),
+                shard.topic_recs.iter().filter(|t| t.is_some()).count()
+            );
+        }
+        for id in 1..=5_000i64 {
+            p.forget(&tenant(), id);
+        }
+        assert_eq!(p.tracked(), 0);
+        let shard = p.shards[0].lock().unwrap();
+        assert!(shard.owners.is_empty());
+        assert!(shard.topics.is_empty());
+        assert!(shard.index.is_empty());
+        assert_eq!((shard.head, shard.tail), (NIL, NIL));
+    }
+
+    /// The verdicts are a function of the remembered windows and nothing else,
+    /// so the sharded slab must answer EXACTLY what the table it replaced
+    /// answered, for any interleaving of produces, resends, gaps, bumps,
+    /// forgets and evictions. A tiny model of the old table — a map and a scan
+    /// for the coldest entry — is driven with the same random operations.
+    #[test]
+    fn the_tracker_answers_exactly_what_a_plain_lru_table_answers() {
+        use std::collections::HashMap as Map;
+
+        #[derive(Clone)]
+        struct ModelEntry {
+            epoch: i16,
+            recent: Vec<Batch>,
+            used: u64,
+        }
+        struct Model {
+            cap: usize,
+            clock: u64,
+            entries: Map<(i64, String, i32), ModelEntry>,
+        }
+        impl Model {
+            fn check(&self, topic: &str, partition: i32, infos: &[BatchDecodeInfo]) -> Verdict {
+                let key = (infos[0].producer_id, topic.to_string(), partition);
+                let pending = Pending {
+                    key: Key {
+                        tenant: tenant(),
+                        producer_id: infos[0].producer_id,
+                        topic: topic.to_string(),
+                        partition,
+                    },
+                    epoch: infos[0].producer_epoch,
+                    batches: {
+                        let mut delta = 0;
+                        infos
+                            .iter()
+                            .map(|i| {
+                                let records = i64::from(i.record_count.max(0));
+                                let b = PendingBatch {
+                                    base_seq: i.base_sequence,
+                                    last_seq: last_sequence(i),
+                                    records,
+                                    offset_delta: delta,
+                                };
+                                delta += records;
+                                b
+                            })
+                            .collect()
+                    },
+                };
+                let entry = self
+                    .entries
+                    .get(&key)
+                    .map(|e| (e.epoch, e.recent.as_slice()));
+                decide(entry, infos, topic, partition, Verdict::Accept(pending))
+            }
+            fn commit(&mut self, pending: &Pending, base: i64) {
+                self.clock += 1;
+                let key = (
+                    pending.key.producer_id,
+                    pending.key.topic.clone(),
+                    pending.key.partition,
+                );
+                let batches: Vec<Batch> = pending
+                    .batches
+                    .iter()
+                    .map(|b| Batch {
+                        base_seq: b.base_seq,
+                        last_seq: b.last_seq,
+                        base_offset: base + b.offset_delta,
+                    })
+                    .collect();
+                if let Some(e) = self.entries.get_mut(&key) {
+                    if pending.epoch > e.epoch {
+                        e.epoch = pending.epoch;
+                        e.recent.clear();
+                    }
+                    e.recent.extend(batches);
+                    while e.recent.len() > WINDOW {
+                        e.recent.remove(0);
+                    }
+                    e.used = self.clock;
+                    return;
+                }
+                while self.entries.len() >= self.cap {
+                    let coldest = self
+                        .entries
+                        .iter()
+                        .min_by_key(|(_, e)| e.used)
+                        .map(|(k, _)| k.clone())
+                        .unwrap();
+                    self.entries.remove(&coldest);
+                }
+                let mut recent = batches;
+                while recent.len() > WINDOW {
+                    recent.remove(0);
+                }
+                self.entries.insert(
+                    key,
+                    ModelEntry {
+                        epoch: pending.epoch,
+                        recent,
+                        used: self.clock,
+                    },
+                );
+            }
+            fn forget(&mut self, id: i64) {
+                self.entries.retain(|k, _| k.0 != id);
+            }
+        }
+
+        // A deterministic xorshift, so a failure reproduces.
+        let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move |n: u64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng % n
+        };
+        let cap = MIN_MAX_TRACKED;
+        let p = Producers::with_capacity(cap);
+        let mut model = Model {
+            cap,
+            clock: 0,
+            entries: Map::new(),
+        };
+        // Per (producer, topic, partition): the sequence the producer is at.
+        let mut at: Map<(i64, &str, i32), (i16, i32)> = Map::new();
+        let mut offset = 0i64;
+        for step in 0..60_000 {
+            let id = 1 + next(40) as i64;
+            let topic = ["orders", "clicks", "a"][next(3) as usize];
+            let partition = next(40) as i32;
+            let (epoch, seq) = *at.entry((id, topic, partition)).or_insert((0, 0));
+            let op = next(100);
+            if op < 2 {
+                p.forget(&tenant(), id);
+                model.forget(id);
+                continue;
+            }
+            // Mostly the next batch; sometimes a resend, a gap, a lower or
+            // higher epoch, a multi-batch run.
+            let (e, base, runs) = match op {
+                2..=9 => (epoch, (seq - 1 - next(8) as i32).max(0), 1),
+                10..=13 => (epoch, seq + 1 + next(3) as i32, 1),
+                14..=15 => (epoch.saturating_sub(1), seq, 1),
+                16..=18 => (epoch + 1, 0, 1),
+                19..=24 => (epoch, seq, 2 + next(3) as usize),
+                _ => (epoch, seq, 1),
+            };
+            let mut infos = Vec::new();
+            let mut s = base;
+            for _ in 0..runs {
+                let n = 1 + next(4) as i32;
+                infos.push(batch(id, e, s, n));
+                s += n;
+            }
+            let got = p.check(&tenant(), topic, partition, &infos);
+            let want = model.check(topic, partition, &infos);
+            assert_eq!(got, want, "step {step}: {id} {topic}-{partition} {infos:?}");
+            if let Verdict::Accept(pending) = got {
+                let records = pending.records();
+                landed(&p, &pending, offset);
+                model.commit(&pending, offset);
+                offset += records;
+                at.insert((id, topic, partition), (e, s));
+            }
+            assert_eq!(p.tracked(), model.entries.len(), "step {step}");
+        }
+        assert!(p.evictions() > 0, "the run never reached the cap");
+    }
+
+    /// Many connections produce at once; the shards take them in parallel and
+    /// the count stays exact.
+    #[test]
+    fn concurrent_producers_keep_an_exact_count() {
+        let p = std::sync::Arc::new(Producers::with_capacity(DEFAULT_MAX_TRACKED));
+        let threads: Vec<_> = (0..8i64)
+            .map(|t| {
+                let p = std::sync::Arc::clone(&p);
+                std::thread::spawn(move || {
+                    for partition in 0..5_000 {
+                        first_batch(&p, &tenant(), t + 1, "orders", partition);
+                        let v = accepted(p.check(
+                            &tenant(),
+                            "orders",
+                            partition,
+                            &[batch(t + 1, 0, 1, 1)],
+                        ));
+                        landed(&p, &v, 1);
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(p.tracked(), 40_000);
+        assert_eq!(p.evictions(), 0);
     }
 }

@@ -706,24 +706,16 @@ impl RaftFacade {
         ))
     }
 
+    /// `GET /api/v1/raft/members`: the raft cluster's members and how long ago
+    /// the LEADER last heard from each (an acknowledged heartbeat or append) —
+    /// the liveness a client of any node can judge by, since every node serves
+    /// the leader's own observations (a follower a copy it fetched over the
+    /// Raft RPC port, `viewAgeMs` old). `lastAckMs` is as of now: the leader's
+    /// figure plus the copy's age. Always answered by the node asked (never
+    /// forwarded): `nodeId` is that node.
     pub(super) async fn api_raft_members(&self, _ctx: ReqCtx) -> Result<ApiOut, RsmError> {
-        let repl = self.repl.metrics();
-        Ok(ApiOut::json(
-            200,
-            json!({
-                "leaderId":if repl.is_leader { Some(1u64) } else { None },
-                "members":[{
-                    "nodeId":1,
-                    "role":"voter",
-                    "state":if repl.is_leader { "leader" } else { "follower" },
-                    "term":repl.term,
-                    "matchIndex":repl.committed_index,
-                    "appliedIndex":repl.applied_index,
-                    "local":true
-                }]
-            })
-            .to_string(),
-        ))
+        let cm = self.repl.members();
+        Ok(ApiOut::json(200, raft_members_json(&cm).to_string()))
     }
     pub(super) async fn api_status_queues(&self, ctx: ReqCtx) -> Result<ApiOut, RsmError> {
         Ok(ApiOut::json(
@@ -891,4 +883,47 @@ fn clear_cursor_lease(c: &mut CursorRow) {
 }
 fn message_delete_miss(partition: &str, txn: &str) -> ApiOut {
     ApiOut::json(404,json!({"success":false,"partitionId":partition,"transactionId":txn,"error":"Message not found","message":"No dead-letter row for this address. Live messages live in immutable segments and cannot be deleted"}).to_string())
+}
+
+/// The body of `GET /api/v1/raft/members` for what one node knows. Pure, so
+/// the shape is testable without a cluster.
+pub(crate) fn raft_members_json(cm: &crate::rsm::replicator::ClusterMembers) -> serde_json::Value {
+    let age_ms = cm.view_age.map(|a| a.as_millis() as u64);
+    let members: Vec<serde_json::Value> = cm
+        .view
+        .as_ref()
+        .map(|v| {
+            v.members
+                .iter()
+                .map(|m| {
+                    let state = if !m.voter {
+                        "learner"
+                    } else if m.id == v.leader {
+                        "leader"
+                    } else {
+                        "follower"
+                    };
+                    json!({
+                        "nodeId": m.id,
+                        "role": if m.voter { "voter" } else { "learner" },
+                        "state": state,
+                        "http": m.http,
+                        "raft": m.raft,
+                        "lastAckMs": m.last_ack_ms.map(|ms| ms + age_ms.unwrap_or(0)),
+                        "matchIndex": m.matched,
+                        "local": m.id == cm.node_id,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({
+        "engine": "raft",
+        "nodeId": cm.node_id,
+        "leaderId": cm.leader,
+        "term": cm.term,
+        "viewAgeMs": age_ms,
+        "viewLeaderId": cm.view.as_ref().map(|v| v.leader),
+        "members": members,
+    })
 }

@@ -852,6 +852,10 @@ const FORWARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120)
 /// forwarded once is served here whatever the role (the facade then answers a
 /// retry naming the leader), so no loop can form while nodes disagree on who
 /// leads. With no leader known the answer is a 503 the client retries.
+///
+/// `/api/v1/raft/` is the exception: those routes describe THE NODE ASKED
+/// (its id, its role, the members view it holds), so a follower answers them
+/// itself — forwarded, a follower's `nodeId` would be the leader's.
 #[cfg(feature = "server")]
 async fn forward_to_leader(
     axum::extract::State(st): axum::extract::State<Arc<AppState>>,
@@ -859,7 +863,8 @@ async fn forward_to_leader(
     next: axum::middleware::Next,
 ) -> Response {
     let path = req.uri().path();
-    let forwardable = path.starts_with("/api/") || path.starts_with("/streams/");
+    let forwardable =
+        (path.starts_with("/api/") && !is_node_local(path)) || path.starts_with("/streams/");
     if !forwardable || req.headers().contains_key(FORWARDED_HEADER) {
         return next.run(req).await;
     }
@@ -868,6 +873,12 @@ async fn forward_to_leader(
         facade::Route::NoLeader => err_response(RsmError::NoLeader),
         facade::Route::Leader(addr) => forward(&addr, req).await,
     }
+}
+
+/// The `/api/` routes a follower answers itself: the ones about the node.
+#[cfg(feature = "server")]
+fn is_node_local(path: &str) -> bool {
+    path.starts_with("/api/v1/raft/")
 }
 
 #[cfg(feature = "server")]
@@ -1226,6 +1237,26 @@ fn quota_grant_from_json(v: &serde_json::Value) -> crate::rsm::effect::QuotaGran
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    /// The routes about THE NODE ASKED are answered by it: a follower that
+    /// forwarded `/api/v1/raft/members` would report the leader's id as its own
+    /// — and a Kafka facade on that follower would file itself under the
+    /// leader's raft node. Everything else under `/api/` still goes to the
+    /// leader.
+    #[cfg(feature = "server")]
+    #[test]
+    fn a_follower_answers_the_raft_routes_itself() {
+        assert!(super::is_node_local("/api/v1/raft/members"));
+        assert!(super::is_node_local("/api/v1/raft/status"));
+        for forwarded in [
+            "/api/v1/push",
+            "/api/v1/kv",
+            "/api/v1/resources/queues",
+            "/api/v1/raftish",
+        ] {
+            assert!(!super::is_node_local(forwarded), "{forwarded}");
+        }
+    }
 
     use axum::body::Bytes;
     use axum::extract::{Path, Query, State};

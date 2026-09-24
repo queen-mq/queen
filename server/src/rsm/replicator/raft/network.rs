@@ -12,6 +12,10 @@
 //! | `POST /raft/v1/prevote` | `VoteRequest` JSON | `Result<VoteResponse, RaftError>` JSON |
 //! | `POST /raft/v1/transfer` | `TransferLeaderRequest` JSON | `Result<TransferLeaderResponse, RaftError>` JSON |
 //! | `POST /raft/v1/snapshot` | [`super::snapshot`] stream | `Result<SnapshotResponse, RaftError>` JSON |
+//! | `POST /raft/v1/members` | empty | the leader's `MembersView` JSON, 503 on a non-leader ([`super::members`]) |
+//!
+//! Every `append` from the leader also carries its members view in the
+//! `x-queen-raft-members` header ([`super::members`]).
 //!
 //! A transport failure is `Unreachable` when the peer could not be connected
 //! (openraft backs off) and a network error otherwise (openraft retries).
@@ -165,14 +169,22 @@ pub(crate) struct HttpNetwork {
     client: HttpClient,
     token: Option<Arc<str>>,
     snap: Arc<super::snapshot::SendCtx>,
+    /// The leader's members view, carried on every append it sends
+    /// ([`super::members`]).
+    members: Arc<super::members::MembersState>,
 }
 
 impl HttpNetwork {
-    pub(crate) fn new(token: Option<String>, snap: Arc<super::snapshot::SendCtx>) -> HttpNetwork {
+    pub(crate) fn new(
+        token: Option<String>,
+        snap: Arc<super::snapshot::SendCtx>,
+        members: Arc<super::members::MembersState>,
+    ) -> HttpNetwork {
         HttpNetwork {
             client: http_client(),
             token: token.map(Arc::from),
             snap,
+            members,
         }
     }
 }
@@ -188,6 +200,7 @@ impl RaftNetworkFactory<TypeConfig> for HttpNetwork {
             client: self.client.clone(),
             token: self.token.clone(),
             snap: self.snap.clone(),
+            members: self.members.clone(),
         }
     }
 }
@@ -200,6 +213,7 @@ pub(crate) struct HttpPeer {
     client: HttpClient,
     token: Option<Arc<str>>,
     snap: Arc<super::snapshot::SendCtx>,
+    members: Arc<super::members::MembersState>,
 }
 
 /// POST `body` to `url` and return the answer's bytes; anything but a 2xx is a
@@ -212,12 +226,29 @@ pub(crate) async fn post(
     body: Body,
     ttl: Duration,
 ) -> Result<Bytes, Fail> {
+    post_with(client, url, token, content_type, body, ttl, None).await
+}
+
+/// [`post`], with one more header: the leader's members view on an append
+/// ([`super::members::MEMBERS_HEADER`]).
+async fn post_with(
+    client: &HttpClient,
+    url: &str,
+    token: Option<&str>,
+    content_type: &str,
+    body: Body,
+    ttl: Duration,
+    members: Option<axum::http::HeaderValue>,
+) -> Result<Bytes, Fail> {
     let mut req = Request::builder()
         .method(Method::POST)
         .uri(url)
         .header(header::CONTENT_TYPE, content_type);
     if let Some(t) = token {
         req = req.header(TOKEN_HEADER, t);
+    }
+    if let Some(v) = members {
+        req = req.header(super::members::MEMBERS_HEADER, v);
     }
     let req = req.body(body).map_err(|e| Fail::Network(e.to_string()))?;
     let resp = match tokio::time::timeout(ttl, client.request(req)).await {
@@ -255,15 +286,17 @@ impl HttpPeer {
         content_type: &str,
         body: Vec<u8>,
         ttl: Duration,
+        members: Option<axum::http::HeaderValue>,
     ) -> Result<Result<T, RaftError<TypeConfig>>, RPCError<TypeConfig>> {
         let url = format!("{}{}", self.base, path);
-        let bytes = post(
+        let bytes = post_with(
             &self.client,
             &url,
             self.token.as_deref(),
             content_type,
             Body::from(body),
             ttl,
+            members,
         )
         .await
         .map_err(Fail::rpc)?;
@@ -287,7 +320,7 @@ impl HttpPeer {
     ) -> Result<T, RPCError<TypeConfig>> {
         let body = serde_json::to_vec(req)
             .map_err(|e| RPCError::Network(NetworkError::new(&io::Error::other(e))))?;
-        self.call::<T>(path, "application/json", body, ttl)
+        self.call::<T>(path, "application/json", body, ttl, None)
             .await?
             .map_err(|e| self.remote(e))
     }
@@ -307,12 +340,16 @@ impl RaftNetworkV2<TypeConfig> for HttpPeer {
         })?;
         let cut = n < rpc.entries.len();
         let last_sent = n.checked_sub(1).map(|i| rpc.entries[i].log_id);
+        // Every append — heartbeats included — carries the leader's members
+        // view: the liveness evidence and the view of it travel together
+        // (super::members).
         let res = self
             .call::<AppendEntriesResponse<TypeConfig>>(
                 "/raft/v1/append",
                 "application/octet-stream",
                 body,
                 option.soft_ttl(),
+                self.members.header(),
             )
             .await?;
         match res {
@@ -416,6 +453,8 @@ mod server {
         /// Plans a follower's prepared command here, on the leader: set by the
         /// facade once it exists ([`super::super::RaftReplicator::set_remote_handler`]).
         pub(crate) remote: Arc<std::sync::OnceLock<super::super::RemoteHandler>>,
+        /// This node's members view, answered to a follower's relay.
+        pub(crate) members: Arc<super::super::members::MembersState>,
     }
 
     impl<S: Store + 'static> RpcState<S> {
@@ -458,6 +497,9 @@ mod server {
     ) -> Response {
         if let Err(r) = st.check(&headers) {
             return r;
+        }
+        if let Some(v) = headers.get(super::super::members::MEMBERS_HEADER) {
+            st.members.receive(v.as_bytes());
         }
         let req = match wire::decode_append(&body) {
             Ok(r) => r,
@@ -569,6 +611,26 @@ mod server {
         }
     }
 
+    /// The leader's members view as it stands now, for an operator (a
+    /// follower gets it on every append instead: [`super::super::members`]).
+    /// 503 on a node that does not lead.
+    async fn members<S: Store + 'static>(
+        State(st): State<Arc<RpcState<S>>>,
+        headers: HeaderMap,
+    ) -> Response {
+        if let Err(r) = st.check(&headers) {
+            return r;
+        }
+        let m = {
+            use openraft::async_runtime::WatchReceiver;
+            st.raft.metrics().borrow_watched().clone()
+        };
+        match st.members.leader_view(&m) {
+            Some(view) => json_answer(&view),
+            None => (StatusCode::SERVICE_UNAVAILABLE, "not the leader").into_response(),
+        }
+    }
+
     async fn snapshot<S: Store + 'static>(
         State(st): State<Arc<RpcState<S>>>,
         headers: HeaderMap,
@@ -614,6 +676,7 @@ mod server {
             .route("/raft/v1/snapshot", post(snapshot::<S>))
             .route("/raft/v1/submit", post(submit::<S>))
             .route("/raft/v1/read_index", post(read_index::<S>))
+            .route("/raft/v1/members", post(members::<S>))
             // Peers are trusted and an append is capped by the sender
             // (wire::MAX_APPEND_BYTES); a snapshot is streamed.
             .layer(axum::extract::DefaultBodyLimit::disable())

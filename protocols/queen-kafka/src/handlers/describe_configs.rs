@@ -425,7 +425,9 @@ fn broker_configs(facade: &Facade) -> Vec<Reported> {
             kind: Kind::Int,
             read_only: true,
             documentation: "QUEEN_KAFKA_GROUP_JOIN_DELAY_MS. How long the first join of an empty \
-                            group waits for company before the join window closes.",
+                            group waits for company before the join window closes; extended by \
+                            the same again while new members keep arriving, up to their \
+                            rebalance timeout.",
         },
         Reported {
             name: "group.min.session.timeout.ms",

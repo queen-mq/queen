@@ -324,6 +324,80 @@ impl Queue {
     }
 }
 
+/// The raft cluster a broker belongs to, as `GET /api/v1/raft/members` reports
+/// it ([`QueenApi::raft_members`]): its members, and how long ago the raft
+/// LEADER last heard from each one. What a facade running inside a raft broker
+/// judges liveness by ([`crate::cluster::liveness`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaftMembers {
+    /// The raft node that answered — the broker this facade runs inside, when
+    /// it runs inside one.
+    pub node_id: u64,
+    /// The leader, as far as the answering node knows.
+    pub leader_id: Option<u64>,
+    /// How old the leader's observations in `members` are: 0 on the leader, the
+    /// age of the copy a follower fetched from it otherwise, `None` when the
+    /// answering node holds no copy at all (no leader yet, or never reached).
+    pub view_age_ms: Option<u64>,
+    pub members: Vec<RaftMember>,
+}
+
+/// One member of [`RaftMembers`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaftMember {
+    pub node_id: u64,
+    /// A voter — a replica every acknowledged write is on a majority of — and
+    /// not a learner.
+    pub voter: bool,
+    /// Milliseconds since the raft leader last had an RPC to this member
+    /// acknowledged, as of NOW (the view's own age already included). `None`
+    /// when there is no figure.
+    pub last_ack_ms: Option<u64>,
+}
+
+/// The wire shape of `GET /api/v1/raft/members`. Everything else the route
+/// reports (addresses, match index, state) is for operators and is ignored.
+#[derive(Debug, Deserialize)]
+struct RaftMembersBody {
+    #[serde(rename = "nodeId")]
+    node_id: u64,
+    #[serde(rename = "leaderId", default)]
+    leader_id: Option<u64>,
+    #[serde(rename = "viewAgeMs", default)]
+    view_age_ms: Option<u64>,
+    #[serde(default)]
+    members: Vec<RaftMemberBody>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RaftMemberBody {
+    #[serde(rename = "nodeId")]
+    node_id: u64,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(rename = "lastAckMs", default)]
+    last_ack_ms: Option<u64>,
+}
+
+impl RaftMembersBody {
+    fn into_members(self) -> RaftMembers {
+        RaftMembers {
+            node_id: self.node_id,
+            leader_id: self.leader_id,
+            view_age_ms: self.view_age_ms,
+            members: self
+                .members
+                .into_iter()
+                .map(|m| RaftMember {
+                    node_id: m.node_id,
+                    voter: m.role.as_deref() != Some("learner"),
+                    last_ack_ms: m.last_ack_ms,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// One message to write, as `POST /api/v1/push` takes it.
 ///
 /// `transactionId` is deliberately not sent. It is the broker's dedup key, and
@@ -960,10 +1034,24 @@ pub trait QueenApi: Send + Sync + 'static {
         token: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Deleted>>;
 
-    /// The bytes each partition of `queue` holds, by partition NAME, from
-    /// `GET /api/v1/resources/queues/{queue}`: what DescribeLogDirs reports as
-    /// a partition's size. A partition the answer carries no size for is
-    /// absent; the default knows none.
+    /// `GET /api/v1/raft/members` — the raft cluster the broker belongs to and
+    /// how long ago its leader last heard from each member
+    /// ([`crate::cluster::liveness`]). `Ok(None)` from a broker that is not a
+    /// raft broker; the default knows none.
+    fn raft_members<'a>(
+        &'a self,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Option<RaftMembers>>> {
+        let _ = token;
+        Box::pin(async { Ok(None) })
+    }
+
+    /// The bytes each partition of `queue` holds, by partition NAME: what
+    /// DescribeLogDirs reports as a partition's size. Read from
+    /// `GET /api/v1/resources/queues/{queue}/sizes`, which is one counter per
+    /// partition, falling back to the full queue detail on a broker without
+    /// that route. A partition the answer carries no size for is absent; the
+    /// default knows none.
     fn partition_bytes<'a>(
         &'a self,
         _queue: &'a str,
@@ -1271,16 +1359,38 @@ struct QueueListBody {
     queues: Vec<Queue>,
 }
 
+/// `GET /api/v1/resources/queues/{queue}/sizes`: retained bytes by partition
+/// name.
+#[derive(Debug, Deserialize)]
+struct SizesBody {
+    #[serde(default)]
+    partitions: HashMap<String, i64>,
+}
+
 impl QueenApi for HttpQueen {
     fn list_queues<'a>(&'a self, token: Option<&'a str>) -> BoxFuture<'a, Result<Vec<Queue>>> {
         Box::pin(async move {
             // Not `?stats=cached`: that serves `queen.stats.child_count` as of
             // the last stats refresh, which for a queue created seconds ago (the
             // auto-create path, every time) is a partition count from before the
-            // queue existed. The enriched form costs a pass over the tenant's
-            // partitions, which is what the TTL below is for.
+            // queue existed.
+            //
+            // `?stats=lanes`: a raft broker then answers the name, id and LIVE
+            // lane count of each queue and skips the per-partition statistics
+            // (cursor scans, segment files, retained bytes) and the tenant-wide
+            // KV scan the dashboard's list carries — at 500k partitions that
+            // enrichment is seconds of work per call, and this list is re-read
+            // every few seconds by every facade. A Postgres broker does not
+            // know the value and answers the enriched list as before, which is
+            // everything this reads and more.
             let body = self
-                .call("GET", "/api/v1/resources/queues", token, None, None)
+                .call(
+                    "GET",
+                    "/api/v1/resources/queues?stats=lanes",
+                    token,
+                    None,
+                    None,
+                )
                 .await?;
             let parsed: QueueListBody =
                 serde_json::from_str(&body).map_err(|e| Error::Body(e.to_string()))?;
@@ -1367,6 +1477,21 @@ impl QueenApi for HttpQueen {
         token: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Vec<(String, i64)>>> {
         Box::pin(async move {
+            // The lean route first: one counter per partition, ~15 bytes of
+            // JSON each. The detail below renders a dozen fields and scans the
+            // cursors and segment files of every partition — hundreds of MB at
+            // 500k partitions, for the one number this wants.
+            let lean = format!("/api/v1/resources/queues/{}/sizes", encode_segment(queue));
+            match self.call("GET", &lean, token, None, None).await {
+                Ok(body) => {
+                    let v: SizesBody =
+                        serde_json::from_str(&body).map_err(|e| Error::Body(e.to_string()))?;
+                    return Ok(v.partitions.into_iter().collect());
+                }
+                // A broker without the route.
+                Err(Error::Status { code: 404, .. }) => {}
+                Err(e) => return Err(e),
+            }
             let path = format!("/api/v1/resources/queues/{}", encode_segment(queue));
             let body = self.call("GET", &path, token, None, None).await?;
             let v: serde_json::Value =
@@ -1382,6 +1507,25 @@ impl QueenApi for HttpQueen {
                     ))
                 })
                 .collect())
+        })
+    }
+
+    fn raft_members<'a>(
+        &'a self,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Option<RaftMembers>>> {
+        Box::pin(async move {
+            match self
+                .call("GET", "/api/v1/raft/members", token, None, None)
+                .await
+            {
+                Ok(body) => serde_json::from_str::<RaftMembersBody>(&body)
+                    .map(|b| Some(b.into_members()))
+                    .map_err(|e| Error::Body(format!("raft members: {e}"))),
+                // Not a raft broker.
+                Err(Error::Status { code: 404, .. }) => Ok(None),
+                Err(e) => Err(e),
+            }
         })
     }
 
@@ -2631,6 +2775,19 @@ pub mod testing {
         identities: Mutex<HashMap<Option<String>, Result<Option<String>>>>,
         /// The credential every identity call was made with, in call order.
         identity_calls: Mutex<Vec<Option<String>>>,
+        /// What `GET /api/v1/raft/members` answers: `None` is a broker that is
+        /// not a raft broker, which is every test that does not set it.
+        pub raft_members: Mutex<Option<RaftMembers>>,
+        /// When set, every `raft_members` call fails with it.
+        pub raft_members_error: Mutex<Option<Error>>,
+        /// How many `raft_members` calls were made.
+        pub raft_member_calls: AtomicUsize,
+        /// What `partition_bytes` answers, per queue: `(lane name, bytes)`.
+        pub partition_sizes: Mutex<HashMap<String, Vec<(String, i64)>>>,
+        /// When set, EVERY KV call that writes fails with it and every read
+        /// still answers — a raft pipeline too busy for a write within its
+        /// budget, which is the shape that emptied the node registry.
+        pub kv_write_error: Mutex<Option<Error>>,
     }
 
     /// The fake key/value store, and the working copy a call applies to.
@@ -2728,6 +2885,11 @@ pub mod testing {
                 kv_read_rows: Mutex::new(None),
                 identities: Mutex::new(HashMap::new()),
                 identity_calls: Mutex::new(Vec::new()),
+                raft_members: Mutex::new(None),
+                raft_members_error: Mutex::new(None),
+                raft_member_calls: AtomicUsize::new(0),
+                partition_sizes: Mutex::new(HashMap::new()),
+                kv_write_error: Mutex::new(None),
             })
         }
 
@@ -3075,6 +3237,35 @@ pub mod testing {
     }
 
     impl QueenApi for FakeQueen {
+        fn partition_bytes<'a>(
+            &'a self,
+            queue: &'a str,
+            _token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Vec<(String, i64)>>> {
+            Box::pin(async move {
+                Ok(self
+                    .partition_sizes
+                    .lock()
+                    .unwrap()
+                    .get(queue)
+                    .cloned()
+                    .unwrap_or_default())
+            })
+        }
+
+        fn raft_members<'a>(
+            &'a self,
+            _token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Option<RaftMembers>>> {
+            Box::pin(async move {
+                self.raft_member_calls.fetch_add(1, Ordering::SeqCst);
+                if let Some(e) = self.raft_members_error.lock().unwrap().clone() {
+                    return Err(e);
+                }
+                Ok(self.raft_members.lock().unwrap().clone())
+            })
+        }
+
         fn list_queues<'a>(&'a self, token: Option<&'a str>) -> BoxFuture<'a, Result<Vec<Queue>>> {
             Box::pin(async move {
                 self.lists.fetch_add(1, Ordering::SeqCst);
@@ -3347,6 +3538,14 @@ pub mod testing {
                 }
                 if let Some(e) = self.fail.lock().unwrap().clone() {
                     return Err(Error::Transport(e));
+                }
+                if ops
+                    .iter()
+                    .any(|op| matches!(op, KvOp::Put { .. } | KvOp::Delete { .. }))
+                {
+                    if let Some(e) = self.kv_write_error.lock().unwrap().clone() {
+                        return Err(e);
+                    }
                 }
                 // The two ceilings the broker refuses the WHOLE batch over. A
                 // double that accepted them would let a caller ship a batch the

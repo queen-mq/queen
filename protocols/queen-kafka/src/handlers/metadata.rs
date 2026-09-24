@@ -75,7 +75,7 @@
 //! scale is tens of thousands of queues and ~827k partitions:
 //!
 //!   * one topic's WIDTH, which comes from Queen and can be any number
-//!     (`advertised_partitions` clamps it — [`MAX_ADVERTISED_PARTITIONS`]);
+//!     (`advertised_partitions` clamps it — [`crate::Facade::max_partitions`]);
 //!   * queues TIMES that width, which only the all-topics listing can reach
 //!     ([`MAX_LISTING_PARTITIONS`]).
 //!
@@ -131,20 +131,34 @@ const MAX_QUEUE_NAME_CHARS: usize = 255;
 /// and anything else a client might mistake for one of them.
 const INTERNAL_PREFIX: &str = "__";
 
-/// Ceiling on the width advertised for ONE topic, whatever Queen reports.
+/// The ceiling on the width advertised for ONE topic when
+/// `QUEEN_KAFKA_MAX_PARTITIONS` is not set ([`crate::Facade::max_partitions`]).
 ///
-/// It is also the ceiling `QUEEN_KAFKA_DEFAULT_PARTITIONS` is validated against
-/// at boot (boot.rs), and the same number for the same reason: 100k lanes is a
-/// ~2.6 MB partition array in every Metadata response, which is already absurd
-/// and is the last order of magnitude before the answer stops being an answer.
-/// The configured default cannot exceed it; a queue's LIVE lane count can, and
-/// that is the case this clamp is actually for — a native Queen queue with 827k
-/// partitions (a real, recorded shape) would otherwise be a 21 MB topic entry
-/// built one `Vec`-triple at a time. Lanes above the ceiling stay reachable
-/// natively and through `POST /api/v1/fetch`; they are not addressable by a
-/// Kafka client, which is the same limitation the module header already states
-/// for lanes whose names are not decimal indices.
-pub const MAX_ADVERTISED_PARTITIONS: u32 = 100_000;
+/// A million: Queen's partitions cost a key and a counter until something is
+/// written to them, and a topic that wide is a shape this facade is benchmarked
+/// at (500k), not a typo. The Metadata answer for it is ~42 bytes a partition
+/// at v9 with three replicas (~50 at v1-v8), so ~42-50 MB for the widest topic
+/// — inside [`crate::conn::MAX_FRAME_BYTES`] and inside every client's default
+/// receive limit (franz-go and librdkafka both stop at ~95-100 MiB). A queue's
+/// LIVE lane count can exceed the ceiling (a native queue can have any number
+/// of lanes); lanes above it stay reachable natively and through
+/// `POST /api/v1/fetch`, but they are not addressable by a Kafka client, which
+/// is the same limitation the module header already states for lanes whose
+/// names are not decimal indices.
+pub const DEFAULT_MAX_PARTITIONS: u32 = 1_000_000;
+
+/// The highest `QUEEN_KAFKA_MAX_PARTITIONS` the boot accepts, and the range a
+/// stored per-topic floor is read back in ([`crate::topic_record`]).
+///
+/// Set by what ONE Metadata answer can carry, because every advertised
+/// partition is written out in full in it: with five raft voters a partition is
+/// 66 bytes at v1-v8 (three node arrays with 4-byte lengths) and 58 at v9, so
+/// 1.5M partitions is ~99 MB — the last width under
+/// [`crate::conn::MAX_FRAME_BYTES`] (100 MiB). Past it the response cannot be
+/// encoded at all and the connection dies after the whole allocation, which is
+/// a topic no client can ever learn the layout of. Pinned by
+/// `the_widest_topic_the_ceiling_allows_still_encodes`.
+pub const MAX_PARTITIONS_CEILING: u32 = 1_500_000;
 
 /// Ceiling on the distinct topic names ONE request is answered about.
 ///
@@ -186,6 +200,12 @@ static TOPIC_CAP: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
 /// are omitted with a loud log line rather than the whole response being made
 /// un-encodable, because a listing that arrives short is something a client can
 /// act on and a connection reset is not.
+///
+/// ONE topic may be wider than this budget (the width ceiling is
+/// [`DEFAULT_MAX_PARTITIONS`] and more), which is why the first topic of a
+/// listing always fits: a listing that omitted the one wide topic would tell a
+/// client the cluster has none, and one topic at the width ceiling still
+/// encodes ([`MAX_PARTITIONS_CEILING`]).
 const MAX_LISTING_PARTITIONS: usize = 200_000;
 
 /// What one requested topic resolves to, before any call to Queen. Pure: this is
@@ -206,13 +226,15 @@ pub enum Plan {
 /// `live` is the queue's partition count from the catalog, or `None` when there
 /// is no such queue. `floor` is the second term of the width — the topic's own
 /// stored floor when it declared one, and `QUEEN_KAFKA_DEFAULT_PARTITIONS`
-/// otherwise. Prefer [`plan_for`], which reads both off one [`Queue`].
-pub fn plan(name: &str, live: Option<i64>, allow_auto_create: bool, floor: u32) -> Plan {
+/// otherwise. `cap` is `QUEEN_KAFKA_MAX_PARTITIONS`
+/// ([`crate::Facade::max_partitions`]). Prefer [`plan_for`], which reads both
+/// terms off one [`Queue`].
+pub fn plan(name: &str, live: Option<i64>, allow_auto_create: bool, floor: u32, cap: u32) -> Plan {
     if let Some(e) = reserved_or_invalid(name) {
         return Plan::Reject(e);
     }
     match live {
-        Some(live) => Plan::Serve(advertised_partitions(live, floor)),
+        Some(live) => Plan::Serve(advertised_partitions(live, floor, cap)),
         None if allow_auto_create => Plan::Create,
         // The client asked us not to create it, so the honest answer is that it
         // is not here. This is also the code a consumer subscribed to a topic
@@ -233,12 +255,14 @@ pub fn plan_for(
     queue: Option<&Queue>,
     allow_auto_create: bool,
     default_partitions: u32,
+    cap: u32,
 ) -> Plan {
     plan(
         name,
         queue.map(|q| q.partitions),
         allow_auto_create,
         queue.map_or(default_partitions, |q| q.floor_or(default_partitions)),
+        cap,
     )
 }
 
@@ -307,10 +331,10 @@ pub fn is_valid_topic_name(name: &str) -> bool {
 
 /// The width to advertise for a queue with `live` materialised partitions. See
 /// the module header for why it is a maximum and not either input alone, and
-/// [`MAX_ADVERTISED_PARTITIONS`] for why it has a ceiling at all.
-pub fn advertised_partitions(live: i64, default_partitions: u32) -> i32 {
-    live.max(default_partitions as i64)
-        .clamp(0, MAX_ADVERTISED_PARTITIONS as i64) as i32
+/// [`DEFAULT_MAX_PARTITIONS`] for why it has a ceiling at all. `cap` is the
+/// ceiling this facade runs with ([`crate::Facade::max_partitions`]).
+pub fn advertised_partitions(live: i64, floor: u32, cap: u32) -> i32 {
+    live.max(i64::from(floor)).clamp(0, i64::from(cap)) as i32
 }
 
 /// The advertised width of each of `names` that Queen has a queue for.
@@ -329,9 +353,9 @@ pub fn advertised_partitions(live: i64, default_partitions: u32) -> i32 {
 /// a blip in the admin API must not fail a fetch of records Queen would have
 /// served, so an unreadable catalog costs the bound and nothing else.
 ///
-/// Lanes past [`MAX_ADVERTISED_PARTITIONS`] are outside the width for the same
-/// reason they are outside a Metadata answer: a Kafka client cannot address
-/// them. They stay readable natively and through `POST /api/v1/fetch`.
+/// Lanes past [`crate::Facade::max_partitions`] are outside the width for the
+/// same reason they are outside a Metadata answer: a Kafka client cannot
+/// address them. They stay readable natively and through `POST /api/v1/fetch`.
 pub(crate) async fn advertised_widths<'a>(
     facade: &Facade,
     names: impl Iterator<Item = &'a str>,
@@ -363,7 +387,11 @@ pub(crate) async fn advertised_widths<'a>(
         .map(|q| {
             (
                 q.name.clone(),
-                advertised_partitions(q.partitions, q.floor_or(facade.default_partitions)),
+                advertised_partitions(
+                    q.partitions,
+                    q.floor_or(facade.default_partitions),
+                    facade.max_partitions,
+                ),
             )
         })
         .collect()
@@ -475,7 +503,11 @@ fn listing(
         .iter()
         .filter(|q| reserved_or_invalid(&q.name).is_none())
     {
-        let width = advertised_partitions(q.partitions, q.floor_or(facade.default_partitions));
+        let width = advertised_partitions(
+            q.partitions,
+            q.floor_or(facade.default_partitions),
+            facade.max_partitions,
+        );
         // The first topic always fits, or a single wide queue would empty the
         // listing entirely and tell a client the cluster has no topics.
         if !out.is_empty() && spent + width as usize > MAX_LISTING_PARTITIONS {
@@ -540,6 +572,7 @@ async fn requested(
                     live.get(n).copied(),
                     allow_auto_create,
                     facade.default_partitions,
+                    facade.max_partitions,
                 ),
             ),
         })
@@ -625,6 +658,7 @@ pub(crate) async fn create_absent(
             *p = Plan::Serve(advertised_partitions(
                 q.partitions,
                 q.floor_or(facade.default_partitions),
+                facade.max_partitions,
             ));
             continue;
         }
@@ -651,7 +685,11 @@ pub(crate) async fn create_absent(
                 // them on the first push. The advertised width is the configured
                 // default, which is the same number the next refresh will
                 // compute through `advertised_partitions`.
-                Plan::Serve(advertised_partitions(0, facade.default_partitions))
+                Plan::Serve(advertised_partitions(
+                    0,
+                    facade.default_partitions,
+                    facade.max_partitions,
+                ))
             }
             Err(e) => {
                 tracing::error!(target: "kafka", topic = name, error = %e, "auto-create failed");
@@ -791,28 +829,36 @@ fn topic(placement: &Placement, name: &str, planned: Plan) -> MetadataResponseTo
         // uses for its own are refused above.
         .with_is_internal(false);
     match planned {
-        Plan::Serve(partitions) => base.with_partitions(
-            (0..partitions)
-                .map(|index| {
-                    let replicas = placement.replicas_of(name, index);
-                    let leader = replicas[0];
-                    MetadataResponsePartition::default()
-                        .with_partition_index(index)
-                        .with_leader_id(leader.into())
-                        // -1 is "unknown epoch", and it is the truth: the facade
-                        // has no leader elections to number. Advertising a real
-                        // epoch would invite clients to run truncation detection
-                        // against a value nothing here maintains.
-                        .with_leader_epoch(-1)
-                        // The leader alone, unless the facade runs inside a
-                        // raft broker: then every live node, which is where
-                        // every partition's log is (see the module header).
-                        .with_replica_nodes(replicas.iter().map(|&n| n.into()).collect())
-                        .with_isr_nodes(replicas.iter().map(|&n| n.into()).collect())
-                        .with_offline_replicas(vec![])
-                })
-                .collect(),
-        ),
+        Plan::Serve(partitions) => {
+            // The topic's hashing prefix once, not once per partition: at a
+            // million partitions this loop IS the answer's cost, and what is
+            // left in it is the three node lists the wire format needs.
+            let placed = placement.topic(name);
+            base.with_partitions(
+                (0..partitions)
+                    .map(|index| {
+                        let r = placed.replicas(index);
+                        MetadataResponsePartition::default()
+                            .with_partition_index(index)
+                            .with_leader_id(r.leader.into())
+                            // -1 is "unknown epoch", and it is the truth: the
+                            // facade has no leader elections to number.
+                            // Advertising a real epoch would invite clients to
+                            // run truncation detection against a value nothing
+                            // here maintains.
+                            .with_leader_epoch(-1)
+                            // The leader alone, unless the facade runs inside a
+                            // raft broker: then every registered node, which is
+                            // where every partition's log is (see the module
+                            // header) — the live ones in sync, the down ones
+                            // offline, as Kafka reports a broker that is down.
+                            .with_replica_nodes(r.replicas.into_iter().map(Into::into).collect())
+                            .with_isr_nodes(r.isr.into_iter().map(Into::into).collect())
+                            .with_offline_replicas(r.offline.into_iter().map(Into::into).collect())
+                    })
+                    .collect(),
+            )
+        }
         // An errored topic carries no partitions: the error IS the answer, and a
         // partition list beside it is something a client may act on.
         Plan::Reject(e) => base.with_error_code(e.code()),
@@ -860,61 +906,97 @@ mod tests {
         assert!(!is_valid_topic_name(&"x".repeat(MAX_QUEUE_NAME_CHARS)));
     }
 
+    /// The cap the unit tests below run with when they are not about the cap.
+    const CAP: u32 = DEFAULT_MAX_PARTITIONS;
+
     #[test]
     fn the_width_never_drops_below_the_configured_default() {
-        assert_eq!(advertised_partitions(0, 1024), 1024);
-        assert_eq!(advertised_partitions(7, 1024), 1024);
-        assert_eq!(advertised_partitions(1024, 1024), 1024);
+        assert_eq!(advertised_partitions(0, 1024, CAP), 1024);
+        assert_eq!(advertised_partitions(7, 1024, CAP), 1024);
+        assert_eq!(advertised_partitions(1024, 1024, CAP), 1024);
         // ...and never hides lanes a native Queen queue already has.
-        assert_eq!(advertised_partitions(5000, 1024), 5000);
+        assert_eq!(advertised_partitions(5000, 1024, CAP), 5000);
         // Nonsense from the admin API cannot become a negative partition count.
-        assert_eq!(advertised_partitions(-3, 16), 16);
+        assert_eq!(advertised_partitions(-3, 16, CAP), 16);
     }
 
     /// The width one topic can reach is bounded, because it is written out in
-    /// full in every Metadata response. 827k lanes is a shape this repo has
-    /// actually run; unclamped it is a ~21 MB topic entry, built one Vec-triple
-    /// at a time, on every refresh of every client.
+    /// full in every Metadata response — by the cap THIS facade runs with,
+    /// which defaults to a million and is the operator's to lower or raise.
     #[test]
     fn one_topic_can_never_be_wider_than_the_ceiling() {
-        assert_eq!(
-            advertised_partitions(827_000, 1024),
-            MAX_ADVERTISED_PARTITIONS as i32
-        );
-        assert_eq!(
-            advertised_partitions(i64::MAX, 16),
-            MAX_ADVERTISED_PARTITIONS as i32
-        );
+        // 827k lanes, a shape this repo has run, is now inside the default.
+        assert_eq!(advertised_partitions(827_000, 1024, CAP), 827_000);
+        assert_eq!(advertised_partitions(i64::MAX, 16, CAP), CAP as i32);
         // Just under it is untouched: the clamp is a ceiling, not a rounding.
         assert_eq!(
-            advertised_partitions(MAX_ADVERTISED_PARTITIONS as i64 - 1, 16),
-            MAX_ADVERTISED_PARTITIONS as i32 - 1
+            advertised_partitions(CAP as i64 - 1, 16, CAP),
+            CAP as i32 - 1
         );
+        // ...and a lower cap binds the floor as well as the lanes.
+        assert_eq!(advertised_partitions(827_000, 1024, 100_000), 100_000);
+        assert_eq!(advertised_partitions(0, 500_000, 100_000), 100_000);
     }
 
-    /// `QUEEN_KAFKA_DEFAULT_PARTITIONS` is validated at boot against this same
-    /// number (boot.rs), so a configured width can never be one the metadata
-    /// path would then clamp behind the operator's back.
+    /// The default is past the 500k the benchmark creates and inside the hard
+    /// ceiling, and both are what the boot validates against (boot.rs).
     #[test]
-    fn the_boot_knob_and_the_clamp_are_the_same_ceiling() {
+    fn the_default_ceiling_covers_half_a_million_and_stays_under_the_hard_one() {
+        const _: () = assert!(DEFAULT_MAX_PARTITIONS >= 1_000_000);
+        const _: () = assert!(DEFAULT_MAX_PARTITIONS <= MAX_PARTITIONS_CEILING);
         const BOOT: &str = include_str!("../boot.rs");
-        assert!(BOOT
-            .contains("const MAX_DEFAULT_PARTITIONS: u32 = metadata::MAX_ADVERTISED_PARTITIONS;"));
-        assert_eq!(
-            advertised_partitions(0, MAX_ADVERTISED_PARTITIONS),
-            MAX_ADVERTISED_PARTITIONS as i32
-        );
+        assert!(BOOT.contains("(1..=metadata::MAX_PARTITIONS_CEILING).contains(&n)"));
+        assert!(BOOT.contains("(1..=max_partitions).contains(&n)"));
+    }
+
+    /// The hard ceiling is what ONE Metadata answer can carry: a topic at
+    /// [`MAX_PARTITIONS_CEILING`] with five replicas per partition still
+    /// encodes under [`crate::conn::MAX_FRAME_BYTES`] at every version. Measured
+    /// on the real encoder over 20k partitions and scaled — the size is exactly
+    /// linear in the partition count.
+    #[test]
+    fn the_widest_topic_the_ceiling_allows_still_encodes() {
+        use kafka_protocol::protocol::Encodable;
+        const SAMPLE: i32 = 20_000;
+        let partition = |i: i32, replicas: i32| {
+            let nodes: Vec<kafka_protocol::messages::BrokerId> =
+                (1..=replicas).map(Into::into).collect();
+            MetadataResponsePartition::default()
+                .with_partition_index(i)
+                .with_leader_id(1.into())
+                .with_leader_epoch(-1)
+                .with_replica_nodes(nodes.clone())
+                .with_isr_nodes(nodes)
+                .with_offline_replicas(vec![])
+        };
+        let one = |n: i32, version: i16| {
+            let topic = MetadataResponseTopic::default()
+                .with_name(Some(TopicName(StrBytes::from_static_str("wide"))))
+                .with_partitions((0..n).map(|i| partition(i, 5)).collect());
+            MetadataResponse::default()
+                .with_topics(vec![topic])
+                .compute_size(version)
+                .unwrap()
+        };
+        for version in 0..=9 {
+            let per_partition = (one(SAMPLE, version) - one(0, version)) / SAMPLE as usize;
+            let widest = one(0, version) + per_partition * MAX_PARTITIONS_CEILING as usize;
+            assert!(
+                widest < crate::conn::MAX_FRAME_BYTES,
+                "v{version}: {per_partition} B/partition, {widest} B at the ceiling"
+            );
+        }
     }
 
     #[test]
     fn an_unknown_topic_is_created_only_when_the_client_allows_it() {
-        assert_eq!(plan("orders", None, true, 8), Plan::Create);
+        assert_eq!(plan("orders", None, true, 8, CAP), Plan::Create);
         assert_eq!(
-            plan("orders", None, false, 8),
+            plan("orders", None, false, 8, CAP),
             Plan::Reject(ResponseError::UnknownTopicOrPartition)
         );
-        assert_eq!(plan("orders", Some(3), true, 8), Plan::Serve(8));
-        assert_eq!(plan("orders", Some(64), true, 8), Plan::Serve(64));
+        assert_eq!(plan("orders", Some(3), true, 8, CAP), Plan::Serve(8));
+        assert_eq!(plan("orders", Some(64), true, 8, CAP), Plan::Serve(64));
     }
 
     /// The rule that must hold whatever else changes: a `__` name is never
@@ -925,7 +1007,7 @@ mod tests {
             for live in [None, Some(0), Some(12)] {
                 for allow in [true, false] {
                     assert_eq!(
-                        plan(name, live, allow, 8),
+                        plan(name, live, allow, 8, CAP),
                         Plan::Reject(ResponseError::UnknownTopicOrPartition),
                         "{name} live={live:?} allow={allow}"
                     );
@@ -937,11 +1019,11 @@ mod tests {
     #[test]
     fn an_unstorable_name_is_invalid_not_unknown() {
         assert_eq!(
-            plan("my topic", None, true, 8),
+            plan("my topic", None, true, 8, CAP),
             Plan::Reject(ResponseError::InvalidTopicException)
         );
         assert_eq!(
-            plan(&"x".repeat(300), None, true, 8),
+            plan(&"x".repeat(300), None, true, 8, CAP),
             Plan::Reject(ResponseError::InvalidTopicException)
         );
     }
@@ -1125,24 +1207,36 @@ mod tests {
         }
     }
 
-    /// The two ceilings compose: no single topic can be wide enough to exhaust
-    /// a listing on its own, so the "the first topic always fits" arm of
-    /// `listing` is a guard against a future re-tuning of the constants and
-    /// never something a client meets. The widest queues Queen can hold are
-    /// listed until the budget is spent, and no further.
+    /// With the width ceiling at a million, ONE topic can be wider than the
+    /// whole listing budget, and the "first topic always fits" arm of
+    /// `listing` is what a client meets: the wide topic is listed — a listing
+    /// without it would tell a client the cluster has no topics — and nothing
+    /// after it is.
     #[tokio::test]
-    async fn the_widest_possible_queues_still_produce_a_usable_listing() {
-        const _: () = assert!(MAX_ADVERTISED_PARTITIONS as usize <= MAX_LISTING_PARTITIONS);
-        let (f, _) = facade(&[("a", 0), ("b", 0), ("c", 0)], MAX_ADVERTISED_PARTITIONS);
+    async fn a_topic_wider_than_the_listing_budget_is_still_listed_alone() {
+        let wide = (MAX_LISTING_PARTITIONS + 1) as u32;
+        let (f, _) = facade(&[("a", 0), ("b", 0), ("c", 0)], wide);
         let resp = handle(&f, &request(None, false), 9, None).await;
-        assert_eq!(
-            resp.topics.len(),
-            MAX_LISTING_PARTITIONS / MAX_ADVERTISED_PARTITIONS as usize
-        );
-        assert_eq!(
-            resp.topics[0].partitions.len(),
-            MAX_ADVERTISED_PARTITIONS as usize
-        );
+        assert_eq!(resp.topics.len(), 1);
+        assert_eq!(resp.topics[0].partitions.len(), wide as usize);
+    }
+
+    /// The benchmark's shape, end to end through the handler: a named topic of
+    /// half a million partitions is answered in full, every partition once, in
+    /// order, with a leader — at the default ceiling, which used to cap it at
+    /// 100k.
+    #[tokio::test]
+    async fn a_half_million_partition_topic_is_answered_in_full() {
+        let (f, _) = facade(&[("wide", 500_000)], 1024);
+        let resp = handle(&f, &request(Some(&["wide"]), false), 9, None).await;
+        let t = named(&resp, "wide");
+        assert_eq!(t.error_code, 0);
+        assert_eq!(t.partitions.len(), 500_000);
+        assert!(t
+            .partitions
+            .iter()
+            .enumerate()
+            .all(|(i, p)| p.partition_index == i as i32 && p.leader_id.0 == 0));
     }
 
     /// A client that NAMES its topics is never truncated — which is every
@@ -1721,6 +1815,84 @@ mod clustered {
             assert_eq!(p.isr_nodes, vec![p.leader_id]);
             assert!(p.offline_replicas.is_empty());
             assert_eq!(p.leader_epoch, -1);
+        }
+    }
+
+    /// The leaders Metadata advertises are the pinned rendezvous scheme's,
+    /// partition by partition — the allocation-free placement changed how they
+    /// are computed, not what they are.
+    #[tokio::test]
+    async fn the_advertised_leaders_are_the_pinned_schemes() {
+        use crate::cluster::rendezvous;
+        let (f, _) = clustered(&[("orders", 2)], &THREE, 2);
+        let resp = handle(&f, &named("orders"), 9, None).await;
+        for p in &resp.topics[0].partitions {
+            assert_eq!(
+                Some(p.leader_id.0),
+                rendezvous::winner(
+                    rendezvous::DOMAIN_PARTITION,
+                    &rendezvous::partition_item("orders", p.partition_index),
+                    &[1, 2, 3]
+                )
+            );
+        }
+    }
+
+    /// Inside a raft broker every registered node is a replica of every
+    /// partition. The live ones are the ISR; a node that is DOWN stays a
+    /// replica, leaves the ISR and is listed offline — how Kafka reports a
+    /// broker that is down — so a readiness check that waits for the full ISR
+    /// waits for it, instead of a lone survivor reporting replicas = ISR =
+    /// itself. The down node is not advertised as a broker and leads nothing.
+    #[tokio::test]
+    async fn inside_raft_a_down_node_is_an_offline_replica_outside_the_isr() {
+        let (f, _) = clustered(&[("orders", 64)], &THREE, 1);
+        let f = f.with_raft(Some(crate::RaftBroker {
+            voters: 3,
+            log_dir: "/var/lib/queen/raft".into(),
+        }));
+        let ids = |v: &[kafka_protocol::messages::BrokerId]| {
+            let mut v: Vec<i32> = v.iter().map(|b| b.0).collect();
+            v.sort();
+            v
+        };
+
+        // Healthy: three replicas, all in sync, nothing offline.
+        let resp = handle(&f, &named("orders"), 9, None).await;
+        for p in &resp.topics[0].partitions {
+            assert_eq!(
+                p.replica_nodes[0], p.leader_id,
+                "the leader is listed first"
+            );
+            assert_eq!(ids(&p.replica_nodes), [1, 2, 3]);
+            assert_eq!(ids(&p.isr_nodes), [1, 2, 3]);
+            assert!(p.offline_replicas.is_empty());
+        }
+
+        // Node 3 goes down.
+        let state = f.cluster.state().unwrap().clone();
+        let view = state.view().unwrap();
+        let (live, down): (Vec<_>, Vec<_>) = view.nodes.iter().cloned().partition(|n| n.id != 3);
+        state.install_view(live, down);
+        let resp = handle(&f, &named("orders"), 9, None).await;
+        assert_eq!(
+            resp.brokers.iter().map(|b| b.node_id.0).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        for p in &resp.topics[0].partitions {
+            assert!([1, 2].contains(&p.leader_id.0), "a down node leads {p:?}");
+            assert_eq!(p.replica_nodes[0], p.leader_id);
+            assert_eq!(p.isr_nodes[0], p.leader_id);
+            assert_eq!(ids(&p.replica_nodes), [1, 2, 3]);
+            assert_eq!(ids(&p.isr_nodes), [1, 2]);
+            assert_eq!(ids(&p.offline_replicas), [3]);
+        }
+        // `offline_replicas` exists from v5; below it the encoder drops the
+        // field rather than refusing the answer, at every version served.
+        for version in 0..=9 {
+            let mut buf = bytes::BytesMut::new();
+            kafka_protocol::protocol::Encodable::encode(&resp, &mut buf, version)
+                .unwrap_or_else(|e| panic!("v{version}: {e}"));
         }
     }
 

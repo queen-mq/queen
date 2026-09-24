@@ -319,7 +319,9 @@ pub struct GroupConfig {
     /// produce N rebalances, each one assigning everything to the members that
     /// happened to have arrived, and every one of them revoked microseconds
     /// later. Waiting once costs the first consumer three seconds of startup
-    /// and saves the group N-1 assignment storms.
+    /// and saves the group N-1 assignment storms. And same rule: while new
+    /// members keep arriving the window is held open for one more delay at a
+    /// time, up to their rebalance timeout (`group::Group::extend_forming_window`).
     pub join_delay: Duration,
     /// `QUEEN_KAFKA_GROUP_MIN_SESSION_TIMEOUT_MS` — Kafka's
     /// `group.min.session.timeout.ms`. Below it a client's heartbeat interval

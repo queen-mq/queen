@@ -133,10 +133,30 @@ pub enum Verdict {
 /// (measured 2026-09-24), with the consumers stalled behind their own commits.
 ///
 /// So a commit JOINS the group's queue, and whoever holds the lock writes
-/// everything queued in fenced calls of one credential each, until the queue
-/// is empty — Kafka's group coordinator batches its `__consumer_offsets`
-/// appends the same way. Every commit still gets its own per-partition results,
-/// and the queue keeps arrival order, so a later commit of a partition wins.
+/// everything queued in fenced calls of one credential each — Kafka's group
+/// coordinator batches its `__consumer_offsets` appends the same way. Every
+/// commit still gets its own per-partition results, and the queue keeps arrival
+/// order, so a later commit of a partition wins.
+///
+/// ## ...and a commit waits for ITS write, not for the queue to run dry
+///
+/// A commit returns as soon as the write that carried it is answered, and
+/// takes the lock only to write when nobody else is writing; a holder hands
+/// the lock on the moment its own commit is answered. The first shape of the
+/// queue waited for the LOCK and then for the answer: the holder drained until
+/// the queue was empty, and every other commit — its offsets already written —
+/// sat behind the lock until then. Under a steady stream of commits the queue
+/// is never empty, so every commit was held for a whole convoy: 188 ms mean
+/// and ~480 ms p99 per commit for 600 consumers on the three-node raft
+/// cluster, against 5 ms for the write that carried it (2026-09-24). A
+/// consumer that commits after every poll polls at the rate its commits come
+/// back, so the convoy was the group's consumption ceiling, and e2e latency
+/// grew with the member count and with the partitions each poll spreads over.
+///
+/// No commit is stranded by the hand-off: a queued commit's task waits on its
+/// answer OR the lock, so whenever a holder lets go — answered, or cancelled
+/// mid-write, which drops the batch it held and answers those commits
+/// `Unavailable` — a waiter takes the lock and writes the rest.
 pub async fn commit(
     api: &dyn QueenApi,
     cluster: &Cluster,
@@ -159,31 +179,43 @@ pub async fn commit(
     };
 
     let cell = state.fences.cell(tenant, group);
-    let (done, answer) = tokio::sync::oneshot::channel();
+    let (done, mut answer) = tokio::sync::oneshot::channel();
     cell.join(Job {
         pairs: pairs.to_vec(),
         generation,
         token: token.map(str::to_string),
         done,
+        joined: std::time::Instant::now(),
     });
-    {
-        // The lock is an OPTIMISATION as it always was — correctness is the
-        // retry rule in `fenced` — and now also the batching point: the holder
-        // drains the queue, which by then holds every commit that arrived
-        // while the previous write was in flight.
-        let mut held = cell.version.lock().await;
-        loop {
-            let batch = cell.take_batch();
-            if batch.is_empty() {
-                break;
+    // See "a commit waits for ITS write" above. `biased`: an answer that is
+    // already here wins over a lock that is already free.
+    tokio::select! {
+        biased;
+        verdict = &mut answer => verdict.unwrap_or(Verdict::Unavailable),
+        mut held = cell.version.lock() => {
+            // Nobody else is writing, so this commit is still queued or already
+            // answered — and the drain below reaches it, because the queue is
+            // FIFO. It stops at this commit's own answer: whatever is queued
+            // behind it is written by ITS waiters, which take the lock next.
+            loop {
+                let batch = cell.take_batch();
+                if batch.is_empty() {
+                    break;
+                }
+                write_batch(api, cluster, state, &key, group, &mut held, batch).await;
+                match answer.try_recv() {
+                    Ok(verdict) => return verdict,
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                        return Verdict::Unavailable
+                    }
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+                }
             }
-            write_batch(api, cluster, state, &key, group, &mut held, batch).await;
+            // The queue is empty and nobody else writes: an answer that is not
+            // here now will never come.
+            answer.try_recv().unwrap_or(Verdict::Unavailable)
         }
     }
-    // Answered by this task's own drain or by an earlier holder's. A sender
-    // dropped unanswered is a holder cancelled mid-write: nothing is known
-    // about that write, and the client's retry is the repair.
-    answer.await.unwrap_or(Verdict::Unavailable)
 }
 
 /// One commit waiting in a group's queue.
@@ -192,6 +224,15 @@ struct Job {
     generation: i32,
     token: Option<String>,
     done: tokio::sync::oneshot::Sender<Verdict>,
+    /// When it joined the queue ([`crate::stats::COMMIT_WRITTEN`]).
+    joined: std::time::Instant,
+}
+
+impl Job {
+    fn answer(self, verdict: Verdict) {
+        crate::stats::COMMIT_WRITTEN.record(self.joined.elapsed());
+        let _ = self.done.send(verdict);
+    }
 }
 
 /// One fenced write of every job in `batch` (all presented with one
@@ -210,6 +251,9 @@ async fn write_batch(
     let generation = batch.iter().map(|j| j.generation).max().unwrap_or(-1);
     let pairs: Vec<(String, Committed)> =
         batch.iter().flat_map(|j| j.pairs.iter().cloned()).collect();
+    crate::stats::COMMIT_BATCHES.add(1);
+    crate::stats::COMMIT_BATCH_JOBS.add(batch.len() as u64);
+    crate::stats::COMMIT_BATCH_PAIRS.add(pairs.len() as u64);
     match fenced(
         api,
         cluster,
@@ -236,17 +280,17 @@ async fn write_batch(
                         "the offset store answered fewer results than it was given".to_string(),
                     )));
                 }
-                let _ = job.done.send(Verdict::Stored(mine));
+                job.answer(Verdict::Stored(mine));
             }
         }
         Verdict::NotCoordinator => {
             for job in batch {
-                let _ = job.done.send(Verdict::NotCoordinator);
+                job.answer(Verdict::NotCoordinator);
             }
         }
         Verdict::Unavailable => {
             for job in batch {
-                let _ = job.done.send(Verdict::Unavailable);
+                job.answer(Verdict::Unavailable);
             }
         }
     }
@@ -595,6 +639,56 @@ mod tests {
             "arrival order lost"
         );
         assert_eq!(stored_offset(&api, OWNED, 18), Some(118));
+    }
+
+    /// A commit is answered by the write that CARRIED it, not when the group's
+    /// queue next runs dry. A group committing after every poll keeps the queue
+    /// from ever being empty; the first shape of the queue held every commit
+    /// behind the lock until it was, so the first commit of a stream waited for
+    /// the whole stream. Here: a commit every 2 ms for 400 ms against a 10 ms
+    /// write. Each must come back within the write in flight when it arrived
+    /// plus its own — and the writes must still be shared.
+    #[tokio::test(start_paused = true)]
+    async fn a_commit_waits_for_its_own_write_and_not_for_the_stream() {
+        const WRITE: std::time::Duration = std::time::Duration::from_millis(10);
+        const COMMITS: i32 = 200;
+        let api = FakeQueen::with(&[]);
+        *api.kv_delay.lock().unwrap() = Some(WRITE);
+        let cluster = Arc::new(cluster(2));
+        let mut set = tokio::task::JoinSet::new();
+        for i in 0..COMMITS {
+            let p = pairs(OWNED, &[(i, 1_000 + i64::from(i))]);
+            let (api, cluster) = (api.clone(), cluster.clone());
+            set.spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(2 * i as u64)).await;
+                let started = tokio::time::Instant::now();
+                let verdict =
+                    commit(&*api, &cluster, &TenantKey::anonymous(), OWNED, 7, &p, None).await;
+                (verdict, started.elapsed())
+            });
+        }
+        let mut slowest = std::time::Duration::ZERO;
+        while let Some(done) = set.join_next().await {
+            let (verdict, took) = done.expect("a commit task panicked");
+            assert!(
+                matches!(&verdict, Verdict::Stored(r) if r.len() == 1 && r[0].is_ok()),
+                "{verdict:?}"
+            );
+            slowest = slowest.max(took);
+        }
+        assert!(
+            slowest <= 2 * WRITE,
+            "a commit took {slowest:?} against a {WRITE:?} write: it waited for the queue, \
+             not for its write"
+        );
+        let calls = api.kv_calls.lock().unwrap().len();
+        assert!(
+            calls < COMMITS as usize / 2,
+            "{COMMITS} commits took {calls} KV calls: they were not batched"
+        );
+        for i in [0, COMMITS / 2, COMMITS - 1] {
+            assert_eq!(stored_offset(&api, OWNED, i), Some(1_000 + i64::from(i)));
+        }
     }
 
     /// Single mode sends no fence at all: one operation per partition, and the

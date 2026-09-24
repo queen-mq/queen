@@ -51,6 +51,7 @@
 
 pub mod cluster;
 pub(crate) mod log_store;
+mod members;
 mod network;
 pub mod snapshot;
 pub(crate) mod state_machine;
@@ -126,6 +127,10 @@ pub(crate) struct Shared {
     leader_raft: std::sync::RwLock<Option<Arc<str>>>,
     /// Plans a follower's prepared command on this node (set by the facade).
     remote: Arc<std::sync::OnceLock<RemoteHandler>>,
+    /// Who is in the cluster and when the leader last heard from each member:
+    /// published on every append while this node leads, received on the
+    /// leader's appends while it follows ([`members`]).
+    members: Arc<members::MembersState>,
 }
 
 /// Plans one follower's prepared command on the leader and answers the encoded
@@ -475,6 +480,7 @@ async fn watch<S: Store + 'static>(
     let mut last_handoff: Option<Instant> = None;
     loop {
         let m = metrics.borrow_watched().clone();
+        shared.members.note(&m);
         let role = role_of(&m);
         let leader_node = m
             .current_leader
@@ -747,6 +753,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
             leader_http: std::sync::RwLock::new(None),
             leader_raft: std::sync::RwLock::new(None),
             remote: Arc::new(std::sync::OnceLock::new()),
+            members: Arc::new(members::MembersState::default()),
         });
 
         // The apply thread: the queue logs are written by our log writer, never
@@ -835,6 +842,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
                     store.clone(),
                     opened.reader.clone(),
                 )),
+                shared.members.clone(),
             )),
         };
         let members: BTreeMap<NodeId, Node> = match &cluster {
@@ -906,6 +914,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
                     restart: restart.clone(),
                 }),
                 remote: shared.remote.clone(),
+                members: shared.members.clone(),
             };
             let _guard = rt.enter();
             rt.spawn(network::serve(listener, state, async move {
@@ -1162,6 +1171,13 @@ impl<S: Store + 'static> RaftReplicator<S> {
     /// The node id.
     pub fn node_id(&self) -> NodeId {
         self.shared.node_id
+    }
+
+    /// Who is in the cluster and when the leader last heard from each member,
+    /// as this node knows it ([`members`]).
+    pub fn members(&self) -> super::ClusterMembers {
+        let m = self.metrics_now();
+        self.shared.members.members(m.as_ref(), self.shared.node_id)
     }
 
     /// The store, for a test's reads.

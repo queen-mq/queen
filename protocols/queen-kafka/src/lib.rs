@@ -29,12 +29,14 @@ pub mod decompress;
 pub mod handlers;
 pub mod idempotent;
 pub mod identity;
+pub mod introspect;
 pub mod obs;
 pub mod offsets;
 pub mod queen;
 pub mod records;
 pub mod sasl;
 pub mod secret;
+pub mod stats;
 pub mod throttle;
 pub mod tls;
 pub mod topic_config;
@@ -85,6 +87,9 @@ pub struct Facade {
     /// unless Queen already has more lanes than that. See
     /// [`handlers::metadata`].
     pub default_partitions: u32,
+    /// `QUEEN_KAFKA_MAX_PARTITIONS` — the widest a topic is advertised,
+    /// created or grown ([`handlers::metadata::DEFAULT_MAX_PARTITIONS`]).
+    pub max_partitions: u32,
     /// The credential every call from THIS connection reaches Queen with: the
     /// token SASL/PLAIN presented, or — on a listener with no SASL —
     /// `QUEEN_TOKEN`, which is optional because a broker with auth disabled
@@ -234,6 +239,7 @@ impl Facade {
             advertised_port: self.advertised_port,
             cluster: self.cluster.clone(),
             default_partitions: self.default_partitions,
+            max_partitions: self.max_partitions,
             queen_token: self.queen_token.clone(),
             queen: lane.queen,
             catalog: lane.catalog,
@@ -270,6 +276,7 @@ impl Facade {
             advertised_port: self.advertised_port,
             cluster: self.cluster.clone(),
             default_partitions: self.default_partitions,
+            max_partitions: self.max_partitions,
             queen_token: Some(token.to_string()),
             queen: Arc::clone(&self.queen),
             catalog: Arc::clone(&self.catalog),
@@ -484,6 +491,7 @@ impl Facade {
             advertised_port,
             cluster,
             default_partitions,
+            max_partitions: handlers::metadata::DEFAULT_MAX_PARTITIONS,
             queen_token,
             lanes: Arc::new(Lanes::new(Arc::clone(&queen), Arc::clone(&catalog))),
             queen,
@@ -506,6 +514,16 @@ impl Facade {
     /// The same facade, running inside the raft broker `raft`.
     pub fn with_raft(mut self, raft: Option<RaftBroker>) -> Facade {
         self.raft = raft;
+        self
+    }
+
+    /// The same facade, with the two size ceilings an operator sets:
+    /// `QUEEN_KAFKA_MAX_PARTITIONS` and `QUEEN_KAFKA_MAX_PRODUCER_STATES`
+    /// ([`idempotent::Producers::with_capacity`]). The producer tracker is
+    /// replaced, so this belongs at boot, before any connection shares it.
+    pub fn with_limits(mut self, max_partitions: u32, max_producer_states: usize) -> Facade {
+        self.max_partitions = max_partitions;
+        self.producers = Arc::new(idempotent::Producers::with_capacity(max_producer_states));
         self
     }
 

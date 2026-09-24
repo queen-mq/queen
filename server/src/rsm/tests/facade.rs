@@ -701,6 +701,129 @@ async fn phase_two_admin_detail_and_stream_state_accept_the_raft_partition_id() 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The two lean reads — the queue list with `?stats=lanes` and a queue's
+/// per-partition `sizes` — answer the same numbers the full renders do, from an
+/// index walk and one counter per partition instead of every partition's
+/// cursors and segment files.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn the_lean_queue_reads_answer_what_the_full_ones_do() {
+    let dir = scratch("lean-reads");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    let items: Vec<Value> = (0..10)
+        .map(|p| serde_json::json!({"queue":"wide","partition":p.to_string(),"payload":{"n":p}}))
+        .chain(std::iter::once(
+            serde_json::json!({"queue":"narrow","partition":"a","payload":{"x":"yyyyyyyy"}}),
+        ))
+        .collect();
+    facade
+        .push(
+            ctx(),
+            PushReq {
+                raw: serde_json::to_vec(&serde_json::json!({ "items": items })).unwrap(),
+            },
+        )
+        .await
+        .expect("push");
+    let get = |path: &str, query: Option<&str>| ApiReq {
+        method: "GET".into(),
+        path: path.into(),
+        query: query.map(str::to_string),
+        body: Vec::new(),
+    };
+
+    let full = facade
+        .api(ctx(), get("/api/v1/resources/queues", None))
+        .await
+        .expect("full list");
+    let lean = facade
+        .api(ctx(), get("/api/v1/resources/queues", Some("stats=lanes")))
+        .await
+        .expect("lean list");
+    assert_eq!(lean.status, 200, "{}", lean.body);
+    let shape = |body: &str| {
+        let mut v: Vec<(String, i64, String)> = parse(body)["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|q| {
+                (
+                    q["name"].as_str().unwrap().to_string(),
+                    q["partitions"].as_i64().unwrap(),
+                    q["id"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(shape(&lean.body), shape(&full.body));
+    assert_eq!(
+        shape(&lean.body)
+            .iter()
+            .map(|(n, p, _)| (n.as_str(), *p))
+            .collect::<Vec<_>>(),
+        [("narrow", 1), ("wide", 10)]
+    );
+    let lean = parse(&lean.body);
+    assert_eq!(lean["stats"], "lanes");
+    assert!(
+        lean.get("kvRows").is_none(),
+        "the lean list scanned the KV rows"
+    );
+    assert!(lean["queues"][0].get("retainedBytes").is_none());
+
+    let sizes = facade
+        .api(ctx(), get("/api/v1/resources/queues/wide/sizes", None))
+        .await
+        .expect("sizes");
+    assert_eq!(sizes.status, 200, "{}", sizes.body);
+    let detail = facade
+        .api(ctx(), get("/api/v1/resources/queues/wide", None))
+        .await
+        .expect("detail");
+    let from_detail: std::collections::BTreeMap<String, i64> = parse(&detail.body)["partitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["name"].as_str().unwrap().to_string(),
+                p["retainedBytes"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    let from_sizes: std::collections::BTreeMap<String, i64> = parse(&sizes.body)["partitions"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.as_i64().unwrap()))
+        .collect();
+    assert_eq!(from_sizes.len(), 10);
+    assert_eq!(from_sizes, from_detail);
+
+    let missing = facade
+        .api(ctx(), get("/api/v1/resources/queues/nope/sizes", None))
+        .await
+        .expect("sizes of nothing");
+    assert_eq!(missing.status, 404);
+
+    // A single node is a cluster of one, heard from now, and says so.
+    let members = facade
+        .api(ctx(), get("/api/v1/raft/members", None))
+        .await
+        .expect("members");
+    assert_eq!(members.status, 200, "{}", members.body);
+    let members = parse(&members.body);
+    assert_eq!(members["viewAgeMs"], 0, "{members}");
+    assert_eq!(members["members"].as_array().unwrap().len(), 1, "{members}");
+    assert_eq!(members["members"][0]["lastAckMs"], 0, "{members}");
+    assert_eq!(members["members"][0]["local"], true, "{members}");
+    assert_eq!(members["leaderId"], members["nodeId"], "{members}");
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn raft_push_stamps_authenticated_subject_and_round_trips_encrypted_payload() {
     let dir = scratch("encrypted-producer");

@@ -25,7 +25,9 @@ impl RaftFacade {
     pub(super) async fn api_impl(&self, ctx: ReqCtx, req: ApiReq) -> Result<ApiOut, RsmError> {
         match (req.method.as_str(), req.path.as_str()) {
             ("POST", "/api/v1/configure") => self.api_configure(ctx, &req.body).await,
-            ("GET", "/api/v1/resources/queues") => self.api_list_queues(ctx).await,
+            ("GET", "/api/v1/resources/queues") => {
+                self.api_list_queues(ctx, req.query.as_deref()).await
+            }
             ("GET", "/api/v1/resources/overview") => self.api_overview(ctx).await,
             ("GET", "/api/v1/resources/namespaces") => self.api_labels(ctx, true).await,
             ("GET", "/api/v1/resources/tasks") => self.api_labels(ctx, false).await,
@@ -111,6 +113,10 @@ impl RaftFacade {
                     if let Some(queue) = queue.strip_suffix("/depth") {
                         if req.method == "GET" {
                             return self.api_queue_depth(ctx, queue, req.query.as_deref()).await;
+                        }
+                    } else if let Some(queue) = queue.strip_suffix("/sizes") {
+                        if req.method == "GET" {
+                            return self.api_queue_sizes(ctx, queue).await;
                         }
                     } else if req.method == "GET" {
                         return self.api_get_queue(ctx, queue).await;
@@ -464,7 +470,10 @@ impl RaftFacade {
         ))
     }
 
-    async fn api_list_queues(&self, ctx: ReqCtx) -> Result<ApiOut, RsmError> {
+    async fn api_list_queues(&self, ctx: ReqCtx, query: Option<&str>) -> Result<ApiOut, RsmError> {
+        if query_value(query, "stats").as_deref() == Some("lanes") {
+            return self.api_list_queue_lanes(ctx).await;
+        }
         let rows = self.queue_snapshots(&ctx.tenant).await?;
         let store = self.store.clone();
         let tenant = ctx.tenant.clone();
@@ -487,6 +496,96 @@ impl RaftFacade {
             200,
             json!({"queues": rows, "kvRows":kv_rows, "kvBytes":kv_bytes, "timerRows":0, "timerBytes":0}).to_string(),
         ))
+    }
+
+    /// `GET /api/v1/resources/queues?stats=lanes`: every queue's name, id and
+    /// LIVE lane count, and nothing else.
+    ///
+    /// The default list renders the dashboard's statistics, and those cost a
+    /// pass over every partition of the tenant — its row, its cursors, its
+    /// retained bytes and its segment files — plus a scan of every KV row for
+    /// the byte totals: seconds of reads at 500k partitions. A client that only
+    /// needs to know which queues exist and how many lanes each has (the Kafka
+    /// facade re-reads this every few seconds, `HttpQueen::list_queues` in
+    /// queen-kafka) pays one key walk of the queue→partition index instead,
+    /// which is exact: the index entry and the partition row are written and
+    /// removed together (`create_partition` / `del_partition`).
+    async fn api_list_queue_lanes(&self, ctx: ReqCtx) -> Result<ApiOut, RsmError> {
+        let store = self.store.clone();
+        let tenant = ctx.tenant.clone();
+        let rows = tokio::task::spawn_blocking(move || {
+            store.read(|r| {
+                let mut queues = Vec::new();
+                r.scan_queues(&tenant, usize::MAX, &mut |name, cfg| {
+                    queues.push((name.to_string(), cfg));
+                    true
+                })?;
+                let mut out = Vec::with_capacity(queues.len());
+                for (name, cfg) in queues {
+                    let mut lanes = 0i64;
+                    r.scan_queue_partitions(&tenant, &name, None, usize::MAX, &mut |_| {
+                        lanes += 1;
+                        true
+                    })?;
+                    out.push(json!({
+                        "id": uuid_bytes_to_string(&cfg.id),
+                        "name": name,
+                        "queue": name,
+                        "partitions": lanes,
+                        "createdAt": crate::rsm::planner::timers::iso_us(cfg.created_at_us),
+                    }));
+                }
+                Ok(out)
+            })
+        })
+        .await
+        .map_err(|e| RsmError::Internal(format!("queue lanes: {e}")))?
+        .map_err(read_error)?;
+        Ok(ApiOut::json(
+            200,
+            json!({"queues": rows, "stats": "lanes"}).to_string(),
+        ))
+    }
+
+    /// `GET /api/v1/resources/queues/:queue/sizes`: the retained bytes of each
+    /// partition, by partition name — one counter per partition, where the
+    /// queue detail renders a dozen fields and scans every partition's cursors
+    /// and segment files (hundreds of MB of JSON at 500k partitions).
+    async fn api_queue_sizes(&self, ctx: ReqCtx, queue: &str) -> Result<ApiOut, RsmError> {
+        let store = self.store.clone();
+        let tenant = ctx.tenant.clone();
+        let q = queue.to_string();
+        let sizes = tokio::task::spawn_blocking(move || {
+            store.read(|r| {
+                if r.queue(&tenant, &q)?.is_none() {
+                    return Ok(None);
+                }
+                let mut sizes = Map::new();
+                r.scan_queue_partitions(&tenant, &q, None, usize::MAX, &mut |pid| {
+                    if let Ok(Some(p)) = r.partition(pid) {
+                        let bytes = r
+                            .partition_counter(pid, Counter::RetainedBytes)
+                            .unwrap_or(0);
+                        sizes.insert(p.partition, Value::from(bytes));
+                    }
+                    true
+                })?;
+                Ok(Some(sizes))
+            })
+        })
+        .await
+        .map_err(|e| RsmError::Internal(format!("queue sizes: {e}")))?
+        .map_err(read_error)?;
+        match sizes {
+            Some(sizes) => Ok(ApiOut::json(
+                200,
+                json!({"queue": queue, "partitions": sizes}).to_string(),
+            )),
+            None => Ok(ApiOut::json(
+                404,
+                json!({"error":"Queue not found"}).to_string(),
+            )),
+        }
     }
 
     async fn api_get_queue(&self, ctx: ReqCtx, queue: &str) -> Result<ApiOut, RsmError> {

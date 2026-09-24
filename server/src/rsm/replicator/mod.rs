@@ -159,6 +159,78 @@ pub struct Membership {
     pub learners: Vec<NodeId>,
 }
 
+/// One member of the cluster as the raft LEADER last saw it
+/// ([`MembersView`]).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MemberSeen {
+    pub id: NodeId,
+    pub voter: bool,
+    /// The member's client address (`QUEEN_RAFT_PEERS`), empty when unknown.
+    pub http: String,
+    /// The member's Raft RPC address, empty when unknown.
+    pub raft: String,
+    /// Milliseconds since the leader last had an RPC to this member
+    /// acknowledged — a heartbeat or an append — when the view was taken. 0 for
+    /// the leader itself. A member not heard from since this leader was
+    /// elected counts from the election. `None` only when not even that is
+    /// known.
+    pub last_ack_ms: Option<u64>,
+    /// The last log index the leader knows the member holds (RSM numbering).
+    pub matched: Option<u64>,
+}
+
+/// Who is in the cluster and when the raft leader last heard from each
+/// member: the leader's own observations, which is what every node judges a
+/// member's liveness by (`GET /api/v1/raft/members`). A follower holds a copy
+/// it fetched from the leader over the Raft RPC port — never through the
+/// client pipeline — so the view keeps flowing when the data path is saturated.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MembersView {
+    /// The leader that took the view.
+    pub leader: NodeId,
+    pub term: u64,
+    pub members: Vec<MemberSeen>,
+}
+
+/// What one node knows about the cluster's members.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClusterMembers {
+    /// This node.
+    pub node_id: NodeId,
+    /// The leader as this node knows it.
+    pub leader: Option<NodeId>,
+    pub term: u64,
+    /// The leader's observations: taken here on the leader, a fetched copy on a
+    /// follower. `None` before a follower has fetched one.
+    pub view: Option<MembersView>,
+    /// How old `view` is: 0 on the leader, the copy's age on a follower.
+    pub view_age: Option<std::time::Duration>,
+}
+
+impl ClusterMembers {
+    /// A cluster of one: this node, the leader, heard from now.
+    pub fn single(node_id: NodeId, term: u64) -> ClusterMembers {
+        ClusterMembers {
+            node_id,
+            leader: Some(node_id),
+            term,
+            view: Some(MembersView {
+                leader: node_id,
+                term,
+                members: vec![MemberSeen {
+                    id: node_id,
+                    voter: true,
+                    http: String::new(),
+                    raft: String::new(),
+                    last_ack_ms: Some(0),
+                    matched: None,
+                }],
+            }),
+            view_age: Some(std::time::Duration::ZERO),
+        }
+    }
+}
+
 impl Membership {
     /// The single-voter membership of raft1 / embedded (D2).
     pub fn single(node: NodeId) -> Membership {

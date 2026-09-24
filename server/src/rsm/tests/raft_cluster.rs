@@ -336,6 +336,114 @@ async fn a_new_leader_takes_over_and_the_old_one_catches_up() {
     }
 }
 
+/// When `member` was last heard from as `node` knows it — the leader's figure
+/// plus the age of the copy — and how old that copy is.
+fn heard(r: &RaftReplicator<HeedStore>, member: u64) -> Option<(u64, u64)> {
+    let cm = r.members();
+    let age = cm.view_age?.as_millis() as u64;
+    let seen = cm.view?.members.into_iter().find(|m| m.id == member)?;
+    Some((seen.last_ack_ms? + age, age))
+}
+
+/// Liveness from raft (`GET /api/v1/raft/members`): the leader reports every
+/// member heard from within a few heartbeats, and each follower serves a fresh
+/// copy of the leader's view — carried on the leader's own appends. A member
+/// that stops is reported silent, by the leader AND by the other follower
+/// through its copy (one authority, so every node agrees), and heard again once
+/// back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_node_reports_the_leaders_view_of_who_is_live() {
+    let _one = serial();
+    log_init();
+    let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("members")).collect();
+    let ports = free_ports(3);
+    let opts = vec![test_opts(); 3];
+    let mut nodes = tokio::task::block_in_place(|| open_all(&dirs, &ports, &opts));
+    let l = tokio::task::block_in_place(|| leader_of(&nodes));
+    let (f, other) = ((l + 1) % 3, (l + 2) % 3);
+    let (lid, fid) = (l as u64 + 1, f as u64 + 1);
+
+    // Everyone heard from recently, as every node reports it.
+    type Nodes = [Option<RaftReplicator<HeedStore>>];
+    let poll = |nodes: &Nodes, want: &dyn Fn(&Nodes) -> bool, what: &str| {
+        let end = Instant::now() + Duration::from_secs(20);
+        while !want(nodes) {
+            assert!(Instant::now() < end, "{what}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    tokio::task::block_in_place(|| {
+        poll(
+            &nodes,
+            &|nodes| {
+                nodes.iter().flatten().all(|r| {
+                    (1..=3)
+                        .all(|m| heard(r, m).is_some_and(|(ack, age)| ack < 1_000 && age < 1_000))
+                })
+            },
+            "not every node reported every member heard from",
+        )
+    });
+    // A follower's copy names the leader that took it.
+    let cm = nodes[f].as_ref().unwrap().members();
+    assert_eq!(cm.view.as_ref().unwrap().leader, lid);
+    assert_eq!(cm.node_id, fid);
+
+    // A follower stops: the leader, and the other follower through its copy,
+    // report it silent while the copy itself stays fresh.
+    let _ = close(nodes[f].take().unwrap());
+    tokio::task::block_in_place(|| {
+        poll(
+            &nodes,
+            &|nodes| {
+                let at_leader = heard(nodes[l].as_ref().unwrap(), fid);
+                let at_other = heard(nodes[other].as_ref().unwrap(), fid);
+                at_leader.is_some_and(|(ack, _)| ack >= 2_000)
+                    && at_other.is_some_and(|(ack, age)| ack >= 2_000 && age < 1_500)
+            },
+            "the stopped follower was not reported silent everywhere",
+        )
+    });
+    // The two that are up are still heard from.
+    for m in [lid, other as u64 + 1] {
+        let (ack, _) = heard(nodes[other].as_ref().unwrap(), m).unwrap();
+        assert!(ack < 1_500, "member {m} silent for {ack} ms");
+    }
+
+    // Back: heard again.
+    let (d, p, o) = (dirs[f].clone(), ports.clone(), test_opts());
+    nodes[f] = Some(tokio::task::block_in_place(move || {
+        open_node(&d, fid, &p, o)
+    }));
+    tokio::task::block_in_place(|| {
+        poll(
+            &nodes,
+            &|nodes| heard(nodes[l].as_ref().unwrap(), fid).is_some_and(|(ack, _)| ack < 1_000),
+            "the restarted follower was not heard from again",
+        )
+    });
+
+    // The LEADER stops. Its successor has never heard from it in its own
+    // term, and still counts its silence from the last append it received
+    // from it — from the stop, not from its own election.
+    let stopped = Instant::now();
+    let _ = close(nodes[l].take().unwrap());
+    let next = tokio::task::block_in_place(|| leader_of(&nodes));
+    let (ack, _) = heard(nodes[next].as_ref().unwrap(), lid).expect("the old leader is listed");
+    let floor = stopped.elapsed().as_millis() as u64;
+    assert!(
+        ack + 250 >= floor,
+        "the dead leader's silence ({ack} ms) counts from the election, not from its stop \
+         ({floor} ms ago)"
+    );
+    for n in nodes.into_iter().flatten() {
+        let _ = close(n);
+    }
+    for d in dirs {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_follower_catches_up_from_the_queue_logs() {
     let _one = serial();
