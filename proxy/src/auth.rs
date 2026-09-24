@@ -31,6 +31,7 @@ use uuid::Uuid;
 use crate::errors;
 use crate::routes::RouteClass;
 use crate::state::{Principal, Role, Scopes, St};
+use crate::store::{data, Store};
 
 // ---------------------------------------------------------------------------
 // API keys
@@ -273,14 +274,14 @@ pub async fn verify_session(st: &St, token: &str) -> Result<Session, Response> {
 
     // Deny-list check (revoked_tokens): 60s in-process cache; skipped when there
     // is no pxdb (dev). Transient DB failure fails OPEN (see is_revoked).
-    if st.keys.is_revoked(&st.db, &claims.jti).await {
+    if st.keys.is_revoked(&st.store, &claims.jti).await {
         tracing::debug!(target: "auth", jti = %claims.jti, "jwt revoked");
         return Err(errors::err_401("invalid credential"));
     }
 
     // The per-cell gate is checked BEFORE the row lookup, not after: on a cell
     // where the capability is off, no request ever asks pxdb about it.
-    let operator = st.cfg.operator_enabled && st.keys.is_operator(&st.db, claims.user_id).await;
+    let operator = st.cfg.operator_enabled && st.keys.is_operator(&st.store, claims.user_id).await;
     Ok(Session { claims, operator })
 }
 
@@ -298,7 +299,7 @@ pub async fn role_on_cluster(
     if session.operator {
         return Ok(Role::Admin);
     }
-    match st.keys.cluster_role(&st.db, session.claims.user_id, cluster_id).await {
+    match st.keys.cluster_role(&st.store, session.claims.user_id, cluster_id).await {
         Some(role) => Ok(role),
         None => {
             // Distinguish "user exists but has no role here" (a real 403)
@@ -306,7 +307,7 @@ pub async fn role_on_cluster(
             // after user deletion (or a dev pxdb reset): that session is
             // dead, and 401 lets the SPA bounce to login instead of
             // leaving a 403 dead-end.
-            if !st.keys.user_exists(&st.db, session.claims.user_id).await {
+            if !st.keys.user_exists(&st.store, session.claims.user_id).await {
                 return Err(errors::err_401("session no longer valid"));
             }
             Err(errors::err_403(errors::CODE_FORBIDDEN, "no role on this cluster"))
@@ -868,11 +869,15 @@ impl Keys {
     ///   * strict (`QUEEN_PROXY_REVOCATION_STRICT=true`) — fail CLOSED, for
     ///     deployments that prefer rejecting sessions to honouring one that may
     ///     have been revoked.
+    ///
     /// Either way the outcome is logged (sampled — an outage is one line per
     /// `REVOKED_WARN_EVERY`, not one per request) and never cached: only an
     /// answer the DB actually gave is worth remembering for 60s.
-    pub async fn is_revoked(&self, db: &Option<deadpool_postgres::Pool>, jti: &str) -> bool {
-        let Some(pool) = db else { return false };
+    pub async fn is_revoked(&self, db: impl Into<Store>, jti: &str) -> bool {
+        let store: Store = db.into();
+        if !store.is_some() {
+            return false;
+        }
 
         if let Some((rev, at)) = self.revoked_cache.lock().unwrap().get(jti) {
             if at.elapsed() < REVOKED_TTL {
@@ -880,24 +885,10 @@ impl Keys {
             }
         }
 
-        let looked_up = match pool.get().await {
-            Ok(client) => match client
-                .query_opt(
-                    // jti column is TEXT by design (001_init.sql): the deny-list
-                    // must accept non-UUID jtis from foreign token mints too.
-                    "SELECT 1 FROM queen_proxy.revoked_tokens WHERE jti = $1",
-                    &[&jti],
-                )
-                .await
-            {
-                Ok(row) => Some(row.is_some()),
-                Err(e) => {
-                    self.warn_deny_list_unavailable(&e.to_string(), "revoked_tokens query failed");
-                    None
-                }
-            },
+        let looked_up = match data::is_jti_revoked(&store, jti).await {
+            Ok(revoked) => Some(revoked),
             Err(e) => {
-                self.warn_deny_list_unavailable(&e.to_string(), "pxdb unavailable");
+                self.warn_deny_list_unavailable(&e.to_string(), "revoked_tokens lookup failed");
                 None
             }
         };
@@ -958,30 +949,21 @@ impl Keys {
     /// validly-signed sessions stuck on a 403 dead-end. On transient DB
     /// errors we assume the user exists (prefer the softer 403 over killing
     /// a possibly-good session).
-    pub async fn user_exists(&self, db: &Option<deadpool_postgres::Pool>, user_id: Uuid) -> bool {
-        let Some(pool) = db.as_ref() else { return false };
-        let Ok(client) = pool.get().await else { return true };
-        match client
-            .query_opt(
-                "SELECT 1 FROM queen_proxy.users WHERE id = $1::text::uuid",
-                &[&user_id.to_string()],
-            )
-            .await
-        {
-            Ok(row) => row.is_some(),
+    pub async fn user_exists(&self, db: impl Into<Store>, user_id: Uuid) -> bool {
+        let store: Store = db.into();
+        if !store.is_some() {
+            return false;
+        }
+        match data::user_exists(&store, user_id).await {
+            Ok(exists) => exists,
             Err(e) => {
-                tracing::warn!(target: "auth", err = %e, "user_exists query failed; assuming exists");
+                tracing::warn!(target: "auth", err = %e, "user_exists lookup failed; assuming exists");
                 true
             }
         }
     }
 
-    pub async fn cluster_role(
-        &self,
-        db: &Option<deadpool_postgres::Pool>,
-        user_id: Uuid,
-        cluster_id: Uuid,
-    ) -> Option<Role> {
+    pub async fn cluster_role(&self, db: impl Into<Store>, user_id: Uuid, cluster_id: Uuid) -> Option<Role> {
         let key = (user_id, cluster_id);
         if let Some((r, at)) = self.role_cache.lock().unwrap().get(&key) {
             if at.elapsed() < ROLE_TTL {
@@ -989,29 +971,15 @@ impl Keys {
             }
         }
 
-        let pool = db.as_ref()?;
-        let role = match pool.get().await {
-            Ok(client) => {
-                let uid = user_id.to_string();
-                let cid = cluster_id.to_string();
-                match client
-                    .query_opt(
-                        "SELECT role FROM queen_proxy.cluster_roles \
-                         WHERE user_id = $1::text::uuid AND cluster_id = $2::text::uuid",
-                        &[&uid, &cid],
-                    )
-                    .await
-                {
-                    Ok(Some(row)) => role_from_str(&row.get::<_, String>(0)),
-                    Ok(None) => None,
-                    Err(e) => {
-                        tracing::warn!(target: "auth", err = %e, "cluster_roles query failed");
-                        return None;
-                    }
-                }
-            }
+        let store: Store = db.into();
+        if !store.is_some() {
+            return None;
+        }
+        let role = match data::cluster_role(&store, user_id, cluster_id).await {
+            Ok(Some(r)) => role_from_str(&r),
+            Ok(None) => None,
             Err(e) => {
-                tracing::warn!(target: "auth", err = %e, "pxdb unavailable for cluster_roles");
+                tracing::warn!(target: "auth", err = %e, "cluster_roles lookup failed");
                 return None;
             }
         };
@@ -1042,29 +1010,21 @@ impl Keys {
     /// deliberately so — a degraded control plane must never GRANT cell-wide
     /// access it cannot confirm, whereas failing open there only means a
     /// revocation is late.
-    pub async fn is_operator(&self, db: &Option<deadpool_postgres::Pool>, user_id: Uuid) -> bool {
+    pub async fn is_operator(&self, db: impl Into<Store>, user_id: Uuid) -> bool {
         if let Some((flag, at)) = self.operator_cache.lock().unwrap().get(&user_id) {
             if at.elapsed() < ROLE_TTL {
                 return *flag;
             }
         }
-        let Some(pool) = db.as_ref() else { return false };
-        let Ok(client) = pool.get().await else {
-            tracing::warn!(target: "auth", "pxdb unavailable for is_operator; denying");
+        let store: Store = db.into();
+        if !store.is_some() {
             return false;
-        };
-        let flag = match client
-            .query_opt(
-                "SELECT is_operator FROM queen_proxy.users WHERE id = $1::text::uuid",
-                &[&user_id.to_string()],
-            )
-            .await
-        {
-            Ok(Some(row)) => row.get::<_, bool>(0),
-            Ok(None) => false,
+        }
+        let flag = match data::user_is_operator(&store, user_id).await {
+            Ok(flag) => flag,
             Err(e) => {
-                tracing::warn!(target: "auth", err = %e, "is_operator query failed; denying");
-                // Never cached: an answer pxdb did not give is not worth
+                tracing::warn!(target: "auth", err = %e, "is_operator lookup failed; denying");
+                // Never cached: an answer the store did not give is not worth
                 // remembering, and recovery must be immediate.
                 return false;
             }
@@ -1126,10 +1086,11 @@ impl Keys {
 /// outcome (an expired row is already inert). Skipped entirely without a pxdb
 /// (dev-static) and disabled by `QUEEN_PROXY_REVOCATION_SWEEP_MS=0`.
 pub fn spawn_revocation_sweep(st: St) {
-    let Some(pool) = st.db.clone() else {
+    if !st.store.is_some() {
         tracing::info!(target: "auth", "revocation sweep: no pxdb configured, skipping (dev-static mode)");
         return;
-    };
+    }
+    let store = st.store.clone();
     let interval = crate::config::revocation_sweep_interval();
     if interval.is_zero() {
         tracing::info!(target: "auth", "revocation sweep disabled (QUEEN_PROXY_REVOCATION_SWEEP_MS=0)");
@@ -1142,24 +1103,14 @@ pub fn spawn_revocation_sweep(st: St) {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tick.tick().await;
-            sweep_revoked_once(&pool).await;
+            sweep_revoked_once(&store).await;
         }
     });
 }
 
-async fn sweep_revoked_once(pool: &deadpool_postgres::Pool) {
-    let client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(target: "auth", err = %e, "revocation sweep: pxdb unavailable");
-            return;
-        }
-    };
-    match client.query_one("SELECT queen_proxy.sweep_revoked_tokens()", &[]).await {
-        Ok(row) => {
-            let deleted: i32 = row.get(0);
-            tracing::debug!(target: "auth", deleted, "revoked_tokens swept");
-        }
+async fn sweep_revoked_once(store: &Store) {
+    match data::sweep_revoked_tokens(store).await {
+        Ok(deleted) => tracing::debug!(target: "auth", deleted, "revoked_tokens swept"),
         Err(e) => tracing::warn!(target: "auth", err = %e, "revocation sweep failed"),
     }
 }
@@ -1757,7 +1708,7 @@ mod tests {
             let mut keys = hs_keys("queen-proxy");
             keys.revocation_strict = strict;
             assert!(
-                !keys.is_revoked(&None, "some-jti").await,
+                !keys.is_revoked(Store::None, "some-jti").await,
                 "dev-static mode has no deny-list at all (strict={strict})"
             );
         }
@@ -2156,7 +2107,7 @@ mod tests {
         let keys = hs_keys("queen-proxy");
         let uid = Uuid::new_v4();
         // no pxdb at all (dev-static), and an unreachable one: both deny.
-        assert!(!keys.is_operator(&None, uid).await);
+        assert!(!keys.is_operator(Store::None, uid).await);
         assert!(!keys.is_operator(&Some(unreachable_pool()), uid).await);
         assert!(
             keys.operator_cache.lock().unwrap().is_empty(),
@@ -2248,5 +2199,51 @@ mod tests {
             .mint_user_jwt(Uuid::new_v4(), "viewer", None, 60)
             .unwrap();
         assert!(keys.verify_jwt_claims(&ed).is_err());
+    }
+
+    /// The single binary: the same lookups answered by the broker's KV.
+    #[tokio::test]
+    async fn the_kv_store_answers_the_session_lookups() {
+        use crate::store::data;
+        let store = Store::Kv(std::sync::Arc::new(crate::store::memkv::MemKv::new()));
+        data::seed_default_plans(&store).await.unwrap();
+        let cell = data::upsert_cell(
+            &store,
+            &data::CellSpec {
+                slug: "local".into(),
+                region: "eu".into(),
+                base_url: "http://127.0.0.1:1".into(),
+                class: "shared".into(),
+                capacity_slots: 1,
+                cell_secret: None,
+            },
+        )
+        .await
+        .unwrap();
+        let out = data::bootstrap_tenant(
+            &store,
+            &data::Bootstrap {
+                tenant_slug: "acme".into(),
+                cluster_slug: "acme".into(),
+                plan_code: "free".into(),
+                cell: Some(cell),
+                admin_email: "a@acme.io".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let user = Uuid::parse_str(out["user_id"].as_str().unwrap()).unwrap();
+        let cluster = Uuid::parse_str(out["cluster_id"].as_str().unwrap()).unwrap();
+        let keys = hs_keys("queen-proxy");
+        assert_eq!(keys.cluster_role(&store, user, cluster).await, Some(Role::Admin));
+        assert_eq!(keys.cluster_role(&store, user, Uuid::new_v4()).await, None);
+        assert!(keys.user_exists(&store, user).await);
+        assert!(!keys.user_exists(&store, Uuid::new_v4()).await);
+        assert!(!keys.is_operator(&store, user).await);
+        assert!(!keys.is_revoked(&store, "jti-x").await);
+        let exp = (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 600) as i64;
+        data::revoke_session(&store, "jti-y", exp, "user", user).await.unwrap();
+        assert!(keys.is_revoked(&store, "jti-y").await);
     }
 }

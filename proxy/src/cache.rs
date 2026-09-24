@@ -1,10 +1,15 @@
 //! ClusterCache: host -> ClusterCtx and api-key-hash -> (ClusterCtx, scopes),
-//! DB-backed with TTL + LISTEN/NOTIFY invalidation. OWNER: Agent B.
+//! store-backed with TTL + invalidation. OWNER: Agent B.
 //!
 //! dev-static (QUEEN_PROXY_DEV_CELL_URL) always wins when configured -- the
-//! DB-backed path below is only ever consulted when it isn't. See
+//! store-backed path below is only ever consulted when it isn't. The lookups
+//! themselves (Postgres SQL or KV documents) live in `store::data`; see
 //! migrations/001_init.sql for the table shapes and the limit_overrides
 //! merge convention (mirrored exactly by `merge_limits` below).
+//!
+//! Invalidation: the standalone proxy LISTENs on `queen_proxy_inval`; inside
+//! the broker the store is the replicated KV and the same signal is its
+//! invalidation feed (`store::data::InvalFeed`), polled once a second.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -17,6 +22,8 @@ use uuid::Uuid;
 
 use crate::config::{Config, PxdbConfig};
 use crate::state::{ClusterCtx, ClusterStatus, EffectiveLimits, Features, Scopes};
+use crate::store::data::{self, ClusterKey, InvalPoll, Lookup};
+use crate::store::{KvBackend, Store};
 
 const HOST_TTL: Duration = Duration::from_secs(30);
 const KEY_POSITIVE_TTL: Duration = Duration::from_secs(30);
@@ -87,17 +94,6 @@ impl LogGate {
 /// Is a stale-serve line due on the process-wide gate?
 fn stale_log_due(now: Instant) -> bool {
     STALE_LOG.due(now)
-}
-
-/// What one pxdb lookup told us. `Absent` (the query ran and matched no row)
-/// and `Unavailable` (pxdb never produced an answer) are deliberately
-/// distinct: the fail-open below is only sound as long as "the DB said no"
-/// can never be confused with "the DB did not answer".
-#[derive(Clone)]
-enum Lookup<T> {
-    Found(T),
-    Absent,
-    Unavailable,
 }
 
 /// Why the fresh-cache fast path was missed, as far as the fail-open rule
@@ -269,7 +265,8 @@ pub struct ClusterCache {
     /// Host header resolves to no cluster — browsers on localhost send
     /// `Host: localhost:6711`, which is no cluster's slug. Never set in cloud.
     default_cluster: Option<String>,
-    db: Option<deadpool_postgres::Pool>,
+    /// Where lookups go: pxdb, the broker's KV, or nowhere (dev-static).
+    store: Store,
     /// Cloned at construction so `spawn_listener` can open its own dedicated
     /// LISTEN connection later. The pool can't be reused for this: deadpool
     /// drives each pooled connection on its own background task and
@@ -300,7 +297,13 @@ pub struct ClusterCache {
 type InvalHook = Arc<dyn Fn(Uuid) + Send + Sync>;
 
 impl ClusterCache {
+    /// The standalone proxy's constructor: pxdb, or none (dev-static).
     pub fn new(cfg: &Config, db: Option<deadpool_postgres::Pool>) -> ClusterCache {
+        ClusterCache::with_store(cfg, db.map(Store::Pg).unwrap_or(Store::None))
+    }
+
+    /// Any store: the single binary hands the broker's KV here.
+    pub fn with_store(cfg: &Config, store: Store) -> ClusterCache {
         let dev_static = cfg.dev_static.as_ref().map(|d| ClusterCtx {
             cluster_id: Uuid::nil(),
             tenant_id: Uuid::nil(),
@@ -325,7 +328,7 @@ impl ClusterCache {
         ClusterCache {
             dev_static,
             default_cluster: cfg.default_cluster.clone(),
-            db,
+            store,
             pxdb_cfg: cfg.pxdb.clone(),
             stale_grace: crate::config::stale_grace(),
             host_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -381,18 +384,18 @@ impl ClusterCache {
             // are dropped together on NOTIFY.
             Ok(id) => {
                 let key = format!("id:{id}");
-                self.resolve_keyed(key, RESOLVE_BY_ID_SQL, id.to_string()).await
+                self.resolve_keyed(key, ClusterKey::Id(id)).await
             }
             Err(_) => self.resolve_slug(reference.to_ascii_lowercase()).await,
         }
     }
 
     async fn resolve_slug(&self, slug: String) -> Option<Arc<ClusterCtx>> {
-        self.resolve_keyed(slug.clone(), RESOLVE_HOST_SQL, slug).await
+        self.resolve_keyed(slug.clone(), ClusterKey::Slug(slug)).await
     }
 
     /// The shared body behind both lookups: `cache_key` names the entry,
-    /// `sql`/`param` name the row. Three outcomes, in order:
+    /// `key` names the row. Three outcomes, in order:
     ///   * a fresh entry is served;
     ///   * an expired entry inside the grace window is served AS IS, and one
     ///     background refresh is started for it (stale-while-revalidate). Its
@@ -403,13 +406,10 @@ impl ClusterCache {
     ///     even that long arrive through NOTIFY invalidation;
     ///   * nothing servable: one lookup, shared by every request that needs
     ///     it, then the PLAN §2 rule (`fallback`) on its outcome.
-    async fn resolve_keyed(
-        &self,
-        cache_key: String,
-        sql: &'static str,
-        param: String,
-    ) -> Option<Arc<ClusterCtx>> {
-        let pool = self.db.as_ref()?;
+    async fn resolve_keyed(&self, cache_key: String, key: ClusterKey) -> Option<Arc<ClusterCtx>> {
+        if !self.store.is_some() {
+            return None;
+        }
         let now = Instant::now();
 
         let stale = {
@@ -425,7 +425,7 @@ impl ClusterCache {
             if fallback(Miss::NoAnswer, Some(*expires_at), now, self.stale_grace) == Fallback::ServeStale {
                 if now >= *refresh_after {
                     // Fire-and-forget: one task per key, a second start is a no-op.
-                    let work = host_lookup_work(pool, &self.host_cache, cache_key.clone(), sql, param);
+                    let work = host_lookup_work(&self.store, &self.host_cache, cache_key.clone(), key);
                     self.host_flights.start(&cache_key, work);
                 }
                 return Some(ctx.clone());
@@ -434,7 +434,7 @@ impl ClusterCache {
 
         let looked = self
             .host_flights
-            .join(&cache_key, host_lookup_work(pool, &self.host_cache, cache_key.clone(), sql, param))
+            .join(&cache_key, host_lookup_work(&self.store, &self.host_cache, cache_key.clone(), key))
             .await;
         let miss = match looked {
             Some(Lookup::Found(ctx)) => return Some(ctx),
@@ -454,7 +454,9 @@ impl ClusterCache {
     /// denying while its refresh runs, a stale positive is the fail-open of
     /// PLAN §2 one refresh away from being confirmed or withdrawn.
     pub async fn by_key_hash(&self, hash_hex: &str) -> Option<KeyResult> {
-        let pool = self.db.as_ref()?;
+        if !self.store.is_some() {
+            return None;
+        }
         let now = Instant::now();
 
         let stale = {
@@ -469,7 +471,7 @@ impl ClusterCache {
         if let Some(e) = &stale {
             if fallback(Miss::NoAnswer, Some(e.expires_at), now, self.stale_grace) == Fallback::ServeStale {
                 if now >= e.refresh_after {
-                    let work = key_lookup_work(pool, &self.key_cache, &self.touched, hash_hex);
+                    let work = key_lookup_work(&self.store, &self.key_cache, &self.touched, hash_hex);
                     self.key_flights.start(hash_hex, work);
                 }
                 return e.value.clone();
@@ -478,7 +480,7 @@ impl ClusterCache {
 
         let looked = self
             .key_flights
-            .join(hash_hex, key_lookup_work(pool, &self.key_cache, &self.touched, hash_hex))
+            .join(hash_hex, key_lookup_work(&self.store, &self.key_cache, &self.touched, hash_hex))
             .await;
         let miss = match looked {
             Some(Lookup::Found(result)) => return Some(result),
@@ -503,14 +505,26 @@ impl ClusterCache {
     /// skeleton declared the latter, but `AppState` stores `cache` as a
     /// plain field (not `Arc<ClusterCache>`), so nothing could ever have
     /// called it that way.
+    ///
+    /// Inside the broker (a KV store) the same invalidations arrive through
+    /// the KV invalidation feed instead, polled every QUEEN_PROXY_INVAL_POLL_MS
+    /// (default 1 s): every node runs its own proxy, and each drops its own
+    /// caches.
     pub fn spawn_listener(&self) {
-        let Some(pxcfg) = self.pxdb_cfg.clone() else {
-            tracing::info!("queen_proxy_inval listener: no pxdb configured, skipping (dev-static mode)");
-            return;
-        };
         let host_cache = self.host_cache.clone();
         let key_cache = self.key_cache.clone();
         let subscribers = self.inval_subscribers.clone();
+        if let Store::Kv(kv) = &self.store {
+            let kv = kv.clone();
+            tokio::spawn(async move {
+                poll_forever(kv, host_cache, key_cache, subscribers).await;
+            });
+            return;
+        }
+        let (Store::Pg(_), Some(pxcfg)) = (&self.store, self.pxdb_cfg.clone()) else {
+            tracing::info!("queen_proxy_inval listener: no pxdb configured, skipping (dev-static mode)");
+            return;
+        };
         tokio::spawn(async move {
             listen_forever(pxcfg, host_cache, key_cache, subscribers).await;
         });
@@ -523,7 +537,10 @@ impl ClusterCache {
     /// replaces: a failed flush is dropped and the next refresh re-touches.
     /// No-op without a pxdb (dev-static).
     pub fn spawn_touch_flush(&self) {
-        let Some(pool) = self.db.clone() else { return };
+        if !self.store.is_some() {
+            return;
+        }
+        let store = self.store.clone();
         let touched = self.touched.clone();
         tokio::spawn(async move {
             let every = Duration::from_millis(
@@ -533,95 +550,40 @@ impl ClusterCache {
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
-                flush_touched(&pool, &touched).await;
+                flush_touched(&store, &touched).await;
             }
         });
     }
 }
 
-// --------------------------------------------------------- pxdb lookups
-//
-// Both return `Unavailable` for a malformed row on purpose: the row EXISTS,
-// so pxdb has not said "no such cluster/key" -- we merely failed to decode
-// its answer (schema drift, a column that went NULL). Classifying that as
-// `Absent` would let one bad row deny a live cluster.
-
-async fn lookup_host(
-    pool: &deadpool_postgres::Pool,
-    sql: &str,
-    param: &str,
-) -> Lookup<Arc<ClusterCtx>> {
-    let client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "resolve_host: pxdb pool.get failed");
-            return Lookup::Unavailable;
-        }
-    };
-    let row_opt = match client.query_opt(sql, &[&param]).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, cluster = %param, "resolve_host: query failed");
-            return Lookup::Unavailable;
-        }
-    };
-    let Some(row) = row_opt else { return Lookup::Absent };
-    match ctx_from_row(&row) {
-        Ok(c) => Lookup::Found(Arc::new(c)),
-        Err(e) => {
-            tracing::error!(error = %e, cluster = %param, "resolve_host: malformed row");
-            Lookup::Unavailable
-        }
-    }
-}
-
-async fn lookup_key(
-    pool: &deadpool_postgres::Pool,
-    hash_hex: &str,
-) -> Lookup<(Arc<ClusterCtx>, Uuid, Scopes)> {
-    let client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "by_key_hash: pxdb pool.get failed");
-            return Lookup::Unavailable;
-        }
-    };
-    let row_opt = match client.query_opt(BY_KEY_HASH_SQL, &[&hash_hex]).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "by_key_hash: query failed");
-            return Lookup::Unavailable;
-        }
-    };
-    let Some(row) = row_opt else { return Lookup::Absent };
-    let result = match build_key_result(&row) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(error = %e, "by_key_hash: malformed row");
-            return Lookup::Unavailable;
-        }
-    };
-
-    // `last_used_at` is NOT bumped here: `apply_key_lookup` records the key
-    // and `spawn_touch_flush` writes the set in one statement per interval.
-    Lookup::Found(result)
-}
-
 // ------------------------------------------------------ lookup tasks
+//
+// The lookups themselves are `store::data::lookup_cluster` / `lookup_api_key`
+// (the SQL moved there verbatim; the KV arm reads the same rows as
+// documents). Both answer `Unavailable` for a malformed row on purpose: the
+// row EXISTS, so the store has not said "no such cluster/key" -- we merely
+// failed to decode its answer (schema drift, a column that went NULL).
+// Classifying that as `Absent` would let one bad row deny a live cluster.
+//
+// `last_used_at` is NOT bumped by a key lookup: `apply_key_lookup` records
+// the key and `spawn_touch_flush` writes the set once per interval.
 
 /// The body of one host flight: look the row up, apply the outcome to the
 /// cache, hand the outcome to whoever is waiting. Runs in its own task.
 fn host_lookup_work(
-    pool: &deadpool_postgres::Pool,
+    store: &Store,
     cache: &Arc<HostMap>,
     cache_key: String,
-    sql: &'static str,
-    param: String,
+    key: ClusterKey,
 ) -> impl Future<Output = Lookup<Arc<ClusterCtx>>> + Send + 'static {
-    let pool = pool.clone();
+    let store = store.clone();
     let cache = cache.clone();
     async move {
-        let looked = lookup_host(&pool, sql, &param).await;
+        let looked = match data::lookup_cluster(&store, &key).await {
+            Lookup::Found(ctx) => Lookup::Found(Arc::new(ctx)),
+            Lookup::Absent => Lookup::Absent,
+            Lookup::Unavailable => Lookup::Unavailable,
+        };
         apply_host_lookup(&cache, &cache_key, &looked);
         looked
     }
@@ -629,17 +591,21 @@ fn host_lookup_work(
 
 /// Same, for one key flight.
 fn key_lookup_work(
-    pool: &deadpool_postgres::Pool,
+    store: &Store,
     cache: &Arc<KeyMap>,
     touched: &Arc<Touched>,
     hash_hex: &str,
 ) -> impl Future<Output = Lookup<KeyResult>> + Send + 'static {
-    let pool = pool.clone();
+    let store = store.clone();
     let cache = cache.clone();
     let touched = touched.clone();
     let hash = hash_hex.to_string();
     async move {
-        let looked = lookup_key(&pool, &hash).await;
+        let looked = match data::lookup_api_key(&store, &hash).await {
+            Lookup::Found((ctx, key_id, scopes)) => Lookup::Found((Arc::new(ctx), key_id, scopes)),
+            Lookup::Absent => Lookup::Absent,
+            Lookup::Unavailable => Lookup::Unavailable,
+        };
         apply_key_lookup(&cache, &touched, &hash, &looked);
         looked
     }
@@ -787,29 +753,16 @@ fn apply_key_lookup(cache: &KeyMap, touched: &Touched, hash_hex: &str, looked: &
     }
 }
 
-/// One statement for every key touched since the last tick.
-async fn flush_touched(pool: &deadpool_postgres::Pool, touched: &Touched) {
-    let ids: Vec<String> = {
+/// One write for every key touched since the last tick.
+async fn flush_touched(store: &Store, touched: &Touched) {
+    let ids: Vec<Uuid> = {
         let mut set = touched.lock().unwrap();
         if set.is_empty() {
             return;
         }
-        set.drain().map(|id| id.to_string()).collect()
+        set.drain().collect()
     };
-    let client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::debug!(error = %e, keys = ids.len(), "last_used_at flush: pxdb unavailable (non-fatal)");
-            return;
-        }
-    };
-    if let Err(e) = client
-        .execute(
-            "UPDATE queen_proxy.api_keys SET last_used_at = now() WHERE id = ANY($1::text[]::uuid[])",
-            &[&ids],
-        )
-        .await
-    {
+    if let Err(e) = data::touch_api_keys(store, &ids).await {
         tracing::debug!(error = %e, keys = ids.len(), "last_used_at flush failed (non-fatal)");
     }
 }
@@ -981,141 +934,72 @@ fn handle_notification(
     }
 }
 
-// -------------------------------------------------------------- row -> ctx
+// ------------------------------------------------------- kv invalidation feed
 
-/// The projection `ctx_from_row` reads, shared by every cluster lookup keyed
-/// on the clusters table. A macro (not a const) so `concat!` can glue a WHERE
-/// onto it at compile time and the two queries cannot drift apart.
-macro_rules! cluster_select {
-    () => {
-        "
-    SELECT c.id::text                  AS cluster_id,
-           c.tenant_id::text           AS tenant_id,
-           c.broker_tenant_uuid::text  AS broker_tenant,
-           c.slug                      AS slug,
-           ce.base_url                 AS base_url,
-           ce.cell_secret              AS cell_secret,
-           t.status                    AS tenant_status,
-           c.status                    AS cluster_status,
-           p.max_req_per_sec, p.req_burst, p.max_msgs_per_sec, p.msgs_burst,
-           p.max_queues, p.max_partitions_per_queue, p.max_parked_pops,
-           p.max_payload_bytes, p.max_batch_items, p.max_retained_bytes, p.max_retention_seconds,
-           (p.features)::text          AS features_json,
-           (c.limit_overrides)::text   AS overrides_json
-    FROM queen_proxy.clusters c
-    JOIN queen_proxy.tenants t ON t.id = c.tenant_id
-    JOIN queen_proxy.cells   ce ON ce.id = c.cell_id
-    JOIN queen_proxy.plans   p  ON p.id = c.plan_id
-    "
-    };
+/// Cluster ids this process currently holds anything for.
+fn cached_clusters(host_cache: &HostMap, key_cache: &KeyMap) -> HashSet<Uuid> {
+    let mut ids: HashSet<Uuid> = host_cache.read().unwrap().values().map(|e| e.ctx.cluster_id).collect();
+    ids.extend(key_cache.read().unwrap().values().filter_map(|e| e.value.as_ref().map(|(ctx, _, _)| ctx.cluster_id)));
+    ids
 }
 
-const RESOLVE_HOST_SQL: &str = concat!(cluster_select!(), "WHERE c.slug = $1");
-
-/// Act-as-cluster by uuid. `$1::text::uuid` for the same reason every other
-/// query in this crate does it: no uuid feature on tokio-postgres.
-const RESOLVE_BY_ID_SQL: &str = concat!(cluster_select!(), "WHERE c.id = $1::text::uuid");
-
-const BY_KEY_HASH_SQL: &str = "
-    SELECT ak.id::text                 AS key_id,
-           ak.scopes                   AS scopes,
-           c.id::text                  AS cluster_id,
-           c.tenant_id::text           AS tenant_id,
-           c.broker_tenant_uuid::text  AS broker_tenant,
-           c.slug                      AS slug,
-           ce.base_url                 AS base_url,
-           ce.cell_secret              AS cell_secret,
-           t.status                    AS tenant_status,
-           c.status                    AS cluster_status,
-           p.max_req_per_sec, p.req_burst, p.max_msgs_per_sec, p.msgs_burst,
-           p.max_queues, p.max_partitions_per_queue, p.max_parked_pops,
-           p.max_payload_bytes, p.max_batch_items, p.max_retained_bytes, p.max_retention_seconds,
-           (p.features)::text          AS features_json,
-           (c.limit_overrides)::text   AS overrides_json
-    FROM queen_proxy.api_keys ak
-    JOIN queen_proxy.clusters c ON c.id = ak.cluster_id
-    JOIN queen_proxy.tenants  t ON t.id = c.tenant_id
-    JOIN queen_proxy.cells    ce ON ce.id = c.cell_id
-    JOIN queen_proxy.plans    p  ON p.id = c.plan_id
-    WHERE ak.key_hash = $1 AND ak.revoked_at IS NULL";
-
-fn build_key_result(row: &tokio_postgres::Row) -> Result<(Arc<ClusterCtx>, Uuid, Scopes), String> {
-    let key_id = parse_uuid(row, "key_id")?;
-    let scopes_vec: Vec<String> = row.try_get("scopes").map_err(|e| format!("scopes: {e}"))?;
-    let scopes = Scopes {
-        produce: scopes_vec.iter().any(|s| s == "produce"),
-        consume: scopes_vec.iter().any(|s| s == "consume"),
-        admin: scopes_vec.iter().any(|s| s == "admin"),
-        read: scopes_vec.iter().any(|s| s == "read"),
-    };
-    let ctx = ctx_from_row(row)?;
-    Ok((Arc::new(ctx), key_id, scopes))
+/// The KV arm of `listen_forever`: poll the invalidation feed
+/// (`store::data::InvalFeed`) and fan out every cluster it names, exactly as a
+/// NOTIFY would. One local read per tick while nothing changes.
+async fn poll_forever(
+    kv: Arc<dyn KvBackend>,
+    host_cache: Arc<HostMap>,
+    key_cache: Arc<KeyMap>,
+    subscribers: Arc<RwLock<Vec<InvalHook>>>,
+) {
+    let every = Duration::from_millis(crate::config::env_u64("QUEEN_PROXY_INVAL_POLL_MS", 1_000).max(100));
+    let mut tick = tokio::time::interval(every);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut feed = data::InvalFeed::new();
+    let mut failing = false;
+    loop {
+        tick.tick().await;
+        match feed.poll(kv.as_ref()).await {
+            Ok(InvalPoll::Quiet) => {}
+            Ok(InvalPoll::Baseline) => {
+                tracing::info!(poll_ms = every.as_millis() as u64, "kv invalidation feed connected");
+                // Whatever was cached before the feed's first answer cannot be
+                // vouched for (empty at a clean boot).
+                for id in cached_clusters(&host_cache, &key_cache) {
+                    fan_out_invalidation(&host_cache, &key_cache, &subscribers, id);
+                }
+            }
+            Ok(InvalPoll::Changed(ids)) => {
+                for id in ids {
+                    tracing::debug!(cluster = %id, "cache invalidated via kv feed");
+                    fan_out_invalidation(&host_cache, &key_cache, &subscribers, id);
+                }
+            }
+            Err(e) => {
+                if !failing {
+                    tracing::warn!(error = %e, "kv invalidation feed unavailable; caches fall back to their TTLs");
+                }
+                failing = true;
+                continue;
+            }
+        }
+        if failing {
+            tracing::info!("kv invalidation feed recovered");
+            failing = false;
+        }
+    }
 }
 
-/// Shared by resolve_host and by_key_hash: both SELECTs alias to the same
-/// column names (cluster_id, tenant_id, broker_tenant, slug, base_url,
-/// cell_secret, tenant_status, cluster_status, the plan limit columns,
-/// features_json, overrides_json) precisely so this one builder works for
-/// either.
-fn ctx_from_row(row: &tokio_postgres::Row) -> Result<ClusterCtx, String> {
-    let cluster_id = parse_uuid(row, "cluster_id")?;
-    let tenant_id = parse_uuid(row, "tenant_id")?;
-    let broker_tenant = parse_uuid(row, "broker_tenant")?;
-    let slug: String = row.try_get("slug").map_err(|e| format!("slug: {e}"))?;
-    let cell_base_url: String = row.try_get("base_url").map_err(|e| format!("base_url: {e}"))?;
-    let cell_token: Option<String> = row.try_get("cell_secret").map_err(|e| format!("cell_secret: {e}"))?;
-    let tenant_status: String = row.try_get("tenant_status").map_err(|e| format!("tenant_status: {e}"))?;
-    let cluster_status: String = row.try_get("cluster_status").map_err(|e| format!("cluster_status: {e}"))?;
-    let status = merge_status(&tenant_status, &cluster_status);
-
-    let base = EffectiveLimits {
-        max_req_per_sec: get_i32_as_i64(row, "max_req_per_sec")?,
-        req_burst: get_i32_as_i64(row, "req_burst")?,
-        max_msgs_per_sec: get_i32_as_i64(row, "max_msgs_per_sec")?,
-        msgs_burst: get_i32_as_i64(row, "msgs_burst")?,
-        max_queues: get_i32_as_i64(row, "max_queues")?,
-        max_partitions_per_queue: get_i32_as_i64(row, "max_partitions_per_queue")?,
-        max_parked_pops: get_i32_as_i64(row, "max_parked_pops")?,
-        max_payload_bytes: get_i32_as_i64(row, "max_payload_bytes")?,
-        max_batch_items: get_i32_as_i64(row, "max_batch_items")?,
-        max_retained_bytes: row.try_get("max_retained_bytes").map_err(|e| format!("max_retained_bytes: {e}"))?,
-        max_retention_seconds: get_i32_as_i64(row, "max_retention_seconds")?,
-    };
-    let overrides_json: String = row.try_get("overrides_json").map_err(|e| format!("overrides_json: {e}"))?;
-    let overrides: serde_json::Value = serde_json::from_str(&overrides_json).unwrap_or(serde_json::Value::Null);
-    let limits = merge_limits(base, &overrides);
-
-    let features_json: String = row.try_get("features_json").map_err(|e| format!("features_json: {e}"))?;
-    let features = parse_features(&features_json);
-
-    Ok(ClusterCtx {
-        cluster_id,
-        tenant_id,
-        broker_tenant,
-        slug,
-        cell_base_url,
-        cell_token,
-        status,
-        limits,
-        features,
-    })
-}
-
-fn parse_uuid(row: &tokio_postgres::Row, col: &str) -> Result<Uuid, String> {
-    let s: String = row.try_get(col).map_err(|e| format!("{col}: {e}"))?;
-    Uuid::parse_str(&s).map_err(|e| format!("{col}: bad uuid {s:?}: {e}"))
-}
-
-fn get_i32_as_i64(row: &tokio_postgres::Row, col: &str) -> Result<Option<i64>, String> {
-    let v: Option<i32> = row.try_get(col).map_err(|e| format!("{col}: {e}"))?;
-    Ok(v.map(i64::from))
-}
+// -------------------------------------------------------- row/doc -> ctx
+//
+// The pure halves of building a ClusterCtx, shared by both store arms
+// (`store::data::ctx_from_row` / `ctx_from_docs`).
 
 /// tenant.status + cluster.status -> effective ClusterStatus, worst wins
 /// (PLAN §6.2 / open decision §13.b: tenant `grace` == "payment-failed" maps
 /// to the same severity as cluster `push_blocked` -- pushes blocked,
 /// consumes allowed -- rather than a full suspend).
-fn merge_status(tenant_status: &str, cluster_status: &str) -> ClusterStatus {
+pub(crate) fn merge_status(tenant_status: &str, cluster_status: &str) -> ClusterStatus {
     fn tenant_severity(s: &str) -> u8 {
         match s {
             "active" => 1,
@@ -1149,7 +1033,7 @@ fn merge_status(tenant_status: &str, cluster_status: &str) -> ClusterStatus {
 /// Convention (also documented on clusters.limit_overrides in
 /// 001_init.sql): key absent -> inherit the plan value; key present as JSON
 /// null -> force unlimited; key present as a number -> that value wins.
-fn merge_limits(base: EffectiveLimits, overrides: &serde_json::Value) -> EffectiveLimits {
+pub(crate) fn merge_limits(base: EffectiveLimits, overrides: &serde_json::Value) -> EffectiveLimits {
     EffectiveLimits {
         max_req_per_sec: override_or(overrides, "max_req_per_sec", base.max_req_per_sec),
         req_burst: override_or(overrides, "req_burst", base.req_burst),
@@ -1179,11 +1063,16 @@ pub(crate) fn override_or(overrides: &serde_json::Value, key: &str, base: Option
     }
 }
 
-fn parse_features(json: &str) -> Features {
-    let v: serde_json::Value = match serde_json::from_str(json) {
-        Ok(v) => v,
-        Err(_) => return Features::default(),
-    };
+pub(crate) fn parse_features(json: &str) -> Features {
+    match serde_json::from_str::<serde_json::Value>(json) {
+        Ok(v) => parse_features_value(&v),
+        Err(_) => Features::default(),
+    }
+}
+
+/// `parse_features` on an already-parsed `plans.features` (the KV document
+/// carries it as JSON, not text).
+pub(crate) fn parse_features_value(v: &serde_json::Value) -> Features {
     Features {
         streams: v.get("streams").and_then(|b| b.as_bool()).unwrap_or(false),
         traces: v.get("traces").and_then(|b| b.as_bool()).unwrap_or(false),
@@ -1565,5 +1454,81 @@ mod tests {
         apply_key_lookup(&cache, &touched, "revoked", &Lookup::Found((ctx(2), key_id, Scopes::all())));
         apply_key_lookup(&cache, &touched, "revoked", &Lookup::Absent);
         assert!(cache.read().unwrap()["revoked"].value.is_none(), "a revoked key must not survive");
+    }
+
+    // ---- the single binary: the broker's KV behind the same cache ----
+
+    async fn kv_world() -> (Store, Uuid, String) {
+        use crate::store::data;
+        let store = Store::Kv(Arc::new(crate::store::memkv::MemKv::new()));
+        data::seed_default_plans(&store).await.unwrap();
+        let cell = data::upsert_cell(
+            &store,
+            &data::CellSpec {
+                slug: "local".into(),
+                region: "eu".into(),
+                base_url: "http://127.0.0.1:1".into(),
+                class: "shared".into(),
+                capacity_slots: 1,
+                cell_secret: None,
+            },
+        )
+        .await
+        .unwrap();
+        let out = data::bootstrap_tenant(
+            &store,
+            &data::Bootstrap {
+                tenant_slug: "acme".into(),
+                cluster_slug: "acme".into(),
+                plan_code: "free".into(),
+                cell: Some(cell),
+                admin_email: "a@acme.io".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let cluster = Uuid::parse_str(out["cluster_id"].as_str().unwrap()).unwrap();
+        (store, cluster, out["api_key"].as_str().unwrap().to_string())
+    }
+
+    #[tokio::test]
+    async fn a_kv_store_resolves_hosts_refs_and_keys() {
+        let (store, cluster, key) = kv_world().await;
+        let cache = ClusterCache::with_store(&crate::config::test_config(&[]), store);
+        let ctx = cache.resolve_host("acme.eu1.queenmq.cloud:6711").await.expect("resolved");
+        assert_eq!(ctx.cluster_id, cluster);
+        assert_eq!(ctx.limits.max_queues, Some(20), "the plan came along");
+        assert_eq!(cache.resolve_ref(&cluster.to_string()).await.expect("by id").slug, "acme");
+        assert!(cache.resolve_host("nope.eu1").await.is_none());
+        let (kctx, _, scopes) = cache.by_key_hash(&crate::auth::key_hash_hex(&key)).await.expect("key");
+        assert_eq!((kctx.cluster_id, scopes), (cluster, Scopes::all()));
+        assert!(cache.by_key_hash(&"0".repeat(64)).await.is_none());
+    }
+
+    /// The Kv arm of `queen_proxy_inval`: a revoke written anywhere (here: the
+    /// store directly, as another node would) reaches this cache through the
+    /// feed well inside the 30 s TTL, and the registry hook hears it too.
+    #[tokio::test]
+    async fn a_kv_write_reaches_the_cache_through_the_feed() {
+        let (store, cluster, key) = kv_world().await;
+        let cache = ClusterCache::with_store(&crate::config::test_config(&[]), store.clone());
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let h = heard.clone();
+        cache.on_invalidate(move |id| h.lock().unwrap().push(id));
+        cache.spawn_listener();
+        tokio::time::sleep(Duration::from_millis(200)).await; // the feed's baseline
+        let hash = crate::auth::key_hash_hex(&key);
+        let (_, key_id, _) = cache.by_key_hash(&hash).await.expect("key");
+        assert!(cache.resolve_host("acme").await.is_some());
+        heard.lock().unwrap().clear();
+
+        crate::store::data::revoke_api_key(&store, key_id).await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while cache.by_key_hash(&hash).await.is_some() {
+            assert!(Instant::now() < deadline, "the revocation never reached the cache");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(heard.lock().unwrap().contains(&cluster), "subscribers (the registry) hear it too");
     }
 }
