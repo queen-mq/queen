@@ -513,6 +513,10 @@ pub(crate) fn build_raft_state_with(
     crate::admission::set_global(admission.clone());
 
     let metrics = Arc::new(crate::metrics::Metrics::new());
+    // The raft handlers hand requests to the facade before the Postgres
+    // path's counters; the facade counts through the global handle, and the
+    // dashboard collector (rsm/dashboard/collector.rs) flushes it.
+    crate::metrics::install_global(metrics.clone());
     let notifier = crate::notify::Notifier::new(cfg.tenancy_header);
     let encryption = crate::encryption::Encryption::from_env();
 
@@ -859,7 +863,10 @@ async fn forward_to_leader(
     next: axum::middleware::Next,
 ) -> Response {
     let path = req.uri().path();
-    let forwardable = path.starts_with("/api/") || path.starts_with("/streams/");
+    // The Raft view describes THIS node and gathers its peers itself: it must
+    // answer where it lands, above all while no leader is known.
+    let forwardable = (path.starts_with("/api/") || path.starts_with("/streams/"))
+        && !path.starts_with("/api/v1/raft/");
     if !forwardable || req.headers().contains_key(FORWARDED_HEADER) {
         return next.run(req).await;
     }

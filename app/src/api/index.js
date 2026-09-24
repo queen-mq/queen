@@ -320,6 +320,19 @@ export const operator = {
     client.get('/api/v1/analytics/worker-metrics', { params, ...config }),
   getPostgresStats: (config) => client.get('/api/v1/analytics/postgres-stats', config),
   /**
+   * RAFT MODE ONLY (stores/engine.js says which). A Postgres-mode or older
+   * broker answers 404, and a proxy that does not classify the family answers
+   * 404 route_blocked: a state to render, not a failure to retry — callers
+   * guard these with stores/routeSupport.js.
+   *
+   * `getRaftStatus`: the answering node's own member object plus `clusterId`,
+   * `leaderId`, `self`, `voters` and `singleNode`. `getRaftMembers`: every
+   * member as that node sees it; `matchIndex` / `lagEntries` /
+   * `heartbeatAgeMs` are the leader's view of each follower.
+   */
+  getRaftStatus: (config) => client.get('/api/v1/raft/status', config),
+  getRaftMembers: (config) => client.get('/api/v1/raft/members', config),
+  /**
    * The two maintenance kill switches, both cell-wide (every tenant on the
    * cell, not just yours). GET reads a flag, POST flips it.
    *

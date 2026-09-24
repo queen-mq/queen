@@ -82,7 +82,12 @@
   <div v-if="showBanners" class="status-strip">
     <div v-if="pushMaintenanceMode" class="status-banner banner-warn">
       <span class="pulse-amber" style="width:7px; height:7px; flex-shrink:0;" />
-      <span>
+      <!-- Raft mode has no spool: a push under maintenance is refused, so a
+           "0 buffered" count would describe a buffer that does not exist. -->
+      <span v-if="isRaft">
+        <strong>Push maintenance active</strong> · every push on this cell is refused with 503 until it is turned off
+      </span>
+      <span v-else>
         <strong>Push maintenance active</strong> ·
         <span class="font-mono tabular-nums">{{ formatNumber(bufferedMessages) }}</span>
         message{{ bufferedMessages === 1 ? '' : 's' }} buffered on disk
@@ -120,6 +125,7 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { queues as queuesApi, consumers as consumersApi, operator } from '@/api'
 import { formatNumber } from '@/composables/useApi'
+import { useEngine } from '@/stores/engine'
 import { useIdentity } from '@/stores/identity'
 import { useToast } from '@/composables/useToast'
 import { isDark, toggleTheme } from '@/composables/useTheme'
@@ -196,6 +202,11 @@ const handleRefresh = async () => {
 const { can } = useIdentity()
 const { notifyError, notifySuccess } = useToast()
 const isOperator = computed(() => can('operator'))
+// What push maintenance DOES depends on the engine: the Postgres engine spools
+// every push to its file buffer and drains it later; raft has no node-local
+// spool and refuses the push outright (server/src/handlers/data.rs: 503
+// {"error":"maintenance"}), so a success can never mean "buffered on one voter".
+const { isRaft } = useEngine()
 
 const pushMaintenanceMode = ref(false)
 const popMaintenanceMode = ref(false)
@@ -242,7 +253,10 @@ const togglePushMaintenance = async () => {
   const enable = !pushMaintenanceMode.value
   // This is a CELL-wide switch: it stops pushes for every tenant on this cell,
   // so it stays behind an explicit confirmation that says so.
-  if (enable && !confirm('Enable PUSH maintenance on this CELL?\n\nPushes for EVERY tenant on this cell will be routed to the file buffer.')) return
+  const pushOutcome = isRaft.value
+    ? 'Pushes for EVERY tenant on this cell will be refused with 503 until maintenance is turned off. Raft mode has no file buffer: nothing is spooled, so producers must retry.'
+    : 'Pushes for EVERY tenant on this cell will be routed to the file buffer.'
+  if (enable && !confirm(`Enable PUSH maintenance on this CELL?\n\n${pushOutcome}`)) return
   if (!enable && bufferedMessages.value > 0 && !confirm(`Disable PUSH maintenance?\n\n${bufferedMessages.value} buffered messages will drain.`)) return
   pushLoading.value = true
   try {

@@ -379,7 +379,9 @@
             </template>
           </template>
         </MetricRow>
+        <!-- Raft mode has no database pool (stores/engine.js). -->
         <MetricRow
+          v-if="!isRaft"
           label="DB pool"
           scope="cell"
           :context="poolContext"
@@ -567,12 +569,14 @@ import {
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { stamp } from '@/composables/useStamp'
+import { useEngine } from '@/stores/engine'
 import { useIdentity } from '@/stores/identity'
 import MetricRow from '@/components/MetricRow.vue'
 
 // The scope strip states all three slugs, so it is built from identity and
 // never from a fetch — it must survive a failed load and an empty tenant.
 const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
+const { isRaft } = useEngine()
 
 // ---------------------------------------------------------------------------
 // Range. Quick ranges only — this view has no Custom mode, so there is no
@@ -1030,7 +1034,11 @@ const retentionTotal = computed(() => {
 const retentionContext = computed(() => {
   if (retentionQ.data.value === null) return 'loading…'
   if (!retentionRows.value.length) {
-    return 'not reported · the log engine does not record retention events yet'
+    // Raft records every retention step (apply → local.db), so an empty
+    // series there IS "nothing deleted in the window".
+    return isRaft.value
+      ? 'none in window'
+      : 'not reported · the log engine does not record retention events yet'
   }
   return 'evicted + completed-retention in window'
 })

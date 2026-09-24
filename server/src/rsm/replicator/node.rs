@@ -163,6 +163,37 @@ impl<S: Store + 'static> NodeReplicator<S> {
         }
     }
 
+    /// Install the handler that answers a peer's gather of this node's own
+    /// dashboard data.
+    pub fn set_local_handler(&self, h: super::raft::RemoteHandler) {
+        if let NodeReplicator::Raft(r) = self {
+            r.set_local_handler(h);
+        }
+    }
+
+    /// The membership as this node sees it; `None` for the local (single
+    /// node, no consensus) replicator.
+    pub fn cluster_view(&self) -> Option<super::raft::ClusterView> {
+        match self {
+            NodeReplicator::Local(_) => None,
+            NodeReplicator::Raft(r) => Some(r.cluster_view()),
+        }
+    }
+
+    /// POST a dashboard gather to a peer's Raft RPC `path`.
+    pub async fn call_peer(
+        &self,
+        raft_addr: &str,
+        path: &str,
+        body: bytes::Bytes,
+        ttl: std::time::Duration,
+    ) -> Result<bytes::Bytes, String> {
+        match self {
+            NodeReplicator::Local(_) => Err("not a cluster node".to_string()),
+            NodeReplicator::Raft(r) => r.call_peer(raft_addr, path, body, ttl).await,
+        }
+    }
+
     /// Send a prepared command to the leader.
     pub async fn forward_command(
         &self,

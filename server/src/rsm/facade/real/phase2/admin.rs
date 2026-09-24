@@ -655,76 +655,140 @@ impl RaftFacade {
         Ok(ApiOut::json(200,json!({"enabled":true,"reason":"raft_state_machine","appliedIndex":applied.0,"durableIndex":applied.1,"queues":applied.2}).to_string()))
     }
 
-    pub(super) async fn api_status(&self, ctx: ReqCtx) -> Result<ApiOut, RsmError> {
-        let queues = self.queue_snapshots(&ctx.tenant).await?;
-        let total: i64 = queues
-            .iter()
-            .filter_map(|x| x.pointer("/messages/total")?.as_i64())
-            .sum();
-        let pending: i64 = queues
-            .iter()
-            .filter_map(|x| x.pointer("/messages/pending")?.as_i64())
-            .sum();
-        let completed: i64 = queues
-            .iter()
-            .filter_map(|x| x.pointer("/messages/completed")?.as_i64())
-            .sum();
-        let now = super::super::wall_micros();
-        Ok(ApiOut::json(200,json!({
-            "timeRange":{"from":crate::rsm::planner::timers::iso_us(now-3_600_000_000),"to":crate::rsm::planner::timers::iso_us(now)},
-            "bucketMinutes":1,"pointCount":0,"throughput":[],"queues":queues,
-            "messages":{"total":total,"pending":pending,"processing":0,"completed":completed,"failed":0,"deadLetter":0,"requests":{"push":0,"pop":0,"ack":0}},
-            "leases":{"active":0,"partitionsWithLeases":0,"totalBatchSize":0,"totalAcked":0},
-            "deadLetterQueue":{"totalMessages":0,"currentMessages":0,"affectedPartitions":0,"topErrors":[]},
-            "workers":[],"errors":{"dbErrors":0,"ackFailed":0,"dlqMessages":0},"statsAge":0,
-            "engine":"raft"
-        }).to_string()))
+    /// `GET /api/v1/raft/status` — this node's block of the Raft view plus the
+    /// cluster's name, leader, size (§14.6).
+    pub(super) async fn api_raft_status(&self, _ctx: ReqCtx) -> Result<ApiOut, RsmError> {
+        let mut v = local_node_json(&self.repl, &*self.store);
+        let view = self.repl.cluster_view();
+        let (cluster, voters) = cluster_identity(view.as_ref(), &v);
+        if let Some(o) = v.as_object_mut() {
+            o.insert("engine".into(), json!("raft"));
+            o.insert("clusterId".into(), json!(cluster));
+            o.insert("self".into(), o.get("nodeId").cloned().unwrap_or(Value::Null));
+            o.insert("voters".into(), json!(voters));
+            o.insert("singleNode".into(), json!(voters <= 1));
+        }
+        Ok(ApiOut::json(200, v.to_string()))
     }
 
-    pub(super) async fn api_raft_status(&self, _ctx: ReqCtx) -> Result<ApiOut, RsmError> {
-        let repl = self.repl.metrics();
-        let map = self.store.map_usage();
+    /// `GET /api/v1/raft/members` — every member of the cluster: this node's
+    /// block, and each peer's own block gathered over the Raft RPC port
+    /// (`/raft/v1/local`); a peer that does not answer within
+    /// [`PEER_GATHER_TTL`] is listed as unreachable. The leader's view of each
+    /// follower's replication (`matchIndex`, `lagEntries`, `heartbeatAgeMs`)
+    /// is folded in from whichever block is the leader's.
+    pub(super) async fn api_raft_members(&self, _ctx: ReqCtx) -> Result<ApiOut, RsmError> {
+        let local = local_node_json(&self.repl, &*self.store);
+        let view = self.repl.cluster_view();
+        let (cluster, voters) = cluster_identity(view.as_ref(), &local);
+        let mut members: Vec<Value> = match &view {
+            None => vec![local.clone()],
+            Some(v) => {
+                let calls = v.members.iter().map(|m| {
+                    let repl = self.repl.clone();
+                    let me = m.node_id == v.node_id;
+                    let m = m.clone();
+                    let local = local.clone();
+                    async move {
+                        if me {
+                            return local;
+                        }
+                        let body = bytes::Bytes::from_static(br#"{"kind":"node"}"#);
+                        match repl
+                            .call_peer(&m.raft_addr, "/raft/v1/local", body, PEER_GATHER_TTL)
+                            .await
+                            .and_then(|b| {
+                                serde_json::from_slice::<Value>(&b).map_err(|e| e.to_string())
+                            }) {
+                            Ok(mut peer) => {
+                                if let Some(o) = peer.as_object_mut() {
+                                    o.insert("local".into(), json!(false));
+                                    o.insert("reachable".into(), json!(true));
+                                }
+                                peer
+                            }
+                            Err(e) => json!({
+                                "nodeId":m.node_id,
+                                "role":if m.voter { "voter" } else { "learner" },
+                                "state":"unreachable",
+                                "local":false,
+                                "reachable":false,
+                                "raftAddr":m.raft_addr,
+                                "httpAddr":m.http_addr,
+                                "hostname":Value::Null,
+                                "error":e
+                            }),
+                        }
+                    }
+                });
+                futures_util::future::join_all(calls).await
+            }
+        };
+        // The leader's replication view, from the leader's own block.
+        let leader_view: Option<(u64, Vec<Value>)> = members.iter().find_map(|m| {
+            (m.get("state").and_then(Value::as_str) == Some("leader")).then(|| {
+                (
+                    m.get("lastLogIndex").and_then(Value::as_u64).unwrap_or(0),
+                    m.get("replication")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default(),
+                )
+            })
+        });
+        for m in &mut members {
+            let id = m.get("nodeId").and_then(Value::as_u64);
+            let is_leader = m.get("state").and_then(Value::as_str) == Some("leader");
+            let (mut matched, mut hb) = (Value::Null, Value::Null);
+            let mut lag = Value::Null;
+            if let Some((last, rep)) = &leader_view {
+                if is_leader {
+                    matched = json!(last);
+                    lag = json!(0);
+                } else if let Some(r) = rep
+                    .iter()
+                    .find(|r| r.get("nodeId").and_then(Value::as_u64) == id)
+                {
+                    matched = r.get("matchIndex").cloned().unwrap_or(Value::Null);
+                    hb = r.get("heartbeatAgeMs").cloned().unwrap_or(Value::Null);
+                    if let Some(mi) = matched.as_u64() {
+                        lag = json!(last.saturating_sub(mi));
+                    }
+                }
+            }
+            if let Some(o) = m.as_object_mut() {
+                o.insert("matchIndex".into(), matched);
+                o.insert("heartbeatAgeMs".into(), hb);
+                o.insert("lagEntries".into(), lag);
+                o.remove("replication");
+            }
+        }
+        members.sort_by_key(|m| m.get("nodeId").and_then(Value::as_u64).unwrap_or(0));
+        let leader = view
+            .as_ref()
+            .and_then(|v| v.leader)
+            .or_else(|| {
+                local
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .filter(|s| *s == "leader")
+                    .and(local.get("nodeId").and_then(Value::as_u64))
+            });
         Ok(ApiOut::json(
             200,
             json!({
                 "engine":"raft",
-                "nodeId":1,
-                "role":if repl.is_leader { "leader" } else { "follower" },
-                "leaderId":if repl.is_leader { Some(1u64) } else { None },
-                "term":repl.term,
-                "lastLogIndex":repl.last_log_index,
-                "committedIndex":repl.committed_index,
-                "appliedIndex":repl.applied_index,
-                "durableIndex":repl.durable_index,
-                "inflight":repl.inflight,
-                "proposals":repl.proposals,
-                "log":{"files":repl.log_files,"bytes":repl.log_bytes},
-                "store":{"mapBytes":map.map_bytes,"usedBytes":map.used_bytes,"mapUsedPct":map.pct(),"readersInUse":map.readers_in_use,"maxReaders":map.max_readers},
-                "singleNode":true
+                "clusterId":cluster,
+                "leaderId":leader,
+                "term":local.get("term").cloned().unwrap_or(Value::Null),
+                "self":local.get("nodeId").cloned().unwrap_or(Value::Null),
+                "voters":voters,
+                "members":members
             })
             .to_string(),
         ))
     }
 
-    pub(super) async fn api_raft_members(&self, _ctx: ReqCtx) -> Result<ApiOut, RsmError> {
-        let repl = self.repl.metrics();
-        Ok(ApiOut::json(
-            200,
-            json!({
-                "leaderId":if repl.is_leader { Some(1u64) } else { None },
-                "members":[{
-                    "nodeId":1,
-                    "role":"voter",
-                    "state":if repl.is_leader { "leader" } else { "follower" },
-                    "term":repl.term,
-                    "matchIndex":repl.committed_index,
-                    "appliedIndex":repl.applied_index,
-                    "local":true
-                }]
-            })
-            .to_string(),
-        ))
-    }
     pub(super) async fn api_status_queues(&self, ctx: ReqCtx) -> Result<ApiOut, RsmError> {
         Ok(ApiOut::json(
             200,
@@ -783,98 +847,307 @@ impl RaftFacade {
     }
     pub(super) async fn api_local_snapshot(
         &self,
-        ctx: &ReqCtx,
+        _ctx: &ReqCtx,
         key: &str,
     ) -> Result<ApiOut, RsmError> {
         let value = match key {
-            "metrics" => self.local_system_metrics(),
-            "workers" => self.local_worker_metrics(),
+            // §14.6: no database, no spool (D19 refuses a push instead of
+            // buffering it). `pending` is the log's appended-not-applied tail.
             "buffers" => {
                 let m = self.repl.metrics();
-                json!({"pending":m.inflight,"failed":0,"dbHealthy":true,"worker":0,"engine":"raft"})
+                json!({"pending":m.inflight,"failed":0,"worker":0,"engine":"raft","spool":false})
             }
-            "queues" => json!({
-                "timeRange":{},
-                "bucketMinutes":1,
-                "series":self.queue_snapshots(&ctx.tenant).await?,
-                "replicas":[{"hostname":"local","workerId":0}]
-            }),
-            "retention" => self.local_metrics.retention_json(&ctx.tenant),
             _ => json!({key:[]}),
         };
         Ok(ApiOut::json(200, value.to_string()))
     }
-
-    fn local_system_metrics(&self) -> Value {
-        let repl = self.repl.metrics();
-        let map = self.store.map_usage();
-        let counters: serde_json::Map<String, Value> = self
-            .store
-            .metrics()
-            .snapshot()
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), json!(v)))
-            .collect();
-        let now = super::super::wall_micros();
-        json!({
-            "engine":"raft",
-            "timeRange":{"from":crate::rsm::planner::timers::iso_us(now-3_600_000_000),"to":crate::rsm::planner::timers::iso_us(now)},
-            "replicaCount":1,
-            "bucketMinutes":1,
-            "pointCount":1,
-            "replicas":[{
-                "hostname":"local","port":0,"workerId":"0",
-                "timeSeries":[{
-                    "raft":{"term":repl.term,"leader":repl.is_leader,"lastLogIndex":repl.last_log_index,"committedIndex":repl.committed_index,"appliedIndex":repl.applied_index,"durableIndex":repl.durable_index,"inflight":repl.inflight,"proposals":repl.proposals,"logFiles":repl.log_files,"logBytes":repl.log_bytes},
-                    "store":{"mapBytes":map.map_bytes,"usedBytes":map.used_bytes,"mapUsedPct":map.pct(),"readersInUse":map.readers_in_use,"maxReaders":map.max_readers,"counters":counters}
-                }]
-            }]
-        })
-    }
-
-    fn local_worker_metrics(&self) -> Value {
-        use std::sync::atomic::Ordering;
-        let m = crate::rsm::timing::metrics();
-        let now = super::super::wall_micros();
-        json!({
-            "timeRange":{"from":crate::rsm::planner::timers::iso_us(now-3_600_000_000),"to":crate::rsm::planner::timers::iso_us(now)},
-            "bucketMinutes":1,
-            "pointCount":1,
-            "timeSeries":[{
-                "pushMessages":m.apply_stats.messages.load(Ordering::Relaxed),
-                "jobsDone":m.apply_stats.entries.load(Ordering::Relaxed),
-                "dlqCount":0,
-                "dbErrors":self.store.metrics().commit_failed.load(Ordering::Relaxed),
-                "slowCommands":m.slow_commands.load(Ordering::Relaxed),
-                "applyReceives":m.apply_receives.load(Ordering::Relaxed)
-            }],
-            "workers":[{"hostname":"local","workerId":0}],
-            "queues":[],
-            "summary":{"engine":"raft"}
-        })
-    }
-    pub(super) async fn api_queue_lag(&self, ctx: ReqCtx) -> Result<ApiOut, RsmError> {
-        let q = self.queue_snapshots(&ctx.tenant).await?;
-        Ok(ApiOut::json(200, json!({"queues":q}).to_string()))
-    }
-    pub(super) async fn api_queue_ops(&self, ctx: ReqCtx) -> Result<ApiOut, RsmError> {
-        let q = self.queue_snapshots(&ctx.tenant).await?;
-        Ok(ApiOut::json(200, json!({"queues":q}).to_string()))
-    }
-    pub(super) async fn api_workload(&self, ctx: ReqCtx) -> Result<ApiOut, RsmError> {
-        let q = self.queue_snapshots(&ctx.tenant).await?;
-        Ok(ApiOut::json(200, json!({"workload":q}).to_string()))
-    }
-    pub(super) async fn api_dlq_signatures(&self, ctx: ReqCtx) -> Result<ApiOut, RsmError> {
+    /// `GET /api/v1/analytics/dlq-signatures?queue=` — `get_dlq_signatures_v1`
+    /// (010): why rows sit in one queue's DLQ, folded into error signatures
+    /// over the newest `limit` rows (default 200, 1..=1000). 400 without a
+    /// queue, as the Postgres handler answers.
+    pub(super) async fn api_dlq_signatures(
+        &self,
+        ctx: ReqCtx,
+        query: Option<&str>,
+    ) -> Result<ApiOut, RsmError> {
+        let q = query_map(query);
+        let Some(queue) = q.get("queue").filter(|v| !v.is_empty()).cloned() else {
+            return Ok(ApiOut::json(400, json!({"error":"queue required"}).to_string()));
+        };
+        let limit = q
+            .get("limit")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(200)
+            .clamp(1, 1000) as usize;
         let store = self.store.clone();
         let tenant = ctx.tenant.clone();
-        let rows=tokio::task::spawn_blocking(move||store.read(|r|{let mut m:BTreeMap<(String,String),i64>=BTreeMap::new();for(_,q,_,d)in scan_dlq_rows(r,&tenant,None,None)?{*m.entry((q,d.error)).or_default()+=1;}Ok(m.into_iter().map(|((queue,error),count)|json!({"queue":queue,"error":error,"count":count})).collect::<Vec<_>>())})).await.map_err(|e|RsmError::Internal(format!("dlq signatures: {e}")))?.map_err(read_error)?;
-        Ok(ApiOut::json(200, json!({"signatures":rows}).to_string()))
+        let q2 = queue.clone();
+        let mut rows = tokio::task::spawn_blocking(move || {
+            store.read(|r| scan_dlq_rows(r, &tenant, Some(&q2), None))
+        })
+        .await
+        .map_err(|e| RsmError::Internal(format!("dlq signatures: {e}")))?
+        .map_err(read_error)?;
+        let rows_now = rows.len();
+        rows.sort_by(|a, b| b.3.failed_at_us.cmp(&a.3.failed_at_us));
+        rows.truncate(limit);
+        let n = rows.len();
+        let mut sigs: BTreeMap<String, i64> = BTreeMap::new();
+        let mut days: BTreeMap<String, i64> = BTreeMap::new();
+        let mut retries = std::collections::BTreeSet::new();
+        let mut groups = std::collections::BTreeSet::new();
+        let mut bytes = 0i64;
+        for (_, _, _, d) in &rows {
+            *sigs.entry(error_signature(&d.error)).or_default() += 1;
+            let day = crate::rsm::planner::timers::iso_us(d.failed_at_us)[..10].to_string();
+            *days.entry(day).or_default() += 1;
+            retries.insert(d.retry_count);
+            groups.insert(d.group.clone());
+            bytes += d.payload.len() as i64;
+        }
+        let mut top: Vec<(String, i64)> = sigs.into_iter().collect();
+        top.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        top.truncate(8);
+        let at = |us: Option<i64>| us.map(super::reads::iso_ms);
+        Ok(ApiOut::json(
+            200,
+            json!({
+                "queue":queue,
+                "rowsNow":rows_now,
+                "sample":n,
+                "retryCounts":retries.into_iter().collect::<Vec<_>>(),
+                "groups":groups.into_iter().collect::<Vec<_>>(),
+                "oldest":at(rows.iter().map(|r| r.3.failed_at_us).min()),
+                "newest":at(rows.iter().map(|r| r.3.failed_at_us).max()),
+                "avgBytes":if n > 0 { ((bytes as f64) / n as f64).round() as i64 } else { 0 },
+                "signatures":top.iter().map(|(text, k)| json!({
+                    "text":text,"n":k,
+                    "share":((*k as f64 / n as f64) * 1000.0).round() / 1000.0
+                })).collect::<Vec<_>>(),
+                "byDay":days.into_iter().map(|(day, k)| json!({"day":day,"n":k})).collect::<Vec<_>>()
+            })
+            .to_string(),
+        ))
     }
-    pub(super) async fn api_partition_liveness(&self, ctx: ReqCtx) -> Result<ApiOut, RsmError> {
-        let parts = self.parts(&ctx.tenant, None, None).await?;
-        let rows:Vec<Value>=parts.into_iter().map(|p|json!({"queue":p.row.queue,"partition":p.row.partition,"partitionId":uuid_bytes_to_string(&p.row.uuid),"lastOffset":p.row.last_offset,"logStart":p.row.log_start,"lastWriteAt":crate::rsm::planner::timers::iso_us(p.row.last_write_at_us)})).collect();
-        Ok(ApiOut::json(200, json!({"partitions":rows}).to_string()))
+
+    /// `GET /api/v1/analytics/partition-liveness` — `get_partition_liveness_v1`
+    /// (011): per queue, how many partitions were written in the last hour,
+    /// day and week, created in the last day, and the write-time span; the
+    /// `limit` (default 20, 1..=200) queues with the most partitions. An empty
+    /// `namespace=` / `task=` filters on the empty label, as in Postgres.
+    pub(super) async fn api_partition_liveness(
+        &self,
+        ctx: ReqCtx,
+        query: Option<&str>,
+    ) -> Result<ApiOut, RsmError> {
+        let q = query_map(query);
+        let queue = q.get("queue").filter(|v| !v.is_empty()).cloned();
+        let namespace = q.get("namespace").cloned();
+        let task = q.get("task").cloned();
+        let limit = q
+            .get("limit")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(20)
+            .clamp(1, 200) as usize;
+        let pending: std::collections::HashMap<String, i64> = self
+            .queue_snapshots(&ctx.tenant)
+            .await?
+            .iter()
+            .filter_map(|v| {
+                let name = v.get("name")?.as_str()?.to_string();
+                let p = v.pointer("/messages/pending")?.as_i64()?
+                    + v.pointer("/messages/processing").and_then(Value::as_i64).unwrap_or(0);
+                Some((name, p))
+            })
+            .collect();
+        let store = self.store.clone();
+        let tenant = ctx.tenant.clone();
+        let now = super::super::wall_micros();
+        const H: i64 = 3_600_000_000;
+        let mut rows = tokio::task::spawn_blocking(move || {
+            store.read(|r| {
+                let mut qs = Vec::new();
+                r.scan_queues(&tenant, usize::MAX, &mut |name, cfg| {
+                    qs.push((name.to_string(), cfg));
+                    true
+                })?;
+                let mut out = Vec::new();
+                for (name, cfg) in qs {
+                    let ns = cfg.namespace.clone().unwrap_or_default();
+                    let tk = cfg.task.clone().unwrap_or_default();
+                    if queue.as_ref().is_some_and(|x| x != &name)
+                        || namespace.as_ref().is_some_and(|x| x != &ns)
+                        || task.as_ref().is_some_and(|x| x != &tk)
+                    {
+                        continue;
+                    }
+                    let mut pids = Vec::new();
+                    r.scan_queue_partitions(&tenant, &name, None, usize::MAX, &mut |pid| {
+                        pids.push(pid);
+                        true
+                    })?;
+                    let (mut parts, mut l1, mut l24, mut l7, mut c24) = (0i64, 0i64, 0i64, 0i64, 0i64);
+                    let (mut oldest, mut newest): (Option<i64>, Option<i64>) = (None, None);
+                    for pid in pids {
+                        let Some(p) = r.partition(pid)? else { continue };
+                        parts += 1;
+                        let w = p.last_write_at_us;
+                        l1 += i64::from(w > now - H);
+                        l24 += i64::from(w > now - 24 * H);
+                        l7 += i64::from(w > now - 168 * H);
+                        c24 += i64::from(p.created_at_us > now - 24 * H);
+                        oldest = Some(oldest.map_or(w, |o| o.min(w)));
+                        newest = Some(newest.map_or(w, |o| o.max(w)));
+                    }
+                    out.push((name, ns, tk, parts, l1, l24, l7, c24, oldest, newest));
+                }
+                Ok(out)
+            })
+        })
+        .await
+        .map_err(|e| RsmError::Internal(format!("partition liveness: {e}")))?
+        .map_err(read_error)?;
+        rows.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
+        rows.truncate(limit);
+        let rows: Vec<Value> = rows
+            .into_iter()
+            .map(|(name, ns, tk, parts, l1, l24, l7, c24, oldest, newest)| {
+                json!({
+                    "queue":name,"namespace":ns,"task":tk,"partitions":parts,
+                    "live1h":l1,"live24h":l24,"live7d":l7,"created24h":c24,
+                    "oldestWriteAt":oldest.map(super::reads::iso_ms),
+                    "newestWriteAt":newest.map(super::reads::iso_ms),
+                    "pending":pending.get(&name).copied().unwrap_or(0)
+                })
+            })
+            .collect();
+        Ok(ApiOut::json(
+            200,
+            json!({"capturedAt":super::reads::iso_ms(now),"rows":rows}).to_string(),
+        ))
+    }
+}
+
+/// `get_dlq_signatures_v1`'s fold of an error text (010): empty → `(no
+/// message)`; then, in order, UUIDs and whole words of 20+ hex digits →
+/// `<id>`, `YYYY-MM-DD[T…[Z]]` → `<date>`, whole words of digits → `<n>`,
+/// whitespace runs → one space; trimmed, first 120 characters.
+pub(super) fn error_signature(error: &str) -> String {
+    let t = error.trim();
+    let s = if t.is_empty() { "(no message)" } else { t };
+    let s = replace_uuids(s);
+    let s = replace_words(&s, |w| w.len() >= 20 && w.chars().all(|c| c.is_ascii_hexdigit()), "<id>");
+    let s = replace_dates(&s);
+    let s = replace_words(&s, |w| w.chars().all(|c| c.is_ascii_digit()), "<n>");
+    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    s.chars().take(120).collect()
+}
+
+fn replace_uuids(s: &str) -> String {
+    let b = s.as_bytes();
+    let is_uuid = |i: usize| -> bool {
+        if i + 36 > b.len() {
+            return false;
+        }
+        (0..36).all(|k| match k {
+            8 | 13 | 18 | 23 => b[i + k] == b'-',
+            _ => b[i + k].is_ascii_hexdigit(),
+        })
+    };
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < b.len() {
+        if is_uuid(i) {
+            out.push_str("<id>");
+            i += 36;
+        } else {
+            let ch = s[i..].chars().next().unwrap_or(' ');
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// Replace every whole word (a run of `[A-Za-z0-9_]`) matching `hit`.
+fn replace_words(s: &str, hit: impl Fn(&str) -> bool, with: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        if !word.is_empty() {
+            if hit(word) {
+                out.push_str(with);
+            } else {
+                out.push_str(word);
+            }
+            word.clear();
+        }
+    };
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            word.push(ch);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(ch);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
+fn replace_dates(s: &str) -> String {
+    let b = s.as_bytes();
+    let d = |i: usize| i < b.len() && b[i].is_ascii_digit();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < b.len() {
+        let date = i + 10 <= b.len()
+            && (0..4).all(|k| d(i + k))
+            && b[i + 4] == b'-'
+            && d(i + 5)
+            && d(i + 6)
+            && b[i + 7] == b'-'
+            && d(i + 8)
+            && d(i + 9);
+        if date {
+            let mut j = i + 10;
+            if j < b.len() && b[j] == b'T' && j + 1 < b.len() && (d(j + 1) || b[j + 1] == b':' || b[j + 1] == b'.') {
+                j += 1;
+                while j < b.len() && (d(j) || b[j] == b':' || b[j] == b'.') {
+                    j += 1;
+                }
+                if j < b.len() && b[j] == b'Z' {
+                    j += 1;
+                }
+            }
+            out.push_str("<date>");
+            i = j;
+        } else {
+            let ch = s[i..].chars().next().unwrap_or(' ');
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::error_signature;
+
+    #[test]
+    fn folds_like_the_stored_procedure() {
+        assert_eq!(error_signature("  "), "(no message)");
+        assert_eq!(
+            error_signature("order 01a0d2c7-e81f-702c-8734-c88401672347 failed at 2026-09-24T09:57:29.004Z after 3 tries"),
+            "order <id> failed at <date> after <n> tries"
+        );
+        assert_eq!(
+            error_signature("hash deadbeefdeadbeefdeadbeef\n\tretry   7"),
+            "hash <id> retry <n>"
+        );
+        assert_eq!(error_signature("v2 abc123 x1"), "v2 abc123 x1");
+        assert_eq!(error_signature(&"x".repeat(200)).len(), 120);
     }
 }
 
@@ -891,4 +1164,91 @@ fn clear_cursor_lease(c: &mut CursorRow) {
 }
 fn message_delete_miss(partition: &str, txn: &str) -> ApiOut {
     ApiOut::json(404,json!({"success":false,"partitionId":partition,"transactionId":txn,"error":"Message not found","message":"No dead-letter row for this address. Live messages live in immutable segments and cannot be deleted"}).to_string())
+}
+
+/// How long a dashboard read waits for a peer's `/raft/v1/local` answer.
+pub(super) const PEER_GATHER_TTL: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// This node's block of the Raft view: identity, role and state, term, the
+/// log's indexes, its queue-log files and bytes, the store's map usage,
+/// version and uptime — and, on the leader, its view of every other member's
+/// replication (`replication`). What `/raft/v1/local` answers a peer, and what
+/// `/api/v1/raft/status` answers a client.
+pub(crate) fn local_node_json(
+    repl: &crate::rsm::replicator::node::NodeReplicator<crate::rsm::store::heed_store::HeedStore>,
+    store: &crate::rsm::store::heed_store::HeedStore,
+) -> Value {
+    use crate::rsm::replicator::{Replicator, Role};
+    let m = repl.metrics();
+    let view = repl.cluster_view();
+    let map = store.map_usage();
+    let node_id = view.as_ref().map(|v| v.node_id).unwrap_or(1);
+    let me = view
+        .as_ref()
+        .and_then(|v| v.members.iter().find(|x| x.node_id == node_id));
+    let state = match repl.role() {
+        Role::Leader { .. } => "leader",
+        Role::Follower { .. } => "follower",
+        Role::Candidate => "candidate",
+        Role::Learner => "learner",
+        Role::Stopped => "shutdown",
+    };
+    let replication: Value = match &view {
+        Some(v) if state == "leader" => Value::Array(
+            v.members
+                .iter()
+                .filter(|x| x.node_id != node_id)
+                .map(|x| json!({"nodeId":x.node_id,"matchIndex":x.matched,"heartbeatAgeMs":x.heartbeat_age_ms}))
+                .collect(),
+        ),
+        _ => Value::Null,
+    };
+    json!({
+        "nodeId":node_id,
+        "hostname":crate::rsm::dashboard::node_label(node_id),
+        "raftAddr":me.map(|x| x.raft_addr.clone()),
+        "httpAddr":me.map(|x| x.http_addr.clone()),
+        "role":if me.is_none_or(|x| x.voter) { "voter" } else { "learner" },
+        "state":state,
+        "local":true,
+        "reachable":true,
+        "leaderId":view.as_ref().and_then(|v| v.leader).or(m.leader),
+        "term":m.term,
+        "lastLogIndex":m.last_log_index,
+        "committedIndex":m.committed_index,
+        "appliedIndex":m.applied_index,
+        "durableIndex":m.durable_index,
+        "inflight":m.inflight,
+        "proposals":m.proposals,
+        "log":{"files":m.log_files,"bytes":m.log_bytes},
+        "store":{"mapBytes":map.map_bytes,"usedBytes":map.used_bytes,"mapUsedPct":map.pct(),"readersInUse":map.readers_in_use,"maxReaders":map.max_readers},
+        "version":crate::VERSION,
+        "uptimeSeconds":crate::rsm::dashboard::started().elapsed().as_secs(),
+        "replication":replication,
+        "error":Value::Null
+    })
+}
+
+/// The cluster's dashboard id and voter count, from the membership (or, on a
+/// replicator without one, from this node alone).
+fn cluster_identity(
+    view: Option<&crate::rsm::replicator::raft::ClusterView>,
+    local: &Value,
+) -> (String, usize) {
+    match view {
+        Some(v) if !v.members.is_empty() => {
+            let members: Vec<(u64, String)> = v
+                .members
+                .iter()
+                .filter(|m| m.voter)
+                .map(|m| (m.node_id, m.raft_addr.clone()))
+                .collect();
+            let voters = members.len();
+            (crate::rsm::dashboard::cluster_id(&members), voters)
+        }
+        _ => {
+            let id = local.get("nodeId").and_then(Value::as_u64).unwrap_or(1);
+            (crate::rsm::dashboard::cluster_id(&[(id, String::new())]), 1)
+        }
+    }
 }

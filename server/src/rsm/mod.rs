@@ -67,6 +67,9 @@ pub mod effect;
 pub mod entry;
 pub mod facade;
 pub mod local_metrics;
+/// Dashboard data in raft mode: node-local metric rows, their collector, the
+/// cross-node gather and the views that re-aggregate them (D17, §14.6).
+pub mod dashboard;
 pub mod maintenance;
 
 // ---------------------------------------------------------------------------

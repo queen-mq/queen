@@ -139,6 +139,11 @@
                  an empty series means NOT REPORTED. Saying "no events" here
                  would assert nothing was deleted while segments are being
                  swept — the opposite of what is happening. -->
+            <!-- Raft records every retention step (apply → local.db), so
+                 there an empty series IS "nothing deleted in this range". -->
+            <div v-else-if="isRaft" class="panel-na">
+              No retention or eviction in this range.
+            </div>
             <div v-else class="panel-na">
               Retention accounting is not recorded by the log engine yet, so this
               cannot be shown. It is not a claim that nothing was deleted.
@@ -601,6 +606,7 @@ import {
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { stamp } from '@/composables/useStamp'
+import { useEngine } from '@/stores/engine'
 import { useIdentity } from '@/stores/identity'
 import { chartColor, chartTheme, alpha } from '@/composables/useChartTheme'
 import { ackFailureSeverity, dlqGrowthSeverity } from '@/composables/useSeverity'
@@ -608,6 +614,7 @@ import BaseChart from '@/components/BaseChart.vue'
 import MultiSelect from '@/components/MultiSelect.vue'
 
 const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
+const { isRaft } = useEngine()
 
 // ---------------------------------------------------------------------------
 // State

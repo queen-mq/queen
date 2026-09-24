@@ -327,6 +327,12 @@ pub fn dlq_by_pos_pid_prefix(p: Pid) -> Vec<u8> {
     pid(p)
 }
 
+/// The offset of a [`dlq_by_pos`] key: its last eight bytes.
+pub fn dlq_by_pos_offset_of(k: &[u8]) -> Option<i64> {
+    let b: [u8; 8] = k.get(k.len().checked_sub(8)?..)?.try_into().ok()?;
+    Some((u64::from_be_bytes(b) ^ (1u64 << 63)) as i64)
+}
+
 // ---------------------------------------------------------------------------
 // dedup (D10 option (a), lean)
 // ---------------------------------------------------------------------------

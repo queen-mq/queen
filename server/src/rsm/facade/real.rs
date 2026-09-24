@@ -442,6 +442,34 @@ impl RaftFacade {
         let qlog_reader = repl.qlog_reader();
         let local_metrics = crate::rsm::local_metrics::open(dir.join("local.db"))
             .map_err(|e| format!("open local metrics at {}/local.db: {e}", dir.display()))?;
+        // The node's dashboard rows (D17): one store and one collector per
+        // process, whichever group opens first. Weak: the facade's shutdown
+        // takes the replicator back by value.
+        match crate::rsm::dashboard::store::open_global(&dir.join("dash.db")) {
+            Ok(dash) => {
+                let repl_w = Arc::downgrade(&repl);
+                let store_w = Arc::downgrade(&store);
+                let gauges: crate::rsm::dashboard::collector::RaftGauges = Arc::new(move || {
+                    let (repl, store) = (repl_w.upgrade()?, store_w.upgrade()?);
+                    let m = repl.metrics();
+                    Some([
+                        m.inflight as f64,
+                        m.committed_index.saturating_sub(m.applied_index) as f64,
+                        m.log_bytes as f64,
+                        m.log_files as f64,
+                        store.map_usage().pct(),
+                    ])
+                });
+                let node_id = repl.cluster_view().map(|v| v.node_id).unwrap_or(1);
+                crate::rsm::dashboard::collector::spawn_once(dash, node_id, gauges);
+            }
+            Err(e) => tracing::warn!(
+                target: "rsm",
+                error = %e,
+                "dashboard rows unavailable ({}/dash.db)",
+                dir.display()
+            ),
+        }
 
         // PERF-E `DEDUP_INDEX=segment`: the planner serves the committed dedup
         // authority from the segments, so hand the batcher a cloned segment
@@ -464,6 +492,26 @@ impl RaftFacade {
             let applied: Arc<dyn Fn() -> u64 + Send + Sync> =
                 Arc::new(move || weak.upgrade().map_or(0, |r| r.applied_index()));
             repl.set_remote_handler(super::remote::handler(&cmd_tx, admit, applied));
+        }
+        // A peer's dashboard read gathers this node's own data (D17). Weak, for
+        // the same reason as the remote handler above.
+        {
+            let repl_w = Arc::downgrade(&repl);
+            let store_w = Arc::downgrade(&store);
+            repl.set_local_handler(Arc::new(move |body: bytes::Bytes| {
+                let repl_w = repl_w.clone();
+                let store_w = store_w.clone();
+                Box::pin(async move {
+                    let (Some(repl), Some(store)) = (repl_w.upgrade(), store_w.upgrade()) else {
+                        return Err("this node is stopping".to_string());
+                    };
+                    // Off the Raft RPC runtime's workers: a wide rows gather
+                    // serializes megabytes, and votes and appends share them.
+                    tokio::task::spawn_blocking(move || phase2::local_gather(&repl, &store, &body))
+                        .await
+                        .map_err(|e| format!("gather task: {e}"))?
+                })
+            }));
         }
 
         tracing::info!(
@@ -1418,6 +1466,10 @@ impl RaftFacade {
                 results[timers_base + i] = serde_json::Value::Object(obj);
             }
         }
+        let txn_dlq = ack_txn
+            .iter()
+            .filter(|(_, _, st)| matches!(st, AckStatus::Dlq))
+            .count() as u64;
         for (i, txn, status) in ack_txn {
             results[i] = serde_json::json!({
                 "index": i,
@@ -1427,6 +1479,21 @@ impl RaftFacade {
                 "error": serde_json::Value::Null,
                 "dlq": matches!(status, AckStatus::Dlq),
             });
+        }
+        // Dashboard counters (data.rs ≈6090): one transaction, and one per
+        // distinct queue it pushed to; its DLQ filings.
+        if let Some(m) = crate::metrics::global() {
+            m.transactions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for p in &pushes {
+                if seen.insert(p.queue.as_str()) {
+                    m.per_queue.add_transaction(&ctx.tenant, &p.queue);
+                }
+            }
+            if txn_dlq > 0 {
+                m.dlq_moved
+                    .fetch_add(txn_dlq, std::sync::atomic::Ordering::Relaxed);
+            }
         }
         Ok(super::TxnOut {
             body: serde_json::json!({
@@ -1925,6 +1992,19 @@ impl RaftFacade {
             }
         }
 
+        // Dashboard counters (Postgres counts in the handler, data.rs ≈440):
+        // one push request of N items; per queue one request and its items.
+        if let Some(m) = crate::metrics::global() {
+            m.push.record_request(resolved.len());
+            let mut per_q: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+            for r in &resolved {
+                *per_q.entry(r.queue.as_str()).or_insert(0) += 1;
+            }
+            for (q, n) in per_q {
+                m.per_queue.add_push(&ctx.tenant, q, n);
+            }
+        }
+
         Ok(PushOut {
             body: render_push(&out),
         })
@@ -2291,6 +2371,8 @@ impl RaftFacade {
                 );
             }
             let park = remaining.min(Duration::from_millis(500));
+            // The dashboard's parked gauge (1 Hz samples, data.rs ≈1197).
+            let _parked = crate::metrics::global().map(|m| m.parked.enter(&ctx.tenant, &queue));
             woke = self.gates.wait(&gate_key, park).await;
             if ctx.deadline.expired() {
                 return autopilot_echo(
@@ -2505,6 +2587,11 @@ fn render_pop_body(
 
     let dl = Some(deadline.instant());
     let mut count = 0usize;
+    // Dashboard: per queue (messages, Σ lag ms, max lag ms), lag = delivery −
+    // creation, as the Postgres renderer measures it (data.rs ≈3457).
+    let now_ms = wall_micros() / 1000;
+    let mut per_q: std::collections::HashMap<&str, (u64, u64, u64)> =
+        std::collections::HashMap::new();
     for claim in claims {
         let Some(info) = infos.get(&claim.pid) else {
             continue;
@@ -2650,6 +2737,11 @@ fn render_pop_body(
                     out.push_str(&msg_off.to_string());
                     out.push('}');
                     count += 1;
+                    let lag_ms = (now_ms - created_at_us / 1000).max(0) as u64;
+                    let e = per_q.entry(info.queue.as_str()).or_insert((0, 0, 0));
+                    e.0 += 1;
+                    e.1 += lag_ms;
+                    e.2 = e.2.max(lag_ms);
                 }
             }
             // Advance past this whole segment; a claim range is a run of segments.
@@ -2663,6 +2755,26 @@ fn render_pop_body(
     out.push_str("],\"partitionsClaimed\":");
     out.push_str(&claims.len().to_string());
     out.push('}');
+    // Dashboard counters (data.rs ≈1247): the pop request and its messages;
+    // per queue its messages and lag, or an empty pop; autoAck is an ack.
+    if let Some(m) = crate::metrics::global() {
+        m.pop.record_request(count);
+        if count == 0 && !top_queue.is_empty() {
+            m.per_queue.add_pop_empty(tenant, top_queue);
+        }
+        for (q, (n, sum, max)) in &per_q {
+            m.per_queue.add_pop(tenant, q, *n);
+            m.per_queue.add_pop_lag(tenant, q, *sum, *max, *n);
+            if auto_ack {
+                m.per_queue.add_ack(tenant, q, *n, 0);
+            }
+        }
+        if auto_ack && count > 0 {
+            m.ack.record_request(count);
+            m.ack_success
+                .fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
     Ok(PopOut {
         body: out,
         empty: count == 0,
@@ -2823,6 +2935,15 @@ impl RaftFacade {
             });
         }
 
+        // Dashboard tallies per target, taken before the targets move into the
+        // command: (queue, ok items, failed items).
+        let tallies: Vec<(String, u64, u64)> = targets
+            .iter()
+            .map(|t| {
+                let ok = t.items.iter().filter(|i| i.status == AckStatus::Ok).count() as u64;
+                (t.queue.clone(), ok, t.items.len() as u64 - ok)
+            })
+            .collect();
         let cmd = Command::Ack(AckCommand {
             request_id: ctx.request_id,
             targets,
@@ -2840,6 +2961,25 @@ impl RaftFacade {
             other => return Err(reply_error(other)),
         };
 
+        // Dashboard counters (data.rs ≈4388): one ack request of N items split
+        // by outcome, the DLQ filings; per queue its outcome split.
+        if let Some(m) = crate::metrics::global() {
+            use std::sync::atomic::Ordering::Relaxed;
+            let ok: u64 = tallies.iter().map(|t| t.1).sum();
+            m.ack.record_request(raw_items.len());
+            m.ack_success.fetch_add(ok, Relaxed);
+            m.ack_failed
+                .fetch_add((raw_items.len() as u64).saturating_sub(ok), Relaxed);
+            let dlq: u64 = results.iter().map(|r| r.dlq as u64).sum();
+            m.dlq_moved.fetch_add(dlq, Relaxed);
+            for (i, (q, ok, failed)) in tallies.iter().enumerate() {
+                m.per_queue.add_ack(&ctx.tenant, q, *ok, *failed);
+                if let Some(r) = results.get(i) {
+                    m.per_queue.add_conflated(&ctx.tenant, q, r.conflated as u64);
+                    m.conflated.fetch_add(r.conflated as u64, Relaxed);
+                }
+            }
+        }
         Ok(AckOut {
             body: render_ack(&txns, &results, &per_item, &bad),
         })
@@ -3747,6 +3887,20 @@ impl Rsm for RaftFacade {
 
     fn notifier(&self) -> Option<&Arc<Notifier>> {
         Some(&self.notifier)
+    }
+
+    fn cluster_id(&self) -> Option<String> {
+        let view = self.repl.cluster_view()?;
+        let members: Vec<(u64, String)> = view
+            .members
+            .iter()
+            .filter(|m| m.voter)
+            .map(|m| (m.node_id, m.raft_addr.clone()))
+            .collect();
+        if members.is_empty() {
+            return None;
+        }
+        Some(crate::rsm::dashboard::cluster_id(&members))
     }
 }
 

@@ -25,7 +25,7 @@
       <div class="scope-strip scope-strip-cell">
         <span class="chip chip-scope"><span class="dot"></span>cell · operator</span>
         <span class="scope-text">
-          host resources, the disk spool and Postgres internals for
+          {{ isRaft ? 'host resources and the replicated log for' : 'host resources, the disk spool and Postgres internals for' }}
           <strong>cell {{ actingCellSlug || 'unknown' }}</strong>
           <span class="scope-sep">·</span>
           shared by every tenant on it, not scoped to {{ actingTenantSlug || 'your tenant' }}
@@ -38,8 +38,13 @@
       <div v-if="dataSource === 'system' && metrics.failed.value" class="status-banner banner-bad view-banner">
         <span :title="formatTimestampUtc(metrics.lastUpdated.value)"><strong>Could not load server metrics</strong> · {{ describeApiError(metrics.error.value) }}<template v-if="systemData"> · showing the last samples that loaded{{ metrics.lastUpdated.value ? ` (as of ${formatTimestamp(metrics.lastUpdated.value)})` : '' }}</template></span>
       </div>
-      <div v-if="dataSource === 'postgres' && pg.failed.value" class="status-banner banner-bad view-banner">
+      <div v-if="source === 'postgres' && pg.failed.value" class="status-banner banner-bad view-banner">
         <span :title="formatTimestampUtc(pg.lastUpdated.value)"><strong>Could not load Postgres stats</strong> · {{ describeApiError(pg.error.value) }}<template v-if="postgresData"> · showing the last stats that loaded{{ pg.lastUpdated.value ? ` (as of ${formatTimestamp(pg.lastUpdated.value)})` : '' }}</template></span>
+      </div>
+      <!-- A route this broker does not serve is not a failure: RaftCluster
+           says so quietly, in place of the view. -->
+      <div v-if="source === 'raft' && raftMembers.failed.value && !raftMembersAbsent" class="status-banner banner-bad view-banner">
+        <span :title="formatTimestampUtc(raftMembers.lastUpdated.value)"><strong>Could not load the Raft cluster</strong> · {{ describeRaftFailure(raftMembers.error.value) }}<template v-if="raftMembers.data.value"> · showing the last members that loaded{{ raftMembers.lastUpdated.value ? ` (as of ${formatTimestamp(raftMembers.lastUpdated.value)})` : '' }}</template></span>
       </div>
 
       <!-- =================== FILTERS =================== -->
@@ -64,7 +69,9 @@
               <span class="label-xs">Source</span>
               <div class="seg">
                 <button :class="{ on: dataSource === 'system' }" @click="selectSource('system')">Server resources</button>
-                <button :class="{ on: dataSource === 'postgres' }" @click="selectSource('postgres')">Postgres stats</button>
+                <!-- The storage the cell runs on: Postgres stats, or the Raft
+                     cluster in raft mode (stores/engine.js decides). -->
+                <button :class="{ on: dataSource === 'storage' }" @click="selectSource('storage')">{{ storageLabel }}</button>
               </div>
             </div>
           </div>
@@ -110,10 +117,78 @@
         </div>
       </div>
 
+      <!-- =================== REPLICATED LOG (raft mode) ===================
+           The summary block in raft mode, in the File buffer's place: raft has
+           no spool — a push under maintenance is refused, never buffered on
+           one voter — so what a node holds is its share of the log. -->
+      <div v-if="isRaft" class="card" :class="{ 'card-alarm': raftAlarm }" style="margin-bottom:16px;">
+        <div class="card-header">
+          <h3>Replicated log</h3>
+          <span v-if="node && node.nodeId !== null" class="card-sub">
+            node {{ node.nodeId }}{{ node.hostname ? ` · ${node.hostname}` : '' }}
+          </span>
+          <span class="chip chip-mute">cell-level</span>
+          <span class="muted">{{ stamp(raftStatus) }}</span>
+        </div>
+        <div class="card-body">
+          <div v-if="raftStatusAbsent" class="panel-na">
+            This broker does not report its replicated log — <code>GET /api/v1/raft/status</code> is not served here.
+          </div>
+          <template v-else>
+            <div v-if="raftStatus.failed.value" class="panel-err">
+              Log state unavailable — {{ describeRaftFailure(raftStatus.error.value) }}.
+              The figures below are unknown, not zero.
+            </div>
+            <div class="stat-grid stat-grid-6">
+              <div class="stat">
+                <div class="stat-label">Role</div>
+                <div class="stat-value">
+                  <span v-if="!node?.state" class="font-mono">—</span>
+                  <span v-else class="chip" :class="node.chip.cls"><span class="dot"></span>{{ node.chip.label }}</span>
+                </div>
+                <div class="stat-foot">{{ node?.clusterNote || '—' }}</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Term</div>
+                <div class="stat-value font-mono">{{ metric(node?.term) }}</div>
+                <div class="stat-foot">
+                  <span v-if="node" :class="{ 'num warn': node.leaderSeverity === 'warn' }">{{ node.leaderNote }}</span>
+                  <span v-else>—</span>
+                </div>
+              </div>
+              <!-- Three indexes, one tile: applied is this node's own, and the
+                   two under it are what it trails — each on its own line, so
+                   a nine-digit index never wraps mid-sentence. -->
+              <div class="stat">
+                <div class="stat-label">Applied</div>
+                <div class="stat-value font-mono">{{ formatIndex(node?.applied) }}</div>
+                <div class="stat-foot">committed <span class="font-mono tabular-nums">{{ formatIndex(node?.committed) }}</span></div>
+                <div class="stat-foot">durable <span class="font-mono tabular-nums">{{ formatIndex(node?.durable) }}</span></div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Inflight</div>
+                <div class="stat-value font-mono">{{ metric(node?.inflight) }}</div>
+                <div class="stat-foot">appended, not yet applied</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Log</div>
+                <div class="stat-value font-mono">{{ bytes(node?.logBytes) }}</div>
+                <div class="stat-foot">{{ metric(node?.logFiles) }} files</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Store map</div>
+                <div class="stat-value font-mono num" :class="numTone(node?.mapSeverity)">{{ formatMapPct(node?.mapPct) }}</div>
+                <div class="stat-foot">{{ bytes(node?.mapUsed) }} of {{ bytes(node?.mapBytes) }}</div>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
       <!-- =================== FILE BUFFER (disk spool) ===================
            The page's summary block: the one snapshot that holds whichever
            source is selected. -->
-      <div class="card" :class="{ 'card-alarm': spoolAlarm }" style="margin-bottom:16px;">
+      <div v-else class="card" :class="{ 'card-alarm': spoolAlarm }" style="margin-bottom:16px;">
         <div class="card-header">
           <h3>File buffer</h3>
           <span class="chip chip-mute">cell-level</span>
@@ -199,8 +274,9 @@
               </div>
             </div>
 
-            <div class="sys-grid-2" style="margin-bottom:16px;">
-              <div class="card">
+            <!-- Raft mode has no database pool, so Broker workers takes the row. -->
+            <div class="sys-grid-2" :class="{ 'sys-grid-solo': isRaft }" style="margin-bottom:16px;">
+              <div v-if="!isRaft" class="card">
                 <div class="card-header">
                   <h3>Database pool</h3>
                   <span class="chip chip-mute">cell-level</span>
@@ -242,7 +318,9 @@
                       </span>
                     </div>
                     <p class="sys-note">
-                      DB errors since broker start (cell-wide):
+                      <!-- Raft has no database: the same counter carries the
+                           local store's commit failures. -->
+                      {{ isRaft ? 'Store commit errors' : 'DB errors' }} since broker start (cell-wide):
                       <span class="font-mono" :class="{ 'color-ember': (lifetimeDbErrors || 0) > 0 }">
                         {{ metric(lifetimeDbErrors) }}
                       </span>
@@ -261,7 +339,7 @@
                 <span class="muted">{{ stamp(metrics) }}</span>
               </div>
               <div class="card-body">
-                <div class="stat-grid stat-grid-6">
+                <div class="stat-grid" :class="isRaft ? 'stat-grid-5' : 'stat-grid-6'">
                   <div class="stat">
                     <div class="stat-label">Replicas</div>
                     <div class="stat-value font-mono">{{ metric(toNum(systemData.replicaCount)) }}</div>
@@ -284,7 +362,7 @@
                     <div class="stat-value font-mono">{{ mb(latest.rss) }}</div>
                     <div class="stat-foot">{{ acrossLabel }}</div>
                   </div>
-                  <div class="stat">
+                  <div v-if="!isRaft" class="stat">
                     <div class="stat-label">DB active</div>
                     <div class="stat-value font-mono">{{ metric(latest.dbActive) }}</div>
                     <div class="stat-foot">{{ acrossLabel }}</div>
@@ -310,7 +388,7 @@
                         <th class="right">CPU (user)</th>
                         <th class="right">CPU (sys)</th>
                         <th class="right">Memory</th>
-                        <th class="right">DB pool</th>
+                        <th v-if="!isRaft" class="right">DB pool</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -320,7 +398,7 @@
                         <td class="right font-mono tabular-nums">{{ pct(cpuOf(replica, 'user_us')) }}</td>
                         <td class="right font-mono tabular-nums">{{ pct(cpuOf(replica, 'system_us')) }}</td>
                         <td class="right font-mono tabular-nums">{{ mb(lastOf(replica, ['memory', 'rss_bytes'])) }}</td>
-                        <td class="right font-mono tabular-nums">
+                        <td v-if="!isRaft" class="right font-mono tabular-nums">
                           {{ metric(lastOf(replica, ['database', 'pool_active'])) }}/{{ metric(lastOf(replica, ['database', 'pool_size'])) }}
                         </td>
                       </tr>
@@ -332,6 +410,16 @@
           </template>
         </template>
       </template>
+
+      <!-- =================== RAFT =================== -->
+      <RaftCluster
+        v-else-if="source === 'raft'"
+        :members="raftMembers.data.value"
+        :loading="raftMembers.loading.value && !raftMembers.data.value"
+        :absent="raftMembersAbsent"
+        :stamp="stamp(raftMembers)"
+        @recheck="recheckRaft"
+      />
 
       <!-- =================== POSTGRES =================== -->
       <template v-else>
@@ -670,27 +758,49 @@
 import { computed, ref, watch } from 'vue'
 
 import BaseChart from '@/components/BaseChart.vue'
+import RaftCluster from '@/components/RaftCluster.vue'
 import { describeApiError, operator } from '@/api'
-import { formatNumber, formatRelativeTime, toNum, useApi } from '@/composables/useApi'
+import { formatBytes, formatNumber, formatRelativeTime, toNum, useApi } from '@/composables/useApi'
 import { chartColor } from '@/composables/useChartTheme'
+import { storageSourceLabel } from '@/composables/useEngine'
 import {
   formatChartLabel, formatDateTimeLocal, formatTimestamp, formatTimestampUtc,
   isMultiDay, validateRange,
 } from '@/composables/useFormat'
+import {
+  describeRaftFailure, formatIndex, formatMapPct, nodeView,
+} from '@/composables/useRaftCluster'
 import { useRefresh } from '@/composables/useRefresh'
+import { numTone } from '@/composables/useSeverity'
 import { stamp } from '@/composables/useStamp'
+import { useEngine } from '@/stores/engine'
 import { useIdentity } from '@/stores/identity'
+import { isMissingRoute, routeSupport } from '@/stores/routeSupport'
 
 // CELL-LEVEL PAGE — every source is an operator route (queen_proxy
 // is_operator_route): /api/v1/analytics/system-metrics, /api/v1/status/buffers,
-// /api/v1/analytics/postgres-stats and the bare /api/v1/status. None of them is
-// tenant-scopable: host CPU, a disk spool and pg_buffercache belong to the cell.
-// The route already declares requires:'operator'; this guard also stops the
-// calls if the operator session stops being live while the page is open.
+// /api/v1/analytics/postgres-stats and the bare /api/v1/status, and in raft
+// mode /api/v1/raft/status and /api/v1/raft/members. None of them is
+// tenant-scopable: host CPU, a disk spool, pg_buffercache and a replicated log
+// belong to the cell. The route already declares requires:'operator'; this
+// guard also stops the calls if the operator session stops being live while
+// the page is open.
 const { can, actingTenantSlug, actingCellSlug } = useIdentity()
 const canOperate = computed(() => can('operator'))
 
+// Postgres or raft (stores/engine.js). Raft mode swaps the storage half of the
+// page — the spool card, the pool, the Postgres source — and nothing else.
+const { engine, isRaft } = useEngine()
+
+// 'system' | 'storage'. The second option is the cell's storage: Postgres
+// stats, or the Raft cluster. Kept as ONE choice so a verdict that lands after
+// the click (or a cluster switch onto the other engine) moves the page with it.
 const dataSource = ref('system')
+const source = computed(() => {
+  if (dataSource.value === 'system') return 'system'
+  return isRaft.value ? 'raft' : 'postgres'
+})
+const storageLabel = computed(() => storageSourceLabel(engine.value))
 const viewMode = ref('aggregate')
 const aggregationType = ref('avg')
 const timeRange = ref(60)
@@ -765,11 +875,28 @@ const buffers = useApi((config) => operator.getBuffers(undefined, config), { imm
 const status = useApi((config) => operator.getStatus(undefined, config), { immediate: false })
 const pg = useApi((config) => operator.getPostgresStats(config), { immediate: false })
 
+// Raft mode. The routes are new: a broker without them answers 404 and a proxy
+// that does not classify them 404 route_blocked — a state to render, not a
+// failure to retry — so each is guarded (asked once per cluster epoch) and a
+// probe (no toast for that answer).
+const raftStatus = useApi(
+  routeSupport.guard('raft-status', (config) => operator.getRaftStatus({ ...config, probe: true })),
+  { immediate: false },
+)
+const raftMembers = useApi(
+  routeSupport.guard('raft-members', (config) => operator.getRaftMembers({ ...config, probe: true })),
+  { immediate: false },
+)
+
+// Only these depend on the engine: the summary block and the storage source.
+const fetchSummary = () => (isRaft.value ? raftStatus.refresh() : buffers.refresh())
+const fetchStorage = () => (isRaft.value ? raftMembers.refresh() : pg.refresh())
+
 const fetchData = () => {
   if (!canOperate.value) return
-  buffers.refresh()
-  if (dataSource.value === 'postgres') {
-    pg.refresh()
+  fetchSummary()
+  if (dataSource.value === 'storage') {
+    fetchStorage()
   } else {
     metrics.refresh()
     status.refresh()
@@ -784,6 +911,23 @@ const selectSource = (src) => {
 useRefresh(fetchData)
 watch(canOperate, (live) => { if (live) fetchData() }, { immediate: true })
 
+// The verdict can land after the page asked (a first visit, before /health
+// answered) or change under it (a cluster switch onto the other engine): fetch
+// what the page now shows, and nothing it no longer does.
+watch(isRaft, () => {
+  if (!canOperate.value) return
+  fetchSummary()
+  if (dataSource.value === 'storage') fetchStorage()
+})
+
+/** "Check again" on the quiet state: forget the verdict for the family, ask once more. */
+const recheckRaft = () => {
+  routeSupport.forget('raft-members')
+  routeSupport.forget('raft-status')
+  raftMembers.refresh()
+  raftStatus.refresh()
+}
+
 // ---------------------------------------------------------------------------
 // Panel state
 // ---------------------------------------------------------------------------
@@ -794,6 +938,7 @@ const pgFirstLoad = computed(() => pg.loading.value && !pg.data.value)
 
 /** A number we hold, or an em dash — never a 0 standing in for "unknown". */
 const metric = (v) => (v === null || v === undefined ? '—' : formatNumber(v))
+const bytes = (v) => (v === null || v === undefined ? '—' : formatBytes(v))
 const pct = (v) => (v === null || v === undefined ? '—' : `${(v / 100).toFixed(1)}%`)
 const mb = (v) => (v === null || v === undefined ? '—' : `${Math.round(v / 1024 / 1024)} MB`)
 const ratio = (v) => (v === null || v === undefined ? '—' : `${v}%`)
@@ -832,6 +977,14 @@ const dbHealthy = computed(() => {
 const spoolAlarm = computed(
   () => dbHealthy.value === false || (bufferFailed.value || 0) > 0 || (bufferPending.value || 0) > 0,
 )
+
+// ---------------------------------------------------------------------------
+// Replicated log (raft mode) — the node that answered /api/v1/raft/status
+// ---------------------------------------------------------------------------
+const node = computed(() => nodeView(raftStatus.data.value))
+const raftAlarm = computed(() => (node.value?.severity || '') !== '')
+const raftStatusAbsent = computed(() => isMissingRoute(raftStatus.error.value))
+const raftMembersAbsent = computed(() => isMissingRoute(raftMembers.error.value))
 
 // ---------------------------------------------------------------------------
 // Brokers (bare /api/v1/status — workers seen in the last two minutes)
@@ -1073,6 +1226,8 @@ const poolOptions = {
 /* The panel pair. Not a stat grid: it lays out CARDS, at the 16px block
    rhythm, so it keeps its own rule (as Analytics' .an-grid-2 does). */
 .sys-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+/* A pair that lost its partner (raft mode has no pool): one card, full row. */
+.sys-grid-2.sys-grid-solo { grid-template-columns: 1fr; }
 
 .sys-workers { display: flex; flex-direction: column; gap: 8px; }
 .sys-worker {

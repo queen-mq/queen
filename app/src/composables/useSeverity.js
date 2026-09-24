@@ -104,6 +104,21 @@ export const THRESHOLDS = Object.freeze({
   // --- Loss (ephemeral rings, eviction) -----------------------------------
   lossWarnRate: 0.01,           // ≥1% of what the group read was dropped first
   lossFloor: 1,
+
+  // --- Raft replication (storage = raft) ----------------------------------
+  // Pinned to the broker's own lines, not invented here: openraft's default
+  // replication_lag_threshold (the broker does not override it in
+  // server/src/rsm/replicator/raft/mod.rs raft_config) is where openraft itself
+  // stops calling a follower "in line-rate replication"; the heartbeat pair is
+  // that file's cluster defaults (100 ms heartbeat, 1-2 s election timeout).
+  raftLagWarnEntries: 5_000,
+  raftHeartbeatWarnMs: 500,     // five heartbeats without an answer
+  raftHeartbeatBadMs: 2_000,    // past the election timeout ceiling
+  // The store's map gate (server/src/rsm/store/mod.rs): at MAP_HIGH_PCT the
+  // planner refuses pushes, timer schedules and KV puts with 507
+  // storage_full, and service resumes only below MAP_LOW_PCT.
+  storeMapWarnPct: 80,          // MAP_LOW_PCT
+  storeMapBadPct: 85,           // MAP_HIGH_PCT
 })
 
 const T = THRESHOLDS
@@ -312,6 +327,60 @@ export function consumerGroupSeverity({ state, maxTimeLag } = {}) {
   if (lag >= T.lagBadSeconds) return SEV_BAD
   if (state === 'Lagging' || lag >= T.lagWarnSeconds) return SEV_WARN
   return SEV_OK
+}
+
+/**
+ * A follower's replication lag: entries the leader holds that it has not
+ * matched. An entry is a batch, so the count is judged against openraft's own
+ * line rather than a guess at entries per second — past it openraft no longer
+ * calls the follower in line-rate replication.
+ *
+ * Never red, for the reason a dead letter never is: a follower behind is
+ * redundancy reduced, not an outage. The outage is quorumSeverity's to call,
+ * and a follower that has stopped answering is raftHeartbeatSeverity's.
+ *
+ * @returns {''|'warn'}
+ */
+export function raftLagSeverity(entries) {
+  const e = n(entries)
+  if (e === null || e < T.raftLagWarnEntries) return SEV_NONE
+  return SEV_WARN
+}
+
+/** How long ago the leader last heard from a follower. A duration, so it keeps fixed lines. */
+export function raftHeartbeatSeverity(ms) {
+  const v = n(ms)
+  if (v === null || v < T.raftHeartbeatWarnMs) return SEV_NONE
+  if (v >= T.raftHeartbeatBadMs) return SEV_BAD
+  return SEV_WARN
+}
+
+/** The store's map usage, in percent: a utilisation, on the broker's own gate. */
+export function storeMapSeverity(pct) {
+  const v = n(pct)
+  if (v === null || v < T.storeMapWarnPct) return SEV_NONE
+  if (v >= T.storeMapBadPct) return SEV_BAD
+  return SEV_WARN
+}
+
+/**
+ * Raft quorum: voters that answer against the voters the cluster has. Below a
+ * majority nothing can be elected or committed — that is the one broken state
+ * of a replicated log. A voter down with the majority intact is attention: the
+ * cluster still serves, one failure closer to not serving.
+ *
+ * @param {object} o
+ * @param {number|null} o.up      voters that answered and are not shut down
+ * @param {number|null} o.voters  voters in the membership
+ * @returns {''|'warn'|'bad'}
+ */
+export function quorumSeverity({ up, voters } = {}) {
+  const u = n(up)
+  const v = n(voters)
+  if (u === null || v === null || v <= 0) return SEV_NONE
+  if (u < Math.floor(v / 2) + 1) return SEV_BAD
+  if (u < v) return SEV_WARN
+  return SEV_NONE
 }
 
 /**

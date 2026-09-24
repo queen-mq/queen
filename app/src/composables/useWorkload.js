@@ -251,7 +251,7 @@ export function findings(rows, level, rangeLabel, options = {}) {
     if (n.queuesTouched === 0 && r.groupsN === 0 && hasGroups) {
       out.push({
         ...base, sev: 'mute',
-        text: `${r.name}: ${plural(n.queues, 'queue')}, nothing pushed, popped or polled in the ${rangeLabel}, no consumer group`,
+        text: `${r.name}: ${plural(r.queues, 'queue')}, nothing pushed, popped or polled in the ${rangeLabel}, no consumer group`,
         evidence: 'cleanup candidates',
       })
     }

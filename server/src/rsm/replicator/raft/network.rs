@@ -416,6 +416,9 @@ mod server {
         /// Plans a follower's prepared command here, on the leader: set by the
         /// facade once it exists ([`super::super::RaftReplicator::set_remote_handler`]).
         pub(crate) remote: Arc<std::sync::OnceLock<super::super::RemoteHandler>>,
+        /// Answers a peer's gather of this node's dashboard data: set by the
+        /// facade ([`super::super::RaftReplicator::set_local_handler`]).
+        pub(crate) local: Arc<std::sync::OnceLock<super::super::RemoteHandler>>,
     }
 
     impl<S: Store + 'static> RpcState<S> {
@@ -541,6 +544,27 @@ mod server {
         }
     }
 
+    /// A peer's gather of this node's own dashboard data (PLAN_RAFT.md D17:
+    /// node-local metrics, cluster views gather from every node). JSON in and
+    /// out; never on the message path.
+    async fn local<S: Store + 'static>(
+        State(st): State<Arc<RpcState<S>>>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Response {
+        if let Err(r) = st.check(&headers) {
+            return r;
+        }
+        let Some(h) = st.local.get().cloned() else {
+            return (StatusCode::SERVICE_UNAVAILABLE, "no facade on this node yet").into_response();
+        };
+        match h(body).await {
+            Ok(b) => (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], b)
+                .into_response(),
+            Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
+        }
+    }
+
     /// A follower's linearizable read point: this node confirms it still leads
     /// (a heartbeat round) and answers the RSM index the follower must have
     /// applied before it reads.
@@ -614,6 +638,7 @@ mod server {
             .route("/raft/v1/snapshot", post(snapshot::<S>))
             .route("/raft/v1/submit", post(submit::<S>))
             .route("/raft/v1/read_index", post(read_index::<S>))
+            .route("/raft/v1/local", post(local::<S>))
             // Peers are trusted and an append is capped by the sender
             // (wire::MAX_APPEND_BYTES); a snapshot is streamed.
             .layer(axum::extract::DefaultBodyLimit::disable())

@@ -1747,6 +1747,10 @@ async fn run_raft(cfg: config::Config) {
         Err(e) => obs::fatal(format!("raft state init failed: {e}")),
     };
 
+    // The event-loop lag probe and the 1 Hz parked sampler, as in the
+    // Postgres boot: the raft collector flushes them with everything else.
+    metrics::spawn_samplers(state.metrics.clone());
+
     let app = handlers::raft::build_raft_router(state, authenticator, cfg.tenancy_header);
 
     let addr = config::host_port(&cfg.bind_addr, &cfg.port);

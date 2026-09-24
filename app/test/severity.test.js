@@ -25,6 +25,10 @@ import {
   numTone,
   pendingDriftSeverity,
   poolSeverity,
+  quorumSeverity,
+  raftHeartbeatSeverity,
+  raftLagSeverity,
+  storeMapSeverity,
   timeLagSeverity,
 } from '../src/composables/useSeverity.js'
 
@@ -215,6 +219,57 @@ test('one partition momentarily behind is what working looks like', () => {
   assert.equal(laggingPartitionsSeverity({ behind: 60, total: 64 }), 'bad')
   assert.equal(laggingPartitionsSeverity({ behind: 3, total: null }), 'mute')
   assert.equal(laggingPartitionsSeverity({ behind: 0, total: 64 }), 'mute')
+})
+
+// ---------------------------------------------------------------------------
+// Raft mode — every line is the broker's own, not one invented here
+// ---------------------------------------------------------------------------
+
+test("a follower's lag is judged on openraft's own lagging line, and never red", () => {
+  assert.equal(THRESHOLDS.raftLagWarnEntries, 5_000)   // openraft replication_lag_threshold
+  assert.equal(raftLagSeverity(0), '')
+  assert.equal(raftLagSeverity(64), '')                // one AppendEntries payload in flight
+  assert.equal(raftLagSeverity(4_999), '')
+  assert.equal(raftLagSeverity(5_000), 'warn')
+  // Redundancy reduced, not an outage: that is the quorum's call to make.
+  assert.equal(raftLagSeverity(50_000_000), 'warn')
+  assert.equal(raftLagSeverity(null), '')
+  assert.equal(raftLagSeverity(undefined), '')
+})
+
+test('heartbeat age is a duration against the cluster timers', () => {
+  // 100 ms heartbeats, a 1-2 s election timeout (replicator/raft raft_config).
+  assert.equal(raftHeartbeatSeverity(12), '')
+  assert.equal(raftHeartbeatSeverity(499), '')
+  assert.equal(raftHeartbeatSeverity(500), 'warn')
+  assert.equal(raftHeartbeatSeverity(1_999), 'warn')
+  assert.equal(raftHeartbeatSeverity(2_000), 'bad')
+  assert.equal(raftHeartbeatSeverity(null), '')
+})
+
+test("the store map follows the broker's refusal gate", () => {
+  // MAP_LOW_PCT / MAP_HIGH_PCT in server/src/rsm/store/mod.rs.
+  assert.equal(THRESHOLDS.storeMapWarnPct, 80)
+  assert.equal(THRESHOLDS.storeMapBadPct, 85)
+  assert.equal(storeMapSeverity(0.038), '')            // a 64 GiB map, 25 MB used
+  assert.equal(storeMapSeverity(79.9), '')
+  assert.equal(storeMapSeverity(80), 'warn')
+  assert.equal(storeMapSeverity(85), 'bad')            // pushes answer 507 storage_full
+  assert.equal(storeMapSeverity(null), '')
+})
+
+test('a quorum is broken only below a majority of voters', () => {
+  assert.equal(quorumSeverity({ up: 3, voters: 3 }), '')
+  assert.equal(quorumSeverity({ up: 2, voters: 3 }), 'warn')
+  assert.equal(quorumSeverity({ up: 1, voters: 3 }), 'bad')
+  assert.equal(quorumSeverity({ up: 3, voters: 5 }), 'warn')
+  assert.equal(quorumSeverity({ up: 2, voters: 5 }), 'bad')
+  assert.equal(quorumSeverity({ up: 1, voters: 1 }), '')
+  assert.equal(quorumSeverity({ up: 0, voters: 1 }), 'bad')
+  // Two voters have no failure to spare by construction: one down is broken.
+  assert.equal(quorumSeverity({ up: 1, voters: 2 }), 'bad')
+  assert.equal(quorumSeverity({ up: 0, voters: 0 }), '')
+  assert.equal(quorumSeverity({}), '')
 })
 
 // ---------------------------------------------------------------------------

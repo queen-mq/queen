@@ -685,7 +685,9 @@ async fn phase_two_admin_detail_and_stream_state_accept_the_raft_partition_id() 
         .await
         .expect("raft status");
     assert_eq!(raft_status.status, 200, "{}", raft_status.body);
-    assert_eq!(parse(&raft_status.body)["role"], "leader");
+    // `role` is the membership role, `state` the Raft state (WP-4.8).
+    assert_eq!(parse(&raft_status.body)["role"], "voter");
+    assert_eq!(parse(&raft_status.body)["state"], "leader");
 
     let postgres_stats = facade
         .api(

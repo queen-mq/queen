@@ -762,6 +762,12 @@ pub trait Rsm: Send + Sync {
     fn notifier(&self) -> Option<&Arc<Notifier>> {
         None
     }
+
+    /// The cluster's dashboard id (`rsm::dashboard::cluster_id`): the same
+    /// on every node of one cluster. `None` when the facade has no replicator.
+    fn cluster_id(&self) -> Option<String> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

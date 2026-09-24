@@ -32,9 +32,23 @@ struct RetentionEvent {
     txns_to: u64,
 }
 
+/// A journal record of finished partition-churn minutes.
+#[derive(Serialize, Deserialize)]
+struct ChurnRecord {
+    churn: Vec<crate::rsm::dashboard::model::ChurnRow>,
+}
+
+/// Partition churn is kept this long (it is one row per queue per minute
+/// with partitions created or deleted).
+const CHURN_KEEP_US: i64 = 24 * 3600 * 1_000_000;
+
 struct State {
     retention: VecDeque<RetentionEvent>,
     appended: usize,
+    /// `(minute, tenant, queue)` → (created, deleted). Minutes before
+    /// `churn_journaled_to` are in the journal; the open minute is not yet.
+    churn: std::collections::BTreeMap<(i64, String, String), (i64, i64)>,
+    churn_journaled_to: i64,
 }
 
 /// One node's local observability store. The registry below makes the applier
@@ -47,6 +61,20 @@ pub struct LocalMetrics {
 
 static REGISTRY: LazyLock<Mutex<HashMap<PathBuf, Weak<LocalMetrics>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// [`LocalMetrics::flush_churn`] on every open store (every raft group of
+/// this process).
+pub fn flush_all_churn(now_us: i64) {
+    let stores: Vec<Arc<LocalMetrics>> = REGISTRY
+        .lock()
+        .expect("local metrics registry poisoned")
+        .values()
+        .filter_map(Weak::upgrade)
+        .collect();
+    for s in stores {
+        s.flush_churn(now_us);
+    }
+}
 
 pub fn open(path: impl Into<PathBuf>) -> io::Result<Arc<LocalMetrics>> {
     let path = path.into();
@@ -66,6 +94,8 @@ impl LocalMetrics {
         }
         let mut events = VecDeque::with_capacity(RETENTION_CAP);
         let mut appended = 0usize;
+        let mut churn = std::collections::BTreeMap::new();
+        let mut churn_to = 0i64;
         match File::open(&path) {
             Ok(mut file) => {
                 let mut bytes = Vec::new();
@@ -91,6 +121,16 @@ impl LocalMetrics {
                                 events.pop_front();
                             }
                             events.push_back(event);
+                            appended += 1;
+                        } else if let Ok(rec) = serde_json::from_slice::<ChurnRecord>(payload) {
+                            for c in rec.churn {
+                                let e = churn
+                                    .entry((c.bucket_us, c.tenant, c.queue))
+                                    .or_insert((0, 0));
+                                e.0 += c.created;
+                                e.1 += c.deleted;
+                                churn_to = churn_to.max(c.bucket_us + 60_000_000);
+                            }
                             appended += 1;
                         }
                         at += len;
@@ -125,6 +165,8 @@ impl LocalMetrics {
             state: Mutex::new(State {
                 retention: events,
                 appended,
+                churn,
+                churn_journaled_to: churn_to,
             }),
         })
     }
@@ -167,10 +209,135 @@ impl LocalMetrics {
         state.retention.push_back(event);
         state.appended += 1;
         if state.appended >= RETENTION_CAP * 2 {
-            if rewrite(&self.path, &state.retention).is_ok() {
-                state.appended = state.retention.len();
+            if rewrite(&self.path, &state.retention, &state.churn).is_ok() {
+                state.appended = state.retention.len() + 1;
             }
         }
+    }
+
+    /// Count partitions created / deleted in `queue` at `at_us` (the applied
+    /// entry's time, so every node counts the same minute). RAM only on the
+    /// apply thread: a finished minute is journaled in one record when the
+    /// next minute's first event arrives.
+    pub fn record_churn(&self, at_us: i64, tenant: &str, queue: &str, created: i64, deleted: i64) {
+        use crate::rsm::dashboard::model::{trunc_us, ChurnRow, US_PER_MIN};
+        let bucket = trunc_us(at_us, US_PER_MIN);
+        let mut state = self.state.lock().expect("local metrics poisoned");
+        if bucket > state.churn_journaled_to {
+            let done: Vec<ChurnRow> = state
+                .churn
+                .range((state.churn_journaled_to, String::new(), String::new())..)
+                .take_while(|((b, _, _), _)| *b < bucket)
+                .map(|((b, t, q), (c, d))| ChurnRow {
+                    bucket_us: *b,
+                    tenant: t.clone(),
+                    queue: q.clone(),
+                    created: *c,
+                    deleted: *d,
+                })
+                .collect();
+            if !done.is_empty() {
+                if let Ok(payload) = serde_json::to_vec(&ChurnRecord { churn: done }) {
+                    if append_record(&self.path, &payload).is_ok() {
+                        state.appended += 1;
+                    }
+                }
+            }
+            state.churn_journaled_to = bucket;
+            let floor = bucket - CHURN_KEEP_US;
+            state.churn.retain(|(b, _, _), _| *b >= floor);
+        }
+        let e = state
+            .churn
+            .entry((bucket, tenant.to_string(), queue.to_string()))
+            .or_insert((0, 0));
+        e.0 += created;
+        e.1 += deleted;
+    }
+
+    /// Journal every churn minute that ended before `now_us` and is not in
+    /// the journal yet. [`LocalMetrics::record_churn`] journals a minute only
+    /// when a later minute's first event arrives; this closes the last one
+    /// when no further event comes (called by the metrics collector).
+    pub fn flush_churn(&self, now_us: i64) {
+        use crate::rsm::dashboard::model::{trunc_us, ChurnRow, US_PER_MIN};
+        let open = trunc_us(now_us, US_PER_MIN);
+        let mut state = self.state.lock().expect("local metrics poisoned");
+        if open <= state.churn_journaled_to {
+            return;
+        }
+        let done: Vec<ChurnRow> = state
+            .churn
+            .range((state.churn_journaled_to, String::new(), String::new())..)
+            .take_while(|((b, _, _), _)| *b < open)
+            .map(|((b, t, q), (c, d))| ChurnRow {
+                bucket_us: *b,
+                tenant: t.clone(),
+                queue: q.clone(),
+                created: *c,
+                deleted: *d,
+            })
+            .collect();
+        if !done.is_empty() {
+            if let Ok(payload) = serde_json::to_vec(&ChurnRecord { churn: done }) {
+                if append_record(&self.path, &payload).is_ok() {
+                    state.appended += 1;
+                }
+            }
+        }
+        state.churn_journaled_to = open;
+    }
+
+    /// The tenant's partition churn in `[from_us, to_us)`, the open minute
+    /// included.
+    pub fn churn_rows(
+        &self,
+        tenant: &str,
+        from_us: i64,
+        to_us: i64,
+    ) -> Vec<crate::rsm::dashboard::model::ChurnRow> {
+        let state = self.state.lock().expect("local metrics poisoned");
+        state
+            .churn
+            .range((from_us, String::new(), String::new())..)
+            .take_while(|((b, _, _), _)| *b < to_us)
+            .filter(|((_, t, _), _)| t == tenant)
+            .map(|((b, t, q), (c, d))| crate::rsm::dashboard::model::ChurnRow {
+                bucket_us: *b,
+                tenant: t.clone(),
+                queue: q.clone(),
+                created: *c,
+                deleted: *d,
+            })
+            .collect()
+    }
+
+    /// The tenant's retention steps in `[from_us, to_us)` as dashboard rows.
+    pub fn retention_rows(
+        &self,
+        tenant: &str,
+        from_us: i64,
+        to_us: i64,
+    ) -> Vec<crate::rsm::dashboard::model::RetentionRow> {
+        let state = self.state.lock().expect("local metrics poisoned");
+        state
+            .retention
+            .iter()
+            .filter(|e| e.tenant == tenant && e.at_us >= from_us && e.at_us < to_us)
+            .map(|e| crate::rsm::dashboard::model::RetentionRow {
+                at_us: e.at_us,
+                tenant: e.tenant.clone(),
+                queue: e.queue.clone(),
+                partition_id: e.pid,
+                retention_msgs: e.log_to.saturating_sub(e.log_from) as i64,
+                completed_retention_msgs: 0,
+                eviction_msgs: 0,
+                log_from: e.log_from,
+                log_to: e.log_to,
+                txns_from: e.txns_from,
+                txns_to: e.txns_to,
+            })
+            .collect()
     }
 
     pub fn retention_json(&self, tenant: &str) -> Value {
@@ -220,7 +387,11 @@ fn append_record(path: &Path, payload: &[u8]) -> io::Result<()> {
     file.write_all(payload)
 }
 
-fn rewrite(path: &Path, events: &VecDeque<RetentionEvent>) -> io::Result<()> {
+fn rewrite(
+    path: &Path,
+    events: &VecDeque<RetentionEvent>,
+    churn: &std::collections::BTreeMap<(i64, String, String), (i64, i64)>,
+) -> io::Result<()> {
     let tmp = path.with_extension("db.tmp");
     let mut file = OpenOptions::new()
         .create(true)
@@ -230,6 +401,23 @@ fn rewrite(path: &Path, events: &VecDeque<RetentionEvent>) -> io::Result<()> {
     file.write_all(MAGIC)?;
     for event in events {
         let payload = serde_json::to_vec(event).map_err(io::Error::other)?;
+        file.write_all(&(payload.len() as u32).to_le_bytes())?;
+        file.write_all(&xxh3_64(&payload).to_le_bytes())?;
+        file.write_all(&payload)?;
+    }
+    let rows: Vec<crate::rsm::dashboard::model::ChurnRow> = churn
+        .iter()
+        .map(|((b, t, q), (c, d))| crate::rsm::dashboard::model::ChurnRow {
+            bucket_us: *b,
+            tenant: t.clone(),
+            queue: q.clone(),
+            created: *c,
+            deleted: *d,
+        })
+        .collect();
+    for chunk in rows.chunks(5_000) {
+        let payload =
+            serde_json::to_vec(&ChurnRecord { churn: chunk.to_vec() }).map_err(io::Error::other)?;
         file.write_all(&(payload.len() as u32).to_le_bytes())?;
         file.write_all(&xxh3_64(&payload).to_le_bytes())?;
         file.write_all(&payload)?;

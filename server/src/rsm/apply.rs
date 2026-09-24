@@ -1611,9 +1611,18 @@ impl<'s, S: Store> Applier<'s, S> {
                 }
                 let row = PartitionRow::new(*uuid, tenant, queue, partition, *created_at_us);
                 self.writes.create_partition(*pid, &row)?;
+                // The dashboard's partition churn (node-local, D17).
+                self.local_metrics.record_churn(now_us, tenant, queue, 1, 0);
                 Ok(())
             }
-            Effect::PartitionDelete { pid } => self.partition_delete(*pid),
+            Effect::PartitionDelete { pid } => {
+                let owner = self.writes.partition(*pid)?.map(|p| (p.tenant, p.queue));
+                self.partition_delete(*pid)?;
+                if let Some((tenant, queue)) = owner {
+                    self.local_metrics.record_churn(now_us, &tenant, &queue, 0, 1);
+                }
+                Ok(())
+            }
 
             Effect::Append {
                 pid,

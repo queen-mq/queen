@@ -316,7 +316,7 @@ async fn run_loop(
 // divided by the interval's seconds (a queue parked for the whole minute with
 // one consumer averages 1; parked 30s averages 0 after integer rounding-down
 // only when < half — round to nearest instead).
-fn drain_parked_avg(
+pub(crate) fn drain_parked_avg(
     metrics: &Metrics,
     interval: Duration,
 ) -> std::collections::HashMap<String, i32> {
@@ -329,7 +329,7 @@ fn drain_parked_avg(
         .collect()
 }
 
-fn delta(prev: &Counters, now: &Counters) -> Counters {
+pub(crate) fn delta(prev: &Counters, now: &Counters) -> Counters {
     // Counters are monotone; saturating_sub guards a counter reset (never expected
     // in-process, but keeps a delta non-negative if it ever happens).
     Counters {
@@ -369,7 +369,7 @@ fn pool_gauges(pool: &Pool) -> (i64, i64, i64) {
 // Usage" turns any transient spike into a permanent plateau that reads as a
 // leak. ru_maxrss is kept only as the last-resort fallback when the live figure
 // is unavailable, and it is at least an upper bound then.
-fn rusage() -> (u64, u64, u64) {
+pub(crate) fn rusage() -> (u64, u64, u64) {
     unsafe {
         let mut u: libc::rusage = std::mem::zeroed();
         if libc::getrusage(libc::RUSAGE_SELF, &mut u) != 0 {

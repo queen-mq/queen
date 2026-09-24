@@ -39,6 +39,80 @@ pub(super) struct Record {
     pub(super) encrypted: bool,
 }
 
+/// The overview's lag block ([`RaftFacade::lag_summary`]).
+pub(super) struct LagSummary {
+    pub(super) time_avg: i64,
+    pub(super) time_max: i64,
+    pub(super) offset_avg: i64,
+    pub(super) offset_max: i64,
+}
+
+/// The newest message stamp a partition can hold: no message in it is newer.
+fn newest_stamp(p: &PartitionRow) -> i64 {
+    p.last_created_at_us.max(p.last_write_at_us)
+}
+
+/// Offsets read per backward step of the message list.
+const MESSAGE_CHUNK: u64 = 256;
+
+/// One partition the message list may read, with what a status needs.
+struct MsgPart {
+    part: Part,
+    cursors: Vec<(String, crate::rsm::effect::CursorRow)>,
+    /// Offsets with a DLQ row (any group).
+    dlq: std::collections::HashSet<i64>,
+    namespace: Option<String>,
+    task: Option<String>,
+    priority: i32,
+}
+
+/// A message the list keeps, with its status.
+struct Picked {
+    created_at_us: i64,
+    offset: u64,
+    cand: usize,
+    status: &'static str,
+    consumed_by: u64,
+    total_groups: u64,
+    record: Record,
+}
+
+/// A message's status as `list_messages_v1` (010 ≈860) derives it:
+/// `dead_letter` when a DLQ row holds the offset; `completed` when every bus
+/// group's cursor passed it, or — with no bus group — the queue-mode cursor
+/// did; `processing` while any cursor of the partition holds a live lease;
+/// otherwise `pending`. Also `(consumedBy, totalGroups)` over the bus groups.
+pub(super) fn message_status(
+    offset: u64,
+    cursors: &[(String, crate::rsm::effect::CursorRow)],
+    dlq: &std::collections::HashSet<i64>,
+    now: i64,
+) -> (&'static str, u64, u64) {
+    let off = offset as i64;
+    let (mut bus, mut passed, mut queue_mode_passed, mut live) = (0u64, 0u64, false, false);
+    for (g, c) in cursors {
+        if g == "__QUEUE_MODE__" {
+            queue_mode_passed |= off <= c.committed;
+        } else {
+            bus += 1;
+            if off <= c.committed {
+                passed += 1;
+            }
+        }
+        live |= c.lease_expires_at_us.is_some_and(|e| e > now);
+    }
+    let status = if dlq.contains(&off) {
+        "dead_letter"
+    } else if (bus > 0 && passed == bus) || (bus == 0 && queue_mode_passed) {
+        "completed"
+    } else if live {
+        "processing"
+    } else {
+        "pending"
+    };
+    (status, passed, bus)
+}
+
 #[derive(Deserialize)]
 struct FetchBody {
     #[serde(default)]
@@ -373,75 +447,254 @@ impl RaftFacade {
         Ok(ApiOut::json(200, json!({"safeTime":crate::rsm::planner::timers::iso_us(super::super::wall_micros()),"safeTimeDegraded":false,"entries":out}).to_string()))
     }
 
+    /// `GET /api/v1/messages` — `queen.list_messages_v1` (010 ≈771): the
+    /// messages created in `[from, to)` (default the last hour; `to` rounds up
+    /// to the next minute), newest first, each with its status against the
+    /// partition's cursors ([`message_status`]), filtered by queue, partition,
+    /// namespace, task and status, then paged by `limit`/`offset`.
+    ///
+    /// Partitions are visited newest write first and each is read backwards
+    /// from its tail, so a page costs O(offset + limit) records plus one chunk
+    /// per partition it touches, never a scan of every log.
     pub(super) async fn api_messages(
         &self,
         ctx: ReqCtx,
         query: Option<&str>,
     ) -> Result<ApiOut, RsmError> {
+        use crate::rsm::dashboard::model::{parse_ts_us, trunc_us, US_PER_MIN};
         let q = query_map(query);
-        let queue = q.get("queue").cloned();
-        let partition = q.get("partition").cloned();
-        let limit = q
-            .get("limit")
+        let get = |k: &str| q.get(k).filter(|s| !s.is_empty()).cloned();
+        let queue = get("queue");
+        let partition = get("partition");
+        let namespace = get("namespace");
+        let task = get("task");
+        let status = get("status");
+        let limit = get("limit")
             .and_then(|s| s.parse().ok())
             .unwrap_or(200usize)
             .clamp(1, 1000);
-        let offset = q
-            .get("offset")
+        let offset = get("offset")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0usize);
-        let selected_parts = self
-            .parts(&ctx.tenant, queue.as_deref(), partition.as_deref())
-            .await?;
-        let selected_pids: Vec<Pid> = selected_parts.iter().map(|p| p.pid).collect();
+        let now = super::super::wall_micros();
+        let from_us = get("from")
+            .and_then(|s| parse_ts_us(&s))
+            .unwrap_or(now - 3_600_000_000);
+        let to_us = trunc_us(
+            get("to").and_then(|s| parse_ts_us(&s)).unwrap_or(now),
+            US_PER_MIN,
+        ) + US_PER_MIN;
+
+        let need_sealed = self.qlog_reader.is_none();
         let store = self.store.clone();
-        let mode = tokio::task::spawn_blocking(move || {
+        let tenant = ctx.tenant.clone();
+        let (mode, mut cands) = tokio::task::spawn_blocking(move || {
             store.read(|r| {
-            let mut has_queue_mode = false;
-            let mut groups = BTreeSet::new();
-            for pid in selected_pids {
-                r.scan_cursors(pid, usize::MAX, &mut |group, _| {
-                    if group == "__QUEUE_MODE__" {
-                        has_queue_mode = true;
-                    } else {
-                        groups.insert(group.to_string());
+                let mut queues = Vec::new();
+                match &queue {
+                    Some(q) => queues.push(q.clone()),
+                    None => {
+                        r.scan_queues(&tenant, usize::MAX, &mut |q, _| {
+                            queues.push(q.to_string());
+                            true
+                        })?;
                     }
-                    true
-                })?;
-            }
-            let bus_groups_count = groups.len();
-            let ty = match (has_queue_mode, bus_groups_count > 0) {
-                (false, false) => "none",
-                (true, false) => "queue",
-                (false, true) => "bus",
-                (true, true) => "hybrid",
-            };
-            Ok(json!({"hasQueueMode":has_queue_mode,"busGroupsCount":bus_groups_count,"type":ty}))
-        })
+                }
+                let mut has_queue_mode = false;
+                let mut bus_groups = BTreeSet::new();
+                let mut cands = Vec::new();
+                for qn in queues {
+                    let cfg = r.queue(&tenant, &qn)?;
+                    let ns = cfg.as_ref().and_then(|c| c.namespace.clone());
+                    let tk = cfg.as_ref().and_then(|c| c.task.clone());
+                    // namespace/task narrow the listing only: Postgres computes
+                    // `mode` over the queue/partition filter alone.
+                    let listed = namespace.as_ref().is_none_or(|n| ns.as_ref() == Some(n))
+                        && task.as_ref().is_none_or(|t| tk.as_ref() == Some(t));
+                    let mut pids = Vec::new();
+                    r.scan_queue_partitions(&tenant, &qn, None, usize::MAX, &mut |pid| {
+                        pids.push(pid);
+                        true
+                    })?;
+                    for pid in pids {
+                        let Some(row) = r.partition(pid)? else { continue };
+                        if partition.as_ref().is_some_and(|x| x != &row.partition) {
+                            continue;
+                        }
+                        let mut cursors = Vec::new();
+                        r.scan_cursors(pid, usize::MAX, &mut |g, c| {
+                            if g == "__QUEUE_MODE__" {
+                                has_queue_mode = true;
+                            } else {
+                                bus_groups.insert(g.to_string());
+                            }
+                            cursors.push((g.to_string(), c));
+                            true
+                        })?;
+                        if !listed
+                            || row.last_offset < row.log_start as i64
+                            || newest_stamp(&row) < from_us
+                        {
+                            continue;
+                        }
+                        let mut dlq = std::collections::HashSet::new();
+                        let pref = keys::dlq_by_pos_pid_prefix(pid);
+                        r.scan_raw(Keyspace::DlqByPos, &pref, &pref, usize::MAX, &mut |k, _| {
+                            if let Some(o) = keys::dlq_by_pos_offset_of(k) {
+                                dlq.insert(o);
+                            }
+                            true
+                        })?;
+                        let mut sealed = Vec::new();
+                        if need_sealed {
+                            r.scan_partition_files(pid, usize::MAX, &mut |f| {
+                                sealed.push(f);
+                                true
+                            })?;
+                        }
+                        cands.push(MsgPart {
+                            part: Part { pid, row, sealed },
+                            cursors,
+                            dlq,
+                            namespace: ns.clone(),
+                            task: tk.clone(),
+                            priority: cfg.as_ref().map(|c| c.priority).unwrap_or(0),
+                        });
+                    }
+                }
+                let bus = bus_groups.len();
+                let ty = match (has_queue_mode, bus > 0) {
+                    (false, false) => "none",
+                    (true, false) => "queue",
+                    (false, true) => "bus",
+                    (true, true) => "hybrid",
+                };
+                Ok((
+                    json!({"hasQueueMode":has_queue_mode,"busGroupsCount":bus,"type":ty}),
+                    cands,
+                ))
+            })
         })
         .await
-        .map_err(|e| RsmError::Internal(format!("message mode read: {e}")))?
+        .map_err(|e| RsmError::Internal(format!("message list read: {e}")))?
         .map_err(read_error)?;
-        let mut records = self
-            .collect_records(
-                &ctx.tenant,
-                queue.as_deref(),
-                partition.as_deref(),
-                limit.saturating_add(offset),
-            )
-            .await?;
-        records.sort_by(|a, b| {
-            b.created_at_us
-                .cmp(&a.created_at_us)
-                .then_with(|| b.offset.cmp(&a.offset))
-        });
-        let total = records.len();
-        let rows: Vec<Value> = records
+
+        cands.sort_by_key(|c| std::cmp::Reverse(newest_stamp(&c.part.row)));
+        let need = offset.saturating_add(limit);
+        let qlog = self.qlog_reader.clone();
+        let reader = self.reader.clone();
+        let tenant = ctx.tenant.clone();
+        let status_filter = status.clone();
+        let (picked, cands) = tokio::task::spawn_blocking(move || {
+            // (created_at, offset, candidate, status, consumedBy, totalGroups, record),
+            // kept sorted newest first and at most `need` long.
+            let mut best: Vec<Picked> = Vec::new();
+            for (ci, c) in cands.iter().enumerate() {
+                if best.len() >= need
+                    && best
+                        .last()
+                        .is_some_and(|w| newest_stamp(&c.part.row) < w.created_at_us)
+                {
+                    break; // no message of this or any later partition is newer
+                }
+                let low = c.part.row.log_start;
+                let mut high = (c.part.row.last_offset + 1).max(0) as u64;
+                'partition: while high > low {
+                    let lo = high.saturating_sub(MESSAGE_CHUNK).max(low);
+                    let mut chunk = Vec::new();
+                    walk_records(
+                        &reader,
+                        qlog.as_ref(),
+                        &tenant,
+                        &c.part,
+                        lo,
+                        high,
+                        usize::MAX,
+                        |rec| {
+                            chunk.push(rec);
+                            true
+                        },
+                    )?;
+                    for rec in chunk.into_iter().rev() {
+                        if rec.created_at_us >= to_us {
+                            continue;
+                        }
+                        if rec.created_at_us < from_us {
+                            break 'partition;
+                        }
+                        let (st, consumed_by, total) =
+                            message_status(rec.offset, &c.cursors, &c.dlq, now);
+                        if status_filter.as_deref().is_some_and(|f| f != st) {
+                            continue;
+                        }
+                        let key = (rec.created_at_us, rec.offset);
+                        if best.len() >= need
+                            && best
+                                .last()
+                                .is_some_and(|w| key <= (w.created_at_us, w.offset))
+                        {
+                            // A partition's stamps only grow with the offset:
+                            // nothing older here can make the page either.
+                            break 'partition;
+                        }
+                        let at = best.partition_point(|w| (w.created_at_us, w.offset) > key);
+                        best.insert(
+                            at,
+                            Picked {
+                                created_at_us: rec.created_at_us,
+                                offset: rec.offset,
+                                cand: ci,
+                                status: st,
+                                consumed_by,
+                                total_groups: total,
+                                record: rec,
+                            },
+                        );
+                        best.truncate(need);
+                    }
+                    high = lo;
+                }
+            }
+            Ok::<_, RsmError>((best, cands))
+        })
+        .await
+        .map_err(|e| RsmError::Internal(format!("message list walk: {e}")))??;
+
+        let rows: Vec<Value> = picked
             .into_iter()
             .skip(offset)
             .take(limit)
-            .map(message_json)
+            .map(|mut p| {
+                decrypt_record(&self.encryption, &mut p.record);
+                let c = &cands[p.cand];
+                let lease = c
+                    .cursors
+                    .iter()
+                    .find(|(g, _)| g == "__QUEUE_MODE__")
+                    .and_then(|(_, cur)| cur.lease_expires_at_us);
+                let mut v = message_json(p.record);
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("status".into(), json!(p.status));
+                    o.insert("queueStatus".into(), json!(p.status));
+                    o.insert(
+                        "busStatus".into(),
+                        json!({"consumedBy":p.consumed_by,"totalGroups":p.total_groups}),
+                    );
+                    o.insert(
+                        "queuePath".into(),
+                        json!(format!("{}/{}", c.part.row.queue, c.part.row.partition)),
+                    );
+                    o.insert("namespace".into(), json!(c.namespace));
+                    o.insert("task".into(), json!(c.task));
+                    o.insert("queuePriority".into(), json!(c.priority));
+                    o.insert("payloadAvailable".into(), json!(true));
+                    o.insert("createdAt".into(), json!(iso_ms(p.created_at_us)));
+                    o.insert("leaseExpiresAt".into(), json!(lease.map(iso_ms)));
+                }
+                v
+            })
             .collect();
+        let total = rows.len();
         Ok(ApiOut::json(
             200,
             json!({"messages":rows,"total":total,"pagination":{"limit":limit,"offset":offset},"mode":mode})
@@ -469,20 +722,22 @@ impl RaftFacade {
         let rec_for_detail = rec.clone();
         let detail=tokio::task::spawn_blocking(move || store.read(|r| {
             let cfg=r.queue(&tenant,&queue)?;
-            let mut groups=Vec::new(); let mut live=false; let mut completed=false; let mut dlq=None;
-            r.scan_cursors(pid,usize::MAX,&mut |g,c| { let consumed=rec_for_detail.offset as i64<=c.committed; completed|=consumed; live|=c.worker.is_some()&&c.lease_expires_at_us.is_some_and(|x|x>super::super::wall_micros()); groups.push(json!({"name":g,"committed":c.committed,"consumed":consumed,"leaseExpiresAt":c.lease_expires_at_us.map(crate::rsm::planner::timers::iso_us)})); true })?;
+            let mut groups=Vec::new(); let mut cursors=Vec::new(); let mut dlq=None;
+            r.scan_cursors(pid,usize::MAX,&mut |g,c| { let consumed=rec_for_detail.offset as i64<=c.committed; groups.push(json!({"name":g,"committed":c.committed,"consumed":consumed,"leaseExpiresAt":c.lease_expires_at_us.map(crate::rsm::planner::timers::iso_us)})); cursors.push((g.to_string(),c)); true })?;
             let pref=keys::dlq_by_pos_pid_prefix(pid); r.scan_raw(Keyspace::DlqByPos,&pref,&pref,usize::MAX,&mut |_k,v| { if let Ok(ids)=rows::dlq_ids_decode(v) { for id in ids { if let Ok(Some(row))=r.dlq(&tenant,&queue,&id) { if row.txn==txn2 { dlq=Some(row); return false; } } } } true })?;
-            Ok((cfg,groups,live,completed,dlq))
+            Ok((cfg,groups,cursors,dlq))
         })).await.map_err(|e|RsmError::Internal(format!("message detail: {e}")))?.map_err(read_error)?;
-        let (cfg, groups, live, completed, dlq) = detail;
+        let (cfg, groups, cursors, dlq) = detail;
         let status = if dlq.is_some() {
             "dead_letter"
-        } else if completed {
-            "completed"
-        } else if live {
-            "processing"
         } else {
-            "pending"
+            message_status(
+                rec.offset,
+                &cursors,
+                &std::collections::HashSet::new(),
+                super::super::wall_micros(),
+            )
+            .0
         };
         let has_queue_mode = groups
             .iter()
@@ -491,7 +746,7 @@ impl RaftFacade {
             .iter()
             .filter(|g| g.get("name").and_then(Value::as_str) != Some("__QUEUE_MODE__"))
             .count();
-        Ok(ApiOut::json(200,json!({"id":uuid_bytes_to_string(&rec.id),"transactionId":rec.txn,"data":payload_json(&rec.payload),"payload":payload_json(&rec.payload),"traceId":rec.trace_id.map(|x|uuid_bytes_to_string(&x)),"producerSub":rec.producer_sub,"createdAt":crate::rsm::planner::timers::iso_us(rec.created_at_us),"partitionId":uuid_bytes_to_string(&part.row.uuid),"partition":part.row.partition,"queue":part.row.queue,"queuePath":format!("{}/{}",part.row.queue,part.row.partition),"namespace":cfg.as_ref().and_then(|x|x.namespace.clone()),"task":cfg.as_ref().and_then(|x|x.task.clone()),"status":status,"errorMessage":dlq.as_ref().map(|x|x.error.clone()),"retryCount":dlq.as_ref().map(|x|x.retry_count).unwrap_or(0),"isEncrypted":rec.encrypted,"queueConfig":cfg.as_ref().map(super::config_options),"mode":{"hasQueueMode":has_queue_mode,"busGroupsCount":bus_groups,"type":if bus_groups>0{"bus"}else{"queue"}},"consumerGroups":groups}).to_string()))
+        Ok(ApiOut::json(200,json!({"id":uuid_bytes_to_string(&rec.id),"transactionId":rec.txn,"data":payload_json(&rec.payload),"payload":payload_json(&rec.payload),"traceId":rec.trace_id.map(|x|uuid_bytes_to_string(&x)),"producerSub":rec.producer_sub,"createdAt":crate::rsm::planner::timers::iso_us(rec.created_at_us),"partitionId":uuid_bytes_to_string(&part.row.uuid),"partition":part.row.partition,"queue":part.row.queue,"queuePath":format!("{}/{}",part.row.queue,part.row.partition),"namespace":cfg.as_ref().and_then(|x|x.namespace.clone()),"task":cfg.as_ref().and_then(|x|x.task.clone()),"status":status,"errorMessage":dlq.as_ref().map(|x|x.error.clone()),"retryCount":dlq.as_ref().map(|x|x.retry_count).unwrap_or(0),"isEncrypted":rec.encrypted,"queueConfig":cfg.as_ref().map(super::config_options),"mode":{"hasQueueMode":has_queue_mode,"busGroupsCount":bus_groups,"type":match (has_queue_mode, bus_groups > 0) {(false,false)=>"none",(true,false)=>"queue",(false,true)=>"bus",(true,true)=>"hybrid"}},"consumerGroups":groups}).to_string()))
     }
 
     pub(super) async fn api_dlq(
@@ -555,44 +810,29 @@ impl RaftFacade {
         only: Option<&str>,
     ) -> Result<ApiOut, RsmError> {
         let store = self.store.clone();
+        let qlog = self.qlog_reader.clone();
+        let reader = self.reader.clone();
         let tenant = ctx.tenant.clone();
         let only = only.map(str::to_string);
-        let only_read = only.clone();
         let now = super::super::wall_micros();
-        let groups = tokio::task::spawn_blocking(move || {
-            store.read(|r| {
-                if let Some(group) = only_read.as_deref() {
-                    group_detail(r, &tenant, group, now).map(|v| vec![v])
-                } else {
-                    group_view(r, &tenant, None, now)
-                }
+        let answer = tokio::task::spawn_blocking(move || {
+            store.read(|r| match only.as_deref() {
+                Some(group) => group_detail(r, qlog.as_ref(), &reader, &tenant, group, now),
+                None => group_view(r, qlog.as_ref(), &reader, &tenant, now).map(Value::Array),
             })
         })
         .await
         .map_err(|e| RsmError::Internal(format!("groups read: {e}")))?
         .map_err(read_error)?;
-        if only.is_some()
-            && groups
-                .first()
-                .is_none_or(|v| v.as_object().is_none_or(|o| o.is_empty()))
-        {
+        // The list is a bare array (Postgres serves the procedure's JSONB
+        // verbatim); one group is `{queue: {...}}`, 404 when it has no cursor.
+        if answer.as_object().is_some_and(|o| o.is_empty()) {
             return Ok(ApiOut::json(
                 404,
                 json!({"error":"Consumer group not found"}).to_string(),
             ));
         }
-        Ok(ApiOut::json(
-            200,
-            if only.is_some() {
-                groups
-                    .into_iter()
-                    .next()
-                    .unwrap_or_else(|| json!({}))
-                    .to_string()
-            } else {
-                json!({"consumerGroups":groups}).to_string()
-            },
-        ))
+        Ok(ApiOut::json(200, answer.to_string()))
     }
 
     pub(super) async fn api_lagging_groups(
@@ -606,14 +846,61 @@ impl RaftFacade {
             .unwrap_or(3600);
         let now = super::super::wall_micros();
         let store = self.store.clone();
+        let qlog = self.qlog_reader.clone();
+        let reader = self.reader.clone();
         let tenant = ctx.tenant.clone();
         let rows = tokio::task::spawn_blocking(move || {
-            store.read(|r| lagging_partitions(r, &tenant, min, now))
+            store.read(|r| lagging_partitions(r, qlog.as_ref(), &reader, &tenant, min, now))
         })
         .await
         .map_err(|e| RsmError::Internal(format!("lag read: {e}")))?
         .map_err(read_error)?;
         Ok(ApiOut::json(200, Value::Array(rows).to_string()))
+    }
+
+    /// The tenant's lag right now, over every cursor (queue mode included):
+    /// `(avg, max)` of each queue's oldest unconsumed message age in seconds,
+    /// and `(avg, max)` of each queue's unconsumed count — the `lag` block of
+    /// `/api/v1/resources/overview` (`get_system_overview_v3`, 019 ≈513, reads
+    /// the same figures from `queen.stats`). Averages are over lagging queues.
+    pub(super) async fn lag_summary(&self, tenant: &str) -> Result<LagSummary, RsmError> {
+        let store = self.store.clone();
+        let qlog = self.qlog_reader.clone();
+        let reader = self.reader.clone();
+        let tenant = tenant.to_string();
+        let now = super::super::wall_micros();
+        let lags = tokio::task::spawn_blocking(move || {
+            store.read(|r| cursor_lags(r, qlog.as_ref(), &reader, &tenant, None, now))
+        })
+        .await
+        .map_err(|e| RsmError::Internal(format!("lag read: {e}")))?
+        .map_err(read_error)?;
+        // queue -> (max age s, max pending)
+        let mut per_queue: HashMap<String, (i64, u64)> = HashMap::new();
+        for l in &lags {
+            let e = per_queue.entry(l.queue.clone()).or_default();
+            e.0 = e.0.max(l.lag_seconds(now).unwrap_or(0));
+            e.1 = e.1.max(l.pending);
+        }
+        let mean = |v: Vec<i64>| {
+            if v.is_empty() {
+                0
+            } else {
+                v.iter().sum::<i64>() / v.len() as i64
+            }
+        };
+        let ages: Vec<i64> = per_queue.values().map(|x| x.0).filter(|x| *x > 0).collect();
+        let offs: Vec<i64> = per_queue
+            .values()
+            .map(|x| x.1 as i64)
+            .filter(|x| *x > 0)
+            .collect();
+        Ok(LagSummary {
+            time_max: ages.iter().copied().max().unwrap_or(0),
+            time_avg: mean(ages),
+            offset_max: offs.iter().copied().max().unwrap_or(0),
+            offset_avg: mean(offs),
+        })
     }
 
     pub(super) async fn api_trace_record(
@@ -1107,175 +1394,326 @@ fn dlq_json(
     (_t, q, id, r): (String, String, [u8; 16], DlqRow),
     partition: Option<&(String, [u8; 16])>,
 ) -> Value {
-    json!({"id":uuid_bytes_to_string(&id),"queue":q,"partition":partition.map(|p|p.0.clone()),"partitionId":r.pid.to_string(),"consumerGroup":r.group,"offset":r.offset,"messageId":r.message_id.map(|x|uuid_bytes_to_string(&x)),"transactionId":r.txn,"data":payload_json(&r.payload),"payload":payload_json(&r.payload),"errorMessage":r.error,"retryCount":r.retry_count,"failedAt":crate::rsm::planner::timers::iso_us(r.failed_at_us)})
+    json!({"id":uuid_bytes_to_string(&id),"queue":q,"partition":partition.map(|p|p.0.clone()),"partitionId":partition.map(|p|uuid_bytes_to_string(&p.1)).unwrap_or_else(|| r.pid.to_string()),"createdAt":crate::rsm::planner::timers::iso_us(r.failed_at_us),"consumerGroup":r.group,"offset":r.offset,"messageId":r.message_id.map(|x|uuid_bytes_to_string(&x)),"transactionId":r.txn,"data":payload_json(&r.payload),"payload":payload_json(&r.payload),"errorMessage":r.error,"retryCount":r.retry_count,"failedAt":crate::rsm::planner::timers::iso_us(r.failed_at_us)})
 }
 
+/// One `(partition, group)` cursor with its lag inputs: the row the Postgres
+/// consumer-group procedures aggregate (010 `v2_base`, `lag_base`,
+/// `detail_base`). `pending` is the §9 arithmetic
+/// `GREATEST(last_offset - GREATEST(committed, log_start - 1), 0)`.
+struct CursorLag {
+    queue: String,
+    partition: String,
+    partition_uuid: [u8; 16],
+    group: String,
+    worker: Option<String>,
+    committed: i64,
+    total_consumed: u64,
+    pending: u64,
+    lease_live: bool,
+    /// The stamp of the oldest message this cursor has not consumed; `None`
+    /// when it is caught up (Postgres: the covering-segment probe).
+    oldest_unconsumed_us: Option<i64>,
+}
+
+impl CursorLag {
+    /// `EXTRACT(EPOCH FROM (NOW() - oldest_unconsumed_at))::integer`: rounded
+    /// to the nearest second, `None` for a caught-up cursor.
+    fn lag_seconds(&self, now: i64) -> Option<i64> {
+        self.oldest_unconsumed_us
+            .map(|t| ((now - t) as f64 / 1_000_000.0).round() as i64)
+    }
+}
+
+/// The stamp of the oldest message a cursor at `committed` has not consumed:
+/// the record covering `committed + 1`, or the first one after it once
+/// retention has deleted past the cursor. Postgres reads the covering
+/// segment's `created_at` (010 `v2_data`); the queue log answers the same from
+/// its in-memory index, without reading a payload.
+pub(super) fn oldest_unconsumed_us(
+    qlog: Option<&QLogReader>,
+    reader: &crate::rsm::segments::Reader,
+    tenant: &str,
+    pid: Pid,
+    p: &PartitionRow,
+    sealed: &dyn Fn() -> Vec<u32>,
+    committed: i64,
+) -> Option<i64> {
+    let high = (p.last_offset + 1).max(0) as u64;
+    let from = ((committed + 1).max(0) as u64).max(p.log_start);
+    if from >= high {
+        return None;
+    }
+    match qlog {
+        Some(q) => {
+            let mut found = None;
+            let _ = q.claim_frames(
+                QLogReader::queue_id_of(tenant, &p.queue),
+                pid,
+                from,
+                high,
+                false,
+                &mut |_, _, created_at_us, _| {
+                    found = Some(created_at_us);
+                    false
+                },
+            );
+            found
+        }
+        None => {
+            let files = sealed();
+            let mut off = from;
+            // A retention gap at `from`: the next live record is the oldest.
+            while off < high {
+                match reader.read_at_within(
+                    bucket_of(tenant, &p.queue, &p.partition),
+                    pid,
+                    off,
+                    &files,
+                    None,
+                ) {
+                    Ok(Some(f)) => return Some(f.created_at_us),
+                    Ok(None) => off += 1,
+                    Err(_) => return None,
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Every cursor of the tenant (of one group when `only` is set), with its lag
+/// inputs. Queue-mode cursors (`__QUEUE_MODE__`) are included, as in Postgres.
+fn cursor_lags<R: Reads + ?Sized>(
+    r: &R,
+    qlog: Option<&QLogReader>,
+    reader: &crate::rsm::segments::Reader,
+    tenant: &str,
+    only: Option<&str>,
+    now: i64,
+) -> crate::rsm::store::Result<Vec<CursorLag>> {
+    let mut queues = Vec::new();
+    r.scan_queues(tenant, usize::MAX, &mut |q, _| {
+        queues.push(q.to_string());
+        true
+    })?;
+    let mut out = Vec::new();
+    for queue in queues {
+        let mut pids = Vec::new();
+        r.scan_queue_partitions(tenant, &queue, None, usize::MAX, &mut |pid| {
+            pids.push(pid);
+            true
+        })?;
+        for pid in pids {
+            let Some(p) = r.partition(pid)? else { continue };
+            let mut cursors = Vec::new();
+            match only {
+                Some(g) => {
+                    if let Some(c) = r.cursor(pid, g)? {
+                        cursors.push((g.to_string(), c));
+                    }
+                }
+                None => {
+                    r.scan_cursors(pid, usize::MAX, &mut |g, c| {
+                        cursors.push((g.to_string(), c));
+                        true
+                    })?;
+                }
+            }
+            for (group, c) in cursors {
+                let pending = p.pending_from(c.committed);
+                let oldest = if pending > 0 {
+                    let sealed = || {
+                        let mut files = Vec::new();
+                        let _ = r.scan_partition_files(pid, usize::MAX, &mut |f| {
+                            files.push(f);
+                            true
+                        });
+                        files
+                    };
+                    oldest_unconsumed_us(qlog, reader, tenant, pid, &p, &sealed, c.committed)
+                } else {
+                    None
+                };
+                out.push(CursorLag {
+                    queue: queue.clone(),
+                    partition: p.partition.clone(),
+                    partition_uuid: p.uuid,
+                    group,
+                    worker: c.worker.clone(),
+                    committed: c.committed,
+                    total_consumed: c.total_consumed,
+                    pending,
+                    lease_live: rows::lease_live(&c, now),
+                    oldest_unconsumed_us: oldest,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `subscriptionTimestamp` as Postgres stores it: mode `all` registers at the
+/// epoch (004 ≈239), which the planner encodes as `i64::MIN`.
+fn subscription_ts_json(us: i64) -> Value {
+    Value::String(crate::rsm::planner::timers::iso_us(us.max(0)))
+}
+
+/// `GET /api/v1/consumer-groups/:group` — `queen.get_consumer_group_details_v1`
+/// (010 ≈1397): `{ queue: { conflation, kind, partitions: [...] } }`.
 fn group_detail<R: Reads + ?Sized>(
     r: &R,
+    qlog: Option<&QLogReader>,
+    reader: &crate::rsm::segments::Reader,
     tenant: &str,
     group: &str,
     now: i64,
 ) -> crate::rsm::store::Result<Value> {
-    let mut queues = Vec::new();
-    r.scan_queues(tenant, usize::MAX, &mut |q, _| {
-        queues.push(q.to_string());
-        true
-    })?;
+    let lags = cursor_lags(r, qlog, reader, tenant, Some(group), now)?;
+    let mut by_queue: std::collections::BTreeMap<String, Vec<&CursorLag>> =
+        std::collections::BTreeMap::new();
+    for l in &lags {
+        by_queue.entry(l.queue.clone()).or_default().push(l);
+    }
     let mut answer = serde_json::Map::new();
-    for queue in queues {
-        let meta = r.group(tenant, &queue, group)?;
-        let mut partitions = Vec::new();
-        r.scan_queue_partitions(tenant, &queue, None, usize::MAX, &mut |pid| {
-            if let (Ok(Some(p)), Ok(Some(c))) = (r.partition(pid), r.cursor(pid, group)) {
-                let lag = p.pending_from(c.committed);
-                let lag_seconds = if lag == 0 {
-                    0
-                } else {
-                    (now - p.oldest_live_at_us.unwrap_or(p.last_write_at_us)).max(0) / 1_000_000
-                };
-                partitions.push(json!({
-                    "partition":p.partition,
-                    "workerId":c.worker,
-                    "lastConsumedAt":Value::Null,
-                    "totalConsumed":c.total_consumed,
-                    "offsetLag":lag,
-                    "timeLagSeconds":lag_seconds,
-                    "leaseActive":rows::lease_live(&c, now)
-                }));
-            }
-            true
-        })?;
-        if !partitions.is_empty() {
-            partitions.sort_by(|a, b| a["partition"].as_str().cmp(&b["partition"].as_str()));
-            answer.insert(
-                queue,
+    for (queue, mut rows) in by_queue {
+        rows.sort_by(|a, b| a.partition.cmp(&b.partition));
+        let conflation = r
+            .group(tenant, &queue, group)?
+            .is_some_and(|m| m.meta.conflation);
+        let partitions: Vec<Value> = rows
+            .iter()
+            .map(|l| {
                 json!({
-                    "conflation":meta.as_ref().is_some_and(|m| m.meta.conflation),
-                    "kind":"queen",
-                    "partitions":partitions
-                }),
-            );
-        }
+                    "partition":l.partition,
+                    "workerId":l.worker,
+                    "lastConsumedAt":Value::Null,
+                    "totalConsumed":l.total_consumed,
+                    "offsetLag":l.pending,
+                    "timeLagSeconds":l.lag_seconds(now).unwrap_or(0),
+                    "leaseActive":l.lease_live
+                })
+            })
+            .collect();
+        answer.insert(
+            queue,
+            json!({"conflation":conflation,"kind":"queen","partitions":partitions}),
+        );
     }
     Ok(Value::Object(answer))
 }
 
+/// `GET /api/v1/consumer-groups/lagging` — `queen.get_lagging_partitions_v1`
+/// (010 ≈1264): every cursor, queue mode included, whose oldest unconsumed
+/// message is older than `min_lag_seconds`, oldest first.
 fn lagging_partitions<R: Reads + ?Sized>(
     r: &R,
+    qlog: Option<&QLogReader>,
+    reader: &crate::rsm::segments::Reader,
     tenant: &str,
     min_lag_seconds: i64,
     now: i64,
 ) -> crate::rsm::store::Result<Vec<Value>> {
-    let mut queues = Vec::new();
-    r.scan_queues(tenant, usize::MAX, &mut |q, _| {
-        queues.push(q.to_string());
-        true
-    })?;
-    let mut answer = Vec::new();
-    for queue in queues {
-        r.scan_queue_partitions(tenant, &queue, None, usize::MAX, &mut |pid| {
-            if let Ok(Some(p)) = r.partition(pid) {
-                let _ = r.scan_cursors(pid, usize::MAX, &mut |group, c| {
-                    if group == "__QUEUE_MODE__" {
-                        return true;
-                    }
-                    let offset_lag = p.pending_from(c.committed);
-                    if offset_lag == 0 {
-                        return true;
-                    }
-                    let oldest_us = p.oldest_live_at_us.unwrap_or(p.last_write_at_us);
-                    // SQL rounds this age to whole seconds and applies a strict
-                    // greater-than filter. Keep a newly-created backlog visible
-                    // for minLagSeconds=0 even inside its first second.
-                    let time_lag_seconds = ((now - oldest_us).max(0) / 1_000_000).max(1);
-                    if time_lag_seconds <= min_lag_seconds {
-                        return true;
-                    }
-                    answer.push(json!({
-                        "consumer_group":group,
-                        "queue_name":queue,
-                        "partition_name":p.partition,
-                        "partition_id":uuid_bytes_to_string(&p.uuid),
-                        "worker_id":c.worker,
-                        "kind":"queen",
-                        "offset_lag":offset_lag,
-                        "time_lag_seconds":time_lag_seconds,
-                        "lag_hours":time_lag_seconds as f64 / 3600.0,
-                        "oldest_unconsumed_at":crate::rsm::planner::timers::iso_us(oldest_us),
-                        "last_consumed_at":Value::Null
-                    }));
-                    true
-                });
+    let mut rows: Vec<(i64, Value)> = cursor_lags(r, qlog, reader, tenant, None, now)?
+        .into_iter()
+        .filter_map(|l| {
+            let lag = l.lag_seconds(now)?;
+            if lag <= min_lag_seconds {
+                return None;
             }
-            true
-        })?;
-    }
-    answer.sort_by(|a, b| {
-        b["time_lag_seconds"]
-            .as_i64()
-            .cmp(&a["time_lag_seconds"].as_i64())
-    });
-    Ok(answer)
+            let oldest = l.oldest_unconsumed_us?;
+            Some((
+                lag,
+                json!({
+                    "consumer_group":l.group,
+                    "queue_name":l.queue,
+                    "partition_name":l.partition,
+                    "partition_id":uuid_bytes_to_string(&l.partition_uuid),
+                    "worker_id":l.worker,
+                    "kind":"queen",
+                    "offset_lag":l.pending,
+                    "time_lag_seconds":lag,
+                    "lag_hours":(lag as f64 / 36.0).round() / 100.0,
+                    "oldest_unconsumed_at":iso_ms(oldest),
+                    "last_consumed_at":Value::Null
+                }),
+            ))
+        })
+        .collect();
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(rows.into_iter().map(|(_, v)| v).collect())
 }
 
+/// `to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`.
+pub(super) fn iso_ms(us: i64) -> String {
+    let s = crate::rsm::planner::timers::iso_us(us.div_euclid(1000) * 1000);
+    // iso_us renders six fractional digits: keep three.
+    format!("{}Z", &s[..s.len() - 4])
+}
+
+/// `GET /api/v1/consumer-groups` — `queen.get_consumer_groups_v4` (010 ≈482):
+/// one row per `(group, queue)` with at least one cursor, ordered by group
+/// then queue. `members` counts partition cursors, `state` is `Lagging` past
+/// 300 s of time lag, else `Stable` once anything was consumed, else `Dead`.
 fn group_view<R: Reads + ?Sized>(
     r: &R,
+    qlog: Option<&QLogReader>,
+    reader: &crate::rsm::segments::Reader,
     tenant: &str,
-    only: Option<&str>,
     now: i64,
 ) -> crate::rsm::store::Result<Vec<Value>> {
-    let mut out = Vec::new();
-    let mut qs = Vec::new();
-    r.scan_queues(tenant, usize::MAX, &mut |q, _| {
-        qs.push(q.to_string());
-        true
-    })?;
-    for q in qs {
-        let mut metas = HashMap::new();
-        r.scan_groups(tenant, &q, usize::MAX, &mut |g, row| {
-            if only.is_none_or(|x| x == g) {
-                metas.insert(g.to_string(), row);
-            }
-            true
-        })?;
-        let mut curs: HashMap<String, Vec<(PartitionRow, crate::rsm::effect::CursorRow)>> =
-            HashMap::new();
-        r.scan_queue_partitions(tenant, &q, None, usize::MAX, &mut |pid| {
-            if let Ok(Some(p)) = r.partition(pid) {
-                let _ = r.scan_cursors(pid, usize::MAX, &mut |g, c| {
-                    if g != "__QUEUE_MODE__" && only.is_none_or(|x| x == g) {
-                        curs.entry(g.to_string()).or_default().push((p.clone(), c));
-                    }
-                    true
-                });
-            }
-            true
-        })?;
-        for (g, rows) in curs {
-            let pending: usize = rows
-                .iter()
-                .map(|(p, c)| p.pending_from(c.committed) as usize)
-                .sum();
-            let processing = rows
-                .iter()
-                .filter(|(_, c)| c.lease_expires_at_us.is_some_and(|x| x > now))
-                .count();
-            let last = rows
-                .iter()
-                .map(|(p, _)| p.last_write_at_us)
-                .max()
-                .unwrap_or(0);
-            let m = metas.remove(&g);
-            out.push(json!({"name":g,"consumerGroup":g,"queue":q,"kind":"queen","partitions":rows.len(),"pending":pending,"processing":processing,"lag":pending,"lagSeconds":if pending>0{(now-last).max(0)/1_000_000}else{0},"subscriptionMode":m.as_ref().map(|x|format!("{:?}",x.meta.mode).to_lowercase()),"subscriptionTimestamp":m.map(|x|crate::rsm::planner::timers::iso_us(x.meta.subscription_timestamp_us))}));
-        }
-        for (g, m) in metas {
-            out.push(json!({"name":g,"consumerGroup":g,"queue":q,"kind":"queen","partitions":0,"pending":0,"processing":0,"lag":0,"lagSeconds":0,"subscriptionMode":format!("{:?}",m.meta.mode).to_lowercase(),"subscriptionTimestamp":crate::rsm::planner::timers::iso_us(m.meta.subscription_timestamp_us)}));
-        }
+    #[derive(Default)]
+    struct Agg {
+        members: u64,
+        with_lag: u64,
+        total_lag: u64,
+        max_time_lag: i64,
+        max_consumed: u64,
     }
-    out.sort_by(|a, b| {
-        (a["consumerGroup"].as_str(), a["queue"].as_str())
-            .cmp(&(b["consumerGroup"].as_str(), b["queue"].as_str()))
-    });
+    let mut groups: std::collections::BTreeMap<(String, String), Agg> =
+        std::collections::BTreeMap::new();
+    for l in cursor_lags(r, qlog, reader, tenant, None, now)? {
+        let a = groups.entry((l.group.clone(), l.queue.clone())).or_default();
+        a.members += 1;
+        if l.pending > 0 {
+            a.with_lag += 1;
+        }
+        a.total_lag += l.pending;
+        a.max_time_lag = a.max_time_lag.max(l.lag_seconds(now).unwrap_or(0));
+        a.max_consumed = a.max_consumed.max(l.total_consumed);
+    }
+    let mut out = Vec::with_capacity(groups.len());
+    for ((group, queue), a) in groups {
+        let meta = if group == "__QUEUE_MODE__" {
+            None
+        } else {
+            r.group(tenant, &queue, &group)?
+        };
+        let state = if a.max_time_lag > 300 {
+            "Lagging"
+        } else if a.max_consumed > 0 {
+            "Stable"
+        } else {
+            "Dead"
+        };
+        out.push(json!({
+            "name":group,
+            "topics":[queue],
+            "queueName":queue,
+            "members":a.members,
+            "partitionCursors":a.members,
+            "partitionsWithLag":a.with_lag,
+            "totalLag":a.total_lag,
+            "maxTimeLag":a.max_time_lag,
+            "state":state,
+            "storage":"segments",
+            "kind":"queen",
+            "subscriptionMode":meta.as_ref().map(|m| format!("{:?}", m.meta.mode).to_lowercase()),
+            "subscriptionTimestamp":meta.as_ref().map(|m| subscription_ts_json(m.meta.subscription_timestamp_us)),
+            "subscriptionCreatedAt":meta.as_ref().map(|m| crate::rsm::planner::timers::iso_us(m.meta.registered_at_us)),
+            "conflation":meta.as_ref().is_some_and(|m| m.meta.conflation)
+        }));
+    }
     Ok(out)
 }
 

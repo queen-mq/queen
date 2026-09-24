@@ -225,6 +225,10 @@ impl Rsm for GroupRouter {
     fn notifier(&self) -> Option<&Arc<Notifier>> {
         self.groups[0].notifier()
     }
+
+    fn cluster_id(&self) -> Option<String> {
+        self.groups[0].cluster_id()
+    }
 }
 
 #[cfg(test)]

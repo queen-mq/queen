@@ -126,6 +126,33 @@ pub(crate) struct Shared {
     leader_raft: std::sync::RwLock<Option<Arc<str>>>,
     /// Plans a follower's prepared command on this node (set by the facade).
     remote: Arc<std::sync::OnceLock<RemoteHandler>>,
+    /// Answers a peer's gather of this node's node-local dashboard data
+    /// (`/raft/v1/local`, set by the facade; PLAN_RAFT.md D17).
+    local: Arc<std::sync::OnceLock<RemoteHandler>>,
+}
+
+/// One member of the cluster as a node sees it ([`RaftReplicator::cluster_view`]).
+#[derive(Clone, Debug, Default)]
+pub struct MemberView {
+    pub node_id: NodeId,
+    pub raft_addr: String,
+    pub http_addr: String,
+    pub voter: bool,
+    /// On the leader: the RSM index this member has replicated (0 when it has
+    /// nothing yet); `None` on a follower or for the leader itself.
+    pub matched: Option<u64>,
+    /// On the leader: milliseconds since this member last acknowledged a
+    /// heartbeat.
+    pub heartbeat_age_ms: Option<u64>,
+}
+
+/// The membership as one node sees it.
+#[derive(Clone, Debug, Default)]
+pub struct ClusterView {
+    pub node_id: NodeId,
+    pub leader: Option<NodeId>,
+    pub term: u64,
+    pub members: Vec<MemberView>,
 }
 
 /// Plans one follower's prepared command on the leader and answers the encoded
@@ -739,6 +766,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
             leader_http: std::sync::RwLock::new(None),
             leader_raft: std::sync::RwLock::new(None),
             remote: Arc::new(std::sync::OnceLock::new()),
+            local: Arc::new(std::sync::OnceLock::new()),
         });
 
         // The apply thread: the queue logs are written by our log writer, never
@@ -898,6 +926,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
                     restart: restart.clone(),
                 }),
                 remote: shared.remote.clone(),
+                local: shared.local.clone(),
             };
             let _guard = rt.enter();
             rt.spawn(network::serve(listener, state, async move {
@@ -1027,6 +1056,87 @@ impl<S: Store + 'static> RaftReplicator<S> {
     /// node (the facade, once it exists). Set once.
     pub fn set_remote_handler(&self, h: RemoteHandler) {
         let _ = self.shared.remote.set(h);
+    }
+
+    /// Install the handler that answers a peer's `/raft/v1/local` gather of
+    /// this node's own dashboard data. Set once.
+    pub fn set_local_handler(&self, h: RemoteHandler) {
+        let _ = self.shared.local.set(h);
+    }
+
+    /// The membership as this node sees it, with the leader's view of each
+    /// follower's replication when this node leads (the dashboard's Raft view).
+    pub fn cluster_view(&self) -> ClusterView {
+        let Some(m) = self.metrics_now() else {
+            return ClusterView {
+                node_id: self.shared.node_id,
+                ..ClusterView::default()
+            };
+        };
+        let mc = m.membership_config.membership();
+        let voters: std::collections::BTreeSet<NodeId> = mc.voter_ids().collect();
+        let mut ids: Vec<NodeId> = voters.iter().copied().collect();
+        ids.extend(mc.learner_ids());
+        ids.sort_unstable();
+        ids.dedup();
+        let members = ids
+            .into_iter()
+            .map(|id| {
+                let node = mc.get_node(&id);
+                let matched = m
+                    .replication
+                    .as_ref()
+                    .and_then(|r| r.get(&id))
+                    .map(|l| l.as_ref().map(|l| rsm_index(l.index)).unwrap_or(0));
+                let heartbeat_age_ms = m
+                    .heartbeat
+                    .as_ref()
+                    .and_then(|h| h.get(&id))
+                    .and_then(|t| t.as_ref())
+                    .map(|t| openraft::Instant::elapsed(&**t).as_millis() as u64);
+                MemberView {
+                    node_id: id,
+                    raft_addr: node.map(|n| n.raft.clone()).unwrap_or_default(),
+                    http_addr: node.map(|n| n.http.clone()).unwrap_or_default(),
+                    voter: voters.contains(&id),
+                    matched,
+                    heartbeat_age_ms,
+                }
+            })
+            .collect();
+        ClusterView {
+            node_id: self.shared.node_id,
+            leader: m.current_leader,
+            term: m.current_term,
+            members,
+        }
+    }
+
+    /// POST `body` to a peer's Raft RPC `path` and return the answer's bytes
+    /// (a dashboard gather; never on the message path).
+    pub async fn call_peer(
+        &self,
+        raft_addr: &str,
+        path: &str,
+        body: bytes::Bytes,
+        ttl: Duration,
+    ) -> Result<bytes::Bytes, String> {
+        let Some((client, token)) = self.rpc.as_ref() else {
+            return Err("not a cluster node".to_string());
+        };
+        let url = format!("http://{raft_addr}{path}");
+        network::post(
+            client,
+            &url,
+            token.as_deref(),
+            "application/json",
+            axum::body::Body::from(body),
+            ttl,
+        )
+        .await
+        .map_err(|e| match e {
+            network::Fail::Unreachable(m) | network::Fail::Network(m) => m,
+        })
     }
 
     /// Whether this node is part of a multi-node cluster (it has peers to

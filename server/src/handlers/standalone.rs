@@ -60,7 +60,13 @@ pub async fn handle_auth_me(State(state): State<Arc<AppState>>) -> Response {
             // synthetic cluster names the tenant the data actually lives under.
             "tenant_id": crate::config::DEFAULT_TENANT,
             "status": "active",
-            "cell_slug": state.server_id,
+            // Raft: one cell per CLUSTER (every node answers the same id),
+            // not one per node.
+            "cell_slug": if state.storage.is_raft() {
+                state.rsm.cluster_id().unwrap_or_else(|| state.server_id.clone())
+            } else {
+                state.server_id.clone()
+            },
         }],
         "act_cluster_header": ACT_CLUSTER_HEADER,
         "role": "admin",

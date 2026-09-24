@@ -1863,6 +1863,20 @@ impl Metrics {
 ///  * a 1 Hz parked-long-poll sampler (minute-averaged into queue_lag_metrics
 ///    by syscollect).
 /// Both are tiny (two atomic ops / a map scan per tick).
+static GLOBAL: std::sync::OnceLock<Arc<Metrics>> = std::sync::OnceLock::new();
+
+/// Install the process's metrics for code that holds no `AppState`: in raft
+/// mode the handlers hand a request to the facade before the Postgres path's
+/// counters, so the facade counts its own traffic through this. First wins.
+pub fn install_global(m: Arc<Metrics>) {
+    let _ = GLOBAL.set(m);
+}
+
+/// The installed process metrics (raft mode), if any.
+pub fn global() -> Option<&'static Arc<Metrics>> {
+    GLOBAL.get()
+}
+
 pub fn spawn_samplers(metrics: Arc<Metrics>) {
     // Scheduler-lag probe. sleep(100ms) resolving late == the runtime (or the
     // host) was too busy to run a ready timer — the same signal Node's

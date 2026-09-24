@@ -36,8 +36,9 @@ choice wins, otherwise the OS preference is honoured only when it asks for light
 - **Analytics** and **Workload** — per-queue and per-group performance, and who is doing the
   work grouped by namespace or task
 - **Ephemeral** — the in-memory queue class, on its own page
-- **System** and **Users** — cell-level health, PostgreSQL internals, the maintenance switches
-  and account management (operators only; both say "cell" on screen)
+- **System** and **Users** — cell-level health, PostgreSQL internals (or, on a raft-mode broker,
+  the replicated log and the Raft cluster's members), the maintenance switches and account
+  management (operators only; both say "cell" on screen)
 
 There is **no pop inspector**, and there will not be one: a pop from a console takes a lease,
 steals from a real consumer and burns a retry attempt with nobody to ack it.
@@ -174,6 +175,7 @@ app/
 │   │   ├── PushMessageModal.vue  # the one push form, three entry points
 │   │   ├── QueueConfigModal.vue  # create and edit, diffed against the echo
 │   │   ├── QueueHealthGrid.vue
+│   │   ├── RaftCluster.vue       # System's Raft source: quorum strip + members
 │   │   ├── RowChart.vue
 │   │   └── Sidebar.vue
 │   ├── composables/              # Vue composables (pure rules live here)
@@ -181,16 +183,19 @@ app/
 │   │   ├── useChartTheme.js
 │   │   ├── useConflation.js      # last-value groups: log depth vs work depth
 │   │   ├── useDlqReplay.js       # replay request + the broker's verdict
+│   │   ├── useEngine.js          # Postgres or raft, from the /health answer
 │   │   ├── useGatedVerdict.js    # absent / gated / paused / transient
 │   │   ├── useKeysetPager.js     # cursor stack: no page numbers, no totals
 │   │   ├── useKvView.js          # KV list body, expiry and state copy
 │   │   ├── usePushVerdict.js     # PushStatus -> what the modal says
 │   │   ├── useQueueConfig.js     # the 21-option catalogue, diff, validate
+│   │   ├── useRaftCluster.js     # member rows, quorum, the raft alert
 │   │   ├── useRefresh.js         # shell refresh registry + shared ticker
 │   │   ├── useTheme.js           # dark by default, light opt-in
 │   │   ├── useTimers.js          # broker instants, payload decode, verdicts
 │   │   └── useToast.js           # notifications
 │   ├── stores/                   # module singletons
+│   │   ├── engine.js             # the acting cell's engine, shared /health
 │   │   ├── identity.js           # /auth/me, roles, acting cluster
 │   │   ├── queuesStore.js        # tenant-keyed queue cache
 │   │   ├── routeSupport.js       # remembers a route this broker does not serve
