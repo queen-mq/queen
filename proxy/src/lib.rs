@@ -12,6 +12,9 @@ pub mod console;
 pub mod db;
 pub mod errors;
 pub mod gateway;
+/// W7 edge hardening (PLAN_SINGLE_BINARY.md): per-IP limits, request limits,
+/// CSRF/CORS/security headers, login guard, TLS serving, fuzz entry points.
+pub mod harden;
 pub mod httpget;
 pub mod kafka_identity;
 pub mod kafka_kv;

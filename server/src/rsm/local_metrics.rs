@@ -12,6 +12,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
+use crate::obs::panic_policy::LockExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use xxhash_rust::xxh3::xxh3_64;
@@ -66,8 +67,7 @@ static REGISTRY: LazyLock<Mutex<HashMap<PathBuf, Weak<LocalMetrics>>>> =
 /// this process).
 pub fn flush_all_churn(now_us: i64) {
     let stores: Vec<Arc<LocalMetrics>> = REGISTRY
-        .lock()
-        .expect("local metrics registry poisoned")
+        .lock_unpoisoned()
         .values()
         .filter_map(Weak::upgrade)
         .collect();
@@ -78,7 +78,7 @@ pub fn flush_all_churn(now_us: i64) {
 
 pub fn open(path: impl Into<PathBuf>) -> io::Result<Arc<LocalMetrics>> {
     let path = path.into();
-    let mut registry = REGISTRY.lock().expect("local metrics registry poisoned");
+    let mut registry = REGISTRY.lock_unpoisoned();
     if let Some(existing) = registry.get(&path).and_then(Weak::upgrade) {
         return Ok(existing);
     }
@@ -199,7 +199,7 @@ impl LocalMetrics {
         let Ok(payload) = serde_json::to_vec(&event) else {
             return;
         };
-        let mut state = self.state.lock().expect("local metrics poisoned");
+        let mut state = self.state.lock_unpoisoned();
         if append_record(&self.path, &payload).is_err() {
             return;
         }
@@ -222,7 +222,7 @@ impl LocalMetrics {
     pub fn record_churn(&self, at_us: i64, tenant: &str, queue: &str, created: i64, deleted: i64) {
         use crate::rsm::dashboard::model::{trunc_us, ChurnRow, US_PER_MIN};
         let bucket = trunc_us(at_us, US_PER_MIN);
-        let mut state = self.state.lock().expect("local metrics poisoned");
+        let mut state = self.state.lock_unpoisoned();
         if bucket > state.churn_journaled_to {
             let done: Vec<ChurnRow> = state
                 .churn
@@ -262,7 +262,7 @@ impl LocalMetrics {
     pub fn flush_churn(&self, now_us: i64) {
         use crate::rsm::dashboard::model::{trunc_us, ChurnRow, US_PER_MIN};
         let open = trunc_us(now_us, US_PER_MIN);
-        let mut state = self.state.lock().expect("local metrics poisoned");
+        let mut state = self.state.lock_unpoisoned();
         if open <= state.churn_journaled_to {
             return;
         }
@@ -296,7 +296,7 @@ impl LocalMetrics {
         from_us: i64,
         to_us: i64,
     ) -> Vec<crate::rsm::dashboard::model::ChurnRow> {
-        let state = self.state.lock().expect("local metrics poisoned");
+        let state = self.state.lock_unpoisoned();
         state
             .churn
             .range((from_us, String::new(), String::new())..)
@@ -319,7 +319,7 @@ impl LocalMetrics {
         from_us: i64,
         to_us: i64,
     ) -> Vec<crate::rsm::dashboard::model::RetentionRow> {
-        let state = self.state.lock().expect("local metrics poisoned");
+        let state = self.state.lock_unpoisoned();
         state
             .retention
             .iter()
@@ -341,7 +341,7 @@ impl LocalMetrics {
     }
 
     pub fn retention_json(&self, tenant: &str) -> Value {
-        let state = self.state.lock().expect("local metrics poisoned");
+        let state = self.state.lock_unpoisoned();
         let mut total = 0u64;
         let series: Vec<Value> = state
             .retention

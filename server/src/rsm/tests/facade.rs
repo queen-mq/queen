@@ -280,6 +280,67 @@ async fn a_retry_with_the_same_transaction_id_is_a_duplicate() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// W7 fuzzing finding: the raft push is dispatched before the HTTP boundary's
+/// `MAX_TXN_BYTES` check, so the facade enforces the u16 frame limit itself —
+/// an over-long transactionId is a 400, never a truncated frame (or, in debug,
+/// a `debug_assert` panic in `pack_frames`). Same for a transaction's push op.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn an_over_long_transaction_id_is_rejected_not_packed() {
+    let dir = scratch("txnlen");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+
+    let long = "t".repeat(u16::MAX as usize + 1);
+    let body = serde_json::json!({"items": [
+        {"queue": "q", "payload": 1, "transactionId": "ok"},
+        {"queue": "q", "payload": 2, "transactionId": long},
+    ]});
+    let err = facade
+        .push(
+            ctx(),
+            PushReq {
+                raw: body.to_string().into_bytes(),
+            },
+        )
+        .await
+        .expect_err("an over-long transactionId must be refused");
+    let shown = format!("{err:?}");
+    assert!(
+        shown.contains("item 1") && shown.contains("65535"),
+        "{shown}"
+    );
+
+    let bundle = serde_json::json!({"operations": [
+        {"type": "push", "items": [{"queue": "q", "payload": 3, "transactionId": long}]},
+    ]});
+    let err = facade
+        .transaction(
+            ctx(),
+            crate::rsm::facade::TxnReq {
+                raw: bundle.to_string().into_bytes(),
+            },
+        )
+        .await
+        .expect_err("an over-long transactionId in a bundle must be refused");
+    assert!(format!("{err:?}").contains("65535"), "{err:?}");
+
+    // At the limit exactly is still a valid push.
+    let edge = "e".repeat(u16::MAX as usize);
+    let body = serde_json::json!({"items": [{"queue": "q", "payload": 4, "transactionId": edge}]});
+    let ok = facade
+        .push(
+            ctx(),
+            PushReq {
+                raw: body.to_string().into_bytes(),
+            },
+        )
+        .await
+        .expect("a 65535-byte transactionId is within the limit");
+    assert_eq!(parse(&ok.body)[0]["status"], "queued", "{}", ok.body);
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_restart_recovers_the_pushed_state() {
     let dir = scratch("recover");

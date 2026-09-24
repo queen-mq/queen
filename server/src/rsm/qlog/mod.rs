@@ -114,6 +114,7 @@ mod tests;
 #[cfg(test)]
 mod wal_tests;
 
+use crate::obs::panic_policy::LockExt;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
@@ -1520,7 +1521,7 @@ impl QLog {
             // other pid is looked up in its own shard).
             let first = cand.first().map(|(_, r)| r.pid).unwrap_or(0);
             let shard = |pid: u64| pid % HASH_SHARDS as u64;
-            let hc = self.cache.hash_shard(first).lock().expect("qlog hash cache poisoned");
+            let hc = self.cache.hash_shard(first).lock_unpoisoned();
             for (file_id, r) in &cand {
                 // Same shard: the guard already held (a second lock of it would
                 // deadlock); another shard: its own short lock.
@@ -2411,14 +2412,13 @@ impl ReadCache {
     fn file(&self, file_id: u64) -> io::Result<Arc<File>> {
         if let Some(f) = self
             .fds
-            .lock()
-            .expect("qlog fd cache poisoned")
+            .lock_unpoisoned()
             .get(&file_id)
         {
             return Ok(f.clone());
         }
         let f = Arc::new(File::open(file_path(&self.dir, file_id))?);
-        let mut fds = self.fds.lock().expect("qlog fd cache poisoned");
+        let mut fds = self.fds.lock_unpoisoned();
         if let Some(won) = fds.get(&file_id) {
             return Ok(won.clone());
         }
@@ -2441,8 +2441,7 @@ impl ReadCache {
     fn forget_file(&self, file_id: u64) {
         if self
             .fds
-            .lock()
-            .expect("qlog fd cache poisoned")
+            .lock_unpoisoned()
             .remove(&file_id)
             .is_some()
         {
@@ -2457,8 +2456,7 @@ impl ReadCache {
 
     fn hash_get(&self, pid: u64, base_offset: u64) -> Option<Arc<[u8]>> {
         self.hash_shard(pid)
-            .lock()
-            .expect("qlog hash cache poisoned")
+            .lock_unpoisoned()
             .map
             .get(&(pid, base_offset))
             .cloned()
@@ -2476,8 +2474,7 @@ impl ReadCache {
         for (pid, base, h) in blocks {
             let mut hc = self
                 .hash_shard(*pid)
-                .lock()
-                .expect("qlog hash cache poisoned");
+                .lock_unpoisoned();
             let add = h.len() + HASH_CACHE_ENTRY_OVERHEAD;
             if add > cap || hc.map.contains_key(&(*pid, *base)) {
                 continue;
@@ -2504,7 +2501,7 @@ impl ReadCache {
     /// Free every cached hash block of this log (retention).
     fn clear_hashes(&self) {
         for shard in &self.hashes {
-            let old = std::mem::take(&mut *shard.lock().expect("qlog hash cache poisoned"));
+            let old = std::mem::take(&mut *shard.lock_unpoisoned());
             HASH_BYTES_CACHED.fetch_sub(old.bytes, Ordering::Relaxed);
         }
     }
@@ -2514,7 +2511,7 @@ impl ReadCache {
     fn cached_blocks(&self) -> usize {
         self.hashes
             .iter()
-            .map(|h| h.lock().expect("qlog hash cache poisoned").map.len())
+            .map(|h| h.lock_unpoisoned().map.len())
             .sum()
     }
 }

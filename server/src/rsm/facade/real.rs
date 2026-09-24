@@ -53,6 +53,7 @@ use crate::frames::{
     pack_frames, unpack_frames_ref, uuid_bytes_to_string, uuid_string_to_bytes, FrameIn,
 };
 use crate::notify::Notifier;
+use crate::obs::panic_policy::RwLockExt;
 use crate::rsm::apply::SystemClock;
 use crate::rsm::batcher::{Batcher, BatcherConfig, Command, CommandTx, Reply, Submission};
 use crate::rsm::effect::{Pid, QueueConfig};
@@ -132,12 +133,11 @@ struct WaitGates {
 
 impl WaitGates {
     fn gate(&self, key: &(String, String, String)) -> Arc<tokio::sync::Notify> {
-        if let Some(g) = self.map.read().expect("gates poisoned").get(key) {
+        if let Some(g) = self.map.read_unpoisoned().get(key) {
             return g.clone();
         }
         self.map
-            .write()
-            .expect("gates poisoned")
+            .write_unpoisoned()
             .entry(key.clone())
             .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
             .clone()
@@ -153,7 +153,7 @@ impl WaitGates {
     }
 
     fn wake_one(&self, tenant: &str, queue: &str, group: Option<&str>) {
-        let map = self.map.read().expect("gates poisoned");
+        let map = self.map.read_unpoisoned();
         match group {
             Some(g) => {
                 let key = (tenant.to_string(), queue.to_string(), g.to_string());
@@ -501,16 +501,23 @@ impl RaftFacade {
             repl.set_local_handler(Arc::new(move |body: bytes::Bytes| {
                 let repl_w = repl_w.clone();
                 let store_w = store_w.clone();
-                Box::pin(async move {
+                // W1: a peer's dashboard read, served on the `queen-raft`
+                // runtime (core by thread name) — explicitly NOT core, so a
+                // panic in it fails this RPC instead of aborting the node.
+                Box::pin(crate::obs::panic_policy::non_core(async move {
                     let (Some(repl), Some(store)) = (repl_w.upgrade(), store_w.upgrade()) else {
                         return Err("this node is stopping".to_string());
                     };
                     // Off the Raft RPC runtime's workers: a wide rows gather
                     // serializes megabytes, and votes and appends share them.
-                    tokio::task::spawn_blocking(move || phase2::local_gather(&repl, &store, &body))
-                        .await
-                        .map_err(|e| format!("gather task: {e}"))?
-                })
+                    tokio::task::spawn_blocking(move || {
+                        crate::obs::panic_policy::non_core_scope(|| {
+                            phase2::local_gather(&repl, &store, &body)
+                        })
+                    })
+                    .await
+                    .map_err(|e| format!("gather task: {e}"))?
+                }))
             }));
         }
 
@@ -1127,6 +1134,12 @@ impl RaftFacade {
                             flat: usize,
                             pushes: &mut Vec<TxnPush>|
          -> Result<(), RsmError> {
+            if txn_too_long(txn_in) {
+                return Err(RsmError::Rejected {
+                    code: "bad_request".into(),
+                    message: format!("transactionId exceeds the {MAX_TXN_BYTES}-byte limit"),
+                });
+            }
             let mid = uuidv7_bytes();
             let mid_str = uuid_bytes_to_string(&mid);
             let txn = txn_in
@@ -1510,24 +1523,37 @@ impl RaftFacade {
 // Push
 // ---------------------------------------------------------------------------
 
+/// The frame codec stores a transaction id behind a u16 length
+/// (`frames::pack_frames`). The Postgres push rejects longer ids at the HTTP
+/// boundary (`handlers::data::MAX_TXN_BYTES`), but a raft push is dispatched
+/// before that check, so the raft paths enforce it themselves: a longer id
+/// packs a frame whose declared txn length is truncated — a `debug_assert`
+/// panic in debug, a corrupt stored frame in release (found by W7 fuzzing).
+const MAX_TXN_BYTES: usize = u16::MAX as usize;
+
+pub(crate) fn txn_too_long(txn: Option<&str>) -> bool {
+    txn.is_some_and(|t| t.len() > MAX_TXN_BYTES)
+}
+
+// `pub(crate)` for the W7 fuzz entry point (`crate::fuzzing::push_body`).
 #[derive(Deserialize)]
-struct PushBodyIn<'a> {
+pub(crate) struct PushBodyIn<'a> {
     #[serde(borrow)]
-    items: Vec<PushItemIn<'a>>,
+    pub(crate) items: Vec<PushItemIn<'a>>,
 }
 
 #[derive(Deserialize)]
-struct PushItemIn<'a> {
+pub(crate) struct PushItemIn<'a> {
     #[serde(borrow)]
-    queue: std::borrow::Cow<'a, str>,
+    pub(crate) queue: std::borrow::Cow<'a, str>,
     #[serde(borrow, default)]
-    partition: Option<std::borrow::Cow<'a, str>>,
+    pub(crate) partition: Option<std::borrow::Cow<'a, str>>,
     #[serde(borrow)]
-    payload: &'a RawValue,
+    pub(crate) payload: &'a RawValue,
     #[serde(borrow, default, rename = "transactionId")]
-    transaction_id: Option<std::borrow::Cow<'a, str>>,
+    pub(crate) transaction_id: Option<std::borrow::Cow<'a, str>>,
     #[serde(borrow, default, rename = "traceId")]
-    trace_id: Option<std::borrow::Cow<'a, str>>,
+    pub(crate) trace_id: Option<std::borrow::Cow<'a, str>>,
 }
 
 /// One input item, receiver-resolved: its original index, minted id, txn, queue,
@@ -1681,6 +1707,18 @@ impl RaftFacade {
             })?;
         if body.items.is_empty() {
             return Ok(PushOut { body: "[]".into() });
+        }
+        if let Some(bad) = body
+            .items
+            .iter()
+            .position(|it| txn_too_long(it.transaction_id.as_deref()))
+        {
+            return Err(RsmError::Rejected {
+                code: "bad_body".into(),
+                message: format!(
+                    "bad push body: transactionId of item {bad} exceeds the {MAX_TXN_BYTES}-byte limit"
+                ),
+            });
         }
         if self.storage_pressure() {
             return Err(RsmError::StorageFull);

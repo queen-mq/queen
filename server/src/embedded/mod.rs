@@ -60,8 +60,13 @@
 //!   samplers and the log reporter — expose no handles today and keep running
 //!   until process exit; with the pool closed they fail their next
 //!   `pool.get()` and idle harmlessly.
-//! * **Panics.** The broker's own doctrine is panic=abort + supervisor
-//!   restart. Embedded in an unwind build, a panicking background loop dies
+//! * **Panics.** The broker's own doctrine (PLAN_SINGLE_BINARY.md W1) is
+//!   unwind everywhere except the core: in raft mode, `start` installs a panic
+//!   hook (`obs::panic_policy::install_embedded`, chained to the host's) that
+//!   ABORTS the process when a raft core thread panics (planner, log writer,
+//!   apply, checkpoint, openraft) — crash, then replay from the data dir —
+//!   and leaves every other panic, including the host's own, to unwind. In
+//!   Postgres mode no hook is installed: a panicking background loop dies
 //!   silently and its subsystem stops; the request paths themselves are
 //!   panic-free under normal operation.
 //! * **The on-disk push spool** (DB-outage / maintenance durability) defaults

@@ -4,7 +4,7 @@
 //! timestamps, no levels, and the Helm-injected `LOG_LEVEL` was never read. This
 //! module installs a `tracing` subscriber whose `EnvFilter` finally honours
 //! `RUST_LOG`/`LOG_LEVEL`, a panic hook that turns a silent task death into a
-//! structured ERROR (see the `panic = "abort"` note below), a single load-safe
+//! structured ERROR (see the panic note below), a single load-safe
 //! sampling primitive (`Sampler`, generalising `ack_registry::maybe_report`), and
 //! the periodic `rates` / `sizes` aggregate reporters.
 //!
@@ -13,13 +13,14 @@
 //! broker-generated UTC timestamp and a subsystem `target`, and (by the WHERE
 //! rule) at least one of queue/partition/group/worker/peer/offset.
 //!
-//! ## panic = "abort"
-//! `Cargo.toml` sets `panic = "abort"` for release, so a panic in any of the ~8
-//! detached background loops aborts the WHOLE process (it does not "keep serving
-//! minus one subsystem" — that is only the dev/unwind build). In-process
-//! catch-and-restart therefore cannot work under the production profile; the
-//! correct, mode-independent fix is a panic HOOK that emits a structured ERROR
-//! (the std hook runs before the abort). k8s then restarts the pod and
+//! ## Panics: unwind, except on the core (PLAN_SINGLE_BINARY.md W1)
+//! `Cargo.toml` builds with `panic = "unwind"`. The hook installed by
+//! [`install_panic_hook`] ([`panic_policy`]) emits a structured ERROR for every
+//! panic and then ABORTS when the panicking thread is a core thread (planner,
+//! log writer/syncer, apply, checkpoint writer, raft runtime, segment writers)
+//! or the panic is a poisoned-lock unwrap; every other thread or task unwinds
+//! and only that task/connection dies. After an abort k8s restarts the pod,
+//! the raft class replays from its durable state and
 //! `file_buffer::startup_recovery` drains any spooled data.
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -75,34 +76,14 @@ pub fn init() {
     }
 }
 
-/// Turn a silent background-task / request panic into a structured ERROR before
-/// the process aborts (see the module note on `panic = "abort"`). Chains the
-/// previous hook so backtraces still print.
+pub mod panic_policy;
+
+/// Install the process panic policy ([`panic_policy::install`]): a structured
+/// ERROR for every panic, then abort on a core thread or a poisoned lock and
+/// unwind everywhere else. Chains the previous hook so backtraces still print.
+/// Call first thing in `main`.
 pub fn install_panic_hook() {
-    let prev = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let location = info
-            .location()
-            .map(|l| format!("{}:{}", l.file(), l.line()))
-            .unwrap_or_else(|| "<unknown>".to_string());
-        let msg = info
-            .payload()
-            .downcast_ref::<&str>()
-            .map(|s| s.to_string())
-            .or_else(|| info.payload().downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "<non-string panic payload>".to_string());
-        let thread = std::thread::current()
-            .name()
-            .unwrap_or("unnamed")
-            .to_string();
-        tracing::error!(
-            target: "panic",
-            location = %location,
-            thread = %thread,
-            "task panicked (process will abort under panic=abort): {msg}"
-        );
-        prev(info);
-    }));
+    panic_policy::install();
 }
 
 /// Structured fatal: log the reason at ERROR, then exit(1). Replaces the scattered

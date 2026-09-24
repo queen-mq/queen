@@ -1537,7 +1537,10 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
     /// the task handle; dropping every sender drains the driver and exits it.
     pub fn spawn(self) -> (CommandTx, tokio::task::JoinHandle<()>) {
         let (cmd_tx, cmd_rx) = mpsc::channel(self.cfg.command_queue_depth);
-        let handle = tokio::spawn(self.run(cmd_rx));
+        // W1: the driver is core. It is a task on the caller's runtime, not a
+        // named thread, so the `core` wrapper (not the thread name) is what
+        // makes a panic in it abort instead of silently wedging every write.
+        let handle = tokio::spawn(crate::obs::panic_policy::core(self.run(cmd_rx)));
         (cmd_tx, handle)
     }
 
@@ -1847,7 +1850,23 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         let store = self.store.clone();
         let running = self.qlog_gc_running.clone();
         tokio::task::spawn_blocking(move || {
-            let result = store.read(|r| crate::rsm::maintenance::reclaim_qlogs(r, &qlogs));
+            // W1: core. The pass compacts and unlinks under a qlog WRITE lock
+            // that the log writer, syncers and planner `.expect()`: it is
+            // crash-safe (replay redoes it) but not unwind-safe (a panic between
+            // the rename and the index swap leaves the in-memory log pointing
+            // into the new file). So a panic here aborts, on this shared
+            // blocking-pool thread, through a scope rather than a thread mark.
+            // The flag still drops on any exit, or GC would never run again.
+            struct Reset(Arc<std::sync::atomic::AtomicBool>);
+            impl Drop for Reset {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::Release);
+                }
+            }
+            let _reset = Reset(running);
+            let result = crate::obs::panic_policy::core_scope(|| {
+                store.read(|r| crate::rsm::maintenance::reclaim_qlogs(r, &qlogs))
+            });
             match result {
                 Ok(n) if n > 0 => tracing::info!(
                     target: "rsm",
@@ -1861,7 +1880,6 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     "rsm qlog retention will retry"
                 ),
             }
-            running.store(false, Ordering::Release);
         });
     }
 
@@ -2514,10 +2532,12 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 // Submitted and now awaiting local apply: finish off the driver
                 // task so the next entry can be planned and submitted (D4).
                 let result_tx = self.result_tx.clone();
-                tokio::spawn(async move {
+                // W1: core — a completion that dies unsent leaves the entry
+                // unresolved and the pipeline stuck behind it.
+                tokio::spawn(crate::obs::panic_policy::core(async move {
                     let res = fut.await;
                     let _ = result_tx.send((seq, res));
-                });
+                }));
             }
         }
     }

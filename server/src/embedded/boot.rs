@@ -149,6 +149,12 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
             dir = %cfg.raft_dir,
             "embedded broker in raft mode — no Postgres pool, no schema apply"
         );
+        // W1 panic policy (PLAN_SINGLE_BINARY.md): a panic on a raft core
+        // thread (planner, log writer, apply, checkpoint, openraft) aborts the
+        // process instead of leaving a silently wedged broker in the host.
+        // The embedded variant never touches the host's own panics or locks.
+        // Idempotent; the binary installs the full policy in `main`.
+        crate::obs::panic_policy::install_embedded();
         // Crash points (§13.5), off unless QUEEN_TEST_FAULTS is set. KEEP IN
         // SYNC with `run_raft`.
         crate::rsm::faults::init_from_env();

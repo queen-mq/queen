@@ -595,7 +595,13 @@ impl QlogWrite {
                 _ => std::thread::scope(|s| -> io::Result<()> {
                     let first = lanes_iter.next().expect("a lane");
                     let joins: Vec<std::thread::ScopedJoinHandle<'_, io::Result<()>>> = lanes_iter
-                        .map(|logs| s.spawn(move || write_lane(logs)))
+                        .map(|logs| {
+                            s.spawn(move || {
+                                // W1: a lane of the core log writer.
+                                crate::obs::panic_policy::mark_current_thread_core();
+                                write_lane(logs)
+                            })
+                        })
                         .collect();
                     let mut res = write_lane(first);
                     for j in joins {

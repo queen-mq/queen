@@ -1,0 +1,35 @@
+# W7 (PLAN_SINGLE_BINARY.md): cargo-fuzz targets for untrusted decoders.
+# Entry points: proxy/src/harden.rs (`queen_proxy::harden::fuzz`).
+# Needs nightly + cargo-fuzz: `cargo +nightly fuzz run <target>` from the
+# parent crate's directory. Every target is a one-line call into an entry
+# point whose seed-corpus test runs on stable in the parent crate.
+[package]
+name = "queen-proxy-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+queen-proxy = { path = ".." }
+
+# Standalone, like its parent: not a member of any workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "route_classify"
+path = "fuzz_targets/route_classify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "edge_headers"
+path = "fuzz_targets/edge_headers.rs"
+test = false
+doc = false
+bench = false

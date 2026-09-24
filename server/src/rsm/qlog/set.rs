@@ -255,7 +255,13 @@ impl QLogSyncer {
             [first, rest @ ..] => std::thread::scope(|s| -> io::Result<()> {
                 let joins: Vec<std::thread::ScopedJoinHandle<'_, io::Result<()>>> = rest
                     .iter()
-                    .map(|f| s.spawn(move || crate::rsm::qlog::fsync_file(f, mode)))
+                    .map(|f| {
+                        s.spawn(move || {
+                            // W1: part of the core log sync.
+                            crate::obs::panic_policy::mark_current_thread_core();
+                            crate::rsm::qlog::fsync_file(f, mode)
+                        })
+                    })
                     .collect();
                 let mut res = crate::rsm::qlog::fsync_file(first, mode);
                 for j in joins {
