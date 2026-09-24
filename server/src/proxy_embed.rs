@@ -123,11 +123,16 @@ pub fn public_router(
             }
         }
     };
-    let router = Router::new()
-        .route("/health", any(passthrough))
-        .route("/metrics", any(metrics.clone()))
-        .route("/metrics/prometheus", any(metrics))
-        .merge(proxy);
+    // Behind the same edge as the proxy's own routes (security headers,
+    // request limits, the connection's client IP).
+    let edge = queen_proxy::harden::Edge::from_env().map_err(|e| format!("edge settings: {e}"))?;
+    let ops = edge.data_plane(
+        Router::new()
+            .route("/health", any(passthrough))
+            .route("/metrics", any(metrics.clone()))
+            .route("/metrics/prometheus", any(metrics)),
+    );
+    let router = ops.merge(proxy);
     Ok((st, router))
 }
 
