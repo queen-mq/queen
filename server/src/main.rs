@@ -1756,6 +1756,7 @@ async fn run_raft(cfg: config::Config) {
     // The single binary (PLAN_SINGLE_BINARY.md W3/W4): the proxy fronts the
     // public port; the broker router behind it has tenancy on, the broker's
     // own JWT off, and no socket — the proxy authenticated the caller.
+    let mut embedded_proxy = None;
     let app = if proxy_embed::enabled() {
         let mut inner_auth = cfg.auth.clone();
         inner_auth.enabled = false;
@@ -1764,7 +1765,8 @@ async fn run_raft(cfg: config::Config) {
             auth::Authenticator::new(inner_auth),
             true,
         );
-        let (_proxy, public) = proxy_embed::public_router(state.rsm.clone(), inner);
+        let (proxy, public) = proxy_embed::public_router(state.rsm.clone(), inner);
+        embedded_proxy = Some(proxy);
         tracing::info!(target: "boot", "single binary: proxy in-process on the public port");
         public
     } else {
@@ -1793,6 +1795,10 @@ async fn run_raft(cfg: config::Config) {
         .await
     {
         tracing::error!(target: "boot", error = %e, "serve loop ended with error");
+    }
+    // The embedded proxy's open usage minute and pending queue rows.
+    if let Some(proxy) = embedded_proxy {
+        queen_proxy::app::shutdown_drain(&proxy).await;
     }
     tracing::info!(target: "shutdown", "shutdown complete");
 }
