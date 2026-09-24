@@ -109,12 +109,22 @@ struct NotifierWaker {
 
 impl Waker for NotifierWaker {
     fn wake(&self, tenant: &str, queue: &str, group: Option<&str>) {
+        // New data on the queue as a whole: only the pinned pops parked here
+        // need it (every registered group has its own wake below).
+        if group.is_none() {
+            self.gates.wake_pinned(tenant, queue);
+            return;
+        }
         // Raft pops park on the per-group gates (P2.2): one wake = one partition
         // became claimable = one parked pop. The queue-wide notifier still fires
         // for any other waiter on this node (it is a no-op when nobody parked).
         self.gates.wake_one(tenant, queue, group);
         let qkey = crate::handlers::tenant_queue_key(tenant, queue);
         self.notifier.wake_local_hint(&qkey, "");
+    }
+
+    fn wants_append_wakes(&self) -> bool {
+        self.gates.pinned_total.load(std::sync::atomic::Ordering::Relaxed) > 0
     }
 }
 
@@ -129,6 +139,41 @@ struct WaitGates {
     map: std::sync::RwLock<
         std::collections::HashMap<(String, String, String), Arc<tokio::sync::Notify>>,
     >,
+    /// Pinned pops parked per (tenant, queue) → group → count. A pinned pop
+    /// never registers its group (004's registrar), so apply's per-group wakes
+    /// cannot reach it; these ride the queue-wide append wake instead.
+    pinned: std::sync::RwLock<
+        std::collections::HashMap<(String, String), std::collections::HashMap<String, usize>>,
+    >,
+    pinned_total: std::sync::atomic::AtomicUsize,
+}
+
+/// A pinned pop's registration while it is parked (see [`WaitGates::pinned`]).
+struct PinnedPark<'a> {
+    gates: &'a WaitGates,
+    key: (String, String, String),
+}
+
+impl Drop for PinnedPark<'_> {
+    fn drop(&mut self) {
+        let (t, q, g) = &self.key;
+        let mut map = self.gates.pinned.write_unpoisoned();
+        let tq = (t.clone(), q.clone());
+        if let Some(groups) = map.get_mut(&tq) {
+            if let Some(n) = groups.get_mut(g) {
+                *n -= 1;
+                if *n == 0 {
+                    groups.remove(g);
+                }
+            }
+            if groups.is_empty() {
+                map.remove(&tq);
+            }
+        }
+        self.gates
+            .pinned_total
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl WaitGates {
@@ -150,6 +195,38 @@ impl WaitGates {
         tokio::pin!(notified);
         notified.as_mut().enable();
         tokio::time::timeout(dur, notified).await.is_ok()
+    }
+
+    fn park_pinned(&self, key: &(String, String, String)) -> PinnedPark<'_> {
+        let (t, q, g) = key;
+        *self
+            .pinned
+            .write_unpoisoned()
+            .entry((t.clone(), q.clone()))
+            .or_default()
+            .entry(g.clone())
+            .or_default() += 1;
+        self.pinned_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        PinnedPark {
+            gates: self,
+            key: key.clone(),
+        }
+    }
+
+    /// An append on (tenant, queue): one parked pinned pop per group.
+    fn wake_pinned(&self, tenant: &str, queue: &str) {
+        let groups: Vec<String> = match self
+            .pinned
+            .read_unpoisoned()
+            .get(&(tenant.to_string(), queue.to_string()))
+        {
+            Some(g) => g.keys().cloned().collect(),
+            None => return,
+        };
+        for g in groups {
+            self.wake_one(tenant, queue, Some(&g));
+        }
     }
 
     fn wake_one(&self, tenant: &str, queue: &str, group: Option<&str>) {
@@ -2470,6 +2547,7 @@ impl RaftFacade {
             let park = remaining.min(Duration::from_millis(500));
             // The dashboard's parked gauge (1 Hz samples, data.rs ≈1197).
             let _parked = crate::metrics::global().map(|m| m.parked.enter(&ctx.tenant, &queue));
+            let _pinned = partition.is_some().then(|| self.gates.park_pinned(&gate_key));
             woke = self.gates.wait(&gate_key, park).await;
             if ctx.deadline.expired() {
                 return autopilot_echo(

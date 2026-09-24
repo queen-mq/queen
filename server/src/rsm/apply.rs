@@ -367,9 +367,17 @@ pub trait Notify: Send + Sync {
     fn applied(&self, index: u64, term: u64, commands: &[CommandRecord]);
 
     /// New work, or a lease released, for a (tenant, queue, group). Parked
-    /// long-polls on this node wake (§9.5). `group` is `None` when the wake is
-    /// for every group of the queue.
+    /// long-polls on this node wake (§9.5). `group` is `None` for new data on
+    /// the queue as a whole, emitted only while [`Notify::wants_append_wakes`]
+    /// says someone parks outside the registered groups.
     fn wake(&self, tenant: &str, queue: &str, group: Option<&str>);
+
+    /// Whether a pop is parked that no registered group's wake reaches (a
+    /// pinned pop never registers its group): apply then also wakes
+    /// `(tenant, queue, None)` for every append. One atomic load per append.
+    fn wants_append_wakes(&self) -> bool {
+        false
+    }
 
     /// A durable point covered `index` (§11.4 step 3). It bounds recovery
     /// replay and lets `LocalReplicator` truncate its log behind it. Never
@@ -1478,6 +1486,9 @@ impl<'s, S: Store> Applier<'s, S> {
         // P2.2), so an entry that armed sixteen partitions must wake sixteen
         // pops, not one. The order does not depend on where in the entry they sat.
         wakes.sort_unstable();
+        // One queue-wide wake per queue per entry (the per-group wakes stay one
+        // per event, above).
+        wakes.dedup_by(|a, b| a.2.is_none() && a == b);
         for (t, q, g) in wakes {
             self.notify.wake(&t, &q, g.as_deref());
             self.stats.wakes += 1;
@@ -2261,6 +2272,9 @@ impl<'s, S: Store> Applier<'s, S> {
             if !leased {
                 wakes.push((tenant.clone(), queue.clone(), Some(g.clone())));
             }
+        }
+        if self.notify.wants_append_wakes() {
+            wakes.push((tenant.clone(), queue.clone(), None));
         }
 
         self.stats.appends += 1;

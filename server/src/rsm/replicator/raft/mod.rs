@@ -250,6 +250,10 @@ impl Notify for RaftNotify {
         self.waker.wake(tenant, queue, group);
     }
 
+    fn wants_append_wakes(&self) -> bool {
+        self.waker.wants_append_wakes()
+    }
+
     fn durable(&self, index: u64) {
         self.shared.durable_index.fetch_max(index, Ordering::AcqRel);
         // The queue logs may now give up files wholly at or below `index` —

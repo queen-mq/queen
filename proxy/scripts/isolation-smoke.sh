@@ -44,9 +44,8 @@ P=${QUEEN_SMOKE_URL:-http://127.0.0.1:6711}
 # instead of psql -- QUEEN_SMOKE_CP=http://<node>/api/cp plus the node's
 # QUEEN_PROXY_CP_TOKEN. The checks that read Postgres rows directly are then
 # reported as counted skips.
-CP=${QUEEN_SMOKE_CP:-}
+SMOKE_CP=${QUEEN_SMOKE_CP:-}
 CP_TOKEN=${QUEEN_PROXY_CP_TOKEN:-}
-ISSUED=""
 SH=${QUEEN_SMOKE_SHARED_HOST:-shared.local}
 KEY_A="qk_dev_devdevdevdevdevdevdevdevdevdevdevdevdev"   # seeded (cluster: dev)
 RUN=$(date +%s | tail -c 7)
@@ -75,17 +74,19 @@ want_out() { if has "$2" "$3"; then bad "$1 (leaked '$2' in: $(short "$3"))"; el
 j()    { printf '%s' "$2" | jq -r "$1" 2>/dev/null; }   # j <filter> <json>
 
 px()   { docker exec -i qpx-pg psql -qtA -U postgres -d queen_proxy "$@"; }
-cpapi() { # method path [json] -> body
-  local args=(-s -X "$1" -H "x-queen-cp-token: $CP_TOKEN")
+cpapi() { # method path [json] -> body   (a non-2xx is logged, never silent)
+  local args=(-s -o "$TMP/cp.body" -w '%{http_code}' -X "$1" -H "x-queen-cp-token: $CP_TOKEN")
   [ -n "${3:-}" ] && args+=(-H 'Content-Type: application/json' -d "$3")
-  curl "${args[@]}" "$CP$2"
+  local code; code=$(curl "${args[@]}" "$SMOKE_CP$2")
+  case "$code" in 2*) ;; *) say "  ...  cp $1 $2 -> $code $(short "$(cat "$TMP/cp.body")")" >&2 ;; esac
+  cat "$TMP/cp.body"
 }
 cluster_id() { # slug -> uuid (empty when absent)
-  if [ -n "$CP" ]; then cpapi GET "/clusters/$1" | jq -r '.id // empty'
+  if [ -n "$SMOKE_CP" ]; then cpapi GET "/clusters/$1" | jq -r '.id // empty'
   else px -c "SELECT id FROM queen_proxy.clusters WHERE slug='$1'"; fi
 }
 revoke_key() { # key uuid
-  if [ -n "$CP" ]; then cpapi DELETE "/keys/$1" >/dev/null
+  if [ -n "$SMOKE_CP" ]; then cpapi DELETE "/keys/$1" >/dev/null; say "  ...  revoked key $1 at $(date +%T)" >&2
   else px -c "SELECT queen_proxy.revoke_api_key('$1'::uuid)" >/dev/null; fi
 }
 
@@ -112,15 +113,17 @@ bgreq() { # method host key path outfile   -- async treq; reap with `wait`
 lt() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a+0 < b+0)}'; }
 creq() { # method host cookie path -> "code|body"   (console/session surface)
   local m=$1 h=$2 c=$3 p=$4
+  # Sec-Fetch-Site: what every browser sends; an edge that enforces CSRF
+  # refuses a cookie-authenticated POST without it (or an Origin).
   local code; code=$(curl -s -o "$BODYF" -D "$HDRF" -w '%{http_code}' -X "$m" \
-    -H "Host: $h" -H "Cookie: $c" "$P$p")
+    -H "Host: $h" -H "Cookie: $c" -H 'Sec-Fetch-Site: same-origin' "$P$p")
   printf '%s|%s' "$code" "$(cat "$BODYF")"
 }
 hdr() { grep -i "^$1:" "$HDRF" | tail -1 | tr -d '\r' | sed "s/^[^:]*:[[:space:]]*//"; }
 
 # --- control-plane helpers ---------------------------------------------------
 ensure_cluster() { # tenant-slug tenant-name cluster-slug plan -> cluster uuid
-  if [ -n "$CP" ]; then
+  if [ -n "$SMOKE_CP" ]; then
     cpapi POST /clusters "{\"tenant_slug\":\"$1\",\"tenant_name\":\"$2\",\"slug\":\"$3\",\"plan\":\"$4\"}" | jq -r '.id // empty'
     return
   fi
@@ -142,9 +145,9 @@ issue_key() { # cluster-uuid label scopes-sql -> "plaintext|key uuid"
   local k h id
   k="qk_dev_$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '=' | cut -c1-43)"
   h=$(printf '%s' "$k" | shasum -a 256 | cut -d' ' -f1)
-  if [ -n "$CP" ]; then
+  if [ -n "$SMOKE_CP" ]; then
     id=$(cpapi POST /keys "{\"cluster_id\":\"$1\",\"name\":\"iso-$RUN-$2\",\"key_hash\":\"$h\",\"scopes\":[$(printf '%s' "$3" | tr "'" '"')]}" | jq -r '.id // empty')
-    ISSUED="$ISSUED $id"
+    echo "$id" >> "$TMP/issued"
     printf '%s|%s' "$k" "$id"
     return
   fi
@@ -153,7 +156,7 @@ issue_key() { # cluster-uuid label scopes-sql -> "plaintext|key uuid"
 }
 set_ovr() { # cluster-uuid json|NULL
   local v
-  if [ -n "$CP" ]; then
+  if [ -n "$SMOKE_CP" ]; then
     if [ "$2" = "NULL" ]; then v=null; else v=$2; fi
     cpapi PUT "/clusters/$1/overrides" "$v" >/dev/null
     return
@@ -184,8 +187,8 @@ cleanup() {
   for c in $CID_A $CID_B $CID_P1 $CID_P2; do [ -n "$c" ] && set_ovr "$c" NULL; done
   # best-effort: revoke every key this run issued, so a dev pxdb does not
   # accumulate one live key per smoke run.
-  for id in $ISSUED; do revoke_key "$id" 2>/dev/null; done
-  [ -n "$CP" ] || px >/dev/null 2>&1 <<SQL || true
+  [ -r "$TMP/issued" ] && while read -r id; do revoke_key "$id" 2>/dev/null; done < "$TMP/issued"
+  [ -n "$SMOKE_CP" ] || px >/dev/null 2>&1 <<SQL || true
 DO \$\$
 DECLARE r RECORD;
 BEGIN
@@ -720,7 +723,7 @@ want_out "queue-lag hides B's queue from A"          "\"$QB\"" "$QL"
 say "  ...  waiting for the usage_minutes flush"
 DEADLINE=$((SECONDS+120)); ROWS=0
 while [ $SECONDS -lt $DEADLINE ]; do
-  if [ -n "$CP" ]; then
+  if [ -n "$SMOKE_CP" ]; then
     ROWS=0
     for c in "$CID_A" "$CID_B"; do
       [ "$(cpapi GET "/clusters/$c/usage" | jq '[.minutes[]?.msgs]|add // 0')" -gt 0 ] 2>/dev/null && ROWS=$((ROWS+1))
@@ -761,7 +764,7 @@ HL_ON=no-log
 if [ -r "$BROKER_LOG" ]; then
   if grep -aq "QUEEN_HOTLIST on" "$BROKER_LOG"; then HL_ON=yes; else HL_ON=no; fi
 fi
-if [ -n "$CP" ]; then
+if [ -n "$SMOKE_CP" ]; then
   skip "broker runs with the hot-list ON (a Postgres-engine structure; raft pops read the log index)"
 else
   check "broker runs with the hot-list ON (the ring IS the pop path)" yes "$HL_ON"
@@ -946,7 +949,7 @@ else
   # The tenant-header injection, asserted where it actually lands: two rows of
   # the same queue NAME in the cell, one per cluster's broker_tenant_uuid --
   # both created through the one shared hostname.
-  if [ -n "$CP" ]; then
+  if [ -n "$SMOKE_CP" ]; then
     skip "x-queen-tenant followed the key, not the host (broker rows: SQL on the cell, none in a single binary; the pops above assert it)"
   else
     SHTEN=$(cellpx -c "SELECT string_agg(tenant_id::text, ',' ORDER BY tenant_id::text) FROM queen.queues WHERE name='$SHQ'")
@@ -982,6 +985,7 @@ else
   R=$(issue_key "$CID_B" shrev "'read'"); SHREV=${R%%|*}; SHREV_ID=${R#*|}
   SHRV=$(req GET $SH "$SHREV" /api/v1/resources/queues)
   check "shared host, a fresh key of cluster two works" 200 "${SHRV%%|*}"
+  [ "${SHRV%%|*}" = "200" ] || say "  ...  fresh key answer: $(short "$SHRV") (id $SHREV_ID)"
   revoke_key "$SHREV_ID"
   say "  ...  waiting for the revocation to propagate (NOTIFY, worst case the 30s key TTL)"
   DEADLINE=$((SECONDS+45)); SHRCODE=""

@@ -467,7 +467,13 @@ pub fn build_embedded(e: Embedded) -> Result<(St, Router), String> {
                 match seed_embedded(&st).await {
                     Ok(()) => break,
                     Err(e) => {
-                        tracing::debug!(target: "proxy", error = %e, "proxy seed: KV not ready");
+                        // An import error is an operator's to fix (it never
+                        // heals by waiting); a KV that has no leader yet does.
+                        if e.starts_with("import") {
+                            tracing::warn!(target: "proxy", error = %e, "proxy import from Postgres failed; retrying");
+                        } else {
+                            tracing::debug!(target: "proxy", error = %e, "proxy seed: KV not ready");
+                        }
                         tokio::time::sleep(wait).await;
                         wait = (wait * 2).min(std::time::Duration::from_secs(5));
                     }
@@ -510,7 +516,9 @@ pub async fn seed_embedded(st: &St) -> Result<(), String> {
     // Set it on ONE node, after stopping the standalone proxy.
     if let Some(px) = &st.cfg.pxdb {
         let pool = db::create_pool(px).await.map_err(|e| format!("import: pxdb: {e}"))?;
-        let report = crate::store::import::import_from_pg(&pool, kv.as_ref(), "imported").await?;
+        let report = crate::store::import::import_from_pg(&pool, kv.as_ref(), "imported")
+            .await
+            .map_err(|e| format!("import: {e}"))?;
         tracing::info!(target: "proxy", report = ?report, "proxy state imported from Postgres");
     }
     crate::store::seed::seed(kv.as_ref()).await.map_err(|e| e.to_string())?;

@@ -860,10 +860,20 @@ pub struct PgSource {
 impl PgSource {
     pub async fn open(pool: &Pool, page: usize) -> Result<PgSource, String> {
         let client = pool.get().await.map_err(|e| format!("pxdb: {e}"))?;
-        let applied = client
-            .query_opt("SELECT 1 FROM queen_proxy.schema_migrations WHERE name = $1", &[&NEEDS_MIGRATION])
+        // A database the standalone proxy never started on has no ledger at
+        // all: the same advice as one migrated only part of the way.
+        let ledger: Option<String> = client
+            .query_one("SELECT to_regclass('queen_proxy.schema_migrations')::text", &[])
             .await
-            .map_err(pg_err)?;
+            .map_err(pg_err)?
+            .get(0);
+        let applied = match ledger {
+            Some(_) => client
+                .query_opt("SELECT 1 FROM queen_proxy.schema_migrations WHERE name = $1", &[&NEEDS_MIGRATION])
+                .await
+                .map_err(pg_err)?,
+            None => None,
+        };
         if applied.is_none() {
             return Err(format!(
                 "the proxy's postgres is not migrated through {NEEDS_MIGRATION}: start the standalone proxy on it once, then import"

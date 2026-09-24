@@ -48,6 +48,24 @@ fn token() -> Option<String> {
         .filter(|t| !t.trim().is_empty())
 }
 
+/// Whether `h` carries the control-plane token (`x-queen-cp-token`, or
+/// `Authorization: Bearer` for a scraper that can only send that). `None`
+/// when the surface is off.
+pub fn operator_token_ok(h: &HeaderMap) -> Option<bool> {
+    let want = token()?;
+    let got = h
+        .get("x-queen-cp-token")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| {
+            h.get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+        })
+        .unwrap_or("");
+    let (a, b) = (want.as_bytes(), got.as_bytes());
+    Some(a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0)
+}
+
 /// 404 when the surface is off, 401 on a wrong token.
 fn guard(h: &HeaderMap) -> Result<(), Response> {
     let Some(want) = token() else {

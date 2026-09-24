@@ -101,6 +101,11 @@ const WRITER_PIPELINE_DEPTH: usize = 0;
 /// the real one. Phase-1 tests use [`NoWaker`].
 pub trait Waker: Send + Sync {
     fn wake(&self, tenant: &str, queue: &str, group: Option<&str>);
+
+    /// See [`crate::rsm::apply::Notify::wants_append_wakes`].
+    fn wants_append_wakes(&self) -> bool {
+        false
+    }
 }
 
 /// A waker that drops every wake. Boot before the seam, and every test that
@@ -192,6 +197,10 @@ impl Notify for ReplNotify {
 
     fn wake(&self, tenant: &str, queue: &str, group: Option<&str>) {
         self.waker.wake(tenant, queue, group);
+    }
+
+    fn wants_append_wakes(&self) -> bool {
+        self.waker.wants_append_wakes()
     }
 
     fn durable(&self, index: u64) {

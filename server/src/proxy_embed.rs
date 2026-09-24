@@ -108,10 +108,25 @@ pub fn public_router(
             }
         }
     };
+    // The broker's metrics describe every tenant's queues: operator-only, on
+    // the control-plane token, and a 404 like the standalone proxy's block
+    // for anyone else.
+    let metrics = {
+        let passthrough = passthrough.clone();
+        move |req: Request<Body>| {
+            let passthrough = passthrough.clone();
+            async move {
+                match queen_proxy::cp::operator_token_ok(req.headers()) {
+                    Some(true) => passthrough(req).await,
+                    _ => queen_proxy::errors::err_404("not_found", "not found"),
+                }
+            }
+        }
+    };
     let router = Router::new()
-        .route("/health", any(passthrough.clone()))
-        .route("/metrics", any(passthrough.clone()))
-        .route("/metrics/prometheus", any(passthrough))
+        .route("/health", any(passthrough))
+        .route("/metrics", any(metrics.clone()))
+        .route("/metrics/prometheus", any(metrics))
         .merge(proxy);
     Ok((st, router))
 }
