@@ -51,6 +51,9 @@ required-features = ["server"]
 # tracing subscriber. The embedded library path (queen::Broker) never needs it.
 default = ["server"]
 server = ["dep:rust-embed", "dep:tracing-subscriber", "axum/http1", "axum/tokio", "dep:queen-proxy"]
+# W7: exposes `queen::fuzzing` (the untrusted decoders as fn(&[u8])) to the
+# cargo-fuzz crate in server/fuzz. Never in a shipped build.
+fuzzing = []
 # jemalloc + heap profiler as the process allocator, for memory hunts
 # (`MALLOC_CONF=prof:true,...`). Never in a release build.
 jemalloc-prof = ["dep:tikv-jemallocator"]
@@ -181,7 +184,10 @@ mimalloc = { version = "0.1", default-features = false }
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+# PLAN_SINGLE_BINARY.md W1: unwind, so a panic in a connection, facade or
+# console task kills only that task. Core threads (planner, log writer, apply,
+# checkpoint, raft) still abort — the hook in src/obs/panic_policy.rs decides.
+panic = "unwind"
 
 # Benchmark iterations: release optimisation without LTO and with parallel
 # codegen, so a measurement round rebuilds in minutes. Ship `release`.

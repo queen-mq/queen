@@ -25,6 +25,10 @@ pub mod cluster;
 pub mod conn;
 pub mod coordinator;
 pub mod decompress;
+/// W7 fuzz entry points (`fuzz/`); not a supported API.
+#[cfg(any(test, feature = "fuzzing"))]
+#[doc(hidden)]
+pub mod fuzzing;
 pub mod handlers;
 pub mod idempotent;
 pub mod identity;

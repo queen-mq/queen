@@ -152,6 +152,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
+use crate::obs::panic_policy::LockExt;
 use crate::rsm::effect::Pid;
 
 pub use frame::FrameError;
@@ -1010,7 +1011,7 @@ pub struct Pin {
 
 impl Drop for Pin {
     fn drop(&mut self) {
-        let mut g = self.shared.pins.lock().expect("segment pins poisoned");
+        let mut g = self.shared.pins.lock_unpoisoned();
         if let Some(n) = g.get_mut(&self.key) {
             *n -= 1;
             if *n == 0 {
@@ -1045,7 +1046,7 @@ impl Shared {
 
     fn reader_for(&self, key: (u16, u32)) -> Result<Arc<File>> {
         {
-            let g = self.caches.lock().expect("segment caches poisoned");
+            let g = self.caches.lock_unpoisoned();
             if let Some(f) = g.readers.get(&key) {
                 return Ok(f.clone());
             }
@@ -1057,7 +1058,7 @@ impl Shared {
             });
         }
         let f = Arc::new(File::open(seg_path(&self.root, key.0, key.1))?);
-        let mut g = self.caches.lock().expect("segment caches poisoned");
+        let mut g = self.caches.lock_unpoisoned();
         if g.readers.len() >= CACHE_MAX {
             if let Some(old) = g.reader_order.pop_front() {
                 g.readers.remove(&old);
@@ -1070,7 +1071,7 @@ impl Shared {
 
     fn index_for(&self, key: (u16, u32)) -> Result<Option<Arc<index::View>>> {
         {
-            let g = self.caches.lock().expect("segment caches poisoned");
+            let g = self.caches.lock_unpoisoned();
             if let Some(v) = g.indexes.get(&key) {
                 return Ok(Some(v.clone()));
             }
@@ -1086,7 +1087,7 @@ impl Shared {
         view.check_identity(key.0, key.1)?;
         let view = Arc::new(view);
         self.index_opens.fetch_add(1, Ordering::Relaxed);
-        let mut g = self.caches.lock().expect("segment caches poisoned");
+        let mut g = self.caches.lock_unpoisoned();
         if g.indexes.len() >= CACHE_MAX {
             if let Some(old) = g.index_order.pop_front() {
                 g.indexes.remove(&old);
@@ -1098,7 +1099,7 @@ impl Shared {
     }
 
     fn evict(&self, key: (u16, u32)) {
-        let mut g = self.caches.lock().expect("segment caches poisoned");
+        let mut g = self.caches.lock_unpoisoned();
         g.readers.remove(&key);
         g.reader_order.retain(|k| *k != key);
         g.indexes.remove(&key);
@@ -1617,7 +1618,7 @@ impl Reader {
         // PERF-F: fold the planner's logical bucket to the local one the file
         // table and the pins map are keyed by (idempotent on a local bucket).
         let key = (self.0.fold(bucket), file_id);
-        let mut pins = self.0.pins.lock().expect("segment pins poisoned");
+        let mut pins = self.0.pins.lock_unpoisoned();
         if !self
             .0
             .files
@@ -3380,6 +3381,8 @@ impl Segments {
             let mut hs = Vec::new();
             for part in fds.chunks(chunk) {
                 hs.push(sc.spawn(move || {
+                    // W1: part of the core segment sync.
+                    crate::obs::panic_policy::mark_current_thread_core();
                     for fd in part {
                         fsync_fd(*fd, mode)?;
                     }
@@ -3733,7 +3736,7 @@ impl Segments {
         let mut out: Vec<(u16, u32)> = Vec::new();
         let mut examined = 0u64;
         {
-            let pins = self.shared.pins.lock().expect("segment pins poisoned");
+            let pins = self.shared.pins.lock_unpoisoned();
             for key in &self.dead {
                 examined += 1;
                 if pins.contains_key(key) {
@@ -3785,7 +3788,7 @@ impl Segments {
         }
         // A handle of its own, so the guard borrows nothing of `self`.
         let shared = self.shared.clone();
-        let pins = shared.pins.lock().expect("segment pins poisoned");
+        let pins = shared.pins.lock_unpoisoned();
         if pins.contains_key(&(bucket, file_id)) {
             return Ok(false);
         }

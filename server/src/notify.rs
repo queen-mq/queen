@@ -34,6 +34,7 @@ use std::time::Duration;
 use tokio::sync::Notify;
 
 use crate::mesh::MeshTransport;
+use crate::obs::panic_policy::{LockExt, RwLockExt};
 
 /// Bound on a queue's hint mailbox. A hint is only useful until a woken pop drains
 /// it, so a small ring (drop-oldest) is plenty; it caps memory when hints arrive
@@ -114,7 +115,7 @@ impl Notifier {
     /// no clone can appear while it holds `gates`, so a pop that has taken a gate here
     /// cannot have it evicted out from under it before it parks.
     fn gate(&self, qkey: &str) -> Arc<QueueGate> {
-        let mut g = self.gates.lock().unwrap();
+        let mut g = self.gates.lock_unpoisoned();
         if let Some(x) = g.get(qkey) {
             x.used.store(true, std::sync::atomic::Ordering::Relaxed);
             return x.clone();
@@ -129,8 +130,7 @@ impl Notifier {
         if self.tenancy {
             let (_, queue) = crate::handlers::split_tenant_queue(qkey);
             self.by_queue
-                .lock()
-                .unwrap()
+                .lock_unpoisoned()
                 .entry(queue.to_string())
                 .or_default()
                 .insert(qkey.to_string());
@@ -142,7 +142,7 @@ impl Notifier {
     /// queue nobody polls returns None here — no gate is created and no hint stored,
     /// preserving the lazy-allocation invariant.
     fn existing_gate(&self, qkey: &str) -> Option<Arc<QueueGate>> {
-        let g = self.gates.lock().unwrap().get(qkey).cloned();
+        let g = self.gates.lock_unpoisoned().get(qkey).cloned();
         if let Some(x) = &g {
             x.used.store(true, std::sync::atomic::Ordering::Relaxed);
         }
@@ -161,7 +161,7 @@ impl Notifier {
         // `HotList::evict_idle`: `gate`'s create branch reaches `by_queue` only after
         // inserting into `gates`, so holding `gates` makes the pair atomic against a
         // re-create. Lock order is always gates → by_queue.
-        let mut g = self.gates.lock().unwrap();
+        let mut g = self.gates.lock_unpoisoned();
         let mut evicted: Vec<String> = Vec::new();
         g.retain(|qkey, gate| {
             if gate.used.swap(false, std::sync::atomic::Ordering::Relaxed)
@@ -173,7 +173,7 @@ impl Notifier {
             false
         });
         if self.tenancy && !evicted.is_empty() {
-            let mut idx = self.by_queue.lock().unwrap();
+            let mut idx = self.by_queue.lock_unpoisoned();
             for qkey in &evicted {
                 let (_, queue) = crate::handlers::split_tenant_queue(qkey);
                 if let Some(set) = idx.get_mut(queue) {
@@ -189,7 +189,7 @@ impl Notifier {
 
     /// Number of live gates (the map the memory bound is stated over).
     pub fn gate_count(&self) -> usize {
-        self.gates.lock().unwrap().len()
+        self.gates.lock_unpoisoned().len()
     }
 
     /// Park a queue-scoped long-poll for up to `dur`, returning the instant a push
@@ -257,10 +257,10 @@ impl Notifier {
     /// waiter. The wake side never creates one — a tenant with nothing parked has
     /// nothing to wake.
     fn any_gate(&self, tenant: &str) -> Arc<Notify> {
-        if let Some(g) = self.any.read().unwrap().get(tenant) {
+        if let Some(g) = self.any.read_unpoisoned().get(tenant) {
             return g.clone();
         }
-        let mut m = self.any.write().unwrap();
+        let mut m = self.any.write_unpoisoned();
         m.entry(tenant.to_string())
             .or_insert_with(|| Arc::new(Notify::new()))
             .clone()
@@ -269,7 +269,7 @@ impl Notifier {
     /// Wake one tenant's parked discovery pops. Shared lock: this is on the push
     /// path. A tenant with nothing ever parked has no entry and costs one miss.
     fn wake_any(&self, tenant: &str) {
-        if let Some(g) = self.any.read().unwrap().get(tenant) {
+        if let Some(g) = self.any.read_unpoisoned().get(tenant) {
             g.notify_waiters();
         }
     }
@@ -278,7 +278,7 @@ impl Notifier {
     /// tenant: the queue name alone cannot say whose data arrived, and waking one
     /// tenant would stall all the others.
     fn wake_any_all(&self) {
-        for g in self.any.read().unwrap().values() {
+        for g in self.any.read_unpoisoned().values() {
             g.notify_waiters();
         }
     }
@@ -293,7 +293,7 @@ impl Notifier {
         if !qkey.is_empty() {
             if let Some(gate) = self.existing_gate(qkey) {
                 if !partition.is_empty() {
-                    let mut h = gate.hints.lock().unwrap();
+                    let mut h = gate.hints.lock_unpoisoned();
                     if h.len() >= HINT_CAP {
                         h.pop_front(); // drop-oldest
                     }
@@ -328,7 +328,7 @@ impl Notifier {
             self.wake_local_hint(&qkey, partition);
             return;
         }
-        let keys: Vec<String> = match self.by_queue.lock().unwrap().get(queue) {
+        let keys: Vec<String> = match self.by_queue.lock_unpoisoned().get(queue) {
             Some(set) => set.iter().cloned().collect(),
             None => {
                 // Nobody is parked on that name, but a discovery pop parks on no
@@ -353,7 +353,7 @@ impl Notifier {
         let Some(gate) = self.existing_gate(qkey) else {
             return Vec::new();
         };
-        let mut h = gate.hints.lock().unwrap();
+        let mut h = gate.hints.lock_unpoisoned();
         let mut out: Vec<String> = Vec::new();
         while out.len() < max {
             match h.pop_front() {

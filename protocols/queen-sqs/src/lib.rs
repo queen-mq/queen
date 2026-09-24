@@ -36,6 +36,10 @@ pub mod config;
 pub mod credentials;
 pub mod envelope;
 pub mod error;
+/// W7 fuzz entry points (`fuzz/`); not a supported API.
+#[cfg(any(test, feature = "fuzzing"))]
+#[doc(hidden)]
+pub mod fuzzing;
 pub mod handle;
 pub mod md5;
 pub mod obs;

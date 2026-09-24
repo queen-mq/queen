@@ -14,6 +14,7 @@
 //! default 1 (measured on the VM: 100 x 1 KB JSON 2.22x at 276 MB/s; level 3
 //! buys 2.45x for 1.7x the CPU); 0 turns the codec off.
 
+use crate::obs::panic_policy::LockExt;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
@@ -104,6 +105,8 @@ pub fn compress_all(raws: &[&[u8]]) -> Vec<Option<Vec<u8>>> {
         let first = chunks.next();
         for (o, r) in chunks {
             s.spawn(move || {
+                // W1: compression for the core log writer.
+                crate::obs::panic_policy::mark_current_thread_core();
                 for (oi, ri) in o.iter_mut().zip(r) {
                     *oi = compress_one(ri);
                 }
@@ -334,7 +337,7 @@ pub fn precompress(raw: Vec<u8>) {
         return;
     }
     let now = Instant::now();
-    let mut g = early_shard(key).lock().expect("qlog early shard");
+    let mut g = early_shard(key).lock_unpoisoned();
     if g.len() >= EARLY_SWEEP_AT {
         let before = g.len();
         g.retain(|_, e| now.duration_since(e.at) < EARLY_TTL);
@@ -351,10 +354,7 @@ fn take_early(blob: &[u8]) -> Option<Arc<Slot>> {
         return None;
     }
     let key = xxhash_rust::xxh3::xxh3_128(blob);
-    let e = early_shard(key)
-        .lock()
-        .expect("qlog early shard")
-        .remove(&key)?;
+    let e = early_shard(key).lock_unpoisoned().remove(&key)?;
     EARLY_LIVE.fetch_sub(1, Ordering::Relaxed);
     Some(e.slot)
 }

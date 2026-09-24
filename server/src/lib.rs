@@ -89,6 +89,13 @@ pub const VERSION: &str = env!("QUEEN_VERSION");
 
 pub mod embedded;
 
+/// W7 fuzz entry points (PLAN_SINGLE_BINARY.md): the broker's untrusted
+/// decoders as `fn(&[u8])`, driven by `server/fuzz` (cargo-fuzz). Not a
+/// supported API; compiled for tests and with the `fuzzing` feature only.
+#[cfg(any(test, feature = "fuzzing"))]
+#[doc(hidden)]
+pub mod fuzzing;
+
 /// The canonical wire types, re-exported so embedding applications can name
 /// request/response types without adding a second dependency.
 pub use queen_protocol as protocol;

@@ -1,0 +1,42 @@
+# W7 (PLAN_SINGLE_BINARY.md): cargo-fuzz targets for untrusted decoders.
+# Entry points: protocols/queen-kafka/src/fuzzing.rs (feature `fuzzing`).
+# Needs nightly + cargo-fuzz: `cargo +nightly fuzz run <target>` from the
+# parent crate's directory. Every target is a one-line call into an entry
+# point whose seed-corpus test runs on stable in the parent crate.
+[package]
+name = "queen-kafka-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+queen-kafka = { path = "..", features = ["fuzzing"] }
+
+# Standalone, like its parent: not a member of any workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "request_frame"
+path = "fuzz_targets/request_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sasl_plain"
+path = "fuzz_targets/sasl_plain.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "record_batches"
+path = "fuzz_targets/record_batches.rs"
+test = false
+doc = false
+bench = false

@@ -89,6 +89,11 @@ uuid = { version = "1", features = ["v4", "v7"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 
+[features]
+# W7 (PLAN_SINGLE_BINARY.md): exposes `queen_sqs::fuzzing` (protocol sniffing
+# and SigV4 as fn(&[u8])) to the cargo-fuzz crate in fuzz/. Never shipped.
+fuzzing = []
+
 [dev-dependencies]
 # `tokio::time::pause`/`advance`. The facade's own clock is injectable
 # (queen::testing::TestClock) precisely so the lease and visibility tests do not

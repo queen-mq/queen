@@ -1,0 +1,35 @@
+# W7 (PLAN_SINGLE_BINARY.md): cargo-fuzz targets for untrusted decoders.
+# Entry points: protocols/queen-sqs/src/fuzzing.rs (feature `fuzzing`).
+# Needs nightly + cargo-fuzz: `cargo +nightly fuzz run <target>` from the
+# parent crate's directory. Every target is a one-line call into an entry
+# point whose seed-corpus test runs on stable in the parent crate.
+[package]
+name = "queen-sqs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+queen-sqs = { path = "..", features = ["fuzzing"] }
+
+# Standalone, like its parent: not a member of any workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "request"
+path = "fuzz_targets/request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sigv4"
+path = "fuzz_targets/sigv4.rs"
+test = false
+doc = false
+bench = false

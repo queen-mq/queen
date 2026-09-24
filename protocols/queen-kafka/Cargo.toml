@@ -88,12 +88,19 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 
+[features]
+# W7 (PLAN_SINGLE_BINARY.md): exposes `queen_kafka::fuzzing` (the pre-handler
+# decoders as fn(&[u8])) to the cargo-fuzz crate in fuzz/. `RequestKind` needs
+# kafka-protocol's message enums; the dev-dependency below turns them on for
+# the seed-corpus tests. Never in a shipped build.
+fuzzing = ["kafka-protocol/messages_enums"]
+
 [dev-dependencies]
 # The tests drive the exchange from the CLIENT side with kafka-protocol's own
 # types — encode requests, decode responses — which is the other half of the
 # crate. Cargo unifies features per build, so `cargo test` gets broker+client
 # while `cargo build` still compiles broker alone.
-kafka-protocol = { version = "0.18", default-features = false, features = ["client"] }
+kafka-protocol = { version = "0.18", default-features = false, features = ["client", "messages_enums"] }
 # `tokio::time::pause`/`advance`. The group coordinator is a state machine whose
 # every transition is either a command or a DEADLINE — a join window closing, a
 # session expiring, an empty group being reaped — so its tests drive a clock
