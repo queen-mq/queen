@@ -46,11 +46,29 @@ ctrs!(
     orphan_released,
     render_part_retry,
     render_part_missing,
+    claim_expired_lease,
+    render_gap_offsets,
+    fwd_transport_retry,
+    fwd_unanswered_pops,
+    fwd_unanswered_claims,
+    render_gap_recovered,
+    render_gap_claims,
+    apply_waited_write,
+    apply_wait_max_us,
+    apply_wait_over_50ms,
+    writer_write_max_us,
+    writer_handoff_max_us,
+    writer_persist_max_us,
 );
 
 #[inline]
 pub fn inc(c: &AtomicU64, n: u64) {
     c.fetch_add(n, Relaxed);
+}
+
+#[inline]
+pub fn max(c: &AtomicU64, n: u64) {
+    c.fetch_max(n, Relaxed);
 }
 
 static EVERY_MS: LazyLock<Option<i64>> = LazyLock::new(|| {

@@ -178,7 +178,25 @@ struct Inner {
     /// Above this many cached bytes, applied entries are evicted even if a
     /// follower still needs them (it then reads them back from disk).
     cache_cap: usize,
+    /// See [`Written`].
+    written: Written,
 }
+
+/// The highest entry (RSM numbering) this node's queue logs hold: written and
+/// indexed — readable by the pop render and the planner — though not yet
+/// fsynced. Set by the writer thread after each group's write, lowered by a
+/// truncation.
+///
+/// openraft may APPLY an entry before this node's own write of it: `append`
+/// makes it readable from memory at once, and a quorum of OTHER nodes can
+/// commit it (a follower applies what the leader committed; the leader commits
+/// on two followers). Apply is then ahead of the queue logs, and a pop answered
+/// right after apply renders offsets whose payload records are not there yet:
+/// the client got a short or empty batch, never acked the rest, and the lease
+/// froze the partition for its whole length (measured on a 3-node cluster at
+/// 300k msg/s: ~1 lease/s, e2e p99 28 s; the slowest disk had 92% of them). So
+/// the state machine waits for this before it applies ([`LogStore::wait_written`]).
+type Written = Arc<tokio::sync::watch::Sender<u64>>;
 
 /// `QUEEN_RAFT_LOG_CACHE_MB` (default 512): see [`Inner::cache_cap`].
 pub(crate) fn cache_cap_from_env() -> usize {
@@ -334,10 +352,14 @@ impl LogStore {
             .truncate(false)
             .write(true)
             .open(cfg.state_dir.join(COMMITTED_FILE))?;
+        // Everything recovered is on disk.
+        let written: Written = Arc::new(tokio::sync::watch::Sender::new(
+            last_log_id.map_or(0, |l| rsm_index(l.index)),
+        ));
         let (tx, rx) = std::sync::mpsc::channel::<Cmd>();
         let (sync_tx, syncer, committed_file) =
             if crate::rsm::replicator::local::writer_pipeline_from_env() {
-                let (stx, srx) = std::sync::mpsc::sync_channel::<SyncMsg>(0);
+                let (stx, srx) = std::sync::mpsc::sync_channel::<SyncMsg>(sync_ahead_from_env());
                 let syncer = Syncer {
                     syncer: set.syncer(),
                     committed_file,
@@ -362,6 +384,7 @@ impl LogStore {
             poison: cfg.poison.clone(),
             sync_tx,
             syncer,
+            written: written.clone(),
         };
         let join = std::thread::Builder::new()
             .name("queen-raft-log".into())
@@ -376,6 +399,7 @@ impl LogStore {
                     poison: cfg.poison,
                     gate: gate.clone(),
                     cache_cap: cfg.cache_cap,
+                    written,
                 }),
             },
             writer: join,
@@ -390,6 +414,39 @@ impl LogStore {
     /// every clone of this store has also been dropped by openraft.
     pub(crate) fn close(&self) {
         self.inner.writer_tx.lock().expect("writer_tx").take();
+    }
+
+    /// Wait until this node's queue logs hold the entry at `raft_index`
+    /// (openraft numbering) and everything before it — see [`Written`]. Fails
+    /// once the log is poisoned (nothing more will be written).
+    pub(crate) async fn wait_written(&self, raft_index: u64) -> io::Result<()> {
+        let want = rsm_index(raft_index);
+        if *self.inner.written.borrow() >= want {
+            return Ok(());
+        }
+        crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.apply_waited_write, 1);
+        let t0 = std::time::Instant::now();
+        let mut rx = self.inner.written.subscribe();
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(100), rx.wait_for(|w| *w >= want))
+                .await
+            {
+                Ok(Ok(_)) => {
+                    let us = t0.elapsed().as_micros() as u64;
+                    crate::rsm::dbgctr::max(&crate::rsm::dbgctr::C.apply_wait_max_us, us);
+                    if us > 50_000 {
+                        crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.apply_wait_over_50ms, 1);
+                    }
+                    return Ok(());
+                }
+                Ok(Err(_)) => return Err(io::Error::other("the raft log writer stopped")),
+                Err(_) => {
+                    if let Some(why) = self.inner.poison.lock().expect("poison").clone() {
+                        return Err(io::Error::other(why));
+                    }
+                }
+            }
+        }
     }
 
     /// The last entry in the log (openraft numbering).
@@ -906,11 +963,16 @@ struct Writer {
     committed_file: Option<File>,
     poison: Poison,
     /// The fsync half (`QUEEN_RAFT_WRITER_PIPELINE`, default on): this thread
-    /// writes group N+1 while the syncer fsyncs group N and answers openraft.
-    /// A rendezvous channel, so the writer never runs more than one group
-    /// ahead of the fsync.
+    /// keeps writing groups while the syncer fsyncs the earlier ones and
+    /// answers openraft. Bounded to `QUEEN_RAFT_SYNC_AHEAD` groups: a slow
+    /// fsync must not stop the WRITES, because apply waits for them
+    /// ([`Written`]) — with a rendezvous here one 100 ms fsync on the leader
+    /// held every apply behind it (measured: push p99 684 ms for 10 s at 450k
+    /// msg/s). The syncer fsyncs every group waiting for it at once.
     sync_tx: Option<std::sync::mpsc::SyncSender<SyncMsg>>,
     syncer: Option<JoinHandle<()>>,
+    /// See [`Written`]: raised after each group's write.
+    written: Written,
 }
 
 /// What the writer hands its syncer, in order.
@@ -936,51 +998,97 @@ struct Syncer {
 }
 
 impl Syncer {
+    /// Take every message waiting (up to [`SYNC_BATCH_MAX`]), fsync the logs of
+    /// all their groups ONCE, then handle them in arrival order: each group
+    /// answered, each commit point written, each barrier released — every one
+    /// after the fsync that covers all the groups before it.
     fn run(mut self, rx: StdReceiver<SyncMsg>) {
-        for msg in rx {
-            match msg {
-                SyncMsg::Group {
-                    ticket,
-                    items,
-                    apps,
-                    callbacks,
-                } => {
-                    let poisoned = self.poison.lock().expect("poison").clone();
-                    let res = match poisoned {
-                        Some(why) => Err(io::Error::other(why)),
-                        None => {
-                            let s0 = crate::rsm::timing::stamp();
-                            let r = self.syncer.sync(&ticket);
-                            if let Some(s0) = s0 {
-                                crate::rsm::timing::metrics()
-                                    .log_fsync
-                                    .record_dur(s0.elapsed());
-                            }
-                            r
+        while let Ok(first) = rx.recv() {
+            let mut batch = vec![first];
+            while batch.len() < SYNC_BATCH_MAX {
+                match rx.try_recv() {
+                    Ok(m) => batch.push(m),
+                    Err(_) => break,
+                }
+            }
+            let mut qids: Vec<u64> = Vec::new();
+            let mut seq = 0u64;
+            let mut groups = 0usize;
+            for m in &batch {
+                if let SyncMsg::Group { ticket, .. } = m {
+                    qids.extend_from_slice(&ticket.qids);
+                    seq = seq.max(ticket.seq);
+                    groups += 1;
+                }
+            }
+            let failed: Option<String> = if groups == 0 {
+                None
+            } else {
+                qids.sort_unstable();
+                qids.dedup();
+                let poisoned = self.poison.lock().expect("poison").clone();
+                match poisoned {
+                    Some(why) => Some(why),
+                    None => {
+                        let s0 = crate::rsm::timing::stamp();
+                        let r = self
+                            .syncer
+                            .sync(&crate::rsm::qlog::set::SyncTicket { qids, seq });
+                        if let Some(s0) = s0 {
+                            crate::rsm::timing::metrics()
+                                .log_fsync
+                                .record_dur(s0.elapsed());
                         }
-                    };
-                    match res {
-                        Ok(()) => {
-                            crate::rsm::faults::hit("qlog.record_fsynced");
-                            crate::rsm::faults::hit("log.flushed");
-                            finish_group(&items, apps, callbacks);
-                        }
-                        Err(e) => {
-                            let why = format!("raft log fsync failed: {e}");
-                            set_poison(&self.poison, why.clone());
-                            for cb in callbacks {
-                                cb.io_completed(Err(io::Error::other(why.clone())));
+                        match r {
+                            Ok(()) => None,
+                            Err(e) => {
+                                let why = format!("raft log fsync failed: {e}");
+                                set_poison(&self.poison, why.clone());
+                                Some(why)
                             }
                         }
                     }
                 }
-                SyncMsg::Committed(c) => write_committed_to(&mut self.committed_file, c),
-                SyncMsg::Barrier(done) => {
-                    let _ = done.send(());
+            };
+            for m in batch {
+                match m {
+                    SyncMsg::Group {
+                        items,
+                        apps,
+                        callbacks,
+                        ..
+                    } => match &failed {
+                        None => {
+                            crate::rsm::faults::hit("qlog.record_fsynced");
+                            crate::rsm::faults::hit("log.flushed");
+                            finish_group(&items, apps, callbacks);
+                        }
+                        Some(why) => {
+                            for cb in callbacks {
+                                cb.io_completed(Err(io::Error::other(why.clone())));
+                            }
+                        }
+                    },
+                    SyncMsg::Committed(c) => write_committed_to(&mut self.committed_file, c),
+                    SyncMsg::Barrier(done) => {
+                        let _ = done.send(());
+                    }
                 }
             }
         }
     }
+}
+
+/// At most this many queued messages per syncer pass.
+const SYNC_BATCH_MAX: usize = 256;
+
+/// `QUEEN_RAFT_SYNC_AHEAD` (default 16): how many written groups may wait for
+/// the syncer before the writer blocks (see [`Writer::sync_tx`]).
+fn sync_ahead_from_env() -> usize {
+    std::env::var("QUEEN_RAFT_SYNC_AHEAD")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(16)
 }
 
 /// A group is durable: record each entry's payload-free form and answer
@@ -1107,9 +1215,11 @@ impl Writer {
         let mut apps: Vec<Option<AppEntry>> = Vec::new();
         let mut callbacks = Vec::with_capacity(appends.len());
         let mut failed: Option<String> = None;
+        let mut max_seq = 0u64;
         for (entries, cb) in appends {
             for e in entries {
                 let seq = rsm_index(e.log_id.index);
+                max_seq = max_seq.max(seq);
                 let term = term_of(&e.log_id);
                 match e.payload {
                     EntryPayload::Normal(app) => {
@@ -1210,15 +1320,27 @@ impl Writer {
         // (blocking until it is done with the previous group). Otherwise write
         // and fsync here.
         if let Some(tx) = &self.sync_tx {
+            let tw = std::time::Instant::now();
             match self.q.write_group_nosync(&mut items) {
                 Ok(ticket) => {
+                    crate::rsm::dbgctr::max(
+                        &crate::rsm::dbgctr::C.writer_write_max_us,
+                        tw.elapsed().as_micros() as u64,
+                    );
+                    self.note_written(max_seq);
                     let msg = SyncMsg::Group {
                         ticket,
                         items,
                         apps,
                         callbacks,
                     };
-                    if let Err(std::sync::mpsc::SendError(msg)) = tx.send(msg) {
+                    let th = std::time::Instant::now();
+                    let sent = tx.send(msg);
+                    crate::rsm::dbgctr::max(
+                        &crate::rsm::dbgctr::C.writer_handoff_max_us,
+                        th.elapsed().as_micros() as u64,
+                    );
+                    if let Err(std::sync::mpsc::SendError(msg)) = sent {
                         let SyncMsg::Group { callbacks, .. } = msg else {
                             unreachable!()
                         };
@@ -1230,9 +1352,23 @@ impl Writer {
             return;
         }
         match self.q.write_group(&mut items) {
-            Ok(()) => finish_group(&items, apps, callbacks),
+            Ok(()) => {
+                self.note_written(max_seq);
+                finish_group(&items, apps, callbacks)
+            }
             Err(e) => self.fail_group(format!("raft log write failed: {e}"), callbacks),
         }
+    }
+
+    /// The group through `max_seq` is written and indexed: apply may pass it.
+    fn note_written(&self, max_seq: u64) {
+        self.written.send_if_modified(|w| {
+            let raise = max_seq > *w;
+            if raise {
+                *w = max_seq;
+            }
+            raise
+        });
     }
 
     fn fail_group(&self, why: String, callbacks: Vec<IOFlushed<TypeConfig>>) {
@@ -1252,6 +1388,14 @@ impl Writer {
             } => {
                 // Every earlier append is fsynced and answered first.
                 self.drain_syncer();
+                // What is cut is no longer written; its indexes are rewritten.
+                self.written.send_if_modified(|w| {
+                    let lower = *w >= from_seq;
+                    if lower {
+                        *w = from_seq.saturating_sub(1);
+                    }
+                    lower
+                });
                 let res = match self.poisoned() {
                     Some(why) => Err(io::Error::other(why)),
                     None => self.q.set.truncate_from_across(from_seq).map(|dropped| {
@@ -1272,6 +1416,8 @@ impl Writer {
                 let _ = done.send(res);
             }
             Cmd::Persist { state, done } => {
+                let tp = std::time::Instant::now();
+                let _tp = scopeguard_max(tp);
                 self.drain_syncer();
                 let res = match self.poisoned() {
                     Some(why) => Err(io::Error::other(why)),
@@ -1299,4 +1445,18 @@ impl Writer {
             (None, None) => {}
         }
     }
+}
+
+/// DIAG: records the persist duration when dropped.
+struct PersistTimer(std::time::Instant);
+impl Drop for PersistTimer {
+    fn drop(&mut self) {
+        crate::rsm::dbgctr::max(
+            &crate::rsm::dbgctr::C.writer_persist_max_us,
+            self.0.elapsed().as_micros() as u64,
+        );
+    }
+}
+fn scopeguard_max(t: std::time::Instant) -> PersistTimer {
+    PersistTimer(t)
 }

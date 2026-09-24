@@ -687,19 +687,81 @@ impl RaftFacade {
                             // had applied) must be applied on THIS node before
                             // the caller renders it.
                             if !self.repl.wait_applied(upto, ctx.deadline.instant()).await {
+                                // The leader claimed, but this node cannot answer
+                                // in time: hand the leases back now, instead of
+                                // letting each hold its partition for the whole
+                                // lease (measured on a 3-node cluster: ~1% of
+                                // messages ~30 s late).
+                                self.release_unanswered(&command, &reply);
                                 return Err(RsmError::Timeout);
                             }
                             return Ok(reply);
                         }
                         (reply, _) => return Ok(reply),
                     },
-                    Err(RemoteError::NoLeader) | Err(RemoteError::Transport(_)) => {}
+                    Err(RemoteError::NoLeader) => {}
+                    Err(RemoteError::Transport(_)) => {
+                        crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.fwd_transport_retry, 1);
+                    }
                 }
             }
             let nap = backoff.min(ctx.deadline.remaining());
             tokio::time::sleep(nap).await;
             backoff = (backoff * 2).min(Duration::from_millis(200));
         }
+    }
+
+    /// A pop the leader answered with claims this node will not deliver (its
+    /// caller's deadline passed while it waited to apply them): release every
+    /// lease with a `Nack` — lease dropped, cursor unmoved, no retry charged,
+    /// the same release the leader's batcher gives an orphaned local claim —
+    /// forwarded to the leader in the background.
+    fn release_unanswered(&self, command: &Command, reply: &Reply) {
+        let group = match command {
+            Command::PopWildcard(c) | Command::PopPinned(c) | Command::PopDiscover(c) => {
+                c.group.clone()
+            }
+            _ => return,
+        };
+        let Reply::Done {
+            outcome: Outcome::Pop(pop),
+            ..
+        } = reply
+        else {
+            return;
+        };
+        let nacks: Vec<Command> = pop
+            .claims
+            .iter()
+            .filter(|c| c.lease_expires_at_us.is_some())
+            .map(|c| {
+                Command::Nack(crate::rsm::planner::NackCommand {
+                    request_id: uuidv7_bytes(),
+                    pid: c.pid,
+                    tenant: String::new(),
+                    queue: String::new(),
+                    group: group.clone(),
+                    worker: c.worker.clone(),
+                })
+            })
+            .collect();
+        crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.fwd_unanswered_pops, 1);
+        if nacks.is_empty() {
+            return;
+        }
+        crate::rsm::dbgctr::inc(
+            &crate::rsm::dbgctr::C.fwd_unanswered_claims,
+            nacks.len() as u64,
+        );
+        let repl = self.repl.clone();
+        tokio::spawn(async move {
+            let budget = Duration::from_secs(5);
+            for cmd in nacks {
+                if let Ok(b) = super::remote::encode_request(&cmd, budget) {
+                    let _ = repl.forward_command(bytes::Bytes::from(b), budget).await;
+                }
+            }
+        });
     }
 
     /// PERF-J: whether a wildcard pop of `(tenant, queue, group)` is provably
@@ -777,6 +839,11 @@ impl RaftFacade {
 // ---------------------------------------------------------------------------
 // Reply → RsmError, and the derived per-command request id
 // ---------------------------------------------------------------------------
+
+/// How much earlier than its caller's deadline a follower's forwarded pop stops
+/// claiming (on top of the planner's own reply margin): the leader's answer
+/// still has to cross back, apply on this node, and be rendered.
+const FOLLOWER_POP_MARGIN: Duration = Duration::from_millis(250);
 
 /// A pop's rendered answer, with the autopilot's choice echoed when it made
 /// one (`"autopilot":{"partitions":W,"batch":B}`).
@@ -2082,8 +2149,19 @@ impl RaftFacade {
             }
             attempt += 1;
             // P1.2: the planner refuses to claim once nobody can receive the answer.
-            let deadline_us = wall_micros()
+            // A follower serving its own client also has to apply the claim and
+            // render it after the leader answers, so it asks the leader to stop
+            // claiming a little earlier (`FOLLOWER_POP_MARGIN`).
+            let mut deadline_us = wall_micros()
                 .saturating_add(ctx.deadline.remaining().as_micros().min(i64::MAX as u128) as i64);
+            if self.offload
+                && !matches!(
+                    self.repl.role(),
+                    crate::rsm::replicator::Role::Leader { .. }
+                )
+            {
+                deadline_us = deadline_us.saturating_sub(FOLLOWER_POP_MARGIN.as_micros() as i64);
+            }
             let (attempt_budget, attempt_parts) = if auto {
                 let ready = if !options.auto_parts {
                     None
@@ -2440,6 +2518,8 @@ fn render_pop_body(
         // here is a genuine gap, exactly as a segment miss.
         let qlog_qid = qlog_reader.map(|_| QLogReader::queue_id_of(tenant, &info.queue));
         let mut off = claim.start_offset;
+        // DIAG (render gaps): one bounded wait per claim for a missing record.
+        let mut waited = false;
         while off <= claim.end_offset {
             // The payload bytes: from the QUEUE LOG when the knob is on (Phase
             // A2), else the segment files. Both return the same `(base_offset,
@@ -2448,6 +2528,40 @@ fn render_pop_body(
             let popped: Option<(u64, i64, u32, Vec<u8>)> = match (qlog_reader, qlog_qid) {
                 (Some(ql), Some(qid)) => match ql.read_owned(qid, claim.pid, off) {
                     Ok(Some(r)) => Some((r.base_offset, r.created_at_us, r.count, r.payload)),
+                    Ok(None) if !waited => {
+                        waited = true;
+                        use crate::rsm::dbgctr::{inc, C};
+                        inc(&C.render_gap_claims, 1);
+                        let before = ql.describe(qid, claim.pid, off);
+                        let mut got = None;
+                        for _ in 0..50 {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                            if let Ok(Some(r)) = ql.read_owned(qid, claim.pid, off) {
+                                got = Some(r);
+                                break;
+                            }
+                        }
+                        static LOGGED: std::sync::atomic::AtomicU64 =
+                            std::sync::atomic::AtomicU64::new(0);
+                        if LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 40 {
+                            eprintln!(
+                                "RENDER_GAP pid={} off={off} claim={}..={} attempt={} recovered={} | {before} || after: {}",
+                                claim.pid,
+                                claim.start_offset,
+                                claim.end_offset,
+                                claim.delivery_attempt,
+                                got.is_some(),
+                                ql.describe(qid, claim.pid, off)
+                            );
+                        }
+                        match got {
+                            Some(r) => {
+                                inc(&C.render_gap_recovered, 1);
+                                Some((r.base_offset, r.created_at_us, r.count, r.payload))
+                            }
+                            None => None,
+                        }
+                    }
                     Ok(None) => None,
                     Err(e) => {
                         return Err(format!(
@@ -2471,6 +2585,7 @@ fn render_pop_body(
                 Some(t) => t,
                 None => {
                     // A gap (retention passed it, or not yet visible): skip one.
+                    crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.render_gap_offsets, 1);
                     off += 1;
                     continue;
                 }

@@ -239,6 +239,8 @@ impl<S: Store + 'static> RaftStateMachine<TypeConfig> for QueenSm<S> {
                     Entry::noop()
                 }
             };
+            // Never ahead of this node's own queue logs (see `log_store::Written`).
+            self.log.wait_written(entry.log_id.index).await?;
             // Registered BEFORE the send, so the apply thread's notify always
             // finds it.
             let (tx, rx) = oneshot::channel();

@@ -18,6 +18,18 @@ pub struct Config {
     pub trace_retention_s: i64,
     pub partition_cleanup_enabled: bool,
     pub partition_cleanup_days: i64,
+    /// `QUEEN_RAFT_RETENTION_VISIT` (default 8192): partitions of ONE queue a
+    /// pass visits at most. The walk resumes where the last pass stopped
+    /// ([`Config::walk`]) and wraps, so a queue with more partitions is swept
+    /// over several passes. `row_limit` bounds the work a pass FINDS; this
+    /// bounds the partitions it LOOKS AT — without it every pass read every
+    /// partition's rows on the planning thread (1M partitions: a pause of
+    /// hundreds of ms every 5 s, push p99 416 ms against 55 ms without).
+    pub visit_cap: usize,
+    /// Where each queue's walk resumes, `(tenant, queue)` -> first pid of the
+    /// next pass. Leader-local and advisory: it only orders which partitions a
+    /// pass looks at first; every effect is still judged from committed state.
+    pub walk: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<(String, String), Pid>>>,
 }
 
 impl Default for Config {
@@ -27,6 +39,8 @@ impl Default for Config {
             trace_retention_s: 7 * 24 * 60 * 60,
             partition_cleanup_enabled: true,
             partition_cleanup_days: 30,
+            visit_cap: 8_192,
+            walk: Default::default(),
         }
     }
 }
@@ -179,14 +193,46 @@ pub fn plan<R: Reads + ?Sized>(r: &R, now_us: i64, cfg: &Config) -> Result<Plann
             .max(900);
         let txns_cutoff = now_us.saturating_sub(txn_window_s * 1_000_000);
 
+        // A bounded window of the queue's partitions, resuming where the last
+        // pass stopped and wrapping to the first ones (see `visit_cap`).
+        let cap = cfg.visit_cap.max(1);
+        let walk_key = (tenant.clone(), queue.clone());
+        let start = cfg
+            .walk
+            .lock()
+            .expect("retention walk")
+            .get(&walk_key)
+            .copied();
         let mut pids = Vec::new();
-        r.scan_queue_partitions(&tenant, &queue, None, usize::MAX, &mut |pid| {
+        r.scan_queue_partitions(&tenant, &queue, start, cap, &mut |pid| {
             pids.push(pid);
             true
         })?;
+        // `None`: the next pass starts from the first partition again.
+        let mut next: Option<Pid> = None;
+        if pids.len() >= cap {
+            next = pids.last().map(|p| p.saturating_add(1));
+        } else if let Some(s) = start {
+            // The tail ran out: wrap, up to the partition this pass began at.
+            let room = cap - pids.len();
+            let mut head = Vec::new();
+            r.scan_queue_partitions(&tenant, &queue, None, room, &mut |pid| {
+                if pid >= s {
+                    return false;
+                }
+                head.push(pid);
+                true
+            })?;
+            if head.len() >= room {
+                next = head.last().map(|p| p.saturating_add(1));
+            }
+            pids.extend(head);
+        }
         for pid in pids {
             if budget == 0 {
                 out.more = true;
+                // The next pass resumes at the first partition not looked at.
+                next = Some(pid);
                 break;
             }
             if r.garbage(pid)?.is_some() {
@@ -286,6 +332,17 @@ pub fn plan<R: Reads + ?Sized>(r: &R, now_us: i64, cfg: &Config) -> Result<Plann
             {
                 out.effects.push(Effect::PartitionDelete { pid });
                 budget = budget.saturating_sub(1);
+            }
+        }
+        {
+            let mut walk = cfg.walk.lock().expect("retention walk");
+            match next {
+                Some(p) => {
+                    walk.insert(walk_key, p);
+                }
+                None => {
+                    walk.remove(&walk_key);
+                }
             }
         }
     }

@@ -1206,6 +1206,37 @@ impl QLog {
         }))
     }
 
+    /// TEMPORARY diagnostic (render gaps, 2026-09-24): what this log's indexes
+    /// hold for `pid` around `offset`.
+    pub fn describe(&self, pid: u64, offset: u64) -> String {
+        let (lo, hi) = (offset.saturating_sub(3000), offset + 3000);
+        let fmt = |v: &[index::Record]| {
+            v.iter()
+                .map(|r| format!("{}..{}", r.base_offset, r.end))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let mut s = format!(
+            "active={:?} near=[{}]",
+            self.files.last().map(|m| (m.id, m.sealed, m.bytes)),
+            fmt(&self.active_index.records_overlapping(pid, lo, hi))
+        );
+        for (fid, view) in &self.sealed {
+            let p = match view.probe(pid, offset) {
+                index::Probe::Hit(_) => "hit",
+                index::Probe::Before => "before",
+                index::Probe::After => "after",
+                index::Probe::Hole => "HOLE",
+                index::Probe::Missing => continue,
+            };
+            let near = view.records_overlapping(pid, lo, hi);
+            if p != "before" || !near.is_empty() {
+                s.push_str(&format!(" | f{fid}:{p} [{}]", fmt(&near)));
+            }
+        }
+        s
+    }
+
     pub fn read_owned(&self, pid: u64, offset: u64) -> io::Result<Option<OwnedRecord>> {
         match self.locate(pid, offset) {
             Some(loc) => Ok(Some(self.read_located(&loc)?)),
