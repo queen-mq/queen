@@ -780,6 +780,10 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                     inc(&C.claim_none_leased, 1);
                     return Ok(None);
                 }
+                if c.worker.is_some() {
+                    // A lease nobody acked ran out: its batch is redelivered.
+                    inc(&C.claim_expired_lease, 1);
+                }
                 c
             }
             None => {

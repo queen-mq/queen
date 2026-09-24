@@ -321,6 +321,9 @@ impl BatcherConfig {
                     "PARTITION_CLEANUP_DAYS",
                     d.maintenance.partition_cleanup_days as u64,
                 ) as i64,
+                visit_cap: num("QUEEN_RAFT_RETENTION_VISIT", d.maintenance.visit_cap as u64)
+                    as usize,
+                walk: Default::default(),
             },
             keep_overlay: flag("QUEEN_RAFT_KEEP_OVERLAY", d.keep_overlay),
             lanes: std::env::var("QUEEN_LANES")

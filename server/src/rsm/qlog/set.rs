@@ -1202,6 +1202,15 @@ impl QLogReader {
             .cloned()
     }
 
+    /// TEMPORARY diagnostic: [`QLog::describe`] of the log holding `pid`.
+    pub fn describe(&self, queue_id: u64, pid: u64, offset: u64) -> String {
+        let id = self.log_id_for(queue_id, pid);
+        match self.log(id) {
+            Some(l) => format!("log {id}: {}", l.read().expect("qlog poisoned").describe(pid, offset)),
+            None => format!("log {id}: not open"),
+        }
+    }
+
     /// The whole record holding `(pid, offset)` — the pop payload read. `None`
     /// when the queue is unknown or no live file holds the offset (a gap the pop
     /// render skips, exactly as a segment `read_at_within` miss).

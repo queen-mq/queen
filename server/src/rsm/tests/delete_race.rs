@@ -1246,3 +1246,62 @@ fn a_purge_in_flight_hides_the_tenants_kv_rows_and_timers() {
     let queue = c.store().read(|r| r.queue(TENANT, "qt")).expect("read");
     assert!(queue.is_none(), "a purged timer re-created its queue");
 }
+
+/// The retention walk visits at most `visit_cap` partitions of a queue per pass
+/// and resumes where the last pass stopped: five dead partitions under a cap of
+/// two go in passes of 2, 2 and 1, each exactly once — a queue with a million
+/// partitions no longer has all of them read on the planning thread every pass.
+#[test]
+fn retention_walks_a_queue_in_bounded_resumable_passes() {
+    let mut c = Cycles::new("retention-walk");
+    let names = ["p0", "p1", "p2", "p3", "p4"];
+    let e = c
+        .plan(
+            names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| push(i as u64 + 1, "q", n, &["m"]))
+                .collect(),
+            None,
+            None,
+        )
+        .expect("the pushes");
+    let pids: Vec<Pid> = names.iter().map(|n| created_pid(&e, "q", n)).collect();
+    c.land();
+    let marks = pids
+        .iter()
+        .map(|&pid| Effect::Watermark {
+            pid,
+            log_start: 1,
+            txns_start: 1,
+        })
+        .collect();
+    c.plan(vec![effects(10, marks)], None, None);
+    c.land();
+    c.wall += 2 * 86_400 * 1_000_000;
+    let cfg = crate::rsm::maintenance::Config {
+        partition_cleanup_days: 1,
+        visit_cap: 2,
+        ..crate::rsm::maintenance::Config::default()
+    };
+    let mut deleted: Vec<Pid> = Vec::new();
+    let mut per_pass: Vec<usize> = Vec::new();
+    for _ in 0..3 {
+        let e = c
+            .plan(Vec::new(), Some(cfg.clone()), None)
+            .expect("a retention pass");
+        let now: Vec<Pid> = pids
+            .iter()
+            .copied()
+            .filter(|&p| deletes_partition(&e, p))
+            .collect();
+        per_pass.push(now.len());
+        deleted.extend(now);
+        c.land();
+    }
+    assert_eq!(per_pass, vec![2, 2, 1], "bounded passes: {per_pass:?}");
+    deleted.sort_unstable();
+    let mut want = pids.clone();
+    want.sort_unstable();
+    assert_eq!(deleted, want, "every partition exactly once");
+}
