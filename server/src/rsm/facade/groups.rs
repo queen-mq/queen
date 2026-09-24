@@ -194,6 +194,24 @@ impl Rsm for GroupRouter {
     ) -> Result<TimerReadOut, RsmError> {
         self.pick(&ctx.tenant).timers_count(ctx, req).await
     }
+    async fn kafka_append(
+        &self,
+        ctx: ReqCtx,
+        parts: Vec<KafkaAppendReq>,
+    ) -> Result<Vec<Result<u64, RsmError>>, RsmError> {
+        self.pick(&ctx.tenant).kafka_append(ctx, parts).await
+    }
+    async fn kafka_read(
+        &self,
+        ctx: ReqCtx,
+        asks: Vec<KafkaReadReq>,
+        max_wait_ms: u64,
+        min_bytes: usize,
+    ) -> Result<Vec<KafkaReadOut>, RsmError> {
+        self.pick(&ctx.tenant)
+            .kafka_read(ctx, asks, max_wait_ms, min_bytes)
+            .await
+    }
     async fn api(&self, ctx: ReqCtx, req: ApiReq) -> Result<ApiOut, RsmError> {
         self.pick(&ctx.tenant).api(ctx, req).await
     }

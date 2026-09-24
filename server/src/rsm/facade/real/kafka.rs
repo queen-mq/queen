@@ -57,8 +57,7 @@ impl RaftFacade {
             .encrypted_queues(&ctx.tenant, parts.iter().map(|p| p.queue.clone()).collect())
             .await?;
 
-        let mut pending: Vec<Result<tokio::sync::oneshot::Receiver<Reply>, RsmError>> =
-            Vec::with_capacity(parts.len());
+        let mut cmds: Vec<Result<Command, RsmError>> = Vec::with_capacity(parts.len());
         for (ordinal, part) in parts.into_iter().enumerate() {
             if let Err(e) = crate::rsm::facade::check_message_key_names(
                 &ctx.tenant,
@@ -66,14 +65,14 @@ impl RaftFacade {
                 None,
                 Some(&part.partition),
             ) {
-                pending.push(Err(e));
+                cmds.push(Err(e));
                 continue;
             }
             let items = if encrypted.contains(&part.queue) {
                 match self.kafka_envelope_items(&ctx, &part) {
                     Ok(items) => items,
                     Err(e) => {
-                        pending.push(Err(e));
+                        cmds.push(Err(e));
                         continue;
                     }
                 }
@@ -83,35 +82,73 @@ impl RaftFacade {
                     frame: kafka_batch::wrap(&part.batches),
                 }]
             };
-            let cmd = Command::Push(PushCommand {
+            cmds.push(Ok(Command::Push(PushCommand {
                 request_id: derived_request_id(ctx.request_id, ordinal as u32),
                 tenant: ctx.tenant.clone(),
                 create_cfg: default_queue_config(&part.queue),
                 queue: part.queue,
                 partition: part.partition,
                 items,
-            });
-            let (sub, rx) = Submission::new(cmd);
-            match tokio::time::timeout(ctx.deadline.remaining(), self.cmd_tx.send(sub)).await {
-                Ok(Ok(())) => pending.push(Ok(rx)),
-                Ok(Err(_)) => return Err(RsmError::Internal("planner channel closed".into())),
-                Err(_) => return Err(RsmError::Timeout),
-            }
+            })));
         }
 
-        let mut out = Vec::with_capacity(pending.len());
-        for p in pending {
-            let rx = match p {
-                Ok(rx) => rx,
+        let replies: Vec<Result<Reply, RsmError>> = if self.offload {
+            // A cluster node serving its own clients: every part goes to the
+            // leader when another node leads, all in flight together, and each
+            // answer arrives once THIS node has applied it — so a Fetch here
+            // reads what the Produce was told, as the push path does.
+            let ctx = &ctx;
+            futures_util::future::join_all(cmds.into_iter().map(|c| async move {
+                match c {
+                    Ok(cmd) => self.submit_offloaded(ctx, cmd).await,
+                    Err(e) => Err(e),
+                }
+            }))
+            .await
+        } else {
+            // Every part enqueued before any answer is awaited, so the parts
+            // of one Produce share a planning cycle.
+            let mut pending: Vec<Result<tokio::sync::oneshot::Receiver<Reply>, RsmError>> =
+                Vec::with_capacity(cmds.len());
+            for c in cmds {
+                let cmd = match c {
+                    Ok(cmd) => cmd,
+                    Err(e) => {
+                        pending.push(Err(e));
+                        continue;
+                    }
+                };
+                let (sub, rx) = Submission::new(cmd);
+                match tokio::time::timeout(ctx.deadline.remaining(), self.cmd_tx.send(sub)).await {
+                    Ok(Ok(())) => pending.push(Ok(rx)),
+                    Ok(Err(_)) => return Err(RsmError::Internal("planner channel closed".into())),
+                    Err(_) => return Err(RsmError::Timeout),
+                }
+            }
+            let mut replies = Vec::with_capacity(pending.len());
+            for p in pending {
+                replies.push(match p {
+                    Ok(rx) => match tokio::time::timeout(ctx.deadline.remaining(), rx).await {
+                        Ok(Ok(r)) => Ok(r),
+                        Ok(Err(_)) => {
+                            return Err(RsmError::Internal("planner dropped the reply".into()))
+                        }
+                        Err(_) => return Err(RsmError::Timeout),
+                    },
+                    Err(e) => Err(e),
+                });
+            }
+            replies
+        };
+
+        let mut out = Vec::with_capacity(replies.len());
+        for reply in replies {
+            let reply = match reply {
+                Ok(r) => r,
                 Err(e) => {
                     out.push(Err(e));
                     continue;
                 }
-            };
-            let reply = match tokio::time::timeout(ctx.deadline.remaining(), rx).await {
-                Ok(Ok(r)) => r,
-                Ok(Err(_)) => return Err(RsmError::Internal("planner dropped the reply".into())),
-                Err(_) => return Err(RsmError::Timeout),
             };
             out.push(match reply {
                 Reply::Done {

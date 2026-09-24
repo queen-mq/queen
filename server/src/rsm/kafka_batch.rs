@@ -301,6 +301,15 @@ mod tests {
     }
 
     #[test]
+    fn only_an_idempotent_producers_payload_writes_a_window() {
+        assert!(!writes_window(&wrap(&fake_batch(2))));
+        let mut idempotent = fake_batch(2);
+        idempotent[43..51].copy_from_slice(&7i64.to_be_bytes()); // producerId
+        assert!(writes_window(&wrap(&idempotent)));
+        assert!(!writes_window(b"not a stored Kafka payload"));
+    }
+
+    #[test]
     fn two_batches_are_scanned_and_stamped_in_order() {
         let mut two = fake_batch(3);
         two.extend(fake_batch(2));
@@ -377,6 +386,17 @@ pub const PRODUCER_TTL_US: i64 = 86_400 * 1_000_000;
 /// The KV key of a producer's window on one partition.
 pub fn producer_key(producer_id: i64, pid: u64) -> String {
     format!("qk:seq:{pid}:{producer_id}")
+}
+
+/// Whether a stored Kafka payload comes from an idempotent producer, so its
+/// append rewrites a window: a KV row, whose version only the control step of
+/// a lanes cycle may hand out (I18). `false` for anything that is not a
+/// well-formed stored payload — the planner refuses those before writing.
+pub fn writes_window(blob: &[u8]) -> bool {
+    batches(blob)
+        .and_then(|b| scan(b).ok())
+        .and_then(|heads| heads.first().map(|h| h.producer_id >= 0))
+        .unwrap_or(false)
 }
 
 /// One producer's window on one partition.

@@ -784,8 +784,6 @@ pub trait Rsm: Send + Sync {
         Err(RsmError::Unsupported)
     }
 
-    /// Phase-2 admin/read/streams surface. Implementations return the final
-    /// wire status/body so the Postgres and RSM internals remain separated.
     /// Append Kafka batches verbatim, one `Append` per part; one answer per
     /// part, in part order: the offset of its first record.
     async fn kafka_append(
@@ -808,6 +806,8 @@ pub trait Rsm: Send + Sync {
         Err(RsmError::Unsupported)
     }
 
+    /// Phase-2 admin/read/streams surface. Implementations return the final
+    /// wire status/body so the Postgres and RSM internals remain separated.
     async fn api(&self, _ctx: ReqCtx, _req: ApiReq) -> Result<ApiOut, RsmError> {
         Err(RsmError::Unsupported)
     }

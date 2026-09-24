@@ -29,6 +29,13 @@ pub(super) fn is_kafka_append(cmd: &PushCommand) -> bool {
     cmd.items.len() == 1 && kafka_batch::is_kafka(&cmd.items[0].frame)
 }
 
+/// Whether a push command is a Kafka append that rewrites its producer's
+/// window ([`kafka_batch::writes_window`]). It assigns a KV version, so the
+/// lanes route it to the control step and never plan it on a lane.
+pub(crate) fn writes_kv(cmd: &PushCommand) -> bool {
+    is_kafka_append(cmd) && kafka_batch::writes_window(&cmd.items[0].frame)
+}
+
 impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// Plan a Kafka append (module header).
     pub fn plan_kafka_append(&self, ov: &mut Overlay, cmd: &PushCommand) -> Planned {
