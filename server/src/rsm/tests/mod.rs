@@ -38,6 +38,7 @@ mod apply_crash;
 mod batcher;
 mod columns;
 mod dedup_txns;
+mod delete_race;
 mod facade;
 #[cfg(feature = "kafka")]
 mod facade_kafka;

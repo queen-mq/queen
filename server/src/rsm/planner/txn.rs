@@ -27,7 +27,7 @@ use crate::rsm::store::Reads;
 pub const TXN_OUTCOME_TAG: u16 = 0xF001;
 
 /// One transaction: every push group, ack target and KV op of the bundle.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct TxnCommand {
     pub request_id: RequestId,
     pub tenant: String,

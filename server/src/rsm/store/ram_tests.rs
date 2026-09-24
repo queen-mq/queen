@@ -848,3 +848,123 @@ fn live_readers_reentering_a_scan_never_block_the_writer() {
         }
     });
 }
+
+// ---------------------------------------------------------------------------
+// The async durable point: a cut taken by the writer, written on another
+// thread (QUEEN_RAFT_CHECKPOINT_ASYNC)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_cut_is_written_on_another_thread_while_the_writer_carries_on() {
+    let mut t = Tmp::new();
+    {
+        let s = t.s();
+        let mut w = s.write().unwrap();
+        assert!(w.can_cut(), "an all-RAM store cuts");
+        w.put_raw(Keyspace::Queues, b"a", b"1").unwrap();
+        w.put_raw(Keyspace::Queues, b"b", b"1").unwrap();
+        w.put_raw(Keyspace::Cursors, b"c", b"1").unwrap();
+        w.set_applied(7, 1).unwrap();
+        let mut cut = w.take_cut().unwrap().expect("a cut");
+        assert!(cut.keys() >= 4, "{} rows", cut.keys());
+        for ks in Keyspace::ALL {
+            assert_eq!(s.dirty_len(ks), 0, "{}: the cut took the dirty set", ks.name());
+        }
+
+        // The writer carries on after the cut: an overwrite, a delete and a new
+        // row. None of them is in the cut, all of them are dirty for the next.
+        w.put_raw(Keyspace::Queues, b"a", b"2").unwrap();
+        w.del_raw(Keyspace::Queues, b"b").unwrap();
+        w.put_raw(Keyspace::Queues, b"z", b"new").unwrap();
+        w.set_applied(9, 1).unwrap();
+        assert_eq!(s.dirty_len(Keyspace::Queues), 3);
+
+        // Written on another thread WHILE the write handle is out: the handle
+        // holds no LMDB transaction, so the checkpoint never waits for it.
+        let (tx, rx) = mpsc::channel();
+        std::thread::scope(|sc| {
+            sc.spawn(|| {
+                tx.send(s.write_cut(&mut cut)).unwrap();
+            });
+            let r = rx
+                .recv_timeout(std::time::Duration::from_secs(20))
+                .expect("the cut was written while the writer held its handle");
+            r.expect("write the cut");
+        });
+        assert_eq!(StoreMetrics::get(&s.metrics().durable_commits), 1);
+        assert_eq!(checkpoint(s, Keyspace::Queues, b"a").as_deref(), Some(&b"1"[..]));
+        assert_eq!(checkpoint(s, Keyspace::Queues, b"b").as_deref(), Some(&b"1"[..]));
+        assert_eq!(checkpoint(s, Keyspace::Queues, b"z"), None);
+        // The live tables have the writer's newer values.
+        w.put_raw(Keyspace::Groups, b"g", b"1").unwrap();
+        assert_eq!(w.get_raw(Keyspace::Queues, b"a").unwrap(), Some(&b"2"[..]));
+        assert_eq!(w.get_raw(Keyspace::Queues, b"b").unwrap(), None);
+    }
+    // A crash after the cut: the store reopens exactly at it.
+    t.reopen();
+    t.s()
+        .read(|r| {
+            assert_eq!(r.get_raw(Keyspace::Queues, b"a")?, Some(&b"1"[..]));
+            assert_eq!(r.get_raw(Keyspace::Queues, b"b")?, Some(&b"1"[..]));
+            assert_eq!(r.get_raw(Keyspace::Queues, b"z")?, None);
+            assert_eq!(r.get_raw(Keyspace::Groups, b"g")?, None);
+            assert_eq!(r.applied_index()?, 7);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_cut_that_is_not_written_goes_back_to_the_dirty_sets() {
+    let t = Tmp::new();
+    let s = t.s();
+    let mut w = s.write().unwrap();
+    w.put_raw(Keyspace::Partitions, b"p", b"1").unwrap();
+    w.set_applied(3, 1).unwrap();
+    let mut cut = w.take_cut().unwrap().expect("a cut");
+    s.fail_next_sync();
+    let e = s.write_cut(&mut cut).unwrap_err();
+    assert!(e.lost_durable_point(), "{e}");
+    assert!(matches!(e, StoreError::CommitFailed { durable: true, .. }));
+    s.restore_cut(cut);
+    assert_eq!(s.dirty_len(Keyspace::Partitions), 1);
+    assert!(s.dirty_len(Keyspace::Meta) >= 1);
+    // The handle is unaffected (the failure is the checkpoint thread's to
+    // report), and the next point writes what the failed one could not.
+    w.durable_commit().unwrap();
+    drop(w);
+    assert_eq!(s.dirty_len(Keyspace::Partitions), 0);
+    assert_eq!(
+        checkpoint(s, Keyspace::Partitions, b"p").as_deref(),
+        Some(&b"1"[..])
+    );
+}
+
+#[test]
+fn a_store_that_syncs_every_commit_does_not_cut() {
+    let dir = std::env::temp_dir().join(format!(
+        "queen-rsm-ram-sync-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let s = HeedStore::open(
+        &dir,
+        &StoreOpts {
+            sync_every_commit: true,
+            ..opts()
+        },
+    )
+    .expect("open");
+    {
+        let mut w = s.write().unwrap();
+        assert!(!w.can_cut());
+        w.put_raw(Keyspace::Queues, b"q", b"1").unwrap();
+        assert!(w.take_cut().unwrap().is_none());
+        // Every commit is the durable one on this store.
+        w.commit().unwrap();
+        assert_eq!(s.dirty_len(Keyspace::Queues), 0);
+    }
+    s.close();
+    let _ = std::fs::remove_dir_all(&dir);
+}

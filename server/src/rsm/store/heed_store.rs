@@ -83,7 +83,7 @@
 //! the next checkpoint.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -93,7 +93,8 @@ use heed::types::Bytes;
 use heed::{Database, Env, EnvFlags, EnvOpenOptions, RwTxn, WithTls};
 
 use super::{
-    Keyspace, MapUsage, Result, Scope, Store, StoreError, StoreMetrics, StoreOpts, MAX_DBS,
+    CheckpointCut, Keyspace, MapUsage, Result, Scope, Store, StoreError, StoreMetrics, StoreOpts,
+    MAX_DBS,
 };
 
 /// The unit the map size is rounded up to. A multiple of every page size this
@@ -197,10 +198,11 @@ struct RamRows {
     /// The live rows, in `memcmp` order — LMDB's comparator, so every range
     /// walk is the walk the LMDB keyspace would do.
     map: BTreeMap<RamKey, RamVal>,
-    /// The keys changed since the last checkpoint. A key here whose value is
-    /// absent from `map` is a delete. Only the apply thread (the one writer)
-    /// touches it; readers never do.
-    dirty: HashSet<RamKey, crate::rsm::fasthash::FxBuild>,
+    /// The rows changed since the last checkpoint, each with its value as of
+    /// its last write (`None` = deleted) — the same `Arc` the map holds, so a
+    /// checkpoint cut is a swap of this map, not a lookup per key. Only the
+    /// apply thread (the one writer) touches it; readers never do.
+    dirty: HashMap<RamKey, Option<RamVal>, crate::rsm::fasthash::FxBuild>,
 }
 
 /// One RAM keyspace: the live rows and their dirty set (module header).
@@ -215,7 +217,7 @@ impl RamTable {
                 // The rows come in key order off an LMDB cursor, so the
                 // collect's sort is a single linear pass before the bulk build.
                 map: rows.into_iter().collect(),
-                dirty: HashSet::default(),
+                dirty: HashMap::default(),
             }),
         }
     }
@@ -236,32 +238,41 @@ impl RamTable {
     }
 
     fn put(&self, key: &[u8], val: RamVal) {
-        let old = {
+        let (old, old_dirty) = {
             let mut g = self.write();
             let rows = &mut *g;
             if let Some(slot) = rows.map.get_mut(key) {
-                let old = std::mem::replace(slot, val);
-                if !rows.dirty.contains(key) {
-                    // First change since the checkpoint: the dirty set shares
-                    // the map's key allocation.
-                    let k = match rows.map.get_key_value(key) {
-                        Some((k, _)) => k.clone(),
-                        None => Arc::from(key),
-                    };
-                    rows.dirty.insert(k);
-                }
-                Some(old)
+                let old = std::mem::replace(slot, val.clone());
+                let old_dirty = match rows.dirty.get_mut(key) {
+                    Some(d) => d.replace(val),
+                    None => {
+                        // First change since the checkpoint: the dirty map
+                        // shares the map's key allocation.
+                        let k = match rows.map.get_key_value(key) {
+                            Some((k, _)) => k.clone(),
+                            None => Arc::from(key),
+                        };
+                        rows.dirty.insert(k, Some(val));
+                        None
+                    }
+                };
+                (Some(old), old_dirty)
             } else {
                 let k: RamKey = Arc::from(key);
-                if !rows.dirty.contains(key) {
-                    rows.dirty.insert(k.clone());
-                }
+                let old_dirty = match rows.dirty.get_mut(key) {
+                    Some(d) => d.replace(val.clone()),
+                    None => {
+                        rows.dirty.insert(k.clone(), Some(val.clone()));
+                        None
+                    }
+                };
                 rows.map.insert(k, val);
-                None
+                (None, old_dirty)
             }
         };
-        // The replaced value is freed outside the lock.
+        // The replaced values are freed outside the lock.
         drop(old);
+        drop(old_dirty);
     }
 
     /// Returns the removed value (freed by the caller, outside the lock).
@@ -269,9 +280,8 @@ impl RamTable {
         let mut g = self.write();
         let rows = &mut *g;
         let (k, v) = rows.map.remove_entry(key)?;
-        // Already dirty: `insert` keeps the set's copy and drops this one,
-        // which is never the last reference.
-        rows.dirty.insert(k);
+        // Already dirty: `insert` keeps the map's key and replaces the value.
+        rows.dirty.insert(k, None);
         Some(v)
     }
 
@@ -283,23 +293,29 @@ impl RamTable {
             let rows = &mut *g;
             let old = std::mem::take(&mut rows.map);
             for k in old.keys() {
-                if !rows.dirty.contains(&**k) {
-                    rows.dirty.insert(k.clone());
-                }
+                rows.dirty.insert(k.clone(), None);
             }
             old
         };
         drop(old);
     }
 
-    /// Take the dirty set, leaving an empty one (O(1) under the lock).
-    fn take_dirty(&self) -> HashSet<RamKey, crate::rsm::fasthash::FxBuild> {
+    /// Take the dirty rows, leaving an empty map (O(1) under the lock).
+    fn take_dirty(&self) -> HashMap<RamKey, Option<RamVal>, crate::rsm::fasthash::FxBuild> {
         std::mem::take(&mut self.write().dirty)
     }
 
-    /// Put keys back into the dirty set: a durable cycle that did not happen.
+    /// Mark keys dirty again — a durable cycle that did not happen — with
+    /// their CURRENT values; a key written again since keeps that newer entry.
     fn restore_dirty(&self, keys: Vec<RamKey>) {
-        self.write().dirty.extend(keys);
+        let mut g = self.write();
+        let rows = &mut *g;
+        for k in keys {
+            if !rows.dirty.contains_key(&*k) {
+                let v = rows.map.get(&*k).cloned();
+                rows.dirty.insert(k, v);
+            }
+        }
     }
 }
 
@@ -353,6 +369,11 @@ pub struct HeedStore {
     max_key: usize,
     max_readers: u32,
     sync_every_commit: bool,
+    /// Every keyspace is RAM ([`Keyspace::is_ram`], true since Phase C). Then
+    /// the write handle holds NO LMDB transaction between durable points —
+    /// nothing but a checkpoint writes LMDB — and a checkpoint can be written
+    /// on another thread ([`Store::write_cut`]) while apply carries on.
+    all_ram: bool,
     /// I1/I15. True while a [`HeedWrite`] is out. LMDB serializes writers on a
     /// process-shared mutex with NO timeout and no typed error, so a second
     /// caller must never reach it: [`HeedStore::write`] refuses first, and the
@@ -468,6 +489,7 @@ impl HeedStore {
             max_key,
             max_readers,
             sync_every_commit: opts.sync_every_commit,
+            all_ram: Keyspace::ALL.iter().all(|k| k.is_ram()),
             writer_out: AtomicBool::new(false),
             #[cfg(test)]
             fail_sync: AtomicBool::new(false),
@@ -608,22 +630,18 @@ impl HeedStore {
     ) -> Result<()> {
         for ks in Keyspace::ALL {
             let Some(t) = self.ram(ks) else { continue };
-            let set = t.take_dirty();
-            if set.is_empty() {
+            let dirty = t.take_dirty();
+            if dirty.is_empty() {
                 continue;
             }
-            let mut keys: Vec<RamKey> = set.into_iter().collect();
+            let mut pairs: Vec<(RamKey, Option<RamVal>)> = dirty.into_iter().collect();
             // Key order: LMDB's B-tree is written leaf after leaf, not at
             // random.
-            keys.sort_unstable();
-            taken.push((ks.slot(), keys));
-            let keys = &taken[taken.len() - 1].1;
+            pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            taken.push((ks.slot(), pairs.iter().map(|(k, _)| k.clone()).collect()));
             let db = *self.db(ks);
-            // A read lock is enough: the caller is the only writer. Readers
-            // are not held up by it.
-            let g = t.read();
-            for k in keys {
-                match g.map.get(&**k) {
+            for (k, v) in &pairs {
+                match v {
                     Some(v) => db.put(txn, k, v).map_err(|e| err(self, e))?,
                     None => {
                         db.delete(txn, k).map_err(|e| err(self, e))?;
@@ -640,6 +658,63 @@ impl HeedStore {
         for (slot, keys) in taken {
             if let Some(t) = self.ram[slot].as_ref() {
                 t.restore_dirty(keys);
+            }
+        }
+    }
+
+    /// The checkpoint CUT: every RAM keyspace's dirty rows, each with its
+    /// value as of its last write. Only the single writer calls it, between
+    /// entries, so those values ARE the store's image at this point; taking
+    /// them is a swap of each keyspace's dirty map (O(1) under its lock), and
+    /// the sort into key order is left to the checkpoint thread.
+    fn cut_dirty(&self) -> CheckpointCut {
+        let mut rows = Vec::new();
+        let mut keys_total = 0usize;
+        for ks in Keyspace::ALL {
+            let Some(t) = self.ram(ks) else { continue };
+            let dirty = t.take_dirty();
+            if dirty.is_empty() {
+                continue;
+            }
+            keys_total += dirty.len();
+            rows.push((ks, dirty.into_iter().collect::<Vec<_>>()));
+        }
+        CheckpointCut {
+            rows,
+            keys: keys_total,
+        }
+    }
+
+    /// Write a cut: ONE LMDB write transaction with every row (a put, or a
+    /// delete), its commit, then the environment sync. Any error leaves LMDB at
+    /// the previous checkpoint (the transaction aborts on drop, or the commit
+    /// is not synced and is superseded by the next one).
+    fn write_cut_inner(&self, cut: &mut CheckpointCut) -> Result<()> {
+        // Key order: LMDB's B-tree is written leaf after leaf, not at random.
+        for (_, pairs) in cut.rows.iter_mut() {
+            pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        }
+        let mut txn = self.env.write_txn().map_err(|e| err(self, e))?;
+        for (ks, pairs) in &cut.rows {
+            let db = *self.db(*ks);
+            for (k, v) in pairs {
+                match v {
+                    Some(v) => db.put(&mut txn, k, v).map_err(|e| err(self, e))?,
+                    None => {
+                        db.delete(&mut txn, k).map_err(|e| err(self, e))?;
+                    }
+                }
+            }
+        }
+        txn.commit().map_err(|e| err(self, e))?;
+        self.sync_now()
+    }
+
+    /// A cut that was not written: its keys go back to their dirty sets.
+    fn restore_cut_inner(&self, cut: CheckpointCut) {
+        for (ks, pairs) in cut.rows {
+            if let Some(t) = self.ram(ks) {
+                t.restore_dirty(pairs.into_iter().map(|(k, _)| k).collect());
             }
         }
     }
@@ -681,6 +756,17 @@ impl Store for HeedStore {
         {
             StoreMetrics::inc(&self.metrics.writer_busy, 1);
             return Err(StoreError::WriterBusy);
+        }
+        if self.all_ram {
+            // Every keyspace is RAM: the handle holds no LMDB transaction (the
+            // checkpoint opens its own), so the LMDB writer lock stays free for
+            // the checkpoint thread.
+            return Ok(HeedWrite {
+                store: self,
+                txn: None,
+                poison: None,
+                arena: RefCell::new(Vec::new()),
+            });
         }
         let txn = match self.env.write_txn() {
             Ok(t) => t,
@@ -748,6 +834,26 @@ impl Store for HeedStore {
 
     fn copy_checkpoint(&self, dir: &Path) -> Result<(u64, u64)> {
         HeedStore::copy_checkpoint(self, dir)
+    }
+
+    fn write_cut(&self, cut: &mut CheckpointCut) -> Result<()> {
+        match self.write_cut_inner(cut) {
+            Ok(()) => {
+                StoreMetrics::inc(&self.metrics.durable_commits, 1);
+                Ok(())
+            }
+            Err(inner) => {
+                StoreMetrics::inc(&self.metrics.commit_failed, 1);
+                Err(StoreError::CommitFailed {
+                    durable: true,
+                    detail: inner.to_string(),
+                })
+            }
+        }
+    }
+
+    fn restore_cut(&self, cut: CheckpointCut) {
+        self.restore_cut_inner(cut)
     }
 }
 
@@ -1014,8 +1120,10 @@ impl super::Reads for HeedRead<'_> {
 /// header for what a commit, a durable commit and an abort mean for them.
 pub struct HeedWrite<'s> {
     store: &'s HeedStore,
-    /// `None` only when the handle is poisoned (a commit that did not happen,
-    /// or a transaction that could not be opened).
+    /// The open LMDB transaction. On an all-RAM store (`HeedStore::all_ram`)
+    /// it is `None` between durable points: nothing but a checkpoint writes
+    /// LMDB. Otherwise `None` only when the handle is poisoned (a commit that
+    /// did not happen, or a transaction that could not be opened).
     txn: Option<RwTxn<'s>>,
     /// What ended this handle. Once a commit has failed there is no
     /// transaction to go back to and nothing to retry, so every later call
@@ -1049,10 +1157,25 @@ impl Drop for HeedWrite<'_> {
 
 impl<'s> HeedWrite<'s> {
     fn txn(&self) -> Result<&RwTxn<'s>> {
-        self.txn.as_ref().ok_or_else(|| self.poisoned())
+        self.usable()?;
+        self.txn.as_ref().ok_or_else(|| {
+            StoreError::Io("no LMDB write transaction is open (every keyspace is RAM)".into())
+        })
     }
 
     fn txn_mut(&mut self) -> Result<&mut RwTxn<'s>> {
+        self.usable()?;
+        if self.txn.is_none() {
+            // An all-RAM handle opens none up front; an LMDB-direct write (no
+            // keyspace is one today) opens it on demand.
+            let t = self
+                .store
+                .env
+                .write_txn()
+                .map_err(|e| err(self.store, e))?;
+            StoreMetrics::inc(&self.store.metrics.write_txns, 1);
+            self.txn = Some(t);
+        }
         // The borrow checker will not let `poisoned()` run while `txn` is
         // borrowed mutably, so the error is built first.
         let e = self.poisoned();
@@ -1062,7 +1185,7 @@ impl<'s> HeedWrite<'s> {
     /// The poison check a RAM access makes in place of borrowing the
     /// transaction: a dead handle answers its fatal error for every keyspace.
     fn usable(&self) -> Result<()> {
-        if self.txn.is_none() {
+        if self.poison.is_some() || (!self.store.all_ram && self.txn.is_none()) {
             return Err(self.poisoned());
         }
         Ok(())
@@ -1127,6 +1250,9 @@ impl<'s> HeedWrite<'s> {
     /// failure.
     fn cycle(&mut self, durable: bool) -> Result<()> {
         self.release_arena();
+        if self.store.all_ram {
+            return self.cycle_ram(durable);
+        }
         let durable_leg = durable || self.store.sync_every_commit;
         let Some(mut txn) = self.txn.take() else {
             return Err(self.poisoned());
@@ -1164,6 +1290,41 @@ impl<'s> HeedWrite<'s> {
         StoreMetrics::inc(&self.store.metrics.write_txns, 1);
         self.txn = Some(next);
         Ok(())
+    }
+
+    /// [`HeedWrite::cycle`] on an all-RAM store. A plain commit has nothing to
+    /// write — every row is RAM, and LMDB is only ever a checkpoint — so it
+    /// only counts. A durable one writes the checkpoint inline: the cut, one
+    /// transaction, its commit and the sync (the same work the checkpoint
+    /// thread does for [`super::Writes::take_cut`]). A failure hands the cut
+    /// back to the dirty sets and poisons the handle, exactly as the drain of
+    /// the LMDB-transaction path does.
+    fn cycle_ram(&mut self, durable: bool) -> Result<()> {
+        self.usable()?;
+        // A stray LMDB-direct transaction (none exists while every keyspace is
+        // RAM) is committed with the cycle, never left open across it.
+        if let Some(txn) = self.txn.take() {
+            if let Err(e) = txn.commit() {
+                let inner = err(self.store, e);
+                return Err(self.commit_failed(durable, inner));
+            }
+        }
+        let durable_leg = durable || self.store.sync_every_commit;
+        if !durable_leg {
+            StoreMetrics::inc(&self.store.metrics.commits, 1);
+            return Ok(());
+        }
+        let mut cut = self.store.cut_dirty();
+        match self.store.write_cut_inner(&mut cut) {
+            Ok(()) => {
+                StoreMetrics::inc(&self.store.metrics.durable_commits, 1);
+                Ok(())
+            }
+            Err(inner) => {
+                self.store.restore_cut_inner(cut);
+                Err(self.commit_failed(true, inner))
+            }
+        }
     }
 
     /// Empty one keyspace. LMDB-direct: `mdb_drop` with `del = 0`, O(1). RAM:
@@ -1209,10 +1370,11 @@ impl super::Reads for HeedWrite<'_> {
         limit: usize,
         cb: &mut dyn FnMut(&[u8], &[u8]) -> bool,
     ) -> Result<usize> {
-        let txn = self.txn()?;
         if let Some(t) = self.store.ram(ks) {
+            self.usable()?;
             return ram_scan(self.store, t, ks, from, prefix, limit, false, cb);
         }
+        let txn = self.txn()?;
         scan_with(self.store, txn, ks, from, prefix, limit, false, cb)
     }
 
@@ -1224,10 +1386,11 @@ impl super::Reads for HeedWrite<'_> {
         limit: usize,
         cb: &mut dyn FnMut(&[u8], &[u8]) -> bool,
     ) -> Result<usize> {
-        let txn = self.txn()?;
         if let Some(t) = self.store.ram(ks) {
+            self.usable()?;
             return ram_scan(self.store, t, ks, from, prefix, limit, true, cb);
         }
+        let txn = self.txn()?;
         scan_with(self.store, txn, ks, from, prefix, limit, true, cb)
     }
 }
@@ -1312,6 +1475,29 @@ impl super::Writes for HeedWrite<'_> {
         self.cycle(true)
     }
 
+    fn can_cut(&self) -> bool {
+        self.store.all_ram && !self.store.sync_every_commit && self.poison.is_none()
+    }
+
+    fn take_cut(&mut self) -> Result<Option<CheckpointCut>> {
+        self.release_arena();
+        self.usable()?;
+        if !self.can_cut() {
+            return Ok(None);
+        }
+        // A stray LMDB-direct transaction (none exists while every keyspace is
+        // RAM) must not stay open: the checkpoint thread needs the LMDB writer
+        // lock. Committing it is the plain commit it would have had.
+        if let Some(txn) = self.txn.take() {
+            if let Err(e) = txn.commit() {
+                let inner = err(self.store, e);
+                return Err(self.commit_failed(false, inner));
+            }
+        }
+        StoreMetrics::inc(&self.store.metrics.commits, 1);
+        Ok(Some(self.store.cut_dirty()))
+    }
+
     fn abort(&mut self) -> Result<()> {
         self.release_arena();
         if self.poison.is_some() {
@@ -1323,6 +1509,10 @@ impl super::Writes for HeedWrite<'_> {
         // (module header).
         if let Some(txn) = self.txn.take() {
             txn.abort();
+        }
+        if self.store.all_ram {
+            // No transaction is held between durable points (see `txn`).
+            return Ok(());
         }
         let next = match self.store.env.write_txn() {
             Ok(t) => t,

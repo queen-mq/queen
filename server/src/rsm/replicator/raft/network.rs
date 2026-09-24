@@ -398,6 +398,9 @@ mod server {
         pub(crate) raft: RaftHandle<S>,
         pub(crate) token: Option<Arc<str>>,
         pub(crate) snap: Arc<RecvCtx>,
+        /// Plans a follower's prepared command here, on the leader: set by the
+        /// facade once it exists ([`super::super::RaftReplicator::set_remote_handler`]).
+        pub(crate) remote: Arc<std::sync::OnceLock<super::super::RemoteHandler>>,
     }
 
     impl<S: Store + 'static> RpcState<S> {
@@ -497,6 +500,60 @@ mod server {
         }
     }
 
+    /// A follower's prepared command (`QUEEN_RAFT_CLIENT_OFFLOAD`): planned by
+    /// this node's batcher exactly as a local one, answered with the encoded
+    /// reply. 503 when this node cannot plan (no facade yet, or not leader —
+    /// the reply then says so and the follower retries elsewhere).
+    async fn submit<S: Store + 'static>(
+        State(st): State<Arc<RpcState<S>>>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Response {
+        if let Err(r) = st.check(&headers) {
+            return r;
+        }
+        let Some(h) = st.remote.get().cloned() else {
+            return (StatusCode::SERVICE_UNAVAILABLE, "no facade on this node yet").into_response();
+        };
+        match h(body).await {
+            Ok(b) => (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/octet-stream")],
+                b,
+            )
+                .into_response(),
+            Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
+        }
+    }
+
+    /// A follower's linearizable read point: this node confirms it still leads
+    /// (a heartbeat round) and answers the RSM index the follower must have
+    /// applied before it reads.
+    async fn read_index<S: Store + 'static>(
+        State(st): State<Arc<RpcState<S>>>,
+        headers: HeaderMap,
+    ) -> Response {
+        if let Err(r) = st.check(&headers) {
+            return r;
+        }
+        match st
+            .raft
+            .ensure_linearizable(openraft::raft::ReadPolicy::ReadIndex)
+            .await
+        {
+            Ok(read) => {
+                let index = read.index() + 1;
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    format!("{{\"index\":{index}}}"),
+                )
+                    .into_response()
+            }
+            Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+        }
+    }
+
     async fn snapshot<S: Store + 'static>(
         State(st): State<Arc<RpcState<S>>>,
         headers: HeaderMap,
@@ -540,6 +597,8 @@ mod server {
             .route("/raft/v1/prevote", post(prevote::<S>))
             .route("/raft/v1/transfer", post(transfer::<S>))
             .route("/raft/v1/snapshot", post(snapshot::<S>))
+            .route("/raft/v1/submit", post(submit::<S>))
+            .route("/raft/v1/read_index", post(read_index::<S>))
             // Peers are trusted and an append is capped by the sender
             // (wire::MAX_APPEND_BYTES); a snapshot is streamed.
             .layer(axum::extract::DefaultBodyLimit::disable())

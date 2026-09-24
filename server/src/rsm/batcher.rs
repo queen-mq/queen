@@ -97,6 +97,9 @@ use crate::rsm::segments::Reader;
 use crate::rsm::state::{Committed, Derived, PlanRings, RingKey, RingSnapshot};
 use crate::rsm::store::{Reads, Store, TypedReads};
 
+#[path = "batcher_lanes.rs"]
+mod lanes;
+
 /// How often the driver polls the applied index while it holds the pipeline on
 /// a [`ProposeError::Timeout`] (I3). Node-local timing, never state.
 const HOLD_POLL_MS: u64 = 2;
@@ -196,6 +199,10 @@ pub struct BatcherConfig {
     /// (`queen_raft_keep_overlay_total{outcome="mismatch"}`) and the rebuild is
     /// what plans. A diagnostic: it costs the rebuild it exists to save.
     pub keep_overlay_verify: bool,
+    /// `QUEEN_LANES` (default 1): how many lane threads plan a cycle's
+    /// commands in parallel ([`lanes`]). 1 is the single planner, exactly as
+    /// before lanes.
+    pub lanes: u64,
 }
 
 impl Default for BatcherConfig {
@@ -221,6 +228,7 @@ impl Default for BatcherConfig {
             maintenance: crate::rsm::maintenance::Config::default(),
             keep_overlay: true,
             keep_overlay_verify: false,
+            lanes: 1,
         }
     }
 }
@@ -315,6 +323,11 @@ impl BatcherConfig {
                 ) as i64,
             },
             keep_overlay: flag("QUEEN_RAFT_KEEP_OVERLAY", d.keep_overlay),
+            lanes: std::env::var("QUEEN_LANES")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(d.lanes)
+                .clamp(1, 64),
             // Off unless explicitly turned on: only "1"/"true"/"on"/"yes".
             keep_overlay_verify: std::env::var("QUEEN_RAFT_KEEP_OVERLAY_VERIFY")
                 .map(|v| {
@@ -336,7 +349,7 @@ impl BatcherConfig {
 /// receiver maps HTTP requests and forwarded frames onto these; the batcher is
 /// their only consumer, and the planner has already been written against the
 /// per-kind structs (`PushCommand`, `PopCommand`, …).
-#[derive(Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub enum Command {
     Push(PushCommand),
     PopPinned(PopCommand),
@@ -1028,6 +1041,8 @@ pub(crate) struct PlannerState {
     epoch: u64,
     cycles: u64,
     pub(crate) stats: KeepStats,
+    /// The lanes (`QUEEN_LANES` > 1), made on the first cycle that uses them.
+    lanes: Option<Box<lanes::LanesState>>,
 }
 
 impl PlannerState {
@@ -1338,8 +1353,16 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
         let maintained = maintenance.is_some();
         let mut maintenance_more = false;
         if let Some(mcfg) = maintenance.as_ref() {
-            let planned = crate::rsm::maintenance::plan(r, now_us, mcfg)?;
+            let mut planned = crate::rsm::maintenance::plan(r, now_us, mcfg)?;
             maintenance_more = planned.more;
+            // Retention judges a partition dead from committed state alone. One
+            // a push wrote this cycle or in an entry still in flight is not
+            // dead: deleting it would drop the message that push was answered
+            // for. A later tick judges it again.
+            planned.effects.retain(|e| match e {
+                Effect::PartitionDelete { pid } => !ov.touches_partition(*pid),
+                _ => true,
+            });
             if !planned.effects.is_empty() {
                 let id = crate::util::uuidv7_bytes();
                 if entry
@@ -2044,27 +2067,52 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             reset_every: KEEP_RESET_EVERY,
         };
 
-        let planned = self
+        let lanes_n = self.cfg.lanes;
+        let epoch0 = self.plan_epoch;
+        let hold0 = self.holding_until.is_some();
+        let rx = self
             .planner_thread
             .run(move |state| {
                 let w0 = Instant::now();
                 let c0 = crate::rsm::timing::thread_cpu_ns();
-                let r = plan_cycle_blocking(
-                    &*store,
-                    &front,
-                    state,
-                    keep,
-                    reader,
-                    qlog_reader,
-                    folded,
-                    commands,
-                    cfg,
-                    wall_us,
-                    expire_window_us,
-                    kv_sweep_limit,
-                    fire_cfg,
-                    maintenance_cfg,
-                );
+                let r = if lanes_n > 1 {
+                    let ls = state
+                        .lanes
+                        .get_or_insert_with(|| Box::new(lanes::LanesState::new(lanes_n)));
+                    lanes::plan_cycle_lanes(
+                        &store,
+                        &front,
+                        ls,
+                        keep,
+                        reader,
+                        qlog_reader,
+                        folded,
+                        commands,
+                        cfg,
+                        wall_us,
+                        expire_window_us,
+                        kv_sweep_limit,
+                        fire_cfg,
+                        maintenance_cfg,
+                    )
+                } else {
+                    plan_cycle_blocking(
+                        &*store,
+                        &front,
+                        state,
+                        keep,
+                        reader,
+                        qlog_reader,
+                        folded,
+                        commands,
+                        cfg,
+                        wall_us,
+                        expire_window_us,
+                        kv_sweep_limit,
+                        fire_cfg,
+                        maintenance_cfg,
+                    )
+                };
                 if crate::rsm::timing::enabled() {
                     let tm = crate::rsm::timing::metrics();
                     tm.plan_whole_wall.record_dur(w0.elapsed());
@@ -2073,8 +2121,28 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 }
                 r
             })
-            .await
-            .map_err(|_| "the queen-planner thread is gone".to_string());
+            ;
+        // While the planner thread plans, keep answering the entries that
+        // landed: a slot freed now is reused by the next cycle at once, rather
+        // than after this one (each cycle used to wait out the planning of the
+        // ones before it — measured: 12 of a 19.5 ms round trip at 370k/s).
+        tokio::pin!(rx);
+        let planned = loop {
+            tokio::select! {
+                biased;
+                r = &mut rx => {
+                    break r.map_err(|_| "the queen-planner thread is gone".to_string());
+                }
+                Some((seq, res)) = self.result_rx.recv() => {
+                    self.note_wake("result");
+                    self.on_result(seq, res);
+                }
+                _ = wait_notify(&self.applied_notify), if self.applied_notify.is_some() => {
+                    self.note_wake("applied_notify");
+                    self.on_applied_wake();
+                }
+            }
+        };
 
         // The KV sweep and the timer fire are best-effort and self-rescheduling:
         // a cycle that could not plan leaves them to their next tick rather
@@ -2089,6 +2157,23 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             if maintenance {
                 self.maintenance_due = false;
             }
+        }
+        // A result handled during planning dropped the pipeline (a lost
+        // leadership moves the epoch) or started a hold (a timed-out propose):
+        // this cycle was planned on entries that may never commit, so it is
+        // not proposed. Its commands are refused retryably; the SDK retries
+        // with the same request ids.
+        if matches!(planned, Ok(Ok(_)))
+            && (self.plan_epoch != epoch0 || (!hold0 && self.holding_until.is_some()))
+        {
+            self.invalidate_kept();
+            for reply in replies {
+                let _ = reply.send(Reply::Refused(Refusal::retry(
+                    "unavailable",
+                    "the pipeline changed while this cycle planned",
+                )));
+            }
+            return;
         }
         let out = match planned {
             Ok(Ok(out)) => out,

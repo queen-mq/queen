@@ -430,6 +430,11 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         let now = self.now_us;
         let empty = || Outcome::Ack(AckOutcome::default());
 
+        // A partition that is garbage or going away has no cursor to move: a
+        // `CursorSet` on it would reach apply after its row is gone.
+        if self.partition(ov, pid)?.is_none() {
+            return Ok(Plan::Empty(empty()));
+        }
         let Some(cur0) = self.cursor(ov, pid, group)? else {
             return Ok(Plan::Empty(empty()));
         };
@@ -528,6 +533,9 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         let pid = cmd.pid;
         let group = &cmd.group;
         let now = self.now_us;
+        if self.partition(ov, pid)?.is_none() {
+            return Ok(Plan::Empty(Outcome::Ack(AckOutcome::default())));
+        }
         let Some(cur0) = self.cursor(ov, pid, group)? else {
             return Ok(Plan::Empty(Outcome::Ack(AckOutcome::default())));
         };
@@ -600,6 +608,11 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         let mut renewed = 0u32;
         let mut earliest: Option<i64> = None;
         for (pid, group) in targets {
+            // The lease index still lists a partition a delete in flight takes
+            // away (or one being chunk-deleted): not a lease to renew.
+            if self.partition(ov, pid)?.is_none() {
+                continue;
+            }
             let Some(cur0) = self.cursor(ov, pid, &group)? else {
                 continue;
             };
@@ -639,6 +652,9 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         let pid = cmd.pid;
         let group = &cmd.group;
         let now = self.now_us;
+        if self.partition(ov, pid)?.is_none() {
+            return Ok(Plan::Empty(Outcome::Empty));
+        }
         let Some(cur0) = self.cursor(ov, pid, group)? else {
             return Ok(Plan::Empty(Outcome::Empty));
         };

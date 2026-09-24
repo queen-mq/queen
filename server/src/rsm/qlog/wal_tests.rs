@@ -690,6 +690,18 @@ fn open_cfg(dir: &Path, writer_pipeline: bool) -> OpenConfig {
     }
 }
 
+/// Fix the directory at one lane before anything opens it, whatever
+/// `QUEEN_QLOG_LANES` says: a test asserting which log holds which record pins the
+/// one-lane layout (lane 0 of a queue IS the queue's log).
+fn one_lane(dir: &Path) {
+    std::fs::create_dir_all(dir.join("qlog")).expect("qlog dir");
+    std::fs::write(
+        dir.join("qlog").join(crate::rsm::qlog::set::LANES_FILE),
+        b"1\n",
+    )
+    .expect("LANES");
+}
+
 fn open_repl(
     dir: &Path,
     store: Arc<HeedStore>,
@@ -806,6 +818,8 @@ fn store_point(store: &HeedStore) -> (u64, u64) {
 async fn every_entry_lands_in_exactly_the_logs_it_touches() {
     let td = TmpDir::new("route");
     let dir = td.path();
+    // This test pins the ONE-lane layout (which log holds which copy).
+    one_lane(dir);
     let mut g = Gen::new();
     let mut entries: Vec<Entry> = Vec::new();
 
@@ -894,6 +908,8 @@ async fn every_entry_lands_in_exactly_the_logs_it_touches() {
 async fn recover_from_the_queue_logs_alone(tag: &str, writer_pipeline: bool) {
     let td = TmpDir::new(tag);
     let dir = td.path();
+    // This test pins the ONE-lane layout (which log holds which copy).
+    one_lane(dir);
     let snapshot = dir.join("store-at-k");
     let mut g = Gen::new();
 

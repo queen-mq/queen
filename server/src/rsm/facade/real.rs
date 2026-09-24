@@ -227,9 +227,15 @@ pub struct RaftFacade {
     /// `PopWildcard` command onto the single serial batcher pipeline. Resolved
     /// once at open.
     pop_fastpath_empty: bool,
+    /// The pop autopilot's per-lane state (`autopilot=true`, wildcard pops).
+    autopilot: super::autopilot::Autopilot,
     /// Push admission budget ([`crate::rsm::admit`], one per process);
     /// `None` when disabled.
     admit: Option<&'static crate::rsm::admit::AdmitGate>,
+    /// A cluster node serving its own clients (`QUEEN_RAFT_CLIENT_OFFLOAD`):
+    /// while another node leads, [`RaftFacade::submit`] sends the prepared
+    /// command there and waits for its own apply ([`super::remote`]).
+    offload: bool,
     data_dir: PathBuf,
     storage_full: std::sync::atomic::AtomicBool,
     storage_pressure_enabled: bool,
@@ -348,32 +354,48 @@ impl RaftFacade {
             // keep host disk fullness and concurrent local GC out of them.
             batcher.maintenance_every_ms = 0;
         }
-        RaftFacade::open_inner(ctx, batcher, !cfg!(test))
+        RaftFacade::open_inner(ctx, batcher, !cfg!(test), 0)
+    }
+
+    /// Raft group `group` of several in this process (`QUEEN_RAFT_GROUPS`,
+    /// [`super::groups`]): its own data directory (`<dir>/groups/g<group>`;
+    /// group 0 keeps `<dir>`) and its own Raft addresses
+    /// ([`crate::rsm::replicator::raft::ClusterConfig::for_group`]).
+    pub fn open_group(ctx: &RsmBuildCtx, group: usize) -> Result<RaftFacade, String> {
+        RaftFacade::open_inner(ctx, BatcherConfig::from_env(), true, group)
     }
 
     /// [`RaftFacade::open`] with an explicit batcher configuration instead of
     /// the environment's — the tests' seam (a fast timer tick, the injected
     /// fire failure), never the boot path's.
     pub fn open_with(ctx: &RsmBuildCtx, batcher_cfg: BatcherConfig) -> Result<RaftFacade, String> {
-        RaftFacade::open_inner(ctx, batcher_cfg, false)
+        RaftFacade::open_inner(ctx, batcher_cfg, false, 0)
     }
 
     fn open_inner(
         ctx: &RsmBuildCtx,
         batcher_cfg: BatcherConfig,
         storage_pressure_enabled: bool,
+        group: usize,
     ) -> Result<RaftFacade, String> {
-        let dir = PathBuf::from(&ctx.data_dir);
         if ctx.data_dir.trim().is_empty() {
             return Err("QUEEN_RAFT_DIR is required in raft mode (§11.1)".into());
         }
+        let dir = match group {
+            0 => PathBuf::from(&ctx.data_dir),
+            g => PathBuf::from(&ctx.data_dir)
+                .join("groups")
+                .join(format!("g{g}")),
+        };
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("create raft data dir {}: {e}", dir.display()))?;
 
         // `QUEEN_RAFT_REPLICATOR`: the local replicator (default) or openraft;
         // `QUEEN_RAFT_PEERS`: a cluster (openraft only).
         let kind = ReplicatorKind::from_env()?;
-        let cluster = crate::rsm::replicator::raft::ClusterConfig::from_env()?;
+        let cluster = crate::rsm::replicator::raft::ClusterConfig::from_env()?
+            .map(|c| c.for_group(group))
+            .transpose()?;
         let node_id = cluster.as_ref().map_or(NODE_ID, |c| c.node_id);
         let ocfg = OpenConfig::new(node_id, dir.clone());
         if kind == ReplicatorKind::Raft {
@@ -431,12 +453,26 @@ impl RaftFacade {
             .with_reader(reader.clone())
             .with_qlog_reader(qlog_reader.clone());
         let (cmd_tx, batcher_join) = batcher.spawn();
+        let admit = crate::rsm::admit::global();
+        // Clients served from every node: whichever node leads plans the
+        // prepared commands its followers send it (every cluster node installs
+        // the handler; a follower's batcher answers `Retry`).
+        let offload = repl.offloads_clients();
+        if offload {
+            // Weak: the replicator holds the handler, and the facade's
+            // shutdown takes the replicator back by value.
+            let weak = Arc::downgrade(&repl);
+            let applied: Arc<dyn Fn() -> u64 + Send + Sync> =
+                Arc::new(move || weak.upgrade().map_or(0, |r| r.applied_index()));
+            repl.set_remote_handler(super::remote::handler(&cmd_tx, admit, applied));
+        }
 
         tracing::info!(
             target: "rsm",
             dir = %dir.display(),
             applied = repl.applied_index(),
             replicator = repl.kind().name(),
+            offload,
             "raft facade open (WP-1.7c)",
         );
 
@@ -452,7 +488,9 @@ impl RaftFacade {
             gates,
             batcher_join,
             pop_fastpath_empty: env_flag("QUEEN_RAFT_POP_FASTPATH_EMPTY", true),
-            admit: crate::rsm::admit::global(),
+            autopilot: super::autopilot::Autopilot::from_env(),
+            admit,
+            offload,
             data_dir: dir,
             storage_full: std::sync::atomic::AtomicBool::new(false),
             storage_pressure_enabled,
@@ -486,6 +524,7 @@ impl RaftFacade {
             gates: _,
             batcher_join,
             pop_fastpath_empty: _,
+            autopilot: _,
             admit: _,
             data_dir: _,
             storage_full: _,
@@ -494,6 +533,7 @@ impl RaftFacade {
             storage_check_interval_us: _,
             disk_high_pct: _,
             disk_low_pct: _,
+            offload: _,
         } = self;
         drop(cmd_tx); // the batcher sees a closed channel, drains, and exits
         let _ = batcher_join.await; // its Arc<repl>/Arc<store> drop here
@@ -573,6 +613,9 @@ impl RaftFacade {
                 })?),
                 _ => None,
             };
+        if self.offload {
+            return self.submit_offloaded(ctx, command).await;
+        }
         let (sub, rx) = Submission::new(command);
         // The bounded channel absorbs back-pressure; a full channel waits, up to
         // the deadline.
@@ -589,6 +632,77 @@ impl RaftFacade {
         }
     }
 
+    /// A cluster node's submit: planned here while this node leads, otherwise
+    /// sent to the leader as a prepared command. A `Done` reply is returned only
+    /// once THIS node has applied its entry, so the caller renders it from
+    /// local state exactly as on the leader. Leader changes, a lost answer and
+    /// "not leader" replies are retried (same request id) until the deadline.
+    async fn submit_offloaded(&self, ctx: &ReqCtx, command: Command) -> Result<Reply, RsmError> {
+        use crate::rsm::replicator::raft::RemoteError;
+        use crate::rsm::replicator::Role;
+        let mut backoff = Duration::from_millis(5);
+        let mut body: Option<bytes::Bytes> = None;
+        loop {
+            if ctx.deadline.expired() {
+                return Err(RsmError::Timeout);
+            }
+            if matches!(self.repl.role(), Role::Leader { .. }) {
+                let (sub, rx) = Submission::new(command.clone());
+                match tokio::time::timeout(ctx.deadline.remaining(), self.cmd_tx.send(sub)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_closed)) => {
+                        return Err(RsmError::Internal("planner channel closed".into()))
+                    }
+                    Err(_elapsed) => return Err(RsmError::Timeout),
+                }
+                match tokio::time::timeout(ctx.deadline.remaining(), rx).await {
+                    Ok(Ok(Reply::Retry { .. })) => {}
+                    Ok(Ok(reply)) => return Ok(reply),
+                    Ok(Err(_dropped)) => {
+                        return Err(RsmError::Internal("planner dropped the reply".into()))
+                    }
+                    Err(_elapsed) => return Err(RsmError::Timeout),
+                }
+            } else {
+                let b = match &body {
+                    Some(b) => b.clone(),
+                    None => {
+                        let b = bytes::Bytes::from(super::remote::encode_request(
+                            &command,
+                            ctx.deadline.remaining(),
+                        )?);
+                        body = Some(b.clone());
+                        b
+                    }
+                };
+                match self
+                    .repl
+                    .forward_command(b, ctx.deadline.remaining())
+                    .await
+                {
+                    Ok(answer) => match super::remote::decode_reply(&answer)? {
+                        (Reply::Retry { .. }, _) => {}
+                        (reply @ Reply::Done { .. }, upto) => {
+                            // Read-your-writes here: the entry (or, for an
+                            // answer from committed state, everything the leader
+                            // had applied) must be applied on THIS node before
+                            // the caller renders it.
+                            if !self.repl.wait_applied(upto, ctx.deadline.instant()).await {
+                                return Err(RsmError::Timeout);
+                            }
+                            return Ok(reply);
+                        }
+                        (reply, _) => return Ok(reply),
+                    },
+                    Err(RemoteError::NoLeader) | Err(RemoteError::Transport(_)) => {}
+                }
+            }
+            let nap = backoff.min(ctx.deadline.remaining());
+            tokio::time::sleep(nap).await;
+            backoff = (backoff * 2).min(Duration::from_millis(200));
+        }
+    }
+
     /// PERF-J: whether a wildcard pop of `(tenant, queue, group)` is provably
     /// empty from committed state, so it need not enter the serial batcher
     /// pipeline (`QUEEN_RAFT_POP_FASTPATH_EMPTY`). The committed read runs on the
@@ -596,6 +710,28 @@ impl RaftFacade {
     /// paths. Any error (join or store) is treated as "not provably empty", so
     /// the caller submits and the planner decides — correctness over the
     /// optimisation.
+    /// The pop autopilot's width input: the group's partitions claimable now,
+    /// counted up to `cap` off the committed store (`None` when unknown).
+    async fn ready_count(&self, tenant: &str, queue: &str, group: &str, cap: usize) -> Option<usize> {
+        let store = self.store.clone();
+        let tenant = tenant.to_string();
+        let queue = queue.to_string();
+        let group = group.to_string();
+        let now_us = wall_micros();
+        let res = tokio::task::spawn_blocking(move || {
+            store.read(|r| {
+                crate::rsm::planner::pop::wildcard_ready_count(
+                    r, &tenant, &queue, &group, now_us, cap,
+                )
+            })
+        })
+        .await;
+        match res {
+            Ok(Ok(n)) => n,
+            _ => None,
+        }
+    }
+
     async fn wildcard_would_be_empty(&self, tenant: &str, queue: &str, group: &str) -> bool {
         let store = self.store.clone();
         let tenant = tenant.to_string();
@@ -642,6 +778,19 @@ impl RaftFacade {
 // ---------------------------------------------------------------------------
 // Reply → RsmError, and the derived per-command request id
 // ---------------------------------------------------------------------------
+
+/// A pop's rendered answer, with the autopilot's choice echoed when it made
+/// one (`"autopilot":{"partitions":W,"batch":B}`).
+fn autopilot_echo(
+    out: Result<PopOut, RsmError>,
+    plan: Option<super::autopilot::Plan>,
+) -> Result<PopOut, RsmError> {
+    let mut out = out?;
+    if let Some(p) = plan {
+        super::autopilot::echo(&mut out.body, p);
+    }
+    Ok(out)
+}
 
 /// Map a non-`Done` [`Reply`] to the typed facade error.
 fn reply_error(reply: Reply) -> RsmError {
@@ -1493,7 +1642,19 @@ impl RaftFacade {
                 .record_dur(t.elapsed());
         }
         let mut rxs = Vec::with_capacity(groups.len());
-        for (ordinal, g) in groups.iter().enumerate() {
+        // The queue-log codec's early start: this node plans the command (it is
+        // not a follower forwarding it), so the group's blob — its frames in
+        // order, which is exactly the `Append` blob when every frame survives
+        // dedup — starts compressing now, while the command waits for its
+        // planning cycle; the log writer then finds it done (qlog::codec).
+        let early_codec = self.qlog_reader.is_some()
+            && crate::rsm::qlog::codec::level() > 0
+            && (!self.offload
+                || matches!(
+                    self.repl.role(),
+                    crate::rsm::replicator::Role::Leader { .. }
+                ));
+        let push_cmd = |ordinal: usize, g: &indexed_groups::Group| {
             let items: Vec<PushItem> = g
                 .members
                 .iter()
@@ -1502,14 +1663,46 @@ impl RaftFacade {
                     frame: resolved[flat].frame.clone(),
                 })
                 .collect();
-            let cmd = Command::Push(PushCommand {
+            if early_codec {
+                let len: usize = items.iter().map(|i| i.frame.len()).sum();
+                if len >= crate::rsm::qlog::codec::MIN_BYTES {
+                    let mut raw = Vec::with_capacity(len);
+                    for i in &items {
+                        raw.extend_from_slice(&i.frame);
+                    }
+                    crate::rsm::qlog::codec::precompress(raw);
+                }
+            }
+            Command::Push(PushCommand {
                 request_id: derived_request_id(ctx.request_id, ordinal as u32),
                 tenant: ctx.tenant.clone(),
                 queue: g.queue.clone(),
                 partition: g.partition.clone(),
                 items,
                 create_cfg: default_queue_config(&g.queue),
+            })
+        };
+        if self.offload {
+            // A cluster node: every group goes through the offload path (to the
+            // leader when another node leads), all in flight together; each
+            // answer arrives once this node has applied it.
+            let futs = groups.iter().enumerate().map(|(ordinal, g)| {
+                let cmd = push_cmd(ordinal, g);
+                let members = g.members.clone();
+                let ctx = &ctx;
+                async move { (members, self.submit_offloaded(ctx, cmd).await) }
             });
+            for (members, res) in futures_util::future::join_all(futs).await {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let _ = tx.send(res?);
+                rxs.push((members, rx));
+            }
+        }
+        for (ordinal, g) in groups.iter().enumerate() {
+            if self.offload {
+                break;
+            }
+            let cmd = push_cmd(ordinal, g);
             let (sub, rx) = Submission::new(cmd);
             let _t_send = crate::rsm::timing::stamp();
             let sent = tokio::time::timeout(ctx.deadline.remaining(), self.cmd_tx.send(sub)).await;
@@ -1869,6 +2062,14 @@ impl RaftFacade {
         let worker = uuid_bytes_to_string(&uuidv7_bytes());
         let budget = batch.min(i32::MAX as u32) as i32;
         let gate_key = (ctx.tenant.clone(), queue.clone(), group.clone());
+        // POP AUTOPILOT (facade/autopilot.rs): a wildcard pop that delegated
+        // its width and/or batch gets them per attempt from the lane's state.
+        let auto = partition.is_none()
+            && namespace.is_empty()
+            && task.is_empty()
+            && (options.auto_parts || options.auto_batch);
+        let _live = auto.then(|| self.autopilot.enter(gate_key.clone()));
+        let mut last_plan: Option<super::autopilot::Plan> = None;
         let mut attempt: u32 = 0;
         // P2.2: set when the last park ended on a WAKE. Wakes fire right after
         // apply, before the store commit, so the committed-state fast path could
@@ -1882,29 +2083,60 @@ impl RaftFacade {
             // deadline is not started — a pop that times out while queued still
             // CLAIMS, and nobody would ever ack that lease.
             if attempt > 0 && ctx.deadline.remaining() < *POP_SUBMIT_MIN {
-                return self
-                    .render_claims(ctx, &queue, &group, &worker, auto_ack, Vec::new())
-                    .await;
+                return autopilot_echo(
+                    self.render_claims(ctx, &queue, &group, &worker, auto_ack, Vec::new())
+                        .await,
+                    last_plan,
+                );
             }
             attempt += 1;
             // P1.2: the planner refuses to claim once nobody can receive the answer.
             let deadline_us = wall_micros()
                 .saturating_add(ctx.deadline.remaining().as_micros().min(i64::MAX as u128) as i64);
+            let (attempt_budget, attempt_parts) = if auto {
+                let ready = if !options.auto_parts {
+                    None
+                } else if let Some(n) = self.autopilot.cached_ready(&gate_key) {
+                    Some(n)
+                } else {
+                    let cap = self.autopilot.ready_scan_cap(&gate_key);
+                    let n = self.ready_count(&ctx.tenant, &queue, &group, cap).await;
+                    if let Some(n) = n {
+                        self.autopilot.store_ready(&gate_key, n);
+                    }
+                    n
+                };
+                let plan = self.autopilot.plan(
+                    &gate_key,
+                    ready,
+                    options.auto_parts,
+                    options.auto_batch,
+                    options.max_parts.clamp(1, 64),
+                    batch,
+                );
+                last_plan = Some(plan);
+                (
+                    plan.batch.min(i32::MAX as u32) as i32,
+                    plan.partitions.clamp(1, 64) as i32,
+                )
+            } else if partition.is_some() {
+                (budget, 1)
+            } else {
+                (budget, options.max_parts.clamp(1, 64) as i32)
+            };
             let cmd = PopCommand {
+                wait,
                 request_id: uuidv7_bytes(), // a fresh command per attempt (§5.4)
                 tenant: ctx.tenant.clone(),
                 queue: queue.clone(),
                 partition: partition.clone(),
                 group: group.clone(),
                 worker: worker.clone(),
-                budget,
+                budget: attempt_budget,
                 // A pinned pop is one partition; a wildcard/discovery pop may
-                // sweep up to the batch (clamped to the 64-wide checkout ceiling).
-                max_parts: if partition.is_some() {
-                    1
-                } else {
-                    options.max_parts.clamp(1, 64) as i32
-                },
+                // sweep up to the batch (clamped to the 64-wide checkout ceiling),
+                // or the autopilot's width.
+                max_parts: attempt_parts,
                 lease_seconds,
                 auto_ack,
                 conflate: group != QUEUE_MODE_GROUP && options.conflate,
@@ -1956,30 +2188,47 @@ impl RaftFacade {
             };
 
             if !claims.is_empty() {
-                return self
-                    .render_claims(ctx, &queue, &group, &worker, auto_ack, claims)
-                    .await;
+                if auto && !auto_ack {
+                    // The lease's drain clock starts (the batch's input).
+                    let n: u64 = claims
+                        .iter()
+                        .map(|c| c.end_offset.saturating_sub(c.start_offset) + 1)
+                        .sum();
+                    self.autopilot
+                        .delivered(&gate_key, &worker, n.min(u32::MAX as u64) as u32);
+                }
+                return autopilot_echo(
+                    self.render_claims(ctx, &queue, &group, &worker, auto_ack, claims)
+                        .await,
+                    last_plan,
+                );
             }
 
             // Empty. Long-poll only for a queue-scoped pop (§9.5); discovery has
             // no single gate here.
             if !wait || partition.is_none() && (!namespace.is_empty() || !task.is_empty()) {
-                return self
-                    .render_claims(ctx, &queue, &group, &worker, auto_ack, Vec::new())
-                    .await;
+                return autopilot_echo(
+                    self.render_claims(ctx, &queue, &group, &worker, auto_ack, Vec::new())
+                        .await,
+                    last_plan,
+                );
             }
             let remaining = ctx.deadline.remaining();
             if remaining.is_zero() {
-                return self
-                    .render_claims(ctx, &queue, &group, &worker, auto_ack, Vec::new())
-                    .await;
+                return autopilot_echo(
+                    self.render_claims(ctx, &queue, &group, &worker, auto_ack, Vec::new())
+                        .await,
+                    last_plan,
+                );
             }
             let park = remaining.min(Duration::from_millis(500));
             woke = self.gates.wait(&gate_key, park).await;
             if ctx.deadline.expired() {
-                return self
-                    .render_claims(ctx, &queue, &group, &worker, auto_ack, Vec::new())
-                    .await;
+                return autopilot_echo(
+                    self.render_claims(ctx, &queue, &group, &worker, auto_ack, Vec::new())
+                        .await,
+                    last_plan,
+                );
             }
             // Loop and re-poll.
         }
@@ -2435,6 +2684,25 @@ impl RaftFacade {
         if raw_items.is_empty() {
             return Ok(AckOut { body: "[]".into() });
         }
+        // POP AUTOPILOT: each lease this ack retires is a drain sample for its
+        // lane's batch (items of one lease arrive together: count runs).
+        if self.autopilot.tracking() {
+            let mut run: Option<(&str, u32)> = None;
+            for (_, _, _, lease, _) in &raw_items {
+                match &mut run {
+                    Some((l, n)) if *l == lease.as_str() => *n += 1,
+                    _ => {
+                        if let Some((l, n)) = run.take() {
+                            self.autopilot.acked(l, n);
+                        }
+                        run = Some((lease.as_str(), 1));
+                    }
+                }
+            }
+            if let Some((l, n)) = run {
+                self.autopilot.acked(l, n);
+            }
+        }
 
         // Resolve each `partitionId` (the numeric pid, see the module header)
         // to a pid; an unparsable one is a per-item error the render carries.
@@ -2552,50 +2820,73 @@ fn resolve_ack_targets(
     let mut per_item: Vec<AckPerItem> = Vec::new();
     let mut bad: Vec<(usize, String)> = Vec::new();
     let mut snapshot_work: Vec<AckSnapshotWork> = Vec::new();
-    // (pid, worker) → target index.
-    let mut index: std::collections::HashMap<(Pid, String), usize> =
+    // (pid, worker) → (target index, lease invalid), and pid → partition row:
+    // each read ONCE per ack request, not once per acknowledged message — a
+    // batch ack of N messages of one lease used to decode the partition row and
+    // the cursor (its delivered set holds up to N hashes) N times each: O(N²),
+    // measured at ~10% of all broker CPU at 850k msg/s.
+    let mut index: std::collections::HashMap<(Pid, String), (usize, bool)> =
+        std::collections::HashMap::new();
+    let mut parts: std::collections::HashMap<Pid, Option<rows::PartitionRow>> =
         std::collections::HashMap::new();
 
     store
         .read(|r| {
-            for f in &flats {
-                let Some(part) = r.partition(f.pid)? else {
+            // Items of one lease arrive together: the previous item's key is the
+            // common case and costs no hash lookup.
+            let mut last: Option<(usize, usize, bool)> = None;
+            for (fi, f) in flats.iter().enumerate() {
+                if !parts.contains_key(&f.pid) {
+                    let row = r.partition(f.pid)?;
+                    parts.insert(f.pid, row);
+                }
+                let Some(part) = parts.get(&f.pid).and_then(|p| p.as_ref()) else {
                     bad.push((f.index, format!("no partition {}", f.pid)));
                     continue;
                 };
-                let key = (f.pid, f.worker.clone());
-                let ti = match index.get(&key) {
-                    Some(&ti) => ti,
-                    None => {
-                        let ti = targets.len();
-                        targets.push(AckTarget {
-                            pid: f.pid,
-                            tenant: tenant.to_string(),
-                            queue: part.queue.clone(),
-                            group: group.to_string(),
-                            worker: f.worker.clone(),
-                            items: Vec::new(),
-                        });
-                        index.insert(key, ti);
-                        ti
-                    }
-                };
-                let hash = txn_hash128(&f.txn);
-                // Keep the reason for a planner-side stale result.  AckResult's
-                // replicated shape intentionally carries hashes rather than
-                // receiver error strings, so the receiver snapshots whether a
-                // presented lease was already invalid while resolving it.
-                let lease_invalid = if f.worker.is_empty() {
-                    false
+                let same_as_last = last.is_some_and(|(lfi, _, _)| {
+                    flats[lfi].pid == f.pid && flats[lfi].worker == f.worker
+                });
+                let (ti, lease_invalid) = if same_as_last {
+                    let (_, ti, li) = last.expect("checked");
+                    (ti, li)
                 } else {
-                    match r.cursor(f.pid, group)? {
-                        Some(cur) => {
-                            cur.worker.as_deref() != Some(f.worker.as_str())
-                                || !rows::lease_live(&cur, wall_micros())
+                    let key = (f.pid, f.worker.clone());
+                    match index.get(&key) {
+                        Some(&v) => v,
+                        None => {
+                            let ti = targets.len();
+                            targets.push(AckTarget {
+                                pid: f.pid,
+                                tenant: tenant.to_string(),
+                                queue: part.queue.clone(),
+                                group: group.to_string(),
+                                worker: f.worker.clone(),
+                                items: Vec::new(),
+                            });
+                            // Keep the reason for a planner-side stale result.
+                            // AckResult's replicated shape intentionally carries
+                            // hashes rather than receiver error strings, so the
+                            // receiver snapshots whether a presented lease was
+                            // already invalid while resolving it.
+                            let lease_invalid = if f.worker.is_empty() {
+                                false
+                            } else {
+                                match r.cursor(f.pid, group)? {
+                                    Some(cur) => {
+                                        cur.worker.as_deref() != Some(f.worker.as_str())
+                                            || !rows::lease_live(&cur, wall_micros())
+                                    }
+                                    None => true,
+                                }
+                            };
+                            index.insert(key, (ti, lease_invalid));
+                            (ti, lease_invalid)
                         }
-                        None => true,
                     }
                 };
+                last = Some((fi, ti, lease_invalid));
+                let hash = txn_hash128(&f.txn);
                 // O20: a signal carries the original frame snapshot so the DLQ
                 // write and cursor advance remain one replicated entry. Populate
                 // it after this short store read from the node-local payload log.
@@ -3401,6 +3692,10 @@ impl Rsm for RaftFacade {
     fn route(&self) -> crate::rsm::facade::Route {
         use crate::rsm::facade::Route;
         use crate::rsm::replicator::Role;
+        if self.offload {
+            // Every node serves its own clients.
+            return Route::Local;
+        }
         match self.repl.role() {
             Role::Leader { .. } | Role::Stopped => Route::Local,
             _ => match self.repl.leader_http() {
@@ -3453,10 +3748,32 @@ pub fn real_builder(ctx: &RsmBuildCtx) -> Arc<dyn Rsm> {
     // independently in `BatcherConfig::from_env`; both read the same
     // `QUEEN_RAFT_DEDUP_INDEX`, so a real node's write and read paths agree.
     crate::rsm::dedup::set_record_index_mode(crate::rsm::dedup::IndexMode::from_env());
-    match RaftFacade::open(ctx) {
-        Ok(f) => Arc::new(f),
-        Err(e) => crate::obs::fatal(format!("raft storage failed to open: {e}")),
+    let groups = super::groups::groups_from_env();
+    if groups <= 1 {
+        return match RaftFacade::open(ctx) {
+            Ok(f) => Arc::new(f),
+            Err(e) => crate::obs::fatal(format!("raft storage failed to open: {e}")),
+        };
     }
+    // Several Raft groups, tenants placed over them (super::groups). Every
+    // node must serve its own clients: the HTTP layer routes before it knows
+    // the tenant's group.
+    if !crate::rsm::replicator::raft::client_offload_from_env() {
+        crate::obs::fatal("QUEEN_RAFT_GROUPS > 1 needs QUEEN_RAFT_CLIENT_OFFLOAD on".to_string());
+    }
+    let overrides = match super::groups::overrides_from_env(groups) {
+        Ok(o) => o,
+        Err(e) => crate::obs::fatal(e),
+    };
+    let mut facades: Vec<Arc<dyn super::Rsm>> = Vec::with_capacity(groups);
+    for g in 0..groups {
+        match RaftFacade::open_group(ctx, g) {
+            Ok(f) => facades.push(Arc::new(f)),
+            Err(e) => crate::obs::fatal(format!("raft group {g} failed to open: {e}")),
+        }
+    }
+    tracing::info!(target: "rsm", groups, pinned = overrides.len(), "raft: tenants spread over groups");
+    Arc::new(super::groups::GroupRouter::new(facades, overrides))
 }
 
 // ---------------------------------------------------------------------------

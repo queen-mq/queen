@@ -325,6 +325,25 @@ impl KeptOverlay {
             .or_else(|| diff_tagged("pids_by_key", &a.pids_by_key, &b.pids_by_key, &pa, &pb))
             .or_else(|| diff_tagged("cursors", &a.cursors, &b.cursors, &pa, &pb))
             .or_else(|| diff_tagged("kv", &a.kv, &b.kv, &pa, &pb))
+            .or_else(|| diff_tagged("gone", &a.gone, &b.gone, &pa, &pb))
+            .or_else(|| {
+                diff_tagged(
+                    "dropped_queues",
+                    &a.dropped_queues,
+                    &b.dropped_queues,
+                    &pa,
+                    &pb,
+                )
+            })
+            .or_else(|| {
+                diff_tagged(
+                    "purged_tenants",
+                    &a.purged_tenants,
+                    &b.purged_tenants,
+                    &pa,
+                    &pb,
+                )
+            })
             .or_else(|| diff_tagged("request_ids", &a.request_ids, &b.request_ids, &pa, &pb))
             .or_else(|| diff_parts(a, b, &pa, &pb))
             .or_else(|| diff_map("dedup", &a.dedup, &b.dedup, |x, y| x == y))
@@ -433,6 +452,7 @@ impl Overlay {
         shrink(&mut self.request_ids);
         shrink(&mut self.kv);
         shrink(&mut self.timers);
+        shrink(&mut self.gone);
     }
 
     /// Take out everything entry `e` put in when it was folded under `tag`.
@@ -445,9 +465,28 @@ impl Overlay {
     ) -> Result<(), &'static str> {
         for eff in &e.effects {
             match eff {
-                Effect::QueueUpsert { tenant, queue, .. }
-                | Effect::QueueDelete { tenant, queue } => {
+                Effect::QueueUpsert { tenant, queue, .. } => {
                     drop_if_tagged(&mut self.queues, &(tenant.clone(), queue.clone()), tag)?;
+                }
+                // What the fold swept (the names, the groups) needs nothing
+                // back: committed state has swept them too once this lands.
+                Effect::QueueDelete { tenant, queue } => {
+                    let key = (tenant.clone(), queue.clone());
+                    drop_if_tagged(&mut self.queues, &key, tag)?;
+                    drop_if_tagged(&mut self.dropped_queues, &key, tag)?;
+                }
+                Effect::TenantPurge { tenant } => {
+                    drop_if_tagged(&mut self.purged_tenants, tenant, tag)?;
+                }
+                Effect::GarbageAdd { pids, scope, .. }
+                    if !matches!(scope, crate::rsm::effect::GarbageScope::Group { .. }) =>
+                {
+                    for pid in pids {
+                        drop_if_tagged(&mut self.gone, pid, tag)?;
+                    }
+                }
+                Effect::PartitionDelete { pid } => {
+                    drop_if_tagged(&mut self.gone, pid, tag)?;
                 }
                 Effect::GroupUpsert {
                     tenant,

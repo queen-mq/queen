@@ -183,6 +183,7 @@ pub fn push_cfg(id: u64, queue: &str, partition: &str, txns: &[&str], cfg: Queue
 
 fn pop_base(id: u64, queue: &str, group: &str, worker: &str) -> PopCommand {
     PopCommand {
+        wait: false,
         request_id: rid(id),
         tenant: TENANT.to_string(),
         queue: queue.to_string(),

@@ -55,7 +55,11 @@ pub fn reclaim_qlogs<R: Reads + ?Sized>(r: &R, qlogs: &QLogReader) -> Result<usi
         usize::MAX,
         &mut |key, value| match (keys::pid_of(key), rows::partition_decode(value)) {
             (Some(pid), Ok(row)) => {
-                let qid = QLogReader::queue_id_of(&row.tenant, &row.queue);
+                // The log that holds this partition's records: its lane's log of
+                // its queue. Every log absent from this map counts all its
+                // message records as dead, so the key must be exactly the log
+                // the writer routed the partition to.
+                let qid = qlogs.log_id_for(QLogReader::queue_id_of(&row.tenant, &row.queue), pid);
                 queues.entry(qid).or_default().insert(pid, row.txns_start);
                 true
             }

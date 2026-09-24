@@ -175,6 +175,9 @@ futures-util = "0.3"
 # immutable `.qidx` beside the file, binary-searched in place. mmap is what
 # keeps that read O(log n) with no per-partition RAM, which is I8.
 memmap2 = "0.9"
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+serde_bytes = "0.11"
+mimalloc = { version = "0.1", default-features = false }
 # The Kafka facade, in-process (feature `kafka`). Its own Cargo.toml documents
 # its dependency choices (kafka-protocol, the four codecs, reqwest for the
 # explicit-QUEEN_URL case on rustls+ring, so no second TLS backend and no cmake).
@@ -207,3 +210,10 @@ codegen-units = 1
 # crashes and replays from durable state exactly as under panic = "abort"
 # (PLAN_SINGLE_BINARY.md W1).
 panic = "unwind"
+
+# Benchmark iterations: release optimisation without LTO and with parallel
+# codegen, so a measurement round rebuilds in minutes. Ship `release`.
+[profile.fastrel]
+inherits = "release"
+lto = false
+codegen-units = 16

@@ -126,6 +126,30 @@ pub enum Kind {
     TenantPurge = 32,
 }
 
+/// `Effect` travels between nodes (a follower's prepared command) in its own
+/// binary codec: `(kind, version, body)`.
+impl serde::Serialize for Effect {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeTuple;
+        let mut t = s.serialize_tuple(3)?;
+        t.serialize_element(&(self.kind() as u16))?;
+        t.serialize_element(&self.version())?;
+        t.serialize_element(serde_bytes::Bytes::new(&self.encode_body()))?;
+        t.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Effect {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Effect, D::Error> {
+        let (kind, version, body): (u16, u16, serde_bytes::ByteBuf) =
+            serde::Deserialize::deserialize(d)?;
+        let kind = Kind::from_u16(kind)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown effect kind {kind}")))?;
+        Effect::decode_body(kind, version, &body)
+            .map_err(|e| serde::de::Error::custom(format!("effect body: {e:?}")))
+    }
+}
+
 impl Kind {
     /// `None` = a kind this build does not know (I16: fatal, never skipped).
     pub fn from_u16(v: u16) -> Option<Kind> {
@@ -264,7 +288,7 @@ pub type Pid = u64;
 /// genuine NULL must survive to the API, it arrives as a new version of
 /// [`Kind::QueueUpsert`]. `namespace` and `task` ARE optional: a queue with no
 /// namespace is ordinary.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct QueueConfig {
     /// `queen.queues.id`, minted by the planner (uuidv7 bytes).
     pub id: [u8; 16],

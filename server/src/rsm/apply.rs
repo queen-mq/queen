@@ -108,7 +108,7 @@ use crate::rsm::store::rows::{
     self, DlqRow, FileRow, GarbageRow, GroupRow, PartitionRow, SegLocRow,
 };
 use crate::rsm::store::{
-    meta, Keyspace, Reads, Store, StoreError, TypedReads, TypedWrites, Writes,
+    meta, CheckpointCut, Keyspace, Reads, Store, StoreError, TypedReads, TypedWrites, Writes,
 };
 
 // ---------------------------------------------------------------------------
@@ -420,6 +420,19 @@ pub struct ApplyConfig {
     /// a durable point records nor recovery (I11) — so toggling it is safe on a
     /// live node and never affects correctness, only the tail.
     pub durable_async: bool,
+    /// `QUEEN_RAFT_CHECKPOINT_ASYNC` (§11.4, Phase C). On (default): the store
+    /// half of a durable point runs on a checkpoint thread. Apply prepares the
+    /// point as always and takes the store's CUT (every RAM row changed since
+    /// the last point, one reference count each) and carries on; the thread
+    /// writes the cut into LMDB, commits and syncs it, and only THEN is the
+    /// point's index reported durable (step 3) and are the files it stopped
+    /// naming unlinked (I10). One point in flight at a time. Off: the whole
+    /// point runs inline on the apply thread — measured at 46-75 ms once a
+    /// second at 300k msg/s, during which nothing is applied. LMDB holds one
+    /// consistent checkpoint per point either way, and recovery is unchanged
+    /// (it reopens at the last point that completed), so toggling it is safe on
+    /// a live node.
+    pub checkpoint_async: bool,
     /// `QUEEN_RAFT_SEG_BUFFERED` (PERF-C, §11.3). On (default): the apply thread
     /// buffers an entry's frames per file and writes each file's whole run with
     /// ONE `write` at the end of the entry, instead of one `write` per message.
@@ -512,6 +525,7 @@ impl Default for ApplyConfig {
             gc_per_pass: 32,
             idle_tick_ms: 2,
             durable_async: true,
+            checkpoint_async: true,
             // Buffering is the safe, high-value half of PERF-C and is on by
             // default; the pool is off in the programmatic default so unit tests
             // spawn no writer threads. `from_env` (the shipped binary) turns the
@@ -582,6 +596,7 @@ impl ApplyConfig {
             gc_per_pass: d.gc_per_pass,
             idle_tick_ms: d.idle_tick_ms,
             durable_async: flag("QUEEN_RAFT_DURABLE_ASYNC", d.durable_async),
+            checkpoint_async: flag("QUEEN_RAFT_CHECKPOINT_ASYNC", d.checkpoint_async),
             seg_buffered: flag("QUEEN_RAFT_SEG_BUFFERED", d.seg_buffered),
             apply_writers: std::env::var("QUEEN_RAFT_APPLY_WRITERS")
                 .ok()
@@ -884,8 +899,24 @@ pub struct Applier<'s, S: Store> {
     /// stopped GC for every other file on the node. This list is bounded by the
     /// claims in flight — outstanding work, never retained volume (I8).
     gc_deferred: BTreeSet<(u16, u32)>,
+    /// The async durable point (`ApplyConfig::checkpoint_async`): the index
+    /// whose cut the checkpoint thread is writing, `None` when none is. At most
+    /// one: the next point waits for it.
+    ckpt_inflight: Option<u64>,
+    /// GC phase two owed to the in-flight cut: the files staged or deferred
+    /// when it was taken. Their rows are gone from that cut, so they are
+    /// unlinked once it is durable and not before (I10).
+    gc_inflight: BTreeSet<(u16, u32)>,
 
     stats: ApplyStats,
+}
+
+/// How [`Applier::begin_checkpoint`] started a durable point.
+pub enum PointStart {
+    /// The store's cut, for the checkpoint thread, and the index it covers.
+    Cut(CheckpointCut, u64),
+    /// The store cannot cut: the point ran inline and this index is durable.
+    Inline(u64),
 }
 
 impl<'s, S: Store> Applier<'s, S> {
@@ -1076,6 +1107,8 @@ impl<'s, S: Store> Applier<'s, S> {
             recorded_seals: BTreeSet::new(),
             gc_staged: BTreeSet::new(),
             gc_deferred: BTreeSet::new(),
+            ckpt_inflight: None,
+            gc_inflight: BTreeSet::new(),
             stats: ApplyStats::default(),
         };
         let rec = Recovered {
@@ -3648,6 +3681,22 @@ impl<'s, S: Store> Applier<'s, S> {
     }
 
     fn durable_point_inner(&mut self) -> Result<u64> {
+        if let Some(i) = self.ckpt_inflight {
+            return Err(ApplyError::Inconsistent {
+                what: "durable point",
+                detail: format!("the checkpoint of {i} is still being written"),
+            });
+        }
+        let seals = self.prepare_point()?;
+        self.commit_point_inline(seals)
+    }
+
+    /// Steps 1 and 2's preparation (§11.4), shared by the inline point and the
+    /// async cut: fsync the segment files written since the last point and
+    /// write every row the point records — file lengths, seals, counters, the
+    /// durable and applied indexes. Returns the sealed files whose rows are now
+    /// written.
+    fn prepare_point(&mut self) -> Result<Vec<(u16, u32)>> {
         let point = self.segments.durable_point()?;
         // Fsync the qlog alongside the segment files ONLY on the unit-test /
         // A1-A2-A3a path (`Some`). On the LIVE A3b path the external writer fsync'd
@@ -3684,6 +3733,12 @@ impl<'s, S: Store> Applier<'s, S> {
         }
         self.writes
             .set_applied(self.applied_index, self.applied_term)?;
+        Ok(seals)
+    }
+
+    /// Step 2's commit and step 3, inline: the durable store commit, then the
+    /// durable index reported and GC phase two.
+    fn commit_point_inline(&mut self, seals: Vec<(u16, u32)>) -> Result<u64> {
         match self.writes.durable_commit() {
             Ok(()) => {}
             Err(e) => {
@@ -3716,6 +3771,107 @@ impl<'s, S: Store> Applier<'s, S> {
         self.unlink_staged()?;
         self.notify.durable(self.durable_index);
         Ok(self.durable_index)
+    }
+
+    /// Whether an async durable point's cut is being written.
+    pub fn checkpoint_in_flight(&self) -> bool {
+        self.ckpt_inflight.is_some()
+    }
+
+    /// The async durable point (`ApplyConfig::checkpoint_async`), first half:
+    /// prepare the point exactly as the inline one does, then take the store's
+    /// CUT instead of committing it here. Returns the cut and the index it
+    /// covers, for the checkpoint thread — or, when the store cannot cut, runs
+    /// the whole point inline and returns its durable index.
+    ///
+    /// Until [`Applier::checkpoint_done`] reports the cut written: no durable
+    /// index is reported (step 3), the files the cut stopped naming stay on
+    /// disk (I10), and no other point starts.
+    pub fn begin_checkpoint(&mut self) -> Result<PointStart> {
+        self.usable()?;
+        if !self.writes.can_cut() {
+            return self.durable_point().map(PointStart::Inline);
+        }
+        match self.begin_checkpoint_inner() {
+            Ok(v) => Ok(v),
+            Err(e) => Err(self.poison(e)),
+        }
+    }
+
+    fn begin_checkpoint_inner(&mut self) -> Result<PointStart> {
+        if let Some(i) = self.ckpt_inflight {
+            return Err(ApplyError::Inconsistent {
+                what: "durable point",
+                detail: format!("the checkpoint of {i} is still being written"),
+            });
+        }
+        let seals = self.prepare_point()?;
+        let Some(cut) = self.writes.take_cut()? else {
+            // `can_cut` said yes a moment ago; finish this point inline rather
+            // than leave it prepared and uncommitted.
+            return self.commit_point_inline(seals).map(PointStart::Inline);
+        };
+        // The cut carries everything a plain commit would: its cadence restarts.
+        self.entries_since_commit = 0;
+        self.dirty = false;
+        self.stats.commits += 1;
+        // Every row is RAM and read live, so the sealed files' rows are already
+        // where a reader looks: their RAM indexes go now, as after a plain
+        // commit.
+        for (b, id) in seals {
+            self.segments.forget_sealed(b, id);
+        }
+        // GC phase two waits for THIS cut to be durable: the files staged or
+        // deferred so far lost their rows in it (I10).
+        let mut owed = std::mem::take(&mut self.gc_staged);
+        owed.append(&mut self.gc_deferred);
+        self.gc_inflight = owed;
+        self.ckpt_inflight = Some(self.applied_index);
+        Ok(PointStart::Cut(cut, self.applied_index))
+    }
+
+    /// The async durable point, second half: the checkpoint thread wrote and
+    /// synced the cut of `index` (or failed to). Success is step 3 of §11.4 —
+    /// `index` is reported durable — and GC phase two for the files the cut
+    /// stopped naming. A failure is a durable point that did not happen: no
+    /// durable index, and the node stops, as on the inline path.
+    pub fn checkpoint_done(
+        &mut self,
+        index: u64,
+        result: std::result::Result<(), StoreError>,
+    ) -> Result<()> {
+        self.usable()?;
+        if self.ckpt_inflight != Some(index) {
+            let e = ApplyError::Inconsistent {
+                what: "checkpoint",
+                detail: format!(
+                    "the cut of {index} landed while {:?} was in flight",
+                    self.ckpt_inflight
+                ),
+            };
+            return Err(self.poison(e));
+        }
+        self.ckpt_inflight = None;
+        if let Err(e) = result {
+            self.stats.durable_points_failed += 1;
+            tracing::error!(
+                target: "rsm",
+                error = %e,
+                lost_durable_point = e.lost_durable_point(),
+                "the durable point did not happen (checkpoint thread); no durable index is reported",
+            );
+            return Err(self.poison(e.into()));
+        }
+        self.durable_index = index;
+        self.stats.durable_points += 1;
+        // §13.5 `durable.store_committed`, as on the inline path.
+        crate::rsm::faults::hit("durable.store_committed");
+        let owed = std::mem::take(&mut self.gc_inflight);
+        if let Err(e) = self.unlink_set(owed) {
+            return Err(self.poison(e));
+        }
+        self.notify.durable(index);
+        Ok(())
     }
 
     /// Everything the maintenance tick does between entries: the durable
@@ -3806,7 +3962,9 @@ impl<'s, S: Store> Applier<'s, S> {
     /// it again — whether its unlink is still owed to the next durable point
     /// or a pin has already deferred it once.
     fn gc_holds(&self, bucket: u16, file_id: u32) -> bool {
-        self.gc_staged.contains(&(bucket, file_id)) || self.gc_deferred.contains(&(bucket, file_id))
+        self.gc_staged.contains(&(bucket, file_id))
+            || self.gc_deferred.contains(&(bucket, file_id))
+            || self.gc_inflight.contains(&(bucket, file_id))
     }
 
     /// Phase one: a dead, unpinned file loses its node-local rows. The file
@@ -3833,7 +3991,7 @@ impl<'s, S: Store> Applier<'s, S> {
         // holds: `Segments::gc_candidates` takes the bound (I8, §11.7).
         let candidates = self.segments.gc_candidates(room);
         for (b, id) in candidates {
-            if self.gc_staged.contains(&(b, id)) || self.gc_deferred.contains(&(b, id)) {
+            if self.gc_holds(b, id) {
                 continue;
             }
             // Read from the file's own index, so a file that sealed before a
@@ -3863,6 +4021,12 @@ impl<'s, S: Store> Applier<'s, S> {
         // tried again here and nowhere else.
         let mut staged = std::mem::take(&mut self.gc_staged);
         staged.append(&mut self.gc_deferred);
+        self.unlink_set(staged)
+    }
+
+    /// GC phase two over `staged`: files whose rows a DURABLE point no longer
+    /// holds (the inline point's, or the async cut's once it is written).
+    fn unlink_set(&mut self, staged: BTreeSet<(u16, u32)>) -> Result<()> {
         for (b, id) in staged {
             // §13.5 `gc.before_unlink`: a durable store commit no longer
             // references this file (its rows are gone); the file is still on
@@ -3995,6 +4159,137 @@ impl Drop for Preflusher {
 }
 
 // ---------------------------------------------------------------------------
+// The async durable point's checkpoint thread (§11.4, QUEEN_RAFT_CHECKPOINT_ASYNC)
+// ---------------------------------------------------------------------------
+
+/// The thread that writes a durable point's store half — the cut apply took
+/// ([`Applier::begin_checkpoint`]) — into the store, commits and syncs it, then
+/// reports back ([`Applier::checkpoint_done`]). One cut at a time, in the
+/// order they were taken: apply starts the next point only after the last one
+/// reported.
+///
+/// The cut's values are shared with the live tables, so it is freed here, off
+/// the apply thread; a cut that failed goes back to the dirty sets
+/// ([`Store::restore_cut`]) before the failure is reported.
+pub(crate) struct Checkpointer {
+    tx: Option<SyncSender<CkptJob>>,
+    done: Receiver<CkptDone>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+struct CkptJob {
+    cut: CheckpointCut,
+    index: u64,
+}
+
+pub(crate) struct CkptDone {
+    index: u64,
+    result: std::result::Result<(), StoreError>,
+    write: Duration,
+    rows: usize,
+}
+
+impl Checkpointer {
+    fn spawn<S: Store + 'static>(store: Arc<S>, clock: Arc<dyn Clock>) -> Checkpointer {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<CkptJob>(1);
+        let (dtx, done) = std::sync::mpsc::channel::<CkptDone>();
+        let join = std::thread::Builder::new()
+            .name("queen-rsm-ckpt".into())
+            .spawn(move || {
+                while let Ok(mut job) = rx.recv() {
+                    let t0 = clock.now();
+                    let rows = job.cut.keys();
+                    let result = store.write_cut(&mut job.cut);
+                    let write = clock.now().duration_since(t0);
+                    if result.is_err() {
+                        store.restore_cut(job.cut);
+                    } else {
+                        drop(job.cut);
+                    }
+                    let d = CkptDone {
+                        index: job.index,
+                        result,
+                        write,
+                        rows,
+                    };
+                    if dtx.send(d).is_err() {
+                        return;
+                    }
+                }
+            })
+            .expect("spawn the checkpoint thread");
+        Checkpointer {
+            tx: Some(tx),
+            done,
+            join: Some(join),
+        }
+    }
+
+    fn submit(&self, cut: CheckpointCut, index: u64) -> Result<()> {
+        let sent = self
+            .tx
+            .as_ref()
+            .map(|tx| tx.send(CkptJob { cut, index }).is_ok())
+            .unwrap_or(false);
+        if sent {
+            Ok(())
+        } else {
+            Err(ApplyError::Inconsistent {
+                what: "checkpoint thread",
+                detail: "the checkpoint thread is gone".into(),
+            })
+        }
+    }
+
+    /// Hand a finished cut's report to apply: the durable index, GC phase two,
+    /// the timings.
+    fn settle<S: Store>(applier: &mut Applier<'_, S>, d: CkptDone) -> Result<()> {
+        if crate::rsm::timing::enabled() {
+            let tm = crate::rsm::timing::metrics();
+            tm.checkpoint_write.record_dur(d.write);
+            tm.checkpoint_rows.record(d.rows as u64);
+        }
+        applier.checkpoint_done(d.index, d.result)
+    }
+
+    /// Settle every report that has arrived, without waiting.
+    fn poll<S: Store>(&self, applier: &mut Applier<'_, S>) -> Result<()> {
+        while let Ok(d) = self.done.try_recv() {
+            Self::settle(applier, d)?;
+        }
+        Ok(())
+    }
+
+    /// Wait for the cut in flight, if any, and settle it.
+    fn drain<S: Store>(&self, applier: &mut Applier<'_, S>) -> Result<()> {
+        while applier.checkpoint_in_flight() {
+            match self.done.recv() {
+                Ok(d) => Self::settle(applier, d)?,
+                Err(_) => {
+                    return Err(ApplyError::Inconsistent {
+                        what: "checkpoint thread",
+                        detail: "the checkpoint thread stopped with a cut in flight".into(),
+                    })
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Checkpointer {
+    fn drop(&mut self) {
+        // Closing the channel ends the thread after the cut it is writing (a
+        // cut is never abandoned half-written: the transaction commits or
+        // aborts as a whole). Joining keeps it from outliving the store.
+        drop(self.tx.take());
+        if let Some(j) = self.join.take() {
+            let _ = j.join();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The thread
 // ---------------------------------------------------------------------------
 
@@ -4012,6 +4307,7 @@ pub(crate) fn run<S: Store>(
     rx: &Receiver<Committed>,
     clock: &dyn Clock,
     preflush: Option<&Preflusher>,
+    ckpt: Option<&Checkpointer>,
 ) -> Result<()> {
     let mut last_commit = clock.now();
     let mut last_durable = last_commit;
@@ -4056,9 +4352,19 @@ pub(crate) fn run<S: Store>(
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
+                // The final point is inline, after the cut in flight landed:
+                // two checkpoints are never written at once.
+                if let Some(c) = ckpt {
+                    c.drain(applier)?;
+                }
                 applier.flush()?;
                 return Ok(());
             }
+        }
+        // A cut the checkpoint thread finished since the last turn: its point
+        // is durable now (step 3), and its GC phase two runs.
+        if let Some(c) = ckpt {
+            c.poll(applier)?;
         }
         // `now` drives the commit/durable/timing CADENCE (load-bearing); the
         // extra `clock.now()` around each stage is metrics-only, so it is gated
@@ -4079,9 +4385,18 @@ pub(crate) fn run<S: Store>(
                 last_preflush = now;
             }
         }
-        if applier.durable_due(now.duration_since(last_durable)) {
+        if applier.durable_due(now.duration_since(last_durable)) && !applier.checkpoint_in_flight()
+        {
             let t0 = crate::rsm::timing::enabled().then(|| clock.now());
-            applier.durable_point()?;
+            match ckpt {
+                Some(c) => match applier.begin_checkpoint()? {
+                    PointStart::Cut(cut, index) => c.submit(cut, index)?,
+                    PointStart::Inline(_) => {}
+                },
+                None => {
+                    applier.durable_point()?;
+                }
+            }
             if let Some(t0) = t0 {
                 crate::rsm::timing::metrics()
                     .durable_point
@@ -4165,14 +4480,21 @@ pub fn spawn_with_reader<S: Store + 'static>(
             // dropped (Stop + join) when `run` returns, so it never outlives the
             // segment handles it holds dup'd copies of.
             let preflush = cfg.durable_async.then(Preflusher::spawn);
+            // The async durable point's store half (§11.4). Declared after the
+            // applier, so it is dropped (Stop + join) first when `run` returns:
+            // no cut outlives the thread, and the store is released with it.
+            let ckpt = cfg
+                .checkpoint_async
+                .then(|| Checkpointer::spawn(store.clone(), clock.clone()));
             tracing::info!(
                 target: "rsm",
                 replay_after = rec.replay_after,
                 applied = rec.applied_index,
                 durable_async = cfg.durable_async,
+                checkpoint_async = cfg.checkpoint_async,
                 "rsm apply thread started",
             );
-            run(&mut applier, &rx, clock.as_ref(), preflush.as_ref())?;
+            run(&mut applier, &rx, clock.as_ref(), preflush.as_ref(), ckpt.as_ref())?;
             Ok(applier.stats())
         })
         .expect("spawn the apply thread")

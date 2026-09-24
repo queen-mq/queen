@@ -144,6 +144,49 @@ impl<S: Store + 'static> NodeReplicator<S> {
         }
     }
 
+    /// Whether client commands received here go to the leader as prepared
+    /// commands (a follower of a multi-node cluster with
+    /// `QUEEN_RAFT_CLIENT_OFFLOAD` on, the default).
+    pub fn offloads_clients(&self) -> bool {
+        match self {
+            NodeReplicator::Local(_) => false,
+            NodeReplicator::Raft(r) => {
+                r.is_cluster() && super::raft::client_offload_from_env()
+            }
+        }
+    }
+
+    /// Install the handler that plans a follower's prepared command here.
+    pub fn set_remote_handler(&self, h: super::raft::RemoteHandler) {
+        if let NodeReplicator::Raft(r) = self {
+            r.set_remote_handler(h);
+        }
+    }
+
+    /// Send a prepared command to the leader.
+    pub async fn forward_command(
+        &self,
+        body: bytes::Bytes,
+        ttl: std::time::Duration,
+    ) -> Result<bytes::Bytes, super::raft::RemoteError> {
+        match self {
+            NodeReplicator::Local(_) => Err(super::raft::RemoteError::NoLeader),
+            NodeReplicator::Raft(r) => r.forward_command(body, ttl).await,
+        }
+    }
+
+    /// Wait until this node has applied `index`; `false` at the deadline.
+    pub async fn wait_applied(&self, index: u64, deadline: std::time::Instant) -> bool {
+        match self {
+            NodeReplicator::Local(r) => {
+                // A single node answers only after its own apply.
+                let _ = deadline;
+                r.applied_index() >= index
+            }
+            NodeReplicator::Raft(r) => r.wait_applied(index, deadline).await,
+        }
+    }
+
     pub fn qlog_reader(&self) -> Option<QLogReader> {
         match self {
             NodeReplicator::Local(r) => r.qlog_reader(),

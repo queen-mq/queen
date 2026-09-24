@@ -36,7 +36,10 @@ use crate::util::uuidv7_bytes;
 /// batcher + segments, behind the [`Rsm`] trait. Registered through the builder
 /// hook ([`set_builder`]) by the boot paths; the [`NotReady`] stub is what a
 /// build with no builder installed (the WP-1.7a seam tests) still gets.
+mod autopilot;
+pub mod groups;
 pub mod real;
+mod remote;
 
 // ---------------------------------------------------------------------------
 // Store key bound (WP-1.2 finding R-108).
@@ -328,6 +331,11 @@ pub struct PopOptions {
     pub subscription_from_now: bool,
     /// Requested last-value delivery policy; persisted on first registration.
     pub conflate: bool,
+    /// `autopilot=true` and no `partitions`: the broker picks the claim width
+    /// (wildcard pops; see `facade::autopilot`).
+    pub auto_parts: bool,
+    /// `autopilot=true` and no `batch`: the broker picks the batch.
+    pub auto_batch: bool,
 }
 
 /// An ack / nack (single or batch): the receiver's raw body plus the resolved

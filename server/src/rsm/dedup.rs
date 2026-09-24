@@ -888,6 +888,9 @@ fn gen_slice_us(created_us: i64, floor_us: i64) -> i64 {
 }
 /// Default global cap in MiB (`QUEEN_RAFT_DEDUP_FRONT_MB`). 512 MiB fronts
 /// ~256 M in-window hashes at 2 B each before any partition falls back.
+/// How many shards the front's per-partition map is split into.
+const FRONT_SHARDS: usize = 64;
+
 pub const FRONT_DEFAULT_CAP_MB: usize = 512;
 /// The most hashes one first-touch seed scan of a pre-existing partition will
 /// read before giving up and marking it FALLBACK. Bounds the one-off planning
@@ -1162,7 +1165,10 @@ impl FrontStats {
 pub struct DedupFront {
     enabled: bool,
     byte_cap: usize,
-    parts: Mutex<HashMap<Pid, PartFront>>,
+    /// Per-partition fronts, sharded by pid ([`FRONT_SHARDS`]): the planner's
+    /// lanes plan different partitions at the same time, and one mutex over
+    /// every partition serialized them.
+    parts: Vec<Mutex<HashMap<Pid, PartFront>>>,
     total_bytes: AtomicU64,
     // counters (own source of truth; mirrored to timing::metrics on publish)
     messages: AtomicU64,
@@ -1208,7 +1214,7 @@ impl DedupFront {
         DedupFront {
             enabled,
             byte_cap,
-            parts: Mutex::new(HashMap::new()),
+            parts: (0..FRONT_SHARDS).map(|_| Mutex::new(HashMap::new())).collect(),
             total_bytes: AtomicU64::new(0),
             messages: AtomicU64::new(0),
             probes_issued: AtomicU64::new(0),
@@ -1247,13 +1253,23 @@ impl DedupFront {
         self.enabled
     }
 
+    /// The shard holding partition `pid`'s front.
+    #[inline]
+    fn shard(&self, pid: Pid) -> std::sync::MutexGuard<'_, HashMap<Pid, PartFront>> {
+        self.parts[(pid % FRONT_SHARDS as u64) as usize]
+            .lock()
+            .unwrap()
+    }
+
     /// Drop everything: the leadership-change hook (see the module note). Every
     /// partition re-seeds from committed state on its next touch.
     pub fn reset(&self) {
         if !self.enabled {
             return;
         }
-        self.parts.lock().unwrap().clear();
+        for shard in &self.parts {
+            shard.lock().unwrap().clear();
+        }
         self.total_bytes.store(0, Ordering::Relaxed);
     }
 
@@ -1264,7 +1280,7 @@ impl DedupFront {
         if !self.enabled {
             return false;
         }
-        !self.parts.lock().unwrap().contains_key(&pid)
+        !self.shard(pid).contains_key(&pid)
     }
 
     /// A partition minted this front-lifetime: born seeded, empty and complete.
@@ -1272,11 +1288,7 @@ impl DedupFront {
         if !self.enabled {
             return;
         }
-        self.parts
-            .lock()
-            .unwrap()
-            .entry(pid)
-            .or_insert_with(PartFront::seeded);
+        self.shard(pid).entry(pid).or_insert_with(PartFront::seeded);
     }
 
     /// Install a first-touch seed the planner collected. `Complete` builds the
@@ -1285,7 +1297,7 @@ impl DedupFront {
         if !self.enabled {
             return;
         }
-        let mut parts = self.parts.lock().unwrap();
+        let mut parts = self.shard(pid);
         // A concurrent path never runs (single planning thread), but a second
         // seed of the same pid this cycle is a no-op.
         if parts.contains_key(&pid) {
@@ -1346,7 +1358,7 @@ impl DedupFront {
             return true;
         }
         let h = u128::from_le_bytes(*hash);
-        let mut parts = self.parts.lock().unwrap();
+        let mut parts = self.shard(pid);
         let issue = match parts.get_mut(&pid) {
             None => true, // not seeded: probe (planner seeds first)
             Some(pf) if pf.fallback => true,
@@ -1386,7 +1398,7 @@ impl DedupFront {
             return ProbeVerdict::Whole;
         }
         let h = u128::from_le_bytes(*hash);
-        let mut parts = self.parts.lock().unwrap();
+        let mut parts = self.shard(pid);
         let verdict = match parts.get_mut(&pid) {
             None => ProbeVerdict::Whole, // not seeded: the planner seeds first
             Some(pf) if pf.fallback => ProbeVerdict::Whole,
@@ -1428,7 +1440,7 @@ impl DedupFront {
             return;
         }
         let h = u128::from_le_bytes(*hash);
-        let mut parts = self.parts.lock().unwrap();
+        let mut parts = self.shard(pid);
         let Some(pf) = parts.get_mut(&pid) else {
             return;
         };
@@ -1457,14 +1469,18 @@ impl DedupFront {
 
     /// A snapshot of the counters and the resident footprint.
     pub fn stats(&self) -> FrontStats {
-        let parts = self.parts.lock().unwrap();
-        let fallback = parts.values().filter(|p| p.fallback).count() as u64;
+        let (mut partitions, mut fallback) = (0u64, 0u64);
+        for shard in &self.parts {
+            let parts = shard.lock().unwrap();
+            partitions += parts.len() as u64;
+            fallback += parts.values().filter(|p| p.fallback).count() as u64;
+        }
         FrontStats {
             messages: self.messages.load(Ordering::Relaxed),
             probes_issued: self.probes_issued.load(Ordering::Relaxed),
             probes_skipped: self.probes_skipped.load(Ordering::Relaxed),
             inserts: self.inserts.load(Ordering::Relaxed),
-            partitions: parts.len() as u64,
+            partitions,
             fallback_partitions: fallback,
             bytes: self.total_bytes.load(Ordering::Relaxed),
         }
@@ -1532,7 +1548,7 @@ mod tests {
         let now = t0 + (n as i64) * 1_000;
         let floor = now - window_us;
         {
-            let parts = f.parts.lock().unwrap();
+            let parts = f.shard(9);
             let pf = parts.get(&9).expect("partition tracked");
             assert!(!pf.fallback, "must not fall back");
             for g in &pf.gens {

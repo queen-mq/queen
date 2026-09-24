@@ -159,6 +159,43 @@ pub fn wildcard_pop_provably_empty<R: TypedReads + ?Sized>(
     Ok(boundary || scanned < cap)
 }
 
+/// The pop autopilot's width input: how many of the group's partitions are
+/// claimable NOW (`pending` rows due), counted up to `cap`. `None` when the
+/// count means nothing for a claim (no such queue or group yet, or a
+/// conflating group, whose claim reads the tail rather than the ring).
+pub fn wildcard_ready_count<R: TypedReads + ?Sized>(
+    r: &R,
+    tenant: &str,
+    queue: &str,
+    group: &str,
+    now_us: i64,
+    cap: usize,
+) -> crate::rsm::store::Result<Option<usize>> {
+    if r.queue(tenant, queue)?.is_none() {
+        return Ok(None);
+    }
+    let Some(g) = r.group(tenant, queue, group)? else {
+        return Ok(None);
+    };
+    if g.meta.conflation {
+        return Ok(None);
+    }
+    let from = keys::pending_prefix(tenant, queue, group);
+    let mut ready = 0usize;
+    let mut seen = 0usize;
+    r.scan_pending(&from, cap.max(1), &mut |t, q, gg, _pid, ready_at| {
+        if t != tenant || q != queue || gg != group {
+            return false;
+        }
+        seen += 1;
+        if ready_at <= now_us {
+            ready += 1;
+        }
+        seen < cap
+    })?;
+    Ok(Some(ready))
+}
+
 /// PLAN_RAFT_DRAIN_FIX P1.2: the time an answer needs after the plan (propose,
 /// commit, apply, reply). A pop whose waiter's deadline falls inside it is
 /// answered EMPTY instead of claiming: a claim nobody receives is a lease
@@ -347,9 +384,20 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         } else {
             cmd.max_parts
         };
-        for (queue, cfg) in queues {
+        for (queue, _) in queues {
             if budget <= 0 || max_parts <= 0 {
                 break;
+            }
+            // The committed set, seen through the overlay (as the pinned and
+            // wildcard pops see their queue): a queue a delete in flight drops
+            // is not one to register a group on.
+            let Some(cfg) = self.queue_cfg(ov, &cmd.tenant, &queue)? else {
+                continue;
+            };
+            if (!ns.is_empty() && cfg.namespace.as_deref() != Some(ns.as_str()))
+                || (!task.is_empty() && cfg.task.as_deref() != Some(task.as_str()))
+            {
+                continue;
             }
             let mut sub = cmd.clone();
             sub.queue = queue.clone();

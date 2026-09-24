@@ -78,7 +78,7 @@ pub const DEFAULT_PARTITION: &str = "Default";
 /// pre-work (O20: the planner never packs or decompresses): the payload is
 /// decoded, decompressed when the client flagged `payloadZstd`, and packed into
 /// the ONE frame the fire will append; the message id is minted.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct TimerSchedule {
     pub queue: String,
     pub key: String,
@@ -90,6 +90,7 @@ pub struct TimerSchedule {
     pub message_id: [u8; 16],
     /// Exactly the bytes a push of this message would carry
     /// ([`crate::frames::pack_frames`] of one frame).
+    #[serde(with = "serde_bytes")]
     pub frame: Vec<u8>,
     /// Whether the STORED payload is zstd-compressed. The receiver
     /// decompresses before packing, so this is `false` for every frame it
@@ -101,7 +102,7 @@ pub struct TimerSchedule {
 }
 
 /// One op of a timers call (025 `p_ops[i]`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum TimerOp {
     /// `schedule` and `reschedule` are the same upsert (025).
     Schedule(TimerSchedule),
@@ -142,7 +143,7 @@ impl TimerOp {
 
 /// `POST /api/v1/timers` and `DELETE /api/v1/timers/:queue/*key` (025
 /// `log_timers_apply_v1`): one command, one atomic unit.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct TimersCommand {
     pub request_id: RequestId,
     pub tenant: String,
@@ -639,6 +640,9 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                     r.updated_at_us = *updated_at_us;
                     r
                 })),
+            // A purge in flight deletes every timer of the tenant when it
+            // applies.
+            None if ov.tenant_purged(tenant) => Ok(None),
             None => self.reads().timer(tenant, queue, key).map_err(store_err),
         }
     }
@@ -807,7 +811,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 }
                 walked += 1;
                 let tk = (t.to_string(), q.to_string(), k.to_string());
-                if !overlay_timers.contains_key(&tk) {
+                if !overlay_timers.contains_key(&tk) && !ov.tenant_purged(t) {
                     due_keys.push(tk);
                 }
                 due_keys.len() < batch
