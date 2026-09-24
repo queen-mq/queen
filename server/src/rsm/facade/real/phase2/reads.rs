@@ -926,6 +926,13 @@ impl RaftFacade {
             .or_else(|| v.get("partition_id"))
             .and_then(Value::as_str);
         let pid = self.resolve_pid(&ctx.tenant, pid_s).await?;
+        if pid_s.is_some() && pid.is_none() {
+            // PG answers a pid outside the tenant with 404 (011_traces.sql).
+            return Ok(ApiOut::json(
+                404,
+                json!({"success":false,"error":"Partition not found"}).to_string(),
+            ));
+        }
         let names = v
             .get("traceNames")
             .or_else(|| v.get("names"))
@@ -969,7 +976,7 @@ impl RaftFacade {
         self.submit_effects(&ctx, vec![Effect::TraceAppend { event }])
             .await?;
         Ok(ApiOut::json(
-            200,
+            201,
             json!({"success":true,"traceId":id}).to_string(),
         ))
     }
@@ -1056,6 +1063,13 @@ impl RaftFacade {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0usize);
         let wanted_pid = self.resolve_pid(&ctx.tenant, pid).await?;
+        if pid.is_some() && wanted_pid.is_none() {
+            // Not this tenant's partition: nothing, never "no pid filter".
+            return Ok(ApiOut::json(
+                200,
+                json!({"traces":[],"events":[],"total":0,"pagination":{"limit":limit,"offset":offset}}).to_string(),
+            ));
+        }
         let tenant = ctx.tenant.clone();
         let txn = txn.map(str::to_string);
         let name = name.map(str::to_string);
@@ -1105,7 +1119,15 @@ impl RaftFacade {
     ) -> Result<Option<Pid>, RsmError> {
         let Some(id) = id else { return Ok(None) };
         if let Ok(p) = id.parse::<u64>() {
-            return Ok(Some(p));
+            // Dense small integers: only the owner may address one.
+            let store = self.store.clone();
+            let tenant = tenant.to_string();
+            return tokio::task::spawn_blocking(move || {
+                store.read(|r| Ok(r.partition(p)?.filter(|row| row.tenant == tenant).map(|_| p)))
+            })
+            .await
+            .map_err(|e| RsmError::Internal(format!("partition lookup: {e}")))?
+            .map_err(read_error);
         }
         let uuid = uuid_string_to_bytes(id);
         let store = self.store.clone();

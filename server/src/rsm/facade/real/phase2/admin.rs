@@ -159,7 +159,17 @@ impl RaftFacade {
         }
         let parts = self.parts(&ctx.tenant, Some(queue), partition).await?;
         if parts.is_empty() {
-            return Ok(ApiOut::json(404,json!({"success":false,"error":if partition.is_some(){"Partition not found"}else{"Queue not found or has no partitions"}}).to_string()));
+            return Ok(ApiOut::json(
+                404,
+                json!({
+                    "success": false,
+                    "error": if partition.is_some() { "Partition not found" } else { "Queue not found or has no partitions" },
+                    "consumerGroup": group,
+                    "queueName": queue,
+                    "partitionsUpdated": 0,
+                })
+                .to_string(),
+            ));
         }
         let qlog = self.qlog_reader.clone();
         let reader = self.reader.clone();

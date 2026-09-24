@@ -3090,6 +3090,16 @@ fn resolve_ack_targets(
                     bad.push((f.index, format!("no partition {}", f.pid)));
                     continue;
                 };
+                // A partitionId is a small dense integer: never trust it as an
+                // address without the owner (the PG engine's p_tenant check,
+                // 005_log_ack.sql). The txn path fails whole on this.
+                if part.tenant != tenant {
+                    bad.push((
+                        f.index,
+                        format!("partition {} not owned by this tenant", f.pid),
+                    ));
+                    continue;
+                }
                 let same_as_last = last.is_some_and(|(lfi, _, _)| {
                     flats[lfi].pid == f.pid && flats[lfi].worker == f.worker
                 });
@@ -3360,6 +3370,7 @@ impl RaftFacade {
     async fn renew_impl(&self, ctx: ReqCtx, req: RenewReq) -> Result<RenewOut, RsmError> {
         let cmd = Command::Renew(RenewCommand {
             request_id: ctx.request_id,
+            tenant: Some(ctx.tenant.clone()),
             worker: req.lease_id.clone(),
             seconds: req.seconds.clamp(1, i32::MAX as i64) as i32,
         });

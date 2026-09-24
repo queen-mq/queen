@@ -480,7 +480,13 @@ pub fn build_embedded(e: Embedded) -> Result<(St, Router), String> {
     let edge = crate::harden::Edge::from_env().map_err(|e| format!("edge settings: {e}"))?;
     tracing::info!(target: "proxy", "{}", edge.describe());
     let app = router_with(st.clone(), Some(&edge));
-    tracing::info!(target: "proxy", "proxy embedded in the broker (state: replicated KV)");
+    tracing::info!(
+        target: "proxy",
+        node = %e.node,
+        enforce = st.cfg.enforce,
+        shared_hosts = ?st.cfg.shared_hosts,
+        "queen-proxy up (embedded in the broker, state: replicated KV)"
+    );
     Ok((st, app))
 }
 

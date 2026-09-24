@@ -2918,6 +2918,7 @@ mod perf1_arrival_tests {
         // on. (Reverting the fix to a bare `Instant` breaks this at compile.)
         let cmd = Command::Renew(RenewCommand {
             request_id: [7u8; 16],
+            tenant: None,
             worker: "w".into(),
             seconds: 30,
         });
@@ -3051,6 +3052,7 @@ mod perf_j_tests {
     fn other_sub(id: u8) -> Submission {
         let cmd = Command::Renew(RenewCommand {
             request_id: rid(id),
+            tenant: None,
             worker: "w".into(),
             seconds: 30,
         });
@@ -3142,6 +3144,7 @@ mod perf_j_tests {
         // (per-cycle) are both set at ingress, both following the metrics knob.
         let (sub, _rx) = Submission::new(Command::Renew(RenewCommand {
             request_id: rid(7),
+            tenant: None,
             worker: "w".into(),
             seconds: 30,
         }));

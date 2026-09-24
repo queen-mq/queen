@@ -734,10 +734,12 @@ async fn get_json_in_process(
     headers: &[(&str, &str)],
     timeout: Duration,
 ) -> Result<serde_json::Value, String> {
-    let path = url
-        .strip_prefix("http://")
-        .and_then(|rest| rest.find('/').map(|i| &rest[i..]))
-        .unwrap_or("/");
+    // Any scheme: the single binary's own cell is `inprocess://self`, and a
+    // path that fell back to `/` fetched the console's index.html.
+    let path = match url.split_once("://") {
+        Some((_, rest)) => rest.find('/').map(|i| &rest[i..]).unwrap_or("/"),
+        None => url,
+    };
     let mut req = axum::http::Request::builder().method("GET").uri(path).header("accept", "application/json");
     for (k, v) in headers {
         req = req.header(*k, *v);

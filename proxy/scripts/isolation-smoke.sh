@@ -39,7 +39,15 @@
 # the §19e wake-latency assertion).
 set -uo pipefail
 
-P=http://127.0.0.1:6711
+P=${QUEEN_SMOKE_URL:-http://127.0.0.1:6711}
+# Single binary (no pxdb): provisioning goes through the control-plane API
+# instead of psql -- QUEEN_SMOKE_CP=http://<node>/api/cp plus the node's
+# QUEEN_PROXY_CP_TOKEN. The checks that read Postgres rows directly are then
+# reported as counted skips.
+CP=${QUEEN_SMOKE_CP:-}
+CP_TOKEN=${QUEEN_PROXY_CP_TOKEN:-}
+ISSUED=""
+SH=${QUEEN_SMOKE_SHARED_HOST:-shared.local}
 KEY_A="qk_dev_devdevdevdevdevdevdevdevdevdevdevdevdev"   # seeded (cluster: dev)
 RUN=$(date +%s | tail -c 7)
 PASS=0; FAIL=0; SKIP=0
@@ -67,6 +75,19 @@ want_out() { if has "$2" "$3"; then bad "$1 (leaked '$2' in: $(short "$3"))"; el
 j()    { printf '%s' "$2" | jq -r "$1" 2>/dev/null; }   # j <filter> <json>
 
 px()   { docker exec -i qpx-pg psql -qtA -U postgres -d queen_proxy "$@"; }
+cpapi() { # method path [json] -> body
+  local args=(-s -X "$1" -H "x-queen-cp-token: $CP_TOKEN")
+  [ -n "${3:-}" ] && args+=(-H 'Content-Type: application/json' -d "$3")
+  curl "${args[@]}" "$CP$2"
+}
+cluster_id() { # slug -> uuid (empty when absent)
+  if [ -n "$CP" ]; then cpapi GET "/clusters/$1" | jq -r '.id // empty'
+  else px -c "SELECT id FROM queen_proxy.clusters WHERE slug='$1'"; fi
+}
+revoke_key() { # key uuid
+  if [ -n "$CP" ]; then cpapi DELETE "/keys/$1" >/dev/null
+  else px -c "SELECT queen_proxy.revoke_api_key('$1'::uuid)" >/dev/null; fi
+}
 
 req() { # method host key path [body] -> "code|body"
   local m=$1 h=$2 k=$3 p=$4 b=${5:-}
@@ -99,6 +120,10 @@ hdr() { grep -i "^$1:" "$HDRF" | tail -1 | tr -d '\r' | sed "s/^[^:]*:[[:space:]
 
 # --- control-plane helpers ---------------------------------------------------
 ensure_cluster() { # tenant-slug tenant-name cluster-slug plan -> cluster uuid
+  if [ -n "$CP" ]; then
+    cpapi POST /clusters "{\"tenant_slug\":\"$1\",\"tenant_name\":\"$2\",\"slug\":\"$3\",\"plan\":\"$4\"}" | jq -r '.id // empty'
+    return
+  fi
   px >/dev/null <<SQL
 DO \$\$
 DECLARE t uuid; cell uuid;
@@ -117,11 +142,22 @@ issue_key() { # cluster-uuid label scopes-sql -> "plaintext|key uuid"
   local k h id
   k="qk_dev_$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '=' | cut -c1-43)"
   h=$(printf '%s' "$k" | shasum -a 256 | cut -d' ' -f1)
+  if [ -n "$CP" ]; then
+    id=$(cpapi POST /keys "{\"cluster_id\":\"$1\",\"name\":\"iso-$RUN-$2\",\"key_hash\":\"$h\",\"scopes\":[$(printf '%s' "$3" | tr "'" '"')]}" | jq -r '.id // empty')
+    ISSUED="$ISSUED $id"
+    printf '%s|%s' "$k" "$id"
+    return
+  fi
   id=$(px -c "SELECT queen_proxy.issue_api_key('$1'::uuid,'iso-$RUN-$2','$h',ARRAY[$3])")
   printf '%s|%s' "$k" "$id"
 }
 set_ovr() { # cluster-uuid json|NULL
   local v
+  if [ -n "$CP" ]; then
+    if [ "$2" = "NULL" ]; then v=null; else v=$2; fi
+    cpapi PUT "/clusters/$1/overrides" "$v" >/dev/null
+    return
+  fi
   if [ "$2" = "NULL" ]; then v="NULL"; else v="'$2'::jsonb"; fi
   px -c "SELECT queen_proxy.set_limit_override('$1'::uuid, $v)" >/dev/null
 }
@@ -148,7 +184,8 @@ cleanup() {
   for c in $CID_A $CID_B $CID_P1 $CID_P2; do [ -n "$c" ] && set_ovr "$c" NULL; done
   # best-effort: revoke every key this run issued, so a dev pxdb does not
   # accumulate one live key per smoke run.
-  px >/dev/null 2>&1 <<SQL || true
+  for id in $ISSUED; do revoke_key "$id" 2>/dev/null; done
+  [ -n "$CP" ] || px >/dev/null 2>&1 <<SQL || true
 DO \$\$
 DECLARE r RECORD;
 BEGIN
@@ -166,7 +203,7 @@ say "== two-tenant isolation through the proxy (run $RUN) =="
 # ============================================================================
 # 0. provisioning
 # ============================================================================
-CID_A=$(px -c "SELECT id FROM queen_proxy.clusters WHERE slug='dev'")
+CID_A=$(cluster_id dev)
 if [ -z "$CID_A" ]; then
   say "  FAIL- cluster 'dev' not seeded; run scripts/dev-cell.sh up first"; exit 2
 fi
@@ -579,7 +616,7 @@ else bad "B's message was NOT swept, so the retention check proves nothing: $(sh
 # ============================================================================
 RK=$(req GET dev "$KEY_TMP" /api/v1/resources/queues)
 check "temp key works before revocation" 200 "${RK%%|*}"
-px -c "SELECT queen_proxy.revoke_api_key('$KEY_TMP_ID'::uuid)" >/dev/null
+revoke_key "$KEY_TMP_ID"
 say "  ...  waiting for key revocation to propagate (NOTIFY, worst case the 30s key TTL)"
 DEADLINE=$((SECONDS+45)); RCODE=""
 while [ $SECONDS -lt $DEADLINE ]; do
@@ -683,7 +720,14 @@ want_out "queue-lag hides B's queue from A"          "\"$QB\"" "$QL"
 say "  ...  waiting for the usage_minutes flush"
 DEADLINE=$((SECONDS+120)); ROWS=0
 while [ $SECONDS -lt $DEADLINE ]; do
-  ROWS=$(px -c "SELECT count(DISTINCT cluster_id) FROM queen_proxy.usage_minutes WHERE msgs > 0")
+  if [ -n "$CP" ]; then
+    ROWS=0
+    for c in "$CID_A" "$CID_B"; do
+      [ "$(cpapi GET "/clusters/$c/usage" | jq '[.minutes[]?.msgs]|add // 0')" -gt 0 ] 2>/dev/null && ROWS=$((ROWS+1))
+    done
+  else
+    ROWS=$(px -c "SELECT count(DISTINCT cluster_id) FROM queen_proxy.usage_minutes WHERE msgs > 0")
+  fi
   [ "${ROWS:-0}" -ge 2 ] 2>/dev/null && break
   sleep 5
 done
@@ -717,7 +761,11 @@ HL_ON=no-log
 if [ -r "$BROKER_LOG" ]; then
   if grep -aq "QUEEN_HOTLIST on" "$BROKER_LOG"; then HL_ON=yes; else HL_ON=no; fi
 fi
-check "broker runs with the hot-list ON (the ring IS the pop path)" yes "$HL_ON"
+if [ -n "$CP" ]; then
+  skip "broker runs with the hot-list ON (a Postgres-engine structure; raft pops read the log index)"
+else
+  check "broker runs with the hot-list ON (the ring IS the pop path)" yes "$HL_ON"
+fi
 
 # autoAck throughout: the ring's leased-Took arm parks a claimed partition on the
 # lease wheel, which would make the second half of this section depend on a 300s
@@ -868,7 +916,6 @@ fi
 #     that the default cluster did not absorb the host -- the two knobs are
 #     different features and must not interact (decision z).
 # ============================================================================
-SH=shared.local
 SHQ="sh20-$RUN"          # the SAME queue name on both clusters
 SHB="sh20b-$RUN"         # exists on cluster `two` only
 cellpx() { docker exec -i qcell-pg psql -qtA -U postgres -d queen "$@"; }
@@ -899,9 +946,13 @@ else
   # The tenant-header injection, asserted where it actually lands: two rows of
   # the same queue NAME in the cell, one per cluster's broker_tenant_uuid --
   # both created through the one shared hostname.
-  SHTEN=$(cellpx -c "SELECT string_agg(tenant_id::text, ',' ORDER BY tenant_id::text) FROM queen.queues WHERE name='$SHQ'")
-  SHWANT=$(px -c "SELECT string_agg(broker_tenant_uuid::text, ',' ORDER BY broker_tenant_uuid::text) FROM queen_proxy.clusters WHERE slug IN ('dev','two')")
-  check "x-queen-tenant followed the key, not the host (broker rows)" "$SHWANT" "$SHTEN"
+  if [ -n "$CP" ]; then
+    skip "x-queen-tenant followed the key, not the host (broker rows: SQL on the cell, none in a single binary; the pops above assert it)"
+  else
+    SHTEN=$(cellpx -c "SELECT string_agg(tenant_id::text, ',' ORDER BY tenant_id::text) FROM queen.queues WHERE name='$SHQ'")
+    SHWANT=$(px -c "SELECT string_agg(broker_tenant_uuid::text, ',' ORDER BY broker_tenant_uuid::text) FROM queen_proxy.clusters WHERE slug IN ('dev','two')")
+    check "x-queen-tenant followed the key, not the host (broker rows)" "$SHWANT" "$SHTEN"
+  fi
 
   # --- scoped listings: content, not just status ----------------------------
   req POST $SH "$KEY_B" /api/v1/push \
@@ -931,7 +982,7 @@ else
   R=$(issue_key "$CID_B" shrev "'read'"); SHREV=${R%%|*}; SHREV_ID=${R#*|}
   SHRV=$(req GET $SH "$SHREV" /api/v1/resources/queues)
   check "shared host, a fresh key of cluster two works" 200 "${SHRV%%|*}"
-  px -c "SELECT queen_proxy.revoke_api_key('$SHREV_ID'::uuid)" >/dev/null
+  revoke_key "$SHREV_ID"
   say "  ...  waiting for the revocation to propagate (NOTIFY, worst case the 30s key TTL)"
   DEADLINE=$((SECONDS+45)); SHRCODE=""
   while [ $SECONDS -lt $DEADLINE ]; do

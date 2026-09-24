@@ -332,6 +332,7 @@ pub fn nack(id: u64, pid: Pid, queue: &str, group: &str, worker: &str) -> Cmd {
 pub fn renew(id: u64, worker: &str, seconds: i32) -> Cmd {
     Cmd::Renew(RenewCommand {
         request_id: rid(id),
+        tenant: None,
         worker: worker.to_string(),
         seconds,
     })

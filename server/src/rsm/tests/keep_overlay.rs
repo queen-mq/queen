@@ -398,6 +398,7 @@ impl Workload {
     fn renew(&mut self) -> Command {
         Command::Renew(RenewCommand {
             request_id: self.id(),
+            tenant: None,
             worker: self.rng.pick(&WORKERS).to_string(),
             seconds: 2,
         })

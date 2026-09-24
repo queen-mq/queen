@@ -464,6 +464,7 @@ fn pop_wildcard(id: u64, queue: &str, group: &str, worker: &str) -> Command {
 fn renew(id: u64, worker: &str) -> Command {
     Command::Renew(RenewCommand {
         request_id: rid(id),
+        tenant: None,
         worker: worker.to_string(),
         seconds: 120,
     })

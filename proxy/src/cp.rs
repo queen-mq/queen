@@ -37,6 +37,7 @@ pub fn router() -> Router<St> {
         .route("/clusters/:slug", get(get_cluster))
         .route("/clusters/:id/overrides", put(set_overrides))
         .route("/clusters/:id/status", put(set_status))
+        .route("/clusters/:id/usage", get(usage))
         .route("/keys", post(issue_key))
         .route("/keys/:id", delete(revoke_key))
 }
@@ -263,5 +264,24 @@ async fn revoke_key(State(st): State<St>, h: HeaderMap, Path(id): Path<Uuid>) ->
     match data::revoke_api_key(&st.store, id).await {
         Ok(()) => (StatusCode::OK, Json(json!({"ok": true}))).into_response(),
         Err(e) => fail(e),
+    }
+}
+
+/// The last hour of a cluster's metered minutes, summed over nodes (what
+/// billing and the smoke's meter check read).
+async fn usage(State(st): State<St>, h: HeaderMap, Path(id): Path<Uuid>) -> Response {
+    if let Err(r) = guard(&h) {
+        return r;
+    }
+    match crate::store::web::usage_minutes(&st.store, id, 1).await {
+        Ok(rows) => {
+            let rows: Vec<Value> = rows
+                .into_iter()
+                .map(|r| json!({"minute": r.minute, "op": r.op, "reqs": r.reqs, "msgs": r.msgs,
+                                "bytes_in": r.bytes_in, "bytes_out": r.bytes_out}))
+                .collect();
+            (StatusCode::OK, Json(json!({"minutes": rows}))).into_response()
+        }
+        Err(e) => crate::errors::json_error(StatusCode::SERVICE_UNAVAILABLE, "unavailable", &format!("{e:?}")),
     }
 }

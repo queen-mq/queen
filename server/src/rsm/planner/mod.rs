@@ -484,6 +484,11 @@ pub struct NackCommand {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RenewCommand {
     pub request_id: RequestId,
+    /// Only this tenant's leases renew (a lease id is a bearer value that can
+    /// leak; the PG engine scopes `log_renew_lease_v1` by `p_tenant`). `None`
+    /// from a node that predates the field: every lease of the worker.
+    #[serde(default)]
+    pub tenant: Option<String>,
     pub worker: String,
     pub seconds: i32,
 }

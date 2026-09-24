@@ -146,6 +146,17 @@ pub(crate) async fn dispatch_push(
     resp
 }
 
+/// A pop's answer: an empty one is a bodiless 204, exactly as on the Postgres
+/// engine (`pop_status` in data.rs), unless the consumer asked for conflation
+/// — its SDK reads a 204 as a broker that cannot conflate.
+fn pop_answer(out: crate::rsm::facade::PopOut, conflate: bool) -> Response {
+    if out.empty && !conflate {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        json(StatusCode::OK, out.body)
+    }
+}
+
 /// `GET /api/v1/pop/queue/:queue` (wildcard). Fields are extracted by the guard
 /// in data.rs (where `PopParams`'s private fields are readable) and passed in.
 #[allow(clippy::too_many_arguments)]
@@ -179,8 +190,9 @@ pub(crate) async fn dispatch_pop(
     // PERF-J: the whole pop handler, pop-only — confirms the empty polling pops
     // are cheap and dominate the mixed `arrival_to_proposed` p50.
     let _t_total = crate::rsm::timing::stamp();
+    let conflate = req.options.conflate;
     let resp = match st.rsm.pop_wildcard(ctx, req).await {
-        Ok(out) => json(StatusCode::OK, out.body),
+        Ok(out) => pop_answer(out, conflate),
         Err(e) => err_response(e),
     };
     if let Some(t) = _t_total {
@@ -221,8 +233,9 @@ pub(crate) async fn dispatch_pop_partition(
         timeout_ms,
         options,
     };
+    let conflate = req.options.conflate;
     match st.rsm.pop_pinned(ctx, req).await {
-        Ok(out) => json(StatusCode::OK, out.body),
+        Ok(out) => pop_answer(out, conflate),
         Err(e) => err_response(e),
     }
 }
@@ -257,8 +270,9 @@ pub(crate) async fn dispatch_pop_discover(
         timeout_ms,
         options,
     };
+    let conflate = req.options.conflate;
     match st.rsm.pop_discover(ctx, req).await {
-        Ok(out) => json(StatusCode::OK, out.body),
+        Ok(out) => pop_answer(out, conflate),
         Err(e) => err_response(e),
     }
 }
