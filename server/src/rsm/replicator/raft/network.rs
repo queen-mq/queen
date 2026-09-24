@@ -110,12 +110,12 @@ impl RaftNetworkV2<TypeConfig> for NoPeer {
 pub(crate) type HttpClient =
     hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, Body>;
 
-/// `QUEEN_RAFT_RPC_POOL`: idle connections kept per peer (default 1024).
+/// `QUEEN_RAFT_RPC_POOL`: idle connections kept per peer (default: no cap).
 fn rpc_pool_from_env() -> usize {
     std::env::var("QUEEN_RAFT_RPC_POOL")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
-        .unwrap_or(1024)
+        .unwrap_or(usize::MAX)
         .max(1)
 }
 
@@ -125,9 +125,14 @@ pub(crate) fn http_client() -> HttpClient {
     connector.set_nodelay(true);
     connector.set_connect_timeout(Some(Duration::from_secs(2)));
     hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
-        // Idle connections kept per peer: `QUEEN_RAFT_RPC_POOL` (default 1024).
-        // A follower serving its own clients forwards hundreds of commands to the
-        // leader at once; with 8 kept idle every other request opened (and then
+        // Idle connections kept per peer: `QUEEN_RAFT_RPC_POOL` (default: no cap,
+        // hyper's own default). A connection the pool will not keep is closed after
+        // its request, and a closed one sits in TIME_WAIT: whenever the forwards in
+        // flight exceed the cap, the churn exhausts the ephemeral ports. Measured
+        // twice: with a cap of 1024, ~2,500 concurrent forwards (the ordered pipeline,
+        // 2,000 single-message producer shards) froze every request for ~35 s out of
+        // each minute. Idle connections cost a socket each, nothing else. Earlier,
+        // with 8 kept idle, every other request opened (and then
         // closed) a connection, and the TIME_WAIT sockets exhausted the ephemeral
         // ports in ~20 s at 100k msg/s — connect() then spun in the kernel on
         // every core of the follower.

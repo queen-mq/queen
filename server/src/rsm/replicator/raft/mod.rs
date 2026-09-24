@@ -194,6 +194,17 @@ pub fn client_offload_from_env() -> bool {
     }
 }
 
+/// `QUEEN_RAFT_FWD_INFLIGHT` (default 4096): calls from this node to the
+/// leader in flight at once (forwarded commands, read indexes). Each holds a
+/// connection, and one destination has ~28k ephemeral ports. Raft's own RPCs
+/// are not gated.
+fn forward_gate() -> &'static tokio::sync::Semaphore {
+    static GATE: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+    GATE.get_or_init(|| {
+        tokio::sync::Semaphore::new(env_u64("QUEEN_RAFT_FWD_INFLIGHT", 4096) as usize)
+    })
+}
+
 impl Shared {
     fn poisoned(&self) -> Option<String> {
         self.poison.lock().expect("poison").clone()
@@ -1177,7 +1188,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
     }
 
     /// POST `body` to the leader's `path` (`/raft/v1/...`) and return the
-    /// answer's bytes.
+    /// answer's bytes. At most `QUEEN_RAFT_FWD_INFLIGHT` calls are in flight.
     async fn call_leader(
         &self,
         path: &str,
@@ -1192,6 +1203,17 @@ impl<S: Store + 'static> RaftReplicator<S> {
             return Err(RemoteError::NoLeader);
         };
         let url = format!("http://{addr}{path}");
+        // Every call holds one HTTP/1 connection to the leader while in flight,
+        // so the calls in flight are the connections open. A push is forwarded
+        // as one call per partition, all at once: 32 pushes of 1,000 new
+        // partitions each put ~26,500 connections on one follower, the
+        // ephemeral ports ran out, and connect() spun on every core of it.
+        // Past the gate a call waits here for a free slot, and the connection
+        // that slot frees is reused.
+        let _slot = match tokio::time::timeout(ttl, forward_gate().acquire()).await {
+            Ok(Ok(slot)) => slot,
+            _ => return Err(RemoteError::Transport("no forward slot within the deadline".into())),
+        };
         network::post(
             client,
             &url,
