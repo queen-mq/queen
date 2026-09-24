@@ -873,6 +873,12 @@ impl Keys {
     /// Either way the outcome is logged (sampled — an outage is one line per
     /// `REVOKED_WARN_EVERY`, not one per request) and never cached: only an
     /// answer the DB actually gave is worth remembering for 60s.
+    /// Forget every cached revocation answer (a session was revoked on some
+    /// node: the replicated revocation epoch moved).
+    pub fn clear_revoked_cache(&self) {
+        self.revoked_cache.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    }
+
     pub async fn is_revoked(&self, db: impl Into<Store>, jti: &str) -> bool {
         let store: Store = db.into();
         if !store.is_some() {

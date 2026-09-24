@@ -272,6 +272,18 @@ async fn async_main(worker_threads: usize) {
 /// reconciler and persister, the revocation sweep, the usage rollup and the
 /// storage-quota pump.
 pub fn start_background(st: &St) {
+    // A revoked session (the nil cluster on the invalidation feed) empties
+    // every node's revocation cache. Weak: the cache owns its hooks.
+    {
+        let weak = Arc::downgrade(st);
+        st.cache.on_invalidate(move |cluster| {
+            if cluster.is_nil() {
+                if let Some(st) = weak.upgrade() {
+                    st.keys.clear_revoked_cache();
+                }
+            }
+        });
+    }
     // Subscribe the queue registry to `queen_proxy_inval` BEFORE the listener
     // starts, so no notification can arrive before the hook is in place. The
     // channel is the cell's one "this cluster is not what you think it is"

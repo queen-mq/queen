@@ -1160,6 +1160,11 @@ pub async fn revoke_session(
             let exp_us = expires_at_unix.saturating_mul(1_000_000);
             let ttl = ((exp_us - now) / 1_000_000 + 1).max(1) as u64;
             let mut b = Batch::default();
+            // The replicated revocation epoch (PLAN_SINGLE_BINARY.md W3): the
+            // nil "cluster" tells every node's invalidation poller to drop its
+            // cached "not revoked" answers, so a logout holds cell-wide within
+            // a poll instead of a cache TTL.
+            b.invalidate(Uuid::nil());
             // ON CONFLICT (jti) DO NOTHING: not required, a double logout is fine.
             b.op(kv::put_op(
                 ns::REVOKED,

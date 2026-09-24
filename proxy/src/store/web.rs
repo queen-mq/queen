@@ -837,35 +837,13 @@ pub async fn revoke_session(store: &Store, jti: &str, exp_secs: i64, user_id: Uu
                 .map_err(pg_err)?;
             Ok(())
         }
-        Store::Kv(kv) => kv_revoke_session(kv.as_ref(), jti, exp_secs, user_id).await,
+        // data.rs's write also moves the replicated revocation epoch, so the
+        // logout holds on every node within a poll, not a cache TTL.
+        Store::Kv(_) => crate::store::data::revoke_session(store, jti, exp_secs, "user", user_id)
+            .await
+            .map_err(WebError::from),
         Store::None => Err(WebError::NotConfigured),
     }
-}
-
-async fn kv_revoke_session(kv: &dyn KvBackend, jti: &str, exp_secs: i64, user_id: Uuid) -> Result<(), WebError> {
-    let jti = jti.trim();
-    if jti.is_empty() {
-        return Err(raised("revoke_session: jti must not be empty"));
-    }
-    let Some(u) = by_id::<UserDoc>(kv, ns::USERS, user_id).await? else {
-        return Err(raised(format!("revoke_session: actor_id must be a known user {user_id}")));
-    };
-    let left = (exp_secs - wall_us() / 1_000_000).max(1) as u64;
-    let doc = RevokedDoc { jti: jti.to_string(), expires_at_us: exp_secs.saturating_mul(1_000_000) };
-    let mut tx = Tx::default();
-    // Absent, NOT required: a double logout keeps the first row and the batch
-    // (the audit row) still commits — `ON CONFLICT (jti) DO NOTHING`.
-    tx.push(kv::put_op(ns::REVOKED, &schema::key(jti), &doc, Expect::Absent, Ttl::Seconds(left), false), None);
-    tx.record(&Audit {
-        tenant_id: u.value.tenant_id,
-        cluster_id: None,
-        actor: "user",
-        actor_id: Some(user_id),
-        action: "session_revoked",
-        target: Some(jti.to_string()),
-        meta: json!({ "expires_at": utc_iso(doc.expires_at_us) }),
-    })?;
-    commit(kv, tx).await
 }
 
 /// `/auth/me`'s own row. `is_operator` is the STORED bit.
