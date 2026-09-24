@@ -1,10 +1,12 @@
 //! Cell-operator account management (`/api/operator/*`).
 //!
 //! These routes are served directly by the proxy because users, tenants and
-//! cluster roles live in pxdb rather than in the broker. Every request first
-//! resolves the acting cluster and requires a live human operator. The acting
-//! cluster supplies the cell boundary: callers can only see tenants with a
-//! cluster on that cell and can only change roles on those clusters.
+//! cluster roles live in the proxy's own store (pxdb, or the broker's KV in
+//! the single binary — every read and write goes through `store::web`)
+//! rather than in the broker's queues. Every request first resolves the
+//! acting cluster and requires a live human operator. The acting cluster
+//! supplies the cell boundary: callers can only see tenants with a cluster on
+//! that cell and can only change roles on those clusters.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,11 +18,11 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio_postgres::error::SqlState;
 use uuid::Uuid;
 
 use crate::errors;
 use crate::state::{ClusterCtx, Principal, St};
+use crate::store::web;
 
 const VALID_ROLES: [&str; 4] = ["admin", "producer", "consumer", "viewer"];
 const VALID_PROVIDERS: [&str; 3] = ["local", "google", "github"];
@@ -46,7 +48,7 @@ async fn operator_ctx(
     if !st.cfg.operator_enabled {
         return Err(route_blocked());
     }
-    if st.db.is_none() {
+    if !st.store.is_some() {
         return Err(errors::json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "not_configured",
@@ -85,167 +87,57 @@ fn route_blocked() -> Response {
     errors::err_404(errors::CODE_ROUTE_BLOCKED, "not available")
 }
 
-async fn cell_for(
-    client: &tokio_postgres::Client,
-    ctx: &ClusterCtx,
-) -> Result<(String, String), Response> {
-    let row = client
-        .query_opt(
-            "SELECT ce.id::text, ce.slug
-               FROM queen_proxy.clusters c
-               JOIN queen_proxy.cells ce ON ce.id = c.cell_id
-              WHERE c.id = $1::text::uuid",
-            &[&ctx.cluster_id.to_string()],
-        )
-        .await
-        .map_err(|e| {
-            tracing::warn!(target: "operator", err = %e, "cell lookup failed");
-            errors::err_502("cell lookup failed")
-        })?;
-    row.map(|r| (r.get(0), r.get(1)))
-        .ok_or_else(|| errors::err_421("acting cluster no longer exists"))
-}
-
 async fn list_users(State(st): State<St>, headers: HeaderMap) -> Response {
     let (ctx, _actor_id) = match operator_ctx(&st, &headers, "/api/operator/users").await {
         Ok(v) => v,
         Err(e) => return e,
     };
-    let pool = st.db.as_ref().expect("operator_ctx guarantees pxdb");
-    let client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "list_users: pool.get failed");
-            return errors::err_502("pxdb unavailable");
-        }
-    };
-    let (cell_id, cell_slug) = match cell_for(&client, &ctx).await {
-        Ok(v) => v,
-        Err(e) => return e,
+    let listing = match web::operator_listing(&st.store, ctx.cluster_id).await {
+        Ok(l) => l,
+        Err(refusal) => return refusal.response(),
     };
 
-    let tenant_rows = match client
-        .query(
-            "SELECT DISTINCT t.id::text, t.slug, t.name
-               FROM queen_proxy.tenants t
-               JOIN queen_proxy.clusters c ON c.tenant_id = t.id
-              WHERE c.cell_id = $1::text::uuid
-              ORDER BY t.slug",
-            &[&cell_id],
-        )
-        .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "tenant list failed");
-            return errors::err_502("tenant list failed");
-        }
-    };
-    let tenants: Vec<Value> = tenant_rows
-        .iter()
-        .map(|r| json!({ "id": r.get::<_, String>(0), "slug": r.get::<_, String>(1), "name": r.get::<_, String>(2) }))
+    let tenants: Vec<Value> = listing
+        .tenants
+        .into_iter()
+        .map(|t| json!({ "id": t.id, "slug": t.slug, "name": t.name }))
         .collect();
-
-    let cluster_rows = match client
-        .query(
-            "SELECT id::text, slug, tenant_id::text, status
-               FROM queen_proxy.clusters
-              WHERE cell_id = $1::text::uuid
-              ORDER BY slug",
-            &[&cell_id],
-        )
-        .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "cluster list failed");
-            return errors::err_502("cluster list failed");
-        }
-    };
-    let clusters: Vec<Value> = cluster_rows
-        .iter()
-        .map(|r| {
-            json!({
-                "id": r.get::<_, String>(0),
-                "slug": r.get::<_, String>(1),
-                "tenant_id": r.get::<_, String>(2),
-                "status": r.get::<_, String>(3),
-            })
-        })
+    let clusters: Vec<Value> = listing
+        .clusters
+        .into_iter()
+        .map(|c| json!({ "id": c.id, "slug": c.slug, "tenant_id": c.tenant_id, "status": c.status }))
         .collect();
-
-    let user_rows = match client
-        .query(
-            "SELECT u.id::text, u.email, u.name, u.tenant_id::text, t.slug,
-                    u.is_operator, (u.password_hash IS NOT NULL),
-                    to_char(u.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
-                    to_char(u.last_login_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
-               FROM queen_proxy.users u
-               JOIN queen_proxy.tenants t ON t.id = u.tenant_id
-              WHERE EXISTS (
-                    SELECT 1 FROM queen_proxy.clusters c
-                     WHERE c.tenant_id = u.tenant_id
-                       AND c.cell_id = $1::text::uuid)
-              ORDER BY t.slug, u.email",
-            &[&cell_id],
-        )
-        .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "user list failed");
-            return errors::err_502("user list failed");
-        }
-    };
 
     let mut user_index = HashMap::new();
-    let mut users: Vec<Value> = user_rows
-        .iter()
+    let mut users: Vec<Value> = listing
+        .users
+        .into_iter()
         .enumerate()
-        .map(|(i, r)| {
-            let id = r.get::<_, String>(0);
-            user_index.insert(id.clone(), i);
+        .map(|(i, u)| {
+            user_index.insert(u.id.clone(), i);
             json!({
-                "id": id,
-                "email": r.get::<_, String>(1),
-                "name": r.get::<_, Option<String>>(2),
-                "tenant_id": r.get::<_, String>(3),
-                "tenant_slug": r.get::<_, String>(4),
-                "is_operator": r.get::<_, bool>(5),
-                "has_local_password": r.get::<_, bool>(6),
-                "created_at": r.get::<_, String>(7),
-                "last_login_at": r.get::<_, Option<String>>(8),
+                "id": u.id,
+                "email": u.email,
+                "name": u.name,
+                "tenant_id": u.tenant_id,
+                "tenant_slug": u.tenant_slug,
+                "is_operator": u.is_operator,
+                "has_local_password": u.has_local_password,
+                "created_at": u.created_at,
+                "last_login_at": u.last_login_at,
                 "roles": [],
             })
         })
         .collect();
 
-    let role_rows = match client
-        .query(
-            "SELECT cr.user_id::text, c.id::text, c.slug, cr.role
-               FROM queen_proxy.cluster_roles cr
-               JOIN queen_proxy.clusters c ON c.id = cr.cluster_id
-              WHERE c.cell_id = $1::text::uuid
-              ORDER BY c.slug",
-            &[&cell_id],
-        )
-        .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "role list failed");
-            return errors::err_502("role list failed");
-        }
-    };
-    for row in role_rows {
-        let user_id = row.get::<_, String>(0);
-        let Some(index) = user_index.get(&user_id).copied() else {
+    for r in listing.roles {
+        let Some(index) = user_index.get(&r.user_id).copied() else {
             continue;
         };
         let role = json!({
-            "cluster_id": row.get::<_, String>(1),
-            "cluster_slug": row.get::<_, String>(2),
-            "role": row.get::<_, String>(3),
+            "cluster_id": r.cluster_id,
+            "cluster_slug": r.cluster_slug,
+            "role": r.role,
         });
         users[index]["roles"]
             .as_array_mut()
@@ -254,7 +146,7 @@ async fn list_users(State(st): State<St>, headers: HeaderMap) -> Response {
     }
 
     json_ok(json!({
-        "cell": { "id": cell_id, "slug": cell_slug },
+        "cell": { "id": listing.cell_id, "slug": listing.cell_slug },
         "tenants": tenants,
         "clusters": clusters,
         "users": users,
@@ -328,106 +220,22 @@ async fn create_user(
         None
     };
 
-    let pool = st.db.as_ref().expect("operator_ctx guarantees pxdb");
-    let mut client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "create_user: pool.get failed");
-            return errors::err_502("pxdb unavailable");
-        }
+    // One transaction: the scope check (tenant + cluster on this cell),
+    // create_user, set_user_name, the first role and the audit row.
+    let new_user = web::NewUser {
+        tenant_id,
+        cluster_id,
+        email: &email,
+        name: &name,
+        provider: &provider,
+        password_hash,
+        role: &role,
     };
-    let (cell_id, _) = match cell_for(&client, &ctx).await {
-        Ok(v) => v,
-        Err(e) => return e,
+    let user_id = match web::operator_create_user(&st.store, ctx.cluster_id, &new_user, actor_id).await {
+        Ok(id) => id,
+        Err(refusal) => return refusal.response(),
     };
-    let tx = match client.transaction().await {
-        Ok(tx) => tx,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "create_user: transaction failed");
-            return errors::err_502("user creation failed");
-        }
-    };
-
-    let scoped = match tx
-        .query_opt(
-            "SELECT 1
-               FROM queen_proxy.clusters
-              WHERE id = $1::text::uuid
-                AND tenant_id = $2::text::uuid
-                AND cell_id = $3::text::uuid",
-            &[&cluster_id.to_string(), &tenant_id.to_string(), &cell_id],
-        )
-        .await
-    {
-        Ok(row) => row.is_some(),
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "create_user: scope check failed");
-            return errors::err_502("cluster lookup failed");
-        }
-    };
-    if !scoped {
-        return errors::err_404("not_found", "tenant and cluster are not on this cell");
-    }
-
-    let user_row = match tx
-        .query_one(
-            "SELECT queen_proxy.create_user($1::text::uuid, $2, $3, $4)::text",
-            &[&tenant_id.to_string(), &email, &password_hash, &provider],
-        )
-        .await
-    {
-        Ok(row) => row,
-        Err(e) if e.code() == Some(&SqlState::UNIQUE_VIOLATION) => {
-            return errors::json_error(
-                StatusCode::CONFLICT,
-                "conflict",
-                "a user with this email already exists",
-            )
-        }
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "create_user failed");
-            return errors::err_502("user creation failed");
-        }
-    };
-    let user_id = user_row.get::<_, String>(0);
-
-    if let Err(e) = tx
-        .execute(
-            "SELECT queen_proxy.set_user_name($1::text::uuid, $2)",
-            &[&user_id, &name],
-        )
-        .await
-    {
-        tracing::warn!(target: "operator", err = %e, "initial user name failed");
-        return errors::err_502("user name could not be saved");
-    }
-
-    if let Err(e) = tx
-        .execute(
-            "SELECT queen_proxy.grant_cluster_role($1::text::uuid, $2, $3)",
-            &[&cluster_id.to_string(), &email, &role],
-        )
-        .await
-    {
-        tracing::warn!(target: "operator", err = %e, "initial role grant failed");
-        return errors::err_502("initial role grant failed");
-    }
-    let meta =
-        json!({ "email": email, "name": name, "provider": provider, "role": role }).to_string();
-    if let Err(e) = tx
-        .execute(
-            "SELECT queen_proxy.record_operation($1::text::uuid, $2::text::uuid, 'user', $3::text::uuid, 'operator_user_created', $4, $5::text::jsonb)",
-            &[&tenant_id.to_string(), &cluster_id.to_string(), &actor_id.to_string(), &user_id, &meta],
-        )
-        .await
-    {
-        tracing::warn!(target: "operator", err = %e, "operator user audit failed");
-        return errors::err_502("user creation audit failed");
-    }
-    if let Err(e) = tx.commit().await {
-        tracing::warn!(target: "operator", err = %e, "create_user commit failed");
-        return errors::err_502("user creation failed");
-    }
+    web::invalidate_local(&st, &[cluster_id]);
 
     json_created(json!({
         "id": user_id,
@@ -463,75 +271,9 @@ async fn update_user(
         Err(msg) => return err_400(msg),
     };
 
-    let pool = st.db.as_ref().expect("operator_ctx guarantees pxdb");
-    let mut client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "update_user: pool.get failed");
-            return errors::err_502("pxdb unavailable");
-        }
-    };
-    let (cell_id, _) = match cell_for(&client, &ctx).await {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    let tx = match client.transaction().await {
-        Ok(tx) => tx,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "update_user: transaction failed");
-            return errors::err_502("user update failed");
-        }
-    };
-    let target = match tx
-        .query_opt(
-            "SELECT u.tenant_id::text, u.name
-               FROM queen_proxy.users u
-              WHERE u.id = $1::text::uuid
-                AND EXISTS (
-                    SELECT 1 FROM queen_proxy.clusters c
-                     WHERE c.tenant_id = u.tenant_id
-                       AND c.cell_id = $2::text::uuid)",
-            &[&user_id.to_string(), &cell_id],
-        )
-        .await
-    {
-        Ok(Some(row)) => row,
-        Ok(None) => return errors::err_404("not_found", "user is not on this cell"),
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "update_user: scope lookup failed");
-            return errors::err_502("user lookup failed");
-        }
-    };
-    let tenant_id = target.get::<_, String>(0);
-    let old_name = target.get::<_, Option<String>>(1);
-    if old_name.as_deref() == Some(name.as_str()) {
-        return json_ok(json!({ "ok": true, "id": user_id, "name": name }));
-    }
-
-    if let Err(e) = tx
-        .execute(
-            "SELECT queen_proxy.set_user_name($1::text::uuid, $2)",
-            &[&user_id.to_string(), &name],
-        )
-        .await
-    {
-        tracing::warn!(target: "operator", err = %e, "set_user_name failed");
-        return errors::err_502("user update failed");
-    }
-    let meta = json!({ "old_name": old_name, "name": name }).to_string();
-    if let Err(e) = tx
-        .execute(
-            "SELECT queen_proxy.record_operation($1::text::uuid, NULL, 'user', $2::text::uuid, 'operator_user_updated', $3, $4::text::jsonb)",
-            &[&tenant_id, &actor_id.to_string(), &user_id.to_string(), &meta],
-        )
-        .await
-    {
-        tracing::warn!(target: "operator", err = %e, "operator user update audit failed");
-        return errors::err_502("user update audit failed");
-    }
-    if let Err(e) = tx.commit().await {
-        tracing::warn!(target: "operator", err = %e, "update_user commit failed");
-        return errors::err_502("user update failed");
+    // Unchanged or renamed, the answer is the same: the name it now has.
+    if let Err(refusal) = web::operator_rename_user(&st.store, ctx.cluster_id, user_id, &name, actor_id).await {
+        return refusal.response();
     }
 
     json_ok(json!({ "ok": true, "id": user_id, "name": name }))
@@ -584,117 +326,24 @@ async fn change_role(
         Err(e) => return e,
     };
 
-    let pool = st.db.as_ref().expect("operator_ctx guarantees pxdb");
-    let mut client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "change_role: pool.get failed");
-            return errors::err_502("pxdb unavailable");
-        }
-    };
-    let (cell_id, _) = match cell_for(&client, &ctx).await {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    let tx = match client.transaction().await {
-        Ok(tx) => tx,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "change_role: transaction failed");
-            return errors::err_502("role change failed");
-        }
-    };
-    if let Err(e) = tx
-        .batch_execute("LOCK TABLE queen_proxy.cluster_roles IN SHARE ROW EXCLUSIVE MODE")
-        .await
+    // The last-admin guard is decided on the same reads the write commits on
+    // (Postgres: LOCK TABLE cluster_roles; KV: version-checked admin seats).
+    if let Err(refusal) = web::operator_change_role(
+        &st.store,
+        ctx.cluster_id,
+        user_id,
+        cluster_id,
+        new_role.as_deref(),
+        would_orphan_admins,
+        actor_id,
+    )
+    .await
     {
-        tracing::warn!(target: "operator", err = %e, "role lock failed");
-        return errors::err_502("role change failed");
-    }
-
-    let standing = match tx
-        .query_opt(
-            "SELECT u.email, u.tenant_id::text, cr.role,
-                    (SELECT count(*) FROM queen_proxy.cluster_roles admins
-                      WHERE admins.cluster_id = c.id AND admins.role = 'admin')
-               FROM queen_proxy.users u
-               JOIN queen_proxy.clusters c
-                 ON c.id = $2::text::uuid AND c.tenant_id = u.tenant_id
-               LEFT JOIN queen_proxy.cluster_roles cr
-                 ON cr.user_id = u.id AND cr.cluster_id = c.id
-              WHERE u.id = $1::text::uuid
-                AND c.cell_id = $3::text::uuid",
-            &[&user_id.to_string(), &cluster_id.to_string(), &cell_id],
-        )
-        .await
-    {
-        Ok(Some(row)) => row,
-        Ok(None) => {
-            return errors::err_404(
-                "not_found",
-                "user and cluster are not on this cell or tenant",
-            )
-        }
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "role standing lookup failed");
-            return errors::err_502("role lookup failed");
-        }
-    };
-    let email = standing.get::<_, String>(0);
-    let tenant_id = standing.get::<_, String>(1);
-    let current_role = standing.get::<_, Option<String>>(2);
-    let admin_count = standing.get::<_, i64>(3);
-
-    if new_role.is_none() && current_role.is_none() {
-        return errors::err_404("not_found", "user has no access to this cluster");
-    }
-    if would_orphan_admins(current_role.as_deref(), admin_count, new_role.as_deref()) {
-        return err_400("cannot remove or demote the last admin of this cluster");
-    }
-
-    let action = if let Some(role) = new_role.as_deref() {
-        if let Err(e) = tx
-            .execute(
-                "SELECT queen_proxy.grant_cluster_role($1::text::uuid, $2, $3)",
-                &[&cluster_id.to_string(), &email, &role],
-            )
-            .await
-        {
-            tracing::warn!(target: "operator", err = %e, "role grant failed");
-            return errors::err_502("role grant failed");
-        }
-        "operator_role_granted"
-    } else {
-        if let Err(e) = tx
-            .execute(
-                "SELECT queen_proxy.revoke_cluster_role($1::text::uuid, $2)",
-                &[&cluster_id.to_string(), &email],
-            )
-            .await
-        {
-            tracing::warn!(target: "operator", err = %e, "role revocation failed");
-            return errors::err_502("role revocation failed");
-        }
-        "operator_role_revoked"
-    };
-
-    let meta =
-        json!({ "email": email, "role": new_role, "previous_role": current_role }).to_string();
-    if let Err(e) = tx
-        .execute(
-            "SELECT queen_proxy.record_operation($1::text::uuid, $2::text::uuid, 'user', $3::text::uuid, $4, $5, $6::text::jsonb)",
-            &[&tenant_id, &cluster_id.to_string(), &actor_id.to_string(), &action, &user_id.to_string(), &meta],
-        )
-        .await
-    {
-        tracing::warn!(target: "operator", err = %e, "operator role audit failed");
-        return errors::err_502("role change audit failed");
-    }
-    if let Err(e) = tx.commit().await {
-        tracing::warn!(target: "operator", err = %e, "role change commit failed");
-        return errors::err_502("role change failed");
+        return refusal.response();
     }
 
     st.keys.invalidate_role(user_id, cluster_id);
+    web::invalidate_local(st, &[cluster_id]);
     json_ok(json!({ "ok": true, "role": new_role }))
 }
 
