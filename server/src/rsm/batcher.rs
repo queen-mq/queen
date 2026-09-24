@@ -238,6 +238,23 @@ impl Default for BatcherConfig {
 /// planning cycle (one fire-order seek) when nothing is due.
 pub const TIMER_TICK_MS_DEFAULT: u64 = 50;
 
+/// `QUEEN_QLOG_RECLAIM` (default on): whether the maintenance tick starts the
+/// node-local queue-log reclaim. Off keeps every sealed file (disk grows); it
+/// exists to measure what the reclaim costs the pipeline.
+fn qlog_reclaim_from_env() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("QUEEN_QLOG_RECLAIM")
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "0" | "false" | "off" | "no"
+        )
+    })
+}
+
 impl BatcherConfig {
     /// Resolve from the environment. Called ONCE at boot by the storage seam
     /// (WP-1.7).
@@ -1834,7 +1851,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
 
         // Node-local: every node of a cluster reclaims its own queue logs, the
         // followers included (the retention floor keeps what the log needs).
-        if self.closing {
+        if self.closing || !qlog_reclaim_from_env() {
             return;
         }
         let Some(qlogs) = self.qlog_reader.clone() else {
@@ -1864,9 +1881,18 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 }
             }
             let _reset = Reset(running);
+            let t0 = std::time::Instant::now();
             let result = crate::obs::panic_policy::core_scope(|| {
                 store.read(|r| crate::rsm::maintenance::reclaim_qlogs(r, &qlogs))
             });
+            let took = t0.elapsed();
+            if took >= Duration::from_millis(20) {
+                tracing::info!(
+                    target: "rsm",
+                    ms = took.as_millis() as u64,
+                    "rsm qlog retention pass"
+                );
+            }
             match result {
                 Ok(n) if n > 0 => tracing::info!(
                     target: "rsm",
