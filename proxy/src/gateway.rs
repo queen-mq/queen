@@ -644,7 +644,14 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
 
     // ----- 5. forward -----
     let op = op_for(&path_only, class);
-    let target: Uri = match format!("{}{}", ctx.cell_base_url.trim_end_matches('/'), path_q).parse()
+    // In the single binary the broker is this process: the router matches on
+    // the path alone (upstream.rs).
+    let base = if st.upstream.in_process() {
+        ""
+    } else {
+        ctx.cell_base_url.trim_end_matches('/')
+    };
+    let target: Uri = match format!("{}{}", base, path_q).parse()
     {
         Ok(u) => u,
         Err(_) => return errors::err_502("bad upstream uri"),
@@ -679,7 +686,7 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
     parts.uri = target;
 
     let upstream_req = Request::from_parts(parts, forward_body);
-    let fut = st.upstream.request(upstream_req);
+    let fut = st.upstream.call(upstream_req);
     let resp = match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), fut).await {
         Err(_) => {
             // Our own 504: record the request but never bill it (M5).
@@ -3577,7 +3584,8 @@ mod tests {
         std::sync::Arc::new(crate::state::AppState {
             cfg,
             db: None,
-            upstream,
+            store: crate::store::Store::None,
+            upstream: crate::upstream::Upstream::Http(upstream),
             cache,
             limits,
             meter,
@@ -3894,7 +3902,8 @@ mod tests {
         std::sync::Arc::new(crate::state::AppState {
             cfg,
             db: None,
-            upstream,
+            store: crate::store::Store::None,
+            upstream: crate::upstream::Upstream::Http(upstream),
             cache,
             limits,
             meter,

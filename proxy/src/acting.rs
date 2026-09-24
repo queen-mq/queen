@@ -652,7 +652,8 @@ mod tests {
         std::sync::Arc::new(crate::state::AppState {
             cfg,
             db: None,
-            upstream,
+            store: crate::store::Store::None,
+            upstream: crate::upstream::Upstream::Http(upstream),
             cache,
             limits,
             meter,

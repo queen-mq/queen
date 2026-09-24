@@ -122,11 +122,15 @@ impl OpClass {
 
 pub struct AppState {
     pub cfg: Config,
-    /// pxdb pool; None in dev-static mode (no persistence, no auth DB).
+    /// pxdb pool; None in dev-static mode (no persistence, no auth DB) AND in
+    /// the single binary, where `store` is the broker's KV. Being retired:
+    /// every read and write moves to `store` (PLAN_SINGLE_BINARY.md W3/W4).
     pub db: Option<deadpool_postgres::Pool>,
-    /// Pooled plaintext HTTP/1.1 client toward cell brokers.
-    pub upstream:
-        hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
+    /// Where the proxy's state lives: its Postgres, or the broker's KV.
+    pub store: crate::store::Store,
+    /// Where the data plane sends a request: a cell broker over HTTP, or the
+    /// broker this proxy runs inside.
+    pub upstream: crate::upstream::Upstream,
     pub cache: crate::cache::ClusterCache,
     pub limits: crate::limits::Limits,
     pub meter: std::sync::Arc<crate::meter::Meter>,

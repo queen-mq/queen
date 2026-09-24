@@ -936,6 +936,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-postgres-rustls",
  "tokio-rustls",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "uuid",
