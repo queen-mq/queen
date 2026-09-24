@@ -893,6 +893,12 @@ impl RaftFacade {
 /// How much earlier than its caller's deadline a follower's forwarded pop stops
 /// claiming (on top of the planner's own reply margin): the leader's answer
 /// still has to cross back, apply on this node, and be rendered.
+///
+/// Capped at a quarter of the time the pop has left. Whole, it swallowed short
+/// long-polls: with the planner's 50 ms a follower pop with `timeout=300` never
+/// claimed at all (the Rust streams runner polls every 300 ms: 4 of 39 tests
+/// passed against a follower, 39 against the leader). A claim this node then
+/// fails to apply in time is handed back (`release_unanswered`).
 const FOLLOWER_POP_MARGIN: Duration = Duration::from_millis(250);
 
 /// A pop's rendered answer, with the autopilot's choice echoed when it made
@@ -2184,16 +2190,19 @@ impl RaftFacade {
             // P1.2: the planner refuses to claim once nobody can receive the answer.
             // A follower serving its own client also has to apply the claim and
             // render it after the leader answers, so it asks the leader to stop
-            // claiming a little earlier (`FOLLOWER_POP_MARGIN`).
-            let mut deadline_us = wall_micros()
-                .saturating_add(ctx.deadline.remaining().as_micros().min(i64::MAX as u128) as i64);
+            // claiming a little earlier (`FOLLOWER_POP_MARGIN`, at most a quarter
+            // of what is left).
+            let remaining = ctx.deadline.remaining();
+            let mut deadline_us =
+                wall_micros().saturating_add(remaining.as_micros().min(i64::MAX as u128) as i64);
             if self.offload
                 && !matches!(
                     self.repl.role(),
                     crate::rsm::replicator::Role::Leader { .. }
                 )
             {
-                deadline_us = deadline_us.saturating_sub(FOLLOWER_POP_MARGIN.as_micros() as i64);
+                let margin = FOLLOWER_POP_MARGIN.min(remaining / 4);
+                deadline_us = deadline_us.saturating_sub(margin.as_micros() as i64);
             }
             let (attempt_budget, attempt_parts) = if auto {
                 let ready = if !options.auto_parts {
