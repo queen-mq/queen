@@ -518,6 +518,15 @@ impl LogStore {
                 .collect();
             (cache_start, from_cache, start)
         };
+        // Entries recovered at open above the applied index sit in the cache in
+        // their payload-free form: enough to apply, not to replicate. A leader
+        // that restarts with an uncommitted entry and wins the next election must
+        // send it to the followers, and the encoder refused it every second
+        // ("a payload-free entry cannot be replicated"): the commit index never
+        // advanced and the cluster was stuck for good (measured: 3 nodes, the
+        // follower down for a snapshot, the leader killed and restarted). Serve
+        // those entries whole, rehydrated from the queue logs like the evicted ones.
+        let from_cache = self.rehydrate_payload_free(from_cache)?;
         if start >= disk_end {
             return Ok(from_cache);
         }
@@ -539,6 +548,46 @@ impl LogStore {
         }
         out.extend(from_cache);
         Ok(out)
+    }
+}
+
+impl LogStore {
+    /// Replace every payload-free `Normal` entry of `entries` (recovered at open)
+    /// by its whole form read back from the queue logs; every other entry is
+    /// returned as it is. Recovered entries are a contiguous run from the start of
+    /// the cache, so one range read covers them.
+    fn rehydrate_payload_free(&self, entries: Vec<REntry>) -> io::Result<Vec<REntry>> {
+        let bare = |e: &REntry| {
+            matches!(&e.payload, EntryPayload::Normal(app) if app.full().is_none() && app.stored_parts().is_none())
+        };
+        let Some(first) = entries.iter().position(bare) else {
+            return Ok(entries);
+        };
+        let last = entries.iter().rposition(bare).expect("a bare entry exists");
+        let (lo, hi) = (entries[first].log_id.index, entries[last].log_id.index);
+        let recs = self
+            .inner
+            .reader
+            .entry_records_range(rsm_index(lo), rsm_index(hi) + 1)?;
+        let mut whole: BTreeMap<u64, REntry> = BTreeMap::new();
+        for (rec, qids) in &recs {
+            let e = rehydrate(&self.inner.reader, rec, qids)?;
+            whole.insert(e.log_id.index, e);
+        }
+        entries
+            .into_iter()
+            .map(|e| {
+                if !bare(&e) {
+                    return Ok(e);
+                }
+                whole.remove(&e.log_id.index).ok_or_else(|| {
+                    io::Error::other(format!(
+                        "raft log entry {} is cached payload-free and not in the queue logs",
+                        e.log_id.index
+                    ))
+                })
+            })
+            .collect()
     }
 }
 
