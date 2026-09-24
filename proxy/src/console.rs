@@ -17,9 +17,10 @@
 //! Host label, or the session's `x-queen-act-cluster` on a SHARED host, and a
 //! Host that names nothing is a 421 (withheld until the credential is valid on
 //! a listener that has shared hosts) — refuse a cluster that is suspended or
-//! being deleted, exactly as the data plane does, require pxdb (503
-//! `{"code":"not_configured"}` in dev-static mode — there is no user/key
-//! table to serve without it), then lift the session cookie into a synthetic
+//! being deleted, exactly as the data plane does, require a store — pxdb, or
+//! the broker's KV in the single binary; every read and write goes through
+//! `store::web` (503 `{"code":"not_configured"}` in dev-static mode — there
+//! is no user/key table to serve without one), then lift the session cookie into a synthetic
 //! `Authorization: Bearer` header when the request has no Authorization
 //! header of its own, and hand off to `auth::authenticate` verbatim — so JWT
 //! verification, the revocation deny-list, and cluster-role resolution
@@ -53,6 +54,7 @@ use crate::auth;
 use crate::errors;
 use crate::limits::PushBlock;
 use crate::state::{ClusterCtx, ClusterStatus, EffectiveLimits, Features, Principal, Role, St};
+use crate::store::web;
 
 /// Scopes an api_keys row (and `queen_proxy.issue_api_key`) accepts — mirrors
 /// the CHECK constraint on `queen_proxy.api_keys.scopes` (001_init.sql).
@@ -151,8 +153,10 @@ async fn console_ctx(st: &St, headers: &HeaderMap) -> Result<(Arc<ClusterCtx>, U
     }
 }
 
+/// A store behind the console: pxdb (standalone) or the broker's KV (single
+/// binary). Only dev-static has none.
 fn require_db(st: &St) -> Result<(), Response> {
-    if st.db.is_some() {
+    if st.store.is_some() {
         Ok(())
     } else {
         Err(err_not_configured())
@@ -174,38 +178,24 @@ fn require_admin(role: Role) -> Result<(), Response> {
 /// The plan identity + monthly counter the cached `ClusterCtx` does not carry:
 /// `EffectiveLimits` is the merged plan+overrides numbers only, with no plan
 /// code and no monthly_msgs_quota (that quota is not a per-request limit, so
-/// the data plane never needed it). `cluster_month_msgs` (004_lifecycle.sql)
-/// reads usage_days plus the not-yet-rolled-up usage_minutes remainder, so
-/// month-to-date never under-counts today.
-const PLAN_USAGE_SQL: &str = "
-    SELECT p.code,
-           p.monthly_msgs_quota,
-           queen_proxy.cluster_month_msgs(c.id, (now() AT TIME ZONE 'UTC')::date),
-           to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM')
-    FROM queen_proxy.clusters c
-    JOIN queen_proxy.plans   p ON p.id = c.plan_id
-    WHERE c.id = $1::text::uuid";
-
+/// the data plane never needed it). Month-to-date reads the rolled-up days
+/// plus the not-yet-rolled-up minutes, so it never under-counts today
+/// (`store::web::cluster_plan_usage`).
 async fn overview(State(st): State<St>, headers: HeaderMap) -> Response {
     let (ctx, _user_id, role) = match console_ctx(&st, &headers).await {
         Ok(v) => v,
         Err(e) => return e,
     };
 
-    let pool = st.db.as_ref().expect("console_ctx guarantees db is configured");
-    let client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(target: "console", err = %e, "overview: pool.get failed");
-            return errors::err_502("pxdb unavailable");
-        }
-    };
-    let cluster_id_str = ctx.cluster_id.to_string();
-    let row = match client.query_opt(PLAN_USAGE_SQL, &[&cluster_id_str]).await {
+    let row = match web::cluster_plan_usage(&st.store, ctx.cluster_id).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             tracing::warn!(target: "console", cluster = %ctx.cluster_id, "overview: cluster row vanished");
             return errors::err_502("cluster not found");
+        }
+        Err(e) if e.is_unavailable() => {
+            tracing::warn!(target: "console", err = %e, "overview: pool.get failed");
+            return errors::err_502("pxdb unavailable");
         }
         Err(e) => {
             tracing::warn!(target: "console", err = %e, "overview: plan/usage query failed");
@@ -221,12 +211,12 @@ async fn overview(State(st): State<St>, headers: HeaderMap) -> Response {
         // of offering them and letting them 403.
         "role": role_str(role),
         "plan": {
-            "code": row.get::<_, String>(0),
-            "monthly_msgs_quota": row.get::<_, Option<i64>>(1),
+            "code": row.code,
+            "monthly_msgs_quota": row.monthly_msgs_quota,
         },
         "usage": {
-            "month": row.get::<_, String>(3),
-            "msgs": row.get::<_, i64>(2),
+            "month": row.month,
+            "msgs": row.msgs,
         },
         // The live quota flags themselves, not a second opinion computed here:
         // these are the same ones gateway.rs turns into a 403 on Produce, so a
@@ -315,14 +305,6 @@ struct UsageQuery {
     hours: Option<i64>,
 }
 
-const USAGE_SQL: &str = "
-    SELECT to_char(minute AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS minute,
-           op_class, reqs, msgs, bytes_in, bytes_out
-    FROM queen_proxy.usage_minutes
-    WHERE cluster_id = $1::text::uuid
-      AND minute >= now() - make_interval(hours => $2::int)
-    ORDER BY minute ASC, op_class ASC";
-
 async fn usage(State(st): State<St>, headers: HeaderMap, Query(q): Query<UsageQuery>) -> Response {
     let (ctx, _user_id, _role) = match console_ctx(&st, &headers).await {
         Ok(v) => v,
@@ -330,18 +312,12 @@ async fn usage(State(st): State<St>, headers: HeaderMap, Query(q): Query<UsageQu
     };
     let hours = clamp_hours(q.hours) as i32;
 
-    // require_db already checked by console_ctx -- safe to unwrap the pool.
-    let pool = st.db.as_ref().expect("console_ctx guarantees db is configured");
-    let client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
+    let rows = match web::usage_minutes(&st.store, ctx.cluster_id, hours).await {
+        Ok(r) => r,
+        Err(e) if e.is_unavailable() => {
             tracing::warn!(target: "console", err = %e, "usage: pool.get failed");
             return errors::err_502("pxdb unavailable");
         }
-    };
-    let cluster_id_str = ctx.cluster_id.to_string();
-    let rows = match client.query(USAGE_SQL, &[&cluster_id_str, &hours]).await {
-        Ok(r) => r,
         Err(e) => {
             tracing::warn!(target: "console", err = %e, "usage: query failed");
             return errors::err_502("usage query failed");
@@ -349,15 +325,15 @@ async fn usage(State(st): State<St>, headers: HeaderMap, Query(q): Query<UsageQu
     };
 
     let items: Vec<Value> = rows
-        .iter()
+        .into_iter()
         .map(|r| {
             json!({
-                "minute": r.get::<_, String>(0),
-                "op": r.get::<_, String>(1),
-                "reqs": r.get::<_, i64>(2),
-                "msgs": r.get::<_, i64>(3),
-                "bytes_in": r.get::<_, i64>(4),
-                "bytes_out": r.get::<_, i64>(5),
+                "minute": r.minute,
+                "op": r.op,
+                "reqs": r.reqs,
+                "msgs": r.msgs,
+                "bytes_in": r.bytes_in,
+                "bytes_out": r.bytes_out,
             })
         })
         .collect();
@@ -374,15 +350,6 @@ fn clamp_hours(hours: Option<i64>) -> i64 {
 // GET /keys, POST /keys, DELETE /keys/:id
 // ---------------------------------------------------------------------------
 
-const LIST_KEYS_SQL: &str = "
-    SELECT id::text, name, scopes,
-           to_char(created_at   AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
-           to_char(last_used_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
-           to_char(revoked_at   AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
-    FROM queen_proxy.api_keys
-    WHERE cluster_id = $1::text::uuid
-    ORDER BY created_at DESC";
-
 async fn list_keys(State(st): State<St>, headers: HeaderMap) -> Response {
     let (ctx, _user_id, role) = match console_ctx(&st, &headers).await {
         Ok(v) => v,
@@ -391,34 +358,29 @@ async fn list_keys(State(st): State<St>, headers: HeaderMap) -> Response {
     if let Err(e) = require_admin(role) {
         return e;
     }
-    let pool = st.db.as_ref().expect("console_ctx guarantees db is configured");
-    let client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
+    let rows = match web::list_cluster_keys(&st.store, ctx.cluster_id).await {
+        Ok(r) => r,
+        Err(e) if e.is_unavailable() => {
             tracing::warn!(target: "console", err = %e, "list_keys: pool.get failed");
             return errors::err_502("pxdb unavailable");
         }
-    };
-    let cluster_id_str = ctx.cluster_id.to_string();
-    let rows = match client.query(LIST_KEYS_SQL, &[&cluster_id_str]).await {
-        Ok(r) => r,
         Err(e) => {
             tracing::warn!(target: "console", err = %e, "list_keys: query failed");
             return errors::err_502("keys query failed");
         }
     };
 
-    // MAI hash: key_hash is never selected above, let alone returned here.
+    // MAI hash: the repository never reads key_hash out, let alone returns it.
     let items: Vec<Value> = rows
-        .iter()
+        .into_iter()
         .map(|r| {
             json!({
-                "id": r.get::<_, String>(0),
-                "name": r.get::<_, String>(1),
-                "scopes": r.get::<_, Vec<String>>(2),
-                "created_at": r.get::<_, String>(3),
-                "last_used_at": r.get::<_, Option<String>>(4),
-                "revoked_at": r.get::<_, Option<String>>(5),
+                "id": r.id,
+                "name": r.name,
+                "scopes": r.scopes,
+                "created_at": r.created_at,
+                "last_used_at": r.last_used_at,
+                "revoked_at": r.revoked_at,
             })
         })
         .collect();
@@ -430,8 +392,6 @@ struct CreateKeyReq {
     name: String,
     scopes: Vec<String>,
 }
-
-const ISSUE_KEY_SQL: &str = "SELECT queen_proxy.issue_api_key($1::text::uuid, $2, $3, $4)::text AS id";
 
 async fn create_key(State(st): State<St>, headers: HeaderMap, Json(body): Json<CreateKeyReq>) -> Response {
     let (ctx, user_id, role) = match console_ctx(&st, &headers).await {
@@ -452,23 +412,17 @@ async fn create_key(State(st): State<St>, headers: HeaderMap, Json(body): Json<C
     let plaintext = auth::generate_api_key("live");
     let hash = auth::key_hash_hex(&plaintext);
 
-    let pool = st.db.as_ref().expect("console_ctx guarantees db is configured");
-    let client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
+    let id = match web::issue_api_key(&st.store, ctx.cluster_id, &name, &hash, &body.scopes).await {
+        Ok(id) => id,
+        Err(e) if e.is_unavailable() => {
             tracing::warn!(target: "console", err = %e, "create_key: pool.get failed");
             return errors::err_502("pxdb unavailable");
         }
-    };
-    let cluster_id_str = ctx.cluster_id.to_string();
-    let row = match client.query_one(ISSUE_KEY_SQL, &[&cluster_id_str, &name, &hash, &body.scopes]).await {
-        Ok(r) => r,
         Err(e) => {
             tracing::warn!(target: "console", err = %e, "create_key: issue_api_key failed");
             return errors::err_502("key creation failed");
         }
     };
-    let id: String = row.get(0);
 
     // issue_api_key() already appends its own operations row (actor =
     // 'control_plane', 002_functions.sql) -- this is the SECOND, deliberately
@@ -486,6 +440,8 @@ async fn create_key(State(st): State<St>, headers: HeaderMap, Json(body): Json<C
         json!({ "name": name, "scopes": body.scopes }),
     )
     .await;
+    // The NOTIFY issue_api_key sends on Postgres, for the single binary.
+    web::invalidate_local(&st, &[ctx.cluster_id]);
 
     json_ok(json!({ "id": id, "key": plaintext }))
 }
@@ -502,29 +458,16 @@ async fn delete_key(State(st): State<St>, headers: HeaderMap, Path(key_id): Path
         return err_400("invalid_request", "malformed key id");
     }
 
-    let pool = st.db.as_ref().expect("console_ctx guarantees db is configured");
-    let client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(target: "console", err = %e, "delete_key: pool.get failed");
-            return errors::err_502("pxdb unavailable");
-        }
-    };
-
     // `queen_proxy.revoke_api_key(uuid)` (002_functions.sql) looks the key up
     // GLOBALLY by id -- it takes no cluster_id and never checks one. Enforce
     // cluster ownership HERE so a console admin on cluster A can never revoke
     // cluster B's key even by guessing/observing its uuid; see report.
-    let cluster_id_str = ctx.cluster_id.to_string();
-    let owned = match client
-        .query_opt(
-            "SELECT 1 FROM queen_proxy.api_keys \
-             WHERE id = $1::text::uuid AND cluster_id = $2::text::uuid AND revoked_at IS NULL",
-            &[&key_id, &cluster_id_str],
-        )
-        .await
-    {
-        Ok(r) => r.is_some(),
+    let owned = match web::api_key_active_on_cluster(&st.store, &key_id, ctx.cluster_id).await {
+        Ok(owned) => owned,
+        Err(e) if e.is_unavailable() => {
+            tracing::warn!(target: "console", err = %e, "delete_key: pool.get failed");
+            return errors::err_502("pxdb unavailable");
+        }
         Err(e) => {
             tracing::warn!(target: "console", err = %e, "delete_key: ownership check failed");
             return errors::err_502("key lookup failed");
@@ -534,10 +477,11 @@ async fn delete_key(State(st): State<St>, headers: HeaderMap, Path(key_id): Path
         return errors::err_404("not_found", "no such active api key on this cluster");
     }
 
-    if let Err(e) = client.execute("SELECT queen_proxy.revoke_api_key($1::text::uuid)", &[&key_id]).await {
+    if let Err(e) = web::revoke_api_key(&st.store, &key_id).await {
         tracing::warn!(target: "console", err = %e, "delete_key: revoke_api_key failed");
         return errors::err_502("key revocation failed");
     }
+    web::invalidate_local(&st, &[ctx.cluster_id]);
     json_ok(json!({ "ok": true }))
 }
 
@@ -570,16 +514,8 @@ fn validate_scopes(scopes: &[String]) -> Result<(), &'static str> {
 // one place that implements them.
 // ---------------------------------------------------------------------------
 
-/// Password hashes are on `queen_proxy.users` — never selected here, never
-/// returned. Same discipline as `LIST_KEYS_SQL` and `key_hash`.
-const LIST_MEMBERS_SQL: &str = "
-    SELECT u.id::text, u.email, cr.role,
-           to_char(cr.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
-    FROM queen_proxy.cluster_roles cr
-    JOIN queen_proxy.users u ON u.id = cr.user_id
-    WHERE cr.cluster_id = $1::text::uuid
-    ORDER BY u.email ASC";
-
+/// Password hashes are on `queen_proxy.users` — never read out here, never
+/// returned. Same discipline as `key_hash`.
 async fn list_members(State(st): State<St>, headers: HeaderMap) -> Response {
     let (ctx, _user_id, role) = match console_ctx(&st, &headers).await {
         Ok(v) => v,
@@ -588,17 +524,12 @@ async fn list_members(State(st): State<St>, headers: HeaderMap) -> Response {
     if let Err(e) = require_admin(role) {
         return e;
     }
-    let pool = st.db.as_ref().expect("console_ctx guarantees db is configured");
-    let client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
+    let rows = match web::list_cluster_members(&st.store, ctx.cluster_id).await {
+        Ok(r) => r,
+        Err(e) if e.is_unavailable() => {
             tracing::warn!(target: "console", err = %e, "list_members: pool.get failed");
             return errors::err_502("pxdb unavailable");
         }
-    };
-    let cluster_id_str = ctx.cluster_id.to_string();
-    let rows = match client.query(LIST_MEMBERS_SQL, &[&cluster_id_str]).await {
-        Ok(r) => r,
         Err(e) => {
             tracing::warn!(target: "console", err = %e, "list_members: query failed");
             return errors::err_502("members query failed");
@@ -606,13 +537,13 @@ async fn list_members(State(st): State<St>, headers: HeaderMap) -> Response {
     };
 
     let items: Vec<Value> = rows
-        .iter()
+        .into_iter()
         .map(|r| {
             json!({
-                "user_id": r.get::<_, String>(0),
-                "email": r.get::<_, String>(1),
-                "role": r.get::<_, String>(2),
-                "granted_at": r.get::<_, String>(3),
+                "user_id": r.user_id,
+                "email": r.email,
+                "role": r.role,
+                "granted_at": r.granted_at,
             })
         })
         .collect();
@@ -629,23 +560,6 @@ struct GrantMemberReq {
 struct RevokeMemberReq {
     email: String,
 }
-
-/// Target user, resolved inside THIS cluster's tenant. `grant_cluster_role`
-/// enforces the same-tenant rule itself and would raise, but resolving here
-/// keeps a mistyped address a 404 instead of a 502, and — the reason this is
-/// not just ergonomics — makes the answer identical whether the address is
-/// unknown or belongs to another tenant, so the console can't be used to probe
-/// for other tenants' users.
-const MEMBER_CANDIDATE_SQL: &str = "
-    SELECT id::text FROM queen_proxy.users WHERE email = $1 AND tenant_id = $2::text::uuid";
-
-/// Current role of one user on this cluster (NULL if none) + how many admins
-/// the cluster has, for the last-admin guard.
-const MEMBER_STANDING_SQL: &str = "
-    SELECT (SELECT role FROM queen_proxy.cluster_roles
-             WHERE cluster_id = $1::text::uuid AND user_id = $2::text::uuid),
-           (SELECT count(*) FROM queen_proxy.cluster_roles
-             WHERE cluster_id = $1::text::uuid AND role = 'admin')";
 
 async fn grant_member(State(st): State<St>, headers: HeaderMap, Json(body): Json<GrantMemberReq>) -> Response {
     let (ctx, user_id, role) = match console_ctx(&st, &headers).await {
@@ -664,28 +578,29 @@ async fn grant_member(State(st): State<St>, headers: HeaderMap, Json(body): Json
         Err(msg) => return err_400("invalid_request", msg),
     };
 
-    let pool = st.db.as_ref().expect("console_ctx guarantees db is configured");
-    let client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
+    // Target user, resolved inside THIS cluster's tenant. `grant_cluster_role`
+    // enforces the same-tenant rule itself and would raise, but resolving here
+    // keeps a mistyped address a 404 instead of a 502, and — the reason this
+    // is not just ergonomics — makes the answer identical whether the address
+    // is unknown or belongs to another tenant, so the console can't be used to
+    // probe for other tenants' users.
+    let target_id = match web::user_id_in_tenant(&st.store, &email, ctx.tenant_id).await {
+        Ok(Some(id)) => id,
+        Ok(None) => return errors::err_404("not_found", "no such user in this cluster's tenant"),
+        Err(e) if e.is_unavailable() => {
             tracing::warn!(target: "console", err = %e, "grant_member: pool.get failed");
             return errors::err_502("pxdb unavailable");
         }
-    };
-
-    let tenant_id_str = ctx.tenant_id.to_string();
-    let target_id = match client.query_opt(MEMBER_CANDIDATE_SQL, &[&email, &tenant_id_str]).await {
-        Ok(Some(r)) => r.get::<_, String>(0),
-        Ok(None) => return errors::err_404("not_found", "no such user in this cluster's tenant"),
         Err(e) => {
             tracing::warn!(target: "console", err = %e, "grant_member: user lookup failed");
             return errors::err_502("user lookup failed");
         }
     };
 
-    let cluster_id_str = ctx.cluster_id.to_string();
-    let standing = match client.query_one(MEMBER_STANDING_SQL, &[&cluster_id_str, &target_id]).await {
-        Ok(r) => (r.get::<_, Option<String>>(0), r.get::<_, i64>(1)),
+    // Current role of the target on this cluster + how many admins it has,
+    // for the last-admin guard.
+    let standing = match web::member_standing(&st.store, ctx.cluster_id, &target_id).await {
+        Ok(s) => s,
         Err(e) => {
             tracing::warn!(target: "console", err = %e, "grant_member: standing query failed");
             return errors::err_502("member lookup failed");
@@ -700,13 +615,7 @@ async fn grant_member(State(st): State<St>, headers: HeaderMap, Json(body): Json
     // parameter and does not know who is calling, so a console admin on
     // cluster A must never be able to name cluster B — the id is never read
     // from the request.
-    if let Err(e) = client
-        .execute(
-            "SELECT queen_proxy.grant_cluster_role($1::text::uuid, $2, $3)",
-            &[&cluster_id_str, &email, &new_role],
-        )
-        .await
-    {
+    if let Err(e) = web::grant_cluster_role(&st.store, ctx.cluster_id, &email, &new_role).await {
         tracing::warn!(target: "console", err = %e, "grant_member: grant_cluster_role failed");
         return errors::err_502("role grant failed");
     }
@@ -724,19 +633,10 @@ async fn grant_member(State(st): State<St>, headers: HeaderMap, Json(body): Json
         json!({ "email": email, "role": new_role }),
     )
     .await;
+    web::invalidate_local(&st, &[ctx.cluster_id]);
 
     json_ok(json!({ "ok": true, "email": email, "role": new_role }))
 }
-
-/// Member standing on THIS cluster, by email — the ownership check that keeps
-/// a revoke inside the caller's own cluster (`cluster_id` is bound, not sent).
-const MEMBER_ON_CLUSTER_SQL: &str = "
-    SELECT u.id::text, cr.role,
-           (SELECT count(*) FROM queen_proxy.cluster_roles
-             WHERE cluster_id = $1::text::uuid AND role = 'admin')
-    FROM queen_proxy.cluster_roles cr
-    JOIN queen_proxy.users u ON u.id = cr.user_id
-    WHERE cr.cluster_id = $1::text::uuid AND u.email = $2";
 
 async fn revoke_member(State(st): State<St>, headers: HeaderMap, Json(body): Json<RevokeMemberReq>) -> Response {
     let (ctx, user_id, role) = match console_ctx(&st, &headers).await {
@@ -751,20 +651,17 @@ async fn revoke_member(State(st): State<St>, headers: HeaderMap, Json(body): Jso
         Err(msg) => return err_400("invalid_request", msg),
     };
 
-    let pool = st.db.as_ref().expect("console_ctx guarantees db is configured");
-    let client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(target: "console", err = %e, "revoke_member: pool.get failed");
-            return errors::err_502("pxdb unavailable");
-        }
-    };
-
-    let cluster_id_str = ctx.cluster_id.to_string();
+    // Member standing on THIS cluster, by email — the ownership check that
+    // keeps a revoke inside the caller's own cluster (the cluster is bound,
+    // not sent).
     let (target_id, current_role, admin_count) =
-        match client.query_opt(MEMBER_ON_CLUSTER_SQL, &[&cluster_id_str, &email]).await {
-            Ok(Some(r)) => (r.get::<_, String>(0), r.get::<_, String>(1), r.get::<_, i64>(2)),
+        match web::member_on_cluster(&st.store, ctx.cluster_id, &email).await {
+            Ok(Some(m)) => m,
             Ok(None) => return errors::err_404("not_found", "no such member on this cluster"),
+            Err(e) if e.is_unavailable() => {
+                tracing::warn!(target: "console", err = %e, "revoke_member: pool.get failed");
+                return errors::err_502("pxdb unavailable");
+            }
             Err(e) => {
                 tracing::warn!(target: "console", err = %e, "revoke_member: member lookup failed");
                 return errors::err_502("member lookup failed");
@@ -775,10 +672,7 @@ async fn revoke_member(State(st): State<St>, headers: HeaderMap, Json(body): Jso
     }
 
     // Bound to this session's cluster for the same reason as the grant above.
-    if let Err(e) = client
-        .execute("SELECT queen_proxy.revoke_cluster_role($1::text::uuid, $2)", &[&cluster_id_str, &email])
-        .await
-    {
+    if let Err(e) = web::revoke_cluster_role(&st.store, ctx.cluster_id, &email).await {
         tracing::warn!(target: "console", err = %e, "revoke_member: revoke_cluster_role failed");
         return errors::err_502("role revocation failed");
     }
@@ -793,6 +687,7 @@ async fn revoke_member(State(st): State<St>, headers: HeaderMap, Json(body): Jso
         json!({ "email": email, "role": current_role }),
     )
     .await;
+    web::invalidate_local(&st, &[ctx.cluster_id]);
 
     json_ok(json!({ "ok": true }))
 }
@@ -836,9 +731,8 @@ fn would_orphan_admins(current_role: Option<&str>, admin_count: i64, new_role: O
 
 /// Append a `queen_proxy.operations` row attributed to the console user (see
 /// `create_key`'s call site for why this exists alongside issue_api_key's own
-/// internal audit row). Mirrors oauth.rs's private `record_op` bind pattern
-/// (`::text::uuid` / `::text::jsonb` casts — no uuid/jsonb tokio-postgres
-/// feature enabled in this crate). Best-effort: never fails the request.
+/// internal audit row). Best-effort: never fails the request (no store, an
+/// unreachable one, or a refused row are skipped silently or warned).
 async fn record_user_op(
     st: &St,
     tenant_id: Uuid,
@@ -848,17 +742,23 @@ async fn record_user_op(
     target: Option<&str>,
     meta: Value,
 ) {
-    let Some(pool) = st.db.as_ref() else { return };
-    let Ok(client) = pool.get().await else { return };
-    let meta_s = meta.to_string();
-    if let Err(e) = client
-        .execute(
-            "SELECT queen_proxy.record_operation($1::text::uuid, $2::text::uuid, 'user', $3::text::uuid, $4, $5, $6::text::jsonb)",
-            &[&tenant_id.to_string(), &cluster_id.to_string(), &actor_id.to_string(), &action, &target, &meta_s],
-        )
-        .await
-    {
-        tracing::warn!(target: "console", action, err = %e, "record_operation failed (non-fatal)");
+    if !st.store.is_some() {
+        return;
+    }
+    let audit = web::Audit {
+        tenant_id,
+        cluster_id: Some(cluster_id),
+        actor: "user",
+        actor_id: Some(actor_id),
+        action,
+        target: target.map(str::to_string),
+        meta,
+    };
+    match web::record_operation(&st.store, &audit).await {
+        Ok(()) => {}
+        // The old path returned silently when the pool had no connection.
+        Err(e) if e.is_unavailable() => {}
+        Err(e) => tracing::warn!(target: "console", action, err = %e, "record_operation failed (non-fatal)"),
     }
 }
 

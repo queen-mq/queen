@@ -42,6 +42,7 @@ use uuid::Uuid;
 use crate::errors;
 use crate::httpget;
 use crate::state::{Role, St};
+use crate::store::web::{self, UserRef};
 
 // ---------------------------------------------------------------------------
 // constants
@@ -115,13 +116,6 @@ struct LoginForm {
     next: Option<String>,
 }
 
-/// A resolved local user + its owning tenant (for session mint + audit).
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct UserRef {
-    user_id: Uuid,
-    tenant_id: Uuid,
-}
-
 // ---------------------------------------------------------------------------
 // local login
 // ---------------------------------------------------------------------------
@@ -150,24 +144,18 @@ async fn login_post(
     }
 }
 
-/// bcrypt-verify a local password. None on: no DB, unknown email, OAuth-only
-/// user (NULL password_hash), or wrong password. Never distinguishes them to
-/// the client (the caller returns a single generic message).
+/// bcrypt-verify a local password. None on: no store, unknown email,
+/// OAuth-only user (NULL password_hash), or wrong password. Never
+/// distinguishes them to the client (the caller returns a single generic
+/// message).
 async fn verify_local(st: &St, email: &str, password: &str) -> Option<UserRef> {
-    let pool = st.db.as_ref()?;
-    let client = pool.get().await.ok()?;
-    let row = client
-        .query_opt(
-            "SELECT id::text, tenant_id::text, password_hash \
-             FROM queen_proxy.users WHERE email = lower($1)",
-            &[&email],
-        )
-        .await
-        .ok()??;
-    let hash: Option<String> = row.get(2);
+    if !st.store.is_some() {
+        return None;
+    }
+    let (user, hash) = web::user_login_by_email(&st.store, email).await.ok()??;
     let hash = hash?;
     if bcrypt::verify(password, &hash).unwrap_or(false) {
-        row_to_userref(&row)
+        Some(user)
     } else {
         None
     }
@@ -202,16 +190,14 @@ async fn establish_session(st: &St, headers: &HeaderMap, user: UserRef, next: &s
 /// previous login audit was: a temporary pxdb failure must not discard a valid
 /// session after password/OAuth verification and token minting succeeded.
 async fn record_login(st: &St, user_id: Uuid) {
-    let Some(pool) = st.db.as_ref() else { return };
-    let Ok(client) = pool.get().await else { return };
-    if let Err(e) = client
-        .execute(
-            "SELECT queen_proxy.record_user_login($1::text::uuid)",
-            &[&user_id.to_string()],
-        )
-        .await
-    {
-        tracing::warn!(target: "oauth", err = %e, "record_user_login failed (non-fatal)");
+    if !st.store.is_some() {
+        return;
+    }
+    match web::record_user_login(&st.store, user_id).await {
+        Ok(()) => {}
+        // The old path returned silently when the pool had no connection.
+        Err(e) if e.is_unavailable() => {}
+        Err(e) => tracing::warn!(target: "oauth", err = %e, "record_user_login failed (non-fatal)"),
     }
 }
 
@@ -237,67 +223,31 @@ async fn logout(State(st): State<St>, headers: HeaderMap) -> Response {
 
 /// Best-effort `queen_proxy.revoke_session(jti, exp, 'user', sub)` for whatever
 /// session the request presents. Every miss is silent by design — no cookie, a
-/// malformed or already-expired one, no pxdb: there is nothing left to revoke
+/// malformed or already-expired one, no store: there is nothing left to revoke
 /// and the logout still has to succeed (a logout that 500s leaves the user
-/// looking logged in). A failed DB call is warned, not surfaced: the cookie is
-/// cleared either way.
+/// looking logged in). A failed store call is warned, not surfaced: the cookie
+/// is cleared either way. On the single binary the deny-list row is
+/// `px.revoked #<jti>`, living exactly as long as the token (store::web).
 async fn revoke_presented_session(st: &St, headers: &HeaderMap) {
     let Some(tok) = presented_session(st, headers) else { return };
     let Ok(claims) = st.keys.verify_jwt_claims(&tok) else { return };
-    let Some(pool) = st.db.as_ref() else { return };
-    let Ok(client) = pool.get().await else {
-        tracing::warn!(target: "oauth", "pxdb unavailable; session cookie cleared but token stays valid until exp");
+    if !st.store.is_some() {
         return;
-    };
-    // revoke_session(p_jti TEXT, p_expires_at TIMESTAMPTZ, p_actor TEXT,
-    // p_actor_id UUID) — exp is the token's own, so the sweep can drop the row
-    // once it expires. `$3::text::uuid` for the same reason as record_op above.
-    match client
-        .execute(
-            "SELECT queen_proxy.revoke_session($1, to_timestamp($2), 'user', $3::text::uuid)",
-            &[&claims.jti, &(claims.exp as f64), &claims.user_id.to_string()],
-        )
-        .await
-    {
-        Ok(_) => {
+    }
+    // exp is the token's own, so the row can go once it expires.
+    match web::revoke_session(&st.store, &claims.jti, claims.exp, claims.user_id).await {
+        Ok(()) => {
             st.keys.note_revoked(&claims.jti);
             tracing::info!(target: "oauth", user_id = %claims.user_id, "session revoked on logout");
+        }
+        Err(e) if e.is_unavailable() => {
+            tracing::warn!(target: "oauth", "pxdb unavailable; session cookie cleared but token stays valid until exp");
         }
         Err(e) => {
             tracing::warn!(target: "oauth", err = %e, "revoke_session failed; cookie cleared but token stays valid until exp");
         }
     }
 }
-
-/// The user's own row. `is_operator` is the STORED bit; whether the capability
-/// is live also depends on this cell's `QUEEN_PROXY_OPERATOR_ENABLED`, and
-/// `/auth/me` reports both so the SPA can tell "you are not an operator" from
-/// "not on this cell" without guessing.
-const ME_USER_SQL: &str = "
-    SELECT u.email, u.is_operator, t.slug
-    FROM queen_proxy.users u
-    JOIN queen_proxy.tenants t ON t.id = u.tenant_id
-    WHERE u.id = $1::text::uuid";
-
-/// The clusters a NORMAL user may select, with the role on each.
-const ME_CLUSTERS_SQL: &str = "
-    SELECT c.id::text, c.slug, cr.role, t.slug, t.id::text, c.status, ce.slug
-    FROM queen_proxy.cluster_roles cr
-    JOIN queen_proxy.clusters c ON c.id = cr.cluster_id
-    JOIN queen_proxy.tenants  t ON t.id = c.tenant_id
-    JOIN queen_proxy.cells    ce ON ce.id = c.cell_id
-    WHERE cr.user_id = $1::text::uuid
-    ORDER BY t.slug, c.slug";
-
-/// The clusters an OPERATOR may select: all of them, as admin — the effective
-/// role acting.rs gives them, membership row or not, so the nav the SPA draws
-/// matches what the data plane will actually allow.
-const ME_CLUSTERS_OPERATOR_SQL: &str = "
-    SELECT c.id::text, c.slug, 'admin'::text, t.slug, t.id::text, c.status, ce.slug
-    FROM queen_proxy.clusters c
-    JOIN queen_proxy.tenants t ON t.id = c.tenant_id
-    JOIN queen_proxy.cells   ce ON ce.id = c.cell_id
-    ORDER BY t.slug, c.slug";
 
 /// Everything the SPA needs to render itself, in one call: who you are,
 /// whether you are an operator (and whether that means anything on this cell),
@@ -339,56 +289,52 @@ async fn me(State(st): State<St>, headers: HeaderMap) -> Response {
     let mut email: Option<String> = None;
     let mut tenant_slug: Option<String> = None;
     let mut clusters: Vec<Value> = Vec::new();
-    if let Some(pool) = st.db.as_ref() {
-        match pool.get().await {
-            Ok(client) => {
-                let uid = claims.user_id.to_string();
-                match client.query_opt(ME_USER_SQL, &[&uid]).await {
-                    Ok(Some(row)) => {
-                        email = Some(row.get::<_, String>(0));
-                        tenant_slug = Some(row.get::<_, String>(2));
-                    }
-                    Ok(None) => {
-                        // The session outlived its user row (deleted, or a dev
-                        // pxdb reset). Nothing to render — send the SPA to
-                        // login rather than an identity with no owner.
-                        return errors::err_401("session no longer valid");
-                    }
-                    Err(e) => tracing::warn!(target: "oauth", err = %e, "me: user lookup failed"),
-                }
-                let (sql, params): (&str, Vec<&(dyn tokio_postgres::types::ToSql + Sync)>) =
-                    if operator_live {
-                        (ME_CLUSTERS_OPERATOR_SQL, vec![])
-                    } else {
-                        (ME_CLUSTERS_SQL, vec![&uid])
-                    };
-                match client.query(sql, &params).await {
-                    Ok(rows) => {
-                        clusters = rows
-                            .iter()
-                            .map(|r| {
-                                json!({
-                                    "id": r.get::<_, String>(0),
-                                    "slug": r.get::<_, String>(1),
-                                    "role": r.get::<_, String>(2),
-                                    "tenant_slug": r.get::<_, String>(3),
-                                    "tenant_id": r.get::<_, String>(4),
-                                    "status": r.get::<_, String>(5),
-                                    // The CELL backing this cluster. A cluster row
-                                    // names both a tenant and a cell, so one
-                                    // selector picks the tenant to scope by AND the
-                                    // broker to forward to — and the UI can label
-                                    // cell-level numbers as such instead of letting
-                                    // them read as the tenant's own.
-                                    "cell_slug": r.get::<_, String>(6),
-                                })
-                            })
-                            .collect();
-                    }
-                    Err(e) => tracing::warn!(target: "oauth", err = %e, "me: cluster list failed"),
-                }
+    if st.store.is_some() {
+        // The store is reached twice (row, then list); an outage is the same
+        // pair of warnings and the same empty answer the one-connection
+        // version gave.
+        match web::me_user(&st.store, claims.user_id).await {
+            Ok(Some(row)) => {
+                email = Some(row.email);
+                tenant_slug = Some(row.tenant_slug);
             }
-            Err(e) => tracing::warn!(target: "oauth", err = %e, "me: pool.get failed"),
+            Ok(None) => {
+                // The session outlived its user row (deleted, or a dev
+                // pxdb reset). Nothing to render — send the SPA to
+                // login rather than an identity with no owner.
+                return errors::err_401("session no longer valid");
+            }
+            Err(e) if e.is_unavailable() => tracing::warn!(target: "oauth", err = %e, "me: pool.get failed"),
+            Err(e) => tracing::warn!(target: "oauth", err = %e, "me: user lookup failed"),
+        }
+        // A live operator selects among ALL clusters, as admin — the
+        // effective role acting.rs gives them, membership row or not, so the
+        // nav the SPA draws matches what the data plane will actually allow.
+        match web::me_clusters(&st.store, claims.user_id, operator_live).await {
+            Ok(rows) => {
+                clusters = rows
+                    .into_iter()
+                    .map(|r| {
+                        json!({
+                            "id": r.id,
+                            "slug": r.slug,
+                            "role": r.role,
+                            "tenant_slug": r.tenant_slug,
+                            "tenant_id": r.tenant_id,
+                            "status": r.status,
+                            // The CELL backing this cluster. A cluster row
+                            // names both a tenant and a cell, so one
+                            // selector picks the tenant to scope by AND the
+                            // broker to forward to — and the UI can label
+                            // cell-level numbers as such instead of letting
+                            // them read as the tenant's own.
+                            "cell_slug": r.cell_slug,
+                        })
+                    })
+                    .collect();
+            }
+            Err(e) if e.is_unavailable() => {}
+            Err(e) => tracing::warn!(target: "oauth", err = %e, "me: cluster list failed"),
         }
     }
 
@@ -1121,7 +1067,11 @@ async fn resolve_oauth(
     provider_id: &str,
     email: &str,
 ) -> Result<UserRef, ResolveErr> {
-    let Some(pool) = st.db.as_ref() else { return Err(ResolveErr::NoDb) };
+    if !st.store.is_some() {
+        return Err(ResolveErr::NoDb);
+    }
+    let store = &st.store;
+    let db = |e: web::WebError| ResolveErr::Db(e.to_string());
     // Verified email is guaranteed by both provider paths (Google
     // email_verified, GitHub primary+verified); pass it through explicitly.
     let email_verified = true;
@@ -1129,9 +1079,9 @@ async fn resolve_oauth(
         .map(|v| v == "true")
         .unwrap_or(false);
 
-    let identity_hit = find_by_identity(pool, provider, provider_id).await.map_err(ResolveErr::Db)?;
+    let identity_hit = web::find_user_by_identity(store, provider, provider_id).await.map_err(db)?;
     let email_hit = if email_verified {
-        find_user_by_email(pool, email).await.map_err(ResolveErr::Db)?
+        web::find_user_by_email(store, email).await.map_err(db)?
     } else {
         None
     };
@@ -1139,7 +1089,7 @@ async fn resolve_oauth(
     match decide_resolution(identity_hit, email_hit, email_verified, autoprovision) {
         Resolution::Login(u) => Ok(u),
         Resolution::Link(u) => {
-            link_identity(pool, &u, provider, provider_id, email).await.map_err(ResolveErr::Db)?;
+            web::link_identity(store, &u, provider, provider_id, email).await.map_err(db)?;
             record_op(
                 st,
                 u.tenant_id,
@@ -1152,9 +1102,7 @@ async fn resolve_oauth(
             Ok(u)
         }
         Resolution::Provision => {
-            let u =
-                provision_user(pool, email, provider, provider_id, &st.cfg.autoprovision_default_role)
-                    .await?;
+            let u = provision_user(st, email, provider, provider_id, &st.cfg.autoprovision_default_role).await?;
             record_op(
                 st,
                 u.tenant_id,
@@ -1170,67 +1118,22 @@ async fn resolve_oauth(
     }
 }
 
-async fn find_by_identity(
-    pool: &deadpool_postgres::Pool,
-    provider: &str,
-    provider_id: &str,
-) -> Result<Option<UserRef>, String> {
-    let client = pool.get().await.map_err(|e| e.to_string())?;
-    let row = client
-        .query_opt(
-            "SELECT u.id::text, u.tenant_id::text \
-             FROM queen_proxy.identities i \
-             JOIN queen_proxy.users u ON u.id = i.user_id \
-             WHERE i.provider = $1 AND i.provider_id = $2",
-            &[&provider, &provider_id],
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(row.as_ref().and_then(row_to_userref))
-}
-
-async fn find_user_by_email(
-    pool: &deadpool_postgres::Pool,
-    email: &str,
-) -> Result<Option<UserRef>, String> {
-    let client = pool.get().await.map_err(|e| e.to_string())?;
-    let row = client
-        .query_opt(
-            "SELECT id::text, tenant_id::text FROM queen_proxy.users WHERE email = lower($1)",
-            &[&email],
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(row.as_ref().and_then(row_to_userref))
-}
-
-async fn link_identity(
-    pool: &deadpool_postgres::Pool,
-    user: &UserRef,
-    provider: &str,
-    provider_id: &str,
-    email: &str,
-) -> Result<(), String> {
-    let client = pool.get().await.map_err(|e| e.to_string())?;
-    client
-        .execute(
-            "INSERT INTO queen_proxy.identities(user_id, provider, provider_id, email, verified) \
-             VALUES ($1::text::uuid, $2, $3, lower($4), true) \
-             ON CONFLICT (provider, provider_id) DO NOTHING",
-            &[&user.user_id.to_string(), &provider, &provider_id, &email],
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 /// Auto-provision a brand-new OAuth user: pick the tenant named by
-/// `QUEEN_PROXY_AUTOPROVISION_TENANT` (slug), then INSERT users + identities in
-/// one transaction. The auth host is the sanctioned direct writer of
-/// users/identities (PLAN §2), so this bypasses the control-plane create_user
-/// SQL function to keep the identity row atomic and record a single `signup` op.
+/// `QUEEN_PROXY_AUTOPROVISION_TENANT` (slug), then write the user, its
+/// identity and the default role on every cluster of that tenant, all or
+/// nothing (`store::web::provision_oauth_user`). The auth host is the
+/// sanctioned direct writer of users/identities (PLAN §2), so this bypasses
+/// the control-plane create_user SQL function to keep the identity row atomic
+/// and record a single `signup` op.
+///
+/// Why every cluster: without the grant the account exists, the login
+/// succeeds, /auth/me returns an empty `clusters` array and every call 403s —
+/// which looks like a broken deploy rather than a permissions decision. It is
+/// the only rule that needs no extra configuration and is correct on a
+/// single-cluster cell, which is what a self-hosted proxy is. `role` is
+/// validated at boot (config::CLUSTER_ROLES), so it cannot violate the CHECK.
 async fn provision_user(
-    pool: &deadpool_postgres::Pool,
+    st: &St,
     email: &str,
     provider: &str,
     provider_id: &str,
@@ -1241,64 +1144,13 @@ async fn provision_user(
         .filter(|s| !s.trim().is_empty());
     let Some(tenant_slug) = tenant_slug else { return Err(ResolveErr::NoTenant) };
 
-    let mut client = pool.get().await.map_err(|e| ResolveErr::Db(e.to_string()))?;
-    let tx = client.transaction().await.map_err(|e| ResolveErr::Db(e.to_string()))?;
-
-    let trow = tx
-        .query_opt("SELECT id::text FROM queen_proxy.tenants WHERE slug = $1", &[&tenant_slug])
-        .await
-        .map_err(|e| ResolveErr::Db(e.to_string()))?;
-    let Some(trow) = trow else { return Err(ResolveErr::NoTenant) };
-    let tenant_id: Uuid = trow
-        .get::<_, String>(0)
-        .parse()
-        .map_err(|_| ResolveErr::Db("tenant id parse".to_string()))?;
-
-    let urow = tx
-        .query_one(
-            "INSERT INTO queen_proxy.users(tenant_id, email) \
-             VALUES ($1::text::uuid, lower($2)) RETURNING id::text",
-            &[&tenant_id.to_string(), &email],
-        )
-        .await
-        .map_err(|e| ResolveErr::Db(e.to_string()))?;
-    let user_id: Uuid = urow
-        .get::<_, String>(0)
-        .parse()
-        .map_err(|_| ResolveErr::Db("user id parse".to_string()))?;
-
-    tx.execute(
-        "INSERT INTO queen_proxy.identities(user_id, provider, provider_id, email, verified) \
-         VALUES ($1::text::uuid, $2, $3, lower($4), true)",
-        &[&user_id.to_string(), &provider, &provider_id, &email],
-    )
-    .await
-    .map_err(|e| ResolveErr::Db(e.to_string()))?;
-
-    // Grant the default role on every cluster of the auto-provision tenant.
-    // Without this the account exists, the login succeeds, /auth/me returns an
-    // empty `clusters` array and every call 403s — which looks like a broken
-    // deploy rather than a permissions decision. In the same transaction as the
-    // user and identity rows on purpose: a half-provisioned human is exactly
-    // the state that is confusing to diagnose.
-    //
-    // "Every cluster of the tenant" is the only rule that needs no extra
-    // configuration and is correct on a single-cluster cell, which is what a
-    // self-hosted proxy is. `role` is validated at boot (config::CLUSTER_ROLES),
-    // so it cannot violate the CHECK here.
-    let granted = tx
-        .execute(
-            "INSERT INTO queen_proxy.cluster_roles(user_id, cluster_id, role) \
-             SELECT $1::text::uuid, c.id, $2 \
-               FROM queen_proxy.clusters c \
-              WHERE c.tenant_id = $3::text::uuid \
-             ON CONFLICT (user_id, cluster_id) DO NOTHING",
-            &[&user_id.to_string(), &default_role, &tenant_id.to_string()],
-        )
-        .await
-        .map_err(|e| ResolveErr::Db(e.to_string()))?;
-
-    tx.commit().await.map_err(|e| ResolveErr::Db(e.to_string()))?;
+    let web::Provisioned { user, granted } =
+        web::provision_oauth_user(&st.store, &tenant_slug, email, provider, provider_id, default_role)
+            .await
+            .map_err(|e| match e {
+                web::ProvisionError::NoTenant => ResolveErr::NoTenant,
+                web::ProvisionError::Db(m) => ResolveErr::Db(m),
+            })?;
 
     if granted == 0 {
         // Not an error: the tenant genuinely has no clusters yet. Say so, because
@@ -1319,12 +1171,12 @@ async fn provision_user(
             "auto-provisioned user granted default role"
         );
     }
-    Ok(UserRef { user_id, tenant_id })
+    Ok(user)
 }
 
-/// Append a `queen_proxy.operations` audit row (actor = user). Best-effort:
-/// no DB, an unavailable pool, or a failed call is skipped, never fatal to the
-/// login it records.
+/// Append a `queen_proxy.operations` audit row (actor = user, no cluster).
+/// Best-effort: no store, an unreachable one, or a refused row is skipped,
+/// never fatal to the login it records.
 async fn record_op(
     st: &St,
     tenant_id: Uuid,
@@ -1333,27 +1185,24 @@ async fn record_op(
     target: Option<String>,
     meta: Value,
 ) {
-    let Some(pool) = st.db.as_ref() else { return };
-    let Ok(client) = pool.get().await else { return };
-    let meta_s = meta.to_string();
-    if let Err(e) = client
-        .execute(
-            // `$5::text::jsonb` (not `$5::jsonb`): the inner ::text pins the bind
-            // param to text so a Rust String serializes, exactly as the ::text::uuid
-            // casts do for the UUID params (tokio-postgres has no jsonb/uuid feature).
-            "SELECT queen_proxy.record_operation($1::text::uuid, NULL, 'user', $2::text::uuid, $3, $4, $5::text::jsonb)",
-            &[&tenant_id.to_string(), &actor_id.to_string(), &action, &target, &meta_s],
-        )
-        .await
-    {
-        tracing::warn!(target: "oauth", action, err = %e, "record_operation failed (non-fatal)");
+    if !st.store.is_some() {
+        return;
     }
-}
-
-fn row_to_userref(row: &tokio_postgres::Row) -> Option<UserRef> {
-    let user_id: Uuid = row.get::<_, String>(0).parse().ok()?;
-    let tenant_id: Uuid = row.get::<_, String>(1).parse().ok()?;
-    Some(UserRef { user_id, tenant_id })
+    let audit = web::Audit {
+        tenant_id,
+        cluster_id: None,
+        actor: "user",
+        actor_id: Some(actor_id),
+        action,
+        target,
+        meta,
+    };
+    match web::record_operation(&st.store, &audit).await {
+        Ok(()) => {}
+        // The old path returned silently when the pool had no connection.
+        Err(e) if e.is_unavailable() => {}
+        Err(e) => tracing::warn!(target: "oauth", action, err = %e, "record_operation failed (non-fatal)"),
+    }
 }
 
 // ---------------------------------------------------------------------------
