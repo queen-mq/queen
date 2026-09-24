@@ -147,7 +147,19 @@ fn every_kind_pins_its_catalogue_version() {
         let bytes = encode_effect(&eff);
         assert_eq!(u16::from_le_bytes([bytes[2], bytes[3]]), *want);
     }
-    let all: Vec<Effect> = all_effect_samples().into_iter().map(|(_, e)| e).collect();
+    let mut all: Vec<Effect> = all_effect_samples().into_iter().map(|(_, e)| e).collect();
+    // Version 2 is one shape of one kind: a cursor row carrying metadata.
+    if let Effect::CursorSet {
+        pid,
+        group,
+        mut row,
+    } = effect_sample(Kind::CursorSet)
+    {
+        row.metadata = "m".into();
+        let v2 = Effect::CursorSet { pid, group, row };
+        assert_eq!(v2.version(), VERSION_2);
+        all.push(v2);
+    }
     assert_eq!(kinds_version_of(&all), SUPPORTED_KINDS_VERSION);
 }
 
@@ -602,6 +614,7 @@ fn every_field_has_its_own_slot() {
         lease_conflated: true,
         delivered: vec![uuid(10)],
         created_at_us: 11,
+        metadata: String::new(),
     };
     let e = Effect::CursorSet {
         pid: 12,

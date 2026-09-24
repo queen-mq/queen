@@ -682,4 +682,62 @@ mod tests {
             assert_eq!(answer(&resp, "orders", 0).committed_offset, 5, "v{version}");
         }
     }
+
+    // ------------------------------------------------- native positions
+
+    /// Against a broker that keeps POSITIONS, a commit is the group's position
+    /// and not a KV row, and it reads back through OffsetFetch exactly as the
+    /// KV one did — both forms, metadata included, a missing one as -1.
+    #[tokio::test]
+    async fn with_native_positions_a_commit_is_a_position_and_reads_back() {
+        let (f, api) = facade_and_queen(&[("orders", 4), ("clicks", 2)]);
+        api.keep_positions();
+        commit(
+            &f,
+            "g",
+            &[
+                ("orders", &[(0, 41, "batch-7"), (3, 12, "")]),
+                ("clicks", &[(1, 5, "")]),
+            ],
+        )
+        .await;
+        assert_eq!(api.position_of("g", "orders", "0"), Some(41));
+        assert_eq!(api.position_of("g", "clicks", "1"), Some(5));
+        assert!(
+            api.kv_keys().iter().all(|k| !k.contains("qk:group:")),
+            "an offset was written as a KV row: {:?}",
+            api.kv_keys()
+        );
+        assert_eq!(
+            api.position_calls.lock().unwrap().len(),
+            1,
+            "one commit is one positions bundle"
+        );
+
+        let resp = handle(&f, &request("g", &[("orders", &[0, 1, 3])]), None).await;
+        assert_eq!(answer(&resp, "orders", 0).committed_offset, 41);
+        assert_eq!(
+            answer(&resp, "orders", 0)
+                .metadata
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            "batch-7"
+        );
+        assert_eq!(answer(&resp, "orders", 1).committed_offset, -1);
+        assert_eq!(answer(&resp, "orders", 1).error_code, 0);
+        assert_eq!(answer(&resp, "orders", 3).committed_offset, 12);
+
+        let all = handle(&f, &request_all("g"), None).await;
+        assert_eq!(all.error_code, 0);
+        assert_eq!(answer(&all, "orders", 0).committed_offset, 41);
+        assert_eq!(answer(&all, "orders", 3).committed_offset, 12);
+        assert_eq!(answer(&all, "clicks", 1).committed_offset, 5);
+
+        // Kafka's "no offset" forgets the position, and reads back as -1.
+        commit(&f, "g", &[("orders", &[(0, -1, "")])]).await;
+        assert_eq!(api.position_of("g", "orders", "0"), None);
+        let resp = handle(&f, &request("g", &[("orders", &[0])]), None).await;
+        assert_eq!(answer(&resp, "orders", 0).committed_offset, -1);
+    }
 }

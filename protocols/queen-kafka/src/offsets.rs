@@ -90,10 +90,31 @@
 //! call's budget; in single mode it is not added at all, so the body on the
 //! wire is byte-identical to what it has always been.
 
+//! ## Or native positions, where the broker keeps them
+//!
+//! In a raft broker that runs this facade in-process, a committed offset is
+//! not a KV row: it is the consumer group's POSITION, the broker's own cursor
+//! row for (group, queue, partition) — `committed = offset - 1`, the metadata
+//! on the row — written through the transaction's `positions` rider and read
+//! back through `POST /api/v1/consumer-groups/positions`
+//! ([`QueenApi::native_positions`]). One commit is then ONE raft entry
+//! whatever its width — no 255-operation ceiling, no chunk per 255 offsets —
+//! and a Kafka group is a Queen consumer group: the console shows its lag, and
+//! a native consumer of the same group name resumes where it committed.
+//!
+//! What changes is WHERE, not WHAT: the functions below keep their signatures
+//! and their per-partition answers, and each one branches on the broker it is
+//! talking to. The fence is still a KV row and still rides at index 0 of the
+//! same bundle — a lost precondition writes no position at all. The group
+//! INDEX (existence and protocol type) stays in KV either way: it is one row
+//! per group, written on a group's first commit, and it is the one thing a
+//! position has no field for. A Kafka commit of `-1` (Kafka's "no offset")
+//! forgets the position, which reads back as the same `-1`.
+
 use kafka_protocol::error::ResponseError;
 
 use crate::cluster::fence::FenceOp;
-use crate::queen::{self, KvOp, QueenApi};
+use crate::queen::{self, KvOp, PositionOp, QueenApi};
 
 /// The KV namespace every offset lives in.
 ///
@@ -151,6 +172,27 @@ const COMMITS_PER_CALL: usize = queen::MAX_KV_OPS_PER_CALL;
 /// operations. Every chunk carries its own: `required: true` aborts the
 /// transaction it is in, and a chunk is a transaction.
 const FENCED_COMMITS_PER_CALL: usize = queen::MAX_KV_OPS_PER_CALL - 1;
+
+/// Positions written in one transaction ([`store`] with native positions).
+///
+/// Far above [`COMMITS_PER_CALL`] because a position is not a KV operation and
+/// the rider has no 256 ceiling, and bounded all the same: one call is one
+/// command on the broker's serial planner (a few µs per position), and a
+/// command that plans for tens of milliseconds holds every push behind it.
+const POSITIONS_PER_CALL: usize = 4096;
+
+/// Positions read in one call (the broker's own ceiling is 65,536).
+const POSITIONS_READ_PER_CALL: usize = 16_384;
+
+/// The longest `group + topic` a position can be kept under, in bytes.
+///
+/// A position is the broker's cursor row, keyed by (tenant, queue, group), and
+/// the broker refuses names past its store key budget —
+/// `tenant + queue + group <= 447` (server/src/rsm/facade/mod.rs,
+/// `NAME_BUDGET_BYTES`) — for the WHOLE bundle it arrives in. So a pair past
+/// it is answered on its own here, before the bundle is built, and the
+/// tenant's share is an allowance: the facade does not see the tenant's name.
+pub const POSITION_NAME_BUDGET: usize = 447 - 64;
 
 /// Keys read in one call to Queen.
 ///
@@ -326,6 +368,46 @@ pub fn parse_key(group: &str, key: &str) -> Option<(String, i32)> {
     Some((unescape(topic), partition.parse().ok()?))
 }
 
+/// The (group, topic, partition) an offset key names, or `None` if it is not
+/// one of ours. Both names are escaped in the key, so neither holds a `:` and
+/// the three fields split unambiguously.
+pub fn parse_full_key(key: &str) -> Option<(String, String, i32)> {
+    let rest = key.strip_prefix(KEY_PREFIX)?;
+    let mut fields = rest.split(':');
+    let (group, topic, partition) = (fields.next()?, fields.next()?, fields.next()?);
+    if fields.next().is_some() {
+        return None;
+    }
+    Some((unescape(group), unescape(topic), partition.parse().ok()?))
+}
+
+/// The position op one committed offset is written as: the topic is the
+/// queue, the partition index is the partition NAME (the spelling produce
+/// writes with), and Kafka's "no offset" forgets the position.
+fn position_op(group: &str, topic: &str, partition: i32, committed: &Committed) -> PositionOp {
+    PositionOp {
+        queue: topic.to_string(),
+        partition: partition.to_string(),
+        group: group.to_string(),
+        offset: (committed.offset >= 0).then_some(committed.offset),
+        metadata: committed.metadata.clone(),
+    }
+}
+
+/// The position ops of a batch of `(key, commit)` pairs, index-aligned: `None`
+/// for a pair that cannot be a position — a key that is not an offset key
+/// (never built by this facade), or names past [`POSITION_NAME_BUDGET`].
+pub fn position_ops(pairs: &[(String, Committed)]) -> Vec<Option<PositionOp>> {
+    pairs
+        .iter()
+        .map(|(key, c)| {
+            parse_full_key(key)
+                .filter(|(group, topic, _)| group.len() + topic.len() <= POSITION_NAME_BUDGET)
+                .map(|(group, topic, partition)| position_op(&group, &topic, partition, c))
+        })
+        .collect()
+}
+
 /// Percent-encode everything outside `[A-Za-z0-9._-]`.
 ///
 /// The set is the one every legal Kafka topic name is already made of, so a
@@ -413,6 +495,9 @@ pub async fn store(
     token: Option<&str>,
     fence: Option<&FenceOp>,
 ) -> Stored {
+    if api.native_positions() {
+        return store_positions(api, pairs, token, fence).await;
+    }
     let per_call = match fence {
         Some(_) => FENCED_COMMITS_PER_CALL,
         None => COMMITS_PER_CALL,
@@ -504,6 +589,85 @@ pub async fn store(
     out
 }
 
+/// [`store`] against a broker that keeps positions: the same answers, one
+/// transaction per [`POSITIONS_PER_CALL`] offsets, each carrying the fence at
+/// KV index 0 when one is given — threaded chunk to chunk exactly as the KV
+/// path threads it, and lost the same way: nothing from that chunk on is
+/// written.
+async fn store_positions(
+    api: &dyn QueenApi,
+    pairs: &[(String, Committed)],
+    token: Option<&str>,
+    fence: Option<&FenceOp>,
+) -> Stored {
+    let mut out = Stored {
+        results: Vec::with_capacity(pairs.len()),
+        ..Stored::default()
+    };
+    let ops = position_ops(pairs);
+    let mut expect = fence.map(|f| f.expect);
+    for (at, chunk) in ops.chunks(POSITIONS_PER_CALL).enumerate() {
+        let positions: Vec<PositionOp> = chunk.iter().flatten().cloned().collect();
+        let kv: Vec<KvOp> = match (fence, expect) {
+            (Some(fence), Some(expect)) => vec![fence.at(expect).kv_op()],
+            _ => Vec::new(),
+        };
+        let started = std::time::Instant::now();
+        let answered = if positions.is_empty() {
+            Ok(Vec::new())
+        } else {
+            api.transaction_positions(&[], &kv, &positions, token).await
+        };
+        crate::stats::COMMIT_KV.record(started.elapsed());
+        match answered {
+            Ok(answers) => {
+                if fence.is_some() && !positions.is_empty() {
+                    match answers.first().map(|a| (a.applied, a.version)) {
+                        Some((Some(true), version)) => {
+                            out.fence_version = Some(version);
+                            expect = Some(version);
+                        }
+                        other => {
+                            let e = queen::Error::Body(format!(
+                                "the fence of a positions bundle answered {other:?}"
+                            ));
+                            out.results.extend(chunk.iter().map(|_| Err(e.clone())));
+                            continue;
+                        }
+                    }
+                }
+                out.results.extend(chunk.iter().map(|op| match op {
+                    Some(_) => Ok(()),
+                    None => Err(queen::Error::Body(format!(
+                        "not storable as a position (the group and topic names exceed \
+                         {POSITION_NAME_BUDGET} bytes together); nothing was written for it"
+                    ))),
+                }));
+            }
+            Err(e @ queen::Error::Precondition { .. }) => {
+                if let queen::Error::Precondition {
+                    reason,
+                    version,
+                    value,
+                    ..
+                } = &e
+                {
+                    out.lost = Some(Lost {
+                        reason: reason.clone(),
+                        version: *version,
+                        value: value.clone(),
+                    });
+                }
+                let unsent = pairs.len() - at * POSITIONS_PER_CALL;
+                out.results.extend((0..unsent).map(|_| Err(e.clone())));
+                return out;
+            }
+            Err(e) => out.results.extend(chunk.iter().map(|_| Err(e.clone()))),
+        }
+    }
+    out
+}
+
 // ------------------------------------------------------------------- reading
 
 /// Read the committed offsets for a known key list, chunked against the read
@@ -513,6 +677,9 @@ pub async fn load(
     keys: &[String],
     token: Option<&str>,
 ) -> queen::Result<Vec<Loaded>> {
+    if api.native_positions() {
+        return load_positions(api, keys, token).await;
+    }
     let mut out = Vec::with_capacity(keys.len());
     for chunk in keys.chunks(KEYS_PER_CALL) {
         let ops = [KvOp::GetMany {
@@ -548,6 +715,47 @@ pub async fn load(
     Ok(out)
 }
 
+/// [`load`] against a broker that keeps positions. The keys of one call name
+/// one group (an OffsetFetch is one group's), and are read in chunks of
+/// [`POSITIONS_READ_PER_CALL`]; a key of another group is read in its own call.
+async fn load_positions(
+    api: &dyn QueenApi,
+    keys: &[String],
+    token: Option<&str>,
+) -> queen::Result<Vec<Loaded>> {
+    let parsed: Vec<Option<(String, String, i32)>> =
+        keys.iter().map(|k| parse_full_key(k)).collect();
+    let mut out: Vec<Loaded> = vec![Loaded::Missing; keys.len()];
+    // The keys by group: (index into `keys`, (queue, partition)).
+    type Wanted = Vec<(usize, (String, String))>;
+    let mut by_group: std::collections::BTreeMap<&str, Wanted> = std::collections::BTreeMap::new();
+    for (i, p) in parsed.iter().enumerate() {
+        if let Some((group, topic, partition)) = p {
+            by_group
+                .entry(group.as_str())
+                .or_default()
+                .push((i, (topic.clone(), partition.to_string())));
+        }
+    }
+    for (group, wanted) in by_group {
+        for chunk in wanted.chunks(POSITIONS_READ_PER_CALL) {
+            let entries: Vec<(String, String)> = chunk.iter().map(|(_, e)| e.clone()).collect();
+            let found = api.positions(group, Some(&entries), token).await?;
+            for ((i, _), position) in chunk.iter().zip(found) {
+                out[*i] = match position.offset {
+                    Some(offset) => Loaded::Found(Committed {
+                        offset,
+                        metadata: position.metadata,
+                        ts: 0,
+                    }),
+                    None => Loaded::Missing,
+                };
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Every committed offset of one group, by prefix, paged.
 ///
 /// This is what OffsetFetch's null-topics form asks for — "everything this
@@ -559,6 +767,28 @@ pub async fn load_group(
     group: &str,
     token: Option<&str>,
 ) -> queen::Result<Vec<(String, i32, Committed)>> {
+    if api.native_positions() {
+        // Every position the group holds. A partition whose NAME is not a
+        // Kafka partition index is a native lane of a group sharing the name,
+        // and is not this group's to answer for.
+        let positions = api.positions(group, None, token).await?;
+        return Ok(positions
+            .into_iter()
+            .filter_map(|p| {
+                let partition: i32 = p.partition.parse().ok()?;
+                let offset = p.offset?;
+                Some((
+                    p.queue,
+                    partition,
+                    Committed {
+                        offset,
+                        metadata: p.metadata,
+                        ts: 0,
+                    },
+                ))
+            })
+            .collect());
+    }
     let prefix = group_prefix(group);
     let mut after: Option<String> = None;
     let mut out = Vec::new();
@@ -776,6 +1006,17 @@ pub async fn delete_group(
     group: &str,
     token: Option<&str>,
 ) -> queen::Result<usize> {
+    if api.native_positions() {
+        // The broker's own group delete: the registration and every position,
+        // on every queue. Then the index row, last, for the reason above.
+        let mut removed = api.forget_group(group, token).await?;
+        if let Some(key) = index_key(group) {
+            let ops = [KvOp::delete(NAMESPACE, &key, None)];
+            let applied = api.kv(&ops, token).await?;
+            removed += applied.iter().filter(|a| a.applied == Some(true)).count();
+        }
+        return Ok(removed);
+    }
     let prefix = group_prefix(group);
     let mut after: Option<String> = None;
     let mut removed = 0usize;
@@ -866,6 +1107,33 @@ pub async fn delete_offsets(
     fence: Option<&FenceOp>,
     token: Option<&str>,
 ) -> Vec<queen::Result<()>> {
+    if api.native_positions() {
+        // Forgetting a position is a position op with no offset: the same
+        // fenced bundle as a commit, with every answer `Ok` when it lands
+        // (forgetting what is not there is not a failure, as above).
+        let forgets: Vec<(String, Committed)> = keys
+            .iter()
+            .map(|k| {
+                (
+                    k.clone(),
+                    Committed {
+                        offset: -1,
+                        metadata: String::new(),
+                        ts: 0,
+                    },
+                )
+            })
+            .collect();
+        let stored = store_positions(api, &forgets, token, fence).await;
+        if stored.lost.is_some() {
+            tracing::debug!(
+                target: "kafka",
+                group,
+                "an offset delete was fenced off; no position was forgotten from that call on"
+            );
+        }
+        return stored.results;
+    }
     // The same two numbers, for the same reason, as the commit path's: the
     // broker refuses a batch of more than `MAX_KV_OPS_PER_CALL` operations
     // outright, and the fence IS one of the operations.
@@ -1666,5 +1934,207 @@ mod tests {
         let tokens = api.tokens.lock().unwrap().clone();
         assert!(!tokens.is_empty());
         assert!(tokens.iter().all(|t| t.as_deref() == Some("tenant-a")));
+    }
+}
+
+/// The same store against a broker that keeps consumer-group POSITIONS
+/// ([`QueenApi::native_positions`]).
+#[cfg(test)]
+mod native_positions {
+    use super::*;
+    use crate::queen::testing::FakeQueen;
+
+    fn commit(offset: i64, metadata: &str) -> Committed {
+        Committed {
+            offset,
+            metadata: metadata.to_string(),
+            ts: 1,
+        }
+    }
+
+    fn pairs(group: &str, topic: &str, offsets: &[(i32, i64)]) -> Vec<(String, Committed)> {
+        offsets
+            .iter()
+            .map(|(p, o)| (key(group, topic, *p).unwrap(), commit(*o, "")))
+            .collect()
+    }
+
+    fn fence(expect: i64) -> FenceOp {
+        FenceOp {
+            key: fence_key("g").unwrap(),
+            value: serde_json::json!({"node": 1}),
+            expect,
+        }
+    }
+
+    fn positions_api() -> std::sync::Arc<FakeQueen> {
+        let api = FakeQueen::with(&[("orders", 4)]);
+        api.keep_positions();
+        api
+    }
+
+    /// The fence rides at KV index 0 of the SAME bundle as the positions, and
+    /// a lost one writes no position at all — the one property that makes a
+    /// stale coordinator harmless.
+    #[tokio::test]
+    async fn a_fenced_commit_carries_its_fence_and_a_lost_one_writes_nothing() {
+        let api = positions_api();
+        let won = store(
+            &*api,
+            &pairs("g", "orders", &[(0, 10), (1, 11)]),
+            None,
+            Some(&fence(0)),
+        )
+        .await;
+        assert!(won.results.iter().all(|r| r.is_ok()), "{:?}", won.results);
+        let version = won.fence_version.expect("the fence version is kept");
+        assert!(won.lost.is_none());
+        let (_, kv) = api.transactions.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(kv.len(), 1, "the fence is the whole KV rider");
+        assert!(
+            matches!(&kv[0], KvOp::Put { key, expect: Some(0), required: true, .. } if key == "qk:fence:g")
+        );
+
+        let stale = store(
+            &*api,
+            &pairs("g", "orders", &[(0, 20), (1, 21)]),
+            None,
+            Some(&fence(version + 1_000)),
+        )
+        .await;
+        assert!(stale.lost.is_some(), "the lost fence is reported");
+        assert!(stale
+            .results
+            .iter()
+            .all(|r| matches!(r, Err(queen::Error::Precondition { .. }))));
+        assert_eq!(
+            api.position_of("g", "orders", "0"),
+            Some(10),
+            "nothing moved"
+        );
+        assert_eq!(api.position_of("g", "orders", "1"), Some(11));
+
+        // The kept version is what the next commit expects, and it lands.
+        let next = store(
+            &*api,
+            &pairs("g", "orders", &[(0, 30)]),
+            None,
+            Some(&fence(version)),
+        )
+        .await;
+        assert!(next.results.iter().all(|r| r.is_ok()), "{:?}", next.results);
+        assert_eq!(api.position_of("g", "orders", "0"), Some(30));
+    }
+
+    /// A wide commit is one bundle per `POSITIONS_PER_CALL` positions — not one
+    /// per 255 — and the fence version is threaded from bundle to bundle.
+    #[tokio::test]
+    async fn a_wide_commit_is_one_bundle_per_positions_call_with_the_fence_threaded() {
+        let api = positions_api();
+        let wide: Vec<(i32, i64)> = (0..(POSITIONS_PER_CALL as i32 * 2 + 5))
+            .map(|p| (p, 7))
+            .collect();
+        let stored = store(&*api, &pairs("g", "orders", &wide), None, Some(&fence(0))).await;
+        assert!(stored.results.iter().all(|r| r.is_ok()));
+        assert_eq!(stored.results.len(), wide.len());
+        let calls = api.position_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 3, "three bundles for {} positions", wide.len());
+        assert_eq!(calls[0].len(), POSITIONS_PER_CALL);
+        let expects: Vec<Option<i64>> = api
+            .transactions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, kv)| match &kv[0] {
+                KvOp::Put { expect, .. } => *expect,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(expects[0], Some(0));
+        assert!(
+            expects[1].is_some_and(|v| v > 0) && expects[2] > expects[1],
+            "each bundle expects the version the one before it wrote: {expects:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn offsets_read_back_as_the_positions_they_are() {
+        let api = positions_api();
+        let mut p = pairs("g", "orders", &[(0, 41), (2, 7)]);
+        p[0].1.metadata = "batch-7".into();
+        store(&*api, &p, None, None).await;
+        let keys = vec![
+            key("g", "orders", 0).unwrap(),
+            key("g", "orders", 1).unwrap(),
+            key("g", "orders", 2).unwrap(),
+        ];
+        let loaded = load(&*api, &keys, None).await.unwrap();
+        assert!(
+            matches!(&loaded[0], Loaded::Found(c) if c.offset == 41 && c.metadata == "batch-7")
+        );
+        assert_eq!(loaded[1], Loaded::Missing);
+        assert!(matches!(&loaded[2], Loaded::Found(c) if c.offset == 7));
+        let all = load_group(&*api, "g", None).await.unwrap();
+        let mut got: Vec<(String, i32, i64)> =
+            all.into_iter().map(|(t, p, c)| (t, p, c.offset)).collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [("orders".to_string(), 0, 41), ("orders".to_string(), 2, 7)]
+        );
+    }
+
+    #[tokio::test]
+    async fn deletes_forget_positions_and_delete_group_takes_the_index_row_too() {
+        let api = positions_api();
+        store(
+            &*api,
+            &pairs("g", "orders", &[(0, 1), (1, 2), (2, 3)]),
+            None,
+            None,
+        )
+        .await;
+        index(&*api, "g", "consumer", None).await.unwrap();
+
+        let forgot =
+            delete_offsets(&*api, "g", &[key("g", "orders", 1).unwrap()], None, None).await;
+        assert!(forgot.iter().all(|r| r.is_ok()), "{forgot:?}");
+        assert_eq!(api.position_of("g", "orders", "1"), None);
+        assert_eq!(
+            api.position_of("g", "orders", "0"),
+            Some(1),
+            "the others stay"
+        );
+
+        let removed = delete_group(&*api, "g", None).await.unwrap();
+        assert_eq!(removed, 2 + 1, "two positions and the index row");
+        assert_eq!(api.forgets.lock().unwrap().as_slice(), ["g".to_string()]);
+        assert_eq!(api.position_of("g", "orders", "0"), None);
+        assert!(api.kv_get(NAMESPACE, &index_key("g").unwrap()).is_none());
+    }
+
+    /// A pair past the name budget is answered on its own; the rest of the
+    /// batch commits.
+    #[tokio::test]
+    async fn a_name_past_the_budget_fails_alone() {
+        let api = positions_api();
+        let long = "g".repeat(POSITION_NAME_BUDGET);
+        let mut batch = pairs("g", "orders", &[(0, 5)]);
+        batch.push((key(&long, "orders", 1).unwrap(), commit(6, "")));
+        let stored = store(&*api, &batch, None, None).await;
+        assert!(stored.results[0].is_ok());
+        assert!(stored.results[1].is_err());
+        assert_eq!(api.position_of("g", "orders", "0"), Some(5));
+    }
+
+    #[test]
+    fn an_offset_key_names_its_group_topic_and_partition() {
+        let k = key("a:b c", "orders.v2", 17).unwrap();
+        assert_eq!(
+            parse_full_key(&k),
+            Some(("a:b c".to_string(), "orders.v2".to_string(), 17))
+        );
+        assert_eq!(parse_full_key("qk:groups:x"), None);
+        assert_eq!(parse_full_key("qk:group:g:t:1:extra"), None);
     }
 }

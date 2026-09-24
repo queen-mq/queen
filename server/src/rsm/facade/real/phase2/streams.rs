@@ -227,6 +227,7 @@ impl RaftFacade {
             timers: Vec::new(),
             extra_effects: extra,
             allow_duplicate: false,
+            positions: Vec::new(),
         });
         let out = match self.submit(&ctx, cmd).await? {
             Reply::Done { outcome, .. } => crate::rsm::batcher::TxnOutcome::from_outcome(&outcome)

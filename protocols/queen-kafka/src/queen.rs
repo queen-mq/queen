@@ -1108,6 +1108,88 @@ pub trait QueenApi: Send + Sync + 'static {
         kv: &'a [KvOp],
         token: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Vec<KvAnswer>>>;
+
+    /// Whether this Queen keeps consumer-group POSITIONS natively — a raft
+    /// broker reached in-process, whose cursor rows are what committed offsets
+    /// become ([`crate::offsets`]). `false` keeps offsets in KV, which is what
+    /// every other broker has. Defaulted, like [`QueenApi::with_host`], so a
+    /// double testing something else says "no" without scripting it.
+    fn native_positions(&self) -> bool {
+        false
+    }
+
+    /// [`QueenApi::transaction`] with a `positions` rider: consumer-group
+    /// positions set or forgotten in the same all-or-nothing bundle as the
+    /// records and the KV operations (a `required` fence among them). The
+    /// answers are the KV ones, exactly as [`QueenApi::transaction`] gives them.
+    ///
+    /// The default serves an empty rider through [`QueenApi::transaction`] and
+    /// refuses a non-empty one: a Queen without positions must never be sent
+    /// a commit it would drop.
+    fn transaction_positions<'a>(
+        &'a self,
+        items: &'a [PushItem],
+        kv: &'a [KvOp],
+        positions: &'a [PositionOp],
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<KvAnswer>>> {
+        if positions.is_empty() {
+            return self.transaction(items, kv, token);
+        }
+        Box::pin(async { Err(Error::Body("this Queen keeps no positions".to_string())) })
+    }
+
+    /// `POST /api/v1/consumer-groups/positions` — where `group` reads: one
+    /// answer per `(queue, partition)` asked, in order, or every position the
+    /// group holds when `entries` is `None`. Linearizable on the broker.
+    fn positions<'a>(
+        &'a self,
+        group: &'a str,
+        entries: Option<&'a [(String, String)]>,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<Position>>> {
+        let _ = (group, entries, token);
+        Box::pin(async { Err(Error::Body("this Queen keeps no positions".to_string())) })
+    }
+
+    /// `DELETE /api/v1/consumer-groups/{group}` — the group, its registration
+    /// and every position it holds, on every queue. Answers how many positions
+    /// were removed.
+    fn forget_group<'a>(
+        &'a self,
+        group: &'a str,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<usize>> {
+        let _ = (group, token);
+        Box::pin(async { Err(Error::Body("this Queen keeps no positions".to_string())) })
+    }
+}
+
+/// One op of the transaction's `positions` rider: where `group` reads
+/// `partition` of `queue` from now on (server/src/rsm/planner/positions.rs).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PositionOp {
+    pub queue: String,
+    pub partition: String,
+    #[serde(rename = "consumerGroup")]
+    pub group: String,
+    /// The next offset the group reads; `None` forgets the position. Always
+    /// on the wire (`null` included): the broker refuses an op without it.
+    pub offset: Option<i64>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub metadata: String,
+}
+
+/// One answer of [`QueenApi::positions`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Position {
+    pub queue: String,
+    pub partition: String,
+    /// The next offset the group reads; `None` where it has no position.
+    #[serde(default)]
+    pub offset: Option<i64>,
+    #[serde(default)]
+    pub metadata: String,
 }
 
 // --------------------------------------------------------------------- client
@@ -1180,6 +1262,9 @@ pub struct HttpQueen {
     /// implies. See [`HttpQueen::with_host`].
     host: Option<String>,
     transport: Transport,
+    /// [`QueenApi::native_positions`]: set by whoever knows the broker behind
+    /// the transport keeps positions ([`HttpQueen::with_native_positions`]).
+    native_positions: bool,
 }
 
 impl HttpQueen {
@@ -1193,6 +1278,7 @@ impl HttpQueen {
         Ok(HttpQueen {
             host: None,
             transport: Transport::Http { base, http },
+            native_positions: false,
         })
     }
 
@@ -1202,7 +1288,16 @@ impl HttpQueen {
         HttpQueen {
             host: None,
             transport: Transport::Local(dispatch),
+            native_positions: false,
         }
+    }
+
+    /// Keep committed offsets as the broker's native consumer-group positions
+    /// ([`QueenApi::native_positions`]). Only the embedding broker can say so:
+    /// it is the one that knows the routes exist behind the transport.
+    pub fn with_native_positions(mut self, on: bool) -> HttpQueen {
+        self.native_positions = on;
+        self
     }
 
     /// Whether this client reaches Queen without leaving the process.
@@ -1675,8 +1770,141 @@ impl QueenApi for HttpQueen {
         Some(Arc::new(HttpQueen {
             host: Some(host.to_string()),
             transport: self.transport.clone(),
+            native_positions: self.native_positions,
         }))
     }
+
+    fn native_positions(&self) -> bool {
+        self.native_positions
+    }
+
+    fn transaction_positions<'a>(
+        &'a self,
+        items: &'a [PushItem],
+        kv: &'a [KvOp],
+        positions: &'a [PositionOp],
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<KvAnswer>>> {
+        if positions.is_empty() {
+            return self.transaction(items, kv, token);
+        }
+        Box::pin(async move {
+            let operations: Vec<TxnOperation<'_>> = if items.is_empty() {
+                Vec::new()
+            } else {
+                vec![TxnOperation::Push { items }]
+            };
+            let payload = serde_json::to_string(&PositionsTransactionBody {
+                operations: &operations,
+                kv,
+                positions,
+            })
+            .map_err(|e| Error::Body(format!("cannot serialize the transaction body: {e}")))?;
+            let body = self
+                .call("POST", "/api/v1/transaction", token, Some(payload), None)
+                .await?;
+            align_transaction_results_with(&body, items.len(), kv.len(), positions.len())
+        })
+    }
+
+    fn positions<'a>(
+        &'a self,
+        group: &'a str,
+        entries: Option<&'a [(String, String)]>,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<Position>>> {
+        Box::pin(async move {
+            let payload = match entries {
+                Some(entries) => serde_json::json!({
+                    "consumerGroup": group,
+                    "entries": entries
+                        .iter()
+                        .map(|(q, p)| serde_json::json!({"queue": q, "partition": p}))
+                        .collect::<Vec<_>>(),
+                }),
+                None => serde_json::json!({ "consumerGroup": group }),
+            };
+            let body = self
+                .call(
+                    "POST",
+                    "/api/v1/consumer-groups/positions",
+                    token,
+                    Some(payload.to_string()),
+                    None,
+                )
+                .await?;
+            #[derive(Deserialize)]
+            struct Answer {
+                #[serde(default)]
+                entries: Vec<Position>,
+            }
+            let answer: Answer =
+                serde_json::from_str(&body).map_err(|e| Error::Body(e.to_string()))?;
+            if let Some(asked) = entries {
+                // One answer per entry, in order, or none of them is trusted:
+                // a short answer shifted by one would hand a partition another
+                // one's offset.
+                let aligned = answer.entries.len() == asked.len()
+                    && answer
+                        .entries
+                        .iter()
+                        .zip(asked)
+                        .all(|(a, (q, p))| &a.queue == q && &a.partition == p);
+                if !aligned {
+                    return Err(Error::Body(format!(
+                        "positions answered {} entries for {} asked, or out of order",
+                        answer.entries.len(),
+                        asked.len()
+                    )));
+                }
+            }
+            Ok(answer.entries)
+        })
+    }
+
+    fn forget_group<'a>(
+        &'a self,
+        group: &'a str,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<usize>> {
+        Box::pin(async move {
+            let path = format!(
+                "/api/v1/consumer-groups/{}?deleteMetadata=true",
+                percent_encode_segment(group)
+            );
+            let body = self.call("DELETE", &path, token, None, None).await?;
+            let v: serde_json::Value =
+                serde_json::from_str(&body).map_err(|e| Error::Body(e.to_string()))?;
+            Ok(v.get("deletedPartitions")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as usize)
+        })
+    }
+}
+
+/// Percent-encode everything but RFC 3986's unreserved set: a group id is any
+/// string, and the broker decodes the path segment it is put in.
+fn percent_encode_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// The transaction body with a `positions` rider — [`TransactionBody`] plus
+/// one top-level array, never sent empty (an empty rider goes through
+/// [`QueenApi::transaction`], byte-identical to what it always was).
+#[derive(Serialize)]
+struct PositionsTransactionBody<'a> {
+    operations: &'a [TxnOperation<'a>],
+    kv: &'a [KvOp],
+    positions: &'a [PositionOp],
 }
 
 /// The KV request body. Borrowed, like [`PushBody`] and [`FetchBody`].
@@ -1778,6 +2006,18 @@ struct TransactionResponseBody {
 ///     as a successful gate is precisely the silent misalignment the route's
 ///     own count guard exists for.
 fn align_transaction_results(body: &str, items: usize, kv: usize) -> Result<Vec<KvAnswer>> {
+    align_transaction_results_with(body, items, kv, 0)
+}
+
+/// [`align_transaction_results`] for a bundle that also carried `positions`
+/// position ops: each must come back exactly once as a `position` rider
+/// result, and none may when none was sent.
+fn align_transaction_results_with(
+    body: &str,
+    items: usize,
+    kv: usize,
+    positions: usize,
+) -> Result<Vec<KvAnswer>> {
     let parsed: TransactionResponseBody =
         serde_json::from_str(body).map_err(|e| Error::Body(e.to_string()))?;
     if !parsed.success {
@@ -1798,6 +2038,7 @@ fn align_transaction_results(body: &str, items: usize, kv: usize) -> Result<Vec<
     }
     let mut out: Vec<Option<KvAnswer>> = (0..kv).map(|_| None).collect();
     let mut echoes = 0usize;
+    let mut placed = 0usize;
     for r in parsed.results {
         match r.op_index {
             // A push echo. Nothing reads it but its own success flag: an
@@ -1823,6 +2064,14 @@ fn align_transaction_results(body: &str, items: usize, kv: usize) -> Result<Vec<
                 }
                 *slot = Some(KvAnswer { index: at, ..r.kv });
             }
+            Some(at) if r.kind == "position" && at < positions => {
+                if !r.success {
+                    return Err(Error::Body(format!(
+                        "the transaction committed but position {at} reports success=false"
+                    )));
+                }
+                placed += 1;
+            }
             // A rider kind this facade did not send. Named rather than ignored.
             Some(at) => {
                 return Err(Error::Body(format!(
@@ -1835,6 +2084,11 @@ fn align_transaction_results(body: &str, items: usize, kv: usize) -> Result<Vec<
     if echoes != items {
         return Err(Error::Body(format!(
             "the transaction answered {echoes} push results for {items} records"
+        )));
+    }
+    if placed != positions {
+        return Err(Error::Body(format!(
+            "the transaction answered {placed} position results for {positions} sent"
         )));
     }
     out.into_iter()
@@ -2669,6 +2923,10 @@ pub mod testing {
     use std::sync::Mutex;
 
     /// A [`QueenApi`] that answers from a script and counts what it was asked.
+    /// The positions a [`FakeQueen`] keeps: (group, queue, partition) →
+    /// (next offset, metadata).
+    pub type PositionRows = std::collections::BTreeMap<(String, String, String), (i64, String)>;
+
     pub struct FakeQueen {
         pub queues: Mutex<Vec<Queue>>,
         pub lists: AtomicUsize,
@@ -2749,6 +3007,17 @@ pub mod testing {
         /// EndTxn verdict table needs a transport failure and a 5xx, which
         /// `fail` cannot express separately.
         pub transaction_error: Mutex<Option<Error>>,
+        /// [`QueenApi::native_positions`]: off unless a test turns it on
+        /// ([`FakeQueen::keep_positions`]).
+        pub native: std::sync::atomic::AtomicBool,
+        /// The positions this Queen keeps, per (group, queue, partition): the
+        /// next offset and the metadata — the broker's cursor rows, behaving
+        /// like them: set and forgotten only by a transaction that committed.
+        pub positions: Mutex<PositionRows>,
+        /// Every positions rider that reached the broker, in call order.
+        pub position_calls: Mutex<Vec<Vec<PositionOp>>>,
+        /// Every `forget_group`, in call order.
+        pub forgets: Mutex<Vec<String>>,
         /// The KV store itself, per (namespace, key) — the same "behave like the
         /// thing, not like a script" as `logs`, so a commit and the fetch that
         /// reads it back can be tested against each other.
@@ -2880,6 +3149,10 @@ pub mod testing {
                 kv_delay: Mutex::new(None),
                 transactions: Mutex::new(Vec::new()),
                 transaction_error: Mutex::new(None),
+                native: std::sync::atomic::AtomicBool::new(false),
+                positions: Mutex::new(std::collections::BTreeMap::new()),
+                position_calls: Mutex::new(Vec::new()),
+                forgets: Mutex::new(Vec::new()),
                 kv: Mutex::new(std::collections::BTreeMap::new()),
                 kv_version: std::sync::atomic::AtomicI64::new(1_000),
                 kv_read_rows: Mutex::new(None),
@@ -3226,6 +3499,41 @@ pub mod testing {
         ) -> BoxFuture<'a, Result<Vec<KvAnswer>>> {
             self.note();
             self.inner.transaction(items, kv, token)
+        }
+
+        fn native_positions(&self) -> bool {
+            self.inner.native_positions()
+        }
+
+        fn transaction_positions<'a>(
+            &'a self,
+            items: &'a [PushItem],
+            kv: &'a [KvOp],
+            positions: &'a [PositionOp],
+            token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Vec<KvAnswer>>> {
+            self.note();
+            self.inner
+                .transaction_positions(items, kv, positions, token)
+        }
+
+        fn positions<'a>(
+            &'a self,
+            group: &'a str,
+            entries: Option<&'a [(String, String)]>,
+            token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Vec<Position>>> {
+            self.note();
+            self.inner.positions(group, entries, token)
+        }
+
+        fn forget_group<'a>(
+            &'a self,
+            group: &'a str,
+            token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<usize>> {
+            self.note();
+            self.inner.forget_group(group, token)
         }
 
         fn with_host(&self, host: &str) -> Option<Arc<dyn QueenApi>> {
@@ -3588,47 +3896,177 @@ pub mod testing {
             kv_ops: &'a [KvOp],
             token: Option<&'a str>,
         ) -> BoxFuture<'a, Result<Vec<KvAnswer>>> {
+            Box::pin(self.transact(items, kv_ops, &[], token))
+        }
+
+        fn native_positions(&self) -> bool {
+            self.native.load(Ordering::SeqCst)
+        }
+
+        fn transaction_positions<'a>(
+            &'a self,
+            items: &'a [PushItem],
+            kv_ops: &'a [KvOp],
+            positions: &'a [PositionOp],
+            token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Vec<KvAnswer>>> {
+            Box::pin(self.transact(items, kv_ops, positions, token))
+        }
+
+        fn positions<'a>(
+            &'a self,
+            group: &'a str,
+            entries: Option<&'a [(String, String)]>,
+            token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Vec<Position>>> {
             Box::pin(async move {
                 self.tokens.lock().unwrap().push(token.map(str::to_string));
-                self.transactions
-                    .lock()
-                    .unwrap()
-                    .push((items.to_vec(), kv_ops.to_vec()));
-                if let Some(e) = self.transaction_error.lock().unwrap().take() {
-                    return Err(e);
-                }
                 if let Some(e) = self.fail.lock().unwrap().clone() {
                     return Err(Error::Transport(e));
                 }
-                // The WIRE's ceilings, which are tighter than `/api/v1/kv`'s
-                // and are refused with the whole bundle
-                // (server/src/handlers/data.rs, `txn_check_kv`).
-                if kv_ops.len() > WIRE_KV_MAX_OPS {
-                    return Err(Error::status(
-                        400,
-                        format!("{} kv operations in one transaction", kv_ops.len()),
-                    ));
-                }
-                let keys: usize = kv_ops.iter().map(KvOp::keys).sum();
-                if keys > WIRE_KV_MAX_KEYS {
-                    return Err(Error::status(
-                        400,
-                        format!("{keys} kv keys in one transaction"),
-                    ));
-                }
-                let mut kv = self.kv.lock().unwrap();
-                let mut logs = self.logs.lock().unwrap();
-                let mut working = kv.clone();
-                let answers = self.apply_kv(kv_ops, &mut working)?;
-                for it in items {
-                    let lane = logs
-                        .entry((it.queue.clone(), it.partition.clone()))
-                        .or_default();
-                    lane.payloads.push(it.payload.clone());
-                }
-                *kv = working;
-                Ok(answers)
+                let held = self.positions.lock().unwrap();
+                let answer = |queue: &str, partition: &str| {
+                    let found =
+                        held.get(&(group.to_string(), queue.to_string(), partition.to_string()));
+                    Position {
+                        queue: queue.to_string(),
+                        partition: partition.to_string(),
+                        offset: found.map(|(o, _)| *o),
+                        metadata: found.map(|(_, m)| m.clone()).unwrap_or_default(),
+                    }
+                };
+                Ok(match entries {
+                    Some(asked) => asked.iter().map(|(q, p)| answer(q, p)).collect(),
+                    None => held
+                        .keys()
+                        .filter(|(g, _, _)| g == group)
+                        .map(|(_, q, p)| answer(q, p))
+                        .collect(),
+                })
             })
+        }
+
+        fn forget_group<'a>(
+            &'a self,
+            group: &'a str,
+            token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<usize>> {
+            Box::pin(async move {
+                self.tokens.lock().unwrap().push(token.map(str::to_string));
+                if let Some(e) = self.fail.lock().unwrap().clone() {
+                    return Err(Error::Transport(e));
+                }
+                self.forgets.lock().unwrap().push(group.to_string());
+                let mut held = self.positions.lock().unwrap();
+                let before = held.len();
+                held.retain(|(g, _, _), _| g != group);
+                Ok(before - held.len())
+            })
+        }
+    }
+
+    impl FakeQueen {
+        /// Keep committed offsets as positions from now on, the way an
+        /// in-process raft broker does ([`QueenApi::native_positions`]).
+        pub fn keep_positions(&self) {
+            self.native.store(true, Ordering::SeqCst);
+        }
+
+        /// The position `group` holds on `queue`/`partition`: the next offset.
+        pub fn position_of(&self, group: &str, queue: &str, partition: &str) -> Option<i64> {
+            self.positions
+                .lock()
+                .unwrap()
+                .get(&(group.to_string(), queue.to_string(), partition.to_string()))
+                .map(|(o, _)| *o)
+        }
+
+        /// One transaction, positions rider included — the broker's
+        /// all-or-nothing: the KV operations are applied to a working copy
+        /// first, and the records and positions land only if every one of them
+        /// did.
+        async fn transact(
+            &self,
+            items: &[PushItem],
+            kv_ops: &[KvOp],
+            positions: &[PositionOp],
+            token: Option<&str>,
+        ) -> Result<Vec<KvAnswer>> {
+            self.tokens.lock().unwrap().push(token.map(str::to_string));
+            self.transactions
+                .lock()
+                .unwrap()
+                .push((items.to_vec(), kv_ops.to_vec()));
+            if !positions.is_empty() {
+                // A commit's write takes the time a KV write does in these
+                // tests (`kv_delay`): it is the same raft round trip.
+                let delay = *self.kv_delay.lock().unwrap();
+                if let Some(d) = delay {
+                    tokio::time::sleep(d).await;
+                }
+                self.position_calls.lock().unwrap().push(positions.to_vec());
+            }
+            if let Some(e) = self.transaction_error.lock().unwrap().take() {
+                return Err(e);
+            }
+            if let Some(e) = self.fail.lock().unwrap().clone() {
+                return Err(Error::Transport(e));
+            }
+            // The WIRE's ceilings, which are tighter than `/api/v1/kv`'s
+            // and are refused with the whole bundle
+            // (server/src/handlers/data.rs, `txn_check_kv`).
+            if kv_ops.len() > WIRE_KV_MAX_OPS {
+                return Err(Error::status(
+                    400,
+                    format!("{} kv operations in one transaction", kv_ops.len()),
+                ));
+            }
+            let keys: usize = kv_ops.iter().map(KvOp::keys).sum();
+            if keys > WIRE_KV_MAX_KEYS {
+                return Err(Error::status(
+                    400,
+                    format!("{keys} kv keys in one transaction"),
+                ));
+            }
+            // A position on a queue that does not exist refuses the bundle
+            // (the planner's `queue_not_found`).
+            {
+                let queues = self.queues.lock().unwrap();
+                if let Some(p) = positions
+                    .iter()
+                    .find(|p| !queues.iter().any(|q| q.name == p.queue))
+                {
+                    return Err(Error::Body(format!(
+                        "the transaction answered success=false, reason=queue_not_found: queue {} \
+                         does not exist",
+                        p.queue
+                    )));
+                }
+            }
+            let mut kv = self.kv.lock().unwrap();
+            let mut logs = self.logs.lock().unwrap();
+            let mut working = kv.clone();
+            let answers = self.apply_kv(kv_ops, &mut working)?;
+            for it in items {
+                let lane = logs
+                    .entry((it.queue.clone(), it.partition.clone()))
+                    .or_default();
+                lane.payloads.push(it.payload.clone());
+            }
+            *kv = working;
+            let mut held = self.positions.lock().unwrap();
+            for p in positions {
+                let at = (p.group.clone(), p.queue.clone(), p.partition.clone());
+                match p.offset {
+                    Some(o) => {
+                        held.insert(at, (o, p.metadata.clone()));
+                    }
+                    None => {
+                        held.remove(&at);
+                    }
+                }
+            }
+            Ok(answers)
         }
     }
 

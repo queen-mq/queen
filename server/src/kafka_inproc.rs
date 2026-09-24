@@ -184,6 +184,26 @@ impl LocalDispatch for RouterDispatch {
     }
 }
 
+/// `QUEEN_KAFKA_OFFSET_STORE`: where the IN-PROCESS facade keeps committed
+/// offsets. `positions` (the default) — this raft broker's own consumer-group
+/// positions, one raft entry per commit batch whatever its width, the group
+/// visible and shared as a Queen consumer group. `kv` — the KV rows
+/// (`qk:group:*`) every other broker keeps them in, which is also what an
+/// explicit `QUEEN_URL` always gets: the facade then cannot know the broker
+/// behind it. Offsets are not moved from one store to the other.
+fn offsets_as_positions() -> bool {
+    match std::env::var("QUEEN_KAFKA_OFFSET_STORE") {
+        Err(_) => true,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "" | "positions" => true,
+            "kv" => false,
+            other => crate::obs::fatal(format!(
+                "QUEEN_KAFKA_OFFSET_STORE={other}: expected `positions` or `kv`"
+            )),
+        },
+    }
+}
+
 /// The HTTP request the facade would have sent, as an axum request: the same
 /// method, path, `Host`, bearer, `Content-Type` and `Content-Length` (the last
 /// one is what push admission sizes its permits by).
@@ -294,14 +314,27 @@ pub fn start(
             Err(e) => crate::obs::fatal(format!("QUEEN_KAFKA_EMBEDDED=true: {e}")),
         },
         None => (
-            Arc::new(HttpQueen::local(Arc::new(RouterDispatch {
-                router,
-                broker: tokio::runtime::Handle::current(),
-                kv: Some((Arc::clone(&rsm), Arc::clone(&auth))),
-            }))),
+            Arc::new(
+                HttpQueen::local(Arc::new(RouterDispatch {
+                    router,
+                    broker: tokio::runtime::Handle::current(),
+                    kv: Some((Arc::clone(&rsm), Arc::clone(&auth))),
+                }))
+                .with_native_positions(offsets_as_positions()),
+            ),
             "in-process",
         ),
     };
+    tracing::info!(
+        target: "kafka",
+        offsets = if api.native_positions() { "positions" } else { "kv" },
+        "committed offsets are kept as {}",
+        if api.native_positions() {
+            "the broker's consumer-group positions"
+        } else {
+            "KV rows"
+        }
+    );
     // Inside this broker the facade can say what its storage is: every raft
     // voter holds every partition, and an acknowledged write is on a majority.
     // Over an explicit QUEEN_URL it knows nothing of the broker behind it.
@@ -777,5 +810,139 @@ mod tests {
         assert_eq!(busy.status, 429);
         assert_eq!(busy.retry_after.as_deref(), Some("3"));
         assert_eq!(busy.body, "{\"error\":\"busy\"}");
+    }
+
+    /// The facade's committed offsets as the broker's own consumer-group
+    /// POSITIONS, end to end over the REAL raft router: the transaction's
+    /// `positions` rider, the read route, the fence riding in the same bundle,
+    /// OffsetDelete's forget and DeleteGroups' encoded group delete — through
+    /// exactly the client and the offsets code the in-process facade runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn offsets_are_the_brokers_positions_end_to_end() {
+        use queen_kafka::offsets::{self, Committed, Loaded};
+        use queen_kafka::queen::{PushItem, QueenApi};
+        std::env::set_var("QUEEN_RAFT_MAP_BYTES", (256usize << 20).to_string());
+        let dir = std::env::temp_dir().join(format!(
+            "queen-kinproc-positions-{}-{}",
+            std::process::id(),
+            crate::util::uuidv7_bytes()[15]
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("QUEEN_STORAGE", "raft");
+        std::env::set_var("QUEEN_RAFT_DIR", dir.join("cfg").display().to_string());
+        let cfg = crate::config::load();
+        let facade = crate::rsm::facade::real::RaftFacade::open(&crate::rsm::facade::RsmBuildCtx {
+            data_dir: dir.display().to_string(),
+            notifier: crate::notify::Notifier::new(false),
+        })
+        .expect("open facade");
+        let rsm: Arc<dyn Rsm> = Arc::new(facade);
+        let state = crate::handlers::raft::build_raft_state_with(&cfg, Some(Arc::clone(&rsm)))
+            .expect("raft state");
+        let router = crate::handlers::raft::build_raft_router(state, auth_off(), false);
+        let client = HttpQueen::local(Arc::new(RouterDispatch {
+            router,
+            broker: tokio::runtime::Handle::current(),
+            kv: Some((Arc::clone(&rsm), auth_off())),
+        }))
+        .with_native_positions(true);
+        assert!(client.native_positions());
+
+        let push = |p: i32| PushItem {
+            queue: "orders".into(),
+            partition: p.to_string(),
+            payload: serde_json::json!({"n": p}),
+        };
+        client
+            .push(&[push(0), push(0), push(0)], None)
+            .await
+            .expect("push");
+        let commit = |o: i64, m: &str| Committed {
+            offset: o,
+            metadata: m.to_string(),
+            ts: 1,
+        };
+        let group = "team a/billing";
+        let k = |p: i32| offsets::key(group, "orders", p).unwrap();
+
+        // A commit, on a partition with data and on one without.
+        let stored = offsets::store(
+            &client,
+            &[(k(0), commit(2, "batch-2")), (k(1), commit(0, ""))],
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            stored.results.iter().all(|r| r.is_ok()),
+            "{:?}",
+            stored.results
+        );
+        let loaded = offsets::load(&client, &[k(0), k(1), k(2)], None)
+            .await
+            .unwrap();
+        assert!(
+            matches!(&loaded[0], Loaded::Found(c) if c.offset == 2 && c.metadata == "batch-2"),
+            "{loaded:?}"
+        );
+        assert!(
+            matches!(&loaded[1], Loaded::Found(c) if c.offset == 0),
+            "{loaded:?}"
+        );
+        assert_eq!(loaded[2], Loaded::Missing);
+        assert_eq!(
+            offsets::load_group(&client, group, None)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // The fence rides in the same bundle; a stale one moves nothing.
+        let fence = |expect: i64| queen_kafka::cluster::fence::FenceOp {
+            key: offsets::fence_key(group).unwrap(),
+            value: serde_json::json!({"node": 1}),
+            expect,
+        };
+        let won = offsets::store(&client, &[(k(0), commit(3, ""))], None, Some(&fence(0))).await;
+        let version = won
+            .fence_version
+            .expect("the fence landed with the position");
+        let lost = offsets::store(
+            &client,
+            &[(k(0), commit(9, ""))],
+            None,
+            Some(&fence(version + 1_000)),
+        )
+        .await;
+        assert!(lost.lost.is_some(), "{:?}", lost.results);
+        let loaded = offsets::load(&client, &[k(0)], None).await.unwrap();
+        assert!(
+            matches!(&loaded[0], Loaded::Found(c) if c.offset == 3),
+            "{loaded:?}"
+        );
+
+        // OffsetDelete forgets one; DeleteGroups takes the rest and the index.
+        let forgot = offsets::delete_offsets(&client, group, &[k(1)], None, None).await;
+        assert!(forgot.iter().all(|r| r.is_ok()), "{forgot:?}");
+        assert_eq!(
+            offsets::load(&client, &[k(1)], None).await.unwrap()[0],
+            Loaded::Missing
+        );
+        offsets::index(&client, group, "consumer", None)
+            .await
+            .expect("index");
+        let removed = offsets::delete_group(&client, group, None)
+            .await
+            .expect("delete group");
+        assert_eq!(removed, 1 + 1, "one position and the index row");
+        assert!(offsets::load_group(&client, group, None)
+            .await
+            .unwrap()
+            .is_empty());
+
+        drop(client);
+        drop(rsm);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

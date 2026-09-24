@@ -456,6 +456,7 @@ impl Workload {
             // The DLQ-replay shape: a duplicate answers empty WITHOUT restoring
             // the overlay (the earlier push groups stay folded).
             allow_duplicate: self.rng.chance(25),
+            positions: Vec::new(),
         })
     }
 
@@ -1344,6 +1345,7 @@ fn a_cycle_that_folds_what_its_entry_does_not_carry_is_not_kept() {
         timers: Vec::new(),
         extra_effects: Vec::new(),
         allow_duplicate: true,
+        positions: Vec::new(),
     });
     let rebuilt0 = rig.state.stats.rebuilt;
     let out = rig.cycle(vec![replay], &s);

@@ -121,15 +121,32 @@ async fn commit(
         .cluster
         .state()
         .map_or(crate::handlers::metadata::SINGLE_NODE_ID, |s| s.me.id);
-    let Some(ops) = bundle.kv_ops(
-        id,
-        pid,
-        epoch,
-        node,
-        crate::handlers::init_producer_id::incarnation(),
-        crate::offsets::now_millis(),
-        &protocol_type,
-    ) else {
+    // Offsets are positions where the broker keeps them (the KV rider then
+    // carries only the fence and the index row), KV writes everywhere else.
+    let rider = if facade.queen.native_positions() {
+        bundle.position_rider(
+            id,
+            pid,
+            epoch,
+            node,
+            crate::handlers::init_producer_id::incarnation(),
+            crate::offsets::now_millis(),
+            &protocol_type,
+        )
+    } else {
+        bundle
+            .kv_ops(
+                id,
+                pid,
+                epoch,
+                node,
+                crate::handlers::init_producer_id::incarnation(),
+                crate::offsets::now_millis(),
+                &protocol_type,
+            )
+            .map(|ops| (ops, Vec::new()))
+    };
+    let Some((ops, positions)) = rider else {
         // Unreachable: InitProducerId refused a transactional id whose key does
         // not fit, and TxnOffsetCommit refused every offset key that does not.
         // Reported rather than assumed, and the stage is dropped because a
@@ -145,7 +162,11 @@ async fn commit(
     debug_assert!(ops.len() <= queen::WIRE_KV_MAX_OPS);
 
     let records = bundle.items.len();
-    match facade.queen.transaction(&bundle.items, &ops, token).await {
+    match facade
+        .queen
+        .transaction_positions(&bundle.items, &ops, &positions, token)
+        .await
+    {
         Ok(answers) => {
             // The fence is index 0 by construction and its answer is where the
             // next transaction's `expect` comes from.
@@ -467,6 +488,53 @@ mod tests {
         assert_eq!(state, TxnState::Empty);
         assert_eq!(seq, 1);
         assert!(version > 0, "the fence's new version was not taken");
+    }
+
+    /// Against a broker that keeps POSITIONS, the offsets ride the same one
+    /// bundle as the `positions` rider: the KV rider keeps only the fence and
+    /// the group index, and a fenced commit moves no position either.
+    #[tokio::test]
+    async fn with_native_positions_the_offsets_are_positions_in_the_same_bundle() {
+        let (f, api) = staged(3, 2).await;
+        api.keep_positions();
+        let resp = handle(&f, &request("tx", PID, 0, true), None).await;
+        assert_eq!(resp.error_code, 0);
+
+        let sent = api.transactions.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1, "a transaction must be exactly one call");
+        let (items, ops) = &sent[0];
+        assert_eq!(items.len(), 3);
+        assert_eq!(
+            ops.len(),
+            2,
+            "the fence and the group index, no offset rows"
+        );
+        assert!(matches!(&ops[0], KvOp::Put { key, required: true, .. } if key == "qk:txn:tx"));
+        let positions = api.position_calls.lock().unwrap().clone();
+        assert_eq!(positions.len(), 1, "the positions rode the same call");
+        assert_eq!(positions[0].len(), 2);
+        assert_eq!(api.position_of("g", "orders", "0"), Some(100));
+        assert_eq!(api.position_of("g", "orders", "1"), Some(101));
+    }
+
+    #[tokio::test]
+    async fn with_native_positions_a_fenced_commit_moves_no_position() {
+        let (f, api) = staged(1, 1).await;
+        api.keep_positions();
+        // Another producer took the id: the stored version moved on.
+        api.kv(
+            &[KvOp::put(
+                crate::offsets::NAMESPACE,
+                "qk:txn:tx",
+                serde_json::json!({"other": true}),
+            )],
+            None,
+        )
+        .await
+        .unwrap();
+        let resp = handle(&f, &request("tx", PID, 0, true), None).await;
+        assert_eq!(resp.error_code, ResponseError::ProducerFenced.code());
+        assert_eq!(api.position_of("g", "orders", "0"), None);
     }
 
     /// ...and the records really are in the log afterwards, at contiguous

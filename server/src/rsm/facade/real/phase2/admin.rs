@@ -434,6 +434,7 @@ impl RaftFacade {
                 queue: source_queue,
             }],
             allow_duplicate: true,
+            positions: Vec::new(),
         });
         let out = match self.submit(&ctx, cmd).await? {
             super::Reply::Done { outcome, .. } => {

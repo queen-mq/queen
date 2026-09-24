@@ -504,7 +504,13 @@ impl LanesState {
                 None => Dest::Control,
             },
             Command::Transaction(c) => {
-                if !c.kv.is_empty() || !c.timers.is_empty() || !c.extra_effects.is_empty() {
+                // Positions can create partitions and register groups, which
+                // only control does (L1, L3).
+                if !c.kv.is_empty()
+                    || !c.timers.is_empty()
+                    || !c.extra_effects.is_empty()
+                    || !c.positions.is_empty()
+                {
                     Dest::Control
                 } else {
                     let mut lanes = Vec::new();

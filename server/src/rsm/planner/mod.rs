@@ -111,6 +111,9 @@ pub use kv::{KvCommand, KvOp};
 // inline stubs, exactly as they stood inside `rsm/mod.rs` before this WP filled
 // `planner`. The owning WP flips one to a file.
 
+/// The transaction's `positions` rider: set or forget where a consumer group
+/// reads a partition ([`Planner::plan_positions`]).
+pub mod positions;
 /// The transaction wire: one command, all-or-nothing (Phase B). Its KV leg
 /// is [`Planner::plan_kv_writes`]; a timers leg would be
 /// [`Planner::plan_timer_ops`].

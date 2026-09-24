@@ -61,10 +61,17 @@
 /// The one catalogue version phase 1 ships. See the module header.
 pub const VERSION_1: u16 = 1;
 
+/// The second catalogue version: [`Kind::CursorSet`] carrying a POSITION's
+/// metadata ([`CursorRow::metadata`]). Minted ONLY for a row whose metadata is
+/// non-empty, so every cursor write of Queen's own consumer protocol — the
+/// hottest effect in the catalogue — keeps its version-1 bytes, and an entry
+/// reports version 2 only when it carries such a row (§5.3).
+pub const VERSION_2: u16 = 2;
+
 /// The highest catalogue version this build can decode and apply. The
 /// replicated cluster version (§12.8) may be lower; it never rises above the
 /// minimum of every voter's value (D20).
-pub const SUPPORTED_KINDS_VERSION: u32 = VERSION_1 as u32;
+pub const SUPPORTED_KINDS_VERSION: u32 = VERSION_2 as u32;
 
 /// Refuse a length prefix above this before allocating: a corrupt file or a
 /// hostile peer must not drive an OOM. Far above
@@ -409,6 +416,12 @@ pub struct CursorRow {
     /// The row is written WHOLE on every mutation, so the planner carries the
     /// existing value forward and stamps `now` only when it creates the row.
     pub created_at_us: i64,
+    /// The client's opaque string recorded with a POSITION set through the
+    /// transaction's `positions` rider (a Kafka commit's metadata); `""` = none.
+    /// Every other writer carries it forward untouched. A row with metadata is
+    /// the one [`Kind::CursorSet`] shape at catalogue [`VERSION_2`]; without it
+    /// the effect keeps its version-1 bytes.
+    pub metadata: String,
 }
 
 /// `log_timers` as the RSM holds it (§6.1), minus the claim columns: a fire is
@@ -842,6 +855,13 @@ impl Effect {
     /// compiler is the gate: a new kind does not build until this match says
     /// which catalogue version it is minted at.
     pub fn version(&self) -> u16 {
+        // The one kind with two shapes: a cursor row that carries position
+        // metadata is minted at version 2, every other one stays at 1.
+        if let Effect::CursorSet { row, .. } = self {
+            if !row.metadata.is_empty() {
+                return VERSION_2;
+            }
+        }
         match self.kind() {
             Kind::Noop
             | Kind::QueueUpsert
@@ -1069,6 +1089,10 @@ impl Effect {
                 w.bool(row.lease_conflated);
                 w.vec_bytes16(&row.delivered);
                 w.i64(row.created_at_us);
+                // Version 2 ([`Effect::version`]): the metadata, last.
+                if !row.metadata.is_empty() {
+                    w.str(&row.metadata);
+                }
             }
             Effect::CursorDelete { pid, group } => {
                 w.u64(*pid);
@@ -1331,7 +1355,7 @@ impl Effect {
                 ..
             } => 128 + payload.len() + txn.len() + error.len(),
             Effect::TimerUpsert { row, .. } => 160 + row.frame.len(),
-            Effect::CursorSet { row, .. } => 96 + row.delivered.len() * 16,
+            Effect::CursorSet { row, .. } => 96 + row.delivered.len() * 16 + row.metadata.len(),
             Effect::KvPut { value, key, .. } => 96 + value.len() + key.len(),
             Effect::TraceAppend { event } => 160 + event.data.len(),
             _ => 128,
@@ -1341,7 +1365,9 @@ impl Effect {
     /// Decode a body of the given kind and version. Errors name the field that
     /// failed, so a corrupt entry is diagnosable from one log line.
     pub fn decode_body(kind: Kind, version: u16, body: &[u8]) -> Result<Effect, CodecError> {
-        if version != VERSION_1 {
+        // Version 2 exists for one kind only (see [`VERSION_2`]).
+        let known = version == VERSION_1 || (version == VERSION_2 && kind == Kind::CursorSet);
+        if !known {
             return Err(CodecError::UnknownVersion {
                 kind: kind as u16,
                 version,
@@ -1458,6 +1484,11 @@ impl Effect {
                     lease_conflated: r.bool("lease_conflated")?,
                     delivered: r.vec_bytes16("delivered")?,
                     created_at_us: r.i64("cursor.created_at")?,
+                    metadata: if version >= VERSION_2 {
+                        r.str("cursor.metadata")?
+                    } else {
+                        String::new()
+                    },
                 },
             },
             Kind::CursorDelete => Effect::CursorDelete {

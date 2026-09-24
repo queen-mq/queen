@@ -53,6 +53,7 @@ mod planner_overlay;
 mod planner_pop;
 mod planner_push;
 mod pop_bounded;
+mod positions;
 mod qlog_read;
 mod qlog_shadow;
 mod qlog_wal;

@@ -52,6 +52,10 @@ pub struct TxnCommand {
     /// destination is a successful no-op: the source row must remain in DLQ.
     /// Public transactions keep their all-or-nothing QDUP refusal.
     pub allow_duplicate: bool,
+    /// The `positions` rider ([`super::positions`]): consumer-group positions
+    /// set or forgotten, all-or-nothing with everything else in the bundle.
+    #[serde(default)]
+    pub positions: Vec<super::positions::PositionOp>,
 }
 
 /// The decoded transaction outcome: per push group, per ack target.
@@ -142,6 +146,15 @@ impl TxnOutcome {
 impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// Plan a transaction all-or-nothing (see the module header).
     pub fn plan_transaction(&self, ov: &mut Overlay, cmd: &TxnCommand) -> Planned {
+        if cmd.pushes.is_empty()
+            && cmd.acks.is_empty()
+            && cmd.positional_acks.is_empty()
+            && cmd.timers.is_empty()
+            && cmd.extra_effects.is_empty()
+            && !cmd.positions.is_empty()
+        {
+            return self.plan_positions_bundle(ov, cmd);
+        }
         let saved = ov.clone();
         let refuse = |ov: &mut Overlay, r: Refusal| -> Planned {
             *ov = saved.clone();
@@ -237,6 +250,17 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             out.acks.results.extend(ack.results);
         }
 
+        // Positions, after the bundle's messages and acks and before its keys:
+        // planned against everything above, folded like them.
+        if !cmd.positions.is_empty() {
+            let effs = match self.plan_positions(ov, &cmd.tenant, &cmd.positions) {
+                Ok(e) => e,
+                Err(r) => return refuse(ov, r),
+            };
+            ov.apply_effects(&effs);
+            effects.extend(effs);
+        }
+
         // The KV rider last (024's order: the bundle's messages, then its keys).
         // A lost `required` precondition aborts the WHOLE bundle: nothing is
         // logged, the overlay is restored, and the answer carries the one
@@ -286,6 +310,46 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             Ok(o) => o,
             Err(r) => return refuse(ov, r),
         };
+        if effects.is_empty() {
+            Ok(Plan::Empty(outcome))
+        } else {
+            Ok(Plan::logged(effects, outcome))
+        }
+    }
+
+    /// A bundle of positions and KV operations only — what a consumer group's
+    /// commit is: the positions, and a `required` fence beside them.
+    ///
+    /// Both legs plan WITHOUT touching the overlay ([`Planner::plan_kv_writes`],
+    /// [`Planner::plan_positions`]) and are folded together at the end, so a
+    /// refusal or a lost precondition has nothing to restore — which is what
+    /// spares this bundle the overlay CLONE the general path takes to be able
+    /// to roll back. A group committing after every poll sends one of these
+    /// per commit batch, and the clone is proportional to everything in flight.
+    fn plan_positions_bundle(&self, ov: &mut Overlay, cmd: &TxnCommand) -> Planned {
+        let mut effects: Vec<Effect> = Vec::new();
+        let mut out = TxnOutcome::default();
+        if !cmd.kv.is_empty() {
+            let kvp = self.plan_kv_writes(ov, &cmd.tenant, &cmd.kv)?;
+            if let Some(f) = kvp.failed {
+                let failed = TxnOutcome {
+                    kv: KvOutcome {
+                        results: Vec::new(),
+                        failed: Some(f),
+                    },
+                    ..TxnOutcome::default()
+                };
+                return failed.into_outcome().map(Plan::Empty);
+            }
+            effects.extend(kvp.effects);
+            out.kv = KvOutcome {
+                results: kvp.results,
+                failed: None,
+            };
+        }
+        effects.extend(self.plan_positions(ov, &cmd.tenant, &cmd.positions)?);
+        let outcome = out.into_outcome()?;
+        ov.apply_effects(&effects);
         if effects.is_empty() {
             Ok(Plan::Empty(outcome))
         } else {

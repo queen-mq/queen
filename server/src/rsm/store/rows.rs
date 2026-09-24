@@ -356,9 +356,18 @@ pub fn partition_decode(b: &[u8]) -> Result<PartitionRow, CodecError> {
 // cursors
 // ---------------------------------------------------------------------------
 
+/// A cursor row without metadata keeps its [`ROW_V1`] bytes; one that carries
+/// a position's metadata is [`ROW_V2`]: the same body with the metadata last.
+/// The same split as the effect's (catalogue version 2 of `CursorSet`), for
+/// the same reason — the native consumer protocol writes this row on every
+/// claim and ack, and its bytes do not change.
 pub fn cursor_encode(c: &CursorRow) -> Vec<u8> {
-    let mut w = Writer::with_capacity(96);
-    head(&mut w);
+    let mut w = Writer::with_capacity(96 + c.metadata.len());
+    if c.metadata.is_empty() {
+        head(&mut w);
+    } else {
+        head_v2(&mut w);
+    }
     w.i64(c.committed);
     w.opt_u64(c.batch_end);
     w.opt_str(c.worker.as_deref());
@@ -371,12 +380,21 @@ pub fn cursor_encode(c: &CursorRow) -> Vec<u8> {
     w.bool(c.lease_conflated);
     w.vec_bytes16(&c.delivered);
     w.i64(c.created_at_us);
+    if !c.metadata.is_empty() {
+        w.str(&c.metadata);
+    }
     w.into_inner()
 }
 
 pub fn cursor_decode(b: &[u8]) -> Result<CursorRow, CodecError> {
     let mut r = Reader::new(b);
-    expect_v1(&mut r, "cursor row version")?;
+    let version = r.u8("cursor row version")?;
+    if version != ROW_V1 && version != ROW_V2 {
+        return Err(CodecError::UnknownVersion {
+            kind: 0,
+            version: version as u16,
+        });
+    }
     Ok(CursorRow {
         committed: r.i64("committed")?,
         batch_end: r.opt_u64("batch_end")?,
@@ -390,6 +408,11 @@ pub fn cursor_decode(b: &[u8]) -> Result<CursorRow, CodecError> {
         lease_conflated: r.bool("lease_conflated")?,
         delivered: r.vec_bytes16("delivered")?,
         created_at_us: r.i64("created_at_us")?,
+        metadata: if version == ROW_V2 {
+            r.str("metadata")?
+        } else {
+            String::new()
+        },
     })
 }
 
@@ -415,6 +438,7 @@ pub fn cursor_fresh(committed: i64, created_at_us: i64) -> CursorRow {
         lease_conflated: false,
         delivered: Vec::new(),
         created_at_us,
+        metadata: String::new(),
     }
 }
 

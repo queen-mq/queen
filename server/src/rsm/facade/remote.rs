@@ -188,3 +188,48 @@ pub(super) fn handler(
         Box::pin(serve(weak, admit, applied.clone(), body))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rsm::planner::positions::PositionOp;
+    use crate::rsm::planner::txn::TxnCommand;
+    use crate::rsm::planner::SubIntent;
+
+    /// A follower's prepared transaction reaches the leader with its positions
+    /// rider intact: the offload path is how a commit made on a follower is
+    /// planned at all.
+    #[test]
+    fn a_prepared_transaction_keeps_its_positions() {
+        let txn = TxnCommand {
+            request_id: [7; 16],
+            tenant: "t".into(),
+            pushes: Vec::new(),
+            acks: Vec::new(),
+            positional_acks: Vec::new(),
+            kv: Vec::new(),
+            timers: Vec::new(),
+            extra_effects: Vec::new(),
+            allow_duplicate: false,
+            positions: vec![PositionOp {
+                queue: "orders".into(),
+                partition: "3".into(),
+                group: "billing".into(),
+                offset: Some(42),
+                metadata: "batch-42".into(),
+                sub: SubIntent {
+                    mode: "new".into(),
+                    from_us: None,
+                    now: false,
+                },
+            }],
+        };
+        let bytes = encode_request(&Command::Transaction(txn.clone()), Duration::from_secs(1))
+            .expect("encode");
+        let back: SubmitReq = postcard::from_bytes(&bytes).expect("decode");
+        match back.command {
+            Command::Transaction(t) => assert_eq!(t, txn),
+            other => panic!("{other:?}"),
+        }
+    }
+}

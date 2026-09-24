@@ -127,7 +127,9 @@ fn an_outcomes_version_reaches_the_header_gate() {
     // `kinds_version` used to be the maximum over EFFECTS only, so an entry
     // whose only novelty was an outcome reported version 1 and sailed through
     // D20's gate. It must report what the outcome was minted at.
-    let later = Placeholder::at_version_for_tests(0xF001, 2, b"v2-shape".to_vec());
+    // One past what this build supports, whatever that is today.
+    let beyond = (SUPPORTED_KINDS_VERSION + 1) as u16;
+    let later = Placeholder::at_version_for_tests(0xF001, beyond, b"next-shape".to_vec());
     let mut e = Entry::new(1, 2, 3);
     e.add_command(uuid(1), Outcome::Placeholder(later), vec![Effect::Noop])
         .unwrap();
@@ -137,18 +139,24 @@ fn an_outcomes_version_reaches_the_header_gate() {
         1,
         "the effects alone are version 1: that is the reading that hid this"
     );
-    assert_eq!(catalogue_version_of(&e.commands, &e.effects), 2);
-    assert_eq!(e.kinds_version, 2, "add_command must fold the outcome in");
+    assert_eq!(catalogue_version_of(&e.commands, &e.effects), beyond as u32);
+    assert_eq!(
+        e.kinds_version, beyond as u32,
+        "add_command must fold the outcome in"
+    );
 
-    // And this build, which supports catalogue version 1, refuses to write it
-    // rather than proposing an entry an old node would misread.
-    assert_eq!(encode_entry(&e), Err(CodecError::UnknownCatalogue(2)));
-    assert!(CodecError::UnknownCatalogue(2).fatal());
+    // And this build refuses to write it rather than proposing an entry an
+    // old node would misread.
+    assert_eq!(
+        encode_entry(&e),
+        Err(CodecError::UnknownCatalogue(beyond as u32))
+    );
+    assert!(CodecError::UnknownCatalogue(beyond as u32).fatal());
 
     // A header that lies downwards is refused as well: it would walk the
     // outcome past the gate.
     let mut lying = e.clone();
-    lying.kinds_version = 1;
+    lying.kinds_version = SUPPORTED_KINDS_VERSION;
     assert_eq!(
         lying.validate(),
         Err(CodecError::Layout(

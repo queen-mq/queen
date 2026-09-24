@@ -162,6 +162,7 @@ fn the_cursor_row_carries_the_created_at_the_cleanup_veto_reads() {
         lease_conflated: false,
         delivered: vec![],
         created_at_us: 1_767_999_000_000_000,
+        metadata: String::new(),
     };
     let e = Effect::CursorSet {
         pid: 7,

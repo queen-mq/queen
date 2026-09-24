@@ -6,6 +6,7 @@ use std::collections::{BTreeSet, HashMap};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::positions::pct_decode;
 use super::{query_map, read_error, ApiOut, ApiReq, Effect, RaftFacade, ReqCtx, RsmError};
 use crate::frames::{unpack_frames_ref, uuid_bytes_to_string, uuid_string_to_bytes};
 use crate::rsm::effect::{Pid, TraceEvent};
@@ -192,38 +193,49 @@ impl RaftFacade {
                 self.api_dlq_move(ctx.clone(), Some(id), None, &req.body)
                     .await?,
             ),
+            // The group, queue and partition segments are percent-decoded:
+            // every SDK encodes the names it puts in these paths, and a name
+            // is what the segment decodes to (see `positions::pct_decode`).
             ["api", "v1", "consumer-groups", group] if req.method == "GET" => {
-                Some(self.api_groups(ctx.clone(), Some(group)).await?)
+                let group = pct_decode(group);
+                Some(self.api_groups(ctx.clone(), Some(&group)).await?)
             }
-            ["api", "v1", "consumer-groups", group] if req.method == "DELETE" => Some(
-                self.api_group_delete(ctx.clone(), group, None, req.query.as_deref())
-                    .await?,
-            ),
-            ["api", "v1", "consumer-groups", group, "subscription"] if req.method == "POST" => {
+            ["api", "v1", "consumer-groups", group] if req.method == "DELETE" => {
+                let group = pct_decode(group);
                 Some(
-                    self.api_group_subscription(ctx.clone(), group, &req.body)
+                    self.api_group_delete(ctx.clone(), &group, None, req.query.as_deref())
+                        .await?,
+                )
+            }
+            ["api", "v1", "consumer-groups", group, "subscription"] if req.method == "POST" => {
+                let group = pct_decode(group);
+                Some(
+                    self.api_group_subscription(ctx.clone(), &group, &req.body)
                         .await?,
                 )
             }
             ["api", "v1", "consumer-groups", group, "queues", queue] if req.method == "DELETE" => {
+                let (group, queue) = (pct_decode(group), pct_decode(queue));
                 Some(
-                    self.api_group_delete(ctx.clone(), group, Some(queue), req.query.as_deref())
+                    self.api_group_delete(ctx.clone(), &group, Some(&queue), req.query.as_deref())
                         .await?,
                 )
             }
             ["api", "v1", "consumer-groups", group, "queues", queue, "seek"]
                 if req.method == "POST" =>
             {
+                let (group, queue) = (pct_decode(group), pct_decode(queue));
                 Some(
-                    self.api_group_seek(ctx.clone(), group, queue, None, &req.body)
+                    self.api_group_seek(ctx.clone(), &group, &queue, None, &req.body)
                         .await?,
                 )
             }
             ["api", "v1", "consumer-groups", group, "queues", queue, "partitions", part, "seek"]
                 if req.method == "POST" =>
             {
+                let (group, queue, part) = (pct_decode(group), pct_decode(queue), pct_decode(part));
                 Some(
-                    self.api_group_seek(ctx.clone(), group, queue, Some(part), &req.body)
+                    self.api_group_seek(ctx.clone(), &group, &queue, Some(&part), &req.body)
                         .await?,
                 )
             }

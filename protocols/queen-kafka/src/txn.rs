@@ -997,6 +997,39 @@ impl Bundle {
         }
         Some(ops)
     }
+
+    /// The commit against a broker that keeps POSITIONS
+    /// ([`crate::queen::QueenApi::native_positions`]): the same KV rider
+    /// without the offset writes — the fence at index 0 and the group index
+    /// row — and the offsets as the bundle's `positions` rider, so they commit
+    /// or roll back with the records exactly as the KV writes did. `None` when
+    /// the rider cannot be built (see [`Bundle::kv_ops`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn position_rider(
+        &self,
+        transactional_id: &str,
+        pid: i64,
+        epoch: i16,
+        node: i32,
+        incarnation: &str,
+        now_ms: i64,
+        protocol_type: &str,
+    ) -> Option<(Vec<KvOp>, Vec<crate::queen::PositionOp>)> {
+        let mut kv = self.kv_ops(
+            transactional_id,
+            pid,
+            epoch,
+            node,
+            incarnation,
+            now_ms,
+            protocol_type,
+        )?;
+        // The offset writes are the tail of `kv_ops`, by construction.
+        kv.truncate(kv.len() - self.offsets.len());
+        let positions: Option<Vec<crate::queen::PositionOp>> =
+            offsets::position_ops(&self.offsets).into_iter().collect();
+        Some((kv, positions?))
+    }
 }
 
 /// The sweep, as a task. Spawned from `boot.rs` and from nothing else.

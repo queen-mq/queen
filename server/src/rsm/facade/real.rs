@@ -1129,6 +1129,10 @@ struct TxnBodyIn<'a> {
     kv: Option<Vec<&'a RawValue>>,
     #[serde(borrow, default)]
     timers: Option<Vec<&'a RawValue>>,
+    /// The positions rider (`planner::positions`): consumer-group positions set
+    /// or forgotten with the bundle.
+    #[serde(default)]
+    positions: Option<Vec<serde_json::Value>>,
 }
 
 /// One `operations` element: a push (with `items`, or one item inline) or an ack.
@@ -1216,11 +1220,21 @@ impl RaftFacade {
             Ok(o) => o,
             Err(e) => return Ok(fail(e.reason, &e.detail)),
         };
+        // The positions rider, validated here (names, offsets, metadata) and
+        // planned inside the same command.
+        let position_ops = match crate::rsm::planner::positions::parse_position_ops(
+            body.positions.as_deref().unwrap_or(&[]),
+            &ctx.tenant,
+        ) {
+            Ok(o) => o,
+            Err(e) => return Ok(fail(e.reason, &e.detail)),
+        };
         let ops = body.operations.unwrap_or_default();
-        if ops.is_empty() && kv_ops.is_empty() && timer_ops.is_empty() {
+        if ops.is_empty() && kv_ops.is_empty() && timer_ops.is_empty() && position_ops.is_empty() {
             return Ok(fail(
                 "bad_request",
-                "transaction requires an operations array (or a top-level kv/timers array)",
+                "transaction requires an operations array (or a top-level kv/timers/positions \
+                 array)",
             ));
         }
         let mut queue_names = std::collections::BTreeSet::new();
@@ -1422,6 +1436,9 @@ impl RaftFacade {
         flat += kv_ops.len();
         let timers_base = flat;
         flat += timer_ops.len();
+        let positions_base = flat;
+        let positions_len = position_ops.len();
+        flat += positions_len;
 
         // The single unambiguous lease hint is every lease-less ack's worker
         // (the JS/Go builders put the pop's leaseId in `requiredLeases`).
@@ -1483,6 +1500,7 @@ impl RaftFacade {
             timers: timer_ops,
             extra_effects: Vec::new(),
             allow_duplicate: false,
+            positions: position_ops,
         });
         let out = match self.submit(&ctx, cmd).await? {
             Reply::Done { outcome, .. } => crate::rsm::batcher::TxnOutcome::from_outcome(&outcome)
@@ -1616,6 +1634,14 @@ impl RaftFacade {
                 "transactionId": txn,
                 "error": serde_json::Value::Null,
                 "dlq": matches!(status, AckStatus::Dlq),
+            });
+        }
+        for i in 0..positions_len {
+            results[positions_base + i] = serde_json::json!({
+                "index": positions_base + i,
+                "opIndex": i,
+                "type": "position",
+                "success": true,
             });
         }
         // Dashboard counters (data.rs ≈6090): one transaction, and one per

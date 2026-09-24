@@ -491,6 +491,10 @@ impl Command {
                         .iter()
                         .map(|e| e.encode_body().len() + 8)
                         .sum::<usize>()
+                    + c.positions
+                        .iter()
+                        .map(|p| p.group.len() + p.metadata.len() + 112)
+                        .sum::<usize>()
                     + 64
             }
             Command::Kv(c) => {
@@ -528,6 +532,7 @@ impl Command {
                 c.pushes.iter().map(|p| p.items.len() as u64).sum::<u64>()
                     + c.acks.iter().map(|t| t.items.len() as u64).sum::<u64>()
                     + c.extra_effects.len() as u64
+                    + c.positions.len() as u64
             }
             Command::Timers(c) => c.ops.len().max(1) as u64,
             Command::Effects(c) => c.effects.len().max(1) as u64,

@@ -19,6 +19,7 @@ use crate::rsm::store::{Keyspace, Reads, Store, TypedReads};
 
 mod admin;
 mod dash;
+mod positions;
 mod reads;
 mod streams;
 
@@ -75,6 +76,9 @@ impl RaftFacade {
             ("GET", "/api/v1/dlq") => self.api_dlq(ctx, req.query.as_deref()).await,
             ("DELETE", "/api/v1/dlq") => self.api_dlq_purge(ctx, req.query.as_deref()).await,
             ("GET", "/api/v1/consumer-groups") => self.api_groups(ctx, None).await,
+            ("POST", "/api/v1/consumer-groups/positions") => {
+                self.api_group_positions(ctx, &req.body).await
+            }
             ("GET", "/api/v1/consumer-groups/lagging") => {
                 self.api_lagging_groups(ctx, req.query.as_deref()).await
             }
