@@ -50,7 +50,7 @@ required-features = ["server"]
 # broker needs: the axum serve stack, the embedded dashboard, and the process
 # tracing subscriber. The embedded library path (queen::Broker) never needs it.
 default = ["server"]
-server = ["dep:rust-embed", "dep:tracing-subscriber", "axum/http1", "axum/tokio"]
+server = ["dep:rust-embed", "dep:tracing-subscriber", "axum/http1", "axum/tokio", "dep:queen-proxy"]
 # jemalloc + heap profiler as the process allocator, for memory hunts
 # (`MALLOC_CONF=prof:true,...`). Never in a release build.
 jemalloc-prof = ["dep:tikv-jemallocator"]
@@ -118,6 +118,9 @@ tikv-jemallocator = { version = "0.6", optional = true, features = ["profiling",
 # Optional: only the `server` feature serves the dashboard; an embedding
 # application brings its own UI.
 rust-embed = { version = "8", optional = true }
+# The single binary (PLAN_SINGLE_BINARY.md W3/W4): the proxy runs in-process,
+# its state in this broker's replicated KV. The HTTP server only.
+queen-proxy = { path = "../proxy", optional = true }
 # Structured logging (LOGGING_PLAN.md). `tracing` macros + a `tracing-subscriber`
 # fmt layer with an EnvFilter that honours LOG_LEVEL/RUST_LOG (previously the
 # Helm-injected LOG_LEVEL was dead). `time` feature = RFC3339 UTC timestamps

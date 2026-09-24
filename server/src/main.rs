@@ -19,6 +19,8 @@ mod file_buffer;
 mod frames;
 mod fusion;
 mod handlers;
+#[cfg(feature = "server")]
+mod proxy_embed;
 mod hotlist;
 mod httpget;
 mod internal;
@@ -1751,7 +1753,23 @@ async fn run_raft(cfg: config::Config) {
     // Postgres boot: the raft collector flushes them with everything else.
     metrics::spawn_samplers(state.metrics.clone());
 
-    let app = handlers::raft::build_raft_router(state, authenticator, cfg.tenancy_header);
+    // The single binary (PLAN_SINGLE_BINARY.md W3/W4): the proxy fronts the
+    // public port; the broker router behind it has tenancy on, the broker's
+    // own JWT off, and no socket — the proxy authenticated the caller.
+    let app = if proxy_embed::enabled() {
+        let mut inner_auth = cfg.auth.clone();
+        inner_auth.enabled = false;
+        let inner = handlers::raft::build_raft_router(
+            state.clone(),
+            auth::Authenticator::new(inner_auth),
+            true,
+        );
+        let (_proxy, public) = proxy_embed::public_router(state.rsm.clone(), inner);
+        tracing::info!(target: "boot", "single binary: proxy in-process on the public port");
+        public
+    } else {
+        handlers::raft::build_raft_router(state, authenticator, cfg.tenancy_header)
+    };
 
     let addr = config::host_port(&cfg.bind_addr, &cfg.port);
     let listener = match bind_listener(&addr).await {

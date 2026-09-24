@@ -216,6 +216,62 @@ async fn async_main(worker_threads: usize) {
         keys,
     });
 
+    start_background(&st);
+    let app = router(st.clone());
+
+    // OPTIONAL HTTPS (PLAN §11 Phase 1 "TLS (CF origin)"): only when both
+    // QUEEN_PROXY_TLS_CERT and QUEEN_PROXY_TLS_KEY are set. Resolved and parsed
+    // before the bind so unusable material fails fast instead of after the port
+    // is taken; unset leaves the plaintext path below untouched.
+    let tls = match config::tls_material() {
+        Ok(Some(m)) => match tls_server_config(&m) {
+            Ok(cfg) => {
+                tracing::info!(cert = %m.cert_path, "TLS listener enabled (rustls/ring)");
+                Some(cfg)
+            }
+            Err(e) => {
+                tracing::error!(cert = %m.cert_path, key = %m.key_path, "TLS material unusable: {e}");
+                std::process::exit(1);
+            }
+        },
+        Ok(None) => None,
+        Err(e) => {
+            tracing::error!("{e}");
+            std::process::exit(1);
+        }
+    };
+
+    let addr = config::host_port(&st.cfg.bind_addr, st.cfg.port);
+    let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind");
+    tracing::info!(
+        addr,
+        enforce = st.cfg.enforce,
+        dev_static = st.cfg.dev_static.is_some(),
+        // Named, not counted: an operator debugging "why does my host 401"
+        // needs to see whether the name they configured is the name a client
+        // actually sends. These are public DNS labels, not secrets.
+        shared_hosts = ?st.cfg.shared_hosts,
+        "queen-proxy up"
+    );
+    match tls {
+        Some(tls_cfg) => serve_tls(listener, app, tls_cfg).await,
+        None => axum::serve(listener, app)
+            .with_graceful_shutdown(obs::shutdown_signal())
+            .await
+            .expect("serve"),
+    }
+
+    // Past this point the listener is closed. Metering and the registry's
+    // pending queue rows are still in memory: flush them before the process
+    // goes away, or the open minute is silently lost on every restart.
+    drain_usage(&st).await;
+}
+
+/// The proxy's background loops, shared by the standalone boot and the single
+/// binary: cache invalidation and key-touch flush, the queue registry's
+/// reconciler and persister, the revocation sweep, the usage rollup and the
+/// storage-quota pump.
+pub fn start_background(st: &St) {
     // Subscribe the queue registry to `queen_proxy_inval` BEFORE the listener
     // starts, so no notification can arrive before the hook is in place. The
     // channel is the cell's one "this cluster is not what you think it is"
@@ -286,8 +342,13 @@ async fn async_main(worker_threads: usize) {
             }
         });
     }
+}
 
-    let app = Router::new()
+/// The proxy's HTTP surface: identity (`/auth`, JWKS), the console and
+/// operator APIs, the console SPA, and — as the fallback — the data-plane
+/// gateway in front of the broker plus the auth-gated dashboard.
+pub fn router(st: St) -> Router {
+    Router::new()
         .route("/healthz", get(healthz))
         .route("/.well-known/jwks.json", get(jwks))
         .nest("/auth", oauth::router())
@@ -304,54 +365,70 @@ async fn async_main(worker_threads: usize) {
         // the BROKER's own embedded webapp answer — unauthenticated and
         // tenant-unaware. See webapp.rs.
         .fallback(webapp::route_fallback)
-        .with_state(st.clone());
+        .with_state(st)
+}
 
-    // OPTIONAL HTTPS (PLAN §11 Phase 1 "TLS (CF origin)"): only when both
-    // QUEEN_PROXY_TLS_CERT and QUEEN_PROXY_TLS_KEY are set. Resolved and parsed
-    // before the bind so unusable material fails fast instead of after the port
-    // is taken; unset leaves the plaintext path below untouched.
-    let tls = match config::tls_material() {
-        Ok(Some(m)) => match tls_server_config(&m) {
-            Ok(cfg) => {
-                tracing::info!(cert = %m.cert_path, "TLS listener enabled (rustls/ring)");
-                Some(cfg)
-            }
-            Err(e) => {
-                tracing::error!(cert = %m.cert_path, key = %m.key_path, "TLS material unusable: {e}");
-                std::process::exit(1);
-            }
-        },
-        Ok(None) => None,
-        Err(e) => {
-            tracing::error!("{e}");
-            std::process::exit(1);
-        }
-    };
+/// What the broker hands the proxy when it runs it in-process
+/// (PLAN_SINGLE_BINARY.md W3/W4).
+pub struct Embedded {
+    /// The broker's replicated KV (the proxy's state, system tenant).
+    pub kv: std::sync::Arc<dyn crate::store::KvBackend>,
+    /// The broker router the data plane relays to: tenancy on, reachable
+    /// only through this call.
+    pub broker: Router,
+}
 
-    let addr = config::host_port(&st.cfg.bind_addr, st.cfg.port);
-    let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind");
-    tracing::info!(
-        addr,
-        enforce = st.cfg.enforce,
-        dev_static = st.cfg.dev_static.is_some(),
-        // Named, not counted: an operator debugging "why does my host 401"
-        // needs to see whether the name they configured is the name a client
-        // actually sends. These are public DNS labels, not secrets.
-        shared_hosts = ?st.cfg.shared_hosts,
-        "queen-proxy up"
-    );
-    match tls {
-        Some(tls_cfg) => serve_tls(listener, app, tls_cfg).await,
-        None => axum::serve(listener, app)
-            .with_graceful_shutdown(obs::shutdown_signal())
-            .await
-            .expect("serve"),
+/// The single binary: the proxy's state over the broker's KV, relaying
+/// in-process to the broker router, its background loops started. The caller
+/// serves the returned router (it replaces the broker's own router on the
+/// public port). Configured from the same `QUEEN_PROXY_*` environment as the
+/// standalone proxy; `PXDB_*` is ignored.
+pub fn build_embedded(e: Embedded) -> (St, Router) {
+    let cfg = config::Config::load();
+    let cache = cache::ClusterCache::new(&cfg, None);
+    let limits = limits::Limits::new(&cfg);
+    let meter = Arc::new(meter::Meter::new(&cfg));
+    meter.spawn_flush(None);
+    let registry = registry::Registry::new(None);
+    let keys = auth::Keys::from_config(&cfg);
+    let boot = config::jwt_boot(config::JwtMaterial {
+        // The replicated KV is the persistence a console session needs.
+        has_pxdb: true,
+        ed_private: cfg.jwt_ed25519_pem.as_deref().is_some_and(|s| !s.trim().is_empty()),
+        ed_public: config::jwt_ed25519_pub_pem().is_some(),
+        hs_secret: cfg.jwt_hs_secret.as_deref().is_some_and(|s| !s.trim().is_empty()),
+        can_mint: keys.can_mint(),
+        can_verify: keys.can_verify(),
+    });
+    if let Some(w) = &boot.warn {
+        tracing::warn!(target: "auth", "{w}");
     }
+    if let Some(e) = &boot.fatal {
+        // In-process there is no "refuse to boot": the broker keeps serving
+        // its own surfaces and the console answers what it can.
+        tracing::error!(target: "auth", mode = boot.mode.as_str(), "{e}");
+    }
+    let st: St = Arc::new(AppState {
+        cfg,
+        db: None,
+        store: crate::store::Store::Kv(e.kv),
+        upstream: crate::upstream::Upstream::InProcess(e.broker),
+        cache,
+        limits,
+        meter,
+        registry,
+        keys,
+    });
+    start_background(&st);
+    let app = router(st.clone());
+    tracing::info!(target: "proxy", "proxy embedded in the broker (state: replicated KV)");
+    (st, app)
+}
 
-    // Past this point the listener is closed. Metering and the registry's
-    // pending queue rows are still in memory: flush them before the process
-    // goes away, or the open minute is silently lost on every restart.
-    drain_usage(&st).await;
+/// Flush the proxy's in-memory usage and queue rows (the broker's shutdown
+/// calls this for the embedded proxy, like the standalone's own exit path).
+pub async fn shutdown_drain(st: &St) {
+    drain_usage(st).await;
 }
 
 /// Flush the metering accumulators and the registry's pending queue rows on
