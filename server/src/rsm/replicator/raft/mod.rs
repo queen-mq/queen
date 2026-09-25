@@ -65,6 +65,7 @@
 //! away for longer than `QUEEN_RAFT_PURGE_HOLD_S` gets a snapshot instead.
 
 mod admin;
+pub use admin::QuiesceHook;
 pub mod cluster;
 pub(crate) mod log_store;
 mod members;
@@ -1504,6 +1505,12 @@ impl<S: Store + 'static> RaftReplicator<S> {
     /// node (the facade, once it exists). Set once.
     pub fn set_remote_handler(&self, h: RemoteHandler) {
         let _ = self.shared.remote.set(h);
+    }
+
+    /// Install the hook that pauses this node's planner around a membership
+    /// change ([`admin::QuiesceHook`]). Set once.
+    pub fn set_quiesce_hook(&self, h: admin::QuiesceHook) {
+        let _ = self.shared.admin.quiesce.set(h);
     }
 
     /// Install the handler that answers a peer's `/raft/v1/local` gather of

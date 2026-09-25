@@ -608,10 +608,17 @@ impl RaftFacade {
         // reader (the default modes never read it). Phase A2: also hand it the
         // qlog reader, so with the knob on the planner reads that authority from
         // the queue log instead.
+        // A membership change pauses the batcher around openraft's own config
+        // entries (batcher::QuiesceReq).
+        let (quiesce_tx, quiesce_rx) = tokio::sync::mpsc::unbounded_channel();
         let batcher = Batcher::new(store.clone(), repl.clone(), batcher_cfg)
             .with_reader(reader.clone())
-            .with_qlog_reader(qlog_reader.clone());
+            .with_qlog_reader(qlog_reader.clone())
+            .with_quiesce(quiesce_rx);
         let (cmd_tx, batcher_join) = batcher.spawn();
+        if let NodeReplicator::Raft(r) = &*repl {
+            r.set_quiesce_hook(crate::rsm::batcher::quiesce_hook(quiesce_tx));
+        }
         let admit = crate::rsm::admit::global();
         // Clients served from every node: whichever node leads plans the
         // prepared commands its followers send it (every cluster node installs

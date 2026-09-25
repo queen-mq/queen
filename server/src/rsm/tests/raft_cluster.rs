@@ -1757,3 +1757,102 @@ async fn the_membership_endpoints_answer_through_the_router() {
     }
     let _ = std::fs::remove_dir_all(cfg_dir);
 }
+
+/// Writes go on while the membership changes: openraft appends a change's
+/// config entries itself, between two entries the leader's batcher proposed
+/// at PREDICTED indexes. The batcher pauses around the change
+/// (`batcher::QuiesceReq`) and plans again from the log's end. Before, the
+/// next entry landed two indexes late, the batcher stopped for good, and
+/// every write answered 500 ("planner channel closed") until leadership moved
+/// (Jepsen membership nemesis, 2026-09-25).
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn writes_go_on_across_membership_changes() {
+    let _one = serial();
+    log_init();
+    let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("member-writes")).collect();
+    let ports = free_ports(4);
+    let opts = vec![test_opts(); 3];
+    let nodes = open_facades(&dirs, &opts, |id| cluster_config(&ports[..3], id)).await;
+    facade_leader(&nodes).await;
+
+    const DEADLINE: Duration = Duration::from_secs(10);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seq = Arc::new(AtomicU64::new(0));
+    let mut clients = Vec::new();
+    for node in nodes.iter().flatten() {
+        for _ in 0..4 {
+            let (node, stop, seq) = (node.clone(), stop.clone(), seq.clone());
+            clients.push(tokio::spawn(async move {
+                let mut worst = Duration::ZERO;
+                let (mut ok, mut failed) = (0u64, Vec::new());
+                while !stop.load(Ordering::Relaxed) {
+                    let n = seq.fetch_add(1, Ordering::Relaxed);
+                    let ctx = crate::rsm::facade::ReqCtx::new(
+                        crate::config::DEFAULT_TENANT,
+                        crate::rsm::facade::Deadline::after(DEADLINE),
+                    );
+                    let t0 = Instant::now();
+                    let r = node
+                        .push(ctx, crate::rsm::facade::PushReq { raw: push_body(n) })
+                        .await;
+                    worst = worst.max(t0.elapsed());
+                    match r {
+                        Ok(_) => ok += 1,
+                        Err(e) => failed.push((t0.elapsed(), e.to_string())),
+                    }
+                }
+                (worst, ok, failed)
+            }));
+        }
+    }
+
+    // Twice: a learner joins (a config entry) and leaves (another).
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    for _ in 0..2 {
+        for change in [
+            MembershipChange::AddLearner {
+                node: 4,
+                raft: format!("127.0.0.1:{}", ports[3]),
+                http: "127.0.0.1:1".into(),
+            },
+            MembershipChange::Remove { node: 4 },
+        ] {
+            let l = facade_leader(&nodes).await;
+            let repl = nodes[l].as_ref().unwrap().repl_for_test();
+            let crate::rsm::replicator::node::NodeReplicator::Raft(r) = &*repl else {
+                panic!("an openraft node");
+            };
+            r.admin_change(change, Instant::now() + Duration::from_secs(10))
+                .await
+                .expect("membership change");
+            drop(repl);
+            tokio::time::sleep(Duration::from_millis(700)).await;
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+
+    let mut worst = Duration::ZERO;
+    let (mut ok, mut failed) = (0u64, Vec::new());
+    for c in clients {
+        let (w, o, f) = c.await.expect("client");
+        worst = worst.max(w);
+        ok += o;
+        failed.extend(f);
+    }
+    eprintln!("pushes answered: {ok}; the slowest across four membership changes: {worst:?}");
+    assert!(ok > 100, "the clients pushed ({ok} answered)");
+    assert!(
+        failed.is_empty(),
+        "every push is answered across the membership changes: {failed:?}"
+    );
+    assert!(
+        worst < Duration::from_secs(3),
+        "a push waited {worst:?} across a membership change"
+    );
+    for n in nodes.into_iter().flatten() {
+        close_facade(n).await;
+    }
+    for d in dirs {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}

@@ -1515,6 +1515,47 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
 /// The leader-side cycle driver. Build one with [`Batcher::new`] and start it
 /// with [`Batcher::spawn`], which returns the channel the facade feeds and a
 /// join handle for the driver task.
+/// A membership change's request to the driver
+/// (`rsm::replicator::raft::admin::change_on_leader`). openraft appends the
+/// change's config entries itself while this node leads, and every entry in
+/// flight was proposed at a PREDICTED index that those entries would shift —
+/// the overlay fold, the drop gate and the applied-index wake all trust it. So
+/// the driver stops planning, answers `drained` once nothing is in flight,
+/// and plans again from the log's end once `resume` resolves (or is dropped).
+pub struct QuiesceReq {
+    pub drained: oneshot::Sender<()>,
+    pub resume: oneshot::Receiver<()>,
+}
+
+/// Resumes the driver when dropped ([`quiesce_hook`]).
+pub struct QuiesceGuard {
+    _resume: oneshot::Sender<()>,
+}
+
+/// The hook a membership change pauses the driver behind `tx` with: it
+/// resolves once nothing is in flight, to a guard that resumes the driver when
+/// dropped; `None` when the driver is gone.
+pub fn quiesce_hook(
+    tx: mpsc::UnboundedSender<QuiesceReq>,
+) -> crate::rsm::replicator::raft::QuiesceHook {
+    Arc::new(move || {
+        let tx = tx.clone();
+        Box::pin(async move {
+            let (drained, drained_rx) = oneshot::channel();
+            let (resume_tx, resume) = oneshot::channel();
+            tx.send(QuiesceReq { drained, resume }).ok()?;
+            drained_rx.await.ok()?;
+            Some(Box::new(QuiesceGuard { _resume: resume_tx }) as Box<dyn Send>)
+        })
+    })
+}
+
+/// A driver pausing for a [`QuiesceReq`].
+struct Quiescing {
+    drained: Option<oneshot::Sender<()>>,
+    resume: oneshot::Receiver<()>,
+}
+
 pub struct Batcher<S: Store, R: Replicator> {
     store: Arc<S>,
     repl: Arc<R>,
@@ -1530,6 +1571,8 @@ pub struct Batcher<S: Store, R: Replicator> {
     /// AND `DEDUP_INDEX=segment`, the planner reads the committed dedup authority
     /// from the qlog instead of the `.seg` files. `None` when the knob is off.
     qlog_reader: Option<QLogReader>,
+    /// Membership changes pausing the driver ([`QuiesceReq`]).
+    quiesce_rx: Option<mpsc::UnboundedReceiver<QuiesceReq>>,
 }
 
 impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
@@ -1541,7 +1584,15 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             front: Arc::new(DedupFront::from_env()),
             reader: None,
             qlog_reader: None,
+            quiesce_rx: None,
         }
+    }
+
+    /// Let membership changes pause this driver around openraft's own config
+    /// entries ([`QuiesceReq`]).
+    pub fn with_quiesce(mut self, rx: mpsc::UnboundedReceiver<QuiesceReq>) -> Batcher<S, R> {
+        self.quiesce_rx = Some(rx);
+        self
     }
 
     /// Hand the batcher the segment [`Reader`] the planner uses to serve the
@@ -1646,6 +1697,9 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             wake_seq: 0,
             last_cycle_at: None,
             plan_epoch: 0,
+            quiesce_rx: self.quiesce_rx,
+            quiescing: None,
+            realign_at: None,
         };
 
         loop {
@@ -1675,6 +1729,14 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                     st.note_wake("result");
                     st.on_result(seq, res);
                 }
+                Some(req) = recv_quiesce(&mut st.quiesce_rx) => {
+                    st.note_wake("quiesce");
+                    st.on_quiesce(req);
+                }
+                _ = quiesce_resumed(&mut st.quiescing), if st.quiescing.is_some() => {
+                    st.note_wake("resume");
+                    st.on_resume();
+                }
                 // PERF-G: the applied index advanced (QUEEN_RAFT_DRIVER_NOTIFY).
                 // Resolve every in-flight entry the apply has now passed, so the
                 // freed pipeline slot is reused on this one wake rather than
@@ -1701,7 +1763,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                     st.start_qlog_gc();
                 }
                 _ = tokio::time::sleep(Duration::from_millis(HOLD_POLL_MS)),
-                    if st.holding_until.is_some() =>
+                    if st.holding_until.is_some() || st.realign_at.is_some() || st.quiescing.is_some() =>
                 {
                     st.note_wake("hold");
                     st.check_hold();
@@ -1727,6 +1789,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                 }
             }
 
+            st.check_quiesced();
             if st.stopped {
                 break;
             }
@@ -1849,6 +1912,31 @@ struct RunState<S: Store, R: Replicator> {
     /// that is never proposed (it failed to encode), a failed cycle. The
     /// planner thread drops a state kept under an older epoch.
     plan_epoch: u64,
+    /// Membership changes pausing the driver ([`QuiesceReq`]), and the one
+    /// pausing it now.
+    quiesce_rx: Option<mpsc::UnboundedReceiver<QuiesceReq>>,
+    quiescing: Option<Quiescing>,
+    /// An entry landed at another index than planned: planning resumes, from
+    /// the log's end, once apply reaches this index ([`RunState::check_hold`]).
+    realign_at: Option<u64>,
+}
+
+/// The next [`QuiesceReq`], or never when no channel was handed in.
+async fn recv_quiesce(rx: &mut Option<mpsc::UnboundedReceiver<QuiesceReq>>) -> Option<QuiesceReq> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The pausing change resumed the driver (or went away).
+async fn quiesce_resumed(q: &mut Option<Quiescing>) {
+    match q {
+        Some(q) => {
+            let _ = (&mut q.resume).await;
+        }
+        None => std::future::pending().await,
+    }
 }
 
 impl<S: Store + 'static, R: Replicator> RunState<S, R> {
@@ -1996,6 +2084,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         !self.stopped
             && !self.paused
             && self.holding_until.is_none()
+            && self.quiescing.is_none()
             && self.unresolved() < self.cfg.pipeline
             && (self.queued() > 0
                 || ((self.expire_due
@@ -2674,16 +2763,21 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     // The overlay fold, the drop gate and the applied-index
                     // wake all use the index this driver predicted for the
                     // entry. A backend that put it anywhere else (openraft
-                    // appending an entry of its own while this node leads)
-                    // would make them wrong, so it is a stop, never a fix-up.
+                    // appending an entry of its own while this node leads — a
+                    // membership change pauses the driver first, QuiesceReq) makes
+                    // them wrong: never a fix-up of the pipeline, but a restart
+                    // of it from the log's end once apply has caught up, the
+                    // reset a leadership regain does (it used to stop the driver
+                    // for good: every write answered 500 until leadership moved).
                     if e.index != at.index {
                         tracing::error!(
                             target: "rsm",
                             predicted = e.index,
                             actual = at.index,
-                            "an entry landed at another index than planned; the driver stops",
+                            "an entry landed at another index than planned; the pipeline restarts from the log's end",
                         );
-                        self.stopped = true;
+                        self.lose_leadership(None);
+                        self.realign_at = Some(self.repl.metrics().last_log_index);
                         return;
                     }
                     // PERF-G: the applied-index wake may already have resolved
@@ -2734,6 +2828,8 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         }
         self.holding_until = None;
         self.paused = true;
+        // A pausing membership change fails with this leadership anyway.
+        self.quiescing = None;
         // The pipeline is gone, and with it every entry the kept overlay holds.
         self.invalidate_kept();
     }
@@ -2748,6 +2844,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     self.lose_leadership(None);
                 }
                 if self.paused {
+                    self.realign_at = None;
                     self.planning_term = Some(term);
                     // I13: a new leader plans only after applying the first
                     // entry of its own term. On a single node with the
@@ -2785,8 +2882,72 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         }
     }
 
+    /// An entry landed off its predicted index ([`RunState::on_result`]): plan
+    /// again, from the log's end, once apply has caught up with everything
+    /// logged — still leading, in the same term (a role change takes over
+    /// otherwise).
+    fn check_realign(&mut self) {
+        let Some(last) = self.realign_at else {
+            return;
+        };
+        if self.repl.applied_index() < last {
+            return;
+        }
+        self.realign_at = None;
+        let role = *self.role_rx.borrow();
+        if let Role::Leader { term } = role {
+            if self.paused && self.planning_term == Some(term) {
+                self.paused = false;
+                self.next_index = self.repl.metrics().last_log_index + 1;
+                self.front.reset();
+                self.invalidate_kept();
+            }
+        }
+    }
+
+    /// A membership change asks to pause ([`QuiesceReq`]).
+    fn on_quiesce(&mut self, req: QuiesceReq) {
+        self.quiescing = Some(Quiescing {
+            drained: Some(req.drained),
+            resume: req.resume,
+        });
+        self.check_quiesced();
+    }
+
+    /// While pausing: tell the change once nothing is in flight.
+    fn check_quiesced(&mut self) {
+        let applied = self.repl.applied_index();
+        let Some(q) = self.quiescing.as_mut() else {
+            return;
+        };
+        if q.drained.is_none() {
+            return;
+        }
+        self.drop_landed(applied);
+        if self.inflight.is_empty() && self.holding_until.is_none() {
+            if let Some(q) = self.quiescing.as_mut() {
+                if let Some(tx) = q.drained.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+    }
+
+    /// The change is done (or gave up): openraft's config entries sit between
+    /// the last planned entry and the next, so plan from the log's end, with
+    /// the reset a leadership regain does.
+    fn on_resume(&mut self) {
+        self.quiescing = None;
+        if !self.paused {
+            self.next_index = self.repl.metrics().last_log_index + 1;
+            self.front.reset();
+            self.invalidate_kept();
+        }
+    }
+
     /// Poll the applied index while holding on a timeout (I3).
     fn check_hold(&mut self) {
+        self.check_realign();
         let Some(until) = self.holding_until else {
             return;
         };

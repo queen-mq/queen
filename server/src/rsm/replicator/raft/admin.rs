@@ -68,8 +68,20 @@ pub(crate) fn promote_max_lag_from_env() -> u64 {
 
 /// What the membership checks share on one node: the lock that keeps changes
 /// one at a time, and the two thresholds.
+/// Pauses this node's planner around a membership change: resolves once
+/// nothing it proposed is still in flight, to a guard that resumes it when
+/// dropped (`crate::rsm::batcher::QuiesceReq`); `None` when there is no
+/// planner to pause. Installed by the facade.
+pub type QuiesceHook = std::sync::Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Box<dyn Send>>> + Send>>
+        + Send
+        + Sync,
+>;
+
 pub(crate) struct AdminCtx {
     lock: tokio::sync::Mutex<()>,
+    /// See [`QuiesceHook`].
+    pub(crate) quiesce: std::sync::OnceLock<QuiesceHook>,
     /// See [`promote_max_lag_from_env`].
     pub(crate) promote_max_lag: u64,
     /// A member is live when it acknowledged an RPC from the leader this
@@ -82,6 +94,7 @@ impl AdminCtx {
     pub(crate) fn new(promote_max_lag: u64, live_within: Duration) -> AdminCtx {
         AdminCtx {
             lock: tokio::sync::Mutex::new(()),
+            quiesce: std::sync::OnceLock::new(),
             promote_max_lag,
             live_within,
         }
@@ -645,6 +658,26 @@ pub(crate) async fn change_on_leader<S: Store + 'static>(
         membership_index = observed.map(|l| rsm_index(l.index)).unwrap_or(0),
         "raft: membership change requested by an operator",
     );
+    // This leader's planner proposes every entry at a PREDICTED index, and
+    // openraft appends the change's config entries itself: pause the planner
+    // (nothing in flight) until the change is done (batcher::QuiesceReq). Left
+    // running, the first entry after the change landed two indexes late and
+    // the planner stopped: every write answered 500 until leadership moved
+    // (Jepsen membership nemesis, 2026-09-25).
+    let paused: Option<Box<dyn Send>> = match ctx.quiesce.get() {
+        Some(hook) => {
+            match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), hook()).await {
+                Ok(g) => g,
+                Err(_elapsed) => {
+                    return Err(ReplError::refused(
+                        "busy",
+                        "the writes in flight did not drain before the deadline; retry",
+                    ))
+                }
+            }
+        }
+        None => None,
+    };
     let res = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         raft.change_membership_if(
@@ -659,6 +692,28 @@ pub(crate) async fn change_on_leader<S: Store + 'static>(
     let resp = match res {
         Err(_elapsed) => {
             tracing::warn!(target: "rsm", change = %what, "raft: membership change: the deadline passed; it may still complete");
+            // It may still append its final config: keep the planner paused
+            // until the membership is uniform and committed again (or this
+            // node stops leading; two minutes at most).
+            if let Some(g) = paused {
+                let raft = raft.clone();
+                tokio::spawn(async move {
+                    let end = Instant::now() + Duration::from_secs(120);
+                    loop {
+                        let m = raft.metrics().borrow_watched().clone();
+                        let joint = m.membership_config.membership().get_joint_config().len() > 1;
+                        let committed = *m.membership_config.log_id() <= m.local_committed;
+                        if m.state != ServerState::Leader
+                            || (!joint && committed)
+                            || Instant::now() >= end
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    drop(g);
+                });
+            }
             return Err(ReplError::Timeout);
         }
         Ok(Ok(resp)) => resp,
