@@ -1434,3 +1434,40 @@ fn timestamps_render_like_postgres() {
     assert_eq!(ts_jsonb(us - 123_400), "2026-09-22T10:15:30+00:00");
     assert_eq!(ts_list(us), "2026-09-22T10:15:30.123400Z");
 }
+
+/// Jepsen W4 (19 G1c cycles in a no-fault run): two calls planned into ONE
+/// entry, each reading the key the other writes. Their reads are rendered at
+/// their own positions (`kv_reads`): the first sees nothing of the second,
+/// the second sees the first's write — a serial order, never a cycle. Read
+/// after the entry had applied (the old path), both saw each other's write.
+#[test]
+fn a_writing_calls_reads_see_nothing_planned_after_it() {
+    let mut c = Cell::new("kv-read-position");
+    let (ida, idb) = (0x5734_0001u64, 0x5734_0002u64);
+    let a = json!([
+        {"op":"getMany","ns":"w4","keys":["y"]},
+        {"op":"put","ns":"w4","key":"x","value":"a","forever":true},
+    ]);
+    let b = json!([
+        {"op":"getMany","ns":"w4","keys":["x"]},
+        {"op":"put","ns":"w4","key":"y","value":"b","forever":true},
+    ]);
+    let reads = crate::rsm::kv_reads::global();
+    let ra = reads
+        .register(rid(ida), TENANT, &ops_for(TENANT, &a))
+        .expect("register a");
+    let rb = reads
+        .register(rid(idb), TENANT, &ops_for(TENANT, &b))
+        .expect("register b");
+    let cycle = c.run(&[kv_cmd(ida, a.clone()), kv_cmd(idb, b.clone())]);
+    assert!(cycle.logged, "both calls write");
+    let got_a = ra.take().expect("a rendered at its position").expect("a");
+    let got_b = rb.take().expect("b rendered at its position").expect("b");
+    assert_eq!(got_a[0]["rows"], json!([]), "a read b's later write: {got_a:?}");
+    assert_eq!(got_a[0]["missing"], json!(["y"]));
+    assert_eq!(got_b[0]["rows"][0]["value"], "a", "b reads a's write: {got_b:?}");
+    assert!(applied(&got_a[1]) && applied(&got_b[1]));
+    // Nothing is left waiting once the calls are done.
+    drop((ra, rb));
+    assert!(reads.call(&rid(ida)).is_none() && reads.call(&rid(idb)).is_none());
+}

@@ -99,7 +99,7 @@ use std::time::{Duration, Instant};
 
 use crate::rsm::dedup;
 use crate::rsm::effect::{Assigns, CodecError, Effect, GarbageScope, Kind, Pid};
-use crate::rsm::entry::{CommandRecord, Entry, RequestId};
+use crate::rsm::entry::{CommandRecord, Entry, Outcome, RequestId};
 use crate::rsm::qlog::set::QLogSet;
 use crate::rsm::segments::{self, FileState, Position, Release, SegError, Segments};
 use crate::rsm::state::Derived;
@@ -1456,6 +1456,53 @@ impl<'s, S: Store> Applier<'s, S> {
         }
     }
 
+    /// The KV calls of `c` a receiver in this process waits on
+    /// ([`crate::rsm::kv_reads`]), keyed by the ordinal of each one's last
+    /// effect. Empty (one atomic load) when nobody waits.
+    fn kv_render_points(&self, c: &Committed) -> HashMap<u32, Vec<usize>> {
+        let reads = crate::rsm::kv_reads::global();
+        let mut at: HashMap<u32, Vec<usize>> = HashMap::new();
+        if !reads.any_waiting() {
+            return at;
+        }
+        for (i, cmd) in c.entry.commands.iter().enumerate() {
+            if matches!(cmd.outcome, Outcome::Kv(_))
+                && cmd.effect_count > 0
+                && reads.call(&cmd.request_id).is_some()
+            {
+                at.entry(cmd.first_effect + cmd.effect_count - 1)
+                    .or_default()
+                    .push(i);
+            }
+        }
+        at
+    }
+
+    /// Render the answers of `cmds` (indexes into `c.entry.commands`) against
+    /// the state as it stands now — after their own effects and every earlier
+    /// command's, before any later one's — at the entry's instant (D5).
+    fn render_kv_reads(&self, c: &Committed, cmds: &[usize]) {
+        let reads = crate::rsm::kv_reads::global();
+        for &i in cmds {
+            let cmd = &c.entry.commands[i];
+            let Outcome::Kv(o) = &cmd.outcome else {
+                continue;
+            };
+            let Some((tenant, ops)) = reads.call(&cmd.request_id) else {
+                continue;
+            };
+            let answer = crate::rsm::planner::kv::render_call(
+                &self.writes,
+                &tenant,
+                &ops,
+                &o.results,
+                c.entry.now_us,
+            )
+            .map_err(|e| e.to_string());
+            reads.answer(&cmd.request_id, answer);
+        }
+    }
+
     /// Tell the operator exactly what stopped this node: the entry (index,
     /// term, digest), the effect and its command, whether every node stops on
     /// it, and what to set if so. One error line, then [`Notify::failed`].
@@ -1637,6 +1684,9 @@ impl<'s, S: Store> Applier<'s, S> {
         // A test's injected refusal (`faults::refuse_apply_of`): off unless a
         // test armed one, one relaxed load per entry.
         let refuse_at = crate::rsm::faults::apply_refusal(&c.entry);
+        // KV calls whose receiver waits for its reads (`kv_reads`): each is
+        // rendered right after its OWN last effect, before any later command's.
+        let kv_render = self.kv_render_points(c);
         for (ord, e) in c.entry.effects.iter().enumerate() {
             match e.assigns() {
                 Assigns::Pid(_) => pids_assigned += 1,
@@ -1653,6 +1703,9 @@ impl<'s, S: Store> Applier<'s, S> {
                 }
             }
             self.effect(c.index, ord as u32, c.entry.now_us, e, &mut wakes)?;
+            if let Some(cmds) = kv_render.get(&(ord as u32)) {
+                self.render_kv_reads(c, cmds);
+            }
             // §13.5 `apply.mid_entry`: some effects of this entry are written
             // to the OPEN store transaction (and some payload bytes to files),
             // the rest are not, and the applied index has NOT advanced — it is

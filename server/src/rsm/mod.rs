@@ -168,6 +168,9 @@ pub mod digest {}
 pub mod fasthash;
 pub mod faults;
 
+/// A KV call's reads, rendered by apply at the call's own position (Jepsen W4).
+pub mod kv_reads;
+
 /// Node-local timing metrics (O18, D17, PERF-1): the lock-free `queen_raft_*`
 /// histograms and counters the pipeline feeds and `/metrics/prometheus` reads.
 /// Not replicated; gated by `QUEEN_RAFT_METRICS` (default on).

@@ -9,10 +9,15 @@
 //! 2. **Writes** — a call with at least one write is ONE [`Command::Kv`],
 //!    planned serially and answered once its entry is committed AND applied on
 //!    this node (I4). A call with none never enters the planner.
-//! 3. **Reads** — evaluated here, off this node's applied state, AFTER the
-//!    call's entry (if any) applied: they see the call's own writes, as 024's
-//!    phase ordering does, and their bytes never enter the log (D7). One
-//!    read budget per call, spent in 024's apply order.
+//! 3. **Reads** — of a call that writes: rendered by apply right after the
+//!    call's own last effect, before any later command's
+//!    ([`crate::rsm::kv_reads`]), so they see the call's own writes, as 024's
+//!    phase ordering does, and nothing planned after it (reading the applied
+//!    state once the entry had applied let two calls each read the other's
+//!    write: Jepsen W4, G1c). Of a read-only call, or of a call answered from
+//!    committed state (a request-id hit): evaluated here, off this node's
+//!    applied state. Their bytes never enter the log (D7). One read budget
+//!    per call, spent in 024's apply order.
 //!
 //! The store reads run on the blocking pool inside one read transaction (pin
 //! 2, I15), under the request's deadline.
@@ -45,17 +50,22 @@ impl RaftFacade {
         }
 
         let pre: Vec<KvOpOutcome> = if ops.iter().any(KvOp::is_write) {
+            let registered = ops
+                .iter()
+                .any(|op| !op.is_write())
+                .then(|| crate::rsm::kv_reads::global().register(ctx.request_id, &ctx.tenant, &ops))
+                .flatten();
             let cmd = Command::Kv(KvCommand {
                 request_id: ctx.request_id,
                 tenant: ctx.tenant.clone(),
                 ops: ops.clone(),
             });
             let reply = self.submit(&ctx, cmd).await.map_err(KvFailure::Rsm)?;
-            let o = match reply {
+            let (o, at) = match reply {
                 Reply::Done {
                     outcome: Outcome::Kv(o),
-                    ..
-                } => o,
+                    at,
+                } => (o, at),
                 Reply::Done { outcome, .. } => {
                     return Err(KvFailure::Rsm(RsmError::Internal(format!(
                         "kv got a non-kv outcome: {outcome:?}"
@@ -87,6 +97,15 @@ impl RaftFacade {
                 return Err(KvFailure::Rsm(RsmError::Internal(
                     "kv_result_misaligned".into(),
                 )));
+            }
+            // The entry applied on this node before the reply: its answer was
+            // rendered at the call's position.
+            if let (Some(reg), Some(_)) = (&registered, at) {
+                if let Some(answer) = reg.take() {
+                    return answer.map(|results| KvOut { results }).map_err(|e| {
+                        KvFailure::Rsm(RsmError::Internal(format!("kv read: {e}")))
+                    });
+                }
             }
             o.results
         } else {
