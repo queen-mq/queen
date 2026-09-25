@@ -36,7 +36,12 @@ assets/
 examples/
 helm/
 helm_queen/
+helm_v1/
+helm_v2/
 test/
+
+# Agent worktrees: full copies of the repo, ~2 GB
+.claude/
 
 # Local dev cell state (pids, logs, spool)
 proxy/.devcell/

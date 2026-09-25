@@ -2,6 +2,8 @@
 #
 # Builds the complete Queen stack:
 # - Rust broker (server/, segments-only engine; SQL schema baked in via include_str!)
+# - the proxy and its console, linked into the broker (in-process in raft mode
+#   with QUEEN_PROXY_EMBEDDED=true)
 # - Vue.js frontend dashboard (served by the broker's SPA fallback)
 # - queenctl operator CLI (Go static binary)
 #
@@ -35,6 +37,26 @@ COPY app/ ./
 # which with this WORKDIR lands at /app/server/webapp/dist.
 RUN npm run build
 
+# Stage 1b: Build the proxy console
+#
+# The proxy crate is linked into the broker by the default `server` feature (the
+# single binary, PLAN_SINGLE_BINARY.md W3/W4: QUEEN_PROXY_EMBEDDED=true runs it
+# in-process, server/src/proxy_embed.rs). It embeds console/dist with rust_embed,
+# which hard-errors at compile time when the folder is missing, and
+# .dockerignore keeps the local dist out of the context — so it is built here,
+# exactly as proxy/Dockerfile builds it.
+FROM node:24-alpine AS console-builder
+
+WORKDIR /build/console
+
+COPY proxy/console/package*.json ./
+
+RUN npm ci
+
+COPY proxy/console/ ./
+
+RUN npm run build
+
 # Stage 2: Build the Rust broker
 FROM rust:1-bookworm AS server-builder
 # TARGETARCH folds the platform into the cache ids below: a multi-platform build
@@ -56,6 +78,14 @@ COPY crates /usr/build/crates
 # dependency like queen-protocol, so it has to be in the context here too.
 COPY protocols/queen-kafka/Cargo.toml /usr/build/protocols/queen-kafka/Cargo.toml
 COPY protocols/queen-kafka/src /usr/build/protocols/queen-kafka/src
+# ...and the proxy library, linked in by the default `server` feature (stage 1b).
+# Its migrations are include_str!-embedded and its console is rust_embed-ed, so
+# both have to be here. Its third embed, ../server/webapp/dist, is the dashboard
+# that layer 3 below puts at /usr/build/server/webapp/dist.
+COPY proxy/Cargo.toml /usr/build/proxy/Cargo.toml
+COPY proxy/src /usr/build/proxy/src
+COPY proxy/migrations /usr/build/proxy/migrations
+COPY --from=console-builder /build/console/dist /usr/build/proxy/console/dist
 
 # Layer 1: manifests + build script + version file (build.rs embeds
 # server.json's version into the binary via env!("QUEEN_VERSION")).
