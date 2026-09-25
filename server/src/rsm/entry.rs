@@ -1092,6 +1092,41 @@ pub fn encode_entry_payload_free(e: &Entry) -> Result<Vec<u8>, CodecError> {
     Ok(frame_entry_body(&body))
 }
 
+/// A digest of an entry that is the same whichever form it is held in — whole,
+/// with its payloads (the leader that planned it), or payload-free (the queue
+/// logs, every follower, a replay): xxh3-64 over every byte of the encoding
+/// except an `Append`'s payload and the stand-in length the payload-free form
+/// carries for it. An operator names a poisoned entry by index AND this digest
+/// (`QUEEN_RAFT_APPLY_SKIP=<index>:<digest>`), and each node checks that the
+/// entry it holds at that index is the one named before it steps over it.
+pub fn entry_digest(e: &Entry) -> u64 {
+    fn one(out: &mut Vec<u8>, e: &Effect) {
+        match e {
+            Effect::Append {
+                pid,
+                bucket,
+                base_offset,
+                count,
+                created_at_us,
+                hashes,
+                blob: _,
+            } => {
+                out.extend_from_slice(&(e.kind() as u16).to_le_bytes());
+                out.extend_from_slice(&e.version().to_le_bytes());
+                out.extend_from_slice(&pid.to_le_bytes());
+                out.extend_from_slice(&bucket.to_le_bytes());
+                out.extend_from_slice(&base_offset.to_le_bytes());
+                out.extend_from_slice(&count.to_le_bytes());
+                out.extend_from_slice(&created_at_us.to_le_bytes());
+                out.extend_from_slice(&(hashes.len() as u32).to_le_bytes());
+                out.extend_from_slice(hashes);
+            }
+            other => write_effect(out, other),
+        }
+    }
+    xxhash_rust::xxh3::xxh3_64(&encode_entry_body_with(e, one))
+}
+
 /// The raw serializer, with no checks at all: for the tests that must FORGE
 /// bytes a valid encoder cannot produce, so the decoder's refusals can be
 /// exercised. Never compiled into the product — the product path is

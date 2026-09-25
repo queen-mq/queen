@@ -628,13 +628,22 @@ pub struct RaftHealth {
     /// stub). Distinct from process liveness: the broker is up and answers
     /// `/health`, but the message path is not yet on the RSM.
     pub storage_ready: bool,
+    /// The openraft replicator's apply record, `{"skipped": [...], "failure":
+    /// {...}|null}`: the entries this node stepped over (an operator's
+    /// `QUEEN_RAFT_APPLY_SKIP`) and the entry that stopped apply here, with
+    /// the exact setting that steps over it. `None` without one.
+    pub apply: Option<serde_json::Value>,
 }
 
 impl RaftHealth {
     /// Render the `raft` object exactly as `/health` embeds it.
     pub fn to_json(&self) -> String {
+        let apply = match &self.apply {
+            Some(a) => format!(",\"apply\":{a}"),
+            None => String::new(),
+        };
         format!(
-            "{{\"role\":\"{}\",\"leader\":{},\"term\":{},\"applied\":{},\"commit\":{},\"lag\":{},\"storageReady\":{}}}",
+            "{{\"role\":\"{}\",\"leader\":{},\"term\":{},\"applied\":{},\"commit\":{},\"lag\":{},\"storageReady\":{}{apply}}}",
             self.role, self.leader_known, self.term, self.applied, self.commit, self.lag_ms, self.storage_ready
         )
     }
@@ -756,6 +765,26 @@ pub trait Rsm: Send + Sync {
         Err(RsmError::Unsupported)
     }
 
+    /// `GET /api/v1/system/raft/membership`: the Raft membership as the leader sees
+    /// it — voters, learners, addresses, the leader, each member's matched
+    /// index, lag and last acknowledgement. Cluster-wide, never tenant-scoped.
+    /// The default: no Raft membership behind this facade.
+    async fn raft_membership(&self, _ctx: ReqCtx) -> Result<ApiOut, RsmError> {
+        Err(RsmError::Unsupported)
+    }
+
+    /// The operator's membership changes (`POST .../learners`,
+    /// `POST .../promote`, `PUT .../voters`, `DELETE .../members/:id`):
+    /// checked and made on the leader, answered with the membership they left
+    /// (`replicator/raft/admin.rs`). The default: none behind this facade.
+    async fn raft_change_membership(
+        &self,
+        _ctx: ReqCtx,
+        _change: crate::rsm::replicator::MembershipChange,
+    ) -> Result<ApiOut, RsmError> {
+        Err(RsmError::Unsupported)
+    }
+
     /// The `/health` raft block (§14.1). Cheap and non-async: a node-local read.
     fn health(&self) -> RaftHealth;
 
@@ -863,6 +892,7 @@ impl Rsm for NotReady {
             commit: 0,
             lag_ms: 0,
             storage_ready: false,
+            apply: None,
         }
     }
 

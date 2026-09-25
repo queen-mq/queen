@@ -136,6 +136,24 @@ pub enum ReplError {
     Unsupported(String),
     Timeout,
     Fatal(String),
+    /// The change was checked and refused before anything was written (a
+    /// membership change that would leave no quorum, a change while another is
+    /// in flight, a learner too far behind to promote). `code` is stable, for
+    /// a caller to branch on; `message` says what to do instead.
+    Refused {
+        code: String,
+        message: String,
+    },
+}
+
+impl ReplError {
+    /// A [`ReplError::Refused`].
+    pub fn refused(code: &str, message: impl Into<String>) -> ReplError {
+        ReplError::Refused {
+            code: code.to_string(),
+            message: message.into(),
+        }
+    }
 }
 
 impl std::fmt::Display for ReplError {
@@ -145,6 +163,7 @@ impl std::fmt::Display for ReplError {
             ReplError::Unsupported(s) => write!(f, "unsupported: {s}"),
             ReplError::Timeout => write!(f, "deadline elapsed"),
             ReplError::Fatal(s) => write!(f, "fatal: {s}"),
+            ReplError::Refused { code, message } => write!(f, "refused ({code}): {message}"),
         }
     }
 }
@@ -241,12 +260,38 @@ impl Membership {
     }
 }
 
-/// A membership change (§12.3, §12.6). Phase 1's single node cannot apply any
-/// of these; the openraft adapter (phase 3/4) does.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A membership change (§12.3, §12.6), as the operator endpoints
+/// (`/api/v1/system/raft/membership/*`) ask for it. The local replicator cannot apply
+/// any of these; the openraft replicator checks each one on the leader first
+/// (`replicator/raft/admin.rs`) and refuses what would leave the cluster
+/// without a quorum. Serialized as `{"op": "add_learner", ...}` when a
+/// follower forwards it to the leader.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
 pub enum MembershipChange {
-    AddLearner { node: NodeId, addr: String },
-    Promote { node: NodeId },
+    /// Add `node` as a learner: it receives the log (or a snapshot) and never
+    /// votes. `raft` is its Raft RPC address, `http` its client address.
+    AddLearner {
+        node: NodeId,
+        raft: String,
+        http: String,
+    },
+    /// Make these learners voters, in one change. Each must be caught up
+    /// (`QUEEN_RAFT_PROMOTE_MAX_LAG` entries) unless `force`.
+    Promote {
+        nodes: Vec<NodeId>,
+        #[serde(default)]
+        force: bool,
+    },
+    /// Make the voter set exactly `voters` (each one already a member). A
+    /// voter left out is removed from the cluster; a learner put in is
+    /// promoted, under the same catch-up rule as [`MembershipChange::Promote`].
+    SetVoters {
+        voters: Vec<NodeId>,
+        #[serde(default)]
+        force: bool,
+    },
+    /// Remove a voter or a learner from the cluster.
     Remove { node: NodeId },
 }
 

@@ -47,7 +47,10 @@
 //!   whole overlay together, fail every waiter with `Retry` (plus the hint), and
 //!   stop planning until this node is leader again and has applied the first
 //!   entry of its term (I13). The retry (same request id) finds the outcome if
-//!   the entry committed, or plans anew (§5.4).
+//!   the entry committed, or plans anew (§5.4). While ANOTHER node is known to
+//!   lead, every queued command and every one that arrives is answered `Retry`
+//!   at once, never parked: it would wait for this node to lead again (a
+//!   leadership transfer cost each such caller its whole deadline).
 //! - [`ProposeError::Timeout`] while still leader: answer the entry's waiters
 //!   `Retry` but keep the entry IN FLIGHT and plan NOTHING until it applies
 //!   locally or the role changes. Dropping the overlay here would plan the next
@@ -1923,9 +1926,46 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             .count()
     }
 
+    /// While another node is known to lead (this one follows it, or is a
+    /// learner), the hint every command reaching this batcher is answered
+    /// with: nothing will be planned here until this node leads again, which
+    /// may be never. `None` while this node leads, or while no leader is known
+    /// (an election: what is queued waits for its outcome).
+    fn bounce_hint(&self) -> Option<Option<NodeId>> {
+        if !self.paused {
+            return None;
+        }
+        match *self.role_rx.borrow() {
+            Role::Follower {
+                leader: Some(leader),
+            } => Some(Some(leader)),
+            Role::Learner => Some(None),
+            _ => None,
+        }
+    }
+
+    /// Answer every queued command `Retry` (with the leader's hint): another
+    /// node leads, and each caller retries there — the offloading facade takes
+    /// it to the new leader under the same request id.
+    fn bounce_queued(&mut self, hint: Option<NodeId>) {
+        while let Some(sub) = self.lane.pop_front().or_else(|| self.queue.pop_front()) {
+            let _ = sub.reply.send(Reply::Retry { hint });
+        }
+    }
+
     /// Queue a submission at the back of its lane: pushes in `queue`, every
-    /// other command in the priority `lane` (when `drain_lane` is on).
+    /// other command in the priority `lane` (when `drain_lane` is on). While
+    /// another node leads, answer it `Retry` instead ([`Self::bounce_hint`]):
+    /// a command parked here would wait for this node to lead again — its
+    /// caller's whole deadline, or for ever — though the leader could plan it
+    /// at once (a follower still forwarding to a node that just handed
+    /// leadership away, a local command that passed the role check a moment
+    /// before the step-down).
     fn enqueue(&mut self, sub: Submission) {
+        if let Some(hint) = self.bounce_hint() {
+            let _ = sub.reply.send(Reply::Retry { hint });
+            return;
+        }
         if self.cfg.drain_lane && !matches!(sub.command, Command::Push(_)) {
             self.lane.push_back(sub);
         } else {
@@ -2214,16 +2254,24 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         // leadership moves the epoch) or started a hold (a timed-out propose):
         // this cycle was planned on entries that may never commit, so it is
         // not proposed. Its commands are refused retryably; the SDK retries
-        // with the same request ids.
+        // with the same request ids. When leadership was lost (this driver is
+        // paused) the answer is `Retry` with the leader's hint, as for every
+        // command a node that does not lead cannot plan: an offloading facade
+        // then takes the command to the new leader itself instead of failing
+        // its caller.
         if matches!(planned, Ok(Ok(_)))
             && (self.plan_epoch != epoch0 || (!hold0 && self.holding_until.is_some()))
         {
             self.invalidate_kept();
+            let lost = self.paused.then(|| self.role_rx.borrow().leader_hint());
             for reply in replies {
-                let _ = reply.send(Reply::Refused(Refusal::retry(
-                    "unavailable",
-                    "the pipeline changed while this cycle planned",
-                )));
+                let _ = match lost {
+                    Some(hint) => reply.send(Reply::Retry { hint }),
+                    None => reply.send(Reply::Refused(Refusal::retry(
+                        "unavailable",
+                        "the pipeline changed while this cycle planned",
+                    ))),
+                };
             }
             return;
         }
@@ -2722,6 +2770,13 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 // Follower / Learner / Candidate: drop the overlay, fail
                 // waiters, and wait for leadership.
                 self.lose_leadership(role.leader_hint());
+                // Another node leads: what is queued here would wait for this
+                // node to lead again. Answer it now; its caller retries on the
+                // leader (an election in progress keeps the queue: this node
+                // may win it).
+                if let Some(hint) = self.bounce_hint() {
+                    self.bounce_queued(hint);
+                }
             }
         }
     }

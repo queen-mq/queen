@@ -198,10 +198,96 @@ impl Rsm for GroupRouter {
         self.pick(&ctx.tenant).api(ctx, req).await
     }
 
+    /// Every group's membership: each group is a Raft cluster of its own.
+    async fn raft_membership(&self, ctx: ReqCtx) -> Result<ApiOut, RsmError> {
+        let mut groups = Vec::with_capacity(self.groups.len());
+        for (g, r) in self.groups.iter().enumerate() {
+            let out = r.raft_membership(ctx.clone()).await?;
+            groups.push(serde_json::json!({
+                "group": g,
+                "status": out.status,
+                "body": serde_json::from_str::<serde_json::Value>(&out.body)
+                    .unwrap_or(serde_json::Value::String(out.body)),
+            }));
+        }
+        Ok(ApiOut::json(
+            200,
+            serde_json::json!({"engine": "raft", "groups": groups}).to_string(),
+        ))
+    }
+
+    /// A membership change is a change of every group: each is a Raft
+    /// cluster of its own over the same nodes. Made group by group, in order,
+    /// each on its own leader; group `g` reaches a node on its Raft port plus
+    /// `g` (`cluster::group_raft_addr`). The answer lists every group's; the
+    /// changes are idempotent, so a caller repeats the whole call after a
+    /// group that failed.
+    async fn raft_change_membership(
+        &self,
+        ctx: ReqCtx,
+        change: crate::rsm::replicator::MembershipChange,
+    ) -> Result<ApiOut, RsmError> {
+        use crate::rsm::replicator::MembershipChange;
+        let mut groups = Vec::with_capacity(self.groups.len());
+        let mut status = 200u16;
+        for (g, r) in self.groups.iter().enumerate() {
+            let this = match &change {
+                MembershipChange::AddLearner { node, raft, http } => {
+                    let raft = crate::rsm::replicator::raft::cluster::group_raft_addr(raft, g)
+                        .map_err(|e| RsmError::Rejected {
+                            code: "bad_request".into(),
+                            message: e,
+                        })?;
+                    MembershipChange::AddLearner {
+                        node: *node,
+                        raft,
+                        http: http.clone(),
+                    }
+                }
+                other => other.clone(),
+            };
+            let out = match r.raft_change_membership(ctx.clone(), this).await {
+                Ok(out) => out,
+                Err(e) => ApiOut::json(
+                    503,
+                    serde_json::json!({"ok": false, "code": e.code(), "error": e.to_string()})
+                        .to_string(),
+                ),
+            };
+            if !(200..300).contains(&out.status) && status == 200 {
+                status = out.status;
+            }
+            groups.push(serde_json::json!({
+                "group": g,
+                "status": out.status,
+                "body": serde_json::from_str::<serde_json::Value>(&out.body)
+                    .unwrap_or(serde_json::Value::String(out.body)),
+            }));
+            if status != 200 {
+                // Later groups are not changed: the call is repeated whole.
+                break;
+            }
+        }
+        Ok(ApiOut::json(
+            status,
+            serde_json::json!({"engine": "raft", "ok": status == 200, "groups": groups})
+                .to_string(),
+        ))
+    }
+
     /// Ready only when every group is: a tenant on a group without a leader
     /// cannot be served.
     fn health(&self) -> RaftHealth {
         let mut all: Vec<RaftHealth> = self.groups.iter().map(|g| g.health()).collect();
+        let applies: Vec<serde_json::Value> = all
+            .iter()
+            .enumerate()
+            .filter_map(|(g, h)| {
+                h.apply
+                    .clone()
+                    .map(|a| serde_json::json!({"group": g, "apply": a}))
+            })
+            .collect();
         let mut h = all.remove(0);
         for o in all {
             h.leader_known &= o.leader_known;
@@ -211,6 +297,7 @@ impl Rsm for GroupRouter {
                 h.role = format!("{}+leader", h.role);
             }
         }
+        h.apply = (!applies.is_empty()).then_some(serde_json::Value::Array(applies));
         h
     }
 

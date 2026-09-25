@@ -202,6 +202,57 @@ pub fn armed() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 
+// ---------------------------------------------------------------------------
+// Apply refusals: a deterministic apply failure, on every node, for the tests
+// of the operator's skip (`QUEEN_RAFT_APPLY_SKIP`)
+// ---------------------------------------------------------------------------
+
+static REFUSE_ENABLED: AtomicBool = AtomicBool::new(false);
+static REFUSED: OnceLock<Mutex<std::collections::HashSet<[u8; 16]>>> = OnceLock::new();
+
+/// From now on apply refuses, at its LAST effect (so the entry is half
+/// executed when it stops, like a real mid-entry refusal), every entry carrying
+/// a command with request id `id` — on every applier of the process, which is
+/// what an in-process cluster needs: the same entry stops every node, as a
+/// logic bug would. Keyed by a request id no other test uses, so the tests
+/// running beside it are untouched. Not a crash point: nothing is killed.
+pub fn refuse_apply_of(id: [u8; 16]) {
+    REFUSED
+        .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .expect("refused ids")
+        .insert(id);
+    REFUSE_ENABLED.store(true, Ordering::Release);
+}
+
+/// Stop refusing the entries of `id`.
+pub fn stop_refusing_apply_of(id: [u8; 16]) {
+    if let Some(m) = REFUSED.get() {
+        m.lock().expect("refused ids").remove(&id);
+    }
+}
+
+/// Where apply must refuse `entry` (the ordinal of its last effect, and why),
+/// or `None`. One relaxed load when nothing is armed.
+#[inline]
+pub fn apply_refusal(entry: &crate::rsm::entry::Entry) -> Option<(usize, String)> {
+    if !REFUSE_ENABLED.load(Ordering::Relaxed) || entry.effects.is_empty() {
+        return None;
+    }
+    let ids = REFUSED.get()?.lock().expect("refused ids");
+    entry
+        .commands
+        .iter()
+        .find(|c| ids.contains(&c.request_id))
+        .map(|c| {
+            let hex: String = c.request_id.iter().map(|b| format!("{b:02x}")).collect();
+            (
+                entry.effects.len() - 1,
+                format!("a test refuses every entry of request {hex}"),
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

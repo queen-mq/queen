@@ -23,6 +23,21 @@
 //! leader plans and proposes; a follower's facade forwards client requests to
 //! the leader (`handlers/raft.rs`).
 //!
+//! # Changing the membership, and the repairs an operator can make
+//!
+//! - The membership changes (`/api/v1/system/raft/membership/*`): add a learner,
+//!   promote learners, set the voters, remove a member — checked on the leader
+//!   so that none leaves the cluster without a quorum ([`admin`]); a follower
+//!   forwards them there. Once committed, the membership in the log is the
+//!   cluster's, whatever `QUEEN_RAFT_PEERS` lists ([`cluster`]).
+//! - A node that joins an existing cluster never initializes one
+//!   ([`RaftOpts::join`]).
+//! - `QUEEN_RAFT_FORCE_RECOVER`: a survivor of a lost majority becomes its
+//!   cluster's only voter, at boot ([`repair`]).
+//! - `QUEEN_RAFT_APPLY_SKIP`: an entry apply refuses deterministically is
+//!   replaced by a skip marker in every node's log, at boot, and applies as a
+//!   no-op ([`repair`], `apply::execute_skip_marker`).
+//!
 //! # Proposals and the plan order (I5, WP-1.11 F-1)
 //!
 //! [`Replicator::propose_entry`] puts the entry on an unbounded channel in its
@@ -49,14 +64,19 @@
 //! only below the purge point ([`log_store::FloorGate`]). A follower that was
 //! away for longer than `QUEEN_RAFT_PURGE_HOLD_S` gets a snapshot instead.
 
+mod admin;
 pub mod cluster;
 pub(crate) mod log_store;
 mod members;
 mod network;
+mod repair;
 pub mod snapshot;
 pub(crate) mod state_machine;
 pub mod types;
 mod wire;
+
+pub use self::admin::MembershipStatus;
+pub use self::repair::SkipSpec;
 
 use std::collections::{BTreeMap, HashMap};
 use std::io;
@@ -72,7 +92,7 @@ use openraft::async_runtime::WatchReceiver;
 use openraft::errors::{ClientWriteError, InitializeError, RaftError};
 use openraft::impls::ProgressResponder;
 use openraft::raft::ReadPolicy;
-use openraft::{ChangeMembers, ServerState, SnapshotPolicy};
+use openraft::{ServerState, SnapshotPolicy};
 use tokio::sync::{mpsc, oneshot, watch, Notify as ApplyWake};
 
 pub use self::cluster::ClusterConfig;
@@ -134,6 +154,15 @@ pub(crate) struct Shared {
     /// published on every append while this node leads, received on the
     /// leader's appends while it follows ([`members`]).
     members: Arc<members::MembersState>,
+    /// The operator's membership changes ([`admin`]): one at a time, and the
+    /// thresholds their checks use. Shared with the Raft RPC server, which runs
+    /// the changes a follower forwards.
+    admin: Arc<admin::AdminCtx>,
+    /// The entry apply refused, when it did (this node then stops).
+    apply_failure: Mutex<Option<apply::ApplyFailure>>,
+    /// `<data_dir>/raft`: the vote, the commit point, and the operator
+    /// repairs' records ([`repair`]).
+    state_dir: PathBuf,
 }
 
 /// One member of the cluster as a node sees it ([`RaftReplicator::cluster_view`]).
@@ -248,6 +277,8 @@ struct RaftNotify {
     shared: Arc<Shared>,
     waker: Arc<dyn Waker>,
     gate: Arc<FloorGate>,
+    /// This node's raft group (`QUEEN_RAFT_GROUPS`), for the skip setting.
+    group: usize,
 }
 
 impl Notify for RaftNotify {
@@ -283,6 +314,31 @@ impl Notify for RaftNotify {
         // The queue logs may now give up files wholly at or below `index` —
         // and below what openraft purged.
         self.gate.durable(index);
+    }
+
+    fn failed(&self, failure: &apply::ApplyFailure) {
+        // Recorded where the next boot's QUEEN_RAFT_APPLY_SKIP checks read it.
+        if let Err(e) = repair::record_failure(&self.shared.state_dir, failure) {
+            tracing::warn!(target: "rsm", error = %e, "raft: could not record the apply failure");
+        }
+        if failure.deterministic() {
+            let setting = match self.group {
+                0 => failure.skip_value(),
+                g => format!("g{g}/{}", failure.skip_value()),
+            };
+            tracing::error!(
+                target: "rsm",
+                node = self.shared.node_id,
+                group = self.group,
+                "raft node {} stops: set QUEEN_RAFT_APPLY_SKIP={setting} on EVERY node to step \
+                 over entry {} (term {}, digest {}), then restart them all",
+                self.shared.node_id,
+                failure.index,
+                failure.term,
+                failure.digest,
+            );
+        }
+        *self.shared.apply_failure.lock().expect("apply failure") = Some(failure.clone());
     }
 }
 
@@ -409,17 +465,56 @@ pub struct RaftOpts {
     /// `QUEEN_RAFT_LOG_CACHE_MB` (default 512 MiB): over this many cached
     /// bytes, applied entries leave memory even if a follower still needs them.
     pub cache_cap: usize,
+    /// `QUEEN_RAFT_JOIN` (default off): this node joins a cluster that already
+    /// exists. On its first start (an empty data directory) it does NOT
+    /// initialize a cluster from `QUEEN_RAFT_PEERS`, and it does not wait for a
+    /// leader: it serves 503 until the leader adds it
+    /// (`POST /api/v1/system/raft/membership/learners`) and replicates to it. A fresh
+    /// node without it still asks its peers first and joins when one of them
+    /// already holds cluster state ([`network`] `/raft/v1/state`).
+    pub join: bool,
+    /// `QUEEN_RAFT_FORCE_RECOVER=<this node's id>`: the unsafe single-survivor
+    /// recovery, at boot ([`repair`]). Refused unless it names this node.
+    pub force_recover: Option<NodeId>,
+    /// `QUEEN_RAFT_APPLY_SKIP=[g<group>/]<index>[:<digest>],...`: entries this
+    /// node rewrites into skip markers at boot ([`repair`]); only this node's
+    /// group's are used.
+    pub apply_skip: Vec<SkipSpec>,
+    /// `QUEEN_RAFT_PROMOTE_MAX_LAG` (default 1000): the most entries behind the
+    /// leader a learner may be and still be promoted without `force`.
+    pub promote_max_lag: u64,
 }
 
 impl RaftOpts {
-    pub fn from_env(exit_on_restart: bool) -> RaftOpts {
-        RaftOpts {
+    pub fn from_env(exit_on_restart: bool) -> io::Result<RaftOpts> {
+        let force_recover = match std::env::var("QUEEN_RAFT_FORCE_RECOVER") {
+            Ok(v) if !v.trim().is_empty() => Some(v.trim().parse::<NodeId>().map_err(|_| {
+                io::Error::other(format!(
+                    "QUEEN_RAFT_FORCE_RECOVER={v}: expected this node's id (a number)"
+                ))
+            })?),
+            _ => None,
+        };
+        let apply_skip =
+            repair::parse_apply_skip(&std::env::var("QUEEN_RAFT_APPLY_SKIP").unwrap_or_default())
+                .map_err(io::Error::other)?;
+        let join = std::env::var("QUEEN_RAFT_JOIN").is_ok_and(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            )
+        });
+        Ok(RaftOpts {
             exit_on_restart,
             purge_hold: Duration::from_secs(env_u64("QUEEN_RAFT_PURGE_HOLD_S", 600)),
             log_keep: env_u64("QUEEN_RAFT_LOG_KEEP", 4096),
             purge_batch: 1024,
             cache_cap: log_store::cache_cap_from_env(),
-        }
+            join,
+            force_recover,
+            apply_skip,
+            promote_max_lag: admin::promote_max_lag_from_env(),
+        })
     }
 }
 
@@ -816,7 +911,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
         waker: Arc<dyn Waker>,
         clock: Arc<dyn apply::Clock>,
     ) -> io::Result<RaftReplicator<S>> {
-        RaftReplicator::open_with(store, cfg, None, waker, clock, RaftOpts::from_env(false))
+        RaftReplicator::open_with(store, cfg, None, waker, clock, RaftOpts::from_env(false)?)
     }
 
     /// Open the node: recover the log from the queue logs, start the apply
@@ -849,12 +944,28 @@ impl<S: Store + 'static> RaftReplicator<S> {
                 )));
             }
         }
+        if let Some(id) = opts.force_recover {
+            if id != cfg.node_id {
+                tracing::error!(
+                    target: "rsm",
+                    named = id,
+                    node = cfg.node_id,
+                    "QUEEN_RAFT_FORCE_RECOVER names another node: refusing to start",
+                );
+                return Err(io::Error::other(format!(
+                    "QUEEN_RAFT_FORCE_RECOVER={id}, but this node is {}: it names the ONE \
+                     surviving node to recover, and is set on that node only",
+                    cfg.node_id
+                )));
+            }
+        }
         let data_dir = cfg
             .seg_root
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
         let state_dir = data_dir.join("raft");
+        let group = repair::group_of_dir(&data_dir);
 
         let (applied, term, durable, qlog_durable) = store
             .read(|r| {
@@ -925,6 +1036,16 @@ impl<S: Store + 'static> RaftReplicator<S> {
         let mut writer_join = Some(opened.writer);
 
         let restart = Arc::new(Restart::default());
+        // A member counts as live for the membership checks while it answered
+        // within two election timeouts (2 s by default: heartbeats go out
+        // every 100 ms).
+        let live_within = Duration::from_millis(
+            2 * env_u64(
+                "QUEEN_RAFT_ELECTION_MS",
+                if cluster.is_some() { 1000 } else { 150 },
+            ),
+        )
+        .max(Duration::from_secs(1));
         let shared = Arc::new(Shared {
             node_id: cfg.node_id,
             applied_index: AtomicU64::new(applied),
@@ -948,6 +1069,9 @@ impl<S: Store + 'static> RaftReplicator<S> {
             remote: Arc::new(std::sync::OnceLock::new()),
             local: Arc::new(std::sync::OnceLock::new()),
             members: Arc::new(members::MembersState::default()),
+            admin: Arc::new(admin::AdminCtx::new(opts.promote_max_lag, live_within)),
+            apply_failure: Mutex::new(None),
+            state_dir: state_dir.clone(),
         });
 
         // The apply thread: the queue logs are written by our log writer, never
@@ -958,6 +1082,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
             shared: shared.clone(),
             waker,
             gate: opened.gate.clone(),
+            group,
         });
         let reader_sink: Arc<OnceLock<segments::Reader>> = Arc::new(OnceLock::new());
         let mut apply_join = Some(apply::spawn_with_reader(
@@ -1006,7 +1131,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
 
         let sm = match QueenSm::new(
             store.clone(),
-            state_dir,
+            state_dir.clone(),
             apply_tx,
             shared.clone(),
             log.clone(),
@@ -1032,6 +1157,80 @@ impl<S: Store + 'static> RaftReplicator<S> {
             Err(e) => return Err(fail(e, None, &mut writer_join, &mut apply_join, &log)),
         };
 
+        // The operator's repairs, before openraft reads the log ([`repair`]):
+        // an apply-skip rewrite a crash interrupted, the entries
+        // `QUEEN_RAFT_APPLY_SKIP` names, then `QUEEN_RAFT_FORCE_RECOVER`.
+        {
+            let skips: Vec<SkipSpec> = opts
+                .apply_skip
+                .iter()
+                .filter(|s| s.group == group)
+                .cloned()
+                .collect();
+            let skipped_in_store: std::collections::BTreeSet<u64> =
+                match store.read(|r| apply::skipped_entries(r)) {
+                    Ok(v) => v.into_iter().map(|(i, _)| i).collect(),
+                    Err(e) => {
+                        // The state machine holds the apply thread's only
+                        // sender: it goes first, or the thread never ends.
+                        drop(sm);
+                        return Err(fail(
+                            io::Error::other(format!("read the skipped entries: {e}")),
+                            Some((rt, None)),
+                            &mut writer_join,
+                            &mut apply_join,
+                            &log,
+                        ));
+                    }
+                };
+            let self_node = cluster
+                .as_ref()
+                .and_then(|c| c.members.get(&cfg.node_id).cloned());
+            let force = opts.force_recover;
+            let node_id = cfg.node_id;
+            let applied_id = applied_log_id(applied, term);
+            let mut log_r = log.clone();
+            let state_r = state_dir.clone();
+            let handle = rt.handle().clone();
+            let repaired: io::Result<()> = std::thread::scope(|s| {
+                s.spawn(move || {
+                    handle.block_on(async move {
+                        repair::finish_journal(&mut log_r, &state_r).await?;
+                        repair::apply_skip(
+                            &mut log_r,
+                            &state_r,
+                            &skips,
+                            applied,
+                            &skipped_in_store,
+                        )
+                        .await?;
+                        if force.is_some() {
+                            repair::force_recover(
+                                &mut log_r, &state_r, node_id, self_node, applied_id,
+                            )
+                            .await?;
+                        }
+                        Ok(())
+                    })
+                })
+                .join()
+                .unwrap_or_else(|_| Err(io::Error::other("the boot repair panicked")))
+            });
+            if let Err(e) = repaired {
+                tracing::error!(target: "rsm", error = %e, "raft: the boot repair refused; this node does not start");
+                // The state machine holds the apply thread's only sender: it
+                // goes first, or the thread never ends and the join hangs.
+                drop(sm);
+                return Err(fail(
+                    e,
+                    Some((rt, None)),
+                    &mut writer_join,
+                    &mut apply_join,
+                    &log,
+                ));
+            }
+        }
+
         let net = match &cluster {
             None => Net::None(NoNetwork),
             Some(c) => Net::Http(HttpNetwork::new(
@@ -1055,6 +1254,38 @@ impl<S: Store + 'static> RaftReplicator<S> {
         let fresh = opened.fresh;
         let handle = rt.handle().clone();
         let log_for_raft = log.clone();
+        let join_flag = opts.join;
+        let probe = cluster.clone().filter(|c| c.members.len() > 1);
+        // Whether this fresh node joins a cluster that exists already (it then
+        // does not wait for a leader below: it has none until it is added).
+        let mut joining = false;
+        let joining_out = &mut joining;
+        // The Raft RPC server starts as soon as openraft exists, BEFORE a fresh
+        // node initializes: a fresh peer asks it whether it holds cluster
+        // state (`/raft/v1/state`) and must get an answer, not a timeout.
+        #[allow(unused_mut)]
+        let mut server_stop = None;
+        #[cfg(feature = "server")]
+        let rpc_serve = match (listener, &cluster) {
+            (Some(listener), Some(c)) => {
+                let (stop_tx, stop_rx) = oneshot::channel::<()>();
+                server_stop = Some(stop_tx);
+                Some((
+                    listener,
+                    c.token.clone().map(Arc::<str>::from),
+                    stop_rx,
+                    Arc::new(RecvCtx {
+                        data_dir: data_dir.clone(),
+                        restart: restart.clone(),
+                    }),
+                    shared.remote.clone(),
+                    shared.local.clone(),
+                    shared.members.clone(),
+                    shared.admin.clone(),
+                ))
+            }
+            _ => None,
+        };
         let built: io::Result<RaftHandle<S>> = std::thread::scope(|s| {
             s.spawn(move || {
                 handle.block_on(async move {
@@ -1067,15 +1298,57 @@ impl<S: Store + 'static> RaftReplicator<S> {
                         }
                     }
                     .map_err(|e| io::Error::other(format!("openraft start: {e}")))?;
+                    #[cfg(feature = "server")]
+                    if let Some((listener, token, stop_rx, snap, remote, local, view, admin)) =
+                        rpc_serve
+                    {
+                        let state = network::RpcState {
+                            raft: raft.clone(),
+                            token,
+                            snap,
+                            remote,
+                            local,
+                            members: view,
+                            admin,
+                        };
+                        tokio::spawn(network::serve(listener, state, async move {
+                            let _ = stop_rx.await;
+                        }));
+                    }
                     if fresh {
-                        // Every node of a new cluster initializes with the same
-                        // members; one that already heard from a peer is not
-                        // allowed to, which is fine.
-                        match raft.initialize(members).await {
-                            Ok(()) => {}
-                            Err(RaftError::APIError(InitializeError::NotAllowed(_))) => {}
-                            Err(e) => {
-                                return Err(io::Error::other(format!("openraft initialize: {e}")))
+                        // A node that joins an existing cluster must NOT
+                        // initialize one: with two such nodes a fresh majority
+                        // of the old voter set would elect a leader of an
+                        // empty log and overwrite the members that hold the
+                        // data. `QUEEN_RAFT_JOIN` says so; without it, a peer
+                        // that already holds cluster state says so.
+                        let found = match (&probe, join_flag) {
+                            (Some(c), false) => peer_with_state(c).await,
+                            _ => None,
+                        };
+                        if join_flag || found.is_some() {
+                            *joining_out = true;
+                            tracing::warn!(
+                                target: "rsm",
+                                node = node_id,
+                                explicit = join_flag,
+                                peer_with_state = ?found,
+                                "raft: this fresh node joins an existing cluster: it does not \
+                                 initialize one, and serves 503 until the leader adds it \
+                                 (POST /api/v1/system/raft/membership/learners)",
+                            );
+                        } else {
+                            // Every node of a new cluster initializes with the
+                            // same members; one that already heard from a peer
+                            // is not allowed to, which is fine.
+                            match raft.initialize(members).await {
+                                Ok(()) => {}
+                                Err(RaftError::APIError(InitializeError::NotAllowed(_))) => {}
+                                Err(e) => {
+                                    return Err(io::Error::other(format!(
+                                        "openraft initialize: {e}"
+                                    )))
+                                }
                             }
                         }
                     }
@@ -1098,35 +1371,13 @@ impl<S: Store + 'static> RaftReplicator<S> {
             }
         };
 
-        // The Raft RPC server.
-        #[allow(unused_mut)]
-        let mut server_stop = None;
-        #[cfg(feature = "server")]
-        if let (Some(listener), Some(c)) = (listener, &cluster) {
-            let (stop_tx, stop_rx) = oneshot::channel::<()>();
-            server_stop = Some(stop_tx);
-            let state = network::RpcState {
-                raft: raft.clone(),
-                token: c.token.clone().map(Arc::from),
-                snap: Arc::new(RecvCtx {
-                    data_dir: data_dir.clone(),
-                    restart: restart.clone(),
-                }),
-                remote: shared.remote.clone(),
-                local: shared.local.clone(),
-                members: shared.members.clone(),
-            };
-            let _guard = rt.enter();
-            rt.spawn(network::serve(listener, state, async move {
-                let _ = stop_rx.await;
-            }));
-        }
-
         // A cluster node's own calls to the leader (prepared commands, read
-        // index): one pooled client.
+        // index, membership changes): one pooled client. Every node with a Raft
+        // network has one, whatever `QUEEN_RAFT_PEERS` listed at its first
+        // start: the membership lives in the log and grows past that list (a
+        // node started alone, or a force-recovered survivor, gains members).
         let rpc = cluster
             .as_ref()
-            .filter(|c| c.members.len() > 1)
             .map(|c| (network::http_client(), c.token.clone().map(Arc::from)));
 
         // The role watch, the followers' progress and the purge driver.
@@ -1161,9 +1412,12 @@ impl<S: Store + 'static> RaftReplicator<S> {
         });
 
         // A single voter: wait until it leads with everything applied (I13). A
-        // cluster node: until a leader is known, for a while.
+        // cluster node: until a leader is known, for a while. A node joining a
+        // cluster has no leader until the leader adds it: it does not wait.
         let end = Instant::now()
-            + if cluster.is_some() {
+            + if joining {
+                Duration::ZERO
+            } else if cluster.is_some() {
                 cfg.replay_deadline.min(Duration::from_secs(30))
             } else {
                 cfg.replay_deadline
@@ -1173,6 +1427,11 @@ impl<S: Store + 'static> RaftReplicator<S> {
             let ready = match role {
                 Role::Leader { .. } => true,
                 Role::Follower { leader: Some(_) } => cluster.is_some(),
+                // A learner (a member being added) is ready once it hears a
+                // leader, like a follower.
+                Role::Learner => {
+                    cluster.is_some() && raft.metrics().borrow_watched().current_leader.is_some()
+                }
                 Role::Stopped => {
                     let why = shared
                         .poisoned()
@@ -1473,6 +1732,143 @@ impl<S: Store + 'static> RaftReplicator<S> {
         self.shared.members.members(m.as_ref(), self.shared.node_id)
     }
 
+    /// The membership for an operator (`GET /api/v1/system/raft/membership`): the
+    /// leader's own view — taken here when this node leads, fetched from the
+    /// leader over the Raft RPC port otherwise — or, with no leader to ask,
+    /// this node's membership with the last members view the leader sent it
+    /// (`source: "follower"`).
+    pub async fn membership_status(&self, deadline: Instant) -> MembershipStatus {
+        let Some(m) = self.metrics_now() else {
+            return MembershipStatus {
+                node_id: self.shared.node_id,
+                source: "stopped".into(),
+                ..MembershipStatus::default()
+            };
+        };
+        if m.state == ServerState::Leader || self.rpc.is_none() {
+            return admin::status(&m, &self.shared.members, &self.shared.admin);
+        }
+        let ttl = deadline
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_secs(5));
+        let call = admin::AdminCall {
+            change: None,
+            timeout_ms: ttl.as_millis() as u64,
+        };
+        if let Ok(body) = serde_json::to_vec(&call) {
+            if let Ok(b) = self
+                .call_leader(
+                    "/raft/v1/membership",
+                    "application/json",
+                    Bytes::from(body),
+                    ttl,
+                )
+                .await
+            {
+                if let Ok(Ok(st)) =
+                    serde_json::from_slice::<admin::AdminAnswer>(&b).map(|a| a.into_result())
+                {
+                    return st;
+                }
+            }
+        }
+        admin::status(&m, &self.shared.members, &self.shared.admin)
+    }
+
+    /// Change the membership (the operator endpoints, [`admin`]): checked and
+    /// made on the leader, which answers once the change committed, with the
+    /// membership it left. A follower forwards the change to the leader over
+    /// the Raft RPC port; with no leader known it answers `NotLeader`.
+    pub async fn admin_change(
+        &self,
+        change: MembershipChange,
+        deadline: Instant,
+    ) -> Result<MembershipStatus, ReplError> {
+        let raft = self
+            .raft
+            .as_ref()
+            .ok_or_else(|| repl_err("openraft stopped"))?;
+        if self.rpc.is_none() {
+            return Err(ReplError::Unsupported(
+                "this node runs as a single voter without a Raft network (QUEEN_RAFT_PEERS \
+                 unset): restart it with QUEEN_RAFT_PEERS listing at least itself before \
+                 changing its membership"
+                    .into(),
+            ));
+        }
+        let Some(m) = self.metrics_now() else {
+            return Err(repl_err("openraft stopped"));
+        };
+        if m.state == ServerState::Leader {
+            return admin::change_on_leader(
+                raft,
+                &self.shared.members,
+                &self.shared.admin,
+                change,
+                deadline,
+            )
+            .await;
+        }
+        let ttl = deadline.saturating_duration_since(Instant::now());
+        let call = admin::AdminCall {
+            change: Some(change),
+            timeout_ms: ttl.as_millis() as u64,
+        };
+        let body = serde_json::to_vec(&call).map_err(repl_err)?;
+        match self
+            .call_leader(
+                "/raft/v1/membership",
+                "application/json",
+                Bytes::from(body),
+                ttl + Duration::from_secs(1),
+            )
+            .await
+        {
+            Ok(b) => serde_json::from_slice::<admin::AdminAnswer>(&b)
+                .map_err(|e| ReplError::Fatal(format!("the leader's answer: {e}")))?
+                .into_result(),
+            Err(RemoteError::NoLeader) => Err(ReplError::NotLeader {
+                hint: m.current_leader.filter(|l| *l != m.id),
+            }),
+            Err(RemoteError::Transport(msg)) => Err(ReplError::refused(
+                "leader_unreachable",
+                format!(
+                    "the leader did not answer ({msg}): the change may or may not have been \
+                     made; read the membership before repeating it"
+                ),
+            )),
+        }
+    }
+
+    /// What `/health` shows about apply: the entries this node applied as skip
+    /// markers (an operator's `QUEEN_RAFT_APPLY_SKIP`, with their digests where
+    /// this node rewrote them itself), and the entry that stopped apply here,
+    /// if one did.
+    pub fn apply_status(&self) -> serde_json::Value {
+        let in_store = self
+            .store
+            .read(|r| apply::skipped_entries(r))
+            .unwrap_or_default();
+        let rewritten = repair::skipped_here(&self.shared.state_dir).unwrap_or_default();
+        let skipped: Vec<serde_json::Value> = in_store
+            .into_iter()
+            .map(|(index, term)| {
+                let digest = rewritten
+                    .iter()
+                    .find(|s| s.index == index)
+                    .map(|s| s.digest.clone());
+                serde_json::json!({"index": index, "term": term, "digest": digest})
+            })
+            .collect();
+        let failure = self
+            .shared
+            .apply_failure
+            .lock()
+            .expect("apply failure")
+            .clone();
+        serde_json::json!({ "skipped": skipped, "failure": failure })
+    }
+
     /// The store, for a test's reads.
     #[cfg(test)]
     pub(crate) fn store_for_test(&self) -> Arc<S> {
@@ -1638,11 +2034,72 @@ fn wait_reader(
     }
 }
 
-/// A member's addresses from `raft_addr/http_addr` (or a bare Raft address).
-fn node_of_addr(addr: &str) -> Node {
-    match addr.split_once('/') {
-        Some((raft, http)) => QueenNode::new(raft.trim(), http.trim()),
-        None => QueenNode::new(addr.trim(), ""),
+/// What `POST /raft/v1/state` answers: whether a node holds cluster state (a
+/// fresh node asks its peers before it initializes a cluster).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NodeState {
+    pub node_id: NodeId,
+    pub term: u64,
+    /// RSM numbering; `None` for an empty log.
+    pub last_log_index: Option<u64>,
+    pub voters: Vec<NodeId>,
+    /// It has a log, a term or a membership: a cluster exists around it.
+    pub initialized: bool,
+}
+
+impl NodeState {
+    pub(crate) fn of(m: &openraft::RaftMetrics<TypeConfig>) -> NodeState {
+        let mem = m.membership_config.membership();
+        NodeState {
+            node_id: m.id,
+            term: m.current_term,
+            last_log_index: m.last_log_index.map(rsm_index),
+            voters: mem.voter_ids().collect(),
+            initialized: m.last_log_index.is_some()
+                || m.current_term > 0
+                || mem.nodes().next().is_some(),
+        }
+    }
+}
+
+/// A fresh node's question to its peers before it initializes a cluster from
+/// `QUEEN_RAFT_PEERS`: does one of them hold cluster state already? Then this
+/// node is a replacement joining that cluster, not a founder. Asked for up to
+/// 1.5 s while some peer does not answer (at a new cluster's first start the
+/// peers are starting too); the first peer that holds state answers it.
+async fn peer_with_state(c: &ClusterConfig) -> Option<NodeId> {
+    let client = network::http_client();
+    let end = Instant::now() + Duration::from_millis(1500);
+    loop {
+        let mut silent = false;
+        for (id, node) in &c.members {
+            if *id == c.node_id || node.raft.is_empty() {
+                continue;
+            }
+            let url = format!("http://{}/raft/v1/state", node.raft);
+            match network::post(
+                &client,
+                &url,
+                c.token.as_deref(),
+                "application/json",
+                axum::body::Body::empty(),
+                Duration::from_millis(400),
+            )
+            .await
+            {
+                Ok(b) => match serde_json::from_slice::<NodeState>(&b) {
+                    Ok(st) if st.initialized => return Some(*id),
+                    Ok(_) => {}
+                    Err(_) => silent = true,
+                },
+                Err(_) => silent = true,
+            }
+        }
+        if !silent || Instant::now() >= end {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
     }
 }
 
@@ -1822,32 +2279,14 @@ impl<S: Store + 'static> Replicator for RaftReplicator<S> {
         }
     }
 
+    /// Checked and made on the leader ([`admin`]); a follower forwards it
+    /// there. See [`RaftReplicator::admin_change`].
     async fn change_membership(
         &self,
         change: MembershipChange,
-        _deadline: Instant,
+        deadline: Instant,
     ) -> Result<(), ReplError> {
-        let raft = self
-            .raft
-            .as_ref()
-            .ok_or_else(|| repl_err("openraft stopped"))?;
-        match change {
-            MembershipChange::AddLearner { node, addr } => raft
-                .add_learner(node, node_of_addr(&addr), true)
-                .await
-                .map(|_| ())
-                .map_err(repl_err),
-            MembershipChange::Promote { node } => raft
-                .change_membership(ChangeMembers::AddVoterIds([node].into()), false)
-                .await
-                .map(|_| ())
-                .map_err(repl_err),
-            MembershipChange::Remove { node } => raft
-                .change_membership(ChangeMembers::RemoveVoters([node].into()), false)
-                .await
-                .map(|_| ())
-                .map_err(repl_err),
-        }
+        self.admin_change(change, deadline).await.map(|_| ())
     }
 
     fn metrics(&self) -> ReplMetrics {

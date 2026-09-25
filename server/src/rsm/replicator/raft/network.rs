@@ -13,6 +13,8 @@
 //! | `POST /raft/v1/transfer` | `TransferLeaderRequest` JSON | `Result<TransferLeaderResponse, RaftError>` JSON |
 //! | `POST /raft/v1/snapshot` | [`super::snapshot`] stream | `Result<SnapshotResponse, RaftError>` JSON |
 //! | `POST /raft/v1/members` | empty | the leader's `MembersView` JSON, 503 on a non-leader ([`super::members`]) |
+//! | `POST /raft/v1/membership` | `AdminCall` JSON | `AdminAnswer` JSON, always 200: a follower's forwarded membership read or change, run on the leader ([`super::admin`]) |
+//! | `POST /raft/v1/state` | empty | `NodeState` JSON: whether this node holds cluster state (a fresh node asks before it initializes one) |
 //!
 //! Every `append` from the leader also carries its members view in the
 //! `x-queen-raft-members` header ([`super::members`]).
@@ -463,6 +465,9 @@ mod server {
         pub(crate) local: Arc<std::sync::OnceLock<super::super::RemoteHandler>>,
         /// This node's members view, answered to a follower's relay.
         pub(crate) members: Arc<super::super::members::MembersState>,
+        /// The membership changes a follower forwards here, on the leader
+        /// ([`super::super::admin`]).
+        pub(crate) admin: Arc<super::super::admin::AdminCtx>,
     }
 
     impl<S: Store + 'static> RpcState<S> {
@@ -674,6 +679,56 @@ mod server {
         }
     }
 
+    /// A membership call a follower forwards ([`super::super::admin`]): the
+    /// status when the body names no change, else the change, checked and made
+    /// here if this node leads. Always a 200 with an `AdminAnswer`: a refusal
+    /// is the caller's to relay, not a transport failure.
+    async fn membership<S: Store + 'static>(
+        State(st): State<Arc<RpcState<S>>>,
+        body: Bytes,
+    ) -> Response {
+        use super::super::admin::{self, AdminAnswer, AdminCall};
+        use openraft::async_runtime::WatchReceiver;
+        let call: AdminCall = match serde_json::from_slice(&body) {
+            Ok(c) => c,
+            Err(e) => return bad_request(e),
+        };
+        let answer = match call.change {
+            None => {
+                let m = st.raft.metrics().borrow_watched().clone();
+                if m.state != openraft::ServerState::Leader {
+                    AdminAnswer::of(Err(crate::rsm::replicator::ReplError::NotLeader {
+                        hint: m.current_leader.filter(|l| *l != m.id),
+                    }))
+                } else {
+                    AdminAnswer::of(Ok(admin::status(&m, &st.members, &st.admin)))
+                }
+            }
+            Some(change) => {
+                let wait = std::time::Duration::from_millis(call.timeout_ms.clamp(1, 120_000));
+                AdminAnswer::of(
+                    admin::change_on_leader(
+                        &st.raft,
+                        &st.members,
+                        &st.admin,
+                        change,
+                        std::time::Instant::now() + wait,
+                    )
+                    .await,
+                )
+            }
+        };
+        json_answer(&answer)
+    }
+
+    /// Whether this node holds cluster state: what a fresh node asks before
+    /// it initializes a cluster (`QUEEN_RAFT_JOIN`).
+    async fn node_state<S: Store + 'static>(State(st): State<Arc<RpcState<S>>>) -> Response {
+        use openraft::async_runtime::WatchReceiver;
+        let m = st.raft.metrics().borrow_watched().clone();
+        json_answer(&super::super::NodeState::of(&m))
+    }
+
     async fn snapshot<S: Store + 'static>(
         State(st): State<Arc<RpcState<S>>>,
         body: Body,
@@ -734,6 +789,8 @@ mod server {
                     .route("/raft/v1/read_index", post(read_index::<S>))
                     .route("/raft/v1/local", post(local::<S>))
                     .route("/raft/v1/members", post(members::<S>))
+                    .route("/raft/v1/membership", post(membership::<S>))
+                    .route("/raft/v1/state", post(node_state::<S>))
                     .layer(DefaultBodyLimit::max(CONTROL_BODY_CAP)),
             )
             // A snapshot is streamed to disk (the `Body` extractor has no cap).

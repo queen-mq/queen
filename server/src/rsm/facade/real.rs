@@ -379,6 +379,13 @@ fn filesystem_used_pct(_path: &std::path::Path) -> Option<f64> {
 }
 
 impl RaftFacade {
+    /// The node's replicator, for a test that drives leadership directly.
+    /// Drop it before [`RaftFacade::shutdown`], which takes the last reference.
+    #[cfg(test)]
+    pub(crate) fn repl_for_test(&self) -> Arc<NodeReplicator<HeedStore>> {
+        self.repl.clone()
+    }
+
     #[cfg(test)]
     pub(crate) fn set_encryption_for_test(
         &mut self,
@@ -431,7 +438,7 @@ impl RaftFacade {
             // keep host disk fullness and concurrent local GC out of them.
             batcher.maintenance_every_ms = 0;
         }
-        RaftFacade::open_inner(ctx, batcher, !cfg!(test), 0)
+        RaftFacade::open_inner(ctx, batcher, !cfg!(test), 0, false, None)
     }
 
     /// Raft group `group` of several in this process (`QUEEN_RAFT_GROUPS`,
@@ -439,21 +446,47 @@ impl RaftFacade {
     /// group 0 keeps `<dir>`) and its own Raft addresses
     /// ([`crate::rsm::replicator::raft::ClusterConfig::for_group`]).
     pub fn open_group(ctx: &RsmBuildCtx, group: usize) -> Result<RaftFacade, String> {
-        RaftFacade::open_inner(ctx, BatcherConfig::from_env(), true, group)
+        RaftFacade::open_inner(ctx, BatcherConfig::from_env(), true, group, true, None)
+    }
+
+    /// A node of an openraft cluster, with the cluster configuration and the
+    /// replicator options given instead of read from the environment (which
+    /// the tests of one process share): the membership tests' seam.
+    #[cfg(test)]
+    pub(crate) fn open_cluster_node_for_test(
+        ctx: &RsmBuildCtx,
+        batcher_cfg: BatcherConfig,
+        cluster: crate::rsm::replicator::raft::ClusterConfig,
+        opts: crate::rsm::replicator::raft::RaftOpts,
+    ) -> Result<RaftFacade, String> {
+        RaftFacade::open_inner(ctx, batcher_cfg, false, 0, false, Some((cluster, opts)))
     }
 
     /// [`RaftFacade::open`] with an explicit batcher configuration instead of
     /// the environment's — the tests' seam (a fast timer tick, the injected
     /// fire failure), never the boot path's.
     pub fn open_with(ctx: &RsmBuildCtx, batcher_cfg: BatcherConfig) -> Result<RaftFacade, String> {
-        RaftFacade::open_inner(ctx, batcher_cfg, false, 0)
+        RaftFacade::open_inner(ctx, batcher_cfg, false, 0, false, None)
     }
 
+    /// `multi_group`: one of several Raft groups in this process
+    /// (`QUEEN_RAFT_GROUPS` > 1): the group's Raft addresses and its PREFERRED
+    /// leader come from [`crate::rsm::replicator::raft::ClusterConfig::for_group`],
+    /// which spreads the groups' leaders over the nodes. A single group has no
+    /// preferred leader: one would only add a leadership transfer after every
+    /// heal (every node led by the same member again), for nothing to spread.
+    /// `node`: the openraft cluster node to run instead of what the
+    /// environment says (a test's, [`RaftFacade::open_cluster_node_for_test`]).
     fn open_inner(
         ctx: &RsmBuildCtx,
         batcher_cfg: BatcherConfig,
         storage_pressure_enabled: bool,
         group: usize,
+        multi_group: bool,
+        node: Option<(
+            crate::rsm::replicator::raft::ClusterConfig,
+            crate::rsm::replicator::raft::RaftOpts,
+        )>,
     ) -> Result<RaftFacade, String> {
         if ctx.data_dir.trim().is_empty() {
             return Err("QUEEN_RAFT_DIR is required in raft mode (§11.1)".into());
@@ -469,10 +502,22 @@ impl RaftFacade {
 
         // `QUEEN_RAFT_REPLICATOR`: the local replicator (default) or openraft;
         // `QUEEN_RAFT_PEERS`: a cluster (openraft only).
-        let kind = ReplicatorKind::from_env()?;
-        let cluster = crate::rsm::replicator::raft::ClusterConfig::from_env()?
-            .map(|c| c.for_group(group))
-            .transpose()?;
+        let (kind, cluster, raft_opts) = match node {
+            Some((c, o)) => (ReplicatorKind::Raft, Some(c), Some(o)),
+            None => (
+                ReplicatorKind::from_env()?,
+                crate::rsm::replicator::raft::ClusterConfig::from_env()?
+                    .map(|c| {
+                        if multi_group {
+                            c.for_group(group)
+                        } else {
+                            Ok(c)
+                        }
+                    })
+                    .transpose()?,
+                None,
+            ),
+        };
         let node_id = cluster.as_ref().map_or(NODE_ID, |c| c.node_id);
         let ocfg = OpenConfig::new(node_id, dir.clone());
         if kind == ReplicatorKind::Raft {
@@ -496,7 +541,7 @@ impl RaftFacade {
             gates: gates.clone(),
         });
         let repl = Arc::new(
-            NodeReplicator::open_with(
+            NodeReplicator::open_with_opts(
                 kind,
                 store.clone(),
                 ocfg,
@@ -505,6 +550,7 @@ impl RaftFacade {
                 Arc::new(SystemClock),
                 // The binary exits to load a received snapshot; tests reopen.
                 storage_pressure_enabled,
+                raft_opts,
             )
             .map_err(|e| {
                 format!(
@@ -2120,7 +2166,13 @@ impl RaftFacade {
                     })
                 }
                 Reply::Refused(refusal) if refusal.retryable => {
-                    return Err(RsmError::Retry { leader_hint: None })
+                    tracing::debug!(
+                        target: "rsm",
+                        code = %refusal.code,
+                        message = %refusal.message,
+                        "push refused, retryable",
+                    );
+                    return Err(RsmError::Retry { leader_hint: None });
                 }
                 Reply::Refused(_) => {
                     for &flat in &members {
@@ -4215,6 +4267,57 @@ impl Rsm for RaftFacade {
             commit: m.committed_index,
             lag_ms: 0,
             storage_ready: !matches!(role, crate::rsm::replicator::Role::Stopped),
+            apply: self.repl.apply_status(),
+        }
+    }
+
+    async fn raft_membership(&self, ctx: ReqCtx) -> Result<ApiOut, RsmError> {
+        match self.repl.membership_status(ctx.deadline.instant()).await {
+            Some(st) => Ok(ApiOut::json(
+                200,
+                serde_json::json!({"engine": "raft", "membership": st}).to_string(),
+            )),
+            None => Ok(membership_unsupported()),
+        }
+    }
+
+    async fn raft_change_membership(
+        &self,
+        ctx: ReqCtx,
+        change: crate::rsm::replicator::MembershipChange,
+    ) -> Result<ApiOut, RsmError> {
+        use crate::rsm::replicator::ReplError;
+        let NodeReplicator::Raft(r) = &*self.repl else {
+            return Ok(membership_unsupported());
+        };
+        match r.admin_change(change, ctx.deadline.instant()).await {
+            Ok(st) => Ok(ApiOut::json(
+                200,
+                serde_json::json!({"engine": "raft", "ok": true, "membership": st}).to_string(),
+            )),
+            Err(ReplError::NotLeader { hint }) => Err(RsmError::Retry {
+                leader_hint: hint.map(|h| h.to_string()),
+            }),
+            Err(ReplError::Timeout) => Ok(ApiOut::json(
+                504,
+                serde_json::json!({"ok": false, "code": "timeout", "error": "the deadline passed before the change committed: it may still complete; read GET /api/v1/system/raft/membership before repeating it"}).to_string(),
+            )),
+            Err(ReplError::Refused { code, message }) => {
+                let status = match code.as_str() {
+                    "bad_request" | "not_a_learner" | "not_a_member" => 400,
+                    "leader_unreachable" => 503,
+                    _ => 409,
+                };
+                Ok(ApiOut::json(
+                    status,
+                    serde_json::json!({"ok": false, "code": code, "error": message}).to_string(),
+                ))
+            }
+            Err(ReplError::Unsupported(m)) => Ok(ApiOut::json(
+                400,
+                serde_json::json!({"ok": false, "code": "unsupported", "error": m}).to_string(),
+            )),
+            Err(ReplError::Fatal(m)) => Err(RsmError::Internal(m)),
         }
     }
 
@@ -4239,6 +4342,19 @@ impl Rsm for RaftFacade {
         }
         Some(crate::rsm::dashboard::cluster_id(&members))
     }
+}
+
+/// The membership routes on a node without the openraft replicator.
+fn membership_unsupported() -> ApiOut {
+    ApiOut::json(
+        400,
+        serde_json::json!({
+            "ok": false,
+            "code": "unsupported",
+            "error": "this node runs the local replicator (QUEEN_RAFT_REPLICATOR=local): it has no Raft membership"
+        })
+        .to_string(),
+    )
 }
 
 // ---------------------------------------------------------------------------

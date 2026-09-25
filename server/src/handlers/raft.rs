@@ -538,6 +538,225 @@ pub(crate) async fn handle_metrics(
 }
 
 // ---------------------------------------------------------------------------
+// Raft membership, for an operator (`/api/v1/system/raft/membership`).
+// ---------------------------------------------------------------------------
+//
+// The routes sit under `/api/v1/system/`, the operator family: `auth` gives
+// them the Admin level, the proxy never lets a tenant through to them, and a
+// request that names a tenant (`x-queen-tenant`) is refused here — the
+// membership is the cell's, not a tenant's. Every node answers them: a
+// follower forwards a change to the leader over the Raft RPC port
+// (`replicator/raft/admin.rs`), and with no leader known answers the usual
+// `503 retry` with the leader hint when there is one.
+//
+// | route | body | answer |
+// |---|---|---|
+// | `GET /api/v1/system/raft/membership` | — | `{"engine","membership":{...}}` |
+// | `POST .../learners` | `{"id","raft","http"}` | `{"ok":true,"membership"}` |
+// | `POST .../promote` | `{"ids":[..],"force"?}` | same |
+// | `PUT .../voters` | `{"voters":[..],"force"?}` | same |
+// | `DELETE .../members/:id` | — | same |
+//
+// `?timeoutMs=` bounds a change (default 30 s): past it the answer is `504
+// timeout` and the change may still complete. A refused change is `409` (or
+// `400` for a malformed one) with a stable `code`: `in_flight`, `no_quorum`,
+// `last_voter`, `learner_behind`, `already_voter`, `address_mismatch`,
+// `membership_changed`, `leader_changed`, `not_a_learner`, `not_a_member`,
+// `bad_request`; `503 leader_unreachable` when the leader did not answer.
+
+/// A membership change's deadline: `?timeoutMs=` (1 ms to 120 s, default 30 s).
+#[cfg(feature = "server")]
+fn membership_deadline(q: &std::collections::HashMap<String, String>) -> Deadline {
+    let ms = q
+        .get("timeoutMs")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(30_000)
+        .clamp(1, 120_000);
+    Deadline::after(std::time::Duration::from_millis(ms))
+}
+
+/// The membership is the cell's: a request scoped to a tenant is refused.
+#[cfg(feature = "server")]
+fn membership_operator_only(tenant: &crate::tenant::Tenant) -> Option<Response> {
+    (tenant.as_str() != crate::config::DEFAULT_TENANT).then(|| {
+        json(
+            StatusCode::FORBIDDEN,
+            serde_json::json!({
+                "ok": false,
+                "code": "forbidden",
+                "error": "the raft membership is cell-wide: only an operator request (no \
+                          x-queen-tenant) may read or change it"
+            })
+            .to_string(),
+        )
+    })
+}
+
+#[cfg(feature = "server")]
+fn api_out(out: crate::rsm::facade::ApiOut) -> Response {
+    let status = StatusCode::from_u16(out.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    (status, [(header::CONTENT_TYPE, out.content_type)], out.body).into_response()
+}
+
+#[cfg(feature = "server")]
+fn membership_bad_request(msg: impl Into<String>) -> Response {
+    json(
+        StatusCode::BAD_REQUEST,
+        serde_json::json!({"ok": false, "code": "bad_request", "error": msg.into()}).to_string(),
+    )
+}
+
+#[cfg(feature = "server")]
+async fn membership_change(
+    st: &AppState,
+    tenant: &crate::tenant::Tenant,
+    q: &std::collections::HashMap<String, String>,
+    change: crate::rsm::replicator::MembershipChange,
+) -> Response {
+    if let Some(r) = membership_operator_only(tenant) {
+        return r;
+    }
+    let ctx = ReqCtx::new(tenant.as_str(), membership_deadline(q));
+    match st.rsm.raft_change_membership(ctx, change).await {
+        Ok(out) => api_out(out),
+        Err(e) => err_response(e),
+    }
+}
+
+/// The JSON body of a membership change (an empty body is `{}`).
+#[cfg(feature = "server")]
+#[allow(clippy::result_large_err)]
+fn membership_body(body: &axum::body::Bytes) -> Result<serde_json::Value, Response> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(serde_json::json!({}));
+    }
+    serde_json::from_slice(body).map_err(|e| membership_bad_request(format!("body: {e}")))
+}
+
+/// `force` from the body or `?force=true`.
+#[cfg(feature = "server")]
+fn membership_force(v: &serde_json::Value, q: &std::collections::HashMap<String, String>) -> bool {
+    v.get("force")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        || q.get("force").is_some_and(|f| f == "true" || f == "1")
+}
+
+/// A list of node ids from `field` (or a single `one`).
+#[cfg(feature = "server")]
+fn membership_ids(v: &serde_json::Value, field: &str, one: &str) -> Option<Vec<u64>> {
+    if let Some(a) = v.get(field).and_then(serde_json::Value::as_array) {
+        return a.iter().map(serde_json::Value::as_u64).collect();
+    }
+    v.get(one)
+        .and_then(serde_json::Value::as_u64)
+        .map(|id| vec![id])
+}
+
+/// `GET /api/v1/system/raft/membership`.
+#[cfg(feature = "server")]
+pub(crate) async fn handle_membership_get(
+    axum::extract::State(st): axum::extract::State<Arc<AppState>>,
+    axum::extract::Extension(tenant): axum::extract::Extension<crate::tenant::Tenant>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if let Some(r) = membership_operator_only(&tenant) {
+        return r;
+    }
+    let ctx = ReqCtx::new(tenant.as_str(), membership_deadline(&q));
+    match st.rsm.raft_membership(ctx).await {
+        Ok(out) => api_out(out),
+        Err(e) => err_response(e),
+    }
+}
+
+/// `POST /api/v1/system/raft/membership/learners` `{"id", "raft", "http"}`.
+#[cfg(feature = "server")]
+pub(crate) async fn handle_membership_add_learner(
+    axum::extract::State(st): axum::extract::State<Arc<AppState>>,
+    axum::extract::Extension(tenant): axum::extract::Extension<crate::tenant::Tenant>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> Response {
+    let v = match membership_body(&body) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let id = v
+        .get("id")
+        .or_else(|| v.get("nodeId"))
+        .and_then(serde_json::Value::as_u64);
+    let raft = v.get("raft").and_then(serde_json::Value::as_str);
+    let http = v.get("http").and_then(serde_json::Value::as_str);
+    let (Some(node), Some(raft), Some(http)) = (id, raft, http) else {
+        return membership_bad_request(
+            "expected {\"id\": <node id>, \"raft\": \"host:port\", \"http\": \"host:port\"}",
+        );
+    };
+    let change = crate::rsm::replicator::MembershipChange::AddLearner {
+        node,
+        raft: raft.to_string(),
+        http: http.to_string(),
+    };
+    membership_change(&st, &tenant, &q, change).await
+}
+
+/// `POST /api/v1/system/raft/membership/promote` `{"ids": [..], "force"?}`.
+#[cfg(feature = "server")]
+pub(crate) async fn handle_membership_promote(
+    axum::extract::State(st): axum::extract::State<Arc<AppState>>,
+    axum::extract::Extension(tenant): axum::extract::Extension<crate::tenant::Tenant>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> Response {
+    let v = match membership_body(&body) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Some(nodes) = membership_ids(&v, "ids", "id").filter(|n| !n.is_empty()) else {
+        return membership_bad_request("expected {\"ids\": [<learner id>, ...], \"force\"?: bool}");
+    };
+    let force = membership_force(&v, &q);
+    let change = crate::rsm::replicator::MembershipChange::Promote { nodes, force };
+    membership_change(&st, &tenant, &q, change).await
+}
+
+/// `PUT /api/v1/system/raft/membership/voters` `{"voters": [..], "force"?}`.
+#[cfg(feature = "server")]
+pub(crate) async fn handle_membership_set_voters(
+    axum::extract::State(st): axum::extract::State<Arc<AppState>>,
+    axum::extract::Extension(tenant): axum::extract::Extension<crate::tenant::Tenant>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> Response {
+    let v = match membership_body(&body) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Some(voters) = membership_ids(&v, "voters", "voter") else {
+        return membership_bad_request("expected {\"voters\": [<node id>, ...], \"force\"?: bool}");
+    };
+    let force = membership_force(&v, &q);
+    let change = crate::rsm::replicator::MembershipChange::SetVoters { voters, force };
+    membership_change(&st, &tenant, &q, change).await
+}
+
+/// `DELETE /api/v1/system/raft/membership/members/:id`.
+#[cfg(feature = "server")]
+pub(crate) async fn handle_membership_remove(
+    axum::extract::State(st): axum::extract::State<Arc<AppState>>,
+    axum::extract::Extension(tenant): axum::extract::Extension<crate::tenant::Tenant>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let Ok(node) = id.parse::<u64>() else {
+        return membership_bad_request(format!("`{id}` is not a node id"));
+    };
+    let change = crate::rsm::replicator::MembershipChange::Remove { node };
+    membership_change(&st, &tenant, &q, change).await
+}
+
+// ---------------------------------------------------------------------------
 // Composition roots.
 // ---------------------------------------------------------------------------
 
@@ -830,6 +1049,24 @@ pub(crate) fn build_raft_router(
         .route("/metrics/prometheus", get(handle_prometheus))
         .route("/status", get(super::handle_status))
         .route("/api/v1/stats/refresh", post(handle_stats_refresh))
+        // ------------------------ raft membership (operator: Admin, no tenant)
+        .route("/api/v1/system/raft/membership", get(handle_membership_get))
+        .route(
+            "/api/v1/system/raft/membership/learners",
+            post(handle_membership_add_learner),
+        )
+        .route(
+            "/api/v1/system/raft/membership/promote",
+            post(handle_membership_promote),
+        )
+        .route(
+            "/api/v1/system/raft/membership/voters",
+            axum::routing::put(handle_membership_set_voters),
+        )
+        .route(
+            "/api/v1/system/raft/membership/members/:id",
+            axum::routing::delete(handle_membership_remove),
+        )
         // --------------------------------------------------- broker identity
         .route("/auth/me", get(super::handle_auth_me))
         .route("/auth/login", get(super::handle_auth_login))

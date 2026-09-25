@@ -224,6 +224,33 @@ impl ApplyError {
     pub fn lost_durable_point(&self) -> bool {
         matches!(self, ApplyError::Store(e) if e.lost_durable_point())
     }
+
+    /// Would every node that applies this entry refuse it the same way? True
+    /// for a refusal decided by the entry and the replicated state alone — a
+    /// codec or validation refusal, a clock or base mismatch, an unsupported
+    /// kind, an effect naming state that is not there, a key over the store's
+    /// limit. False for what only THIS node hit: I/O, a full map or disk, its
+    /// own files or store bytes, a hole in what its replicator delivered, and
+    /// the follow-on refusal of an applier already stopped.
+    ///
+    /// The operator's skip (`QUEEN_RAFT_APPLY_SKIP`) is for the first kind
+    /// only: skipping an entry that other nodes applied diverges them.
+    pub fn deterministic(&self) -> bool {
+        match self {
+            ApplyError::Entry(_)
+            | ApplyError::Bases { .. }
+            | ApplyError::TimeWentBackwards { .. }
+            | ApplyError::Unsupported { .. }
+            | ApplyError::Inconsistent { .. } => true,
+            ApplyError::Store(e) => matches!(e, StoreError::KeyTooLong { .. }),
+            ApplyError::Gap { .. }
+            | ApplyError::Segments(_)
+            | ApplyError::Poisoned { .. }
+            | ApplyError::Disagreement { .. }
+            | ApplyError::Qlog(_)
+            | ApplyError::LocalMetrics(_) => false,
+        }
+    }
 }
 
 impl std::fmt::Display for ApplyError {
@@ -394,6 +421,120 @@ pub trait Notify: Send + Sync {
     /// the per-PARTITION wake a Kafka Fetch parks on. Unlike [`Notify::wake`]
     /// it does not depend on any native consumer group being subscribed.
     fn appended(&self, _tenant: &str, _queue: &str, _partition: &str) {}
+
+    /// Apply refused the entry `failure` describes, and this node stops here
+    /// (§12.1 Fatal). Called once, on the apply thread, before it returns the
+    /// error: the replicator keeps it for `/health` and for the next boot's
+    /// `QUEEN_RAFT_APPLY_SKIP` checks. It must not block (a file write of a
+    /// few hundred bytes is the most it may do).
+    fn failed(&self, _failure: &ApplyFailure) {}
+}
+
+/// Why apply stopped this node at one entry, as the operator needs it: which
+/// entry (index, term, digest), which effect of which command, and whether
+/// the same entry stops every node ([`ApplyError::deterministic`]).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyFailure {
+    pub index: u64,
+    pub term: u64,
+    /// [`crate::rsm::entry::entry_digest`] of the entry, 16 hex digits: the
+    /// same on every node that holds it, whatever form it is held in.
+    pub digest: String,
+    /// `deterministic`: a logic or invariant refusal, the same on every node
+    /// that applies this entry (the hatch, `QUEEN_RAFT_APPLY_SKIP`, is for
+    /// these). `node-local`: I/O, a full disk or map, this node's files — the
+    /// other nodes apply the entry, and only this node needs repair.
+    pub class: String,
+    /// The effect that failed, `#<ordinal> <kind>`; `None` when the entry was
+    /// refused before any effect ran (a gate: validation, clock, bases).
+    pub effect: Option<String>,
+    /// The command that effect belongs to: its request id (hex) and outcome.
+    pub command: Option<String>,
+    pub error: String,
+}
+
+impl ApplyFailure {
+    pub fn deterministic(&self) -> bool {
+        self.class == "deterministic"
+    }
+
+    /// The value of `QUEEN_RAFT_APPLY_SKIP` that steps over this entry (in
+    /// raft group 0; group `g` prefixes it with `g<g>/`).
+    pub fn skip_value(&self) -> String {
+        format!("{}:{}", self.index, self.digest)
+    }
+}
+
+/// `meta` prefix of `apply_skipped/<index, u64 BE>` -> JSON: an entry this
+/// node applied as a skip marker (an operator's `QUEEN_RAFT_APPLY_SKIP`,
+/// `replicator/raft/repair.rs`). NODE-LOCAL like the qlog tails: out of the
+/// §12.9 digest. What `/health` lists, and what tells the next boot that this
+/// node skipped the entry rather than executed it.
+pub const APPLY_SKIPPED_PREFIX: &[u8] = b"apply_skipped/";
+
+/// The [`APPLY_SKIPPED_PREFIX`] key of entry `index`.
+pub fn apply_skipped_key(index: u64) -> Vec<u8> {
+    let mut k = Vec::with_capacity(APPLY_SKIPPED_PREFIX.len() + 8);
+    k.extend_from_slice(APPLY_SKIPPED_PREFIX);
+    k.extend_from_slice(&index.to_be_bytes());
+    k
+}
+
+/// Every skip marker this store applied: `(index, term)`, ascending.
+pub fn skipped_entries<R: Reads + ?Sized>(
+    reads: &R,
+) -> std::result::Result<Vec<(u64, u64)>, StoreError> {
+    let mut out = Vec::new();
+    reads.scan_raw(
+        Keyspace::Meta,
+        APPLY_SKIPPED_PREFIX,
+        APPLY_SKIPPED_PREFIX,
+        usize::MAX,
+        &mut |k, v| {
+            if let Ok(b) = <[u8; 8]>::try_from(&k[APPLY_SKIPPED_PREFIX.len()..]) {
+                let term = serde_json::from_slice::<serde_json::Value>(v)
+                    .ok()
+                    .and_then(|j| j.get("term").and_then(serde_json::Value::as_u64))
+                    .unwrap_or(0);
+                out.push((u64::from_be_bytes(b), term));
+            }
+            true
+        },
+    )?;
+    Ok(out)
+}
+
+/// Is `e` a skip marker: an entry with no command and no effect whose header
+/// is not all zeros? The batcher never proposes an entry without a command, and
+/// openraft's own entries reach apply as [`Entry::noop`] (all zeros), so the
+/// only such entry is the one `QUEEN_RAFT_APPLY_SKIP` put in place of a
+/// skipped one: its header carries the skipped entry's clock and the id
+/// bases after it (`replicator/raft/repair.rs`).
+pub fn is_skip_marker(e: &Entry) -> bool {
+    e.commands.is_empty()
+        && e.effects.is_empty()
+        && (e.now_us != 0 || e.pid_base != 0 || e.kv_version_base != 0)
+}
+
+/// The marker that stands in for a skipped entry: no command, no effect, the
+/// skipped entry's clock, and the partition-id and KV-version bases AFTER it —
+/// the ids it reserved are burned, never reused, so every entry planned after
+/// it keeps its bases (I18) and applies.
+pub fn skip_marker_of(e: &Entry) -> Entry {
+    let (mut pids, mut kvs) = (0u64, 0u64);
+    for eff in &e.effects {
+        match eff.assigns() {
+            Assigns::Pid(_) => pids += 1,
+            Assigns::KvVersion(_) => kvs += 1,
+            Assigns::Nothing => {}
+        }
+    }
+    Entry::new(
+        e.now_us.max(1),
+        e.pid_base.saturating_add(pids),
+        e.kv_version_base.saturating_add(kvs),
+    )
 }
 
 /// The notifier of a node with nothing attached yet (phase 1 tests, embedded
@@ -681,6 +822,9 @@ pub struct ApplyStats {
     /// no-op: a delete of something already deleted. Counted rather than
     /// refused, because the SQL's deletes are idempotent too.
     pub missing_rows: u64,
+    /// Skip markers applied: entries an operator stepped over
+    /// (`QUEEN_RAFT_APPLY_SKIP`).
+    pub skipped_by_operator: u64,
 }
 
 /// What recovery found (§11.5).
@@ -902,6 +1046,9 @@ pub struct Applier<'s, S: Store> {
     /// Why this applier refuses to do anything else (see
     /// [`Applier::apply`]'s failure contract).
     poisoned: Option<String>,
+    /// The effect of the entry being executed that refused, for the failure
+    /// report ([`ApplyFailure`]).
+    failed_effect: Option<u32>,
 
     /// Sealed files whose `partition_files` rows are already committed.
     /// Bounded by the files sealed since the last commit, not by the files
@@ -1132,6 +1279,7 @@ impl<'s, S: Store> Applier<'s, S> {
             entries_since_commit: 0,
             dirty: false,
             poisoned: None,
+            failed_effect: None,
             recorded_seals: BTreeSet::new(),
             gc_staged: BTreeSet::new(),
             gc_deferred: BTreeSet::new(),
@@ -1287,12 +1435,99 @@ impl<'s, S: Store> Applier<'s, S> {
             // only log the operator sees is the replicator's later "apply thread
             // gone" (`local.rs`), never the I5/gap/bases cause (WP-1.11
             // diagnosability finding).
-            Err(e) => return Err(self.refused(e)),
+            Err(e) => {
+                let e = self.refused(e);
+                self.report(c, &e, None);
+                return Err(e);
+            }
         }
+        self.failed_effect = None;
         match self.execute(c) {
             Ok(a) => Ok(a),
-            Err(e) => Err(self.poison(e)),
+            Err(e) => {
+                let first = self.poisoned.is_none();
+                let e = self.poison(e);
+                if first {
+                    let at = self.failed_effect.take();
+                    self.report(c, &e, at);
+                }
+                Err(e)
+            }
         }
+    }
+
+    /// Tell the operator exactly what stopped this node: the entry (index,
+    /// term, digest), the effect and its command, whether every node stops on
+    /// it, and what to set if so. One error line, then [`Notify::failed`].
+    fn report(&self, c: &Committed, e: &ApplyError, effect: Option<u32>) {
+        let digest = format!("{:016x}", crate::rsm::entry::entry_digest(&c.entry));
+        let eff = effect.and_then(|ord| {
+            c.entry
+                .effects
+                .get(ord as usize)
+                .map(|x| format!("#{ord} {}", x.kind().name()))
+        });
+        let cmd = effect.and_then(|ord| {
+            c.entry
+                .commands
+                .iter()
+                .find(|k| k.first_effect <= ord && ord < k.first_effect + k.effect_count)
+                .map(|k| {
+                    let id: String = k.request_id.iter().map(|b| format!("{b:02x}")).collect();
+                    format!("request {id} ({})", outcome_name(&k.outcome))
+                })
+        });
+        let failure = ApplyFailure {
+            index: c.index,
+            term: c.term,
+            digest,
+            class: if e.deterministic() {
+                "deterministic"
+            } else {
+                "node-local"
+            }
+            .to_string(),
+            effect: eff,
+            command: cmd,
+            error: e.to_string(),
+        };
+        if failure.deterministic() {
+            tracing::error!(
+                target: "rsm",
+                index = failure.index,
+                term = failure.term,
+                digest = %failure.digest,
+                effect = failure.effect.as_deref().unwrap_or("-"),
+                command = failure.command.as_deref().unwrap_or("-"),
+                error = %failure.error,
+                "APPLY FAILED at entry {} (term {}), a DETERMINISTIC refusal: every node that \
+                 applies this entry stops on it, and a restart replays it and stops again. To \
+                 step over it without a code change, set QUEEN_RAFT_APPLY_SKIP={} (prefix `g<N>/` \
+                 for raft group N > 0) on EVERY node of the cluster, stopped and new ones \
+                 included, and restart them: the entry becomes a no-op everywhere, none of its \
+                 effects apply, and its commands were never answered. Entries planned on top of \
+                 it may fail next; each is reported the same way",
+                failure.index,
+                failure.term,
+                failure.skip_value(),
+            );
+        } else {
+            tracing::error!(
+                target: "rsm",
+                index = failure.index,
+                term = failure.term,
+                digest = %failure.digest,
+                effect = failure.effect.as_deref().unwrap_or("-"),
+                error = %failure.error,
+                "APPLY FAILED at entry {} (term {}), a NODE-LOCAL failure (I/O, space, or this \
+                 node's own files): the other nodes apply this entry. Do NOT set \
+                 QUEEN_RAFT_APPLY_SKIP for it. Repair this node (disk, space, permissions) and \
+                 restart it, or wipe its data directory and let it rejoin from a peer",
+                failure.index,
+                failure.term,
+            );
+        }
+        self.notify.failed(&failure);
     }
 
     /// Log a gate refusal that stops this node here (§12.1 Fatal) and hand it
@@ -1399,11 +1634,23 @@ impl<'s, S: Store> Applier<'s, S> {
         let mut pids_assigned = 0u64;
         let mut kv_versions_assigned = 0u64;
         let max_created_before = self.max_created_at_us;
+        // A test's injected refusal (`faults::refuse_apply_of`): off unless a
+        // test armed one, one relaxed load per entry.
+        let refuse_at = crate::rsm::faults::apply_refusal(&c.entry);
         for (ord, e) in c.entry.effects.iter().enumerate() {
             match e.assigns() {
                 Assigns::Pid(_) => pids_assigned += 1,
                 Assigns::KvVersion(_) => kv_versions_assigned += 1,
                 Assigns::Nothing => {}
+            }
+            self.failed_effect = Some(ord as u32);
+            if let Some((at, why)) = &refuse_at {
+                if *at == ord {
+                    return Err(ApplyError::Inconsistent {
+                        what: "injected apply fault (test)",
+                        detail: why.clone(),
+                    });
+                }
             }
             self.effect(c.index, ord as u32, c.entry.now_us, e, &mut wakes)?;
             // §13.5 `apply.mid_entry`: some effects of this entry are written
@@ -1417,6 +1664,7 @@ impl<'s, S: Store> Applier<'s, S> {
                 crate::rsm::faults::hit("apply.mid_entry");
             }
         }
+        self.failed_effect = None;
         self.stats.effects += c.entry.effects.len() as u64;
 
         // PERF-C: flush this entry's buffered segment writes — one `write` per
@@ -1547,6 +1795,9 @@ impl<'s, S: Store> Applier<'s, S> {
         if self.cfg.qlog && self.cfg.qlog_writer_external {
             self.last_append_index = self.last_append_index.max(c.index);
         }
+        if is_skip_marker(&c.entry) {
+            self.execute_skip_marker(c)?;
+        }
         self.applied_index = c.index;
         self.applied_term = c.term;
         self.writes.set_applied(c.index, c.term)?;
@@ -1555,6 +1806,53 @@ impl<'s, S: Store> Applier<'s, S> {
         self.stats.entries += 1;
         self.notify.applied(c.index, c.term, &[]);
         Ok(Applied::Executed { effects: 0 })
+    }
+
+    /// A skip marker ([`is_skip_marker`]): the entry an operator told this
+    /// cluster to step over (`QUEEN_RAFT_APPLY_SKIP`) was replaced by it in the
+    /// log, so none of that entry's effects, outcomes or wakes exist here. What
+    /// the marker carries is kept: the clock (never backwards, I5) and the
+    /// partition-id and KV-version bases after the skipped entry (the ids it
+    /// reserved are burned, so the entries planned after it keep their bases,
+    /// I18). The skip is recorded in node-local `meta`, and said loudly.
+    fn execute_skip_marker(&mut self, c: &Committed) -> Result<()> {
+        let m = &c.entry;
+        if m.now_us > self.last_now_us {
+            self.last_now_us = m.now_us;
+            self.writes.set_meta_i64(meta::LAST_NOW_US, m.now_us)?;
+        }
+        if m.pid_base > self.next_pid {
+            self.next_pid = m.pid_base;
+            self.writes.set_meta_u64(meta::NEXT_PID, self.next_pid)?;
+        }
+        if m.kv_version_base > self.kv_version_next {
+            self.kv_version_next = m.kv_version_base;
+            self.writes
+                .set_meta_u64(meta::KV_VERSION_NEXT, self.kv_version_next)?;
+        }
+        let record = serde_json::json!({
+            "term": c.term,
+            "nowUs": m.now_us,
+            "pidBase": m.pid_base,
+            "kvVersionBase": m.kv_version_base,
+        })
+        .to_string();
+        self.writes
+            .set_meta_blob(&apply_skipped_key(c.index), record.as_bytes())?;
+        self.stats.skipped_by_operator += 1;
+        tracing::error!(
+            target: "rsm",
+            index = c.index,
+            term = c.term,
+            next_pid = self.next_pid,
+            kv_version_next = self.kv_version_next,
+            "apply: SKIPPED entry {} (term {}) as an operator asked (QUEEN_RAFT_APPLY_SKIP): none \
+             of its effects applied, its commands were not answered, the ids it reserved are \
+             burned",
+            c.index,
+            c.term,
+        );
+        Ok(())
     }
 
     // -- one effect --------------------------------------------------------
@@ -4566,6 +4864,21 @@ pub fn spawn_with_reader<S: Store + 'static>(
         .expect("spawn the apply thread")
 }
 
+/// A command's outcome kind, for the failure report.
+fn outcome_name(o: &crate::rsm::entry::Outcome) -> &'static str {
+    use crate::rsm::entry::Outcome;
+    match o {
+        Outcome::Empty => "empty",
+        Outcome::Push(_) => "push",
+        Outcome::Pop(_) => "pop",
+        Outcome::Ack(_) => "ack",
+        Outcome::Renew(_) => "renew",
+        Outcome::DlqHead(_) => "dlq head",
+        Outcome::Kv(_) => "kv",
+        Outcome::Placeholder(_) => "admin",
+    }
+}
+
 /// What a frame at `base` still holds when its partition is deleted.
 ///
 /// Retention releases the payload of everything below `log_start` and leaves
@@ -4678,7 +4991,8 @@ fn digest_of<R: Reads + ?Sized>(
             if ks == Keyspace::Meta
                 && (k == meta::DURABLE_INDEX
                     || k == meta::QLOG_DURABLE_INDEX
-                    || k.starts_with(meta::QLOG_TAIL_PREFIX))
+                    || k.starts_with(meta::QLOG_TAIL_PREFIX)
+                    || k.starts_with(APPLY_SKIPPED_PREFIX))
             {
                 return true;
             }

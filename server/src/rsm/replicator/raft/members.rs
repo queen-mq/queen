@@ -176,6 +176,12 @@ impl MembersState {
         Some((view, age + at.elapsed()))
     }
 
+    /// The last members view received from a leader, and its age now
+    /// (the membership admin view of a follower, [`super::admin::status`]).
+    pub(crate) fn received_view(&self) -> Option<(MembersView, Duration)> {
+        self.received()
+    }
+
     /// On a follower: the openraft index every member the LEADER still counts
     /// as live has replicated, from the last view received — the floor the
     /// leader purges by ([`super::replicated_floor`]). A follower that purges

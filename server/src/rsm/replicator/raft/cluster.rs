@@ -14,9 +14,28 @@
 //!
 //! Every node of a new cluster starts with the SAME list on an empty data
 //! directory; each one initializes the cluster with it (openraft allows that
-//! with identical members) and they elect a leader. After the first start the
-//! membership lives in the log and the list is only used for this node's own
-//! listen address.
+//! with identical members) and they elect a leader.
+//!
+//! # The persisted membership wins
+//!
+//! After the first start the membership lives in the log (membership entries,
+//! and `raft/membership.json` once one is applied), and a node that has any
+//! raft state never initializes again: the list is then only read for this
+//! node's own listen address, the token and a group's preferred leader. A
+//! committed change (`/api/v1/system/raft/membership/*`, or
+//! `QUEEN_RAFT_FORCE_RECOVER`) therefore stands across restarts whatever
+//! `QUEEN_RAFT_PEERS` still says: it needs no edit for the cluster to work,
+//! and should be edited anyway so the next NEW node sees the current members.
+//! A member removed from the membership but still listed is simply not
+//! contacted; a member added but not listed works (its address is in the
+//! membership).
+//!
+//! A node that JOINS an existing cluster (a replacement, a new member) lists
+//! at least itself here (its listen address) and must not initialize a
+//! cluster of its own: it starts with `QUEEN_RAFT_JOIN=true`, or — as a
+//! safety net — finds that a listed peer already holds cluster state and
+//! joins anyway (`RaftOpts::join`). It then serves 503 until the leader adds
+//! it as a learner.
 
 use std::collections::BTreeMap;
 
@@ -119,21 +138,7 @@ impl ClusterConfig {
     /// position `group mod n` (by id) as its leader, so the groups' leaders
     /// spread over the nodes. Group 0 keeps the addresses as configured.
     pub fn for_group(&self, group: usize) -> Result<ClusterConfig, String> {
-        let shift = |addr: &str| -> Result<String, String> {
-            if group == 0 {
-                return Ok(addr.to_string());
-            }
-            let (host, port) = addr
-                .rsplit_once(':')
-                .ok_or_else(|| format!("raft address `{addr}` has no port"))?;
-            let port: u16 = port
-                .parse()
-                .map_err(|_| format!("raft address `{addr}`: bad port"))?;
-            let port = port
-                .checked_add(group as u16)
-                .ok_or_else(|| format!("raft address `{addr}`: port + {group} overflows"))?;
-            Ok(format!("{host}:{port}"))
-        };
+        let shift = |addr: &str| group_raft_addr(addr, group);
         let mut members = BTreeMap::new();
         for (id, n) in &self.members {
             members.insert(*id, QueenNode::new(shift(&n.raft)?, n.http.clone()));
@@ -147,6 +152,26 @@ impl ClusterConfig {
             preferred_leader: (ids.len() > 1).then(|| ids[group % ids.len()]),
         })
     }
+}
+
+/// Raft group `group`'s Raft address of a node whose group-0 Raft address is
+/// `addr`: the port plus `group` (the client address is the same for every
+/// group). What [`ClusterConfig::for_group`] applies to every member, and what
+/// a membership change applies to the address it adds.
+pub fn group_raft_addr(addr: &str, group: usize) -> Result<String, String> {
+    if group == 0 {
+        return Ok(addr.to_string());
+    }
+    let (host, port) = addr
+        .rsplit_once(':')
+        .ok_or_else(|| format!("raft address `{addr}` has no port"))?;
+    let port: u16 = port
+        .parse()
+        .map_err(|_| format!("raft address `{addr}`: bad port"))?;
+    let port = port
+        .checked_add(group as u16)
+        .ok_or_else(|| format!("raft address `{addr}`: port + {group} overflows"))?;
+    Ok(format!("{host}:{port}"))
 }
 
 /// `QUEEN_RAFT_NODE_ID`: a number, or `ordinal` for a StatefulSet pod — the

@@ -87,6 +87,32 @@ impl<S: Store + 'static> NodeReplicator<S> {
         clock: Arc<dyn apply::Clock>,
         exit_on_restart: bool,
     ) -> io::Result<NodeReplicator<S>> {
+        NodeReplicator::open_with_opts(
+            kind,
+            store,
+            cfg,
+            cluster,
+            waker,
+            clock,
+            exit_on_restart,
+            None,
+        )
+    }
+
+    /// [`NodeReplicator::open_with`], with the openraft replicator's options
+    /// given (`Some`, a test's cluster node) instead of read from the
+    /// environment (`None`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_with_opts(
+        kind: ReplicatorKind,
+        store: Arc<S>,
+        cfg: OpenConfig,
+        cluster: Option<ClusterConfig>,
+        waker: Arc<dyn Waker>,
+        clock: Arc<dyn apply::Clock>,
+        exit_on_restart: bool,
+        opts: Option<super::raft::RaftOpts>,
+    ) -> io::Result<NodeReplicator<S>> {
         let data_dir = cfg
             .seg_root
             .parent()
@@ -108,15 +134,36 @@ impl<S: Store + 'static> NodeReplicator<S> {
                 }
                 LocalReplicator::open(store, cfg, waker, clock).map(NodeReplicator::Local)
             }
-            ReplicatorKind::Raft => RaftReplicator::open_with(
-                store,
-                cfg,
-                cluster,
-                waker,
-                clock,
-                super::raft::RaftOpts::from_env(exit_on_restart),
-            )
-            .map(NodeReplicator::Raft),
+            ReplicatorKind::Raft => {
+                let opts = match opts {
+                    Some(o) => o,
+                    None => super::raft::RaftOpts::from_env(exit_on_restart)?,
+                };
+                RaftReplicator::open_with(store, cfg, cluster, waker, clock, opts)
+                    .map(NodeReplicator::Raft)
+            }
+        }
+    }
+
+    /// The membership for an operator (`GET /api/v1/system/raft/membership`,
+    /// [`RaftReplicator::membership_status`]); `None` for the local replicator,
+    /// which has none.
+    pub async fn membership_status(
+        &self,
+        deadline: Instant,
+    ) -> Option<super::raft::MembershipStatus> {
+        match self {
+            NodeReplicator::Local(_) => None,
+            NodeReplicator::Raft(r) => Some(r.membership_status(deadline).await),
+        }
+    }
+
+    /// What `/health` shows about apply ([`RaftReplicator::apply_status`]);
+    /// `None` for the local replicator.
+    pub fn apply_status(&self) -> Option<serde_json::Value> {
+        match self {
+            NodeReplicator::Local(_) => None,
+            NodeReplicator::Raft(r) => Some(r.apply_status()),
         }
     }
 
