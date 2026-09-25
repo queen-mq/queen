@@ -1,0 +1,741 @@
+# HELP queen_uptime_seconds Process uptime in seconds
+# TYPE queen_uptime_seconds gauge
+queen_uptime_seconds 49
+# HELP queen_process_resident_memory_bytes Resident memory of this process
+# TYPE queen_process_resident_memory_bytes gauge
+queen_process_resident_memory_bytes 0
+# HELP queen_process_push_requests_total Push API requests handled by this process
+# TYPE queen_process_push_requests_total counter
+queen_process_push_requests_total 18135
+# HELP queen_process_pop_requests_total Pop API requests handled by this process
+# TYPE queen_process_pop_requests_total counter
+queen_process_pop_requests_total 17127
+# HELP queen_process_ack_requests_total Ack API requests handled by this process
+# TYPE queen_process_ack_requests_total counter
+queen_process_ack_requests_total 17127
+# HELP queen_process_push_messages_total Messages pushed by this process
+# TYPE queen_process_push_messages_total counter
+queen_process_push_messages_total 181350
+# HELP queen_process_pop_messages_total Messages popped by this process
+# TYPE queen_process_pop_messages_total counter
+queen_process_pop_messages_total 174750
+# HELP queen_process_ack_messages_total Messages acked by this process
+# TYPE queen_process_ack_messages_total counter
+queen_process_ack_messages_total 174750
+# HELP queen_pop_targeted_total Hinted targeted single-partition pops issued
+# TYPE queen_pop_targeted_total counter
+queen_pop_targeted_total 0
+# HELP queen_pop_wildcard_total Wildcard candidate-scan pops issued
+# TYPE queen_pop_wildcard_total counter
+queen_pop_wildcard_total 0
+# HELP queen_pop_fill_wait_total Pops that held an under-full batch back (minPopWaitTime)
+# TYPE queen_pop_fill_wait_total counter
+queen_pop_fill_wait_total 0
+# HELP queen_pop_fill_wait_microseconds_total Total time pops spent fattening an under-full batch
+# TYPE queen_pop_fill_wait_microseconds_total counter
+queen_pop_fill_wait_microseconds_total 0
+# HELP queen_parked_long_polls Currently parked long-poll pops on this process
+# TYPE queen_parked_long_polls gauge
+# HELP queen_event_loop_lag_avg_milliseconds Mean scheduler (event-loop) lag since start
+# TYPE queen_event_loop_lag_avg_milliseconds gauge
+queen_event_loop_lag_avg_milliseconds 1.096
+# HELP queen_batches_fired_total Fusion batches flushed
+# TYPE queen_batches_fired_total counter
+# HELP queen_batch_items_fired_total Items flushed across fusion batches
+# TYPE queen_batch_items_fired_total counter
+# HELP queen_fusion_items_per_batch Mean items per fusion batch
+# TYPE queen_fusion_items_per_batch gauge
+# HELP queen_batch_rtt_milliseconds Fusion batch round-trip latency
+# TYPE queen_batch_rtt_milliseconds gauge
+queen_batches_fired_total{op="push"} 0
+queen_batch_items_fired_total{op="push"} 0
+queen_fusion_items_per_batch{op="push"} 0.00
+queen_batch_rtt_milliseconds{op="push",quantile="0.5"} 0.000
+queen_batch_rtt_milliseconds{op="push",quantile="0.99"} 0.000
+queen_batches_fired_total{op="pop"} 0
+queen_batch_items_fired_total{op="pop"} 0
+queen_fusion_items_per_batch{op="pop"} 0.00
+queen_batch_rtt_milliseconds{op="pop",quantile="0.5"} 0.000
+queen_batch_rtt_milliseconds{op="pop",quantile="0.99"} 0.000
+queen_batches_fired_total{op="ack"} 0
+queen_batch_items_fired_total{op="ack"} 0
+queen_fusion_items_per_batch{op="ack"} 0.00
+queen_batch_rtt_milliseconds{op="ack",quantile="0.5"} 0.000
+queen_batch_rtt_milliseconds{op="ack",quantile="0.99"} 0.000
+# HELP queen_kv_ops_total KV operations by code path and outcome
+# TYPE queen_kv_ops_total counter
+queen_kv_ops_total{op="get",result="applied"} 0
+queen_kv_ops_total{op="get",result="rejected"} 0
+queen_kv_ops_total{op="get",result="error"} 0
+queen_kv_ops_total{op="getMany",result="applied"} 0
+queen_kv_ops_total{op="getMany",result="rejected"} 0
+queen_kv_ops_total{op="getMany",result="error"} 0
+queen_kv_ops_total{op="getPrefix",result="applied"} 0
+queen_kv_ops_total{op="getPrefix",result="rejected"} 0
+queen_kv_ops_total{op="getPrefix",result="error"} 0
+queen_kv_ops_total{op="put",result="applied"} 0
+queen_kv_ops_total{op="put",result="rejected"} 0
+queen_kv_ops_total{op="put",result="error"} 0
+queen_kv_ops_total{op="delete",result="applied"} 0
+queen_kv_ops_total{op="delete",result="rejected"} 0
+queen_kv_ops_total{op="delete",result="error"} 0
+queen_kv_ops_total{op="incr",result="applied"} 0
+queen_kv_ops_total{op="incr",result="rejected"} 0
+queen_kv_ops_total{op="incr",result="error"} 0
+# HELP queen_kv_op_duration_milliseconds KV operation latency
+# TYPE queen_kv_op_duration_milliseconds gauge
+queen_kv_op_duration_milliseconds{op="get",quantile="0.5"} 0.000
+queen_kv_op_duration_milliseconds{op="get",quantile="0.99"} 0.000
+queen_kv_op_duration_milliseconds{op="getMany",quantile="0.5"} 0.000
+queen_kv_op_duration_milliseconds{op="getMany",quantile="0.99"} 0.000
+queen_kv_op_duration_milliseconds{op="getPrefix",quantile="0.5"} 0.000
+queen_kv_op_duration_milliseconds{op="getPrefix",quantile="0.99"} 0.000
+queen_kv_op_duration_milliseconds{op="put",quantile="0.5"} 0.000
+queen_kv_op_duration_milliseconds{op="put",quantile="0.99"} 0.000
+queen_kv_op_duration_milliseconds{op="delete",quantile="0.5"} 0.000
+queen_kv_op_duration_milliseconds{op="delete",quantile="0.99"} 0.000
+queen_kv_op_duration_milliseconds{op="incr",quantile="0.5"} 0.000
+queen_kv_op_duration_milliseconds{op="incr",quantile="0.99"} 0.000
+# HELP queen_kv_bytes_total KV value bytes written / read
+# TYPE queen_kv_bytes_total counter
+queen_kv_bytes_total{dir="in"} 0
+queen_kv_bytes_total{dir="out"} 0
+# HELP queen_kv_expired_not_pruned Expired KV rows the sweeper has not pruned yet (capped)
+# TYPE queen_kv_expired_not_pruned gauge
+queen_kv_expired_not_pruned 0
+# HELP queen_kv_expired_not_pruned_capped 1 when the unpruned count hit its cap and is a floor
+# TYPE queen_kv_expired_not_pruned_capped gauge
+queen_kv_expired_not_pruned_capped 0
+# HELP queen_kv_expiry_lag_seconds Age of the oldest expired, unpruned KV row
+# TYPE queen_kv_expiry_lag_seconds gauge
+queen_kv_expiry_lag_seconds 0.000
+# HELP queen_kv_read_rejected_total KV reads refused before reaching the database
+# TYPE queen_kv_read_rejected_total counter
+queen_kv_read_rejected_total{reason="rate_limited"} 0
+queen_kv_read_rejected_total{reason="quota"} 0
+queen_kv_read_rejected_total{reason="pool"} 0
+queen_kv_read_rejected_total{reason="disabled"} 0
+# HELP queen_kv_pool Dedicated KV connection pool
+# TYPE queen_kv_pool gauge
+queen_kv_pool{state="size"} 0
+queen_kv_pool{state="available"} 0
+queen_kv_pool{state="waiting"} 0
+# HELP queen_kv_singleflight_coalesced_total KV reads that shared an in-flight query
+# TYPE queen_kv_singleflight_coalesced_total counter
+queen_kv_singleflight_coalesced_total 0
+# HELP queen_timers_due Timers due now, from the sweep probe (capped)
+# TYPE queen_timers_due gauge
+queen_timers_due 0
+# HELP queen_timers_due_capped 1 when the due count hit its cap and is a floor
+# TYPE queen_timers_due_capped gauge
+queen_timers_due_capped 0
+# HELP queen_timers_oldest_late_seconds Lateness of the oldest due timer
+# TYPE queen_timers_oldest_late_seconds gauge
+queen_timers_oldest_late_seconds 0.000
+# HELP queen_timers_fire_lag_seconds Delivery lateness of fired timers, per tenant
+# TYPE queen_timers_fire_lag_seconds gauge
+# HELP queen_timers_fire_lag_tenants_dropped_total Fire-lag samples dropped because the tenant cap was reached
+# TYPE queen_timers_fire_lag_tenants_dropped_total counter
+queen_timers_fire_lag_tenants_dropped_total 0
+# HELP queen_timers_fired_total Fired timer segments by outcome
+# TYPE queen_timers_fired_total counter
+queen_timers_fired_total{result="fired"} 0
+queen_timers_fired_total{result="duplicate"} 0
+queen_timers_fired_total{result="stale"} 0
+# HELP queen_timers_dlq_total Timers dead-lettered after exhausting attempts
+# TYPE queen_timers_dlq_total counter
+queen_timers_dlq_total 0
+# HELP queen_timers_fire_failures_total Failed fire transactions by SQLSTATE class
+# TYPE queen_timers_fire_failures_total counter
+queen_timers_fire_failures_total{class="transient"} 0
+queen_timers_fire_failures_total{class="permanent"} 0
+queen_timers_fire_failures_total{class="config"} 0
+# HELP queen_timers_poisoned_total Batches replayed one segment per call after a permanent error
+# TYPE queen_timers_poisoned_total counter
+queen_timers_poisoned_total 0
+# HELP queen_timers_schedule_rejected_total Timer schedules refused
+# TYPE queen_timers_schedule_rejected_total counter
+queen_timers_schedule_rejected_total{reason="shape"} 0
+queen_timers_schedule_rejected_total{reason="payload_too_large"} 0
+queen_timers_schedule_rejected_total{reason="quota"} 0
+queen_timers_schedule_rejected_total{reason="horizon"} 0
+queen_timers_schedule_rejected_total{reason="gated"} 0
+queen_timers_schedule_rejected_total{reason="rate_limited"} 0
+queen_timers_schedule_rejected_total{reason="unavailable"} 0
+queen_timers_schedule_rejected_total{reason="disabled"} 0
+# HELP queen_sweeper_cycle_milliseconds Sweeper phase duration
+# TYPE queen_sweeper_cycle_milliseconds gauge
+queen_sweeper_cycle_milliseconds{phase="fire",quantile="0.5"} 0.000
+queen_sweeper_cycle_milliseconds{phase="fire",quantile="0.99"} 0.000
+queen_sweeper_cycle_milliseconds{phase="kv_expire",quantile="0.5"} 0.000
+queen_sweeper_cycle_milliseconds{phase="kv_expire",quantile="0.99"} 0.000
+queen_sweeper_cycle_milliseconds{phase="usage",quantile="0.5"} 0.000
+queen_sweeper_cycle_milliseconds{phase="usage",quantile="0.99"} 0.000
+# HELP queen_sweeper_rows_total Rows handled by each sweeper phase
+# TYPE queen_sweeper_rows_total counter
+queen_sweeper_rows_total{phase="fire"} 0
+queen_sweeper_rows_total{phase="kv_expire"} 0
+queen_sweeper_rows_total{phase="usage"} 0
+# HELP queen_sweeper_skip_locked_total Rows another broker was already holding
+# TYPE queen_sweeper_skip_locked_total counter
+queen_sweeper_skip_locked_total 0
+# HELP queen_sweeper_phase_skipped_total Phases shed under pressure (the degradation ladder, made visible)
+# TYPE queen_sweeper_phase_skipped_total counter
+queen_sweeper_phase_skipped_total{phase="fire"} 0
+queen_sweeper_phase_skipped_total{phase="kv_expire"} 0
+queen_sweeper_phase_skipped_total{phase="usage"} 0
+# HELP queen_sweeper_sleep_milliseconds Sleep the sweeper chose after the last cycle
+# TYPE queen_sweeper_sleep_milliseconds gauge
+queen_sweeper_sleep_milliseconds 0
+# HELP queen_ephemeral_messages_total Ephemeral messages by verb
+# TYPE queen_ephemeral_messages_total counter
+queen_ephemeral_messages_total{verb="pushed"} 0
+queen_ephemeral_messages_total{verb="popped"} 0
+queen_ephemeral_messages_total{verb="acked"} 0
+# HELP queen_ephemeral_dropped_total Ephemeral messages dropped, by cause
+# TYPE queen_ephemeral_dropped_total counter
+queen_ephemeral_dropped_total{cause="bounds"} 0
+queen_ephemeral_dropped_total{cause="ttl"} 0
+queen_ephemeral_dropped_total{cause="retry"} 0
+# HELP queen_ephemeral_forwarded_total Ephemeral requests relayed to the partition's rendezvous owner
+# TYPE queen_ephemeral_forwarded_total counter
+queen_ephemeral_forwarded_total 0
+# HELP queen_ephemeral_wipes_total Ephemeral rings dropped because their partition moved owner
+# TYPE queen_ephemeral_wipes_total counter
+queen_ephemeral_wipes_total 0
+# HELP queen_ephemeral_bytes Bytes held by this broker's ephemeral rings
+# TYPE queen_ephemeral_bytes gauge
+queen_ephemeral_bytes 0
+# HELP queen_ephemeral_queues Ephemeral queues on this broker (declared + live implicit)
+# TYPE queen_ephemeral_queues gauge
+queen_ephemeral_queues 0
+# HELP queen_admission_budget Write-transaction admission budget
+# TYPE queen_admission_budget gauge
+queen_admission_budget 682
+# HELP queen_raft_plan_seconds Planner cycle duration
+# TYPE queen_raft_plan_seconds summary
+queen_raft_plan_seconds{quantile="0.5"} 0.001048575
+queen_raft_plan_seconds{quantile="0.9"} 0.008388607
+queen_raft_plan_seconds{quantile="0.99"} 0.008388607
+queen_raft_plan_seconds{quantile="0.999"} 0.008388607
+queen_raft_plan_seconds{quantile="1"} 0.005788584
+queen_raft_plan_seconds_count 368
+queen_raft_plan_seconds_sum 0.823809211
+# HELP queen_raft_plan_cpu_seconds Planner command loop, thread CPU time
+# TYPE queen_raft_plan_cpu_seconds summary
+queen_raft_plan_cpu_seconds{quantile="0.5"} 0.001048575
+queen_raft_plan_cpu_seconds{quantile="0.9"} 0.008388607
+queen_raft_plan_cpu_seconds{quantile="0.99"} 0.008388607
+queen_raft_plan_cpu_seconds{quantile="0.999"} 0.008388607
+queen_raft_plan_cpu_seconds{quantile="1"} 0.005143292
+queen_raft_plan_cpu_seconds_count 368
+queen_raft_plan_cpu_seconds_sum 0.710165329
+# HELP queen_raft_plan_whole_wall_seconds Whole plan_cycle_blocking call, wall
+# TYPE queen_raft_plan_whole_wall_seconds summary
+queen_raft_plan_whole_wall_seconds{quantile="0.5"} 0.002097151
+queen_raft_plan_whole_wall_seconds{quantile="0.9"} 0.008388607
+queen_raft_plan_whole_wall_seconds{quantile="0.99"} 0.016777215
+queen_raft_plan_whole_wall_seconds{quantile="0.999"} 0.016777215
+queen_raft_plan_whole_wall_seconds{quantile="1"} 0.010618125
+queen_raft_plan_whole_wall_seconds_count 368
+queen_raft_plan_whole_wall_seconds_sum 1.003944419
+# HELP queen_raft_plan_whole_cpu_seconds Whole plan_cycle_blocking call, thread CPU
+# TYPE queen_raft_plan_whole_cpu_seconds summary
+queen_raft_plan_whole_cpu_seconds{quantile="0.5"} 0.002097151
+queen_raft_plan_whole_cpu_seconds{quantile="0.9"} 0.008388607
+queen_raft_plan_whole_cpu_seconds{quantile="0.99"} 0.008388607
+queen_raft_plan_whole_cpu_seconds{quantile="0.999"} 0.008388607
+queen_raft_plan_whole_cpu_seconds{quantile="1"} 0.007556792
+queen_raft_plan_whole_cpu_seconds_count 368
+queen_raft_plan_whole_cpu_seconds_sum 0.853118454
+# HELP queen_raft_push_h_total_seconds PERF-J: whole raft push handler (entry to response), push-only
+# TYPE queen_raft_push_h_total_seconds summary
+queen_raft_push_h_total_seconds{quantile="0.5"} 2.147483647
+queen_raft_push_h_total_seconds{quantile="0.9"} 2.147483647
+queen_raft_push_h_total_seconds{quantile="0.99"} 4.294967295
+queen_raft_push_h_total_seconds{quantile="0.999"} 4.294967295
+queen_raft_push_h_total_seconds{quantile="1"} 2.427157500
+queen_raft_push_h_total_seconds_count 18135
+queen_raft_push_h_total_seconds_sum 22953.977962319
+# HELP queen_raft_push_h_prep_seconds PERF-J: push pre-submit (parse+pack), entry to first channel send
+# TYPE queen_raft_push_h_prep_seconds summary
+queen_raft_push_h_prep_seconds{quantile="0.5"} 0.000016383
+queen_raft_push_h_prep_seconds{quantile="0.9"} 0.000065535
+queen_raft_push_h_prep_seconds{quantile="0.99"} 0.000262143
+queen_raft_push_h_prep_seconds{quantile="0.999"} 0.000524287
+queen_raft_push_h_prep_seconds{quantile="1"} 0.001452959
+queen_raft_push_h_prep_seconds_count 18749
+queen_raft_push_h_prep_seconds_sum 0.445083114
+# HELP queen_raft_push_h_submit_seconds PERF-J: push channel enqueue (cmd_tx.send await), back-pressure
+# TYPE queen_raft_push_h_submit_seconds summary
+queen_raft_push_h_submit_seconds{quantile="0.5"} 0.000000511
+queen_raft_push_h_submit_seconds{quantile="0.9"} 0.000001023
+queen_raft_push_h_submit_seconds{quantile="0.99"} 0.000004095
+queen_raft_push_h_submit_seconds{quantile="0.999"} 0.000032767
+queen_raft_push_h_submit_seconds{quantile="1"} 0.000460292
+queen_raft_push_h_submit_seconds_count 18749
+queen_raft_push_h_submit_seconds_sum 0.013945871
+# HELP queen_raft_push_h_await_seconds PERF-J: push reply wait (propose+commit+apply+answer), push-only
+# TYPE queen_raft_push_h_await_seconds summary
+queen_raft_push_h_await_seconds{quantile="0.5"} 2.147483647
+queen_raft_push_h_await_seconds{quantile="0.9"} 2.147483647
+queen_raft_push_h_await_seconds{quantile="0.99"} 4.294967295
+queen_raft_push_h_await_seconds{quantile="0.999"} 4.294967295
+queen_raft_push_h_await_seconds{quantile="1"} 2.427124666
+queen_raft_push_h_await_seconds_count 18135
+queen_raft_push_h_await_seconds_sum 22953.232644108
+# HELP queen_raft_pop_h_total_seconds PERF-J: whole raft pop handler (entry to response), pop-only
+# TYPE queen_raft_pop_h_total_seconds summary
+queen_raft_pop_h_total_seconds{quantile="0.5"} 4.294967295
+queen_raft_pop_h_total_seconds{quantile="0.9"} 4.294967295
+queen_raft_pop_h_total_seconds{quantile="0.99"} 8.589934591
+queen_raft_pop_h_total_seconds{quantile="0.999"} 8.589934591
+queen_raft_pop_h_total_seconds{quantile="1"} 4.750986125
+queen_raft_pop_h_total_seconds_count 17109
+queen_raft_pop_h_total_seconds_sum 38992.692752302
+# HELP queen_raft_arrival_to_proposed_seconds Command arrival to its entry proposed
+# TYPE queen_raft_arrival_to_proposed_seconds summary
+queen_raft_arrival_to_proposed_seconds{quantile="0.5"} 0.536870911
+queen_raft_arrival_to_proposed_seconds{quantile="0.9"} 1.073741823
+queen_raft_arrival_to_proposed_seconds{quantile="0.99"} 2.147483647
+queen_raft_arrival_to_proposed_seconds{quantile="0.999"} 2.147483647
+queen_raft_arrival_to_proposed_seconds{quantile="1"} 1.560851625
+queen_raft_arrival_to_proposed_seconds_count 39836
+queen_raft_arrival_to_proposed_seconds_sum 17100.537975488
+# HELP queen_raft_queue_wait_seconds Command arrival to the cycle that drained it (PERF-G leg 1)
+# TYPE queen_raft_queue_wait_seconds summary
+queen_raft_queue_wait_seconds{quantile="0.5"} 0.067108863
+queen_raft_queue_wait_seconds{quantile="0.9"} 1.073741823
+queen_raft_queue_wait_seconds{quantile="0.99"} 1.073741823
+queen_raft_queue_wait_seconds{quantile="0.999"} 1.073741823
+queen_raft_queue_wait_seconds{quantile="1"} 1.173466167
+queen_raft_queue_wait_seconds_count 85318
+queen_raft_queue_wait_seconds_sum 16152.085617945
+# HELP queen_raft_drain_to_propose_seconds Cycle drain to its entry proposed (PERF-G leg 2)
+# TYPE queen_raft_drain_to_propose_seconds summary
+queen_raft_drain_to_propose_seconds{quantile="0.5"} 0.004194303
+queen_raft_drain_to_propose_seconds{quantile="0.9"} 0.016777215
+queen_raft_drain_to_propose_seconds{quantile="0.99"} 0.067108863
+queen_raft_drain_to_propose_seconds{quantile="0.999"} 0.067108863
+queen_raft_drain_to_propose_seconds{quantile="1"} 0.050379625
+queen_raft_drain_to_propose_seconds_count 355
+queen_raft_drain_to_propose_seconds_sum 1.858869634
+# HELP queen_raft_propose_roundtrip_seconds Entry proposed to its waiters answered (commit+apply+notify)
+# TYPE queen_raft_propose_roundtrip_seconds summary
+queen_raft_propose_roundtrip_seconds{quantile="0.5"} 0.536870911
+queen_raft_propose_roundtrip_seconds{quantile="0.9"} 1.073741823
+queen_raft_propose_roundtrip_seconds{quantile="0.99"} 2.147483647
+queen_raft_propose_roundtrip_seconds{quantile="0.999"} 2.147483647
+queen_raft_propose_roundtrip_seconds{quantile="1"} 1.920514667
+queen_raft_propose_roundtrip_seconds_count 351
+queen_raft_propose_roundtrip_seconds_sum 190.530676955
+# HELP queen_raft_proposed_to_committed_seconds Entry proposed to its group fsynced
+# TYPE queen_raft_proposed_to_committed_seconds summary
+queen_raft_proposed_to_committed_seconds{quantile="0.5"} 0.000000000
+queen_raft_proposed_to_committed_seconds{quantile="0.9"} 0.000000000
+queen_raft_proposed_to_committed_seconds{quantile="0.99"} 0.000000000
+queen_raft_proposed_to_committed_seconds{quantile="0.999"} 0.000000000
+queen_raft_proposed_to_committed_seconds{quantile="1"} 0.000000000
+queen_raft_proposed_to_committed_seconds_count 0
+queen_raft_proposed_to_committed_seconds_sum 0.000000000
+# HELP queen_raft_writer_pickup_seconds Entry proposed to the writer starting its group fsync (PERF-G)
+# TYPE queen_raft_writer_pickup_seconds summary
+queen_raft_writer_pickup_seconds{quantile="0.5"} 0.000000000
+queen_raft_writer_pickup_seconds{quantile="0.9"} 0.000000000
+queen_raft_writer_pickup_seconds{quantile="0.99"} 0.000000000
+queen_raft_writer_pickup_seconds{quantile="0.999"} 0.000000000
+queen_raft_writer_pickup_seconds{quantile="1"} 0.000000000
+queen_raft_writer_pickup_seconds_count 0
+queen_raft_writer_pickup_seconds_sum 0.000000000
+# HELP queen_raft_log_fsync_seconds Log group fsync duration
+# TYPE queen_raft_log_fsync_seconds summary
+queen_raft_log_fsync_seconds{quantile="0.5"} 0.134217727
+queen_raft_log_fsync_seconds{quantile="0.9"} 1.073741823
+queen_raft_log_fsync_seconds{quantile="0.99"} 1.073741823
+queen_raft_log_fsync_seconds{quantile="0.999"} 2.147483647
+queen_raft_log_fsync_seconds{quantile="1"} 1.097565166
+queen_raft_log_fsync_seconds_count 182
+queen_raft_log_fsync_seconds_sum 40.514875210
+# HELP queen_raft_apply_entry_seconds Per-entry apply duration (total)
+# TYPE queen_raft_apply_entry_seconds summary
+queen_raft_apply_entry_seconds{quantile="0.5"} 0.000524287
+queen_raft_apply_entry_seconds{quantile="0.9"} 0.004194303
+queen_raft_apply_entry_seconds{quantile="0.99"} 0.008388607
+queen_raft_apply_entry_seconds{quantile="0.999"} 0.016777215
+queen_raft_apply_entry_seconds{quantile="1"} 0.013154959
+queen_raft_apply_entry_seconds_count 353
+queen_raft_apply_entry_seconds_sum 0.316825546
+# HELP queen_raft_apply_segment_seconds Per-entry segment write_all duration
+# TYPE queen_raft_apply_segment_seconds summary
+queen_raft_apply_segment_seconds{quantile="0.5"} 0.000000000
+queen_raft_apply_segment_seconds{quantile="0.9"} 0.000000000
+queen_raft_apply_segment_seconds{quantile="0.99"} 0.000000000
+queen_raft_apply_segment_seconds{quantile="0.999"} 0.000000000
+queen_raft_apply_segment_seconds{quantile="1"} 0.000000000
+queen_raft_apply_segment_seconds_count 0
+queen_raft_apply_segment_seconds_sum 0.000000000
+# HELP queen_raft_apply_other_seconds Per-entry apply remainder (store puts + dispatch + derived)
+# TYPE queen_raft_apply_other_seconds summary
+queen_raft_apply_other_seconds{quantile="0.5"} 0.000524287
+queen_raft_apply_other_seconds{quantile="0.9"} 0.004194303
+queen_raft_apply_other_seconds{quantile="0.99"} 0.008388607
+queen_raft_apply_other_seconds{quantile="0.999"} 0.016777215
+queen_raft_apply_other_seconds{quantile="1"} 0.013154959
+queen_raft_apply_other_seconds_count 353
+queen_raft_apply_other_seconds_sum 0.316825546
+# HELP queen_raft_store_commit_seconds Store commit duration
+# TYPE queen_raft_store_commit_seconds summary
+queen_raft_store_commit_seconds{quantile="0.5"} 0.000262143
+queen_raft_store_commit_seconds{quantile="0.9"} 0.004194303
+queen_raft_store_commit_seconds{quantile="0.99"} 0.008388607
+queen_raft_store_commit_seconds{quantile="0.999"} 0.016777215
+queen_raft_store_commit_seconds{quantile="1"} 0.008696041
+queen_raft_store_commit_seconds_count 329
+queen_raft_store_commit_seconds_sum 0.281279791
+# HELP queen_raft_durable_point_seconds Durable point duration (total)
+# TYPE queen_raft_durable_point_seconds summary
+queen_raft_durable_point_seconds{quantile="0.5"} 0.000131071
+queen_raft_durable_point_seconds{quantile="0.9"} 0.000524287
+queen_raft_durable_point_seconds{quantile="0.99"} 0.016777215
+queen_raft_durable_point_seconds{quantile="0.999"} 0.016777215
+queen_raft_durable_point_seconds{quantile="1"} 0.012858458
+queen_raft_durable_point_seconds_count 48
+queen_raft_durable_point_seconds_sum 0.019777540
+# HELP queen_raft_checkpoint_write_seconds Async durable point: the checkpoint cut written, committed and synced (checkpoint thread)
+# TYPE queen_raft_checkpoint_write_seconds summary
+queen_raft_checkpoint_write_seconds{quantile="0.5"} 0.268435455
+queen_raft_checkpoint_write_seconds{quantile="0.9"} 0.536870911
+queen_raft_checkpoint_write_seconds{quantile="0.99"} 1.073741823
+queen_raft_checkpoint_write_seconds{quantile="0.999"} 1.073741823
+queen_raft_checkpoint_write_seconds{quantile="1"} 0.833680125
+queen_raft_checkpoint_write_seconds_count 48
+queen_raft_checkpoint_write_seconds_sum 9.300595082
+# HELP queen_raft_durable_seg_fsync_seconds Durable point segment-file fsync duration
+# TYPE queen_raft_durable_seg_fsync_seconds summary
+queen_raft_durable_seg_fsync_seconds{quantile="0.5"} 0.000000511
+queen_raft_durable_seg_fsync_seconds{quantile="0.9"} 0.000001023
+queen_raft_durable_seg_fsync_seconds{quantile="0.99"} 0.000131071
+queen_raft_durable_seg_fsync_seconds{quantile="0.999"} 0.000131071
+queen_raft_durable_seg_fsync_seconds{quantile="1"} 0.000101667
+queen_raft_durable_seg_fsync_seconds_count 48
+queen_raft_durable_seg_fsync_seconds_sum 0.000120915
+# HELP queen_raft_durable_dir_fsync_seconds Durable point directory fsync duration
+# TYPE queen_raft_durable_dir_fsync_seconds summary
+queen_raft_durable_dir_fsync_seconds{quantile="0.5"} 0.000000063
+queen_raft_durable_dir_fsync_seconds{quantile="0.9"} 0.000000127
+queen_raft_durable_dir_fsync_seconds{quantile="0.99"} 0.016777215
+queen_raft_durable_dir_fsync_seconds{quantile="0.999"} 0.016777215
+queen_raft_durable_dir_fsync_seconds{quantile="1"} 0.012826083
+queen_raft_durable_dir_fsync_seconds_count 48
+queen_raft_durable_dir_fsync_seconds_sum 0.012828084
+# HELP queen_raft_pop_read_seconds Pop payload read (segment render) latency
+# TYPE queen_raft_pop_read_seconds summary
+queen_raft_pop_read_seconds{quantile="0.5"} 0.000065535
+queen_raft_pop_read_seconds{quantile="0.9"} 0.000524287
+queen_raft_pop_read_seconds{quantile="0.99"} 0.536870911
+queen_raft_pop_read_seconds{quantile="0.999"} 1.073741823
+queen_raft_pop_read_seconds{quantile="1"} 0.962419000
+queen_raft_pop_read_seconds_count 17127
+queen_raft_pop_read_seconds_sum 162.492412011
+# HELP queen_raft_plan_deferred Commands drained but deferred unplanned by the plan budget cut
+# TYPE queen_raft_plan_deferred summary
+queen_raft_plan_deferred{quantile="0.5"} 0
+queen_raft_plan_deferred{quantile="0.9"} 511
+queen_raft_plan_deferred{quantile="0.99"} 1023
+queen_raft_plan_deferred{quantile="0.999"} 1023
+queen_raft_plan_deferred{quantile="1"} 989
+queen_raft_plan_deferred_count 368
+queen_raft_plan_deferred_sum 45482
+# HELP queen_raft_drain_commands Drain size in commands
+# TYPE queen_raft_drain_commands summary
+queen_raft_drain_commands{quantile="0.5"} 127
+queen_raft_drain_commands{quantile="0.9"} 1023
+queen_raft_drain_commands{quantile="0.99"} 2047
+queen_raft_drain_commands{quantile="0.999"} 2047
+queen_raft_drain_commands{quantile="1"} 1312
+queen_raft_drain_commands_count 355
+queen_raft_drain_commands_sum 85318
+# HELP queen_raft_drain_messages Drain size in messages
+# TYPE queen_raft_drain_messages summary
+queen_raft_drain_messages{quantile="0.5"} 511
+queen_raft_drain_messages{quantile="0.9"} 8191
+queen_raft_drain_messages{quantile="0.99"} 8191
+queen_raft_drain_messages{quantile="0.999"} 16383
+queen_raft_drain_messages{quantile="1"} 8238
+queen_raft_drain_messages_count 355
+queen_raft_drain_messages_sum 405403
+# HELP queen_raft_group_entries Log group size in entries
+# TYPE queen_raft_group_entries summary
+queen_raft_group_entries{quantile="0.5"} 1
+queen_raft_group_entries{quantile="0.9"} 3
+queen_raft_group_entries{quantile="0.99"} 3
+queen_raft_group_entries{quantile="0.999"} 3
+queen_raft_group_entries{quantile="1"} 3
+queen_raft_group_entries_count 291
+queen_raft_group_entries_sum 357
+# HELP queen_raft_group_bytes Log group size in bytes
+# TYPE queen_raft_group_bytes summary
+queen_raft_group_bytes{quantile="0.5"} 0
+queen_raft_group_bytes{quantile="0.9"} 2097151
+queen_raft_group_bytes{quantile="0.99"} 2097151
+queen_raft_group_bytes{quantile="0.999"} 4194303
+queen_raft_group_bytes{quantile="1"} 2167229
+queen_raft_group_bytes_count 291
+queen_raft_group_bytes_sum 68796096
+# HELP queen_raft_apply_channel_depth Apply channel depth at receive
+# TYPE queen_raft_apply_channel_depth summary
+queen_raft_apply_channel_depth{quantile="0.5"} 1
+queen_raft_apply_channel_depth{quantile="0.9"} 1
+queen_raft_apply_channel_depth{quantile="0.99"} 1
+queen_raft_apply_channel_depth{quantile="0.999"} 1
+queen_raft_apply_channel_depth{quantile="1"} 1
+queen_raft_apply_channel_depth_count 353
+queen_raft_apply_channel_depth_sum 353
+# HELP queen_raft_checkpoint_rows Rows per async checkpoint cut
+# TYPE queen_raft_checkpoint_rows summary
+queen_raft_checkpoint_rows{quantile="0.5"} 16383
+queen_raft_checkpoint_rows{quantile="0.9"} 16383
+queen_raft_checkpoint_rows{quantile="0.99"} 32767
+queen_raft_checkpoint_rows{quantile="0.999"} 32767
+queen_raft_checkpoint_rows{quantile="1"} 17800
+queen_raft_checkpoint_rows_count 48
+queen_raft_checkpoint_rows_sum 390131
+# HELP queen_raft_qlog_early_codec_hits_total Append blobs whose compression the facade started before planning
+# TYPE queen_raft_qlog_early_codec_hits_total counter
+queen_raft_qlog_early_codec_hits_total 18570
+# HELP queen_raft_qlog_early_codec_waiting Early compression jobs not yet taken by a proposal
+# TYPE queen_raft_qlog_early_codec_waiting gauge
+queen_raft_qlog_early_codec_waiting 179
+# HELP queen_raft_planner_commands_total Commands planned, by kind
+# TYPE queen_raft_planner_commands_total counter
+queen_raft_planner_commands_total{kind="push"} 18570
+queen_raft_planner_commands_total{kind="pop_pinned"} 0
+queen_raft_planner_commands_total{kind="pop_wildcard"} 20266
+queen_raft_planner_commands_total{kind="pop_discover"} 0
+queen_raft_planner_commands_total{kind="ack"} 0
+queen_raft_planner_commands_total{kind="ack_positional"} 0
+queen_raft_planner_commands_total{kind="nack"} 0
+queen_raft_planner_commands_total{kind="renew"} 0
+queen_raft_planner_commands_total{kind="dlq_head"} 0
+queen_raft_planner_commands_total{kind="transaction"} 0
+queen_raft_planner_commands_total{kind="kv"} 0
+queen_raft_planner_commands_total{kind="timers"} 0
+queen_raft_planner_commands_total{kind="effects"} 1000
+# HELP queen_raft_planner_slow_total Slow-planned commands, by kind (O18)
+# TYPE queen_raft_planner_slow_total counter
+queen_raft_planner_slow_total{kind="push"} 0
+queen_raft_planner_slow_total{kind="pop_pinned"} 0
+queen_raft_planner_slow_total{kind="pop_wildcard"} 0
+queen_raft_planner_slow_total{kind="pop_discover"} 0
+queen_raft_planner_slow_total{kind="ack"} 0
+queen_raft_planner_slow_total{kind="ack_positional"} 0
+queen_raft_planner_slow_total{kind="nack"} 0
+queen_raft_planner_slow_total{kind="renew"} 0
+queen_raft_planner_slow_total{kind="dlq_head"} 0
+queen_raft_planner_slow_total{kind="transaction"} 0
+queen_raft_planner_slow_total{kind="kv"} 0
+queen_raft_planner_slow_total{kind="timers"} 0
+queen_raft_planner_slow_total{kind="effects"} 0
+# HELP queen_raft_planner_plan_seconds Per-command planning duration, by kind
+# TYPE queen_raft_planner_plan_seconds summary
+queen_raft_planner_plan_seconds{kind="push",quantile="0.5"} 0.000008191
+queen_raft_planner_plan_seconds{kind="push",quantile="0.99"} 0.000065535
+queen_raft_planner_plan_seconds{kind="push",quantile="1"} 0.001760542
+queen_raft_planner_plan_seconds_count{kind="push"} 18570
+queen_raft_planner_plan_seconds{kind="pop_wildcard",quantile="0.5"} 0.000008191
+queen_raft_planner_plan_seconds{kind="pop_wildcard",quantile="0.99"} 0.000524287
+queen_raft_planner_plan_seconds{kind="pop_wildcard",quantile="1"} 0.001792458
+queen_raft_planner_plan_seconds_count{kind="pop_wildcard"} 20266
+queen_raft_planner_plan_seconds{kind="effects",quantile="0.5"} 0.000002047
+queen_raft_planner_plan_seconds{kind="effects",quantile="0.99"} 0.000032767
+queen_raft_planner_plan_seconds{kind="effects",quantile="1"} 0.000223209
+queen_raft_planner_plan_seconds_count{kind="effects"} 1000
+# HELP queen_raft_slow_commands_total Commands over QUEEN_RAFT_SLOW_COMMAND_MS
+# TYPE queen_raft_slow_commands_total counter
+queen_raft_slow_commands_total 0
+# HELP queen_raft_keep_overlay_total Planning cycles by what the kept overlay did
+# TYPE queen_raft_keep_overlay_total counter
+queen_raft_keep_overlay_total{outcome="advanced"} 367
+queen_raft_keep_overlay_total{outcome="rebuilt"} 1
+queen_raft_keep_overlay_total{outcome="fallback"} 0
+queen_raft_keep_overlay_total{outcome="poisoned"} 0
+queen_raft_keep_overlay_total{outcome="mismatch"} 0
+# HELP queen_raft_plan_ring_loads_total Kept rings scanned from pending
+# TYPE queen_raft_plan_ring_loads_total counter
+queen_raft_plan_ring_loads_total 2000
+# HELP queen_raft_apply_receives_total Apply-channel receives
+# TYPE queen_raft_apply_receives_total counter
+queen_raft_apply_receives_total 353
+# HELP queen_raft_apply_stats Apply thread counters (ApplyStats)
+# TYPE queen_raft_apply_stats counter
+queen_raft_apply_stats{field="entries"} 313
+queen_raft_apply_stats{field="skipped"} 0
+queen_raft_apply_stats{field="effects"} 29701
+queen_raft_apply_stats{field="appends"} 13674
+queen_raft_apply_stats{field="messages"} 136740
+queen_raft_apply_stats{field="bytes_appended"} 53392743
+queen_raft_apply_stats{field="commits"} 338
+queen_raft_apply_stats{field="durable_points"} 39
+queen_raft_apply_stats{field="durable_points_failed"} 0
+queen_raft_apply_stats{field="outcomes_recorded"} 28694
+queen_raft_apply_stats{field="wakes"} 13667
+queen_raft_apply_stats{field="files_unlinked"} 0
+queen_raft_apply_stats{field="gc_deferred"} 0
+queen_raft_apply_stats{field="rows_swept"} 0
+queen_raft_apply_stats{field="missing_rows"} 0
+# TYPE queen_raft_dbg counter
+queen_raft_dbg{c="pop_over_queue"} 20266
+queen_raft_dbg{c="pop_cands"} 17665
+queen_raft_dbg{c="pop_empty_nocand"} 2601
+queen_raft_dbg{c="pop_empty_allfail"} 0
+queen_raft_dbg{c="pop_claims"} 17665
+queen_raft_dbg{c="claim_ok"} 17665
+queen_raft_dbg{c="claim_ok_msgs"} 180140
+queen_raft_dbg{c="claim_none_nopart"} 0
+queen_raft_dbg{c="claim_none_window"} 0
+queen_raft_dbg{c="claim_none_leased"} 0
+queen_raft_dbg{c="claim_none_sealed"} 0
+queen_raft_dbg{c="claim_none_taken0_nosegs"} 0
+queen_raft_dbg{c="claim_none_taken0_segs"} 0
+queen_raft_dbg{c="ack_fast"} 0
+queen_raft_dbg{c="ack_reject"} 0
+queen_raft_dbg{c="ack_slow_released"} 0
+queen_raft_dbg{c="ack_slow_kept"} 0
+queen_raft_dbg{c="ack_slow_nolease"} 0
+queen_raft_dbg{c="push_dedup_build"} 0
+queen_raft_dbg{c="push_dedup_records"} 0
+queen_raft_dbg{c="orphan_released"} 0
+queen_raft_dbg{c="render_part_retry"} 0
+queen_raft_dbg{c="render_part_missing"} 0
+queen_raft_dbg{c="claim_expired_lease"} 0
+queen_raft_dbg{c="render_gap_offsets"} 0
+queen_raft_dbg{c="fwd_transport_retry"} 0
+queen_raft_dbg{c="fwd_unanswered_pops"} 0
+queen_raft_dbg{c="fwd_unanswered_claims"} 0
+queen_raft_dbg{c="render_gap_recovered"} 0
+queen_raft_dbg{c="render_gap_claims"} 0
+queen_raft_dbg{c="apply_waited_write"} 0
+queen_raft_dbg{c="apply_wait_max_us"} 0
+queen_raft_dbg{c="apply_wait_over_50ms"} 0
+queen_raft_dbg{c="writer_write_max_us"} 1058485
+queen_raft_dbg{c="writer_handoff_max_us"} 29
+queen_raft_dbg{c="writer_persist_max_us"} 12929
+# HELP queen_raft_admit_bytes Admission budget and bytes held by storage-growing commands in the pipeline
+# TYPE queen_raft_admit_bytes gauge
+queen_raft_admit_bytes{kind="cap"} 67108864
+queen_raft_admit_bytes{kind="held"} 0
+# HELP queen_raft_admit_waiting Commands waiting for admission room now
+# TYPE queen_raft_admit_waiting gauge
+queen_raft_admit_waiting 0
+# HELP queen_raft_admit_total Commands that waited for admission room, and that were refused with 429
+# TYPE queen_raft_admit_total counter
+queen_raft_admit_total{outcome="waited"} 0
+queen_raft_admit_total{outcome="refused"} 0
+# HELP queen_raft_store_operations_total Embedded-store operations by kind
+# TYPE queen_raft_store_operations_total counter
+queen_raft_store_operations_total{kind="commits"} 377
+queen_raft_store_operations_total{kind="durable_commits"} 48
+queen_raft_store_operations_total{kind="write_txns"} 0
+queen_raft_store_operations_total{kind="read_txns"} 131450
+queen_raft_store_operations_total{kind="rows_put"} 397784
+queen_raft_store_operations_total{kind="rows_deleted"} 17127
+queen_raft_store_operations_total{kind="logical_bytes"} 26021981
+queen_raft_store_operations_total{kind="map_full"} 0
+queen_raft_store_operations_total{kind="readers_full"} 0
+queen_raft_store_operations_total{kind="nested_read"} 0
+queen_raft_store_operations_total{kind="writer_busy"} 0
+queen_raft_store_operations_total{kind="key_too_long"} 0
+queen_raft_store_operations_total{kind="commit_failed"} 0
+# HELP queen_raft_store_map_bytes LMDB map capacity and use
+# TYPE queen_raft_store_map_bytes gauge
+queen_raft_store_map_bytes{kind="capacity"} 68719476736
+queen_raft_store_map_bytes{kind="used"} 19005440
+# HELP queen_raft_store_ram_rows Rows per RAM keyspace: live, and keys dirty since the last checkpoint
+# TYPE queen_raft_store_ram_rows gauge
+queen_raft_store_ram_rows{ks="meta",kind="live"} 7
+queen_raft_store_ram_rows{ks="meta",kind="dirty"} 5
+queen_raft_store_ram_rows{ks="garbage",kind="live"} 0
+queen_raft_store_ram_rows{ks="garbage",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="queues",kind="live"} 1000
+queen_raft_store_ram_rows{ks="queues",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="groups",kind="live"} 1000
+queen_raft_store_ram_rows{ks="groups",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="partitions",kind="live"} 1000
+queen_raft_store_ram_rows{ks="partitions",kind="dirty"} 445
+queen_raft_store_ram_rows{ks="partitions_by_key",kind="live"} 1000
+queen_raft_store_ram_rows{ks="partitions_by_key",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="queue_partitions",kind="live"} 1000
+queen_raft_store_ram_rows{ks="queue_partitions",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="partition_files",kind="live"} 0
+queen_raft_store_ram_rows{ks="partition_files",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="cursors",kind="live"} 1000
+queen_raft_store_ram_rows{ks="cursors",kind="dirty"} 477
+queen_raft_store_ram_rows{ks="leases_by_worker",kind="live"} 0
+queen_raft_store_ram_rows{ks="leases_by_worker",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="pending",kind="live"} 659
+queen_raft_store_ram_rows{ks="pending",kind="dirty"} 785
+queen_raft_store_ram_rows{ks="dlq",kind="live"} 0
+queen_raft_store_ram_rows{ks="dlq",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="dlq_by_pos",kind="live"} 0
+queen_raft_store_ram_rows{ks="dlq_by_pos",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="dedup",kind="live"} 0
+queen_raft_store_ram_rows{ks="dedup",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="txns",kind="live"} 0
+queen_raft_store_ram_rows{ks="txns",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="request_ids",kind="live"} 37259
+queen_raft_store_ram_rows{ks="request_ids",kind="dirty"} 922
+queen_raft_store_ram_rows{ks="request_expiry",kind="live"} 37259
+queen_raft_store_ram_rows{ks="request_expiry",kind="dirty"} 922
+queen_raft_store_ram_rows{ks="counters",kind="live"} 13004
+queen_raft_store_ram_rows{ks="counters",kind="dirty"} 6322
+queen_raft_store_ram_rows{ks="seg_loc",kind="live"} 18135
+queen_raft_store_ram_rows{ks="seg_loc",kind="dirty"} 445
+queen_raft_store_ram_rows{ks="files",kind="live"} 16
+queen_raft_store_ram_rows{ks="files",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="kv",kind="live"} 0
+queen_raft_store_ram_rows{ks="kv",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="kv_expiry",kind="live"} 0
+queen_raft_store_ram_rows{ks="kv_expiry",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="timers",kind="live"} 0
+queen_raft_store_ram_rows{ks="timers",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="timers_due",kind="live"} 0
+queen_raft_store_ram_rows{ks="timers_due",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="streams_queries",kind="live"} 0
+queen_raft_store_ram_rows{ks="streams_queries",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="streams_state",kind="live"} 0
+queen_raft_store_ram_rows{ks="streams_state",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="flags",kind="live"} 0
+queen_raft_store_ram_rows{ks="flags",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="quotas",kind="live"} 0
+queen_raft_store_ram_rows{ks="quotas",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="eph_config",kind="live"} 0
+queen_raft_store_ram_rows{ks="eph_config",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="traces",kind="live"} 0
+queen_raft_store_ram_rows{ks="traces",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="trace_names",kind="live"} 0
+queen_raft_store_ram_rows{ks="trace_names",kind="dirty"} 0
+queen_raft_store_ram_rows{ks="trace_expiry",kind="live"} 0
+queen_raft_store_ram_rows{ks="trace_expiry",kind="dirty"} 0
+# HELP queen_raft_store_readers LMDB reader slots
+# TYPE queen_raft_store_readers gauge
+queen_raft_store_readers{kind="used"} 320
+queen_raft_store_readers{kind="limit"} 1024
+# HELP queen_raft_index Raft/RSM indexes
+# TYPE queen_raft_index gauge
+queen_raft_index{kind="log"} 357
+queen_raft_index{kind="committed"} 353
+queen_raft_index{kind="applied"} 353
+queen_raft_index{kind="durable"} 349
+# HELP queen_raft_inflight Entries committed or proposed but not applied
+# TYPE queen_raft_inflight gauge
+queen_raft_inflight 4
+# HELP queen_raft_proposals_total Proposals accepted since open
+# TYPE queen_raft_proposals_total counter
+queen_raft_proposals_total 355
+# HELP queen_raft_log_storage Queue-log files and bytes
+# TYPE queen_raft_log_storage gauge
+queen_raft_log_storage{kind="files"} 1001
+queen_raft_log_storage{kind="bytes"} 43909745
+# HELP queen_raft_storage_full Disk/map admission gate
+# TYPE queen_raft_storage_full gauge
+queen_raft_storage_full 0

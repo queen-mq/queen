@@ -67,9 +67,133 @@ use std::os::unix::fs::FileExt;
 use std::sync::{Arc, RwLock};
 
 use crate::rsm::qlog::{
-    BandFrame, CommittedFrame, EntryRecord, OwnedRecord, QLog, QLogOptions, ReclaimProgress,
-    RecordInput, WriteRecord,
+    record, BandFrame, CommittedFrame, EntryPart, EntryRecord, OwnedRecord, QLog, QLogOptions,
+    ReclaimProgress, RecordInput, WriteRecord,
 };
+
+/// How the log writer lays an entry's payload-free record across the logs its
+/// effects touch (`QUEEN_QLOG_ENTRY_LAYOUT`). Node-local and read-compatible
+/// both ways: the readers accept either layout, mixed in one directory, so the
+/// knob may flip on a live data directory (a binary WITHOUT stub support must
+/// not open a directory written with `stub`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EntryLayout {
+    /// Every touched log gets the whole record (Phase C as built): an entry
+    /// costs `touched logs × its bytes` — bytes grow like queues² per cycle
+    /// (PLAN_QLOG_ENTRY_BYTES.md §1).
+    Copies,
+    /// The lowest touched log id gets the whole record, every other touched
+    /// log a 61-byte stub ([`record::REC_ENTRY_STUB`]): an entry costs its bytes
+    /// once plus 61 bytes per extra log. Same logs, same fsyncs, same rule.
+    #[default]
+    Stub,
+}
+
+impl EntryLayout {
+    /// `QUEEN_QLOG_ENTRY_LAYOUT`: `copies`, anything else (or unset) `stub`.
+    pub fn from_env() -> EntryLayout {
+        match std::env::var("QUEEN_QLOG_ENTRY_LAYOUT") {
+            Ok(v) if matches!(v.trim().to_ascii_lowercase().as_str(), "copies" | "copy") => {
+                EntryLayout::Copies
+            }
+            _ => EntryLayout::Stub,
+        }
+    }
+}
+
+/// One seq's parts across the logs, as [`EntryMerge`] has seen them.
+struct Parts {
+    /// `(copies, term, now_us)` of the first part seen: every part must agree.
+    head: (u32, u64, i64),
+    full: Option<EntryRecord>,
+    /// `(digest, len)` of every stub seen, checked against the whole record.
+    stubs: Vec<(u64, u32)>,
+    /// The logs holding a part (whole or stub), in the order seen.
+    logs: Vec<u64>,
+}
+
+/// What [`EntryMerge`] makes of one seq.
+enum Verdict {
+    /// Every part is present and they agree: the whole record, and the logs
+    /// holding a part (where the entry's payload records are).
+    Complete(EntryRecord, Vec<u64>),
+    /// Fewer parts than `copies`: the group did not land everywhere (why).
+    Incomplete(String),
+}
+
+fn disagree(seq: u64, what: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("the copies of entry {seq} disagree across the queue logs ({what})"),
+    )
+}
+
+impl Parts {
+    /// Complete, incomplete, or refused. More parts than `copies`, a stub that
+    /// does not name the whole record, or every part a stub is refused: never
+    /// guessed.
+    fn verdict(self, seq: u64) -> io::Result<Verdict> {
+        let copies = self.head.0;
+        let found = self.logs.len() as u32;
+        if found > copies {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("entry {seq} is in {found} queue logs but was written to {copies}"),
+            ));
+        }
+        if let Some(full) = &self.full {
+            let named = (record::entry_digest(&full.entry), full.entry.len() as u32);
+            if self.stubs.iter().any(|s| *s != named) {
+                return Err(disagree(seq, "a stub does not name the whole record"));
+            }
+        }
+        if found < copies {
+            return Ok(Verdict::Incomplete(format!(
+                "entry {seq} is incomplete: {found} of its {copies} copies survived"
+            )));
+        }
+        match self.full {
+            Some(full) => Ok(Verdict::Complete(full, self.logs)),
+            None => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("entry {seq}: all {copies} of its parts are stubs; no log holds the whole record"),
+            )),
+        }
+    }
+}
+
+/// The merge [`QLogSet::scan_entries`] and [`QLogReader::entry_records_range`]
+/// share: every log's entry parts, by seq, checked for agreement as they come.
+#[derive(Default)]
+struct EntryMerge {
+    by_seq: BTreeMap<u64, Parts>,
+}
+
+impl EntryMerge {
+    fn add(&mut self, log: u64, part: EntryPart) -> io::Result<()> {
+        let seq = part.seq();
+        let head = part.head();
+        let p = self.by_seq.entry(seq).or_insert_with(|| Parts {
+            head,
+            full: None,
+            stubs: Vec::new(),
+            logs: Vec::new(),
+        });
+        if p.head != head {
+            return Err(disagree(seq, "copies, term or clock"));
+        }
+        p.logs.push(log);
+        match part {
+            EntryPart::Full(r) => match &p.full {
+                Some(f) if f.entry != r.entry => return Err(disagree(seq, "two whole records")),
+                Some(_) => {}
+                None => p.full = Some(r),
+            },
+            EntryPart::Stub(s) => p.stubs.push((s.digest, s.len)),
+        }
+        Ok(())
+    }
+}
 
 /// Phase C: the reserved queue id of the SYSTEM log (`<root>/q0/`). It holds the
 /// entry record of every entry whose effects touch no queue — a `Noop`, a
@@ -492,6 +616,12 @@ impl QLogSet {
     /// this seeds `written_seq`/`durable_seq` so the next commit's recorded index
     /// never goes backwards over the reopened tail.
     pub fn reopen_all(&mut self) -> io::Result<u64> {
+        self.reopen_all_guarded(0)
+    }
+
+    /// [`QLogSet::reopen_all`], refusing a log whose damage sits inside what
+    /// the store recorded as qlog-durable ([`QLog::open_guarded`]).
+    pub fn reopen_all_guarded(&mut self, durable: u64) -> io::Result<u64> {
         self.load_lanes()?;
         let rd = match std::fs::read_dir(&self.root) {
             Ok(rd) => rd,
@@ -527,7 +657,7 @@ impl QLogSet {
             {
                 continue;
             }
-            let (mut log, rec) = QLog::open(&self.root, id, self.opts)?;
+            let (mut log, rec) = QLog::open_guarded(&self.root, id, self.opts, durable)?;
             log.set_recovery_floor(self.floor.clone());
             tail = tail.max(rec.max_seq);
             self.logs
@@ -554,7 +684,9 @@ impl QLogSet {
     ///
     /// It delivers only the DURABLE PREFIX: starting at `from_seq`, it stops at
     /// the first seq that is missing (a gap) or incomplete (fewer than `copies`
-    /// distinct logs hold it). An entry is acknowledged only after the fsync of
+    /// distinct logs hold a part of it — its whole record or, in the stub layout
+    /// ([`EntryLayout::Stub`], `copies` counting both, exactly one whole record
+    /// and every stub naming it by digest). An entry is acknowledged only after the fsync of
     /// EVERY log its group touched, and groups are written one after another, so
     /// a missing or incomplete entry means its group's fsyncs did not all land:
     /// nothing of that group was acknowledged and no later group was written.
@@ -571,10 +703,6 @@ impl QLogSet {
         from_seq: u64,
         cb: &mut dyn FnMut(EntryRecord) -> io::Result<()>,
     ) -> io::Result<EntryScan> {
-        struct Agg {
-            rec: EntryRecord,
-            found: u32,
-        }
         // Entry indexes start at 1.
         let from_seq = from_seq.max(1);
         let logs: Vec<(u64, Arc<RwLock<QLog>>)> = self
@@ -584,54 +712,36 @@ impl QLogSet {
             .iter()
             .map(|(k, v)| (*k, v.clone()))
             .collect();
-        let mut merged: BTreeMap<u64, Agg> = BTreeMap::new();
+        let mut merge = EntryMerge::default();
         for (qid, log) in logs {
-            let recs = log
+            let parts = log
                 .read()
                 .expect("qlog poisoned")
-                .entry_records_from(from_seq)?;
+                .entry_parts_between(from_seq, u64::MAX)?;
             let mut prev: Option<u64> = None;
-            for r in recs {
-                if prev.is_some_and(|p| r.seq <= p) {
+            for part in parts {
+                let seq = part.seq();
+                if prev.is_some_and(|p| seq <= p) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!(
-                            "qlog q{qid}: entry record seq {} follows seq {} (a queue log's \
+                            "qlog q{qid}: entry record seq {seq} follows seq {} (a queue log's \
                              entry seqs must strictly ascend)",
-                            r.seq,
                             prev.unwrap_or(0)
                         ),
                     ));
                 }
-                prev = Some(r.seq);
-                match merged.entry(r.seq) {
-                    std::collections::btree_map::Entry::Vacant(v) => {
-                        v.insert(Agg { rec: r, found: 1 });
-                    }
-                    std::collections::btree_map::Entry::Occupied(mut o) => {
-                        let a = o.get_mut();
-                        if a.rec != r {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                format!(
-                                    "qlog q{qid}: the copies of entry {} disagree across the \
-                                     queue logs",
-                                    r.seq
-                                ),
-                            ));
-                        }
-                        a.found += 1;
-                    }
-                }
+                prev = Some(seq);
+                merge.add(qid, part)?;
             }
         }
         let mut out = EntryScan {
             next_seq: from_seq,
-            max_seq_found: merged.keys().next_back().copied().unwrap_or(0),
+            max_seq_found: merge.by_seq.keys().next_back().copied().unwrap_or(0),
             ..EntryScan::default()
         };
-        let total = merged.len() as u64;
-        for (seq, a) in merged {
+        let total = merge.by_seq.len() as u64;
+        for (seq, parts) in merge.by_seq {
             if seq != out.next_seq {
                 out.stopped = Some(format!(
                     "entry {} is missing from every queue log (next found: {seq})",
@@ -639,25 +749,17 @@ impl QLogSet {
                 ));
                 break;
             }
-            if a.found > a.rec.copies {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "entry {seq} is in {} queue logs but was written to {}",
-                        a.found, a.rec.copies
-                    ),
-                ));
+            match parts.verdict(seq)? {
+                Verdict::Incomplete(why) => {
+                    out.stopped = Some(why);
+                    break;
+                }
+                Verdict::Complete(rec, _logs) => {
+                    cb(rec)?;
+                    out.delivered += 1;
+                    out.next_seq += 1;
+                }
             }
-            if a.found < a.rec.copies {
-                out.stopped = Some(format!(
-                    "entry {seq} is incomplete: {} of its {} copies survived",
-                    a.found, a.rec.copies
-                ));
-                break;
-            }
-            cb(a.rec)?;
-            out.delivered += 1;
-            out.next_seq += 1;
         }
         out.discarded = total - out.delivered;
         Ok(out)
@@ -1128,40 +1230,28 @@ impl QLogReader {
             .iter()
             .map(|(qid, l)| (*qid, l.clone()))
             .collect();
-        // seq -> (the record, the queue logs holding a copy of it)
-        let mut merged: BTreeMap<u64, (EntryRecord, Vec<u64>)> = BTreeMap::new();
+        // Every part (whole record or stub) of every seq in the window; the
+        // logs holding a part are where the entry's payload records are.
+        let mut merge = EntryMerge::default();
         for (qid, log) in logs {
-            let recs = log
+            let parts = log
                 .read()
                 .expect("qlog poisoned")
-                .entry_records_between(from_seq, end_seq)?;
-            for r in recs {
-                match merged.entry(r.seq) {
-                    std::collections::btree_map::Entry::Vacant(v) => {
-                        v.insert((r, vec![qid]));
-                    }
-                    std::collections::btree_map::Entry::Occupied(mut o) => {
-                        if o.get().0 != r {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                format!(
-                                    "the copies of entry {} disagree across the queue logs",
-                                    r.seq
-                                ),
-                            ));
-                        }
-                        o.get_mut().1.push(qid);
-                    }
-                }
+                .entry_parts_between(from_seq, end_seq)?;
+            for part in parts {
+                merge.add(qid, part)?;
             }
         }
-        let mut out = Vec::with_capacity(merged.len());
+        let mut out = Vec::with_capacity(merge.by_seq.len());
         let mut next = from_seq;
-        for (seq, (rec, qids)) in merged {
-            if seq != next || (qids.len() as u32) < rec.copies {
+        for (seq, parts) in merge.by_seq {
+            if seq != next {
                 break;
             }
-            out.push((rec, qids));
+            match parts.verdict(seq)? {
+                Verdict::Incomplete(_) => break,
+                Verdict::Complete(rec, qids) => out.push((rec, qids)),
+            }
             next += 1;
         }
         Ok(out)

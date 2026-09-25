@@ -68,8 +68,8 @@ use tokio::sync::Notify as ApplyWake;
 use crate::rsm::apply::{self, ApplyConfig, ApplyStats, Committed, Notify};
 use crate::rsm::entry::{decode_entry, encode_entry_payload_free, Entry};
 use crate::rsm::qlog::codec::StoredPayload;
-use crate::rsm::qlog::set::{QLogSet, SYSTEM_QUEUE_ID};
-use crate::rsm::qlog::{EntryInput, RecordInput, WriteRecord};
+use crate::rsm::qlog::set::{EntryLayout, QLogSet, SYSTEM_QUEUE_ID};
+use crate::rsm::qlog::{EntryInput, EntryStubInput, RecordInput, WriteRecord};
 use crate::rsm::segments;
 use crate::rsm::store::{Store, TypedReads};
 
@@ -318,6 +318,9 @@ pub(crate) struct QlogWrite {
     /// truncated from the replay window, but its row is committed, so a map miss
     /// can only be such a partition and this read always finds it.
     pub(crate) lookup: PartitionLookup,
+    /// Whole record in every touched log, or in the lowest one plus stubs
+    /// (`QUEEN_QLOG_ENTRY_LAYOUT`, [`EntryLayout`]).
+    pub(crate) layout: EntryLayout,
 }
 
 impl QlogWrite {
@@ -582,17 +585,33 @@ impl QlogWrite {
                 for (log, r) in msgs.drain(..) {
                     by_log.entry(log).or_default().push(r);
                 }
+                // Stub layout: the whole record once, in the LOWEST touched log
+                // (the system log when it is touched), a stub naming it in every
+                // other. `copies` still counts every touched log.
+                let home = touched.iter().next().copied();
+                let digest = (q.layout == EntryLayout::Stub && copies > 1)
+                    .then(|| crate::rsm::qlog::record::entry_digest(&pf[i]));
                 for log in &touched {
-                    by_log
-                        .entry(*log)
-                        .or_default()
-                        .push(WriteRecord::Entry(EntryInput {
+                    let rec = match digest {
+                        Some(digest) if Some(*log) != home => {
+                            WriteRecord::EntryStub(EntryStubInput {
+                                seq,
+                                now_us,
+                                copies,
+                                term: it.term,
+                                digest,
+                                len: pf[i].len() as u32,
+                            })
+                        }
+                        _ => WriteRecord::Entry(EntryInput {
                             seq,
                             now_us,
                             copies,
                             term: it.term,
                             entry: &pf[i],
-                        }));
+                        }),
+                    };
+                    by_log.entry(*log).or_default().push(rec);
                 }
             }
             // One write per touched log (page cache, no fsync yet), the lanes
@@ -1381,6 +1400,18 @@ impl<S: Store + 'static> LocalReplicator<S> {
         waker: Arc<dyn Waker>,
         clock: Arc<dyn apply::Clock>,
     ) -> io::Result<LocalReplicator<S>> {
+        Self::open_with_entry_layout(store, cfg, waker, clock, EntryLayout::from_env())
+    }
+
+    /// [`LocalReplicator::open`] with the queue-log entry layout given instead
+    /// of read from `QUEEN_QLOG_ENTRY_LAYOUT` (tests pin it).
+    pub(crate) fn open_with_entry_layout(
+        store: Arc<S>,
+        cfg: OpenConfig,
+        waker: Arc<dyn Waker>,
+        clock: Arc<dyn apply::Clock>,
+        layout: EntryLayout,
+    ) -> io::Result<LocalReplicator<S>> {
         // 1. The log: recover it, truncate any torn tail. With the qlog knob on
         //    it is only a legacy source (nothing appends to it any more).
         let (log, log_rec) = LogStore::open(&cfg.log_dir, cfg.log_opts)?;
@@ -1435,8 +1466,14 @@ impl<S: Store + 'static> LocalReplicator<S> {
                 .seg_root
                 .parent()
                 .unwrap_or_else(|| std::path::Path::new("."));
+            let qlog_durable_index = store
+                .read(|r| {
+                    Ok(r.meta_u64(crate::rsm::store::meta::QLOG_DURABLE_INDEX)?
+                        .unwrap_or(0))
+                })
+                .map_err(|e| io::Error::other(format!("read qlog durable index: {e}")))?;
             let mut set = QLogSet::new(data_dir.join("qlog"), qopts);
-            let qlog_tail = set.reopen_all()?;
+            let qlog_tail = set.reopen_all_guarded(qlog_durable_index)?;
             // NA-QLOG-I1 reconciliation, moved here from `Applier::open` now that
             // the qlog is boot/writer-owned: the reopened durable tail must be
             // AHEAD of or EQUAL to what the store recorded as qlog-durable, never
@@ -1444,12 +1481,6 @@ impl<S: Store + 'static> LocalReplicator<S> {
             // payload store — silent data loss — so refuse to start. (Ahead is
             // benign: an un-fsync'd SIGKILL tail, or records for rolled-back
             // entries the raft log will replay.)
-            let qlog_durable_index = store
-                .read(|r| {
-                    Ok(r.meta_u64(crate::rsm::store::meta::QLOG_DURABLE_INDEX)?
-                        .unwrap_or(0))
-                })
-                .map_err(|e| io::Error::other(format!("read qlog durable index: {e}")))?;
             if qlog_tail < qlog_durable_index {
                 return Err(io::Error::other(format!(
                     "qlog durable tail seq {qlog_tail} is BEHIND the store's recorded \
@@ -1698,6 +1729,7 @@ impl<S: Store + 'static> LocalReplicator<S> {
                 set,
                 pid_qid: seed_pid_qid,
                 lookup,
+                layout,
             }),
             _ => None,
         };

@@ -260,7 +260,7 @@ impl LogStore {
         let committed = read_committed(&cfg.state_dir);
 
         let mut set = QLogSet::new(cfg.qlog_root.clone(), cfg.qopts);
-        let tail = set.reopen_all()?;
+        let tail = set.reopen_all_guarded(cfg.qlog_durable_index)?;
         if tail < cfg.qlog_durable_index {
             return Err(io::Error::other(format!(
                 "queue logs' durable tail {tail} is BEHIND the store's qlog-durable index {}: \
@@ -378,6 +378,7 @@ impl LogStore {
                 set,
                 pid_qid,
                 lookup: cfg.lookup,
+                layout: crate::rsm::qlog::set::EntryLayout::from_env(),
             },
             state_dir: cfg.state_dir,
             committed_file,

@@ -91,6 +91,18 @@
 //! ([`QLog::unlink_dead_files`]) never drops a file holding a record above the
 //! RECOVERY FLOOR (the store's durable index, raised at each durable point).
 //!
+//! ## The stub layout (`QUEEN_QLOG_ENTRY_LAYOUT=stub`)
+//!
+//! Writing the whole entry record into every touched log makes an entry cost
+//! `touched logs × entry bytes`: one entry of a busy cycle touches hundreds of
+//! queues, so the copies swamp the payloads (measured 2026-09-25: 99% of the
+//! bytes at 1000 queues). With the stub layout the LOWEST touched log id gets
+//! the whole record and every other touched log a 61-byte stub
+//! ([`record::REC_ENTRY_STUB`]: same header, the whole record's digest and
+//! length). `copies` still counts every touched log and recovery still needs
+//! every part, so the durability rule is the one above; only the bytes change.
+//! The readers accept both layouts, mixed in one directory.
+//!
 //! # Not this phase
 //!
 //! - transactions / present-in-all (Phase B) — the fields exist, the machinery
@@ -173,6 +185,55 @@ fn prealloc_chunk() -> u64 {
 }
 /// Preallocate only while the log's bytes-per-sync estimate is below this.
 const PREALLOC_MAX_BYTES_PER_SYNC: u64 = 32 * 1024;
+
+/// Preallocate only after this many syncs of a log unless
+/// `QUEEN_RAFT_QLOG_PREALLOC_MIN_SYNCS` says otherwise (PLAN_QLOG_ENTRY_BYTES.md
+/// §6): with the stub layout every log is small per sync, and an ungated run
+/// zero-filled 1 MiB ahead of every one of them (1 GB of zeros at 1000 queues,
+/// 2.1 GB for 2000 idle queues in 25 s).
+const PREALLOC_MIN_SYNCS: u64 = 64;
+
+/// `QUEEN_RAFT_QLOG_PREALLOC_MIN_SYNCS` (default [`PREALLOC_MIN_SYNCS`]; 0 =
+/// ungated): preallocate only once a log has been synced this many times — sustained
+/// traffic, not a queue's create and first contact — and size the run to about
+/// that many syncs of its bytes-per-sync (clamped to [`PREALLOC_MIN_RUN`] ..
+/// the chunk), so a trickling log gets a small run and an idle one none. A
+/// growing `fdatasync` costs one journal commit (~24 KB and a second flush);
+/// a run of `n × bytes-per-sync` zeros saves about `n` of them.
+fn prealloc_min_syncs() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("QUEEN_RAFT_QLOG_PREALLOC_MIN_SYNCS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(PREALLOC_MIN_SYNCS)
+    })
+}
+
+/// The smallest run [`prealloc_min_syncs`] sizes.
+const PREALLOC_MIN_RUN: u64 = 64 * 1024;
+
+/// The zero run to keep ahead of a log's end, or `None` for none: `chunk`
+/// while the log's `bytes_per_sync` is known and small; with the
+/// sustained-traffic gate (`min_syncs > 0`), nothing until the log has been
+/// synced `min_syncs` times, then `min_syncs × bytes_per_sync` clamped to
+/// [`PREALLOC_MIN_RUN`] .. `chunk`.
+fn prealloc_run(chunk: u64, min_syncs: u64, syncs: u64, bytes_per_sync: u64) -> Option<u64> {
+    if chunk == 0 || bytes_per_sync == 0 || bytes_per_sync >= PREALLOC_MAX_BYTES_PER_SYNC {
+        return None;
+    }
+    if min_syncs == 0 {
+        return Some(chunk);
+    }
+    if syncs < min_syncs {
+        return None;
+    }
+    Some(
+        bytes_per_sync
+            .saturating_mul(min_syncs)
+            .clamp(PREALLOC_MIN_RUN.min(chunk), chunk),
+    )
+}
 
 /// How the group fsync reaches the platter. Mirrors
 /// [`crate::rsm::replicator::log::Fsync`] and
@@ -273,6 +334,20 @@ pub struct EntryInput<'a> {
     pub entry: &'a [u8],
 }
 
+/// One entry STUB to append ([`record::REC_ENTRY_STUB`]): an entry's part in a
+/// log that does not hold its whole record (`QUEEN_QLOG_ENTRY_LAYOUT=stub`).
+/// The header fields are the whole record's; `digest`/`len` name its bytes.
+#[derive(Clone, Copy, Debug)]
+pub struct EntryStubInput {
+    pub seq: u64,
+    pub now_us: i64,
+    pub copies: u32,
+    pub term: u64,
+    /// [`record::entry_digest`] of the whole record's entry bytes.
+    pub digest: u64,
+    pub len: u32,
+}
+
 /// One record of a mixed group ([`QLog::write_mixed`]): a message or an entry.
 /// Within one group, records must come in non-decreasing `seq` order (the writer
 /// emits each entry's payload records, then its entry record, entry by entry).
@@ -283,6 +358,7 @@ pub enum WriteRecord<'a> {
     /// ([`codec::compress_one`]); written with [`record::FLAG_PAYLOAD_ZSTD`].
     Zstd(RecordInput<'a>),
     Entry(EntryInput<'a>),
+    EntryStub(EntryStubInput),
 }
 
 impl WriteRecord<'_> {
@@ -291,6 +367,7 @@ impl WriteRecord<'_> {
         match self {
             WriteRecord::Msg(r) | WriteRecord::Zstd(r) => r.seq,
             WriteRecord::Entry(e) => e.seq,
+            WriteRecord::EntryStub(s) => s.seq,
         }
     }
 }
@@ -307,6 +384,42 @@ pub struct EntryRecord {
     pub term: u64,
     /// The payload-free entry bytes, exactly as written.
     pub entry: Vec<u8>,
+}
+
+/// One entry stub read back ([`record::REC_ENTRY_STUB`], checksum verified).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EntryStub {
+    pub seq: u64,
+    pub now_us: i64,
+    pub copies: u32,
+    pub term: u64,
+    /// [`record::entry_digest`] of the whole record's entry bytes.
+    pub digest: u64,
+    pub len: u32,
+}
+
+/// An entry's part in one log: its whole record, or a stub naming it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EntryPart {
+    Full(EntryRecord),
+    Stub(EntryStub),
+}
+
+impl EntryPart {
+    pub fn seq(&self) -> u64 {
+        match self {
+            EntryPart::Full(r) => r.seq,
+            EntryPart::Stub(s) => s.seq,
+        }
+    }
+
+    /// `(copies, term, now_us)`: what every part of one entry must agree on.
+    pub fn head(&self) -> (u32, u64, i64) {
+        match self {
+            EntryPart::Full(r) => (r.copies, r.term, r.now_us),
+            EntryPart::Stub(s) => (s.copies, s.term, s.now_us),
+        }
+    }
 }
 
 /// The transaction envelope of a record read back (Phase B).
@@ -559,8 +672,26 @@ impl QLog {
     /// Open (creating the directory if needed) queue `queue_id`'s logs under
     /// `root`, validate and truncate the torn tail of the active file, rebuild
     /// the active index by scanning it, and map (or rebuild) every sealed
-    /// file's `.qidx`.
+    /// file's `.qidx`. [`QLog::open_guarded`] with no durable index.
     pub fn open(root: &Path, queue_id: u64, opts: QLogOptions) -> io::Result<(QLog, QLogRecovery)> {
+        QLog::open_guarded(root, queue_id, opts, 0)
+    }
+
+    /// [`QLog::open`], knowing the store's qlog-durable index `durable`: every
+    /// record with `seq <= durable` was fsync'd before the store recorded it.
+    /// A damaged record in the active file is cut as a torn tail only when no
+    /// record at or below `durable` verifies AFTER it (a crash can leave an
+    /// un-fsync'd group torn with later un-fsync'd pages on disk, never a
+    /// durable one). One that does is corruption inside acknowledged data:
+    /// cutting there dropped every later record of the queue while the node
+    /// booted healthy (Jepsen P5, `repro/qlog-bitflip-hole.sh`), so the open
+    /// fails instead.
+    pub fn open_guarded(
+        root: &Path,
+        queue_id: u64,
+        opts: QLogOptions,
+        durable: u64,
+    ) -> io::Result<(QLog, QLogRecovery)> {
         let dir = queue_dir(root, queue_id);
         std::fs::create_dir_all(&dir)?;
         let mut ids = scan_ids(&dir)?;
@@ -611,7 +742,25 @@ impl QLog {
                 let _ = std::fs::remove_file(qidx_path(&dir, id));
                 let _ = std::fs::remove_file(qidx_tmp_path(&dir, id));
                 let scan = scan_file(&path, on_disk)?;
-                if scan.torn.is_some() {
+                if let Some((at, why)) = &scan.torn {
+                    if durable > 0 {
+                        if let Some((next, seq)) = first_verified_after(&path, *at, on_disk)? {
+                            if seq <= durable {
+                                return Err(corrupt(
+                                    &path,
+                                    &format!(
+                                        "damaged record at byte {at} ({why}) is followed by a \
+                                         verified record at byte {next} with seq {seq}, at or \
+                                         below the store's qlog-durable index {durable}: \
+                                         corruption inside acknowledged data, not a torn tail; \
+                                         refusing to cut it (restore this node: a cluster \
+                                         member rejoins from a peer once its data directory \
+                                         is wiped)"
+                                    ),
+                                ));
+                            }
+                        }
+                    }
                     let f = OpenOptions::new().write(true).open(&path)?;
                     f.set_len(scan.valid_bytes)?;
                     fsync_file(&f, opts.fsync)?;
@@ -875,6 +1024,7 @@ impl QLog {
                     r.payload.len(),
                 ),
                 WriteRecord::Entry(e) => record::FIXED_PREFIX + e.entry.len(),
+                WriteRecord::EntryStub(_) => record::FIXED_PREFIX + record::STUB_PAYLOAD,
             })
             .sum();
         let mut buf: Vec<u8> = Vec::with_capacity(cap);
@@ -918,6 +1068,17 @@ impl QLog {
                         u64::from(e.copies),
                         e.term,
                         e.entry,
+                    );
+                }
+                WriteRecord::EntryStub(s) => {
+                    record::encode_entry_stub_into(
+                        &mut buf,
+                        s.seq,
+                        s.now_us,
+                        u64::from(s.copies),
+                        s.term,
+                        s.digest,
+                        s.len,
                     );
                 }
             }
@@ -992,13 +1153,18 @@ impl QLog {
             self.written_at_seen = self.written_total;
         }
         self.written_total += added;
-        let chunk = prealloc_chunk();
-        if chunk == 0
-            || self.opts.fsync == Fsync::Off
-            || self.bytes_per_sync == 0
-            || self.bytes_per_sync >= PREALLOC_MAX_BYTES_PER_SYNC
-            || end + chunk / 4 <= self.prealloc_end
-        {
+        if self.opts.fsync == Fsync::Off {
+            return Ok(());
+        }
+        let Some(chunk) = prealloc_run(
+            prealloc_chunk(),
+            prealloc_min_syncs(),
+            syncs,
+            self.bytes_per_sync,
+        ) else {
+            return Ok(());
+        };
+        if end + chunk / 4 <= self.prealloc_end {
             return Ok(());
         }
         // No run past the roll size: the next write rolls there anyway.
@@ -1604,24 +1770,18 @@ impl QLog {
         Ok(())
     }
 
-    /// Phase C recovery read: every [`record::REC_ENTRY`] record of this log
-    /// with `seq >= from_seq`, in file order (= non-decreasing `seq`),
-    /// checksum-verified, with its bytes. A file whose `max_seq` is below
-    /// `from_seq` is skipped unread (a bound for a sealed file, exact for the
-    /// active one — so an idle queue costs nothing at boot); every other file is
-    /// scanned. A damaged record in a SEALED file is corruption and is surfaced;
-    /// in the active file ([`QLog::open`] already truncated its torn tail) a
-    /// record that no longer verifies ends the walk — the reopen's torn-tail
-    /// rule.
-    /// The entry records with `from_seq <= seq < end_seq`, in file order: the
-    /// bounded twin of [`QLog::entry_records_from`] for a live read of a window
-    /// (a follower catching up), which reads only the files that can hold it.
-    pub fn entry_records_between(
-        &self,
-        from_seq: u64,
-        end_seq: u64,
-    ) -> io::Result<Vec<EntryRecord>> {
-        let mut out: Vec<EntryRecord> = Vec::new();
+    /// Phase C recovery read: every entry part of this log — whole record
+    /// ([`record::REC_ENTRY`]) or stub ([`record::REC_ENTRY_STUB`]) — with
+    /// `from_seq <= seq < end_seq`, in file order (= non-decreasing `seq`),
+    /// checksum-verified. A file whose `max_seq` is below `from_seq` is skipped
+    /// unread (a bound for a sealed file, exact for the active one — so an idle
+    /// queue costs nothing at boot), and so is every file created for a seq at
+    /// or past `end_seq`; every other file is scanned. A damaged record in a
+    /// SEALED file is corruption and is surfaced; in the active file
+    /// ([`QLog::open`] already truncated its torn tail) a record that no longer
+    /// verifies ends the walk — the reopen's torn-tail rule.
+    pub fn entry_parts_between(&self, from_seq: u64, end_seq: u64) -> io::Result<Vec<EntryPart>> {
+        let mut out: Vec<EntryPart> = Vec::new();
         for m in &self.files {
             if m.max_seq < from_seq {
                 continue;
@@ -1633,49 +1793,33 @@ impl QLog {
             }
             let path = file_path(&self.dir, m.id);
             let (_valid, torn) = scan_records(&path, m.bytes, |h, _pos, bytes| {
-                if h.kind() == record::REC_ENTRY && h.seq >= from_seq && h.seq < end_seq {
-                    let rr = record::decode(bytes).map_err(io::Error::from)?;
-                    out.push(EntryRecord {
+                let kind = h.kind();
+                if !record::is_entry_kind(kind) || h.seq < from_seq || h.seq >= end_seq {
+                    return Ok(());
+                }
+                let rr = record::decode(bytes).map_err(io::Error::from)?;
+                // `pid` carries `copies`; 0 (pre-Phase-C) reads as one.
+                let copies = u32::try_from(h.pid).unwrap_or(u32::MAX).max(1);
+                if kind == record::REC_ENTRY {
+                    out.push(EntryPart::Full(EntryRecord {
                         seq: h.seq,
                         now_us: h.created_at_us,
-                        copies: u32::try_from(h.pid).unwrap_or(u32::MAX).max(1),
+                        copies,
                         term: h.base_offset,
                         entry: rr.payload.to_vec(),
-                    });
-                }
-                Ok(())
-            })?;
-            if let Some((at, why)) = torn {
-                if m.sealed {
-                    return Err(corrupt(
-                        &path,
-                        &format!("damaged record at byte {at} of a sealed file: {why}"),
-                    ));
-                }
-                break;
-            }
-        }
-        Ok(out)
-    }
-
-    pub fn entry_records_from(&self, from_seq: u64) -> io::Result<Vec<EntryRecord>> {
-        let mut out: Vec<EntryRecord> = Vec::new();
-        for m in &self.files {
-            if m.max_seq < from_seq {
-                continue;
-            }
-            let path = file_path(&self.dir, m.id);
-            let (_valid, torn) = scan_records(&path, m.bytes, |h, _pos, bytes| {
-                if h.kind() == record::REC_ENTRY && h.seq >= from_seq {
-                    let rr = record::decode(bytes).map_err(io::Error::from)?;
-                    out.push(EntryRecord {
+                    }));
+                } else {
+                    let (digest, len) = record::stub_fields(rr.payload).ok_or_else(|| {
+                        corrupt(&path, &format!("entry stub {} has a malformed payload", h.seq))
+                    })?;
+                    out.push(EntryPart::Stub(EntryStub {
                         seq: h.seq,
                         now_us: h.created_at_us,
-                        // `pid` carries `copies`; 0 (pre-Phase-C) reads as one.
-                        copies: u32::try_from(h.pid).unwrap_or(u32::MAX).max(1),
+                        copies,
                         term: h.base_offset,
-                        entry: rr.payload.to_vec(),
-                    });
+                        digest,
+                        len,
+                    }));
                 }
                 Ok(())
             })?;
@@ -1690,6 +1834,28 @@ impl QLog {
             }
         }
         Ok(out)
+    }
+
+    /// The WHOLE entry records with `from_seq <= seq < end_seq` (stubs left
+    /// out): [`QLog::entry_parts_between`] for a caller that wants the bytes.
+    pub fn entry_records_between(
+        &self,
+        from_seq: u64,
+        end_seq: u64,
+    ) -> io::Result<Vec<EntryRecord>> {
+        Ok(self
+            .entry_parts_between(from_seq, end_seq)?
+            .into_iter()
+            .filter_map(|p| match p {
+                EntryPart::Full(r) => Some(r),
+                EntryPart::Stub(_) => None,
+            })
+            .collect())
+    }
+
+    /// [`QLog::entry_records_between`] with no upper bound.
+    pub fn entry_records_from(&self, from_seq: u64) -> io::Result<Vec<EntryRecord>> {
+        self.entry_records_between(from_seq, u64::MAX)
     }
 
     /// A Raft truncation: drop every record with `seq >= cut`, WHEREVER it is.
@@ -1844,7 +2010,7 @@ impl QLog {
                 out_of_order.get_or_insert((pos, h.seq));
             } else {
                 kept_max = kept_max.max(h.seq);
-                if h.kind() != record::REC_ENTRY {
+                if !record::is_entry_kind(h.kind()) {
                     keep.push(index::Record::of_header(h, pos));
                 }
             }
@@ -2074,7 +2240,7 @@ impl QLog {
         let mut records = Vec::new();
         let upto = std::fs::metadata(&src)?.len();
         let (_valid, torn) = scan_records(&src, upto, |header, _old_at, bytes| {
-            if header.kind() != record::REC_ENTRY {
+            if !record::is_entry_kind(header.kind()) {
                 let idx = index::Record::of_header(header, at);
                 if !record_is_dead(&idx, txns_starts) {
                     out.write_all(bytes)?;
@@ -2616,7 +2782,7 @@ fn scan_file(path: &Path, upto: u64) -> io::Result<ScanOut> {
     let mut max_seq = 0u64;
     let (valid_bytes, torn) = scan_records(path, upto, |header, pos, _bytes| {
         max_seq = max_seq.max(header.seq);
-        if header.kind() != record::REC_ENTRY {
+        if !record::is_entry_kind(header.kind()) {
             records.push(index::Record::of_header(header, pos));
         }
         Ok(())
@@ -2627,6 +2793,45 @@ fn scan_file(path: &Path, upto: u64) -> io::Result<ScanOut> {
         torn,
         max_seq,
     })
+}
+
+/// After a damaged record at byte `from`: the first record at or before
+/// `upto` that verifies, as `(its byte offset, its seq)` — found by skipping
+/// the damaged record by its own length word when that survived, else by
+/// trying every later offset (a record's length word is never zero, so a
+/// zero-filled run is jumped). `None`: nothing verifies after it, a torn tail.
+fn first_verified_after(path: &Path, from: u64, upto: u64) -> io::Result<Option<(u64, u64)>> {
+    let mut buf = Vec::new();
+    {
+        let mut f = File::open(path)?;
+        f.seek(SeekFrom::Start(from))?;
+        f.take(upto.saturating_sub(from)).read_to_end(&mut buf)?;
+    }
+    let verified_at = |off: usize| -> Option<u64> {
+        let rest = buf.get(off..)?;
+        let header = record::parse_header(rest.get(..record::FIXED_PREFIX)?).ok()?;
+        let frame = rest.get(..header.record_len())?;
+        record::verify(frame, &header).ok()?;
+        Some(header.seq)
+    };
+    if let Some(len) = buf.get(..4) {
+        let skip = 4 + u32::from_le_bytes(len.try_into().expect("4 bytes")) as usize;
+        if let Some(seq) = verified_at(skip) {
+            return Ok(Some((from + skip as u64, seq)));
+        }
+    }
+    let mut off = 1;
+    while off < buf.len() {
+        match buf[off..].iter().position(|b| *b != 0) {
+            None => break,
+            Some(p) => off = (off + p).saturating_sub(3).max(off),
+        }
+        if let Some(seq) = verified_at(off) {
+            return Ok(Some((from + off as u64, seq)));
+        }
+        off += 1;
+    }
+    Ok(None)
 }
 
 /// The scan engine: walk a file's records from its header to `upto`, verify

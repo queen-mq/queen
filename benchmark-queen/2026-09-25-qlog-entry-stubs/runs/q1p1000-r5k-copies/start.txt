@@ -1,0 +1,1 @@
+health=200 layout=copies queues=1 rate=5000

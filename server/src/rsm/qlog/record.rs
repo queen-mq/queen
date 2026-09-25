@@ -81,6 +81,43 @@ pub const TXN_CROSS_QUEUE: u8 = 1;
 /// by [`encode_entry_into`] before Phase C) reads as one copy.
 pub const REC_ENTRY: u8 = 2;
 
+/// `txn_kind == 3`: an entry STUB (`QUEEN_QLOG_ENTRY_LAYOUT=stub`). An entry
+/// that touches several logs is written WHOLE ([`REC_ENTRY`]) into one of them
+/// and as a stub into every other: the same header (`seq`, `copies` in the
+/// `pid` slot, the term in the `base_offset` slot, `now_us` in `created_at`,
+/// `count` 0) and a [`STUB_PAYLOAD`]-byte payload, `digest:u64 | entry_len:u32`
+/// — the xxh3 of the whole record's entry bytes and their length. A stub counts
+/// as one of the entry's `copies`: recovery still needs EVERY log's part (the
+/// durability rule does not change), but the entry's bytes are written once
+/// instead of once per touched log. Like an entry record it is never indexed.
+pub const REC_ENTRY_STUB: u8 = 3;
+
+/// A stub's payload: `digest:u64 | entry_len:u32`.
+pub const STUB_PAYLOAD: usize = 8 + 4;
+
+/// Whether `kind` ([`Header::kind`]) is an entry record, whole or stub: a
+/// record that holds no partition's messages and is never indexed.
+pub fn is_entry_kind(kind: u8) -> bool {
+    kind == REC_ENTRY || kind == REC_ENTRY_STUB
+}
+
+/// The digest a stub carries for an entry's payload-free bytes.
+pub fn entry_digest(entry: &[u8]) -> u64 {
+    xxh3_64(entry)
+}
+
+/// The `(digest, entry_len)` of a stub's payload, or `None` when the payload is
+/// not exactly [`STUB_PAYLOAD`] bytes.
+pub fn stub_fields(payload: &[u8]) -> Option<(u64, u32)> {
+    if payload.len() != STUB_PAYLOAD {
+        return None;
+    }
+    Some((
+        u64::from_le_bytes(payload[0..8].try_into().expect("8 bytes")),
+        u32::from_le_bytes(payload[8..12].try_into().expect("4 bytes")),
+    ))
+}
+
 /// High bit of `txn_kind`: the payload is zstd-compressed. Only message records
 /// carry it; the kind is `txn_kind & !FLAG_PAYLOAD_ZSTD` ([`Header::kind`]).
 pub const FLAG_PAYLOAD_ZSTD: u8 = 0x80;
@@ -124,7 +161,8 @@ pub enum RecordError {
     Truncated { need: usize, have: usize },
     /// `len` is below the fixed body or above [`MAX_RECORD_BODY`].
     BadLength(u32),
-    /// A `txn_kind` this build does not know (0, 1 and [`REC_ENTRY`] exist).
+    /// A `txn_kind` this build does not know (0, 1, [`REC_ENTRY`] and
+    /// [`REC_ENTRY_STUB`] exist).
     BadTxnKind(u8),
     /// The declared parts (`txn` envelope + `16 * count` hashes) do not fit in
     /// the `len` the header declares.
@@ -409,6 +447,36 @@ pub fn encode_entry_record_into(
     term: u64,
     entry: &[u8],
 ) -> usize {
+    encode_entry_kind_into(out, REC_ENTRY, seq, now_us, copies, term, entry)
+}
+
+/// Append one entry STUB ([`REC_ENTRY_STUB`]) for an entry whose whole record
+/// ([`encode_entry_record_into`]) goes to another log: the same header fields,
+/// and `digest | entry_len` of the whole record's entry bytes as its payload.
+pub fn encode_entry_stub_into(
+    out: &mut Vec<u8>,
+    seq: u64,
+    now_us: i64,
+    copies: u64,
+    term: u64,
+    digest: u64,
+    entry_len: u32,
+) -> usize {
+    let mut p = [0u8; STUB_PAYLOAD];
+    p[0..8].copy_from_slice(&digest.to_le_bytes());
+    p[8..12].copy_from_slice(&entry_len.to_le_bytes());
+    encode_entry_kind_into(out, REC_ENTRY_STUB, seq, now_us, copies, term, &p)
+}
+
+fn encode_entry_kind_into(
+    out: &mut Vec<u8>,
+    kind: u8,
+    seq: u64,
+    now_us: i64,
+    copies: u64,
+    term: u64,
+    entry: &[u8],
+) -> usize {
     let body_len = FIXED_AFTER_LEN + entry.len();
     debug_assert!(
         body_len <= MAX_RECORD_BODY as usize,
@@ -423,7 +491,7 @@ pub fn encode_entry_record_into(
     out.extend_from_slice(&term.to_le_bytes()); // base_offset slot = the Raft term
     out.extend_from_slice(&0u32.to_le_bytes()); // count
     out.extend_from_slice(&now_us.to_le_bytes()); // created_at carries now_us
-    out.push(REC_ENTRY);
+    out.push(kind);
     out.extend_from_slice(entry);
     let sum = xxh3_64(&out[start + UNCHECKED_PREFIX..]);
     out[start + 4..start + UNCHECKED_PREFIX].copy_from_slice(&sum.to_le_bytes());
@@ -499,8 +567,8 @@ pub fn hashes_prefix_len(count: u32) -> usize {
 pub fn hashes_from_prefix(buf: &[u8]) -> Result<Option<(Header, &[u8])>, RecordError> {
     let header = parse_header(buf)?;
     match header.kind() {
-        // REC_ENTRY carries count 0: an empty hash block.
-        TXN_NONE | REC_ENTRY => {
+        // Entry records (whole or stub) carry count 0: an empty hash block.
+        TXN_NONE | REC_ENTRY | REC_ENTRY_STUB => {
             let end = FIXED_PREFIX + header.hashes_len();
             if end > header.record_len() {
                 return Err(RecordError::Stride {
@@ -547,8 +615,9 @@ pub fn decode(buf: &[u8]) -> Result<RecordRef<'_>, RecordError> {
         // REC_ENTRY: a payload-free entry record (per-queue-only log of record).
         // No txn envelope; count is 0 so the hash list is empty and `payload`
         // below is the whole entry-bytes tail. It is NOT a message — the index
-        // build and the pop/dedup read skip it (count 0, txn_kind 2).
-        TXN_NONE | REC_ENTRY => None,
+        // build and the pop/dedup read skip it (count 0, txn_kind 2). A stub
+        // (txn_kind 3) has the same shape with its 12-byte payload.
+        TXN_NONE | REC_ENTRY | REC_ENTRY_STUB => None,
         TXN_CROSS_QUEUE => {
             if off + TXN_ENVELOPE > total {
                 return Err(RecordError::Stride {
@@ -634,6 +703,35 @@ mod tests {
         let mut one = Vec::new();
         encode_entry_into(&mut one, 77, 5, b"entry-bytes");
         assert_eq!(decode(&one).expect("decodes").header.pid, 1);
+    }
+
+    #[test]
+    fn an_entry_stub_round_trips_and_is_not_a_message() {
+        let entry = b"the-whole-payload-free-entry";
+        let digest = entry_digest(entry);
+        let mut buf = Vec::new();
+        let n = encode_entry_stub_into(&mut buf, 88, 9, 4, 7, digest, entry.len() as u32);
+        assert_eq!(n, buf.len());
+        assert_eq!(n, FIXED_PREFIX + STUB_PAYLOAD, "a stub is 61 bytes");
+        let rr = decode(&buf).expect("stub decodes");
+        assert_eq!(rr.header.kind(), REC_ENTRY_STUB);
+        assert!(is_entry_kind(rr.header.kind()));
+        assert!(!is_entry_kind(TXN_NONE));
+        assert_eq!(
+            (rr.header.seq, rr.header.pid, rr.header.base_offset),
+            (88, 4, 7),
+            "seq, copies, term"
+        );
+        assert_eq!((rr.header.count, rr.header.created_at_us), (0, 9));
+        assert!(rr.hashes.is_empty() && rr.txn.is_none());
+        assert_eq!(stub_fields(rr.payload), Some((digest, entry.len() as u32)));
+        assert_eq!(stub_fields(entry), None, "a whole record is not a stub");
+        // The prefix read (dedup) treats it like an entry record: no hashes.
+        let (h, hashes) = hashes_from_prefix(&buf).expect("prefix").expect("no txn");
+        assert_eq!((h.kind(), hashes.len()), (REC_ENTRY_STUB, 0));
+        // Torn: the checksum catches it.
+        *buf.last_mut().expect("nonempty") ^= 0x01;
+        assert!(matches!(decode(&buf), Err(RecordError::Checksum { .. })));
     }
 
     #[test]

@@ -1,0 +1,15 @@
+goload -mode multiq -> http://127.0.0.1:6690 queues=1000 partitions/queue=1 lanes=1000 rate=5000 push-batch=10 consume=perqueue cpq=1 consumers=64 pop-batch=100 payload~256B
+  per queue: 5.000 msg/s, 0.500 push req/s
+[configure] 1000 queues in 6.27s (160/s) errors=0
+[consumers] 1000 long-poll consumers (1 per queue, pinned=false), start staggered over 100ms
+[06:48:50 +  5s] offered=    2506/s pushed=    2390/s popped=    2222/s shed=     0/s inflight=   58 | push p50= 61.18 p99= 456.70 ms | e2e p50= 132.10 p99=  708.61 ms | pops=    222/s empty=      0/s lag=840 | errs push=0 pop=0 | gor=3242
+[window] start at +10s
+[06:48:55 + 10s] offered=    4998/s pushed=    4290/s popped=    3984/s shed=     0/s inflight=  412 | push p50=354.30 p99= 749.57 ms | e2e p50= 667.65 p99= 1335.30 ms | pops=    398/s empty=      0/s lag=2370 | errs push=0 pop=0 | gor=4252
+[06:49:00 + 15s] offered=    5006/s pushed=    4850/s popped=    4352/s shed=     0/s inflight=  490 | push p50=839.68 p99=1400.83 ms | e2e p50=1548.29 p99= 2506.75 ms | pops=    435/s empty=      0/s lag=4860 | errs push=0 pop=0 | gor=4955
+[06:49:05 + 20s] offered=    4996/s pushed=    4620/s popped=    4332/s shed=     0/s inflight=  678 | push p50=1171.46 p99=1630.21 ms | e2e p50=2375.68 p99= 3096.58 ms | pops=    433/s empty=      0/s lag=6300 | errs push=0 pop=0 | gor=5371
+[06:49:10 + 25s] offered=    4998/s pushed=    5166/s popped=    4470/s shed=     0/s inflight=  582 | push p50=1269.76 p99=1859.58 ms | e2e p50=2375.68 p99= 3358.72 ms | pops=    447/s empty=      0/s lag=9780 | errs push=0 pop=0 | gor=5500
+[06:49:15 + 30s] offered=    4998/s pushed=    4508/s popped=    4758/s shed=     0/s inflight=  839 | push p50=1777.66 p99=2473.98 ms | e2e p50=2899.97 p99= 4079.62 ms | pops=    472/s empty=      0/s lag=8530 | errs push=0 pop=0 | gor=6376
+[06:49:20 + 35s] offered=    5006/s pushed=    5324/s popped=    5276/s shed=     0/s inflight=  680 | push p50=1728.51 p99=2539.52 ms | e2e p50=3293.18 p99= 4358.14 ms | pops=    497/s empty=      0/s lag=8770 | errs push=0 pop=0 | gor=6289
+[pop error] pop request failed: request failed after 1 attempts: HTTP 503 [timeout]: {"error":"the request deadline elapsed","code":"timeout"}
+[pop error] pop request failed: request failed after 1 attempts: HTTP 503 [timeout]: {"error":"the request deadline elapsed","code":"timeout"}
+[result] {"configure_errors":0,"configure_s":6.267992083,"consume":"perqueue","consumers":64,"consumers_per_queue":1,"e2e_p50_ms":2572.288,"e2e_p999_ms":4358.144,"e2e_p99_ms":4177.92,"empty_pops_s":0,"lag_at_end":9260,"offered_msg_s":5000.000118000003,"partitions_per_queue":1,"pop_batch":100,"pop_errors":2,"popped_msg_s":4700.000110920003,"pops_s":458.13334414528026,"push_batch":10,"push_errors":0,"push_p50_ms":1417.216,"push_p999_ms":2768.896,"push_p99_ms":2572.288,"pushed_msg_s":4929.666783006803,"queues":1000,"rate":5000,"shed_msg_s":0,"window_s":29.999999292}

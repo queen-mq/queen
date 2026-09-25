@@ -534,15 +534,17 @@ fn roll_seal_reopen_reads_everything() {
 
 #[test]
 fn prealloc_zero_run_is_cut_at_roll_and_reopen() {
-    // Small synced appends switch the zero-filled run on; it must never leak
-    // into a sealed file, a reopen, or a read.
+    // Small synced appends switch the zero-filled run on (past the
+    // sustained-traffic gate's syncs); it must never leak into a sealed file,
+    // a reopen, or a read.
     let td = TmpDir::new("prealloc");
     let opts = QLogOptions::testing_durable(64 * 1024, Fsync::Data);
     let qid = 5;
     let n = 600u64;
+    let warm = super::PREALLOC_MIN_SYNCS + 6;
     {
         let (mut q, _) = QLog::open(td.path(), qid, opts).unwrap();
-        fill(&mut q, 3, 20);
+        fill(&mut q, 3, warm);
         let active = q.files().last().unwrap().clone();
         let phys = std::fs::metadata(qlog_file(td.path(), qid, active.id))
             .unwrap()
@@ -552,7 +554,7 @@ fn prealloc_zero_run_is_cut_at_roll_and_reopen() {
             "no zero run ahead ({phys} <= {})",
             active.bytes
         );
-        for i in 20..n {
+        for i in warm..n {
             append_one(&mut q, i, 3, i, 1_000 + i as i64);
         }
         assert!(q.file_count() >= 2, "fixture did not roll");
@@ -1097,4 +1099,66 @@ fn empty_open_then_use() {
     assert_eq!(rep.files, 1);
     assert_eq!(rep.records, 1);
     assert_eq!(q.read_payload(1, 0).unwrap(), Some(payload(123, 96)));
+}
+
+#[test]
+fn prealloc_waits_for_sustained_traffic_and_sizes_the_run_to_it() {
+    use super::prealloc_run as run;
+    const MIB: u64 = 1 << 20;
+    // No gate (today): the whole chunk once bytes-per-sync is known and small.
+    assert_eq!(run(MIB, 0, 1, 2048), Some(MIB));
+    assert_eq!(run(MIB, 0, 1, 0), None, "no estimate yet");
+    assert_eq!(run(MIB, 0, 1, 40 << 10), None, "big syncs need no run");
+    assert_eq!(run(0, 64, 1000, 2048), None, "QUEEN_RAFT_QLOG_PREALLOC_KB=0");
+    // Gated: nothing before the 64th sync (a queue's create + first contact)…
+    assert_eq!(run(MIB, 64, 63, 2048), None);
+    // …then about 64 syncs' worth: 64 × 2 KiB.
+    assert_eq!(run(MIB, 64, 64, 2048), Some(128 << 10));
+    // Clamped to [64 KiB, chunk].
+    assert_eq!(run(MIB, 64, 64, 100), Some(64 << 10));
+    assert_eq!(run(MIB, 64, 1000, 30 << 10), Some(MIB));
+    assert_eq!(run(32 << 10, 64, 1000, 100), Some(32 << 10), "a chunk under the floor wins");
+}
+
+/// Jepsen P5 (`repro/qlog-bitflip-hole.sh`): one damaged byte in the middle of
+/// the active file. With verified records at or below the store's durable
+/// index after it, the open refuses and leaves the file as it was; with only
+/// records above it after the damage (a crash's torn, un-fsync'd group) it
+/// cuts the tail as before. Both the record's body and its length word.
+#[test]
+fn damage_inside_durable_records_refuses_the_open() {
+    let td = TmpDir::new("bitflip");
+    let opts = QLogOptions::testing_durable(64 << 20, Fsync::Data);
+    let qid = 7;
+    let locs = {
+        let (mut q, _) = QLog::open(td.path(), qid, opts).unwrap();
+        fill(&mut q, 3, 100)
+    };
+    let path = qlog_file(td.path(), qid, locs[50].file_id);
+    let clean = std::fs::read(&path).unwrap();
+    // A byte of record 50's body, then a byte of its length word.
+    for at in [locs[50].offset + 60, locs[50].offset + 2] {
+        let mut bytes = clean.clone();
+        bytes[at as usize] ^= 0x5A;
+        std::fs::write(&path, &bytes).unwrap();
+
+        let err = QLog::open_guarded(td.path(), qid, opts, 99)
+            .err()
+            .expect("a damaged durable record must refuse the open");
+        assert!(
+            err.to_string().contains("corruption inside acknowledged data"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "the refusal cut nothing");
+
+        // Only the records after the damage are above the durable index: the
+        // torn-tail rule, as before.
+        let (_q, rep) = QLog::open_guarded(td.path(), qid, opts, 40).unwrap();
+        assert!(rep.truncated_tail);
+        assert_eq!(rep.records, 50);
+        std::fs::write(&path, &clean).unwrap();
+    }
+    let (_q, rep) = QLog::open_guarded(td.path(), qid, opts, 99).unwrap();
+    assert!(!rep.truncated_tail);
+    assert_eq!(rep.records, 100);
 }

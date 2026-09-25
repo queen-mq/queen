@@ -1,0 +1,13 @@
+goload -mode multiq -> http://127.0.0.1:6690 queues=1000 partitions/queue=1 lanes=1000 rate=5000 push-batch=10 consume=perqueue cpq=1 consumers=64 pop-batch=100 payload~256B
+  per queue: 5.000 msg/s, 0.500 push req/s
+[configure] 1000 queues in 7.57s (132/s) errors=0
+[consumers] 1000 long-poll consumers (1 per queue, pinned=false), start staggered over 100ms
+[06:53:31 +  5s] offered=    2504/s pushed=    2382/s popped=    2276/s shed=     0/s inflight=   61 | push p50= 61.70 p99= 831.49 ms | e2e p50= 125.44 p99= 1105.92 ms | pops=    228/s empty=      0/s lag=530 | errs push=0 pop=0 | gor=3289
+[window] start at +10s
+[06:53:36 + 10s] offered=    5000/s pushed=    4662/s popped=    4362/s shed=     0/s inflight=  230 | push p50=305.15 p99= 675.84 ms | e2e p50= 659.46 p99= 1204.22 ms | pops=    436/s empty=      0/s lag=2030 | errs push=0 pop=0 | gor=3964
+[06:53:41 + 15s] offered=    4998/s pushed=    5382/s popped=    5512/s shed=     0/s inflight=   38 | push p50=407.55 p99= 749.57 ms | e2e p50= 864.26 p99= 1220.61 ms | pops=    551/s empty=      0/s lag=1380 | errs push=0 pop=0 | gor=3833
+[06:53:46 + 20s] offered=    5002/s pushed=    4848/s popped=    4832/s shed=     0/s inflight=  116 | push p50=218.11 p99= 313.34 ms | e2e p50= 464.90 p99=  593.92 ms | pops=    483/s empty=      0/s lag=1460 | errs push=0 pop=0 | gor=3911
+[06:53:51 + 25s] offered=    5000/s pushed=    4720/s popped=    4574/s shed=     0/s inflight=  255 | push p50=296.96 p99= 618.50 ms | e2e p50= 602.11 p99=  937.98 ms | pops=    457/s empty=      0/s lag=2190 | errs push=0 pop=0 | gor=4050
+[06:53:56 + 30s] offered=    5000/s pushed=    4020/s popped=    3506/s shed=     0/s inflight=  745 | push p50=823.30 p99=1302.53 ms | e2e p50=1564.67 p99= 2441.22 ms | pops=    351/s empty=      0/s lag=4760 | errs push=0 pop=0 | gor=5250
+[06:54:01 + 35s] offered=    4998/s pushed=    4786/s popped=    4708/s shed=     0/s inflight=  852 | push p50=1318.91 p99=1908.74 ms | e2e p50=2572.29 p99= 3358.72 ms | pops=    471/s empty=      0/s lag=5150 | errs push=0 pop=0 | gor=5817
+[result] {"configure_errors":0,"configure_s":7.570387709,"consume":"perqueue","consumers":64,"consumers_per_queue":1,"e2e_p50_ms":995.328,"e2e_p999_ms":4046.848,"e2e_p99_ms":3784.704,"empty_pops_s":0,"lag_at_end":8120,"offered_msg_s":5000.336257029942,"partitions_per_queue":1,"pop_batch":100,"pop_errors":0,"popped_msg_s":4591.669351415736,"pops_s":459.0669350831036,"push_batch":10,"push_errors":0,"push_p50_ms":544.768,"push_p999_ms":2539.52,"push_p99_ms":2310.144,"pushed_msg_s":4794.669470109906,"queues":1000,"rate":5000,"shed_msg_s":0,"window_s":29.999982459}

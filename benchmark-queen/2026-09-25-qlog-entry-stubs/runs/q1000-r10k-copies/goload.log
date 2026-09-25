@@ -1,0 +1,23 @@
+goload -mode multiq -> http://127.0.0.1:6690 queues=1000 partitions/queue=1 lanes=1000 rate=10000 push-batch=10 consume=perqueue cpq=1 consumers=64 pop-batch=100 payload~256B
+  per queue: 10.000 msg/s, 1.000 push req/s
+[configure] 1000 queues in 7.41s (135/s) errors=0
+[consumers] 1000 long-poll consumers (1 per queue, pinned=false), start staggered over 100ms
+[pop error] pop request failed: request failed after 1 attempts: HTTP 503 [timeout]: {"error":"the request deadline elapsed","code":"timeout"}
+[06:41:24 +  5s] offered=    5006/s pushed=    2645/s popped=    1607/s shed=     0/s inflight= 1183 | push p50=864.26 p99=1826.82 ms | e2e p50=1826.82 p99= 2703.36 ms | pops=    161/s empty=      0/s lag=5190 | errs push=0 pop=1 | gor=6561
+[pop error] pop request failed: request failed after 1 attempts: HTTP 503 [timeout]: {"error":"the request deadline elapsed","code":"timeout"}
+[pop error] pop request failed: request failed after 1 attempts: HTTP 503 [timeout]: {"error":"the request deadline elapsed","code":"timeout"}
+[pop error] pop request failed: request failed after 1 attempts: HTTP 503 [timeout]: {"error":"the request deadline elapsed","code":"timeout"}
+[pop error] pop request failed: request failed after 1 attempts: HTTP 503 [timeout]: {"error":"the request deadline elapsed","code":"timeout"}
+[window] start at +10s
+[06:41:29 + 10s] offered=   10005/s pushed=    5521/s popped=    3476/s shed=     0/s inflight= 3422 | push p50=2965.50 p99=4292.61 ms | e2e p50=3620.86 p99= 5406.72 ms | pops=    276/s empty=      0/s lag=15410 | errs push=0 pop=180 | gor=15058
+[06:41:34 + 15s] offered=   10000/s pushed=    4982/s popped=    3278/s shed=     0/s inflight= 5931 | push p50=5406.72 p99=6324.22 ms | e2e p50=6258.69 p99= 7503.87 ms | pops=    202/s empty=      0/s lag=23930 | errs push=0 pop=180 | gor=21688
+[06:41:39 + 20s] offered=   10002/s pushed=    3950/s popped=    6122/s shed=     0/s inflight= 8957 | push p50=7438.34 p99=8454.14 ms | e2e p50=8585.22 p99= 9764.86 ms | pops=    279/s empty=      0/s lag=13070 | errs push=0 pop=407 | gor=29896
+[06:41:44 + 25s] offered=   10000/s pushed=    8320/s popped=    8958/s shed=     0/s inflight= 9797 | push p50=9240.58 p99=10027.01 ms | e2e p50=10682.37 p99=13434.88 ms | pops=    403/s empty=      0/s lag=9880 | errs push=0 pop=417 | gor=33068
+[06:41:49 + 30s] offered=    9998/s pushed=    6104/s popped=    3870/s shed=     0/s inflight=11745 | push p50=11075.58 p99=12255.23 ms | e2e p50=13041.66 p99=14221.31 ms | pops=    221/s empty=      0/s lag=21050 | errs push=0 pop=417 | gor=39242
+[push error] mq-908: push request failed: request failed after 1 attempts: Post "http://127.0.0.1:6690/api/v1/push": dial tcp 127.0.0.1:6690: connect: can't assign requested address
+[push error] mq-907: push request failed: request failed after 1 attempts: Post "http://127.0.0.1:6690/api/v1/push": dial tcp 127.0.0.1:6690: connect: can't assign requested address
+[push error] mq-909: push request failed: request failed after 1 attempts: Post "http://127.0.0.1:6690/api/v1/push": dial tcp 127.0.0.1:6690: connect: can't assign requested address
+[push error] mq-910: push request failed: request failed after 1 attempts: Post "http://127.0.0.1:6690/api/v1/push": dial tcp 127.0.0.1:6690: connect: can't assign requested address
+[push error] mq-911: push request failed: request failed after 1 attempts: Post "http://127.0.0.1:6690/api/v1/push": dial tcp 127.0.0.1:6690: connect: can't assign requested address
+[06:41:54 + 35s] offered=    9996/s pushed=    1710/s popped=    4242/s shed=     0/s inflight=15298 | push p50=13041.66 p99=13565.95 ms | e2e p50=13828.10 p99=14614.53 ms | pops=    325/s empty=      2/s lag=8390 | errs push=594 pop=423 | gor=48909
+[result] {"configure_errors":0,"configure_s":7.405470708,"consume":"perqueue","consumers":64,"consumers_per_queue":1,"e2e_p50_ms":10682.368,"e2e_p999_ms":18219.008,"e2e_p99_ms":17694.72,"empty_pops_s":0.3000155712281686,"lag_at_end":14700,"offered_msg_s":9999.18563840016,"partitions_per_queue":1,"pop_batch":100,"pop_errors":386,"popped_msg_s":4740.912726674459,"pops_s":269.51398815330475,"push_batch":10,"push_errors":3964,"push_p50_ms":9371.648,"push_p999_ms":17432.576,"push_p99_ms":17432.576,"pushed_msg_s":4717.244831610904,"queues":1000,"rate":10000,"shed_msg_s":0,"window_s":29.998442958}
