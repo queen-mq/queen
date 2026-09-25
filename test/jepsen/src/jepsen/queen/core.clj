@@ -6,18 +6,21 @@
                     [cli :as cli]
                     [generator :as gen]
                     [history :as h]
+                    [store :as store]
                     [tests :as tests]]
             [jepsen.nemesis.combined :as nc]
             [jepsen.os.debian :as debian]
             [jepsen.tests.kafka :as kafka]
-            [jepsen.queen [db :as db]]
+            [jepsen.queen [db :as db]
+                          [nemesis :as qn]]
             [jepsen.queen.workload [log :as log]]))
 
 (def workloads
   {:log log/workload})
 
 (def all-faults
-  #{:pause :kill :partition :clock})
+  #{:pause :kill :partition :clock :pause-kill :part-kill :bridge :leader-deaf
+    :snap-kill :corrupt})
 
 (def special-nemeses
   {:none []
@@ -53,6 +56,47 @@
                                  history)
                        opts)))))
 
+(defn lazyfs-checker
+  "With --lazyfs: every node's lazyfs.log must show the cache never full (a
+  full cache writes straight through and the power losses lose nothing), and
+  says how many power losses actually dropped un-fsynced bytes."
+  []
+  (reify checker/Checker
+    (check [this test history opts]
+      (if-not (:lazyfs test)
+        {:valid? true}
+        (let [per-node
+              (into (sorted-map)
+                    (for [node (:nodes test)
+                          :let [f (store/path test node "lazyfs.log")]
+                          :when (.exists f)]
+                      (let [lines  (str/split-lines (slurp f))
+                            usages (keep #(some-> (re-find #"cache usage .* is ([0-9.]+)%" %)
+                                                  second parse-double)
+                                         lines)
+                            ; One report per power loss; lazyfs prints a
+                            ; running total after each inode, so a report's
+                            ; total is its last one.
+                            losses (->> lines
+                                        (partition-by #(boolean (re-find #"report request submitted" %)))
+                                        (remove #(re-find #"report request submitted" (first %)))
+                                        (keep (fn [chunk]
+                                                (some->> chunk
+                                                         (keep #(re-find #"un-fsynced: (\d+) bytes" %))
+                                                         last
+                                                         second
+                                                         parse-long))))]
+                        [node {:max-usage-pct (reduce max 0.0 usages)
+                               :clears        (count (filter #(re-find #"cache is cleared" %)
+                                                             lines))
+                               :lossy-clears  (count (filter pos? losses))
+                               :lost-bytes    (reduce + 0 losses)}])))
+              worst (reduce max 0.0 (map :max-usage-pct (vals per-node)))]
+          {:valid?        (and (= (count per-node) (count (:nodes test)))
+                               (< worst 99.0))
+           :max-usage-pct worst
+           :nodes         per-node})))))
+
 (defn test-name
   "A name without spaces (it is the store directory)."
   [opts]
@@ -65,6 +109,8 @@
        (when (some #{:kill :pause :clock} (:nemesis opts))
          (str "_t=" (->> (:db-targets opts) (map name) (str/join ","))))
        (when (:txn-sends? opts) "_txn")
+       (when (:lazyfs opts) "_lazyfs")
+       (when (:disk-hog opts) "_hog")
        "_offload=" (if (:offload opts) "on" "off")
        "_lanes=" (:lanes opts)
        (when (seq (:env opts))
@@ -86,7 +132,8 @@
                   :pause     {:targets (:db-targets opts)}
                   :kill      {:targets (:db-targets opts)}
                   :clock     {:targets (:db-targets opts)}
-                  :interval  (:nemesis-interval opts)}
+                  :interval  (:nemesis-interval opts)
+                  :phase     (:composite-phase opts)}
         ; Only the fault families in use: the packet and file-corruption
         ; packages are not part of P1, and the clock package's setup steps
         ; every node's clock, so it joins only when clock faults are asked for.
@@ -94,7 +141,25 @@
                    (cond-> [(nc/partition-package nopts)
                             (nc/db-package nopts)]
                      (contains? (:faults nopts) :clock)
-                     (conj (nc/clock-package nopts))))
+                     (conj (nc/clock-package nopts))
+
+                     (contains? (:faults nopts) :pause-kill)
+                     (conj (qn/pause-kill-package nopts))
+
+                     (contains? (:faults nopts) :part-kill)
+                     (conj (qn/part-kill-package nopts))
+
+                     (contains? (:faults nopts) :bridge)
+                     (conj (qn/bridge-package nopts))
+
+                     (contains? (:faults nopts) :leader-deaf)
+                     (conj (qn/leader-deaf-package nopts))
+
+                     (contains? (:faults nopts) :snap-kill)
+                     (conj (qn/snap-kill-package nopts))
+
+                     (contains? (:faults nopts) :corrupt)
+                     (conj (qn/corrupt-package nopts))))
         fg       (:final-generator workload)]
     (merge tests/noop-test
            opts
@@ -130,6 +195,7 @@
                             :panic    (checker/log-file-pattern
                                         #"panicked at|NA-QLOG-I1|poison"
                                         "queen.log")
+                            :lazyfs   (lazyfs-checker)
                             :workload (:checker workload)})
             :perf-opts   {:nemeses (:perf nemesis)}})))
 
@@ -141,6 +207,16 @@
     :default [:one :primaries :majority :all]
     :parse-fn parse-comma-kws
     :validate [(partial every? db-targets) (cli/one-of db-targets)]]
+
+   [nil "--composite-phase SECONDS" "pause-kill / part-kill: how long each phase (minority behind; new majority) lasts."
+    :default 20
+    :parse-fn read-string]
+
+   [nil "--disk-hog" "Run a loop of O_DSYNC writes on every node's disk for the whole test (slow fsyncs)."
+    :default false]
+
+   [nil "--disk-hog-bs SIZE" "Block size of the --disk-hog writes (dd bs=)."
+    :default "256k"]
 
    [nil "--dedup-index MODE" "QUEEN_RAFT_DEDUP_INDEX: txns (the product default), rows or segment. P0/P1 ran segment, as qc.sh did."
     :default "txns"]
@@ -161,6 +237,12 @@
     :default 12
     :parse-fn parse-long]
 
+   [nil "--lazyfs" "Put QUEEN_RAFT_DIR on lazyfs: every kill becomes a power loss (un-fsynced writes are lost)."
+    :default false]
+
+   [nil "--lazyfs-cache SIZE" "lazyfs cache size; each node pre-allocates it in RAM. A full cache writes through (toothless)."
+    :default "1GB"]
+
    [nil "--lanes N" "QUEEN_LANES (planner lanes)."
     :default 16
     :parse-fn parse-long]
@@ -169,7 +251,7 @@
     :default 256
     :parse-fn parse-long]
 
-   [nil "--nemesis FAULTS" "Comma-separated faults: pause,kill,partition,clock, or none/all."
+   [nil "--nemesis FAULTS" "Comma-separated faults: pause,kill,partition,clock,pause-kill,part-kill,bridge,leader-deaf,snap-kill,corrupt, or none/all."
     :default #{}
     :parse-fn parse-nemesis-spec
     :validate [(partial every? all-faults)

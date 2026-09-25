@@ -14,7 +14,8 @@
                     [util :as util :refer [meh]]]
             [jepsen.control.net :as cn]
             [jepsen.control.util :as cu]
-            [jepsen.queen.http :as qh])
+            [jepsen.queen.http :as qh]
+            [jepsen.queen.lazyfs :as qlazyfs])
   (:import (java.security MessageDigest)
            (java.io FileInputStream)))
 
@@ -139,8 +140,15 @@
                                  " 2>&1 < /dev/null &"))
           :started))))
 
+(defn lazyfs
+  "The lazyfs map for this test's data directory, or nil without --lazyfs."
+  [test]
+  (when (:lazyfs test)
+    (qlazyfs/lazyfs-map test data-dir)))
+
 (defn kill-node!
-  "kill -9 the wrapper, then every queen process."
+  "kill -9 the wrapper, then every queen process. With --lazyfs the kill is a
+  power loss: lazyfs then forgets every write the node had not fsynced."
   [test node]
   (c/su
     (meh (c/exec :bash :-c (str "test -f " wrapper-pid-file
@@ -153,7 +161,34 @@
         (meh (c/exec :pkill :-9 :-x :queen))
         (Thread/sleep 100)
         (recur (inc i)))))
-  :killed)
+  (if-let [lfs (lazyfs test)]
+    (if (qlazyfs/mounted? lfs)
+      {:killed true, :power-loss (qlazyfs/power-loss! lfs)}
+      :killed)
+    :killed))
+
+(def hog-file     "/opt/queen-hog")
+(def hog-pid-file "/opt/queen-hog.pid")
+
+(defn start-disk-hog!
+  "--disk-hog: a background loop of synchronous writes to the same disk as
+  the data directory, so every fsync of the node waits behind them: written
+  queue-log groups wait longer for their fsync, widening the window in which
+  a node has applied entries it has not fsynced yet."
+  [test]
+  (c/su
+    (c/exec :bash :-c
+            (str "setsid nohup bash -c 'while true; do dd if=/dev/zero of="
+                 hog-file " bs=" (:disk-hog-bs test "256k") " count=256 oflag=dsync"
+                 " 2>/dev/null; done' > /dev/null 2>&1 < /dev/null & echo $! > "
+                 hog-pid-file))))
+
+(defn stop-disk-hog!
+  []
+  (c/su
+    (meh (c/exec :bash :-c (str "test -f " hog-pid-file " && kill -9 $(cat "
+                                hog-pid-file ") 2>/dev/null; pkill -9 -x dd; true")))
+    (c/exec :rm :-f hog-file hog-pid-file)))
 
 (defn await-healthy!
   "Waits until this node's /health answers 200 (a leader is known)."
@@ -226,6 +261,11 @@
         (info node "queen md5" md5))
       (cu/write-file! (run-sh-script test node) run-sh)
       (c/exec :chmod :+x run-sh))
+    ; QUEEN_RAFT_DIR on lazyfs: the queue logs, the LMDB store (lock.mdb is a
+    ; shared writable mmap; it works on lazyfs), the raft state files.
+    (when-let [lfs (lazyfs test)]
+      (qlazyfs/install!)
+      (qlazyfs/mount! lfs))
     ; Start every node together, on empty directories: each initializes the
     ; cluster with the same member list and they elect a leader.
     (jepsen/synchronize test)
@@ -234,10 +274,16 @@
     (jepsen/synchronize test)
     (when (= node (jepsen/primary test))
       (configure-queues! test node))
-    (jepsen/synchronize test))
+    (jepsen/synchronize test)
+    (when (:disk-hog test)
+      (start-disk-hog! test)))
 
   (teardown! [this test node]
-    (kill-node! test node)
+    (stop-disk-hog!)
+    ; Always unmount a lazyfs left over from an earlier test, whatever this
+    ; test's options: the data directory may be its mount point.
+    (kill-node! (dissoc test :lazyfs) node)
+    (qlazyfs/umount! (qlazyfs/lazyfs-map test data-dir))
     (c/su (c/exec :rm :-rf data-dir buf-dir log-file ls-file pid-file
                   wrapper-pid-file)))
 
@@ -245,9 +291,14 @@
   (log-files [this test node]
     (meh (c/su (c/exec :bash :-c (str "ls -laR " data-dir " > " ls-file
                                       " 2>&1; true"))))
-    {log-file "queen.log"
-     ls-file  "data-ls.txt"
-     run-sh   "run.sh"})
+    ; The final cache usage goes into lazyfs.log, for the lazyfs checker.
+    (when-let [lfs (lazyfs test)]
+      (when (qlazyfs/mounted? lfs)
+        (meh (qlazyfs/usage! lfs))))
+    (cond-> {log-file "queen.log"
+             ls-file  "data-ls.txt"
+             run-sh   "run.sh"}
+      (lazyfs test) (assoc (:log-file (lazyfs test)) "lazyfs.log")))
 
   db/Process
   (start! [this test node]

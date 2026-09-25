@@ -1,0 +1,20 @@
+# P5: BIN=/root/bin/queen-wt-snapfix ./run-matrix.sh matrix-p5.txt  (dedup txns, offload on)
+# Regression on the snapshot-storm fix.
+p5-reg-kill-on         --workload log --nemesis kill --time-limit 300 --rate 200
+p5-reg-part-on         --workload log --nemesis partition --time-limit 300 --rate 200
+p5-reg-all-on          --workload log --nemesis all --time-limit 300 --rate 200
+# lazyfs: QUEEN_RAFT_DIR on lazyfs, every kill is a power loss.
+p5-lz-kill-one         --workload log --lazyfs --nemesis kill --db-targets one --time-limit 300 --rate 200 --nemesis-interval 10
+p5-lz-kill-mix         --workload log --lazyfs --nemesis kill --time-limit 300 --rate 200 --nemesis-interval 10
+p5-lz-kill-fast-dp20   --workload log --lazyfs --nemesis kill --time-limit 300 --rate 300 --nemesis-interval 3 --env QUEEN_RAFT_DURABLE_EVERY_MS=20
+p5-lz-hog-kill-one     --workload log --lazyfs --disk-hog --nemesis kill --db-targets one --time-limit 300 --rate 200 --nemesis-interval 5 --env QUEEN_RAFT_DURABLE_EVERY_MS=20
+# NATS composites, with power loss.
+p5-lz-pause-kill       --workload log --lazyfs --nemesis pause-kill --time-limit 300 --rate 200 --nemesis-interval 5 --composite-phase 20
+p5-lz-part-kill        --workload log --lazyfs --nemesis part-kill --time-limit 300 --rate 200 --nemesis-interval 5 --composite-phase 20
+# Kill (power loss) during the snapshot catch-up of a node away past the purge hold.
+p5-snap-kill-lz        --workload log --lazyfs --nemesis snap-kill --time-limit 300 --rate 400 --composite-phase 10 --nemesis-interval 3 --env QUEEN_RAFT_PURGE_HOLD_S=3,QUEEN_RAFT_LOG_KEEP=16
+# File corruption on one node (each trial restores the node if it refuses to boot).
+p5-corrupt2            --workload log --nemesis corrupt --time-limit 300 --rate 200 --nemesis-interval 10
+# Partitions openraft GH#2080 is about.
+p5-leader-deaf         --workload log --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+p5-bridge              --workload log --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20

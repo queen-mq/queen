@@ -191,9 +191,14 @@
                                   (let [k (by-qp [(:queue e)
                                                   (str (:partition e))])
                                         h (:highWatermark e)]
-                                    (when (and k (not (:error e))
-                                               (integer? h) (pos? h))
-                                      [k (dec h)])))
+                                    (cond
+                                      (nil? k) nil
+                                      ; No such partition here: nothing
+                                      ; committed to it that this node applied.
+                                      (= "UNKNOWN_TOPIC_OR_PARTITION" (:error e))
+                                      [k -1]
+                                      (:error e) nil
+                                      (integer? h) [k (dec h)])))
                                 (:entries (:body r))))
                 [reads pos' anomalies notes]
                 (reduce
@@ -213,7 +218,17 @@
                                               :requested (get positions k))))]
 
                         (empty? (:records e))
-                        [reads pos' anomalies notes]
+                        ; Nothing at an offset below the high watermark the
+                        ; same answer reports: the node says the records exist
+                        ; and serves none of them (a hole it cannot see).
+                        (let [req (get positions k)
+                              h   (:highWatermark e)]
+                          [reads pos'
+                           (cond-> anomalies
+                             (and (integer? h) (integer? req) (< req h))
+                             (conj {:type :empty-below-hwm, :key k,
+                                    :requested req, :highWatermark h}))
+                           notes])
 
                         :else
                         (let [recs (:records e)
@@ -470,8 +485,8 @@
   (update [this test context event]
     (case [(:type event) (:f event)]
       [:ok :poll]
-      (when-let [h (:hwm event)]
-        (swap! offsets #(merge-with max % h)))
+      (when-let [h (seq (:hwm event))]
+        (swap! offsets #(merge-with max % (into {} h))))
 
       ; Every key an :ok or :info send wrote joins the final polls, so its
       ; values are read at the end even if no poll ever assigned it: an :info
@@ -485,6 +500,51 @@
                                  m ks)))))
       nil)
     (TrackCommitted. (gen/update gen test context event) offsets)))
+
+(defrecord FinalPolls [target-offsets gen]
+  ; kafka/FinalPolls, except that a key whose target is -1 (only ever written
+  ; by sends of unknown outcome, or by a /transaction) is satisfied once a poll
+  ; reports its high watermark: there may be nothing to read, and waiting for a
+  ; record would hold every final poll until --final-time-limit.
+  gen/Generator
+  (op [this test context]
+    (when-not (empty? target-offsets)
+      (when-let [[op gen'] (gen/op gen test context)]
+        [op (assoc this :gen gen')])))
+
+  (update [this test context {:keys [type f] :as event}]
+    (if (and (= :ok type) (= :poll f))
+      (let [read     (kafka/op->max-offsets event)
+            hwm      (:hwm event)
+            offsets' (reduce-kv (fn [t k target]
+                                  (if (or (<= target (get read k -2))
+                                          (and (= -1 target) (contains? hwm k)))
+                                    (dissoc t k)
+                                    t))
+                                target-offsets
+                                target-offsets)]
+        (when-not (= (count target-offsets) (count offsets'))
+          (info "Process" (:process event) "now waiting for" offsets'))
+        (FinalPolls. offsets' gen))
+      this)))
+
+(defn final-polls
+  "kafka/final-polls with the FinalPolls above: every thread, from its own
+  node, crashes its client, assigns every key from offset 0 and polls until it
+  has read every tracked offset."
+  [offsets]
+  (delay
+    (let [offsets @offsets]
+      (info "Polling up to offsets" offsets)
+      (->> [{:f :crash}
+            {:f :debug-topic-partitions, :value (keys offsets)}
+            {:f :assign, :value (keys offsets), :seek-to-beginning? true}
+            (->> {:f :poll, :value [[:poll]], :poll-ms 1000}
+                 repeat
+                 (gen/stagger 1/5))]
+           (gen/time-limit 10000)
+           repeat
+           (->FinalPolls offsets)))))
 
 (defn sends-only
   "A /transaction bundles pushes (and acks, KV), never a fetch: strip the polls
@@ -524,7 +584,7 @@
                              kafka/tag-rw
                              (kafka/interleave-subscribes opts)
                              kafka/poll-unseen))
-     :final-generator (gen/each-thread (kafka/final-polls max-offsets))
+     :final-generator (gen/each-thread (final-polls max-offsets))
      :wrap-generator  (fn [gen]
                         (->> gen
                              (kafka/track-key-offsets max-offsets)
