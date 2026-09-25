@@ -13,10 +13,12 @@
             [jepsen.tests.kafka :as kafka]
             [jepsen.queen [db :as db]
                           [nemesis :as qn]]
-            [jepsen.queen.workload [log :as log]]))
+            [jepsen.queen.workload [log :as log]
+                                   [queue :as queue]]))
 
 (def workloads
-  {:log log/workload})
+  {:log   log/workload
+   :queue queue/workload})
 
 (def all-faults
   #{:pause :kill :partition :clock :pause-kill :part-kill :bridge :leader-deaf
@@ -218,6 +220,8 @@
    [nil "--disk-hog-bs SIZE" "Block size of the --disk-hog writes (dd bs=)."
     :default "256k"]
 
+   [nil "--corrupt-node NODE" "The one node the corrupt nemesis damages (default: random)."]
+
    [nil "--dedup-index MODE" "QUEEN_RAFT_DEDUP_INDEX: txns (the product default), rows or segment. P0/P1 ran segment, as qc.sh did."
     :default "txns"]
 
@@ -289,7 +293,15 @@
     :id :txn-sends?
     :default false]
 
-   ["-w" "--workload NAME" "Workload: log."
+   [nil "--w2-lease SECONDS" "queue workload: leaseSeconds of every pop."
+    :default 3
+    :parse-fn parse-long]
+
+   [nil "--w2-partitions N" "queue workload: partitions of the test queue."
+    :default 8
+    :parse-fn parse-long]
+
+   ["-w" "--workload NAME" "Workload: log or queue."
     :default :log
     :parse-fn keyword
     :validate [workloads (cli/one-of workloads)]]])

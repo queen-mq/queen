@@ -299,7 +299,8 @@
       n/Nemesis
       (setup! [this test]
         (c/with-test-nodes test (n/compile-c-resource! "corrupt-file.c" "corrupt-file"))
-        (reset! victim (rand/nth (vec (sort (:nodes test)))))
+        (reset! victim (or (:corrupt-node test)
+                           (rand/nth (vec (sort (:nodes test))))))
         (info "file corruption victim:" @victim)
         this)
 
@@ -313,15 +314,20 @@
                        (db/kill! db test node)
                        (c/su (c/exec :rm :-rf bak)
                              (c/exec :cp :-a data-dir bak))
-                       (let [r   (corrupt-one! class mode)
-                             _   (db/start! db test node)
-                             up? (await-up? node 20)]
+                       (let [r     (corrupt-one! class mode)
+                             lines (try (parse-long
+                                          (str/trim (c/su (c/exec :bash :-c "wc -l < /opt/queen/queen.log"))))
+                                        (catch Exception _ 0))
+                             _     (db/start! db test node)
+                             up?   (await-up? node 20)]
                          (if up?
                            (do (c/su (c/exec :rm :-rf bak))
                                (assoc r :outcome :booted))
+                           ; Only this boot's lines: why it refused.
                            (let [why (try (c/su (c/exec :bash :-c
-                                                        (str "grep -E 'FATAL|poison|panicked' "
-                                                             "/opt/queen/queen.log | tail -1 | cut -c1-300")))
+                                                        (str "tail -n +" (inc lines) " /opt/queen/queen.log"
+                                                             " | grep -E 'FATAL|poison|panicked|corruption'"
+                                                             " | tail -1 | cut -c1-400")))
                                           (catch Exception _ nil))]
                              (db/kill! db test node)
                              (c/su (c/exec :rm :-rf data-dir)

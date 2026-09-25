@@ -1,0 +1,15 @@
+# Regression on the fixed binary (qlog stubs + corruption guard + quorum-loss step-down):
+#   BIN=/root/bin/queen-wt-fixes ./run-matrix.sh matrix-p6.txt   (dedup txns, offload on, lanes 16)
+p6-corrupt             --workload log --nemesis corrupt --corrupt-node n5 --time-limit 300 --rate 200 --nemesis-interval 10
+p6-leader-deaf         --workload log --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+p6-lz-kill-mix         --workload log --lazyfs --nemesis kill --time-limit 300 --rate 200 --nemesis-interval 10
+p6-lz-kill-fast-dp20   --workload log --lazyfs --nemesis kill --time-limit 300 --rate 300 --nemesis-interval 3 --env QUEEN_RAFT_DURABLE_EVERY_MS=20
+p6-lz-hog-kill-one     --workload log --lazyfs --disk-hog --nemesis kill --db-targets one --time-limit 300 --rate 200 --nemesis-interval 5 --env QUEEN_RAFT_DURABLE_EVERY_MS=20
+p6-snap-kill-lz        --workload log --lazyfs --nemesis snap-kill --time-limit 300 --rate 400 --composite-phase 10 --nemesis-interval 3 --env QUEEN_RAFT_PURGE_HOLD_S=3,QUEEN_RAFT_LOG_KEEP=16
+p6-reg-kill-on         --workload log --nemesis kill --time-limit 300 --rate 200
+p6-reg-part-on         --workload log --nemesis partition --time-limit 300 --rate 200
+p6-reg-all-on          --workload log --nemesis all --time-limit 300 --rate 200
+p6-bridge              --workload log --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+# W2, the lease-queue workload.
+w2-smoke-none          --workload queue --nemesis none --time-limit 120 --rate 200
+w2-kill                --workload queue --nemesis kill --time-limit 300 --rate 200

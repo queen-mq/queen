@@ -17,9 +17,14 @@
 # V and from the leader.
 #
 # Run on the Jepsen control node with no test running:
-#   ./qlog-bitflip-hole.sh /root/bin/queen-wt-snapfix
+#   ./qlog-bitflip-hole.sh /root/bin/queen-wt-snapfix [flip|cut]
+#
+# flip (default): overwrite one byte inside record ha-01500.
+# cut: truncate the ha queue log inside record ha-01500 (a lost tail of
+#      acknowledged, fsynced records: nothing valid follows the damage).
 set -u
 BIN=${1:?queen binary}
+MODE=${2:-flip}
 NODES=(n1 n2 n3 n4 n5)
 ip() { getent hosts "$1" | awk '{print $1}'; }
 PEERS=""
@@ -76,10 +81,10 @@ PY
 sleep 4   # a durable point on every node covers everything
 echo "applied: leader $(h "$L" | sed -n 's/.*"applied":\([0-9]*\).*/\1/p'), victim $(h "$V" | sed -n 's/.*"applied":\([0-9]*\).*/\1/p')"
 
-echo "== kill -9 $V; overwrite one byte in the middle of its ha queue log"
+echo "== kill -9 $V; damage its ha queue log (mode $MODE)"
 ssh "$V" 'kill -9 $(cat /opt/queen/wrapper.pid) 2>/dev/null; pkill -9 -x queen; true'
-ssh "$V" python3 - <<'PY'
-import glob
+ssh "$V" MODE=$MODE python3 - <<'PY'
+import glob, os
 # The ha queue log: the one holding ha's transaction ids; else the largest non-system log.
 files = [f for f in glob.glob("/opt/queen/data/qlog/q*/r*.qlog") if "/q0/" not in f]
 data = {f: open(f, "rb").read() for f in files}
@@ -93,10 +98,14 @@ if pos < 0:
     pos = end // 2
 else:
     pos += 3
-old = b[pos]; b[pos] ^= 0xFF
-open(f, "r+b").write(bytes(b))
-print("file=%s size=%d logical_end=%d flipped byte %d (0x%02x -> 0x%02x) %s" % (
-    f, len(b), end, pos, old, b[pos], "inside record ha-01500" if data[f].find(b"ha-01500") >= 0 else "at the middle of the logical data"))
+if os.environ.get("MODE") == "cut":
+    os.truncate(f, pos)
+    print("file=%s size=%d logical_end=%d truncated to %d bytes (inside record ha-01500)" % (f, len(b), end, pos))
+else:
+    old = b[pos]; b[pos] ^= 0xFF
+    open(f, "r+b").write(bytes(b))
+    print("file=%s size=%d logical_end=%d flipped byte %d (0x%02x -> 0x%02x) %s" % (
+        f, len(b), end, pos, old, b[pos], "inside record ha-01500" if data[f].find(b"ha-01500") >= 0 else "at the middle of the logical data"))
 PY
 
 echo "== start $V"
