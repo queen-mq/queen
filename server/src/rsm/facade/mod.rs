@@ -861,11 +861,14 @@ impl Rsm for NotReady {
 // ---------------------------------------------------------------------------
 
 /// What the builder needs to construct a real facade: the data directory
-/// (required in raft mode, §11.1) and the receiver's notifier, so the RSM's
-/// apply thread can wake parked long-polls through it (§9.5).
+/// (required in raft mode, §11.1), the receiver's notifier, so the RSM's
+/// apply thread can wake parked long-polls through it (§9.5), and the disk
+/// gate's thresholds (`Config::raft_disk_high_pct` / `raft_disk_low_pct`).
 pub struct RsmBuildCtx {
     pub data_dir: String,
     pub notifier: Arc<Notifier>,
+    pub disk_high_pct: f64,
+    pub disk_low_pct: f64,
 }
 
 /// The hook WP-1.7c installs: given the build context, produce the real facade.

@@ -664,6 +664,8 @@ mod tests {
         let facade = crate::rsm::facade::real::RaftFacade::open(&crate::rsm::facade::RsmBuildCtx {
             data_dir: dir.display().to_string(),
             notifier: crate::notify::Notifier::new(false),
+            disk_high_pct: 85.0,
+            disk_low_pct: 80.0,
         })
         .expect("open facade");
         let rsm: Arc<dyn Rsm> = Arc::new(facade);
@@ -834,6 +836,8 @@ mod tests {
         let facade = crate::rsm::facade::real::RaftFacade::open(&crate::rsm::facade::RsmBuildCtx {
             data_dir: dir.display().to_string(),
             notifier: crate::notify::Notifier::new(false),
+            disk_high_pct: 85.0,
+            disk_low_pct: 80.0,
         })
         .expect("open facade");
         let rsm: Arc<dyn Rsm> = Arc::new(facade);

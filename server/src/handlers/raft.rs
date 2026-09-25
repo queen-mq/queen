@@ -541,6 +541,8 @@ pub(crate) fn build_raft_state_with(
         None => facade::build(&facade::RsmBuildCtx {
             data_dir: cfg.raft_dir.clone(),
             notifier: notifier.clone(),
+            disk_high_pct: cfg.raft_disk_high_pct,
+            disk_low_pct: cfg.raft_disk_low_pct,
         }),
     };
     let bootstrap = rsm.bootstrap();
@@ -1432,6 +1434,8 @@ mod tests {
             &crate::rsm::facade::RsmBuildCtx {
                 data_dir: dir.display().to_string(),
                 notifier: crate::notify::Notifier::new(false),
+                disk_high_pct: 85.0,
+                disk_low_pct: 80.0,
             },
             crate::rsm::batcher::BatcherConfig {
                 timer_tick_ms: 10,
@@ -1595,6 +1599,8 @@ mod tests {
             RaftFacade::open(&RsmBuildCtx {
                 data_dir: dir.display().to_string(),
                 notifier: crate::notify::Notifier::new(false),
+                disk_high_pct: 85.0,
+                disk_low_pct: 80.0,
             })
             .expect("open the facade"),
         );
@@ -1773,6 +1779,8 @@ mod tests {
             RaftFacade::open(&RsmBuildCtx {
                 data_dir: dir.display().to_string(),
                 notifier: crate::notify::Notifier::new(false),
+                disk_high_pct: 85.0,
+                disk_low_pct: 80.0,
             })
             .expect("open the facade"),
         );

@@ -34,7 +34,9 @@ fn group_all_params(group: &str) -> qp::PopParams {
 async fn embedded_raft_runs_admin_message_dlq_and_observability_without_postgres() {
     let dir = std::env::temp_dir().join(unique("queen-embedded-raft"));
     let queue = unique("queue");
-    let broker = Broker::start(BrokerConfig::new().raft(&dir))
+    // The host's disk usage is not under test: the gate closes only on a full
+    // disk (the default 85% refused the first push on a 91%-full dev machine).
+    let broker = Broker::start(BrokerConfig::new().raft(&dir).raft_disk_pct(100.0, 100.0))
         .await
         .expect("embedded raft boot");
 
@@ -117,7 +119,10 @@ async fn embedded_raft_runs_admin_message_dlq_and_observability_without_postgres
 
     let metrics = broker.metrics().await.expect("metrics");
     assert_eq!(metrics["engine"], "raft", "{metrics}");
-    assert!(metrics.get("database").is_none(), "{metrics}");
+    // The legacy pool block stays for dashboard compatibility, with no SQL
+    // connections behind it.
+    assert_eq!(metrics["database"]["poolSize"], 0, "{metrics}");
+    assert_eq!(metrics["database"]["idleConnections"], 0, "{metrics}");
     let health = broker.health().await.expect("health");
     assert_eq!(health["status"], "healthy", "{health}");
     assert!(broker

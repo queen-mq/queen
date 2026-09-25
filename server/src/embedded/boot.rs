@@ -110,6 +110,29 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         cfg.storage = config::StorageMode::Raft;
         cfg.raft_dir = dir.display().to_string();
     }
+    // Refused, not defaulted like the env knobs: a fraction passed for a
+    // percentage (0.85) would otherwise refuse every write.
+    for (field, pct, slot) in [
+        (
+            "raft_disk_high_pct",
+            bc.raft_disk_high_pct,
+            &mut cfg.raft_disk_high_pct,
+        ),
+        (
+            "raft_disk_low_pct",
+            bc.raft_disk_low_pct,
+            &mut cfg.raft_disk_low_pct,
+        ),
+    ] {
+        if let Some(pct) = pct {
+            if !config::is_pct(pct) {
+                return Err(StartError::Config(format!(
+                    "{field} must be a percentage in 1..=100"
+                )));
+            }
+            *slot = pct;
+        }
+    }
 
     // Env knobs that only make sense with the HTTP surface are ignored
     // embedded — say so instead of silently dropping them.

@@ -357,14 +357,6 @@ fn env_flag(name: &str, default_on: bool) -> bool {
         .unwrap_or(default_on)
 }
 
-fn env_pct(name: &str, default: f64) -> f64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .filter(|v| (1.0..=100.0).contains(v))
-        .unwrap_or(default)
-}
-
 #[cfg(unix)]
 fn filesystem_used_pct(path: &std::path::Path) -> Option<f64> {
     use std::os::unix::ffi::OsStrExt;
@@ -641,8 +633,8 @@ impl RaftFacade {
                 .unwrap_or(100)
                 .clamp(10, 60_000)
                 .saturating_mul(1_000),
-            disk_high_pct: env_pct("QUEEN_RAFT_DISK_HIGH_PCT", 85.0),
-            disk_low_pct: env_pct("QUEEN_RAFT_DISK_LOW_PCT", 80.0),
+            disk_high_pct: ctx.disk_high_pct,
+            disk_low_pct: ctx.disk_low_pct,
         })
     }
 

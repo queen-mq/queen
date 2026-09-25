@@ -716,6 +716,13 @@ pub struct Config {
     /// §14.1 — `/health` answers `200 healthy` while the apply lag is under this
     /// (`QUEEN_RAFT_READY_LAG_MS`), else `503 settling`.
     pub raft_ready_lag_ms: u64,
+    /// The disk gate: writes that grow storage are refused (`507`) once the
+    /// data directory's filesystem is at least this percent used
+    /// (`QUEEN_RAFT_DISK_HIGH_PCT`, default 85).
+    pub raft_disk_high_pct: f64,
+    /// Once the disk gate has closed, writes are accepted again below this
+    /// percent (`QUEEN_RAFT_DISK_LOW_PCT`, default 80).
+    pub raft_disk_low_pct: f64,
     /// The admission arbiter's budget ceiling in raft mode
     /// (`QUEEN_RAFT_PLANNER_QUEUE_DEPTH`). In postgres mode admission is sized by
     /// `DB_POOL_SIZE`; in raft mode there is no pool — writes flow through the
@@ -1245,6 +1252,18 @@ fn env_f64(k: &str, def: f64) -> f64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(def)
+}
+/// A percentage knob: unset, unparsable or outside [`is_pct`] keeps `def`.
+fn env_pct(k: &str, def: f64) -> f64 {
+    std::env::var(k)
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| is_pct(*v))
+        .unwrap_or(def)
+}
+/// The range a percentage knob accepts (NaN is outside it).
+pub(crate) fn is_pct(v: f64) -> bool {
+    (1.0..=100.0).contains(&v)
 }
 // ---------------------------------------------------------------------------
 // Boolean env parsing — ONE parser for every boolean knob in the broker.
@@ -1959,6 +1978,8 @@ pub fn load() -> Config {
         storage: StorageMode::Postgres,
         raft_dir: env_str("QUEEN_RAFT_DIR", "/var/lib/queen/raft"),
         raft_ready_lag_ms: env_int("QUEEN_RAFT_READY_LAG_MS", 2000).max(0) as u64,
+        raft_disk_high_pct: env_pct("QUEEN_RAFT_DISK_HIGH_PCT", 85.0),
+        raft_disk_low_pct: env_pct("QUEEN_RAFT_DISK_LOW_PCT", 80.0),
         raft_planner_queue_depth: env_int("QUEEN_RAFT_PLANNER_QUEUE_DEPTH", 1024).max(1) as usize,
         // ------------------------------------------- kv + timers (PLAN_KV_TIMERS.md)
         kv_max_value_bytes: env_int("QUEEN_KV_MAX_VALUE_BYTES", 65536).max(1) as usize,

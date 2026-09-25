@@ -284,6 +284,13 @@ pub struct BrokerConfig {
     /// connecting to Postgres. `None` keeps the normal Postgres backend (unless
     /// `QUEEN_STORAGE=raft` is selected in the environment).
     pub raft_dir: Option<PathBuf>,
+    /// Raft mode: refuse writes (`507`) once the data directory's filesystem
+    /// is at least this percent used (env `QUEEN_RAFT_DISK_HIGH_PCT`, default
+    /// 85). 100 leaves only a full disk to the gate.
+    pub raft_disk_high_pct: Option<f64>,
+    /// Raft mode: accept writes again below this percent once the disk gate
+    /// has closed (env `QUEEN_RAFT_DISK_LOW_PCT`, default 80).
+    pub raft_disk_low_pct: Option<f64>,
 }
 
 /// Same defaults as [`BrokerConfig::new`] — the derive would silently flip
@@ -313,6 +320,8 @@ impl BrokerConfig {
             system_metrics: true,
             log_reports: true,
             raft_dir: None,
+            raft_disk_high_pct: None,
+            raft_disk_low_pct: None,
         }
     }
 
@@ -387,6 +396,14 @@ impl BrokerConfig {
     /// directory (PLAN_RAFT WP-2.10).
     pub fn raft(mut self, data_dir: impl Into<PathBuf>) -> Self {
         self.raft_dir = Some(data_dir.into());
+        self
+    }
+
+    /// Set the raft disk gate in one call: refuse writes at `high` percent of
+    /// the data directory's filesystem used, accept them again below `low`.
+    pub fn raft_disk_pct(mut self, high: f64, low: f64) -> Self {
+        self.raft_disk_high_pct = Some(high);
+        self.raft_disk_low_pct = Some(low);
         self
     }
 }
