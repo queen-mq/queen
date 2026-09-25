@@ -23,8 +23,10 @@ sourceOfTruth:
   - webdoc/scripts/gen-snippets.mjs
   - webdoc/scripts/lib/source.mjs
   - .github/workflows/docs.yml
+  - webdoc/scripts/check-doclinks.mjs
 # sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 # sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): gen-proxy-routes.mjs gained the two replay arms, a write-inherits-read assertion and a new CLASSIFY_FINGERPRINT; gen-routes.mjs and gen-openapi.mjs gained the KV console access arm and the matching tag. The workflow this page describes is unchanged.
+# sourceOfTruth re-read 2026-09-25 (through fc71b65b + working tree): package.json and docs.yml gained check:doclinks, the dashboard doc-link guard; the verify row and the CI paragraph now name it.
 ---
 
 This site exists because the previous one drifted far enough from the implementation to
@@ -360,7 +362,7 @@ build stops until a human has compared the two implementations.
 | `pnpm lint:docs:fix` | the same, applying the fixable rules |
 | `pnpm build` | static build into `dist/`, including the Pagefind index |
 | `pnpm typecheck` | `astro check` |
-| `pnpm verify` | the whole content chain, in order: `gen:check`, `build`, `check:markdown`, `check:brief`, `lint:docs`, `check:prose`, `check:sourceoftruth` (what to run before pushing); run `pnpm typecheck` alongside it |
+| `pnpm verify` | the whole content chain, in order: `gen:check`, `build`, `check:markdown`, `check:brief`, `lint:docs`, `check:prose`, `check:sourceoftruth`, `check:doclinks` (what to run before pushing); run `pnpm typecheck` alongside it |
 
 Run them from `webdoc/`, or with `pnpm --dir webdoc <script>` from the repository root.
 
@@ -368,7 +370,9 @@ Run them from `webdoc/`, or with `pnpm --dir webdoc <script>` from the repositor
 
 `.github/workflows/docs.yml` runs the generator drift check, typecheck, build, all four content
 guards and the Nimbus linter, so a page built from source can never be published behind that
-source. Checkout uses the full git history because the source-of-truth guard compares commit
+source. It also runs `check:doclinks`, which fails when a dashboard route's `docs` path (the "?"
+next to the page title) names a page that no longer exists, or when `DOCS_BASE_URL` in
+`app/src/components/Header.vue` differs from `site` in `astro.config.ts`. Checkout uses the full git history because the source-of-truth guard compares commit
 timestamps. The order matters: the
 `nimbus/internal-link` rule resolves links against `.nimbus/routes.json`, which Astro
 materializes at `astro:build:done`, so linting before building checks links against a stale
