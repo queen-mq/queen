@@ -13,7 +13,8 @@
   (:require [clojure.set :as set]
             [clojure.string :as str]
             [clojure.tools.logging :refer [info warn]]
-            [jepsen [control :as c]
+            [jepsen [checker :as checker]
+                    [control :as c]
                     [db :as db]
                     [generator :as gen]
                     [nemesis :as n]
@@ -23,7 +24,8 @@
             [jepsen.control.net :as cn]
             [jepsen.control.util :as cu]
             [jepsen.nemesis.file :as nf]
-            [jepsen.queen.db :as qdb]))
+            [jepsen.queen [db :as qdb]
+                          [membership :as qm]]))
 
 (defn- roles
   "A fresh random split: {:behind #{...} :crasher n :rest #{...}}."
@@ -283,19 +285,96 @@
               (< (* 1000 timeout-s) elapsed)      false
               :else (do (Thread/sleep 250) (recur)))))))
 
+(defn- log-lines
+  "How many lines queen.log has now (on the bound node)."
+  []
+  (try (parse-long (str/trim (c/su (c/exec :bash :-c "wc -l < /opt/queen/queen.log"))))
+       (catch Exception _ 0)))
+
+(defn- why-since
+  "The last fatal line logged after line `lines` (on the bound node)."
+  [lines]
+  (try (c/su (c/exec :bash :-c
+                     (str "tail -n +" (inc lines) " /opt/queen/queen.log"
+                          " | grep -E 'FATAL|poison|panicked|corruption|CORRUPT'"
+                          " | tail -1 | cut -c1-400")))
+       (catch Exception _ nil)))
+
+(defn- exit-rc-since
+  "The exit code in the wrapper's last 'queen exited rc=N' line after line
+  `lines` (135 = SIGBUS), or nil."
+  [lines]
+  (try (some->> (c/su (c/exec :bash :-c
+                              (str "tail -n +" (inc lines) " /opt/queen/queen.log"
+                                   " | grep -o 'queen exited rc=[0-9]*' | tail -1")))
+                (re-find #"rc=(\d+)")
+                second
+                parse-long)
+       (catch Exception _ nil)))
+
+(defn- alive?
+  []
+  (try (c/su (c/exec :pgrep :-x :queen)) true
+       (catch Exception _ false)))
+
+(defn- watch-exit
+  "Watches the bound node for watch-s seconds: the ms after which queen died,
+  or nil. A process gone for 2 s is dead (an exit 75 comes back at once)."
+  [watch-s]
+  (let [t0 (System/currentTimeMillis)]
+    (loop []
+      (let [el (- (System/currentTimeMillis) t0)]
+        (cond (< (* 1000 watch-s) el) nil
+              (alive?)                (do (Thread/sleep 500) (recur))
+              :else (do (Thread/sleep 2000)
+                        (if (alive?) (recur) el)))))))
+
+(defn- rejoin!
+  "Replace the node through the membership API: remove, wipe, rejoin."
+  [test node]
+  (let [r (qm/replace! test [node])]
+    {:rejoined (boolean (some :rejoined (:rejoins r)))
+     :detail   r}))
+
 (defn corrupt-nemesis
-  "Damages files on ONE node, fixed for the whole test. Each operation is one
-  independent trial: kill the node, copy its data directory aside, bitflip or
-  truncate one random file of a class (qlog, seg, store, state), start it.
-  If it does not come up (it refused the damage), the copy is put back
-  byte-for-byte - the node never ran in between, so nothing rolls back - and
-  it starts again. Queen must refuse or repair the damage; it must never
-  serve it or lead with it."
+  "Damages files on ONE node, fixed for the whole test. Each :corrupt-file
+  op is one independent trial: kill the node, copy its data directory aside,
+  bitflip or truncate one random file of a class (qlog, seg, store, state),
+  start it, and watch it for --corrupt-watch seconds. Outcomes:
+
+    :booted        it came up and stayed up (the damage was refused or
+                   repaired, or lies where nothing read it yet);
+    :refused       it did not come up (the log says why);
+    :runtime-exit  it came up and then exited (a damaged value found at
+                   runtime ends the process).
+
+  A node that refused never ran on the damage, so the copy may be put back
+  byte-for-byte (remedy :restore). A node that ran may not be rolled back:
+  it is removed from the cluster, wiped and rejoins (remedy :rejoin, the
+  operator's path through the membership API). --corrupt-remedy picks for a
+  refusal: restore, rejoin, or mix (either, at random). A node found dead
+  at the start of a trial or by :corrupt-heal (it exited later) rejoins
+  too. Queen must refuse or repair the damage; it must never serve it or
+  lead with it."
   [db]
-  (let [victim (atom nil)]
+  (let [victim    (atom nil)
+        boot-line (atom 0)
+        late!     (fn [test node]
+                    ; Did the victim die on its own since its last start?
+                    (let [dead (get (c/on-nodes test [node]
+                                                (fn [test node]
+                                                  (when-not (alive?)
+                                                    {:why (why-since @boot-line)})))
+                                    node)]
+                      (cond
+                        (nil? dead)  nil
+                        (:why dead)  (assoc dead :rejoin (rejoin! test node))
+                        :else        (do (c/on-nodes test [node]
+                                                     (fn [test node] (db/start! db test node)))
+                                         (assoc dead :started true)))))]
     (reify
       n/Reflection
-      (fs [_] #{:corrupt-file})
+      (fs [_] #{:corrupt-file :corrupt-heal})
 
       n/Nemesis
       (setup! [this test]
@@ -306,55 +385,87 @@
         this)
 
       (invoke! [this test op]
-        (let [{:keys [class mode]} (:value op)
-              node @victim
-              bak  (str data-dir ".bak")
-              res  (c/on-nodes
-                     test [node]
-                     (fn [test node]
-                       (db/kill! db test node)
-                       (c/su (c/exec :rm :-rf bak)
-                             (c/exec :cp :-a data-dir bak))
-                       (let [r     (corrupt-one! class mode)
-                             lines (try (parse-long
-                                          (str/trim (c/su (c/exec :bash :-c "wc -l < /opt/queen/queen.log"))))
-                                        (catch Exception _ 0))
-                             _     (db/start! db test node)
-                             up?   (await-up? node 20)]
-                         (if up?
-                           (do (c/su (c/exec :rm :-rf bak))
-                               (assoc r :outcome :booted))
-                           ; Only this boot's lines: why it refused.
-                           (let [why (try (c/su (c/exec :bash :-c
-                                                        (str "tail -n +" (inc lines) " /opt/queen/queen.log"
-                                                             " | grep -E 'FATAL|poison|panicked|corruption'"
-                                                             " | tail -1 | cut -c1-400")))
-                                          (catch Exception _ nil))]
-                             (db/kill! db test node)
-                             (c/su (c/exec :rm :-rf data-dir)
-                                   (c/exec :mv bak data-dir))
-                             (db/start! db test node)
-                             (assoc r :outcome :refused, :why why
-                                    :restored-up? (await-up? node 30)))))))]
-          (assoc op :value (assoc (get res node) :node node))))
+        (let [node @victim]
+          (case (:f op)
+            :corrupt-heal
+            (assoc op :value {:node node, :late-exit (late! test node)})
+
+            :corrupt-file
+            (let [{:keys [class mode]} (:value op)
+                  bak    (str data-dir ".bak")
+                  late   (late! test node)
+                  trial  (get (c/on-nodes
+                                test [node]
+                                (fn [test node]
+                                  (db/kill! db test node)
+                                  (c/su (c/exec :rm :-rf bak)
+                                        (c/exec :cp :-a data-dir bak))
+                                  (let [r     (corrupt-one! class mode)
+                                        lines (log-lines)
+                                        _     (reset! boot-line lines)
+                                        _     (db/start! db test node)
+                                        up?   (await-up? node 20)]
+                                    (if up?
+                                      (if-let [ms (watch-exit (:corrupt-watch test 15))]
+                                        (assoc r :outcome :runtime-exit, :exit-after-ms ms
+                                               :why (why-since lines), :rc (exit-rc-since lines))
+                                        (do (c/su (c/exec :rm :-rf bak))
+                                            (assoc r :outcome :booted)))
+                                      (assoc r :outcome :refused, :why (why-since lines)
+                                             :rc (exit-rc-since lines))))))
+                              node)
+                  remedy (case (:outcome trial)
+                           :booted       nil
+                           :runtime-exit :rejoin
+                           :refused      (case (:corrupt-remedy test :mix)
+                                           :restore :restore
+                                           :rejoin  :rejoin
+                                           (rand/nth [:restore :rejoin])))
+                  fix    (case remedy
+                           nil      nil
+                           :restore (get (c/on-nodes
+                                           test [node]
+                                           (fn [test node]
+                                             (db/kill! db test node)
+                                             (c/su (c/exec :rm :-rf data-dir)
+                                                   (c/exec :mv bak data-dir))
+                                             (reset! boot-line (log-lines))
+                                             (db/start! db test node)
+                                             {:restored-up? (await-up? node 30)}))
+                                         node)
+                           :rejoin  (do (c/on-nodes test [node]
+                                                    (fn [test node] (c/su (c/exec :rm :-rf bak))))
+                                        (let [r (rejoin! test node)]
+                                          (c/on-nodes test [node]
+                                                      (fn [test node] (reset! boot-line (log-lines))))
+                                          {:rejoin r})))]
+              (assoc op :value (cond-> (merge trial fix {:node node})
+                                 remedy (assoc :remedy remedy)
+                                 late   (assoc :late-exit late)))))))
 
       (teardown! [this test]))))
 
+(def default-corrupt-classes
+  "File classes a corrupt op draws from, with repeats as weights. The seg
+  files are empty on the raft engine (the queue logs are the only WAL): the
+  data lives in qlog and store."
+  [:qlog :qlog :qlog :store :store :state])
+
 (defn corrupt-package
-  [{:keys [faults interval db]}]
-  (let [needed? (contains? faults :corrupt)]
+  [{:keys [faults interval db corrupt-classes]}]
+  (let [needed? (contains? faults :corrupt)
+        classes (vec (or (seq corrupt-classes) default-corrupt-classes))]
     {:nemesis (corrupt-nemesis db)
      :generator
      (when needed?
        (->> (fn [test ctx]
               {:type  :info, :f :corrupt-file
-               ; The seg files are empty on the raft engine (the queue
-               ; logs are the only WAL): the data lives in qlog and store.
-               :value {:class (rand/nth [:qlog :qlog :qlog :store :store :state])
+               :value {:class (rand/nth classes)
                        :mode  (rand/nth [:bitflip :truncate])}})
             (gen/stagger interval)))
      :final-generator
-     (when needed? {:type :info, :f :start, :value :all})
+     (when needed? [{:type :info, :f :corrupt-heal, :value nil}
+                    {:type :info, :f :start, :value :all}])
      :perf #{{:name  "corrupt"
               :start #{:corrupt-file}
               :stop  #{}
@@ -421,70 +532,104 @@
               :color "#A0C8E9"}}}))
 
 ;; ---------------------------------------------------------------------------
-;; Membership (PLACEHOLDER: off by default, not wired).
-;;
-;; TODO(membership): another session is building the raft membership admin
-;; endpoints (add learner / promote / remove voter). Once their spec exists,
-;; implement MembershipAdmin over HTTP (one call per method, against the node
-;; given as `via`), pass it as :membership-admin, and enable the fault with
-;; --nemesis membership. Until then the package refuses to start.
-
-(defprotocol MembershipAdmin
-  "The raft membership admin surface the nemesis needs."
-  (members [admin test via]
-    "What `via` believes: {:voters #{node} :learners #{node}}.")
-  (add-learner! [admin test via node]
-    "Add `node` as a learner, asking `via` (the leader, or any node that
-    forwards).")
-  (promote! [admin test via node]
-    "Promote the learner `node` to voter.")
-  (remove-voter! [admin test via node]
-    "Remove the voter `node` from the membership."))
-
-(def unimplemented-admin
-  (reify MembershipAdmin
-    (members [_ _ _] (throw (ex-info "TODO(membership): admin endpoints not wired" {})))
-    (add-learner! [_ _ _ _] (throw (ex-info "TODO(membership): admin endpoints not wired" {})))
-    (promote! [_ _ _ _] (throw (ex-info "TODO(membership): admin endpoints not wired" {})))
-    (remove-voter! [_ _ _ _] (throw (ex-info "TODO(membership): admin endpoints not wired" {})))))
+;; Membership changes, through the admin API (jepsen.queen.membership).
 
 (defn membership-nemesis
-  "One cycle per :membership-cycle op:
-     1. remove-voter! a random voter R (never below 3 voters);
-     2. kill R, wipe its data directory, start it EMPTY (a node that rejoins
-        with its old id and an empty vote store is the D21 hazard: the new
-        admin surface must refuse it or give R a new identity - the test
-        records which);
-     3. add-learner! R; wait until its applied index reaches the leader's;
-     4. promote! R.
-  Every step's answer goes into the op. The view is re-read from the leader
-  before each step (members), so the nemesis tolerates a lost answer."
-  [db admin]
-  (reify
-    n/Reflection
-    (fs [_] #{:membership-cycle})
+  "  :member-cycle   one voter out and back (a follower, then the leader on
+                   alternate cycles): remove it, kill it, wipe its data
+                   directory, start it empty with QUEEN_RAFT_JOIN=true, add it
+                   as a learner, wait until it has caught up, promote it.
+     :member-double  two voters out (the cluster commits on three), then both
+                   back the same way. Only from five voters.
+     :member-heal    every node back as a voter.
+  A change the API refuses (409 no_quorum while a majority is not live, 409
+  in_flight while another change runs) is recorded and the cycle stops there:
+  refusing is the API's job. Each op's value holds every step with the
+  membership its answer carried."
+  []
+  (let [cycles (atom 0)]
+    (reify
+      n/Reflection
+      (fs [_] #{:member-cycle :member-double :member-heal})
 
-    n/Nemesis
-    (setup! [this test]
-      (when (= admin unimplemented-admin)
-        (throw (ex-info "TODO(membership): no MembershipAdmin implementation; leave the membership fault off"
-                        {})))
-      this)
+      n/Nemesis
+      (setup! [this test] this)
 
-    (invoke! [this test op]
-      ; TODO(membership): implement once MembershipAdmin exists; the steps
-      ; are the docstring's.
-      (assoc op :value :not-implemented))
+      (invoke! [this test op]
+        (assoc op :value
+               (case (:f op)
+                 :member-cycle  (qm/cycle! test (swap! cycles inc))
+                 :member-double (qm/double-cycle! test)
+                 :member-heal   (qm/heal! test))))
 
-    (teardown! [this test])))
+      (teardown! [this test]))))
 
 (defn membership-package
-  [{:keys [faults interval db membership-admin]}]
+  [{:keys [faults interval]}]
   (let [needed? (contains? faults :membership)]
-    {:nemesis   (when needed?
-                  (membership-nemesis db (or membership-admin unimplemented-admin)))
+    {:nemesis   (membership-nemesis)
      :generator (when needed?
-                  (->> (repeat {:type :info, :f :membership-cycle, :value nil})
-                       (gen/stagger (* 3 interval))))
-     :perf      #{{:name "membership", :fs #{:membership-cycle}, :start #{}, :stop #{}
+                  (->> (gen/mix [(repeat {:type :info, :f :member-cycle, :value nil})
+                                 (repeat {:type :info, :f :member-cycle, :value nil})
+                                 (repeat {:type :info, :f :member-double, :value nil})])
+                       (gen/stagger interval)))
+     :final-generator (when needed? {:type :info, :f :member-heal, :value nil})
+     :perf      #{{:name  "membership"
+                   :fs    #{:member-cycle :member-double :member-heal}
+                   :start #{}
+                   :stop  #{}
                    :color "#E9C0A0"}}}))
+
+;; ---------------------------------------------------------------------------
+;; What the fault ops did, counted (informational: always valid).
+
+(defn fault-summary-checker
+  "Counts the corrupt-file trials by class, outcome and remedy, and the
+  membership cycles by result, from the nemesis ops' values."
+  []
+  (reify checker/Checker
+    (check [this test history opts]
+      ; A nemesis op is :info twice; the completion is the one whose value
+      ; carries what happened.
+      (let [done    (->> history
+                         (filter #(and (= :nemesis (:process %)) (= :info (:type %))
+                                       (map? (:value %)))))
+            corrupt (filter #(and (= :corrupt-file (:f %)) (:outcome (:value %))) done)
+            heals   (filter #(and (= :corrupt-heal (:f %)) (contains? (:value %) :node)) done)
+            members (filter #(and (#{:member-cycle :member-double :member-heal} (:f %))
+                                  (some (:value %) [:removals :healed :skipped]))
+                            done)
+            rejoins (fn [v] (concat (:rejoins v) (:healed v)))]
+        {:valid? true
+         :corrupt-trials   (count corrupt)
+         :corrupt-outcomes (->> corrupt
+                                (map (comp (juxt :class :outcome :remedy) :value))
+                                frequencies
+                                (into (sorted-map-by #(compare (str %1) (str %2)))))
+         :corrupt-exit-rcs (frequencies (keep (comp :rc :value) corrupt))
+         :corrupt-late-exits (->> (concat corrupt heals)
+                                  (keep (comp :late-exit :value))
+                                  (mapv #(select-keys % [:why :started])))
+         :corrupt-late-rejoined (->> (concat corrupt heals)
+                                     (keep (comp :rejoin :late-exit :value))
+                                     (map :rejoined)
+                                     frequencies)
+         :corrupt-not-back (->> corrupt
+                                (keep (fn [op]
+                                        (let [v (:value op)]
+                                          (when (or (false? (:restored-up? v))
+                                                    (and (:rejoin v)
+                                                         (not (:rejoined (:rejoin v)))))
+                                            (select-keys v [:class :mode :file :outcome :remedy :why])))))
+                                vec)
+         :member-ops       (frequencies (map :f members))
+         :member-skipped   (frequencies (keep (comp :skipped :value) members))
+         :member-removals  (->> members
+                                (mapcat (comp :removals :value))
+                                (map (juxt :status :code))
+                                frequencies)
+         :member-rejoins   (->> members
+                                (mapcat (comp rejoins :value))
+                                (map :rejoined)
+                                frequencies)
+         :member-final     (:after (:value (last (filter #(= :member-heal (:f %)) members))))}))))

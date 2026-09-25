@@ -7,7 +7,8 @@
                     [independent :as independent]
                     [nemesis :as n]
                     [util :as util]]
-            [jepsen.queen [nemesis :as qn]]
+            [jepsen.queen [membership :as qm]
+                          [nemesis :as qn]]
             [jepsen.queen.workload [dedup :as dedup]
                                    [elle :as elle]
                                    [pipeline :as pipeline]
@@ -282,14 +283,62 @@
 ;; ---------------------------------------------------------------------------
 ;; Nemeses that need no cluster to check
 
-(deftest membership-placeholder
-  (testing "the membership fault refuses to start until an admin is wired"
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"TODO\(membership\)"
-                          (n/setup! (qn/membership-nemesis nil qn/unimplemented-admin)
-                                    test-map))))
+(deftest nemeses-offline
+  (testing "the membership nemesis offers its three ops, and is off unless asked for"
+    (is (= #{:member-cycle :member-double :member-heal}
+           (n/fs (qn/membership-nemesis))))
+    (is (nil? (:generator (qn/membership-package {:faults #{:kill}, :interval 10}))))
+    (is (some? (:generator (qn/membership-package {:faults #{:membership}, :interval 10})))))
+  (testing "a membership answer is recorded compactly"
+    (is (= {:leader 2, :term 7, :voters [1 2 3 5], :learners [4], :in-flight true}
+           (qm/summary {:leader 2, :term 7, :voters [5 3 2 1], :learners [4]
+                        :changeInFlight true, :members [{:nodeId 1}]}))))
   (testing "the restart nemesis offers its three ops"
     (is (= #{:restart :rolling-restart :restart-heal}
            (n/fs (qn/graceful-restart-nemesis)))))
   (testing "the restart package is off unless asked for"
     (is (nil? (:generator (qn/graceful-restart-package {:faults #{:kill}, :interval 10}))))
-    (is (some? (:generator (qn/graceful-restart-package {:faults #{:restart}, :interval 10}))))))
+    (is (some? (:generator (qn/graceful-restart-package {:faults #{:restart}, :interval 10})))))
+  (testing "the corrupt package draws from the classes asked for"
+    (let [g (:generator (qn/corrupt-package {:faults #{:corrupt}, :interval 1
+                                             :corrupt-classes [:store]}))]
+      (is (some? g))))
+  (testing "fault outcomes are counted"
+    (let [r (checker/check
+              (qn/fault-summary-checker) test-map
+              (hist [{:process :nemesis, :type :info, :f :corrupt-file, :value {:class :store}}
+                     {:process :nemesis, :type :info, :f :corrupt-file
+                      :value {:class :store, :outcome :refused, :remedy :restore
+                              :restored-up? true}}
+                     {:process :nemesis, :type :info, :f :corrupt-file, :value nil}
+                     {:process :nemesis, :type :info, :f :corrupt-file
+                      :value {:class :store, :outcome :runtime-exit, :remedy :rejoin
+                              :rejoin {:rejoined false}}}
+                     {:process :nemesis, :type :info, :f :member-cycle, :value nil}
+                     {:process :nemesis, :type :info, :f :member-cycle
+                      :value {:removals [{:status 200, :removed true}]
+                              :rejoins  [{:rejoined true}]}}
+                     {:process :nemesis, :type :info, :f :member-double, :value nil}
+                     {:process :nemesis, :type :info, :f :member-double
+                      :value {:removals [{:status 200, :removed true}
+                                         {:status 409, :code "no_quorum"}]
+                              :rejoins  [{:rejoined true}]}}
+                     {:process :nemesis, :type :info, :f :member-heal, :value nil}
+                     {:process :nemesis, :type :info, :f :member-heal
+                      :value {:healed [], :after {:voters [1 2 3 4 5]}}}
+                     {:process :nemesis, :type :info, :f :corrupt-heal, :value nil}
+                     {:process :nemesis, :type :info, :f :corrupt-heal
+                      :value {:node "n3", :late-exit {:why "FATAL: raft store: CORRUPT"
+                                                      :rejoin {:rejoined true}}}}])
+              {})]
+      (println (pr-str r))
+      (is (true? (:valid? r)))
+      (is (= 2 (:corrupt-trials r)))
+      (is (= {[:store :refused :restore] 1, [:store :runtime-exit :rejoin] 1}
+             (into {} (:corrupt-outcomes r))))
+      (is (= 1 (count (:corrupt-not-back r))))
+      (is (= {[200 nil] 2, [409 "no_quorum"] 1} (:member-removals r)))
+      (is (= {true 2} (:member-rejoins r)))
+      (is (= {:voters [1 2 3 4 5]} (:member-final r)))
+      (is (= [{:why "FATAL: raft store: CORRUPT"}] (:corrupt-late-exits r)))
+      (is (= {true 1} (:corrupt-late-rejoined r))))))

@@ -98,6 +98,17 @@
        "  echo \"run.sh: exit 75 = load a received snapshot; restarting\"\n"
        "done\n"))
 
+(defn write-run-sh!
+  "Writes this node's run.sh; `extra` env entries go on top of the test's
+  (a node that rejoins empty gets QUEEN_RAFT_JOIN=true, and keeps it: the
+  flag only matters to a node with an empty data directory)."
+  ([test node]
+   (write-run-sh! test node nil))
+  ([test node extra]
+   (c/su
+     (cu/write-file! (run-sh-script (update test :extra-env merge extra) node) run-sh)
+     (c/exec :chmod :+x run-sh))))
+
 (def ^:private local-md5
   (memoize
     (fn [path]
@@ -139,6 +150,15 @@
       (do (c/exec :bash :-c (str "setsid nohup " run-sh " >> " log-file
                                  " 2>&1 < /dev/null &"))
           :started))))
+
+(defn wipe-data!
+  "Deletes everything under the data and buffer directories. The directories
+  stay (a lazyfs data directory stays mounted)."
+  []
+  (c/su
+    (c/exec :mkdir :-p data-dir buf-dir)
+    (c/exec :find data-dir :-mindepth 1 :-delete)
+    (c/exec :find buf-dir :-mindepth 1 :-delete)))
 
 (defn lazyfs
   "The lazyfs map for this test's data directory, or nil without --lazyfs."
@@ -290,9 +310,8 @@
       (disable-ntp!)
       (c/exec :mkdir :-p dir data-dir buf-dir)
       (let [md5 (install-binary! test)]
-        (info node "queen md5" md5))
-      (cu/write-file! (run-sh-script test node) run-sh)
-      (c/exec :chmod :+x run-sh))
+        (info node "queen md5" md5)))
+    (write-run-sh! test node)
     ; QUEEN_RAFT_DIR on lazyfs: the queue logs, the LMDB store (lock.mdb is a
     ; shared writable mmap; it works on lazyfs), the raft state files.
     (when-let [lfs (lazyfs test)]

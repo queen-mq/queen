@@ -122,6 +122,10 @@
          (str "_t=" (->> (:db-targets opts) (map name) (str/join ","))))
        (when (:txn-sends? opts) "_txn")
        (when (= :leader (:kv-route opts)) "_kv-leader")
+       (when-not (:kv-lift opts) "_kv-default-limits")
+       (when (some #{:corrupt} (:nemesis opts))
+         (str "_c=" (->> (:corrupt-classes opts) distinct (map name) (str/join ","))
+              "_" (name (:corrupt-remedy opts))))
        (when (:lazyfs opts) "_lazyfs")
        (when (:disk-hog opts) "_hog")
        "_offload=" (if (:offload opts) "on" "off")
@@ -146,7 +150,8 @@
                   :kill      {:targets (:db-targets opts)}
                   :clock     {:targets (:db-targets opts)}
                   :interval  (:nemesis-interval opts)
-                  :phase     (:composite-phase opts)}
+                  :phase     (:composite-phase opts)
+                  :corrupt-classes (:corrupt-classes opts)}
         ; Only the fault families in use: the packet and file-corruption
         ; packages are not part of P1, and the clock package's setup steps
         ; every node's clock, so it joins only when clock faults are asked for.
@@ -177,8 +182,6 @@
                      (contains? (:faults nopts) :restart)
                      (conj (qn/graceful-restart-package nopts))
 
-                     ; TODO(membership): off until the admin endpoints exist
-                     ; (the package refuses to set up without an implementation).
                      (contains? (:faults nopts) :membership)
                      (conj (qn/membership-package nopts))))
         fg       (:final-generator workload)]
@@ -194,8 +197,9 @@
             :ww-deps     true
             :raft-token  (str (random-uuid))
             ; The workload's own node settings (the KV workloads lift the KV
-            ; rate ladder), then --env on top.
-            :extra-env   (merge (:db-env workload) (:env opts))
+            ; rate ladder, unless --no-kv-lift), then --env on top.
+            :extra-env   (merge (when (:kv-lift opts) (:db-env workload))
+                                (:env opts))
             :queue-names (mapv #(str "jepsen-" %) (range (:queues opts)))
             :client-timeout-ms (+ (:server-timeout-ms opts) 5000)
             :generator
@@ -219,6 +223,7 @@
                                         #"panicked at|NA-QLOG-I1|poison"
                                         "queen.log")
                             :lazyfs   (lazyfs-checker)
+                            :faults   (qn/fault-summary-checker)
                             :workload (:checker workload)})
             :perf-opts   {:nemeses (:perf nemesis)}})))
 
@@ -242,6 +247,20 @@
     :default "256k"]
 
    [nil "--corrupt-node NODE" "The one node the corrupt nemesis damages (default: random)."]
+
+   [nil "--corrupt-classes CLASSES" "Comma-separated file classes the corrupt nemesis draws from (repeats weigh): qlog, store (data.mdb), state, seg."
+    :default qn/default-corrupt-classes
+    :parse-fn parse-comma-kws
+    :validate [(partial every? #{:qlog :store :state :seg}) "qlog, store, state or seg"]]
+
+   [nil "--corrupt-remedy REMEDY" "What a node that refused its damage gets: restore (the copy taken before the damage), rejoin (removed, wiped, rejoins through the membership API) or mix."
+    :default :mix
+    :parse-fn keyword
+    :validate [#{:restore :rejoin :mix} "restore, rejoin or mix"]]
+
+   [nil "--corrupt-watch SECONDS" "How long the corrupt nemesis watches a node that booted on damage for a runtime exit."
+    :default 15
+    :parse-fn read-string]
 
    [nil "--dedup-index MODE" "QUEEN_RAFT_DEDUP_INDEX: txns (the product default), rows or segment. P0/P1 ran segment, as qc.sh did."
     :default "txns"]
@@ -276,7 +295,7 @@
     :default 256
     :parse-fn parse-long]
 
-   [nil "--nemesis FAULTS" "Comma-separated faults: pause,kill,partition,clock,pause-kill,part-kill,bridge,leader-deaf,snap-kill,corrupt,restart (graceful), membership (TODO: not wired), or none/all."
+   [nil "--nemesis FAULTS" "Comma-separated faults: pause,kill,partition,clock,pause-kill,part-kill,bridge,leader-deaf,snap-kill,corrupt,restart (graceful), membership (remove, wipe, rejoin through the admin API), or none/all."
     :default #{}
     :parse-fn parse-nemesis-spec
     :validate [(partial every? all-faults)
@@ -318,6 +337,9 @@
     :default :spread
     :parse-fn keyword
     :validate [#{:spread :leader} "spread or leader"]]
+
+   [nil "--[no-]kv-lift" "KV workloads: lift the per-tenant KV rate limits on the nodes (default); --no-kv-lift keeps the product's QUEEN_KV_* defaults."
+    :default true]
 
    [nil "--ops-per-key N" "register workload: operations per key."
     :default 200
