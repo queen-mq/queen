@@ -355,6 +355,9 @@ pub struct Cell {
     /// the environment default (on), `Some(v)` forces the bounded/ baseline claim
     /// path so the differential A/B runs both in one process.
     claim_from_ring: Option<bool>,
+    /// The planner's `PlanConfig::term_start_us` (a leader's term began then):
+    /// `None`, as in every test that does not set it.
+    term_start: Option<i64>,
 }
 
 /// What one [`Cell::run`] produced: the per-command results in input order, and
@@ -389,6 +392,7 @@ impl Cell {
             wall: BASE_US,
             front: DedupFront::disabled(),
             claim_from_ring: None,
+            term_start: None,
         }
     }
 
@@ -408,6 +412,12 @@ impl Cell {
     /// The cell's persistent dedup front, for asserting on its stats.
     pub fn front(&self) -> &DedupFront {
         &self.front
+    }
+
+    /// Plan as a leader whose term began at `t` (`PlanConfig::term_start_us`).
+    pub fn set_term_start(&mut self, t: Option<i64>) -> &mut Cell {
+        self.term_start = t;
+        self
     }
 
     /// Advance the wall clock the planner stamps from.
@@ -492,7 +502,16 @@ impl Cell {
                 let now = ov.plan_now(&committed, wall).expect("plan now");
                 ov.mark_cycle_start();
                 let planner =
-                    Planner::new(committed, now, PlanConfig::default(), &self.front, None);
+                    Planner::new(
+                    committed,
+                    now,
+                    PlanConfig {
+                        term_start_us: self.term_start,
+                        ..PlanConfig::default()
+                    },
+                    &self.front,
+                    None,
+                );
                 let (effects, report) = planner.plan_timer_fire(&mut ov, fire).expect("fire");
                 Ok((report, effects))
             })
@@ -541,7 +560,16 @@ impl Cell {
                 let mut ov = Overlay::new(r.next_pid()?, r.kv_version_next()?);
                 ov.mark_cycle_start();
                 let mut planner =
-                    Planner::new(committed, now, PlanConfig::default(), &self.front, None);
+                    Planner::new(
+                    committed,
+                    now,
+                    PlanConfig {
+                        term_start_us: self.term_start,
+                        ..PlanConfig::default()
+                    },
+                    &self.front,
+                    None,
+                );
                 if let Some(v) = self.claim_from_ring {
                     planner.set_claim_from_ring(v);
                 }

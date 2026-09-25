@@ -156,7 +156,21 @@ pub struct PlanConfig {
     /// sets the product default (`txns`) and keeps `record` (apply side) in
     /// step via [`dedup::set_record_index_mode`].
     pub index_mode: IndexMode,
+    /// `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (default 500): a lease granted before
+    /// this leader's term ([`PlanConfig::term_start_us`]) was timed by another
+    /// node's clock, so it is held this much past its expiry before its batch
+    /// goes to another worker. A leader whose clock runs ahead of the
+    /// grantor's would otherwise end the lease early (Jepsen P8 W2 under
+    /// restarts: node clocks 576 ms apart, two workers holding one message
+    /// for 50-289 ms). 0 = off.
+    pub lease_skew_grace_us: i64,
+    /// The RSM clock when this leader's term began planning, set per cycle by
+    /// the batcher; `None` (no grace) outside a leader's term.
+    pub term_start_us: Option<i64>,
 }
+
+/// The default of [`PlanConfig::lease_skew_grace_us`].
+pub const LEASE_SKEW_GRACE_US_DEFAULT: i64 = 500_000;
 
 impl Default for PlanConfig {
     fn default() -> PlanConfig {
@@ -165,6 +179,8 @@ impl Default for PlanConfig {
             plan_budget_ms: PLAN_BUDGET_MS_DEFAULT,
             slow_command_ms: SLOW_COMMAND_MS_DEFAULT,
             index_mode: IndexMode::Rows,
+            lease_skew_grace_us: LEASE_SKEW_GRACE_US_DEFAULT,
+            term_start_us: None,
         }
     }
 }

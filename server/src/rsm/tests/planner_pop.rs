@@ -580,3 +580,43 @@ fn mode(m: &str) -> SubIntent {
         now: false,
     }
 }
+
+/// Jepsen P8, W2 under graceful restarts: node clocks up to 576 ms apart, and
+/// twice two workers held one message at once (50-289 ms). A lease granted
+/// before this leader's term was timed by another node's clock: it is held
+/// `PlanConfig::lease_skew_grace_us` (500 ms) past its expiry before another
+/// worker gets its batch.
+#[test]
+fn a_lease_from_an_earlier_term_is_held_for_the_clock_skew_grace() {
+    let mut c = Cell::new("pop-skew-grace");
+    c.run(&[push(1, "q", "p0", &["m1"])]);
+    c.advance(1000);
+    let first = c.run(&[pop_wildcard_with(2, "q", "g", "wa", |p| p.lease_seconds = 1)]);
+    assert_eq!(only(&first.outcome(0)).worker, "wa", "wa holds m1");
+    // Another leader takes over 100 ms later; 1.2 s after the grant the
+    // lease has run out by this leader's clock, but it came from the
+    // earlier term: still held.
+    let granted = c.now();
+    c.set_term_start(Some(granted + 100_000));
+    c.advance(1_200_000);
+    let early = c.run(&[pop_wildcard(3, "q", "g", "wb")]);
+    assert!(claims(&early.outcome(0)).is_empty(), "wb got m1 inside the grace");
+    // Past expiry + 500 ms: the batch is redelivered.
+    c.advance(400_000);
+    let late = c.run(&[pop_wildcard(4, "q", "g", "wb")]);
+    assert_eq!(only(&late.outcome(0)).worker, "wb", "wb gets m1 after the grace");
+}
+
+/// A lease this leader's own term granted ends on time: no grace.
+#[test]
+fn a_lease_this_term_granted_ends_on_time() {
+    let mut c = Cell::new("pop-skew-own");
+    c.run(&[push(1, "q", "p0", &["m1"])]);
+    c.advance(1000);
+    c.set_term_start(Some(c.now() - 1));
+    let first = c.run(&[pop_wildcard_with(2, "q", "g", "wa", |p| p.lease_seconds = 1)]);
+    assert_eq!(only(&first.outcome(0)).worker, "wa");
+    c.advance(1_200_000);
+    let next = c.run(&[pop_wildcard(3, "q", "g", "wb")]);
+    assert_eq!(only(&next.outcome(0)).worker, "wb", "redelivered on time");
+}

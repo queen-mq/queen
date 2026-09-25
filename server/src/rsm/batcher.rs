@@ -309,6 +309,12 @@ impl BatcherConfig {
                 plan_budget_ms: num("QUEEN_RAFT_PLAN_MAX_MS", d.plan.plan_budget_ms),
                 slow_command_ms: num("QUEEN_RAFT_SLOW_COMMAND_MS", d.plan.slow_command_ms),
                 index_mode,
+                // 0 turns it off, so not `num` (which ignores 0).
+                lease_skew_grace_us: std::env::var("QUEEN_RAFT_MAX_CLOCK_SKEW_MS")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<i64>().ok())
+                    .map_or(d.plan.lease_skew_grace_us, |ms| ms.max(0) * 1000),
+                term_start_us: None,
             },
             driver_notify: flag("QUEEN_RAFT_DRIVER_NOTIFY", d.driver_notify),
             push_priority: flag("QUEEN_RAFT_PUSH_PRIORITY", d.push_priority),
@@ -1700,7 +1706,11 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             quiesce_rx: self.quiesce_rx,
             quiescing: None,
             realign_at: None,
+            term_start_us: None,
         };
+        if role.is_leader() {
+            st.term_start_us = Some(st.rsm_now());
+        }
 
         loop {
             // Take every command that has already arrived BEFORE planning. The
@@ -1919,6 +1929,9 @@ struct RunState<S: Store, R: Replicator> {
     /// An entry landed at another index than planned: planning resumes, from
     /// the log's end, once apply reaches this index ([`RunState::check_hold`]).
     realign_at: Option<u64>,
+    /// The RSM clock when this node's current leadership began planning
+    /// ([`crate::rsm::planner::PlanConfig::term_start_us`]).
+    term_start_us: Option<i64>,
 }
 
 /// The next [`QuiesceReq`], or never when no channel was handed in.
@@ -2238,7 +2251,8 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         let expire_window_us = expire.then(|| self.cfg.request_id_window_s as i64 * 1_000_000);
         let kv_sweep_limit = kv_sweep.then_some(self.cfg.kv_sweep_limit);
         let store = self.store.clone();
-        let cfg = self.cfg.plan.clone();
+        let mut cfg = self.cfg.plan.clone();
+        cfg.term_start_us = self.term_start_us;
         let front = self.front.clone();
         let reader = self.reader.clone();
         let qlog_reader = self.qlog_reader.clone();
@@ -2846,6 +2860,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 if self.paused {
                     self.realign_at = None;
                     self.planning_term = Some(term);
+                    self.term_start_us = Some(self.rsm_now());
                     // I13: a new leader plans only after applying the first
                     // entry of its own term. On a single node with the
                     // LocalReplicator the term never changes, so this is the
@@ -2903,6 +2918,13 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 self.invalidate_kept();
             }
         }
+    }
+
+    /// The RSM clock now: this node's wall clock, never behind the last
+    /// applied entry's (D5).
+    fn rsm_now(&self) -> i64 {
+        let last = self.store.read(|r| r.last_now_us()).unwrap_or(0);
+        now_micros().max(last)
     }
 
     /// A membership change asks to pause ([`QuiesceReq`]).

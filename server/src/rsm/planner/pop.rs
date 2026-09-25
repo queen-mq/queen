@@ -40,6 +40,7 @@ use crate::rsm::dedup::IndexMode;
 use crate::rsm::dedup::TxnsRow;
 use crate::rsm::effect::{Effect, GroupMeta, Pid, QueueConfig, SubscriptionMode};
 use crate::rsm::entry::{Outcome, PopClaim, PopOutcome};
+use crate::rsm::effect::CursorRow;
 use crate::rsm::store::rows::{cursor_fresh, lease_live, GroupRow};
 use crate::rsm::store::{keys, Keyspace, Reads, StoreError, TypedReads};
 
@@ -215,6 +216,24 @@ fn pop_expired(cmd: &PopCommand, now_us: i64) -> bool {
 }
 
 impl<'a, R: Reads + ?Sized> Planner<'a, R> {
+    /// A lease granted before this leader's term — timed by ANOTHER node's
+    /// clock — is still held for [`super::PlanConfig::lease_skew_grace_us`]
+    /// past its expiry. RSM time only moves forward, so every lease an earlier
+    /// term granted was acquired before this term's first `now`, and every
+    /// lease this term grants after it; the grace covers exactly the case
+    /// where this leader's clock runs ahead of the grantor's.
+    fn lease_held_across_leaders(&self, c: &CursorRow, now: i64) -> bool {
+        let grace = self.cfg.lease_skew_grace_us;
+        let Some(term_start) = self.cfg.term_start_us else {
+            return false;
+        };
+        grace > 0
+            && c.worker.is_some()
+            && c.lease_acquired_at_us.is_some_and(|a| a < term_start)
+            && c.lease_expires_at_us
+                .is_some_and(|e: i64| e.saturating_add(grace) > now)
+    }
+
     /// A pinned pop of one named partition (`log_pop_specific_v1`). An unknown
     /// partition answers EMPTY and is never provisioned — only a push
     /// materialises one.
@@ -775,7 +794,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         let first_contact = existing.is_none();
         let mut cur = match existing {
             Some(c) => {
-                if lease_live(&c, now) {
+                if lease_live(&c, now) || self.lease_held_across_leaders(&c, now) {
                     // Held by a live lease (this worker or another): skip.
                     inc(&C.claim_none_leased, 1);
                     return Ok(None);
