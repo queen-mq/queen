@@ -385,6 +385,9 @@ struct WatchOpts {
     /// The member this group would rather have lead ([`ClusterConfig::for_group`]):
     /// a leader that is not it hands leadership over once it is caught up.
     preferred: Option<NodeId>,
+    /// A leader with no quorum acknowledgement for this long hands its
+    /// leadership away ([`quorum_step`]); zero: never.
+    quorum_loss: Duration,
 }
 
 /// How a node runs beyond its [`OpenConfig`]. [`RaftOpts::from_env`] is the
@@ -428,6 +431,7 @@ impl WatchOpts {
             keep: o.log_keep,
             batch: o.purge_batch.max(1),
             preferred: None,
+            quorum_loss: Duration::ZERO,
         }
     }
 }
@@ -528,6 +532,7 @@ async fn watch<S: Store + 'static>(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut seen: HashMap<NodeId, (Option<u64>, Instant)> = HashMap::new();
     let mut last_handoff: Option<Instant> = None;
+    let mut last_quorum_step: Option<Instant> = None;
     loop {
         let m = metrics.borrow_watched().clone();
         shared.members.note(&m);
@@ -601,9 +606,122 @@ async fn watch<S: Store + 'static>(
                     shared.members.follower_floor(m.id, opts.hold).unwrap_or(0)
                 };
                 purge_step(&raft, &shared, &m, purge_floor, &opts).await;
-                prefer_step(&raft, &m, &opts, &mut last_handoff).await;
+                prefer_step(&raft, &shared.members, &m, &opts, &mut last_handoff).await;
+                quorum_step(&raft, &shared.members, &m, &opts, &mut last_quorum_step).await;
             }
         }
+    }
+}
+
+/// A node that handed its leadership away is not handed it back for this long:
+/// it is leaving (the binary hands off on SIGTERM,
+/// [`RaftReplicator::hand_off_leadership`]), and leading again would end in an
+/// election when it exits. Longer than a drain; the node that comes back from
+/// the restart is preferred again once it has passed.
+const HANDED_OFF_HOLD: Duration = Duration::from_secs(60);
+
+/// A member is handed leadership only if it acknowledged an RPC this recently
+/// (a cluster heartbeats every 100 ms). The leader keeps a member's matched
+/// index after the member stops, and a transfer to a stopped node leaves the
+/// group without a leader until the election timeout.
+const HAND_TO_ACKED_WITHIN: Duration = Duration::from_secs(1);
+
+/// How often a hand-off asks again while no other node has taken over: a
+/// target a few entries behind ignores the request, and the leader takes no
+/// writes meanwhile, so it has them by the next one.
+const HAND_OFF_RETRY: Duration = Duration::from_millis(100);
+
+/// Whether the leader's metrics show `id` acknowledging an RPC within `within`.
+fn acked_within(m: &openraft::RaftMetrics<TypeConfig>, id: NodeId, within: Duration) -> bool {
+    matches!(
+        m.heartbeat.as_ref().and_then(|h| h.get(&id)),
+        Some(Some(t)) if openraft::Instant::elapsed(&**t) < within
+    )
+}
+
+/// The voter, other than this leader, with the most of its log: among those
+/// that acknowledged an RPC within [`HAND_TO_ACKED_WITHIN`] and did not just
+/// hand leadership away themselves.
+fn most_caught_up(
+    m: &openraft::RaftMetrics<TypeConfig>,
+    members: &members::MembersState,
+) -> Option<NodeId> {
+    let voters: std::collections::BTreeSet<NodeId> =
+        m.membership_config.membership().voter_ids().collect();
+    m.replication
+        .as_ref()?
+        .iter()
+        .filter(|(id, _)| {
+            **id != m.id
+                && voters.contains(*id)
+                && acked_within(m, **id, HAND_TO_ACKED_WITHIN)
+                && !members.handed_off_within(**id, HANDED_OFF_HOLD)
+        })
+        .max_by_key(|(_, matched)| matched.as_ref().map(|l| l.index))
+        .map(|(id, _)| *id)
+}
+
+/// The voter, other than this leader, with the most of its log, heard from or
+/// not.
+fn furthest_voter(m: &openraft::RaftMetrics<TypeConfig>) -> Option<NodeId> {
+    let rep = m.replication.as_ref();
+    m.membership_config
+        .membership()
+        .voter_ids()
+        .filter(|id| *id != m.id)
+        .max_by_key(|id| {
+            rep.and_then(|r| r.get(id))
+                .and_then(|l| l.as_ref())
+                .map(|l| l.index)
+        })
+}
+
+/// openraft keeps a leader in office for as long as its followers hear it,
+/// whether or not their answers reach it: a leader that can send but not
+/// receive commits nothing, and the followers, still receiving its appends,
+/// never elect another (openraft GH#2080; Jepsen P5 `leader-deaf`: every write
+/// stalled for the whole fault, 25 s in `repro/leader-deaf-stall.sh`). A leader
+/// with no quorum acknowledgement for [`WatchOpts::quorum_loss`] hands its
+/// leadership to the most caught-up voter: the transfer travels the direction
+/// that still works, and the voters elect the target. At most once per
+/// `quorum_loss`; a leader cut off both ways only stops heartbeating, and the
+/// other side elects as it would anyway.
+async fn quorum_step<S: Store + 'static>(
+    raft: &RaftHandle<S>,
+    members: &members::MembersState,
+    m: &openraft::RaftMetrics<TypeConfig>,
+    opts: &WatchOpts,
+    last: &mut Option<Instant>,
+) {
+    if opts.quorum_loss.is_zero()
+        || m.state != ServerState::Leader
+        || m.membership_config.membership().voter_ids().count() < 2
+        || last.is_some_and(|t| t.elapsed() < opts.quorum_loss)
+    {
+        return;
+    }
+    let silent = match m.last_quorum_acked.as_ref() {
+        Some(t) => openraft::Instant::elapsed(&**t),
+        None => match members.leading_for(m.current_term) {
+            Some(d) => d,
+            None => return,
+        },
+    };
+    if silent < opts.quorum_loss {
+        return;
+    }
+    let Some(to) = most_caught_up(m, members).or_else(|| furthest_voter(m)) else {
+        return;
+    };
+    *last = Some(Instant::now());
+    match raft.trigger().transfer_leader(to).await {
+        Ok(()) => tracing::warn!(
+            target: "rsm",
+            to,
+            silent_ms = silent.as_millis() as u64,
+            "raft: no quorum acknowledgement: handing leadership to another voter",
+        ),
+        Err(e) => tracing::warn!(target: "rsm", to, error = %e, "raft: quorum-loss hand-off"),
     }
 }
 
@@ -611,9 +729,11 @@ async fn watch<S: Store + 'static>(
 /// that is not its group's preferred member hands leadership to it once that
 /// member has every entry but a few (at most one attempt per 10 s, so a
 /// preferred node that keeps failing does not keep the group without a
-/// leader).
+/// leader). Never to a member that stopped answering, or that just handed
+/// leadership away.
 async fn prefer_step<S: Store + 'static>(
     raft: &RaftHandle<S>,
+    members: &members::MembersState,
     m: &openraft::RaftMetrics<TypeConfig>,
     opts: &WatchOpts,
     last: &mut Option<Instant>,
@@ -625,6 +745,11 @@ async fn prefer_step<S: Store + 'static>(
         return;
     }
     if last.is_some_and(|t| t.elapsed() < Duration::from_secs(10)) {
+        return;
+    }
+    if !acked_within(m, pref, HAND_TO_ACKED_WITHIN)
+        || members.handed_off_within(pref, HANDED_OFF_HOLD)
+    {
         return;
     }
     let Some(rep) = &m.replication else {
@@ -883,6 +1008,10 @@ impl<S: Store + 'static> RaftReplicator<S> {
             Ok(c) => c,
             Err(e) => return Err(fail(e, None, &mut writer_join, &mut apply_join, &log)),
         };
+        // Past the leader lease (`election_timeout_max`) and one more election
+        // timeout: 3 s by default.
+        let quorum_loss =
+            Duration::from_millis(config.election_timeout_max + config.election_timeout_min);
         let rt = match tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("queen-raft")
@@ -999,6 +1128,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
             role_tx,
             WatchOpts {
                 preferred: cluster.as_ref().and_then(|c| c.preferred_leader),
+                quorum_loss,
                 ..WatchOpts::of(&opts)
             },
         ));
@@ -1347,6 +1477,71 @@ impl<S: Store + 'static> RaftReplicator<S> {
     /// The per-queue-log reader: pop payloads and the planner's dedup reads.
     pub fn qlog_reader(&self) -> Option<QLogReader> {
         Some(self.qlog_reader.clone())
+    }
+
+    /// On the way out (the binary's SIGTERM): a leader hands its leadership to
+    /// the most caught-up live voter and waits, up to `wait`, until another
+    /// node leads — so stopping the leader (a rolling restart) costs the
+    /// cluster one transfer instead of an election timeout without a leader
+    /// (1-2 s). This node also stops campaigning, for good: leading again would
+    /// end in an election when it exits. Returns the new leader; `None` when
+    /// this node did not lead, had no live voter to hand to, or no other node
+    /// took over in time (the cluster then elects as it would have anyway).
+    pub async fn hand_off_leadership(&self, wait: Duration) -> Option<NodeId> {
+        let raft = self.raft.as_ref()?;
+        raft.runtime_config().elect(false);
+        let me = self.shared.node_id;
+        let mut metrics = raft.metrics();
+        {
+            let m = metrics.borrow_watched();
+            if m.state != ServerState::Leader
+                || m.membership_config.membership().voter_ids().count() < 2
+            {
+                return None;
+            }
+        }
+        let t0 = Instant::now();
+        let mut asked: Option<(NodeId, Instant)> = None;
+        loop {
+            let m = metrics.borrow_watched().clone();
+            if let Some(l) = m.current_leader.filter(|l| *l != me) {
+                tracing::info!(
+                    target: "rsm",
+                    to = l,
+                    ms = t0.elapsed().as_millis() as u64,
+                    "raft: leadership handed off"
+                );
+                return Some(l);
+            }
+            if m.state == ServerState::Leader
+                && asked.is_none_or(|(_, at)| at.elapsed() >= HAND_OFF_RETRY)
+            {
+                let Some(to) = most_caught_up(&m, &self.shared.members) else {
+                    tracing::warn!(target: "rsm", "raft: no live voter to hand leadership to");
+                    return None;
+                };
+                if let Err(e) = raft.trigger().transfer_leader(to).await {
+                    tracing::warn!(target: "rsm", to, error = %e, "raft: leadership hand-off");
+                    return None;
+                }
+                asked = Some((to, Instant::now()));
+            }
+            let left = wait.saturating_sub(t0.elapsed());
+            if left.is_zero() {
+                tracing::warn!(
+                    target: "rsm",
+                    to = ?asked.map(|(to, _)| to),
+                    ms = wait.as_millis() as u64,
+                    "raft: no other node took leadership over in time"
+                );
+                return None;
+            }
+            if let Ok(Err(_)) =
+                tokio::time::timeout(left.min(HAND_OFF_RETRY), metrics.changed()).await
+            {
+                return None;
+            }
+        }
     }
 
     /// Stop the node and return the apply thread's stats and the store handle.

@@ -63,6 +63,9 @@ pub(crate) struct MembersState {
     /// arrived. Parsed only when read ([`MembersState::members`]): the append
     /// path reads the term and stores bytes, nothing else.
     received: Mutex<Option<(u64, Vec<u8>, Instant)>>,
+    /// The last leader that handed its leadership to another member (a
+    /// `TransferLeader` this node received), and when.
+    handed_off: Mutex<Option<(NodeId, Instant)>>,
 }
 
 /// How long ago the leader last heard from one member, in milliseconds.
@@ -201,6 +204,30 @@ impl MembersState {
             }
         }
         Some(floor)
+    }
+
+    /// How long this node has led `term`; `None` when it does not lead it.
+    pub(crate) fn leading_for(&self, term: u64) -> Option<Duration> {
+        self.leading_since
+            .lock()
+            .expect("leading_since")
+            .filter(|(t, _)| *t == term)
+            .map(|(_, at)| at.elapsed())
+    }
+
+    /// A leader handed its leadership away. openraft sends the transfer to
+    /// every voter, so whoever leads next knows.
+    pub(crate) fn note_hand_off(&self, from: NodeId) {
+        *self.handed_off.lock().expect("handed_off") = Some((from, Instant::now()));
+    }
+
+    /// Whether `node` was the last leader to hand its leadership away, within
+    /// `window`: a node leaving (SIGTERM hands off first) is not handed it back.
+    pub(crate) fn handed_off_within(&self, node: NodeId, window: Duration) -> bool {
+        self.handed_off
+            .lock()
+            .expect("handed_off")
+            .is_some_and(|(n, at)| n == node && at.elapsed() < window)
     }
 
     /// The PREVIOUS leader, as this node last heard from it while following:
@@ -427,5 +454,21 @@ mod tests {
         let newer = published(3, 10, Duration::ZERO).header().unwrap();
         follower.receive(newer.as_bytes());
         assert_eq!(follower.received().unwrap().0.leader, 3);
+    }
+
+    /// The node that handed leadership away is remembered for the window, and
+    /// only the last one.
+    #[test]
+    fn a_hand_off_is_remembered_for_its_window() {
+        let s = MembersState::default();
+        let minute = Duration::from_secs(60);
+        assert!(!s.handed_off_within(1, minute));
+        s.note_hand_off(1);
+        assert!(s.handed_off_within(1, minute));
+        assert!(!s.handed_off_within(2, minute));
+        assert!(!s.handed_off_within(1, Duration::ZERO));
+        s.note_hand_off(2);
+        assert!(!s.handed_off_within(1, minute));
+        assert!(s.handed_off_within(2, minute));
     }
 }

@@ -14,6 +14,10 @@
 //! - **snapshot** ([`a_follower_behind_the_purge_point_gets_a_snapshot`]): a
 //!   follower behind the leader's purge point receives a snapshot, restarts on
 //!   it, and converges.
+//! - **hand-off** ([`a_leader_on_its_way_out_hands_leadership_to_a_live_peer`],
+//!   [`a_node_that_handed_off_is_not_handed_leadership_back`]): a leader on its
+//!   way out (SIGTERM) hands leadership to a live peer faster than an election
+//!   could elect one, and is not handed it back while it drains.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -127,13 +131,22 @@ fn test_opts() -> RaftOpts {
 
 /// Open node `id` over `dir`, as the binary does: a pending snapshot first.
 fn open_node(dir: &Path, id: u64, ports: &[u16], opts: RaftOpts) -> RaftReplicator<HeedStore> {
+    open_node_in(dir, id, cluster_config(ports, id), opts)
+}
+
+fn open_node_in(
+    dir: &Path,
+    id: u64,
+    cluster: ClusterConfig,
+    opts: RaftOpts,
+) -> RaftReplicator<HeedStore> {
     let cfg = node_config(dir, id);
     snapshot::apply_pending(dir, qlog_options(&cfg)).expect("apply a pending snapshot");
     let store = Arc::new(HeedStore::open(&dir.join("store"), &store_opts()).expect("store"));
     RaftReplicator::open_with(
         store,
         cfg,
-        Some(cluster_config(ports, id)),
+        Some(cluster),
         Arc::new(NoWaker),
         Arc::new(SystemClock),
         opts,
@@ -147,13 +160,24 @@ fn open_all(
     ports: &[u16],
     opts: &[RaftOpts],
 ) -> Vec<Option<RaftReplicator<HeedStore>>> {
+    open_all_in(dirs, opts, |id| cluster_config(ports, id))
+}
+
+/// [`open_all`], node `id` with the cluster configuration `cluster(id)`.
+fn open_all_in(
+    dirs: &[PathBuf],
+    opts: &[RaftOpts],
+    cluster: impl Fn(u64) -> ClusterConfig + Sync,
+) -> Vec<Option<RaftReplicator<HeedStore>>> {
+    let cluster = &cluster;
     std::thread::scope(|s| {
         let hs: Vec<_> = dirs
             .iter()
             .enumerate()
             .map(|(i, d)| {
                 let o = opts[i].clone();
-                s.spawn(move || open_node(d, i as u64 + 1, ports, o))
+                let id = i as u64 + 1;
+                s.spawn(move || open_node_in(d, id, cluster(id), o))
             })
             .collect();
         hs.into_iter()
@@ -565,6 +589,115 @@ async fn a_follower_behind_the_purge_point_gets_a_snapshot() {
     assert!(more > last);
     tokio::task::block_in_place(|| wait_applied(&nodes, more));
     tokio::task::block_in_place(|| converge(nodes, 3 * N, "snapshot"));
+    for d in dirs {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+/// A leader on its way out (the binary's SIGTERM) hands leadership to a live
+/// peer: another node leads well within the election timeout (1 s — an
+/// election after the leader stops takes at least that), never the member that
+/// stopped answering, and the cluster goes on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_leader_on_its_way_out_hands_leadership_to_a_live_peer() {
+    let _one = serial();
+    log_init();
+    const N: u64 = 100;
+    let entries = workload(SEED, 2 * N);
+    let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("handoff")).collect();
+    let ports = free_ports(3);
+    let opts = vec![test_opts(); 3];
+    let mut nodes = tokio::task::block_in_place(|| open_all(&dirs, &ports, &opts));
+    let l = tokio::task::block_in_place(|| leader_of(&nodes));
+    let first = propose_all(nodes[l].as_ref().unwrap(), &entries[..N as usize]).await;
+    tokio::task::block_in_place(|| wait_applied(&nodes, first));
+
+    // The follower with the higher id stops, caught up: its matched index
+    // ties the live one's, so only its silence tells them apart.
+    let followers: Vec<usize> = (0..3).filter(|i| *i != l).collect();
+    let (live, gone) = (followers[0], followers[1]);
+    let _ = close(nodes[gone].take().unwrap());
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let t0 = Instant::now();
+    let to = nodes[l]
+        .as_ref()
+        .unwrap()
+        .hand_off_leadership(Duration::from_secs(3))
+        .await;
+    let took = t0.elapsed();
+    assert_eq!(to, Some(live as u64 + 1), "handed to the live follower");
+    assert!(
+        took < Duration::from_millis(800),
+        "a transfer, not an election timeout: {took:?}"
+    );
+    assert_eq!(tokio::task::block_in_place(|| leader_of(&nodes)), live);
+    // The old leader, now following, has nothing left to hand.
+    assert_eq!(
+        nodes[l]
+            .as_ref()
+            .unwrap()
+            .hand_off_leadership(Duration::from_secs(3))
+            .await,
+        None
+    );
+
+    let last = propose_all(nodes[live].as_ref().unwrap(), &entries[N as usize..]).await;
+    let id = gone as u64 + 1;
+    let (d, p) = (dirs[gone].clone(), ports.clone());
+    nodes[gone] = Some(tokio::task::block_in_place(move || {
+        open_node(&d, id, &p, test_opts())
+    }));
+    tokio::task::block_in_place(|| wait_applied(&nodes, last));
+    tokio::task::block_in_place(|| converge(nodes, 2 * N, "handoff"));
+    for d in dirs {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+/// With a preferred leader (group 0 prefers node 1,
+/// [`ClusterConfig::for_group`]), the preferred node that handed leadership
+/// away on its way out is not handed it back while it drains: that would end
+/// in an election when it exits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_that_handed_off_is_not_handed_leadership_back() {
+    let _one = serial();
+    log_init();
+    const N: u64 = 100;
+    let entries = workload(SEED, 2 * N);
+    let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("handback")).collect();
+    let ports = free_ports(3);
+    let opts = vec![test_opts(); 3];
+    let nodes = tokio::task::block_in_place(|| {
+        open_all_in(&dirs, &opts, |id| {
+            cluster_config(&ports, id).for_group(0).expect("group 0")
+        })
+    });
+    let end = Instant::now() + Duration::from_secs(30);
+    while tokio::task::block_in_place(|| leader_of(&nodes)) != 0 {
+        assert!(Instant::now() < end, "node 1, the preferred one, never led");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    propose_all(nodes[0].as_ref().unwrap(), &entries[..N as usize]).await;
+
+    let to = nodes[0]
+        .as_ref()
+        .unwrap()
+        .hand_off_leadership(Duration::from_secs(3))
+        .await
+        .expect("node 1 hands off");
+    let new = to as usize - 1;
+    // The new leader checks its preference every 500 ms: without the hold it
+    // hands node 1 its leadership back at the first check.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(
+        tokio::task::block_in_place(|| leader_of(&nodes)),
+        new,
+        "node {to} still leads"
+    );
+    let last = propose_all(nodes[new].as_ref().unwrap(), &entries[N as usize..]).await;
+    tokio::task::block_in_place(|| wait_applied(&nodes, last));
+    tokio::task::block_in_place(|| converge(nodes, 2 * N, "handback"));
     for d in dirs {
         let _ = std::fs::remove_dir_all(d);
     }

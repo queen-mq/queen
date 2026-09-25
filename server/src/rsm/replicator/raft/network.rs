@@ -582,6 +582,10 @@ mod server {
     ) -> Response {
         match serde_json::from_slice::<TransferLeaderRequest<TypeConfig>>(&body) {
             Ok(req) => {
+                // Whoever leads next must not hand it straight back
+                // (super::super::prefer_step).
+                st.members
+                    .note_hand_off(req.from_leader().leader_id().voted_for);
                 let res: Result<_, RaftError<TypeConfig>> = st
                     .raft
                     .handle_transfer_leader(req)

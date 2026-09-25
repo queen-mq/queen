@@ -229,6 +229,11 @@ impl Rsm for GroupRouter {
     fn cluster_id(&self) -> Option<String> {
         self.groups[0].cluster_id()
     }
+
+    async fn hand_off_leadership(&self, wait: std::time::Duration) {
+        futures_util::future::join_all(self.groups.iter().map(|g| g.hand_off_leadership(wait)))
+            .await;
+    }
 }
 
 #[cfg(test)]

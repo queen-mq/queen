@@ -1781,6 +1781,19 @@ async fn run_raft(cfg: config::Config) {
     // Postgres boot: the raft collector flushes them with everything else.
     metrics::spawn_samplers(state.metrics.clone());
 
+    // On SIGTERM a node that leads first hands its leadership to a caught-up
+    // peer, and only then does the listener drain: stopping the leader (a
+    // rolling restart) costs the cluster one transfer, not an election timeout
+    // without a leader (1-2 s). It drains as a follower.
+    let handoff_rsm = state.rsm.clone();
+    let shutdown = {
+        let rsm = handoff_rsm.clone();
+        async move {
+            obs::shutdown_signal().await;
+            rsm.hand_off_leadership(HAND_OFF_WAIT).await;
+        }
+    };
+
     // The Kafka facade's own KV calls reach the state machine directly
     // (kafka_inproc.rs), so it keeps its own handles on it and on auth.
     #[cfg(feature = "kafka")]
@@ -1849,12 +1862,12 @@ async fn run_raft(cfg: config::Config) {
 
     if embedded_proxy.is_some() {
         // W7: TLS, connection limits and the peer address for the edge.
-        if let Err(e) = proxy_embed::serve(listener, app).await {
+        if let Err(e) = proxy_embed::serve(listener, app, shutdown).await {
             obs::fatal(format!("single binary: {e}"));
         }
     } else if let Err(e) = axum::serve(listener, app)
         .tcp_nodelay(true)
-        .with_graceful_shutdown(obs::shutdown_signal())
+        .with_graceful_shutdown(shutdown)
         .await
     {
         tracing::error!(target: "boot", error = %e, "serve loop ended with error");
@@ -1870,5 +1883,14 @@ async fn run_raft(cfg: config::Config) {
     if let Some(proxy) = embedded_proxy {
         queen_proxy::app::shutdown_drain(&proxy).await;
     }
+    // Leading again after the drain (no peer was caught up at the signal, or
+    // a long drain outlived the peers' hold on handing it back): hand off once
+    // more before exiting.
+    handoff_rsm.hand_off_leadership(HAND_OFF_WAIT).await;
     tracing::info!(target: "shutdown", "shutdown complete");
 }
+
+/// How long a node on its way out waits for another node to take its
+/// leadership over (`Rsm::hand_off_leadership`); a transfer takes one round
+/// trip and a vote.
+const HAND_OFF_WAIT: std::time::Duration = std::time::Duration::from_secs(3);

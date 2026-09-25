@@ -1016,6 +1016,13 @@ impl Broker {
     /// to call once from any clone; later calls are no-ops. After shutdown,
     /// every operation on any clone fails with a pool error.
     pub async fn shutdown(&self) -> usize {
+        // A raft cluster node that leads hands its leadership to a caught-up
+        // peer first, as the binary does on SIGTERM (a no-op off a cluster).
+        self.inner
+            .st
+            .rsm
+            .hand_off_leadership(std::time::Duration::from_secs(3))
+            .await;
         for t in self.inner.tasks.lock().unwrap().drain(..) {
             t.abort();
         }

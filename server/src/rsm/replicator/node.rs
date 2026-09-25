@@ -146,6 +146,16 @@ impl<S: Store + 'static> NodeReplicator<S> {
         }
     }
 
+    /// On the way out: a leader hands its leadership to a caught-up peer
+    /// ([`RaftReplicator::hand_off_leadership`]). A local replicator has no
+    /// peer.
+    pub async fn hand_off_leadership(&self, wait: std::time::Duration) -> Option<NodeId> {
+        match self {
+            NodeReplicator::Local(_) => None,
+            NodeReplicator::Raft(r) => r.hand_off_leadership(wait).await,
+        }
+    }
+
     /// Where a follower forwards client requests: the leader's HTTP address,
     /// when another node leads. `None` on the leader, on a single node, and
     /// while no leader is known.

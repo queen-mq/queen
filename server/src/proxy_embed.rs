@@ -138,12 +138,17 @@ pub fn public_router(
 
 /// Serve the single binary's public router: TLS when `QUEEN_TLS_CERT` /
 /// `QUEEN_TLS_KEY` are set, the edge's connection limits
-/// (`QUEEN_EDGE_*`), the peer address every per-IP rule keys on.
-pub async fn serve(listener: tokio::net::TcpListener, app: Router) -> Result<(), String> {
+/// (`QUEEN_EDGE_*`), the peer address every per-IP rule keys on. Drains and
+/// returns once `shutdown` resolves.
+pub async fn serve(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+) -> Result<(), String> {
     let tls = queen_proxy::harden::tls_config_from_env("QUEEN")?;
     let opts = queen_proxy::harden::ServeOptions::from_env()?;
     tracing::info!(target: "boot", tls = tls.is_some(), "public listener (hardened)");
-    queen_proxy::harden::serve(listener, app, tls, opts, crate::obs::shutdown_signal()).await;
+    queen_proxy::harden::serve(listener, app, tls, opts, shutdown).await;
     Ok(())
 }
 

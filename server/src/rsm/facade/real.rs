@@ -4093,6 +4093,10 @@ impl Rsm for RaftFacade {
         Some(&self.notifier)
     }
 
+    async fn hand_off_leadership(&self, wait: std::time::Duration) {
+        self.repl.hand_off_leadership(wait).await;
+    }
+
     fn cluster_id(&self) -> Option<String> {
         let view = self.repl.cluster_view()?;
         let members: Vec<(u64, String)> = view

@@ -768,6 +768,11 @@ pub trait Rsm: Send + Sync {
     fn cluster_id(&self) -> Option<String> {
         None
     }
+
+    /// On the way out (SIGTERM): where this node leads, it hands leadership to
+    /// a caught-up peer, so the cluster does not wait out an election timeout.
+    /// Bounded by `wait`. Nothing to do without a cluster.
+    async fn hand_off_leadership(&self, _wait: std::time::Duration) {}
 }
 
 // ---------------------------------------------------------------------------
