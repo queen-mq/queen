@@ -1162,3 +1162,314 @@ fn damage_inside_durable_records_refuses_the_open() {
     assert!(!rep.truncated_tail);
     assert_eq!(rep.records, 100);
 }
+
+// ---------------------------------------------------------------------------
+// Shared logs, the rewrite threshold, sealing quiet files (2026-09-25)
+// ---------------------------------------------------------------------------
+
+/// Twenty one-message records, pid 10 and pid 11 alternating, over several
+/// small files: half of every sealed file's bytes belong to each pid.
+fn mixed_log(tag: &str) -> (TmpDir, QLog, QLogOptions) {
+    let td = TmpDir::new(tag);
+    let opts = QLogOptions::testing(300);
+    let (mut q, _) = QLog::open(td.path(), 1, opts).unwrap();
+    for i in 0..20u64 {
+        append_one(&mut q, i + 1, 10 + (i % 2), i / 2, 10_000 + i as i64);
+    }
+    assert!(q.file_count() >= 3);
+    (td, q, opts)
+}
+
+fn reclaim_all(q: &mut QLog, starts: &std::collections::HashMap<u64, u64>) -> usize {
+    let mut changed = 0;
+    loop {
+        let step = q.unlink_below_txns_bounded(starts, 1).unwrap();
+        changed += step.changed;
+        if !step.more {
+            return changed;
+        }
+    }
+}
+
+#[test]
+fn compact_threshold_waits_for_enough_dead_bytes() {
+    let (_td, mut q, _) = mixed_log("compact-threshold");
+    let mut starts = std::collections::HashMap::new();
+    starts.insert(10, u64::MAX); // pid 10 expired: half of each mixed file
+    starts.insert(11, 0);
+    // 90% required, ~50% dead: nothing is rewritten.
+    q.set_compact_min_dead_pct(90);
+    let bytes_before = q.bytes();
+    assert_eq!(
+        reclaim_all(&mut q, &starts),
+        0,
+        "below the threshold nothing is rewritten"
+    );
+    assert_eq!(q.bytes(), bytes_before);
+    // A lower threshold rewrites them, once the watermarks move again.
+    q.set_compact_min_dead_pct(40);
+    starts.insert(12, 0); // a new generation: the files are examined again
+    assert!(
+        reclaim_all(&mut q, &starts) > 0,
+        "above the threshold mixed files are rewritten"
+    );
+    assert!(q.bytes() < bytes_before);
+    for offset in 0..10 {
+        assert!(
+            q.read_payload(11, offset).unwrap().is_some(),
+            "live pid 11 survives"
+        );
+    }
+}
+
+#[test]
+fn compact_threshold_zero_keeps_the_first_dead_message_rule() {
+    let (_td, mut q, _) = mixed_log("compact-zero");
+    q.set_compact_min_dead_pct(0);
+    let mut starts = std::collections::HashMap::new();
+    starts.insert(10, u64::MAX);
+    starts.insert(11, 0);
+    assert!(reclaim_all(&mut q, &starts) > 0);
+}
+
+#[test]
+fn seal_active_lets_retention_drop_a_quiet_file() {
+    let td = TmpDir::new("seal-quiet");
+    let opts = QLogOptions::testing(1 << 20); // never rolls on size here
+    let (mut q, _) = QLog::open(td.path(), 7, opts).unwrap();
+    for i in 0..5u64 {
+        append_one(&mut q, i + 1, 10, i, 1_000);
+    }
+    assert_eq!(q.file_count(), 1);
+    let age = q
+        .active_age_us(1_000 + 60_000_000)
+        .expect("an active file with data");
+    assert!(age >= 60_000_000, "age runs from the oldest message");
+    // Without a seal, retention cannot touch the active file.
+    let mut starts = std::collections::HashMap::new();
+    starts.insert(10, u64::MAX);
+    assert_eq!(
+        reclaim_all(&mut q, &starts),
+        0,
+        "the active file is never a candidate"
+    );
+    assert!(q.seal_active(6).unwrap(), "a file with data rolls");
+    assert_eq!(q.file_count(), 2, "sealed file + a new empty active file");
+    assert!(
+        q.active_age_us(i64::MAX).is_none(),
+        "the new active file holds nothing"
+    );
+    assert!(
+        !q.seal_active(7).unwrap(),
+        "an empty active file does not roll"
+    );
+    starts.insert(11, 0); // new generation
+    assert!(
+        reclaim_all(&mut q, &starts) > 0,
+        "the sealed quiet file is reclaimed"
+    );
+    assert!(q.is_empty_log(), "nothing left but an empty active file");
+    // Reopen: the empty active file carries first_seq 6, the tail bound.
+    drop(q);
+    let (q, rec) = QLog::open(td.path(), 7, opts).unwrap();
+    assert!(!rec.truncated_tail);
+    assert!(q.is_empty_log());
+    assert!(rec.max_seq >= 5);
+}
+
+#[test]
+fn shared_logs_route_every_queue_to_one_of_k_logs() {
+    use super::set::{shard_log_id, QLogSet, SYSTEM_QUEUE_ID};
+    let td = TmpDir::new("shard-route");
+    let set = QLogSet::new(td.path().join("qlog"), QLogOptions::testing(1 << 20));
+    let qa = QLogSet::queue_id_of("t", "a");
+    let qb = QLogSet::queue_id_of("t", "b");
+    // Default: one log per queue (lane 0 = the queue id).
+    assert_eq!(set.log_id_for(qa, 5), qa);
+    assert_eq!(set.log_id_for_queue(qa), qa);
+    set.set_shards(4);
+    let reader = set.reader();
+    for pid in [1u64, 2, 3, 99] {
+        assert_eq!(
+            set.log_id_for(qa, pid),
+            shard_log_id(qa % 4),
+            "one queue, one shared log"
+        );
+        assert_eq!(
+            reader.log_id_for(qa, pid),
+            set.log_id_for(qa, pid),
+            "the reader routes alike"
+        );
+    }
+    assert_eq!(set.log_id_for_queue(qb), shard_log_id(qb % 4));
+    for q in [qa, qb] {
+        let id = set.log_id_for(q, 1);
+        assert!((2..6).contains(&id), "shared log ids are 2..2+K");
+        assert_ne!(id, SYSTEM_QUEUE_ID);
+    }
+}
+
+#[test]
+fn shards_file_fixes_the_layout_of_a_directory() {
+    use super::set::{QLogSet, SHARDS_FILE};
+    // A new directory whose SHARDS file says 8 keeps 8.
+    let td = TmpDir::new("shards-file");
+    let root = td.path().join("qlog");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join(SHARDS_FILE), "8\n").unwrap();
+    let mut set = QLogSet::new(root.clone(), QLogOptions::testing(1 << 20));
+    set.reopen_all().unwrap();
+    assert_eq!(set.shards(), 8);
+    // An existing per-queue directory without the file keeps per-queue logs.
+    let td2 = TmpDir::new("shards-legacy");
+    let root2 = td2.path().join("qlog");
+    std::fs::create_dir_all(root2.join("q12345")).unwrap();
+    let mut set2 = QLogSet::new(root2.clone(), QLogOptions::testing(1 << 20));
+    set2.reopen_all().unwrap();
+    assert_eq!(set2.shards(), 0);
+    assert!(
+        !root2.join(SHARDS_FILE).exists(),
+        "no file = one log per queue"
+    );
+}
+
+/// Write one one-message record into `log` through the set (no fsync).
+fn write_one(set: &mut super::set::QLogSet, log: u64, seq: u64, pid: u64, base: u64, created: i64) {
+    let h = hashes(seq, 1);
+    let p = payload(seq, 64);
+    set.write_group_for_qid(
+        log,
+        &[RecordInput {
+            seq,
+            pid,
+            base_offset: base,
+            count: 1,
+            created_at_us: created,
+            txn: None,
+            hashes: &h,
+            payload: &p,
+        }],
+    )
+    .unwrap();
+}
+
+#[test]
+fn idle_pass_seals_quiet_logs_and_removes_empty_ones() {
+    use super::set::QLogSet;
+    let td = TmpDir::new("idle-pass");
+    let root = td.path().join("qlog");
+    let mut set = QLogSet::new(root.clone(), QLogOptions::testing(1 << 20));
+    set.reopen_all().unwrap(); // per-queue layout
+    set.set_recovery_floor(u64::MAX);
+    let q = QLogSet::queue_id_of("t", "quiet");
+    let log = set.log_id_for(q, 10);
+    for i in 0..3u64 {
+        write_one(&mut set, log, i + 1, 10, i, 1_000);
+    }
+    set.sync().unwrap();
+    assert!(root.join(format!("q{log}")).is_dir());
+    // The data is an hour old: the pass seals the active file.
+    let now = 1_000 + 3_600_000_000;
+    set.idle_pass(now, std::time::Duration::from_secs(600))
+        .unwrap();
+    // Retention: the queue's partition is gone (no watermark) -> dead.
+    let reader = set.reader();
+    let starts = std::collections::HashMap::new();
+    let mut changed = 0;
+    loop {
+        let p = reader.reclaim_below_txns(log, &starts, 1).unwrap();
+        changed += p.changed;
+        if !p.more {
+            break;
+        }
+    }
+    assert!(changed > 0, "the sealed file was reclaimed");
+    // Nothing left: the next pass closes the log and removes its directory.
+    set.idle_pass(now, std::time::Duration::from_secs(600))
+        .unwrap();
+    assert!(
+        !root.join(format!("q{log}")).exists(),
+        "the empty queue log is removed"
+    );
+    assert!(!reader.log_ids().contains(&log));
+    // A later write re-creates it.
+    write_one(&mut set, log, 9, 10, 3, now);
+    assert!(root.join(format!("q{log}")).is_dir());
+}
+
+#[test]
+fn idle_pass_never_removes_shared_logs() {
+    use super::set::QLogSet;
+    let td = TmpDir::new("idle-shared");
+    let root = td.path().join("qlog");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join(super::set::SHARDS_FILE), "2\n").unwrap();
+    let mut set = QLogSet::new(root.clone(), QLogOptions::testing(1 << 20));
+    set.reopen_all().unwrap();
+    set.set_recovery_floor(u64::MAX);
+    let q = QLogSet::queue_id_of("t", "x");
+    let log = set.log_id_for(q, 1);
+    write_one(&mut set, log, 1, 1, 0, 1_000);
+    set.sync().unwrap();
+    set.idle_pass(1_000 + 3_600_000_000, std::time::Duration::from_secs(1))
+        .unwrap();
+    let reader = set.reader();
+    loop {
+        let p = reader
+            .reclaim_below_txns(log, &std::collections::HashMap::new(), 1)
+            .unwrap();
+        if !p.more {
+            break;
+        }
+    }
+    set.idle_pass(1_000 + 3_600_000_000, std::time::Duration::from_secs(1))
+        .unwrap();
+    assert!(root.join(format!("q{log}")).is_dir(), "a shared log stays");
+    // remove() of a queue in a shared directory leaves the log alone.
+    set.remove("t", "x");
+    assert!(reader.log_ids().contains(&log));
+}
+
+#[test]
+fn pooled_sync_covers_many_logs() {
+    use super::set::QLogSet;
+    let td = TmpDir::new("pooled-sync");
+    let root = td.path().join("qlog");
+    let mut set = QLogSet::new(root, QLogOptions::testing_durable(1 << 20, Fsync::Data));
+    // Eight logs: one fsynced inline, seven through the pool (kept small, the
+    // parallel test run shares one fd limit).
+    for q in 0..8u64 {
+        let qid = QLogSet::queue_id_of("t", &format!("q{q}"));
+        let log = set.log_id_for(qid, 1);
+        write_one(&mut set, log, q + 1, 1, 0, 1_000);
+    }
+    set.sync().unwrap();
+    assert_eq!(set.durable_seq(), 8);
+}
+
+#[test]
+fn reclaim_step_unlinks_every_dead_file_and_caps_rewrites() {
+    // Many sealed files: pid 10 fills the first half, pid 11 the second, and
+    // a few files mix both.
+    let td = TmpDir::new("reclaim-step");
+    let opts = QLogOptions::testing(300);
+    let (mut q, _) = QLog::open(td.path(), 1, opts).unwrap();
+    for i in 0..40u64 {
+        let pid = if i < 20 { 10 } else { 11 };
+        append_one(&mut q, i + 1, pid, i % 20, 10_000 + i as i64);
+    }
+    let before = q.file_count();
+    assert!(before >= 6);
+    // pid 10 expired, pid 11 live: the pid-10 files are wholly dead.
+    let mut starts = std::collections::HashMap::new();
+    starts.insert(10, u64::MAX);
+    starts.insert(11, 0);
+    // One step, no rewrites allowed: every wholly dead file goes at once.
+    let step = q.reclaim_step(&starts, usize::MAX, false).unwrap();
+    assert_eq!(step.compacted, 0, "no rewrite without the budget");
+    assert!(step.changed >= 2, "several dead files unlinked in one step");
+    assert!(q.file_count() < before);
+    for offset in 0..20 {
+        assert!(q.read_payload(11, offset).unwrap().is_some(), "live pid 11 survives");
+    }
+}

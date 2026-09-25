@@ -30,6 +30,11 @@ pub struct Config {
     /// next pass. Leader-local and advisory: it only orders which partitions a
     /// pass looks at first; every effect is still judged from committed state.
     pub walk: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<(String, String), Pid>>>,
+    /// `QUEEN_RAFT_TXN_WINDOW_MIN_S` (default 900): the least time a message's
+    /// hash list — and so its queue-log record — is kept, whatever the queue's
+    /// dedup window and completed retention. The physical reclaim of a queue
+    /// log follows this watermark, so nothing is freed before it.
+    pub txn_window_min_s: i64,
 }
 
 impl Default for Config {
@@ -41,6 +46,7 @@ impl Default for Config {
             partition_cleanup_days: 30,
             visit_cap: 8_192,
             walk: Default::default(),
+            txn_window_min_s: 900,
         }
     }
 }
@@ -99,20 +105,34 @@ pub fn reclaim_qlogs<R: Reads + ?Sized>(r: &R, qlogs: &QLogReader) -> Result<usi
     let cursor = qlogs.reclaim_queue_cursor();
     let split = ordered.partition_point(|(qid, _)| *qid < cursor);
     ordered.rotate_left(split);
-    // One immutable file per cadence, globally. Copy-forward can touch tens of
-    // MiB, so queue count must not multiply a maintenance pause.
+    // A bounded pass: up to `RECLAIM_EXAMINE_PER_PASS` sealed files looked at
+    // and every dead one unlinked (cheap), but at most ONE copy-forward rewrite
+    // (it can touch tens of MiB), all within `RECLAIM_PASS_BUDGET`. It used to
+    // examine one file per pass for the whole broker — one every 5 s — so
+    // hundreds of sealed queue files took hours to go.
+    let deadline = std::time::Instant::now() + RECLAIM_PASS_BUDGET;
+    let mut examined = 0usize;
+    let mut compacted = false;
     for (qid, starts) in ordered {
+        if examined >= RECLAIM_EXAMINE_PER_PASS || std::time::Instant::now() >= deadline {
+            break;
+        }
         let progress = qlogs
-            .reclaim_below_txns(qid, &starts, 1)
+            .reclaim_step(qid, &starts, RECLAIM_EXAMINE_PER_PASS - examined, !compacted)
             .map_err(|e| StoreError::Io(format!("qlog retention: {e}")))?;
         qlogs.advance_reclaim_queue_cursor(qid);
         removed += progress.changed;
-        if progress.examined > 0 {
-            break;
-        }
+        examined += progress.examined;
+        compacted |= progress.compacted > 0;
     }
     Ok(removed)
 }
+
+/// The most sealed queue-log files one retention pass looks at.
+const RECLAIM_EXAMINE_PER_PASS: usize = 256;
+
+/// The wall time one retention pass may take before it stops looking.
+const RECLAIM_PASS_BUDGET: std::time::Duration = std::time::Duration::from_millis(200);
 
 pub fn plan<R: Reads + ?Sized>(r: &R, now_us: i64, cfg: &Config) -> Result<Planned> {
     let mut out = Planned::default();
@@ -190,7 +210,7 @@ pub fn plan<R: Reads + ?Sized>(r: &R, now_us: i64, cfg: &Config) -> Result<Plann
             .then(|| now_us.saturating_sub(qcfg.max_wait_time_seconds as i64 * 1_000_000));
         let txn_window_s = i64::from(qcfg.dedup_window_seconds)
             .max(i64::from(qcfg.completed_retention_seconds))
-            .max(900);
+            .max(cfg.txn_window_min_s.max(0));
         let txns_cutoff = now_us.saturating_sub(txn_window_s * 1_000_000);
 
         // A bounded window of the queue's partitions, resuming where the last
