@@ -1,0 +1,29 @@
+# P1: W1 (log) under every fault family, offload on and off. ./run-matrix.sh matrix-p1.txt
+# One line per test: <label> <lein run test args>; run-matrix.sh adds nodes, ssh key, --bin, --concurrency 2n.
+p1-kill-on             --workload log --nemesis kill --time-limit 300 --rate 200
+p1-kill-off            --workload log --nemesis kill --time-limit 300 --rate 200 --no-offload
+p1-pause-on            --workload log --nemesis pause --time-limit 300 --rate 200
+p1-pause-off           --workload log --nemesis pause --time-limit 300 --rate 200 --no-offload
+p1-part-on             --workload log --nemesis partition --time-limit 300 --rate 200
+p1-part-off            --workload log --nemesis partition --time-limit 300 --rate 200 --no-offload
+p1-clock-on            --workload log --nemesis clock --time-limit 300 --rate 200
+p1-clock-off           --workload log --nemesis clock --time-limit 300 --rate 200 --no-offload
+# Extensions: combined faults, forced snapshots (exit 75), planner lanes 1.
+p1x-kill-snap-on       --workload log --nemesis kill --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_PURGE_HOLD_S=5,QUEEN_RAFT_LOG_KEEP=64
+p1x-kill-snap-off      --workload log --nemesis kill --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_PURGE_HOLD_S=5,QUEEN_RAFT_LOG_KEEP=64 --no-offload
+p1x-all-on             --workload log --nemesis all --time-limit 600 --rate 200
+p1x-all-off            --workload log --nemesis all --time-limit 600 --rate 200 --no-offload
+p1x-kill-lanes1-on     --workload log --nemesis kill --time-limit 300 --rate 200 --lanes 1
+p1x-part-lanes1-on     --workload log --nemesis partition --time-limit 300 --rate 200 --lanes 1
+# W1 with multi-partition /transaction bundles (1-4 pushes, one raft entry each).
+p1t-none-on            --workload log --txn --nemesis none --time-limit 120 --rate 200
+p1t-kill-on            --workload log --txn --nemesis kill --time-limit 300 --rate 200
+p1t-part-on            --workload log --txn --nemesis partition --time-limit 300 --rate 200
+p1t-kill-off           --workload log --txn --nemesis kill --time-limit 300 --rate 200 --no-offload
+p1t-pause-on           --workload log --txn --nemesis pause --time-limit 300 --rate 200
+# Higher intensity: hot keys, fast leader kills, fast kills with forced snapshots, everything at once.
+p1z-kill-hot-on        --workload log --nemesis kill --time-limit 300 --rate 1000 --concurrency 5n --key-count 3 --nemesis-interval 5
+p1y-kill-prim-fast-on  --workload log --nemesis kill --db-targets primaries --time-limit 300 --rate 400 --nemesis-interval 3
+p1y-kill-snap-fast-on  --workload log --nemesis kill --time-limit 300 --rate 300 --nemesis-interval 4 --env QUEEN_RAFT_PURGE_HOLD_S=3,QUEEN_RAFT_LOG_KEEP=16
+p1y-txn-all-fast-on    --workload log --txn --nemesis all --time-limit 300 --rate 300 --nemesis-interval 5
+p1y-all-fast-on        --workload log --nemesis all --time-limit 300 --rate 300 --nemesis-interval 5 --env QUEEN_RAFT_PURGE_HOLD_S=3,QUEEN_RAFT_LOG_KEEP=16
