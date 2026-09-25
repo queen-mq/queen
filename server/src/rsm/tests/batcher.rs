@@ -1211,3 +1211,195 @@ async fn the_pipeline_holds_at_pipeline_unapplied_entries_when_apply_stalls() {
     fx.handle.abort();
     let _ = std::fs::remove_dir_all(&fx.dir);
 }
+
+// ---------------------------------------------------------------------------
+// LANES (`QUEEN_LANES` > 1): where a woken long-poll wildcard pop is planned
+// ---------------------------------------------------------------------------
+
+fn pop_wildcard(id: u64, queue: &str, group: &str, worker: &str, wait: bool) -> Command {
+    Command::PopWildcard(PopCommand {
+        wait,
+        request_id: rid(id),
+        tenant: TENANT.to_string(),
+        queue: queue.to_string(),
+        partition: None,
+        group: group.to_string(),
+        worker: worker.to_string(),
+        budget: 100,
+        max_parts: 10,
+        lease_seconds: 60,
+        auto_ack: false,
+        conflate: false,
+        sub: SubIntent {
+            mode: "all".to_string(),
+            from_us: None,
+            now: false,
+        },
+        skip_window_debounce: false,
+        namespace: String::new(),
+        task: String::new(),
+        create_cfg: None,
+        deadline_us: 0,
+    })
+}
+
+/// A real node whose batcher plans on `lanes` lanes, and one long-poll
+/// consumer (group `g`, worker `w`).
+struct LanesNode {
+    tx: CommandTx,
+    handle: tokio::task::JoinHandle<()>,
+    repl: Arc<LocalReplicator<HeedStore>>,
+    dir: PathBuf,
+    next: u64,
+}
+
+impl LanesNode {
+    fn open(tag: &str, lanes: u64) -> LanesNode {
+        let dir = scratch(tag);
+        let store = Arc::new(HeedStore::open(&dir.join("store"), &store_opts()).expect("store"));
+        let repl = Arc::new(open_repl(&dir, store.clone()));
+        let cfg = BatcherConfig {
+            lanes,
+            ..small_pipeline(4, 5_000)
+        };
+        let (tx, handle) = Batcher::new(store, repl.clone(), cfg).spawn();
+        LanesNode {
+            tx,
+            handle,
+            repl,
+            dir,
+            next: 50_000,
+        }
+    }
+
+    fn id(&mut self) -> u64 {
+        self.next += 1;
+        self.next
+    }
+
+    async fn push(&mut self, queue: &str, partition: &str, txn: &str) -> Reply {
+        let id = self.id();
+        let reply = submit(&self.tx, push(id, queue, partition, &[txn])).await;
+        let _ = done(&reply);
+        reply
+    }
+
+    /// A long-poll wildcard pop: the pids it claimed (none: the facade parks it).
+    async fn pop(&mut self, queue: &str) -> Vec<u64> {
+        let id = self.id();
+        let reply = submit(&self.tx, pop_wildcard(id, queue, "g", "w", true)).await;
+        match done(&reply).0 {
+            Outcome::Pop(o) => o.claims.iter().map(|c| c.pid).collect(),
+            other => panic!("expected a pop outcome, got {other:?}"),
+        }
+    }
+
+    async fn ack(&mut self, pid: u64, queue: &str, txns: &[String]) {
+        let id = self.id();
+        let txns: Vec<&str> = txns.iter().map(String::as_str).collect();
+        let reply = submit(&self.tx, ack_ok(id, pid, queue, "g", "w", &txns)).await;
+        let _ = done(&reply);
+    }
+
+    async fn close(self) {
+        drop(self.tx);
+        let _ = self.handle.await;
+        drop(self.repl);
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// LANES: a parked long-poll wildcard pop, woken by an append to its queue,
+/// claims on its FIRST re-plan when the queue's partitions all sit in one lane.
+/// The facade parks a long-poll pop that comes back empty and submits it again
+/// when an append to its queue applies (`WaitGates::wake_one`). The router
+/// used to place that re-plan by a ready hint the owning lane's push never
+/// refreshes, else round-robin, and a lane with nothing ready answered a
+/// long-poll pop empty: on 8 lanes a one-partition queue was claimed once
+/// every ~8 wakes (measured 2026-09-25, 100 queues: pop_claims /
+/// pop_over_queue = 1/8, e2e p50 82 ms against 8.9 ms on one planner).
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn lanes_a_woken_long_poll_pop_of_a_one_lane_queue_claims_on_its_first_replan() {
+    const LANES: u64 = 8;
+    let mut node = LanesNode::open("lanes-one-lane", LANES);
+    // One partition per queue; the pids are consecutive, so the queues cover
+    // every lane (pid % LANES).
+    let mut queues = Vec::new();
+    for i in 0..LANES {
+        let q = format!("q{i}");
+        let (pid, _) = push_created(&node.push(&q, "p0", &format!("{q}-0")).await);
+        queues.push((q, pid));
+    }
+    // The consumer's first pop registers the group and takes the backlog; it
+    // acks, and its next pop finds nothing: that is the pop that parks.
+    for (q, pid) in &queues {
+        assert_eq!(
+            node.pop(q).await,
+            vec![*pid],
+            "{q}: first contact takes the backlog"
+        );
+        node.ack(*pid, q, &[format!("{q}-0")]).await;
+        assert!(
+            node.pop(q).await.is_empty(),
+            "{q}: nothing left, the pop parks"
+        );
+    }
+    // Each append wakes the parked pop, which is planned again: count the
+    // wakes it takes to claim.
+    let mut wakes = Vec::new();
+    for (q, pid) in &queues {
+        let mut n = 0u64;
+        loop {
+            n += 1;
+            node.push(q, "p0", &format!("{q}-{n}")).await;
+            if !node.pop(q).await.is_empty() || n == 3 * LANES {
+                break;
+            }
+        }
+        wakes.push((q.clone(), pid % LANES, n));
+    }
+    node.close().await;
+    assert!(
+        wakes.iter().all(|(_, _, n)| *n == 1),
+        "every woken pop claims on its first re-plan; (queue, lane, wakes to claim): {wakes:?}"
+    );
+}
+
+/// LANES: the same when the queue's partitions span lanes. The router can only
+/// guess which lane holds the ready one; a guessed lane that finds nothing
+/// hands the pop to control, which sees every partition — a long-poll pop too,
+/// or it parks on a false empty and the next wake guesses again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn lanes_a_woken_long_poll_pop_of_a_queue_across_lanes_claims_on_its_first_replan() {
+    const LANES: u64 = 8;
+    let mut node = LanesNode::open("lanes-across", LANES);
+    let q = "spread";
+    let (pa, _) = push_created(&node.push(q, "a", "a-0").await);
+    let (pb, _) = push_created(&node.push(q, "b", "b-0").await);
+    assert_ne!(pa % LANES, pb % LANES, "two lanes");
+    let mut first = node.pop(q).await;
+    first.sort_unstable();
+    assert_eq!(first, vec![pa, pb], "first contact takes both backlogs");
+    node.ack(pa, q, &["a-0".to_string()]).await;
+    node.ack(pb, q, &["b-0".to_string()]).await;
+    assert!(node.pop(q).await.is_empty(), "nothing left, the pop parks");
+    // Appends to ONE partition, two rounds per lane: each wakes the parked
+    // pop, which must claim at once.
+    let mut missed = Vec::new();
+    let mut unacked: Vec<String> = Vec::new();
+    for round in 1..=2 * LANES {
+        let txn = format!("b-{round}");
+        node.push(q, "b", &txn).await;
+        unacked.push(txn);
+        if node.pop(q).await.is_empty() {
+            missed.push(round);
+        } else {
+            node.ack(pb, q, &std::mem::take(&mut unacked)).await;
+        }
+    }
+    node.close().await;
+    assert!(
+        missed.is_empty(),
+        "every woken pop claims on its first re-plan; rounds that found nothing: {missed:?}"
+    );
+}

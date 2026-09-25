@@ -254,9 +254,14 @@ planner, untouched).
 - **Lane overlays** hold only their partitions (plus the catalog): each lane
   keeps its payload-stripped slice of every in-flight entry and advances over
   those; control's effects on its partitions are folded into its slice.
-- **Wildcard pops** go to the lane whose last walk found the most ready
-  partitions (round-robin when none is known); an empty result in a lane is
-  re-planned by control, so a pop is empty only when the whole queue is.
+- **Wildcard pops** go to the lane that holds every partition of the queue
+  when one does (up to 16 committed partitions read, none being created), and
+  an empty result there is final. Otherwise to the lane whose last walk found
+  the most ready partitions (round-robin when none is known), and an empty
+  result in that lane is re-planned by control, long-poll pops included, so a
+  pop is empty only when the whole queue is. (Until 2026-09-25 a long-poll pop
+  parked on a guessed lane's empty and was guessed again at the next wake: on
+  8 lanes, one claim per ~8 wakes.)
 - **Queue logs per (queue, lane)** (§7) are built independently of the planner:
   `qlog/LANES` fixes a directory's count at creation, a partition's records
   live in lane `pid % lanes`, lanes are written in parallel, and the fsync of

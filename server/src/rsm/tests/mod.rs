@@ -48,7 +48,7 @@ mod keep_overlay;
 mod kv;
 mod kv_crash;
 mod planner_ack;
-mod planner_harness;
+pub(super) mod planner_harness;
 mod planner_overlay;
 mod planner_pop;
 mod planner_push;

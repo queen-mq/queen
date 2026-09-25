@@ -14,6 +14,13 @@
 //! them in the entry, so the entry applies exactly as if one thread had
 //! planned it in that order.
 //!
+//! A wildcard pop names no partition. It goes to the lane that holds every
+//! partition of its queue when one does ([`LanesState::whole_lane`]), and what
+//! that lane finds empty is empty. Otherwise the router guesses a lane
+//! ([`LanesState::wildcard_lane`]), and a guessed lane that finds nothing hands
+//! the pop to control, which sees every partition: a pop is empty only when
+//! its whole queue is, a long-poll pop included.
+//!
 //! Invariants that make this equal to the single planner:
 //!
 //! - **L1** a lane plans only commands whose every partition is its own and
@@ -96,6 +103,9 @@ struct Record {
     queues: Vec<(String, String)>,
     tenants: Vec<String>,
     pids: Vec<Pid>,
+    /// Queues this entry creates partitions for: until it lands no lane holds
+    /// the whole of one ([`LanesState::whole_lane`]).
+    creates: Vec<(String, String)>,
 }
 
 /// The lanes' state on the planner thread (see the module header).
@@ -189,8 +199,16 @@ impl LaneStats {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Dest {
     Lane(u64),
+    /// A wildcard pop's lane that holds every partition of the queue: what it
+    /// finds empty is empty.
+    Whole(u64),
     Control,
 }
+
+/// The most committed partitions the router reads to find the one lane of a
+/// queue ([`LanesState::whole_lane`]); a queue with more counts as spanning
+/// lanes.
+const WHOLE_SCAN_CAP: usize = 16;
 
 /// How one command fared in a lane.
 enum LaneSlot {
@@ -290,13 +308,24 @@ fn record_of(full: Arc<Entry>, subs: Vec<Arc<Entry>>) -> Record {
     let mut queues = Vec::new();
     let mut tenants = Vec::new();
     let mut pids = Vec::new();
+    let mut creates: Vec<(String, String)> = Vec::new();
     for e in &full.effects {
         match e {
             Effect::PartitionCreate {
-                pid, created_at_us, ..
+                pid,
+                created_at_us,
+                tenant,
+                queue,
+                ..
             } => {
                 pid_hi = pid_hi.max(pid.saturating_add(1));
                 created_hi = created_hi.max(*created_at_us);
+                if creates
+                    .last()
+                    .is_none_or(|(t, q)| t != tenant || q != queue)
+                {
+                    creates.push((tenant.clone(), queue.clone()));
+                }
             }
             Effect::Append { created_at_us, .. } => created_hi = created_hi.max(*created_at_us),
             Effect::KvPut { version, .. } => kv_hi = kv_hi.max(version.saturating_add(1)),
@@ -316,6 +345,8 @@ fn record_of(full: Arc<Entry>, subs: Vec<Arc<Entry>>) -> Record {
             _ => {}
         }
     }
+    creates.sort_unstable();
+    creates.dedup();
     Record {
         now_us: full.now_us,
         full,
@@ -326,6 +357,7 @@ fn record_of(full: Arc<Entry>, subs: Vec<Arc<Entry>>) -> Record {
         queues,
         tenants,
         pids,
+        creates,
     }
 }
 
@@ -334,6 +366,8 @@ struct Busy {
     queues: HashSet<(String, String)>,
     tenants: HashSet<String>,
     pids: HashSet<Pid>,
+    /// Queues with a partition being created.
+    creating: HashSet<(String, String)>,
 }
 
 impl Busy {
@@ -407,11 +441,13 @@ impl LanesState {
             queues: HashSet::new(),
             tenants: HashSet::new(),
             pids: HashSet::new(),
+            creating: HashSet::new(),
         };
         for r in &self.records {
             b.queues.extend(r.queues.iter().cloned());
             b.tenants.extend(r.tenants.iter().cloned());
             b.pids.extend(r.pids.iter().copied());
+            b.creating.extend(r.creates.iter().cloned());
         }
         b
     }
@@ -476,6 +512,8 @@ impl LanesState {
                     || r.group(&c.tenant, &c.queue, &c.group)?.is_none()
                 {
                     Dest::Control
+                } else if let Some(l) = self.whole_lane(r, &c.tenant, &c.queue, busy)? {
+                    Dest::Whole(l)
                 } else {
                     Dest::Lane(self.wildcard_lane(&(
                         c.tenant.clone(),
@@ -534,6 +572,33 @@ impl LanesState {
         })
     }
 
+    /// The one lane that holds every partition of `(tenant, queue)` (committed,
+    /// none being created), when there is one: a wildcard pop planned there
+    /// sees the whole queue. `None` when the partitions span lanes, when there
+    /// are none, or past [`WHOLE_SCAN_CAP`] of them.
+    fn whole_lane<R: Reads + ?Sized>(
+        &self,
+        r: &R,
+        tenant: &str,
+        queue: &str,
+        busy: &Busy,
+    ) -> crate::rsm::store::Result<Option<u64>> {
+        if busy
+            .creating
+            .contains(&(tenant.to_string(), queue.to_string()))
+        {
+            return Ok(None);
+        }
+        let n = self.n;
+        let (mut lane, mut one, mut seen) = (None, true, 0usize);
+        r.scan_queue_partitions(tenant, queue, None, WHOLE_SCAN_CAP + 1, &mut |pid| {
+            seen += 1;
+            one = *lane.get_or_insert(pid % n) == pid % n;
+            one
+        })?;
+        Ok(lane.filter(|_| one && seen <= WHOLE_SCAN_CAP))
+    }
+
     /// The lane a wildcard pop of `key` goes to: the one whose last walk found
     /// the most ready partitions (each pick uses one up), else round-robin, so
     /// every lane's partitions get consumed.
@@ -563,7 +628,8 @@ impl LanesState {
 
 /// Plan one lane's commands (on its thread): its kept overlay advanced over its
 /// slices of the in-flight entries, its rings filtered to its partitions, the
-/// router's clock.
+/// router's clock. Each command carries whether this lane holds its whole
+/// queue ([`Dest::Whole`]).
 #[allow(clippy::too_many_arguments)]
 fn plan_lane<S: Store>(
     store: &S,
@@ -575,7 +641,7 @@ fn plan_lane<S: Store>(
     reader: Option<Reader>,
     qlog_reader: Option<QLogReader>,
     folded: &[(u64, Arc<Entry>)],
-    cmds: Vec<(usize, Command)>,
+    cmds: Vec<(usize, Command, bool)>,
     cfg: PlanConfig,
     now_us: i64,
     ring_keys: &[RingKey],
@@ -621,7 +687,7 @@ fn plan_lane<S: Store>(
         let start = std::time::Instant::now();
         let budget = std::time::Duration::from_millis(cfg.plan_budget_ms);
         let mut cut = false;
-        for (pos, cmd) in cmds {
+        for (pos, cmd, whole) in cmds {
             if cut {
                 out.slots.push((pos, LaneSlot::Deferred(Box::new(cmd))));
                 continue;
@@ -665,13 +731,14 @@ fn plan_lane<S: Store>(
                     if ov.folds() != folds0 {
                         out.poisoned = true;
                     }
-                    if matches!(&cmd, Command::PopWildcard(p) if !p.wait) {
-                        // Nothing ready among THIS lane's partitions, and the
-                        // pop will not wait: it is empty only when the whole
-                        // queue is, so control plans it with every partition.
-                        // A long-poll pop parks and is woken by the next apply
-                        // that makes a partition of its queue ready, whichever
-                        // lane owns it.
+                    if matches!(&cmd, Command::PopWildcard(_)) && !whole {
+                        // Nothing ready among THIS lane's partitions, and other
+                        // lanes hold some of the queue: the pop is empty only
+                        // when the whole queue is, so control plans it with
+                        // every partition. A long-poll pop too: parked on this
+                        // false empty, it is woken by the next append and
+                        // guessed again (on 8 lanes, one claim per ~8 wakes,
+                        // measured 2026-09-25).
                         LaneSlot::Misrouted(Box::new(cmd))
                     } else {
                         LaneSlot::Empty(outcome)
@@ -739,7 +806,7 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
     // ---- the router ------------------------------------------------------
     let t_router = std::time::Instant::now();
     let mut slots: Vec<Option<Slot>> = (0..batch_len).map(|_| None).collect();
-    let mut per_lane: Vec<Vec<(usize, Command)>> = (0..n).map(|_| Vec::new()).collect();
+    let mut per_lane: Vec<Vec<(usize, Command, bool)>> = (0..n).map(|_| Vec::new()).collect();
     let mut control: Vec<(usize, Command)> = Vec::new();
     let mut ring_keys: Vec<RingKey> = Vec::new();
     let (store_applied, base_pid, base_kv, now_us) = {
@@ -796,14 +863,14 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
                     }
                 };
                 match dest {
-                    Dest::Lane(l) => {
+                    Dest::Lane(l) | Dest::Whole(l) => {
                         if let Command::PopWildcard(p) = &cmd {
                             let k = (p.tenant.clone(), p.queue.clone(), p.group.clone());
                             if !ring_keys.contains(&k) {
                                 ring_keys.push(k);
                             }
                         }
-                        per_lane[l as usize].push((pos, cmd));
+                        per_lane[l as usize].push((pos, cmd, dest == Dest::Whole(l)));
                     }
                     Dest::Control => control.push((pos, cmd)),
                 }
@@ -1195,3 +1262,68 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
     })
 }
 
+#[cfg(test)]
+mod whole_lane_tests {
+    //! Where the router sends a wildcard pop: to the lane that holds the whole
+    //! queue when one does ([`Dest::Whole`], an empty answer there is final),
+    //! else to a guessed lane ([`Dest::Lane`], whose empty answer control
+    //! re-plans). Routing only: the batcher tests
+    //! (`lanes_a_woken_long_poll_pop_*`) prove what a woken pop claims.
+    use super::*;
+    use crate::rsm::tests::planner_harness::{self as h, Cell};
+
+    const N: u64 = 8;
+
+    fn wildcard(id: u64, queue: &str) -> Command {
+        match h::pop_wildcard(id, queue, "g", "w") {
+            h::Cmd::PopWildcard(c) => Command::PopWildcard(c),
+            _ => unreachable!(),
+        }
+    }
+
+    fn route(ls: &mut LanesState, cell: &Cell, cmd: &Command) -> Dest {
+        let busy = ls.busy();
+        cell.node
+            .store()
+            .read(|r| ls.route(r, cmd, &busy))
+            .expect("route")
+    }
+
+    #[test]
+    fn a_wildcard_pop_goes_whole_only_to_a_lane_holding_every_partition() {
+        let mut cell = Cell::new("lanes-whole");
+        // "one": one partition. "two": two, with consecutive pids (two lanes).
+        cell.run(&[
+            h::push(1, "one", "p0", &["a"]),
+            h::push(2, "two", "p0", &["b"]),
+            h::push(3, "two", "p1", &["c"]),
+        ]);
+        cell.run(&[
+            h::pop_wildcard(4, "one", "g", "w"),
+            h::pop_wildcard(5, "two", "g", "w"),
+        ]);
+        let one = cell.pid_of("one", "p0").expect("one/p0");
+        let mut ls = LanesState::new(N);
+
+        assert_eq!(
+            route(&mut ls, &cell, &wildcard(10, "one")),
+            Dest::Whole(one % N)
+        );
+        assert!(
+            matches!(route(&mut ls, &cell, &wildcard(11, "two")), Dest::Lane(_)),
+            "partitions in two lanes: the lane is a guess"
+        );
+
+        // A partition of "one" being created: no lane holds all of it until
+        // the entry lands.
+        let entry = cell
+            .plan_entry(&[h::push(12, "one", "p1", &["d"])], None)
+            .expect("an entry that creates one/p1");
+        let subs = split(&entry, N);
+        ls.records.push_back(record_of(Arc::new(entry), subs));
+        assert!(
+            matches!(route(&mut ls, &cell, &wildcard(13, "one")), Dest::Lane(_)),
+            "a partition in flight: the lane is a guess"
+        );
+    }
+}
