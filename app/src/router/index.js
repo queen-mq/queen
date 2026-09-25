@@ -18,6 +18,13 @@ const { standalone } = useIdentity()
 //   nav      : { group, order } to appear in the sidebar. Omit to stay
 //              reachable by URL but out of the nav.
 //   proxyOnly: the broker-direct dashboard has no pxdb-backed account store.
+//   docs     : path on the docs site (DOCS_BASE_URL in Header.vue) that best
+//              explains this page, e.g. '/use/kv'. Whole pages only, never an
+//              anchor — a heading rename must not be able to break this link.
+//              Renders the "?" next to the breadcrumb title. Checked in CI by
+//              webdoc/scripts/check-doclinks.mjs, which fails the build if the
+//              target page no longer exists; omit the field rather than point
+//              it at something approximate.
 const routes = [
   {
     path: '/',
@@ -27,6 +34,7 @@ const routes = [
       title: 'Dashboard', subtitle: 'System overview and key metrics',
       requires: 'read', scope: 'tenant',
       nav: { group: 'Overview', icon: 'dashboard', order: 1 },
+      docs: '/deploy/dashboard',
     }
   },
   {
@@ -37,6 +45,7 @@ const routes = [
       title: 'Queue Operations', subtitle: 'Per-queue throughput, lag, and consumer health',
       requires: 'read', scope: 'tenant',
       nav: { group: 'Overview', icon: 'operations', order: 2 },
+      docs: '/internals/stats',
     }
   },
   {
@@ -47,6 +56,7 @@ const routes = [
       title: 'Queues', subtitle: 'Manage message queues and partitions',
       requires: 'read', scope: 'tenant',
       nav: { group: 'Routing', icon: 'queues', order: 1 },
+      docs: '/use/model',
     }
   },
   {
@@ -56,6 +66,7 @@ const routes = [
     meta: {
       title: 'Queue Detail', subtitle: 'Queue configuration and status',
       requires: 'read', scope: 'tenant',
+      docs: '/reference/queue-options',
     }
   },
   {
@@ -72,6 +83,7 @@ const routes = [
       title: 'Ephemeral Queues', subtitle: 'RAM-class queues — contents survive nothing',
       requires: 'read', scope: 'tenant',
       nav: { group: 'Routing', icon: 'ephemeral', order: 2 },
+      docs: '/use/ephemeral',
     }
   },
   {
@@ -82,6 +94,7 @@ const routes = [
       title: 'Consumer Groups', subtitle: 'Monitor consumer lag and status',
       requires: 'read', scope: 'tenant',
       nav: { group: 'Routing', icon: 'consumers', order: 3 },
+      docs: '/use/model',
     }
   },
   {
@@ -92,6 +105,7 @@ const routes = [
       title: 'Messages', subtitle: 'Browse, inspect and push messages',
       requires: 'read', scope: 'tenant',
       nav: { group: 'Routing', icon: 'messages', order: 4 },
+      docs: '/reference/http/messages-dlq',
     }
   },
   {
@@ -106,6 +120,7 @@ const routes = [
       title: 'KV', subtitle: 'Browse the key-value store, namespace by namespace',
       requires: 'read', scope: 'tenant',
       nav: { group: 'State', icon: 'kv', order: 1 },
+      docs: '/use/kv',
     }
   },
   {
@@ -120,6 +135,7 @@ const routes = [
       title: 'Timers', subtitle: 'Scheduled messages waiting to fire, per queue',
       requires: 'read', scope: 'tenant',
       nav: { group: 'State', icon: 'timers', order: 2 },
+      docs: '/use/timers',
     }
   },
   {
@@ -130,6 +146,7 @@ const routes = [
       title: 'Traces', subtitle: 'Track message flows across queues',
       requires: 'read', scope: 'tenant',
       nav: { group: 'Observability', icon: 'traces', order: 1 },
+      docs: '/reference/http/traces',
     }
   },
   {
@@ -140,6 +157,7 @@ const routes = [
       title: 'Analytics', subtitle: 'Throughput and performance trends',
       requires: 'read', scope: 'tenant',
       nav: { group: 'Observability', icon: 'analytics', order: 2 },
+      docs: '/reference/http/analytics',
     }
   },
   {
@@ -153,6 +171,7 @@ const routes = [
       title: 'Workload', subtitle: 'Who is doing the work, how much, and what is stuck',
       requires: 'read', scope: 'tenant',
       nav: { group: 'Observability', icon: 'workload', order: 3 },
+      docs: '/deploy/dashboard',
     }
   },
   {
@@ -163,6 +182,7 @@ const routes = [
       title: 'Dead Letter', subtitle: 'Inspect, replay and purge failed messages',
       requires: 'read', scope: 'tenant',
       nav: { group: 'Observability', icon: 'dlq', order: 4 },
+      docs: '/reference/http/messages-dlq',
     }
   },
   {
@@ -175,6 +195,7 @@ const routes = [
       title: 'System', subtitle: 'Cell-level: server resources and Postgres internals',
       requires: 'operator', scope: 'cell',
       nav: { group: 'Cell', icon: 'system', order: 1 },
+      docs: '/deploy/operations',
     }
   },
   {
@@ -185,6 +206,7 @@ const routes = [
       title: 'Users', subtitle: 'Cell-level: user accounts and cluster access',
       requires: 'operator', scope: 'cell', proxyOnly: true,
       nav: { group: 'Cell', icon: 'users', order: 2 },
+      docs: '/reference/multi-tenant/auth',
     }
   },
   {

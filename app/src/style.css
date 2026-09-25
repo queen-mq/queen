@@ -554,6 +554,13 @@
 .crumbs .sep { opacity: .5; color: var(--text-faint); font-size: 11px; }
 .crumbs .here { color: var(--text-hi); font-weight: 500; }
 
+.doc-link {
+  display: grid; place-items: center; width: 16px; height: 16px; border-radius: 999px;
+  color: var(--text-low); flex-shrink: 0; transition: color .12s;
+}
+.doc-link:hover { color: var(--text-hi); }
+.doc-link svg { width: 14px; height: 14px; }
+
 .cmd-search {
   margin-left: auto; display: flex; align-items: center; gap: 7px;
   min-width: 240px; max-width: 440px; flex: 1;
