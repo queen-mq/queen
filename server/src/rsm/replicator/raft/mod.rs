@@ -320,6 +320,14 @@ fn raft_config(cluster: bool) -> io::Result<Arc<openraft::Config>> {
         election_timeout_max: election * 2,
         // Snapshots are built by the purge driver, never on a schedule.
         snapshot_policy: SnapshotPolicy::Never,
+        // ...and the purge driver alone purges ([`purge_step`]: the floor of
+        // what live members hold, minus `QUEEN_RAFT_LOG_KEEP`). openraft's own
+        // purge after every snapshot build keeps only this many entries below
+        // the snapshot (default 1000), whatever a lagging member still needs:
+        // with it, followers purged 1000 below each snapshot and a new leader
+        // had to send full snapshots to members the old one served from its
+        // log. u64::MAX turns it off; `trigger().purge_log` ignores it.
+        max_in_snapshot_log_to_keep: u64::MAX,
         // A restarted node always runs an election, so a new term's blank entry
         // commits (and applies) everything its log holds before it plans.
         enable_leader_restore: Some(false),
@@ -583,7 +591,16 @@ async fn watch<S: Store + 'static>(
                 }
             }
             _ = tick.tick() => {
-                purge_step(&raft, &shared, &m, floor, &opts).await;
+                // A follower purges by the floor its leader keeps, from the
+                // leader's view received on the appends: whoever is elected
+                // next still holds what a lagging member needs. No view yet:
+                // nothing is purged.
+                let purge_floor = if m.replication.is_some() {
+                    floor
+                } else {
+                    shared.members.follower_floor(m.id, opts.hold).unwrap_or(0)
+                };
+                purge_step(&raft, &shared, &m, purge_floor, &opts).await;
                 prefer_step(&raft, &m, &opts, &mut last_handoff).await;
             }
         }

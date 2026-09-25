@@ -173,6 +173,36 @@ impl MembersState {
         Some((view, age + at.elapsed()))
     }
 
+    /// On a follower: the openraft index every member the LEADER still counts
+    /// as live has replicated, from the last view received — the floor the
+    /// leader purges by ([`super::replicated_floor`]). A follower that purges
+    /// below it and is then elected must send a snapshot to a member the old
+    /// leader was still serving from its log (measured: a follower away for
+    /// 43 s, under a 600 s hold, got a 5.9 MB snapshot and a restart once
+    /// leadership moved). A member is live while the leader heard from it
+    /// within `hold`, counted to now: the view's figure plus the view's age.
+    /// This node and the leader are left out: neither needs the log from here.
+    /// `None` before the first view (or when it does not parse): the caller
+    /// then purges nothing.
+    pub(crate) fn follower_floor(&self, me: NodeId, hold: Duration) -> Option<u64> {
+        let (view, age) = self.received()?;
+        let mut floor = u64::MAX;
+        for m in &view.members {
+            if m.id == me || m.id == view.leader {
+                continue;
+            }
+            let live = m
+                .last_ack_ms
+                .is_some_and(|ms| Duration::from_millis(ms) + age < hold);
+            if live {
+                // The view counts in RSM numbering; the purge in openraft
+                // indexes (RSM = openraft + 1).
+                floor = floor.min(m.matched.map_or(0, |i| i.saturating_sub(1)));
+            }
+        }
+        Some(floor)
+    }
+
     /// The PREVIOUS leader, as this node last heard from it while following:
     /// its id and how long ago its last append arrived here.
     fn previous_leader(&self) -> Option<(NodeId, u64)> {
@@ -346,6 +376,40 @@ mod tests {
         let (id, ms) = follower.previous_leader().unwrap();
         assert_eq!(id, 2);
         assert!(ms < 1_000, "{ms}");
+    }
+
+    /// A follower purges no deeper than its leader: the lowest index held by a
+    /// member the leader heard from within `hold` — itself and the leader left
+    /// out, a silent member dropped once its silence (plus the view's age)
+    /// reaches `hold`, openraft numbering (RSM - 1). No view: no floor to go
+    /// by, so the caller keeps the whole log.
+    #[test]
+    fn a_follower_purges_no_deeper_than_what_live_members_hold() {
+        let hold = Duration::from_secs(600);
+        assert_eq!(MembersState::default().follower_floor(2, hold), None);
+
+        let leader = published(1, 7, Duration::ZERO);
+        {
+            let mut v = view(1);
+            v.members[1].matched = Some(5_000); // node 2, the follower asking
+            v.members[2].matched = Some(1_227); // node 3, behind
+            v.members[0].matched = Some(9_000); // node 1, the leader
+            *leader.published.write().unwrap() =
+                Some((7, serde_json::to_string(&v).unwrap(), Instant::now()));
+        }
+        let follower = MembersState::default();
+        follower.receive(leader.header().unwrap().as_bytes());
+        // Node 3 holds 1227 (RSM) = 1226 (openraft): node 2 keeps that much.
+        assert_eq!(follower.follower_floor(2, hold), Some(1_226));
+        // Node 3 asking: node 2 is the only other non-leader.
+        assert_eq!(follower.follower_floor(3, hold), Some(4_999));
+
+        // Node 3 silent past the hold (30 ms of silence + the view's age):
+        // the leader has stopped holding the log for it, and so does node 2.
+        assert_eq!(
+            follower.follower_floor(2, Duration::from_millis(20)),
+            Some(u64::MAX)
+        );
     }
 
     /// The header is read before openraft judges the append, so a deposed
