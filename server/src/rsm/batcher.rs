@@ -344,6 +344,10 @@ impl BatcherConfig {
                 visit_cap: num("QUEEN_RAFT_RETENTION_VISIT", d.maintenance.visit_cap as u64)
                     as usize,
                 walk: Default::default(),
+                txn_window_min_s: num(
+                    "QUEEN_RAFT_TXN_WINDOW_MIN_S",
+                    d.maintenance.txn_window_min_s as u64,
+                ) as i64,
             },
             keep_overlay: flag("QUEEN_RAFT_KEEP_OVERLAY", d.keep_overlay),
             lanes: std::env::var("QUEEN_LANES")

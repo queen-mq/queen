@@ -312,6 +312,15 @@ pub struct QLogSet {
     /// of one group are written in parallel. Fixed when the directory is
     /// created (`qlog/LANES`); shared with every reader.
     lanes: Arc<AtomicU64>,
+    /// How many SHARED logs the queues are spread over (`0` = one log per
+    /// queue): a queue's records live in shared log `queue_id % shards`
+    /// ([`route_log`]). Fixed when the directory is created (`qlog/SHARDS`);
+    /// shared with every reader.
+    shards: Arc<AtomicU64>,
+    /// When the writer last ran [`QLogSet::idle_pass`].
+    idle_at: Option<std::time::Instant>,
+    /// Where the next [`QLogSet::idle_pass`] resumes (a log id).
+    idle_cursor: u64,
     /// The fsync'd tail of every log a sync covered, for the applier to record
     /// ([`QLogSet::track_tails`]); `None` when nobody records them.
     tails: Option<Arc<QlogTails>>,
@@ -390,6 +399,126 @@ pub fn lanes_from_env() -> u64 {
         .clamp(1, MAX_LANES)
 }
 
+/// The file under the queue-log root that fixes the directory's SHARED-log
+/// count ([`QLogSet::shards`]).
+pub const SHARDS_FILE: &str = "SHARDS";
+
+/// The most shared logs a directory may have.
+pub const MAX_SHARDS: u64 = 4096;
+
+/// `QUEEN_QLOG_SHARDS`: how many SHARED logs a NEW data directory gets
+/// (default 0 = one log per queue, the layout before shared logs). With `K > 0`
+/// every queue's records go to shared log `queue_id % K`, so a group fsyncs at
+/// most `K` logs however many queues it touches — the per-queue fsync fan-out
+/// is what collapsed 10,000 single-partition queues on one node while one
+/// queue with 10,000 partitions (one log) stayed at ~10 ms. An existing
+/// directory keeps the layout it was created with.
+pub fn shards_from_env() -> u64 {
+    std::env::var("QUEEN_QLOG_SHARDS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+        .min(MAX_SHARDS)
+}
+
+/// The log id of shared log `shard`. `0` is the system log and `1` only ever a
+/// remapped queue id in a per-queue directory, so shared logs start at 2.
+pub fn shard_log_id(shard: u64) -> u64 {
+    2 + shard
+}
+
+/// The log holding partition `pid` of queue `queue_id`: the queue's shared log
+/// when the directory has shards, else the partition's lane log of the queue.
+pub fn route_log(queue_id: u64, pid: u64, lanes: u64, shards: u64) -> u64 {
+    if shards > 0 {
+        shard_log_id(queue_id % shards)
+    } else {
+        lane_log_id(queue_id, pid % lanes.max(1))
+    }
+}
+
+/// The log holding a queue's partition-less records (catalog, groups, DLQ
+/// entry parts): the queue's shared log, or its lane-0 log (the queue id).
+pub fn route_queue_log(queue_id: u64, shards: u64) -> u64 {
+    if shards > 0 {
+        shard_log_id(queue_id % shards)
+    } else {
+        queue_id
+    }
+}
+
+/// The rewrite threshold shared logs get unless `QUEEN_QLOG_COMPACT_MIN_DEAD_PCT`
+/// says otherwise: a shared file mixes queues whose messages die at different
+/// times, so it is copied forward only once half of it is dead.
+pub const SHARED_COMPACT_MIN_DEAD_PCT: u8 = 50;
+
+/// `QUEEN_QLOG_SEAL_AGE_S` (default 600, 0 = never): an active file holding
+/// data this old is sealed by the writer's idle pass so retention can reclaim
+/// it ([`QLogSet::idle_pass`]).
+pub fn seal_age_from_env() -> std::time::Duration {
+    std::time::Duration::from_secs(
+        std::env::var("QUEEN_QLOG_SEAL_AGE_S")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(600),
+    )
+}
+
+/// How often the writer runs [`QLogSet::idle_pass`].
+const IDLE_PASS_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The most seals + removals one [`QLogSet::idle_pass`] does.
+const IDLE_PASS_BUDGET: usize = 64;
+
+/// A fixed pool of fsync threads ([`QLogSyncer::sync`]). A group that touched
+/// many logs used to spawn one scoped thread per extra log per group: at ~1,000
+/// touched logs that alone cost 22-38 ms per group even with fsync off.
+struct FsyncPool {
+    tx: std::sync::Mutex<std::sync::mpsc::Sender<FsyncJob>>,
+}
+
+struct FsyncJob {
+    file: std::fs::File,
+    mode: crate::rsm::qlog::Fsync,
+    done: std::sync::mpsc::Sender<io::Result<()>>,
+}
+
+/// `QUEEN_QLOG_FSYNC_THREADS` (default 32): the pool's size.
+fn fsync_pool() -> &'static FsyncPool {
+    static POOL: std::sync::OnceLock<FsyncPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let n = std::env::var("QUEEN_QLOG_FSYNC_THREADS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(32)
+            .clamp(1, 1024);
+        let (tx, rx) = std::sync::mpsc::channel::<FsyncJob>();
+        let rx = Arc::new(std::sync::Mutex::new(rx));
+        for i in 0..n {
+            let rx = rx.clone();
+            std::thread::Builder::new()
+                .name(format!("queen-qlog-fsync-{i}"))
+                .spawn(move || {
+                    // W1: part of the core log sync.
+                    crate::obs::panic_policy::mark_current_thread_core();
+                    loop {
+                        let job = {
+                            let guard = rx.lock().unwrap_or_else(|e| e.into_inner());
+                            guard.recv()
+                        };
+                        let Ok(job) = job else { return };
+                        let res = crate::rsm::qlog::fsync_file(&job.file, job.mode);
+                        let _ = job.done.send(res);
+                    }
+                })
+                .expect("spawn a qlog fsync thread");
+        }
+        FsyncPool {
+            tx: std::sync::Mutex::new(tx),
+        }
+    })
+}
+
 /// What one group's writes left to fsync: every log written, and the highest
 /// record `seq` among them. The writer takes it ([`QLogSet::take_ticket`]); a
 /// [`QLogSyncer`] fsyncs it, on another thread if the caller wants the next
@@ -436,41 +565,64 @@ impl QLogSyncer {
                 }
             }
         }
-        self.fsync_all(&handles)?;
+        self.fsync_all(handles)?;
         if let Some(t) = &self.tails {
             t.note_synced(&tails);
         }
         Ok(())
     }
 
-    fn fsync_all(&self, handles: &[std::fs::File]) -> io::Result<()> {
+    fn fsync_all(&self, mut handles: Vec<std::fs::File>) -> io::Result<()> {
         let mode = self.mode;
-        match handles {
-            [] => Ok(()),
-            [one] => crate::rsm::qlog::fsync_file(one, mode),
-            [first, rest @ ..] => std::thread::scope(|s| -> io::Result<()> {
-                let joins: Vec<std::thread::ScopedJoinHandle<'_, io::Result<()>>> = rest
-                    .iter()
-                    .map(|f| {
-                        s.spawn(move || {
-                            // W1: part of the core log sync.
-                            crate::obs::panic_policy::mark_current_thread_core();
-                            crate::rsm::qlog::fsync_file(f, mode)
-                        })
-                    })
-                    .collect();
-                let mut res = crate::rsm::qlog::fsync_file(first, mode);
-                for j in joins {
-                    let r = j
-                        .join()
-                        .unwrap_or_else(|_| Err(io::Error::other("qlog fsync thread panicked")));
-                    if res.is_ok() {
-                        res = r;
+        if handles.len() <= 1 {
+            // The one-busy-queue case: inline, no hand-off.
+            return match handles.pop() {
+                Some(one) => crate::rsm::qlog::fsync_file(&one, mode),
+                None => Ok(()),
+            };
+        }
+        // Every log but the first goes to the fixed pool; this thread fsyncs
+        // the first meanwhile. Still the slowest fsync, not the sum.
+        let first = handles.remove(0);
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<io::Result<()>>();
+        let mut sent = 0usize;
+        let mut res: io::Result<()> = Ok(());
+        {
+            let pool = fsync_pool();
+            let tx = pool.tx.lock().unwrap_or_else(|e| e.into_inner());
+            for file in handles {
+                let job = FsyncJob {
+                    file,
+                    mode,
+                    done: done_tx.clone(),
+                };
+                match tx.send(job) {
+                    Ok(()) => sent += 1,
+                    // A dead pool (every thread gone) fsyncs here instead.
+                    Err(e) => {
+                        let job = e.0;
+                        let r = crate::rsm::qlog::fsync_file(&job.file, job.mode);
+                        if res.is_ok() {
+                            res = r;
+                        }
                     }
                 }
-                res
-            }),
+            }
         }
+        drop(done_tx);
+        let r = crate::rsm::qlog::fsync_file(&first, mode);
+        if res.is_ok() {
+            res = r;
+        }
+        for _ in 0..sent {
+            let r = done_rx
+                .recv()
+                .unwrap_or_else(|_| Err(io::Error::other("qlog fsync thread gone")));
+            if res.is_ok() {
+                res = r;
+            }
+        }
+        res
     }
 }
 
@@ -528,6 +680,9 @@ impl QLogSet {
             reclaim_queue_cursor: Arc::new(AtomicU64::new(0)),
             reclaim_paused: Arc::new(AtomicU64::new(0)),
             lanes: Arc::new(AtomicU64::new(1)),
+            shards: Arc::new(AtomicU64::new(0)),
+            idle_at: None,
+            idle_cursor: 0,
             tails: None,
         }
     }
@@ -581,9 +736,116 @@ impl QLogSet {
         self.lanes.store(n.clamp(1, MAX_LANES), Ordering::Release);
     }
 
+    /// This directory's shared-log count (0 = one log per queue; 0 until
+    /// [`QLogSet::reopen_all`] reads it).
+    pub fn shards(&self) -> u64 {
+        self.shards.load(Ordering::Acquire)
+    }
+
+    /// Fix the shared-log count of a set that has not been reopened (tests, and
+    /// a caller that creates a fresh directory itself).
+    pub fn set_shards(&self, n: u64) {
+        self.shards.store(n.min(MAX_SHARDS), Ordering::Release);
+    }
+
     /// The log that holds partition `pid`'s records in queue `queue_id`.
     pub fn log_id_for(&self, queue_id: u64, pid: u64) -> u64 {
-        lane_log_id(queue_id, pid % self.lanes())
+        route_log(queue_id, pid, self.lanes(), self.shards())
+    }
+
+    /// The log that holds queue `queue_id`'s partition-less records.
+    pub fn log_id_for_queue(&self, queue_id: u64) -> u64 {
+        route_queue_log(queue_id, self.shards())
+    }
+
+    /// The rewrite threshold this set's logs get
+    /// ([`QLog::set_compact_min_dead_pct`]): shared logs mix queues, so they
+    /// wait for half a file to be dead; per-queue logs keep the old rule.
+    fn compact_pct(&self) -> u8 {
+        if self.shards() > 0 {
+            SHARED_COMPACT_MIN_DEAD_PCT
+        } else {
+            0
+        }
+    }
+
+    /// Read `qlog/SHARDS`, or create it: a new directory takes
+    /// `QUEEN_QLOG_SHARDS`, an existing one without the file keeps one log per
+    /// queue. Call after [`QLogSet::load_lanes`] (which creates the root).
+    fn load_shards(&self) -> io::Result<()> {
+        let path = self.root.join(SHARDS_FILE);
+        let n = match std::fs::read_to_string(&path) {
+            Ok(s) => s
+                .trim()
+                .parse::<u64>()
+                .ok()
+                .filter(|n| *n <= MAX_SHARDS)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{}: not a shard count: {s:?}", path.display()),
+                    )
+                })?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let existing = std::fs::read_dir(&self.root)?
+                    .filter_map(|e| e.ok())
+                    .any(|e| {
+                        e.file_name()
+                            .to_str()
+                            .and_then(|n| n.strip_prefix('q'))
+                            .is_some_and(|r| r.parse::<u64>().is_ok())
+                    });
+                let n = if existing { 0 } else { shards_from_env() };
+                // No file means one log per queue, so only a shared layout is
+                // written down. Two openers of one new root (boot + snapshot
+                // tail) may race here: each writes its own temp file, and the
+                // loser of the rename reads what the winner fixed.
+                if n > 0 {
+                    static TMP: AtomicU64 = AtomicU64::new(0);
+                    let tmp = self.root.join(format!(
+                        "{SHARDS_FILE}.tmp.{}.{}",
+                        std::process::id(),
+                        TMP.fetch_add(1, Ordering::Relaxed)
+                    ));
+                    {
+                        use std::io::Write;
+                        let mut f = std::fs::File::create(&tmp)?;
+                        f.write_all(format!("{n}\n").as_bytes())?;
+                        f.sync_all()?;
+                    }
+                    std::fs::rename(&tmp, &path)?;
+                    std::fs::File::open(&self.root)?.sync_all()?;
+                    std::fs::read_to_string(&path)?
+                        .trim()
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|v| *v <= MAX_SHARDS)
+                        .unwrap_or(n)
+                } else {
+                    0
+                }
+            }
+            Err(e) => return Err(e),
+        };
+        let env = shards_from_env();
+        if std::env::var("QUEEN_QLOG_SHARDS").is_ok() && env != n {
+            tracing::warn!(
+                target: "rsm",
+                dir_shards = n,
+                env_shards = env,
+                "QUEEN_QLOG_SHARDS differs from the queue-log directory's shard count; the directory's wins",
+            );
+        }
+        if n > 0 && self.lanes() > 1 {
+            tracing::warn!(
+                target: "rsm",
+                shards = n,
+                lanes = self.lanes(),
+                "queue-log lanes are ignored in a directory with shared logs",
+            );
+        }
+        self.shards.store(n, Ordering::Release);
+        Ok(())
     }
 
     /// The lane of partition `pid` (its log is `lane_log_id(queue, lane)`).
@@ -704,6 +966,7 @@ impl QLogSet {
             reclaim_paused: self.reclaim_paused.clone(),
             root: self.root.clone(),
             lanes: self.lanes.clone(),
+            shards: self.shards.clone(),
         }
     }
 
@@ -735,6 +998,7 @@ impl QLogSet {
     /// the store recorded as qlog-durable ([`QLog::open_guarded`]).
     pub fn reopen_all_guarded(&mut self, durable: u64) -> io::Result<u64> {
         self.load_lanes()?;
+        self.load_shards()?;
         let rd = match std::fs::read_dir(&self.root) {
             Ok(rd) => rd,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
@@ -771,6 +1035,7 @@ impl QLogSet {
             }
             let (mut log, rec) = QLog::open_guarded(&self.root, id, self.opts, durable)?;
             log.set_recovery_floor(self.floor.clone());
+            log.set_compact_min_dead_pct(self.compact_pct());
             tail = tail.max(rec.max_seq);
             self.logs
                 .write()
@@ -1157,6 +1422,7 @@ impl QLogSet {
         }
         let (mut log, _rec) = QLog::open(&self.root, qid, self.opts)?;
         log.set_recovery_floor(self.floor.clone());
+        log.set_compact_min_dead_pct(self.compact_pct());
         let arc = Arc::new(RwLock::new(log));
         self.logs
             .write()
@@ -1165,22 +1431,121 @@ impl QLogSet {
         Ok(arc)
     }
 
-    /// Drop a deleted queue's log handle and any records still buffered for it
-    /// (§NA-I5: a log for a dropped queue is GC'd). A1/A2 drop only the in-RAM
-    /// handle and buffer; unlinking the on-disk `q<id>/` directory is retention
-    /// (§3.3), a later phase.
+    /// A queue was deleted: drop any records still buffered for it (the applier
+    /// path). Its logs stay OPEN, so retention sees them: its partitions are
+    /// gone, so every message record in them is dead and whole files are
+    /// unlinked; the writer's [`QLogSet::idle_pass`] seals the last file once
+    /// it is old and removes the directory once nothing is left
+    /// (§NA-I5: a log for a dropped queue is GC'd). A shared log is never
+    /// removed: the queue's records die there the same way.
     pub fn remove(&mut self, tenant: &str, queue: &str) {
+        if self.shards() > 0 {
+            return;
+        }
         let queue_id = Self::queue_id_of(tenant, queue);
         for lane in 0..self.lanes() {
-            let qid = lane_log_id(queue_id, lane);
-            if let Some(log) = self.logs.write().expect("qlog set poisoned").remove(&qid) {
-                let log = log.read().expect("qlog poisoned");
-                replace_total(&self.totals.files, log.file_count() as u64, 0);
-                replace_total(&self.totals.bytes, log.bytes(), 0);
-            }
-            self.pending.remove(&qid);
-            self.dirty.remove(&qid);
+            self.pending.remove(&lane_log_id(queue_id, lane));
         }
+    }
+
+    /// [`QLogSet::idle_pass`] at most every few seconds (writer thread).
+    pub fn maybe_idle_pass(&mut self) -> io::Result<()> {
+        let now = std::time::Instant::now();
+        if self
+            .idle_at
+            .is_some_and(|at| now.duration_since(at) < IDLE_PASS_EVERY)
+        {
+            return Ok(());
+        }
+        self.idle_at = Some(now);
+        let seal_age = seal_age_from_env();
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as i64)
+            .unwrap_or(0);
+        self.idle_pass(now_us, seal_age)
+    }
+
+    /// The writer's housekeeping over every open log — the writer is the single
+    /// writer of every log, so rolling one here races no append:
+    ///
+    /// - SEAL an active file whose data is older than `seal_age` (0 = never).
+    ///   A log rolls only on size, and retention never touches the active
+    ///   file, so a queue that went quiet kept its last file (up to the roll
+    ///   size) forever, however long ago its messages expired.
+    /// - REMOVE a per-queue log with nothing left (no sealed file, an empty
+    ///   active file): close it and delete its directory. A deleted queue ends
+    ///   here once retention has unlinked its files; a later write re-creates
+    ///   the log. The system log and shared logs are never removed.
+    ///
+    /// Logs written since the last sync are skipped (they are busy anyway).
+    pub fn idle_pass(&mut self, now_us: i64, seal_age: std::time::Duration) -> io::Result<()> {
+        let seal_age_us = i64::try_from(seal_age.as_micros()).unwrap_or(i64::MAX);
+        let next_seq = self.written_seq.saturating_add(1);
+        let per_queue = self.shards() == 0;
+        // Resume after the last log this pass acted on: a roll costs a few
+        // fsyncs on the writer thread, so a pass does at most
+        // `IDLE_PASS_BUDGET` of them and the next one continues from here.
+        let mut logs: Vec<(u64, Arc<RwLock<QLog>>)> = self
+            .logs
+            .read()
+            .expect("qlog set poisoned")
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        let split = logs.partition_point(|(id, _)| *id < self.idle_cursor);
+        logs.rotate_left(split);
+        let mut sealed = 0usize;
+        let mut removed = 0usize;
+        // Wrap to the start unless the budget stops this pass part-way.
+        self.idle_cursor = 0;
+        for (id, log) in logs {
+            if sealed + removed >= IDLE_PASS_BUDGET {
+                self.idle_cursor = id;
+                break;
+            }
+            if self.dirty.contains(&id) || self.pending.contains_key(&id) {
+                continue;
+            }
+            let (seal, empty) = {
+                let g = log.read().expect("qlog poisoned");
+                let seal =
+                    seal_age_us > 0 && g.active_age_us(now_us).is_some_and(|a| a >= seal_age_us);
+                (seal, g.is_removable())
+            };
+            if seal {
+                let mut g = log.write().expect("qlog poisoned");
+                let (f0, b0) = (g.file_count() as u64, g.bytes());
+                if g.seal_active(next_seq)? {
+                    sealed += 1;
+                }
+                replace_total(&self.totals.files, f0, g.file_count() as u64);
+                replace_total(&self.totals.bytes, b0, g.bytes());
+                continue;
+            }
+            if empty && per_queue && id != SYSTEM_QUEUE_ID {
+                let dir = log.read().expect("qlog poisoned").dir().to_path_buf();
+                let removed_log = self.logs.write().expect("qlog set poisoned").remove(&id);
+                if let Some(l) = removed_log {
+                    let g = l.read().expect("qlog poisoned");
+                    replace_total(&self.totals.files, g.file_count() as u64, 0);
+                    replace_total(&self.totals.bytes, g.bytes(), 0);
+                }
+                match std::fs::remove_dir_all(&dir) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            std::fs::File::open(&self.root)?.sync_all()?;
+        }
+        if sealed + removed > 0 {
+            tracing::debug!(target: "rsm", sealed, removed, "qlog idle pass");
+        }
+        Ok(())
     }
 
     /// The open log for a queue id, for the read-match / reopen tests. Test-only:
@@ -1216,6 +1581,8 @@ pub struct QLogReader {
     root: PathBuf,
     /// Shared with the set: see [`QLogSet::lanes`].
     lanes: Arc<AtomicU64>,
+    /// Shared with the set: see [`QLogSet::shards`].
+    shards: Arc<AtomicU64>,
 }
 
 /// Retention stays paused while one of these is alive.
@@ -1282,6 +1649,19 @@ impl QLogReader {
         txns_starts: &std::collections::HashMap<u64, u64>,
         max_files: usize,
     ) -> io::Result<ReclaimProgress> {
+        self.reclaim_step(queue_id, txns_starts, max_files, true)
+    }
+
+    /// [`QLogReader::reclaim_below_txns`], with copy-forward rewrites allowed
+    /// or not (`allow_compact`): a pass lets one rewrite through and unlinks
+    /// every dead file it looks at.
+    pub(crate) fn reclaim_step(
+        &self,
+        queue_id: u64,
+        txns_starts: &std::collections::HashMap<u64, u64>,
+        max_files: usize,
+        allow_compact: bool,
+    ) -> io::Result<ReclaimProgress> {
         if self.reclaim_paused.load(Ordering::Acquire) > 0 {
             return Ok(ReclaimProgress {
                 more: true,
@@ -1297,7 +1677,7 @@ impl QLogReader {
                     });
                 };
                 let (files_before, bytes_before) = (log.file_count() as u64, log.bytes());
-                let result = log.unlink_below_txns_bounded(txns_starts, max_files);
+                let result = log.reclaim_step(txns_starts, max_files, allow_compact);
                 let (files_after, bytes_after) = (log.file_count() as u64, log.bytes());
                 replace_total(&self.totals.files, files_before, files_after);
                 replace_total(&self.totals.bytes, bytes_before, bytes_after);
@@ -1380,9 +1760,14 @@ impl QLogReader {
         self.lanes.load(Ordering::Acquire)
     }
 
+    /// This directory's shared-log count (0 = one log per queue).
+    pub fn shards(&self) -> u64 {
+        self.shards.load(Ordering::Acquire)
+    }
+
     /// The log that holds partition `pid`'s records in queue `queue_id`.
     pub fn log_id_for(&self, queue_id: u64, pid: u64) -> u64 {
-        lane_log_id(queue_id, pid % self.lanes())
+        route_log(queue_id, pid, self.lanes(), self.shards())
     }
 
     /// The open log holding `pid`'s records of queue `queue_id`.

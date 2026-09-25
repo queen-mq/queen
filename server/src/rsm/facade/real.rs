@@ -312,6 +312,14 @@ pub struct RaftFacade {
     /// `PopWildcard` command onto the single serial batcher pipeline. Resolved
     /// once at open.
     pop_fastpath_empty: bool,
+    /// `QUEEN_RAFT_POP_PARK_RECHECK_MS` (default 5000): how long a parked
+    /// long-poll waits for a wake before it re-checks on its own. Wakes are
+    /// event-driven (an append or a lease release applied here), so the re-check
+    /// is only the safety net for work that becomes claimable by the clock (an
+    /// expired lease, a delayed message) — it was 500 ms, which cost ~2 store
+    /// reads per second per parked consumer with nothing happening (6.4 cores
+    /// for 50,000 idle consumers).
+    pop_park_recheck: Duration,
     /// The pop autopilot's per-lane state (`autopilot=true`, wildcard pops).
     autopilot: super::autopilot::Autopilot,
     /// Push admission budget ([`crate::rsm::admit`], one per process);
@@ -666,6 +674,13 @@ impl RaftFacade {
             gates,
             batcher_join,
             pop_fastpath_empty: env_flag("QUEEN_RAFT_POP_FASTPATH_EMPTY", true),
+            pop_park_recheck: Duration::from_millis(
+                std::env::var("QUEEN_RAFT_POP_PARK_RECHECK_MS")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .unwrap_or(5_000)
+                    .clamp(10, 60_000),
+            ),
             autopilot: super::autopilot::Autopilot::from_env(),
             admit,
             offload,
@@ -702,6 +717,7 @@ impl RaftFacade {
             gates: _,
             batcher_join,
             pop_fastpath_empty: _,
+            pop_park_recheck: _,
             autopilot: _,
             admit: _,
             data_dir: _,
@@ -2682,7 +2698,7 @@ impl RaftFacade {
                 )
                 .await;
             }
-            let park = remaining.min(Duration::from_millis(500));
+            let park = remaining.min(self.pop_park_recheck);
             // The dashboard's parked gauge (1 Hz samples, data.rs ≈1197).
             let _parked = crate::metrics::global().map(|m| m.parked.enter(&ctx.tenant, &queue));
             let _pinned = partition.is_some().then(|| self.gates.park_pinned(&gate_key));

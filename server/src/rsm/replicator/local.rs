@@ -367,7 +367,13 @@ impl QlogWrite {
         items: &mut [GroupItem],
     ) -> io::Result<crate::rsm::qlog::set::SyncTicket> {
         use crate::rsm::effect::Effect;
-        use crate::rsm::qlog::set::lane_log_id;
+        use crate::rsm::qlog::set::{route_log, route_queue_log};
+        // Housekeeping on the single writer's thread: seal quiet files so
+        // retention can reclaim them, remove per-queue logs left empty. A
+        // failure here is logged, never the group's.
+        if let Err(e) = self.set.maybe_idle_pass() {
+            tracing::warn!(target: "rsm", error = %e, "qlog idle pass failed");
+        }
         // The payload-free bytes of every entry — the entry records carry
         // these: encoded from the ORIGINAL entry (its payloads are still in
         // it), or as received (a follower's stored-form entry).
@@ -424,6 +430,10 @@ impl QlogWrite {
             }
         }
         let lanes = self.set.lanes();
+        // Shared logs: every queue's records go to its shared log, written on
+        // the writer thread (lane 0); per-queue logs keep their lanes.
+        let shards = self.set.shards();
+        let lane_for = |pid: u64| if shards > 0 { 0 } else { pid % lanes };
         let mut zi = 0usize;
         let mut max_seq = 0u64;
         // Every log written, with its lane.
@@ -467,7 +477,7 @@ impl QlogWrite {
                         | Effect::GroupDelete { tenant, queue, .. }
                         | Effect::DlqInsert { tenant, queue, .. }
                         | Effect::DlqDelete { tenant, queue, .. } => {
-                            let log = QLogSet::queue_id_of(tenant, queue);
+                            let log = route_queue_log(QLogSet::queue_id_of(tenant, queue), shards);
                             lane_of_log.insert(log, 0);
                             touched.insert(log);
                         }
@@ -476,16 +486,16 @@ impl QlogWrite {
                         } => {
                             let qid = QLogSet::queue_id_of(tenant, queue);
                             q.pid_qid.insert(*pid, qid);
-                            let lane = pid % lanes;
-                            let log = lane_log_id(qid, lane);
+                            let lane = lane_for(*pid);
+                            let log = route_log(qid, *pid, lanes, shards);
                             lane_of_log.insert(log, lane);
                             touched.insert(log);
                         }
                         Effect::PartitionDelete { pid } => {
                             match resolve_qid(&mut q.pid_qid, &lookup, *pid)? {
                                 Some(qid) => {
-                                    let lane = pid % lanes;
-                                    let log = lane_log_id(qid, lane);
+                                    let lane = lane_for(*pid);
+                                    let log = route_log(qid, *pid, lanes, shards);
                                     lane_of_log.insert(log, lane);
                                     touched.insert(log);
                                 }
@@ -498,8 +508,8 @@ impl QlogWrite {
                         | Effect::Watermark { pid, .. } => {
                             match resolve_qid(&mut q.pid_qid, &lookup, *pid)? {
                                 Some(qid) => {
-                                    let lane = pid % lanes;
-                                    let log = lane_log_id(qid, lane);
+                                    let lane = lane_for(*pid);
+                                    let log = route_log(qid, *pid, lanes, shards);
                                     lane_of_log.insert(log, lane);
                                     touched.insert(log);
                                 }
@@ -521,8 +531,8 @@ impl QlogWrite {
                                         "qlog route: no partition row for pid {pid}"
                                     ))
                                 })?;
-                            let lane = pid % lanes;
-                            let log = lane_log_id(qid, lane);
+                            let lane = lane_for(*pid);
+                            let log = route_log(qid, *pid, lanes, shards);
                             lane_of_log.insert(log, lane);
                             touched.insert(log);
                             let (zstd, payload): (bool, &[u8]) = match stored {

@@ -659,6 +659,30 @@ pub struct QLog {
     reclaim_txns_starts: HashMap<u64, u64>,
     reclaim_checked: HashMap<u64, u64>,
     reclaim_cursor: u64,
+    /// Wall clock (µs) when the active file was created or reopened: the age of
+    /// an active file that holds only entry records ([`QLog::active_age_us`]).
+    active_opened_us: i64,
+    /// Retention rewrites a sealed file that mixes live and dead messages only
+    /// once at least this percent of its message bytes is dead
+    /// ([`QLog::set_compact_min_dead_pct`]); 0 = on the first dead message.
+    compact_min_dead_pct: u8,
+}
+
+/// Wall clock in µs, for file ages. Never part of replicated state.
+fn wall_now_us() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0)
+}
+
+/// `QUEEN_QLOG_COMPACT_MIN_DEAD_PCT` (0-100), when set: overrides the rewrite
+/// threshold of every log ([`QLog::set_compact_min_dead_pct`]).
+pub fn compact_min_dead_pct_from_env() -> Option<u8> {
+    std::env::var("QUEEN_QLOG_COMPACT_MIN_DEAD_PCT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u8>().ok())
+        .map(|p| p.min(100))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -666,6 +690,8 @@ pub(crate) struct ReclaimProgress {
     pub changed: usize,
     pub examined: usize,
     pub more: bool,
+    /// Copy-forward rewrites done.
+    pub compacted: usize,
 }
 
 impl QLog {
@@ -870,6 +896,8 @@ impl QLog {
             reclaim_txns_starts: HashMap::new(),
             reclaim_checked: HashMap::new(),
             reclaim_cursor: FIRST_FILE_ID,
+            active_opened_us: wall_now_us(),
+            compact_min_dead_pct: compact_min_dead_pct_from_env().unwrap_or(0),
         };
         tracing::info!(
             target: "rsm",
@@ -1228,7 +1256,82 @@ impl QLog {
         self.prealloc_end = FILE_HEADER_LEN;
         self.files.push(FileMeta::empty(id, first_seq));
         self.active_index.open(id);
+        self.active_opened_us = wall_now_us();
         Ok(())
+    }
+
+    /// The rewrite threshold retention applies to this log's sealed files: a
+    /// file mixing live and dead messages is copied forward only once at least
+    /// `pct` percent of its message bytes is dead. Shared logs (many queues
+    /// with different retention in one file) need a threshold, or the same
+    /// file is rewritten on every retention pass. An env override wins.
+    pub fn set_compact_min_dead_pct(&mut self, pct: u8) {
+        self.compact_min_dead_pct = compact_min_dead_pct_from_env().unwrap_or(pct.min(100));
+    }
+
+    /// How long the active file has held data: from its oldest message (the
+    /// leader's `created_at`), or from when it was opened when it holds only
+    /// entry records. `None` when there is no active file or it holds nothing
+    /// past its header.
+    pub(crate) fn active_age_us(&self, now_us: i64) -> Option<i64> {
+        self.active.as_ref()?;
+        let meta = self.files.last()?;
+        if meta.bytes <= FILE_HEADER_LEN {
+            return None;
+        }
+        let since = if meta.records > 0 && meta.min_created_at_us != i64::MAX {
+            meta.min_created_at_us.min(self.active_opened_us)
+        } else {
+            self.active_opened_us
+        };
+        Some(now_us.saturating_sub(since))
+    }
+
+    /// Seal a QUIET active file so retention can reclaim it: an active file is
+    /// never a retention candidate, and a log only rolls on size, so a queue
+    /// that went quiet kept its last file (up to the roll size) forever. A
+    /// normal roll: the outgoing file is fsynced and indexed, and a new empty
+    /// active file starts at `next_seq` — the writer's next seq, above every
+    /// record written so far, exactly as an empty active file left by a crash
+    /// between a roll and its first write. Writer thread only (the writer is
+    /// the single writer of every log). Returns whether it rolled.
+    pub(crate) fn seal_active(&mut self, next_seq: u64) -> io::Result<bool> {
+        if self.active.is_none() {
+            return Ok(false);
+        }
+        let Some(meta) = self.files.last() else {
+            return Ok(false);
+        };
+        if meta.bytes <= FILE_HEADER_LEN {
+            return Ok(false);
+        }
+        let first_seq = next_seq.max(meta.max_seq.saturating_add(1));
+        self.roll(first_seq)?;
+        Ok(true)
+    }
+
+    /// Nothing left: no sealed file, and at most an active file that holds
+    /// nothing past its header. Such a log can be closed and its directory
+    /// removed; a later write re-creates it.
+    pub(crate) fn is_empty_log(&self) -> bool {
+        self.sealed.is_empty()
+            && self.files.iter().all(|m| !m.sealed && m.bytes <= FILE_HEADER_LEN)
+    }
+
+    /// [`QLog::is_empty_log`], and safe to REMOVE: every empty file's
+    /// `first_seq` is at or below the recovery floor. An empty active file's
+    /// `first_seq` counts in the durable tail a reopen reports (and seeds the
+    /// recorded qlog-durable index from); once the floor has passed it, a real
+    /// record at or above it exists in a log that stays, so removing this one
+    /// cannot leave the tail behind what the store recorded.
+    pub(crate) fn is_removable(&self) -> bool {
+        let floor = self.floor.load(Ordering::Acquire);
+        self.is_empty_log() && self.files.iter().all(|m| m.first_seq <= floor)
+    }
+
+    /// This log's directory (`<root>/q<id>`).
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
     }
 
     /// Seal the active file — write its `.qidx`, map it, mark it sealed — and
@@ -2153,6 +2256,19 @@ impl QLog {
         txns_starts: &std::collections::HashMap<u64, u64>,
         max_files: usize,
     ) -> io::Result<ReclaimProgress> {
+        self.reclaim_step(txns_starts, max_files, true)
+    }
+
+    /// [`QLog::unlink_below_txns_bounded`], with copy-forward allowed or not: a
+    /// file that would need a rewrite while `allow_compact` is false is left
+    /// for a later pass (and not marked examined).
+    pub(crate) fn reclaim_step(
+        &mut self,
+        txns_starts: &std::collections::HashMap<u64, u64>,
+        max_files: usize,
+        allow_compact: bool,
+    ) -> io::Result<ReclaimProgress> {
+        let mut allow_compact = allow_compact;
         if self.reclaim_txns_starts != *txns_starts {
             self.reclaim_txns_starts = txns_starts.clone();
             self.reclaim_generation = self.reclaim_generation.wrapping_add(1).max(1);
@@ -2180,12 +2296,13 @@ impl QLog {
         for id in selected {
             out.examined += 1;
             self.reclaim_cursor = id.wrapping_add(1).max(FIRST_FILE_ID);
-            let (live, dead_messages) = {
+            let (live, dead_messages, live_bytes, dead_bytes) = {
                 let Some(view) = self.sealed.get(&id) else {
                     continue;
                 };
                 let mut live = 0usize;
                 let mut dead_messages = 0usize;
+                let (mut live_bytes, mut dead_bytes) = (0u64, 0u64);
                 for record in view.records() {
                     // Entry records have count=0. They are cheap recovery
                     // metadata, not a reason to rewrite a 64 MiB file whose
@@ -2196,18 +2313,35 @@ impl QLog {
                     }
                     if record_is_dead(&record, txns_starts) {
                         dead_messages += 1;
+                        dead_bytes += u64::from(record.len);
                     } else {
                         live += 1;
+                        live_bytes += u64::from(record.len);
                     }
                 }
-                (live, dead_messages)
+                (live, dead_messages, live_bytes, dead_bytes)
             };
 
+            // A mixed file is rewritten only once enough of it is dead
+            // (`compact_min_dead_pct`, 0 = the first dead message): a file
+            // shared by queues with different retention would otherwise be
+            // copied forward again on every pass a watermark moves.
+            let worth_rewriting = dead_messages > 0
+                && dead_bytes.saturating_mul(100)
+                    >= u64::from(self.compact_min_dead_pct)
+                        .saturating_mul(live_bytes.saturating_add(dead_bytes));
             if live == 0 {
                 out.changed += self.unlink_dead_files(|meta| meta.id == id)?;
-            } else if dead_messages > 0 {
+            } else if worth_rewriting {
+                if !allow_compact {
+                    // Over this pass's rewrite budget: look again next pass.
+                    out.more = true;
+                    continue;
+                }
                 self.compact_file_below_txns(id, txns_starts)?;
                 out.changed += 1;
+                out.compacted += 1;
+                allow_compact = false;
             }
             if self.files.iter().any(|meta| meta.id == id) {
                 self.reclaim_checked.insert(id, generation);
