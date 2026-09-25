@@ -732,9 +732,10 @@ async fn resolve_conflation(
 ///
 /// `queue` is `None` on the discovery route, which spans queues and so has no
 /// single per-queue counter to attribute to; `scope` is the label for the log
-/// line either way (a queue name, or the `namespace/task` pair).
-fn note_conflation_conflict(
-    st: &Arc<AppState>,
+/// line either way (a queue name, or the `namespace/task` pair). The raft pop
+/// answers call it too (`handlers::raft::pop_answer`).
+pub(crate) fn note_conflation_conflict(
+    st: &AppState,
     tenant: &str,
     queue: Option<&str>,
     scope: &str,
@@ -936,6 +937,7 @@ pub async fn handle_pop(
                     .map(|ms| ms.saturating_mul(1_000)),
                 subscription_from_now: from.is_some_and(|v| v.eq_ignore_ascii_case("now")),
                 conflate,
+                conflate_requested: p.conflation,
             },
         )
         .await;
@@ -2758,6 +2760,7 @@ pub async fn handle_pop_partition(
                     .map(|ms| ms.saturating_mul(1_000)),
                 subscription_from_now: from.is_some_and(|v| v.eq_ignore_ascii_case("now")),
                 conflate: p.conflation == Some(true) && p.consumer_group.is_some(),
+                conflate_requested: p.conflation,
             },
         )
         .await;
@@ -3055,6 +3058,7 @@ pub async fn handle_pop_discover(
                     .map(|ms| ms.saturating_mul(1_000)),
                 subscription_from_now: from.is_some_and(|v| v.eq_ignore_ascii_case("now")),
                 conflate,
+                conflate_requested: p.conflation,
             },
         )
         .await;

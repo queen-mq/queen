@@ -1034,6 +1034,29 @@ impl RaftFacade {
 /// fails to apply in time is handed back (`release_unanswered`).
 const FOLLOWER_POP_MARGIN: Duration = Duration::from_millis(250);
 
+/// PLAN_CONFLATION §3.1/§3.3, the answer half, rendered as the Postgres engine
+/// renders it (`render_pop_parts` in data.rs): `"conflation":true` on every
+/// answer whose EFFECTIVE policy is conflating, empty ones included, and
+/// `"conflationConflict":true` when the request named another value and the
+/// stored one won. Both keys go after `partitionsClaimed` and only when true, so
+/// every other answer keeps its bytes. The SDKs read a missing key on a pop that
+/// asked for conflation as a broker that cannot conflate, and stop the consumer.
+fn conflation_echo(out: &mut PopOut, on: bool, conflict: bool) {
+    out.conflation = on;
+    out.conflation_conflict = conflict;
+    if !(on || conflict) || !out.body.ends_with('}') {
+        return;
+    }
+    out.body.pop();
+    if on {
+        out.body.push_str(",\"conflation\":true");
+    }
+    if conflict {
+        out.body.push_str(",\"conflationConflict\":true");
+    }
+    out.body.push('}');
+}
+
 /// A pop's rendered answer, with the autopilot's choice echoed when it made
 /// one (`"autopilot":{"partitions":W,"batch":B}`).
 fn autopilot_echo(
@@ -2402,11 +2425,17 @@ impl RaftFacade {
             // deadline is not started — a pop that times out while queued still
             // CLAIMS, and nobody would ever ack that lease.
             if attempt > 0 && ctx.deadline.remaining() < *POP_SUBMIT_MIN {
-                return autopilot_echo(
-                    self.render_claims(ctx, &queue, &group, &worker, auto_ack, Vec::new())
-                        .await,
+                return self.answer_pop(
+                    ctx,
+                    &queue,
+                    &group,
+                    &worker,
+                    auto_ack,
+                    Vec::new(),
+                    options.conflate_requested,
                     last_plan,
-                );
+                )
+                .await;
             }
             attempt += 1;
             // P1.2: the planner refuses to claim once nobody can receive the answer.
@@ -2547,29 +2576,47 @@ impl RaftFacade {
                     self.autopilot
                         .delivered(&gate_key, &worker, n.min(u32::MAX as u64) as u32);
                 }
-                return autopilot_echo(
-                    self.render_claims(ctx, &queue, &group, &worker, auto_ack, claims)
-                        .await,
+                return self.answer_pop(
+                    ctx,
+                    &queue,
+                    &group,
+                    &worker,
+                    auto_ack,
+                    claims,
+                    options.conflate_requested,
                     last_plan,
-                );
+                )
+                .await;
             }
 
             // Empty. Long-poll only for a queue-scoped pop (§9.5); discovery has
             // no single gate here.
             if !wait || partition.is_none() && (!namespace.is_empty() || !task.is_empty()) {
-                return autopilot_echo(
-                    self.render_claims(ctx, &queue, &group, &worker, auto_ack, Vec::new())
-                        .await,
+                return self.answer_pop(
+                    ctx,
+                    &queue,
+                    &group,
+                    &worker,
+                    auto_ack,
+                    Vec::new(),
+                    options.conflate_requested,
                     last_plan,
-                );
+                )
+                .await;
             }
             let remaining = ctx.deadline.remaining();
             if remaining.is_zero() {
-                return autopilot_echo(
-                    self.render_claims(ctx, &queue, &group, &worker, auto_ack, Vec::new())
-                        .await,
+                return self.answer_pop(
+                    ctx,
+                    &queue,
+                    &group,
+                    &worker,
+                    auto_ack,
+                    Vec::new(),
+                    options.conflate_requested,
                     last_plan,
-                );
+                )
+                .await;
             }
             let park = remaining.min(Duration::from_millis(500));
             // The dashboard's parked gauge (1 Hz samples, data.rs ≈1197).
@@ -2577,14 +2624,82 @@ impl RaftFacade {
             let _pinned = partition.is_some().then(|| self.gates.park_pinned(&gate_key));
             woke = self.gates.wait(&gate_key, park).await;
             if ctx.deadline.expired() {
-                return autopilot_echo(
-                    self.render_claims(ctx, &queue, &group, &worker, auto_ack, Vec::new())
-                        .await,
+                return self.answer_pop(
+                    ctx,
+                    &queue,
+                    &group,
+                    &worker,
+                    auto_ack,
+                    Vec::new(),
+                    options.conflate_requested,
                     last_plan,
-                );
+                )
+                .await;
             }
             // Loop and re-poll.
         }
+    }
+
+    /// A pop's answer: the claims rendered (`render_claims`), then the
+    /// conflation echo and the autopilot's.
+    #[allow(clippy::too_many_arguments)]
+    async fn answer_pop(
+        &self,
+        ctx: &ReqCtx,
+        queue: &str,
+        group: &str,
+        worker: &str,
+        auto_ack: bool,
+        claims: Vec<PopClaim>,
+        requested: Option<bool>,
+        plan: Option<super::autopilot::Plan>,
+    ) -> Result<PopOut, RsmError> {
+        let on = self
+            .effective_conflation(ctx, queue, group, &claims, requested)
+            .await;
+        let conflict = group != QUEUE_MODE_GROUP && matches!(requested, Some(r) if r != on);
+        let mut out = self
+            .render_claims(ctx, queue, group, worker, auto_ack, claims)
+            .await?;
+        conflation_echo(&mut out, on, conflict);
+        autopilot_echo(Ok(out), plan)
+    }
+
+    /// The group's EFFECTIVE conflation policy for this answer, resolved as
+    /// `resolve_conflation` resolves it on the Postgres engine (§3.3). With claims
+    /// it is what they applied: the planner already let the stored policy win,
+    /// or used the request's when this pop registered the group. Without, it is
+    /// the stored policy, or the request's when the group is not registered.
+    /// Queue mode has no group to hang a policy on. A discovery pop spans
+    /// queues, so an empty one answers with the request's value.
+    async fn effective_conflation(
+        &self,
+        ctx: &ReqCtx,
+        queue: &str,
+        group: &str,
+        claims: &[PopClaim],
+        requested: Option<bool>,
+    ) -> bool {
+        if group == QUEUE_MODE_GROUP {
+            return false;
+        }
+        if !claims.is_empty() {
+            return claims.iter().any(|c| c.conflated);
+        }
+        let requested = requested.unwrap_or(false);
+        if queue.is_empty() {
+            return requested;
+        }
+        let store = self.store.clone();
+        let (tenant, queue, group) = (ctx.tenant.clone(), queue.to_string(), group.to_string());
+        tokio::task::spawn_blocking(move || {
+            store.read(|r| Ok(r.group(&tenant, &queue, &group)?.map(|g| g.meta.conflation)))
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .flatten()
+        .unwrap_or(requested)
     }
 
     /// Read every claim's payload off this node's files (§7.5) and render the
@@ -2980,6 +3095,8 @@ fn render_pop_body(
     Ok(PopOut {
         body: out,
         empty: count == 0,
+        conflation: false,
+        conflation_conflict: false,
     })
 }
 

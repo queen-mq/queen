@@ -1613,3 +1613,113 @@ async fn an_autopilot_pop_fills_its_batch_from_several_sparse_partitions() {
     facade.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// PLAN_CONFLATION §3.1/§3.3 on the raft engine: every answer to a group whose
+/// effective policy conflates says so (`"conflation":true`), empty ones included,
+/// and a request that named another value is told the stored one won
+/// (`"conflationConflict":true`). The SDKs stop a consumer that asked for
+/// conflation and got an answer without the key (client-go `checkConflationEcho`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_conflating_group_echoes_its_policy_on_every_answer() {
+    let dir = scratch("conflation-echo");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    facade
+        .push(
+            ctx(),
+            PushReq {
+                raw: br#"{"items":[
+                    {"queue":"cfl","partition":"p1","payload":{"n":1},"transactionId":"c1"},
+                    {"queue":"cfl","partition":"p1","payload":{"n":2},"transactionId":"c2"},
+                    {"queue":"cfl","partition":"p1","payload":{"n":3},"transactionId":"c3"}
+                ]}"#
+                .to_vec(),
+            },
+        )
+        .await
+        .expect("push");
+    let pop = |group: Option<&str>, requested: Option<bool>| {
+        let facade = &facade;
+        let group = group.map(str::to_string);
+        async move {
+            facade
+                .pop_wildcard(
+                    ctx(),
+                    PopReq {
+                        queue: "cfl".into(),
+                        options: conflate_like_the_receiver(&group, requested),
+                        group,
+                        batch: 10,
+                        auto_ack: false,
+                        wait: false,
+                        timeout_ms: 1_000,
+                    },
+                )
+                .await
+                .expect("pop")
+        }
+    };
+
+    // The registrar: a conflating pop of a new group gets the newest frame only.
+    let first = pop(Some("g-cfl"), Some(true)).await;
+    let body = parse(&first.body);
+    let msgs = body["messages"].as_array().expect("messages");
+    assert_eq!(msgs.len(), 1, "last value only: {body}");
+    assert_eq!(msgs[0]["data"]["n"], 3, "{body}");
+    assert_eq!(body["conflation"], true, "{body}");
+    assert!(body.get("conflationConflict").is_none(), "{body}");
+    assert!(first.conflation && !first.conflation_conflict);
+
+    // Empty (the partition is leased): the STORED policy still answers, so the
+    // receiver sends a 200 with this body, not a bodiless 204.
+    let empty = pop(Some("g-cfl"), Some(true)).await;
+    assert!(empty.empty, "{}", empty.body);
+    assert_eq!(parse(&empty.body)["conflation"], true, "{}", empty.body);
+    assert!(empty.conflation && !empty.conflation_conflict);
+
+    // A request that names the other value: the stored policy wins, and says so.
+    let disagree = pop(Some("g-cfl"), Some(false)).await;
+    let body = parse(&disagree.body);
+    assert_eq!(body["conflation"], true, "{body}");
+    assert_eq!(body["conflationConflict"], true, "{body}");
+    assert!(disagree.conflation && disagree.conflation_conflict);
+
+    // A request that names nothing is told the policy, and is not a conflict.
+    let silent = pop(Some("g-cfl"), None).await;
+    let body = parse(&silent.body);
+    assert_eq!(body["conflation"], true, "{body}");
+    assert!(body.get("conflationConflict").is_none(), "{body}");
+
+    // A plain group: neither key, full or empty (the receiver's 204 stays).
+    let plain = pop(Some("g-plain"), None).await;
+    let body = parse(&plain.body);
+    assert_eq!(body["messages"].as_array().map(Vec::len), Some(3), "{body}");
+    assert!(body.get("conflation").is_none(), "{body}");
+    assert!(!plain.conflation && !plain.conflation_conflict);
+    let plain_empty = pop(Some("g-plain"), Some(false)).await;
+    assert!(plain_empty.empty && !plain_empty.conflation && !plain_empty.conflation_conflict);
+    assert!(!plain_empty.body.contains("conflation"), "{}", plain_empty.body);
+
+    // Queue mode has no group to hang a policy on: never a key, never a conflict.
+    let queue_mode = pop(None, Some(false)).await;
+    assert!(!queue_mode.conflation && !queue_mode.conflation_conflict);
+    assert!(!queue_mode.body.contains("conflation"), "{}", queue_mode.body);
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The receiver's `PopOptions` for a wildcard pop (data.rs `handle_pop`): the
+/// conflating width is the batch, the requested value rides along verbatim.
+fn conflate_like_the_receiver(
+    group: &Option<String>,
+    requested: Option<bool>,
+) -> crate::rsm::facade::PopOptions {
+    let conflate = requested == Some(true) && group.is_some();
+    crate::rsm::facade::PopOptions {
+        subscription_mode: "all".into(),
+        max_parts: if conflate { 10 } else { 1 },
+        conflate,
+        conflate_requested: requested,
+        ..Default::default()
+    }
+}

@@ -147,10 +147,30 @@ pub(crate) async fn dispatch_push(
 }
 
 /// A pop's answer: an empty one is a bodiless 204, exactly as on the Postgres
-/// engine (`pop_status` in data.rs), unless the consumer asked for conflation
-/// — its SDK reads a 204 as a broker that cannot conflate.
-fn pop_answer(out: crate::rsm::facade::PopOut, conflate: bool) -> Response {
-    if out.empty && !conflate {
+/// engine (`pop_status` in data.rs), unless it has something to say about
+/// conflation (the group's effective policy conflates, or the request conflicted
+/// with it) — an SDK that asked for conflation reads a 204 as a broker that
+/// cannot conflate. A conflict is counted and logged as on the Postgres engine.
+fn pop_answer(
+    st: &AppState,
+    tenant: &str,
+    out: crate::rsm::facade::PopOut,
+    conflict_scope: Option<(Option<&str>, &str, &str, Option<bool>)>,
+) -> Response {
+    if out.conflation_conflict {
+        if let Some((queue, scope, group, requested)) = conflict_scope {
+            crate::handlers::data::note_conflation_conflict(
+                st,
+                tenant,
+                queue,
+                scope,
+                group,
+                out.conflation,
+                requested,
+            );
+        }
+    }
+    if out.empty && !out.conflation && !out.conflation_conflict {
         StatusCode::NO_CONTENT.into_response()
     } else {
         json(StatusCode::OK, out.body)
@@ -175,6 +195,10 @@ pub(crate) async fn dispatch_pop(
         return err_response(e);
     }
     let ctx = ReqCtx::new(tenant, deadline_for(timeout_ms));
+    // A conflict needs the names for its log line; only a request that named a
+    // policy can conflict, so nothing is copied otherwise.
+    let requested = options.conflate_requested;
+    let scope = requested.map(|_| (queue.clone(), group.clone().unwrap_or_default()));
     let req = PopReq {
         queue,
         group,
@@ -190,9 +214,15 @@ pub(crate) async fn dispatch_pop(
     // PERF-J: the whole pop handler, pop-only — confirms the empty polling pops
     // are cheap and dominate the mixed `arrival_to_proposed` p50.
     let _t_total = crate::rsm::timing::stamp();
-    let conflate = req.options.conflate;
     let resp = match st.rsm.pop_wildcard(ctx, req).await {
-        Ok(out) => pop_answer(out, conflate),
+        Ok(out) => pop_answer(
+            st,
+            tenant,
+            out,
+            scope
+                .as_ref()
+                .map(|(q, g)| (Some(q.as_str()), q.as_str(), g.as_str(), requested)),
+        ),
         Err(e) => err_response(e),
     };
     if let Some(t) = _t_total {
@@ -223,6 +253,8 @@ pub(crate) async fn dispatch_pop_partition(
         return err_response(e);
     }
     let ctx = ReqCtx::new(tenant, deadline_for(timeout_ms));
+    let requested = options.conflate_requested;
+    let scope = requested.map(|_| (queue.clone(), group.clone().unwrap_or_default()));
     let req = PopPinnedReq {
         queue,
         partition,
@@ -233,9 +265,15 @@ pub(crate) async fn dispatch_pop_partition(
         timeout_ms,
         options,
     };
-    let conflate = req.options.conflate;
     match st.rsm.pop_pinned(ctx, req).await {
-        Ok(out) => pop_answer(out, conflate),
+        Ok(out) => pop_answer(
+            st,
+            tenant,
+            out,
+            scope
+                .as_ref()
+                .map(|(q, g)| (Some(q.as_str()), q.as_str(), g.as_str(), requested)),
+        ),
         Err(e) => err_response(e),
     }
 }
@@ -260,6 +298,16 @@ pub(crate) async fn dispatch_pop_discover(
         return err_response(e);
     }
     let ctx = ReqCtx::new(tenant, deadline_for(timeout_ms));
+    // Discovery spans queues: the conflict is attributed to the namespace/task
+    // pair, with no per-queue counter (as on the Postgres engine).
+    let requested = options.conflate_requested;
+    let scope = requested.map(|_| {
+        let star = |s: &str| if s.is_empty() { "*".to_string() } else { s.to_string() };
+        (
+            format!("{}/{}", star(&namespace), star(&task)),
+            group.clone().unwrap_or_default(),
+        )
+    });
     let req = PopDiscoverReq {
         namespace,
         task,
@@ -270,9 +318,15 @@ pub(crate) async fn dispatch_pop_discover(
         timeout_ms,
         options,
     };
-    let conflate = req.options.conflate;
     match st.rsm.pop_discover(ctx, req).await {
-        Ok(out) => pop_answer(out, conflate),
+        Ok(out) => pop_answer(
+            st,
+            tenant,
+            out,
+            scope
+                .as_ref()
+                .map(|(s, g)| (None, s.as_str(), g.as_str(), requested)),
+        ),
         Err(e) => err_response(e),
     }
 }

@@ -331,6 +331,10 @@ pub struct PopOptions {
     pub subscription_from_now: bool,
     /// Requested last-value delivery policy; persisted on first registration.
     pub conflate: bool,
+    /// The literal `conflation` query value, `None` when the request did not
+    /// carry it. Only for the answer (PLAN_CONFLATION §3.1/§3.3): a request that
+    /// names a value the group's stored policy does not have is a conflict.
+    pub conflate_requested: Option<bool>,
     /// `autopilot=true` and no `partitions`: the broker picks the claim width
     /// (wildcard pops; see `facade::autopilot`).
     pub auto_parts: bool,
@@ -391,6 +395,13 @@ pub struct PushOut {
 pub struct PopOut {
     pub body: String,
     pub empty: bool,
+    /// PLAN_CONFLATION §3.1: the group's EFFECTIVE policy is conflating. The body
+    /// carries `"conflation":true`, and an empty answer is a 200 with that body,
+    /// not a bodiless 204.
+    pub conflation: bool,
+    /// §3.3: the request named a policy the group's stored one overrode. The body
+    /// carries `"conflationConflict":true`.
+    pub conflation_conflict: bool,
 }
 
 /// An ack outcome: the rendered response body.
