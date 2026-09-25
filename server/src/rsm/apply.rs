@@ -891,6 +891,9 @@ pub struct Applier<'s, S: Store> {
     /// which is exactly what the reconciliation needs. Seeded at open from the
     /// stored value so it never regresses over a reopened tail.
     last_append_index: u64,
+    /// The writer's fsync'd queue-log tails, recorded per log at every durable
+    /// point (`meta::qlog_tail_key`); `None` when apply owns the qlog (tests).
+    qlog_tails: Option<Arc<crate::rsm::qlog::set::QlogTails>>,
 
     /// Entries executed since the last store commit (§11.3's second trigger).
     entries_since_commit: u64,
@@ -1125,6 +1128,7 @@ impl<'s, S: Store> Applier<'s, S> {
             last_now_us,
             max_created_at_us,
             last_append_index: qlog_durable_index,
+            qlog_tails: None,
             entries_since_commit: 0,
             dirty: false,
             poisoned: None,
@@ -3784,6 +3788,13 @@ impl<'s, S: Store> Applier<'s, S> {
             self.writes
                 .set_meta_u64(meta::QLOG_DURABLE_INDEX, self.last_append_index)?;
         }
+        // Each queue log's own fsync'd, applied tail: a reopen refuses a log
+        // that comes back shorter (QLogSet::check_tails).
+        if let Some(tails) = &self.qlog_tails {
+            for (log, seq) in tails.take_committed(self.last_append_index) {
+                self.writes.set_meta_u64(&meta::qlog_tail_key(log), seq)?;
+            }
+        }
         self.writes
             .set_applied(self.applied_index, self.applied_term)?;
         Ok(seals)
@@ -4491,7 +4502,7 @@ pub fn spawn<S: Store + 'static>(
     clock: Arc<dyn Clock>,
     rx: Receiver<Committed>,
 ) -> std::thread::JoinHandle<Result<ApplyStats>> {
-    spawn_with_reader(store, seg_root, seg_opts, cfg, notify, clock, rx, None)
+    spawn_with_reader(store, seg_root, seg_opts, cfg, notify, clock, rx, None, None)
 }
 
 /// [`spawn`], plus a one-shot sink the thread publishes the segment
@@ -4516,11 +4527,13 @@ pub fn spawn_with_reader<S: Store + 'static>(
     clock: Arc<dyn Clock>,
     rx: Receiver<Committed>,
     reader_sink: Option<Arc<std::sync::OnceLock<segments::Reader>>>,
+    qlog_tails: Option<Arc<crate::rsm::qlog::set::QlogTails>>,
 ) -> std::thread::JoinHandle<Result<ApplyStats>> {
     std::thread::Builder::new()
         .name("queen-rsm-apply".into())
         .spawn(move || {
             let (mut applier, rec) = Applier::open(&*store, &seg_root, seg_opts, cfg, notify)?;
+            applier.qlog_tails = qlog_tails;
             if let Some(sink) = &reader_sink {
                 // First-write-wins; there is only ever one apply thread per
                 // replicator, so this sets exactly once.
@@ -4662,7 +4675,11 @@ fn digest_of<R: Reads + ?Sized>(
         reads.scan_raw(ks, &[], &[], usize::MAX, &mut |k, v| {
             // `durable_index` and the qlog's `qlog_durable_index` are this
             // node's platter, not the cluster's state.
-            if ks == Keyspace::Meta && (k == meta::DURABLE_INDEX || k == meta::QLOG_DURABLE_INDEX) {
+            if ks == Keyspace::Meta
+                && (k == meta::DURABLE_INDEX
+                    || k == meta::QLOG_DURABLE_INDEX
+                    || k.starts_with(meta::QLOG_TAIL_PREFIX))
+            {
                 return true;
             }
             h.update(&(k.len() as u64).to_le_bytes());

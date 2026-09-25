@@ -1456,6 +1456,7 @@ impl<S: Store + 'static> LocalReplicator<S> {
         // writer + applier are byte-for-byte today.
         let mut apply_cfg = cfg.apply_cfg;
         let qlog_on = apply_cfg.qlog;
+        let mut qlog_tails = None;
         let (qlog_set, qlog_lookup, qlog_reader): (
             Option<QLogSet>,
             Option<PartitionLookup>,
@@ -1484,6 +1485,12 @@ impl<S: Store + 'static> LocalReplicator<S> {
                 .map_err(|e| io::Error::other(format!("read qlog durable index: {e}")))?;
             let mut set = QLogSet::new(data_dir.join("qlog"), qopts);
             let qlog_tail = set.reopen_all_guarded(qlog_durable_index)?;
+            set.check_tails(|log| {
+                store
+                    .read(|r| r.meta_u64(&crate::rsm::store::meta::qlog_tail_key(log)))
+                    .map_err(|e| io::Error::other(format!("read qlog tail of q{log}: {e}")))
+            })?;
+            qlog_tails = Some(set.track_tails());
             // NA-QLOG-I1 reconciliation, moved here from `Applier::open` now that
             // the qlog is boot/writer-owned: the reopened durable tail must be
             // AHEAD of or EQUAL to what the store recorded as qlog-durable, never
@@ -1589,6 +1596,7 @@ impl<S: Store + 'static> LocalReplicator<S> {
             clock,
             apply_rx,
             Some(reader_sink.clone()),
+            qlog_tails,
         );
 
         // 5. Replay: every entry after the store's durable index, in order.

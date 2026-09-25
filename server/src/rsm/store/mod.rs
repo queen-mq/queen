@@ -434,6 +434,20 @@ pub mod meta {
     /// qlog's durable tail against it — the qlog must be AHEAD of or EQUAL to it,
     /// never behind for a committed record (NA-QLOG-I1).
     pub const QLOG_DURABLE_INDEX: &[u8] = b"qlog_durable_index";
+    /// Prefix of `qlog_tail/<queue log id, u64 BE>` -> `u64`: the highest
+    /// record `seq` this node fsync'd into that queue log and applied, as of a
+    /// durable point. NODE-LOCAL like [`QLOG_DURABLE_INDEX`] (out of the §12.9
+    /// digest). A reopened log that ends below it lost acknowledged records
+    /// ([`crate::rsm::qlog::set::QLogSet::check_tails`]).
+    pub const QLOG_TAIL_PREFIX: &[u8] = b"qlog_tail/";
+
+    /// The [`QLOG_TAIL_PREFIX`] key of queue log `log`.
+    pub fn qlog_tail_key(log: u64) -> Vec<u8> {
+        let mut k = Vec::with_capacity(QLOG_TAIL_PREFIX.len() + 8);
+        k.extend_from_slice(QLOG_TAIL_PREFIX);
+        k.extend_from_slice(&log.to_be_bytes());
+        k
+    }
     /// `u64`: the next partition id the planner may assign (I18, §5.1).
     pub const NEXT_PID: &[u8] = b"next_pid";
     /// `u64`: the next KV version (I18, §5.1).

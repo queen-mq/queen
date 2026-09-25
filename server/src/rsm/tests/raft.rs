@@ -173,6 +173,7 @@ impl StoreBuilder<TypeConfig, LogStore, TestSm, Guard> for QlogStoreBuilder {
             durable_index: 0,
             applied: None,
             qlog_durable_index: 0,
+            qlog_tail: Box::new(|_| Ok(None)),
             poison: Arc::new(Mutex::new(None)),
             cache_cap: 1 << 30,
         })

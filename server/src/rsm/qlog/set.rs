@@ -321,6 +321,63 @@ pub struct QLogSet {
     idle_at: Option<std::time::Instant>,
     /// Where the next [`QLogSet::idle_pass`] resumes (a log id).
     idle_cursor: u64,
+    /// The fsync'd tail of every log a sync covered, for the applier to record
+    /// ([`QLogSet::track_tails`]); `None` when nobody records them.
+    tails: Option<Arc<QlogTails>>,
+}
+
+/// Per queue log, the `seq`s its fsyncs made durable, waiting for their
+/// entries to be applied: the applier records each log's tail at its durable
+/// points (`meta::qlog_tail_key`), and a reopen refuses a log that comes back
+/// shorter ([`QLogSet::check_tails`]) — a log truncated inside acknowledged
+/// records, which the set-wide tail check cannot see while another log is
+/// complete (Jepsen P6, `repro/qlog-bitflip-hole.sh cut`). Only applied `seq`s
+/// are recorded: a follower's unapplied suffix may still be cut by Raft.
+#[derive(Debug, Default)]
+pub struct QlogTails {
+    synced: std::sync::Mutex<BTreeMap<u64, std::collections::VecDeque<u64>>>,
+}
+
+impl QlogTails {
+    /// A sync made `(log, seq)` durable: the log held records up to `seq`.
+    fn note_synced(&self, pairs: &[(u64, u64)]) {
+        let mut g = self.synced.lock().expect("qlog tails");
+        for (log, seq) in pairs {
+            let q = g.entry(*log).or_default();
+            if q.back().is_none_or(|b| b < seq) {
+                q.push_back(*seq);
+            }
+        }
+    }
+
+    /// The tails the applied index `upto` makes permanent: per log, the
+    /// highest synced `seq` at or below it.
+    pub fn take_committed(&self, upto: u64) -> Vec<(u64, u64)> {
+        let mut g = self.synced.lock().expect("qlog tails");
+        let mut out = Vec::new();
+        g.retain(|log, q| {
+            let mut last = None;
+            while q.front().is_some_and(|s| *s <= upto) {
+                last = q.pop_front();
+            }
+            if let Some(s) = last {
+                out.push((*log, s));
+            }
+            !q.is_empty()
+        });
+        out
+    }
+
+    /// Raft cut every log at `cut`: synced `seq`s at or above it are gone.
+    fn truncate_from(&self, cut: u64) {
+        let mut g = self.synced.lock().expect("qlog tails");
+        g.retain(|_, q| {
+            while q.back().is_some_and(|s| *s >= cut) {
+                q.pop_back();
+            }
+            !q.is_empty()
+        });
+    }
 }
 
 /// The file under the queue-log root that fixes the directory's lane count.
@@ -477,6 +534,7 @@ pub struct SyncTicket {
 pub struct QLogSyncer {
     logs: SharedLogs,
     mode: crate::rsm::qlog::Fsync,
+    tails: Option<Arc<QlogTails>>,
 }
 
 impl QLogSyncer {
@@ -488,6 +546,7 @@ impl QLogSyncer {
     /// byte written before this call is durable when it returns.
     pub fn sync(&self, t: &SyncTicket) -> io::Result<()> {
         let mut handles: Vec<std::fs::File> = Vec::with_capacity(t.qids.len());
+        let mut tails: Vec<(u64, u64)> = Vec::new();
         for qid in &t.qids {
             let arc = self
                 .logs
@@ -496,11 +555,24 @@ impl QLogSyncer {
                 .get(qid)
                 .cloned();
             if let Some(log) = arc {
-                if let Some(f) = log.read().expect("qlog poisoned").active_clone()? {
+                let g = log.read().expect("qlog poisoned");
+                // Under the same lock as the clone: every record up to this
+                // tail is in the cloned file or in a file its roll fsync'd.
+                let tail = g.durable_tail();
+                if let Some(f) = g.active_clone()? {
                     handles.push(f);
+                    tails.push((*qid, tail));
                 }
             }
         }
+        self.fsync_all(handles)?;
+        if let Some(t) = &self.tails {
+            t.note_synced(&tails);
+        }
+        Ok(())
+    }
+
+    fn fsync_all(&self, mut handles: Vec<std::fs::File>) -> io::Result<()> {
         let mode = self.mode;
         if handles.len() <= 1 {
             // The one-busy-queue case: inline, no hand-off.
@@ -611,7 +683,46 @@ impl QLogSet {
             shards: Arc::new(AtomicU64::new(0)),
             idle_at: None,
             idle_cursor: 0,
+            tails: None,
         }
+    }
+
+    /// Record every log's fsync'd tail from now on, for the applier to
+    /// persist ([`QlogTails`]). Call before taking any [`QLogSet::syncer`].
+    pub fn track_tails(&mut self) -> Arc<QlogTails> {
+        self.tails.get_or_insert_with(Default::default).clone()
+    }
+
+    /// Every open log against the tail the store recorded for it at a durable
+    /// point (`recorded`: log id -> `meta::qlog_tail_key` value). A log that
+    /// reopened SHORTER lost records this node had fsync'd and applied: a
+    /// truncation inside acknowledged records, which [`QLog::open_guarded`]
+    /// cannot see when nothing verifies after the cut.
+    pub fn check_tails(&self, recorded: impl Fn(u64) -> io::Result<Option<u64>>) -> io::Result<()> {
+        let logs: Vec<(u64, u64)> = self
+            .logs
+            .read()
+            .expect("qlog set poisoned")
+            .iter()
+            .map(|(id, l)| (*id, l.read().expect("qlog poisoned").durable_tail()))
+            .collect();
+        for (id, tail) in logs {
+            if let Some(want) = recorded(id)? {
+                if tail < want {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "rsm qlog corrupt (queue log q{id}): it ends at seq {tail}, below \
+                             seq {want}, which this node fsync'd and applied: acknowledged \
+                             records are missing (a truncated log); refusing to start (restore \
+                             this node: a cluster member rejoins from a peer once its data \
+                             directory is wiped)"
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// This directory's lane count (1 until [`QLogSet::reopen_all`] reads it).
@@ -864,6 +975,7 @@ impl QLogSet {
         QLogSyncer {
             logs: self.logs.clone(),
             mode: self.opts.fsync,
+            tails: self.tails.clone(),
         }
     }
 
@@ -1035,6 +1147,9 @@ impl QLogSet {
     /// [`QLogSet::scan_entries`] stopped before — durably, before the writer
     /// reuses those seqs. Returns the bytes dropped.
     pub fn truncate_from(&mut self, cut: u64) -> io::Result<u64> {
+        if let Some(t) = &self.tails {
+            t.truncate_from(cut);
+        }
         let logs: Vec<Arc<RwLock<QLog>>> = self
             .logs
             .read()
@@ -1054,6 +1169,9 @@ impl QLogSet {
     /// (a conflicting suffix or the tail above a snapshot may sit in a sealed
     /// file). Returns the bytes dropped.
     pub fn truncate_from_across(&mut self, cut: u64) -> io::Result<u64> {
+        if let Some(t) = &self.tails {
+            t.truncate_from(cut);
+        }
         let logs: Vec<Arc<RwLock<QLog>>> = self
             .logs
             .read()
