@@ -55,6 +55,17 @@
 //! - **`MDB_PANIC`** ([`StoreError::EnvDead`]), the one code LMDB raises to
 //!   say the environment is dead.
 //!
+//! # Value integrity (store format 1)
+//!
+//! LMDB has no checksums, so every value carries one: `value ‖ xxh3` over the
+//! keyspace, the key and the value, computed at the put, carried unchanged
+//! through RAM, the checkpoint and the file, and verified on every read, at the
+//! load and by the scrub. A failure is [`StoreError::CorruptValue`] (keyspace
+//! and key named), fatal and node-local: a corrupt store refuses to open, and a
+//! corrupt value found at runtime poisons the store. Callers only ever see
+//! logical bytes. The format, its row, legacy stores and snapshots are in
+//! [`integrity`].
+//!
 //! # Phase C: RAM keyspaces, LMDB as their checkpoint
 //!
 //! The hot keyspaces ([`Keyspace::is_ram`]) live in RAM, loaded in full at
@@ -151,6 +162,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub mod heed_store;
+pub mod integrity;
+#[cfg(test)]
+mod integrity_tests;
 pub mod keys;
 #[cfg(test)]
 mod ram_tests;
@@ -418,6 +432,11 @@ pub const MAX_DBS: u32 = 64;
 /// The fixed keys of [`Keyspace::Meta`] (§6.1). Their values are fixed-width
 /// little-endian scalars, except `membership` and `digest_chain`, which are
 /// opaque blobs owned by phase 3 and phase 4.
+///
+/// The `meta` DATABASE also holds the adapter's own format row
+/// ([`super::integrity::FORMAT_KEY`]), which is not a row of the keyspace: it
+/// is never loaded into RAM, scanned or digested, and `put_raw`/`del_raw`
+/// refuse it.
 pub mod meta {
     /// `u64`: the index of the last entry apply has executed.
     pub const APPLIED_INDEX: &[u8] = b"applied_index";
@@ -509,6 +528,19 @@ pub enum StoreError {
         keyspace: &'static str,
         detail: String,
     },
+    /// The store's own integrity check failed ([`integrity`], format 1): a
+    /// value whose checksum does not match its keyspace, key and bytes, a key
+    /// out of order, a B-tree whose rows disagree with its own row count, or a
+    /// page LMDB could not read. The bytes on THIS node are damaged — another
+    /// node holds the same logical value under a correct checksum — so this is
+    /// FATAL and NODE-LOCAL: never an apply outcome, never a planner effect,
+    /// never retried. `key` is the row it was found at (empty when the damage
+    /// is the keyspace's, not one row's).
+    CorruptValue {
+        keyspace: &'static str,
+        key: Vec<u8>,
+        detail: String,
+    },
     /// A store commit DID NOT HAPPEN. `durable` says which commit it was:
     ///
     /// - `false` — the ordinary commit of §11.3. The rows of the open
@@ -562,9 +594,17 @@ impl StoreError {
             self,
             StoreError::MapFull { .. }
                 | StoreError::Corrupt { .. }
+                | StoreError::CorruptValue { .. }
                 | StoreError::CommitFailed { .. }
                 | StoreError::EnvDead { .. }
         )
+    }
+
+    /// The store's integrity check failed ([`StoreError::CorruptValue`]): this
+    /// node's copy of the state is damaged, and the node must be restored,
+    /// not restarted into the same bytes.
+    pub fn corrupt_store(&self) -> bool {
+        matches!(self, StoreError::CorruptValue { .. })
     }
 
     /// The durable point of §11.4 did not happen. The caller reports NO
@@ -577,6 +617,14 @@ impl StoreError {
     pub(crate) fn corrupt(ks: Keyspace, detail: impl Into<String>) -> StoreError {
         StoreError::Corrupt {
             keyspace: ks.name(),
+            detail: detail.into(),
+        }
+    }
+
+    pub(crate) fn corrupt_value(ks: Keyspace, key: &[u8], detail: impl Into<String>) -> StoreError {
+        StoreError::CorruptValue {
+            keyspace: ks.name(),
+            key: key.to_vec(),
             detail: detail.into(),
         }
     }
@@ -611,6 +659,22 @@ impl std::fmt::Display for StoreError {
             ),
             StoreError::Corrupt { keyspace, detail } => {
                 write!(f, "store: {keyspace} row did not decode: {detail}")
+            }
+            StoreError::CorruptValue {
+                keyspace,
+                key,
+                detail,
+            } => {
+                if key.is_empty() {
+                    write!(f, "store: CORRUPT keyspace `{keyspace}`: {detail}. ")?;
+                } else {
+                    write!(
+                        f,
+                        "store: CORRUPT value in keyspace `{keyspace}` at key {}: {detail}. ",
+                        integrity::render_key(key)
+                    )?;
+                }
+                f.write_str(integrity::RESTORE_HINT)
             }
             StoreError::CommitFailed { durable, detail } => {
                 let what = if *durable {
@@ -725,6 +789,27 @@ pub struct StoreOpts {
     /// Only a test opens the store with fsync on every commit. Production is
     /// pin 1 (`MDB_NOSYNC`) and a durable commit at the durable point.
     pub sync_every_commit: bool,
+    /// `QUEEN_STORE_VERIFY=1`: before the load, scrub the whole LMDB image in
+    /// one read transaction — every value, the key order, every B-tree's row
+    /// count — log what it found, and refuse to open at the first corrupt
+    /// row ([`integrity`]). The load verifies every value anyway; this adds
+    /// the report and the count of every damaged row.
+    pub verify_at_open: bool,
+    /// Migrate a format-0 store (no checksums) to format 1 at open, once and
+    /// atomically ([`integrity`]). Off: a legacy store keeps working
+    /// unverified, with one warning.
+    pub migrate_legacy: bool,
+    /// Called once with the first corrupt value found at runtime
+    /// ([`integrity::CorruptHook`]). The binary's ends the process.
+    pub on_corrupt: Option<integrity::CorruptHook>,
+    /// TEST ONLY: create a NEW store in format 0 (no checksums), as a build
+    /// before format 1 did: a legacy fixture, and the A/B of the overhead.
+    #[cfg(test)]
+    pub(crate) create_legacy: bool,
+    /// TEST ONLY: the migration fails after rewriting every row, before its
+    /// commit — the path on which a legacy store must stay untouched.
+    #[cfg(test)]
+    pub(crate) fail_migration: bool,
 }
 
 impl Default for StoreOpts {
@@ -737,6 +822,13 @@ impl Default for StoreOpts {
             // leader loops and a snapshot reader.
             max_readers: 1024,
             sync_every_commit: false,
+            verify_at_open: false,
+            migrate_legacy: true,
+            on_corrupt: None,
+            #[cfg(test)]
+            create_legacy: false,
+            #[cfg(test)]
+            fail_migration: false,
         }
     }
 }
@@ -834,6 +926,12 @@ pub struct StoreMetrics {
     /// ([`StoreError::CommitFailed`]). Never expected: it is an alert, and the
     /// node stops.
     pub commit_failed: AtomicU64,
+    /// Values that failed the integrity check ([`StoreError::CorruptValue`]).
+    /// Never expected: the store is damaged, and the node stops.
+    pub corrupt_values: AtomicU64,
+    /// Rows the incremental scrub has verified (the background pass's
+    /// progress, [`integrity::ScrubCursor`]).
+    pub scrubbed_rows: AtomicU64,
 }
 
 impl StoreMetrics {
@@ -861,6 +959,8 @@ impl StoreMetrics {
             ("writer_busy", Self::get(&self.writer_busy)),
             ("key_too_long", Self::get(&self.key_too_long)),
             ("commit_failed", Self::get(&self.commit_failed)),
+            ("corrupt_values", Self::get(&self.corrupt_values)),
+            ("scrubbed_rows", Self::get(&self.scrubbed_rows)),
         ]
     }
 }

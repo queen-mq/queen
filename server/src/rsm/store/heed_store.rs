@@ -81,21 +81,40 @@
 //! checkpoint plus the WAL. A durable cycle that fails puts the keys it had
 //! taken back into the dirty sets, so nothing is ever silently dropped from
 //! the next checkpoint.
+//!
+//! # Format 1: sealed values ([`super::integrity`])
+//!
+//! A RAM table holds every value in its STORED form, `value ‖ checksum`,
+//! sealed once by `put_raw`; the checkpoint copies those bytes to LMDB as they
+//! are, and the load at open reads them back into the tables, verifying every
+//! one (plus the key order and each B-tree's row count). Every read —
+//! `get_raw` and both scans, on either handle, RAM or LMDB — verifies the
+//! checksum and hands out the logical bytes only. The first mismatch found at
+//! runtime poisons the store ([`HeedStore::poisoned`]): from then on every
+//! read, write, commit, checkpoint and copy refuses with it, so nothing more is
+//! served from, or checkpointed over, a store known to be damaged.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
+use std::io::Write as _;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use heed::types::Bytes;
 use heed::{Database, Env, EnvFlags, EnvOpenOptions, RwTxn, WithTls};
 
+use super::integrity::{
+    self, CorruptHook, ScrubCursor, ScrubPhase, ScrubReport, StoreFormat, CHECKSUM_LEN, FORMAT_KEY,
+};
 use super::{
     CheckpointCut, Keyspace, MapUsage, Result, Scope, Store, StoreError, StoreMetrics, StoreOpts,
     MAX_DBS,
 };
+
+/// Every keyspace's checksum seed, by slot ([`integrity::seeds`]).
+type Seeds = [u64; Keyspace::ALL.len()];
 
 /// The unit the map size is rounded up to. A multiple of every page size this
 /// broker runs on (4 KiB on x86-64 Linux, 16 KiB on Apple silicon), so the
@@ -379,6 +398,20 @@ pub struct HeedStore {
     /// caller must never reach it: [`HeedStore::write`] refuses first, and the
     /// handle clears the flag when it drops.
     writer_out: AtomicBool,
+    /// The store format ([`integrity`]): format 1 carries a checksum in every
+    /// value; a legacy (format 0) store runs unverified.
+    format: StoreFormat,
+    /// `format.checksummed()`, read on every value access.
+    checksummed: bool,
+    /// Every keyspace's checksum seed, by slot.
+    seeds: Seeds,
+    /// Set by the first corrupt value found at RUNTIME ([`HeedStore::poisoned`]):
+    /// from then on every read, write, checkpoint and copy answers `poison`,
+    /// so a node never serves a store it knows to be damaged.
+    poisoned: AtomicBool,
+    poison: OnceLock<StoreError>,
+    /// Called once, with that first corruption ([`StoreOpts::on_corrupt`]).
+    on_corrupt: Option<CorruptHook>,
     /// TEST ONLY. Set by [`HeedStore::fail_next_sync`]: the next environment
     /// sync answers as a failing `fsync` does. A durable point whose sync
     /// fails is the one condition §11.4 cannot be checked against on real
@@ -400,6 +433,13 @@ impl HeedStore {
     ///
     /// Every RAM keyspace is then read IN FULL into its [`RamTable`] (one read
     /// transaction), which is the checkpoint the WAL replays on top of.
+    ///
+    /// Format 1 ([`integrity`]): that load VERIFIES every value, the key order
+    /// and each B-tree's row count, so a damaged store refuses to open with a
+    /// [`StoreError::CorruptValue`] naming the keyspace and the key. A new
+    /// store is created in format 1; a legacy one is migrated first
+    /// ([`StoreOpts::migrate_legacy`]) or opened unverified with one warning;
+    /// [`StoreOpts::verify_at_open`] scrubs the whole image before the load.
     pub fn open(dir: &Path, opts: &StoreOpts) -> Result<HeedStore> {
         std::fs::create_dir_all(dir)
             .map_err(|e| StoreError::Io(format!("{}: {e}", dir.display())))?;
@@ -438,6 +478,27 @@ impl HeedStore {
             other => StoreError::Mdb(format!("open {}: {other}", dir.display())),
         })?;
 
+        // Everything below can refuse (a damaged store refuses to open), and
+        // an environment that is merely dropped is not guaranteed to have let
+        // go of the path before the caller retries: close it and wait.
+        match Self::open_env(env.clone(), dir, opts) {
+            Ok(store) => Ok(store),
+            Err(e) => {
+                env.prepare_for_closing().wait();
+                Err(e)
+            }
+        }
+    }
+
+    /// [`HeedStore::open`] from the open environment on: the keyspaces, the
+    /// format, the migration, the scrub and the verified load.
+    fn open_env(env: Env<WithTls>, dir: &Path, opts: &StoreOpts) -> Result<HeedStore> {
+        let seeds = integrity::seeds();
+        #[cfg(test)]
+        let (create_legacy, fail_migration) = (opts.create_legacy, opts.fail_migration);
+        #[cfg(not(test))]
+        let (create_legacy, fail_migration) = (false, false);
+
         let mut w = env
             .write_txn()
             .map_err(|e| StoreError::Mdb(format!("open write txn: {e}")))?;
@@ -448,14 +509,73 @@ impl HeedStore {
                 .map_err(|e| StoreError::Mdb(format!("create {}: {e}", ks.name())))?;
             dbs.push(db);
         }
+        // Format 1: what this store is — and a NEW store's format row, in the
+        // same transaction that creates its keyspaces.
+        let mut format = detect_format(&mut w, &dbs, &seeds, create_legacy)?;
         w.commit()
             .map_err(|e| StoreError::Mdb(format!("commit keyspaces: {e}")))?;
         // The keyspace table itself is durable before anything else runs.
         env.force_sync()
             .map_err(|e| StoreError::Mdb(format!("sync keyspaces: {e}")))?;
 
-        // Phase C: load the checkpoint of every RAM keyspace. No key is dirty
-        // afterwards — the RAM image IS the LMDB image.
+        if format == StoreFormat::Legacy && opts.migrate_legacy && !create_legacy {
+            match migrate_to_v1(&env, &dbs, &seeds, fail_migration) {
+                Migration::Done(rows) => {
+                    format = StoreFormat::V1;
+                    tracing::warn!(
+                        target: "rsm",
+                        dir = %dir.display(),
+                        rows,
+                        "store: migrated a format-0 store (no value checksums) to format 1; \
+                         every value is verified from now on, and a build before format 1 \
+                         can no longer open it",
+                    );
+                }
+                // It lost its format row (never re-sealed), or the migration
+                // landed without its sync.
+                Migration::Refused(e) => return Err(e),
+                Migration::NotDone(e) => tracing::warn!(
+                    target: "rsm",
+                    dir = %dir.display(),
+                    error = %e,
+                    "store: the migration to format 1 did not happen; the store stays format 0",
+                ),
+            }
+        }
+
+        if opts.verify_at_open {
+            let report = {
+                let r = env
+                    .read_txn()
+                    .map_err(|e| StoreError::Mdb(format!("open scrub txn: {e}")))?;
+                scrub_image(&r, &dbs, format, &seeds, "by the scrub at open")
+            };
+            match &report.first_corrupt {
+                None => tracing::info!(
+                    target: "rsm",
+                    dir = %dir.display(),
+                    format = format.version(),
+                    keyspaces = report.keyspaces,
+                    rows = report.rows,
+                    bytes = report.bytes,
+                    "store: QUEEN_STORE_VERIFY: every row verified",
+                ),
+                Some(first) => tracing::error!(
+                    target: "rsm",
+                    dir = %dir.display(),
+                    format = format.version(),
+                    rows = report.rows,
+                    corrupt = report.corrupt,
+                    first = %first,
+                    "store: QUEEN_STORE_VERIFY: the store is damaged",
+                ),
+            }
+            report.into_result()?;
+        }
+
+        // Phase C: load the checkpoint of every RAM keyspace, VERIFYING it
+        // (format 1). No key is dirty afterwards — the RAM image IS the LMDB
+        // image, sealed values included.
         let mut ram: Vec<Option<RamTable>> = (0..dbs.len()).map(|_| None).collect();
         {
             let r = env
@@ -465,17 +585,19 @@ impl HeedStore {
                 if !ks.is_ram() {
                     continue;
                 }
-                let mut rows: Vec<(RamKey, RamVal)> = Vec::new();
-                let it = dbs[ks.slot()]
-                    .iter(&r)
-                    .map_err(|e| StoreError::Mdb(format!("load {}: {e}", ks.name())))?;
-                for row in it {
-                    let (k, v) =
-                        row.map_err(|e| StoreError::Mdb(format!("load {}: {e}", ks.name())))?;
-                    rows.push((Arc::from(k), Arc::from(v)));
-                }
+                let rows = load_keyspace(&r, dbs[ks.slot()], ks, format, seeds[ks.slot()])?;
                 ram[ks.slot()] = Some(RamTable::loaded(rows));
             }
+        }
+        if format == StoreFormat::Legacy {
+            // The one warning a format-0 store gets (integrity module header).
+            tracing::warn!(
+                target: "rsm",
+                dir = %dir.display(),
+                "store: format 0 (written before value checksums): this store runs UNVERIFIED — \
+                 a damaged value is served as it is. It is migrated at the next open with \
+                 migration on, or replaced by a snapshot",
+            );
         }
 
         let max_key = env.max_key_size();
@@ -491,6 +613,12 @@ impl HeedStore {
             sync_every_commit: opts.sync_every_commit,
             all_ram: Keyspace::ALL.iter().all(|k| k.is_ram()),
             writer_out: AtomicBool::new(false),
+            format,
+            checksummed: format.checksummed(),
+            seeds,
+            poisoned: AtomicBool::new(false),
+            poison: OnceLock::new(),
+            on_corrupt: opts.on_corrupt.clone(),
             #[cfg(test)]
             fail_sync: AtomicBool::new(false),
         })
@@ -512,9 +640,25 @@ impl HeedStore {
 
     /// TEST ONLY: the row as the LMDB image holds it — for a RAM keyspace, the
     /// CHECKPOINT, bypassing the live table. Opens its own read transaction,
-    /// so call it from a thread that holds no other one.
+    /// so call it from a thread that holds no other one. The LOGICAL bytes,
+    /// verified in format 1 (a mismatch is the error, without poisoning).
     #[cfg(test)]
     pub fn checkpoint_get(&self, ks: Keyspace, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let Some(stored) = self.checkpoint_get_stored(ks, key)? else {
+            return Ok(None);
+        };
+        if !self.checksummed {
+            return Ok(Some(stored));
+        }
+        integrity::open(self.seeds[ks.slot()], key, &stored)
+            .map(|v| Some(v.to_vec()))
+            .map_err(|m| integrity::mismatch_error(ks, key, m, "in the checkpoint"))
+    }
+
+    /// TEST ONLY: [`HeedStore::checkpoint_get`] without the check: the STORED
+    /// bytes (the checksum included in format 1).
+    #[cfg(test)]
+    pub fn checkpoint_get_stored(&self, ks: Keyspace, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let _guard = ReadGuard::acquire(&self.metrics)?;
         let txn = self.env.read_txn().map_err(|e| err(self, e))?;
         let v = self
@@ -523,6 +667,22 @@ impl HeedStore {
             .map_err(|e| err(self, e))?
             .map(|v| v.to_vec());
         Ok(v)
+    }
+
+    /// TEST ONLY: the stored bytes of a row in the LIVE (RAM) table, checksum
+    /// included — what a read verifies.
+    #[cfg(test)]
+    pub fn ram_get_stored(&self, ks: Keyspace, key: &[u8]) -> Option<Vec<u8>> {
+        self.ram(ks).and_then(|t| t.get(key)).map(|v| v.to_vec())
+    }
+
+    /// TEST ONLY: replace the stored bytes of a row in the LIVE table as they
+    /// are, bypassing the seal — memory damage, as a read will meet it.
+    #[cfg(test)]
+    pub fn ram_put_stored(&self, ks: Keyspace, key: &[u8], stored: &[u8]) {
+        if let Some(t) = self.ram(ks) {
+            t.put(key, Arc::from(stored));
+        }
     }
 
     /// `mdb_env_sync(env, 1)`, with the test hook above in front of it. This is
@@ -550,7 +710,14 @@ impl HeedStore {
     /// node reopens at from this copy (the snapshot of a Raft cluster). The
     /// RAM keyspaces are in the image as of the last durable point, the
     /// LMDB-direct ones possibly ahead of it, exactly as after a crash.
+    ///
+    /// Format 1: the copy is VERIFIED before it is handed over — every row,
+    /// the key order, every B-tree's row count ([`scrub_dir`]). A copy is what
+    /// a peer will boot from, so damage stops HERE, on the node it belongs to:
+    /// the copy is refused and this store poisoned, instead of a follower
+    /// refusing to boot from it and asking again.
     pub fn copy_checkpoint(&self, dir: &Path) -> Result<(u64, u64)> {
+        self.check_poison()?;
         std::fs::create_dir_all(dir)
             .map_err(|e| StoreError::Io(format!("{}: {e}", dir.display())))?;
         let path = dir.join("data.mdb");
@@ -568,7 +735,20 @@ impl HeedStore {
         if let Ok(d) = std::fs::File::open(dir) {
             let _ = d.sync_all();
         }
-        read_checkpoint_meta(dir)
+        let (applied, term, report) = inspect_image(dir, true).map_err(|e| {
+            if e.corrupt_store() {
+                self.corrupt_found(e)
+            } else {
+                e
+            }
+        })?;
+        if let Some(report) = report {
+            StoreMetrics::inc(&self.metrics.scrubbed_rows, report.rows);
+            if let Some(first) = report.first_corrupt {
+                return Err(self.corrupt_found(first));
+            }
+        }
+        Ok((applied, term))
     }
 
     /// Close the environment and wait until LMDB has really let go of the
@@ -603,6 +783,234 @@ impl HeedStore {
     /// The live table of a RAM keyspace, `None` for an LMDB-direct one.
     fn ram(&self, ks: Keyspace) -> Option<&RamTable> {
         self.ram[ks.slot()].as_ref()
+    }
+
+    // -----------------------------------------------------------------------
+    // Value integrity (format 1, see `integrity`)
+    // -----------------------------------------------------------------------
+
+    /// The format this store is in ([`integrity`]).
+    pub fn format(&self) -> StoreFormat {
+        self.format
+    }
+
+    /// The first corrupt value this store found at runtime, once it has
+    /// found one: from then on it refuses every call with it.
+    pub fn poisoned(&self) -> Option<StoreError> {
+        if self.poisoned.load(Ordering::Acquire) {
+            Some(self.poison_error())
+        } else {
+            None
+        }
+    }
+
+    /// The stored form of `val` under `key`: sealed in format 1, as it is in
+    /// format 0. The ONE place a value's checksum is computed.
+    #[inline]
+    fn seal(&self, ks: Keyspace, key: &[u8], val: &[u8]) -> RamVal {
+        if self.checksummed {
+            integrity::seal_arc(self.seeds[ks.slot()], key, val)
+        } else {
+            Arc::from(val)
+        }
+    }
+
+    /// Verify a stored value and return its logical bytes (format 1), or the
+    /// bytes as they are (format 0). A mismatch poisons the store.
+    #[inline]
+    fn open_value<'v>(&self, ks: Keyspace, key: &[u8], stored: &'v [u8]) -> Result<&'v [u8]> {
+        if !self.checksummed {
+            return Ok(stored);
+        }
+        match integrity::open(self.seeds[ks.slot()], key, stored) {
+            Ok(v) => Ok(v),
+            Err(m) => Err(self.corrupt_found(integrity::mismatch_error(ks, key, m, "by a read"))),
+        }
+    }
+
+    /// A corrupt value found at RUNTIME: count it, latch the poison (every
+    /// later call answers the first corruption), log it and call the hook —
+    /// once. Returns `e` for the caller that found it.
+    ///
+    /// The latch is what keeps a corruption NODE-LOCAL: a caller that swallows
+    /// the error cannot read on, plan on or checkpoint on a store known to be
+    /// damaged, and the binary's hook ends the process before it can.
+    #[cold]
+    #[inline(never)]
+    fn corrupt_found(&self, e: StoreError) -> StoreError {
+        StoreMetrics::inc(&self.metrics.corrupt_values, 1);
+        let _ = self.poison.set(e.clone());
+        if !self.poisoned.swap(true, Ordering::AcqRel) {
+            tracing::error!(
+                target: "rsm",
+                dir = %self.dir.display(),
+                error = %e,
+                "store: a corrupt value; this store now refuses every read and write",
+            );
+            if let Some(hook) = &self.on_corrupt {
+                (hook.0)(&e);
+            }
+        }
+        e
+    }
+
+    /// Refuse when the store is poisoned. One relaxed load on the hot path.
+    #[inline]
+    fn check_poison(&self) -> Result<()> {
+        if self.poisoned.load(Ordering::Relaxed) {
+            return Err(self.poison_error());
+        }
+        Ok(())
+    }
+
+    #[cold]
+    fn poison_error(&self) -> StoreError {
+        self.poison.get().cloned().unwrap_or_else(|| {
+            StoreError::corrupt_value(Keyspace::Meta, &[], "this store found a corrupt value")
+        })
+    }
+
+    /// A full scrub of the store: every row of the LMDB image in ONE read
+    /// transaction (the value checksums, the key order, each B-tree's row
+    /// count), then every RAM table's values. Counts every failure and names
+    /// the first; a failure poisons the store like a read's does.
+    ///
+    /// For a test, a tool, or a quiet moment: the one transaction holds pages
+    /// for the length of the walk. A live node's background pass runs
+    /// [`HeedStore::scrub_step`] instead.
+    pub fn scrub(&self) -> Result<ScrubReport> {
+        self.check_poison()?;
+        let mut report = {
+            let _guard = ReadGuard::acquire(&self.metrics)?;
+            let txn = self.env.read_txn().map_err(|e| err(self, e))?;
+            scrub_image(&txn, &self.dbs, self.format, &self.seeds, "by the scrub")
+        };
+        if self.checksummed {
+            for ks in Keyspace::ALL {
+                let Some(t) = self.ram(ks) else { continue };
+                let seed = self.seeds[ks.slot()];
+                let rows: Vec<(RamKey, RamVal)> = t
+                    .read()
+                    .map
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                for (k, v) in rows {
+                    if let Err(m) = integrity::open(seed, &k, &v) {
+                        report.fail(integrity::mismatch_error(ks, &k, m, "in RAM by the scrub"));
+                    }
+                }
+            }
+        }
+        StoreMetrics::inc(&self.metrics.scrubbed_rows, report.rows);
+        if let Some(first) = &report.first_corrupt {
+            return Err(self.corrupt_found(first.clone()));
+        }
+        Ok(report)
+    }
+
+    /// One bounded step of the background scrub: at most `budget` rows, the
+    /// LMDB image in ONE short read transaction (what the next boot and a
+    /// snapshot will read), then the RAM tables (what reads are served from),
+    /// resuming where `cur` stopped. Returns whether a whole pass completed
+    /// (`cur` then restarts). The first corrupt row is the error — naming its
+    /// keyspace and key — and poisons the store, as a read that found it
+    /// would.
+    ///
+    /// No clock here (I2): the caller paces the steps (`QUEEN_STORE_VERIFY`
+    /// covers boot; a maintenance loop calls this with a pause between steps,
+    /// on every node, since the damage it looks for is node-local).
+    pub fn scrub_step(&self, cur: &mut ScrubCursor, budget: usize) -> Result<bool> {
+        self.check_poison()?;
+        let mut left = budget.max(1);
+        let n = Keyspace::ALL.len();
+        if cur.phase == ScrubPhase::Image {
+            let _guard = ReadGuard::acquire(&self.metrics)?;
+            let txn = self.env.read_txn().map_err(|e| err(self, e))?;
+            while left > 0 && cur.slot < n {
+                let ks = Keyspace::ALL[cur.slot];
+                let walked = scrub_image_chunk(
+                    &txn,
+                    self.dbs[cur.slot],
+                    ks,
+                    self.format,
+                    self.seeds[cur.slot],
+                    cur.after.as_deref(),
+                    left,
+                )
+                .map_err(|e| {
+                    if e.corrupt_store() {
+                        self.corrupt_found(e)
+                    } else {
+                        e
+                    }
+                })?;
+                left -= walked.rows;
+                cur.rows += walked.rows as u64;
+                StoreMetrics::inc(&self.metrics.scrubbed_rows, walked.rows as u64);
+                match walked.last {
+                    Some(last) if !walked.exhausted => cur.after = Some(last),
+                    _ => {
+                        cur.slot += 1;
+                        cur.after = None;
+                    }
+                }
+            }
+            if cur.slot < n {
+                return Ok(false);
+            }
+            cur.phase = ScrubPhase::Ram;
+            cur.slot = 0;
+            cur.after = None;
+        }
+        // The RAM tables. A format-0 store has no checksum to verify there.
+        while self.checksummed && left > 0 && cur.slot < n {
+            let ks = Keyspace::ALL[cur.slot];
+            let Some(t) = self.ram(ks) else {
+                cur.slot += 1;
+                continue;
+            };
+            let take = left.min(RAM_SCAN_CHUNK);
+            let rows: Vec<(RamKey, RamVal)> = {
+                let g = t.read();
+                let lo = match &cur.after {
+                    Some(a) => Bound::Excluded(&a[..]),
+                    None => Bound::Unbounded,
+                };
+                g.map
+                    .range::<[u8], _>((lo, Bound::Unbounded))
+                    .take(take)
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            };
+            let seed = self.seeds[ks.slot()];
+            for (k, v) in &rows {
+                if let Err(m) = integrity::open(seed, k, v) {
+                    let e = integrity::mismatch_error(ks, k, m, "in RAM by the scrub");
+                    return Err(self.corrupt_found(e));
+                }
+            }
+            left -= rows.len();
+            cur.rows += rows.len() as u64;
+            StoreMetrics::inc(&self.metrics.scrubbed_rows, rows.len() as u64);
+            match rows.last() {
+                Some((k, _)) if rows.len() == take => cur.after = Some(k.to_vec()),
+                _ => {
+                    cur.slot += 1;
+                    cur.after = None;
+                }
+            }
+        }
+        if self.checksummed && cur.slot < n {
+            return Ok(false);
+        }
+        // A whole pass: start over.
+        cur.phase = ScrubPhase::Image;
+        cur.slot = 0;
+        cur.after = None;
+        cur.rows = 0;
+        cur.passes += 1;
+        Ok(true)
     }
 
     fn check_key(&self, ks: Keyspace, key: &[u8]) -> Result<()> {
@@ -733,6 +1141,8 @@ impl Store for HeedStore {
     type Write<'s> = HeedWrite<'s>;
 
     fn read<R>(&self, f: impl FnOnce(&HeedRead<'_>) -> Result<R>) -> Result<R> {
+        // Format 1: a store that found a corrupt value serves nothing more.
+        self.check_poison()?;
         // PIN 2: one read per thread, beginning and ending inside this call.
         let _guard = ReadGuard::acquire(&self.metrics)?;
         let txn = self.env.read_txn().map_err(|e| err(self, e))?;
@@ -746,6 +1156,7 @@ impl Store for HeedStore {
     }
 
     fn write(&self) -> Result<HeedWrite<'_>> {
+        self.check_poison()?;
         // I1 and I15, enforced rather than assumed. Without this the second
         // caller would block inside LMDB's writer mutex — no deadline, no
         // typed error, and on a tokio worker no way back.
@@ -837,7 +1248,10 @@ impl Store for HeedStore {
     }
 
     fn write_cut(&self, cut: &mut CheckpointCut) -> Result<()> {
-        match self.write_cut_inner(cut) {
+        // A poisoned store writes no checkpoint: its last good one is what a
+        // restart must find.
+        let written = self.check_poison().and_then(|()| self.write_cut_inner(cut));
+        match written {
             Ok(()) => {
                 StoreMetrics::inc(&self.metrics.durable_commits, 1);
                 Ok(())
@@ -955,6 +1369,11 @@ fn scan_with<'t>(
                 if !prefix.is_empty() && !k.starts_with(prefix) {
                     break;
                 }
+                // The adapter's own format row is not a row of `meta`.
+                if ks == Keyspace::Meta && k == FORMAT_KEY {
+                    continue;
+                }
+                let v = store.open_value(ks, k, v)?;
                 n += 1;
                 if !cb(k, v) {
                     break;
@@ -1031,8 +1450,10 @@ fn ram_scan(
             if !prefix.is_empty() && !k.starts_with(prefix) {
                 return Ok(n);
             }
+            // Verified here, off the table's lock, before the callback sees it.
+            let val = store.open_value(ks, &k, &v)?;
             n += 1;
-            if !cb(&k, &v) || n >= want {
+            if !cb(&k, val) || n >= want {
                 return Ok(n);
             }
             last = Some(k);
@@ -1068,13 +1489,28 @@ impl super::Reads for HeedRead<'_> {
 
     fn get_raw(&self, ks: Keyspace, key: &[u8]) -> Result<Option<&[u8]>> {
         self.store.check_key(ks, key)?;
+        self.store.check_poison()?;
         if let Some(t) = self.store.ram(ks) {
-            return Ok(t.get(key).map(|v| pin_in_arena(&self.arena, v)));
+            return match t.get(key) {
+                None => Ok(None),
+                Some(v) => {
+                    let stored = pin_in_arena(&self.arena, v);
+                    self.store.open_value(ks, key, stored).map(Some)
+                }
+            };
         }
-        self.store
+        if is_format_row(ks, key) {
+            return Ok(None);
+        }
+        match self
+            .store
             .db(ks)
             .get(&self.txn, key)
-            .map_err(|e| err(self.store, e))
+            .map_err(|e| err(self.store, e))?
+        {
+            None => Ok(None),
+            Some(stored) => self.store.open_value(ks, key, stored).map(Some),
+        }
     }
 
     fn scan_raw(
@@ -1085,6 +1521,7 @@ impl super::Reads for HeedRead<'_> {
         limit: usize,
         cb: &mut dyn FnMut(&[u8], &[u8]) -> bool,
     ) -> Result<usize> {
+        self.store.check_poison()?;
         if let Some(t) = self.store.ram(ks) {
             return ram_scan(self.store, t, ks, from, prefix, limit, false, cb);
         }
@@ -1099,11 +1536,29 @@ impl super::Reads for HeedRead<'_> {
         limit: usize,
         cb: &mut dyn FnMut(&[u8], &[u8]) -> bool,
     ) -> Result<usize> {
+        self.store.check_poison()?;
         if let Some(t) = self.store.ram(ks) {
             return ram_scan(self.store, t, ks, from, prefix, limit, true, cb);
         }
         scan_with(self.store, &self.txn, ks, from, prefix, limit, true, cb)
     }
+}
+
+/// The adapter's own format row ([`integrity::FORMAT_KEY`] in `meta`), which
+/// the keyspace API neither reads, writes nor deletes.
+#[inline]
+fn is_format_row(ks: Keyspace, key: &[u8]) -> bool {
+    ks == Keyspace::Meta && key == FORMAT_KEY
+}
+
+/// The refusal of a write or a delete of the format row through the keyspace
+/// API: it describes this node's file, and a caller that rewrote it could make
+/// the store unreadable at the next open.
+fn format_row_refused() -> StoreError {
+    StoreError::Io(format!(
+        "`meta/{}` is the store's own format row and is not written through the keyspace API",
+        String::from_utf8_lossy(FORMAT_KEY)
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1183,12 +1638,13 @@ impl<'s> HeedWrite<'s> {
     }
 
     /// The poison check a RAM access makes in place of borrowing the
-    /// transaction: a dead handle answers its fatal error for every keyspace.
+    /// transaction: a dead handle answers its fatal error for every keyspace,
+    /// and so does a handle on a store that found a corrupt value.
     fn usable(&self) -> Result<()> {
         if self.poison.is_some() || (!self.store.all_ram && self.txn.is_none()) {
             return Err(self.poisoned());
         }
-        Ok(())
+        self.store.check_poison()
     }
 
     /// Drop every value `get_raw` handed out. Only callable with `&mut self`,
@@ -1250,6 +1706,9 @@ impl<'s> HeedWrite<'s> {
     /// failure.
     fn cycle(&mut self, durable: bool) -> Result<()> {
         self.release_arena();
+        // A store that found a corrupt value commits nothing more: its last
+        // good checkpoint is what a restart must find.
+        self.store.check_poison()?;
         if self.store.all_ram {
             return self.cycle_ram(durable);
         }
@@ -1354,12 +1813,26 @@ impl super::Reads for HeedWrite<'_> {
         self.store.check_key(ks, key)?;
         if let Some(t) = self.store.ram(ks) {
             self.usable()?;
-            return Ok(t.get(key).map(|v| pin_in_arena(&self.arena, v)));
+            return match t.get(key) {
+                None => Ok(None),
+                Some(v) => {
+                    let stored = pin_in_arena(&self.arena, v);
+                    self.store.open_value(ks, key, stored).map(Some)
+                }
+            };
         }
-        self.store
+        if is_format_row(ks, key) {
+            return Ok(None);
+        }
+        match self
+            .store
             .db(ks)
             .get(self.txn()?, key)
-            .map_err(|e| err(self.store, e))
+            .map_err(|e| err(self.store, e))?
+        {
+            None => Ok(None),
+            Some(stored) => self.store.open_value(ks, key, stored).map(Some),
+        }
     }
 
     fn scan_raw(
@@ -1399,15 +1872,29 @@ impl super::Writes for HeedWrite<'_> {
     fn put_raw(&mut self, ks: Keyspace, key: &[u8], val: &[u8]) -> Result<()> {
         self.release_arena();
         self.store.check_key(ks, key)?;
+        if is_format_row(ks, key) {
+            return Err(format_row_refused());
+        }
         let store = self.store;
         let n = (key.len() + val.len()) as u64;
         if let Some(t) = store.ram(ks) {
             self.usable()?;
-            t.put(key, Arc::from(val));
+            // Format 1: sealed HERE, where the value is born; the checkpoint
+            // carries these bytes to the file unchanged.
+            t.put(key, store.seal(ks, key, val));
         } else {
             let db = *store.db(ks);
+            let (checksummed, seed) = (store.checksummed, store.seeds[ks.slot()]);
             let txn = self.txn_mut()?;
-            db.put(txn, key, val).map_err(|e| err(store, e))?;
+            if checksummed {
+                db.put_reserved(txn, key, val.len() + CHECKSUM_LEN, |space| {
+                    space.write_all(val)?;
+                    space.write_all(&integrity::checksum(seed, key, val).to_le_bytes())
+                })
+                .map_err(|e| err(store, e))?;
+            } else {
+                db.put(txn, key, val).map_err(|e| err(store, e))?;
+            }
         }
         StoreMetrics::inc(&store.metrics.rows_put, 1);
         StoreMetrics::inc(&store.metrics.logical_bytes, n);
@@ -1417,6 +1904,9 @@ impl super::Writes for HeedWrite<'_> {
     fn del_raw(&mut self, ks: Keyspace, key: &[u8]) -> Result<bool> {
         self.release_arena();
         self.store.check_key(ks, key)?;
+        if is_format_row(ks, key) {
+            return Err(format_row_refused());
+        }
         let store = self.store;
         let had = if let Some(t) = store.ram(ks) {
             self.usable()?;
@@ -1537,14 +2027,414 @@ impl super::Writes for HeedWrite<'_> {
     }
 }
 
-/// The `(applied_index, applied_term)` of the LMDB image in `dir` (a store
-/// directory that is NOT open in this process), read without loading it: a
-/// read-only environment and two `meta` keys. `(0, 0)` when there is no image.
-pub fn read_checkpoint_meta(dir: &Path) -> Result<(u64, u64)> {
+// ---------------------------------------------------------------------------
+// Format 1: the format row, the migration, the verified load, the scrub
+// ---------------------------------------------------------------------------
+
+/// An LMDB error met while WALKING a keyspace: a page LMDB could not read
+/// (`MDB_CORRUPTED`, `MDB_PAGE_NOTFOUND`, `MDB_INVALID`) is damage to this
+/// node's file and answers [`StoreError::CorruptValue`] at the last key walked;
+/// anything else keeps its ordinary meaning.
+fn walk_error(ks: Keyspace, after: Option<&[u8]>, e: heed::Error) -> StoreError {
+    use heed::MdbError;
+    match e {
+        heed::Error::Mdb(MdbError::Corrupted | MdbError::PageNotFound | MdbError::Invalid) => {
+            let detail = format!("LMDB could not read a page of this keyspace ({e})");
+            match after {
+                Some(k) => StoreError::corrupt_value(ks, k, format!("{detail}, after this key")),
+                None => StoreError::corrupt_value(ks, &[], detail),
+            }
+        }
+        other => StoreError::Mdb(format!("walk {}: {other}", ks.name())),
+    }
+}
+
+/// A key that does not sort after the one before it: the walk left the
+/// B-tree's order, which only a damaged page does.
+fn order_error(ks: Keyspace, prev: &[u8], k: &[u8]) -> StoreError {
+    StoreError::corrupt_value(
+        ks,
+        k,
+        format!(
+            "key out of order: it follows {} in the B-tree walk",
+            integrity::render_key(prev)
+        ),
+    )
+}
+
+/// A B-tree whose walk and whose own header disagree about its row count: a
+/// damaged branch page skipped or repeated a subtree.
+fn count_error(ks: Keyspace, walked: u64, header: u64) -> StoreError {
+    StoreError::corrupt_value(
+        ks,
+        &[],
+        format!("the B-tree walk found {walked} rows but its header counts {header}"),
+    )
+}
+
+/// The format row of `meta`, decoded and VERIFIED; `None` when there is none.
+fn read_format_row(
+    txn: &heed::RoTxn<'_>,
+    meta: Database<Bytes, Bytes>,
+    seed: u64,
+) -> Result<Option<StoreFormat>> {
+    let stored = meta
+        .get(txn, FORMAT_KEY)
+        .map_err(|e| StoreError::Mdb(format!("read the format row: {e}")))?;
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    let v = integrity::open(seed, FORMAT_KEY, stored).map_err(|m| {
+        integrity::mismatch_error(Keyspace::Meta, FORMAT_KEY, m, "at open (the format row)")
+    })?;
+    let version = match <[u8; 4]>::try_from(v) {
+        Ok(b) => u32::from_le_bytes(b),
+        Err(_) => {
+            return Err(StoreError::corrupt_value(
+                Keyspace::Meta,
+                FORMAT_KEY,
+                format!("the format row holds {} B, not a u32", v.len()),
+            ))
+        }
+    };
+    match version {
+        1 => Ok(Some(StoreFormat::V1)),
+        n if n > 1 => Err(StoreError::Io(format!(
+            "store format {n} was written by a newer build (this one reads formats 0 and 1): \
+             refusing to open it"
+        ))),
+        n => Err(StoreError::corrupt_value(
+            Keyspace::Meta,
+            FORMAT_KEY,
+            format!("the format row says {n}, which no build writes"),
+        )),
+    }
+}
+
+/// Which format the store just opened is in; a NEW store (no row anywhere) is
+/// given its format-1 row here, in the transaction that creates its keyspaces.
+/// A store with rows and no format row is format 0 (legacy).
+fn detect_format(
+    w: &mut RwTxn<'_>,
+    dbs: &[Database<Bytes, Bytes>],
+    seeds: &Seeds,
+    create_legacy: bool,
+) -> Result<StoreFormat> {
+    let meta = dbs[Keyspace::Meta.slot()];
+    let seed = seeds[Keyspace::Meta.slot()];
+    if let Some(format) = read_format_row(w, meta, seed)? {
+        return Ok(format);
+    }
+    let mut rows = 0u64;
+    for (db, ks) in dbs.iter().zip(Keyspace::ALL) {
+        rows += db
+            .len(w)
+            .map_err(|e| StoreError::Mdb(format!("count {}: {e}", ks.name())))?;
+    }
+    if rows > 0 || create_legacy {
+        return Ok(StoreFormat::Legacy);
+    }
+    let row = integrity::seal_vec(seed, FORMAT_KEY, &StoreFormat::V1.version().to_le_bytes());
+    meta.put(w, FORMAT_KEY, &row)
+        .map_err(|e| StoreError::Mdb(format!("write the format row: {e}")))?;
+    Ok(StoreFormat::V1)
+}
+
+/// The refusal of a store that looks like format 0 (no format row) but holds a
+/// value that verifies as format 1: it LOST its format row. Serving it as
+/// format 0 would hand every caller its checksums as data, and migrating it
+/// would seal it twice.
+fn lost_format_row(ks: Keyspace, k: &[u8]) -> StoreError {
+    StoreError::corrupt_value(
+        ks,
+        k,
+        "this store has no format row, yet this value carries a format-1 checksum: \
+         the format row was lost",
+    )
+}
+
+/// What [`migrate_to_v1`] did.
+enum Migration {
+    /// Committed and synced: the store is format 1. The rows rewritten.
+    Done(u64),
+    /// Nothing landed (the transaction aborted before or at its commit): the
+    /// store is the format-0 store it was.
+    NotDone(StoreError),
+    /// The store must not be opened: it lost its format row, or the migration
+    /// committed and its sync failed (the file is format 1 in the page cache
+    /// and nobody knows what reached the platter).
+    Refused(StoreError),
+}
+
+/// Format 0 → format 1, once and atomically: ONE write transaction rewrites
+/// every row of every keyspace sealed and adds the format row, then commit and
+/// sync. A crash anywhere before the commit leaves the store format 0, and the
+/// next open migrates again.
+fn migrate_to_v1(
+    env: &Env<WithTls>,
+    dbs: &[Database<Bytes, Bytes>],
+    seeds: &Seeds,
+    fail_before_commit: bool,
+) -> Migration {
+    let mut w = match env.write_txn() {
+        Ok(w) => w,
+        Err(e) => {
+            return Migration::NotDone(StoreError::Mdb(format!(
+                "open the migration transaction: {e}"
+            )))
+        }
+    };
+    let mut total = 0u64;
+    for ks in Keyspace::ALL {
+        let db = dbs[ks.slot()];
+        let seed = seeds[ks.slot()];
+        // Collect first: the iterator borrows the transaction the puts need.
+        let mut rows: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let it = match db.iter(&w) {
+            Ok(it) => it,
+            Err(e) => return Migration::NotDone(walk_error(ks, None, e)),
+        };
+        for row in it {
+            let (k, v) = match row {
+                Ok(r) => r,
+                Err(e) => return Migration::NotDone(walk_error(ks, None, e)),
+            };
+            if integrity::verifies(seed, k, v) {
+                return Migration::Refused(lost_format_row(ks, k));
+            }
+            rows.push((k.to_vec(), v.to_vec()));
+        }
+        for (k, v) in &rows {
+            let put = db.put_reserved(&mut w, k, v.len() + CHECKSUM_LEN, |space| {
+                space.write_all(v)?;
+                space.write_all(&integrity::checksum(seed, k, v).to_le_bytes())
+            });
+            if let Err(e) = put {
+                return Migration::NotDone(StoreError::Mdb(format!("migrate {}: {e}", ks.name())));
+            }
+        }
+        total += rows.len() as u64;
+    }
+    let meta_seed = seeds[Keyspace::Meta.slot()];
+    let row = integrity::seal_vec(
+        meta_seed,
+        FORMAT_KEY,
+        &StoreFormat::V1.version().to_le_bytes(),
+    );
+    if let Err(e) = dbs[Keyspace::Meta.slot()].put(&mut w, FORMAT_KEY, &row) {
+        return Migration::NotDone(StoreError::Mdb(format!("write the format row: {e}")));
+    }
+    if fail_before_commit {
+        // TEST ONLY: every row was rewritten inside the transaction; dropping
+        // it must leave the file exactly as it was.
+        return Migration::NotDone(StoreError::Io("injected migration failure".into()));
+    }
+    if let Err(e) = w.commit() {
+        return Migration::NotDone(StoreError::Mdb(format!("commit the migration: {e}")));
+    }
+    match env.force_sync() {
+        Ok(()) => Migration::Done(total),
+        Err(e) => Migration::Refused(StoreError::CommitFailed {
+            durable: true,
+            detail: format!("the migration to format 1 committed but did not sync: {e}"),
+        }),
+    }
+}
+
+/// Load one RAM keyspace from the LMDB image, VERIFYING it on the way: the key
+/// order, every value (format 1), and the walk's row count against the
+/// B-tree's own header. The format row stays out of the table (it is the
+/// adapter's). In a format-0 store every row is checked for a format-1
+/// checksum instead, so a store that lost its format row is refused rather
+/// than served. The RAM table keeps the stored bytes, checksum included.
+fn load_keyspace(
+    txn: &heed::RoTxn<'_>,
+    db: Database<Bytes, Bytes>,
+    ks: Keyspace,
+    format: StoreFormat,
+    seed: u64,
+) -> Result<Vec<(RamKey, RamVal)>> {
+    let mut rows: Vec<(RamKey, RamVal)> = Vec::new();
+    let mut walked = 0u64;
+    let mut prev: Option<&[u8]> = None;
+    let it = db.iter(txn).map_err(|e| walk_error(ks, None, e))?;
+    for row in it {
+        let (k, v) = row.map_err(|e| walk_error(ks, prev, e))?;
+        walked += 1;
+        if let Some(p) = prev {
+            if p >= k {
+                return Err(order_error(ks, p, k));
+            }
+        }
+        prev = Some(k);
+        if ks == Keyspace::Meta && k == FORMAT_KEY {
+            continue;
+        }
+        if format.checksummed() {
+            if let Err(m) = integrity::open(seed, k, v) {
+                return Err(integrity::mismatch_error(
+                    ks,
+                    k,
+                    m,
+                    "at the load (in the store file)",
+                ));
+            }
+        } else if integrity::verifies(seed, k, v) {
+            return Err(lost_format_row(ks, k));
+        }
+        rows.push((Arc::from(k), Arc::from(v)));
+    }
+    let header = db
+        .len(txn)
+        .map_err(|e| StoreError::Mdb(format!("count {}: {e}", ks.name())))?;
+    if header != walked {
+        return Err(count_error(ks, walked, header));
+    }
+    Ok(rows)
+}
+
+/// Walk EVERY keyspace of an LMDB image inside one read transaction: the key
+/// order, every value's checksum (format 1) and each B-tree's row count,
+/// counting every failure and naming the first. `dbs` is indexed by slot;
+/// `None` is a keyspace the image does not have (an image older than it).
+fn scrub_image_opt(
+    txn: &heed::RoTxn<'_>,
+    dbs: &[Option<Database<Bytes, Bytes>>],
+    format: StoreFormat,
+    seeds: &Seeds,
+    site: &str,
+) -> ScrubReport {
+    let mut report = ScrubReport::new(format);
+    for ks in Keyspace::ALL {
+        let Some(db) = dbs[ks.slot()] else { continue };
+        let seed = seeds[ks.slot()];
+        report.keyspaces += 1;
+        let mut walked = 0u64;
+        let mut prev: Option<&[u8]> = None;
+        let it = match db.iter(txn) {
+            Ok(it) => it,
+            Err(e) => {
+                report.fail(walk_error(ks, None, e));
+                continue;
+            }
+        };
+        let mut broke = false;
+        for row in it {
+            let (k, v) = match row {
+                Ok(r) => r,
+                Err(e) => {
+                    report.fail(walk_error(ks, prev, e));
+                    broke = true;
+                    break;
+                }
+            };
+            walked += 1;
+            report.rows += 1;
+            report.bytes += (k.len() + v.len()) as u64;
+            if let Some(p) = prev {
+                if p >= k {
+                    report.fail(order_error(ks, p, k));
+                }
+            }
+            prev = Some(k);
+            if format.checksummed() {
+                if let Err(m) = integrity::open(seed, k, v) {
+                    report.fail(integrity::mismatch_error(ks, k, m, site));
+                }
+            }
+        }
+        if !broke {
+            match db.len(txn) {
+                Ok(header) if header != walked => report.fail(count_error(ks, walked, header)),
+                Ok(_) => {}
+                Err(e) => report.fail(walk_error(ks, prev, e)),
+            }
+        }
+    }
+    report
+}
+
+/// [`scrub_image_opt`] over an open store's keyspaces.
+fn scrub_image(
+    txn: &heed::RoTxn<'_>,
+    dbs: &[Database<Bytes, Bytes>],
+    format: StoreFormat,
+    seeds: &Seeds,
+    site: &str,
+) -> ScrubReport {
+    let dbs: Vec<Option<Database<Bytes, Bytes>>> = dbs.iter().copied().map(Some).collect();
+    scrub_image_opt(txn, &dbs, format, seeds, site)
+}
+
+/// What one keyspace chunk of the incremental scrub walked.
+struct Chunk {
+    rows: usize,
+    /// The last key verified.
+    last: Option<Vec<u8>>,
+    /// The keyspace has no row after `last`.
+    exhausted: bool,
+}
+
+/// At most `limit` rows of one keyspace of the image, after `after`: the key
+/// order within the chunk and every value's checksum (format 1). The first
+/// failure is the error. A chunk spans one read transaction, so the B-tree's
+/// row count is checked only by the whole-image walks (open, [`HeedStore::scrub`]).
+fn scrub_image_chunk(
+    txn: &heed::RoTxn<'_>,
+    db: Database<Bytes, Bytes>,
+    ks: Keyspace,
+    format: StoreFormat,
+    seed: u64,
+    after: Option<&[u8]>,
+    limit: usize,
+) -> Result<Chunk> {
+    let range = match after {
+        Some(a) => (Bound::Excluded(a), Bound::Unbounded),
+        None => (Bound::Unbounded, Bound::Unbounded),
+    };
+    let it = db
+        .range(txn, &range)
+        .map_err(|e| walk_error(ks, after, e))?;
+    let mut rows = 0usize;
+    let mut prev: Option<&[u8]> = None;
+    for row in it {
+        if rows >= limit {
+            return Ok(Chunk {
+                rows,
+                last: prev.map(|p| p.to_vec()),
+                exhausted: false,
+            });
+        }
+        let (k, v) = row.map_err(|e| walk_error(ks, prev.or(after), e))?;
+        if let Some(p) = prev.or(after) {
+            if p >= k {
+                return Err(order_error(ks, p, k));
+            }
+        }
+        if format.checksummed() {
+            integrity::open(seed, k, v)
+                .map_err(|m| integrity::mismatch_error(ks, k, m, "by the background scrub"))?;
+        }
+        prev = Some(k);
+        rows += 1;
+    }
+    Ok(Chunk {
+        rows,
+        last: prev.map(|p| p.to_vec()),
+        exhausted: true,
+    })
+}
+
+/// A store image that is NOT open in this process (a copy about to be sent, a
+/// staged snapshot, a live directory before its store opens), opened
+/// read-only: its checkpoint `(applied_index, applied_term)` read in its own
+/// format, and — with `scrub` — every row verified ([`scrub_image_opt`]).
+/// `(0, 0, None)` when there is no image.
+fn inspect_image(dir: &Path, scrub: bool) -> Result<(u64, u64, Option<ScrubReport>)> {
     let data = dir.join("data.mdb");
     let used = match std::fs::metadata(&data) {
         Ok(m) => m.len() as usize,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0, None)),
         Err(e) => return Err(StoreError::Io(format!("{}: {e}", data.display()))),
     };
     let map = (used + 2 * MAP_ROUND).div_ceil(MAP_ROUND) * MAP_ROUND;
@@ -1555,6 +2445,7 @@ pub fn read_checkpoint_meta(dir: &Path) -> Result<(u64, u64)> {
     unsafe { o.flags(EnvFlags::READ_ONLY | EnvFlags::NO_LOCK) };
     let env: Env<WithTls> = unsafe { o.open(dir) }
         .map_err(|e| StoreError::Mdb(format!("open {} read-only: {e}", dir.display())))?;
+    let seeds = integrity::seeds();
     let out = (|| {
         let r = env
             .read_txn()
@@ -1562,24 +2453,59 @@ pub fn read_checkpoint_meta(dir: &Path) -> Result<(u64, u64)> {
         let db: Option<Database<Bytes, Bytes>> = env
             .open_database(&r, Some(Keyspace::Meta.name()))
             .map_err(|e| StoreError::Mdb(format!("open meta in {}: {e}", dir.display())))?;
-        let Some(db) = db else {
-            return Ok((0, 0));
+        let Some(meta) = db else {
+            return Ok((0, 0, None));
         };
+        let meta_seed = seeds[Keyspace::Meta.slot()];
+        let format = read_format_row(&r, meta, meta_seed)?.unwrap_or(StoreFormat::Legacy);
         let get = |key: &[u8]| -> Result<u64> {
-            match db
+            let stored = meta
                 .get(&r, key)
-                .map_err(|e| StoreError::Mdb(format!("read meta in {}: {e}", dir.display())))?
-            {
-                Some(v) => super::rows::u64_decode(v)
-                    .map_err(|_| StoreError::corrupt(Keyspace::Meta, "u64")),
-                None => Ok(0),
-            }
+                .map_err(|e| StoreError::Mdb(format!("read meta in {}: {e}", dir.display())))?;
+            let Some(stored) = stored else { return Ok(0) };
+            let v = if format.checksummed() {
+                integrity::open(meta_seed, key, stored).map_err(|m| {
+                    integrity::mismatch_error(Keyspace::Meta, key, m, "in a store image")
+                })?
+            } else {
+                stored
+            };
+            super::rows::u64_decode(v).map_err(|_| StoreError::corrupt(Keyspace::Meta, "u64"))
         };
-        Ok((
-            get(super::meta::APPLIED_INDEX)?,
-            get(super::meta::APPLIED_TERM)?,
-        ))
+        let applied = get(super::meta::APPLIED_INDEX)?;
+        let term = get(super::meta::APPLIED_TERM)?;
+        if !scrub {
+            return Ok((applied, term, None));
+        }
+        let mut dbs: Vec<Option<Database<Bytes, Bytes>>> = Vec::with_capacity(Keyspace::ALL.len());
+        for ks in Keyspace::ALL {
+            let db = env.open_database(&r, Some(ks.name())).map_err(|e| {
+                StoreError::Mdb(format!("open {} in {}: {e}", ks.name(), dir.display()))
+            })?;
+            dbs.push(db);
+        }
+        let report = scrub_image_opt(&r, &dbs, format, &seeds, "in a store image");
+        Ok((applied, term, Some(report)))
     })();
     env.prepare_for_closing().wait();
     out
+}
+
+/// The `(applied_index, applied_term)` of the LMDB image in `dir` (a store
+/// directory that is NOT open in this process), read without loading it: a
+/// read-only environment and two `meta` keys, in the image's own format
+/// (verified in format 1). `(0, 0)` when there is no image.
+pub fn read_checkpoint_meta(dir: &Path) -> Result<(u64, u64)> {
+    let (applied, term, _) = inspect_image(dir, false)?;
+    Ok((applied, term))
+}
+
+/// Verify EVERY row of the LMDB image in `dir` (a store directory that is NOT
+/// open in this process: a copy, a staged snapshot, a stopped node's store):
+/// the whole-image walk of [`HeedStore::scrub`], without opening the store.
+/// The report counts every failure; [`ScrubReport::into_result`] turns the
+/// first into the error.
+pub fn scrub_dir(dir: &Path) -> Result<ScrubReport> {
+    let (_, _, report) = inspect_image(dir, true)?;
+    Ok(report.unwrap_or_else(|| ScrubReport::new(StoreFormat::Legacy)))
 }

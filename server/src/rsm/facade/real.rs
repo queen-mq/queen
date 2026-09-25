@@ -1116,8 +1116,11 @@ fn default_queue_config(queue: &str) -> QueueConfig {
     crate::rsm::planner::timers::implicit_queue_config_for(queue)
 }
 
-/// The store options, honouring `QUEEN_RAFT_MAP_BYTES` (the boot path is exempt
-/// from the I2 clock/env ban that `rsm/store` itself carries).
+/// The store options, honouring `QUEEN_RAFT_MAP_BYTES`, `QUEEN_STORE_VERIFY`
+/// (scrub the whole store at open, default off) and `QUEEN_STORE_MIGRATE`
+/// (`0` keeps a format-0 store unverified instead of migrating it), with the
+/// node-local fatal a corrupt value found at runtime ends in (the boot path is
+/// exempt from the I2 clock/env ban that `rsm/store` itself carries).
 fn store_opts_from_env() -> StoreOpts {
     let mut o = StoreOpts::default();
     if let Some(v) = std::env::var("QUEEN_RAFT_MAP_BYTES")
@@ -1127,6 +1130,15 @@ fn store_opts_from_env() -> StoreOpts {
     {
         o.map_bytes = Some(v);
     }
+    o.verify_at_open = env_flag("QUEEN_STORE_VERIFY", false);
+    o.migrate_legacy = env_flag("QUEEN_STORE_MIGRATE", true);
+    // The store has already refused every later call; ending the process makes
+    // leadership move and stops whatever swallowed the error. The restart's load
+    // verifies the last checkpoint: a damaged file refuses to boot with the
+    // restore instruction, damage that was only in memory is gone.
+    o.on_corrupt = Some(crate::rsm::store::integrity::CorruptHook::new(|e| {
+        crate::obs::fatal(format!("raft store: {e}"))
+    }));
     o
 }
 

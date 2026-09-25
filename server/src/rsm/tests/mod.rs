@@ -65,5 +65,6 @@ mod roundtrip;
 pub(super) mod samples;
 mod store;
 mod store_crash;
+mod store_integrity;
 mod timers;
 mod timers_crash;
