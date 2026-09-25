@@ -5,6 +5,21 @@
       <span>Queen</span>
       <span class="sep">/</span>
       <span class="here">{{ pageTitle }}</span>
+      <a
+        v-if="docHref"
+        class="doc-link"
+        :href="docHref"
+        target="_blank"
+        rel="noopener"
+        :title="`Documentation: ${pageTitle}`"
+        :aria-label="`Open documentation for ${pageTitle}`"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+          <circle cx="12" cy="12" r="9"/>
+          <path stroke-linecap="round" stroke-linejoin="round" d="M9.88 8.52a2.25 2.25 0 1 1 3.4 2.6c-.78.6-1.28 1.1-1.28 2.13"/>
+          <circle cx="12" cy="16.5" r=".3" fill="currentColor" stroke="none"/>
+        </svg>
+      </a>
     </div>
 
     <div class="cmd-search" ref="searchContainer" @click="focusSearch">
@@ -129,6 +144,12 @@ const router = useRouter()
 const emit = defineEmits(['refresh'])
 
 const pageTitle = computed(() => route.meta.title || 'Dashboard')
+
+// The public docs site (webdoc/astro.config.ts `site`). Checked against that
+// file by webdoc/scripts/check-doclinks.mjs, so the two cannot drift apart
+// silently.
+const DOCS_BASE_URL = 'https://queenmq.com'
+const docHref = computed(() => route.meta.docs ? `${DOCS_BASE_URL}${route.meta.docs}` : null)
 
 const searchQuery = ref('')
 const showResults = ref(false)

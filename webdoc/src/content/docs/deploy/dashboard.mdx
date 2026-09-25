@@ -16,6 +16,7 @@ sourceOfTruth:
   - proxy/src/webapp.rs
   - proxy/src/operator.rs
 # sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the views list gains Messages push, Queues create and edit, Dead Letter replay and the new Timers page, the State nav group is named, and the two dead-letter captions are marked as predating the Replay action (the screenshots themselves are unchanged).
+# sourceOfTruth re-read 2026-09-25 (through fc71b65b + working tree): routes gained a `docs` meta path that renders a "?" next to the page title; the views list is unchanged.
 # EDITOR NOTE: app/src/views/Kv.vue and app/src/views/Timers.vue govern the State group described below and belong in the sourceOfTruth list above. They are untracked today, and a listed source with no commit behind it gives check-sourceoftruth.mjs no date to compare against, so add both entries in the same commit that first commits those two views.
 ---
 
@@ -42,7 +43,8 @@ so a missing path under `/api/` or `/auth/` still answers a JSON 404 instead of 
 Every view is tenant-scoped except System and Users, and both exceptions are labelled on screen.
 The sidebar groups them the way the router does: Overview, Routing, **State** (the key/value
 browser and the timers page, which read stored state that belongs to no queue), Observability and
-Cell.
+Cell. Most views show a **?** next to the page title in the header. It opens the page of this
+site that explains the view.
 
 - **Dashboard**, `/`: the resource overview, namespaces and tasks
 - **Queue Operations**, `/operations`: per-queue throughput, lag and consumer health

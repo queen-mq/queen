@@ -29,6 +29,8 @@ on:
       - "clients/client-php/**"
       - "supervisor/**"
       - "README.md"
+      - "app/src/router/index.js"
+      - "app/src/components/Header.vue"
       - "examples/**"
       - ".github/workflows/docs.yml"
   pull_request:
@@ -50,6 +52,8 @@ on:
       - "clients/client-php/**"
       - "supervisor/**"
       - "README.md"
+      - "app/src/router/index.js"
+      - "app/src/components/Header.vue"
       - "examples/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
@@ -130,3 +134,8 @@ jobs:
 
       - name: Source-of-truth freshness
         run: pnpm check:sourceoftruth
+
+      # The dashboard's "?" links (route meta `docs`) must land on a real page,
+      # and Header.vue's DOCS_BASE_URL must match `site` in astro.config.ts.
+      - name: Dashboard doc links
+        run: pnpm check:doclinks
