@@ -11,8 +11,13 @@
 //!   broker's own JWT off, and is bound to no socket: the proxy is the only
 //!   way in.
 //! - **Public port:** serves the proxy router (console, OAuth, operator,
-//!   dashboard, data plane). `/health` and `/metrics*` pass straight to the
-//!   broker, unauthenticated as on a bare broker, for probes and scrapers.
+//!   dashboard, data plane). `/health` passes straight to the broker for
+//!   probes; `/metrics*` only with the control-plane token.
+//! - **Internal port (optional, [`separate_port`]):** with `QUEEN_PROXY_PORT`
+//!   set to a port other than `PORT`, the proxy serves `QUEEN_PROXY_PORT` and
+//!   `PORT` serves the broker router itself, exactly as a broker without the
+//!   proxy does (its own JWT and tenancy settings): for clients inside the
+//!   network, scrapers and probes. That port must not face the internet.
 //!
 //! On with `QUEEN_PROXY_EMBEDDED=true`; configured by the same
 //! `QUEEN_PROXY_*` environment as the standalone proxy.
@@ -42,6 +47,18 @@ pub fn enabled() -> bool {
             .as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+/// `QUEEN_PROXY_PORT`, when the proxy gets a port of its own: set and not
+/// `broker_port` (the broker's `PORT`). `None`: the proxy fronts `PORT` and
+/// the broker router has no socket.
+pub fn separate_port(broker_port: &str) -> Option<String> {
+    separate_port_of(std::env::var("QUEEN_PROXY_PORT").ok().as_deref(), broker_port)
+}
+
+fn separate_port_of(proxy_port: Option<&str>, broker_port: &str) -> Option<String> {
+    let port = proxy_port?.trim();
+    (!port.is_empty() && port != broker_port.trim()).then(|| port.to_string())
 }
 
 /// The proxy's store: this broker's KV, for the proxy's system tenant.
@@ -160,4 +177,18 @@ pub fn not_ready() -> Response {
         "{\"error\":\"proxy starting\"}",
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::separate_port_of;
+
+    #[test]
+    fn the_proxy_gets_its_own_port_only_when_one_other_than_port_is_set() {
+        assert_eq!(separate_port_of(None, "6632"), None);
+        assert_eq!(separate_port_of(Some(""), "6632"), None);
+        assert_eq!(separate_port_of(Some(" 6632 "), "6632"), None);
+        assert_eq!(separate_port_of(Some("6711"), "6632"), Some("6711".to_string()));
+        assert_eq!(separate_port_of(Some(" 6711\n"), "6632"), Some("6711".to_string()));
+    }
 }

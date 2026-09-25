@@ -1807,8 +1807,13 @@ async fn run_raft(cfg: config::Config) {
 
     // The single binary (PLAN_SINGLE_BINARY.md W3/W4): the proxy fronts the
     // public port; the broker router behind it has tenancy on, the broker's
-    // own JWT off, and no socket — the proxy authenticated the caller.
+    // own JWT off, and no socket — the proxy authenticated the caller. With
+    // QUEEN_PROXY_PORT set to another port (proxy_embed::separate_port), the
+    // proxy serves THAT port and PORT serves the broker router itself, with the
+    // broker's own auth and tenancy: an internal port for clients inside the
+    // network, scrapers and probes.
     let mut embedded_proxy = None;
+    let mut proxy_front = None;
     let app = if proxy_embed::enabled() {
         let mut inner_auth = cfg.auth.clone();
         inner_auth.enabled = false;
@@ -1822,8 +1827,16 @@ async fn run_raft(cfg: config::Config) {
             Err(e) => obs::fatal(format!("single binary: {e}")),
         };
         embedded_proxy = Some(proxy);
-        tracing::info!(target: "boot", "single binary: proxy in-process on the public port");
-        public
+        match proxy_embed::separate_port(&cfg.port) {
+            Some(port) => {
+                proxy_front = Some((port, public));
+                handlers::raft::build_raft_router(state, authenticator, cfg.tenancy_header)
+            }
+            None => {
+                tracing::info!(target: "boot", "single binary: proxy in-process on the public port");
+                public
+            }
+        }
     } else {
         handlers::raft::build_raft_router(state, authenticator, cfg.tenancy_header)
     };
@@ -1832,6 +1845,26 @@ async fn run_raft(cfg: config::Config) {
     let listener = match bind_listener(&addr).await {
         Ok(l) => l,
         Err(e) => obs::fatal(format!("cannot bind {addr}: {e}")),
+    };
+    // Bound before anything serves, so a taken proxy port fails the boot the
+    // way a taken PORT does.
+    let proxy_front = match proxy_front {
+        Some((port, public)) => {
+            let proxy_addr = config::host_port(&cfg.bind_addr, &port);
+            match bind_listener(&proxy_addr).await {
+                Ok(l) => {
+                    tracing::info!(
+                        target: "boot",
+                        proxy = %proxy_addr,
+                        broker = %addr,
+                        "single binary: proxy in-process on its own port; the broker router serves PORT (internal)"
+                    );
+                    Some((l, public))
+                }
+                Err(e) => obs::fatal(format!("cannot bind {proxy_addr} (QUEEN_PROXY_PORT): {e}")),
+            }
+        }
+        None => None,
     };
     tracing::info!(
         target: "boot",
@@ -1860,7 +1893,26 @@ async fn run_raft(cfg: config::Config) {
         )
     });
 
-    if embedded_proxy.is_some() {
+    if let Some((proxy_listener, public)) = proxy_front {
+        // Two listeners, one shutdown: the hand-off runs once, then both drain.
+        let shutdown = futures_util::FutureExt::shared(shutdown);
+        let broker = async {
+            if let Err(e) = axum::serve(listener, app)
+                .tcp_nodelay(true)
+                .with_graceful_shutdown(shutdown.clone())
+                .await
+            {
+                tracing::error!(target: "boot", error = %e, "serve loop ended with error");
+            }
+        };
+        // W7 on the proxy's port only: TLS, connection limits, the edge.
+        let proxy = async {
+            if let Err(e) = proxy_embed::serve(proxy_listener, public, shutdown.clone()).await {
+                obs::fatal(format!("single binary: {e}"));
+            }
+        };
+        tokio::join!(broker, proxy);
+    } else if embedded_proxy.is_some() {
         // W7: TLS, connection limits and the peer address for the edge.
         if let Err(e) = proxy_embed::serve(listener, app, shutdown).await {
             obs::fatal(format!("single binary: {e}"));
