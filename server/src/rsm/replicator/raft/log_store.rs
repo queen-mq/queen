@@ -231,6 +231,9 @@ pub(crate) struct OpenCfg {
     pub applied: Option<LogId>,
     /// `meta::QLOG_DURABLE_INDEX`: the reopened queue logs must not be behind it.
     pub qlog_durable_index: u64,
+    /// Each queue log's recorded tail (`meta::qlog_tail_key`): a reopened log
+    /// must not end below it ([`QLogSet::check_tails`]).
+    pub qlog_tail: Box<dyn Fn(u64) -> io::Result<Option<u64>> + Send>,
     pub poison: Poison,
     /// See [`Inner::cache_cap`].
     pub cache_cap: usize,
@@ -249,6 +252,8 @@ pub(crate) struct Opened {
     /// The retention floor's two inputs; the apply thread's notifier reports
     /// durable points to it.
     pub gate: Arc<FloorGate>,
+    /// The writer's fsync'd tails, for the applier to record.
+    pub tails: Arc<crate::rsm::qlog::set::QlogTails>,
 }
 
 impl LogStore {
@@ -268,6 +273,8 @@ impl LogStore {
                 cfg.qlog_durable_index
             )));
         }
+        set.check_tails(&cfg.qlog_tail)?;
+        let tails = set.track_tails();
         // What openraft may still read starts right after the purge point. A
         // directory from before the retention gate (`floor_v` 0) may have lost
         // entries at or below the store's applied index: those count as purged.
@@ -408,6 +415,7 @@ impl LogStore {
             recovered,
             fresh,
             gate,
+            tails,
         })
     }
 

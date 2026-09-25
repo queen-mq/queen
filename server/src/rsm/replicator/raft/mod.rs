@@ -909,9 +909,18 @@ impl<S: Store + 'static> RaftReplicator<S> {
             durable_index: durable,
             applied: applied_log_id(applied, term),
             qlog_durable_index: qlog_durable,
+            qlog_tail: {
+                let store = store.clone();
+                Box::new(move |log| {
+                    store
+                        .read(|r| r.meta_u64(&crate::rsm::store::meta::qlog_tail_key(log)))
+                        .map_err(|e| io::Error::other(format!("read qlog tail of q{log}: {e}")))
+                })
+            },
             poison: poison.clone(),
             cache_cap: opts.cache_cap,
         })?;
+        let qlog_tails = opened.tails.clone();
         let log = opened.store;
         let mut writer_join = Some(opened.writer);
 
@@ -960,6 +969,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
             clock,
             apply_rx,
             Some(reader_sink.clone()),
+            Some(qlog_tails),
         ));
 
         // Everything below owns a thread or a runtime: on failure, unwind in

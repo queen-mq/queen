@@ -1741,6 +1741,7 @@ async fn read_range_rehydrates_stub_layout_entries() {
             durable_index: 0,
             applied: None,
             qlog_durable_index: 0,
+            qlog_tail: Box::new(|_| Ok(None)),
             poison: Arc::new(std::sync::Mutex::new(None)),
             cache_cap: 64 << 20,
         })
@@ -1789,6 +1790,7 @@ async fn read_range_rehydrates_stub_layout_entries() {
             durable_index: 0,
             applied,
             qlog_durable_index: 0,
+            qlog_tail: Box::new(|_| Ok(None)),
             poison: Arc::new(std::sync::Mutex::new(None)),
             cache_cap: 64 << 20,
         })
@@ -1834,4 +1836,156 @@ async fn read_range_rehydrates_stub_layout_entries() {
     drop(st);
     opened.writer.join().expect("writer");
     let _ = (pb, pc);
+}
+
+/// Jepsen P6: every log's fsync'd tail waits until apply passes it (a
+/// follower's unapplied suffix may still be cut by Raft), a Raft cut drops
+/// the tails above it, and a reopened log that ends below its recorded tail
+/// is refused — here while the other log is complete, which the set-wide
+/// tail check alone lets through.
+#[test]
+fn a_log_that_reopens_below_its_recorded_tail_is_refused() {
+    let td = TmpDir::new("tails");
+    let root = td.path();
+    let opts = super::QLogOptions::testing_durable(1 << 20, super::Fsync::Data);
+    let mut set = QLogSet::new(root.to_path_buf(), opts);
+    set.reopen_all().expect("reopen_all");
+    let tails = set.track_tails();
+    let (h, p) = (vec![7u8; 16], b"payload".to_vec());
+    let bodies: Vec<Vec<u8>> = (0..=10).map(|s| eb(s, 1)).collect();
+    for seq in 1..=5u64 {
+        set.write_mixed_for_qid(
+            Q1,
+            &[msg(seq, 7, seq, &h, &p), ent(seq, 1, &bodies[seq as usize])],
+        )
+        .expect("write Q1");
+    }
+    for seq in 6..=8u64 {
+        set.write_mixed_for_qid(Q2, &[ent(seq, 1, &bodies[seq as usize])])
+            .expect("write Q2");
+    }
+    let t = set.take_ticket();
+    set.syncer().sync(&t).expect("sync");
+    assert_eq!(
+        tails.take_committed(4),
+        vec![],
+        "nothing applied that far yet"
+    );
+    assert_eq!(tails.take_committed(5), vec![(Q1, 5)]);
+    assert_eq!(tails.take_committed(8), vec![(Q2, 8)]);
+
+    // An unapplied suffix, then a Raft cut: its tail is never recorded.
+    for seq in 9..=10u64 {
+        set.write_mixed_for_qid(Q1, &[ent(seq, 1, &bodies[seq as usize])])
+            .expect("write Q1 suffix");
+    }
+    let t = set.take_ticket();
+    set.syncer().sync(&t).expect("sync suffix");
+    set.truncate_from_across(9).expect("raft cut");
+    assert_eq!(tails.take_committed(20), vec![]);
+    drop(set);
+
+    let recorded = |log: u64| -> std::io::Result<Option<u64>> {
+        Ok(match log {
+            Q1 => Some(5),
+            Q2 => Some(8),
+            _ => None,
+        })
+    };
+    // Intact: both logs reach their tails.
+    reopen(root, opts)
+        .check_tails(recorded)
+        .expect("intact logs pass");
+
+    // Q1's active file cut inside its records.
+    let path = active_file(root, Q1);
+    let len = std::fs::metadata(&path).expect("len").len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("open")
+        .set_len(len * 2 / 3)
+        .expect("cut");
+    let mut set = QLogSet::new(root.to_path_buf(), opts);
+    assert_eq!(
+        set.reopen_all_guarded(8)
+            .expect("the set-wide check passes"),
+        8
+    );
+    let err = set
+        .check_tails(recorded)
+        .expect_err("Q1 ends below its tail");
+    assert!(
+        err.to_string().contains(&format!("queue log q{Q1}")),
+        "{err}"
+    );
+}
+
+/// The same through the replicator: a durable point records each queue log's
+/// tail, and a reopen with one queue's log cut inside its applied records
+/// fails, although the other queue's log still carries the highest seq.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replicator_refuses_a_queue_log_cut_inside_applied_records() {
+    let td = TmpDir::new("tailcut");
+    let dir = td.path();
+    one_lane(dir);
+    let mut g = Gen::new();
+    let mut batch: Vec<Bytes> = Vec::new();
+    let mut e = g.begin();
+    let pa = g.create_queue(&mut e, QA);
+    let pb = g.create_queue(&mut e, QB);
+    batch.push(wire(&e));
+    for _ in 0..20 {
+        let mut e = g.begin();
+        g.push(&mut e, pa, 1);
+        batch.push(wire(&e));
+    }
+    for _ in 0..5 {
+        let mut e = g.begin();
+        g.push(&mut e, pb, 1);
+        batch.push(wire(&e));
+    }
+    {
+        let store = open_store(dir);
+        let repl = open_repl_with(dir, store, false, EntryLayout::Stub);
+        propose_all(&repl, batch).await;
+        // Shutdown takes the durable point that records the tails.
+        let _ = shutdown_and_digest(repl);
+    }
+    let qa = QLogSet::queue_id_of(TENANT, QA);
+    {
+        let store = open_store(dir);
+        let tail = store
+            .read(|r| r.meta_u64(&crate::rsm::store::meta::qlog_tail_key(qa)))
+            .expect("read");
+        assert!(
+            tail.is_some_and(|t| t > 1),
+            "A's tail is recorded: {tail:?}"
+        );
+        let store = Arc::try_unwrap(store).unwrap_or_else(|_| panic!("store still shared"));
+        store.close();
+    }
+    let path = active_file(&dir.join("qlog"), qa);
+    let len = std::fs::metadata(&path).expect("len").len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("open")
+        .set_len(len / 2)
+        .expect("cut");
+    let store = open_store(dir);
+    let res = LocalReplicator::open_with_entry_layout(
+        store,
+        open_cfg(dir, false),
+        Arc::new(NoWaker),
+        Arc::new(SystemClock),
+        EntryLayout::Stub,
+    );
+    match res {
+        Ok(_) => panic!("a queue log cut inside applied records must refuse the open"),
+        Err(e) => assert!(
+            e.to_string().contains("acknowledged records are missing"),
+            "{e}"
+        ),
+    }
 }

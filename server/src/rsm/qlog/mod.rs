@@ -887,6 +887,12 @@ impl QLog {
         self.queue_id
     }
 
+    /// The highest `seq` this log holds: its active file's (the `first_seq` of
+    /// an active file a roll left empty). `0` for a log never written.
+    pub fn durable_tail(&self) -> u64 {
+        self.files.last().map_or(0, |f| f.first_seq.max(f.max_seq))
+    }
+
     /// Attach a shared recovery floor (Phase C): from now on no file holding a
     /// record with `seq >` the floor's value is ever unlinked. [`set::QLogSet`]
     /// attaches its own handle to every log it opens.
