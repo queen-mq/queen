@@ -1,0 +1,112 @@
+# P8: W1 regression + the workloads W2-W6 under faults.
+#
+#   cd /root/jepsen-p8 && RUNS=/root/runs-p8 BIN=/root/bin/queen-wt-tails ./run-matrix.sh matrix-p8.txt
+#
+# Every line is one 300 s test (run-matrix.sh adds the 5 nodes, the ssh key,
+# --bin and --concurrency 2n). Measured on P6/P7: a 300 s test takes 5:50-7:10
+# of wall time (setup, recovery, final reads, analysis); budget 6.5 min.
+# The sections are in priority order: stop after any section and what ran is
+# a complete answer for its workloads.
+#
+# Estimate: 62 runs x 6.5 min = ~6.7 h wall; 6 VMs (control + 5 nodes) =
+# ~40 VM-hours. Sections: 1 = 2.8 h, 2 = 0.9 h, 3 = 2.3 h, 4 = 0.8 h.
+# W4 (elle) is already invalid without faults (G1c, see the smoke): its fault
+# runs show which OTHER anomalies faults add; drop them to save ~0.8 h.
+#
+# Fault names: kill / pause / partition / clock (Jepsen combined packages),
+# bridge, leader-deaf (this suite), restart = graceful SIGTERM -> exit -> start
+# (one node or rolling), "lz" = --lazyfs (a kill loses what was not fsynced).
+# KV workloads (W3, W3b, W3c, W4) run at --rate 100 (Knossos / Elle analysis),
+# the others at 200.
+
+# --- 0. Smokes, already run 2026-09-25 on queen-wt-tails (all valid except W4: G1c).
+# p8-w3-spread-smoke   --workload register --nemesis none --time-limit 120 --rate 100
+# p8-w3-leader-smoke   --workload register --kv-route leader --nemesis none --time-limit 120 --rate 100
+# p8-w3b-smoke         --workload counter --nemesis none --time-limit 120 --rate 100
+# p8-w3c-smoke         --workload claim --nemesis none --time-limit 120 --rate 100
+# p8-w4-smoke          --workload elle --nemesis none --time-limit 120 --rate 100
+# p8-w5-smoke          --workload pipeline --nemesis none --time-limit 120 --rate 100
+# p8-w6-smoke          --workload dedup --nemesis none --time-limit 120 --rate 100
+# p8-restart-check     --workload log --nemesis restart --time-limit 120 --rate 100 --nemesis-interval 20
+
+# --- 1. The new workloads under the faults most likely to break them (26 runs, ~2.8 h)
+p8-w3-kill             --workload register --nemesis kill --time-limit 300 --rate 100
+p8-w3-part             --workload register --nemesis partition --time-limit 300 --rate 100
+p8-w3-lz-kill          --workload register --lazyfs --nemesis kill --time-limit 300 --rate 100
+p8-w3-leader-deaf      --workload register --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+p8-w3-lead-part        --workload register --kv-route leader --nemesis partition --time-limit 300 --rate 100
+p8-w3-lead-deaf        --workload register --kv-route leader --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+p8-w3b-kill            --workload counter --nemesis kill --time-limit 300 --rate 100
+p8-w3b-part            --workload counter --nemesis partition --time-limit 300 --rate 100
+p8-w3b-lz-kill         --workload counter --lazyfs --nemesis kill --time-limit 300 --rate 100
+p8-w3c-kill            --workload claim --nemesis kill --time-limit 300 --rate 100
+p8-w3c-part            --workload claim --nemesis partition --time-limit 300 --rate 100
+p8-w3c-lz-kill         --workload claim --lazyfs --nemesis kill --time-limit 300 --rate 100
+p8-w4-kill             --workload elle --nemesis kill --time-limit 300 --rate 100
+p8-w4-part             --workload elle --nemesis partition --time-limit 300 --rate 100
+p8-w4-lz-kill          --workload elle --lazyfs --nemesis kill --time-limit 300 --rate 100
+p8-w5-kill             --workload pipeline --nemesis kill --time-limit 300 --rate 200
+p8-w5-part             --workload pipeline --nemesis partition --time-limit 300 --rate 200
+p8-w5-lz-kill          --workload pipeline --lazyfs --nemesis kill --time-limit 300 --rate 200
+p8-w5-leader-deaf      --workload pipeline --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+p8-w6-kill             --workload dedup --nemesis kill --time-limit 300 --rate 200
+p8-w6-part             --workload dedup --nemesis partition --time-limit 300 --rate 200
+p8-w6-lz-kill          --workload dedup --lazyfs --nemesis kill --time-limit 300 --rate 200
+p8-w6-leader-deaf      --workload dedup --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+p8-w2-kill             --workload queue --nemesis kill --time-limit 300 --rate 200
+p8-w2-part             --workload queue --nemesis partition --time-limit 300 --rate 200
+p8-w2-leader-deaf      --workload queue --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+
+# --- 2. Graceful restarts, every workload (8 runs, ~0.9 h)
+p8-w1-restart          --workload log --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+p8-w2-restart          --workload queue --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+p8-w3-restart          --workload register --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+p8-w3b-restart         --workload counter --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+p8-w3c-restart         --workload claim --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+p8-w4-restart          --workload elle --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+p8-w5-restart          --workload pipeline --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+p8-w6-restart          --workload dedup --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+
+# --- 3. The rest of the fault set where it means something (21 runs, ~2.3 h)
+#     pause: a paused leader that wakes up; bridge: two majorities sharing a node;
+#     clock: lease expiry (W2, W5) and any clock-based read path (W3).
+p8-w3-pause            --workload register --nemesis pause --time-limit 300 --rate 100
+p8-w3-bridge           --workload register --nemesis bridge --time-limit 300 --rate 100 --nemesis-interval 20
+p8-w3-clock            --workload register --nemesis clock --time-limit 300 --rate 100
+p8-w3b-pause           --workload counter --nemesis pause --time-limit 300 --rate 100
+p8-w3b-leader-deaf     --workload counter --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+p8-w3c-pause           --workload claim --nemesis pause --time-limit 300 --rate 100
+p8-w3c-leader-deaf     --workload claim --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+p8-w4-pause            --workload elle --nemesis pause --time-limit 300 --rate 100
+p8-w4-leader-deaf      --workload elle --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+p8-w4-bridge           --workload elle --nemesis bridge --time-limit 300 --rate 100 --nemesis-interval 20
+p8-w5-pause            --workload pipeline --nemesis pause --time-limit 300 --rate 200
+p8-w5-bridge           --workload pipeline --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+p8-w5-clock            --workload pipeline --nemesis clock --time-limit 300 --rate 200
+p8-w6-pause            --workload dedup --nemesis pause --time-limit 300 --rate 200
+p8-w6-bridge           --workload dedup --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+p8-w2-pause            --workload queue --nemesis pause --time-limit 300 --rate 200
+p8-w2-lz-kill          --workload queue --lazyfs --nemesis kill --time-limit 300 --rate 200
+p8-w2-bridge           --workload queue --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+p8-w2-clock            --workload queue --nemesis clock --time-limit 300 --rate 200
+p8-w3-lead-kill        --workload register --kv-route leader --nemesis kill --time-limit 300 --rate 100
+p8-w3-lead-pause       --workload register --kv-route leader --nemesis pause --time-limit 300 --rate 100
+
+# --- 4. W1 regression on the same binary (7 runs, ~0.8 h)
+p8-w1-kill             --workload log --nemesis kill --time-limit 300 --rate 200
+p8-w1-pause            --workload log --nemesis pause --time-limit 300 --rate 200
+p8-w1-part             --workload log --nemesis partition --time-limit 300 --rate 200
+p8-w1-lz-kill          --workload log --lazyfs --nemesis kill --time-limit 300 --rate 200 --nemesis-interval 10
+p8-w1-leader-deaf      --workload log --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+p8-w1-bridge           --workload log --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+p8-w1-clock            --workload log --nemesis clock --time-limit 300 --rate 200
+
+# --- 5. Membership changes: NOT WIRED (the admin endpoints do not exist yet).
+#     TODO(membership): implement jepsen.queen.nemesis/MembershipAdmin, then
+#     uncomment. The package refuses to start without it.
+# p8-w1-membership     --workload log --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+# p8-w2-membership     --workload queue --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+# p8-w3-membership     --workload register --nemesis membership --time-limit 300 --rate 100 --nemesis-interval 20
+# p8-w5-membership     --workload pipeline --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+# p8-w6-membership     --workload dedup --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+# p8-w1-member-kill    --workload log --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20

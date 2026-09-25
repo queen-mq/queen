@@ -51,16 +51,19 @@
       t)))
 
 (defn request!
-  "Sends one request (method :get or :post, body a Clojure value encoded as
-  JSON, or nil). See the namespace doc for the result and the exceptions."
+  "Sends one request (method :get, :post, :put or :delete; body a Clojure
+  value encoded as JSON, or nil). See the namespace doc for the result and the exceptions."
   [^HttpClient c method url body timeout-ms]
   (let [b (-> (HttpRequest/newBuilder (URI/create url))
               (.timeout (Duration/ofMillis (long timeout-ms)))
               (.header "Content-Type" "application/json"))
         b (case method
-            :get  (.GET b)
-            :post (.POST b (HttpRequest$BodyPublishers/ofString
-                             (json/write-str body))))
+            :get    (.GET b)
+            :delete (.DELETE b)
+            :post   (.POST b (HttpRequest$BodyPublishers/ofString
+                               (json/write-str body)))
+            :put    (.PUT b (HttpRequest$BodyPublishers/ofString
+                              (json/write-str body))))
         req (.build b)]
     (try
       (let [resp (.send c req (HttpResponse$BodyHandlers/ofString))]

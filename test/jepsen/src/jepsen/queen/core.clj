@@ -13,16 +13,26 @@
             [jepsen.tests.kafka :as kafka]
             [jepsen.queen [db :as db]
                           [nemesis :as qn]]
-            [jepsen.queen.workload [log :as log]
-                                   [queue :as queue]]))
+            [jepsen.queen.workload [dedup :as dedup]
+                                   [elle :as elle]
+                                   [log :as log]
+                                   [pipeline :as pipeline]
+                                   [queue :as queue]
+                                   [register :as register]]))
 
 (def workloads
-  {:log   log/workload
-   :queue queue/workload})
+  {:log      log/workload         ; W1
+   :queue    queue/workload       ; W2
+   :register register/register-workload  ; W3
+   :counter  register/counter-workload   ; W3b
+   :claim    register/claim-workload     ; W3c
+   :elle     elle/workload        ; W4
+   :pipeline pipeline/workload    ; W5
+   :dedup    dedup/workload})     ; W6
 
 (def all-faults
   #{:pause :kill :partition :clock :pause-kill :part-kill :bridge :leader-deaf
-    :snap-kill :corrupt})
+    :snap-kill :corrupt :restart :membership})
 
 (def special-nemeses
   {:none []
@@ -111,6 +121,7 @@
        (when (some #{:kill :pause :clock} (:nemesis opts))
          (str "_t=" (->> (:db-targets opts) (map name) (str/join ","))))
        (when (:txn-sends? opts) "_txn")
+       (when (= :leader (:kv-route opts)) "_kv-leader")
        (when (:lazyfs opts) "_lazyfs")
        (when (:disk-hog opts) "_hog")
        "_offload=" (if (:offload opts) "on" "off")
@@ -161,7 +172,15 @@
                      (conj (qn/snap-kill-package nopts))
 
                      (contains? (:faults nopts) :corrupt)
-                     (conj (qn/corrupt-package nopts))))
+                     (conj (qn/corrupt-package nopts))
+
+                     (contains? (:faults nopts) :restart)
+                     (conj (qn/graceful-restart-package nopts))
+
+                     ; TODO(membership): off until the admin endpoints exist
+                     ; (the package refuses to set up without an implementation).
+                     (contains? (:faults nopts) :membership)
+                     (conj (qn/membership-package nopts))))
         fg       (:final-generator workload)]
     (merge tests/noop-test
            opts
@@ -174,7 +193,9 @@
             :txn?        false
             :ww-deps     true
             :raft-token  (str (random-uuid))
-            :extra-env   (:env opts)
+            ; The workload's own node settings (the KV workloads lift the KV
+            ; rate ladder), then --env on top.
+            :extra-env   (merge (:db-env workload) (:env opts))
             :queue-names (mapv #(str "jepsen-" %) (range (:queues opts)))
             :client-timeout-ms (+ (:server-timeout-ms opts) 5000)
             :generator
@@ -255,7 +276,7 @@
     :default 256
     :parse-fn parse-long]
 
-   [nil "--nemesis FAULTS" "Comma-separated faults: pause,kill,partition,clock,pause-kill,part-kill,bridge,leader-deaf,snap-kill,corrupt, or none/all."
+   [nil "--nemesis FAULTS" "Comma-separated faults: pause,kill,partition,clock,pause-kill,part-kill,bridge,leader-deaf,snap-kill,corrupt,restart (graceful), membership (TODO: not wired), or none/all."
     :default #{}
     :parse-fn parse-nemesis-spec
     :validate [(partial every? all-faults)
@@ -293,7 +314,36 @@
     :id :txn-sends?
     :default false]
 
-   [nil "--w2-lease SECONDS" "queue workload: leaseSeconds of every pop."
+   [nil "--kv-route ROUTE" "KV workloads: spread (each client on its own node) or leader (every request to the current leader)."
+    :default :spread
+    :parse-fn keyword
+    :validate [#{:spread :leader} "spread or leader"]]
+
+   [nil "--ops-per-key N" "register workload: operations per key."
+    :default 200
+    :parse-fn parse-long]
+
+   [nil "--threads-per-key N" "register / claim workloads: client threads per key (must divide the concurrency)."
+    :default 5
+    :parse-fn parse-long]
+
+   [nil "--w5-keys N" "pipeline workload: counter keys c:0..N-1 (input m counts on m mod N)."
+    :default 5
+    :parse-fn parse-long]
+
+   [nil "--w5-partitions N" "pipeline workload: partitions of the in and out queues."
+    :default 4
+    :parse-fn parse-long]
+
+   [nil "--w6-ids N" "dedup workload: transactionIds per partition (sends pick one at random)."
+    :default 40
+    :parse-fn parse-long]
+
+   [nil "--w6-partitions N" "dedup workload: partitions of the test queue."
+    :default 4
+    :parse-fn parse-long]
+
+   [nil "--w2-lease SECONDS" "queue workload: leaseSeconds of every pop (the pipeline workload's too)."
     :default 3
     :parse-fn parse-long]
 
@@ -301,7 +351,7 @@
     :default 8
     :parse-fn parse-long]
 
-   ["-w" "--workload NAME" "Workload: log or queue."
+   ["-w" "--workload NAME" "Workload: log (W1), queue (W2), register (W3), counter (W3b), claim (W3c), elle (W4), pipeline (W5), dedup (W6)."
     :default :log
     :parse-fn keyword
     :validate [workloads (cli/one-of workloads)]]])

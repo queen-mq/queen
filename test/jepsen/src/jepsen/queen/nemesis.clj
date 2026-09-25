@@ -22,7 +22,8 @@
                     [util :as util]]
             [jepsen.control.net :as cn]
             [jepsen.control.util :as cu]
-            [jepsen.nemesis.file :as nf]))
+            [jepsen.nemesis.file :as nf]
+            [jepsen.queen.db :as qdb]))
 
 (defn- roles
   "A fresh random split: {:behind #{...} :crasher n :rest #{...}}."
@@ -358,3 +359,132 @@
               :start #{:corrupt-file}
               :stop  #{}
               :color "#D2E9A0"}}}))
+
+;; ---------------------------------------------------------------------------
+;; Graceful restart: SIGTERM, wait for the exit, start again.
+
+(defn graceful-restart-nemesis
+  "  :restart          SIGTERM one node's queen (random, or :value), wait for
+                     it to exit (killed after 30 s: :forced), start it, wait
+                     for /health.
+     :rolling-restart  the same for every node in turn, each healthy before
+                     the next.
+     :restart-heal     start every node that is not running.
+  A leader that gets SIGTERM hands leadership off before it exits (commit
+  74818982); a restart of the leader should therefore cost no election
+  timeout."
+  []
+  (reify
+    n/Reflection
+    (fs [_] #{:restart :rolling-restart :restart-heal})
+
+    n/Nemesis
+    (setup! [this test] this)
+
+    (invoke! [this test op]
+      (case (:f op)
+        :restart
+        (let [node (or (:value op) (rand/nth (vec (:nodes test))))
+              res  (c/on-nodes test [node]
+                               (fn [test node] (qdb/graceful-restart! test node 30)))]
+          (assoc op :value (get res node)))
+
+        :rolling-restart
+        (assoc op :value
+               (mapv (fn [node]
+                       (get (c/on-nodes test [node]
+                                        (fn [test node] (qdb/graceful-restart! test node 30)))
+                            node))
+                     (rand/shuffle (vec (:nodes test)))))
+
+        :restart-heal
+        (assoc op :value (c/on-nodes test (fn [test node] (qdb/start-node! test node))))))
+
+    (teardown! [this test])))
+
+(defn graceful-restart-package
+  [{:keys [faults interval]}]
+  (let [needed? (contains? faults :restart)]
+    {:nemesis (graceful-restart-nemesis)
+     :generator
+     (when needed?
+       (->> (gen/mix [(repeat {:type :info, :f :restart, :value nil})
+                      (repeat {:type :info, :f :restart, :value nil})
+                      (repeat {:type :info, :f :rolling-restart, :value nil})])
+            (gen/stagger interval)))
+     :final-generator
+     (when needed? {:type :info, :f :restart-heal, :value nil})
+     :perf #{{:name  "restart"
+              :fs    #{:restart :rolling-restart}
+              :start #{}
+              :stop  #{}
+              :color "#A0C8E9"}}}))
+
+;; ---------------------------------------------------------------------------
+;; Membership (PLACEHOLDER: off by default, not wired).
+;;
+;; TODO(membership): another session is building the raft membership admin
+;; endpoints (add learner / promote / remove voter). Once their spec exists,
+;; implement MembershipAdmin over HTTP (one call per method, against the node
+;; given as `via`), pass it as :membership-admin, and enable the fault with
+;; --nemesis membership. Until then the package refuses to start.
+
+(defprotocol MembershipAdmin
+  "The raft membership admin surface the nemesis needs."
+  (members [admin test via]
+    "What `via` believes: {:voters #{node} :learners #{node}}.")
+  (add-learner! [admin test via node]
+    "Add `node` as a learner, asking `via` (the leader, or any node that
+    forwards).")
+  (promote! [admin test via node]
+    "Promote the learner `node` to voter.")
+  (remove-voter! [admin test via node]
+    "Remove the voter `node` from the membership."))
+
+(def unimplemented-admin
+  (reify MembershipAdmin
+    (members [_ _ _] (throw (ex-info "TODO(membership): admin endpoints not wired" {})))
+    (add-learner! [_ _ _ _] (throw (ex-info "TODO(membership): admin endpoints not wired" {})))
+    (promote! [_ _ _ _] (throw (ex-info "TODO(membership): admin endpoints not wired" {})))
+    (remove-voter! [_ _ _ _] (throw (ex-info "TODO(membership): admin endpoints not wired" {})))))
+
+(defn membership-nemesis
+  "One cycle per :membership-cycle op:
+     1. remove-voter! a random voter R (never below 3 voters);
+     2. kill R, wipe its data directory, start it EMPTY (a node that rejoins
+        with its old id and an empty vote store is the D21 hazard: the new
+        admin surface must refuse it or give R a new identity - the test
+        records which);
+     3. add-learner! R; wait until its applied index reaches the leader's;
+     4. promote! R.
+  Every step's answer goes into the op. The view is re-read from the leader
+  before each step (members), so the nemesis tolerates a lost answer."
+  [db admin]
+  (reify
+    n/Reflection
+    (fs [_] #{:membership-cycle})
+
+    n/Nemesis
+    (setup! [this test]
+      (when (= admin unimplemented-admin)
+        (throw (ex-info "TODO(membership): no MembershipAdmin implementation; leave the membership fault off"
+                        {})))
+      this)
+
+    (invoke! [this test op]
+      ; TODO(membership): implement once MembershipAdmin exists; the steps
+      ; are the docstring's.
+      (assoc op :value :not-implemented))
+
+    (teardown! [this test])))
+
+(defn membership-package
+  [{:keys [faults interval db membership-admin]}]
+  (let [needed? (contains? faults :membership)]
+    {:nemesis   (when needed?
+                  (membership-nemesis db (or membership-admin unimplemented-admin)))
+     :generator (when needed?
+                  (->> (repeat {:type :info, :f :membership-cycle, :value nil})
+                       (gen/stagger (* 3 interval))))
+     :perf      #{{:name "membership", :fs #{:membership-cycle}, :start #{}, :stop #{}
+                   :color "#E9C0A0"}}}))

@@ -190,6 +190,38 @@
                                 hog-pid-file ") 2>/dev/null; pkill -9 -x dd; true")))
     (c/exec :rm :-f hog-file hog-pid-file)))
 
+(declare await-healthy!)
+
+(defn graceful-restart!
+  "SIGTERM the queen binary (the wrapper then exits: it restarts only on 75),
+  wait up to timeout-s for it to exit, start the node again and wait for
+  /health. Returns what happened: the exit code the wrapper logged, how long
+  the exit took, whether it had to be killed, how long until healthy."
+  [test node timeout-s]
+  (let [t0      (System/currentTimeMillis)
+        lines   (try (parse-long (str/trim (c/su (c/exec :bash :-c (str "wc -l < " log-file)))))
+                     (catch Exception _ 0))
+        pid     (try (str/trim (c/su (c/exec :pgrep :-x :queen))) (catch Exception _ nil))]
+    (if-not pid
+      {:node node, :was-running false, :start (start-node! test node)}
+      (do
+        (c/su (c/exec :kill :-TERM (first (str/split-lines pid))))
+        (let [exited? (loop []
+                        (cond (not (running?)) true
+                              (< (* 1000 timeout-s) (- (System/currentTimeMillis) t0)) false
+                              :else (do (Thread/sleep 100) (recur))))
+              exit-ms (- (System/currentTimeMillis) t0)
+              _       (when-not exited? (kill-node! (dissoc test :lazyfs) node))
+              rc      (try (->> (c/su (c/exec :bash :-c (str "tail -n +" (inc lines) " " log-file
+                                                             " | grep -o 'queen exited rc=[0-9]*' | tail -1")))
+                                (re-find #"rc=(\d+)") second parse-long)
+                           (catch Exception _ nil))
+              _       (start-node! test node)
+              up?     (try (await-healthy! node 60000) true
+                           (catch Exception _ false))]
+          {:node node, :exit-ms exit-ms, :forced (not exited?), :rc rc
+           :healthy-after-ms (when up? (- (System/currentTimeMillis) t0))})))))
+
 (defn await-healthy!
   "Waits until this node's /health answers 200 (a leader is known)."
   [node timeout-ms]
