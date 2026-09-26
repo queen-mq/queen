@@ -206,6 +206,11 @@ pub struct BatcherConfig {
     /// commands in parallel ([`lanes`]). 1 is the single planner, exactly as
     /// before lanes.
     pub lanes: u64,
+    /// `QUEEN_RAFT_CLOCK` (default `monotonic`): within a term the RSM clock
+    /// runs on the leader's monotonic clock from where the term began
+    /// ([`RunState::plan_wall`]); `wall` stamps the wall clock every cycle, as
+    /// before.
+    pub monotonic_clock: bool,
 }
 
 impl Default for BatcherConfig {
@@ -232,6 +237,7 @@ impl Default for BatcherConfig {
             keep_overlay: true,
             keep_overlay_verify: false,
             lanes: 1,
+            monotonic_clock: true,
         }
     }
 }
@@ -361,6 +367,9 @@ impl BatcherConfig {
                 .and_then(|v| v.trim().parse::<u64>().ok())
                 .unwrap_or(d.lanes)
                 .clamp(1, 64),
+            monotonic_clock: std::env::var("QUEEN_RAFT_CLOCK")
+                .map(|v| !v.trim().eq_ignore_ascii_case("wall"))
+                .unwrap_or(d.monotonic_clock),
             // Off unless explicitly turned on: only "1"/"true"/"on"/"yes".
             keep_overlay_verify: std::env::var("QUEEN_RAFT_KEEP_OVERLAY_VERIFY")
                 .map(|v| {
@@ -1707,9 +1716,10 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             quiescing: None,
             realign_at: None,
             term_start_us: None,
+            clock_anchor: None,
         };
         if role.is_leader() {
-            st.term_start_us = Some(st.rsm_now());
+            st.begin_term_clock();
         }
 
         loop {
@@ -1932,6 +1942,9 @@ struct RunState<S: Store, R: Replicator> {
     /// The RSM clock when this node's current leadership began planning
     /// ([`crate::rsm::planner::PlanConfig::term_start_us`]).
     term_start_us: Option<i64>,
+    /// The RSM clock when this node's leadership began planning, and the
+    /// monotonic instant it was read at ([`RunState::plan_wall`]).
+    clock_anchor: Option<(i64, Instant)>,
 }
 
 /// The next [`QuiesceReq`], or never when no channel was handed in.
@@ -2247,7 +2260,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             .map(|e| (e.index, e.entry.clone()))
             .collect();
 
-        let wall_us = now_micros();
+        let wall_us = self.plan_wall();
         let expire_window_us = expire.then(|| self.cfg.request_id_window_s as i64 * 1_000_000);
         let kv_sweep_limit = kv_sweep.then_some(self.cfg.kv_sweep_limit);
         let store = self.store.clone();
@@ -2860,7 +2873,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 if self.paused {
                     self.realign_at = None;
                     self.planning_term = Some(term);
-                    self.term_start_us = Some(self.rsm_now());
+                    self.begin_term_clock();
                     // I13: a new leader plans only after applying the first
                     // entry of its own term. On a single node with the
                     // LocalReplicator the term never changes, so this is the
@@ -2925,6 +2938,24 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     fn rsm_now(&self) -> i64 {
         let last = self.store.read(|r| r.last_now_us()).unwrap_or(0);
         now_micros().max(last)
+    }
+
+    /// A term begins planning: the RSM clock is read once, here, from the
+    /// wall ([`RunState::rsm_now`]: never behind the last applied entry) —
+    /// the lease grace's term start and the clock's anchor.
+    fn begin_term_clock(&mut self) {
+        let now = self.rsm_now();
+        self.term_start_us = Some(now);
+        self.clock_anchor = Some((now, Instant::now()));
+    }
+
+    /// The wall clock a cycle plans from ([`paced_wall`]).
+    fn plan_wall(&mut self) -> i64 {
+        let wall = now_micros();
+        if !self.cfg.monotonic_clock {
+            return wall;
+        }
+        paced_wall(self.clock_anchor, wall, Instant::now())
     }
 
     /// A membership change asks to pause ([`QuiesceReq`]).
@@ -3108,6 +3139,36 @@ async fn wait_notify(n: &Option<Arc<Notify>>) {
         // Unreachable under the select guard; park forever so a stray poll is
         // inert rather than a busy spin.
         None => std::future::pending::<()>().await,
+    }
+}
+
+/// The clock a leader's cycle plans from: the RSM clock where its term
+/// began, moved on by the MONOTONIC time since (`wall` before any term).
+///
+/// The planner stamps each entry above this and the RSM clock's high-water
+/// mark (D5: never back). Following the wall clock every cycle, a step of it —
+/// NTP, a paused VM, Jepsen's clock nemesis — moved the RSM clock with it:
+///  - forward, and every lease ended early by the size of the step (P9 W2: the
+///    leader's clock leapt ~300 s and a second worker got a message 10 ms
+///    after the first);
+///  - back, and the stamp stood still at its high-water mark, every lease,
+///    delay and TTL with it, until the wall caught up; while it stood ahead of
+///    every node's wall clock, their pops' deadlines (wall + timeout) had all
+///    passed (P9 W5, W2: a 150-170 s excursion answered every pop empty for
+///    minutes).
+///
+/// On the monotonic clock neither happens: a lease lasts its real duration,
+/// and the RSM clock stays with real time through a leader's excursions. The
+/// wall is read once per term ([`RunState::begin_term_clock`]); a step of it
+/// reaches the RSM clock at the next term, as a jump the lease grace covers up
+/// to `QUEEN_RAFT_MAX_CLOCK_SKEW_MS`. Between steps, the wall and the
+/// monotonic clock advance at the same NTP-disciplined rate.
+fn paced_wall(anchor: Option<(i64, Instant)>, wall: i64, now: Instant) -> i64 {
+    match anchor {
+        Some((at_us, at)) => {
+            at_us.saturating_add(now.saturating_duration_since(at).as_micros() as i64)
+        }
+        None => wall,
     }
 }
 
@@ -3426,5 +3487,34 @@ mod perf_j_tests {
         assert_eq!(sub.enqueued_at.is_some(), on);
         // They are the SAME instant at ingress (one stamp read).
         assert_eq!(sub.received_at, sub.enqueued_at);
+    }
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use std::time::{Duration, Instant};
+
+    use super::paced_wall;
+
+    const S: i64 = 1_000_000;
+
+    #[test]
+    fn before_any_term_it_is_the_wall() {
+        assert_eq!(paced_wall(None, 42 * S, Instant::now()), 42 * S);
+    }
+
+    /// P9 W2 / W5 under the clock nemesis: the leader's wall clock leapt
+    /// forward and back; the RSM clock went with it, ending leases early and
+    /// then standing still. It moves on real time only.
+    #[test]
+    fn within_a_term_it_moves_on_real_time_whatever_the_wall_does() {
+        let t0 = Instant::now();
+        let anchor = Some((1_000 * S, t0));
+        let t1 = t0 + Duration::from_secs(10);
+        assert_eq!(paced_wall(anchor, 1_010 * S, t1), 1_010 * S, "in step with the wall");
+        assert_eq!(paced_wall(anchor, 1_310 * S, t1), 1_010 * S, "a 300 s leap: ignored");
+        assert_eq!(paced_wall(anchor, 840 * S, t1), 1_010 * S, "a 170 s drop: ignored");
+        let t2 = t0 + Duration::from_secs(13);
+        assert_eq!(paced_wall(anchor, 0, t2), 1_013 * S, "3 s of real time is 3 s");
     }
 }
