@@ -3,23 +3,48 @@
   (POST /api/v1/kv): a getMany of the keys the transaction reads, then a put
   of each key it writes (forever:true), checked at strict serializability.
 
-  Queen evaluates a batch's reads AFTER its own entry applied on the node that
-  answers (rsm/facade/real/kv.rs), so a read of a key the same batch writes
-  would see that write whatever its position. Transactions are therefore
-  normalised before they are sent: reads first, then writes; one write per key
-  (the last); no read of a key the transaction writes. Elle sees exactly the
-  normalised transaction.
+  Queen renders a batch's reads right after the batch's own writes
+  (rsm/facade/real/kv.rs, rsm/kv_reads.rs), so a read of a key the same batch
+  writes would see that write whatever its position. Transactions are
+  therefore normalised before they are sent: reads first, then writes; one
+  write per key (the last); no read of a key the transaction writes. Elle sees
+  exactly the normalised transaction.
 
-  A read-only batch waits for the read index; a batch with writes is one raft
-  entry, its reads taken after that entry applied - possibly after LATER
-  entries too, which is what RESEARCH.md expected Elle to see as G-single."
+  A read-only batch waits for the read index and reads at an entry boundary; a
+  batch with writes is one raft entry, its reads rendered at its own position
+  in the log."
   (:require [clojure.tools.logging :refer [info warn]]
+            [elle.graph]
             [jepsen [checker :as checker]
                     [client :as client]
                     [generator :as gen]]
             [jepsen.tests.cycle.wr :as wr]
             [jepsen.queen [http :as qh]
-                          [kv :as kv]]))
+                          [kv :as kv]])
+  (:import (io.lacuna.bifurcan ISet)
+           (java.util.function BinaryOperator)))
+
+(def ^:private non-mutating-union-bset
+  "elle.graph/union-bset without the corruption. Elle 0.2.7 runs on bifurcan
+  0.2.0-alpha7, whose Set.union of two forked sets merges under the set's own
+  editor - null for every forked collection - so nodes an earlier forked union
+  left behind (also editor null) count as owned and are written in place.
+  elle.rw-register's ext-key-graph shares one downstream set among many ops
+  (downstream-ops-by-ext-key-transitive!, rw_register.clj:326), so a later
+  union adds ops to the downstream sets of ops already done: false
+  :linearizable-keys version edges and spurious :cyclic-versions (P8: 6 of 8
+  W4 runs; every reported cycle held an edge no realtime order justifies). A
+  union through a fresh linear copy runs under a brand-new editor that owns no
+  existing node, so neither argument is touched. Upstream: elle README warning
+  (244b151, unreleased), bifurcan fix 33d7030 (master, unreleased; 0.2.0-rc1
+  still has the bug). Drop this once elle ships on a fixed bifurcan."
+  (reify BinaryOperator
+    (apply [_ a b]
+      (cond (nil? a) b
+            (nil? b) a
+            true     (.forked (.union (.linear ^ISet a) ^ISet b))))))
+
+(alter-var-root #'elle.graph/union-bset (constantly non-mutating-union-bset))
 
 (defn normalize
   "Reads first, then writes; the last write of a key only; no read of a key
