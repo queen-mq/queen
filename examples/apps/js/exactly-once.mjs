@@ -12,10 +12,10 @@
 // not commit with the acknowledgement, and any window between the two is a
 // window in which the work happens twice.
 //
-// Here the marker is a row in the same PostgreSQL as the queue, written in the
-// same transaction as the ack. There is no window. Either the order is marked
-// and acknowledged, or neither, and a redelivery finds the marker and does
-// nothing.
+// Here the marker is a KV entry in the same broker state as the queue, written
+// in the same transaction as the ack. There is no window. Either the order is
+// marked and acknowledged, or neither, and a redelivery finds the marker and
+// does nothing.
 //
 //   orders
 //     └── group "charger"   marker + ack in ONE transaction

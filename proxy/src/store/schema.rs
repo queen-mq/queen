@@ -1,22 +1,22 @@
-//! The proxy's state in the broker's KV: the one layout every repository and
-//! the Postgres import agree on (PLAN_SINGLE_BINARY.md W3/W5).
+//! The proxy's state in the broker's KV: the one layout every repository
+//! agrees on (PLAN_SINGLE_BINARY.md W3).
 //!
 //! - **Tenant:** everything lives under [`PROXY_TENANT`], a reserved broker
 //!   tenant no customer can reach (the gateway only ever injects a cluster's
 //!   random `broker_tenant_uuid`).
-//! - **Tables:** one namespace per Postgres table ([`ns`]), one JSON document
+//! - **Tables:** one namespace per table ([`ns`]), one JSON document
 //!   per row, keyed `#<primary key>`. Every key starts with [`K`] because the
 //!   broker's `getPrefix` needs a non-empty prefix: a whole table is
 //!   `scan(ns, "#")`.
-//! - **Indexes:** a Postgres UNIQUE or lookup index is a second namespace
+//! - **Indexes:** a UNIQUE or lookup index is a second namespace
 //!   (`<table>.<column>`) whose key is `#<value>` and whose value is the row's
 //!   id — written in the SAME atomic batch as the row, `putIfAbsent` +
 //!   `required: true` for a unique one, so two nodes can never both win. A
 //!   "rows of X" index is `#<x id>/<row id>` with an empty value, listed by
 //!   prefix.
 //! - **Time:** every timestamp is epoch microseconds (UTC), `*_us`.
-//! - **Cascades:** Postgres' `ON DELETE CASCADE` becomes an explicit delete of
-//!   the child rows and their index keys, in the parent's batch where it fits
+//! - **Cascades:** deleting a parent is an explicit delete of the child rows
+//!   and their index keys, in the parent's batch where it fits
 //!   (a batch is atomic; very large cascades go in several).
 
 use serde::{Deserialize, Serialize};
@@ -161,7 +161,7 @@ pub struct PlanDoc {
     pub max_retained_bytes: Option<i64>,
     pub max_retention_seconds: Option<i64>,
     pub monthly_msgs_quota: Option<i64>,
-    /// Open JSON (Postgres default `{"kv":true,"timers":true,"ephemeral":true}`).
+    /// Open JSON (default `{"kv":true,"timers":true,"ephemeral":true}`).
     pub features: Value,
     pub created_at_us: i64,
 }
@@ -269,14 +269,10 @@ pub struct OutboxDoc {
     pub consumed_at_us: Option<i64>,
 }
 
-/// `px.meta #schema`: the layout version, and when/what the Postgres import
-/// brought in (W5).
+/// `px.meta #schema`: the layout version.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct MetaDoc {
     pub version: u32,
-    pub imported_at_us: Option<i64>,
-    #[serde(default)]
-    pub imported_rows: Value,
 }
 
 /// The layout version [`MetaDoc::version`] carries.

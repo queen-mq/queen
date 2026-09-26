@@ -1,63 +1,70 @@
 ---
 title: Queues and resources
-description: "POST /api/v1/configure, the /api/v1/resources/* listings and the partition-discovery route: every enforced option, its default, and what reads it."
+description: "POST /api/v1/configure, the /api/v1/resources/* listings, partition discovery and the offset fetch: every option, its default, and what reads it."
 type: reference
 tier: use
 sidebar:
   order: 9
   label: Queues
 sourceOfTruth:
+  - server/src/rsm/facade/real/phase2.rs
+  - server/src/rsm/facade/real/phase2/reads.rs
+  - server/src/rsm/facade/real/phase2/admin.rs
+  - server/src/rsm/facade/real.rs
   - server/src/handlers/queues.rs
-  - server/src/handlers/partitions.rs
-  - server/sql/procedures/033_log_partitions_changed.sql
-  - server/src/main.rs
+  - server/src/handlers/raft.rs
   - server/src/auth.rs
-  - server/src/db.rs
-  - server/src/retention.rs
-  - server/src/stats.rs
-  - server/sql/procedures/012_configure.sql
-  - server/sql/procedures/013_analytics.sql
-  - server/sql/procedures/018_stats.sql
-  - server/sql/procedures/019_worker_metrics.sql
-  - server/sql/procedures/001_log_schema.sql
-  - server/sql/procedures/004_log_pop.sql
-  - server/sql/procedures/005_log_ack.sql
-  - server/sql/procedures/006_log_maintenance.sql
-  - server/sql/procedures/011_log_stats.sql
+  - server/src/rsm/effect.rs
+  - server/src/rsm/apply.rs
+  - server/src/rsm/maintenance.rs
+  - server/src/rsm/batcher.rs
+  - server/src/rsm/planner/push.rs
+  - server/src/rsm/planner/pop.rs
+  - server/src/rsm/planner/ack.rs
+  - server/src/rsm/planner/timers.rs
 verifiedBy:
   - clients/client-js/test-v2/queue.js
   - clients/client-js/test-v2/retention.js
   - test/runners/tenancy/tenancy-check.sh
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the configure section is rewritten for the merge rule, the mode key and the 400s; the detail route now carries a 21-key options object, and the handler drops the cached encryption flag as well as the lease.
+  - server/src/rsm/tests/facade.rs
 ---
 
-A queue does not have to be created before it is used: the first push to a queue
-name creates the queue, one partition, and a `queen.queues` configuration row
-with column defaults. It also derives `namespace` and `task` from a dotted queue
-name (`billing.invoice` becomes namespace `billing`, task `invoice`), so a
-push-only queue is still visible to namespace and task discovery pops.
+A queue does not have to be created before it is used. The first push to a queue
+name creates the queue and the partition the push names (`Default` when it names
+none) with the implicit defaults. They match the `/configure` defaults listed below,
+except for two options: `leaseTime` is 60 seconds instead of 300, and
+`retentionSinkHoldMaxSeconds` is `0` instead of 604800. The push also derives
+`namespace` and `task` from the name: the first dotted component is the namespace and
+the second is the task. `billing.invoice` becomes namespace `billing`, task `invoice`;
+an undotted `orders` becomes namespace `orders` with an empty task. A push-only queue
+is therefore still visible to namespace and task discovery pops.
+
+A **pop can create the queue too**: `GET /api/v1/pop/queue/:queue` on a name that does
+not exist creates it with the same implicit defaults, because a consumer group may
+legitimately register before the first push. The practical consequence is that a
+consumer-side typo creates an empty queue rather than nothing. The partition-pinned pop
+and the namespace/task discovery pop create nothing. A timer that fires into a missing
+queue, and a dead-letter replay to a destination that does not exist, create it the
+same way.
+
 `POST /api/v1/configure` exists to set options that differ from the defaults, and to
-pre-create a queue so a consumer can attach before any producer runs.
+create a queue so a consumer can attach before any producer runs.
 
-A **pop can create the row too**: a queue-scoped pop on a name that does not
-exist creates the `queen.queues` row with column defaults, because a consumer
-group may legitimately subscribe before the first push and its durable
-subscription record hangs off the queue's id. The practical consequence is that
-a consumer-side typo now creates an empty queue rather than nothing.
-
-Two routes mutate queue state: `POST /api/v1/configure` (read-write) and
-`DELETE /api/v1/resources/queues/:queue` (**admin**). Everything else on this page
-is a read at the `read-only` access level.
+Two routes change queue state: `POST /api/v1/configure` (read-write) and
+`DELETE /api/v1/resources/queues/:queue` (**admin**). Each is a command the leader
+turns into entries of the replicated log; it takes effect on every node when those
+entries apply. Everything else on this page is a read at the `read-only` access level.
 
 ## POST /api/v1/configure
 
-`queue` is the only required field. Options may be nested under `options` or sent
-at the top level; the broker normalises them into one bag before calling
-`queen.configure_queue_v1`. Top-level `namespace` and `task` are folded into the
-options when they are non-empty strings. Two other top-level keys are routing,
-not configuration: `options` itself, and `mode`, which decides whether the call
-merges or replaces.
+`queue` is the only required field, a string. An empty string is a valid queue name. A
+missing or non-string `queue` is a `400`.
+
+Options are read from the `options` object when the body has one, and from the top
+level of the body otherwise; the two places are not combined. A top-level `namespace`
+or `task` that is a non-empty string is folded into the options when `options` does not
+already carry that key. Two other top-level keys are routing, not configuration:
+`options` itself, and `mode`, which decides whether the call merges or replaces.
 
 ```json
 {
@@ -72,181 +79,154 @@ merges or replaces.
 }
 ```
 
-An empty string is a valid queue name: `queen.configure_queue_v1` creates a row
-named `''`, and the JavaScript client's own load test relies on it. A missing or
-non-string `queue` is a `400`.
+The broker reads the queue's current configuration, applies the body to it, and writes
+the whole resulting configuration as one log entry.
 
 ### Configure merges, unless you ask it to replace
 
-An edit to an existing queue keeps every option the body does not mention. Four
-rules cover all 21 options, `namespace` and `task` included, and
-`queen.configure_queue_v1` applies them one option at a time:
+An edit to an existing queue keeps every option the body does not mention:
 
 | In the body | What the queue ends up with |
 | --- | --- |
 | the key is absent | the value the queue already had |
-| the key is present with `null` | that option's default |
-| the key is present with a value | that value |
-| top-level `"mode": "replace"` | every option re-parsed from defaults, so anything the body omits goes back to the default |
+| the key is present with a value of its type | that value |
+| `namespace`, `task` or `retentionSinkHold` with `null` or any non-string value | `""`, which is their default |
+| any other option with `null`, or a value of the wrong type | no change: the call is a `400` naming the key (`leaseTime must be an integer`, `retentionEnabled must be a boolean`) |
+| top-level `"mode": "replace"` | every option starts from the `/configure` defaults, so anything the body omits goes back to its default |
 
-A queue that does not exist yet is created from defaults whichever mode you
-send: there is nothing to keep. So on a create the two modes are the same call,
-and on an edit they are opposites.
+Integer options take JSON integers that fit in 32 bits, and boolean options take JSON
+booleans. A string such as `"60"` is a `400`, not a number.
+
+A queue that does not exist yet is created from the `/configure` defaults whichever
+mode you send: there is nothing to keep. So on a create the two modes are the same
+call, and on an edit they are opposites. A replace keeps the queue's id and creation
+time.
 
 <Aside type="note">
 `mode` is the only spelling of this decision on the wire. It is `"merge"`
 (the default when the key is absent or `null`) or `"replace"`; anything else,
 including `"Replace"`, `""`, `true` and `1`, is a `400`
 `{"error":"mode must be \"merge\" or \"replace\", got ..."}` and nothing is
-written. A `replace` key inside `options` is ignored: the handler overwrites it
-from `mode`, so one body can never carry two answers that disagree.
+written. A `replace` or `mode` key inside `options` is not an option and is ignored.
 </Aside>
 
 Merge is the default because every client sends only the options its caller set.
-Before 1.6.0 every call replaced, so `queenctl queue configure orders
---lease-time 60` reset `dedupWindowSeconds` to 3600, retention to off and the
-sink hold to off, silently, on a queue the operator meant only to nudge. An
-editor built on that is a reset button with a friendlier face. What changed is
-the default, not the capability: `"mode": "replace"` is the old behaviour, and
-it is what `queenctl apply -f` sends, because a manifest means the whole
-configuration and anything it leaves out should go back to the default.
+`"mode": "replace"` is for a caller that states the whole configuration, and it is what
+`queenctl apply -f` sends: a manifest means the whole configuration, and anything it
+leaves out should go back to the default.
 
-Concurrent edits of one queue serialise: the stored procedure takes
-`SELECT ... FOR UPDATE` on the queue row first, so the second caller merges onto
-the first one's result rather than onto the row it read before waiting.
-Concurrent creates take no lock (there is no row yet) and stay on the
-`ON CONFLICT` path they always had.
+Concurrent edits of one queue are not merged with each other. Each call reads the
+current configuration, applies its keys, and writes the whole configuration back, so
+when two merging edits race, the one applied second wins and the keys only the first
+one set are lost. Serialize edits to one queue on the caller's side when that matters.
 
 <Aside type="caution">
-The direction of the surprise moved with the default. A caller that relied on an
-omitted key resetting a queue now keeps it: send `"mode": "replace"`, or send
-the key explicitly as `null`, which restores that one option's default and
-leaves the rest alone.
-
-How much a given SDK is affected depends on what it puts on the wire. Go, Rust
-and `queenctl queue configure` send only the options the caller set, so their
-partial calls now keep all the rest. JavaScript, Python and PHP merge a
-nine-option client-side default bag into every `.config()` call (`leaseTime`,
-`retryLimit`, `priority`, `delayedProcessing`, `windowBuffer`, `maxSize`,
-`retentionSeconds`, `completedRetentionSeconds`, `encryptionEnabled`), so those
-nine are always sent and always land on the client's default when the caller
-does not name them, in either mode; the other twelve now survive a partial call
-where they used to reset.
+What the merge rule means for a given SDK depends on what it puts on the wire. Go,
+Rust and `queenctl queue configure` send only the options the caller set, so their
+partial calls keep all the rest. JavaScript, Python and PHP merge a nine-option
+client-side default bag into every `.config()` call (`leaseTime`, `retryLimit`,
+`priority`, `delayedProcessing`, `windowBuffer`, `maxSize`, `retentionSeconds`,
+`completedRetentionSeconds`, `encryptionEnabled`), so those nine are always sent and
+always land on the client's default when the caller does not name them, in either mode;
+the other options survive a partial call.
 </Aside>
 
 ### Enforced options
 
-These are the options this engine reads. Each row names what enforces it, so you
-can predict the behaviour change from setting it.
+These are the options something on the broker reads. Each row names what reads it, so
+you can predict the behaviour change from setting it.
 
-| Option | Default | What enforces it |
+| Option | Default | What reads it |
 | --- | --- | --- |
-| `namespace` | `""` | Stored on `queen.queues`; selects queues for the discovery pop and for `namespace` filters on the listings and analytics routes. |
+| `namespace` | `""` | Stored on the queue. Selects queues for the namespace discovery pop and for the `namespace` filter of `GET /api/v1/messages`, and groups `GET /api/v1/resources/namespaces`. |
 | `task` | `""` | Same as `namespace`, on the `task` axis. |
-| `leaseTime` | `300` (seconds) | Written to `queen.queues.lease_time`; the pop path uses `COALESCE(request leaseSeconds, queue lease_time, 60)` for the lease it takes. |
-| `retryLimit` | `3` | The per-(partition, group) retry budget charged by an explicit `failed` ack (`005_log_ack.sql`). Below the limit the batch redelivers; at the limit the head frame is dead-lettered or dropped. |
-| `deadLetterQueue` | `true` | With `dlqAfterMaxRetries`, decides whether an exhausted retry budget writes `queen.log_dlq`. |
+| `leaseTime` | `300` (seconds) | The lease a pop on `/api/v1/pop/queue/:queue`, or its partition-pinned form, takes when the request sends no `leaseSeconds`. A namespace/task discovery pop does not read it: it leases for 60 seconds unless the request sends `leaseSeconds`. |
+| `retryLimit` | `3` | The retry budget per (partition, consumer group), charged by an explicit `failed` ack. Below the limit the lease is released and the failed message is delivered again; at the limit it is dead-lettered or dropped. |
+| `deadLetterQueue` | `true` | With `dlqAfterMaxRetries`, decides whether an exhausted retry budget files a dead-letter row. |
 | `dlqAfterMaxRetries` | `true` | See the note below: the two flags are OR-ed. |
-| `delayedProcessing` | `0` (seconds) | Pop visibility: only segments at least this old are delivered. In-flight backlog is bounded by rate × delay. |
-| `windowBuffer` | `0` (seconds) | Pop visibility: if the partition received a segment within this window, the pop delivers **nothing** from that partition. Trades latency for larger batches. |
-| `minPopWaitTime` | `0` (ms, off) | How long a non-empty pop may hold an under-full batch before claiming it, so one commit carries more messages. Clamped by SQL to `[0, 60000]`. |
-| `retentionEnabled` | `false` | Master switch for the two age-based retention rules. Without it, `retentionSeconds` and `completedRetentionSeconds` do nothing. |
-| `retentionSeconds` | `0` | Rule 1 cutoff. Active only when `retentionEnabled` is true and the value is positive. Whole segments older than the cutoff are deleted. |
-| `completedRetentionSeconds` | `0` | Rule 2 cutoff: segments every group has consumed past. Also widens the `queen.log_txns` purge window (`GREATEST(dedupWindowSeconds, completedRetentionSeconds, 900)`). |
-| `maxWaitTimeSeconds` | `0` | **Deletes whole segments older than the cutoff for every consumer group, in-flight leases included.** Independent of `retentionEnabled`. See below. |
-| `encryptionEnabled` | `false` | Stored on `queen.queues` and read at push time; payloads are stored as an encrypted envelope when a key is configured. |
-| `dedupWindowSeconds` | `3600` (seconds) | Written to `queen.queues.dedup_window_seconds`. The push path probes `queen.log_txns` within this window before allocating an offset. `0` disables the probe entirely. |
-| `retentionSinkHold` | `""` (off) | The name of an S3 sink that has to keep up with this queue. Retention will not delete a segment that sink has not committed to its lake yet. Must match `[A-Za-z0-9._-]{0,64}`. See below. |
-| `retentionSinkHoldMaxSeconds` | `604800` (7 days) | The ceiling on that hold. Must be between `60` and `31536000`. |
+| `delayedProcessing` | `0` (seconds) | Pop visibility: only messages at least this old are delivered. |
+| `windowBuffer` | `0` (seconds) | Pop visibility: if the partition received a write within this window, the pop delivers **nothing** from that partition. Trades latency for larger batches. |
+| `retentionEnabled` | `false` | Switch for the two age-based retention rules. Without it, `retentionSeconds` and `completedRetentionSeconds` do nothing. |
+| `retentionSeconds` | `0` | Rule 1: messages older than this are removed from the head of each partition. Active only when `retentionEnabled` is true and the value is positive. |
+| `completedRetentionSeconds` | `0` | Rule 2: the same, for messages every cursor on the partition has passed. A partition no group has a cursor on is not trimmed by this rule. Also sets how long transaction-id hashes are kept: the largest of `dedupWindowSeconds`, `completedRetentionSeconds` and 900 seconds. |
+| `maxWaitTimeSeconds` | `0` | **Removes messages older than the cutoff for every consumer group, leased ones included.** Independent of `retentionEnabled`. See below. |
+| `encryptionEnabled` | `false` | Read at push time. With `QUEEN_ENCRYPTION_KEY` set, the queue's payloads are stored encrypted; without a key they are stored as plaintext. |
+| `dedupWindowSeconds` | `3600` (seconds) | The push path looks for each message's transaction id among the partition's messages written within this window, and answers `duplicate` with the original's offset instead of writing it. `0` disables the lookup. |
 
-Values are stored as given. The broker does not validate ranges, apart from the
-SQL clamp on `minPopWaitTime`, a `max(0)` floor on `dedupWindowSeconds`, and the
-two sink-hold options, which are **rejected** rather than clamped.
+Retention removes messages from the head of a partition in the batches they were pushed
+in: messages pushed together in one request are removed together.
 
-Seventeen rows for twenty-one keys. The four this table leaves out, `priority`,
-`ttl`, `maxSize` and `retryDelay`, are stored, echoed back and enforced by
-nothing at all: no push, pop, ack or maintenance path reads any of them. They are
-listed with what does read them, which is only ever an echo, under
+Values are stored as given. The broker does not check ranges, apart from clamping
+`minPopWaitTime` to `[0, 60000]`, flooring `dedupWindowSeconds` at `0`, and the two
+sink-hold checks below, which are **rejected** rather than clamped.
+
+Fourteen rows for twenty-one keys. Two more, `retentionSinkHold` and
+`retentionSinkHoldMaxSeconds`, are read by retention and described below. The other
+five are stored, echoed back and read by nothing: `priority` (default `0`, echoed by
+`GET /api/v1/messages` as `queuePriority`), `ttl` (`3600`), `maxSize` (`0`, echoed a
+second time as `maxQueueSize`), `retryDelay` (`1000`) and `minPopWaitTime` (`0` ms).
+No push, pop, ack or retention path reads any of them. See
 [Queue options](/reference/queue-options).
 
 <Aside type="note">
 The effective `leaseTime` depends on how the queue came to exist. A queue created
-implicitly by a push or a pop gets the `queen.queues` column default, **60 seconds**.
-A queue created by `/configure`, or reconfigured with `"mode": "replace"`, gets the
-option's default, **300 seconds**, when `leaseTime` is omitted. Since 1.6.0 a
-merging edit that does not mention `leaseTime` keeps whatever the column holds,
-so a push-created queue nudged through `/configure` stays at 60.
-Both are overridable per request with `?leaseSeconds=`. Because there is a single
-`lease_time` column, the value the queue detail endpoint displays is the value the
-pop path leases with. Before 2026-07-31 the display could say 300 on an
-implicitly created queue whose pops actually leased at 60. Every other option has
-the same default either way, because the `queen.queues` column defaults and the
-`/configure` defaults agree.
+implicitly by a push or a pop gets **60 seconds**. A queue created by `/configure`, or
+reconfigured with `"mode": "replace"`, gets the option's default, **300 seconds**, when
+`leaseTime` is omitted. A pop overrides either with `?leaseSeconds=`. The value the
+queue detail route displays is the value queue-scoped pops lease with.
 </Aside>
 
 #### Disabling the dead-letter queue takes both flags
 
-`005_log_ack.sql` computes the DLQ switch as
-`COALESCE(dead_letter_queue, true) OR COALESCE(dlq_after_max_retries, true)`.
-Setting only one of them to `false` leaves dead-lettering on. Send both as
-`false` to turn it off, at which point an exhausted retry budget drops the
-poison frame instead of quarantining it.
+The ack path computes the switch as `deadLetterQueue OR dlqAfterMaxRetries`. Setting
+only one of them to `false` leaves dead-lettering on. Send both as `false` to turn it
+off, at which point an exhausted retry budget drops the failed message (the cursor
+moves past it) instead of filing it. An ack with status `dlq` files a dead letter
+whatever the two flags say.
 
 #### maxWaitTimeSeconds deletes messages
 
-`maxWaitTimeSeconds` is not a delivery deadline and it does not dead-letter.
-`queen.log_evict_max_wait_step_v1` delegates to the same delete-and-advance path
-retention uses, with the cutoff taken from `queen.queues.max_wait_time_seconds`:
-whole segments older than the cutoff are removed for every consumer group,
-including groups holding a live lease on them. The SQL calls this data loss by
-design. A cursor left below the new log start resumes at the next existing
-offset; the pop scan tolerates the gap. Use it only where dropping stale work is
-the intent.
+`maxWaitTimeSeconds` is not a delivery deadline and it does not dead-letter. The
+retention pass removes messages older than the cutoff from the head of every partition
+of the queue, for every consumer group, including messages a group holds a live lease
+on. This is data loss by design. A cursor left below the new start of the log resumes at
+the first message still there. Use it only where dropping stale work is the intent.
 
-#### The sink hold is rejected out of range, never clamped
+#### retentionSinkHold and retentionSinkHoldMaxSeconds
 
-`retentionSinkHold` and `retentionSinkHoldMaxSeconds` are the only two options
-`012_configure.sql` refuses. A name outside `[A-Za-z0-9._-]{0,64}`, or a cap
-outside 60 to 31,536,000 seconds, answers `400` with
-`{"error":"...","invalid":"<the option>"}` and **the queue keeps the
-configuration it had**; nothing partial is written. `invalid` is what tells the
-handler this is a bad request rather than a broken broker: without it the
-envelope would take the stored-procedure error path below and arrive as a `500`,
-which reaches an operator as an outage and a metering proxy as an unbilled
-upstream failure. It is a key of the error envelope only, never of a successful
-echo. The difference from the
-clamps above is deliberate, because these two govern *deletion*: a silently
-clamped `0` would floor the hold at a minute ago and hand the lake a hole, and a
-silently clamped `999999999` would park retention for thirty-one years. The
-character set is narrow for a second reason: the name is the middle segment of
-the key/value key the retention cycle probes
-(`s3:<sink>:<queue>:committed`), built by concatenation, so a name containing
-`:` would compose the same key as a different (sink, queue) pair.
+These two options were the retention hold of the S3 sink, which 2.0 does not ship. The
+broker still validates and stores them, and the retention pass still reads them:
 
-With a hold set, the two segment-deleting cutoffs are floored at
+- `retentionSinkHold` must match `[A-Za-z0-9._-]{0,64}` and `retentionSinkHoldMaxSeconds`
+  must be between 60 and 31,536,000. Outside either, the call is a `400` (code
+  `bad_request`) and **the queue keeps the configuration it had**; nothing partial is
+  written. The check applies to the value the queue ends up with, not only to a value
+  the body sends. A queue created implicitly stores `retentionSinkHoldMaxSeconds: 0`,
+  so a merging edit of such a queue answers `400`
+  (`retentionSinkHoldMaxSeconds must be between 60 and 31536000`) unless the body sets
+  `retentionSinkHoldMaxSeconds` or sends `"mode": "replace"`.
+- With a non-empty `retentionSinkHold`, rules 1 and 2 remove nothing younger than
+  `retentionSinkHoldMaxSeconds`: the hold waits for a sink commit pointer that nothing in
+  2.0 writes. `maxWaitTimeSeconds` is not held.
 
-```text
-GREATEST(committed window end - 60 s, now() - retentionSinkHoldMaxSeconds)
-```
+Leave `retentionSinkHold` empty.
 
-Both halves earn their place. The minute of slack covers the sub-second skew of a
-watermark-derived bound, paid in kept bytes and never in lost ones. The cap is
-what makes the option safe to ship: without it a stopped sink is unbounded
-retention, and it also means the hold works from the moment it is set, before the
-sink has committed anything, because a queue with no pointer yet keeps everything
-younger than the cap.
+#### How retention runs
 
-Two limits worth knowing. The hold floors the cutoffs that delete **segments**,
-and deliberately not the dedup-hash purge or the `maxWaitTimeSeconds` eviction:
-those delete by different rules, and a copy in a lake says nothing about when a
-dedup hash may go. And the pointer read degrades rather than fails: if it cannot
-be read, every held queue falls back to its cap-only floor, because that value is
-tenant-writable and a malformed one must never stop deletion cluster-wide. The
-operator's view of all this is on [the S3 sink page](/deploy/s3#the-lag-slo-and-the-retention-rule).
+The leader evaluates rules 1 and 2 and `maxWaitTimeSeconds` every `RETENTION_INTERVAL`
+milliseconds (default 5000) and writes the result as log entries that move each
+partition's start forward, so every node drops the same messages. Each pass is bounded
+by `RETENTION_BATCH_SIZE` (default 1000); what does not fit waits for the next pass.
+
+The same pass removes a partition that holds no messages (never written, or emptied by
+retention), is older than `PARTITION_CLEANUP_DAYS` days (default 30) and has seen no
+write, no lease and no new cursor in that time, provided it has no dead letters and no
+streams state.
+`QUEEN_PARTITION_CLEANUP_ENABLED=false` turns that cleanup off.
 
 ### Response
 
-`200` with the stored-procedure JSON passed through verbatim:
+`200` with the resulting configuration:
 
 ```json
 {
@@ -261,43 +241,35 @@ operator's view of all this is on [the S3 sink page](/deploy/s3#the-lag-slo-and-
 }
 ```
 
-`storage` is a hard-coded literal. There is no engine-selector column behind it
-(there is only one engine); the key is kept so the response shape does not change.
+The example abbreviates `options`. It echoes the **resulting configuration**, not the
+request: twenty keys, every option except `namespace` and `task`, plus `maxQueueSize`,
+a second spelling of `maxSize` that `/configure` does not read. A caller that sent three
+options gets the whole set back and needs no second read to render the queue's
+configuration, which is what makes a merging edit safe to build a form on. `namespace`
+and `task` stay top level. There is no `mode` or `replace` key anywhere in the response:
+the flag is a directive of the request, read once and never stored.
 
-`partitionId` is **always `null`**. Configuring a queue does not create a partition:
-partitions are created by the first push that names one. The key used to carry the id of
-a `Default` partition the engine never used, and it was removed on 2026-07-30 along with
-the rows-engine table that held it. The key itself is kept so the response shape does not
-change.
+`storage` and `partitionId` are constants kept so the response shape does not change:
+`storage` is always `"segments"`, and `partitionId` is always `null`, because
+configuring a queue creates no partition. Partitions are created by the first push that
+names one.
 
-The `options` object echoes the **effective row**, not the request: all 19
-option keys, built from the values the upsert has just written. A caller that
-sent three options gets all nineteen back and needs no second read to render the
-queue's whole configuration, which is exactly what makes a merging edit safe to
-build a form on. `namespace` and `task` stay top level, where they have always
-been. There is no `replace` key anywhere in the response: the flag is a
-directive of the request, read once and never stored.
+Every failure writes nothing:
 
-`queen.configure_queue_v1` owns every configuration write: one row,
-`queen.queues`, carries the whole configuration including `lease_time` and
-`dedup_window_seconds`. After the stored procedure returns, the handler drops
-this queue's cached lease time **and its cached encryption flag**, locally and on
-mesh peers via a `QUEUE_CONFIG_SET` frame, so both a `leaseTime` and an
-`encryptionEnabled` change are visible on the next pop and the next push. If the
-stored procedure returns a body carrying an `error` key, the handler
-short-circuits before those invalidations.
+- a body that is not JSON: `400`, code `bad_body`;
+- a missing or non-string `queue`: `400` `{"error":"queue is required","code":"bad_request"}`;
+- an unrecognised `mode`: `400`, described above;
+- an option of the wrong type, or `null` for a numeric or boolean option: `400`, code
+  `bad_request`;
+- a sink-hold option out of range: `400`, code `bad_request`, described above;
+- a queue name too long for the store: `413`, code `name_too_long`.
 
-Four failure shapes, and the status is the difference between them. A malformed
-body, a missing or non-string `queue`, and an unrecognised `mode` are `400`, and
-nothing is written. The two sink-hold option refusals are `400` as well, marked
-with `invalid`, described above. Any other error the stored procedure reports is
-passed back verbatim at `500`, or at `404` when its message contains "not found".
-And a failure of the call itself rather than a verdict inside it, an exhausted
-pool or a database error, is `500` with `{"error":"configure failed: ..."}`.
+A write the cluster cannot take (no leader, an election, a timeout) answers `503` with
+`Retry-After: 1`, as every write does. See [Errors](/reference/errors).
 
 ## GET /api/v1/resources/queues
 
-Lists the tenant's queues.
+Lists the tenant's queues, newest first.
 
 ```json
 {
@@ -305,52 +277,63 @@ Lists the tenant's queues.
     {
       "id": "0198...",
       "name": "orders",
+      "queue": "orders",
       "namespace": "billing",
       "task": "invoice",
-      "createdAt": "2026-07-30T09:12:44.011Z",
+      "storage": "segments",
       "partitions": 8,
-      "retainedBytes": 194883,
       "segments": { "segments": 41, "messages": 12904 },
-      "messages": { "total": 12904, "pending": 310, "processing": 24 }
+      "messages": { "total": 12904, "pending": 286, "processing": 24, "completed": 12594, "deadLetter": 0 },
+      "retainedBytes": 194883,
+      "options": { "leaseTime": 120, "retryLimit": 5, "dedupWindowSeconds": 600 },
+      "createdAt": "2026-07-30T09:12:44.011000Z"
     }
-  ]
+  ],
+  "kvRows": 12,
+  "kvBytes": 4096,
+  "timerRows": 0,
+  "timerBytes": 0
 }
 ```
 
-Three different clocks feed one object, and the difference matters when you read
-these numbers:
+Every number is computed from the node's state when the request arrives. There is no
+stats table and no refresh cycle behind it; `POST /api/v1/stats/refresh` answers `200`
+and does nothing on 2.0. The cost of the call grows with the tenant's partition and
+cursor count.
 
-- `partitions` and `messages.total` are computed live per request from
-  `queen.log_partitions` watermark arithmetic (`log_queue_stats_all_v1`), at a
-  cost proportional to the tenant's partition count, never its segment count.
-  `messages.total` is the count of **retained** frames, not the backlog.
-- `segments` is read from `queen.stats.segment_count`, which the retained-bytes
-  lane fills out of the one `log_segments` scan it already makes. It is as stale
-  as that lane's cadence and reads `0` on a queue the lane has not passed over
-  yet; the per-queue detail route below keeps the exact live count.
-- `messages.pending` and `messages.processing` come from `queen.stats`, which a
-  background reconciler refreshes every `STATS_INTERVAL_MS` (default `10000` ms)
-  on whichever replica claims the `stats_refresh` row in
-  `queen.maintenance_leases`. They are the same watermark
-  values the overview sums, so the list agrees with the rest of the dashboard
-  rather than with a fresher count.
+- `partitions` is the queue's partition count.
+- `messages.total` counts **retained** messages, not the backlog.
+- `messages.pending` counts the messages the slowest cursor has not passed,
+  **excluding** those inside a live lease, which are `messages.processing`. Per
+  partition, the slowest cursor is the lowest committed offset among the named consumer
+  groups; the queue-mode cursor counts only when no named group has a cursor there; with
+  no cursor at all, every retained message is pending.
+- `messages.completed` is `total` minus pending (leased included) minus `deadLetter`.
+- `messages.deadLetter` counts the queue's dead-letter rows.
+- `segments.segments` counts each partition's sealed payload files, plus one for the open
+  tail of each non-empty partition. Treat it as a size indicator; `segments.messages`
+  repeats `messages.total`.
+- `retainedBytes` is the payload bytes the queue retains.
+- `options` is the object the detail route returns (abbreviated above).
+- `kvRows` and `kvBytes` are the tenant's KV rows and their key-plus-value bytes.
+  `timerRows` and `timerBytes` are always `0`.
 
-`?stats=cached` skips the live enrichment entirely and serves the cached
-`queen.stats` view as it stands, so nothing is computed per call. It exists for
-pollers whose fields are all in the cached view anyway, such as the proxy's
-reconciler, which sends it unconditionally; a broker older than the parameter
-ignores it and enriches as before.
+`?stats=lanes` answers only each queue's `id`, `name`, `queue`, `partitions` and
+`createdAt`, with `"stats": "lanes"` at the top level, from an index walk instead of
+every partition's cursors and files. Use it when you only need to know which queues
+exist and how many partitions each has. Any other `stats` value, `cached` included,
+returns the full list.
 
 <Aside type="caution">
-`namespace` and `task` query parameters are accepted and **ignored**. `stats` is
-the only query parameter the handler reads: it always serves the full list for
-the tenant. Filter client-side, or use `GET /api/v1/status/queues`, which does apply
-`queue`, `namespace` and `task`. See [Status and metrics](/reference/http/status-metrics).
+`namespace` and `task` query parameters are accepted and **ignored**. `stats` is the
+only query parameter this route reads: it always serves the full list for the tenant.
+`GET /api/v1/status/queues` applies no filter either. Filter client-side. See
+[Status and metrics](/reference/http/status-metrics).
 </Aside>
 
 ## GET /api/v1/resources/queues/:queue
 
-One queue in detail: identity, its whole configuration, per-partition stats, and
+One queue in detail: identity, its whole configuration, per-partition figures, and
 totals.
 
 ```json
@@ -359,15 +342,14 @@ totals.
   "name": "orders",
   "namespace": "billing",
   "task": "invoice",
-  "createdAt": "2026-07-30T09:12:44.011Z",
+  "createdAt": "2026-07-30T09:12:44.011000Z",
   "options": {
-    "namespace": "billing",
-    "task": "invoice",
     "priority": 0,
     "leaseTime": 120,
     "retryLimit": 5,
     "retryDelay": 1000,
     "maxSize": 0,
+    "maxQueueSize": 0,
     "ttl": 3600,
     "deadLetterQueue": true,
     "dlqAfterMaxRetries": true,
@@ -387,48 +369,52 @@ totals.
     {
       "id": "0198...",
       "name": "Default",
-      "createdAt": "2026-07-30T09:12:44.031Z",
+      "createdAt": "2026-07-30T09:12:44.031000Z",
+      "messages": {
+        "total": 1600, "pending": 40, "processing": 8,
+        "completed": 1560, "failed": null, "deadLetter": 0
+      },
       "stats": {
         "total": 1600, "pending": 40, "processing": 8,
-        "completed": 1552, "failed": null, "deadLetter": 0
+        "completed": 1560, "failed": null, "deadLetter": 0
       },
-      "oldestMessage": "2026-07-30T09:12:45.100Z",
-      "newestMessage": "2026-07-30T10:44:02.900Z"
+      "cursor": { "totalConsumed": 1560, "batchesConsumed": 0 },
+      "lastActivity": "2026-07-30T10:44:01.120000Z",
+      "oldestMessage": "2026-07-30T09:12:45.100000Z",
+      "newestMessage": "2026-07-30T10:44:02.900000Z",
+      "retainedBytes": 24160
     }
   ],
-  "totals": { "total": 12904, "pending": 310, "processing": 24, "completed": 12570, "failed": null, "deadLetter": 0 },
-  "retainedBytes": 194883,
-  "segments": { "segments": 41, "messages": 12904 }
+  "segments": { "segments": 41, "messages": 12904 },
+  "totals": { "total": 12904, "pending": 310, "processing": 24, "completed": 12594, "failed": null, "deadLetter": 0 },
+  "retainedBytes": 194883
 }
 ```
 
-`options` carries **all 21 keys** `/configure` accepts, spelled exactly as
-`configure_queue_v1` parses and echoes them, so a `GET`, an edit and a `POST`
-round-trip without a mapping table. `namespace` and `task` appear inside it as
-well as at the top level, where readers have always found them. This is the read
-an editor prefills from, and the reason it is the whole set rather than a
-selection is the merge rule above: a form that shows some options and silently
-keeps the rest cannot tell you what the queue is. The narrower six-key `config`
-block on `GET /api/v1/status/queues/:name` is unchanged and is a different
-object.
+`options` carries twenty keys: every option `/configure` accepts except `namespace` and
+`task`, spelled exactly as `/configure` reads them, plus `maxQueueSize`. Post it back as
+`options`, with `namespace` and `task` at the top level, and a `GET`, an edit and a
+`POST` round-trip without a mapping table. This is the read an editor prefills from, and
+it is the whole set rather than a selection because of the merge rule above: a form that
+shows some options and silently keeps the rest cannot tell you what the queue is.
 
-Notes that follow from the log engine: `pending` is measured against the **worst**
-(lowest) committed cursor across the queue's consumer groups, so a single lagging
-group holds the number up; `failed` is always `null` because there is no
-per-message failure state; and `retainedBytes` is a `queen.stats` value, refreshed
-by the retained-bytes lane (`RETAINED_BYTES_INTERVAL_MS`, default 10 minutes, on
-whichever replica claims the `retained_bytes` row in `queen.maintenance_leases`),
-so it can lag by up to one lane period and reads `0` on a queue created
-since the lane's last pass. A queue with no `queen.queues` row answers `404` with
-`{"error":"Queue not found"}`.
+Per partition, `messages` and `stats` are the same object. Here `pending` **includes**
+what is leased (`processing` is a part of it), unlike the list route. It uses the
+slowest-cursor rule above, so a single lagging group holds the number up. `completed` is
+`total - pending - deadLetter`, and `failed` is always `null` because there is no
+per-message failure state. `cursor.totalConsumed` sums the lifetime counters of the
+partition's cursors; `batchesConsumed` is always `0`. `lastActivity` is the latest lease
+taken on the partition. `oldestMessage` is the stamp of the first message ever written to
+the partition, and retention does not move it; `newestMessage` is the stamp of the newest
+message, `null` when the partition retains none. Partitions are sorted by name.
+
+A queue that does not exist answers `404` with `{"error":"Queue not found"}`.
 
 ## GET /api/v1/resources/queues/:queue/depth
 
-Access level **read-only**. The minimal backlog read for relays and schedulers: one call to
-`queen.log_queue_depth_v1` (`011_log_stats`), which computes per-partition pending with the
-watermark arithmetic only. No `log_segments` scan, no timestamps, no DLQ join: against the
-console-grade detail route above this is one index-only read, computed live per request (never
-stale by the stats cadence).
+Access level **read-only**. The minimal backlog read for relays and schedulers:
+per-partition pending from offsets and cursors only. No payload files, no timestamps and
+no dead-letter rows are read, and it is computed per request.
 
 ```json
 {
@@ -448,20 +434,16 @@ stale by the stats cadence).
 }
 ```
 
-Without `group`, `pending` uses the same worst-cursor precedence the detail route and the
-dashboard publish, so the numbers agree. With `?group=<name>` each partition reports that
-group's own backlog against its committed cursor; a group with no cursor on a partition owes
-the partition's whole retained range. A queue with no `queen.queues` row answers `404` with
+Without `group`, `pending` uses the same slowest-cursor rule as the detail route, so the
+numbers agree. With `?group=<name>` each partition reports that group's own backlog
+against its committed cursor; a group with no cursor on a partition owes the
+partition's whole retained range. A queue that does not exist answers `404` with
 `{"error":"Queue not found"}`.
 
-`partitionsPending` counts the partitions with anything pending. It is useful for
-every group: `queenctl queue depth` used to compute it client-side and call it
-`partitionsNonEmpty`.
-
-`processing` is the portion of pending work covered by live leases, clamped to `pending`;
-`ready` is `pending - processing`, and `partitionsReady` counts partitions whose `ready` value is
-non-zero. These fields are computed from the same consumer rows as pending, not from a message or
-segment scan.
+`partitionsPending` counts the partitions with anything pending. `processing` is the
+part of pending covered by live leases, clamped to `pending`; `ready` is
+`pending - processing`, and `partitionsReady` counts partitions whose `ready` value is
+non-zero.
 
 `conflation` and `effectivePending` describe [last-value
 delivery](/reference/http/pop#conflation). `conflation` is the group's stored delivery
@@ -476,19 +458,32 @@ decides whether you are looking at an incident:
 > A conflating queue at `pending: 4000000, effectivePending: 12` is healthy. The
 > same two numbers on a non-conflating group are a page.
 
+## GET /api/v1/resources/queues/:queue/sizes
+
+Access level **read-only**. The retained payload bytes of each partition, keyed by
+partition name. It reads one counter per partition, where the detail route also reads
+every partition's cursors and files.
+
+```json
+{ "queue": "orders", "partitions": { "Default": 24160, "eu-1": 170723 } }
+```
+
+A queue that does not exist answers `404` with `{"error":"Queue not found"}`.
+
 ## DELETE /api/v1/resources/queues/:queue
 
-Access level **admin**. One call to `queen.delete_queue_v1`
-(`013_analytics`) owns the whole delete. It removes, in order, the queue's
-`queen.log_txns` and `queen.log_dlq` rows (neither carries a foreign key by
-design, because the purge path must never pay FK-trigger cost, so they are
-deleted explicitly while the partitions still resolve), then the single `queen.queues`
-row. That one delete cascades to everything else: `queen.log_partitions` and,
-under it, `log_segments` and `log_consumers`, plus the consumer watermarks,
-queue-scoped consumer-group metadata, lag metrics and `queen.stats` rows.
-Before the queue-identity merge this was two non-atomic steps (a stored
-procedure plus a broker-side teardown of the engine tables); it is now one
-transaction.
+Access level **admin**. The delete runs as a sequence of log entries:
+
+1. The first entry removes the queue's name: its configuration, its consumer-group
+   registrations, its counters and the index from partition names to partitions. From
+   this entry on the name is free, and a push right after it creates a new, empty queue.
+2. The same entry starts removing the old partitions' data, and follow-up entries
+   finish it, in chunks of up to 1,000 rows: cursors and leases, dead-letter rows, the
+   payload index, deduplication rows and counters, then each partition itself.
+
+The call answers after the last chunk has applied. If it runs out of time first, it
+answers `503` (code `timeout`), and the leader's retention pass finishes the remaining
+chunks.
 
 The response is `200` with a JSON body, never `204`: the SDKs read
 `res.deleted === true` and a bodyless response would make them see `null`.
@@ -513,64 +508,43 @@ The status stays `200` because the SDKs use delete-before-create as a cleanup
 idiom; a `404` would turn a no-op into a thrown error for them. Check `deleted`,
 not the status code.
 
-Message traces are **not** deleted. `queen.message_traces` had its foreign keys
-dropped so it could hold traces for both engines, so a queue delete leaves its
-traces behind. See [Traces](/reference/http/traces).
+Message traces are **not** deleted. They keep their tenant and stay readable by name
+until they expire. See [Traces](/reference/http/traces).
 
 ## Aggregate listings
 
-Three sibling reads, all `read-only`, all passing their stored procedure's JSON
-through unchanged.
+Three sibling reads, all `read-only`, all computed per request from the same per-queue
+figures as `GET /api/v1/resources/queues`, for the caller's tenant only.
 
 | Route | Returns |
 | --- | --- |
-| `GET /api/v1/resources/overview` | Counts (`queues`, `partitions`, `namespaces`, `tasks`), a `messages` block (`total`, `pending`, `processing`, `completed`, `failed`, `deadLetter`), a `lag` block (time and offset, avg/median/min/max), a `throughput` block (`ingestedPerSecond`, `processedPerSecond` over the last 5 minutes ÷ 300), `timestamp` and `statsAge`. |
-| `GET /api/v1/resources/namespaces` | `namespaces[]` with `namespace`, `queues`, `partitions`, `messages.total`, `messages.pending`. |
+| `GET /api/v1/resources/overview` | Counts (`queues`, `partitions`, `namespaces`, `tasks`), a `messages` block (`total`, `pending`, `processing`, `completed`, `failed`, `deadLetter`), a `lag` block (`time` and `offset`, each with `avg`, `median`, `min`, `max`), `timestamp` and `statsAge`. |
+| `GET /api/v1/resources/namespaces` | `namespaces[]` with `namespace`, `queues`, `partitions`, `messages.total`, `messages.pending`, in name order. |
 | `GET /api/v1/resources/tasks` | The same shape on the `task` axis. |
 
-<Aside type="caution">
-Before 2026-07-30 the `partitions` count on the namespaces and tasks routes was wrong, and
-usually **zero**: it counted rows in the retired rows-engine partition table, whose only
-writer was `/configure`. A queue created implicitly by a push contributed nothing to it.
-It now counts live log partitions and agrees with the per-queue `partitions` that
-`/api/v1/resources/queues` has always reported correctly, so expect these two numbers to
-go up on an existing dashboard.
-</Aside>
+Because they sum the list's figures, `messages.pending` excludes leased messages here
+too. In the overview, `failed` is always `0`, and `statsAge` is always `0` because
+nothing is cached. The `lag` block is per queue: a queue's time lag is the age in
+seconds of the oldest message any of its cursors has not consumed, and its offset lag
+is the largest backlog of any one cursor (one partition, one group). `avg` and `max` are
+taken over the queues whose lag is above zero; `median` and `min` are always `0`.
 
-`statsAge` is the age in seconds of the numbers you are reading, or `-1` when
-nothing has been reconciled yet. Treat a large `statsAge` as "the reconciler is
-not running", not as "the queue is idle".
-
-<Aside type="note">
-`GET /api/v1/resources/overview` has two bodies. For the **default tenant** (which
-is every request when `QUEEN_TENANCY_HEADER` is off), it blends cluster-wide
-lifetime counters from `queen.worker_metrics_summary` and counts
-`queen.queues` without a tenant predicate, so on a shared cell the default-tenant
-overview is cell-wide. For a specific tenant it is re-derived from that tenant's
-`queen.stats` queue rows and its own per-queue counters. The `namespaces` count
-also changes meaning between the branches: `queen.stats` namespace rows for the
-default tenant, `COUNT(DISTINCT namespace)` for a tenant.
-</Aside>
+The namespaces and tasks listings count only non-empty labels. Because a push derives
+the namespace from the first dotted component of the name, an undotted queue created by
+a push is listed as a namespace of its own.
 
 ## POST /api/v1/partitions/changed
 
-The only route that lists partition **names**. Everything else answers a per-queue
-count, which is enough for a queue whose partitions are numbered `0..N-1` and
-useless for one partitioned by entity, where the names are order ids or customer
-ids and nothing enumerates them. It is the discovery half of what
-`POST /api/v1/fetch` is the read half of, and it answers `lastOffset` and
-`logStart` alongside each name so a caller can start fetching without a second
-round trip.
+Lists a queue's partitions by **name**, a page at a time, optionally only those written
+since an instant, with the offsets a reader needs. It is the discovery half of what
+[`POST /api/v1/fetch`](#post-apiv1fetch) is the read half of: each name comes with
+`lastOffset` and `logStart`, so a caller can start fetching without a second round
+trip. It serves a queue partitioned by entity, where the names are order ids or
+customer ids and a per-queue count is not enough.
 
-Like the fetch, it is **not a pop**: no lease, no cursor, no claim, nothing
-written anywhere. It reads two tables, `queen.queues` and `queen.log_partitions`,
-plus `pg_stat_activity` for the watermark below. Two callers asking the same
-question get the same answer and neither disturbs a consumer group. Its access
-level is `read-only`, and it takes **no admission permit**: this is one indexed
-scan of a small table, so the connection pool is the backpressure and the
-statement timeout is the ceiling.
-
-The one client that exists for it today is [the S3 sink](/deploy/s3).
+Like the fetch, it is **not a pop**: no lease, no cursor, no claim, nothing written.
+Two callers asking the same question get the same answer and neither disturbs a
+consumer group. Its access level is `read-only`.
 
 ### Request
 
@@ -583,9 +557,9 @@ The one client that exists for it today is [the S3 sink](/deploy/s3).
 
 | Field | Required | What it is |
 | --- | --- | --- |
-| `entries` | yes | At most **64**. An entry is a *queue*, not a partition, and each one can cost 1000 rows. More than 64 is a `400`, not a truncation: silently dropping entries would leave the caller waiting for queues the broker never looked at. |
-| `queue` | yes | The queue name. Empty is a `400`, because an empty name can only come back as unknown and would read as "this queue was deleted". |
-| `since` | no | Absent or `null` enumerates the queue's whole partition set, ordered by name. Present returns only partitions written at or after it, ordered by `(lastWriteAt, name)`. It is parsed by PostgreSQL, so the accepted spellings are the ones every other timestamp on this wire accepts; one it cannot parse is a `400` naming the literal. |
+| `entries` | yes | At most **1024**; more is a `400` (`{"error":"too many entries"}`), not a truncation. An entry is a *queue*, not a partition, and each one can cost 1000 rows. A missing `entries` is an empty list. |
+| `queue` | yes | The queue name. A missing name is looked up as `""`, which is a valid queue name, so it answers like any other name. |
+| `since` | no | Absent or `null` enumerates the queue's whole partition set, ordered by name. An ISO 8601 instant returns only partitions written at or after it, ordered by `(lastWriteAt, name)`. It is read to millisecond precision; a value that does not parse is treated as absent. |
 | `after` | no | The opaque cursor from a previous answer's `next`, echoed back unmodified. |
 | `limit` | no | Partitions for this entry. Default 1000, clamped to 1 to 1000, never rejected. A caller that asks for more learns the real bound from `next` being non-null. |
 
@@ -602,14 +576,13 @@ The one client that exists for it today is [the S3 sink](/deploy/s3).
                  "next": null } ] }
 ```
 
-`lastOffset` is the allocator's last offset, so the high watermark is
-`lastOffset + 1`. `logStart` is the oldest offset retention still holds.
-Timestamps are rendered UTC at microsecond precision.
+`lastOffset` is the last offset written, so the high watermark is `lastOffset + 1`.
+`logStart` is the oldest offset retention still holds. Timestamps are rendered UTC at
+microsecond precision.
 
 `next` is non-null **only when the page filled**, which is the rule to page on: a
 short page is the end of the sweep. The cost is one extra empty round trip when
-the partition count is an exact multiple of the limit; a look-ahead row would buy
-nothing a caller can act on.
+the partition count is an exact multiple of the limit.
 
 **The cursor is opaque and mode-tagged. Do not parse it.** Its shape is the
 broker's, and it carries which kind of sweep produced it, so a cursor from an
@@ -621,96 +594,73 @@ Two per-entry errors replace `partitions` and `next`:
 
 | `error` | When |
 | --- | --- |
-| `UNKNOWN_TOPIC_OR_PARTITION` | The queue does not exist **for this tenant**. Byte-identical to the answer for a queue that exists nowhere, so this route cannot be used to discover another tenant's queue names. |
-| `BAD_CURSOR` | The `after` cursor does not belong to the sweep it was sent with. |
+| `UNKNOWN_TOPIC_OR_PARTITION` | The queue does not exist **for this tenant**. Identical to the answer for a queue that exists nowhere, so this route cannot be used to discover another tenant's queue names. |
+| `BAD_CURSOR` | The `after` cursor does not parse, or does not belong to the sweep it was sent with. |
 
-**Paging is sound because `lastWriteAt` only moves up.** The push path quantizes
-it to at most one real change per second per partition and never writes it
-backwards, so a row bumped between two pages of one sweep moves *forward* past
-the cursor and is seen a second time on a later page. Seen twice is free, since
-the caller re-reads bounds it already had; missed would be a silent hole in
-whatever the caller is mirroring. That asymmetry is the whole argument.
+**Paging is sound because `lastWriteAt` only moves up.** Every write to a partition
+stamps it with a time later than the previous write, so a partition written between two
+pages of one sweep moves *forward* past the cursor and is seen a second time on a later
+page. Seen twice is free, since the caller re-reads bounds it already had; missed would
+be a silent hole in whatever the caller is mirroring.
 
 ### `safeTime`
 
-Every answer carries a watermark, and it is the reason the route exists in this
-shape rather than as a listing:
+On 2.0, `safeTime` is the answering node's clock when it builds the answer, and
+`safeTimeDegraded` is always `false`. Both keys are kept so the answer's shape does not
+change. `safeTime` is not derived from the writes in flight: a write stamped shortly
+before it can still become visible after the answer, so do not treat a time range just
+below `safeTime` as closed. It is answered even for an **empty** `entries` array.
 
-**`safeTime` is an instant such that no segment with an earlier `created_at` can
-still become visible.** A segment's `created_at` is stamped while the partition
-allocator's row lock is held, so it is at or after the inserting transaction's
-`xact_start`; the oldest `xact_start` among in-transaction sessions is therefore
-a floor under every `created_at` still to arrive, and anything strictly below it
-is settled. A guard of five seconds is subtracted, covering the skew between one
-backend's snapshot of `pg_stat_activity` and another's.
+## POST /api/v1/fetch
 
-That is what lets a reader treat a time range as a **closed set**: re-reading
-`[A, B)` for `B` at or below `safeTime` yields exactly the same rows, which is
-what makes a reader's retry idempotent without naming offsets.
+Access level **read-only**. Reads messages from given offsets, several partitions per
+call: the read half of the pair. Like the discovery route it takes no lease, moves no
+cursor and claims nothing; no consumer group is involved.
 
-Three consequences worth knowing:
+```json
+{ "entries": [ { "queue": "orders", "partition": "cust-0420", "offset": 1400, "maxBytes": 1048576 } ],
+  "maxWaitMs": 5000,
+  "minBytes": 1 }
+```
 
-- An **idle** session pins nothing, because its `xact_start` is null.
-- A **long read-only** transaction, a stats refresh for instance, pins `safeTime`
-  and holds the watermark back for its own duration. That is latency, never
-  incorrectness.
-- **HA needs nothing.** `pg_stat_activity` is cluster-wide, so a second broker's
-  sessions pin correctly with no mesh involvement.
+| Field | Required | What it is |
+| --- | --- | --- |
+| `entries` | yes | At most **1024**; more is a `400` (`{"error":"too many entries"}`). |
+| `queue` | yes | The queue name. |
+| `partition` | no | The partition name: a string, or a number read as its decimal spelling. Absent means `Default`. |
+| `offset` | yes | The first offset to read. A negative offset is a `400` (`{"error":"offset must be non-negative"}`). |
+| `maxBytes` | no | Payload bytes for this entry. Default 1 MiB, clamped to 1 byte to 8 MiB. The first record is returned even when it alone is larger. |
+| `maxWaitMs` | no | How long to wait for data. Default `0` (answer at once), capped at 30000. |
+| `minBytes` | no | With `maxWaitMs`, answer as soon as the entries hold at least this many payload bytes. Default `1`. |
 
-`safeTime` is computed once per call, before any partition row is read, and it is
-answered even for an **empty** `entries` array: a caller whose queues are all idle
-still needs the watermark, and an empty batch is how it asks for one.
+```json
+{ "entries": [ { "queue": "orders",
+                 "partition": "cust-0420",
+                 "records": [ { "offset": 1400,
+                                "transactionId": "order-4471",
+                                "payload": { "amount": 41 },
+                                "ts": "2026-09-04T10:04:12.000000Z" } ],
+                 "highWatermark": 1812,
+                 "logStartOffset": 1400 } ] }
+```
 
-#### The order of that first read is load-bearing, and so is `VOLATILE`
-
-`queen.log_partitions_changed_v1` writes nothing, so `STABLE` is what its body
-looks like it deserves. `STABLE` is wrong here, and the reason has nothing to do
-with writes. A `STABLE` function's statements all run under the snapshot the
-*calling* query took, but `pg_stat_activity` is not read through a snapshot at
-all: it reports live backend state. The two therefore observe the database at
-different instants, and a transaction can slip through the gap: the caller takes
-its snapshot while a long write transaction `T` is in flight, `T` commits, the
-body reads `pg_stat_activity` and finds nothing to hold the watermark back, and
-the partition scan still runs under the older snapshot that cannot see `T`'s row.
-`T` is then in neither the enumeration nor the watermark, and a sink can close a
-window above records it was never told about. Silent loss, of exactly the rows the
-protocol exists not to lose. It was found by the engine's randomized test, not by
-reading the code.
-
-`VOLATILE` closes it, because a `VOLATILE` function takes a **fresh snapshot for
-each statement of its body** instead of inheriting the caller's. Combined with
-reading `pg_stat_activity` **first**, before the queue is resolved and before any
-partition is scanned, both cases are covered: a partition whose transaction
-committed before the scan's snapshot is enumerated and read normally, and one that
-had not committed by then either was already in flight at the activity read (so its
-`xact_start` is inside the minimum) or had not started (so its `xact_start` is
-later than the read). Either way its records are at or above `safeTime` and belong
-to a later window. Reading the activity *after* the scan, or putting any table read
-before it, re-opens the gap; the five second guard is belt and not the argument.
-
-One precondition holds it up, and the broker meets it: fresh-snapshot-per-statement
-is READ COMMITTED behaviour. A caller that wrapped this call in an explicit
-REPEATABLE READ or SERIALIZABLE transaction would pin one snapshot for the whole
-transaction and reinstate the hole, `VOLATILE` or not. The broker issues it as a
-single autocommit statement at the default isolation.
-
-<Aside type="caution">
-**`safeTimeDegraded: true` means the honest watermark was unknowable.**
-PostgreSQL masks `pg_stat_activity` across roles: for a session owned by a role
-the reader is not a member of, and without `pg_read_all_stats`, `state` and
-`xact_start` come back null. Such a row contributes nothing to a minimum while
-being exactly the kind of session that could hold a write transaction open, so a
-minimum over the visible rows would *overestimate* the safe instant, which is the
-one direction that loses data.
-
-Masked rows are therefore counted, and one is enough: the answer falls back to
-`now()` minus `QUEEN_FETCH_SAFE_FLOOR_MS` (default 30,000 ms, which must exceed
-any write statement's timeout) and says so. Degraded is correct and usable; it
-only costs lag. Granting `pg_read_all_stats` to the broker's role is what buys the
-lag back, and on PostgreSQL 16 without it the degrade is permanent rather than
-occasional, because `backend_type` is masked too. See
-[the S3 sink's deploy page](/deploy/s3#grant-pg_read_all_stats-to-the-broker-role).
-</Aside>
+- There is one answer per asked entry, in order, with at most 10,000 records each.
+- `highWatermark` is `lastOffset + 1`; `logStartOffset` is the oldest offset retention
+  still holds. `ts` is the message's stamp.
+- Payloads stored encrypted are decrypted when the broker has the key. A payload that
+  is not JSON comes back as a string.
+- An entry whose queue does not exist for this tenant carries
+  `"error": "UNKNOWN_TOPIC_OR_PARTITION"` with no records and both offsets `0`. A queue
+  that exists without that partition answers no records and both offsets `0`, without
+  an error.
+- An `offset` below `logStartOffset` or above `highWatermark` carries
+  `"error": "OFFSET_OUT_OF_RANGE"` with the real offsets, so the caller can reset.
+- With `maxWaitMs`, the call returns once the entries hold at least `minBytes` of
+  payload (each record counts its payload's JSON length, at least 1), once the wait runs
+  out, or once an entry reports an error. A write to one of the partitions it reads
+  wakes it.
+- A body that is not JSON, or an entry without `queue` or `offset`, is a `400` (code
+  `bad_body`).
 
 ## Access levels
 
@@ -724,13 +674,16 @@ listings.
 | `GET /api/v1/resources/queues` | read-only |
 | `GET /api/v1/resources/queues/:queue` | read-only |
 | `GET /api/v1/resources/queues/:queue/depth` | read-only |
+| `GET /api/v1/resources/queues/:queue/sizes` | read-only |
 | `DELETE /api/v1/resources/queues/:queue` | admin |
 | `GET /api/v1/resources/overview` | read-only |
 | `GET /api/v1/resources/namespaces` | read-only |
 | `GET /api/v1/resources/tasks` | read-only |
 | `POST /api/v1/partitions/changed` | read-only |
+| `POST /api/v1/fetch` | read-only |
 
 Every route here resolves a tenant from the request, so with
-`QUEEN_TENANCY_HEADER` on they are scoped to the caller's tenant. The full route
-table, generated from the router and the authorization function, is in the
+`QUEEN_TENANCY_HEADER` on they are scoped to the caller's tenant. In a cluster any node
+answers them: a follower forwards the request to the leader. The full route table,
+generated from the router and the authorization function, is in the
 [reference index](/reference).

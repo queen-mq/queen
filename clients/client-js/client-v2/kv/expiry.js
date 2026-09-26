@@ -95,7 +95,7 @@ function instantMs(value) {
  *
  * The empty answer is deliberate and is the reason this function validates so
  * little: §5.1's rule -- exactly one of `ttlSeconds` and `forever:true`, zero
- * or two being the same error -- lives in `kv_apply_v1`, so that all seven
+ * or two being the same error -- lives in the broker, so that all seven
  * clients AND the embedded broker (which never passes through an HTTP handler)
  * inherit it without a line of their own. Re-implementing it here would give
  * the product two places that can disagree about when a key dies. What IS

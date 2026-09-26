@@ -109,7 +109,7 @@ export class WindowSessionOperator {
     // events in this batch.
     const sessions = new Map()  // userKey -> { acc, sessionStart, lastEventTime, dirty, seeded }
 
-    // Seed from PG state.
+    // Seed from the loaded state.
     for (const [stateKey, value] of loadedState.entries()) {
       // Expected shape: `${operatorTag}\u001fopen\u001f${userKey}`
       const parts = stateKey.split('\u001f')
@@ -193,8 +193,8 @@ export class WindowSessionOperator {
       const stateKey = this.openSessionStateKey(userKey)
       if (s.closed) {
         if (s.seeded) stateOps.push({ type: 'delete', key: stateKey })
-        // Newly-opened sessions that closed in the same batch never made
-        // it to PG, so no delete needed.
+        // Newly-opened sessions that closed in the same batch were never
+        // persisted, so no delete needed.
       } else if (s.dirty) {
         stateOps.push({
           type: 'upsert',

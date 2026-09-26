@@ -3,12 +3,10 @@
 # Build and publish the Queen container images to GHCR (or any OCI registry).
 #
 #   ./build.sh                      # build the broker for the host arch, keep it local
-#   ./build.sh all                  # build both images locally
-#   ./build.sh proxy --push         # build + publish the proxy
-#   ./build.sh all --push --multiarch --latest
+#   ./build.sh --push --multiarch --latest
 #
-# Both images build from the repo root: the proxy crate embeds the broker's
-# dashboard from ../server/webapp/dist, so its context cannot be proxy/.
+# The image builds from the repo root: the broker links the proxy crate and the
+# Kafka facade by path.
 #
 # Publishing needs a token with the `write:packages` scope. The GitHub CLI is
 # the least painful source of one (GHCR does not accept fine-grained PATs):
@@ -35,7 +33,7 @@ PLATFORM_OVERRIDE=""
 
 usage() {
     cat <<'EOF'
-usage: ./build.sh [broker|proxy|all] [options]
+usage: ./build.sh [broker] [options]
 
   --push              push to the registry instead of loading into the local daemon
   --multiarch         build linux/amd64 + linux/arm64 (implies --push; needs a
@@ -51,13 +49,13 @@ usage: ./build.sh [broker|proxy|all] [options]
   --tag TAG           use TAG instead of the version from the manifest
   -h, --help          this text
 
-Image names: broker -> $REGISTRY/queen, proxy -> $REGISTRY/queen-proxy
+Image name: broker -> $REGISTRY/queen
 EOF
 }
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        broker|proxy|all) TARGET="$1" ;;
+        broker) TARGET="$1" ;;
         --push)       PUSH=true ;;
         --multiarch)  MULTIARCH=true; PUSH=true ;;
         --platform)   PLATFORM_OVERRIDE="$2"; shift ;;
@@ -179,17 +177,8 @@ build_broker() {
         --build-arg "QUEENCTL_COMMIT=$COMMIT"
 }
 
-build_proxy() {
-    local version
-    version=$(awk -F'"' '/^\[package\]/{p=1} p && /^version[[:space:]]*=/{print $2; exit}' \
-        proxy/Cargo.toml)
-    build_image queen-proxy ./proxy/Dockerfile "$version"
-}
-
 case "$TARGET" in
     broker) build_broker ;;
-    proxy)  build_proxy ;;
-    all)    build_broker; build_proxy ;;
 esac
 
 echo "==> done"

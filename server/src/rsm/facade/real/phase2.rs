@@ -92,7 +92,6 @@ impl RaftFacade {
             ("GET", "/api/v1/raft/liveness") => self.api_raft_liveness(ctx).await,
             ("GET", "/api/v1/status/queues") => self.api_status_queues(ctx).await,
             ("GET", "/api/v1/status/analytics") => self.api_status_analytics(ctx).await,
-            ("GET", "/api/v1/status/buffers") => self.api_local_snapshot(&ctx, "buffers").await,
             ("GET", "/api/v1/analytics/system-metrics") => {
                 self.api_system_metrics(ctx, req.query.as_deref()).await
             }
@@ -119,18 +118,6 @@ impl RaftFacade {
             }
             ("GET", "/api/v1/analytics/partition-liveness") => {
                 self.api_partition_liveness(ctx, req.query.as_deref()).await
-            }
-            ("GET", "/api/v1/analytics/postgres-stats") => self.api_postgres_stats(ctx).await,
-            ("GET", "/api/v1/system/maintenance") => self.api_flag_get("maintenance_mode").await,
-            ("POST", "/api/v1/system/maintenance") => {
-                self.api_flag_set(ctx, "maintenance_mode", &req.body).await
-            }
-            ("GET", "/api/v1/system/maintenance/pop") => {
-                self.api_flag_get("pop_maintenance_mode").await
-            }
-            ("POST", "/api/v1/system/maintenance/pop") => {
-                self.api_flag_set(ctx, "pop_maintenance_mode", &req.body)
-                    .await
             }
             ("GET", "/api/v1/system/kv-timers") => self.api_flag_get("kv_timers_enabled").await,
             ("POST", "/api/v1/system/kv-timers") => {
@@ -831,8 +818,7 @@ impl RaftFacade {
         ))
     }
 
-    /// `GET /api/v1/resources/namespaces` and `/tasks` —
-    /// `queen.get_namespaces_v2` / `get_tasks_v2` (018 ≈276, ≈336): one row per
+    /// `GET /api/v1/resources/namespaces` and `/tasks`: one row per
     /// non-empty label with its queue and partition counts and messages.
     async fn api_labels(&self, ctx: ReqCtx, namespace: bool) -> Result<ApiOut, RsmError> {
         let rows = self.queue_snapshots(&ctx.tenant).await?;
@@ -1199,6 +1185,14 @@ fn configured_defaults(now: i64) -> QueueConfig {
 }
 
 fn apply_config_options(cfg: &mut QueueConfig, o: &Map<String, Value>) -> Result<(), RsmError> {
+    // A queue created implicitly by a push stores 0 here (no sink hold was ever
+    // configured): read it as the default, so a later merge-mode configure of
+    // that queue is not refused over a value nobody set. An explicit 0 in the
+    // request is still refused by the range check below.
+    let defaults = configured_defaults(cfg.created_at_us);
+    if cfg.retention_sink_hold_max_seconds == 0 {
+        cfg.retention_sink_hold_max_seconds = defaults.retention_sink_hold_max_seconds;
+    }
     let s = |k: &str| o.get(k).map(|v| v.as_str().unwrap_or("").to_string());
     let i = |k: &str| -> Result<Option<i32>, RsmError> {
         o.get(k)
@@ -1223,16 +1217,21 @@ fn apply_config_options(cfg: &mut QueueConfig, o: &Map<String, Value>) -> Result
     if let Some(v) = s("task") {
         cfg.task = Some(v);
     }
+    // An explicit `null` restores the option's default (the dashboard's reset).
     macro_rules! set_i {
         ($k:literal,$f:ident) => {
-            if let Some(v) = i($k)? {
+            if o.get($k).is_some_and(Value::is_null) {
+                cfg.$f = defaults.$f;
+            } else if let Some(v) = i($k)? {
                 cfg.$f = v;
             }
         };
     }
     macro_rules! set_b {
         ($k:literal,$f:ident) => {
-            if let Some(v) = b($k)? {
+            if o.get($k).is_some_and(Value::is_null) {
+                cfg.$f = defaults.$f;
+            } else if let Some(v) = b($k)? {
                 cfg.$f = v;
             }
         };
@@ -1303,7 +1302,7 @@ struct SnapCounts {
     retained: i64,
 }
 
-/// A queue as `queen.get_queues_v2` (018 ≈238) lists it: `pending` excludes
+/// A queue as the queue listing shows it: `pending` excludes
 /// what is leased (`processing`); `completed` = total − pending − DLQ, as the
 /// queue detail counts it.
 fn queue_json(name: &str, c: &QueueConfig, n: &SnapCounts) -> Value {
@@ -1370,7 +1369,60 @@ pub(super) fn depth_json<R: Reads + ?Sized>(
             .group(tenant, queue, g)?
             .is_some_and(|x| x.meta.conflation);
     }
-    r.scan_queue_partitions(tenant,queue,None,usize::MAX,&mut |pid| { if let Ok(Some(p))=r.partition(pid) { let (committed,processing)=if let Some(g)=group { r.cursor(pid,g).ok().flatten().map(|c| { let live=c.lease_expires_at_us.is_some_and(|x|x>now); (c.committed,if live {(c.batch_end.unwrap_or(c.committed.max(0) as u64) as i64-c.committed).max(0)}else{0}) }).unwrap_or((-1,0)) } else { let mut named=None;let mut qm=None;let mut proc=0;let _=r.scan_cursors(pid,usize::MAX,&mut |g,c|{if g=="__QUEUE_MODE__"{qm=Some(qm.map_or(c.committed,|x:i64|x.min(c.committed)))}else{named=Some(named.map_or(c.committed,|x:i64|x.min(c.committed)))} if c.lease_expires_at_us.is_some_and(|x|x>now){proc+=(c.batch_end.unwrap_or(c.committed.max(0) as u64) as i64-c.committed).max(0)} true});(named.or(qm).unwrap_or(-1),proc)}; let pending=p.pending_from(committed) as i64;let processing=processing.min(pending);parts.push(json!({"partition":p.partition,"pending":pending,"processing":processing,"ready":pending-processing})); } true })?;
+    // Queue level: every NAMED group of the queue counts, including one with no
+    // cursor on a partition yet (it has consumed nothing there), so `pending`
+    // is the worst named cursor's; the queue-mode cursor counts only when the
+    // queue has no named group.
+    let mut named_groups: Vec<String> = Vec::new();
+    if group.is_none() {
+        r.scan_groups(tenant, queue, usize::MAX, &mut |g, _| {
+            if g != "__QUEUE_MODE__" {
+                named_groups.push(g.to_string());
+            }
+            true
+        })?;
+    }
+    r.scan_queue_partitions(tenant, queue, None, usize::MAX, &mut |pid| {
+        if let Ok(Some(p)) = r.partition(pid) {
+            let live = |c: &crate::rsm::effect::CursorRow| {
+                if c.lease_expires_at_us.is_some_and(|x| x > now) {
+                    (c.batch_end.unwrap_or(c.committed.max(0) as u64) as i64 - c.committed).max(0)
+                } else {
+                    0
+                }
+            };
+            let (committed, processing) = if let Some(g) = group {
+                r.cursor(pid, g)
+                    .ok()
+                    .flatten()
+                    .map(|c| (c.committed, live(&c)))
+                    .unwrap_or((-1, 0))
+            } else {
+                let mut named: Option<i64> = None;
+                let mut seen = 0usize;
+                let mut qm: Option<i64> = None;
+                let mut proc = 0;
+                let _ = r.scan_cursors(pid, usize::MAX, &mut |g, c| {
+                    if g == "__QUEUE_MODE__" {
+                        qm = Some(qm.map_or(c.committed, |x| x.min(c.committed)));
+                    } else {
+                        seen += 1;
+                        named = Some(named.map_or(c.committed, |x| x.min(c.committed)));
+                    }
+                    proc += live(&c);
+                    true
+                });
+                if seen < named_groups.len() {
+                    named = Some(-1);
+                }
+                (named.or(qm).unwrap_or(-1), proc)
+            };
+            let pending = p.pending_from(committed) as i64;
+            let processing = processing.min(pending);
+            parts.push(json!({"partition":p.partition,"pending":pending,"processing":processing,"ready":pending-processing}));
+        }
+        true
+    })?;
     parts.sort_by(|a, b| a["partition"].as_str().cmp(&b["partition"].as_str()));
     let pending: i64 = parts.iter().filter_map(|v| v["pending"].as_i64()).sum();
     let processing: i64 = parts.iter().filter_map(|v| v["processing"].as_i64()).sum();
@@ -1386,4 +1438,54 @@ pub(super) fn depth_json<R: Reads + ?Sized>(
     Ok(Some(
         json!({"queue":queue,"group":group,"pending":pending,"processing":processing,"ready":ready,"partitionsPending":pp,"partitionsReady":pr,"conflation":conflation,"effectivePending":if conflation{pp}else{pending},"effectiveReady":if conflation{pr}else{ready},"partitions":parts}),
     ))
+}
+
+#[cfg(test)]
+mod configure_tests {
+    use super::*;
+
+    fn opts(v: Value) -> Map<String, Value> {
+        v.as_object().cloned().unwrap_or_default()
+    }
+
+    /// A queue a push created stores no sink-hold ceiling; merging options into
+    /// it must not trip the ceiling's range check (it used to answer 400 to
+    /// every SDK `.create()` that followed a push).
+    #[test]
+    fn a_merge_into_an_implicitly_created_queue_is_accepted() {
+        let mut cfg = crate::rsm::planner::timers::implicit_queue_config();
+        assert_eq!(cfg.retention_sink_hold_max_seconds, 0);
+        apply_config_options(&mut cfg, &opts(json!({"leaseTime": 60}))).expect("merge");
+        assert_eq!(cfg.lease_time, 60);
+        assert_eq!(cfg.retention_sink_hold_max_seconds, 604_800);
+    }
+
+    #[test]
+    fn an_explicit_out_of_range_sink_hold_ceiling_is_still_refused() {
+        let mut cfg = configured_defaults(0);
+        let err = apply_config_options(
+            &mut cfg,
+            &opts(json!({"retentionSinkHoldMaxSeconds": 0})),
+        );
+        assert!(err.is_err());
+    }
+
+    /// `null` restores the default (the dashboard editor's reset).
+    #[test]
+    fn null_restores_the_default() {
+        let mut cfg = configured_defaults(0);
+        apply_config_options(
+            &mut cfg,
+            &opts(json!({"leaseTime": 60, "retentionEnabled": true})),
+        )
+        .unwrap();
+        apply_config_options(
+            &mut cfg,
+            &opts(json!({"leaseTime": null, "retentionEnabled": null})),
+        )
+        .unwrap();
+        let d = configured_defaults(0);
+        assert_eq!(cfg.lease_time, d.lease_time);
+        assert_eq!(cfg.retention_enabled, d.retention_enabled);
+    }
 }

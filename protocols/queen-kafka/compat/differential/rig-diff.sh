@@ -9,8 +9,12 @@
 #   protocols/queen-kafka/compat/differential/rig-diff.sh down    # tear everything down
 #
 # Deliberately NOT rig.sh's ports and NOT rig.sh's container names: that rig may
-# be running at the same time and is owned by someone else. Postgres 25543,
-# broker 26699, facade 29192, Kafka 29092.
+# be running at the same time and is owned by someone else. Broker 26699,
+# facade 29192, Kafka 29092. The broker is one raft node whose data directory
+# ($STATE_DIR/raft) is created fresh by `up` and removed by `down`; its disk
+# gate runs at QUEEN_RAFT_DISK_HIGH_PCT=99.5 unless that variable says
+# otherwise, because a throwaway rig on a developer disk is not what the gate
+# (85 by default) protects.
 #
 # Kafka is pinned to 3.9.1 on purpose. 4.0 (KIP-896) dropped the request
 # versions older clients used, and the facade caps Fetch at v6 — against a 4.0
@@ -37,18 +41,18 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 
-PG_HOST_PORT="${PG_HOST_PORT:-25543}"
 BROKER_PORT="${BROKER_PORT:-26699}"
 FACADE_PORT="${FACADE_PORT:-29192}"
 KAFKA_PORT="${KAFKA_PORT:-29092}"
 PARTITIONS="${PARTITIONS:-8}"
 KAFKA_IMAGE="${KAFKA_IMAGE:-apache/kafka:3.9.1}"
+DISK_HIGH_PCT="${QUEEN_RAFT_DISK_HIGH_PCT:-99.5}"
 
 # Overridable so a stage of a campaign can run this rig inside its own assigned
 # container namespace while another one is up. Every port above already is.
-PG_CONTAINER="${PG_CONTAINER:-qk-diff-pg}"
 KAFKA_CONTAINER="${KAFKA_CONTAINER:-qk-diff-kafka}"
 STATE_DIR="${STATE_DIR:-/tmp/qk-diff}"
+RAFT_DIR="$STATE_DIR/raft"
 BROKER_LOG="$STATE_DIR/broker.log"
 FACADE_LOG="$STATE_DIR/facade.log"
 BROKER_PIDFILE="$STATE_DIR/broker.pid"
@@ -70,21 +74,13 @@ down() {
     kill -9 "$pid" 2>/dev/null
     rm -f "$f"
   done
-  docker rm -f "$PG_CONTAINER" "$KAFKA_CONTAINER" >/dev/null 2>&1
+  docker rm -f "$KAFKA_CONTAINER" >/dev/null 2>&1
+  rm -rf "$RAFT_DIR"
   echo "down. logs (if any) under $STATE_DIR"
 }
 
 up() {
   mkdir -p "$STATE_DIR"
-
-  say "postgres on 127.0.0.1:$PG_HOST_PORT (tmpfs, thrown away at exit)"
-  docker rm -f "$PG_CONTAINER" >/dev/null 2>&1
-  docker run -d --name "$PG_CONTAINER" \
-    -e POSTGRES_PASSWORD=postgres -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres \
-    -e PGDATA=/var/lib/postgresql/data/pgdata \
-    -p "$PG_HOST_PORT":5432 \
-    --tmpfs /var/lib/postgresql/data:rw,size=2g \
-    postgres:16 -c max_connections=400 >/dev/null || return 1
 
   say "kafka ($KAFKA_IMAGE, KRaft single node) on 127.0.0.1:$KAFKA_PORT"
   docker rm -f "$KAFKA_CONTAINER" >/dev/null 2>&1
@@ -108,21 +104,17 @@ up() {
     -e KAFKA_LOG_DIRS=/tmp/kraft-combined-logs \
     "$KAFKA_IMAGE" >/dev/null || return 1
 
-  for _ in $(seq 1 60); do
-    docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break
-    sleep 1
-  done
-  docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 || {
-    echo "postgres never became ready" >&2; docker logs "$PG_CONTAINER" 2>&1 | tail -20; return 1; }
-
   say "building the broker and the facade (debug)"
   ( cd "$REPO_ROOT/server" && cargo build ) || return 1
   ( cd "$REPO_ROOT/protocols/queen-kafka" && cargo build ) || return 1
 
-  say "broker on 127.0.0.1:$BROKER_PORT"
-  PG_HOST=127.0.0.1 PG_PORT="$PG_HOST_PORT" PG_USER=postgres PG_PASSWORD=postgres \
-  PG_DATABASE=postgres PORT="$BROKER_PORT" QUEEN_BIND_ADDR=127.0.0.1 \
-  QUEEN_APPLY_SCHEMA=true DB_POOL_SIZE=32 LOG_LEVEL=info \
+  # A fresh data directory per `up`: the differential compares answers from a
+  # cold stack, and a previous run's topics would be a second opinion.
+  say "broker on 127.0.0.1:$BROKER_PORT (one raft node, data in $RAFT_DIR)"
+  rm -rf "$RAFT_DIR"
+  mkdir -p "$RAFT_DIR" || return 1
+  QUEEN_RAFT_DIR="$RAFT_DIR" QUEEN_RAFT_DISK_HIGH_PCT="$DISK_HIGH_PCT" \
+  PORT="$BROKER_PORT" QUEEN_BIND_ADDR=127.0.0.1 LOG_LEVEL=info \
     "$REPO_ROOT/server/target/debug/queen" > "$BROKER_LOG" 2>&1 &
   echo $! > "$BROKER_PIDFILE"
 

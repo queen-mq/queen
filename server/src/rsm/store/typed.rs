@@ -413,9 +413,9 @@ pub trait TypedReads: Reads {
     /// The `(pid, group, offset)` index → the dead letters filed AT that
     /// position, in the order they were filed.
     ///
-    /// A list, not one id: `log_dlq`'s index in postgres is not unique, and a
+    /// A list, not one id: this index is not unique, and a
     /// message that is replayed from the DLQ and dies again is filed at the
-    /// same position twice (005). An index that kept only the newest left the
+    /// same position twice. An index that kept only the newest left the
     /// older row reachable by nothing — a delete of the partition or of the
     /// consumer group walks this index, so the row and its `dlq_count` would
     /// outlive the queue itself.
@@ -472,7 +472,7 @@ pub trait TypedReads: Reads {
 
     /// One KV row, expired or not: liveness is the CALLER's predicate
     /// ([`KvRow::live`]), because the sweep and the console read expired rows
-    /// that every other reader treats as absent (024 §5.7).
+    /// that every other reader treats as absent (§5.7).
     fn kv(&self, tenant: &str, ns: &str, key: &str) -> Result<Option<KvRow>> {
         let k = keys::kv(tenant, ns, key);
         if k.len() > self.max_key_len() {
@@ -489,7 +489,7 @@ pub trait TypedReads: Reads {
     }
 
     /// The rows of one namespace whose key starts with `key_prefix`, in key
-    /// BYTE order (024's `COLLATE "C"`), starting strictly after `after` when it
+    /// BYTE order (`COLLATE "C"`), starting strictly after `after` when it
     /// is given — the exclusive keyset cursor of getPrefix and of the console
     /// list. `cb(key, row)`; expired rows are passed too (see [`TypedReads::kv`]).
     ///
@@ -547,8 +547,8 @@ pub trait TypedReads: Reads {
     }
 
     /// Every row of one tenant, namespace by namespace, in key order:
-    /// `cb(ns, key, row)`. Θ(keys of the tenant), like 024's
-    /// `kv_namespaces_v1`, which is its one reader.
+    /// `cb(ns, key, row)`. Θ(keys of the tenant); the namespace listing is
+    /// its one reader.
     fn scan_kv_tenant(
         &self,
         tenant: &str,
@@ -629,7 +629,7 @@ pub trait TypedReads: Reads {
 
     // --------------------------------------------------------------- timers
 
-    /// One timer (025 PK `(tenant, queue, timer_key)`).
+    /// One timer (PK `(tenant, queue, timer_key)`).
     fn timer(&self, tenant: &str, queue: &str, key: &str) -> Result<Option<TimerRow>> {
         let k = keys::timers(tenant, queue, key);
         decode(
@@ -640,7 +640,7 @@ pub trait TypedReads: Reads {
     }
 
     /// One queue's timers in timer-key BYTE order, starting strictly AFTER
-    /// `after` when given (025 `log_timers_list_v1`'s exclusive keyset cursor).
+    /// `after` when given (the exclusive keyset cursor).
     fn scan_timers(
         &self,
         tenant: &str,
@@ -684,8 +684,7 @@ pub trait TypedReads: Reads {
     }
 
     /// Exactly how many of one queue's timers have a key starting with the
-    /// LITERAL `prefix` (025 `log_timers_count_v1`): a prefix range walk, no
-    /// row decoded.
+    /// LITERAL `prefix`: a prefix range walk, no row decoded.
     fn count_timers_with_prefix(&self, tenant: &str, queue: &str, prefix: &str) -> Result<u64> {
         let p = keys::timers_key_prefix(tenant, queue, prefix);
         let mut n = 0u64;

@@ -6,28 +6,33 @@ tier: use
 sidebar:
   order: 2
 sourceOfTruth:
-  - server/sql/procedures/001_log_schema.sql
-  - server/sql/procedures/003_log_push.sql
-  - server/sql/procedures/004_log_pop.sql
-  - server/sql/procedures/005_log_ack.sql
-  - server/sql/procedures/006_log_maintenance.sql
   - server/src/handlers/data.rs
+  - server/src/handlers/raft.rs
+  - server/src/rsm/planner/push.rs
+  - server/src/rsm/planner/pop.rs
+  - server/src/rsm/planner/ack.rs
+  - server/src/rsm/planner/txn.rs
+  - server/src/rsm/dedup.rs
+  - server/src/rsm/maintenance.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/real/phase2/admin.rs
+  - server/src/rsm/replicator/local.rs
+  - server/src/rsm/replicator/raft/log_store.rs
 verifiedBy:
   - clients/client-js/test-v2/docs.js
   - clients/client-js/test-v2/semantics.js
 digest: >-
   A queue is a named container with a configuration and a partition is an ordered lane inside it,
-  and neither is declared before use: the push that names them creates both in the transaction
-  that stores the message. A partition costs one row plus one row per consumer group that reads
-  it, so tens of thousands of lanes are ordinary and one million has been served at 200,000
-  messages a second, while a partition per message is not a supported shape. A consumer group is a
+  and neither is declared before use: the push that names them creates both in the entry of the
+  replicated log that stores the message. A partition is a record in the broker's replicated state
+  plus one cursor per consumer group that reads it, not a file or a process of its own; a partition
+  per entity is the intended shape and a partition per message is not. A consumer group is a
   name holding one cursor per partition, so two groups read the same stored copy at their own
   pace; omitting the group places the caller in the implicit __QUEUE_MODE__ competing-consumers
   group. Where a named group starts is decided on its first contact with the queue and
   stored: mode `new`, the default, skips the backlog and `all` delivers everything retained,
   and passing the mode later changes nothing. An ack is an offset commit, so acking one message
   completes every earlier unacked message in that partition for that group.
-# sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
 ---
 
 Queen stores a queue as a set of ordered partitions, and a consumer group as one cursor per
@@ -38,7 +43,7 @@ from those two sentences.
 
 A queue is a named container with a configuration. A partition is an ordered lane inside it.
 Neither is declared before use: a push to a queue and a partition that do not exist creates
-both, in the transaction that stores the message.
+both, in the same entry of the replicated log that stores the message.
 
 <Render file="snippets/js-push" />
 
@@ -46,10 +51,10 @@ That call created the queue, the lane and the message; a push that names no part
 `Default`. Partition by the entity whose order you care about, a customer or a device or a
 document: one entity, one lane, and a slow lane holds up nothing outside it.
 
-A partition costs one row, plus one row per group that reads it. Tens of thousands of lanes are
-ordinary and [a million](/benchmarks/cardinality-1m) has been served at 200,000 messages a
-second; a partition per message is not. A dotted queue name fills the `namespace` and `task`
-labels a [discovery pop](/reference/http/pop) matches on.
+A partition costs a record in the broker's replicated state, plus one cursor per group that reads
+it: not a file and not a process of its own. A partition per entity is the intended shape; a
+partition per message is not. A dotted queue name fills the `namespace` and `task` labels a
+[discovery pop](/reference/http/pop) matches on.
 
 ## Producing and deduplication
 
@@ -59,15 +64,17 @@ queue and partition, so one request can write to several of both.
 <Render file="snippets/js-push-dedup" />
 
 Deduplication is on by default with a window of 3600 seconds, and it is exact, not
-probabilistic: the probe runs inside PostgreSQL under the row lock that allocates offsets, so a
-duplicate writes nothing. It is scoped to one partition, `dedupWindowSeconds: 0` turns it off,
-and the key only works if you derive it from the work: an upstream event id, a primary key plus
-a version. A fresh UUID per attempt deduplicates nothing.
+probabilistic: the leader probes the partition's index of transaction ids when it plans the push,
+in the same step that allocates the offsets, so a duplicate writes nothing. It is scoped to one
+partition, `dedupWindowSeconds: 0` turns it off, and the key only works if you derive it from the
+work: an upstream event id, a primary key plus a version. A fresh UUID per attempt deduplicates
+nothing.
 
 The response is `201` with one verdict per item, and `201` does not mean stored: `queued` is
-committed, `duplicate` wrote nothing and returns the original id, `buffered` means PostgreSQL
-was unreachable and the item waits on the broker's disk spool, `failed` means neither. Read
-every item's `status`.
+committed, `duplicate` wrote nothing and returns the original id, `error` means the broker refused
+that item's partition and wrote nothing for it. Read every item's `status`. When no node can take
+the write at all (an election, a lost quorum), the request fails with `503` and `Retry-After`.
+There is no spool: the client retries, and a deterministic `transactionId` makes that retry safe.
 
 ## Consuming, groups and subscription modes
 
@@ -139,12 +146,12 @@ completed silently. A duplicate delivery is recoverable, a swallowed failure is 
 
 Acking implicitly is two things. The SDK consume loops ack after your handler returns and nack
 when it throws, still a leased at-least-once pop; the server-side `autoAck=true` commits the
-cursor in the transaction that reads the messages, which is at-most-once.
+cursor in the same log entry that claims the messages, which is at-most-once.
 
 ## Leases, retries and the dead-letter queue
 
 A leased pop removes nothing. It writes a holder, an expiry and the last delivered offset onto
-the (partition, group) row; until an ack releases the claim or it expires, no other consumer in
+the (partition, group) cursor; until an ack releases the claim or it expires, no other consumer in
 the group takes that partition.
 
 <Partition
@@ -173,17 +180,18 @@ retry budget, so a crash-looping consumer redelivers forever without ever dead-l
 
 The budget is one counter per (partition, group) against `retryLimit`, default 3: a `failed` ack
 spends one and redelivers, `retry` redelivers without spending, `dlq` files the message at once.
-When it runs out the head message is copied into a real dead-letter table with its payload and
-the reason, or dropped if you turned dead-lettering off.
+When it runs out the head message is copied into a dead-letter record with its payload and the
+reason, kept apart from the log because a dead letter outlives the segment it came from, or dropped
+if you turned dead-lettering off.
 
-Dead-letter rows survive retention and leave one address at a time, by delete or by replay, which
-moves the row out under the derived transaction id `dlq:<row id>`, so an unattended one grows
-without bound ([messages and DLQ](/reference/http/messages-dlq)).
+Dead letters survive retention and leave one address at a time, by delete or by replay, which
+moves the record out under the derived transaction id `dlq:<row id>`, so an unattended
+dead-letter queue grows without bound ([messages and DLQ](/reference/http/messages-dlq)).
 
 ## Transactions
 
-`POST /api/v1/transaction` bundles pushes and acks into one PostgreSQL transaction: everything
-in the call commits together or nothing does. It exists for the pipeline handoff, an ack of the
+`POST /api/v1/transaction` bundles pushes and acks into one entry of the replicated log:
+everything in the call commits together or nothing does. It exists for the pipeline handoff, an ack of the
 input and a push of the output that cannot come apart.
 
 **The bundle is N to M, not one to one.** One call may acknowledge batches leased from any number
@@ -202,9 +210,9 @@ Atomicity covers the broker's state, not the network: a blind retry after a lost
 duplicates the pushes unless their transaction ids are deterministic and the deduplication
 window covers your retry horizon.
 
-**The bundle is not only pushes and acks.** Two more arrays ride the same commit when their surfaces
-are switched on: `kv`, which writes [transactional state](/use/kv), and `timers`, which schedules or
-cancels a [timer](/use/timers). Both are **top-level fields of the request body**, beside `operations`
+**The bundle is not only pushes and acks.** Two more arrays ride the same commit: `kv`, which
+writes [transactional state](/use/kv), and `timers`, which schedules or cancels a
+[timer](/use/timers). Both are **top-level fields of the request body**, beside `operations`
 and never inside it, and a bundle that carries neither is byte for byte the call it was before they
 existed. That is what makes an idempotency marker, an external effect and the cursor advance a single
 commit instead of three, and it is the one thing a key/value store or a scheduler standing beside the
@@ -221,9 +229,10 @@ end.
 A seek releases any live lease, abandoning an in-flight batch instead of acking it, and resets
 the retry budget. It touches exactly one group: everyone else keeps their position.
 
-A timestamp lands on a segment boundary rather than an exact message, so you also get messages
-committed slightly before the instant you asked for: seek a little early and filter in the
-handler. Retention is the floor, and deleted data cannot be replayed by any means.
+A timestamp moves the cursor to just before the first message the broker stored at or after that
+instant. The instant is compared with the time the broker stamped on each message when it stored
+it, not with anything in your payload. Retention is the floor, and deleted data cannot be replayed
+by any means.
 
 <Partition
   alt="A partition whose offsets 2 and 3 have been deleted by retention and are drawn as dashed empty cells. A dashed vertical line at offset 4 marks log_start. The billing cursor sits at 7 before the seek and at the log_start boundary after it."
@@ -275,17 +284,18 @@ age alone, leased or not. Use it where staleness makes a message worthless, neve
 for slow consumers.
 
 `POST /api/v1/configure` merges: an option the body does not carry keeps the value the queue
-already has, an explicit `null` restores that option's default, and `"mode": "replace"` resets
-everything the body omits, the deduplication window included ([option
-table](/reference/queue-options)).
+already has, and `"mode": "replace"` resets everything the body omits to its default, the
+deduplication window included. A `null` for a numeric or boolean option is refused with `400`
+rather than read as "restore the default" ([option table](/reference/queue-options)).
 
 ## Delivery guarantees
 
 Delivery on a leased pop is at-least-once: the cursor moves only on ack, so nothing is lost and
-some things arrive twice, on lease expiry, on any nack, after a broker restart, and on a
+some things arrive twice, on lease expiry, on any nack, after a node restart, and on a
 dead-letter replay. Ordering is total per partition in commit order and nothing more: no global
-order, no priority. Durability is PostgreSQL's, which is why `buffered` deserves an alert. Make
-handlers idempotent on `transactionId` and the duplicates stop mattering.
+order, no priority. Durability is the replicated log's: a write is answered once its entry is
+committed, which means fsynced to disk on a single node, and on a majority of the voters in a
+cluster. Make handlers idempotent on `transactionId` and the duplicates stop mattering.
 
 Two failures change the code you write. A `429` is backpressure and carries `Retry-After` in
 seconds: the SDKs honour it and retry in place, unbounded on a long-poll pop and bounded

@@ -1,39 +1,22 @@
-//! Long-poll waker + inter-instance notification facade.
+//! Long-poll waker.
 //!
-//! Two jobs, one struct:
-//!
-//! 1. **Local long-poll waker.** A parked POP (`handlers::handle_pop*`) is a
-//!    deadline poll: it re-checks `seg_has_pending` every `POP_WAIT_POLL_MS`.
-//!    Instead of a blind `sleep`, it now parks on a per-queue [`tokio::sync::Notify`]
-//!    gate. A local PUSH — or a MESSAGE_AVAILABLE from a peer, or an HTTP
-//!    `/internal/api/notify` — wakes the gate so the pop re-polls at once. The
-//!    per-poll timeout is still honoured, so this is a strict latency improvement:
-//!    a missed wake merely falls back to the old poll interval.
-//!
-//! 2. **Peer fan-out.** When a mesh transport is attached (multi-replica mode), the
-//!    same PUSH/maintenance/config-change also broadcasts to peers so their parked
-//!    pops / cached flags stay current. With no transport attached (a single stock
-//!    broker) every peer call is a no-op and only the local waker runs.
-//!
-//! The `Notifier` is decoupled from the transport's construction: it starts with
-//! an empty transport slot and main.rs calls [`attach_transport`](Notifier::attach_transport)
-//! once wiring is complete, breaking the AppState ↔ transport cycle.
+//! A parked POP parks on a per-queue [`tokio::sync::Notify`] gate instead of a
+//! blind `sleep`. A local push or apply wakes the gate so the pop re-checks at
+//! once; the per-poll timeout is still honoured, so a missed wake merely falls
+//! back to the poll interval.
 //!
 //! Track B (PLAN_QUEEN_PROXY_CLOUD.md §5): every `qkey` below is the COMPOSITE
 //! `handlers::tenant_queue_key(tenant, queue)`, byte-identical to the hot-list ring
 //! key. A bare-name gate on a shared cell both over-wakes (every tenant parked on
 //! `orders`) and LOSES wakes: [`drain_hints`] pops from the shared deque, so one
-//! tenant's pop consumes the hint another tenant's push produced. The peer frames
-//! carry the tenant explicitly, so the key never travels the wire as one blob.
+//! tenant's pop consumes the hint another tenant's push produced.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use crate::mesh::MeshTransport;
 use crate::obs::panic_policy::{LockExt, RwLockExt};
 
 /// Bound on a queue's hint mailbox. A hint is only useful until a woken pop drains
@@ -96,8 +79,6 @@ pub struct Notifier {
     /// [`PartitionWatch`]es alive in this process. Zero ⇒ the apply thread does
     /// not even collect per-partition appends ([`Notifier::watches_partitions`]).
     partition_watches: std::sync::atomic::AtomicUsize,
-    /// Optional peer transport (multi-replica mode). Set once at startup.
-    transport: OnceLock<Arc<MeshTransport>>,
 }
 
 impl Notifier {
@@ -108,17 +89,7 @@ impl Notifier {
             any: std::sync::RwLock::new(HashMap::new()),
             tenancy,
             partition_watches: std::sync::atomic::AtomicUsize::new(0),
-            transport: OnceLock::new(),
         })
-    }
-
-    /// Wire up the peer transport. Idempotent-ish: only the first attach wins.
-    pub fn attach_transport(&self, t: Arc<MeshTransport>) {
-        let _ = self.transport.set(t);
-    }
-
-    pub fn transport(&self) -> Option<&Arc<MeshTransport>> {
-        self.transport.get()
     }
 
     /// The gate a queue-scoped pop parks on. get-or-create. The returned `Arc` is the
@@ -439,14 +410,10 @@ impl Notifier {
         out
     }
 
-    /// A local PUSH landed: wake local pops (with the partition hint) AND fan out
-    /// MESSAGE_AVAILABLE to peers. `qkey` is the composite key; the peer frame
-    /// carries the tenant and the queue as separate fields.
+    /// A local PUSH landed: wake local pops (with the partition hint). `qkey` is
+    /// the composite key.
     pub fn notify_pushed(&self, qkey: &str, partition: &str) {
         self.wake_local_hint(qkey, partition);
-        if let Some(t) = self.transport.get() {
-            t.send_message_available(qkey, partition);
-        }
     }
 
     /// A committed push bundle landed, touching every (qkey, partition) in `keys`:
@@ -458,148 +425,7 @@ impl Notifier {
         for (qkey, partition) in keys {
             self.wake_local_hint(qkey, partition);
         }
-        if let Some(t) = self.transport.get() {
-            t.send_messages_available_batch(keys);
-        }
     }
-
-    /// C1 (hot-list wake coalescing): fan a committed push bundle out to peers ONLY
-    /// (the batched MESSAGE_AVAILABLE), WITHOUT the per-push local `wake_local_hint`.
-    /// With the hot-list on, the pushing broker coalesces its LOCAL wake into a ~5ms
-    /// tick (removing the O(parked consumers) notify_waiters storm), while peers still
-    /// get an immediate wake — so a mixed hot-list-on/off cluster keeps prompt
-    /// cross-broker discovery. No-op with no transport (single broker).
-    pub fn fan_out_pushed_batch(&self, keys: &[(String, String)]) {
-        if let Some(t) = self.transport.get() {
-            t.send_messages_available_batch(keys);
-        }
-    }
-
-    // ---- config/maintenance change broadcasts (local state is mutated by the
-    // ---- caller; these only fan the change out to peers) --------------------
-
-    pub fn broadcast_maintenance(&self, enabled: bool) {
-        if let Some(t) = self.transport.get() {
-            t.send_maintenance(enabled);
-        }
-    }
-
-    pub fn broadcast_pop_maintenance(&self, enabled: bool) {
-        if let Some(t) = self.transport.get() {
-            t.send_pop_maintenance(enabled);
-        }
-    }
-
-    pub fn broadcast_queue_config_set(&self, qkey: &str) {
-        if let Some(t) = self.transport.get() {
-            t.send_queue_config_set(qkey);
-        }
-    }
-
-    pub fn broadcast_queue_config_delete(&self, qkey: &str) {
-        if let Some(t) = self.transport.get() {
-            t.send_queue_config_delete(qkey);
-        }
-    }
-}
-
-// ===========================================================================
-// The sweeper's local wake (PLAN_KV_TIMERS.md §7.4)
-// ===========================================================================
-
-/// The in-process, best-effort wake of the timer sweeper: an `AtomicI64` holding
-/// the nearest locally committed `deliver_at` plus a `Notify`.
-///
-/// It lives HERE and not in `sweeper.rs`, which owns the loop that awaits it,
-/// because the seams that ring it are compiled into both crate roots (the twin
-/// module lists of `src/main.rs` and `src/lib.rs`) while the sweeper is declared
-/// by the binary alone: the embedded broker has no sweeper. A handler naming
-/// `crate::sweeper` breaks the library build, so the waker sits in a module both
-/// targets list. The embedded broker therefore holds a waker nobody awaits, which
-/// is harmless: a hint is one CAS and a permit nobody takes.
-///
-/// The handler of `POST /api/v1/timers` and the transaction wire ring it **after
-/// the commit and never before** — a wake for a transaction that then rolls back
-/// costs a wasted cycle and, worse, teaches the loop that work exists which does
-/// not. The cost is one CAS, and the anti-storm property is free: the hint only
-/// applies when the new minimum is EARLIER, so scheduling a million timers for
-/// next week produces exactly ONE wake.
-///
-/// Losing a hint costs latency and never correctness: `QUEEN_SWEEPER_MAX_SLEEP_MS`
-/// is the recovery window and `deliverAt` is "no earlier than". What a MISSING
-/// hint cost, from 1.0.3 through 1.5.1 when nothing rang this: a timer scheduled
-/// on an idle broker waited out the idle backoff, up to
-/// `QUEEN_SWEEPER_IDLE_MAX_SLEEP_MS` (30 s), whatever its delay.
-pub struct SweeperWake {
-    /// Epoch ms of the nearest hinted delivery, `i64::MAX` when nothing is
-    /// pending. Re-armed at the top of every sweeper cycle.
-    earliest_ms: AtomicI64,
-    notify: Notify,
-}
-
-impl Default for SweeperWake {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl SweeperWake {
-    pub fn new() -> Self {
-        SweeperWake {
-            earliest_ms: AtomicI64::new(i64::MAX),
-            notify: Notify::new(),
-        }
-    }
-
-    /// Ring for a timer that becomes due in `delay_ms`. A past or negative delay
-    /// is legal (§4.2: a `deliverAt` in the past fires on the first cycle).
-    pub fn hint(&self, delay_ms: i64) {
-        let at = crate::util::now_epoch_ms().saturating_add(delay_ms.max(0));
-        loop {
-            let cur = self.earliest_ms.load(Ordering::Relaxed);
-            if at >= cur {
-                return; // not earlier than what we already promised to wake for
-            }
-            if self
-                .earliest_ms
-                .compare_exchange_weak(cur, at, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                // `notify_one` stores a permit when nobody is waiting, so a hint
-                // that lands mid-cycle is not lost.
-                self.notify.notify_one();
-                return;
-            }
-        }
-    }
-
-    /// Re-arm at the top of a cycle: anything hinted from here on is news.
-    pub(crate) fn arm(&self) {
-        self.earliest_ms.store(i64::MAX, Ordering::Relaxed);
-    }
-
-    /// Resolves on the next hint that moves the minimum, or at once on the
-    /// permit left by one that landed while nobody was waiting.
-    pub(crate) async fn notified(&self) {
-        self.notify.notified().await;
-    }
-}
-
-static SWEEPER_WAKE: OnceLock<Arc<SweeperWake>> = OnceLock::new();
-
-/// The process-wide sweeper waker. Process-global rather than a field of
-/// `AppState` because the embedded facade, the HTTP handlers and the sweeper loop
-/// all need the same one, and a second `Broker` in one process shares the first
-/// one's sweeper exactly as it shares its admission arbiter.
-pub fn sweeper_wake() -> &'static Arc<SweeperWake> {
-    SWEEPER_WAKE.get_or_init(|| Arc::new(SweeperWake::new()))
-}
-
-/// One-liner for the commit seams (§7.4): the timers handler, the transaction
-/// wire, and the ephemeral engine's lease backstop through its injected hook.
-/// Safe to call whether or not a sweeper task was ever spawned.
-pub fn hint_sweeper_in_ms(delay_ms: i64) {
-    sweeper_wake().hint(delay_ms);
 }
 
 /// One Kafka Fetch's registration on the partitions it reads
@@ -695,70 +521,6 @@ mod tests {
             .existing_gate("q")
             .expect("the gate stays until the sweep");
         assert!(g.watchers.lock().unwrap().is_empty());
-    }
-
-    // ------------------------------------------------ the sweeper's wake (§7.4)
-
-    /// `hint` applies only when the new minimum is EARLIER. That single property
-    /// is the whole anti-storm defence of §7.4: a million timers scheduled for
-    /// next week must produce exactly one wake, not a million.
-    #[test]
-    fn a_later_sweeper_hint_does_not_move_the_minimum() {
-        let w = SweeperWake::new();
-        w.arm();
-        w.hint(1000);
-        let after_first = w.earliest_ms.load(Ordering::Relaxed);
-        assert!(after_first < i64::MAX);
-        w.hint(60_000);
-        assert_eq!(
-            w.earliest_ms.load(Ordering::Relaxed),
-            after_first,
-            "a later delivery must not move the minimum"
-        );
-        w.hint(1);
-        assert!(
-            w.earliest_ms.load(Ordering::Relaxed) < after_first,
-            "an earlier one must"
-        );
-    }
-
-    /// A negative delay is legal (§4.2: a `deliverAt` in the past fires on the
-    /// first cycle) and must not underflow into a distant past that would then
-    /// swallow every later hint.
-    #[test]
-    fn a_past_sweeper_hint_is_clamped_to_now_not_to_the_epoch() {
-        let w = SweeperWake::new();
-        w.arm();
-        w.hint(i64::MIN);
-        let v = w.earliest_ms.load(Ordering::Relaxed);
-        assert!(v > 0, "a past hint must not underflow: {v}");
-        assert!(v <= crate::util::now_epoch_ms() + 1);
-    }
-
-    /// A hint that lands while nobody is sleeping is not lost: `notify_one`
-    /// stores a permit, so the next wait returns at once. This is what lets a
-    /// timer scheduled during a fire pass cut the following sleep short.
-    #[tokio::test]
-    async fn a_sweeper_hint_that_lands_mid_cycle_is_kept_as_a_permit() {
-        let w = SweeperWake::new();
-        w.arm();
-        w.hint(5);
-        tokio::time::timeout(Duration::from_millis(500), w.notified())
-            .await
-            .expect("the permit stored by the hint must resolve the next wait");
-    }
-
-    /// With the hot list off, the announce a committed write makes is the legacy
-    /// wake: the gate a parked pop created receives the partition hint, exactly
-    /// as a push's did before the hot list existed. The hot-list-on half is
-    /// pinned from the ring's side in `hotlist.rs`.
-    #[test]
-    fn announce_with_the_hot_list_off_hands_the_gate_the_partition_hint() {
-        let n = Notifier::new(false);
-        let h = crate::hotlist::HotList::new(false, 1, 100, false, false);
-        n.gate("q"); // a parked pop created the gate
-        crate::handlers::announce_landed(&h, &n, &[("q".to_string(), "p7".to_string(), 3)]);
-        assert_eq!(n.drain_hints("q", 10), vec!["p7".to_string()]);
     }
 
     #[test]

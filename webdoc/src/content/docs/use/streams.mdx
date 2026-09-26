@@ -1,14 +1,16 @@
 ---
 title: Streams
-description: "Windowed aggregation, event time and per-message gating over a queue: an operator chain in your process, and one PostgreSQL transaction that commits state, output and ack together."
+description: "Windowed aggregation, event time and per-message gating over a queue: an operator chain in your process, and one entry of the replicated log that commits state, output and ack together."
 type: concept
 tier: use
 sidebar:
   order: 5
 sourceOfTruth:
-  - server/src/handlers/streams.rs
-  - server/sql/procedures/007_log_streams.sql
-  - server/sql/procedures/006_log_maintenance.sql
+  - server/src/rsm/facade/real/phase2/streams.rs
+  - server/src/rsm/facade/real/phase2.rs
+  - server/src/rsm/planner/ack.rs
+  - server/src/rsm/planner/txn.rs
+  - server/src/rsm/maintenance.rs
   - clients/client-js/client-v2/streams/Stream.js
   - clients/client-js/client-v2/streams/runtime/Runner.js
   - clients/client-js/client-v2/streams/operators/GateOperator.js
@@ -19,21 +21,21 @@ verifiedBy:
 digest: >-
   A windowed query reads a queue, folds its messages into time buckets and pushes each closed
   window onto a sink queue, one ordinary message per window and per key; open windows are readable
-  through `POST /streams/v1/state/get`. The chain runs in your process; state is rows in the same
-  PostgreSQL. Windows are `windowTumbling`, `windowSliding`, `windowSession` and `windowCron`.
+  through `POST /streams/v1/state/get`. The chain runs in your process; its state lives in the
+  broker's replicated state beside the queues. Windows are `windowTumbling`, `windowSliding`,
+  `windowSession` and `windowCron`.
   Bucketing uses commit time unless an `eventTime` extractor switches the runtime to watermarks,
   `allowedLateness` and `onLate`. One cycle commits state writes, sink pushes and the leased
-  batch's ack in one PostgreSQL transaction, all or none. `foreach` acks after the function
-  returns, so an effect outside PostgreSQL is at-least-once. `.gate()` replaces the window and
+  batch's ack in one entry of the replicated log, all or none. `foreach` acks after the function
+  returns, so an effect outside the broker is at-least-once. `.gate()` replaces the window and
   reducer with a per-message allow or deny that keeps the denied tail leased and in order. Inside a
   stream the state primitive is `state_ops`, not the KV, and a cycle carries no KV or timer
   operations. Retention never touches stream state.
-# sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
 ---
 
 A streaming query reads a queue, decides something per message or per time bucket, and pushes the
 result to another queue. You write it as an operator chain, the chain runs in your process, and its
-state lives in the same PostgreSQL that holds the messages. Two shapes exist: a window plus a
+state lives in the same broker that holds the messages. Two shapes exist: a window plus a
 reducer, which folds buckets and emits one message per closed window, and a [gate](#gating), which
 makes an allow or deny decision on every message.
 
@@ -76,8 +78,8 @@ queue reads them.
 
 Open windows have one. [`POST /streams/v1/state/get`](/reference/http/streams) returns the live
 accumulators for a query and partition, by exact key, by key prefix, or by ripeness, at read-only
-access level. Because the state is rows in the same PostgreSQL, there is no instance to locate
-first and no metadata service to run.
+access level. Because the state lives in the broker beside the queues, there is no instance to
+locate first and no metadata service to run.
 
 ## The four windows
 
@@ -140,9 +142,8 @@ state write, no push, no ack, and the lease simply times out.
 
 That is what makes a rate limiter or a circuit breaker expressible without a deferred queue, and
 the ordering is preserved by construction rather than by a retry policy. The broker side is exact
-about it: a partial ack of K walks K frames forward over the real `queen.log_segments` ranges
-instead of adding K to the cursor, so offsets already removed by retention are skipped rather than
-counted.
+about it: a partial ack of K moves the cursor exactly K messages past the start of the leased batch
+and keeps the lease on the rest.
 
 Three constraints, all enforced when the chain is built:
 
@@ -156,32 +157,25 @@ Three constraints, all enforced when the chain is built:
 ## Why it is exactly-once
 
 A cycle is four steps: pop a batch from the source under a lease, read the state rows for that
-partition, run your operators, commit. The commit is one request and one PostgreSQL transaction
-carrying three things: the state upserts and deletes, the sink pushes, the ack of the source
+partition, run your operators, commit. The commit is one request and one entry of the replicated
+log carrying three things: the state upserts and deletes, the sink pushes, the ack of the source
 batch.
 
 All three land or none does. A crash mid-cycle leaves the source cursor where it was, the lease
 expires, and the batch comes back to rebuild the same window from the same input. A response lost
-on the wire cannot double-emit either: the sink push happens before the ack inside the
-transaction, and the ack aborts on an expired lease, so a retried cycle finds the lease gone and
-its sink write rolls back with it.
+on the wire cannot double-emit either: the ack is refused on a lease that has expired or been
+released, and a refused ack refuses the whole entry, so a retried cycle finds the lease gone and
+its sink push is never written.
 
-Sink pushes are not a second write path. `queen.log_streams_cycle_v1` calls
-`queen.log_push_one_v1` inline, in the same transaction, and that is the same allocator
-[`POST /api/v1/push`](/reference/http/push) and
-[`POST /api/v1/transaction`](/reference/http/transaction) go through. One code path is why a window
-result gets a real offset, a real deduplication probe against the sink queue's window, and its
-partition's ordering, rather than a lookalike write that a consumer can tell apart later.
-
-Two details make the cycle cheap rather than merely correct. The procedure takes an **array** of
-cycle elements and wraps each one in its own savepoint, so a failing element rolls back alone while
-the others commit in the same transaction; the broker route submits one element per request today.
-And concurrent cycles and idle flushes on the same `(query, partition)` state shard serialise on a
-PostgreSQL advisory lock taken before either writes, so a flush timer firing mid-cycle waits rather
-than interleaving.
+Sink pushes are not a second write path. The cycle's sink pushes are planned by the same push
+planner that serves [`POST /api/v1/push`](/reference/http/push) and
+[`POST /api/v1/transaction`](/reference/http/transaction), inside the cycle's own entry. One code
+path is why a window result gets a real offset, a real deduplication probe against the sink queue's
+window, and its partition's ordering, rather than a lookalike write that a consumer can tell apart
+later.
 
 `foreach` is the exception. It calls your function and acks after it returns, so an effect
-outside PostgreSQL is at-least-once. An effect that must not repeat belongs on a sink queue with
+outside the broker is at-least-once. An effect that must not repeat belongs on a sink queue with
 a consumer of its own.
 
 ## Keys, workers and state
@@ -192,37 +186,37 @@ partition count, exactly as it is for consumers in one group. `keyBy` changes th
 it aligned with the partition, or repartition through an intermediate queue first.
 
 A partition carrying open stream state is never reclaimed underneath you. Maintenance deletes an
-empty, long-inactive partition only when nothing references it, and a surviving row in
-`queen_streams.state` vetoes that delete, so a keyed window on a queue that has gone quiet for a
-month still has its partition when the next message arrives. See
+empty, long-inactive partition only when nothing references it, and surviving stream state for
+that partition vetoes the delete, so a keyed window on a queue that has gone quiet for a month
+still has its partition when the next message arrives. See
 [retention](/internals/retention/).
 
 Closed windows delete their own rows, and nothing else does: retention never touches stream
-state. It is reclaimed by dropping the query, or by rerunning the chain with `reset` on. `reset`
-is also the answer to the **HTTP 409** you get when you redeploy a changed chain under a name
-already registered, because old accumulators and a new fold shape do not mix.
+state. Registering a changed chain with `reset` on deletes the old accumulators, and `reset` is
+the answer to the **HTTP 409** you get when you redeploy a changed chain under a name already
+registered, because old accumulators and a new fold shape do not mix.
 
 ## Two things are called state, and the order between them is not a preference
 
-`ctx.state` in an operator and [KV state](/use/kv) are both state in the same PostgreSQL, and only one
-of them is atomic with the cycle.
+`ctx.state` in an operator and [KV state](/use/kv) are both state in the broker's replicated state,
+and only one of them is atomic with the cycle.
 
 | | `state_ops`, reached as `ctx.state` | `queen.kv` |
 | --- | --- | --- |
-| Rows in | `queen_streams.state`, keyed `(query, partition, key)` | `queen.kv`, keyed `(tenant, namespace, key)` |
-| Commits with | The cycle: state, sink push and ack, one transaction | The transaction wire, when a write rides a bundle |
+| Keyed by | `(query, partition, key)` | `(tenant, namespace, key)` |
+| Commits with | The cycle: state, sink push and ack, one log entry | The transaction wire, when a write rides a bundle |
 | Reachable from another partition or query | No | Yes |
 | Expiry | None. A closed window deletes its own row | Mandatory on every write |
 
 > **Inside a stream, the state primitive is `state_ops`.**
 
-The atomicity you get from `state_ops` is free: `queen.log_streams_cycle_v1` commits the state writes,
-the sink pushes and the ack together, and there is nothing to configure and nothing to get wrong. The
+The atomicity you get from `state_ops` is free: the cycle's entry commits the state writes, the sink
+pushes and the ack together, and there is nothing to configure and nothing to get wrong. The
 KV is newer and more visible, so it is the one that gets reached for by default, and reaching for it
 silently gives up the only guarantee streaming already handed you.
 
 The KV earns a place inside a stream for one job, and it is the job `state_ops` cannot do: **state that
-crosses partitions or queries.** `queen_streams.state` is keyed by query and partition, so a marker on
+crosses partitions or queries.** Stream state is keyed by query and partition, so a marker on
 a business id whose events fall on different partitions, or a budget shared across every partition of a
 query, is not expressible in it. Those are the cases, and there are no others.
 
@@ -239,22 +233,18 @@ than last.
 
 This is the thing somebody will try, so it is written here rather than discovered.
 
-A cycle carries no `kv` and no `timers` array. A stream cycle is the one actor in the product that takes
-a **blocking** advisory lock, and the total lock order puts `queen.kv` and `queen.log_timers` outside
-it, so a cycle that touched them would hold the two outermost spaces while blocking on an advisory
-lock. The rule that forbids it is the same one that makes the whole order acyclic, and it is not an
-omission that a later array would fix.
+A cycle carries no `kv` and no `timers` array: the cycle route accepts state operations, sink
+pushes and the source ack, and nothing else.
 
 The consequence is concrete. The inverse rate limiter, an `incr` with a `max` deciding admission and a
 [timer](/use/timers) moving the rejected work later instead of dropping it, is written in a **flat
 consumer**, not in an operator. From a stream you emit onto a queue and the timer goes in the consumer
-of that queue. That is one extra line of architecture and no loss of any guarantee, but found on your
-own it looks like an arbitrary limit, so here it is with its reason.
+of that queue. That is one extra line of architecture and no loss of any guarantee.
 
 Gating remains the shape a stream does have for pacing: `.gate()` denies in place, keeps the denied tail
 leased and in order, and needs no second queue. It discards or defers by lease. It does not reschedule.
 
-One operator chain, four kinds of window or one gate, one transaction per cycle, and results that
+One operator chain, four kinds of window or one gate, one log entry per cycle, and results that
 arrive on a queue like any other message.
 
 <CardGrid>
@@ -264,9 +254,9 @@ arrive on a queue like any other message.
     description="Every combinator, every window option, and the full run options table, per SDK."
   />
   <LinkCard
-    href="/internals/schema"
-    title="State and the cycle procedure"
-    description="The queen_streams tables and the stored procedure that commits a cycle."
+    href="/internals/"
+    title="Internals"
+    description="How a 2.0 node stores and replicates the state this page describes."
   />
   <LinkCard
     href="/reference/errors/"

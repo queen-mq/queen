@@ -135,18 +135,11 @@
                 height="240px"
               />
             </div>
-            <!-- queen.retention_history has no writer under the log engine, so
-                 an empty series means NOT REPORTED. Saying "no events" here
-                 would assert nothing was deleted while segments are being
-                 swept — the opposite of what is happening. -->
-            <!-- Raft records every retention step (apply → local.db), so
-                 there an empty series IS "nothing deleted in this range". -->
-            <div v-else-if="isRaft" class="panel-na">
-              No retention or eviction in this range.
-            </div>
+            <!-- Every retention step is recorded when it applies
+                 (rsm/local_metrics.rs), so an empty series IS "nothing deleted
+                 in this range". -->
             <div v-else class="panel-na">
-              Retention accounting is not recorded by the log engine yet, so this
-              cannot be shown. It is not a claim that nothing was deleted.
+              No retention or eviction in this range.
             </div>
           </div>
         </div>
@@ -449,8 +442,7 @@
                  beside this one are gone: they charted worker_metrics columns
                  (avg_free_slots / db_connections / avg_job_queue_size) that the
                  Rust broker never writes, so they were flat zeros presented as
-                 measurements. Real pool numbers live in system_metrics and are
-                 on the Dashboard's DB pool row. -->
+                 measurements. -->
             <div class="card" style="margin-bottom:16px;">
               <div class="card-header">
                 <h3>Event Loop Latency <span class="cell-chip">cell</span></h3>
@@ -606,7 +598,6 @@ import {
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { stamp } from '@/composables/useStamp'
-import { useEngine } from '@/stores/engine'
 import { useIdentity } from '@/stores/identity'
 import { chartColor, chartTheme, alpha } from '@/composables/useChartTheme'
 import { ackFailureSeverity, dlqGrowthSeverity } from '@/composables/useSeverity'
@@ -614,7 +605,6 @@ import BaseChart from '@/components/BaseChart.vue'
 import MultiSelect from '@/components/MultiSelect.vue'
 
 const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
-const { isRaft } = useEngine()
 
 // ---------------------------------------------------------------------------
 // State
@@ -794,9 +784,9 @@ const eventLoopMetrics = [
 const selectedEventLoopMetrics = reactive({ avg: true, max: true })
 const toggleEventLoopMetric = (key) => { selectedEventLoopMetrics[key] = !selectedEventLoopMetrics[key] }
 
-// No `dbErrors` entry: server/src/metrics.rs declares the counter and
-// db.rs writes it, but nothing in the broker ever increments it — the series
-// was a guaranteed zero wearing the name of a real failure mode.
+// No `dbErrors` entry: server/src/metrics.rs declares the counter, but nothing
+// in the broker ever increments it — the series was a guaranteed zero wearing
+// the name of a real failure mode.
 // Same here: amber and red for two series that the chart itself draws in
 // chartColor(1) and chartColor(0). A series is told apart by its slot in the
 // ramp; whether the numbers are BAD is the chip in the header, which now
@@ -1165,9 +1155,7 @@ const eventLoopChartData = computed(() => {
 
 // The Connection Pool and Job Queue Depth datasets are gone with their panels:
 // avg_free_slots / db_connections / avg_job_queue_size / max_job_queue_size are
-// not in insert_worker_metrics' column list (server/src/db.rs), so they held
-// their DDL default of 0 forever. The real pool gauges live in
-// queen.system_metrics and are charted by the Dashboard's DB pool row.
+// never written, so they would chart a constant 0.
 
 const errorsChartData = computed(() => {
   if (!workerData.value?.timeSeries?.length) return { labels: [], datasets: [] }

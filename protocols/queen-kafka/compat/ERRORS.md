@@ -640,14 +640,14 @@ This API has no top-level error code, exactly as OffsetCommit has none.
 | `INVALID_TXN_STATE` (48) / `PRODUCER_FENCED` (90) / `INVALID_PRODUCER_EPOCH` (47) / `INVALID_PRODUCER_ID_MAPPING` (49) | no | as AddPartitionsToTxn | |
 
 Nothing is WRITTEN by this request. The offsets are staged and `EndTxn(commit)`
-writes them, in the same Postgres transaction as the records — which is the
+writes them, in the same broker transaction as the records — which is the
 whole of exactly-once processing here.
 
 ## EndTxn (v0–v3) — top level
 
 | Code | Retriable | When | Notes |
 |---|---|---|---|
-| `PRODUCER_FENCED` (90) | no | the commit's `required` precondition lost: another producer holds this `transactional.id` | **Zero records and zero offsets were written** — a lost `required` precondition raises 23514 out of `kv_apply_v1` and rolls the whole bundle back (005_log_ack.sql). Asserted by reading the log, not by trusting the code. |
+| `PRODUCER_FENCED` (90) | no | the commit's `required` precondition lost: another producer holds this `transactional.id` | **Zero records and zero offsets were written** — a lost `required` precondition makes the broker refuse the whole bundle (`reason: "kv_precondition"`) and apply none of it. Asserted by reading the log, not by trusting the code. |
 | `INVALID_TXN_STATE` (48) | no | no binding for this `transactional.id`; the transaction expired; a cap poisoned it | **The crash path.** Fatal, and it has to be: a facade that died mid-transaction lost the stage, and this is the only answer that cannot let an application believe an uncommitted commit. A commit that landed and whose response was lost also answers this — a FALSE NEGATIVE, which is the safe direction, because the offsets landed atomically with the records and a restarted application reprocesses nothing. |
 | `COORDINATOR_NOT_AVAILABLE` (15) | yes | the bundle could not be sent: a transport failure, a 5xx, a 429 (with `throttle_time_ms`) | **The stage is KEPT**, so the client's retry commits the same records. Dropping it here would turn a retry into a silent empty commit. |
 | `CONCURRENT_TRANSACTIONS` (51) | yes | a bundle for this transaction is already in flight | |

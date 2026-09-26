@@ -80,8 +80,8 @@ type TimerSchedule struct {
 
 	// DeliverAt is client-side sugar for Delay: it is converted to a relative
 	// delay when the request is sent, because an absolute instant is NOT
-	// expressible on this wire -- one clock, Postgres's, so no broker skew can
-	// enter (§4.2). Supplying both is an error.
+	// expressible on this wire -- one clock, the broker's, so no client skew
+	// can enter (§4.2). Supplying both is an error.
 	DeliverAt time.Time
 
 	// Payload is the message body. []byte and json.RawMessage travel verbatim;

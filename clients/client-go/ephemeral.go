@@ -21,8 +21,8 @@ import (
 // WHAT THIS SURFACE IS ABOUT, BEFORE ANY SIGNATURE: contents survive NOTHING
 // (§1.2). Not a restart, not a crash, not a deploy, not the ownership move that a
 // membership change causes. Treat a failover like a Redis restart. Declared
-// CONFIGURATION is durable -- it lives in PG and comes back after a restart, as
-// configured and EMPTY. There is no replay, no history, no subscriptionMode and
+// CONFIGURATION is durable -- it lives in the broker's replicated log and comes
+// back after a restart, as configured and EMPTY. There is no replay, no history, no subscriptionMode and
 // no DLQ, because none of those concepts has a referent when there is no history
 // to have.
 //
@@ -387,9 +387,9 @@ func requireEphemeralQueue(queue string) error {
 
 // ------------------------------------------------------------- declaration
 
-// Configure declares a queue and its bounds, and persists the OPTIONS in PG
-// (§1.1): the configuration survives a restart, the contents never do, and the
-// queue comes back declared and empty.
+// Configure declares a queue and its bounds, and persists the OPTIONS in the
+// broker's replicated log (§1.1): the configuration survives a restart, the
+// contents never do, and the queue comes back declared and empty.
 //
 // Optional in every sense -- a push or a pop that names an unknown queue creates
 // it implicitly with the tenant defaults. Declare when you want non-default
@@ -446,14 +446,13 @@ type EphemeralDeleted struct {
 	// Deleted is true when anything went: the RAM rings, the declaration row,
 	// or both.
 	Deleted bool `json:"deleted"`
-	// Declared reports whether a PG declaration row was removed too -- i.e.
+	// Declared reports whether a declaration was removed too -- i.e.
 	// whether this was a declared queue rather than an implicit one. It is the
 	// only part of an ephemeral queue that ever survived anything.
 	Declared bool `json:"declared"`
 }
 
-// Delete removes the queue: contents, cursors, and the declared configuration in
-// PG.
+// Delete removes the queue: contents, cursors, and the declared configuration.
 func (e *Ephemeral) Delete(ctx context.Context, queue string) (EphemeralDeleted, error) {
 	if err := requireEphemeralQueue(queue); err != nil {
 		return EphemeralDeleted{}, err
@@ -745,9 +744,7 @@ func (e *Ephemeral) Ack(ctx context.Context, queue string, acks interface{}, opt
 // Queues lists every ephemeral queue this tenant currently has, declared and
 // implicit.
 //
-// Free to poll: the gauges are read out of the broker's own memory, with no
-// database behind them -- unlike the durable meter, whose 1s poll is
-// load-bearing on PG.
+// Free to poll: the gauges are read out of the broker's own memory.
 //
 // It hands back the decoded body rather than a struct, exactly as the Admin
 // gauge endpoints do: the shape is the broker's, and typing it here would make

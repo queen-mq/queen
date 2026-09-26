@@ -4,14 +4,13 @@
 //! Most return the broker's JSON verbatim as [`serde_json::Value`]: the shapes
 //! are report-shaped, they change with the dashboard, and typing them here
 //! would turn every cosmetic addition into a client release. The endpoints
-//! whose shape is part of the contract — DLQ, lease renewal, maintenance — are
-//! typed.
+//! whose shape is part of the contract — DLQ, lease renewal — are typed.
 
 use std::sync::Arc;
 
 use queen_protocol::{
-    DlqParams, DlqResponse, MaintenanceRequest, MaintenanceResponse, RenewLeaseRequest,
-    RenewLeaseResponse, SeekRequest, SubscriptionRequest, TraceRequest, TraceResponse,
+    DlqParams, DlqResponse, RenewLeaseRequest, RenewLeaseResponse, SeekRequest,
+    SubscriptionRequest, TraceRequest, TraceResponse,
 };
 
 use crate::error::Result;
@@ -403,10 +402,6 @@ impl Admin {
             .await
     }
 
-    pub async fn postgres_stats(&self) -> Result<serde_json::Value> {
-        self.get("/api/v1/analytics/postgres-stats").await
-    }
-
     // ------------------------------------------------------------- system
 
     pub async fn health(&self) -> Result<serde_json::Value> {
@@ -416,54 +411,6 @@ impl Admin {
     /// Prometheus exposition text, not JSON.
     pub async fn metrics(&self) -> Result<String> {
         self.inner.http.get_text("/metrics", &Opts::default()).await
-    }
-
-    /// Whether pushes are being diverted to the on-disk spool.
-    pub async fn maintenance(&self) -> Result<MaintenanceResponse> {
-        let out: Option<MaintenanceResponse> = self
-            .inner
-            .http
-            .get_json("/api/v1/system/maintenance", &Opts::default())
-            .await?;
-        Ok(out.unwrap_or_default())
-    }
-
-    /// Divert every push to the spool. They replay when this is turned off.
-    pub async fn set_maintenance(&self, enabled: bool) -> Result<MaintenanceResponse> {
-        let out: Option<MaintenanceResponse> = self
-            .inner
-            .http
-            .post_json(
-                "/api/v1/system/maintenance",
-                &MaintenanceRequest { enabled },
-                &Opts::default(),
-            )
-            .await?;
-        Ok(out.unwrap_or_default())
-    }
-
-    pub async fn pop_maintenance(&self) -> Result<MaintenanceResponse> {
-        let out: Option<MaintenanceResponse> = self
-            .inner
-            .http
-            .get_json("/api/v1/system/maintenance/pop", &Opts::default())
-            .await?;
-        Ok(out.unwrap_or_default())
-    }
-
-    /// Pause consumption. Pops answer 204 with `paused: true`, which the
-    /// client surfaces as an empty poll rather than an error.
-    pub async fn set_pop_maintenance(&self, enabled: bool) -> Result<MaintenanceResponse> {
-        let out: Option<MaintenanceResponse> = self
-            .inner
-            .http
-            .post_json(
-                "/api/v1/system/maintenance/pop",
-                &MaintenanceRequest { enabled },
-                &Opts::default(),
-            )
-            .await?;
-        Ok(out.unwrap_or_default())
     }
 }
 

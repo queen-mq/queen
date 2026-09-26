@@ -23,9 +23,9 @@ use serde::{Deserialize, Serialize};
 /// must run on both keeps sending the complete option set the queue should end
 /// up with.
 ///
-/// The documented default for each field below is the *SQL* default, which is
-/// the one that actually applies — and therefore the value an explicit `null`,
-/// a `replace`, and a create all land on.
+/// The documented default for each field below is the *broker's* default,
+/// which is the one that actually applies — and therefore the value an explicit
+/// `null`, a `replace`, and a create all land on.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct QueueOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,9 +160,10 @@ pub struct QueueOptions {
     )]
     pub dedup_window_seconds: Option<i32>,
 
-    /// Name of the S3 sink that copies this queue to a data lake. Default `""`
+    /// Name of the sink whose commits hold this queue's retention. Default `""`
     /// (off). When set, retention will not delete a segment the sink has not
     /// committed yet, bounded by [`Self::retention_sink_hold_max_seconds`].
+    /// Queen 2.0 does not ship the S3 sink that wrote those commits.
     ///
     /// Must match `[A-Za-z0-9._-]{0,64}` — it is a segment of the sink's own
     /// commit key, so anything else is **rejected**, not clamped: the broker
@@ -308,9 +309,9 @@ pub struct DlqMessage {
 
     /// Why the message was dead-lettered.
     ///
-    /// The wire key is `errorMessage`: `queen.get_dlq_messages_v1` projects the
-    /// stored `error` column under that name, and the handler passes the SP's
-    /// text straight through. Reading `error` instead — as this did — left the
+    /// The wire key is `errorMessage`: the broker stores the dead-letter reason
+    /// as `error` and answers it under that name. Reading `error` instead — as
+    /// this did — left the
     /// field permanently `None` while the reason sat unnoticed in `rest`. The
     /// alias keeps the plain key working for anything that renders a DLQ row
     /// from a different source.
@@ -332,14 +333,14 @@ pub struct DlqMessage {
 ///
 /// The broker collects exactly `queue` and `consumerGroup` from the query
 /// string, then adds `limit` (default 100) and `offset` (default 0). The JS
-/// SDK's DLQ builder also sends `partition`, `from` and `to` — those keys never
-/// reach the stored procedure and are silently ignored, so a caller who relies
-/// on them gets an unfiltered page back and no error. [`DlqParams`] therefore
-/// exposes only the four that work.
+/// SDK's DLQ builder also sends `partition`, `from` and `to` — the broker
+/// silently ignores those keys, so a caller who relies on them gets an
+/// unfiltered page back and no error. [`DlqParams`] therefore exposes only the
+/// four that work.
 ///
-/// `total` is the length of the returned page, not the size of the DLQ — it is
-/// computed from `messages.len()` after the query, so it can never exceed
-/// `limit` and cannot be used for pagination.
+/// On the 2.0 broker `total` counts every DLQ entry that matched `queue` and
+/// `consumerGroup`, before `offset` and `limit` apply. A 1.x broker reported
+/// the length of the returned page instead, which can never exceed `limit`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DlqResponse {
     #[serde(default)]
@@ -537,7 +538,8 @@ pub struct MaintenanceResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 
-    /// How many messages are sitting in the spool. Push routes only.
+    /// Push-maintenance replies only. The 2.0 broker has no spool and always
+    /// answers `0`; a 1.x broker reported the pushes waiting in its disk spool.
     #[serde(
         rename = "bufferedMessages",
         default,
@@ -557,8 +559,9 @@ pub struct MaintenanceResponse {
 }
 
 impl MaintenanceResponse {
-    /// Whether pushes are being diverted to the spool. `None` when this reply
-    /// did not report on it.
+    /// Whether push maintenance mode is on. The 2.0 broker refuses pushes with
+    /// a `503` while it is (it has no spool to divert them to). `None` when
+    /// this reply did not report on it.
     pub fn push_paused(&self) -> Option<bool> {
         self.maintenance_mode
     }

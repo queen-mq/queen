@@ -331,7 +331,8 @@ only one of the three that leaves the dead-letter row behind.
 
 ## `TransactionBuilder`
 
-`client.transaction()`. Pushes and acks in one PostgreSQL transaction, all-or-nothing.
+`client.transaction()`. Pushes and acks in one transaction: one entry in the replicated log,
+all-or-nothing.
 
 | Method | Notes |
 | --- | --- |

@@ -2,94 +2,78 @@
 #
 # Queen test matrix. Builds the broker image + per-language runner images, then
 # runs each (suite x topology) as an isolated docker-compose project in parallel
-# and prints a pass/fail matrix.
+# and prints a pass/fail matrix. The broker is the single binary on its only
+# storage class, raft: there is no database in any stack.
 #
 #   suites:  js go py cli cpp laravel rust-client
-#                               -> run on `single`, `ha` and `tenanted` stacks
+#                               -> the client suites; run on every requested
+#                                  client topology (default `single` + `tenanted`)
 #            rust               -> in-process broker unit tests, no stack (`unit`)
-#            mesh               -> HA mesh assertion, `ha` stack only
-#            tenancy            -> two-tenant isolation, `ha-tenanted` stack only
+#            tenancy            -> two-tenant isolation with the trusted tenant
+#                                  header: `tenanted` (one node), and
+#                                  `ha-tenanted` (the cluster) when `ha` is asked for
 #            http               -> the kv/timer wire with no SDK in the way
 #                                  (PLAN_KV_TIMERS.md §10.2), `single` only
 #            conflation         -> the PLAN_CONFLATION.md §7.3 end-to-end
 #                                  scenarios at the raw HTTP wire (no SDK),
 #                                  `single` only
-#            s3sink             -> the PLAN_S3_SINK.md §9 end-to-end scenarios:
-#                                  the queen-s3 connector, a versitygw gateway
-#                                  and a DuckDB reader, all inside the runner
-#                                  image, against the stack's broker.
-#                                  `single` + `tenanted` (the parity rule).
+#            txnsemantics       -> the transactional gate (PLAN_KV_TIMERS.md §15):
+#                                  a lost kv precondition rolls back the push and
+#                                  the timer, index-aligned results; raw HTTP,
+#                                  `single` only
 #
 #   topologies:
-#     single       1 PG + 1 broker                       (QUEEN_TENANCY_HEADER off)
-#     ha           1 PG + queen-a/queen-b mesh pair      (QUEEN_TENANCY_HEADER off)
+#     single       1 raft broker (single voter)          (QUEEN_TENANCY_HEADER off)
 #     tenanted     same as `single` but the broker runs QUEEN_TENANCY_HEADER=true
 #                  while the client suites send NO x-queen-tenant header — the
-#                  DEFAULT-TENANT path, which is what every cloud cell serves.
-#                  Its results MUST be identical to `single`; run.sh reports a
-#                  TENANCY PARITY line and fails the run on any divergence.
-#     ha-tenanted  the HA pair with QUEEN_TENANCY_HEADER=true — the substrate for
-#                  the `tenancy` suite (two tenants, one queue name, mesh in play).
-#     raft1        1 broker on QUEEN_STORAGE=raft, NO Postgres (PLAN_RAFT.md
-#                  §13.3, WP-1.9). The runner reads QUEEN_TEST_STORAGE=raft and
-#                  runs the phase-2 public API suite, skipping only assertions
-#                  that directly inspect private Postgres tables. run.sh reports
-#                  a RAFT PARITY line comparing single↔raft1 and fails on any
-#                  divergence in the tests both lanes ran. Only suites whose
-#                  runner implements the raft lane (RAFT_SUITES) get a raft1 job.
+#                  DEFAULT-TENANT path. Its results MUST be identical to
+#                  `single`; run.sh reports a TENANCY PARITY line and fails the
+#                  run on any divergence.
+#     ha           a 3-node raft cluster (openraft; the helm_v2 env set). Client
+#                  suites talk to queen-1, leader or follower. OPT-IN
+#                  (`--topo single,ha`) until it has a validated baseline.
+#     ha-tenanted  the cluster with QUEEN_TENANCY_HEADER=true — the substrate for
+#                  the `tenancy` suite when `ha` is requested.
+#     raft1        accepted as an alias of `single` (every lane is raft now).
 #
-# Each stack = its own Postgres + broker(s) + runner on a private network, so
-# suites never collide (they share test-queue name patterns) and nothing binds
-# host ports. Postgres runs on tmpfs and is thrown away after each run.
+# Each stack = its own broker(s) + runner on a private network with fresh data
+# volumes, so suites never collide (they share test-queue name patterns) and
+# nothing binds host ports. The volumes are removed after each run (`down -v`),
+# so every lane starts on an empty broker: there is no cleanup to run.
 #
 # Usage:
-#   test/run.sh                        # full matrix
+#   test/run.sh                        # full matrix (single + tenanted)
 #   test/run.sh --suite js,go          # subset of suites
 #   test/run.sh --suite py --topo single
-#   test/run.sh --suite js --topo tenanted     # flag-ON default-tenant lane
-#   test/run.sh --suite js --topo single,raft1 # the RAFT PARITY gate (WP-1.9)
-#   test/run.sh --suite tenancy        # two-tenant isolation over the HA pair
+#   test/run.sh --suite js --topo single,tenanted  # the tenancy parity pair
+#   test/run.sh --suite js --topo single,ha        # add the 3-node cluster lane
+#   test/run.sh --suite tenancy        # two-tenant isolation, one node
+#   test/run.sh --suite tenancy --topo ha          # ...over the 3-node cluster
 #   test/run.sh --suite http           # every kv/timer route, no SDK in the way
 #   test/run.sh --suite conflation     # PLAN_CONFLATION §7.3 e2e, no SDK in the way
-#   test/run.sh --suite s3sink         # PLAN_S3_SINK §9 e2e: sink + versitygw + DuckDB
 #   test/run.sh --no-build-broker      # reuse an existing queen:test
 #   test/run.sh -j 3                   # cap parallelism (default: 4)
 #   test/run.sh --keep                 # leave stacks up for debugging
 #
-# Env: QUEEN_TEST_MAX_PARALLEL overrides -j.
+# Env: QUEEN_TEST_MAX_PARALLEL overrides -j. QUEEN_TEST_BROKER_DOCKERFILE picks
+# the Dockerfile queen:test is built from (default: the product image, ./Dockerfile).
 set -uo pipefail
 
-ALL_SUITES="js go py cli cpp laravel rust-client rust mesh tenancy http conflation s3sink"
+ALL_SUITES="js go py cli cpp laravel rust-client rust tenancy http conflation txnsemantics"
 CLIENT_SUITES="js go py cli cpp laravel rust-client"
 # Suites whose `single` and `tenanted` lanes must agree (the tenancy parity gate
-# at the bottom). Every client suite, plus s3sink: the sink reads through fetch
-# and partitions/changed and commits through kv, and all three take the tenant
-# from the broker's own header handling — so a divergence between the flag-off
-# and default-tenant lanes is exactly the regression the gate exists to catch.
-PARITY_SUITES="$CLIENT_SUITES s3sink"
-
-# Suites whose runner implements the raft lane (QUEEN_TEST_STORAGE=raft). Only
-# these get a `raft1` job, so requesting `--topo raft1` never starts a lane a
-# runner cannot honour.
-# Every full-featured SDK runner below skips only its optional SQL cleanup in
-# raft mode; the tests themselves use Queen's public HTTP API.
-RAFT_SUITES="js go py cpp laravel rust-client"
-# Suites whose single↔raft1 verdicts the RAFT PARITY gate compares. The same set
-# by construction: a suite is comparable exactly when it ran a raft1 lane.
-RAFT_PARITY_SUITES="$RAFT_SUITES"
+# at the bottom): every client suite.
+PARITY_SUITES="$CLIENT_SUITES"
 
 SUITES="$ALL_SUITES"
-# `raft1` is OPT-IN (`--topo …,raft1`), like pgless's `native` lane was while its
-# class was young. Keeping it out of the default matrix means a bare
-# `test/run.sh` (and CI's
-# per-suite cells) are unchanged; add raft1 to `--topo` to run the gate:
-#   test/run.sh --suite js --topo single,raft1
-# The RAFT PARITY gate below fires automatically whenever both lanes ran.
-TOPOS="single ha tenanted"
+# The single-node lanes are the default. `ha` (3-node cluster) is opt-in:
+#   test/run.sh --suite js --topo single,ha
+TOPOS="single tenanted"
 BUILD_BROKER=1
 BUILD_RUNNERS=1
 KEEP=0
 MAXP="${QUEEN_TEST_MAX_PARALLEL:-4}"
+BROKER_DOCKERFILE="${QUEEN_TEST_BROKER_DOCKERFILE:-Dockerfile}"
 
 # --- locate repo root (this script lives in <repo>/test) --------------------
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -110,6 +94,15 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# `raft1` was the opt-in raft lane of the two-storage-class era. Every lane is
+# raft now, so it is simply the single node; dedupe after mapping.
+_topos=""
+for t in $TOPOS; do
+  [ "$t" = "raft1" ] && { echo ">> note: --topo raft1 is now \`single\` (every lane is raft)"; t=single; }
+  case " $_topos " in *" $t "*) ;; *) _topos="$_topos $t";; esac
+done
+TOPOS="${_topos# }"
+
 command -v docker >/dev/null || { echo "docker not found" >&2; exit 2; }
 docker compose version >/dev/null 2>&1 || { echo "docker compose v2 required" >&2; exit 2; }
 
@@ -117,7 +110,6 @@ LOGDIR="$(mktemp -d -t queen-test.XXXXXX)"
 echo ">> logs: $LOGDIR"
 
 is_client() { case " $CLIENT_SUITES " in *" $1 "*) return 0;; *) return 1;; esac; }
-is_raft_suite() { case " $RAFT_SUITES " in *" $1 "*) return 0;; *) return 1;; esac; }
 want_suite() { case " $SUITES " in *" $1 "*) return 0;; *) return 1;; esac; }
 want_topo()  { case " $TOPOS " in *" $1 "*) return 0;; *) return 1;; esac; }
 
@@ -129,20 +121,15 @@ compose_for() {
   case "$1" in
     single|tenanted)  echo "$COMPOSE_DIR/docker-compose.single.yml";;
     ha|ha-tenanted)   echo "$COMPOSE_DIR/docker-compose.ha.yml";;
-    raft1)            echo "$COMPOSE_DIR/docker-compose.raft1.yml";;
     *) echo ""; return 1;;
   esac
 }
-# `raft1` carries no tenant header (the single-node Phase-2 lane is not tenanted),
-# so it falls through to false with every non-tenanted topology.
 tenancy_for() { case "$1" in tenanted|ha-tenanted) echo true;; *) echo false;; esac; }
 
 # --- build images -----------------------------------------------------------
 build_runner() {
   # Every runner builds from the repo root; the heavy trees are denylisted per
-  # runner by a sidecar test/runners/<suite>/Dockerfile.dockerignore. (`rust`
-  # used to build from server/, but the shared crates/queen-protocol has to be
-  # in its context now — see test/runners/rust/Dockerfile.)
+  # runner by a sidecar test/runners/<suite>/Dockerfile.dockerignore.
   suite="$1"; df="test/runners/$suite/Dockerfile"; ctx="."
   echo ">> build queen-test-runner-$suite"
   ( cd "$REPO_ROOT" && DOCKER_BUILDKIT=1 docker build -q -f "$df" -t "queen-test-runner-$suite" "$ctx" ) \
@@ -153,10 +140,10 @@ needs_broker=0
 for s in $SUITES; do want_suite "$s" && [ "$s" != "rust" ] && needs_broker=1; done
 
 if [ "$BUILD_BROKER" = 1 ] && [ "$needs_broker" = 1 ]; then
-  echo ">> build queen:test (broker)"
-  # Context is the repo root, not server/: the broker takes queen-protocol by
-  # the relative path ../crates/queen-protocol, which has to be inside it.
-  ( cd "$REPO_ROOT" && DOCKER_BUILDKIT=1 docker build -q -f server/Dockerfile -t queen:test . ) \
+  echo ">> build queen:test (broker, $BROKER_DOCKERFILE)"
+  # Context is the repo root: the broker links the proxy, the Kafka facade and
+  # queen-protocol by relative path, and the image embeds both frontends.
+  ( cd "$REPO_ROOT" && DOCKER_BUILDKIT=1 docker build -q -f "$BROKER_DOCKERFILE" -t queen:test . ) \
     || { echo "!! broker image build failed"; exit 1; }
 fi
 
@@ -171,41 +158,24 @@ for s in $SUITES; do
   want_suite "$s" || continue
   if is_client "$s"; then
     want_topo single   && add_job "$s" single
-    want_topo ha       && add_job "$s" ha
     want_topo tenanted && add_job "$s" tenanted
-    # raft1 only for suites whose runner honours QUEEN_TEST_STORAGE=raft (WP-1.9).
-    want_topo raft1 && is_raft_suite "$s" && add_job "$s" raft1
-  elif [ "$s" = "mesh" ]; then
-    add_job mesh ha            # mesh is inherently an HA-stack check
+    want_topo ha       && add_job "$s" ha
   elif [ "$s" = "tenancy" ]; then
-    add_job tenancy ha-tenanted  # two tenants over the mesh pair, flag ON
-  elif [ "$s" = "http" ]; then
-    # `single` and nothing else, and the reason is a product rule rather than a
-    # cost: with QUEEN_TENANCY_HEADER on, `kv_require_grant` follows it, so the
-    # ABSENCE of a per-tenant quota row is a 403 `feature_gated` (§9.4). Granting
-    # the default tenant would mean writing to the database, and this suite has
-    # no database access on purpose — every assertion it makes is at the HTTP
-    # wire. The wire shape it pins is topology-independent anyway: the same
-    # bodies, the same routes and the same result layout on any stack.
-    add_job http single
-  elif [ "$s" = "conflation" ]; then
-    # PLAN_CONFLATION.md §7.3: the conflation e2e scenarios, raw HTTP with no
-    # SDK in the path (the per-SDK halves belong to §7.2 and land with the
-    # clients). `single` only, and like `http` that is a scope statement rather
-    # than a cost cut: every §7.3 scenario is a (partition, consumer-group)
-    # semantic — the §1.3 guarantee, the retry budget, the stored policy, depth
-    # — none of which changes shape across the mesh, and the ha lanes of the
-    # client suites already exercise the transport.
-    add_job conflation single
-  elif [ "$s" = "s3sink" ]; then
-    # PLAN_S3_SINK.md §9. `single` and `tenanted` only: the sink is a client of
-    # three routes whose tenant handling is the subject of the parity rule, and
-    # the mesh adds nothing to it — window commits are per queue and go through
-    # one KV key pair, so a second broker exercises the transport and not the
-    # protocol. The runner carries the sink binary, the S3 gateway and the
-    # reader, so the stack is the same pg + broker every other suite runs.
-    want_topo single   && add_job s3sink single
-    want_topo tenanted && add_job s3sink tenanted
+    # Two tenants driven with the trusted header, so the flag is ON in both of
+    # its lanes: the single node (both of its URLs are that node), and the
+    # cluster (push on one node, pop on another) when the cluster is asked for.
+    tj=0
+    if want_topo single || want_topo tenanted; then add_job tenancy tenanted; tj=1; fi
+    if want_topo ha || want_topo ha-tenanted; then add_job tenancy ha-tenanted; tj=1; fi
+    [ "$tj" = 1 ] || add_job tenancy tenanted
+  elif [ "$s" = "http" ] || [ "$s" = "conflation" ] || [ "$s" = "txnsemantics" ]; then
+    # `single` and nothing else. For `http` the reason is a product rule, not a
+    # cost: with QUEEN_TENANCY_HEADER on, the kv grant rule follows it, and this
+    # suite deliberately makes every assertion at the HTTP wire. For all three
+    # the shape they pin — bodies, routes, a (partition, consumer-group)
+    # semantic, a transaction's all-or-nothing — does not change with the
+    # topology, and the client suites' `ha` lanes exercise the transport.
+    add_job "$s" single
   elif [ "$s" = "rust" ]; then
     add_job rust unit          # no stack
   fi
@@ -224,16 +194,11 @@ run_job() {
     proj="queen-test-${suite}-${topo}"
     compose="$(compose_for "$topo")"
     if [ -z "$compose" ]; then
-      echo "unknown topology: $topo (want single|ha|tenanted|ha-tenanted|raft1)" >"$log"
+      echo "unknown topology: $topo (want single|tenanted|ha|ha-tenanted)" >"$log"
       echo 2 >"$base.code"; echo 0 >"$base.dur"
       echo ">> FAIL ${suite}/${topo} rc=2 (unknown topology)"; return
     fi
     tflag="$(tenancy_for "$topo")"
-    # No per-suite kv/timer knob here any more. The http suite's whole subject IS
-    # the kv/timer surface, and it used to need the two boot flags pinned on for
-    # its lane; those flags are gone and every broker this harness starts has both
-    # surfaces, so the suite needs nothing special and no other lane can lose them
-    # by accident.
     QUEEN_RUNNER_IMAGE="queen-test-runner-$suite" QUEEN_TEST_TENANCY="$tflag" \
       docker compose -p "$proj" -f "$compose" up \
         --abort-on-container-exit --exit-code-from runner >"$log" 2>&1
@@ -277,8 +242,8 @@ wait
 # --- matrix report ----------------------------------------------------------
 echo
 echo "========================= Queen test matrix ========================="
-printf "%-12s %-11s %-11s %-11s %-13s %-11s %-8s\n" \
-  "suite" "single" "ha" "tenanted" "ha-tenanted" "raft1" "unit"
+printf "%-13s %-11s %-11s %-11s %-13s %-8s\n" \
+  "suite" "single" "tenanted" "ha" "ha-tenanted" "unit"
 overall=0
 cell() {  # suite topo width
   f="$LOGDIR/$1-$2.code"; w="$3"
@@ -290,9 +255,9 @@ cell() {  # suite topo width
 # and forgotten here would run, be gated on, and never appear in the report.
 for s in $ALL_SUITES; do
   want_suite "$s" || continue
-  printf "%-12s " "$s"
-  cell "$s" single 11; cell "$s" ha 11; cell "$s" tenanted 11
-  cell "$s" ha-tenanted 13; cell "$s" raft1 11; cell "$s" unit 8
+  printf "%-13s " "$s"
+  cell "$s" single 11; cell "$s" tenanted 11; cell "$s" ha 11
+  cell "$s" ha-tenanted 13; cell "$s" unit 8
   printf "\n"
 done
 echo "===================================================================="
@@ -300,9 +265,9 @@ echo "===================================================================="
 # --- tenancy parity gate ----------------------------------------------------
 # The `tenanted` lane runs the SAME suite against a broker with native tenant
 # scoping ON and no tenant header — the default-tenant path. Its outcome must be
-# byte-for-byte the same verdict as the flag-off `single` lane; a divergence
-# means the flag changed behaviour for an untenanted client, which is a
-# regression regardless of which side is green.
+# the same verdict as the flag-off `single` lane; a divergence means the flag
+# changed behaviour for an untenanted client, which is a regression regardless
+# of which side is green.
 #
 # The exit code is the hard gate. It is also coarse (99/112 and 100/112 are both
 # rc=1), so where a suite prints a machine-readable tally we compare that too —
@@ -313,9 +278,6 @@ tally() {  # logfile -> comparable pass tally, or "" if the suite prints none
   t="$(grep -aoE 'Overall Results: [0-9]+/[0-9]+ tests passed' "$f" 2>/dev/null \
        | sed -e 's/Overall Results: //' -e 's/ tests passed//' | paste -sd, -)"
   [ -n "$t" ] && { echo "$t"; return; }
-  # pytest: "=== 140 passed, 1 failed, 91 errors in 12.34s ===". The broad
-  # character class also swallows the "in 313" duration tail ("in" is lowercase
-  # letters), which made parity flap when one lane merely ran slower — chop it.
   # cargo: one "test result: ok. 24 passed; 0 failed; ..." per test binary.
   # Join them in order — counts only, no durations, so it cannot flap. This
   # MUST come before the pytest pattern below: that one also matches the
@@ -324,6 +286,9 @@ tally() {  # logfile -> comparable pass tally, or "" if the suite prints none
   t="$(grep -aoE 'test result: [a-zA-Z]+\. [0-9]+ passed; [0-9]+ failed' "$f" 2>/dev/null \
        | sed 's/test result: //' | paste -sd, -)"
   [ -n "$t" ] && { echo "$t"; return; }
+  # pytest: "=== 140 passed, 1 failed, 91 errors in 12.34s ===". The broad
+  # character class also swallows the "in 313" duration tail ("in" is lowercase
+  # letters), which made parity flap when one lane merely ran slower — chop it.
   t="$(grep -aoE '[0-9]+ passed[0-9a-z, ]*' "$f" 2>/dev/null | tail -1 \
        | sed -e 's/ in [0-9]*$//' -e 's/ *$//')"
   [ -n "$t" ] && { echo "$t"; return; }
@@ -355,56 +320,6 @@ if [ "$parity_checked" -gt 0 ]; then
     echo "TENANCY PARITY: OK ($parity_checked suite(s) identical with the flag on and off)"
   else
     echo "TENANCY PARITY: FAILED ($parity_bad of $parity_checked suite(s) diverged)"
-    overall=1
-  fi
-fi
-
-# --- raft parity gate -------------------------------------------------------
-# PLAN_RAFT.md §13.3, WP-2.12. The `raft1` lane runs the same public SDK suite
-# against a broker on QUEEN_STORAGE=raft with no Postgres. A runner may skip
-# only tests that directly inspect private Postgres state; it must exercise the
-# public Phase-2 API. Totals can therefore differ from `single`, but the verdict
-# and failed count must match.
-#
-# Compare the failed tally, not the passed one: direct-database skips can change
-# the total while leaving the public API verdict identical.
-raft_failed() {  # logfile -> comma-joined FAILED counts across the suite's buckets, or ""
-  local f="$1" t
-  # JS: "Overall Results: P/T tests passed, F/T tests failed" — keep F, drop /T.
-  t="$(grep -aoE '[0-9]+/[0-9]+ tests failed' "$f" 2>/dev/null | sed -E 's#/[0-9]+ tests failed##' | paste -sd, -)"
-  [ -n "$t" ] && { echo "$t"; return; }
-  # cargo ("test result: FAILED. 3 passed; 1 failed; …") and pytest ("1 failed, …").
-  t="$(grep -aoE '[0-9]+ failed' "$f" 2>/dev/null | grep -oE '^[0-9]+' | paste -sd, -)"
-  [ -n "$t" ] && { echo "$t"; return; }
-  echo ""
-}
-rparity_checked=0; rparity_bad=0
-for s in $RAFT_PARITY_SUITES; do
-  want_suite "$s" || continue
-  fo="$LOGDIR/$s-single.code"; fn="$LOGDIR/$s-raft1.code"
-  [ -f "$fo" ] && [ -f "$fn" ] || continue
-  rparity_checked=$((rparity_checked+1))
-  co="$(cat "$fo")"; cn="$(cat "$fn")"
-  # Passed tallies for context (they differ by design); failed tallies for the gate.
-  to="$(tally "$LOGDIR/$s-single.log")"; tn="$(tally "$LOGDIR/$s-raft1.log")"
-  ffo="$(raft_failed "$LOGDIR/$s-single.log")"; ffn="$(raft_failed "$LOGDIR/$s-raft1.log")"
-  diverged=0
-  [ "$co" != "$cn" ] && diverged=1
-  [ -n "$ffo" ] && [ -n "$ffn" ] && [ "$ffo" != "$ffn" ] && diverged=1
-  if [ "$diverged" = 1 ]; then
-    rparity_bad=$((rparity_bad+1))
-    echo "!! RAFT DIVERGENCE $s (single vs raft1): rc=$co [${to:-no tally}, failed ${ffo:-?}] vs rc=$cn [${tn:-no tally}, failed ${ffn:-?}]"
-    echo "   postgres log: $LOGDIR/$s-single.log"
-    echo "   raft1    log: $LOGDIR/$s-raft1.log"
-  else
-    echo "   raft parity $s (single vs raft1): rc=$co both lanes, failed ${ffo:-0} both lanes (single ran ${to:-?}, raft1 ran ${tn:-?} — subset by design, skips printed in the raft1 log)"
-  fi
-done
-if [ "$rparity_checked" -gt 0 ]; then
-  if [ "$rparity_bad" = 0 ]; then
-    echo "RAFT PARITY: OK ($rparity_checked suite(s): raft1 public-API verdict identical to single)"
-  else
-    echo "RAFT PARITY: FAILED ($rparity_bad of $rparity_checked suite(s) diverged)"
     overall=1
   fi
 fi

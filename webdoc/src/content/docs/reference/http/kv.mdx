@@ -7,27 +7,33 @@ sidebar:
   label: kv
 sourceOfTruth:
   - server/src/handlers/kv.rs
-  - server/src/main.rs
+  - server/src/handlers/raft.rs
+  - server/src/rsm/facade/real/kv.rs
+  - server/src/rsm/planner/kv.rs
+  - server/src/rsm/planner/txn.rs
+  - server/src/rsm/facade/real.rs
   - server/src/switches.rs
   - server/src/quota.rs
-  - server/sql/procedures/024_kv.sql
+  - server/src/auth.rs
+  - proxy/src/routes.rs
 verifiedBy:
-  - server/tests/kv_semantics.rs
-  - server/tests/kv_handler_isolation.rs
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): 1.6.0 adds the two console read routes, documented below; the query-string rule now covers the namespaces selector too, and the console's explicit includeExpired is stated against the wire default of false.
+  - server/src/rsm/tests/facade_kv.rs
 ---
 
-Six routes and one namespace-scoped key/value store. `POST /api/v1/kv` is the complete surface and
-one stored procedure answers it; the three path routes are sugar for the cases people write by hand;
-the two under `/api/v1/resources/kv` are a read-only listing for a console, which exists because the
-batch route deliberately cannot do what a browser needs.
+Six routes and one namespace-scoped key/value store. `POST /api/v1/kv` is the complete surface; the
+three path routes are sugar for the cases people write by hand; the two under `/api/v1/resources/kv`
+are a read-only listing for a console, which exists because the batch route deliberately cannot do
+what a browser needs.
+
+The state machine answers all six. A call that writes is one entry in the replicated log, answered
+once that entry has committed and applied. A call that only reads is answered from the node's
+applied state after a read barrier, so it sees every write the cluster had committed when the read
+began.
 
 <Aside type="note">
-Every broker registers the four routes above the line. There is no variable that turns them on, and a
-`404` on one of them means the path is wrong, never that the cell lacks the surface. The two console
-routes are the exception, and the only one: they arrived in 1.6.0, so a `404` there can also mean an
-older broker. That is the state the dashboard renders as "not available on this broker" rather than
-as an error. See [limits](/reference/limits) for what is deliberately not here.
+Every 2.0 broker serves the six routes. There is no variable that turns them on, and a `404` on one
+of them means the path is wrong, never that the node lacks the surface. See
+[limits](/reference/limits) for what is deliberately not here.
 </Aside>
 
 ## The routes
@@ -43,7 +49,8 @@ as an error. See [limits](/reference/limits) for what is deliberately not here.
 
 The last entry point is not a route of its own: the same operations travel as a top-level `kv`
 array on [`POST /api/v1/transaction`](/reference/http/transaction), which is the only place where
-a KV precondition can gate an ack.
+a KV precondition can gate an ack. There a call is limited to 64 operations and 256 keys, and
+`getPrefix` is refused.
 
 `*key` is a catch-all, so `order/9f1/items` is written naturally and a key containing a literal
 slash is written `%2F`. Nothing may ever be added as a literal segment under `/api/v1/kv/:ns/`,
@@ -52,22 +59,22 @@ on the batch route.
 
 Every route on this page except the batch **refuses any query string**, rather than ignoring one:
 the three path routes, and both halves of the console pair, including the selector that reads no
-parameters at all. A surface where four routes refuse and the fifth quietly serves teaches a caller
-that the rule is advisory, which is how a prefix ends up in an access log on the route where it does
-leak. This is a privacy boundary and not a parsing preference: `?prefix=quota:acme:` is recorded by
-the broker's access log, the proxy's, the metering sample, the per-request-id tracing span and any
-ingress in front, and a mitigation living in one component out of five is not a mitigation. Prefix
-reads exist only inside a `POST` body, and so do cursors, which are keys.
+parameters at all. The refusal is a `400` with `reason: "kv_no_query_string"`. A surface where four
+routes refuse and the fifth quietly serves teaches a caller that the rule is advisory, which is how a
+prefix ends up in an access log on the route where it does leak. This is a privacy boundary and not
+a parsing preference: `?prefix=quota:acme:` is recorded by every access log, tracing span and
+ingress between the client and the broker, and a mitigation living in one of them is not a
+mitigation. Prefix reads exist only inside a `POST` body, and so do cursors, which are keys.
 
-A path route also refuses a body carrying `op`, `ns`, `namespace` or `key`: the URL already names
-those, and silently preferring one over the other is the class of quiet override this API refuses
-everywhere.
+A path route also refuses a body carrying `op`, `ns`, `namespace` or `key` (`reason:
+"kv_field_in_path"`): the URL already names those, and silently preferring one over the other is
+the class of quiet override this API refuses everywhere.
 
 ## The operations
 
-`ns` is required on every operation in the batch. Seven names, six code paths: `putIfAbsent`
-desugars to `put` with `expect: 0` on entry to the stored procedure, so it is one path, one set of
-metrics and one taxonomy.
+`ns` is required on every operation in the batch and must match `^[a-z0-9][a-z0-9._-]{0,63}$`.
+Seven names, six code paths: `putIfAbsent` desugars to `put` with `expect: 0` when the broker
+validates the call, so it is one path, one set of metrics and one taxonomy.
 
 | `op` | Fields | Returns |
 | --- | --- | --- |
@@ -80,18 +87,20 @@ metrics and one taxonomy.
 | `incr` | `ns`, `key`, `delta`, one of `ttlSeconds`/`forever`, `min?`, `max?` | `{applied, key, value, version}` |
 
 Every element of the response carries its own `index` and `op`, and the array is index-aligned to
-the request: result *i* answers operation *i*. The procedure raises rather than returning a short
-array, so a missing element is a broken contract and never a silent `null` in position.
+the request: result *i* answers operation *i*. The broker checks the alignment before it answers and
+fails the call with a `500` rather than return a short array, so a missing element is a broken
+contract and never a silent `null` in position.
 
 ### Exactly one expiry, always
 
 Every `put`, `putIfAbsent` and `incr` carries **exactly one** of `ttlSeconds` (an integer greater
-than zero) or `forever: true`. Zero or two of them is `kv_expiry_not_specified`, a `400`.
+than zero) or `forever: true`. Zero or two of them is `kv_expiry_not_specified`, and a `ttlSeconds`
+that is not a positive integer is `kv_bad_ttl`. Both are `400`.
 
-The rule lives in SQL, so all seven clients, the transaction wire and the embedded broker inherit
-it without a line of their own. A `put` does **not** inherit the previous key's expiry, and that is
-not expressible: a write that silently kept the old TTL is the fastest way to make an idempotency
-marker immortal.
+The rule is checked in one place, where the broker validates the call, so every client, the
+transaction wire and the embedded broker inherit it without a line of their own. A `put` does
+**not** inherit the previous key's expiry, and that is not expressible: a write that silently kept
+the old TTL is the fastest way to make an idempotency marker immortal.
 
 `incr` is the exception that proves the shape: its TTL is **create-only**. A live row keeps the
 expiry it has, because a fixed-window limiter whose window is extended by every increment stops
@@ -100,22 +109,23 @@ makes the limiter a single call.
 
 ### `expect`, and what it costs when it loses
 
-| `expect` | Statement | Meaning |
+| `expect` | Write | Meaning |
 | --- | --- | --- |
 | absent | unconditional upsert | replaces the value **and** the expiry |
-| `0` | insert, or update only a row that is not live | "must not exist", and it wins against an expired row the sweeper has not pruned |
-| `N > 0` | a pure update, never the insert arm | optimistic lock |
+| `0` | writes only when no live row exists | "must not exist", and it wins against an expired row the expiry sweep has not removed yet |
+| `N > 0` | updates only the live row at version `N`, never creates | optimistic lock |
 
 `expect: N > 0` never creates anything. An `expect` worth zero rows has to be worth zero writes, or
 a saga's compensation fires on the branch that `expect` was written to prevent.
 
-`expect` present but `null` or `undefined` is a client-side bug, not a downgrade to an
-unconditional upsert: writing the word declares the intent to fence.
+`expect: null` is refused (`kv_bad_expect`, a `400`) rather than read as an unconditional upsert:
+writing the word declares the intent to fence. A `putIfAbsent` with an `expect` other than `0`, and
+an `incr` with any `expect`, are `400` as well.
 
 A write that does not apply still returns the **current** value and version, so the loser needs no
-second round trip. That version is **advisory**: it describes a row at the instant of the failed
-statement, and reusing it blindly as a fencing token in the next attempt is how a compare-and-swap
-loop stops converging on a contested key.
+second round trip. That version is **advisory**: it describes the row at the instant the write was
+judged, and reusing it blindly as a fencing token in the next attempt is how a compare-and-swap loop
+stops converging on a contested key.
 
 ### Reads and their ceilings
 
@@ -127,50 +137,49 @@ reads return **rows**, never a key-to-value map, so the confusion is not express
 `getPrefix` exists **only** in the `POST` body. It is refused inside the transaction wire
 (`kv_get_prefix_not_allowed_in_transaction`) and it has never been a query parameter. The boundary
 is the cost, not the operation: `get` and `getMany` are allowed inside a transaction because the
-caller fixes their cost up front, and unbounded read work does not belong in the transaction that
-holds the outermost lock space.
+caller fixes their cost up front, and a read whose size the caller does not fix does not belong in
+a transaction.
 
 An empty or absent prefix is `kv_prefix_required`, a `400`. A namespace is not a table to enumerate.
 
-`limit` defaults to 100 and is **clamped** to `QUEEN_KV_PREFIX_LIMIT`, never rejected, with
-`truncated` telling the truth: a `400` on a limit that is too high is an error the caller cannot fix
-without reading the server's configuration. There is a second ceiling in **bytes**,
-`QUEEN_KV_MAX_READ_BYTES`, applied to the whole call, because a ceiling on keys is not a ceiling on
-bytes and a thousand 64 KiB values are 64 MB.
+`limit` defaults to 100 and is **clamped** to `1..1000`, never rejected, with `truncated` telling
+the truth: a `400` on a limit that is too high is an error the caller cannot fix without reading the
+server's configuration. There is a second ceiling in **bytes**: one call reads at most 4 MiB of
+values across all of its operations, because a ceiling on keys is not a ceiling on bytes and a
+thousand 64 KiB values are 64 MB.
 
-`after` is an exclusive keyset cursor, not an offset. Each page is its own read-committed snapshot,
-so it is **not** a snapshot of the namespace: with `after`, a key inserted behind the cursor is not
-seen. Good for compacting state, wrong for an exact count.
+`after` is an exclusive keyset cursor, not an offset. Each page is read on its own, so the pages
+together are **not** a snapshot of the namespace: with `after`, a key inserted behind the cursor is
+not seen. Good for compacting state, wrong for an exact count.
 
 ## The console listing
 
 `GET /api/v1/resources/kv/namespaces` and `POST /api/v1/resources/kv/list` are a pair, and they are
 not `getPrefix` under another name. `getPrefix` requires a prefix, never returns an expired row, and
-reaches a cell through the proxy as a gated KV batch that a Viewer cannot call at all. A console
+reaches a node through the proxy as a gated KV batch that a Viewer cannot call at all. A console
 needs the other shape of the same read: the whole namespace, cursor-paged, visible to a read-only
-identity, with the rows the sweeper has not collected yet **shown and labelled**.
+identity, with the rows the expiry sweep has not removed yet **shown and labelled**.
 
 The selector answers `{"namespaces": [{"namespace": "orders", "keys": 27413}]}`, ordered by
 namespace in byte order. `keys` counts every row of the namespace exactly, expired ones included: an
-expired row is not a live key, but it is still an occupied one. That is a different population from
-the `kvRows` figure on [the queue listing](/reference/http/queues), which the sweeper computes over
-live rows only, every five minutes, sampled above its threshold. So the per-namespace count can
-legitimately be the larger of the two, and a dashboard showing both labels one of them `≈`.
+expired row is not a live key, but it still occupies the namespace until the leader's expiry sweep
+removes it. The `kvRows` figure on [the queue listing](/reference/http/queues) counts the same rows
+across all of the tenant's namespaces.
 
 The page takes a JSON body and no query parameters at all:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `namespace` | required | validated in SQL; a malformed one is a `400`, an unknown one is an empty page |
-| `prefix` | `""` | free text, a byte range under `starts_with`: `%` and `_` are ordinary bytes, and an empty prefix lists the whole namespace |
-| `after` | none | the exclusive keyset cursor: the last key of the previous page |
+| `namespace` | required | checked against the namespace pattern above; a malformed one is a `400`, an unknown one is an empty page |
+| `prefix` | `""` | free text, a byte prefix: `%` and `_` are ordinary bytes, and an empty prefix lists the whole namespace |
+| `after` | none | the exclusive keyset cursor: the last key of the previous page. An empty string is no cursor |
 | `limit` | `100` | clamped to `1..1000`, never rejected |
 | `keysOnly` | `false` | omit every value |
-| `includeExpired` | `false` | include rows whose expiry has passed and whose sweep has not happened yet |
+| `includeExpired` | `false` | include rows whose expiry has passed and that the expiry sweep has not removed yet |
 
-The wire default is `false`, matching the stored procedure's own. The dashboard's KV browser sends
-`includeExpired: true` on every page, explicitly, because an expired row is still an occupied one
-and hiding it would make the page disagree with the count in the selector beside it.
+The wire default is `false`, the same answer every other read on this surface gives. The dashboard's
+KV browser sends `includeExpired: true` on every page, explicitly, because an expired row is still
+an occupied one and hiding it would make the page disagree with the count in the selector beside it.
 
 ```bash
 curl -sS -X POST http://localhost:6632/api/v1/resources/kv/list -H 'content-type: application/json' -d '{"namespace":"orders","limit":100,"includeExpired":true}'
@@ -190,29 +199,29 @@ curl -sS -X POST http://localhost:6632/api/v1/resources/kv/list -H 'content-type
 ```
 
 `truncated` is true when another page exists, and `nextAfter` is then the last key printed. Send it
-back as `after`. Both stamps are rendered in UTC with a literal `Z`, whatever the broker's session
-time zone is. Every row carries `expired`, computed in SQL against one instant for the whole page, so
-a page cannot show one key alive and the next dead by a few microseconds, and a client must never
-re-decide it from `expiresAt` against its own clock.
+back as `after`. Both stamps are rendered in UTC with a literal `Z`. With `includeExpired`, every row
+carries `expired`, computed against one instant for the whole page, so a page cannot show one key
+alive and the next dead by a few microseconds, and a client must never re-decide it from `expiresAt`
+against its own clock.
 
 A page can also end **before** the row limit. `bytes` is the value bytes the page charged against
-`QUEEN_KV_MAX_READ_BYTES` (4 MiB), the row that straddles the budget is kept and the page stops
-there: a thousand keys of 64 KiB are 64 MB, and the real resource is the byte. So a short page with
+the 4 MiB read budget; the row that straddles the budget is kept and the page stops there: a
+thousand keys of 64 KiB are 64 MB, and the real resource is the byte. So a short page with
 `truncated: true` is the byte budget speaking, not a broken pager. Under `keysOnly` that figure is
 `0`, which is why a keysOnly page can only ever stop at the row limit.
 
 **Why the list is a `POST`.** Its cursor is a key. `?after=wh.deliver:acme:b15f6d46…` in a URL is
-recorded by the access log of the browser's proxy, the ingress, the queen proxy and the broker. It is
-the same rule that makes the path routes refuse a query string, applied to the one parameter that
+recorded by the access log of the browser's proxy, the ingress, the Queen proxy and the broker. It
+is the same rule that makes the path routes refuse a query string, applied to the one parameter that
 would otherwise have to travel in one. It is nevertheless a **read**: `read-only` broker-side, so a
 read-only token can page through a namespace, and `Read` at the proxy, where `/api/v1/resources` is
-classified by prefix and method-agnostically. Neither route is metered as a KV operation, and neither
-is behind the `kv` plan feature. Both are behind the KV kill switch and the per-tenant read rate, so
-a paused cell answers `503 kv_disabled` here exactly as it does on the batch route.
+classified by prefix whatever the method. Neither route is behind the `kv` plan feature. Both are
+behind the KV kill switch and the per-tenant read rate, so a paused KV answers `503 kv_disabled`
+here exactly as it does on the batch route.
 
 Two things this pair deliberately does not have: a total, and an offset. Page 135 of 27,000 keys
 costs what page 1 costs because the cursor is a keyset cursor; knowing it is page 135 of anything
-would cost a `count(*)` per page.
+would cost a count per page.
 
 ## The one rule about status codes
 
@@ -223,13 +232,12 @@ explicit field in the body. The cost is stated rather than hidden: `curl` does n
 REST habit expects on a missing key, and anything scripting this surface has to read the body. The
 benefit is that `applied: false`, which is the single most frequent outcome of the product's
 number-one use case, does not land inside the retry policy, the error metrics and the dashboards of
-seven clients plus the proxy. The house precedent is queue deletion, which keeps `200` on
+every client and the proxy. The house precedent is queue deletion, which keeps `200` on
 `deleted: false` for the same reason.
 
 `ETag` yes, `If-Match` no. The response header is free and informative; a conditional write goes
 through `expect` in the body and nowhere else, so a precondition has exactly one spelling. The ETag
-saves **bandwidth, not the round trip to the database**: nothing caches KV values, with any TTL, and
-nothing will.
+saves **bandwidth, not the round trip**: nothing caches KV values, with any TTL.
 
 ## The closed `reason` taxonomy
 
@@ -237,8 +245,8 @@ A write that returns `applied: false` carries exactly one `reason`, from this li
 
 | `reason` | Which operation | What happened |
 | --- | --- | --- |
-| `exists` | `put` with `expect: 0` | a live row is already there, and it is not yours |
-| `absent` | `put` or `delete` with `expect: N > 0` | no live row to update or delete |
+| `exists` | `put` or `delete` with `expect: 0`, and `putIfAbsent` | a live row is already there, and it is not yours |
+| `absent` | `put` or `delete` with `expect: N > 0`, and a `delete` without `expect` | no live row to update or delete |
 | `version` | `put` or `delete` with `expect: N > 0` | the row is there and its version is not `N` |
 | `limit` | `incr` | the result would cross `min` or `max`, or `delta` itself is outside them |
 | `type` | `incr` | a live row holds a value that is not a number |
@@ -253,17 +261,17 @@ that cannot be given back.
 
 `reason: 'type'` is evaluated against a **live** row only. An expired row counts as zero and is
 incremented, so a key initialised as an object and then left to expire does not reject every request
-of that customer until the sweeper gets to it.
+of that customer until the sweep gets to it.
 
 ## Escalating a verdict into a rollback
 
-`required: true` on a `put`, `delete` or `incr` turns a lost precondition into a failure of the whole
-call, per element and opt-in. That is what makes a gate a gate inside
+`required: true` on a `put`, `putIfAbsent`, `delete` or `incr` turns a lost precondition into a
+failure of the whole call, per element and opt-in. That is what makes a gate a gate inside
 [`POST /api/v1/transaction`](/reference/http/transaction): the ack does not commit if the marker was
 already there.
 
-The transaction really does abort in PostgreSQL, and the broker translates the abort into **HTTP
-200**:
+Nothing in the call is written, and inside a transaction nothing in the bundle is: no message, no
+ack, no other key. The broker answers **HTTP 200**:
 
 ```json
 {
@@ -277,23 +285,31 @@ The transaction really does abort in PostgreSQL, and the broker translates the a
 ```
 
 A lost `required` is the expected outcome of every legitimate redelivery, which is why it is not a
-4xx: it must pollute neither the error metrics nor the retry policies. `failedIndex` is in the
-**flat** result space of the transaction, so it indexes the same array the client already reads.
-`kvReason` is one of the five above. Clients branch on those two fields and never on the message.
+4xx: it must pollute neither the error metrics nor the retry policies. On `POST /api/v1/kv`,
+`failedIndex` is the operation's index; inside a transaction it is in the **flat** result space of
+the transaction, so it indexes the same array the client already reads. `kvReason` is one of the
+five above. Clients branch on those two fields and never on the message.
 
 ## Status codes
 
 | Code | When | `error` |
 | --- | --- | --- |
 | `200` | the call ran, whatever each operation decided | |
-| `400` | shape: charset, missing or double expiry, unknown op, empty prefix, a `tenant` field inside an op, one key named twice | `kv_bad_request` |
-| `400` | a query string on any route but the batch | `kv_no_query_string` |
+| `400` | shape: charset, missing or double expiry, unknown op, empty prefix, a `tenant` field inside an op, one key written twice, too many operations or keys in one call. `reason` names which | `kv_bad_request` |
+| `400` | a query string on any route but the batch (`reason: "kv_no_query_string"`) | `kv_bad_request` |
 | `403` | occupancy quota exhausted | `kv_quota_exceeded` |
-| `403` | the feature is not on the plan, or tenancy is on and there is no quota row | `feature_gated` |
-| `403` | the operator paused KV **and** the operations arrived inside the transaction wire | `kv_disabled` |
-| `413` | a value or a key over its ceiling | `payload_too_large` |
+| `403` | the plan does not include KV, or a write from a tenant with no KV grant while `QUEEN_KV_REQUIRE_GRANT` is on (its default follows `QUEEN_TENANCY_HEADER`) | `feature_gated` |
+| `413` | a value or a key over its ceiling, or a call larger than one log entry may carry | `payload_too_large` |
 | `429` | per-tenant read or write rate exceeded, with `Retry-After` | `rate_limited` |
-| `503` | the KV pool is exhausted, the database is slow, or the operator paused KV, with `Retry-After` | `kv_unavailable`, `kv_disabled` |
+| `500` | an internal error | `kv_error` |
+| `503` | the call could not complete: its deadline (`QUEEN_STMT_TIMEOUT_MS`, default 30 s) passed, the cluster had no leader or asked for a retry (`reason` `kv_timeout`, `kv_no_leader`, `kv_retry`), or the node's per-tenant table is full. With `Retry-After: 1` | `kv_unavailable` |
+| `503` | an operator paused KV, with `Retry-After: 1` | `kv_disabled` |
+| `507` | a `put`, `putIfAbsent` or `incr` while the node's data disk is above `QUEEN_RAFT_DISK_HIGH_PCT` (default 85) | code `storage_full` |
+
+After `kv_timeout` or `kv_retry` the outcome of a write is unknown: its entry may have committed.
+The `507`, and the `503` a follower gives before the KV handler runs when it cannot reach a leader
+(code `no_leader` or `retry`), use the broker's common envelope `{"error": "…", "code": "…"}`; see
+[HTTP API conventions](/reference/http/).
 
 One sentence decides which of the three refusals you got:
 
@@ -302,21 +318,21 @@ One sentence decides which of the three refusals you got:
 
 Two consequences of that rule are worth stating on their own.
 
-**`403` and not `507` for a full quota.** `507` is WebDAV, no HTTP client treats it specially, and
-the gateway already answers `403` for storage quota, so a third status would be a second dialect of
-"out of space" to keep aligned across seven clients forever. And **not `429`**, because a
-`Retry-After` on a row quota is a lie: no delay resolves it, and it would make the client retry in a
-loop exactly when the tenant is already over.
+**`403` and not `429` for a full quota**, because a `Retry-After` on a row quota is a lie: no delay
+resolves it, and it would make the client retry in a loop exactly when the tenant is already over.
+And **not `507`** either: on this surface `507` means the node's data disk is past its high-water
+mark, a condition of the node that refuses growing writes for every tenant, while a quota belongs to
+one tenant.
 
 **Reads and deletes are always allowed**, including over quota. A tenant that cannot delete cannot
-get back under the limit.
+get back under the limit. The disk gate follows the same rule: it refuses only the writes that can
+grow the store.
 
-**A switched-off KV is a `503`, and never a `404`.** There used to be a boot flag that decided
-whether these routes were registered, and a call to an unregistered route got `404`; the flag is
-gone, the surface is on every cell, and the only way it stops answering is an operator's runtime
-switch. That is temporary and the client **should** come back, which is what `503` with `Retry-After`
-says. Inside the transaction wire the same pause answers `403` instead, because a bundle that retries
-a paused KV forever is a client spinning on the hot path with messages in hand.
+**A switched-off KV is a `503`, and never a `404`.** The routes are served by every node, and the
+only way the surface stops answering is an operator's runtime switch (`{"kv": false}` on
+`POST /api/v1/system/kv-timers`, see [system routes](/reference/http/system)). That is temporary
+and the client **should** come back, which is what `503` with `Retry-After` says. The switch covers
+the six routes on this page; it does not refuse the `kv` array of `POST /api/v1/transaction`.
 
 ## Examples
 
@@ -350,9 +366,10 @@ When the key does not derive from a partition key, use the atomic operations: `p
 way **out** of the compare-and-swap loop and a precondition would put the loop back.
 
 And a hierarchy worth stating in this order: **the ack transaction is the primary fence, `expect` is
-the secondary assertion.** A state write that shares its transaction with the ack is undone when an
-expired lease makes the ack raise, which compare-and-swap cannot do, because an `expect` against a
-version that still matches succeeds from a zombie worker just as well as from a live one.
+the secondary assertion.** A state write that shares a transaction with the ack is not applied when
+the ack is refused for an expired lease: the transaction is one entry in the replicated log and
+applies whole or not at all. Compare-and-swap cannot do that, because an `expect` against a version
+that still matches succeeds from a zombie worker just as well as from a live one.
 
 Put `expect` in anyway. If it never fails it cost nothing, and the day it fails you have just
 discovered that two consumers are serving the same partition, with a verdict instead of a wrong

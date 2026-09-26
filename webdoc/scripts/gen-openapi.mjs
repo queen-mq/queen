@@ -4,8 +4,9 @@
  * Nothing here is transcribed. Every part of each operation comes from a
  * specific construct in the Rust source:
  *
- *   path + method      the `Router::new()` chain (broker main.rs; proxy main.rs
- *                      plus the nested console and auth routers)
+ *   path + method      the broker's raft router and the generic adapter behind it
+ *                      (`brokerRoutes` in lib/source.mjs); the proxy's
+ *                      `router()` in app.rs plus its nested routers
  *   path parameters    the `:name` segments of the registered path
  *   query parameters   the handler's `Query<T>` extractor — the fields of `T`
  *                      with their serde renames and optionality; or, for
@@ -18,17 +19,28 @@
  *   tenant scoping     whether the handler takes the `Tenant` extension
  *
  * What is NOT derivable is marked as such in the document rather than invented.
- * The hot paths build their response JSON by string concatenation
- * (`render_push_results`, `render_pop_parts`, `render_ack_results`), and several
- * management handlers pass a stored procedure's JSON through verbatim; for those
- * the response schema is an open object carrying `x-queen-schema: "opaque"` and
- * a pointer to the page that documents the shape. A spec that says "object" is
- * honest; a spec that invents field names is not.
+ * The hot paths build their response JSON by string concatenation, and the
+ * routes the generic adapter serves read their own query string and body; for
+ * those the response schema is an open object carrying `x-queen-schema:
+ * "opaque"` and a pointer to the page that documents the shape. A spec that
+ * says "object" is honest; a spec that invents field names is not.
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { ROUTER_BUILDER, WEBDOC, emitPartial, isCheck, repoRead, rustFiles, sliceBlock } from "./lib/source.mjs";
+import {
+  RAFT_ADAPTER,
+  RAFT_ADAPTER_DYNAMIC,
+  RAFT_ROUTER,
+  WEBDOC,
+  adapterIgnoresCtx,
+  brokerRoutes,
+  emitPartial,
+  isCheck,
+  repoRead,
+  rustFiles,
+  sliceBlock,
+} from "./lib/source.mjs";
 
 const OUT = join(WEBDOC, "public", "openapi");
 const VERSION = "1.0.0";
@@ -43,8 +55,11 @@ const STATUS = {
   NOT_FOUND: "404",
   CONFLICT: "409",
   PAYLOAD_TOO_LARGE: "413",
+  TOO_MANY_REQUESTS: "429",
   INTERNAL_SERVER_ERROR: "500",
   SERVICE_UNAVAILABLE: "503",
+  GATEWAY_TIMEOUT: "504",
+  INSUFFICIENT_STORAGE: "507",
 };
 
 const STATUS_TEXT = {
@@ -57,8 +72,11 @@ const STATUS_TEXT = {
   404: "Not found.",
   409: "Conflict.",
   413: "Body larger than QUEEN_MAX_BODY_BYTES.",
+  429: "Push admission is full: retry after the Retry-After seconds.",
   500: "Internal error.",
-  503: "Dependency unavailable, typically PostgreSQL.",
+  503: "No leader is known (an election, or a cluster without its majority), or the command timed out: retry after the Retry-After seconds.",
+  504: "The operation did not finish inside its deadline and may still complete.",
+  507: "The disk gate is closed: the data directory's filesystem, or the store's map, is over its high mark.",
 };
 
 // ---------------------------------------------------------------------------
@@ -69,7 +87,7 @@ const STATUS_TEXT = {
 function indexHandlers(files) {
   const out = new Map();
   for (const { path: file, text } of files) {
-    const re = /pub async fn (\w+)\s*\(([\s\S]*?)\)\s*->\s*Response\s*\{/g;
+    const re = /pub(?:\([^)]*\))? async fn (\w+)\s*\(([\s\S]*?)\)\s*->\s*Response\s*\{/g;
     let m;
     while ((m = re.exec(text))) {
       const [, name, args] = m;
@@ -237,9 +255,9 @@ function queryParams(handler, structs) {
   }
   // A handler that takes the map only to REFUSE it. The KV path routes do this
   // on purpose (a prefix in a URL is recorded by every access log between the
-  // client and the database), and the "forwarded" note below — "parameters are
-  // forwarded to a stored procedure" — would be the opposite of the truth on
-  // exactly the routes where the rule is a privacy boundary.
+  // client and the broker), and the "forwarded" note below would be the
+  // opposite of the truth on exactly the routes where the rule is a privacy
+  // boundary.
   if (/\breject_query\s*\(/.test(handler.body)) return { mode: "rejected", params: [] };
   return { mode: "forwarded", params: [] };
 }
@@ -381,8 +399,8 @@ function parseRouterChain(block) {
  * untouched by this change so that its diff says exactly one thing.
  * 2026-09-04: the bulk DLQ purge arm, in the admin block above the GET block
  * exactly as the Rust places it, so `GET /api/v1/dlq` stays read-only.
- * 2026-09-04: the partition-discovery arm (PLAN_S3_SINK.md §5.1), beside the
- * fetch arm it is the twin of and outside the GET block for the same reason.
+ * 2026-09-04: the partition-discovery arm, beside the fetch arm it is the twin
+ * of and outside the GET block for the same reason.
  * 2026-09-11: the console's KV page (PLAN_DASHBOARD_ACTIONS.md §2.5), beside
  * those two and for the same reason. This one is not in the harmless direction
  * of the gap above: the whole point of the Rust arm is that a READ-ONLY token
@@ -414,7 +432,7 @@ function accessLevel(method, path) {
   // PLAN_QUEEN_KAFKA.md C2: a pure read, outside the GET block because the
   // batch request is a body.
   if (m === "POST" && path === "/api/v1/fetch") return "read-only";
-  // PLAN_S3_SINK.md §5.1: the fetch arm's twin, and read-only for the same
+  // The fetch arm's twin (partition discovery), and read-only for the same
   // reason.
   if (m === "POST" && path === "/api/v1/partitions/changed") return "read-only";
   // PLAN_DASHBOARD_ACTIONS.md §2.5: the console's keyset page over a KV
@@ -465,8 +483,9 @@ const TAGS = [
   // the two families share no storage, no durability contract and no verbs.
   ["Ephemeral queues", (p) => /^\/api\/v1\/ephemeral(\/|$)/.test(p)],
   ["Operator", (p) => p.startsWith("/api/v1/system")],
+  ["Cluster", (p) => p.startsWith("/api/v1/raft/")],
+  ["Reads by offset", (p) => p === "/api/v1/fetch" || p === "/api/v1/partitions/changed"],
   ["Dashboard identity", (p) => p.startsWith("/auth/")],
-  ["Internal", (p) => p.startsWith("/internal/")],
 ];
 
 function tagOf(path) {
@@ -521,9 +540,73 @@ const ERROR_SCHEMA = {
 // Broker document
 // ---------------------------------------------------------------------------
 
+/** The tenant header parameter, for an operation that reads the tenant. */
+const TENANT_HEADER = {
+  name: "x-queen-tenant",
+  in: "header",
+  required: false,
+  schema: { type: "string", format: "uuid" },
+  description:
+    "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; " +
+    "unauthenticated by design, so the broker must not be reachable directly by tenants.",
+};
+
+/**
+ * An operation the generic adapter serves (`api_impl` / `api_dynamic`). Its
+ * handler reads the raw query string and body itself, so neither is derivable
+ * from a Rust type: the operation asserts the path, the method, the access
+ * level and the tenant scoping, and points at the reference page for the rest.
+ */
+function adapterOperation(r, oapiPath, params, level, tenantScoped) {
+  const op = {
+    operationId: `${r.method}_${oapiPath.replace(/[^\w]+/g, "_").replace(/^_|_$/g, "")}`,
+    tags: [tagOf(r.path)],
+    summary: `${r.method.toUpperCase()} ${r.path}`,
+    parameters: [
+      ...params.map((p) => ({ name: p, in: "path", required: true, schema: { type: "string" } })),
+      ...(tenantScoped ? [TENANT_HEADER] : []),
+    ],
+    responses: {
+      200: {
+        description: STATUS_TEXT[200],
+        content: {
+          "application/json": {
+            schema: {
+              description:
+                "Shape not derivable from a Rust type. See the route's page under " +
+                "/reference/http for the field-by-field contract.",
+            },
+          },
+        },
+        "x-queen-schema": "opaque",
+      },
+      400: { description: STATUS_TEXT[400], content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
+      503: { description: STATUS_TEXT[503], content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
+    },
+    "x-queen-access-level": level,
+    "x-queen-tenant-scoped": tenantScoped,
+    "x-queen-handler": `${RAFT_ADAPTER}::${r.handler}`,
+    "x-queen-query-params": "adapter",
+    "x-queen-note":
+      "Served by the broker's generic adapter, which reads its own query string and body: " +
+      "parameters and body are documented on the reference page for this route, not derived here.",
+  };
+  if (level !== "public") op.security = [{ bearerAuth: [] }];
+  if (r.method !== "get" && r.method !== "delete") {
+    op.requestBody = {
+      required: false,
+      content: { "application/json": { schema: { type: "object" } } },
+      "x-queen-schema": "opaque",
+    };
+  }
+  return op;
+}
+
 function brokerSpec(handlers, structs) {
-  const chain = sliceBlock(repoRead("server/src/main.rs"), ROUTER_BUILDER, ".with_state(state);");
-  const routes = dropTrailingSlashTwins(parseRouterChain(chain));
+  const ignoresCtx = adapterIgnoresCtx();
+  const routes = dropTrailingSlashTwins(
+    brokerRoutes().map((r) => ({ ...r, method: r.method.toLowerCase() })),
+  );
   if (routes.length < 40) throw new Error(`only parsed ${routes.length} broker routes`);
 
   const paths = {};
@@ -531,12 +614,24 @@ function brokerSpec(handlers, structs) {
   let opaqueBodies = 0;
 
   for (const r of routes) {
+    if (r.via === "adapter") {
+      const { oapiPath, params } = toOpenApiPath(r.path);
+      const level = accessLevel(r.method, r.path);
+      const tenantScoped =
+        !r.path.startsWith("/api/v1/system/") && r.passesCtx && !ignoresCtx.has(r.handler);
+      const op = adapterOperation(r, oapiPath, params, level, tenantScoped);
+      if (op.requestBody) opaqueBodies++;
+      paths[oapiPath] ??= {};
+      paths[oapiPath][r.method] = op;
+      continue;
+    }
     const h = handlers.get(r.handler);
     if (!h) throw new Error(`router references handler ${r.handler}, not found in server/src`);
 
     const { oapiPath, params, wildcard } = toOpenApiPath(r.path);
     const level = accessLevel(r.method, r.path);
-    const tenantScoped = /tenant::Tenant|Extension<Tenant>/.test(h.args);
+    const tenantScoped =
+      !r.path.startsWith("/api/v1/system/") && /tenant::Tenant|Extension<Tenant>/.test(h.args);
     const q = queryParams(h, structs);
     // GET is excluded by rule; DELETE is not any more. `requestBody` already
     // gates on the handler taking `body: Bytes`, and until now no DELETE handler
@@ -560,19 +655,7 @@ function brokerSpec(handlers, structs) {
           schema: { type: "string" },
         })),
         ...q.params,
-        ...(tenantScoped
-          ? [
-              {
-                name: "x-queen-tenant",
-                in: "header",
-                required: false,
-                schema: { type: "string", format: "uuid" },
-                description:
-                  "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; " +
-                  "unauthenticated by design, so the broker must not be reachable directly by tenants.",
-              },
-            ]
-          : []),
+        ...(tenantScoped ? [TENANT_HEADER] : []),
       ],
       responses: responses(h),
       "x-queen-access-level": level,
@@ -587,14 +670,14 @@ function brokerSpec(handlers, structs) {
     }
     if (q.mode === "forwarded") {
       op["x-queen-note"] =
-        "Query parameters are forwarded to a stored procedure without being read by name in " +
-        "Rust, so they are not recoverable from the handler. See the reference page for this route.";
+        "Query parameters are not read by name in this handler (it hands the request on), so " +
+        "they are not recoverable from it. See the reference page for this route.";
     }
     if (q.mode === "rejected") {
       op["x-queen-note"] =
         "This route takes no query parameters and refuses any query string outright, rather " +
         "than ignoring one: a prefix or key in a URL is recorded by every access log, proxy " +
-        "sample and tracing span between the client and the database.";
+        "sample and tracing span between the client and the broker.";
     }
 
     paths[oapiPath] ??= {};
@@ -610,14 +693,15 @@ function brokerSpec(handlers, structs) {
         summary: "The HTTP API of the Queen MQ broker.",
         description: [
           "Generated from the broker's own source at documentation build time by",
-          "`webdoc/scripts/gen-openapi.mjs`: paths and methods come from the axum router,",
-          "query parameters from each handler's extractor, request bodies from the structs",
-          "handlers deserialize into, response codes from the `StatusCode` variants each",
-          "handler can return, and authorization from `auth::route_access_level`.",
+          "`webdoc/scripts/gen-openapi.mjs`: paths and methods come from the raft router and",
+          "the generic adapter behind it, query parameters from each router handler's",
+          "extractor, request bodies from the structs those handlers deserialize into,",
+          "response codes from the `StatusCode` variants each can return, and authorization",
+          "from `auth::route_access_level`.",
           "",
           "Response bodies on the hot paths are assembled by string concatenation rather than",
-          "serialized from a type, and several management routes forward a stored procedure's",
-          "JSON verbatim. Those responses carry `x-queen-schema: \"opaque\"` and are typed as an",
+          "serialized from a type, and the routes the generic adapter serves read their own",
+          "query string and body. Those carry `x-queen-schema: \"opaque\"` and are typed as an",
           "open object: the field-by-field shape is documented on the reference pages instead of",
           "guessed at here.",
           "",
@@ -660,13 +744,17 @@ function subRouter(file) {
 }
 
 function proxySpec() {
-  const mainText = repoRead("proxy/src/main.rs");
-  const chain = sliceBlock(mainText, ROUTER_BUILDER, ";");
+  const appText = repoRead("proxy/src/app.rs");
+  const chain = sliceBlock(appText, "let app = Router::new()", ".with_state(st);");
   const own = parseRouterChain(chain);
 
+  // The `.nest(prefix, ...)` calls of the same chain, each a `pub fn router()`
+  // in its own file.
   const nested = [
     ...subRouter("proxy/src/oauth.rs").map((r) => ({ ...r, path: `/auth${r.path}` })),
     ...subRouter("proxy/src/console.rs").map((r) => ({ ...r, path: `/api/console${r.path}` })),
+    ...subRouter("proxy/src/operator.rs").map((r) => ({ ...r, path: `/api/operator${r.path}` })),
+    ...subRouter("proxy/src/cp.rs").map((r) => ({ ...r, path: `/api/cp${r.path}` })),
   ];
 
   const routes = dropTrailingSlashTwins(
@@ -679,9 +767,10 @@ function proxySpec() {
     const { oapiPath, params, wildcard } = toOpenApiPath(r.path);
     const isConsole = r.path.startsWith("/api/console");
     const isAuth = r.path.startsWith("/auth");
+    const isCp = r.path.startsWith("/api/cp");
     const op = {
       operationId: `${r.method}_${oapiPath.replace(/[^\w]+/g, "_").replace(/^_|_$/g, "") || "root"}`,
-      tags: [isConsole ? "Console" : isAuth ? "Authentication" : "Service"],
+      tags: [isConsole ? "Console" : isAuth ? "Authentication" : isCp ? "Control plane" : "Service"],
       summary: `${r.method.toUpperCase()} ${r.path}`,
       parameters: params.map((p) => ({ name: p, in: "path", required: true, schema: { type: "string" } })),
       responses: { 200: { description: "OK" } },
@@ -690,6 +779,12 @@ function proxySpec() {
     if (wildcard) {
       op["x-queen-note"] =
         "Registered in axum as a catch-all segment: every path below this prefix resolves here.";
+    }
+    if (isCp) {
+      op.security = [{ cpToken: [] }];
+      op.description =
+        "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no " +
+        "token configured the whole surface answers 404.";
     }
     if (isConsole) {
       op.security = [{ sessionCookie: [] }, { bearerAuth: [] }];
@@ -709,13 +804,14 @@ function proxySpec() {
         version: VERSION,
         summary: "The proxy's own surface: service endpoints, login, and the cluster console.",
         description: [
-          "Generated from `proxy/`'s router at documentation build time.",
+          "Generated from `proxy/`'s router at documentation build time. The proxy runs inside",
+          "the broker process when QUEEN_PROXY_EMBEDDED is on.",
           "",
           "This document covers only the endpoints the proxy *serves*. Every other path is",
-          "forwarded to the broker of the cluster addressed by the request's first DNS label,",
-          "after classification, authentication, quota and rate-limit checks. For the broker's",
-          "own surface use the broker document; for which of those routes a tenant credential",
-          "can reach, see the route-class table in the documentation.",
+          "handed to the broker, in-process, for the cluster addressed by the request's first DNS",
+          "label, after classification, authentication, quota and rate-limit checks. For the",
+          "broker's own surface use the broker document; for which of those routes a tenant",
+          "credential can reach, see the route-class table in the documentation.",
           "",
           "Response shapes are not derivable here: console handlers build their JSON inline.",
           "Only paths, methods, path parameters and the credential kind are asserted.",
@@ -723,7 +819,7 @@ function proxySpec() {
         license: { name: "Apache-2.0", identifier: "Apache-2.0" },
       },
       servers: [{ url: "https://{cluster}.example.com", variables: { cluster: { default: "my-cluster" } } }],
-      tags: [{ name: "Service" }, { name: "Authentication" }, { name: "Console" }],
+      tags: [{ name: "Service" }, { name: "Authentication" }, { name: "Console" }, { name: "Control plane" }],
       components: {
         securitySchemes: {
           bearerAuth: {
@@ -736,6 +832,12 @@ function proxySpec() {
             in: "cookie",
             name: "queen_session",
             description: "The httpOnly session cookie the proxy sets at login.",
+          },
+          cpToken: {
+            type: "apiKey",
+            in: "header",
+            name: "x-queen-cp-token",
+            description: "The control-plane token, the value of QUEEN_PROXY_CP_TOKEN.",
           },
         },
         schemas: { Error: { type: "object", properties: { error: { type: "string" }, code: { type: "string" } } } },
@@ -831,8 +933,8 @@ function main() {
     title: "OpenAPI coverage",
     description: "How many operations each generated OpenAPI document covers, and how much of each was derived from a Rust type.",
     sources: [
-      "server/src/main.rs, server/src/handlers/*.rs (broker)",
-      "proxy/src/{main,console,oauth}.rs (proxy)",
+      `${RAFT_ROUTER}, ${RAFT_ADAPTER}, ${RAFT_ADAPTER_DYNAMIC}, server/src/handlers/*.rs (broker)`,
+      "proxy/src/{app,console,oauth,operator,cp}.rs (proxy)",
     ],
     body: lines,
     check,

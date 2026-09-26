@@ -10,10 +10,10 @@ verifiedBy:
 ---
 
 The four tutorials before this one move messages. This one aggregates them, and the aggregation
-lives in the same database as the queue: window state per partition, each closed window pushed to
-an output queue, and the acknowledgement of the inputs it was computed from, all in one PostgreSQL
-transaction. That is exactly-once aggregation with no changelog topic and no state store to size
-and operate.
+lives in the same broker as the queue: window state per partition, each closed window pushed to an
+output queue, and the acknowledgement of the inputs it was computed from, all in one entry of the
+broker's replicated log. That is exactly-once aggregation with no changelog topic and no state
+store to size and operate.
 
 Where the JavaScript client takes a single options object, this one spells the query as a chain:
 `window_tumbling` and `idle_flush_ms` for the window, one call per aggregate, `to` for the sink,

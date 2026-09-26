@@ -914,7 +914,7 @@ pub async fn dispatch(conn: &mut Conn, frame: Bytes) -> Reply {
         // Three of these four await nothing at all: a transaction's partitions,
         // its group and its offsets are STAGED in this process
         // (`crate::txn`), and the only request that talks to Queen is EndTxn —
-        // which is the whole design, because that one call is one Postgres
+        // which is the whole design, because that one call is one broker
         // transaction carrying every record and every offset together.
         //
         // None of them takes `api_version`: nothing inside `0..=3` changes a

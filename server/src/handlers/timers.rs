@@ -23,11 +23,11 @@
 //! cancels of a tenant that is over quota — while the fire never stops
 //! automatically (§12.1), so that tenant would keep producing messages it cannot
 //! stop, until the horizon or an operator. The block would produce the opposite
-//! of its purpose. Schedule and cancel are the same stored procedure but NOT the
+//! of its purpose. Schedule and cancel are the same operation but NOT the
 //! same authorization decision.
 //!
-//! ISOLATION (§13.1): nothing here names a table or a stored procedure — the
-//! tenant is bound by the wrappers in `db.rs` and comes from the middleware, not
+//! ISOLATION (§13.1): nothing here reaches into the storage layer directly —
+//! the tenant is bound by the wrappers in `db.rs` and comes from the middleware, not
 //! from a body. `tests/kv_handler_isolation.rs` enforces it mechanically.
 
 use std::collections::HashMap;
@@ -42,7 +42,6 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use super::{json, AppState};
-use crate::db;
 use crate::tenant::Tenant;
 
 // ---------------------------------------------------------------------------
@@ -69,7 +68,7 @@ fn env_usize(key: &'static str, def: usize) -> usize {
 }
 
 /// §9.7 assumes a cap of 256 ops per call, and the metering counts PER OP for
-/// exactly that reason. The stored procedure has no ceiling of its own on the
+/// exactly that reason. The planner has no ceiling of its own on the
 /// op count — this edge is the only one, which makes it load-bearing rather
 /// than defensive.
 fn max_ops_per_call() -> usize {
@@ -97,8 +96,8 @@ fn max_horizon_ms() -> i64 {
 }
 
 /// Exact timer counts are prefix-scoped so they remain index-driven. Bound the
-/// caller-controlled value in BYTES, matching PostgreSQL's `octet_length` and
-/// the actual size that travels through the URL, driver and btree comparator.
+/// caller-controlled value in BYTES, matching the actual size that travels
+/// through the URL and the store's own byte-order comparator.
 /// `laravel:` is the first consumer; the endpoint remains namespace-generic.
 const TIMER_COUNT_PREFIX_MAX_BYTES: usize = 128;
 
@@ -230,61 +229,6 @@ fn gated(
     Some(resp)
 }
 
-fn db_error_response(st: &AppState, e: &tokio_postgres::Error) -> Response {
-    let dbe = match e.as_db_error() {
-        None => {
-            st.metrics.record_db_error();
-            return unavailable("connection");
-        }
-        Some(d) => d,
-    };
-    let code = dbe.code().code().to_string();
-    let msg = dbe.message().to_string();
-    // The timer SP puts the actionable text in the MESSAGE (with the op's index)
-    // and the teaching in the HINT; there is no name-bearing DETAIL to withhold
-    // the way the KV precondition has (§13.5).
-    let hint = dbe.hint().map(str::to_string);
-    let class = &code[..2.min(code.len())];
-
-    match code.as_str() {
-        "22023" => json(
-            StatusCode::BAD_REQUEST,
-            err("timers_bad_request", Some(&msg), hint.as_deref()),
-        ),
-        "22001" => json(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            err("payload_too_large", Some(&msg), hint.as_deref()),
-        ),
-        _ if code == "40001" || code == "40P01" || matches!(class, "08" | "53" | "57" | "58") => {
-            st.metrics.record_db_error();
-            unavailable(&msg)
-        }
-        _ if class == "42" => {
-            st.metrics.record_db_error();
-            static MISCONF: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
-            if let Some(suppressed) = MISCONF.tick_now() {
-                tracing::error!(
-                    target: "timers",
-                    sqlstate = %code,
-                    suppressed,
-                    "timer stored procedure missing or malformed; is the schema applied?"
-                );
-            }
-            json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                err("timers_misconfigured", Some(&msg), None),
-            )
-        }
-        _ => {
-            st.metrics.record_db_error();
-            json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                err("timers_error", Some(&msg), None),
-            )
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Op preparation — the part of §8.2 point 5 that belongs to this route.
 // ---------------------------------------------------------------------------
@@ -293,16 +237,16 @@ fn db_error_response(st: &AppState, e: &tokio_postgres::Error) -> Response {
 /// silent drop (§4.2): a tenant posting `{"producerSub":"billing-service"}` would
 /// otherwise get, one second later, a frame in the log whose provenance is
 /// attested by the broker and forged by the client — and `producer_sub` is the
-/// one non-repudiable field of a frame. The stored procedure rejects the same
+/// one non-repudiable field of a frame. The planner rejects the same
 /// list; this edge exists because it also has to reject the UNDERSCORED spelling
 /// the broker itself uses.
 ///
-/// `_messageId` is the load-bearing one. The SP takes it as
-/// `COALESCE((op->>'_messageId')::uuid, gen_random_uuid())` — it is how the
+/// `_messageId` is the load-bearing one. The planner takes it as the
+/// caller-supplied id when present, else mints a fresh one — it is how the
 /// broker promises the id at schedule time (§20's "messageId promised at
-/// schedule") — and it is NOT in the SP's own server-owned list, because the SP
-/// cannot tell the broker's injection from a client's. This route can, so this
-/// is where a forged message id has to die.
+/// schedule") — and it is NOT in the planner's own server-owned list, because
+/// the planner cannot tell the broker's injection from a client's. This route
+/// can, so this is where a forged message id has to die.
 fn reject_server_owned(op: &Map<String, Value>, index: usize) -> Option<Response> {
     for k in op.keys() {
         if k.starts_with('_') {
@@ -340,22 +284,23 @@ async fn prepare_schedule(
     mut op: Map<String, Value>,
     index: usize,
 ) -> Result<Value, Response> {
-    let queue = match op.get("queue").and_then(|v| v.as_str()) {
-        Some(q) if !q.is_empty() => q.to_string(),
-        _ => {
-            return Err(bad_request(
-                "timers_queue_required",
-                &format!("op at index {index}: queue is required"),
-            ))
-        }
-    };
+    if !op
+        .get("queue")
+        .and_then(|v| v.as_str())
+        .is_some_and(|q| !q.is_empty())
+    {
+        return Err(bad_request(
+            "timers_queue_required",
+            &format!("op at index {index}: queue is required"),
+        ));
+    }
 
     // §4.2 and §20.6: only RELATIVE durations on this wire, and they are in
     // MILLISECONDS. The declared rule of the product is "durations that can be
     // sub-second are in milliseconds, the ones that cannot are in seconds" — a
     // 250 ms retry backoff is a real and central use of timers, a sub-second TTL
     // is not a real use for anybody. An absolute instant is not expressible: one
-    // clock, Postgres's, and no inter-broker skew can enter anywhere.
+    // clock, the RSM's, and no inter-broker skew can enter anywhere.
     let delay = match op.get("delayMs") {
         Some(v) if v.is_number() => v.as_f64().unwrap_or(0.0),
         _ => {
@@ -426,58 +371,9 @@ async fn prepare_schedule(
         ));
     }
 
-    // Encrypt when this queue is configured for at-rest encryption. A client
-    // that ALSO claims `encrypted:true` while the broker is about to encrypt is
-    // an ambiguity, not a convenience: double encryption or a lie to the
-    // consumer, depending on who is right. Refuse instead of guessing.
-    //
-    // Raft mode (PLAN_RAFT WP-2.3) never probes: `encryption_enabled_for` reads
-    // the queue row through the Postgres pool, which must not be dialled there,
-    // and the raft push path does not encrypt either (phase-1 queues are
-    // unencrypted, rsm/facade/real.rs). A client's own `encrypted` flag still
-    // travels on the frame, exactly as on the postgres class.
-    let broker_encrypts = !st.storage.is_raft()
-        && st.encryption.is_enabled()
-        && st.encryption_enabled_for(&queue, tenant).await;
-    let client_claims = op.get("encrypted").and_then(|v| v.as_bool()) == Some(true);
-    if broker_encrypts && client_claims {
-        return Err(bad_request(
-            "timers_encrypted_conflict",
-            &format!(
-                "op at index {index}: queue `{queue}` encrypts at rest, so `encrypted` is set by \
-                 the broker and must not be supplied"
-            ),
-        ));
-    }
-    if broker_encrypts {
-        match st.encryption.encrypt(&raw) {
-            Some(env) => {
-                op.insert(
-                    "payload".to_string(),
-                    Value::String(base64::engine::general_purpose::STANDARD.encode(&env)),
-                );
-                op.insert("encrypted".to_string(), Value::Bool(true));
-            }
-            None => {
-                // Same policy as the push handler: warn (sampled — a broken
-                // cipher must not flood stderr at ingest rate) and store
-                // plaintext. Never fail the schedule.
-                static ENC_FAIL: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
-                if let Some(suppressed) = ENC_FAIL.tick_now() {
-                    tracing::warn!(
-                        target: "timers",
-                        queue = %queue,
-                        suppressed,
-                        "encryption failed; timer payload stored as plaintext"
-                    );
-                }
-            }
-        }
-    }
-
     // The message id is minted here and promised to the caller in the response:
     // a client that knows the id at schedule time can correlate the delivered
-    // frame without a second API. The SP mints its own only as a fallback.
+    // frame without a second API. The planner mints its own only as a fallback.
     let mid = crate::frames::uuid_bytes_to_string(&crate::util::uuidv7_bytes());
     op.insert("_messageId".to_string(), Value::String(mid));
 
@@ -488,120 +384,24 @@ async fn prepare_schedule(
 // The one path to the database.
 // ---------------------------------------------------------------------------
 
-/// `charged` is how many timers the ladder billed to this tenant's local delta
-/// before the call (§9.3), so that this function — the only one that knows
-/// whether anything committed — can give it back. The refund is not symmetric,
-/// and each arm below says why: the safe direction is to over-count, because
-/// over-counting blocks a tenant early and under-counting blocks it late.
-async fn apply_ops(
-    st: &Arc<AppState>,
-    tenant: &str,
-    producer_sub: Option<&str>,
-    ops: Vec<Value>,
-    charged: i64,
-) -> Result<Vec<Value>, Response> {
-    if ops.is_empty() {
-        return Ok(Vec::new());
-    }
-    if ops.len() > max_ops_per_call() {
-        return Err(bad_request(
-            "timers_too_many_ops",
-            &format!(
-                "{} ops in one call, the ceiling is {}",
-                ops.len(),
-                max_ops_per_call()
-            ),
-        ));
-    }
-    // The nearest delivery this batch promises, for the sweeper wake after the
-    // commit (§7.4). Schedules and reschedules carry `delayMs`; a cancel carries
-    // none and rings nothing. A reschedule to a LATER instant rings for nothing
-    // too, harmlessly: the hint applies only when the new minimum is earlier
-    // than the one the loop already promised, so the minimum over the batch's
-    // schedules covers every case that needs a ring.
-    let nearest_ms: Option<i64> = ops
-        .iter()
-        .filter_map(|o| o.get("delayMs").and_then(Value::as_f64))
-        .map(|d| d as i64)
-        .min();
-    let ops_json = Value::Array(ops).to_string();
-
-    let client = match st.pool.get().await {
-        Ok(c) => c,
-        Err(_) => {
-            st.metrics.record_db_error();
-            // Never reached the database: the charge goes back in full.
-            st.quota.refund(tenant, 0, 0, charged);
-            return Err(unavailable("timers_pool_exhausted"));
-        }
-    };
-    // Captured before the query: a schedule that outlives the broker-side
-    // timeout must be cancelled server-side, not abandoned. An abandoned
-    // statement keeps row locks on the timer table, and those locks are what a
-    // user's cancel waits behind (§12).
-    let cancel = client.cancel_token();
-    let res = tokio::time::timeout(
-        st.stmt_timeout,
-        db::timers_apply(&client, &ops_json, tenant, producer_sub),
-    )
-    .await;
-
-    match super::kv::resolve_db(res, client, cancel, "timers_apply", &st.metrics) {
-        Ok(txt) => match serde_json::from_str::<Value>(&txt) {
-            Ok(Value::Array(a)) => {
-                // SEAM (§7.4): the local, in-process sweeper wake, AFTER the
-                // commit and never before — a wake for a transaction that then
-                // rolls back costs a wasted cycle and, worse, teaches the loop
-                // that work exists which does not. One CAS, and the anti-storm
-                // property is free: the hint applies only when the new minimum
-                // is EARLIER, so a million timers scheduled for next week
-                // produce exactly one wake. An op the procedure refused inside
-                // a committed batch rings for nothing, which costs one probe.
-                // Rung HERE, in the one path to the database, so the cancel
-                // route shares the seam and cannot drift from it.
-                if let Some(ms) = nearest_ms {
-                    crate::notify::hint_sweeper_in_ms(ms);
-                }
-                Ok(a)
-            }
-            _ => {
-                st.metrics.record_db_error();
-                Err(json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    err("timers_error", Some("timers_result_unreadable"), None),
-                ))
-            }
-        },
-        // The transaction raised, so it rolled back and nothing was scheduled.
-        Err(Some(e)) => {
-            st.quota.refund(tenant, 0, 0, charged);
-            Err(db_error_response(st, &e))
-        }
-        // NOT refunded: a broker-side timeout does not say whether the statement
-        // committed — the cancel is best-effort — so the charge stands until the
-        // next refresh corrects it against the true measurement.
-        Err(None) => Err(unavailable("timers_timeout")),
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Raft mode (PLAN_RAFT.md WP-2.3): the same funnel, the state machine where the
-// stored procedure was. Everything above the funnel — the body shape, the
-// server-owned field rule, the horizon, the payload ceiling, the ladder and
-// its per-op charge — is shared with the postgres class, so the two cannot
-// disagree about what a timer call is.
+// Raft mode (PLAN_RAFT.md WP-2.3): the state machine that applies the ops this
+// funnel has already prepared. Everything above the funnel — the body shape,
+// the server-owned field rule, the horizon, the payload ceiling, the ladder
+// and its per-op charge — is shared by every timer call, so there is exactly
+// one place that decides what a timer call is.
 // ---------------------------------------------------------------------------
 
-/// The facade's deadline for one timer call: the statement timeout the
-/// postgres path gives the SP, never below a second.
+/// The facade's deadline for one timer call: `st.stmt_timeout`, never below a
+/// second.
 fn raft_ctx(st: &AppState, tenant: &str) -> crate::rsm::facade::ReqCtx {
     let budget = st.stmt_timeout.max(std::time::Duration::from_secs(1));
     crate::rsm::facade::ReqCtx::new(tenant, crate::rsm::facade::Deadline::after(budget))
 }
 
 /// A facade error in the vocabulary of this surface (§9.5): a bad call is
-/// `400 timers_bad_request` exactly as the SP's 22023, an oversized one is the
-/// 413 of the payload ceiling, a cluster that cannot answer is the retryable
+/// `400 timers_bad_request`, an oversized one is the 413 of the payload
+/// ceiling, a cluster that cannot answer is the retryable
 /// `503 timers_unavailable`. What has no timer-specific meaning (a name over
 /// the store's key limit, storage full, the phase-1 stub) keeps the raft
 /// rendering.
@@ -636,7 +436,7 @@ fn raft_error_response(e: crate::rsm::facade::RsmError) -> Response {
 }
 
 /// `apply_ops`'s raft twin: one [`crate::rsm::facade::Rsm::timers_apply`] call.
-/// The refund rule is the postgres one: give the charge back only when NOTHING
+/// The refund rule: give the charge back only when NOTHING
 /// can have been scheduled (the call was refused before it was planned); a
 /// timeout or a retry may have committed, so its charge stands until the next
 /// measurement corrects it — over-counting is the safe direction.
@@ -703,7 +503,7 @@ fn single_response(results: Vec<Value>) -> Response {
 // ---------------------------------------------------------------------------
 // POST /api/v1/timers — schedule and reschedule, batch.
 //
-// `cancel` is accepted in this array too (it is the same stored procedure and
+// `cancel` is accepted in this array too (it is the same operation and
 // the same transaction), but a cancel sent here inherits this route's
 // authorization class. The route that is guaranteed never to be blocked is
 // DELETE /api/v1/timers/:queue/*timerKey (§9.6), and that is what an SDK must
@@ -844,11 +644,7 @@ async fn timers_batch_inner(
     // The sweeper wake (§7.4) rang inside `apply_ops`, after the commit. Raft
     // mode has no sweeper to wake: the leader's fire step runs on its own tick
     // and in the very cycle that plans this call.
-    let res = if st.storage.is_raft() {
-        apply_ops_raft(st, tenant.as_str(), producer_sub.as_deref(), ops, schedules).await
-    } else {
-        apply_ops(st, tenant.as_str(), producer_sub.as_deref(), ops, schedules).await
-    };
+    let res = apply_ops_raft(st, tenant.as_str(), producer_sub.as_deref(), ops, schedules).await;
     match res {
         Ok(results) => batch_response(results),
         Err(resp) => resp,
@@ -870,7 +666,7 @@ pub async fn handle_timer_cancel(
     op.insert("op".to_string(), Value::String("cancel".to_string()));
     op.insert("queue".to_string(), Value::String(queue));
     op.insert("timerKey".to_string(), Value::String(timer_key));
-    // The caller may echo the txn it expects, and the SP hands it back on
+    // The caller may echo the txn it expects, and the planner hands it back on
     // `absent` so the "was it already delivered?" check needs no second API
     // (§4.4). It is the only query parameter this route reads, and it is the
     // caller's own identifier — nothing is revealed by its presence.
@@ -894,11 +690,7 @@ pub async fn handle_timer_cancel(
     }
     // A cancel carries no producer identity: it produces nothing. It is charged
     // ZERO and never refunded (§9.7: the cancel counts zero and does not refund).
-    let res = if st.storage.is_raft() {
-        apply_ops_raft(&st, tenant.as_str(), None, vec![Value::Object(op)], 0).await
-    } else {
-        apply_ops(&st, tenant.as_str(), None, vec![Value::Object(op)], 0).await
-    };
+    let res = apply_ops_raft(&st, tenant.as_str(), None, vec![Value::Object(op)], 0).await;
     match res {
         Ok(results) => single_response(results),
         Err(resp) => resp,
@@ -917,36 +709,10 @@ pub async fn handle_timer_peek(
     if let Some(resp) = gated(&st, tenant.as_str(), crate::switches::Surface::TimerRead, 0) {
         return resp;
     }
-    // Raft mode: a local read of the state machine (the same body shape).
-    if st.storage.is_raft() {
-        let req = crate::rsm::facade::TimerPeekReq { queue, timer_key };
-        return match st.rsm.timer_peek(raft_ctx(&st, tenant.as_str()), req).await {
-            Ok(out) => json(StatusCode::OK, out.body),
-            Err(e) => raft_error_response(e),
-        };
-    }
-    let client = match st.pool.get().await {
-        Ok(c) => c,
-        Err(_) => {
-            st.metrics.record_db_error();
-            return unavailable("timers_pool_exhausted");
-        }
-    };
-    let cancel = client.cancel_token();
-    let res = tokio::time::timeout(
-        st.stmt_timeout,
-        db::timers_peek(&client, tenant.as_str(), &queue, &timer_key),
-    )
-    .await;
-    match super::kv::resolve_db(res, client, cancel, "timers_peek", &st.metrics) {
-        // A miss is `{"found":false}` with HTTP 200, not a 404: the one
-        // status-code rule (§8.1). And the payload comes back exactly as it is
-        // stored, with `encrypted` telling the truth about it — peek is an
-        // inspection surface and must not quietly decrypt what the fire will
-        // deliver as an envelope.
-        Ok(txt) => json(StatusCode::OK, txt),
-        Err(Some(e)) => db_error_response(&st, &e),
-        Err(None) => unavailable("timers_timeout"),
+    let req = crate::rsm::facade::TimerPeekReq { queue, timer_key };
+    match st.rsm.timer_peek(raft_ctx(&st, tenant.as_str()), req).await {
+        Ok(out) => json(StatusCode::OK, out.body),
+        Err(e) => raft_error_response(e),
     }
 }
 
@@ -1050,65 +816,24 @@ pub async fn handle_timers_list(
         Err((reason, detail)) => return bad_request(reason, &detail),
     };
 
-    // Raft mode: local reads of the state machine, the same two contracts.
-    if st.storage.is_raft() {
-        let ctx = raft_ctx(&st, tenant.as_str());
-        let res = match query {
-            TimerReadQuery::List { after, limit } => {
-                let req = crate::rsm::facade::TimersListReq {
-                    queue,
-                    after,
-                    limit,
-                };
-                st.rsm.timers_list(ctx, req).await
-            }
-            TimerReadQuery::Count { prefix } => {
-                let req = crate::rsm::facade::TimersCountReq { queue, prefix };
-                st.rsm.timers_count(ctx, req).await
-            }
-        };
-        return match res {
-            Ok(out) => json(StatusCode::OK, out.body),
-            Err(e) => raft_error_response(e),
-        };
-    }
-
-    let client = match st.pool.get().await {
-        Ok(c) => c,
-        Err(_) => {
-            st.metrics.record_db_error();
-            return unavailable("timers_pool_exhausted");
-        }
-    };
-    let cancel = client.cancel_token();
-    match query {
+    let ctx = raft_ctx(&st, tenant.as_str());
+    let res = match query {
         TimerReadQuery::List { after, limit } => {
-            // `after` is an EXCLUSIVE keyset cursor, not an offset, and it is
-            // stable because timer_key carries COLLATE "C". `limit` is CLAMPED
-            // by the SP and never rejected, with `truncated` telling the truth.
-            let res = tokio::time::timeout(
-                st.stmt_timeout,
-                db::timers_list(&client, tenant.as_str(), &queue, after.as_deref(), limit),
-            )
-            .await;
-            match super::kv::resolve_db(res, client, cancel, "timers_list", &st.metrics) {
-                Ok(txt) => json(StatusCode::OK, txt),
-                Err(Some(e)) => db_error_response(&st, &e),
-                Err(None) => unavailable("timers_timeout"),
-            }
+            let req = crate::rsm::facade::TimersListReq {
+                queue,
+                after,
+                limit,
+            };
+            st.rsm.timers_list(ctx, req).await
         }
         TimerReadQuery::Count { prefix } => {
-            let res = tokio::time::timeout(
-                st.stmt_timeout,
-                db::timers_count(&client, tenant.as_str(), &queue, &prefix),
-            )
-            .await;
-            match super::kv::resolve_db(res, client, cancel, "timers_count", &st.metrics) {
-                Ok(txt) => json(StatusCode::OK, txt),
-                Err(Some(e)) => db_error_response(&st, &e),
-                Err(None) => unavailable("timers_timeout"),
-            }
+            let req = crate::rsm::facade::TimersCountReq { queue, prefix };
+            st.rsm.timers_count(ctx, req).await
         }
+    };
+    match res {
+        Ok(out) => json(StatusCode::OK, out.body),
+        Err(e) => raft_error_response(e),
     }
 }
 
@@ -1116,7 +841,7 @@ pub async fn handle_timers_list(
 mod tests {
     use super::*;
 
-    /// The rule that closes the forged-provenance hole: the SP cannot tell the
+    /// The rule that closes the forged-provenance hole: the planner cannot tell the
     /// broker's `_messageId` from a client's, so this route is where a supplied
     /// one has to die.
     #[test]

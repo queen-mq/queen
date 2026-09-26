@@ -12,8 +12,8 @@ import (
 // `queenctl tail --conflation` (PLAN_CONFLATION.md §4, the client-cli row).
 //
 // queenctl sends the flag through the Go SDK and does not re-implement any of
-// the policy: the broker owns it (§3.3 — SQL is the authority, the request flag
-// only ever registers a new group or reveals a disagreement). What queenctl
+// the policy: the broker owns it (§3.3 — the broker's record is the authority,
+// the request flag only ever registers a new group or reveals a disagreement). What queenctl
 // owns is making the two things the SDK reports actually reach a human at a
 // terminal, which is a different job from making them reach a program.
 

@@ -7,18 +7,19 @@ description: "Every Prometheus metric family the broker exposes, with its type a
     Regenerate with: pnpm --dir webdoc gen
     Source of truth:
       - server/src/metrics.rs
-      - server/src/handlers/status.rs
+      - server/src/rsm/timing.rs
+      - server/src/rsm/facade/real.rs
+      - server/src/rsm/admit.rs
 */}
 
-`GET /metrics/prometheus` exposes **83 families**. `queen_process_*` counts what this one broker instance did since it started; `queen_cluster_*` are lifetime totals read back out of PostgreSQL, so every instance reports the same value.
-
-The `queen_kv_*`, `queen_timers_*` and `queen_sweeper_*` families are exposed by **every** broker, at zero on one that has never seen a key or a timer, because those surfaces are part of the engine rather than a feature a cell opts into. A dashboard panel or an alert built on them can therefore be written before the first tenant arrives, and a family that goes missing is a broker that is gone, not a feature that is off.
+`GET /metrics/prometheus` exposes **103 families**. Every one describes the node that answered: `queen_process_*` counts what this node did since it started, and the `queen_raft_*` families describe its replicated log, its store and its pipeline. Scrape every node. The pipeline timing and admission families are skipped when `QUEEN_RAFT_METRICS` is `0`, `false`, `off` or `no`; it is on by default.
 
 ### Process (this broker instance)
 
 | Family | Type | Help |
 | --- | --- | --- |
 | `queen_event_loop_lag_avg_milliseconds` | gauge | Mean scheduler (event-loop) lag since start |
+| `queen_malloc_bytes` | gauge | glibc heap: in use, free inside the arenas, arena total, mmapped chunks |
 | `queen_parked_long_polls` | gauge | Currently parked long-poll pops on this process |
 | `queen_process_ack_messages_total` | counter | Messages acked by this process |
 | `queen_process_ack_requests_total` | counter | Ack API requests handled by this process |
@@ -29,37 +30,74 @@ The `queen_kv_*`, `queen_timers_*` and `queen_sweeper_*` families are exposed by
 | `queen_process_resident_memory_bytes` | gauge | Resident memory of this process |
 | `queen_uptime_seconds` | gauge | Process uptime in seconds |
 
-### Cluster lifetime totals (from PostgreSQL)
+### Replicated log and storage
 
 | Family | Type | Help |
 | --- | --- | --- |
-| `queen_cluster_ack_messages_total` | counter | DB-backed cluster lifetime total |
-| `queen_cluster_ack_requests_total` | counter | DB-backed cluster lifetime total |
-| `queen_cluster_ack_total` | counter | Acks by outcome (DB-backed) |
-| `queen_cluster_db_errors_total` | counter | DB-backed cluster lifetime total |
-| `queen_cluster_dlq_total` | counter | DB-backed cluster lifetime total |
-| `queen_cluster_pop_messages_total` | counter | DB-backed cluster lifetime total |
-| `queen_cluster_pop_requests_total` | counter | DB-backed cluster lifetime total |
-| `queen_cluster_push_messages_total` | counter | DB-backed cluster lifetime total |
-| `queen_cluster_push_requests_total` | counter | DB-backed cluster lifetime total |
-| `queen_cluster_transactions_total` | counter | DB-backed cluster lifetime total |
+| `queen_raft_index` | gauge | Raft/RSM indexes |
+| `queen_raft_inflight` | gauge | Entries committed or proposed but not applied |
+| `queen_raft_log_storage` | gauge | Queue-log files and bytes |
+| `queen_raft_proposals_total` | counter | Proposals accepted since open |
+| `queen_raft_storage_full` | gauge | Disk/map admission gate |
+| `queen_raft_store_commit_seconds` | summary | Store commit duration |
+| `queen_raft_store_map_bytes` | gauge | LMDB map capacity and use |
+| `queen_raft_store_operations_total` | counter | Embedded-store operations by kind |
+| `queen_raft_store_ram_rows` | gauge | Rows per RAM keyspace: live, and keys dirty since the last checkpoint |
+| `queen_raft_store_readers` | gauge | LMDB reader slots |
 
-### Per-queue rates and depth
+### Admission
 
 | Family | Type | Help |
 | --- | --- | --- |
-| `queen_dlq_depth` | gauge | Dead-letter queue depth |
-| `queen_dlq_depth_by_queue` | gauge | Dead-letter depth per queue |
-| `queen_queue_ack_per_minute` | gauge | Per-queue acks by result |
-| `queen_queue_conflated_per_minute` | gauge | Per-queue minute-rate |
-| `queen_queue_metrics_age_seconds` | gauge | Per-queue minute-rate |
-| `queen_queue_parked_consumers` | gauge | Per-queue minute-rate |
-| `queen_queue_pop_empty_per_minute` | gauge | Per-queue minute-rate |
-| `queen_queue_pop_lag_milliseconds` | gauge | Per-queue pop lag |
-| `queen_queue_pop_messages_per_minute` | gauge | Per-queue minute-rate |
-| `queen_queue_push_messages_per_minute` | gauge | Per-queue minute-rate |
-| `queen_queue_push_requests_per_minute` | gauge | Per-queue minute-rate |
-| `queen_queue_transactions_per_minute` | gauge | Per-queue minute-rate |
+| `queen_raft_admit_bytes` | gauge | Admission budget and bytes held by storage-growing commands in the pipeline |
+| `queen_raft_admit_total` | counter | Commands that waited for admission room, and that were refused with 429 |
+| `queen_raft_admit_waiting` | gauge | Commands waiting for admission room now |
+
+### Pipeline timing
+
+| Family | Type | Help |
+| --- | --- | --- |
+| `queen_raft_apply_channel_depth` | summary | Apply channel depth at receive |
+| `queen_raft_apply_entry_seconds` | summary | Per-entry apply duration (total) |
+| `queen_raft_apply_other_seconds` | summary | Per-entry apply remainder (store puts + dispatch + derived) |
+| `queen_raft_apply_receives_total` | counter | Apply-channel receives |
+| `queen_raft_apply_segment_seconds` | summary | Per-entry segment write_all duration |
+| `queen_raft_apply_stats` | counter | Apply thread counters (ApplyStats) |
+| `queen_raft_arrival_to_proposed_seconds` | summary | Command arrival to its entry proposed |
+| `queen_raft_checkpoint_rows` | summary | Rows per async checkpoint cut |
+| `queen_raft_checkpoint_write_seconds` | summary | Async durable point: the checkpoint cut written, committed and synced (checkpoint thread) |
+| `queen_raft_drain_commands` | summary | Drain size in commands |
+| `queen_raft_drain_messages` | summary | Drain size in messages |
+| `queen_raft_drain_to_propose_seconds` | summary | Cycle drain to its entry proposed (PERF-G leg 2) |
+| `queen_raft_durable_dir_fsync_seconds` | summary | Durable point directory fsync duration |
+| `queen_raft_durable_point_seconds` | summary | Durable point duration (total) |
+| `queen_raft_durable_seg_fsync_seconds` | summary | Durable point segment-file fsync duration |
+| `queen_raft_group_bytes` | summary | Log group size in bytes |
+| `queen_raft_group_entries` | summary | Log group size in entries |
+| `queen_raft_keep_overlay_total` | counter | Planning cycles by what the kept overlay did |
+| `queen_raft_log_fsync_seconds` | summary | Log group fsync duration |
+| `queen_raft_plan_cpu_seconds` | summary | Planner command loop, thread CPU time |
+| `queen_raft_plan_deferred` | summary | Commands drained but deferred unplanned by the plan budget cut |
+| `queen_raft_plan_ring_loads_total` | counter | Kept rings scanned from pending |
+| `queen_raft_plan_seconds` | summary | Planner cycle duration |
+| `queen_raft_plan_whole_cpu_seconds` | summary | Whole plan_cycle_blocking call, thread CPU |
+| `queen_raft_plan_whole_wall_seconds` | summary | Whole plan_cycle_blocking call, wall |
+| `queen_raft_planner_commands_total` | counter | Commands planned, by kind |
+| `queen_raft_planner_plan_seconds` | summary | Per-command planning duration, by kind |
+| `queen_raft_planner_slow_total` | counter | Slow-planned commands, by kind (O18) |
+| `queen_raft_pop_h_total_seconds` | summary | PERF-J: whole raft pop handler (entry to response), pop-only |
+| `queen_raft_pop_read_seconds` | summary | Pop payload read (segment render) latency |
+| `queen_raft_propose_roundtrip_seconds` | summary | Entry proposed to its waiters answered (commit+apply+notify) |
+| `queen_raft_proposed_to_committed_seconds` | summary | Entry proposed to its group fsynced |
+| `queen_raft_push_h_await_seconds` | summary | PERF-J: push reply wait (propose+commit+apply+answer), push-only |
+| `queen_raft_push_h_prep_seconds` | summary | PERF-J: push pre-submit (parse+pack), entry to first channel send |
+| `queen_raft_push_h_submit_seconds` | summary | PERF-J: push channel enqueue (cmd_tx.send await), back-pressure |
+| `queen_raft_push_h_total_seconds` | summary | PERF-J: whole raft push handler (entry to response), push-only |
+| `queen_raft_qlog_early_codec_hits_total` | counter | Append blobs whose compression the facade started before planning |
+| `queen_raft_qlog_early_codec_waiting` | gauge | Early compression jobs not yet taken by a proposal |
+| `queen_raft_queue_wait_seconds` | summary | Command arrival to the cycle that drained it (PERF-G leg 1) |
+| `queen_raft_slow_commands_total` | counter | Commands over QUEEN_RAFT_SLOW_COMMAND_MS |
+| `queen_raft_writer_pickup_seconds` | summary | Entry proposed to the writer starting its group fsync (PERF-G) |
 
 ### Engine internals
 
@@ -73,6 +111,17 @@ The `queen_kv_*`, `queen_timers_*` and `queen_sweeper_*` families are exposed by
 | `queen_pop_fill_wait_total` | counter | Pops that held an under-full batch back (minPopWaitTime) |
 | `queen_pop_targeted_total` | counter | Hinted targeted single-partition pops issued |
 | `queen_pop_wildcard_total` | counter | Wildcard candidate-scan pops issued |
+
+### Ephemeral queues
+
+| Family | Type | Help |
+| --- | --- | --- |
+| `queen_ephemeral_bytes` | gauge | Bytes held by this broker's ephemeral rings |
+| `queen_ephemeral_dropped_total` | counter | Ephemeral messages dropped, by cause |
+| `queen_ephemeral_forwarded_total` | counter | Ephemeral requests relayed to the partition's rendezvous owner |
+| `queen_ephemeral_messages_total` | counter | Ephemeral messages by verb |
+| `queen_ephemeral_queues` | gauge | Ephemeral queues on this broker (declared + live implicit) |
+| `queen_ephemeral_wipes_total` | counter | Ephemeral rings dropped because their partition moved owner |
 
 ### Key/value state, timers and the sweeper
 
@@ -102,27 +151,3 @@ The `queen_kv_*`, `queen_timers_*` and `queen_sweeper_*` families are exposed by
 | `queen_timers_oldest_late_seconds` | gauge | Lateness of the oldest due timer |
 | `queen_timers_poisoned_total` | counter | Batches replayed one segment per call after a permanent error |
 | `queen_timers_schedule_rejected_total` | counter | Timer schedules refused |
-
-### Other
-
-| Family | Type | Help |
-| --- | --- | --- |
-| `queen_admission_budget` | gauge | Write-transaction admission budget |
-| `queen_admission_cycle_ms` | gauge | Median flush-cycle duration |
-| `queen_admission_inflight` | gauge | Admitted write transactions per lane |
-| `queen_admission_trains_per_s` | gauge | Commit trains per second (flush cycles) |
-| `queen_admission_txn_per_train` | gauge | Mean transactions per commit train |
-| `queen_admission_waiting` | gauge | Waiters per lane |
-| `queen_db_pool_active` | gauge | Active pooled connections |
-| `queen_db_pool_idle` | gauge | Idle pooled connections |
-| `queen_db_pool_size` | gauge | Configured DB pool size |
-| `queen_ephemeral_bytes` | gauge | Bytes held by this broker's ephemeral rings |
-| `queen_ephemeral_dropped_total` | counter | Ephemeral messages dropped, by cause |
-| `queen_ephemeral_forwarded_total` | counter | Ephemeral requests relayed to the partition's rendezvous owner |
-| `queen_ephemeral_messages_total` | counter | Ephemeral messages by verb |
-| `queen_ephemeral_queues` | gauge | Ephemeral queues on this broker (declared + live implicit) |
-| `queen_ephemeral_wipes_total` | counter | Ephemeral rings dropped because their partition moved owner |
-| `queen_file_buffer_db_healthy` | gauge | File-buffer DB-reachability hint |
-| `queen_file_buffer_failed` | gauge | Spool write failures |
-| `queen_file_buffer_pending` | gauge | Spooled push events awaiting drain |
-| `queen_maintenance_mode_enabled` | gauge | Push maintenance mode flag |

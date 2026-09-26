@@ -90,20 +90,19 @@ pub enum PushStatus {
     /// dedup window. `message_id` is the *pre-existing* message's id, not a new
     /// one — which is what makes a retried push safely idempotent.
     Duplicate,
-    /// The database transaction that would have stored this message failed.
+    /// The broker refused the item and stored nothing for it.
     Error,
-    /// Push maintenance mode is on: the message went to the broker's on-disk
-    /// spool and will be replayed when maintenance is disabled. It is accepted,
-    /// but it is not yet in the queue.
+    /// The 2.0 broker does not return this status. A 1.x broker returned it
+    /// when push maintenance mode diverted the message to its disk spool.
     Buffered,
-    /// Maintenance mode was on and the spool write itself failed. The message
-    /// is lost; this is the only push status that means "not accepted".
+    /// The 2.0 broker does not return this status. A 1.x broker returned it
+    /// when the spool write itself failed and the message was lost.
     Failed,
 }
 
 impl PushStatus {
     /// Whether the broker took responsibility for the message. `Buffered`
-    /// counts: it is durable in the spool and replays on maintenance exit.
+    /// counts, as it did on a 1.x broker; the 2.0 broker never returns it.
     pub fn accepted(self) -> bool {
         matches!(self, Self::Queued | Self::Duplicate | Self::Buffered)
     }
@@ -144,11 +143,10 @@ pub struct PushResult {
     ///
     /// `None` in three cases, and in all three there is genuinely no offset to
     /// report rather than one being withheld: [`PushStatus::Error`] (the
-    /// transaction that would have stored the message failed),
-    /// [`PushStatus::Buffered`] and [`PushStatus::Failed`] (maintenance mode
-    /// diverted the message to the broker's spool; the replay allocates its
-    /// offset later), and any response from a broker older than the one that
-    /// added the field — the key is simply absent there.
+    /// broker refused the item and stored nothing), [`PushStatus::Buffered`]
+    /// and [`PushStatus::Failed`] (1.x statuses the 2.0 broker never returns),
+    /// and any response from a broker older than the one that added the field —
+    /// the key is simply absent there.
     ///
     /// Absent on the wire rather than `null` when unknown, and skipped on
     /// serialization for the same reason: the addition is strictly additive and

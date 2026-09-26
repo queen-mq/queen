@@ -1,10 +1,12 @@
 """
 Timer integration tests -- against a real broker (PLAN_KV_TIMERS.md §4).
 
-Every queue here starts with ``test-`` so ``cleanup_test_data`` purges both the
-queue and the pending rows of ``queen.log_timers``; the timer table has no
-foreign key to the queue, so it would otherwise survive the queue that gave it
-its name and re-fire into the next run.
+The queue names (``test-timer-py-*``) and timer keys are FIXED, not per-run, so
+this file expects a broker that has never seen them. The harness gives every
+lane a fresh broker, so that holds there. Rerun it against the same broker and
+it meets the previous run's timers (some still pending, up to 120 s out) and
+its fired messages in the same queues, and the delivery tests can pop an old
+frame instead of this run's.
 
 ``deliverAt`` IS "NOT BEFORE": every wait below polls with a deadline rather
 than sleeping for the delay and asserting once.

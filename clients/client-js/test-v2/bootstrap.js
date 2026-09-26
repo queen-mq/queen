@@ -217,8 +217,8 @@ export async function testCgBootstrapTimestamp(client) {
 
     // 3. Record cutoff timestamp (after historical, before new messages)
     //    Wait before capturing the cutoff to handle clock skew between the
-    //    client (Date.now) and PostgreSQL (NOW()). Without this, the last
-    //    push batch may have a PG created_at AFTER the client-side cutoff.
+    //    client (Date.now) and the broker's clock. Without this, the last
+    //    push batch may have a broker created_at AFTER the client-side cutoff.
     await new Promise(resolve => setTimeout(resolve, 2000))
     const cutoffTimestamp = new Date().toISOString()
     console.log(`  Cutoff timestamp: ${cutoffTimestamp}`)

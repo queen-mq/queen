@@ -315,7 +315,7 @@ class Timers
      * Schedule and reschedule many in one call and one transaction.
      *
      * A `cancel` built with TimerOp::cancel() is accepted here too — it is the
-     * same stored procedure — but it then inherits this route's class and can
+     * same broker operation — but it then inherits this route's class and can
      * be refused with the rest of the batch. Use cancel() for cancels.
      *
      * @return array {results: [...]} index-aligned to the input.

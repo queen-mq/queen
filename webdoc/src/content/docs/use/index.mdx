@@ -8,14 +8,17 @@ sidebar:
 sourceOfTruth:
   - server/src/main.rs
   - server/src/handlers/data.rs
+  - server/src/handlers/raft.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/planner/txn.rs
 digest: >-
   The surface is push, pop and acknowledge plus one container, `POST /api/v1/transaction`, which
   commits any number of pushes and acks across any number of queues, partitions and consumer
-  groups in one PostgreSQL transaction. Two optional top-level arrays ride that same commit, and
-  every broker serves them: `kv`, a transactional key/value store where every
-  write carries an expiry, and `timers`, a message promised now and delivered later, cancellable
-  until it fires and with no recurrence. The queue and partition are created by the push that names
-  them, so nothing is provisioned first. An acknowledgement commits a position, not one message,
+  groups as one entry in the broker's replicated log, applied whole or not at all. Two optional
+  top-level arrays ride that same commit, and every broker serves them: `kv`, a transactional
+  key/value store where every write carries an expiry, and `timers`, a message promised now and
+  delivered later, cancellable until it fires and with no recurrence. The queue and partition are
+  created by the push that names them, so nothing is provisioned first. An acknowledgement commits a position, not one message,
   so acking the last message of a batch completes the batch. A consumer group holds at most one
   leased batch per partition, so parallelism comes from partitions, not from more consumers on
   one. It is all HTTP: curl is a client and the SDKs are convenience over it. Packages: JavaScript
@@ -23,16 +26,15 @@ digest: >-
   github.com/smartpricing/queen/clients/client-go`, Rust crate `queen-mq`, PHP `composer require
   queen-mq/php-client`, CLI `make -C clients/client-cli build`, C++ one header
   `clients/client-cpp/queen_client.hpp`.
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): main.rs registers three new routes; nothing this page describes moved.
 ---
 
 The surface you write against is small: push a message, pop it, acknowledge it. The fourth call
 is not a fourth operation but a container.
 [`POST /api/v1/transaction`](/reference/http/transaction/) takes an `operations` array of pushes
 and acks, any number of each, spanning any number of queues, partitions and consumer groups, and
-commits the whole array in one PostgreSQL transaction. Every application in this section is those
-three operations and that container in a different arrangement.
+commits the whole array as one entry in the broker's replicated log: it applies whole or not at
+all. Every application in this section is those three operations and that container in a different
+arrangement.
 
 The container takes two more arrays, and they are top-level fields of the request body rather than
 entries in `operations`: `kv` writes [transactional state](/use/kv) and `timers` schedules or cancels
@@ -70,7 +72,7 @@ What people build with it:
 - **Replay.** Move a group's cursor back to a timestamp, or point a new group at history:
   [replay](/use/examples/#replay).
 - **Windowed aggregation.** Tumbling, sliding, session and cron windows, with the accumulator in
-  the same PostgreSQL: [streams](/use/streams).
+  the same broker as the queue: [streams](/use/streams).
 
 Pick a client, write the loop, read [errors](/reference/errors/) before it meets traffic.
 

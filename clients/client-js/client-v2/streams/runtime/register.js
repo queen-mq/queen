@@ -26,7 +26,7 @@ export async function registerQuery({ http, name, sourceQueue, sinkQueue, config
       const msg = err.body.error || 'config_hash mismatch'
       const hint =
         '\n\nHint: pass `reset: true` to Stream.run({...}) to wipe the existing ' +
-        'queen_streams.state for this queryId, or pick a new queryId.'
+        'stream state for this queryId, or pick a new queryId.'
       const e = new Error(msg + hint)
       e.code = 'STREAMS_CONFIG_HASH_MISMATCH'
       throw e

@@ -25,64 +25,29 @@
 // unused-glob lint would fire on files this target deliberately does not edit.
 #![allow(unused_imports)]
 
-mod ack_fusion;
-mod ack_registry;
 mod auth;
 mod config;
-mod db;
-mod dedup;
 mod encryption;
-mod pop_autopilot;
-mod pop_fusion;
-// EPHEMERAL_QUEUES.md §3.2 — twin of the `mod ephemeral;` in main.rs. The
-// engine needs no pool, no mesh and no sweeper, so the library target compiles
-// and runs it unchanged.
+// EPHEMERAL_QUEUES.md §3.2 — twin of the `mod ephemeral;` in main.rs.
 mod ephemeral;
-mod file_buffer;
 mod frames;
-mod fusion;
 mod handlers;
-mod hotlist;
 mod httpget;
-mod internal;
-// Twin of the `mod kafka_facade;` in main.rs (the twin-list rule of this header).
-// Compiled, never started: embedded mode supervises a child process that talks
-// HTTP to the broker's listener, and an embedded `queen::Broker` has no listener.
-// `handlers::status` reads its process-global, which is `None` here.
-mod kafka_facade;
-// Twin of the `mod kafka_inproc;` in main.rs: the Kafka facade run IN-PROCESS in
-// raft mode (feature `kafka`). Compiled, never started here, and its
-// process-global reads `None` for `handlers::status`.
+// Twin of the `mod kafka_inproc;` in main.rs: the Kafka facade run IN-PROCESS
+// (feature `kafka`). Compiled, never started here, and its process-global reads
+// `None` for `handlers::status`.
 #[cfg(feature = "kafka")]
 mod kafka_inproc;
-// Twin of the `mod sqs_facade;` in main.rs, on the same terms as `kafka_facade`
-// above: compiled, never started, and its process-global reads `None` here.
-mod sqs_facade;
-// Twin of the `mod s3_sink;` in main.rs (the S3 / data-lake sink connector), on
-// the same terms as the two facades above: compiled, never started, and its
-// process-global reads `None` here.
-mod lease;
-mod mesh;
 mod metrics;
-mod migrate;
 mod notify;
 mod obs;
 mod peerclient;
-mod pgtls;
 mod quota;
-mod reconcile;
-mod retention;
-mod s3_sink;
-// PLAN_RAFT.md §3.4 — the replicated state machine (Queen without Postgres).
-// In BOTH crate roots (the twin-list rule of this header): the embedded
-// `queen::Broker` is a single-node deployment, which is exactly the topology
-// the LocalReplicator serves (O15). Compiled from WP-1.1 on, reached by no
-// handler until the storage seam of WP-1.7 exists, and inert in
-// QUEEN_STORAGE=postgres, which is the default until GA (D1).
-mod admission;
+// The replicated state machine: the broker's storage. In BOTH crate roots (the
+// twin-list rule of this header): the embedded `queen::Broker` is a
+// single-node deployment, which is exactly the topology the LocalReplicator
+// serves (O15).
 mod rsm;
-mod schema;
-mod stats;
 mod switches;
 mod syscollect;
 mod tenant;

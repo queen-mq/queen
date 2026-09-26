@@ -3,7 +3,7 @@
  *   'second' | 'minute' | 'hour' | 'day' | 'week'
  *
  * Boundaries are anchored to UTC. Day = midnight UTC; week = Monday 00:00
- * UTC. Tests here exercise live behaviour (in-PG state) for the second
+ * UTC. Tests here exercise live behaviour (broker-side state) for the second
  * granularity (fast enough to test in seconds rather than hours).
  */
 

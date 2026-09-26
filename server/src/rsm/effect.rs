@@ -48,11 +48,9 @@
 //!
 //! The whole catalogue of §5.2, so later phases only add versions. The
 //! message-path kinds (queues, groups, partitions, appends, cursors, DLQ,
-//! watermarks, garbage, the meta kinds) are modelled field by field against
-//! the SQL that specifies them. The kinds no phase-1 planner emits — KV,
-//! timers, streams, traces, flags, quotas, ephemeral config — carry their
-//! fields as the SQL and §6.1 define them, and their planners (phase 2) prove
-//! them with conformance tests.
+//! watermarks, garbage, the meta kinds) are modelled field by field. The kinds
+//! no phase-1 planner emits — KV, timers, streams, traces, flags, quotas,
+//! ephemeral config — carry their fields as §6.1 defines them.
 
 // ---------------------------------------------------------------------------
 // Catalogue
@@ -284,20 +282,17 @@ impl Kind {
 /// creation inside the entry (I18). Node-independent, unlike a position (D8).
 pub type Pid = u64;
 
-/// `queen.queues` as the RSM holds it (§6.1: every column except `storage`
-/// and the pgless-only `replication_factor`). `tenant` and `queue` are the
-/// keyspace key and live on the effect, not here.
+/// A queue's configuration as the RSM holds it (§6.1). `tenant` and `queue`
+/// are the keyspace key and live on the effect, not here.
 ///
-/// The integer and boolean columns are NOT nullable here although several are
-/// nullable in Postgres: they all carry a DEFAULT, every writer sets them, and
-/// the planner resolves the value before the effect is built. WP-2.5 (the
-/// configure merge) proves that against `configure_merge_semantics.rs`; if a
-/// genuine NULL must survive to the API, it arrives as a new version of
+/// The integer and boolean fields are NOT optional: every writer sets them,
+/// and the planner resolves the value before the effect is built. If a
+/// genuine null must survive to the API, it arrives as a new version of
 /// [`Kind::QueueUpsert`]. `namespace` and `task` ARE optional: a queue with no
 /// namespace is ordinary.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct QueueConfig {
-    /// `queen.queues.id`, minted by the planner (uuidv7 bytes).
+    /// The queue id, minted by the planner (uuidv7 bytes).
     pub id: [u8; 16],
     pub namespace: Option<String>,
     pub task: Option<String>,
@@ -324,8 +319,8 @@ pub struct QueueConfig {
     pub created_at_us: i64,
 }
 
-/// `consumer_groups_metadata.subscription_mode`. The SQL's three values; a
-/// fourth would be a new version of [`Kind::GroupUpsert`].
+/// A consumer group's subscription mode. Three values; a fourth would be a
+/// new version of [`Kind::GroupUpsert`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SubscriptionMode {
@@ -345,13 +340,13 @@ impl SubscriptionMode {
     }
 }
 
-/// `consumer_groups_metadata` as the RSM holds it (§6.1). A DISCOVERY
+/// A consumer group's registration as the RSM holds it (§6.1). A DISCOVERY
 /// registration names no queue: it carries `namespace`/`task` and the effect's
 /// queue is empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GroupMeta {
     pub id: [u8; 16],
-    /// `''` = the whole queue, as in the SQL.
+    /// `''` = the whole queue.
     pub partition_name: String,
     pub namespace: String,
     pub task: String,
@@ -366,7 +361,7 @@ pub struct GroupMeta {
     pub registered_at_us: i64,
 }
 
-/// The full `log_consumers` row of a (partition, group), written whole on
+/// The full cursor row of a (partition, group), written whole on
 /// every mutation, as pgless wrote it: apply stays a plain overwrite and
 /// recovery is order-independent within a partition.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -388,26 +383,19 @@ pub struct CursorRow {
     pub lease_conflated: bool,
     /// O16, ratified at G0: the DELIVERED SET recorded in the claim, bounded
     /// by the batch size. The distinct xxh3_128 transaction hashes actually
-    /// delivered (ack_registry.rs stores the same set in RAM today, and states
-    /// why the distinct set — not the frame-ordered multiset — is the right
-    /// one). Empty when the row holds no lease. It is what lets the ack fast
-    /// path be deterministic instead of depending on a RAM map that a failover
-    /// loses.
+    /// delivered. Empty when the row holds no lease. It is what lets the ack
+    /// fast path be deterministic instead of depending on a RAM map that a
+    /// failover loses.
     pub delivered: Vec<[u8; 16]>,
-    /// `queen.log_consumers.created_at` (001 ≈233): when this (partition,
-    /// group) row was first written.
+    /// When this (partition, group) row was first written.
     ///
-    /// It is load-bearing, not bookkeeping. `log_partition_dead_v1`
-    /// (006 ≈623) spares an empty, long-idle partition while ANY of its cursor
-    /// rows was created inside the cleanup window — `c.created_at >= p_cutoff`
-    /// — and for an autoAck-only group that leg is the only one that can
-    /// speak: 004 NULLs `lease_acquired_at` on an auto-ack pop and such a row
-    /// holds no lease, so both timestamp legs are NULL (006 ≈596). Without
-    /// this column WP-2.7's cleanup would delete a partition, its cursors and
-    /// their `total_consumed` where the postgres oracle keeps them: a
-    /// dual-backend conformance failure (G-1), found by a conformance test two
-    /// phases from here at the price of a format change on the highest-rate
-    /// effect in the catalogue.
+    /// It is load-bearing, not bookkeeping. The partition cleanup spares an
+    /// empty, long-idle partition while ANY of its cursor rows was created
+    /// inside the cleanup window, and for an autoAck-only group that leg is
+    /// the only one that can speak: an auto-ack pop clears `lease_acquired_at`
+    /// and such a row holds no lease, so both timestamp legs are unset.
+    /// Without this field WP-2.7's cleanup would delete such a partition, its
+    /// cursors and their `total_consumed`.
     ///
     /// [`GroupMeta::registered_at_us`] is not a substitute: it is per
     /// (tenant, queue, group), older than the per-partition row, so it would
@@ -424,9 +412,9 @@ pub struct CursorRow {
     pub metadata: String,
 }
 
-/// `log_timers` as the RSM holds it (§6.1), minus the claim columns: a fire is
-/// one command whose apply deletes the rows and appends atomically, so
-/// `claimed_until` / `claim_token` (025 ≈778) have nothing to protect.
+/// A timer row as the RSM holds it (§6.1), with no claim fields: a fire is
+/// one command whose apply deletes the rows and appends atomically, so a
+/// claim would have nothing to protect.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TimerRow {
     pub partition: String,
@@ -451,7 +439,7 @@ pub struct TimerRow {
     pub updated_at_us: i64,
 }
 
-/// `queen_streams.queries` (002).
+/// A registered streams query.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamsQueryRow {
     pub name: String,
@@ -462,7 +450,7 @@ pub struct StreamsQueryRow {
     pub updated_at_us: i64,
 }
 
-/// One `message_traces` row plus its `message_trace_names` (D18). The
+/// One trace event plus its trace names (D18). The
 /// keyspace key is (tenant, pid, txn, seq); `seq` is assigned by apply, which
 /// is deterministic because apply reads the last seq of that key — the planner
 /// cannot know it without reserving a counter it would then have to carry.
@@ -475,22 +463,22 @@ pub struct TraceEvent {
     pub txn: String,
     pub consumer_group: Option<String>,
     pub event_type: String,
-    /// The `data` JSONB, raw.
+    /// The `data` JSON, raw.
     pub data: Vec<u8>,
     pub worker: Option<String>,
     pub names: Vec<String>,
     pub created_at_us: i64,
 }
 
-/// Which grant table a [`Kind::QuotaSet`] writes (§6.1 `quotas`).
+/// Which kind of grant a [`Kind::QuotaSet`] writes (§6.1 `quotas`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum QuotaKind {
-    /// `queen.kv_quota` (024): rows, bytes, timers, horizon, read/write rates.
+    /// KV: rows, bytes, timers, horizon, read/write rates.
     Kv = 0,
-    /// `queen.ephemeral_quota` (030): bytes, queues, msgs/s.
+    /// Ephemeral queues: bytes, queues, msgs/s.
     Ephemeral = 1,
-    /// `queen_streams.quota` (002): queries.
+    /// Streams: queries.
     Streams = 2,
 }
 
@@ -505,9 +493,9 @@ impl QuotaKind {
     }
 }
 
-/// The union of the three grant tables; `None` = unlimited, as in the SQL,
-/// and the ABSENCE of the row is a denial once the grant is required. A field
-/// a kind does not use is `None`.
+/// The union of the three grant kinds; `None` = unlimited, and the ABSENCE
+/// of the row is a denial once the grant is required. A field a kind does not
+/// use is `None`.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct QuotaGrant {
     pub enabled: bool,
@@ -527,13 +515,13 @@ pub struct QuotaGrant {
 /// delete under the pids it names (§5.2 rules).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GarbageScope {
-    /// A queue delete (013): every pid-keyed row of those partitions —
+    /// A queue delete: every pid-keyed row of those partitions —
     /// segments, cursors, DLQ, dedup, counters. Timers and KV are untouched.
     Queue,
-    /// A tenant purge (031): as `Queue`, and the tenant's name-keyed rows go
+    /// A tenant purge: as `Queue`, and the tenant's name-keyed rows go
     /// with the command that opened the garbage.
     Tenant,
-    /// A consumer group delete (014): only the `(pid, group)` rows.
+    /// A consumer group delete: only the `(pid, group)` rows.
     Group { group: String },
 }
 
@@ -548,48 +536,47 @@ pub enum Effect {
     /// Nothing.
     Noop,
 
-    /// Create or replace a queue's configuration (012, and the implicit
-    /// creation of 003/004/005/007/025).
+    /// Create or replace a queue's configuration (explicitly, or implicitly
+    /// on first use).
     QueueUpsert {
         tenant: String,
         queue: String,
         cfg: QueueConfig,
     },
-    /// Remove the name-keyed rows of a queue (013). The pid-keyed data goes in
+    /// Remove the name-keyed rows of a queue. The pid-keyed data goes in
     /// `DeleteChunk`s behind a `GarbageAdd`, and the NAME is reusable at once.
     QueueDelete { tenant: String, queue: String },
 
-    /// Register or update a consumer group (004 first contact, 014).
+    /// Register or update a consumer group.
     GroupUpsert {
         tenant: String,
         queue: String,
         group: String,
         meta: GroupMeta,
     },
-    /// Remove a group's name-keyed row (014).
+    /// Remove a group's name-keyed row.
     GroupDelete {
         tenant: String,
         queue: String,
         group: String,
     },
 
-    /// A new partition (003/004/005/007/025 implicit creation). `pid` is
+    /// A new partition, created implicitly on first use. `pid` is
     /// `entry.pid_base + ordinal` (I18).
     PartitionCreate {
         pid: Pid,
-        /// `log_partitions.id`, kept because reads and traces echo it.
+        /// The partition's uuid, kept because reads and traces echo it.
         uuid: [u8; 16],
         tenant: String,
         queue: String,
         partition: String,
         created_at_us: i64,
     },
-    /// Drop a partition and everything keyed by it (006, 013, 031).
+    /// Drop a partition and everything keyed by it.
     PartitionDelete { pid: Pid },
 
-    /// Messages appended to a partition (003, 005 txn, 007 sink, 025 fire,
-    /// 016 DLQ move). The blob is the survivors' packed frames, concatenated
-    /// and RAW (the queue log may store it zstd-compressed — a node-local codec,
+    /// Messages appended to a partition. The blob is the survivors' packed
+    /// frames, concatenated and RAW (the queue log may store it zstd-compressed — a node-local codec,
     /// `qlog::codec`, never part of the entry) — and `hashes` is `16 * count` bytes in
     /// frame order (the xxh3_128 of each frame's transaction id), which the
     /// dedup index and ack-by-hash both read. The POSITION the bytes end up
@@ -607,18 +594,17 @@ pub enum Effect {
         blob: Vec<u8>,
     },
 
-    /// The whole cursor row of a (partition, group) (004 claim/seed, 005
-    /// ack/nack/renew/DLQ head, 007, 010 seek, 014).
+    /// The whole cursor row of a (partition, group).
     CursorSet {
         pid: Pid,
         group: String,
         row: CursorRow,
     },
-    /// Remove a cursor row (014, 010).
+    /// Remove a cursor row.
     CursorDelete { pid: Pid, group: String },
 
-    /// File a dead letter (005 `log_dlq_head_v1`, 025 `log_timers_dlq_v1`,
-    /// 016). `tenant` and `queue` are carried, not derived from `pid`, because
+    /// File a dead letter. `tenant` and `queue` are carried, not derived from
+    /// `pid`, because
     /// they are the primary key of the row: `(tenant, queue, dlq_id)`.
     /// `offset` is `-1` for a timer's DLQ row, whose group is `__timer__`.
     DlqInsert {
@@ -630,21 +616,21 @@ pub enum Effect {
         offset: i64,
         message_id: Option<[u8; 16]>,
         txn: String,
-        /// The payload JSONB, raw. Present because a dead letter outlives the
+        /// The payload JSON, raw. Present because a dead letter outlives the
         /// segment it came from.
         payload: Vec<u8>,
         error: String,
         retry_count: u32,
         failed_at_us: i64,
     },
-    /// Remove a dead letter (016 replay, purge).
+    /// Remove a dead letter (replay, purge).
     DlqDelete {
         dlq_id: [u8; 16],
         tenant: String,
         queue: String,
     },
 
-    /// Move a partition's watermarks (006 retention, txns purge, max-wait
+    /// Move a partition's watermarks (retention, txns purge, max-wait
     /// eviction): `log_start` deletes segments below it, `txns_start` the
     /// dedup hash lists, which outlive the segments (D10).
     Watermark {
@@ -653,7 +639,7 @@ pub enum Effect {
         txns_start: u64,
     },
 
-    /// Write a KV row (024, and the KV riders of 005). `version` is
+    /// Write a KV row (and the KV riders of a transaction). `version` is
     /// `entry.kv_version_base + ordinal` of the versioned write inside the
     /// entry (I18), so two commands writing one key in one entry get different
     /// versions and a stale `expect` cannot win.

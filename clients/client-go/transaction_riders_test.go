@@ -113,9 +113,9 @@ func pushTxnOf(t *testing.T, body []byte) string {
 
 func TestTransactionOmitsTheRiderArraysWhenThereAreNone(t *testing.T) {
 	// §6.3 buys byte-identity on the server when the arrays are ABSENT. A client
-	// that emitted `"kv":null` would be tolerated (the procedure uses
-	// jsonb_typeof for exactly that reason) but would still be a client that
-	// changed a body which had no reason to change.
+	// that emitted `"kv":null` would be tolerated (the broker reads null as
+	// absent) but would still be a client that changed a body which had no
+	// reason to change.
 	srv := newCaptureServer(t, okJSON(`{"transactionId":"tx","success":true,"results":[{"index":0,"type":"push","success":true,"transactionId":"p","messageId":"m","queueName":"q"}]}`))
 	client := newWireClient(t, srv.URL)
 

@@ -202,7 +202,7 @@ fn identity_body(ctx: &ClusterCtx, key_id: Uuid, scopes: Scopes, operator_enable
     })
 }
 
-/// The lifecycle word for a cluster, spelled the way `queen_proxy.clusters`
+/// The lifecycle word for a cluster, spelled the way `clusters`
 /// spells it — the same vocabulary the cookie handler's `clusters` rows carry,
 /// because they come straight out of that column.
 fn status_str(s: ClusterStatus) -> &'static str {
@@ -264,18 +264,16 @@ mod tests {
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':'))
     }
 
-    fn st_with(shared: &[&str], dev_cell: Option<&str>, insecure: bool) -> St {
+    /// `store`: `None` for no store at all (every lookup misses), or a world
+    /// whose cluster `cell` answers `Host: cell.test`.
+    fn st_with(shared: &[&str], store: Option<crate::store::Store>, insecure: bool) -> St {
         let mut cfg = crate::config::test_config(shared);
         cfg.dev_insecure = insecure;
-        cfg.dev_static = dev_cell.map(|url| crate::config::DevStaticCluster {
-            cell_url: url.to_string(),
-            cell_token: None,
-            broker_tenant: crate::config::DEFAULT_TENANT_UUID.to_string(),
-        });
-        let cache = crate::cache::ClusterCache::new(&cfg, None);
+        let store = store.unwrap_or(crate::store::Store::None);
+        let cache = crate::cache::ClusterCache::new(&cfg, store.clone());
         let limits = crate::limits::Limits::new(&cfg);
         let meter = std::sync::Arc::new(crate::meter::Meter::new(&cfg));
-        let registry = crate::registry::Registry::new(None);
+        let registry = crate::registry::Registry::new(crate::store::Store::None);
         let keys = crate::auth::Keys::from_config(&cfg);
         let mut connector = hyper_util::client::legacy::connect::HttpConnector::new();
         connector.set_nodelay(true);
@@ -284,8 +282,7 @@ mod tests {
                 .build::<_, axum::body::Body>(connector);
         std::sync::Arc::new(crate::state::AppState {
             cfg,
-            db: None,
-            store: crate::store::Store::None,
+            store,
             upstream: crate::upstream::Upstream::Http(upstream),
             cache,
             limits,
@@ -315,17 +312,18 @@ mod tests {
     /// cluster it acts on.
     #[tokio::test]
     async fn a_bearer_gets_its_acting_cluster() {
-        // dev-static resolves any Host to one cluster and dev-insecure hands
-        // out the principal, which is the only way to reach the 200 without a
-        // pxdb behind the cache. The cluster it names is `resolve_host`'s own.
-        let st = st_with(&[], Some("http://127.0.0.1:6632"), true);
+        // The store resolves `cell.test` to its cluster and dev-insecure hands
+        // out the principal. The cluster it names is `resolve_host`'s own.
+        let (store, cluster, _) =
+            crate::store::data::test_world("cell", "http://127.0.0.1:6632", "pro").await;
+        let st = st_with(&[], Some(store), true);
         let resp = bearer_me(&st, &hdrs("cell.test", Some("Bearer qk_live_abc")))
             .await
             .expect("an api key must be answered here, not by the cookie path");
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_of(resp).await;
         let named = tenant_of(&body).expect("acting_cluster.id");
-        assert_eq!(named, Uuid::nil().to_string(), "dev-static's cluster");
+        assert_eq!(named, cluster.to_string(), "the Host's cluster");
     }
 
     /// The shape, asked the way the consumer asks it — `tenant_of` on the real
@@ -371,7 +369,9 @@ mod tests {
     /// not a session cookie.
     #[tokio::test]
     async fn no_bearer_leaves_the_cookie_path_alone() {
-        let st = st_with(&[], Some("http://127.0.0.1:6632"), true);
+        let (store, _, _) =
+            crate::store::data::test_world("cell", "http://127.0.0.1:6632", "pro").await;
+        let st = st_with(&[], Some(store), true);
         for auth in [
             None,
             Some("Bearer eyJhbGciOiJIUzI1NiJ9.e30.sig"),
@@ -398,7 +398,7 @@ mod tests {
     /// 421. This route must not become the oracle the data plane refuses to be.
     #[tokio::test]
     async fn an_unknown_key_is_401_and_never_403() {
-        // shared host + no pxdb: every key hash misses, which is exactly the
+        // shared host + no store: every key hash misses, which is exactly the
         // "unknown or revoked" case
         let st = st_with(&["shared.test"], None, false);
         let resp = bearer_me(&st, &hdrs("shared.test", Some("Bearer qk_live_nope")))
@@ -450,7 +450,7 @@ mod tests {
 
     /// The lie that must not be told: the identity names the cluster the NEXT
     /// request will act on, so it is resolved by the data plane's own path and
-    /// never by a bare key lookup. With no pxdb the key resolves to nothing and
+    /// never by a bare key lookup. With no store the key resolves to nothing and
     /// the answer is `authenticate_for`'s own 401 — never a 200 naming the
     /// cluster the HOST happens to point at.
     ///
@@ -459,8 +459,8 @@ mod tests {
     /// this module asks that function rather than answering for itself.
     #[tokio::test]
     async fn a_named_host_alone_never_names_an_identity() {
-        // A real host lookup (no dev-static) with no pxdb: the Host resolves to
-        // nothing, so the listener's own refusal is the answer.
+        // A real host lookup with no store: the Host resolves to nothing, so
+        // the listener's own refusal is the answer.
         let st = st_with(&[], None, false);
         let resp = bearer_me(&st, &hdrs("prod.example.test", Some("Bearer qk_live_abc")))
             .await
@@ -470,7 +470,7 @@ mod tests {
     }
 
     /// The status word is the column's own vocabulary, so a reader of this
-    /// document and a reader of `queen_proxy.clusters` see the same string.
+    /// document and a reader of `clusters` see the same string.
     #[test]
     fn the_status_word_is_the_column_vocabulary() {
         assert_eq!(status_str(ClusterStatus::Active), "active");

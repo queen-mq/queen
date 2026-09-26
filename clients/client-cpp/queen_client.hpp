@@ -768,9 +768,6 @@ inline std::string pop_target_label(const std::string& queue, const std::string&
  *   conflict -> the broker speaks conflation and the stored policy won: warn,
  *               once per (queue, group). Not an error -- §3.3/Q3, a reject here
  *               takes down the already-correct half of a rolling deploy.
- *   paused   -> pop maintenance: the request never reached the claim path, so
- *               there is no policy to echo and nothing to conclude from the
- *               absence of one. Not a verdict, not an error.
  *   neither  -> the broker never applied it and never heard of it. Raise (§4).
  */
 inline void enforce_conflation_contract(bool requested, const json& response,
@@ -782,9 +779,6 @@ inline void enforce_conflation_contract(bool requested, const json& response,
         warn_conflation_conflict_once(queue, group);
         return;
     }
-    if (response.is_object() && response.value("paused", false)) {
-        return;
-    }
     throw ConflationUnsupportedError(queue, group);
 }
 
@@ -793,8 +787,7 @@ inline void enforce_conflation_contract(bool requested, const json& response,
  *
  * A timer payload travels base64 on the wire (PLAN_KV_TIMERS.md §4.1) and the
  * broker decodes it with the STANDARD engine. Padding is not cosmetic here: an
- * unpadded encoder produces a 22023 from the stored procedure and nothing in
- * the error names the encoder as the cause.
+ * unpadded encoder gets the payload refused as invalid base64.
  *
  * Written out rather than borrowed from httplib::detail, which is a private
  * namespace of a vendored header and has no encoder at all in some releases.
@@ -898,7 +891,7 @@ inline std::string base64_decode(const std::string& input) {
  * turns an idempotency marker into a duplicate external effect.
  *
  * A non-positive TTL throws here rather than travelling as `ttlSeconds: 0`: the
- * stored procedure would refuse it anyway, and paying a round trip to learn
+ * broker would refuse it anyway, and paying a round trip to learn
  * that a deadline is already in the past is not a service to anybody.
  */
 inline long long ttl_seconds_from_millis(long long millis) {
@@ -1103,8 +1096,8 @@ struct PopResult {
  * §5.1: every put, putIfAbsent and incr carries exactly one of `ttlSeconds`
  * (an integer greater than zero) and `forever: true`. Zero or two declarations
  * are the same error, because both mean the caller did not decide, and a
- * default is how a marker becomes immortal. The rule lives in the stored
- * procedure so all seven clients inherit it; this type makes the wrong shape
+ * default is how a marker becomes immortal. The rule lives in the broker so
+ * all seven clients inherit it; this type makes the wrong shape
  * INEXPRESSIBLE in C++ instead of merely refused one round trip later.
  *
  * A put NEVER inherits the previous key's expiry -- that is not expressible on
@@ -1130,14 +1123,14 @@ public:
      * No expiry.
      *
      * FORBIDDEN in anything CI executes (§10.4): a test that goes wrong leaves
-     * immortal state in a shared database, and the next run inherits it.
+     * immortal state in a shared broker, and the next run inherits it.
      */
     static KvTtl forever() { return KvTtl(true, 0); }
 
     /**
      * The admitted sugar: an absolute instant, converted to a delta of seconds
      * at send time and rounded UP (§20.1). There is no `expiresAt` field on the
-     * wire and there will not be -- one clock, and it is the database's.
+     * wire and there will not be -- one clock, and it is the broker's.
      */
     static KvTtl until(std::chrono::system_clock::time_point when) {
         auto delta = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1205,8 +1198,8 @@ struct KvIncrOptions {
  * be sub-second are in milliseconds, the ones that cannot are in seconds", and
  * a 250 ms retry backoff is a central use of timers while a sub-second TTL is
  * not a real use for anybody. An absolute instant is not expressible: one
- * clock, Postgres's, so no skew between brokers can enter anywhere. A delay in
- * the past is LEGAL and fires on the first cycle.
+ * clock, the broker's, so no client's skew can enter anywhere. A delay in the
+ * past is LEGAL and fires on the first cycle.
  *
  * `deliverAt` is "NOT BEFORE", never "exactly at". A healthy timer lands within
  * about ten milliseconds above the sweeper's minimum sleep; above one second
@@ -1379,8 +1372,8 @@ inline json kv_incr_op(const std::string& ns, const std::string& key, long long 
 }
 
 /**
- * putIfAbsent desugars to `put` with `expect: 0` INSIDE the stored procedure,
- * one code path there. It keeps its own name on the wire because that is the
+ * putIfAbsent desugars to `put` with `expect: 0` INSIDE the broker, one code
+ * path there. It keeps its own name on the wire because that is the
  * name of the thing, and because `applied` answering "did I win?" is the most
  * frequent question asked of this API.
  *
@@ -1430,8 +1423,8 @@ inline json timer_cancel_op(const std::string& queue, const std::string& timer_k
  *
  * The client-side half of the alignment guard (§6.4, §8.2): N operations in, N
  * results out. A missing element read as "not found" would turn a broker that
- * never ran the operation -- an old broker whose wire procedure predates this
- * feature, for instance -- into a business answer, and the caller would act on
+ * never ran the operation -- an old broker that predates this feature, for
+ * instance -- into a business answer, and the caller would act on
  * a gate that never fired.
  */
 // ---------------------------------------------------------------------------
@@ -2775,8 +2768,7 @@ public:
      *
      * The arrays are omitted entirely when empty, never sent as `[]`: a bundle
      * that uses neither feature must be byte-identical to what this client sent
-     * before the feature existed (§6.3), and the broker's own skip is written on
-     * `jsonb_typeof` for the same reason.
+     * before the feature existed (§6.3).
      *
      * `results[]` is a FLAT index space with an append-only layout: the
      * operations first, exactly as today, then the KV array, then the timers.
@@ -2840,7 +2832,7 @@ public:
 // (GET/PUT/DELETE /api/v1/kv/:ns/{key}) exist as sugar for the handful of cases
 // people write by hand with curl; this client does not use them, so it also
 // does not read the `ETag` header they return -- which saves bandwidth, never
-// the round trip to the database, since there is no cache in front of the KV
+// the round trip to the broker, since there is no cache in front of the KV
 // and there will not be one (§8.5).
 //
 // WHAT THIS CLIENT DOES NOT HAVE, stated rather than implied (§10.2 gives the
@@ -2902,9 +2894,9 @@ public:
     /**
      * Claim a key only if it does not exist -- the idempotency marker.
      *
-     * Exactly one concurrent caller wins: the conflict arm takes the row lock
-     * BEFORE evaluating its condition, so the second caller re-evaluates
-     * against the new row and does not apply. It also wins against an expired
+     * Exactly one concurrent caller wins: the broker plans every write at one
+     * serial point, so the second caller is judged against the winner's row
+     * and does not apply. It also wins against an expired
      * row that has not been pruned yet, which resurrects the key as a NEW
      * lineage.
      *
@@ -3034,8 +3026,8 @@ public:
 // WHAT THIS CLASS IS ABOUT, BEFORE ANY SIGNATURE: contents survive NOTHING
 // (§1.2). Not a restart, not a crash, not a deploy, not the ownership move a
 // membership change causes. Treat a failover like a Redis restart. Declared
-// CONFIGURATION is durable -- it lives in PG and comes back after a restart, as
-// configured and EMPTY. There is no replay, no history, no subscriptionMode and
+// CONFIGURATION is durable -- it lives in the broker's replicated log and comes
+// back after a restart, as configured and EMPTY. There is no replay, no history, no subscriptionMode and
 // no DLQ, because none of those concepts has a referent when there is no
 // history to have.
 //
@@ -3124,9 +3116,9 @@ public:
     // ---------------------------------------------------------------- declare
 
     /**
-     * Declare a queue and its bounds. Persists the OPTIONS in PG (§1.1): the
-     * configuration survives a restart, the contents never do, and the queue
-     * comes back declared and empty.
+     * Declare a queue and its bounds. Persists the OPTIONS in the broker's
+     * replicated log (§1.1): the configuration survives a restart, the contents
+     * never do, and the queue comes back declared and empty.
      *
      * Optional in every sense -- a push or a pop that names an unknown queue
      * creates it implicitly with the tenant defaults. Declare when you want
@@ -3158,8 +3150,8 @@ public:
     }
 
     /**
-     * Delete the queue: contents, cursors, and the declared configuration in
-     * PG. Named `del` because `delete` is a keyword, exactly as on KvBuilder.
+     * Delete the queue: contents, cursors, and the declared configuration.
+     * Named `del` because `delete` is a keyword, exactly as on KvBuilder.
      */
     json del(const std::string& queue) {
         require_queue(queue);
@@ -3302,9 +3294,7 @@ public:
     /**
      * Every ephemeral queue this tenant currently has, declared and implicit.
      *
-     * Free to poll: the gauges are read out of the broker's own memory, with no
-     * database behind them -- unlike the durable meter, whose 1s poll is
-     * load-bearing on PG.
+     * Free to poll: the gauges are read out of the broker's own memory.
      */
     json queues() {
         return call([&] {
@@ -4168,8 +4158,8 @@ public:
         }
 
         // Dedupe: with v4 multi-partition pop, all messages in one batch
-        // share the same leaseId (one renew_lease_v2 call extends every
-        // claimed partition_consumers row). Without this dedupe, callers
+        // share the same leaseId (one renew call extends the lease of every
+        // claimed partition). Without this dedupe, callers
         // passing the full message vector would issue N redundant identical
         // HTTP calls. Preserve insertion order for deterministic output.
         {

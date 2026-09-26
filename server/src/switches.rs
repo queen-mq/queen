@@ -24,11 +24,9 @@
 //!   * a KILL SWITCH is turned off to stop something that is already running and
 //!     is hurting. It is read on every call; the surface exists either way;
 //!     flipping it takes effect now, on a cell an operator is holding at three
-//!     in the morning; and it is expected to be flipped BACK. Same class as
-//!     `maintenance_mode` and `pop_maintenance_mode` (`handlers/maintenance.rs`),
-//!     which is why it wears the same shape: an in-process atomic authoritative
-//!     on the hot path, plus a row in `queen.system_state` as a best-effort
-//!     mirror for propagation and restart, and a fresh read on the GET.
+//!     in the morning; and it is expected to be flipped BACK. It is an
+//!     in-process atomic authoritative on the hot path, plus a replicated flag
+//!     for restart, and a fresh read on the GET.
 //!
 //! Hence the one answer a paused surface gives: **503** with `Retry-After` on
 //! the routes (temporary, come back), and a PERMANENT refusal inside the
@@ -92,8 +90,7 @@ pub struct Switches {
 }
 
 impl Switches {
-    /// The `queen.system_state` keys, spelled out because an operator types them
-    /// into a `psql` prompt during an incident and a rename is a silent no-op.
+    /// The replicated flag keys, spelled out because a rename is a silent no-op.
     pub const KEY_KV: &'static str = "kv_enabled";
     pub const KEY_TIMERS_SCHEDULE: &'static str = "timers_schedule_enabled";
     pub const KEY_TIMERS_FIRE: &'static str = "timers_fire_enabled";
@@ -103,8 +100,8 @@ impl Switches {
     /// There is nothing at boot to seed them from: a kill switch that a cell
     /// could start life with in the off position would be a gate wearing this
     /// module's name. The only thing that turns one off is an operator, through
-    /// `/api/v1/system/kv-timers` or the `queen.system_state` row, and `adopt`
-    /// below is how a restart picks that decision back up.
+    /// `/api/v1/system/kv-timers`, and the replicated flag is how a restart
+    /// picks that decision back up.
     pub fn new() -> Arc<Switches> {
         Arc::new(Switches::fresh())
     }
@@ -441,8 +438,8 @@ pub fn decide(
 /// (EPHEMERAL_QUEUES.md §1.6, M7).
 ///
 /// WHY THIS IS A SIBLING OF `decide` AND NOT AN ARM OF IT. `decide` reads its
-/// occupancy from `Quotas`, which is a MEASUREMENT: the rollup counts rows in
-/// Postgres, every broker re-reads the count, and the enforcer is the local delta
+/// occupancy from `Quotas`, which is a MEASUREMENT: the count of stored rows,
+/// and the enforcer is the local delta
 /// against it. The ephemeral engine has no such loop, because the broker IS the
 /// meter — the bytes are in its own heap and `Ephemeral` holds them exactly. So
 /// the third rung needs a different authority object, and the alternative

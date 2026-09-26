@@ -28,8 +28,8 @@
  *      construction: one warning and a thousand look identical from the broker
  *      side.
  *
- * These run against an in-process httplib::Server on localhost -- no broker, no
- * Postgres, so the suite is self-contained:
+ * These run against an in-process httplib::Server on localhost -- no broker,
+ * so the suite is self-contained:
  *
  *   make conflation && ./bin/test_conflation
  *

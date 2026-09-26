@@ -6,7 +6,9 @@ tier: use
 sidebar:
   order: 3
 sourceOfTruth:
-  - server/sql/procedures/024_kv.sql
+  - server/src/rsm/planner/kv.rs
+  - server/src/rsm/facade/real/kv.rs
+  - server/src/rsm/facade/real.rs
   - server/src/handlers/kv.rs
   - server/src/config.rs
   - clients/client-js/client-v2/kv/Kv.js
@@ -14,11 +16,11 @@ sourceOfTruth:
 verifiedBy:
   - clients/client-js/test-v2/kv.js
   - clients/client-py/tests/test_kv.py
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + this patch): the console list (PLAN_DASHBOARD_ACTIONS.md §2.5) is now in the reads section; the rest matches the code.
 ---
 
-`queen.kv` is a key/value store that lives in the same PostgreSQL as the log, and its value is not
-that it stores keys. It is that a write to it can share the transaction with a push and an ack.
+`queen.kv` is a key/value store that lives in the same replicated state as the queues, and its
+value is not that it stores keys. It is that a write to it can share the transaction with a push
+and an ack: one entry in the broker's replicated log, applied whole or not at all.
 
 The idempotency marker, the effect and the cursor advance commit together or not at all. A key/value
 store standing beside the broker cannot give you that, at any price and however fast it is, because
@@ -54,7 +56,7 @@ finds the marker present and aborts. That verdict arrives as **HTTP 200** with
 most frequent outcome of this product and it must not land in a retry policy or an error metric.
 
 The property this buys is exact and it is worth stating in the negative first, because the promise is
-easy to inflate. It is **not** exactly-once end to end: the charge is outside PostgreSQL, so a crash
+easy to inflate. It is **not** exactly-once end to end: the charge is outside the broker, so a crash
 between the charge and the commit repeats the charge on redelivery, and no broker can prevent that.
 
 What the shared commit does give is the pair of guarantees a store on the side cannot:
@@ -100,12 +102,12 @@ Every write returns an object, and in JavaScript objects are always truthy.
 ## Every write carries an expiry
 
 `put`, `putIfAbsent` and `incr` each carry **exactly one** of `ttlSeconds` (an integer above zero) or
-`forever: true`. Zero or two of them is a `400`. The rule lives in SQL rather than in seven clients, so
-it applies identically to the HTTP routes, the transaction wire and the embedded broker.
+`forever: true`. Zero or two of them is a `400`. The rule lives in the broker rather than in seven
+clients, so it applies identically to the HTTP routes, the transaction wire and the embedded broker.
 
-This is the difference between a store you can leave running and one you cannot. `queen_streams.state`
-has no expiry because a closed window deletes its own row; a KV key has no such event, so an optional
-TTL would mean a table that grows in silence and an operator who pays for it.
+This is the difference between a store you can leave running and one you cannot. Stream state has no
+expiry because a closed window deletes its own row; a KV key has no such event, so an optional TTL
+would mean a store that grows in silence and an operator who pays for it.
 
 Two consequences follow, and both are the kind that bite once.
 
@@ -154,22 +156,22 @@ race needs no second round trip. The `reason` taxonomy is closed: `exists`, `abs
 `limit`, `type`.
 
 <Aside type="caution">
-The `version` handed to the loser is advisory. It comes from a sequence, it is unique and opaque, and
-it is **not** monotonic and not a write count. Compare it for equality, never for order, and never do
-arithmetic on it.
+The `version` handed to the loser is advisory. It is unique and opaque, and it is **not** a write
+count. Compare it for equality, never for order, and never do arithmetic on it.
 </Aside>
 
 Two ordering rules complete the picture. **The transaction is the primary fence and `expect` is the
-secondary assertion**: a state write sharing the transaction with an ack is undone when an expired
-lease makes that ack raise, which a compare-and-set cannot do, because an `expect` on a version that
+secondary assertion**: a state write sharing the transaction with an ack is refused with it when an
+expired lease makes that ack fail, which a compare-and-set cannot do, because an `expect` on a version that
 still matches succeeds from a zombie as happily as from the rightful holder. And a bundle may touch a
 given key **at most once**, so there is no intra-batch evaluation order to reason about.
 
 ## `incr` is the way out of the retry loop
 
 `incr` has no `expect`, deliberately: it exists to remove the compare-and-set loop, and a precondition
-would put the loop back. The value is `numeric` server side, so nothing overflows; typed SDKs expose
-int64 and fail loudly rather than hand back a number that lost precision.
+would put the loop back. Server side the arithmetic is exact decimal while the value fits a 128-bit
+mantissa with at most 38 fractional digits, and falls back to a 64-bit float beyond that; typed SDKs
+expose int64 and fail loudly rather than hand back a number that lost precision.
 
 With `max`, **`applied` is the admission decision**. If the increment would breach the ceiling nothing
 is written and the answer is `applied: false, reason: "limit"` with the current value. It does not
@@ -183,13 +185,12 @@ limiter would stop limiting exactly under load.
 ## Reads, and the boundary that is about cost
 
 `get` and `getMany` are allowed inside a transaction because the caller fixes their cost. `getPrefix`
-is not, and the boundary is the cost rather than the kind of operation: it is unbounded read work
-inside the transaction that holds the outermost lock space and, downstream, partition locks.
+is not, because its cost is unbounded: the boundary is the cost rather than the kind of operation.
 
 `getPrefix` also never appears in a query string. `?prefix=quota:acme:` would pass through the
 broker's access logs, the proxy's, the metering sample, the tracing span and any ingress in front, and
 a mitigation living in one component out of four is not a mitigation. It is available on
-`POST /api/v1/kv` and nowhere else, and it requires a prefix: a namespace is not a table to enumerate.
+`POST /api/v1/kv` and nowhere else, and it requires a prefix: a namespace is not a list to enumerate.
 
 The dashboard's KV browser is the one read that does enumerate one, and it is a different route for
 that reason: `POST /api/v1/resources/kv/list`, read-only and viewer-visible, whose page may take an
@@ -200,19 +201,19 @@ otherwise have to travel in a URL: its cursor is a key. `GET /api/v1/resources/k
 selector. [The KV routes](/reference/http/kv) has the field-by-field contract.
 
 Page limits are clamped rather than refused, and `truncated` tells the truth. There is a byte ceiling
-as well as a key ceiling, `QUEEN_KV_MAX_READ_BYTES` (4 MiB), because a thousand keys of 64 KiB is 64 MB
-and the real resource is the byte. `after` is an exclusive keyset cursor, not an offset. Ordering is
-byte order under the `C` collation, so non-ASCII keys are not in the alphabetical order of a locale,
-and each page is its own snapshot: good for compacting state, not for an exact count.
+as well as a key ceiling, 4 MiB per call, because a thousand keys of 64 KiB is 64 MB and the real
+resource is the byte. `after` is an exclusive keyset cursor, not an offset. Ordering is byte order,
+so non-ASCII keys are not in the alphabetical order of a locale, and each page is its own snapshot:
+good for compacting state, not for an exact count.
 
-## `queen_streams.state` is a different thing with a similar name
+## Stream state is a different thing with a similar name
 
-Both are state in PostgreSQL and only one of them is atomic with a stream cycle.
+Both live in the broker's replicated state and only one of them is atomic with a stream cycle.
 
-| | `queen_streams.state` | `queen.kv` |
+| | Stream state (`state_ops`) | `queen.kv` |
 | --- | --- | --- |
 | Identity | `(query_id, partition_id, key)` | `(tenant, namespace, key)` |
-| Atomic with | The stream cycle: state, sink push and ack in one transaction | The transaction wire, when the write rides a bundle |
+| Atomic with | The stream cycle: state, sink push and ack in one log entry | The transaction wire, when the write rides a bundle |
 | Reachable across partitions | No | Yes |
 | Expiry | None. A closed window deletes its own row | Mandatory on every write |
 | Written by | Operators, through `state_ops` | Anybody, through the KV surface |
@@ -226,23 +227,25 @@ or queries. [Streams](/use/streams) states the rule where an operator author wil
 
 No query by value, no predicates, no secondary indexes, no listing without a prefix, no watch,
 subscribe or long poll, no `merge`, no `deletePrefix`, no compare-and-set on the value, and no value
-above 64 KiB. Keys are capped at 512 bytes.
+above 64 KiB. Keys are capped at 512 bytes, and at fewer when the tenant and namespace names are long,
+because the store key carries all three and is itself bounded.
 
-Values are never cached by the broker, at any TTL. The first use of this store is an idempotency
-marker, and a stale read of a marker says "not there" and performs the external effect twice: a cache
-would make the transactional primitive eventually consistent in precisely the place it exists not to
-be.
+Values are never cached by the broker, at any TTL, and a read waits until the node answering it has
+applied everything the cluster had committed when the read began. The first use of this store is an
+idempotency marker, and a stale read of a marker says "not there" and performs the external effect
+twice: a cache would make the transactional primitive eventually consistent in precisely the place it
+exists not to be.
 
 <CardGrid>
   <LinkCard
     href="/use/timers"
     title="Timers"
-    description="The other half of the same release: a message promised now and delivered later, cancellable until a broker claims it."
+    description="The other half of the same release: a message promised now and delivered later, cancellable until it fires."
   />
   <LinkCard
     href="/internals/kv"
     title="KV internals"
-    description="queen.kv column by column, the collation that is load-bearing twice, and kv_live_v1 as the only definition of existence."
+    description="How KV entries are keyed, versioned and expired in the broker's replicated state."
   />
   <LinkCard
     href="/use/streams"

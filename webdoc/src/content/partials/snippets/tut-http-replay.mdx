@@ -145,7 +145,7 @@ echo "-> HTTP $STATUS"
 jq -c '.[]' "$TMP/body"
 
 # One element per item, in request order. Anything other than "queued" here
-# would mean the message is not in PostgreSQL, whatever the 201 says.
+# would mean the broker did not store the message, whatever the 201 says.
 [ "$(jq '[.[] | select(.status == "queued")] | length' "$TMP/body")" = "$EVENT_COUNT" ] \
   || fail "not every event was queued"
 

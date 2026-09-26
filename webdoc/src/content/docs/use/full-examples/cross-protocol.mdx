@@ -1,6 +1,6 @@
 ---
 title: Kafka in, Queen out
-description: "Produce with a Kafka client, consume with the Queen SDK, against one set of rows. No connector, no mirror-maker, no second copy."
+description: "Produce with a Kafka client, consume with the Queen SDK, against one set of messages. No connector, no mirror-maker, no second copy."
 type: example
 tier: use
 sidebar:
@@ -19,8 +19,8 @@ Most systems that speak more than one protocol speak them over separate data. A 
 rows from one place to another, and from then on you own two copies and the lag between them.
 
 This pair does not copy anything. The producer writes over the Kafka wire protocol on port 9092.
-The consumer reads over Queen's own API on port 6632. Both address **the same rows**, at the same
-time, and neither knows the other exists.
+The consumer reads over Queen's own API on port 6632. Both address **the same messages**, at the
+same time, and neither knows the other exists.
 
 ## Why it works
 
@@ -28,7 +28,7 @@ Two translations, and both of them are the facade's, not yours.
 
 **A Kafka topic is a Queen queue.** The Kafka partition *index* is the Queen partition *name*,
 written out in decimal. Topic `orders` partition 7 is queue `orders`, partition `"7"`. Nothing
-converts and nothing is mapped at read time: they are one row in one table.
+converts and nothing is mapped at read time: they are one partition of one queue.
 
 **A record is stored in an envelope.** A Queen payload is JSON and a Kafka key and value are
 arbitrary bytes, so the facade wraps each record and base64s the byte fields:
@@ -86,9 +86,9 @@ Watch **Consumer Groups** while both halves run, and the difference between the 
 visible in the counters.
 
 A Kafka consumer reads through `POST /api/v1/fetch`, which takes no lease, claims nothing and
-moves no cursor. Its progress lives in committed offsets in `queen.kv`. So a topic consumed only
-by Kafka clients shows `0.0 POP`, `0.0 ACK` and a `pending` count that never falls, because only
-retention removes those messages. That is correct, not a stall.
+moves no cursor. Its progress lives in committed offsets in Queen's key/value store. So a topic
+consumed only by Kafka clients shows `0.0 POP`, `0.0 ACK` and a `pending` count that never falls,
+because only retention removes those messages. That is correct, not a stall.
 
 The consumer here is a native one, so it pops and acks. The same queue, read the other way, moves
 the pop and ack counters and drains `pending` as it goes.

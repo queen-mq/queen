@@ -74,13 +74,6 @@ final class ConflationGuard
         $conflict = ($body['conflationConflict'] ?? false) === true;
         $applied = ($body['conflation'] ?? false) === true;
 
-        // Pop maintenance is not version skew: the broker refused the pop before
-        // it reached the claim path, so there is no policy to echo and nothing
-        // to conclude from the absence of one. Without this, an operator pausing
-        // pops would stop every conflating consumer in the fleet with a "broker
-        // too old" exception.
-        $paused = ($body['paused'] ?? false) === true;
-
         // Ordinary queue consumers require every message, so silently joining
         // a group whose persisted policy is conflation=true would discard
         // intermediate jobs. The broker echoes the effective policy even when
@@ -96,7 +89,7 @@ final class ConflationGuard
             self::warnOnce($queue, $group, $namespace, $task, $applied);
         }
 
-        if (!$requested || $applied || $conflict || $paused) {
+        if (!$requested || $applied || $conflict) {
             return;
         }
 

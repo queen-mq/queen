@@ -1,8 +1,9 @@
 //! `POST /api/v1/transaction` — push and ack atomically.
 //!
 //! This is the endpoint that makes a handoff safe: acking the message you just
-//! finished and pushing the next stage's happen in one PostgreSQL transaction,
-//! so a crash between them is impossible.
+//! finished and pushing the next stage's happen in one transaction (one entry
+//! in the broker's replicated log: all of it applies or none), so a crash
+//! between them is impossible.
 //!
 //! A rolled-back transaction still answers **HTTP 200** with
 //! `success: false` — the status code is not the signal.
@@ -91,10 +92,10 @@ pub struct TxnAckOperation {
     #[serde(rename = "leaseId", default, skip_serializing_if = "Option::is_none")]
     pub lease_id: Option<String>,
 
-    /// Why the message failed, carried through to the DLQ row.
+    /// Why the message failed, carried through to the DLQ entry.
     ///
-    /// `handle_transaction` reads `error` off the ack operation and hands it to
-    /// the SP as the dead-letter reason. Without this field a transactional
+    /// The broker reads `error` off the ack operation and records it as the
+    /// dead-letter reason. Without this field a transactional
     /// `failed`/`dlq` ack could only ever produce a DLQ entry with no reason,
     /// while the plain ack route carries one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -137,10 +138,9 @@ pub struct TransactionRequest {
     #[serde(rename = "requiredLeases", default)]
     pub required_leases: Vec<String>,
 
-    /// KV operations applied in the same PostgreSQL transaction as the pushes
-    /// and acks. `getPrefix` is refused here — its cost is not bounded by the
-    /// caller, and this transaction holds the outermost lock space of the
-    /// product.
+    /// KV operations applied in the same transaction as the pushes and acks
+    /// (one entry in the broker's replicated log). `getPrefix` is refused
+    /// here — its cost is not bounded by the caller.
     ///
     /// An operation marked `required` that loses its precondition **rolls the
     /// whole bundle back**. That is the point: the ack and the push do not
@@ -314,7 +314,7 @@ impl TxnResultItem {
 /// `kv_precondition`, `timer_horizon_exceeded`, `payload_too_large`,
 /// `misaligned`, `db_error`.
 ///
-/// The status stays **200** for every verdict the database itself returned. A
+/// The status stays **200** for every verdict the broker itself returned. A
 /// lost KV precondition is the expected outcome of any legitimate redelivery —
 /// it is the idempotency marker doing its job — and it must pollute neither the
 /// error metrics nor the retry policy.
@@ -328,9 +328,9 @@ pub struct TransactionResponse {
     #[serde(default)]
     pub results: Vec<TxnResultItem>,
 
-    /// Set on rollback. Carries the database's own message, so it is prefixed
-    /// with the broker's SQL error tags — `QDUP ...` for a duplicate push,
-    /// `QTXN ...` for an ack that referenced an unknown message.
+    /// Set on rollback. Carries the broker's own message, prefixed with its
+    /// error tags — `QDUP ...` for a duplicate push, `QTXN ...` for a rejected
+    /// ack.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 
@@ -359,8 +359,8 @@ pub struct TransactionResponse {
     #[serde(rename = "kvReason", default, skip_serializing_if = "Option::is_none")]
     pub kv_reason: Option<KvReason>,
 
-    /// The winner's version. Advisory: read outside the row lock, so it is not
-    /// a fencing token to reuse blindly.
+    /// The winner's version when the precondition was checked. It may have
+    /// changed since, so it is not a fencing token to reuse blindly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<i64>,
 

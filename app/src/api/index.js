@@ -6,8 +6,8 @@ import { timerAddr, timerQueueAddr } from './timerPath'
 //
 //  * Everything below except `operator` is TENANT-SCOPED: the proxy injects
 //    the tenant of the acting cluster, so the answer is "for this tenant".
-//  * `operator` is CELL-LEVEL: unscopable by nature (host CPU, PG internals,
-//    cell maintenance, the file buffer). It answers 200 only for a live
+//  * `operator` is CELL-LEVEL: unscopable by nature (host CPU, the replicated
+//    log). It answers 200 only for a live
 //    operator and 404 `route_blocked` for everyone else
 //    (proxy/src/routes.rs is_operator_route). A view that renders one of
 //    those numbers MUST label it cell-level, or a tenant reads a cell figure
@@ -58,13 +58,12 @@ export const queues = {
 // The RAM storage class (EPHEMERAL_QUEUES.md §3.1) — its own route family, and
 // its own vocabulary. What these answer is NOT what `queues` above answers: an
 // ephemeral queue has a ring depth and no pending, no retained bytes, no DLQ
-// and no PG-derived lag, because none of those concepts has a referent when the
-// contents survive nothing (§1.2). A view that borrows a durable column here is
-// inventing a number.
+// and no lag derived from the durable log, because none of those concepts has
+// a referent when the contents survive nothing (§1.2). A view that borrows a
+// durable column here is inventing a number.
 //
-// The two status routes read in-process gauges and touch no database (§6), so —
-// unlike the durable meter, whose 1s poll is load-bearing on PG — they can be
-// polled at 1-2s at zero cost anywhere.
+// The two status routes read in-process gauges and touch no storage (§6), so
+// they can be polled at 1-2s without reading the store.
 //
 // OLD BROKER / OLD PROXY. The family is new in 1.1 and nothing negotiates a
 // version: a broker without the routes 404s, a proxy that does not classify
@@ -239,8 +238,8 @@ export const kv = {
 // out whether a timer it can no longer cancel is still pending, and the stop
 // button must not switch itself off). So `timers_disabled` is reachable only on
 // `POST /api/v1/timers`, which nothing here calls, and the only 503 these
-// routes can mint is the handler's own `timers_unavailable` — a pool
-// exhaustion, a statement timeout or a dead connection.
+// routes can mint is the handler's own `timers_unavailable`: no leader, a
+// retry, or a deadline that passed before the cluster answered.
 //
 // The key encoder lives in ./timerPath.js so `node --test` can reach it; see
 // that file for why the escaping is load-bearing and not uniform across the
@@ -312,18 +311,14 @@ export const operator = {
     client.delete(`/api/operator/users/${encodeURIComponent(userId)}/roles/${encodeURIComponent(clusterId)}`, config),
   /** Cell-wide broker status (every tenant on this cell). */
   getStatus: (params, config) => client.get('/api/v1/status', { params, ...config }),
-  /** Disk file-buffer state for the cell. */
-  getBuffers: (params, config) => client.get('/api/v1/status/buffers', { params, ...config }),
   getSystemMetrics: (params, config) =>
     client.get('/api/v1/analytics/system-metrics', { params, ...config }),
   getWorkerMetrics: (params, config) =>
     client.get('/api/v1/analytics/worker-metrics', { params, ...config }),
-  getPostgresStats: (config) => client.get('/api/v1/analytics/postgres-stats', config),
   /**
-   * RAFT MODE ONLY (stores/engine.js says which). A Postgres-mode or older
-   * broker answers 404, and a proxy that does not classify the family answers
-   * 404 route_blocked: a state to render, not a failure to retry — callers
-   * guard these with stores/routeSupport.js.
+   * The raft routes. An older broker answers 404, and a proxy that does not
+   * classify the family answers 404 route_blocked: a state to render, not a
+   * failure to retry — callers guard these with stores/routeSupport.js.
    *
    * `getRaftStatus`: the answering node's own member object plus `clusterId`,
    * `leaderId`, `self`, `voters` and `singleNode`. `getRaftMembers`: every
@@ -332,19 +327,6 @@ export const operator = {
    */
   getRaftStatus: (config) => client.get('/api/v1/raft/status', config),
   getRaftMembers: (config) => client.get('/api/v1/raft/members', config),
-  /**
-   * The two maintenance kill switches, both cell-wide (every tenant on the
-   * cell, not just yours). GET reads a flag, POST flips it.
-   *
-   * `getMaintenance` reports BOTH flags — `maintenanceMode` and
-   * `popMaintenanceMode` — so the header banners need only this one call;
-   * `setPopMaintenance` is the pop switch's write half.
-   */
-  getMaintenance: (config) => client.get('/api/v1/system/maintenance', config),
-  setMaintenance: (enabled, config) =>
-    client.post('/api/v1/system/maintenance', { enabled }, config),
-  setPopMaintenance: (enabled, config) =>
-    client.post('/api/v1/system/maintenance/pop', { enabled }, config),
   getPrometheus: (config) =>
     client.get('/metrics/prometheus', { responseType: 'text', ...config }),
 }

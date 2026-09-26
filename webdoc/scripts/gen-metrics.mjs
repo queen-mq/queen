@@ -1,20 +1,29 @@
 /**
  * Generate the Prometheus family reference from the code that emits it.
  *
- * The exposition is assembled in two places with two different shapes:
- *   server/src/metrics.rs         `ht(&mut s, name, help, type)` helper calls
- *   server/src/handlers/status.rs raw `# HELP` / `# TYPE` strings, some of
- *                                 them templated over an array of family names
+ * `GET /metrics/prometheus` (`handle_prometheus` in server/src/handlers/raft.rs)
+ * concatenates four emitters, in several shapes:
+ *   server/src/metrics.rs          `ht(&mut s, name, help, type)` helper calls
+ *   server/src/rsm/timing.rs       `(name, help, &histogram)` tuples rendered as
+ *                                  summaries, split `# HELP` / `# TYPE` literals,
+ *                                  and one `let pname = "..."` template
+ *   server/src/rsm/facade/real.rs  raw `# HELP` / `# TYPE` strings
+ *   server/src/rsm/admit.rs        raw `# HELP` / `# TYPE` strings
  *
- * Both are parsed. Every `"queen_*"` string literal in either file is then
+ * All are parsed. Every `"queen_*"` string literal in those files is then
  * checked against what was parsed, so a family can never quietly vanish from
- * the reference: an unmatched name is reported and published with no help text
- * rather than dropped.
+ * the reference. The debug counters of server/src/rsm/dbgctr.rs carry no HELP
+ * and are left out on purpose.
  */
 
 import { cell, emitPartial, isCheck, repoRead } from "./lib/source.mjs";
 
-const SOURCES = ["server/src/metrics.rs", "server/src/handlers/status.rs"];
+const SOURCES = [
+  "server/src/metrics.rs",
+  "server/src/rsm/timing.rs",
+  "server/src/rsm/facade/real.rs",
+  "server/src/rsm/admit.rs",
+];
 
 function collect(text, families) {
   const put = (name, help, type) => {
@@ -27,21 +36,37 @@ function collect(text, families) {
   // kv/timers/sweeper block are emitted through a `&dyn Fn(&mut String, …)`
   // argument already named `ht`, so they parsed as nothing and were published
   // with empty Type and Help cells.
-  for (const m of text.matchAll(/\bht\(\s*(?:&mut\s+)?\w+\s*,\s*"([^"]+)"\s*,\s*"([^"]*)"\s*,\s*"(\w+)"\s*\)/g)) {
+  // rustfmt splits a long call over lines and leaves a trailing comma.
+  for (const m of text.matchAll(/\bht\(\s*(?:&mut\s+)?\w+\s*,\s*"([^"]+)"\s*,\s*"([^"]*)"\s*,\s*"(\w+)"\s*,?\s*\)/g)) {
     put(m[1], m[2], m[3]);
   }
 
   // An array of (name, help, &counter) tuples fed to `ht(name, help, "type")`
-  // by the loop right after it. The literal type lives in that `ht` call.
-  for (const m of text.matchAll(/\(\s*"(queen_[a-z_]+)"\s*,\s*"([^"]*)"\s*,\s*&[\w.]+\s*\)/g)) {
-    const after = text.slice(m.index, m.index + 1600);
+  // by the loop right after it, or to `render_summary`, which always writes
+  // `# TYPE {name} summary`. The trailing comma is rustfmt's, on a tuple split
+  // over several lines.
+  for (const m of text.matchAll(/\(\s*"(queen_[a-z_]+)"\s*,\s*"([^"]*)"\s*,\s*&[\w.]+\s*,?\s*\)/g)) {
+    const after = text.slice(m.index, m.index + 9000);
     const typed = after.match(/ht\(\s*&mut\s+\w+\s*,\s*\w+\s*,\s*\w+\s*,\s*"(\w+)"\s*\)/);
-    put(m[1], m[2], typed ? typed[1] : "");
+    const summary = /render_summary\(/.test(after);
+    put(m[1], m[2], typed ? typed[1] : summary ? "summary" : "");
   }
 
-  // "# HELP name help\n# TYPE name type"
+  // "# HELP name help\n# TYPE name type", in one literal.
   for (const m of text.matchAll(/# HELP (queen_[a-z_]+) ([^\\"]*)\\n# TYPE \1 (\w+)/g)) {
     put(m[1], m[2].trim(), m[3]);
+  }
+
+  // The same pair split over two literals: "# HELP name help\n" then, a
+  // statement later, "# TYPE name type\n".
+  for (const m of text.matchAll(/# HELP (queen_[a-z_]+) ([^\\"]*)\\n"[\s\S]{0,240}?# TYPE \1 (\w+)/g)) {
+    put(m[1], m[2].trim(), m[3]);
+  }
+
+  // `let pname = "queen_x";` followed by a `# HELP {pname} help\n# TYPE {pname} type`
+  // template.
+  for (const m of text.matchAll(/let (\w+) = "(queen_[a-z_]+)";[\s\S]{0,400}?# HELP \{\1\} ([^\\"]*)\\n# TYPE \{\1\} (\w+)/g)) {
+    put(m[2], m[3].trim(), m[4]);
   }
 
   // "# HELP {ident} help\n# TYPE {ident} type" — templated over a nearby array
@@ -74,10 +99,15 @@ function universe(text) {
 }
 
 const GROUPS = [
-  ["Process (this broker instance)", (n) => n.startsWith("queen_process_") || ["queen_uptime_seconds", "queen_event_loop_lag_avg_milliseconds", "queen_parked_long_polls"].includes(n)],
-  ["Cluster lifetime totals (from PostgreSQL)", (n) => n.startsWith("queen_cluster_")],
+  ["Process (this broker instance)", (n) => n.startsWith("queen_process_") || ["queen_uptime_seconds", "queen_event_loop_lag_avg_milliseconds", "queen_parked_long_polls", "queen_malloc_bytes"].includes(n)],
+  ["Replicated log and storage", (n) =>
+    n.startsWith("queen_raft_store_") || n.startsWith("queen_raft_index") || n === "queen_raft_inflight" ||
+    n === "queen_raft_proposals_total" || n === "queen_raft_log_storage" || n === "queen_raft_storage_full"],
+  ["Admission", (n) => n.startsWith("queen_raft_admit_")],
+  ["Pipeline timing", (n) => n.startsWith("queen_raft_")],
   ["Per-queue rates and depth", (n) => n.startsWith("queen_queue_") || n.startsWith("queen_dlq_")],
   ["Engine internals", (n) => n.startsWith("queen_seg_") || n.startsWith("queen_batch") || n.startsWith("queen_fusion") || n.startsWith("queen_pop_")],
+  ["Ephemeral queues", (n) => n.startsWith("queen_ephemeral_")],
   // Emitted by every broker, including one that has never seen a key or a timer:
   // the exposition gates that used to hide this block are gone with the boot flags.
   ["Key/value state, timers and the sweeper", (n) =>
@@ -129,17 +159,11 @@ function main() {
 
   const lines = [];
   lines.push(
-    `\`GET /metrics/prometheus\` exposes **${families.size} families**. ` +
-      `\`queen_process_*\` counts what this one broker instance did since it started; ` +
-      `\`queen_cluster_*\` are lifetime totals read back out of PostgreSQL, so every ` +
-      `instance reports the same value.`,
-    "",
-    `The \`queen_kv_*\`, \`queen_timers_*\` and \`queen_sweeper_*\` families are exposed by ` +
-      `**every** broker, at zero on one that has never seen a key or a timer, because those ` +
-      `surfaces are part of the engine rather than a feature a cell opts into. A dashboard ` +
-      `panel or an alert built on them can therefore be written before the first tenant ` +
-      `arrives, and a family that goes missing is a broker that is gone, not a feature that ` +
-      `is off.`,
+    `\`GET /metrics/prometheus\` exposes **${families.size} families**. Every one describes ` +
+      `the node that answered: \`queen_process_*\` counts what this node did since it ` +
+      `started, and the \`queen_raft_*\` families describe its replicated log, its store and ` +
+      `its pipeline. Scrape every node. The pipeline timing and admission families are ` +
+      `skipped when \`QUEEN_RAFT_METRICS\` is \`0\`, \`false\`, \`off\` or \`no\`; it is on by default.`,
     "",
   );
 

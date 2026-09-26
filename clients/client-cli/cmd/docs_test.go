@@ -48,7 +48,7 @@ func TestDocsTargetResolution(t *testing.T) {
 		{"server", "https://queenmq.com/deploy/"},
 		{"dashboard", "https://queenmq.com/deploy/dashboard/"},
 		{"benchmarks", "https://queenmq.com/benchmarks/"},
-		{"sizing", "https://queenmq.com/deploy/postgres/"},
+		{"sizing", "https://queenmq.com/deploy/"},
 		// The .html suffix the old flag taught people to type is tolerated.
 		{"quickstart.html", "https://queenmq.com/start/quickstart/"},
 		{"HTTP-API", "https://queenmq.com/reference/http/"},

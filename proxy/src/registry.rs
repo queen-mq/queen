@@ -9,24 +9,23 @@
 //!     DB"), the per-queue count the cap check reads in O(1), and the only
 //!     place individual partition identity lives at all.
 //!   * `db_partition_floor` -- the last-known partitions_count per queue,
-//!     seeded from queen_proxy.queues on lazy load and kept in step by the
-//!     reconciler. This exists because queen_proxy.queues (001_init.sql)
+//!     seeded from the stored queue rows on lazy load and kept in step by the
+//!     reconciler. This exists because a queue row (`store::schema::QueueDoc`)
 //!     only ever stores a COUNT, never partition names (and neither does
 //!     the broker's own resources/queues response) -- so after a proxy
 //!     restart `partitions` starts empty and there is no way to repopulate exact
-//!     historical partition names from the DB. `db_partition_floor` is the
+//!     historical partition names from the store. `db_partition_floor` is the
 //!     restart-safety net: the effective partition count used for the cap
 //!     check is `max(observed in `partitions`, db_partition_floor)`, so a
 //!     restart can't be used to bypass max_partitions_per_queue before the
 //!     reconciler's next pass (or fresh traffic) catches back up.
 //!
-//! Nothing on the request path waits for the database. A miss is decided in
+//! Nothing on the request path waits for the store. A miss is decided in
 //! memory and the queue row that records it is coalesced per (cluster, queue)
-//! for `spawn_persister`, which writes one UNNEST upsert per tick (or, inside
-//! the broker, one KV batch per ~120 rows: `store::data`). The 2026-08-22
-//! soak ran the old shape -- one synchronous upsert per new (queue, partition),
-//! awaited before the push was forwarded -- to 743 149 writes during a
-//! partition-creation ramp, on the Postgres the data path was saturating.
+//! for `spawn_persister`, which writes one KV batch per ~120 rows per tick
+//! (`store::data`). The 2026-08-22 soak ran the old shape -- one synchronous
+//! upsert per new (queue, partition), awaited before the push was forwarded --
+//! to 743 149 writes during a partition-creation ramp.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
@@ -100,7 +99,7 @@ struct ClusterRegistry {
     /// Queue names known to exist (DB lazy-load, reconciler, or this
     /// process's own admits) -- backs the max_queues check. Pruned to the
     /// broker's inventory on every confirmed reconcile pass, and dropped
-    /// wholesale by `invalidate` when pxdb says the cluster changed: a name in
+    /// wholesale by `invalidate` when the store says the cluster changed: a name in
     /// here that no longer exists is a plan slot the tenant cannot use.
     queue_names: HashSet<String>,
     /// Has this cluster's cell already been reported as not sending the
@@ -110,7 +109,7 @@ struct ClusterRegistry {
 }
 
 pub struct Registry {
-    /// Where the queue rows live: pxdb, the broker's KV, or nowhere.
+    /// Where the queue rows live: the broker's KV (or nowhere, in tests).
     store: Store,
     /// Inside the broker: the in-process router the reconciler asks for the
     /// queue inventory instead of opening a socket to `cells.base_url`.
@@ -122,7 +121,7 @@ pub struct Registry {
     loaded: Arc<RwLock<HashSet<Uuid>>>,
     /// Clusters currently believed to be over their storage quota, per the
     /// reconciler's last successful byte count. Read by the storage-quota
-    /// pump in main.rs -- see `over_storage`.
+    /// pump in app.rs -- see `over_storage`.
     over_storage: Arc<RwLock<HashSet<Uuid>>>,
     /// The last retained-bytes TOTAL measured for each cluster, alongside the
     /// over/under verdict derived from it. The verdict alone cannot drive the
@@ -135,13 +134,8 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// The standalone proxy's constructor: pxdb, or none (dev-static).
-    pub fn new(db: Option<deadpool_postgres::Pool>) -> Registry {
-        Registry::with_store(db.map(Store::Pg).unwrap_or(Store::None))
-    }
-
-    /// Any store: the single binary hands the broker's KV here.
-    pub fn with_store(store: Store) -> Registry {
+    /// A registry over `store` (the broker's KV).
+    pub fn new(store: Store) -> Registry {
         Registry {
             store,
             inventory: None,
@@ -155,7 +149,7 @@ impl Registry {
 
     /// Ask `upstream` (when it is in-process) for the queue inventory rather
     /// than the cell's `base_url` over a socket. Without it the reconciler
-    /// fetches over plain HTTP, as the standalone proxy always has.
+    /// fetches over plain HTTP.
     pub fn with_inventory(mut self, upstream: Upstream) -> Registry {
         if upstream.in_process() {
             self.inventory = Some(upstream);
@@ -224,8 +218,8 @@ impl Registry {
         Admit::Allowed
     }
 
-    /// Bootstrap a cluster's known-queue-names + partition floor from
-    /// queen_proxy.queues, once. No-op (and harmless) with no DB (dev-static).
+    /// Bootstrap a cluster's known-queue-names + partition floor from the
+    /// stored queue rows, once. No-op (and harmless) without a store.
     async fn ensure_loaded(&self, cluster_id: Uuid) {
         if self.loaded.read().unwrap().contains(&cluster_id) {
             return;
@@ -254,7 +248,7 @@ impl Registry {
     /// Record a queue's projected partition count for the persister, keeping
     /// the maximum per (cluster, queue). A burst creating 5 000 partitions of
     /// one queue is one row in the next flush, not 5 000 upserts on the
-    /// request path. No-op without a pxdb (dev-static).
+    /// request path. No-op without a store.
     fn enqueue_persist(&self, cluster_id: Uuid, queue: &str, partitions_count: i64) {
         if !self.store.is_some() {
             return;
@@ -265,11 +259,11 @@ impl Registry {
     }
 
     /// Spawn the queue-row persister: every QUEEN_PROXY_REGISTRY_PERSIST_MS it
-    /// writes whatever `admit` coalesced since the last tick as ONE statement.
-    /// Called from main.rs next to `spawn_reconciler`. No-op without a pxdb.
+    /// writes whatever `admit` coalesced since the last tick. Started by
+    /// `app::start_background` next to `spawn_reconciler`. No-op without a
+    /// store.
     pub fn spawn_persister(&self) {
         if !self.store.is_some() {
-            tracing::info!("registry persister: no pxdb configured, skipping (dev-static mode)");
             return;
         }
         let store = self.store.clone();
@@ -288,7 +282,8 @@ impl Registry {
         });
     }
 
-    /// Shutdown counterpart of the periodic flush (main.rs bounds it).
+    /// Shutdown counterpart of the periodic flush (`app::shutdown_drain`
+    /// bounds it).
     pub async fn drain(&self) {
         if self.store.is_some() {
             flush_pending(&self.store, &self.pending).await;
@@ -298,7 +293,7 @@ impl Registry {
     /// Clusters currently believed over their plan's max_retained_bytes, per
     /// the reconciler's last successful byte count for that cluster.
     ///
-    /// Consumed by the storage-quota pump in main.rs, which diffs this list
+    /// Consumed by the storage-quota pump in app.rs, which diffs this list
     /// every 10s and calls `st.limits.set_push_blocked(id, ..)` on the
     /// transitions; gateway.rs then answers 403 `storage_quota_exceeded` on
     /// Produce for a blocked cluster (consumes stay allowed). Registry does
@@ -312,7 +307,7 @@ impl Registry {
 
     /// The reconciler's last measured retained-bytes total per cluster.
     ///
-    /// The storage pump in main.rs feeds these to `Limits::publish_retained`,
+    /// The storage pump in app.rs feeds these to `Limits::publish_retained`,
     /// which is what lets the push gate add the bytes accepted since a total
     /// was computed instead of trusting a figure that may be a whole broker
     /// recompute period old.
@@ -321,17 +316,17 @@ impl Registry {
     }
 
     /// Drop a cluster's in-memory queue registry so the next `admit` rebuilds
-    /// it from pxdb, where the `deleted_at IS NULL` filter lives.
+    /// it from the store, where the soft-delete filter lives.
     ///
     /// The partition-cap floor survives, because `ensure_loaded` re-reads it
-    /// from `queen_proxy.queues`; the exact partition NAMES this process
+    /// from the stored queue rows; the exact partition NAMES this process
     /// admitted do not, which is the same position a restart leaves the
     /// registry in and which the floor exists to cover (module doc).
     pub fn invalidate(&self, cluster_id: Uuid) {
         invalidate_cluster(&self.known, &self.loaded, cluster_id);
     }
 
-    /// `invalidate` as a standalone callable, for the pxdb NOTIFY listener in
+    /// `invalidate` as a standalone callable, for the invalidation feed in
     /// cache.rs to hold.
     ///
     /// Handing over clones of the two maps rather than an `Arc<Registry>` (or,
@@ -346,7 +341,6 @@ impl Registry {
 
     pub fn spawn_reconciler(&self) {
         if !self.store.is_some() {
-            tracing::info!("registry reconciler: no pxdb configured, skipping (dev-static mode)");
             return;
         }
         let store = self.store.clone();
@@ -393,9 +387,9 @@ fn invalidate_cluster(
 
 type Pending = Mutex<HashMap<(Uuid, String), i64>>;
 
-/// One write per flush (`store::data::persist_queue_floors`: the UNNEST
-/// upsert with GREATEST, so the row is a floor that only the reconciler, which
-/// knows the broker's true count, ever lowers).
+/// One write per flush (`store::data::persist_queue_floors`: grow-only, so
+/// the row is a floor that only the reconciler, which knows the broker's true
+/// count, ever lowers).
 async fn flush_pending(store: &Store, pending: &Pending) {
     let batch: HashMap<(Uuid, String), i64> = {
         let mut p = pending.lock().unwrap();
@@ -512,9 +506,8 @@ async fn reconcile_cluster(
 
         // Write only what changed. `db_partition_floor` is the last count this
         // process read from or wrote to the row, so an equal value means the
-        // row already says so -- and a no-op UPDATE is not free in Postgres:
-        // a new tuple version, WAL, and a dead tuple for autovacuum, once per
-        // queue per cycle, on the database the data path shares.
+        // row already says so -- and a no-op write is not free: a replicated
+        // KV entry once per queue per cycle, on the log the data path shares.
         let unchanged = {
             let map = known.read().unwrap();
             map.get(&target.cluster_id)
@@ -530,7 +523,7 @@ async fn reconcile_cluster(
     let written = match data::reconcile_queue_counts(store, target.cluster_id, &changed).await {
         Ok(w) => w,
         Err(e) => {
-            tracing::warn!(cluster = %target.cluster_id, error = %e, "registry reconciler: pool.get failed, skipping DB sync this cycle");
+            tracing::warn!(cluster = %target.cluster_id, error = %e, "registry reconciler: store write failed, skipping the sync this cycle");
             return;
         }
     };
@@ -597,7 +590,7 @@ async fn reconcile_cluster(
     }
 
     // Queues that disappeared from the broker's own listing: soft-delete.
-    // queen_proxy.queues is a CACHE (ownership is broker-side, PLAN §5), so a
+    // The stored queue rows are a CACHE (ownership is broker-side, PLAN §5), so a
     // false sweep never touches broker data. It isn't free either: the swept
     // rows are what re-seeds `db_partition_floor` after a proxy restart
     // (module doc), so losing them loses the partition-cap floor. Which answers
@@ -618,7 +611,7 @@ async fn reconcile_cluster(
             // cluster with 61 tombstoned rows and 0 live ones refused every
             // push to a new queue name with `queue limit reached (20)` until
             // the proxy was restarted, because a restart is the only thing that
-            // re-ran the lazy load and its `deleted_at IS NULL` filter. Pruned
+            // re-ran the lazy load and its soft-delete filter. Pruned
             // in the SAME branch as the DB write so the two never disagree
             // about what exists; a failed sweep retries next cycle.
             let seen: HashSet<&str> = seen_names.iter().map(String::as_str).collect();
@@ -868,29 +861,15 @@ mod tests {
         }
     }
 
-    /// A pool nothing listens behind (127.0.0.1:1), bounded so a test can
-    /// never hang on it: the registry must behave with a pxdb that is
-    /// configured but unreachable.
-    fn unreachable_pool() -> deadpool_postgres::Pool {
-        let mut pg = tokio_postgres::Config::new();
-        pg.host("127.0.0.1").port(1).user("x").dbname("x").connect_timeout(Duration::from_secs(2));
-        let mgr = deadpool_postgres::Manager::from_config(
-            pg,
-            tokio_postgres::NoTls,
-            deadpool_postgres::ManagerConfig { recycling_method: deadpool_postgres::RecyclingMethod::Fast },
-        );
-        deadpool_postgres::Pool::builder(mgr)
-            .max_size(1)
-            .runtime(deadpool_postgres::Runtime::Tokio1)
-            .wait_timeout(Some(Duration::from_secs(2)))
-            .create_timeout(Some(Duration::from_secs(2)))
-            .build()
-            .unwrap()
+    /// A store that never answers: the registry must behave with a store
+    /// that is configured but unreachable.
+    fn unreachable_store() -> Store {
+        Store::Kv(Arc::new(crate::store::memkv::Down))
     }
 
     #[tokio::test]
     async fn new_partitions_coalesce_into_one_pending_row_per_queue() {
-        let reg = Registry::new(Some(unreachable_pool()));
+        let reg = Registry::new(unreachable_store());
         let ctx = test_ctx(None, None);
         for i in 0..50 {
             assert_eq!(reg.admit(&ctx, "orders", &format!("p{i}")).await, Admit::Allowed);
@@ -904,17 +883,17 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_flush_keeps_the_batch_for_the_next_tick() {
-        let reg = Registry::new(Some(unreachable_pool()));
+        let reg = Registry::new(unreachable_store());
         let ctx = test_ctx(None, None);
         assert_eq!(reg.admit(&ctx, "orders", "p0").await, Admit::Allowed);
-        reg.drain().await; // pxdb unreachable: the row must survive the failure
+        reg.drain().await; // store unreachable: the row must survive the failure
         let pending = reg.pending.lock().unwrap().clone();
         assert_eq!(pending.get(&(ctx.cluster_id, "orders".to_string())), Some(&1));
     }
 
     #[tokio::test]
     async fn admit_allows_then_fast_paths_without_db() {
-        let reg = Registry::new(None);
+        let reg = Registry::new(Store::None);
         let ctx = test_ctx(Some(10), Some(10));
         assert_eq!(reg.admit(&ctx, "orders", "p0").await, Admit::Allowed);
         // Same pair again: db is None, so this can only be the in-process
@@ -924,7 +903,7 @@ mod tests {
 
     #[tokio::test]
     async fn admit_enforces_max_partitions_per_queue() {
-        let reg = Registry::new(None);
+        let reg = Registry::new(Store::None);
         let ctx = test_ctx(None, Some(2));
         assert_eq!(reg.admit(&ctx, "orders", "p0").await, Admit::Allowed);
         assert_eq!(reg.admit(&ctx, "orders", "p1").await, Admit::Allowed);
@@ -933,7 +912,7 @@ mod tests {
 
     #[tokio::test]
     async fn admit_enforces_max_queues_but_not_on_repeat_partitions() {
-        let reg = Registry::new(None);
+        let reg = Registry::new(Store::None);
         let ctx = test_ctx(Some(1), None);
         assert_eq!(reg.admit(&ctx, "orders", "p0").await, Admit::Allowed);
         // A second partition of the SAME queue must not count against
@@ -1090,7 +1069,7 @@ mod tests {
     /// slots must come back without a restart.
     #[tokio::test]
     async fn pruning_swept_names_frees_queue_slots_without_a_restart() {
-        let reg = Registry::new(None);
+        let reg = Registry::new(Store::None);
         let ctx = test_ctx(Some(2), None);
         assert_eq!(reg.admit(&ctx, "orders", "p0").await, Admit::Allowed);
         assert_eq!(reg.admit(&ctx, "shipments", "p0").await, Admit::Allowed);
@@ -1114,11 +1093,12 @@ mod tests {
     }
 
     /// The other half of the fix: a soft-delete performed anywhere else (the
-    /// console, an operator's hand) reaches the proxy as a pxdb NOTIFY, and the
+    /// console, an operator's hand) reaches the proxy through the invalidation
+    /// feed, and the
     /// invalidator has to make the next admit rebuild from the live rows.
     #[tokio::test]
     async fn invalidate_frees_queue_slots_without_a_restart() {
-        let reg = Registry::new(None);
+        let reg = Registry::new(Store::None);
         let ctx = test_ctx(Some(1), None);
         assert_eq!(reg.admit(&ctx, "orders", "p0").await, Admit::Allowed);
         assert_eq!(reg.admit(&ctx, "shipments", "p0").await, Admit::OverQueues { max: 1 });
@@ -1133,7 +1113,7 @@ mod tests {
 
     #[test]
     fn the_invalidator_closure_clears_the_same_state() {
-        let reg = Registry::new(None);
+        let reg = Registry::new(Store::None);
         let cluster_id = Uuid::from_u128(42);
         reg.known.write().unwrap().insert(cluster_id, ClusterRegistry::default());
         reg.loaded.write().unwrap().insert(cluster_id);
@@ -1147,7 +1127,7 @@ mod tests {
 
     #[test]
     fn forget_clears_state() {
-        let reg = Registry::new(None);
+        let reg = Registry::new(Store::None);
         let cluster_id = Uuid::from_u128(42);
         reg.known.write().unwrap().insert(cluster_id, ClusterRegistry::default());
         reg.loaded.write().unwrap().insert(cluster_id);
@@ -1158,7 +1138,7 @@ mod tests {
 
     #[test]
     fn retained_totals_round_trip_for_the_storage_pump() {
-        let reg = Registry::new(None);
+        let reg = Registry::new(Store::None);
         let a = Uuid::from_u128(1);
         let b = Uuid::from_u128(2);
         reg.retained.write().unwrap().insert(a, 4_096);
@@ -1207,7 +1187,7 @@ mod tests {
         let (store, cluster) = kv_cluster().await;
         let mut ctx = test_ctx(Some(2), Some(3));
         ctx.cluster_id = cluster;
-        let reg = Registry::with_store(store.clone());
+        let reg = Registry::new(store.clone());
         for p in 0..3 {
             assert_eq!(reg.admit(&ctx, "orders", &format!("p{p}")).await, Admit::Allowed);
         }
@@ -1217,7 +1197,7 @@ mod tests {
 
         // A fresh process: no partition names, but the floor and the queue
         // names come back from the store, so a restart bypasses no cap.
-        let reg2 = Registry::with_store(store);
+        let reg2 = Registry::new(store);
         assert_eq!(reg2.admit(&ctx, "orders", "p9").await, Admit::OverPartitions { max: 3 });
         assert_eq!(reg2.admit(&ctx, "invoices", "p0").await, Admit::OverQueues { max: 2 });
     }
@@ -1245,7 +1225,7 @@ mod tests {
                 }))
             }),
         );
-        let reg = Registry::with_store(store.clone()).with_inventory(Upstream::InProcess(router));
+        let reg = Registry::new(store.clone()).with_inventory(Upstream::InProcess(router));
         reconcile_once(&reg.store, reg.inventory.as_ref(), &reg.known, &reg.over_storage, &reg.retained).await;
 
         let mut live = data::live_queues(&store, cluster).await.unwrap();

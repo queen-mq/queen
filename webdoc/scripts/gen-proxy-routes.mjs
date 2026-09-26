@@ -13,17 +13,17 @@
 
 import {
   assertFingerprint,
+  brokerRoutes as brokerRouteTable,
   cell,
   emitPartial,
   fnBody,
   isCheck,
-  ROUTER_BUILDER,
+  RAFT_ADAPTER,
+  RAFT_ROUTER,
   repoRead,
-  sliceBlock,
 } from "./lib/source.mjs";
 
 const PROXY_ROUTES = "proxy/src/routes.rs";
-const MAIN = "server/src/main.rs";
 
 // Bump after re-reading the Rust when a guard trips.
 // 2026-08-17: `classify` grew the KV and timer families and split every gated
@@ -90,21 +90,23 @@ const MAIN = "server/src/main.rs";
 // one of them must, since the KV browser's list is a `Read` POST (§2.5).
 // Re-read in full: nothing else in the function moved, and `is_operator_route`
 // is untouched.
-const CLASSIFY_FINGERPRINT = "0737293f24981410";
-const OPERATOR_FINGERPRINT = "04d6dea7366b466d";
+// 2026-09-26 (Queen 2.0, the PostgreSQL storage class removed): `classify`
+// blocks two more exact paths, `/api/v1/resources/tenant` and
+// `/api/v1/resources/quota`, operator surfaces of the raft adapter that a
+// tenant must never reach; mirrored in the blocked arm below. And
+// `is_operator_route` lost `/api/v1/analytics/postgres-stats`, which the broker
+// no longer serves. The comment edits around the PG-era wording in the Rust
+// do not move the fingerprints.
+const CLASSIFY_FINGERPRINT = "826f7c720cacd775";
+const OPERATOR_FINGERPRINT = "aee5990e5ef5fb90";
 
 // --- mirror of `is_operator_route` -----------------------------------------
 
 const OPERATOR_ROUTES = new Set([
   "/api/v1/status",
-  "/api/v1/status/buffers",
   "/api/v1/analytics/system-metrics",
   "/api/v1/analytics/worker-metrics",
-  "/api/v1/analytics/postgres-stats",
-  // Both maintenance kill switches, both halves. `/system/shared-state` is
-  // deliberately NOT here and stays blocked.
-  "/api/v1/system/maintenance",
-  "/api/v1/system/maintenance/pop",
+  // `/system/shared-state` is deliberately NOT here and stays blocked.
   "/metrics/prometheus",
 ]);
 
@@ -131,6 +133,8 @@ function classify(m, p) {
     p.startsWith("/api/v1/migration") ||
     p.startsWith("/api/v1/system") ||
     p.startsWith("/internal") ||
+    p === "/api/v1/resources/tenant" ||
+    p === "/api/v1/resources/quota" ||
     p === "/api/v1/stats/refresh" ||
     p === "/metrics" ||
     p === "/status"
@@ -151,7 +155,7 @@ function classify(m, p) {
   if (p === "/api/v1/fetch") {
     return m === "POST" ? "consume" : "blocked";
   }
-  // PLAN_S3_SINK.md §5.1: the fetch arm with the path swapped, and method-exact
+  // Partition discovery: the fetch arm with the path swapped, and method-exact
   // on the exact path for the same reason.
   if (p === "/api/v1/partitions/changed") {
     return m === "POST" ? "consume" : "blocked";
@@ -255,7 +259,7 @@ const CLASS_MEANING = [
   ["produce", "Counted against the message quota. May create queues and partitions implicitly."],
   [
     "consume",
-    "Pop, ack, lease extension, the batched read-from-offset the Kafka facade consumes through, and the partition discovery the S3 sink maps a queue with. A `wait=true` pop also holds a parked-consumer slot; the fetch does not, since its long poll is a body field rather than a query flag. Both reads are classified for the authority they need rather than for what they write: they are non-destructive and never quota-blocked, but one hands out message payloads and the other the partition names and offsets to read them by, so they carry the authority of the pop they stand in for instead of the read level every user role already has.",
+    "Pop, ack, lease extension, the batched read-from-offset the Kafka facade consumes through, and the partition discovery a reader maps a queue with. A `wait=true` pop also holds a parked-consumer slot; the fetch does not, since its long poll is a body field rather than a query flag. Both reads are classified for the authority they need rather than for what they write: they are non-destructive and never quota-blocked, but one hands out message payloads and the other the partition names and offsets to read them by, so they carry the authority of the pop they stand in for instead of the read level every user role already has.",
   ],
   [
     "queue admin",
@@ -283,22 +287,9 @@ const CLASS_MEANING = [
   ["blocked", "Never exposed to a tenant, whatever the credential. Returns 404."],
 ];
 
-/** The broker's real routes — same parse as gen-routes.mjs. */
+/** The broker's real routes: the same table gen-routes.mjs publishes. */
 function brokerRoutes() {
-  const block = sliceBlock(repoRead(MAIN), ROUTER_BUILDER, ".with_state(state);");
-  const routes = [];
-  const re = /\.route\(\s*"([^"]+)"\s*,/g;
-  let m;
-  while ((m = re.exec(block))) {
-    const path = m[1];
-    const rest = block.slice(re.lastIndex, re.lastIndex + 400);
-    const stop = rest.indexOf(".route(");
-    const window = stop === -1 ? rest : rest.slice(0, stop);
-    for (const [, verb] of window.matchAll(/\b(get|post|put|patch|delete|head|options)\(\s*[\w:]+/g)) {
-      routes.push({ path, method: verb.toUpperCase() });
-    }
-  }
-  return routes;
+  return brokerRouteTable().map(({ path, method }) => ({ path, method }));
 }
 
 /**
@@ -327,7 +318,7 @@ const READ_WRITE_ALLOWED = new Map([
     "the console's KV browser (PLAN_DASHBOARD_ACTIONS.md §2.5): a read-only, " +
       "viewer-visible, cursor-paged list that is a POST only because its cursor is a " +
       "KEY, and a key in a query string is written to every access log between the " +
-      "browser and the database",
+      "browser and the broker",
   ],
 ]);
 
@@ -426,7 +417,11 @@ function main() {
     name: "proxy-route-classes",
     title: "proxy route classes",
     description: "How the proxy classifies each broker route, and which ones a tenant credential can reach.",
-    sources: [`${PROXY_ROUTES} (classify, is_operator_route)`, `${MAIN} (Router::new chain)`],
+    sources: [
+      `${PROXY_ROUTES} (classify, is_operator_route)`,
+      `${RAFT_ROUTER} (build_raft_router)`,
+      `${RAFT_ADAPTER} (api_impl, api_dynamic)`,
+    ],
     body: lines.join("\n"),
     check,
   });

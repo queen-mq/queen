@@ -12,9 +12,9 @@ import (
 //
 // The unit suite in ../cmd pins the wire and the degrade-loudly error against a
 // fake broker. What it cannot pin is that the flag queenctl sends is the flag
-// the SQL reads, that the policy really is per GROUP and not per call, and that
-// the depth numbers an operator reads mean what §5.3 says they mean. Those need
-// the real thing.
+// the broker reads, that the policy really is per GROUP and not per call, and
+// that the depth numbers an operator reads mean what §5.3 says they mean. Those
+// need the real thing.
 
 // cflGroup keeps consumer-group names unique per run, so a re-run against a
 // shared broker never inherits a group that was already registered with the

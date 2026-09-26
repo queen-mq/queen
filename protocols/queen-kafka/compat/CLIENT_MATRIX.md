@@ -31,7 +31,8 @@ claims and this file has only ever made the second one.
 A fifth, on **2026-08-30**, changed what is BETWEEN the client and Queen rather
 than either end: the **Cloud** shape, where the facade's `QUEEN_URL` is a cell's
 proxy instead of a broker, so every Kafka request crosses authentication, tenant
-scoping, quotas and metering. It is measured in [`cloud/`](cloud) and has its own
+scoping, quotas and metering. It was measured by the `cloud/` rig (standalone
+proxy; removed with Postgres on 2026-09-26) and has its own
 section, ["Reaching the facade in Queen Cloud"](#reaching-the-facade-in-queen-cloud).
 
 Read this file with [ERRORS.md](ERRORS.md) (what the facade puts on the wire and
@@ -444,7 +445,7 @@ Kafka client --TCP--> queen-kafka --QUEEN_URL--> queen-proxy --> queen
 ```
 
 **Measured: franz-go, 16 of 16 scenarios green from a clean machine, 2026-08-30**
-([`cloud/`](cloud)). That is one client row, not fifteen. The proxy sits on the
+(the `cloud/` rig, since removed). That is one client row, not fifteen. The proxy sits on the
 **HTTP** hop between the facade and Queen and never on the Kafka wire, so nothing
 it does is client-specific and no row in the matrix above is expected to change.
 But this file has only ever claimed what it measured, so: every other row's Cloud
@@ -480,13 +481,11 @@ visible from the Kafka side until every request fails.
    (`QUEEN_PROXY_SHARED_HOSTS`), or else be given a per-cluster hostname to route
    on. On a shared host the proxy resolves the cluster from the credential; on an
    unknown host it resolves nothing.
-2. **The BROKER has a second, independent KV gate.** With
-   `QUEEN_TENANCY_HEADER=true`, which every cell runs, the broker derives
-   `kv_require_grant`, and the **absence** of a `queen.kv_quota` row is a denial
-   rather than a permission (`server/src/config.rs`, `server/src/quota.rs`).
-   Without one row per broker tenant every offset commit is `403` at the broker,
-   past everything the proxy already allowed. `cloud/rig-cloud.sh` inserts them
-   and says why on the line.
+2. **The BROKER had a second, independent KV gate** on the Postgres-backed
+   broker measured here: with `QUEEN_TENANCY_HEADER=true` the **absence** of a
+   per-tenant KV grant row was a denial rather than a permission, so every
+   offset commit was `403` at the broker, past everything the proxy already
+   allowed. The raft broker has not been measured against this yet.
 
 ## Deploying more than one facade: CLUSTER MODE (2026-08-29)
 
@@ -506,11 +505,13 @@ answer is now conditional, and the condition is one environment variable.
 
 ### The evidence
 
-[`compat/cluster/`](cluster) stands up one Postgres, **two mesh-wired Queen
-brokers on it**, **three clustered facades** (nodes 1 and 3 in front of broker A,
-node 2 in front of broker B, so a cross-broker read is on the critical path of
-every group assertion), **one facade with the cluster config absent** and **two
-unclustered facades**, then runs nine scenarios. Nine pass, no skips. The
+[`compat/cluster/`](cluster) now stands up **a raft cluster of three Queen
+brokers**, **three clustered facades** (one in front of each broker, so a
+cross-node round trip is on the critical path of every group assertion), **one
+facade with the cluster config absent** and **two unclustered facades**, then
+runs nine scenarios. The evidence below is from 2026-08-29, when the same suite
+ran against two mesh-wired brokers on one shared Postgres: nine passed, no
+skips. It has not been re-run on the raft rig. The
 clients are real: franz-go, a `segmentio/kafka-go` second opinion, and raw
 `kmsg` over TCP wherever a client would route around the thing under test.
 
@@ -561,8 +562,8 @@ committed offsets sum to 128 of 128 produced, read back through node 3
 ```
 
 Metadata, and the reason a non-leader still serves data: leadership here is an
-**advertisement**, not an access control. Every node has the data, because there
-is one shared Postgres underneath.
+**advertisement**, not an access control. Every node has the data, because every
+facade reads the same Queen deployment underneath.
 
 ```
 leaders spread over the live set as map[1:2 2:5 3:1]
@@ -583,8 +584,9 @@ routing refusal)`, 208 of 208.
   Two independent client implementations were used precisely so that the
   redirect dance is not proven by one library's quirk.
 - **`replicas == isr == [leader]` and `leader_epoch == -1`**, on every partition,
-  on every node. There is one copy of the data and no replication protocol; the
-  broker list is a routing table, not a durability claim.
+  on every node, for a facade that reaches Queen over HTTP: it does not model the
+  broker's replication, and the broker list is a routing table, not a durability
+  claim.
 - **Only the group WRITES are gated.** JoinGroup, SyncGroup, Heartbeat,
   LeaveGroup, OffsetCommit, DescribeGroups and DeleteGroups are refused at a
   non-owner, before any group actor is spawned. **OffsetFetch, ListOffsets,
@@ -631,7 +633,7 @@ routing refusal)`, 208 of 208.
    same node.** The ownership hash takes the group id and never the tenant,
    because the tenant key is seeded per process and a tenant-aware hash would
    never converge across facades. Harmless: they stay two coordinator entries
-   over two `queen.kv` rows, with separate fences.
+   over two KV rows, with separate fences.
 
 ## The M7 admin APIs: acceptance and open decisions (2026-08-29, extended 2026-08-30)
 
@@ -1411,7 +1413,7 @@ client that read the ApiVersions response.
 | 35 | DescribeLogDirs | **Advertised since 2026-09-24** (v1-v4): inside a raft broker the facade answers its node's data directory with every partition and its `retainedBytes`; over HTTP it answers no directory | nothing inside a raft broker; outside one, kafka-ui's Size columns stay blank |
 | 38-41 | Create/Renew/Expire/DescribeDelegationToken | A delegation token is derived from a SCRAM principal and signed by the broker. This facade mints no credentials; Queen does | `kafka-delegation-tokens.sh` fails. Nothing in this matrix uses it |
 | 43 | ElectLeaders | One logical broker and no replicas: every Metadata answer is `replicas=[0], isr=[0]`. In cluster mode a partition's leader is a rendezvous hash, deterministic and not movable | `kafka-leader-election.sh` fails; Cruise Control's self-healing cannot run |
-| 45, 46 | Alter/ListPartitionReassignments | There are no replicas to move; durability is Postgres's. A reassignment API over one logical broker would accept a plan and have nothing to do with it | `kafka-reassign-partitions.sh` fails; Cruise Control and Confluent's auto-balancer cannot run. No UI calls `listPartitionReassignments` on a render path |
+| 45, 46 | Alter/ListPartitionReassignments | There are no replicas to move; durability is the Queen broker's. A reassignment API over one logical broker would accept a plan and have nothing to do with it | `kafka-reassign-partitions.sh` fails; Cruise Control and Confluent's auto-balancer cannot run. No UI calls `listPartitionReassignments` on a render path |
 | 48, 49 | Describe/AlterClientQuotas | The facade DOES have quotas, namely Queen's 429 with `Retry-After`, but they are the Cloud proxy's, per TENANT, and not expressible in Kafka's `(user, client-id)` model. Altering must never work for a second and independent reason: it would let a tenant raise its own rate cap | `kafka-configs.sh --entity-type clients --describe` fails; kafka-ui's quotas tab is absent. The one absence with a real future story: a READ-ONLY 48 mapping the tenant onto a `user` entity, once the proxy exposes the cap |
 | 50, 51 | Describe/AlterUserScramCredentials | SASL here is PLAIN only and the credential is a Queen bearer verified by Queen. There is no local user store. Supporting SCRAM would make this facade a credential store with its own secrets at rest | `kafka-configs.sh --entity-type users --alter --add-config 'SCRAM-SHA-256=[…]'` fails; kafka-ui's user management tab is absent. This is a security posture change, not a protocol gap |
 | 55 | DescribeQuorum | No Raft log and no voters; every field would be invented. The one thing UIs actually render, a controller id, is already in every Metadata answer | `kafka-metadata-quorum.sh describe` fails; kafka-ui's KRaft panel feature-detects and hides |

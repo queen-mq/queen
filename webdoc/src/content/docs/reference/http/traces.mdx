@@ -7,16 +7,14 @@ sidebar:
   order: 12
   label: Traces
 sourceOfTruth:
-  - server/src/handlers/traces.rs
-  - server/src/main.rs
+  - server/src/rsm/facade/real/phase2/reads.rs
+  - server/src/rsm/facade/real/phase2.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/apply.rs
+  - server/src/rsm/maintenance.rs
+  - server/src/rsm/batcher.rs
+  - server/src/handlers/raft.rs
   - server/src/auth.rs
-  - server/src/db.rs
-  - server/sql/procedures/017_traces.sql
-  - server/sql/procedures/010_log_admin.sql
-verifiedBy:
-  - proxy/scripts/isolation-smoke.sh
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): main.rs, auth.rs and db.rs gained the replay and KV console routes; nothing this page describes moved.
 ---
 
 A trace is an application-written event attached to a message address. The broker
@@ -26,17 +24,15 @@ happened to this message, in the words of the workers that handled it"
 (retry reasons, external system responses, business checkpoints) for messages whose
 payload alone does not explain their fate.
 
-Traces are engine-agnostic: they live in `queen.message_traces`, keyed by
-`(partition_id, transaction_id)`, with optional labels in
-`queen.message_trace_names`. That key is why the read routes take the same
-two-segment address as the message routes.
+Traces live in the replicated state, keyed by tenant, partition and transaction id,
+with an index by name. Recording one is one entry in the replicated log. That key is
+why the address route takes the same two-segment address as the message routes.
 
 ## POST /api/v1/traces
 
-Access level `read-write`. Required: `transactionId`, `partitionId`, `data`. A
-missing or empty `transactionId`/`partitionId` is a `400`
-(`transactionId and partitionId are required`); a missing `data` is a `400`
-(`data is required`).
+Access level `read-write`. Required: `transactionId`. A missing or empty
+`transactionId` is a `400` (`{"error":"transactionId is required"}`), and a body that is
+not JSON is a `400` (code `bad_body`).
 
 ```json
 {
@@ -51,108 +47,102 @@ missing or empty `transactionId`/`partitionId` is a `400`
 
 | Field | Default | Notes |
 | --- | --- | --- |
-| `transactionId` | required | Free text; not validated against any message. |
-| `partitionId` | required | Must be a partition UUID. |
-| `consumerGroup` | `__QUEUE_MODE__` | The group the event is attributed to. |
-| `eventType` | `"info"` | Free text. |
-| `data` | required | Any JSON value; stored as given. |
-| `traceNames` | none | Array of labels, or a single string, which is wrapped into a one-element array. Anything else is ignored. |
+| `transactionId` | required | Free text; not validated against any message. `transaction_id` is accepted too. |
+| `partitionId` | none | The decimal partition id a pop answer carries, or the partition UUID. `partition_id` is accepted too. It must resolve among the caller's partitions (below). Without it the trace has no partition and can be read only by name. |
+| `consumerGroup` | `null` | The group the event is attributed to, stored as given. |
+| `eventType` | `"event"` | Free text. `type` is accepted too. |
+| `data` | `null` | Any JSON value, stored as given. |
+| `traceNames` | none | An array of labels. `names` is accepted too. Only its string elements are kept; any other value is ignored. |
+| `traceId` | a new UUIDv7 | A UUID to use as the trace's id. |
+| `messageId` | `null` | A message UUID stored with the trace. |
+| `worker` | `null` | Free text naming the writer. |
 
-`workerId` is **always** stored as `seg-rust`. The handler stamps it and does not
-read a client-supplied value.
-
-Success is `201` with `{"success": true, "traceId": "0198..."}`. A stored-procedure
-body carrying `success: false` or a non-null `error` is served as `500`.
+Success is `201` with `{"success": true, "traceId": "0198..."}`. The trace is stamped
+with the answering node's clock. A trace adds to storage, so it is refused like a push
+when the node cannot take it: `507` (code `storage_full`) past the data disk's
+high-water mark, and `429` (code `overloaded`) while write admission is full.
 
 <Aside type="caution">
-Nothing checks that the message exists. A message's id lives inside a compressed
-segment blob and is invisible to SQL, so `record_trace_v1` (`010_log_admin`)
-stores the trace with `message_id = NULL` and keys it by
-`(partition_id, transaction_id)`. A trace posted for a transaction id that was
-never pushed is stored and returned by the read routes exactly like a real one.
-Traces are evidence you produce, not evidence the broker corroborates.
+Nothing checks that the message exists. A trace is keyed by the address you send and
+stored whether or not a message with that transaction id was ever pushed. A trace
+posted for a transaction id that was never pushed is stored and returned by the read
+routes exactly like a real one. Traces are evidence you produce, not evidence the
+broker corroborates.
 </Aside>
 
-With `QUEEN_TENANCY_HEADER` enabled the `partitionId` is checked against the
-caller's tenant before anything is written, because it arrives straight off the
-wire and a leaked or guessed UUID would otherwise let anyone attach records to
-another tenant's messages. A foreign partition gets the same
-`{"success": false, "error": "Message not found"}` at `404` that an unknown one
-would. With tenancy off there is no gate, and a `partitionId` that is not a valid
-UUID reaches the stored procedure and comes back as `500`
-(`{"error":"trace failed: ..."}`).
+A `partitionId` is resolved among the caller's own partitions before anything is
+written, because it arrives straight off the wire and a leaked or guessed id would
+otherwise let anyone attach records to another tenant's messages. A foreign, unknown or
+malformed `partitionId` gets `404` with `{"success": false, "error": "Partition not found"}`
+and nothing is written.
 
 ## GET /api/v1/traces/:partitionId/:transactionId
 
-All traces for one message address, oldest first.
+All traces for one message address, newest first. Query: `limit` (default `200`,
+clamped to 1 to 1000), `offset` (default `0`).
 
 ```json
 {
   "traces": [
     {
-      "id": "0198...",
-      "event_type": "retry",
-      "data": { "reason": "downstream 503", "attempt": 2 },
-      "consumer_group": "invoicer",
-      "worker_id": "seg-rust",
-      "created_at": "2026-07-30T10:52:11.400Z",
-      "trace_names": ["payment-failures", "order-4471"]
-    }
-  ]
-}
-```
-
-Keys are snake_case on all three read routes. An address with no traces returns
-`{"traces": []}` at `200`, and so does a partition belonging to another tenant,
-which is the same answer for the same reason as the message routes: an empty set
-leaks nothing about whether the partition exists elsewhere.
-
-## GET /api/v1/traces/by-name/:traceName
-
-Every trace carrying one label, oldest first, with the queue and partition names
-resolved through `queen.log_partitions` and `queen.queues`.
-
-Query: `limit` (default `100`), `offset` (default `0`).
-
-```json
-{
-  "traces": [
-    {
-      "id": "0198...",
+      "traceId": "0198...",
+      "trace_id": "0198...",
+      "partitionId": "17",
+      "partition_id": "17",
+      "messageId": null,
+      "message_id": null,
+      "transactionId": "order-4471",
       "transaction_id": "order-4471",
-      "partition_id": "0198...",
+      "consumerGroup": "invoicer",
+      "consumer_group": "invoicer",
+      "eventType": "retry",
       "event_type": "retry",
       "data": { "reason": "downstream 503", "attempt": 2 },
-      "consumer_group": "invoicer",
-      "worker_id": "seg-rust",
-      "created_at": "2026-07-30T10:52:11.400Z",
+      "worker": null,
+      "worker_id": null,
+      "names": ["payment-failures", "order-4471"],
+      "trace_names": ["payment-failures", "order-4471"],
+      "createdAt": "2026-07-30T10:52:11.400000Z",
+      "created_at": "2026-07-30T10:52:11.400000Z",
       "queue_name": "orders",
       "partition_name": "eu-1",
-      "message_payload": null,
-      "trace_names": ["payment-failures", "order-4471"]
+      "message_payload": null
     }
   ],
   "total": 1,
-  "pagination": { "limit": 100, "offset": 0 }
+  "pagination": { "limit": 200, "offset": 0 }
 }
 ```
 
-`message_payload` is `null` **by construction**: payloads live inside compressed
-segment blobs that SQL cannot open, and the key is kept only so the JSON shape
-does not change. Use `GET /api/v1/messages/:partitionId/:transactionId` to fetch
-the payload. See [messages and DLQ](/reference/http/messages-dlq).
+The body also carries `events`, a copy of `traces`, left out above. Every trace carries
+each field under two spellings, camelCase and snake_case, with the same value.
+`partitionId` is the decimal partition id, the form pop answers carry; the address
+route accepts it or the UUID. `queue_name` and `partition_name` are resolved from the
+partition and are `null` once it is gone. `message_payload` is always `null`: use
+`GET /api/v1/messages/:partitionId/:transactionId` to fetch the payload. See
+[messages and DLQ](/reference/http/messages-dlq). `total` counts every match, not the
+page.
 
-This route is name-addressed, so there is no partition id to gate on. Ownership is
-resolved per trace through its partition (`queen.log_partitions.queue_id` is the
-`queen.queues` id), and only traces belonging to the caller's tenant are counted
-and returned. `total` here **is** a real count of the tenant-scoped match set, not
-the page length.
+An address with no traces returns an empty `traces` list at `200`, and so does a
+partition that belongs to another tenant or does not exist: an empty set leaks nothing
+about whether the partition exists elsewhere.
+
+## GET /api/v1/traces/by-name/:traceName
+
+Every trace of the caller's tenant carrying one label, newest first, in the same body
+as the address route. Query: `limit` (default `200`, clamped to 1 to 1000), `offset`
+(default `0`). `total` is the full count of the tenant's matches, not the page length.
+
+This route is name-addressed, so there is no partition to gate on. A trace belongs to
+the tenant that recorded it, and only the caller's tenant's traces are counted and
+returned. A trace whose partition has been deleted is still returned here, with
+`queue_name` and `partition_name` `null`.
 
 ## GET /api/v1/traces/names
 
-The index of labels that exist, most recently seen first.
+The index of labels the caller's tenant has used, in name order.
 
-Query: `limit` (default `50`), `offset` (default `0`).
+Query: `limit` (default `100`, clamped to 1 to 1000), `offset` (default `0`).
 
 ```json
 {
@@ -161,37 +151,35 @@ Query: `limit` (default `50`), `offset` (default `0`).
       "trace_name": "payment-failures",
       "trace_count": 214,
       "message_count": 173,
-      "last_seen": "2026-07-30T10:52:11.400Z"
+      "last_seen": "2026-07-30T10:52:11.400000Z"
     }
   ],
   "total": 4,
-  "pagination": { "limit": 50, "offset": 0 }
+  "pagination": { "limit": 100, "offset": 0 }
 }
 ```
 
-`trace_count` counts trace rows, `message_count` counts distinct transaction ids.
-A name appears only when at least one of its traces belongs to the caller's tenant,
-and its counts and `last_seen` are computed from that tenant's traces alone:
-trace names are caller-chosen text, so a global index would leak both the names
-and the activity times of every other tenant.
+`trace_count` counts traces, `message_count` counts distinct message addresses
+(partition and transaction id), and `last_seen` is the newest trace's time. `total` is
+the number of names. Only the caller's tenant's traces are counted: trace names are
+caller-chosen text, so a global index would leak both the names and the activity times
+of every other tenant.
 
 ## Operational limits
 
-Two properties of the trace tables that will surprise you eventually:
+Three properties of trace storage that will surprise you eventually:
 
-- **Nothing purges traces.** Retention, the DLQ purge and the metrics cleanup all
-  leave `queen.message_traces` and `queen.message_trace_names` alone. Trace volume
-  is entirely your writes; size the table accordingly, and prune it yourself if you
-  trace at message rate. The one exception is a full tenant wipe: the
-  operator-invoked `queen.delete_tenant_data_v1` deletes the wiped tenant's traces
-  queue by queue, because traces are payload-derived and may not outlive the tenant.
-- **Deleting a queue leaves its traces behind.** The foreign keys from
-  `queen.message_traces` to the message and partition tables were dropped so the
-  table could serve both engines, so a queue delete does not cascade. The orphaned
-  rows stay in the table but become unattributable: the by-name and names routes
-  resolve ownership through the partition, and a trace whose partition row is gone
-  belongs to nobody, so it is filtered out rather than shown to everyone. It is
-  still readable by exact address.
+- **Traces expire.** The leader's retention pass (every `RETENTION_INTERVAL`
+  milliseconds, default 5000) deletes traces older than `QUEEN_RAFT_TRACE_RETENTION_S`
+  seconds (default 604800, 7 days). Message retention, the dead-letter purge and queue
+  deletes do not touch traces. A tenant purge (`DELETE /api/v1/resources/tenant`)
+  deletes the tenant's traces.
+- **Deleting a queue leaves its traces behind** until they expire. They keep their
+  tenant, so the by-name and names routes still return them; the address route no
+  longer can, because the partition id no longer resolves.
+- **The read routes walk every stored trace** and filter by tenant, address or name,
+  so their cost grows with the node's total trace volume. If you trace at message
+  rate, lower `QUEEN_RAFT_TRACE_RETENTION_S` to bound it.
 
 ## Access levels
 
@@ -206,6 +194,6 @@ All four are tenant-scoped. Note the routing shape: `/api/v1/traces/names` is on
 segment deep and cannot collide with the two-segment address route, but
 `/api/v1/traces/by-name/:traceName` and
 `/api/v1/traces/:partitionId/:transactionId` are both two segments deep and the
-static `by-name` wins. A partition whose id were literally `by-name` is
-unreachable. Partition ids are UUIDs, so this is a routing fact rather than a
-practical limit.
+static `by-name` wins. A partition whose id were literally `by-name` would be
+unreachable. Partition ids are numbers or UUIDs, so this is a routing fact rather than
+a practical limit.

@@ -1,6 +1,6 @@
 ---
 title: Multi-tenant cell
-description: "A two-core cell above 2400 msg/s, and twelve tenants with zero cross-tenant delivery."
+description: "Queen 1.x on PostgreSQL: a two-core cell above 2400 msg/s, and twelve tenants with zero cross-tenant delivery."
 type: reference
 sidebar:
   order: 6
@@ -12,8 +12,14 @@ sourceOfTruth:
   - benchmark-queen/2026-07-30-1h-soak/vm-sampler.csv
 ---
 
-A **cell** is PostgreSQL, the proxy's state database, the broker and the proxy in one CPU-capped
-control group: a free-tier shape is two cores covering all four, loader outside the cap.
+<Aside type="caution">
+This run measured **Queen 1.x**, whose storage was PostgreSQL. 2.0 replaced that storage with a
+replicated log, so these figures describe the 1.x engine and not 2.0.
+</Aside>
+
+A **cell** in 1.x was PostgreSQL, the proxy's state database, the broker and the proxy in one
+CPU-capped control group: a free-tier shape was two cores covering all four, loader outside the
+cap.
 
 **A 2-core cell held above 2400 msg/s through the proxy with zero loss, and twelve tenants
 sharing one queue and one consumer group ran an hour with zero cross-tenant deliveries.** Both

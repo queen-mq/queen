@@ -1,6 +1,6 @@
 ---
 title: A million ordered partitions
-description: "1,000,000 FIFO lanes in one PostgreSQL, created during the run under load."
+description: "Queen 1.x: 1,000,000 FIFO lanes in one PostgreSQL, created during the run under load."
 type: reference
 sidebar:
   order: 3
@@ -9,14 +9,12 @@ sourceOfTruth:
   - benchmark-queen/2026-08-11-1m-partitions/raw-final-dedupoff/g.out
   - benchmark-queen/2026-08-11-1m-partitions/raw-final-dedupoff/partitions.csv
   - benchmark-queen/2026-07-29-vm-campaign/goload/main.go
-digest: >-
-  1,000,000 ordered partitions in a single queue, created during the run at 1,000 a second,
-  serving 200,000 msg/s with zero push, pop or ack errors, on one 32 vCPU / 62 GiB machine over
-  one hour, of which 43 minutes ran against the completed space. Conditions: leased pops with
-  explicit acks, deduplication off, retention on with RETENTION_PARALLELISM=16, 300 consumers,
-  push batch 100, 256-byte payloads. Without synthetic consumer work this shape held p50 27.5 ms
-  and p99 115 ms. Storage grew 235 MB a minute, 19.6 bytes per message.
 ---
+
+<Aside type="caution">
+This run measured **Queen 1.x**, whose storage was PostgreSQL. 2.0 replaced that storage with a
+replicated log, so these figures describe the 1.x engine and not 2.0.
+</Aside>
 
 **One broker against one PostgreSQL held 1,000,000 ordered partitions in a single queue, none
 preallocated, created during the run at a thousand a second while it served 200,000 messages a
@@ -24,8 +22,8 @@ second with leased pops and explicit acknowledgement. 722,265,600 messages, zero
 errors, and a database that stopped growing.** Queen 1.0.0, 32 vCPU / 62 GiB, artifacts in
 `benchmark-queen/2026-08-11-1m-partitions/`.
 
-A partition costs a row and an index range, not a file or a process. The serve path does not care
-how many there are.
+In 1.x a partition cost a row and an index range, not a file or a process, and the serve path did
+not care how many there were.
 
 ## Configuration
 
@@ -106,24 +104,24 @@ resident memory per partition**.
 | WAL fsync | 247 µs |
 | Connection pool | never above 208 of 300 |
 
-The [hot list](/internals/hotlist) holds only partitions with data, so its cost follows the work:
-a few thousand entries all run.
+The 1.x hot list held only partitions with data, so its cost followed the work: a few thousand
+entries all run.
 
 ## Three costs that follow the space
 
 Invisible at two hundred partitions, decisive at a million.
 
-**[Deduplication](/internals/dedup) holds every hash, not the ones in the window.** The cache
-grew 235 MB a minute, 19.6 bytes per message against a model asking 192 MB, and filled 6 GB then
-16 GB: a block seals only when it fills, nearly six hours at 0.2 messages a second per partition.
-Saturated, pushes fall back to a full-window SQL probe, **still authoritative, no duplicate
-admitted**, but the cost lands on PostgreSQL.
+**Deduplication held every hash, not the ones in the window.** The cache grew 235 MB a minute,
+19.6 bytes per message against a model asking 192 MB, and filled 6 GB then 16 GB: a block sealed
+only when it filled, nearly six hours at 0.2 messages a second per partition. Saturated, pushes fell
+back to a full-window SQL probe, **still authoritative, no duplicate admitted**, but the cost
+landed on PostgreSQL.
 
-**[Retention](/internals/retention) walks one row per partition per cycle.** At
-`RETENTION_PARALLELISM=4` the sweep grew from 108 s at 400,000 partitions to 402 s at a million;
-at 16 it settles near 195 s, which is what this run used.
+**Retention walked one row per partition per cycle.** At `RETENTION_PARALLELISM=4` the sweep grew
+from 108 s at 400,000 partitions to 402 s at a million; at 16 it settled near 195 s, which is what
+this run used.
 
-**The [statistics refresh](/internals/stats) took 6.8 seconds** at 825,706 partitions, harmlessly.
+**The statistics refresh took 6.8 seconds** at 825,706 partitions, harmlessly.
 
 ## What it does not establish
 

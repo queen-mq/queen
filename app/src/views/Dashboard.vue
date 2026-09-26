@@ -313,7 +313,7 @@
         :value-format="fmtCount"
         expand-unit="msgs"
         :error="retentionError"
-        tooltip="Messages deleted by the retention / eviction workers. The log engine does not write retention_history yet, so an empty series means NOT REPORTED — it is not proof that nothing was deleted."
+        tooltip="Messages deleted by the retention / eviction workers. Every retention step is recorded when it applies, so an empty series means nothing was deleted in the window."
         :expanded="isExpanded('retention')"
         @toggle-expand="toggleRow('retention')"
       >
@@ -376,32 +376,6 @@
             <span v-if="cpuLatest === null" class="num">—</span>
             <template v-else>
               <span class="num">{{ cpuLatest.toFixed(1) }}</span><i class="mr-unit">%</i>
-            </template>
-          </template>
-        </MetricRow>
-        <!-- Raft mode has no database pool (stores/engine.js). -->
-        <MetricRow
-          v-if="!isRaft"
-          label="DB pool"
-          scope="cell"
-          :context="poolContext"
-          :series="poolSeriesData"
-          :labels="statusChartLabels"
-          :value-format="(v) => Math.round(v) + ' conns'"
-          expand-unit="connections"
-          :severity="poolSeverity"
-          :loading="loadingStatus"
-          :error="statusError"
-          :expanded="isExpanded('dbPool')"
-          @toggle-expand="toggleRow('dbPool')"
-        >
-          <template #value>
-            <span v-if="!poolLatest" class="num">—</span>
-            <template v-else>
-              <span class="num" :class="poolSeverity">{{ poolLatest.active ?? '—' }}</span>
-              <span class="mr-sep">/</span>
-              <span class="num">{{ poolLatest.size ?? '—' }}</span>
-              <i class="mr-unit">conns</i>
             </template>
           </template>
         </MetricRow>
@@ -564,19 +538,17 @@ import { isConflating } from '@/composables/useConflation'
 import { semanticColors } from '@/composables/useChartTheme'
 import {
   ackFailureSeverity, backlogSeverity, eventLoopSeverity, numTone,
-  pendingDriftSeverity, poolSeverity as poolSeverityOf, timeLagSeverity,
+  pendingDriftSeverity, timeLagSeverity,
 } from '@/composables/useSeverity'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { stamp } from '@/composables/useStamp'
-import { useEngine } from '@/stores/engine'
 import { useIdentity } from '@/stores/identity'
 import MetricRow from '@/components/MetricRow.vue'
 
 // The scope strip states all three slugs, so it is built from identity and
 // never from a fetch — it must survive a failed load and an empty tenant.
 const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
-const { isRaft } = useEngine()
 
 // ---------------------------------------------------------------------------
 // Range. Quick ranges only — this view has no Custom mode, so there is no
@@ -663,7 +635,7 @@ const consumersErrorText = computed(() => describeApiError(consumersQ.error.valu
 const ALL_ROW_KEYS = [
   'throughput', 'pendingDelta', 'parked', 'fillRatio', 'timeLag',
   'errors', 'partitions', 'retention',
-  'eventLoop', 'cpu', 'dbPool',
+  'eventLoop', 'cpu',
 ]
 const expandedRows = ref(new Set())
 const isExpanded = (key) => expandedRows.value.has(key)
@@ -828,9 +800,9 @@ const pendingDeltaSeverity = computed(() =>
 // ---------------------------------------------------------------------------
 // Time lag row.
 //
-// VALUE  = the tenant overview's lag, which under the log engine falls back to
-//          the age of the oldest unconsumed message — so it stays correct with
-//          consumers stopped. NULL means the broker has no measurement, and
+// VALUE  = the tenant overview's lag: the age of each queue's oldest
+//          unconsumed message — so it stays correct with consumers
+//          stopped. NULL means the broker has no measurement, and
 //          that must render '—', never 0s.
 // CHART  = per-bucket pop-sampled lag, with a gap for every bucket that had no
 //          pops (see `history` above).
@@ -994,9 +966,8 @@ const fillSeverity = computed(() => '')
 // ---------------------------------------------------------------------------
 // Retention row.
 //
-// queen.retention_history has no writer under the log engine, so an empty
-// series means NOT REPORTED. Rendering that as "0 msgs evicted" would assert
-// something the product cannot know while the engine is deleting segments.
+// Every retention step is recorded when it applies (rsm/local_metrics.rs), so
+// an empty series IS "nothing deleted in the window".
 // ---------------------------------------------------------------------------
 const retentionRows = computed(() => {
   const payload = retentionQ.data.value
@@ -1033,13 +1004,7 @@ const retentionTotal = computed(() => {
 })
 const retentionContext = computed(() => {
   if (retentionQ.data.value === null) return 'loading…'
-  if (!retentionRows.value.length) {
-    // Raft records every retention step (apply → local.db), so an empty
-    // series there IS "nothing deleted in the window".
-    return isRaft.value
-      ? 'none in window'
-      : 'not reported · the log engine does not record retention events yet'
-  }
+  if (!retentionRows.value.length) return 'none in window'
   return 'evicted + completed-retention in window'
 })
 
@@ -1161,39 +1126,6 @@ const cpuContext = computed(() => {
   const s = latestFinite(statusHistory.value.map(x => x.queenCpuSysPct))
   if (u === null && s === null) return 'no CPU samples for this cell'
   return `user ${(u || 0).toFixed(0)}% · sys ${(s || 0).toFixed(0)}% · whole cell`
-})
-
-// --- DB pool (cell) — saturation = waiters; warn at 80% util, bad at size. ---
-const poolLatest = computed(() => {
-  const h = statusHistory.value
-  if (!h.length) return null
-  const active = latestFinite(h.map(x => x.dbPoolActive))
-  const idle   = latestFinite(h.map(x => x.dbPoolIdle))
-  const size   = latestFinite(h.map(x => x.dbPoolSize))
-  if (active === null && idle === null && size === null) return null
-  return {
-    active: active === null ? null : Math.round(active),
-    idle: idle === null ? null : Math.round(idle),
-    size: size === null
-      ? (active === null && idle === null ? null : Math.round((active || 0) + (idle || 0)))
-      : Math.round(size),
-  }
-})
-const poolSeriesData = computed(() => {
-  const h = statusHistory.value
-  if (!h.length) return null
-  return [
-    { label: 'Active', data: h.map(x => toNum(x.dbPoolActive)) },
-    { label: 'Idle',   data: h.map(x => toNum(x.dbPoolIdle)) },
-  ]
-})
-// Kept: saturation is a ratio already, and a full pool means queries are
-// waiting for a connection.
-const poolSeverity = computed(() => poolSeverityOf(poolLatest.value || {}))
-const poolContext = computed(() => {
-  const p = poolLatest.value
-  if (!p) return 'no pool samples for this cell'
-  return `idle ${p.idle ?? '—'} · size ${p.size ?? '—'} · whole cell`
 })
 
 // --- Batch efficiency (cell) — point-in-time averages. <5 = tiny commits. ---

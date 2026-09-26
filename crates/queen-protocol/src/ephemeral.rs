@@ -7,9 +7,8 @@
 //! down once here rather than repeated on every struct:
 //!
 //! * **The identity is on the ENVELOPE, not on the item.** The durable push
-//!   repeats `{queue, partition}` on every item because a bundle spanning
-//!   queues shares one PostgreSQL transaction; there is no transaction here to
-//!   share, so one request addresses one queue and
+//!   repeats `{queue, partition}` on every item because one request may span
+//!   queues and partitions; here one request addresses one queue and
 //!   [`EphemeralMessage`] carries a payload and nothing else. No
 //!   `transactionId`: there is no dedup index to hold one.
 //!
@@ -493,7 +492,8 @@ pub struct EphemeralOptions {
 
 /// Body of `POST /api/v1/ephemeral/configure`.
 ///
-/// Declaring a queue persists the OPTIONS in PostgreSQL (§1.1): the
+/// Declaring a queue persists the OPTIONS in the broker's replicated state
+/// (§1.1): the
 /// configuration survives a restart, the contents never do, and the queue comes
 /// back declared and EMPTY.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -527,9 +527,9 @@ pub struct EphemeralResetResponse {
 /// with a 200, and every client that ignored the field read a miss as a
 /// success. The status code describes the call; the field describes the queue.
 ///
-/// `declared` separates the two tiers of §1.1 — it says whether a PostgreSQL
-/// declaration row was removed as well as the RAM rings, which is the only part
-/// of an ephemeral queue that ever survived anything.
+/// `declared` separates the two tiers of §1.1 — it says whether a persisted
+/// declaration was removed as well as the RAM rings, which is the only part of
+/// an ephemeral queue that ever survived anything.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct EphemeralDeleteResponse {
     #[serde(default)]

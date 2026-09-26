@@ -109,7 +109,7 @@ var messagesGetCmd = &cobra.Command{
 var messagesDeleteCmd = &cobra.Command{
 	Use:     "delete <partitionId> <transactionId>",
 	Aliases: []string{"rm"},
-	Short:   "Delete a single message (async via stored procedure)",
+	Short:   "Delete a single message",
 	Args:    cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if !msgDeleteYes {

@@ -346,7 +346,7 @@
                 </div>
               </div>
               <div class="stat">
-                <!-- Real message-count backlog from the log engine — the number
+                <!-- Real message-count backlog from the broker — the number
                      operators actually ask for, and it is returned already.
                      Under conflation those messages are superseded, not owed:
                      the label says log lag so the tile beside it is read as the

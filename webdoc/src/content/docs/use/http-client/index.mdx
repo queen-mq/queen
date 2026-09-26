@@ -33,10 +33,9 @@ deterministic one and a retry inside the dedup window comes back as a duplicate 
 writing twice.
 
 The answer is `201` and one entry per item, in request order, each carrying a `status`:
-`queued`, `duplicate` (nothing was written, and `message_id` is the original message's),
-`buffered` (the database write failed and the message is on the broker's disk spool awaiting
-replay) or `failed` (the spool write failed too, and the message is gone). A `201` does not by
-itself mean "stored in PostgreSQL": read every item's status.
+`queued` (committed), `duplicate` (nothing was written, and `message_id` is the original
+message's) or `error` (the broker refused that item's partition and wrote nothing for it). A `201`
+does not by itself mean every item was stored: read every item's status.
 
 ## Pop
 

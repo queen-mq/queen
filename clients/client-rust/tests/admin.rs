@@ -1877,24 +1877,17 @@ async fn the_observability_endpoints_answer() {
     assert!(!metrics.is_empty(), "the metrics endpoint returned nothing");
     let parsed: serde_json::Value = serde_json::from_str(&metrics)
         .unwrap_or_else(|e| panic!("/metrics stopped being JSON ({e}): {metrics}"));
-    for key in [
-        "cpu", "memory", "database", "messages", "requests", "uptime",
-    ] {
+    for key in ["cpu", "memory", "messages", "requests", "uptime"] {
         assert!(
             parsed.get(key).is_some(),
             "the metrics body lost `{key}`: {parsed}"
         );
     }
-    assert!(
-        parsed["database"].get("poolSize").is_some(),
-        "the metrics body lost the pool block, which is what says the broker is \
-         connected at all: {parsed}"
-    );
 }
 
-// The analytics quartet had no call site at all. They are pure read models over
-// pg_stat_* and the metrics tables, so the only way they break is a shape change
-// — and each one feeds a chart that would silently flatline.
+// The analytics trio had no call site at all. They are pure read models, so the
+// only way they break is a shape change — and each one feeds a chart that would
+// silently flatline.
 #[tokio::test]
 async fn the_analytics_endpoints_answer_with_their_series() {
     let q = broker!();
@@ -1944,17 +1937,6 @@ async fn the_analytics_endpoints_answer_with_their_series() {
         assert!(
             workers.get(key).and_then(|v| v.as_array()).is_some(),
             "worker metrics `{key}` is not a series: {workers}"
-        );
-    }
-
-    let pg = admin.postgres_stats().await.expect("postgres stats failed");
-    for key in ["timestamp", "database", "databaseCache", "cacheSummary"] {
-        assert!(pg.get(key).is_some(), "postgres stats lost `{key}`: {pg}");
-    }
-    for key in ["tableCache", "indexCache", "activeQueries", "tableSizes"] {
-        assert!(
-            pg.get(key).and_then(|v| v.as_array()).is_some(),
-            "postgres stats `{key}` is not an array: {pg}"
         );
     }
 }

@@ -40,9 +40,8 @@
 //!      inject Authorization (ctx.cell_token), X-Queen-Tenant (cfg.send_tenant_header),
 //!      X-Queen-Request-Id; long-poll timeout = min(client timeout|30s, cfg max) + margin
 //!   6. meter post-response (M1–M6): push -> parse per-item statuses (exclude
-//!      error, dedupe duplicate, buffered counts), pop -> delivered count +
-//!      debit_deliveries, bytes in/out always; the same push parse feeds the
-//!      sampled §6.10 maintenance signal. The ephemeral push/pop pair meters as
+//!      error, dedupe duplicate), pop -> delivered count + debit_deliveries,
+//!      bytes in/out always. The ephemeral push/pop pair meters as
 //!      Push/Delivery like its durable twin (EPHEMERAL_QUEUES.md Q6), off a
 //!      one-number 201 body instead of a status array. The streams cycle keeps
 //!      its reqs-only base sample and adds a SECOND Sample (op Push, reqs 0)
@@ -260,15 +259,9 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
             Ok(b) => b,
             Err(_) => return errors::err_413("request body exceeds cap"),
         };
-        // Two carve-outs, chained, and the order does not matter: each demands
-        // that EVERY op of the batch sit in its OWN namespace, so a body can
-        // satisfy at most one of them and a body that satisfies neither comes
-        // back unchanged. The second is the S3 sink's (`s3_kv.rs`, PLAN_S3_SINK
-        // §8/D4): `queen-s3` / `s3:`, whose window commit is the one WRITE a
-        // read path cannot proceed without — refusing it under the storage
-        // block re-uploads the same window for ever while the lag grows.
+        // The carve-out demands that EVERY op of the batch sit in the Kafka
+        // facade's own namespace; a body that does not comes back unchanged.
         let class = crate::kafka_kv::effective_class(class, &buffered);
-        let class = crate::s3_kv::effective_class(class, &buffered);
         (class, Request::from_parts(parts, Body::from(buffered)))
     } else {
         (class, req)
@@ -395,13 +388,12 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
     // written, and only the request knows how many messages each one carried.
     let mut cycle_sinks = CycleSinks::default();
     let is_cycle = is_streams_cycle(&parts.method, &path_only);
-    // Read once here, used once at step 6. The request line is about to be
-    // consumed and the replay's message can only be counted off the RESPONSE
-    // (D4), so the predicate has to cross the pipeline the way `is_cycle` does.
+    // Read once here, used at step 4b (BOTH replay routes read a body that can
+    // name a destination to create) and at step 6. The request line is about
+    // to be consumed and the replay's message can only be counted off the
+    // RESPONSE (D4), so the predicate has to cross the pipeline the way
+    // `is_cycle` does.
     let is_replay = is_dlq_replay(&parts.method, &path_only);
-    // ...and the narrower half of it, the only replay route whose body can name
-    // a destination to create. Step 4b buffers and admits on this one alone.
-    let names_a_dest = is_replay_with_dest(&parts.method, &path_only);
     let forward_body: Body = if class == RouteClass::Produce {
         // Body-total cap is the instance cap only; the per-item plan cap is
         // enforced per item inside enforce_produce (a batch of many small
@@ -435,7 +427,7 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
             return resp;
         }
         Body::from(buffered)
-    } else if names_a_dest {
+    } else if is_replay {
         // 4b'''''. The OTHER QueueAdmin creation path, and the reason it is
         // here rather than only in `plan_gates`: a replay whose body names
         // `{queue, partition}` MOVES the dead letter somewhere else, and the
@@ -462,9 +454,11 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
         // own pair, which the broker had to find (`db::dlq_row_for_move` joins
         // log_partitions and queues) before it could read the row at all.
         //
-        // The address-keyed retry route is deliberately NOT here: it replays in
-        // place and never reads its body, so there is no destination to admit
-        // and a body posted to it names nothing (`is_replay_with_dest`).
+        // BOTH replay routes are here, the address-keyed retry as well as the
+        // row-id replay: the broker answers the two with the same move
+        // (`api_dlq_move`, server/src/rsm/facade/real/phase2/admin.rs), which
+        // reads the same `{queue, partition}` body. Admitting only the row-id
+        // route left the retry route as the bypass of this whole arm.
         let buffered = match axum::body::to_bytes(body, st.cfg.max_body_bytes).await {
             Ok(b) => b,
             Err(_) => return errors::err_413("request body exceeds cap"),
@@ -761,24 +755,15 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
         } else {
             count_push_statuses(&buffered)
         };
-        let counts = parsed.unwrap_or_else(|| {
+        let accepted = parsed.unwrap_or_else(|| {
             tracing::warn!(target: "meter", cluster = %ctx.slug, rid, "push response parse failed; msgs=0");
-            PushCounts::default()
+            0
         });
-        // §6.10 maintenance signal, off the same parse (never a second pass).
-        // Short-circuits before the clock read when nothing was buffered.
-        if predominantly_buffered(&counts) && maint_log_due(std::time::Instant::now()) {
-            tracing::info!(
-                target: "gateway", cluster = %ctx.slug, buffered = counts.buffered,
-                items = counts.total, rid,
-                "cell is spooling pushes to disk (maintenance mode or DB outage)"
-            );
-        }
         st.meter.record(Sample {
             cluster_id: ctx.cluster_id,
             op: OpClass::Push,
             reqs: 1,
-            msgs: counts.accepted,
+            msgs: accepted,
             bytes_in,
             bytes_out: buffered.len() as u64,
         });
@@ -861,7 +846,7 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
             });
             return finalize(rparts, Body::from(buffered), &rid);
         }
-        // 204 (empty / paused) or any other non-200: nothing to parse.
+        // 204 (empty) or any other non-200: nothing to parse.
         st.meter.record(Sample {
             cluster_id: ctx.cluster_id,
             op: OpClass::Delivery,
@@ -1119,7 +1104,7 @@ fn sink_pair(g: &((String, String), u64)) -> (&str, &str) {
 ///
 /// Takes the registry and the enforcing flag rather than `St`: the decision
 /// needs exactly those two things, and a function that does not need an
-/// `AppState` can be unit-tested with a `Registry::new(None)`.
+/// `AppState` can be unit-tested with a `Registry::new(crate::store::Store::None)`.
 async fn admit_pairs<'a>(
     registry: &crate::registry::Registry,
     enforcing: bool,
@@ -1297,9 +1282,10 @@ fn is_configure(method: &Method, path: &str) -> bool {
     method == Method::POST && path == "/api/v1/configure"
 }
 
-/// STEP 4b for `POST /api/v1/dlq/:id/replay`: registry admission for the
-/// destination its body NAMES (`is_replay_with_dest` is the gate on the arm;
-/// the address-keyed replay reads no body and reaches this function never).
+/// STEP 4b for BOTH replay routes (`is_dlq_replay` is the gate on the arm):
+/// registry admission for the destination the body NAMES. The address-keyed
+/// retry and the row-id replay are the same move at the broker (`api_dlq_move`)
+/// and read the same body, so they get the same caps and the same errors.
 ///
 /// A replay with `{queue, partition}` is a MOVE, and the move provisions what
 /// it does not find — `queen.log_dlq_move_v1` calls `log_push_one_v1` with
@@ -1402,37 +1388,37 @@ fn half_named_dest(st: &St, ctx: &ClusterCtx, missing: &str, rid: &str) -> Resul
     ))
 }
 
-/// The optional body of a replay, in the shape the handler's
-/// `parse_replay_overrides` accepts: absent, empty or `{}` names no
-/// destination, and either half may be present on its own (what that means for
-/// admission is `admit_replay_dest`'s decision, not this parser's). A present
-/// name comes back TRIMMED, the way the handler trims it, and a
-/// present-but-blank one is read as absent — the broker refuses that with a
-/// 400, and this function's job is to name what will be CREATED, not to validate.
-#[derive(Deserialize)]
-struct ReplayDest {
-    queue: Option<String>,
-    partition: Option<String>,
-}
-
+/// The optional body of a replay, read the way the broker's `api_dlq_move`
+/// reads it: absent, empty or `{}` names no destination, and either half may be
+/// present on its own (what that means for admission is `admit_replay_dest`'s
+/// decision, not this parser's). A present name comes back TRIMMED, the way the
+/// broker trims it, and a present-but-blank one is read as absent — the broker
+/// refuses that with a 400, and this function's job is to name what will be
+/// CREATED, not to validate.
+///
+/// A `serde_json::Value` and `get(..).as_str()`, NOT a derived struct, because
+/// that is the broker's own reading and the two must agree on every body the
+/// broker accepts. A struct refuses a non-string half (`{"queue":"new",
+/// "partition":7}`) and a repeated key, both of which the broker takes — it
+/// ignores the non-string half and keeps the last key — so a stricter parser
+/// here forwarded, unadmitted, a body that creates a queue or a partition.
 fn parse_replay_dest(bytes: &[u8]) -> Result<(Option<String>, Option<String>), ()> {
     // The dashboard's plain "Replay" sends no body at all; a `{}` from a curl
     // is the same request. Neither names a destination.
     if bytes.iter().all(|b| b.is_ascii_whitespace()) {
         return Ok((None, None));
     }
-    let d: ReplayDest = serde_json::from_slice(bytes).map_err(|_| ())?;
-    // TRIMMED, because the handler trims: `parse_replay_overrides` is
-    // `b.queue.map(|q| q.trim().to_string())` (server/src/handlers/messages.rs),
-    // so the name that reaches `log_dlq_move_v1` — and the queue the SP
-    // PROVISIONS — is the trimmed one. `str::trim` on both sides, so the two
-    // agree on what whitespace is rather than on an ASCII rule here and a
+    let v: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| ())?;
+    // TRIMMED, because the broker trims: `api_dlq_move` reads
+    // `target.get("queue").and_then(Value::as_str).map(str::trim)`, so the name
+    // the move PROVISIONS is the trimmed one. `str::trim` on both sides, so the
+    // two agree on what whitespace is rather than on an ASCII rule here and a
     // Unicode one there.
     //
     // Admitting the padded spelling instead would make the registry's count
     // and the broker's rows two different sets, in both directions and
     // permanently: `" orders"` is remembered (and persisted to
-    // queen_proxy.queues by `enqueue_persist`) as a queue that will never
+    // queues by `enqueue_persist`) as a queue that will never
     // exist, spending a plan slot on a name nobody can address, while
     // `orders` — the queue the move actually creates — is admitted by nobody
     // and later counted a SECOND time by the first push that spells it
@@ -1442,8 +1428,14 @@ fn parse_replay_dest(bytes: &[u8]) -> Result<(Option<String>, Option<String>), (
     // trims it again on arrival, which is exactly why trimming here is safe —
     // this function reports what will be created, and the trim is what makes
     // that report true.
-    let named = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    Ok((named(d.queue), named(d.partition)))
+    let named = |k: &str| {
+        v.get(k)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    Ok((named("queue"), named("partition")))
 }
 
 /// The two DLQ replay routes (PLAN_DASHBOARD_ACTIONS.md §2.0/§2.3): the
@@ -1485,35 +1477,18 @@ fn is_dlq_replay(method: &Method, path: &str) -> bool {
                 (Some(pid), Some(txid), None) if !pid.is_empty() && !txid.is_empty()
             )
         });
-    retry || is_replay_with_dest(method, path)
+    let replay = path
+        .strip_prefix("/api/v1/dlq/")
+        .and_then(|rest| rest.strip_suffix("/replay"))
+        .is_some_and(|id| !id.is_empty() && !id.contains('/'));
+    retry || replay
 }
 
-/// The replay route that can NAME a destination: the row-id-keyed one.
-///
-/// Its sibling replays IN PLACE and reads no body at all
-/// (`handlers/messages.rs`: "This route replays IN PLACE. The destination
-/// override is the id-addressed route's affordance"), so there is nothing there
-/// to admit — and admitting one anyway would be worse than doing nothing:
-/// `Registry::admit` REMEMBERS the name it allows, so a `{"queue":"…"}` posted
-/// to the retry route would spend a plan slot on a queue the broker is never
-/// going to create, until the reconciler prunes it back to the broker's own
-/// inventory. The day that route learns the override, this predicate is what
-/// has to grow, and the admission follows it.
-fn is_replay_with_dest(method: &Method, path: &str) -> bool {
-    method == Method::POST
-        && path
-            .strip_prefix("/api/v1/dlq/")
-            .and_then(|rest| rest.strip_suffix("/replay"))
-            .is_some_and(|id| !id.is_empty() && !id.contains('/'))
-}
-
-/// Options that decide how long a queue keeps data: both are read by
-/// configure_queue_v1 (012_configure.sql) into queen.queues and become the
-/// retention sweep's rule-1 / rule-2 cutoffs (server/src/retention.rs).
+/// Options that decide how long a queue keeps data: both are stored in the
+/// queue's configuration and become the retention pass's cutoffs.
 /// Deliberately NOT here: `maxWaitTimeSeconds`, an eviction deadline that only
-/// ever SHORTENS a message's life (045_log_maintenance.sql,
-/// log_evict_max_wait_step_v1), so it cannot exceed a retention ceiling; and
-/// `ttl`, which the segments engine only echoes back.
+/// ever SHORTENS a message's life, so it cannot exceed a retention ceiling; and
+/// `ttl`, which the broker only echoes back.
 const RETENTION_KEYS: &[&str] = &["retentionSeconds", "completedRetentionSeconds"];
 
 /// The parts of a `/configure` body the proxy enforces on.
@@ -1673,39 +1648,16 @@ fn parse_produce_items(path: &str, bytes: &[u8]) -> Result<Vec<ItemInfo>, ()> {
     }
 }
 
-/// Per-item tallies from a push 201 response.
-#[derive(Default, Debug, PartialEq, Eq)]
-struct PushCounts {
-    /// Billable items (M1–M3): `queued` + `buffered`.
-    accepted: u64,
-    /// `buffered` alone — tracked separately because it is the cell's
-    /// maintenance/spool signal (§6.10), not because it bills differently.
-    buffered: u64,
-    /// Items in the response, whatever their status.
-    total: u64,
-}
-
-/// Count a push 201 response. The body is a top-level array of per-item
-/// `{...,"status":...}`; `queued` and `buffered` are accepted, `duplicate` /
+/// Count the billable items of a push 201 response. The body is a top-level
+/// array of per-item `{...,"status":...}`; `queued` is accepted, `duplicate` /
 /// `error` / `failed` are not (M1–M3). None on parse failure.
-fn count_push_statuses(bytes: &[u8]) -> Option<PushCounts> {
+fn count_push_statuses(bytes: &[u8]) -> Option<u64> {
     #[derive(Deserialize)]
     struct StatusLite {
         status: String,
     }
     let arr: Vec<StatusLite> = serde_json::from_slice(bytes).ok()?;
-    let mut counts = PushCounts { total: arr.len() as u64, ..PushCounts::default() };
-    for s in &arr {
-        match s.status.as_str() {
-            "queued" => counts.accepted += 1,
-            "buffered" => {
-                counts.accepted += 1;
-                counts.buffered += 1;
-            }
-            _ => {}
-        }
-    }
-    Some(counts)
+    Some(arr.iter().filter(|s| s.status == "queued").count() as u64)
 }
 
 /// Items in an ephemeral push body: `{queue, partition?, messages:[...]}`
@@ -1730,17 +1682,16 @@ fn count_ephemeral_push_items(bytes: &[u8]) -> u64 {
 
 /// Count an ephemeral push 201: `{"pushed":N}` (§3.1). The family answers one
 /// number rather than a per-item status array because the request is
-/// all-or-nothing — there is no `duplicate` (no dedup) and no `buffered` (no
-/// spool: a RAM queue has nowhere to spill to), so `accepted` is the whole
-/// tally and the §6.10 maintenance signal can never fire off it. `None` on a
-/// shape we cannot read, handled at the call site exactly like a durable one.
-fn count_ephemeral_pushed(bytes: &[u8]) -> Option<PushCounts> {
+/// all-or-nothing — there is no `duplicate` (no dedup), so `pushed` is the
+/// whole billable tally. `None` on a shape we cannot read, handled at the call
+/// site exactly like a durable one.
+fn count_ephemeral_pushed(bytes: &[u8]) -> Option<u64> {
     #[derive(Deserialize)]
     struct EphPushedLite {
         pushed: u64,
     }
     let p: EphPushedLite = serde_json::from_slice(bytes).ok()?;
-    Some(PushCounts { accepted: p.pushed, buffered: 0, total: p.pushed })
+    Some(p.pushed)
 }
 
 /// What a transaction 2xx response says about the push ops counted on the way
@@ -1792,36 +1743,6 @@ fn txn_outcome(bytes: &[u8]) -> TxnOutcome {
     TxnOutcome::Committed { duplicates }
 }
 
-/// §6.10: a cell in maintenance (or with its DB down) spools pushes to disk and
-/// answers `buffered` instead of `queued` (server/src/handlers/data.rs). A
-/// single buffered item can also be one item's failed transaction, so only a
-/// clear majority is read as "this cell is not writing to PG right now".
-fn predominantly_buffered(counts: &PushCounts) -> bool {
-    counts.total > 0 && counts.buffered * 2 > counts.total
-}
-
-/// Sampling interval for the maintenance signal — one line, not one per push.
-const MAINT_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Next instant a maintenance line may be emitted. Process-wide rather than
-/// per-cluster on purpose: one proxy fronts one cell (§2) and maintenance is a
-/// property of the cell, so the first cluster to notice reports for all of them.
-static MAINT_LOG_NEXT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-
-/// Is a maintenance line due? Non-blocking try_lock, so a concurrent responder
-/// skips its line instead of waiting on the hot path (same shape as
-/// limits.rs::maybe_gc).
-fn maint_log_due(now: std::time::Instant) -> bool {
-    let Ok(mut next) = MAINT_LOG_NEXT.try_lock() else { return false };
-    match *next {
-        Some(at) if now < at => false,
-        _ => {
-            *next = Some(now + MAINT_LOG_INTERVAL);
-            true
-        }
-    }
-}
-
 /// Count delivered messages in a pop 200 response: `{...,"messages":[...]}`.
 /// `IgnoredAny` counts elements without materialising them. None on parse fail.
 fn count_pop_messages(bytes: &[u8]) -> Option<u64> {
@@ -1839,7 +1760,7 @@ fn count_pop_messages(bytes: &[u8]) -> Option<u64> {
 ///
 /// Three causes, three codes — Track C clients switch on the code and treat
 /// `storage_quota_exceeded` as terminal. Each live flag is written by exactly
-/// one thing (storage: the pump in main.rs off registry over_storage; monthly:
+/// one thing (storage: the pump in app.rs off registry over_storage; monthly:
 /// the rollup task off plans.monthly_msgs_quota), so when one is set the cause
 /// is unambiguous; ctx.status is the DB lifecycle one (tenant `grace` or
 /// cluster `push_blocked` — cache.rs::merge_status) and never says *why* it was
@@ -2463,15 +2384,12 @@ mod tests {
             {"index":0,"status":"queued","queueName":"a"},
             {"index":1,"status":"duplicate","queueName":"a"},
             {"index":2,"status":"error","queueName":"a"},
-            {"index":3,"status":"buffered","queueName":"b"},
+            {"index":3,"status":"queued","queueName":"b"},
             {"index":4,"status":"failed","queueName":"b"}
         ]"#;
-        // queued + buffered = 2 accepted; duplicate/error/failed excluded
-        let counts = count_push_statuses(body).expect("parse");
-        assert_eq!(counts.accepted, 2);
-        assert_eq!(counts.buffered, 1);
-        assert_eq!(counts.total, 5);
-        assert_eq!(count_push_statuses(b"[]"), Some(PushCounts::default()));
+        // queued = 2 accepted; duplicate/error/failed excluded
+        assert_eq!(count_push_statuses(body), Some(2));
+        assert_eq!(count_push_statuses(b"[]"), Some(0));
         // an error object (not an array) -> None (parse fail, msgs=0 at call site)
         assert_eq!(count_push_statuses(br#"{"error":"bad body"}"#), None);
     }
@@ -2691,7 +2609,7 @@ mod tests {
 
         // Two queues and two partitions each: everything fits, and a second
         // identical cycle takes the in-process fast path without creating more.
-        let reg = crate::registry::Registry::new(None);
+        let reg = crate::registry::Registry::new(crate::store::Store::None);
         let ctx = cycle_ctx(Some(2), Some(2));
         for _ in 0..2 {
             assert!(admit_pairs(&reg, true, &ctx, sinks.groups.iter().map(sink_pair), "rid")
@@ -2707,7 +2625,7 @@ mod tests {
         let sinks = count_cycle_push_items(SINK_BODY);
 
         // One partition per queue: `enriched`'s second partition is over.
-        let reg = crate::registry::Registry::new(None);
+        let reg = crate::registry::Registry::new(crate::store::Store::None);
         let ctx = cycle_ctx(Some(9), Some(1));
         let refused = admit_pairs(&reg, true, &ctx, sinks.groups.iter().map(sink_pair), "rid")
             .await
@@ -2718,7 +2636,7 @@ mod tests {
         assert_eq!(body["error"], "partition limit reached (1)");
 
         // One queue: the second distinct queue is over.
-        let reg = crate::registry::Registry::new(None);
+        let reg = crate::registry::Registry::new(crate::store::Store::None);
         let ctx = cycle_ctx(Some(1), Some(9));
         let refused = admit_pairs(&reg, true, &ctx, sinks.groups.iter().map(sink_pair), "rid")
             .await
@@ -2729,7 +2647,7 @@ mod tests {
 
         // Shadow mode: the same cycle over the same cap is logged, not refused
         // — the rate/quota posture the whole file shares.
-        let reg = crate::registry::Registry::new(None);
+        let reg = crate::registry::Registry::new(crate::store::Store::None);
         let ctx = cycle_ctx(Some(1), Some(1));
         assert!(admit_pairs(&reg, false, &ctx, sinks.groups.iter().map(sink_pair), "rid")
             .await
@@ -2747,7 +2665,7 @@ mod tests {
                 payload_len: 1,
             })
             .collect();
-        let reg = crate::registry::Registry::new(None);
+        let reg = crate::registry::Registry::new(crate::store::Store::None);
         // room for exactly one queue and one partition: five copies of one pair
         let ctx = cycle_ctx(Some(1), Some(1));
         assert!(admit_pairs(&reg, true, &ctx, items.iter().map(produce_pair), "rid").await.is_ok());
@@ -2815,7 +2733,7 @@ mod tests {
         assert!(cycle_payload_cap(&sinks, Some(1)).is_ok());
 
         // caps of zero: no pair to admit, so nothing to refuse
-        let reg = crate::registry::Registry::new(None);
+        let reg = crate::registry::Registry::new(crate::store::Store::None);
         let ctx = cycle_ctx(Some(0), Some(0));
         assert!(admit_pairs(&reg, true, &ctx, sinks.groups.iter().map(sink_pair), "rid")
             .await
@@ -2839,37 +2757,6 @@ mod tests {
         assert!(!is_streams_cycle(&Method::GET, STREAMS_CYCLE_PATH));
         assert!(!is_streams_cycle(&Method::POST, "/streams/v1/queries"));
         assert!(!is_streams_cycle(&Method::POST, "/streams/v1/cycle/extra"));
-    }
-
-    #[test]
-    fn maintenance_signal_needs_a_buffered_majority() {
-        let all_buffered = br#"[{"status":"buffered"},{"status":"buffered"}]"#;
-        assert!(predominantly_buffered(&count_push_statuses(all_buffered).expect("parse")));
-
-        // one item's transaction failed and spooled: not a cell-wide signal
-        let one_of_three = br#"[{"status":"queued"},{"status":"queued"},{"status":"buffered"}]"#;
-        assert!(!predominantly_buffered(&count_push_statuses(one_of_three).expect("parse")));
-
-        // exactly half is not a majority
-        let half = br#"[{"status":"queued"},{"status":"buffered"}]"#;
-        assert!(!predominantly_buffered(&count_push_statuses(half).expect("parse")));
-
-        // nothing to report: empty array, and the parse-failure default
-        assert!(!predominantly_buffered(&count_push_statuses(b"[]").expect("parse")));
-        assert!(!predominantly_buffered(&PushCounts::default()));
-    }
-
-    #[test]
-    fn maint_log_sampling_gate_admits_one_line_per_interval() {
-        // The gate is a process-wide static; this is the only test touching it.
-        let t0 = std::time::Instant::now();
-        assert!(maint_log_due(t0), "first line is always due");
-        assert!(!maint_log_due(t0), "a second push in the same instant is sampled out");
-        assert!(
-            !maint_log_due(t0 + MAINT_LOG_INTERVAL - std::time::Duration::from_millis(1)),
-            "still inside the interval"
-        );
-        assert!(maint_log_due(t0 + MAINT_LOG_INTERVAL), "due again once the interval elapses");
     }
 
     // ---- transaction billing: a rollback is HTTP 200 and must not be charged ----
@@ -2925,8 +2812,6 @@ mod tests {
         let body = br#"{"success":true,"queue":"q","partition":"p","partitionId":"pid","leaseId":"l","consumerGroup":"g","messages":[{"a":1},{"b":2},{"c":3}]}"#;
         assert_eq!(count_pop_messages(body), Some(3));
         assert_eq!(count_pop_messages(br#"{"success":true,"messages":[]}"#), Some(0));
-        // paused 204-ish body still parses to zero
-        assert_eq!(count_pop_messages(br#"{"messages":[],"paused":true}"#), Some(0));
         // missing messages field defaults to empty
         assert_eq!(count_pop_messages(br#"{"success":true}"#), Some(0));
     }
@@ -3192,12 +3077,7 @@ mod tests {
     /// The 201 the family answers is one number, not a status array (§3.1).
     #[test]
     fn ephemeral_push_201_is_counted_from_pushed() {
-        let counts = count_ephemeral_pushed(br#"{"pushed":3}"#).expect("parse");
-        assert_eq!(counts.accepted, 3);
-        assert_eq!(counts.total, 3);
-        // nothing spools in RAM, so the maintenance signal can never fire here
-        assert_eq!(counts.buffered, 0);
-        assert!(!predominantly_buffered(&counts));
+        assert_eq!(count_ephemeral_pushed(br#"{"pushed":3}"#), Some(3));
         // a shape we cannot read charges nothing, like a durable push 201
         assert_eq!(count_ephemeral_pushed(br#"{"error":"queue_full"}"#), None);
         assert_eq!(count_ephemeral_pushed(b"not json"), None);
@@ -3389,151 +3269,6 @@ mod tests {
         }
     }
 
-    // ---- the S3 sink's kv override (s3_kv.rs), at the same gates ----
-    //
-    // The sniffer's own behaviour is pinned in `s3_kv.rs`. These are about what
-    // the RECLASSIFICATION does once it has happened, which is this file's
-    // property, and they are the sink's half of the two tests above.
-
-    /// THE trap this carve-out exists for, and it is sharper than the Kafka
-    /// one. A tenant over its storage quota is push-blocked on purpose; if the
-    /// same block refuses the sink's WINDOW COMMIT, the sink re-uploads and
-    /// re-commits the identical window for ever while its lag grows without
-    /// bound — and a commit pointer of a few hundred bytes is not what the
-    /// storage block exists to stop. `mixed_block` is computed for the CLASS,
-    /// and `Consume` is not a class it is computed for.
-    #[test]
-    fn a_blocked_tenant_can_still_commit_a_window() {
-        use crate::routes::classify;
-        let kv_batch = classify(&Method::POST, "/api/v1/kv");
-        for body in [
-            // the commit: a CAS put with a required precondition
-            br#"{"operations":[{"op":"put","ns":"queen-s3","key":"s3:commit:sink-a:orders","value":{"tEnd":"2026-09-04T10:00:00Z"},"expect":41,"required":true,"forever":true}]}"#.as_slice(),
-            // the recovery read that precedes it
-            br#"{"operations":[{"op":"getMany","ns":"queen-s3","keys":["s3:commit:sink-a:orders"]}]}"#,
-        ] {
-            let class = crate::s3_kv::effective_class(kv_batch, body);
-            assert_eq!(class, RouteClass::Consume);
-            let would_block = matches!(class, RouteClass::Gated(_, crate::routes::GatedOp::Mixed));
-            assert!(!would_block, "{}", String::from_utf8_lossy(body));
-        }
-    }
-
-    /// The sink is a CONSUMER, so a consume-scoped credential — the one it
-    /// holds for the fetch and the discovery call — is enough for its
-    /// bookkeeping too, and a plan that never mentions `kv` does not gate it.
-    #[test]
-    fn a_sink_batch_reaches_a_tenant_whose_plan_has_no_kv() {
-        use crate::routes::{classify, Feature};
-        let kv_batch = classify(&Method::POST, "/api/v1/kv");
-        let body = br#"{"operations":[{"op":"putIfAbsent","ns":"queen-s3","key":"s3:instance:sink-a","value":{},"ttlSeconds":60}]}"#;
-        let class = crate::s3_kv::effective_class(kv_batch, body);
-        assert_eq!(class, RouteClass::Consume);
-        assert!(!feature_enabled(
-            Feature::Kv,
-            &crate::state::Features::default()
-        ));
-        assert!(
-            !matches!(class, RouteClass::Gated(_, _)),
-            "a Gated class would still meet the plan flag"
-        );
-        let consumer = crate::state::Principal::ApiKey {
-            key_id: uuid::Uuid::nil(),
-            scopes: crate::state::Scopes {
-                consume: true,
-                read: true,
-                produce: false,
-                admin: false,
-            },
-        };
-        assert!(crate::auth::authorize(&consumer, class).is_ok());
-    }
-
-    /// No bill moves because of a classification, same as the Kafka override:
-    /// `Gated(_,_)` meters reqs-only `Read`, and a `Consume` that is not a pop
-    /// path meters reqs-only `Read` too.
-    #[test]
-    fn a_sink_batch_meters_the_same_as_before() {
-        use crate::routes::classify;
-        let before = classify(&Method::POST, "/api/v1/kv");
-        let after = crate::s3_kv::effective_class(
-            before,
-            br#"{"operations":[{"op":"getPrefix","ns":"queen-s3","prefix":"s3:instance:","limit":500}]}"#,
-        );
-        assert_ne!(before, after, "the class really did change");
-        assert_eq!(op_for("/api/v1/kv", before), OpClass::Read);
-        assert_eq!(op_for("/api/v1/kv", after), OpClass::Read);
-        assert!(!is_pop_path("/api/v1/kv"));
-        assert!(!is_wait_pop("/api/v1/kv", Some("wait=true&timeout=30000")));
-    }
-
-    /// A non-`s3:` batch is the KV product and keeps `Gated(Kv, Mixed)` in
-    /// every gate — and the two carve-outs stay disjoint, so chaining them in
-    /// `handle` cannot grant a class neither would grant alone.
-    #[test]
-    fn a_plain_kv_batch_survives_both_carve_outs_unchanged() {
-        use crate::routes::{classify, Feature, GatedOp};
-        let kv_batch = classify(&Method::POST, "/api/v1/kv");
-        for body in [
-            br#"{"operations":[{"op":"put","ns":"app","key":"cache:x","value":1}]}"#.as_slice(),
-            // ...one that only LOOKS like the sink's
-            br#"{"operations":[{"op":"put","ns":"app","key":"s3:commit:a","value":1}]}"#,
-            // ...and one that mixes the two reserved spaces, which must fail
-            // closed onto the old class whichever predicate sees it first
-            br#"{"operations":[{"op":"put","ns":"queen-s3","key":"s3:commit:a","value":1},{"op":"put","ns":"queen-kafka","key":"qk:group:g","value":1}]}"#,
-        ] {
-            let why = String::from_utf8_lossy(body);
-            // the chain `handle` runs, in the order it runs it
-            let class = crate::s3_kv::effective_class(
-                crate::kafka_kv::effective_class(kv_batch, body),
-                body,
-            );
-            assert_eq!(
-                class,
-                RouteClass::Gated(Feature::Kv, GatedOp::Mixed),
-                "{why}"
-            );
-            assert!(
-                !feature_enabled(Feature::Kv, &crate::state::Features::default()),
-                "{why}"
-            );
-            let read_only = crate::state::Principal::ApiKey {
-                key_id: uuid::Uuid::nil(),
-                scopes: crate::state::Scopes {
-                    read: true,
-                    produce: false,
-                    consume: false,
-                    admin: false,
-                },
-            };
-            assert!(crate::auth::authorize(&read_only, class).is_err(), "{why}");
-            assert!(matches!(class, RouteClass::Gated(_, GatedOp::Mixed)), "{why}");
-            assert_eq!(op_for("/api/v1/kv", class), OpClass::Read, "{why}");
-        }
-    }
-
-    /// The sink override is scoped to the one class that asks its body, the
-    /// discovery route it serves included.
-    #[test]
-    fn the_sink_override_touches_no_other_route() {
-        use crate::routes::classify;
-        let s3 = br#"{"operations":[{"op":"put","ns":"queen-s3","key":"s3:commit:a","value":1}]}"#;
-        for (m, p) in [
-            (Method::POST, "/api/v1/push"),
-            (Method::POST, "/api/v1/transaction"),
-            (Method::POST, "/api/v1/timers"),
-            (Method::POST, "/streams/v1/cycle"),
-            (Method::GET, "/api/v1/kv/queen-s3/s3:commit:a"),
-            (Method::PUT, "/api/v1/kv/queen-s3/s3:commit:a"),
-            (Method::DELETE, "/api/v1/kv/queen-s3/s3:commit:a"),
-            (Method::POST, "/api/v1/fetch"),
-            (Method::POST, "/api/v1/partitions/changed"),
-        ] {
-            let before = classify(&m, p);
-            assert_eq!(crate::s3_kv::effective_class(before, s3), before, "{m} {p}");
-        }
-    }
-
     // ---- PLAN_DASHBOARD_ACTIONS.md §1.4/§2.0: the DLQ replay gates --------
     //
     // The arms themselves are pinned in `routes.rs`. These are about what the
@@ -3553,7 +3288,7 @@ mod tests {
         crate::state::Principal::ApiKey { key_id: uuid::Uuid::nil(), scopes }
     }
 
-    /// A whole `St` with no pxdb behind it — acting.rs's `st_with` twin, copied
+    /// A whole `St` with no store behind it — acting.rs's `st_with` twin, copied
     /// rather than shared because that one lives inside its own test module.
     /// Nothing here reaches the network: `plan_gates` asks `st.limits` and
     /// nothing else.
@@ -3571,10 +3306,10 @@ mod tests {
     fn gate_st_with(enforce: bool) -> St {
         let mut cfg = crate::config::test_config(&[]);
         cfg.enforce = enforce;
-        let cache = crate::cache::ClusterCache::new(&cfg, None);
+        let cache = crate::cache::ClusterCache::new(&cfg, crate::store::Store::None);
         let limits = crate::limits::Limits::new(&cfg);
         let meter = std::sync::Arc::new(crate::meter::Meter::new(&cfg));
-        let registry = crate::registry::Registry::new(None);
+        let registry = crate::registry::Registry::new(crate::store::Store::None);
         let keys = crate::auth::Keys::from_config(&cfg);
         let mut connector = hyper_util::client::legacy::connect::HttpConnector::new();
         connector.set_nodelay(true);
@@ -3583,7 +3318,6 @@ mod tests {
                 .build::<_, axum::body::Body>(connector);
         std::sync::Arc::new(crate::state::AppState {
             cfg,
-            db: None,
             store: crate::store::Store::None,
             upstream: crate::upstream::Upstream::Http(upstream),
             cache,
@@ -3847,9 +3581,9 @@ mod tests {
     //
     // Reading the samples back is the awkward part and the reason this is the
     // only test here shaped like an integration test: a `Meter` has exactly one
-    // exit that does not need a pxdb, its disk spool, which is where a flush
-    // against an unreachable database puts the rows. So the meter is given a
-    // pool nothing listens behind, and the failure is the readout.
+    // exit that does not need a store, its disk spool, which is where a drain
+    // against an unreachable KV puts the rows. So the meter is given a KV that
+    // never answers, and the failure is the readout.
 
     /// A stub broker on a loopback port, answering every request with one
     /// `move_response`-shaped verdict chosen by the dead-letter row id in the
@@ -3874,25 +3608,39 @@ mod tests {
         (format!("http://{addr}"), task)
     }
 
-    /// An `St` wired end to end at a stub broker: dev-static names the cluster
-    /// (so `resolve_host` answers without a pxdb) and dev-insecure hands the
-    /// request a full-scope principal (so the test is about steps 4-6, not
-    /// about minting a credential). The flush interval is pushed out of the
-    /// way — the rows this test reads are the ones `drain()` writes.
-    fn replay_st(cell_url: &str, spool_dir: &str) -> St {
+    /// An `St` wired end to end at a stub broker: an in-memory KV names the
+    /// cluster `cell` on a cell at `cell_url` (so `resolve_host` answers for
+    /// `Host: cell.test`) and dev-insecure hands the request a full-scope
+    /// principal (so the test is about steps 4-6, not about minting a
+    /// credential). The flush interval is pushed out of the way — the rows
+    /// this test reads are the ones `drain()` writes.
+    async fn replay_st(cell_url: &str, spool_dir: &str) -> St {
+        replay_st_capped(cell_url, spool_dir, None).await
+    }
+
+    /// `replay_st` with the limits ENFORCING and the cluster's plan narrowed by
+    /// `caps` (a limit-override document), for the admission half of the
+    /// replay arm driven through `handle`.
+    async fn replay_st_capped(
+        cell_url: &str,
+        spool_dir: &str,
+        caps: Option<serde_json::Value>,
+    ) -> St {
         let mut cfg = crate::config::test_config(&[]);
         cfg.dev_insecure = true;
-        cfg.dev_static = Some(crate::config::DevStaticCluster {
-            cell_url: cell_url.to_string(),
-            cell_token: None,
-            broker_tenant: crate::config::DEFAULT_TENANT_UUID.to_string(),
-        });
+        cfg.enforce = caps.is_some();
         cfg.spool_dir = spool_dir.to_string();
         cfg.meter_flush_ms = 600_000;
-        let cache = crate::cache::ClusterCache::new(&cfg, None);
+        let (store, cluster, _) = crate::store::data::test_world("cell", cell_url, "pro").await;
+        if let Some(caps) = caps {
+            crate::store::data::set_limit_override(&store, cluster, Some(&caps))
+                .await
+                .expect("limit override");
+        }
+        let cache = crate::cache::ClusterCache::new(&cfg, store.clone());
         let limits = crate::limits::Limits::new(&cfg);
         let meter = std::sync::Arc::new(crate::meter::Meter::new(&cfg));
-        let registry = crate::registry::Registry::new(None);
+        let registry = crate::registry::Registry::new(crate::store::Store::None);
         let keys = crate::auth::Keys::from_config(&cfg);
         let mut connector = hyper_util::client::legacy::connect::HttpConnector::new();
         connector.set_nodelay(true);
@@ -3901,8 +3649,7 @@ mod tests {
                 .build::<_, axum::body::Body>(connector);
         std::sync::Arc::new(crate::state::AppState {
             cfg,
-            db: None,
-            store: crate::store::Store::None,
+            store,
             upstream: crate::upstream::Upstream::Http(upstream),
             cache,
             limits,
@@ -3910,32 +3657,6 @@ mod tests {
             registry,
             keys,
         })
-    }
-
-    /// A pool nothing listens behind (registry.rs's `unreachable_pool` twin,
-    /// copied for the same reason `gate_st` is): every flush through it fails,
-    /// and a failed flush spools its rows to disk, which is this test's readout.
-    fn unreachable_pool() -> deadpool_postgres::Pool {
-        let mut pg = tokio_postgres::Config::new();
-        pg.host("127.0.0.1")
-            .port(1)
-            .user("x")
-            .dbname("x")
-            .connect_timeout(std::time::Duration::from_secs(2));
-        let mgr = deadpool_postgres::Manager::from_config(
-            pg,
-            tokio_postgres::NoTls,
-            deadpool_postgres::ManagerConfig {
-                recycling_method: deadpool_postgres::RecyclingMethod::Fast,
-            },
-        );
-        deadpool_postgres::Pool::builder(mgr)
-            .max_size(1)
-            .runtime(deadpool_postgres::Runtime::Tokio1)
-            .wait_timeout(Some(std::time::Duration::from_secs(2)))
-            .create_timeout(Some(std::time::Duration::from_secs(2)))
-            .build()
-            .expect("pool")
     }
 
     fn spooled_rows(dir: &str) -> Vec<crate::meter::UsageRow> {
@@ -3963,9 +3684,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("queen-proxy-replay-{}", uuid::Uuid::new_v4()));
         let dir = dir.to_str().expect("temp path").to_string();
         let (cell, _broker) = stub_broker().await;
-        let st = replay_st(&cell, &dir);
-        // Sets the pool `drain()` writes through. Unreachable on purpose.
-        st.meter.spawn_flush(Some(unreachable_pool()));
+        let st = replay_st(&cell, &dir).await;
+        // Sets the KV `drain()` writes through. Unreachable on purpose.
+        let down = crate::store::Store::Kv(std::sync::Arc::new(crate::store::memkv::Down));
+        st.meter.spawn_flush(&down, "test");
 
         for id in ["moved-row", "duplicate-row"] {
             let resp = handle(
@@ -4007,6 +3729,62 @@ mod tests {
         // twice — and only for the reply that said a frame was written. Delete
         // the arm in `handle` and this is `(0, 0)`.
         assert_eq!(totals("push"), (0, 1));
+    }
+
+    /// The bypass this pins: the broker's address-keyed retry reads the same
+    /// `{queue, partition}` body as the row-id replay (both are `api_dlq_move`),
+    /// but only the replay route was buffered and admitted, so a destination
+    /// named on the retry route created queues past the plan's cap. Driven
+    /// through `handle`, because the gap was in which requests reach the
+    /// admission, not in the admission itself.
+    #[tokio::test]
+    async fn the_retry_route_admits_its_destination_like_the_replay_route() {
+        let dir = std::env::temp_dir().join(format!("queen-proxy-retry-{}", uuid::Uuid::new_v4()));
+        let dir = dir.to_str().expect("temp path").to_string();
+        let (cell, _broker) = stub_broker().await;
+        let caps = serde_json::json!({"max_queues": 1, "max_partitions_per_queue": 1});
+        let st = replay_st_capped(&cell, &dir, Some(caps)).await;
+        let send = |path: &str, body: &'static str| {
+            let st = st.clone();
+            let req = Request::builder()
+                .method(Method::POST)
+                .uri(path)
+                .header(header::HOST, "cell.test")
+                .body(Body::from(body))
+                .expect("request");
+            async move { handle(State(st), req).await }
+        };
+
+        // No body and a body that names no destination: forwarded as before.
+        for body in ["", "{}"] {
+            let resp = send(RETRY_PATH, body).await;
+            assert_eq!(resp.status(), StatusCode::OK, "retry with body {body:?}");
+        }
+        // The one queue the cap allows is admitted and forwarded.
+        let fits = send(RETRY_PATH, r#"{"queue":"orders","partition":"p"}"#).await;
+        assert_eq!(fits.status(), StatusCode::OK);
+
+        // A second queue is refused on BOTH routes with the same answer.
+        let over = r#"{"queue":"orders-2","partition":"p"}"#;
+        let mut answers = Vec::new();
+        for path in [RETRY_PATH, REPLAY_PATH] {
+            let refused = send(path, over).await;
+            assert_eq!(refused.status(), StatusCode::FORBIDDEN, "{path}");
+            answers.push(err_body(refused).await);
+        }
+        assert_eq!(answers[0]["code"], errors::CODE_QUOTA_EXCEEDED);
+        assert_eq!(answers[0]["error"], "queue limit reached (1)");
+        assert_eq!(answers[0], answers[1], "same cap, same error on both routes");
+
+        // A half-named destination is refused on the retry route too — also
+        // when the other half is not a string, which the broker ignores.
+        for body in [r#"{"queue":"orders-3"}"#, r#"{"queue":"orders-3","partition":7}"#] {
+            let refused = send(RETRY_PATH, body).await;
+            assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{body}");
+            let answer = err_body(refused).await;
+            assert_eq!(answer["code"], "invalid_request", "{body}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The `{queue, partition}` override is a CREATION path — the SP provisions
@@ -4053,14 +3831,12 @@ mod tests {
         assert_eq!(answer["code"], errors::CODE_QUOTA_EXCEEDED);
         assert_eq!(answer["error"], "queue limit reached (1)");
 
-        // Only ONE of the two routes can name a destination, so only one is
-        // buffered and admitted. The address-keyed retry replays in place and
-        // never reads its body; admitting a queue it will not create would
-        // spend a plan slot on a name that never appears at the broker.
-        assert!(is_replay_with_dest(&Method::POST, REPLAY_PATH));
-        assert!(!is_replay_with_dest(&Method::POST, RETRY_PATH));
-        assert!(!is_replay_with_dest(&Method::GET, REPLAY_PATH));
-        assert!(is_dlq_replay(&Method::POST, RETRY_PATH), "still gated and billed");
+        // BOTH routes can name a destination (the broker answers the two with
+        // one `api_dlq_move`), so both are buffered and admitted: the arm in
+        // `handle` is gated on `is_dlq_replay`, which answers both.
+        assert!(is_dlq_replay(&Method::POST, REPLAY_PATH));
+        assert!(is_dlq_replay(&Method::POST, RETRY_PATH));
+        assert!(!is_dlq_replay(&Method::GET, REPLAY_PATH));
 
         // The bodies that name no destination, and the ones this proxy cannot
         // read: nothing to admit, forwarded verbatim for the broker's own
@@ -4235,9 +4011,9 @@ mod tests {
     }
 
     /// What the body parser hands the admission, and the shapes that name
-    /// nothing. The handler's own `parse_replay_overrides` is the twin
-    /// (server/src/handlers/messages.rs): a present half must be a non-empty
-    /// name, an omitted one keeps the source row's.
+    /// nothing. The broker's own reading in `api_dlq_move` is the twin
+    /// (server/src/rsm/facade/real/phase2/admin.rs): a present half must be a
+    /// non-empty string, an omitted one keeps the source row's.
     #[test]
     fn the_replay_body_names_zero_one_or_two_halves() {
         let dest = |b: &[u8]| parse_replay_dest(b);
@@ -4256,8 +4032,8 @@ mod tests {
         // A blank name is not a name: the broker 400s it, and admitting one
         // would burn a plan slot on a queue nobody can address.
         assert_eq!(dest(br#"{"queue":"   ","partition":""}"#), Ok((None, None)));
-        // PADDED is the same name, because the handler trims before the SP
-        // sees it (`parse_replay_overrides`). What is admitted here has to be
+        // PADDED is the same name, because the broker trims before the move
+        // provisions it (`api_dlq_move`). What is admitted here has to be
         // what gets created there, or the registry counts a queue the broker
         // never makes and misses the one it does.
         assert_eq!(
@@ -4273,19 +4049,26 @@ mod tests {
             dest(br#"{"queue":"orders","reason":"manual"}"#),
             Ok((Some("orders".to_string()), None))
         );
-        // Unreadable: forwarded, never half-enforced.
+        // Unreadable: forwarded, never half-enforced (the broker 400s it too).
         assert_eq!(dest(b"not json"), Err(()));
-        assert_eq!(dest(br#"["orders"]"#), Err(()));
-        assert_eq!(dest(br#"{"queue":7}"#), Err(()));
-        // A two-element ARRAY is the same two halves, positionally: serde reads
-        // a struct from a sequence as well as from a map, and the handler's
-        // `ReplayBody` is derived the same way, so the broker provisions
-        // exactly what this admits. Pinned because it is surprising, and
-        // because the two parsers agreeing is the property that matters.
+        // Read the way the broker reads it, which is the property that matters:
+        // a non-string half is IGNORED there, not an error, so the other half is
+        // still a name — a stricter parser forwarded these unadmitted and the
+        // broker created the string half's queue or partition.
+        assert_eq!(dest(br#"{"queue":7}"#), Ok((None, None)));
         assert_eq!(
-            dest(br#"["orders","eu-2"]"#),
-            Ok((Some("orders".to_string()), Some("eu-2".to_string())))
+            dest(br#"{"queue":"new-q","partition":7}"#),
+            Ok((Some("new-q".to_string()), None))
         );
+        // A repeated key is the LAST one at the broker (serde_json's map), not
+        // a parse error that travels on unadmitted.
+        assert_eq!(
+            dest(br#"{"queue":"a","partition":"p","queue":"b"}"#),
+            Ok((Some("b".to_string()), Some("p".to_string())))
+        );
+        // A JSON value that is not an object names nothing at the broker.
+        assert_eq!(dest(br#"["orders","eu-2"]"#), Ok((None, None)));
+        assert_eq!(dest(br#""orders""#), Ok((None, None)));
     }
 
     #[test]

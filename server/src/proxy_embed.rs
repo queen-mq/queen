@@ -1,5 +1,5 @@
 //! The single binary (PLAN_SINGLE_BINARY.md W3/W4): the proxy runs inside the
-//! broker, one process per node, no Postgres.
+//! broker, one process per node.
 //!
 //! - **State:** the proxy's tables live in this broker's replicated KV under
 //!   the proxy's system tenant ([`queen_proxy::store::schema::PROXY_TENANT`]),
@@ -19,8 +19,8 @@
 //!   proxy does (its own JWT and tenancy settings): for clients inside the
 //!   network, scrapers and probes. That port must not face the internet.
 //!
-//! On with `QUEEN_PROXY_EMBEDDED=true`; configured by the same
-//! `QUEEN_PROXY_*` environment as the standalone proxy.
+//! On with `QUEEN_PROXY_EMBEDDED=true`; configured by the `QUEEN_PROXY_*`
+//! environment.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -126,8 +126,7 @@ pub fn public_router(
         }
     };
     // The broker's metrics describe every tenant's queues: operator-only, on
-    // the control-plane token, and a 404 like the standalone proxy's block
-    // for anyone else.
+    // the control-plane token, and a 404 for anyone else.
     let metrics = {
         let passthrough = passthrough.clone();
         move |req: Request<Body>| {

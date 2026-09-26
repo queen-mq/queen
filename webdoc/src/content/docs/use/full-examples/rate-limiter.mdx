@@ -1,6 +1,6 @@
 ---
 title: Rate limiter
-description: "Counting requests per key in a window where the counter is a row in the same database as the queue, and the two things you can do with the ones over the line: discard them, or move them."
+description: "Counting requests per key in a window where the counter lives in the same broker as the queue, and the two things you can do with the ones over the line: discard them, or move them."
 type: example
 tier: use
 sidebar:
@@ -15,8 +15,8 @@ verifiedBy:
 The textbook rate limiter counts requests per key in a fixed window, and the usual implementation is a
 counter in Redis: a second data system to run, to size, and to lose on restart.
 
-Here the counter is a row in the same PostgreSQL as the queue, which is what makes counting exact
-rather than approximately exact. What that buys is one half of the problem. The other half is what
+Here the counter lives in the same broker as the queue, in its replicated state, which is what makes
+counting exact rather than approximately exact. What that buys is one half of the problem. The other half is what
 happens to the request that arrives over the line, and there are exactly two answers: throw it away, or
 move it. They are different products dressed as one setting, and picking between them by accident is
 the usual way a limiter disappoints the people behind it.
@@ -25,7 +25,8 @@ the usual way a limiter disappoints the people behind it.
 
 The programs below count with a windowed aggregation over the request stream itself. The window
 state, the decisions it emits and the acknowledgement of the requests it counted commit in one
-PostgreSQL transaction, so the counter cannot drift from the stream it was computed from.
+entry of the broker's replicated log, so the counter cannot drift from the stream it was computed
+from.
 
 Counting and enforcing are deliberately separate: the counting is exact and belongs to the broker, the
 policy is yours and changes on a different schedule. Note also how the test is made deterministic,

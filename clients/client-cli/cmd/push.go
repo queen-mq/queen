@@ -226,7 +226,7 @@ func pushNDJSON(ctx context.Context, q *queen.Queen, queue string, in io.Reader,
 			txnID = pushTxID
 			firstTxnAssigned = true
 		}
-		// Server-side push_messages_v3 generates a fresh UUID when
+		// The broker mints a fresh transaction id when
 		// transactionId is empty. We could mint one here for parity with the
 		// SDK, but letting the server own that keeps behaviour consistent
 		// across clients (same as a curl-driven push).

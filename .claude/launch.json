@@ -30,7 +30,7 @@
       "runtimeExecutable": "/bin/sh",
       "runtimeArgs": [
         "-c",
-        "PG_HOST=localhost PG_PORT=5456 PG_USER=postgres PG_PASSWORD=postgres PG_DATABASE=postgres PORT=6632 QUEEN_APPLY_SCHEMA=1 DB_POOL_SIZE=16 exec server/target/release/queen"
+        "QUEEN_RAFT_DIR=${TMPDIR:-/tmp}/queen-dev/6632 QUEEN_RAFT_DISK_HIGH_PCT=99.5 QUEEN_RAFT_DISK_LOW_PCT=99 PORT=6632 exec server/target/release/queen"
       ],
       "port": 6632
     },
@@ -39,7 +39,7 @@
       "runtimeExecutable": "/bin/sh",
       "runtimeArgs": [
         "-c",
-        "PXDB_HOST=localhost PXDB_PORT=5456 PXDB_USER=postgres PXDB_PASSWORD=postgres PXDB_DB=queen_proxy QUEEN_PROXY_PORT=6711 QUEEN_PROXY_OPERATOR_ENABLED=true QUEEN_PROXY_JWT_SECRET=dev-only-secret-not-for-production QUEEN_PROXY_SPOOL_DIR=/private/tmp/claude-502/-Users-alice-Work-queen/14c49b73-9301-42e3-9611-3fbb256dfa6f/scratchpad/proxy-spool exec proxy/target/release/queen-proxy"
+        "QUEEN_RAFT_DIR=${TMPDIR:-/tmp}/queen-dev/6710 QUEEN_RAFT_DISK_HIGH_PCT=99.5 QUEEN_RAFT_DISK_LOW_PCT=99 PORT=6710 QUEEN_PROXY_EMBEDDED=true QUEEN_PROXY_PORT=6711 QUEEN_PROXY_OPERATOR_ENABLED=true QUEEN_PROXY_JWT_SECRET=dev-only-secret-not-for-production QUEEN_PROXY_SPOOL_DIR=${TMPDIR:-/tmp}/queen-dev/6710-proxy-spool exec server/target/release/queen"
       ],
       "port": 6711
     },
@@ -48,7 +48,7 @@
       "runtimeExecutable": "/bin/sh",
       "runtimeArgs": [
         "-c",
-        "PG_HOST=localhost PG_PORT=5456 PG_USER=postgres PG_PASSWORD=postgres PG_DATABASE=queen_pr49 PORT=6645 QUEEN_APPLY_SCHEMA=1 DB_POOL_SIZE=8 exec server/target/release/queen"
+        "QUEEN_RAFT_DIR=${TMPDIR:-/tmp}/queen-dev/6645 QUEEN_RAFT_DISK_HIGH_PCT=99.5 QUEEN_RAFT_DISK_LOW_PCT=99 PORT=6645 exec server/target/release/queen"
       ],
       "port": 6645
     },
@@ -84,7 +84,7 @@
       "runtimeExecutable": "/bin/sh",
       "runtimeArgs": [
         "-c",
-        "PG_HOST=localhost PG_PORT=5456 PG_USER=postgres PG_PASSWORD=postgres PG_DATABASE=postgres PORT=6646 QUEEN_APPLY_SCHEMA=1 DB_POOL_SIZE=8 exec server/target/debug/queen"
+        "QUEEN_RAFT_DIR=${TMPDIR:-/tmp}/queen-dev/6646 QUEEN_RAFT_DISK_HIGH_PCT=99.5 QUEEN_RAFT_DISK_LOW_PCT=99 PORT=6646 exec server/target/debug/queen"
       ],
       "port": 6646
     },

@@ -10,11 +10,10 @@
 //     a push request body contains producerSub, the server replaces it with
 //     the authenticated JWT sub.
 //
-// These are black-box: the segments engine stores messages in seg_segments and
-// never populates queen.messages, so producerSub is observed via the pop API
-// (the seg-native ground truth) rather than a direct SQL read. The JWT-gated
-// tests require the server running with JWT enabled and the matching JWT_SECRET
-// env var set when running the tests.
+// These are black-box: producerSub is observed via the pop API, which is the
+// ground truth a client has for what the broker stored. The JWT-gated tests
+// require the server running with JWT enabled and the matching JWT_SECRET env
+// var set when running the tests.
 
 package tests
 
@@ -132,8 +131,8 @@ func configureQueue(t *testing.T, queue, bearer string) {
 
 // popProducerSub pops the queue (optionally authenticated) until it observes the
 // message with the given transactionId, then returns its ProducerSub as
-// deserialised into the typed Message struct. This is the seg-native ground
-// truth for producerSub (queen.messages is never populated by the seg engine).
+// deserialised into the typed Message struct. The pop API is the ground truth
+// for producerSub.
 func popProducerSub(ctx context.Context, t *testing.T, bearer, queue, txID string) (string, bool) {
 	t.Helper()
 	c, err := queen.New(queen.ClientConfig{URL: serverURL, BearerToken: bearer})

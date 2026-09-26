@@ -21,7 +21,7 @@ Failures must be retried a bounded number of times, and what never succeeds has 
 somewhere a human can look at.
 
 One ordered lane per destination gives the first two properties for free: a dead endpoint backs up
-its own lane and no other. The last two are the broker's retry budget and its dead-letter table,
+its own lane and no other. The last two are the broker's retry budget and its dead-letter queue,
 which means they survive the sender process dying mid-flight, and a loop inside your handler would
 not.
 

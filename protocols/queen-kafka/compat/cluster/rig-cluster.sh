@@ -5,20 +5,20 @@
 # It stands up the whole shape cluster mode exists for and then runs `run.sh`
 # against it:
 #
-#   one throwaway Postgres                              (container qkx-c2-pg)
-#   TWO Queen brokers, mesh-wired, on that ONE Postgres (the HA recipe of
-#                                                        test/compose/docker-compose.ha.yml)
+#   ONE Queen cluster of THREE raft brokers A, B, C     (each on its own
+#                                                        throwaway data directory)
 #   THREE queen-kafka facades in cluster mode           nodes 1, 2, 3
-#       node 1 -> broker A     node 2 -> broker B     node 3 -> broker A
+#       node 1 -> broker A     node 2 -> broker B     node 3 -> broker C
 #   ONE queen-kafka facade with the cluster config ABSENT   (the regression lane)
 #   TWO independent single-node facades                     (the old split-brain shape)
 #
-# Node 1 and node 2 are in front of DIFFERENT brokers on purpose: it puts a
-# cross-broker read on the critical path of every group assertion, which is what
-# proves the design's premise that the data path is stateless over the shared
-# Postgres (032_log_fetch.sql:11-19 takes no lease and writes nothing;
-# 003_log_push.sql:131-213 allocates the offset under a row lock in the database
-# rather than in a broker).
+# The three clustered facades are in front of DIFFERENT brokers on purpose:
+# whichever broker leads the raft cluster, two of them reach it through a
+# follower, which puts a cross-node round trip on the critical path of every
+# group assertion. That is what proves the design's premise that the facades'
+# data path is stateless over one Queen deployment: every broker answers for
+# every partition, and a write is ordered by the raft leader, not by the facade
+# or the broker it happened to arrive at.
 #
 #   protocols/queen-kafka/compat/cluster/rig-cluster.sh            # stand up, run, tear down
 #   protocols/queen-kafka/compat/cluster/rig-cluster.sh -run TestAcceptance -v
@@ -26,31 +26,39 @@
 #
 # Every argument that is not --keep is passed through to `go test`.
 #
-# PORTS. This rig owns 32400-32419 and binds nothing else. Postgres 32400,
-# brokers 32401/32402 (mesh 32403/32404), facades 32410-32415. Every one is
-# overridable by environment variable; if you move them, move them as a block.
+# PORTS. This rig owns 32400-32419 and binds nothing else. Brokers 32401-32403
+# (their raft RPC on 32404-32406, bound to 127.0.0.1), facades 32410-32415.
+# Every one is overridable by environment variable; if you move them, move them
+# as a block.
+#
+# DISK. The brokers' disk gate refuses writes (507) once a data directory's
+# filesystem is QUEEN_RAFT_DISK_HIGH_PCT used, 85 by default; a throwaway rig on
+# a developer disk is not what it protects, so the rig runs it at 99.5 unless
+# QUEEN_RAFT_DISK_HIGH_PCT says otherwise.
 #
 # TEARDOWN. Every host process's pid is written to $LOGDIR/pids/<name>.pid at
 # spawn and teardown kills ONLY those pids. Nothing is ever resolved from a
-# port. The container is removed by its own name and no other.
+# port. The brokers' data directories ($LOGDIR/raft-*) are removed; the logs
+# are kept.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 
-PG_PORT="${PG_PORT:-32400}"
 BROKER_A_PORT="${BROKER_A_PORT:-32401}"
 BROKER_B_PORT="${BROKER_B_PORT:-32402}"
-MESH_A_PORT="${MESH_A_PORT:-32403}"
-MESH_B_PORT="${MESH_B_PORT:-32404}"
+BROKER_C_PORT="${BROKER_C_PORT:-32403}"
+RAFT_A_PORT="${RAFT_A_PORT:-32404}"
+RAFT_B_PORT="${RAFT_B_PORT:-32405}"
+RAFT_C_PORT="${RAFT_C_PORT:-32406}"
 NODE1_PORT="${NODE1_PORT:-32410}"
 NODE2_PORT="${NODE2_PORT:-32411}"
 NODE3_PORT="${NODE3_PORT:-32412}"
 SINGLE_PORT="${SINGLE_PORT:-32413}"
 SPLIT_A_PORT="${SPLIT_A_PORT:-32414}"
 SPLIT_B_PORT="${SPLIT_B_PORT:-32415}"
-CONTAINER="${CONTAINER:-qkx-c2-pg}"
 PARTITIONS="${PARTITIONS:-8}"
+DISK_HIGH_PCT="${QUEEN_RAFT_DISK_HIGH_PCT:-99.5}"
 CLUSTER_NAME="${CLUSTER_NAME:-qkxc2}"
 
 # The registry cadence. The product defaults are 2000/10000 and they are what
@@ -66,20 +74,22 @@ TTL_MS="${TTL_MS:-3000}"
 JOIN_DELAY_MS="${JOIN_DELAY_MS:-3000}"
 
 # All facades of one cluster must present credentials of ONE Queen tenant --
-# queen.kv is keyed by tenant, so two tenants would be two registries and each
+# Queen's KV is keyed by tenant, so two tenants would be two registries and each
 # facade would see only itself (cluster/registry.rs, the "alone" warning). The
 # rig's brokers run with JWT off, so this string authenticates nothing; it is
 # generated per run rather than hardcoded so that nothing outside this rig can
 # come to depend on its value.
 QUEEN_TOKEN_VALUE="${QUEEN_TOKEN_VALUE:-qkx-c2-$$-$(date +%s)}"
-MESH_SECRET="qkx-c2-mesh-$$"
+# Every raft RPC between the brokers carries this; generated per run for the
+# same reason.
+RAFT_TOKEN="qkx-c2-raft-$$-$(date +%s)"
 
 KEEP=0
 GO_TEST_ARGS=()
 for arg in "$@"; do
   case "$arg" in
     --keep) KEEP=1;;
-    -h|--help) sed -n '2,36p' "$0"; exit 0;;
+    -h|--help) sed -n '2,42p' "$0"; exit 0;;
     *) GO_TEST_ARGS+=("$arg");;
   esac
 done
@@ -90,7 +100,7 @@ mkdir -p "$LOGDIR/pids"
 say() { printf '\n=== %s\n' "$*"; }
 
 # Every pid this script spawns, in the order they must die.
-PID_NAMES=(split-b split-a single node-3 node-2 node-1 broker-b broker-a)
+PID_NAMES=(split-b split-a single node-3 node-2 node-1 broker-c broker-b broker-a)
 
 pid_of() { [ -f "$LOGDIR/pids/$1.pid" ] && cat "$LOGDIR/pids/$1.pid"; }
 
@@ -99,16 +109,15 @@ cleanup() {
   if [ "$KEEP" = 1 ]; then
     echo
     echo "--keep: the stack is still up."
-    echo "  postgres  : container $CONTAINER on 127.0.0.1:$PG_PORT"
-    echo "  broker A  : http://127.0.0.1:$BROKER_A_PORT   broker B : http://127.0.0.1:$BROKER_B_PORT"
+    echo "  brokers   : A http://127.0.0.1:$BROKER_A_PORT  B http://127.0.0.1:$BROKER_B_PORT  C http://127.0.0.1:$BROKER_C_PORT"
     echo "  cluster   : 1@127.0.0.1:$NODE1_PORT 2@127.0.0.1:$NODE2_PORT 3@127.0.0.1:$NODE3_PORT"
     echo "  single    : 127.0.0.1:$SINGLE_PORT"
     echo "  split     : 127.0.0.1:$SPLIT_A_PORT 127.0.0.1:$SPLIT_B_PORT"
     echo "  logs      : $LOGDIR"
-    echo "  tear down : for f in $LOGDIR/pids/*.pid; do kill -9 \$(cat \$f); done; docker rm -f $CONTAINER"
+    echo "  tear down : for f in $LOGDIR/pids/*.pid; do kill -9 \$(cat \$f); done; rm -rf $LOGDIR/raft-*"
     exit $code
   fi
-  say "tearing down (only the pids recorded at spawn, only the container named $CONTAINER)"
+  say "tearing down (only the pids recorded at spawn, only this rig's data directories)"
   local name pid
   for name in "${PID_NAMES[@]}"; do
     pid="$(pid_of "$name")"
@@ -119,33 +128,15 @@ cleanup() {
     pid="$(pid_of "$name")"
     [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
   done
-  docker rm -f "$CONTAINER" >/dev/null 2>&1
+  rm -rf "$LOGDIR"/raft-broker-a "$LOGDIR"/raft-broker-b "$LOGDIR"/raft-broker-c
   echo "logs kept at $LOGDIR"
   exit $code
 }
 trap cleanup EXIT INT TERM
 
-command -v docker >/dev/null || { echo "docker not found" >&2; exit 2; }
 command -v go >/dev/null || { echo "go not found" >&2; exit 2; }
 command -v cargo >/dev/null || { echo "cargo not found" >&2; exit 2; }
 command -v nc >/dev/null || { echo "nc not found" >&2; exit 2; }
-
-# --------------------------------------------------------------------- postgres
-say "postgres on 127.0.0.1:$PG_PORT (container $CONTAINER, tmpfs, thrown away at exit)"
-docker rm -f "$CONTAINER" >/dev/null 2>&1
-docker run -d --name "$CONTAINER" \
-  -e POSTGRES_PASSWORD=postgres -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres \
-  -e PGDATA=/var/lib/postgresql/data/pgdata \
-  -p "$PG_PORT":5432 \
-  --tmpfs /var/lib/postgresql/data:rw,size=2g \
-  postgres:16 -c max_connections=400 >/dev/null || exit 1
-
-for _ in $(seq 1 60); do
-  docker exec "$CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break
-  sleep 1
-done
-docker exec "$CONTAINER" pg_isready -U postgres >/dev/null 2>&1 || {
-  echo "postgres never became ready" >&2; docker logs "$CONTAINER" | tail -20; exit 1; }
 
 # ----------------------------------------------------------------------- builds
 say "building the broker and the facade (debug, each from its own manifest)"
@@ -153,20 +144,23 @@ say "building the broker and the facade (debug, each from its own manifest)"
 ( cd "$REPO_ROOT/protocols/queen-kafka" && cargo build ) || exit 1
 
 # ---------------------------------------------------------------------- brokers
-# The HA recipe: ONE Postgres, two brokers with distinct QUEEN_SERVER_IDs, a
-# byte-identical QUEEN_SYNC_SECRET and each other as QUEEN_MESH_PEERS. The mesh
-# carries best-effort wake hints only -- everything durable is in the shared
-# database, which is the whole reason two facades in front of two brokers can
+# One raft cluster of three voters, the shape of helm_v2/broker: every node
+# starts with the SAME QUEEN_RAFT_PEERS (`id=raft_addr/http_addr`) on an empty
+# data directory, they elect a leader, and a follower forwards what it cannot
+# answer to the leader's HTTP address. Everything durable is in the replicated
+# log, which is the whole reason three facades in front of three brokers can
 # coordinate one group.
+PEERS="1=127.0.0.1:$RAFT_A_PORT/127.0.0.1:$BROKER_A_PORT"
+PEERS="$PEERS,2=127.0.0.1:$RAFT_B_PORT/127.0.0.1:$BROKER_B_PORT"
+PEERS="$PEERS,3=127.0.0.1:$RAFT_C_PORT/127.0.0.1:$BROKER_C_PORT"
+
 start_broker() {
-  local name=$1 port=$2 mesh=$3 peer=$4
-  mkdir -p "$LOGDIR/buffers-$name"
-  PG_HOST=127.0.0.1 PG_PORT="$PG_PORT" PG_USER=postgres PG_PASSWORD=postgres \
-  PG_DATABASE=postgres PORT="$port" QUEEN_BIND_ADDR=127.0.0.1 \
-  QUEEN_APPLY_SCHEMA=true DB_POOL_SIZE=32 LOG_LEVEL=info \
-  QUEEN_SERVER_ID="$name" QUEEN_MESH_PORT="$mesh" QUEEN_MESH_PEERS="127.0.0.1:$peer" \
-  QUEEN_SYNC_SECRET="$MESH_SECRET" \
-  FILE_BUFFER_DIR="$LOGDIR/buffers-$name" \
+  local name=$1 id=$2 port=$3 raft=$4
+  mkdir -p "$LOGDIR/raft-$name"
+  QUEEN_RAFT_DIR="$LOGDIR/raft-$name" QUEEN_RAFT_DISK_HIGH_PCT="$DISK_HIGH_PCT" \
+  QUEEN_RAFT_REPLICATOR=openraft QUEEN_RAFT_NODE_ID="$id" QUEEN_RAFT_PEERS="$PEERS" \
+  QUEEN_RAFT_LISTEN="127.0.0.1:$raft" QUEEN_RAFT_TOKEN="$RAFT_TOKEN" \
+  QUEEN_SERVER_ID="$name" PORT="$port" QUEEN_BIND_ADDR=127.0.0.1 LOG_LEVEL=info \
     "$REPO_ROOT/server/target/debug/queen" > "$LOGDIR/$name.log" 2>&1 &
   echo $! > "$LOGDIR/pids/$name.pid"
 }
@@ -182,16 +176,17 @@ wait_http() {
   return 1
 }
 
-say "broker A on 127.0.0.1:$BROKER_A_PORT and broker B on 127.0.0.1:$BROKER_B_PORT (one Postgres, meshed)"
-# Broker A alone until it is healthy: both run QUEEN_APPLY_SCHEMA, and two
-# schema applies racing on a cold database is a recorded boot deadlock
-# (queen-schema-apply-per-statement-fix) rather than anything this rig is for.
-start_broker broker-a "$BROKER_A_PORT" "$MESH_A_PORT" "$MESH_B_PORT"
-wait_http "http://127.0.0.1:$BROKER_A_PORT/health" "$LOGDIR/pids/broker-a.pid" "broker A" || {
-  tail -30 "$LOGDIR/broker-a.log" >&2; exit 1; }
-start_broker broker-b "$BROKER_B_PORT" "$MESH_B_PORT" "$MESH_A_PORT"
-wait_http "http://127.0.0.1:$BROKER_B_PORT/health" "$LOGDIR/pids/broker-b.pid" "broker B" || {
-  tail -30 "$LOGDIR/broker-b.log" >&2; exit 1; }
+say "one raft cluster: broker A on 127.0.0.1:$BROKER_A_PORT, B on 127.0.0.1:$BROKER_B_PORT, C on 127.0.0.1:$BROKER_C_PORT"
+# All three before waiting on any: a broker answers /health 200 only once a
+# leader is known, and no leader is elected without a majority up.
+start_broker broker-a 1 "$BROKER_A_PORT" "$RAFT_A_PORT"
+start_broker broker-b 2 "$BROKER_B_PORT" "$RAFT_B_PORT"
+start_broker broker-c 3 "$BROKER_C_PORT" "$RAFT_C_PORT"
+for b in a b c; do
+  port_var="BROKER_$(printf '%s' "$b" | tr a-z A-Z)_PORT"
+  wait_http "http://127.0.0.1:${!port_var}/health" "$LOGDIR/pids/broker-$b.pid" "broker $b" || {
+    tail -30 "$LOGDIR/broker-$b.log" >&2; exit 1; }
+done
 
 # ---------------------------------------------------------------------- facades
 # One start script per facade, written out rather than inlined, for the same
@@ -236,7 +231,7 @@ SCRIPT
 
 write_facade_script node-1 "$NODE1_PORT" "$BROKER_A_PORT" 1
 write_facade_script node-2 "$NODE2_PORT" "$BROKER_B_PORT" 2
-write_facade_script node-3 "$NODE3_PORT" "$BROKER_A_PORT" 3
+write_facade_script node-3 "$NODE3_PORT" "$BROKER_C_PORT" 3
 write_facade_script single "$SINGLE_PORT" "$BROKER_A_PORT" ""
 write_facade_script split-a "$SPLIT_A_PORT" "$BROKER_A_PORT" ""
 write_facade_script split-b "$SPLIT_B_PORT" "$BROKER_A_PORT" ""
@@ -269,8 +264,8 @@ exec "$LOGDIR/start-node-\$1.sh"
 SCRIPT
 chmod +x "$LOGDIR/start-node.sh"
 
-# The DEPLOY half of the same pair: SIGTERM, which is what `kubectl delete pod`,
-# `systemctl stop` and the broker's own facade supervisor send. A facade that is
+# The DEPLOY half of the same pair: SIGTERM, which is what `kubectl delete pod`
+# and `systemctl stop` send. A facade that is
 # asked to stop hands its registry row back before it exits, so this is the
 # command the rolling-restart scenario drives -- kill-node.sh is a crash and
 # proves the other half. Same discipline: the pid comes from the file written at
@@ -292,7 +287,7 @@ exit 1
 SCRIPT
 chmod +x "$LOGDIR/stop-node.sh"
 
-say "three clustered facades: 1@127.0.0.1:$NODE1_PORT (broker A), 2@127.0.0.1:$NODE2_PORT (broker B), 3@127.0.0.1:$NODE3_PORT (broker A)"
+say "three clustered facades: 1@127.0.0.1:$NODE1_PORT (broker A), 2@127.0.0.1:$NODE2_PORT (broker B), 3@127.0.0.1:$NODE3_PORT (broker C)"
 for name in node-1 node-2 node-3; do
   "$LOGDIR/start-$name.sh" || { echo "$name did not start:" >&2; tail -30 "$LOGDIR/$name.log" >&2; exit 1; }
 done
@@ -323,6 +318,7 @@ QUEEN_KAFKA_START_CMD="$LOGDIR/start-node.sh" \
 QUEEN_KAFKA_LOGDIR="$LOGDIR" \
 QUEEN_URL="http://127.0.0.1:$BROKER_A_PORT" \
 QUEEN_URL_B="http://127.0.0.1:$BROKER_B_PORT" \
+QUEEN_URL_C="http://127.0.0.1:$BROKER_C_PORT" \
   "$SCRIPT_DIR/run.sh" "${GO_TEST_ARGS[@]+"${GO_TEST_ARGS[@]}"}"
 RESULT=$?
 

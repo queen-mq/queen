@@ -1,7 +1,7 @@
 //! Usage metering. OWNER: Agent D.
 //! Contract (M1–M6, PLAN §4): meter post-response from per-item statuses —
-//! never charge `error`, never double-charge `duplicate`, `buffered` counts
-//! as accepted; exempt 5xx and scope-403s (all Agent A / gateway.rs's job —
+//! never charge `error`, never double-charge `duplicate`; exempt 5xx and
+//! scope-403s (all Agent A / gateway.rs's job —
 //! `record()` here just aggregates whatever Sample it's handed).
 //!
 //! In-memory per-(cluster, op, minute) aggregates, 16-way sharded by
@@ -9,20 +9,15 @@
 //! (spool.rs) when they cannot be, drained back on the next startup.
 //! `record()` deliberately does not log at info/debug on the hot per-request
 //! path (rates/sizes belong in aggregated blocks, not per-message lines — see
-//! obs.rs conventions). Every statement lives in `store::usage`, which answers
-//! from either backend:
-//!
-//! - **Postgres (the standalone proxy):** closed minutes only — the current
-//!   minute keeps accumulating — ADDED to `queen_proxy.usage_minutes` by an
-//!   UPSERT and forgotten; a failed flush goes to the spool at once.
-//! - **The broker's KV (the single binary, `spawn_flush_store`):** each node
-//!   OVERWRITES its own row per (cluster, minute, op) with its cumulative
-//!   value — the open minute included, so the console and the quota see
-//!   current traffic — which makes a retried write idempotent and leaves no
-//!   row two nodes read-modify-write (store/usage.rs has the layout). A failed
-//!   flush stays in memory and is retried on the next tick (a leader election
-//!   is not worth a trip to the disk); only a long outage
-//!   (`KV_BACKLOG_MAX` closed keys) or the shutdown drain spools.
+//! obs.rs conventions). Every read and write lives in `store::usage`, over
+//! the broker's KV (`spawn_flush`): each node OVERWRITES its own row per
+//! (cluster, minute, op) with its cumulative value — the open minute
+//! included, so the console and the quota see current traffic — which makes a
+//! retried write idempotent and leaves no row two nodes read-modify-write
+//! (store/usage.rs has the layout). A failed flush stays in memory and is
+//! retried on the next tick (a leader election is not worth a trip to the
+//! disk); only a long outage (`KV_BACKLOG_MAX` closed keys) or the shutdown
+//! drain spools.
 //!
 //! Downstream of the minute aggregates, this module also drives the billing
 //! chain (`spawn_rollup`): closed days are folded into usage_days, and the
@@ -35,7 +30,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use deadpool_postgres::Pool;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -46,14 +40,14 @@ use crate::store::{usage, KvBackend, Store};
 
 const N_SHARDS: usize = 16;
 
-/// Ceiling on the shutdown drain's DB write. The drain runs on the way out,
-/// after the listener is gone: it must not hold the process open on a pxdb
+/// Ceiling on the shutdown drain's KV write. The drain runs on the way out,
+/// after the listener is gone: it must not hold the process open on a KV
 /// that has stopped answering, and it already has a fallback that always
 /// terminates (the disk spool).
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Rollup + monthly-quota cadence. HOURLY, not daily, for two reasons:
-/// `rollup_usage_days()` is idempotent and cheap (it recomputes each closed
+/// `usage::rollup_days` is idempotent and cheap (it recomputes each closed
 /// day from usage_minutes, so extra runs cost an aggregate pass and change
 /// nothing), and the monthly quota check rides this same tick — which makes
 /// the interval the worst-case delay before a cluster that has blown through
@@ -164,9 +158,8 @@ struct Entry {
 
 /// A single closed-minute rollup, ready to flush or spool. Also the on-disk
 /// spool JSONL row shape — field names match the task's `{cluster_id,minute,
-/// op,reqs,msgs,bytes_in,bytes_out}` spec exactly, independent of the DB
-/// column names (usage_minutes.op_class, not `op`). A spooled row is always
-/// usage to ADD, on either backend.
+/// op,reqs,msgs,bytes_in,bytes_out}` spec exactly, independent of the stored
+/// field names (`op_class`, not `op`). A spooled row is always usage to ADD.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct UsageRow {
     pub cluster_id: Uuid,
@@ -178,18 +171,11 @@ pub struct UsageRow {
     pub bytes_out: u64,
 }
 
-/// The additive Postgres UPSERT (store/usage.rs has the SQL).
-async fn upsert_rows(pool: &Pool, rows: &[UsageRow]) -> Result<(), String> {
-    usage::pg_add_minutes(pool, rows).await
-}
-
-/// Where the meter persists. Set once, by `spawn_flush` / `spawn_flush_store`.
+/// Where the meter persists. Set once, by `spawn_flush`.
 #[derive(Clone)]
 enum Sink {
-    /// Dev-static mode: usage is discarded.
+    /// No store (tests): usage is discarded.
     None,
-    /// The standalone proxy's Postgres.
-    Pg(Pool),
     /// The broker's KV: this node's rows, under `node`.
     Kv { kv: Arc<dyn KvBackend>, node: String, keep_days: u64 },
 }
@@ -201,8 +187,8 @@ pub struct Meter {
     /// Where `drain()` writes. The periodic path gets it as a parameter
     /// (`spawn_flush`), but `drain()` is called from the shutdown path with
     /// nothing but `&self`, so it is remembered here on the way past. Never
-    /// set == dev-static mode: drain discards, exactly like `flush_once` does
-    /// with `db: None`.
+    /// set, or `Sink::None`: drain discards, like the periodic path does
+    /// without a store.
     sink: OnceLock<Sink>,
     /// One KV flush at a time (the periodic loop, the shutdown drain, the
     /// spool replay): each reads and overwrites this node's rows, and two
@@ -298,45 +284,26 @@ impl Meter {
     /// restart silently drops up to one minute of usage per cluster per op.
     ///
     /// Bounded by DRAIN_TIMEOUT and falling back to the disk spool on any
-    /// failure, so it always terminates: a shutdown that hangs on pxdb would
+    /// failure, so it always terminates: a shutdown that hangs on the KV would
     /// turn a deploy into an outage. The spool fallback carries the same
-    /// at-least-once exposure as the periodic path — a commit whose ack is
-    /// lost is replayed by `recover()` and re-added by the UPSERT — which is
-    /// the deliberate trade: usage we can over-count once is recoverable,
-    /// usage we drop is gone.
+    /// at-least-once exposure as the periodic path — a write whose ack is
+    /// lost is replayed on the next start and added again — which is the
+    /// deliberate trade: usage we can over-count once is recoverable, usage
+    /// we drop is gone.
     pub async fn drain(&self) {
         if let Some(Sink::Kv { kv, node, keep_days }) = self.sink.get() {
             return self.drain_kv(kv.as_ref(), node, *keep_days).await;
         }
+        // No store: nothing would ever replay a spool, so discard.
         let rows = self.drain_all();
-        if rows.is_empty() {
-            return;
-        }
-        let Some(Sink::Pg(pool)) = self.sink.get() else {
-            tracing::debug!(target: "meter", rows = rows.len(), "no pxdb (dev mode); discarding usage rows on drain");
-            return;
-        };
-        match tokio::time::timeout(DRAIN_TIMEOUT, upsert_rows(pool, &rows)).await {
-            Ok(Ok(())) => {
-                tracing::info!(target: "meter", rows = rows.len(), "usage_minutes drained on shutdown");
-            }
-            Ok(Err(e)) => {
-                tracing::warn!(target: "meter", rows = rows.len(), error = %e, "shutdown drain failed; spooling to disk");
-                self.spool.write(&rows);
-            }
-            Err(_) => {
-                tracing::warn!(
-                    target: "meter", rows = rows.len(), timeout_ms = DRAIN_TIMEOUT.as_millis() as u64,
-                    "shutdown drain timed out; spooling to disk"
-                );
-                self.spool.write(&rows);
-            }
+        if !rows.is_empty() {
+            tracing::debug!(target: "meter", rows = rows.len(), "no store; discarding usage rows on drain");
         }
     }
 
     /// KV shutdown: one last flush of everything (every minute counts as
-    /// closed now), bounded like the Postgres drain; whatever it could not
-    /// write goes to the spool as usage to add.
+    /// closed now), bounded by DRAIN_TIMEOUT; whatever it could not write
+    /// goes to the spool as usage to add.
     async fn drain_kv(&self, kv: &dyn KvBackend, node: &str, keep_days: u64) {
         let res = tokio::time::timeout(DRAIN_TIMEOUT, self.flush_kv(kv, node, keep_days, u64::MAX)).await;
         let left = self.take_pending(None);
@@ -360,63 +327,29 @@ impl Meter {
         }
     }
 
-    async fn flush_once(&self, db: Option<&Pool>) {
-        let rows = self.drain_closed(now_minute_epoch());
-        if rows.is_empty() {
-            return;
-        }
-        let Some(pool) = db else {
-            tracing::debug!(target: "meter", rows = rows.len(), "no pxdb (dev mode); discarding closed-minute usage rows");
-            return;
-        };
-        match upsert_rows(pool, &rows).await {
-            Ok(()) => {
-                tracing::debug!(target: "meter", rows = rows.len(), "usage_minutes flush ok");
-            }
-            Err(e) => {
-                tracing::warn!(target: "meter", rows = rows.len(), error = %e, "usage_minutes flush failed; spooling to disk");
-                self.spool.write(&rows);
-            }
-        }
-    }
-
-    /// Startup spool recovery (once, before the periodic loop begins) then a
-    /// flush every `cfg.meter_flush_ms`. `db: None` (dev-static mode) skips
-    /// recovery and just drains+discards on every tick.
-    pub fn spawn_flush(self: &Arc<Self>, db: Option<deadpool_postgres::Pool>) {
-        // Remember the pool for `drain()`, which takes no parameters.
-        let _ = self.sink.set(match &db {
-            Some(pool) => Sink::Pg(pool.clone()),
-            None => Sink::None,
-        });
-        let this = Arc::clone(self);
-        tokio::spawn(async move {
-            if let Some(pool) = db.clone() {
-                this.spool
-                    .recover(move |rows| {
-                        let pool = pool.clone();
-                        async move { upsert_rows(&pool, &rows).await }
-                    })
-                    .await;
-            }
-            let mut tick = tokio::time::interval(Duration::from_millis(this.flush_ms.max(100)));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tick.tick().await;
-                this.flush_once(db.as_ref()).await;
-            }
-        });
-    }
-
-    /// `spawn_flush` for any [`Store`]: Postgres and none behave exactly as
-    /// `spawn_flush`; the KV (the single binary) writes this node's rows
-    /// under `node` (a label unique per process and stable across its
-    /// restarts — see `usage::node_label`). The spool is replayed first, as
-    /// usage to add.
-    pub fn spawn_flush_store(self: &Arc<Self>, store: &Store, node: &str) {
+    /// Startup spool recovery (once, before the periodic loop begins), then
+    /// a flush every `cfg.meter_flush_ms`: this node's rows, written under
+    /// `node` (a label unique per process and stable across its restarts —
+    /// see `usage::node_label`). The spool is replayed as usage to add.
+    /// Without a store (tests) closed minutes are discarded on every tick.
+    pub fn spawn_flush(self: &Arc<Self>, store: &Store, node: &str) {
         let kv = match store {
-            Store::Pg(pool) => return self.spawn_flush(Some(pool.clone())),
-            Store::None => return self.spawn_flush(None),
+            Store::None => {
+                let _ = self.sink.set(Sink::None);
+                let this = Arc::clone(self);
+                tokio::spawn(async move {
+                    let mut tick = tokio::time::interval(Duration::from_millis(this.flush_ms.max(100)));
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    loop {
+                        tick.tick().await;
+                        let rows = this.drain_closed(now_minute_epoch());
+                        if !rows.is_empty() {
+                            tracing::debug!(target: "meter", rows = rows.len(), "no store; discarding closed-minute usage rows");
+                        }
+                    }
+                });
+                return;
+            }
             Store::Kv(kv) => kv.clone(),
         };
         let node = usage::node_label(node);
@@ -649,13 +582,11 @@ struct QuotaState {
 /// Periodic billing driver: fold closed days into `usage_days`, then evaluate
 /// `plans.monthly_msgs_quota` (PLAN §6.7). Detached, never panics, tolerates
 /// the store being down by skipping the tick — a failed read is not evidence
-/// that a block may be released. Runs on `st.store`: the standalone proxy's
-/// Postgres, or (single binary) the broker's KV on every node — the rollup
-/// writes the same rows whichever node runs it, and the push blocks it sets
-/// are per process.
+/// that a block may be released. Runs on `st.store`, the broker's KV, on
+/// every node — the rollup writes the same rows whichever node runs it, and
+/// the push blocks it sets are per process.
 pub fn spawn_rollup(st: St) {
     if !st.store.is_some() {
-        tracing::info!(target: "meter", "usage rollup: no pxdb configured, skipping (dev-static mode)");
         return;
     }
     tokio::spawn(async move {
@@ -693,28 +624,10 @@ async fn rollup_once(store: &Store, meter: &Meter) {
         Err(e) => {
             tracing::warn!(target: "meter", error = %e, "usage_days rollup failed; retrying next tick");
             meter.restore_reroll(extra);
-            // Pruning below only deletes minutes whose day is already rolled up,
-            // so a failed rollup makes it a no-op rather than a data loss — but
-            // there is nothing to gain from the round trip either.
-            return;
         }
     }
-
-    // Bound usage_minutes growth. Ordered strictly after the rollup: the prune
-    // is gated on the day existing in usage_days, so running it first would
-    // simply skip the days this pass just folded in. (KV: the rows carry a
-    // TTL instead, and this is a no-op.)
-    let keep_days = keep_days_raw as i32;
-    match usage::prune_minutes(store, keep_days).await {
-        Ok(pruned) => {
-            if pruned > 0 {
-                tracing::info!(target: "meter", pruned, keep_days, "usage_minutes pruned");
-            }
-        }
-        Err(e) => {
-            tracing::warn!(target: "meter", error = %e, "usage_minutes prune failed; retrying next tick");
-        }
-    }
+    // usage_minutes needs no prune: every minute row carries its TTL
+    // (`usage::minute_ttl_secs`).
 }
 
 async fn enforce_monthly_quota(
@@ -728,7 +641,7 @@ async fn enforce_monthly_quota(
         Err(e) => {
             // Leave every existing decision alone: we have no evidence either
             // way, and releasing a block on a failed read would hand a tenant
-            // an unmetered hour every time pxdb hiccups.
+            // an unmetered hour every time the store hiccups.
             tracing::warn!(target: "meter", error = %e, "monthly quota: query failed, leaving decisions unchanged");
             return;
         }
@@ -827,12 +740,8 @@ mod tests {
     /// meter_flush_ms and spool_dir; the rest are inert placeholders.
     fn cfg_with_dir(dir: &std::path::Path) -> crate::config::Config {
         crate::config::Config {
-            port: 0,
-            bind_addr: "0.0.0.0".to_string(),
-            pxdb: None,
             enforce: false,
             dev_insecure: true,
-            dev_static: None,
             default_cluster: None,
             shared_hosts: Vec::new(),
             send_tenant_header: true,
@@ -863,78 +772,6 @@ mod tests {
             meter_flush_ms: 1000,
             spool_dir: dir.to_str().unwrap().to_string(),
         }
-    }
-
-    /// Opt-in smoke test against a real Postgres: verifies the actual SQL
-    /// (`$1::text::uuid` cast, the ON CONFLICT clause, column names) against
-    /// a live server rather than just the in-memory aggregation logic. Not
-    /// part of the default `cargo test` run — needs a live PG on :5465 (this
-    /// crate's reserved dev pxdb port, CONTRACTS.md point 4) and creates its
-    /// own throwaway usage_minutes table (doesn't depend on Agent B's
-    /// migration having landed yet). Run explicitly with:
-    ///   cargo test --lib meter::tests::live_upsert_rows_against_real_postgres -- --ignored
-    #[tokio::test]
-    #[ignore = "requires a live postgres on :5465 — see doc comment"]
-    async fn live_upsert_rows_against_real_postgres() {
-        let pxcfg = crate::config::PxdbConfig {
-            host: "127.0.0.1".to_string(),
-            port: 5465,
-            user: "postgres".to_string(),
-            password: "postgres".to_string(),
-            dbname: "queen_proxy".to_string(),
-            use_ssl: false,
-            ssl_reject_unauthorized: false,
-            ssl_root_cert: None,
-            pool_size: 4,
-            timeout_ms: 5_000,
-        };
-        let pool = crate::db::create_pool(&pxcfg).await.expect("connect to dev pxdb on :5465");
-        {
-            let client = pool.get().await.unwrap();
-            client
-                .batch_execute(
-                    "CREATE SCHEMA IF NOT EXISTS queen_proxy;
-                     DROP TABLE IF EXISTS queen_proxy.usage_minutes;
-                     CREATE TABLE queen_proxy.usage_minutes (
-                        cluster_id uuid NOT NULL,
-                        minute timestamptz NOT NULL,
-                        op_class text NOT NULL,
-                        reqs bigint NOT NULL DEFAULT 0,
-                        msgs bigint NOT NULL DEFAULT 0,
-                        bytes_in bigint NOT NULL DEFAULT 0,
-                        bytes_out bigint NOT NULL DEFAULT 0,
-                        PRIMARY KEY (cluster_id, minute, op_class)
-                     )",
-                )
-                .await
-                .expect("create throwaway test schema");
-        }
-
-        let cid = Uuid::new_v4();
-        let row1 =
-            UsageRow { cluster_id: cid, minute: 29_000_000, op: "push".to_string(), reqs: 3, msgs: 10, bytes_in: 500, bytes_out: 0 };
-        upsert_rows(&pool, &[row1.clone()]).await.expect("first upsert");
-        // A second flush for the *same* (cluster,minute,op) must add, not
-        // overwrite — this is the whole point of the ON CONFLICT clause.
-        let row2 = UsageRow { reqs: 2, msgs: 4, bytes_in: 100, bytes_out: 50, ..row1.clone() };
-        upsert_rows(&pool, &[row2]).await.expect("second upsert (additive)");
-
-        let client = pool.get().await.unwrap();
-        let r = client
-            .query_one(
-                "SELECT reqs, msgs, bytes_in, bytes_out, extract(epoch from minute)::bigint / 60
-                 FROM queen_proxy.usage_minutes WHERE cluster_id = $1::text::uuid AND op_class = $2",
-                &[&cid.to_string(), &"push"],
-            )
-            .await
-            .expect("row should exist after upsert");
-        let reqs: i64 = r.get(0);
-        let msgs: i64 = r.get(1);
-        let bytes_in: i64 = r.get(2);
-        let bytes_out: i64 = r.get(3);
-        let minute_epoch: i64 = r.get(4);
-        assert_eq!((reqs, msgs, bytes_in, bytes_out), (5, 14, 600, 50), "ON CONFLICT DO UPDATE must add, not replace");
-        assert_eq!(minute_epoch as u64, row1.minute, "to_timestamp($2::bigint) round-trips the minute epoch");
     }
 
     #[test]
@@ -975,19 +812,18 @@ mod tests {
     }
 
     #[test]
-    fn flush_once_without_db_discards_closed_rows() {
+    fn drain_closed_is_destructive() {
         let dir = tempdir();
         let meter = Meter::new(&cfg_with_dir(dir.path()));
         let cid = Uuid::new_v4();
         meter.record(Sample { cluster_id: cid, op: OpClass::Txn, reqs: 1, msgs: 1, bytes_in: 1, bytes_out: 1 });
         // Force the entry into a "closed" minute by draining with a future
-        // reference point directly (flush_once uses real now, so we exercise
-        // drain_closed the same way flush_once would via a future minute).
+        // reference point directly (the no-store tick uses real now, so we
+        // exercise drain_closed the way it would via a future minute).
         let rows = meter.drain_closed(now_minute_epoch() + 1);
         assert_eq!(rows.len(), 1);
-        // With db=None, flush_once's own drain would find nothing left to
-        // discard a second time (already drained above) — this just confirms
-        // drain_closed is destructive (entries don't reappear).
+        // A second pass finds nothing left to discard: drain_closed is
+        // destructive (entries don't reappear).
         assert!(meter.drain_closed(now_minute_epoch() + 1).is_empty());
     }
 
@@ -1018,7 +854,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drain_without_pxdb_empties_the_accumulators_and_spools_nothing() {
+    async fn drain_without_a_store_empties_the_accumulators_and_spools_nothing() {
         let dir = tempdir();
         let meter = Meter::new(&cfg_with_dir(dir.path()));
         meter.record(Sample {
@@ -1029,12 +865,12 @@ mod tests {
             bytes_in: 1,
             bytes_out: 1,
         });
-        // db never set (dev-static): discard, exactly like flush_once, rather
-        // than spooling rows no recovery pass would ever have a DB to drain to.
+        // No store: discard, like the no-store tick, rather than spooling rows
+        // no recovery pass would ever have a store to drain to.
         meter.drain().await;
         assert!(meter.drain_all().is_empty(), "drain must consume the aggregates either way");
         let spooled = std::fs::read_dir(dir.path()).unwrap().count();
-        assert_eq!(spooled, 0, "no pxdb means nothing to spool for");
+        assert_eq!(spooled, 0, "no store means nothing to spool for");
     }
 
     #[tokio::test]

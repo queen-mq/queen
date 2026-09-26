@@ -43,7 +43,7 @@
 #  ---------------------------------------------------------------------------
 #  Usage:  test/runners/http/http-wire-unit.sh            # picks a free port
 #          PLAN_PORT=18632 test/runners/http/http-wire-unit.sh
-#  Needs:  bash, curl, jq, python3. No broker and no Postgres.
+#  Needs:  bash, curl, jq, python3. No broker.
 # =============================================================================
 set -uo pipefail
 

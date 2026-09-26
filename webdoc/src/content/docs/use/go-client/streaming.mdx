@@ -12,9 +12,9 @@ verifiedBy:
 The four tutorials before this one move messages. This one aggregates them: a streaming query
 reads a queue, keeps window state per partition, and pushes each closed window to an output queue.
 
-The state, the output and the acknowledgement of the inputs commit in the same PostgreSQL
-transaction, which is exactly-once aggregation with no changelog topic and no state store to size
-and operate: the state and the queue are already in the same database.
+The state, the output and the acknowledgement of the inputs commit in one entry of the broker's
+replicated log, which is exactly-once aggregation with no changelog topic and no state store to
+size and operate: the state and the queue already live in the same broker.
 
 The query is built from the same queue builders, adapted with `AsStreamSource()`, and `Run`
 returns as soon as it is registered, with the pop loop in its own goroutine. The program owns the

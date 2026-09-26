@@ -2,10 +2,11 @@
   <div class="view-container">
 
     <!-- Tenant scope, from identity and never from the fetch. Two key counts
-         sit beside it and they COUNT DIFFERENT POPULATIONS: `≈ N live keys` is
-         the sweeper's five-minute snapshot of the live rows of every namespace,
-         `N in <ns>` an exact count of every row of one namespace, expired
-         included. Both titles say so; the script header has the why. -->
+         sit beside it and they COUNT DIFFERENT SCOPES: `N keys` is every row
+         of every namespace, counted when the queue listing was read, `N in
+         <ns>` every row of one namespace, counted when the picker was filled.
+         Both include expired rows awaiting sweep. Both titles say so; the
+         script header has the why. -->
     <div class="scope-strip">
       <span class="chip chip-mute">tenant scope</span>
       <span class="scope-text">
@@ -15,10 +16,10 @@
       </span>
       <span class="scope-fill"></span>
       <span v-if="usageMeasured" class="chip chip-mute" :title="TENANT_TOTAL_TITLE">
-        ≈ {{ formatNumber(kvRows) }} live keys
+        {{ formatNumber(kvRows) }} keys
       </span>
       <span v-if="usageMeasured && kvBytes !== null" class="scope-meta" :title="TENANT_BYTES_TITLE">
-        ≈ {{ formatBytes(kvBytes) }}
+        {{ formatBytes(kvBytes) }}
       </span>
       <span v-if="exactCount !== null" class="scope-meta" :title="EXACT_COUNT_TITLE">
         {{ formatNumber(exactCount) }} in {{ namespace }}
@@ -368,8 +369,8 @@
 // and for the same reason this page keeps the prefix out of its own URL while
 // the namespace, which is a declared name and not data, lives in `?ns=`.
 //
-// NO PRIVATE TICKER, AND NO AUTO-REFRESH. Every call here is a Postgres read
-// on a tenant-scoped, metered, rate-limited route, and a keyset page that
+// NO PRIVATE TICKER, AND NO AUTO-REFRESH. Every call here is a read of the
+// replicated store on a tenant-scoped, metered, rate-limited route, and a keyset page that
 // re-fetched under the reader would move rows while they are being read. The
 // page refreshes when the operator asks (the shell's Refresh button) and on a
 // cluster switch — and a stable verdict short-circuits even that: a 404 is
@@ -377,15 +378,13 @@
 // page of the dashboard re-asks it, while a 403 or a 503 stops THIS page's
 // calls until it is remounted or "Check again" is pressed.
 //
-// THREE KEY COUNTS, THREE PROVENANCES, AND TWO DIFFERENT POPULATIONS. The page
-// says which is which, because they can disagree and both still be right:
-//   · `≈ N live keys` the tenant's footprint across every namespace, from the
-//                     queue listing's root. queen.kv_usage_step_v1 counts LIVE
-//                     rows only, every five minutes, and above 200k rows it is
-//                     a scaled shard sample — hence `≈`, twice over
-//   · `N in <ns>`     EXACT, one namespace, a count(*) of EVERY row taken when
-//                     the picker was filled — expired-awaiting-sweep included,
-//                     so it can exceed the figure beside it
+// THREE KEY COUNTS, THREE PROVENANCES. The page says which is which, because
+// they are taken at different moments and can disagree while both are right:
+//   · `N keys`        the tenant's footprint across every namespace, from the
+//                     queue listing's root: every stored row, expired ones
+//                     awaiting sweep included, counted when the listing was read
+//   · `N in <ns>`     one namespace, every row, expired-awaiting-sweep
+//                     included, counted when the picker was filled
 //   · the page        exactly the rows on screen; the keyset walk has no
 //                     total, by construction
 //
@@ -423,34 +422,29 @@ const { epoch, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdenti
 const { notifyError } = useToast()
 
 /** How long the prefix box waits for the typing to stop. Every applied prefix
- *  is a metered Postgres read, so the box does not fire per keystroke — and
+ *  is a metered read, so the box does not fire per keystroke — and
  *  Enter skips the wait for an operator who already knows what they want. */
 const PREFIX_DEBOUNCE_MS = 300
 
-// The tenant figure and the namespace figure do NOT measure the same
-// population, and saying so is the whole job of these two titles.
-// queen.kv_usage_step_v1 (026_kv_sweeper.sql) counts LIVE rows only, on a
-// five-minute cadence, and degrades to a scaled shard sample above 200k rows;
-// queen.kv_namespaces_v1 counts every row of the namespace, expired ones
-// included, exactly. So the exact number can exceed the approximate one, and an
-// operator who is not told why would read that as a bug in one of them.
+// The tenant figure and the namespace figure are both exact counts of every
+// stored row, expired ones included, but they are taken by two different reads
+// at two different moments, and saying so is the job of these titles.
 const TENANT_TOTAL_TITLE =
-  'Every LIVE key this tenant holds on the cell, across all namespaces, from the sweeper\'s cached ' +
-  'measurement on the queue listing: refreshed about every five minutes, and above 200k rows it is a ' +
-  'scaled sample. Expired rows awaiting sweep are NOT in it, so a namespace count below can be larger'
+  'Every KV row this tenant stores on the cell, across all namespaces, counted when the queue listing ' +
+  'was read. Expired rows awaiting sweep are included, as they are in the namespace count'
 const TENANT_BYTES_TITLE =
-  'What the live keys occupy in Postgres — the stored size of each value, after compression and TOAST, ' +
-  'from the same five-minute sweeper snapshot. Not comparable with a page\'s byte figure, which measures ' +
-  'the JSON text the listing serialized'
+  'The key and value bytes of every KV row this tenant stores on the cell, expired rows included, ' +
+  'counted when the queue listing was read. Not comparable with a page\'s byte figure, which counts ' +
+  'values only'
 const EXACT_COUNT_TITLE =
   'Exact count for this namespace, taken when the picker was filled. It counts every row, expired ones ' +
   'awaiting sweep included — an expired key is not a live key, but it is still an occupied one'
 const SIZE_TITLE =
-  'The value\'s JSON size, measured in this browser. Postgres counts the same value a byte or two ' +
-  'larger — jsonb\'s text form spaces its separators — and the page total below is Postgres\'s count'
+  'The value\'s JSON size, measured in this browser from the value the broker returned. The page ' +
+  'total below is the broker\'s own count of the stored bytes'
 const PAGE_BYTES_TITLE =
-  'What this page cost to serialize, as Postgres measured it: octet_length(value::text) summed over ' +
-  'the rows. A page stops at 4 MiB even when the row limit is not reached'
+  'The stored size of the values on this page, as the broker counted it: the bytes of each value\'s ' +
+  'JSON text, summed over the rows. A page stops at 4 MiB of values even when the row limit is not reached'
 const VERSION_TITLE =
   'Bumped on every write to this key. It is what a compare-and-set writes against, so a version that ' +
   'moved between two looks means somebody else wrote in between'
@@ -459,8 +453,8 @@ const READ_ONLY_TITLE =
   'by hand needs a version check and an audit trail this page does not have (§2.5 D6)'
 
 // ---------------------------------------------------------------------------
-// The tenant's footprint, from the queue listing's root (a sweeper snapshot,
-// shared with every other page through the TTL-cached store).
+// The tenant's footprint, from the queue listing's root (shared with every
+// other page through the TTL-cached store).
 // ---------------------------------------------------------------------------
 const queuesStore = useQueuesStore()
 const { kvRows, kvBytes, fetchQueues } = queuesStore
@@ -542,10 +536,10 @@ const exactCount = computed(() => {
   const hit = options.value.find(o => o.namespace === namespace.value)
   return hit ? hit.keys : null
 })
-// A cell that has not run the sweeper's usage phase yet answers `kvRows: 0`
-// rather than omitting the field, so the strip would otherwise print
-// `≈ 0 live keys` beside a selector reporting thousands. The selector is the
-// witness; the rule lives in useKvView.js with the why.
+// The queue listing can be older than the namespace listing (it is shared
+// with every other page), so the strip could otherwise print `0 keys` beside a
+// selector reporting thousands. The selector is the witness; the rule lives in
+// useKvView.js with the why.
 const usageMeasured = computed(() => sweeperUsageIsMeasured(kvRows.value, options.value))
 
 const rows = computed(() => {

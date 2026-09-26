@@ -1,7 +1,7 @@
-//! Key/value state, alongside the queue and in the same database.
+//! Key/value state, alongside the queue and in the same broker.
 //!
 //! The point of this surface is not to be a cache. It is to let a consumer
-//! write state **in the same PostgreSQL transaction as its ack**, which is what
+//! write state **in the same transaction as its ack**, which is what
 //! [`crate::transaction::TransactionBuilder::kv`] does — everything here is the
 //! standalone convenience for the times that is not needed.
 //!
@@ -134,7 +134,7 @@ impl Kv {
     ///
     /// Only available here, in the POST batch: never as a query string (a
     /// prefix in a URL is recorded by every access log between the client and
-    /// the database) and never inside a transaction (its cost is not bounded by
+    /// the broker) and never inside a transaction (its cost is not bounded by
     /// the caller, and a transaction holds the outermost lock space).
     pub fn get_prefix(&self, ns: &str, prefix: &str) -> PrefixQuery {
         PrefixQuery {
@@ -160,9 +160,9 @@ impl Kv {
     /// Write a key **only if it is not there**.
     ///
     /// This is the idempotency marker, and `applied()` answers "did I win?".
-    /// Exactly one concurrent caller wins: the conflict arm takes the row lock
-    /// before it evaluates the condition, so the second caller re-reads against
-    /// the winner's row rather than racing it. An expired-but-unpruned row
+    /// Exactly one concurrent caller wins: the broker plans every write at one
+    /// serial point, so the second caller is judged against the winner's row
+    /// rather than racing it. An expired-but-unpruned row
     /// counts as absent, so this also resurrects a dead lineage.
     ///
     /// Do not add an `expect` to it: the alias *is* `expect: 0`, and a
@@ -337,9 +337,9 @@ impl WriteBuilder {
     /// Fence this write on a version, `0` meaning "must not exist".
     ///
     /// A failed `expect` applies nothing and returns the current value and
-    /// version. That version is **advisory**: it is read outside the row lock,
-    /// so a CAS loop may reuse it, but a fencing scheme must not treat it as a
-    /// token.
+    /// version. That version is **advisory**: another writer may move it before
+    /// you read it, so a CAS loop may reuse it, but a fencing scheme must not
+    /// treat it as a token.
     pub fn expect(mut self, version: i64) -> Self {
         self.expect = Some(version);
         self

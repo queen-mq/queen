@@ -2,8 +2,8 @@
  * The KV surface (PLAN_KV_TIMERS.md §5, §8.1).
  *
  * Seven operations, five code paths: get, getMany, getPrefix, put,
- * putIfAbsent (an alias that desugars to put with expect:0 inside the stored
- * procedure), delete, incr. Plus two conveniences this client owns: `once`,
+ * putIfAbsent (an alias that desugars to put with expect:0 inside the
+ * broker), delete, incr. Plus two conveniences this client owns: `once`,
  * which is the idempotency marker written the way people actually reach for
  * it, and `listAll`, which walks the keyset cursor of getPrefix.
  *
@@ -249,7 +249,7 @@ export class Kv {
     if (!results) {
       throw new Error('kv: unexpected response envelope — expected {"results":[...]}')
     }
-    // The stored procedure guarantees one result per op and raises rather than
+    // The broker answers one result per op and fails the call rather than
     // returning a short array (§6.4). A short one here means something between
     // the two rewrote the answer, and attributing result i to op j is how a
     // caller ends up trusting the wrong verdict.
@@ -293,7 +293,7 @@ export class Kv {
    * One key. Returns the ROW, not the value:
    * `{found, key, value?, version?, expiresAt?, updatedAt?}`.
    *
-   * `found` is separate from `value` because `null` is a legal JSONB value
+   * `found` is separate from `value` because `null` is a legal JSON value
    * (§5.5): `{found:true, value:null}` and `{found:false}` are different
    * things, and an SDK that returned "the value or null" would collapse them.
    */

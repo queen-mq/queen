@@ -38,8 +38,8 @@ var txCmd = &cobra.Command{
 	Use:   "tx -f <bundle.json>",
 	Short: "Run an atomic ack+push transaction from a JSON file",
 	Long: `Reads a transaction bundle from a file (or stdin with -f -) and
-posts it to /api/v1/transaction. The whole bundle commits as one server-side
-transaction backed by a single Postgres BEGIN/COMMIT.`,
+posts it to /api/v1/transaction. The whole bundle commits as one broker
+command: all of it applies, or none of it does.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if txFile == "" {
 			return clierr.Userf("--file is required")

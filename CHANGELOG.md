@@ -3,6 +3,77 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased (2.0.0)
+
+**The PostgreSQL storage class is removed.** Queen 2.0 has one storage class, its own replicated
+log, and there is no database to run beside it. Each node keeps its whole state in one data
+directory, `QUEEN_RAFT_DIR` (default `/var/lib/queen/raft`): the queue logs that hold the payloads,
+an embedded ordered store for everything the broker looks up, and, on a cluster, the raft state.
+A single node answers a write once it is fsynced to its own disk. A cluster of three or five voters
+(`QUEEN_RAFT_REPLICATOR=openraft`, `QUEEN_RAFT_NODE_ID`, `QUEEN_RAFT_PEERS`, `QUEEN_RAFT_TOKEN`)
+has one leader order every write, answers it once a majority of the voters have it on disk, and
+keeps serving through the loss of a minority. `QUEEN_STORAGE` is gone with the choice it made.
+There is no in-place upgrade from 1.x: a 2.0 broker does not read a 1.x database and messages do
+not carry over, so a move is a cutover. Start 2.0 beside the old deployment, re-apply the queue
+configuration, move the producers, drain the old deployment and move the consumers.
+
+**The SQS facade and the S3 sink are removed.** Neither is in the image or the binary any more,
+and `QUEEN_SQS_*` and `QUEEN_S3_*` are not read. The S3 sink is to be reimplemented in a later
+release.
+
+**The standalone proxy is removed.** The proxy runs inside the broker process with
+`QUEEN_PROXY_EMBEDDED=true`, fronting `PORT`, or its own `QUEEN_PROXY_PORT` while `PORT` stays the
+internal broker port. Its tenants, clusters, users, API-key hashes, plans and usage live in the
+broker's replicated key/value store under a system tenant, so the proxy database, `PXDB_*` and the
+proxy's SQL migrations are gone, along with the `queen-proxy` binary and image. A first tenant can
+come from `QUEEN_PROXY_BOOTSTRAP_*` at boot, and the rest through the control plane under
+`/api/cp/*`, guarded by `QUEEN_PROXY_CP_TOKEN`.
+
+**The Kafka facade runs in-process.** `QUEEN_KAFKA_EMBEDDED=true` starts it inside the broker,
+calling the broker's router without a socket; there is no child process and no `QUEEN_KAFKA_BIN`.
+Committed offsets are Queen consumer-group positions by default (`QUEEN_KAFKA_OFFSET_STORE`,
+`positions` or `kv`).
+
+**Environment variables removed.** Every PostgreSQL variable (`PG_*`, `DB_POOL_SIZE`,
+`PG_USE_SSL`, `PG_SSL_REJECT_UNAUTHORIZED`, `PG_SSL_ROOT_CERT`), the disk spool (`FILE_BUFFER_*`),
+the broker mesh (`QUEEN_MESH_*`, `QUEEN_UDP_*`, `QUEEN_SYNC_*`), the hot-list, fusion, ack-fusion,
+pop-fusion and admission knobs, `QUEEN_APPLY_SCHEMA`, `RETENTION_PARALLELISM`, the statistics
+refresh intervals, `QUEEN_STORAGE`, `QUEEN_SQS_*`, `QUEEN_S3_*` and `PXDB_*`. Some 1.x names stay
+because the 2.0 engine reads them: `RETENTION_INTERVAL`, `RETENTION_BATCH_SIZE`,
+`PARTITION_CLEANUP_DAYS`, `QUEEN_PARTITION_CLEANUP_ENABLED`, `METRICS_FLUSH_MS`,
+`QUEEN_SWEEPER_BACKOFF_MIN_MS`, `QUEEN_SWEEPER_BACKOFF_MAX_MS`,
+`QUEEN_SWEEPER_TRANSIENT_BACKOFF_MS`, `QUEEN_SWEEPER_MAX_ATTEMPTS`, `QUEEN_STMT_TIMEOUT_MS`,
+`DEFAULT_TIMEOUT`, `POP_DEFAULT_TIMEOUT_MS` and `DEFAULT_SUBSCRIPTION_MODE`.
+
+**Routes and answers.** `GET /api/v1/analytics/postgres-stats` and the broker-to-broker
+`/internal/api/*` routes are gone, and `/metrics` no longer carries a `database` block. A push item
+answers `queued`, `duplicate` or `error`: with no spool there is no `buffered`. When a node cannot
+take a write the request fails with `503` and `Retry-After`, and a full disk answers `507`.
+`POST /api/v1/stats/refresh` still answers `200` and does nothing, because counters are kept as
+entries apply.
+
+**Maintenance mode is removed.** `GET`/`POST /api/v1/system/maintenance`,
+`GET`/`POST /api/v1/system/maintenance/pop` and `GET /api/v1/status/buffers` answer `404`. No push
+or DLQ replay is refused with a maintenance `503`, and no pop answers `{"messages":[],"paused":true}`.
+The embedded Rust API loses `Broker::set_push_maintenance`. The SDKs drop their maintenance calls
+(`get`/`setMaintenanceMode` and `get`/`setPopMaintenanceMode` in JS and PHP, the same four in Go,
+`get`/`set_maintenance_mode` and `get`/`set_pop_maintenance_mode` in Python, and `Admin::maintenance`,
+`set_maintenance`, `pop_maintenance` and `set_pop_maintenance` in Rust) along with their handling
+of a paused pop; `queenctl maintenance` and the dashboard's maintenance switches are gone. The kv,
+timers and ephemeral kill switches and tenant quotas stay.
+
+**The embedded Rust API boots on a data directory.** `BrokerConfig::new().raft(dir)`, with
+`raft_disk_pct(high, low)` and `stmt_timeout_ms`; `pg()`, `pg_use_ssl`,
+`pg_ssl_reject_unauthorized`, `pool_size`, `apply_schema`, `spool_dir`, `retention`,
+`stats_refresh`, `system_metrics` and `log_reports` are removed. `StartError` has only `Config`, and
+`Broker::shutdown()` returns nothing.
+
+**One image, one binary.** `ghcr.io/queen-mq/queen` carries the broker, with the proxy and the Kafka
+facade linked in, the dashboard and `queenctl`; the `queen-kafka`, `queen-sqs` and `queen-s3`
+binaries and the PostgreSQL client tools are gone. The dashboard is raft-only: the Postgres stats
+panel, the database pool and the disk-spool cards are removed, and the replicated log's status
+takes their place.
+
 ## 1.6.0 - 2026-09-11
 
 **A read-scoped credential could replay a dead letter through the proxy. It cannot now.**

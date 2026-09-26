@@ -155,7 +155,7 @@
 // I2, enforced rather than reviewed: `clippy.toml` lists the clock,
 // environment and randomness calls this side of the line may not make,
 // `[lints.clippy]` in Cargo.toml switches the lint off for the rest of the
-// package (the postgres class, and every integration test), and this is where
+// package (and every integration test), and this is where
 // it is switched back on — for this module and every module under it.
 #![deny(clippy::disallowed_methods)]
 
@@ -230,8 +230,8 @@ pub enum Keyspace {
     PartitionFiles,
     /// `(pid, group) → CursorRow`.
     Cursors,
-    /// `(worker, pid, group) → lease_expires_at_us`. The derived index
-    /// `log_renew_lease_v1` walks in key order, never a hash map.
+    /// `(worker, pid, group) → lease_expires_at_us`. The derived index a lease
+    /// renew walks in key order, never a hash map.
     LeasesByWorker,
     /// `(tenant, queue, group, pid) → ready_at_us`: partitions with work for a
     /// group, so the ready rings of §6.3 rebuild in O(pending).
@@ -244,7 +244,7 @@ pub enum Keyspace {
     Dedup,
     /// `(pid, base_offset) → [end][created][hashes]`: one sequential row per
     /// `Append`, the expiry half of D10 option (a) lean. Walked per partition
-    /// from its own `txns_start`, exactly like 006's purge step.
+    /// from its own `txns_start`.
     Txns,
     /// `request_id → (now_us, outcome)` (D6, §5.4).
     RequestIds,
@@ -258,30 +258,29 @@ pub enum Keyspace {
     /// NODE-LOCAL. `(bucket, file_id) → (length at the last durable point,
     /// sealed, live bytes, snapshot references)` (§6.2, I11).
     Files,
-    /// `(tenant, ns, key) → KvRow` (024 `queen.kv`, WP-2.2). The tenant and the
-    /// namespace are escaped names and the KEY is the raw, unterminated tail, so
-    /// the keys of one namespace sort in byte order (the SQL's `COLLATE "C"`)
-    /// and a key prefix is a store-key prefix ([`keys::kv`]).
+    /// `(tenant, ns, key) → KvRow` (WP-2.2). The tenant and the namespace are
+    /// escaped names and the KEY is the raw, unterminated tail, so the keys of
+    /// one namespace sort in byte order and a key prefix is a store-key prefix
+    /// ([`keys::kv`]).
     Kv,
     /// `(expires_at_us, version) → kv store key`: the expiry index of [`Keyspace::Kv`]
     /// — one row per row that carries an expiry, oldest first, so the leader's
-    /// sweep (026's `kv_expire_step_v1`) is O(expired) instead of a scan of
+    /// sweep is O(expired) instead of a scan of
     /// every key. The version is unique per write (I18), so the pair is unique.
     KvExpiry,
-    /// `(tenant, queue, timer_key) → TimerRow` (025 `queen.log_timers`, WP-2.3).
-    /// Keyed by NAMES like the SQL table: a timer names its destination queue
+    /// `(tenant, queue, timer_key) → TimerRow` (WP-2.3).
+    /// Keyed by NAMES: a timer names its destination queue
     /// and partition, which are born at the fire, never at the schedule.
     Timers,
     /// `(due_us, tenant, queue, timer_key) → ()`: the fire order. `due_us` is
-    /// the row's effective visibility (`deliver_at`, pushed out by a backoff),
-    /// the RSM twin of 025's generated `visible_at` column and its only index.
+    /// the row's effective visibility (`deliver_at`, pushed out by a backoff).
     /// The leader's fire step walks it from the front while `due_us <= now`.
     TimersDue,
-    /// `(tenant, query_id) → StreamsQueryRow` (`queen_streams.queries`).
+    /// `(tenant, query_id) → StreamsQueryRow`.
     StreamsQueries,
-    /// `(query_id, pid, key) → StreamsStateRow` (`queen_streams.state`).
+    /// `(query_id, pid, key) → StreamsStateRow`.
     StreamsState,
-    /// `flag name → JSON` (`queen.system_state`).
+    /// `flag name → JSON`.
     Flags,
     /// `(quota kind, tenant) → QuotaGrant`.
     Quotas,
@@ -513,9 +512,8 @@ pub enum StoreError {
     MapFull { used_bytes: u64, map_bytes: u64 },
     /// A key longer than LMDB accepts (511 B by default; [`Store::max_key_len`]
     /// reports what this build got). A composite name key — say
-    /// `(tenant, queue, group)` — can reach it, and the postgres class has no
-    /// such limit, so this is a refusal the planner must turn into a 4xx, not
-    /// a panic and not a truncation.
+    /// `(tenant, queue, group)` — can reach it, so this is a refusal the
+    /// planner must turn into a 4xx, not a panic and not a truncation.
     KeyTooLong {
         keyspace: &'static str,
         len: usize,

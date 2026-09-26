@@ -1,6 +1,6 @@
 ---
 title: Transactional ack and push
-description: "One body, two operations, one PostgreSQL commit: the acknowledgement of the input and the push of the output."
+description: "One body, two operations, one atomic commit: the acknowledgement of the input and the push of the output."
 type: tutorial
 tier: use
 sidebar:
@@ -12,7 +12,7 @@ verifiedBy:
 The previous tutorial handed work between queues in two requests. In that order a crash between
 them duplicates work, in the other order it loses it, and two HTTP calls can never be one commit.
 `POST /api/v1/transaction` takes an `operations` array instead, so the ack of the input and the
-push of the output become one PostgreSQL transaction.
+push of the output become one entry in the broker's replicated log, applied whole or not at all.
 
 Two fields on the ack operation carry it. `consumerGroup` has to be explicit, because it defaults
 to `__QUEUE_MODE__` and the transaction would then commit a cursor this consumer never read from,

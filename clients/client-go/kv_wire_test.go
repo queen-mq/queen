@@ -355,7 +355,7 @@ func TestKVKeyIsPercentEscapedInThePath(t *testing.T) {
 }
 
 func TestKVGetSeparatesFoundFromANullValue(t *testing.T) {
-	// `'null'::jsonb` is a legal value: {found:true, value:null} and
+	// JSON `null` is a legal value: {found:true, value:null} and
 	// {found:false} are different things no SDK may collapse (§5.5).
 	srv := newCaptureServer(t,
 		okJSON(`{"index":0,"op":"get","found":true,"key":"k","value":null,"version":3}`),
@@ -538,7 +538,7 @@ func TestKVBatchRefusesAnOpBuiltWithABadExpiry(t *testing.T) {
 func TestKVRequiredPreconditionIsATypedErrorOnTheStandaloneSurface(t *testing.T) {
 	// `required:true` asks for the escalation: the whole call is rolled back and
 	// the answer carries NO results array at all, just the verdict envelope --
-	// at HTTP 200, because the transaction really did abort in SQL and this must
+	// at HTTP 200, because the transaction really did abort and this must
 	// pollute neither the retry policies nor the error metrics of the broker.
 	//
 	// On THIS surface it is an error (the caller asked for the escalation, and

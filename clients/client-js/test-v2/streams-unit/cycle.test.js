@@ -100,7 +100,7 @@ describe('Runner — windowed aggregation', () => {
     // The 10:00 window is closed (created and closed in the same batch
     // since the third message crosses the minute boundary). The 10:01
     // window stays open. Because the 10:00 window was never persisted to
-    // PG (created+closed in one cycle), no delete state op is emitted —
+    // the broker (created+closed in one cycle), no delete state op is emitted —
     // only the closed-window push and the open-window upsert.
     assert.equal(c.push_items.length, 1, 'one closed-window emit')
     assert.deepEqual(c.push_items[0].payload, { count: 2, sum: 30 })

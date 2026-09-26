@@ -1,6 +1,6 @@
 ---
 title: Cross-broker comparison
-description: "Queen, Kafka, RabbitMQ and pgmq on one machine with matched resources: the same pipeline at four shapes, with CPU, memory, disk and the conditions that make each row true."
+description: "Queen 1.x, Kafka, RabbitMQ and pgmq on one machine with matched resources: the same pipeline at four shapes, with CPU, memory, disk and the conditions that make each row true."
 type: reference
 sidebar:
   order: 4
@@ -9,26 +9,12 @@ sourceOfTruth:
   - benchmark-queen/crossbench/results/2026-08-04-scale-campaign/NIGHT-REPORT.md
   - benchmark-queen/crossbench/results/2026-08-03-pgmq-ab/RESULTS.md
   - benchmark-queen/crossbench/SPEC.md
-digest: >-
-  Queen MQ, Kafka, RabbitMQ and pgmq on one 32 vCPU / 62 GB machine, Intel Xeon Platinum 8358 at
-  2.60 GHz with NVMe, matched at CM_CPUS=32 and CM_MEM=56g, PostgreSQL left at synchronous_commit
-  = on and fsync = on, the same twelve-stage ordered pipeline carrying 10 to 30 ms of simulated
-  work per message, 256-byte payloads, one run per system except Queen MQ's dense figure, which is
-  a median of eight. Sparse, 1,000 ordered lanes at 2 messages per lane per second: all four
-  served the full rate, and pgmq won on latency with p50 55.1 ms against Queen MQ's 71.5 ms,
-  RabbitMQ's 92.7 ms and Kafka's 142.9 ms. Dense, the same 1,000 lanes at 12 messages per lane per
-  second: Queen MQ served 96 percent of the offered rate at p50 680 ms and Kafka 89 percent at
-  2,287 ms, while pgmq served 63 percent and shed 104,780 messages and RabbitMQ served 27 percent
-  and shed 363,942. That reversal between the two shapes is the finding. Kafka was the cheapest of
-  the four on CPU and on disk in every shape, using 2.2 cores against Queen MQ's 7.4 on sparse and
-  3.9 against 16.0 on dense, which is partly a durability difference rather than pure efficiency:
-  Kafka at its defaults pays no real fsync per commit and Queen MQ and pgmq both do. pgmq is
-  insensitive to cardinality, returning identical percentiles across a twentyfold change in lane
-  count, and at 20,000 properties it beat Queen MQ roughly threefold on both tail percentiles. The
-  page states that each of these systems would go faster run by someone who operates it daily, and
-  that for three of the four that is not its authors.
-# sourceOfTruth re-read 2026-08-27 (through a6cbac22 + working tree): page matches the code.
 ---
+
+<Aside type="caution">
+These runs measured **Queen 1.x**, whose storage was PostgreSQL. 2.0 replaced that storage with a
+replicated log, so the Queen figures describe the 1.x engine and not 2.0.
+</Aside>
 
 Queen, Kafka, RabbitMQ and pgmq ran the same twelve-stage ordered pipeline on one machine, under
 the same CPU and memory limits, at four shapes. The design differences behind these numbers are on
@@ -68,7 +54,7 @@ chained consumer hops, with simulated per-message work of 10 to 20 ms on the fir
 | system | p50 ms | p95 ms | deliveries/s | cores | RAM | disk MB/s | physical queues | consumers |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | **pgmq** | **55.1** | **65.5** | 11 700 | 6.5 | 2.2 GB | 65 | 12 | 96 |
-| **Queen** | 71.5 | 92.7 | 11 700 | 7.4 | **1.8 GB** | **51** | **4** | 48 |
+| **Queen 1.x** | 71.5 | 92.7 | 11 700 | 7.4 | **1.8 GB** | **51** | **4** | 48 |
 | **RabbitMQ** | 92.7 | 120.2 | 11 699 | 7.0 | 2.6 GB | 62 | **12 000** | **12 000** |
 | **Kafka** | 142.9 | 170.0 | 11 700 | **2.2** | 11.6 GB | **15** | 4 | 48 |
 
@@ -85,7 +71,7 @@ to express what Queen expresses with 4 and 48.
 
 | system | p50 ms | p95 ms | deliveries/s | % of rate | cores | RAM | disk MB/s | shed |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **Queen** | **680** (range 340 to 3 234) | 881.7 | **69 110** | **96%** | 16.0 | 4.5 GB | 77 | **0** |
+| **Queen 1.x** | **680** (range 340 to 3 234) | 881.7 | **69 110** | **96%** | 16.0 | 4.5 GB | 77 | **0** |
 | **Kafka** | 2 287 | 5 439 | 64 252 | 89% | **3.9** | 12.2 GB | **22** | 0 |
 | **pgmq** | 11 863 | 16 777 | 45 622 | 63% | 19.3 | 5.1 GB | 111 | 104 780 |
 | **RabbitMQ** | 19 952 | 39 903 | 19 666 | **27%** | 9.7 | 2.7 GB | 162 | 363 942 |
@@ -118,8 +104,8 @@ can actually express.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | **pgmq** | **240 000** | **71.5** | **881.7** | **5 439** | 15.3 | 7.0 GB |
 | pgmq | 12 000 | 71.5 | 881.7 | 5 439 | 15.0 | 6.7 GB |
-| **Queen** | 80 000 | 101.1 | 2 494 | 15 385 | 14.6 | 7.1 GB |
-| Queen | 4 000 | 110.2 | 1 923 | 7 054 | 14.7 | 5.1 GB |
+| **Queen 1.x** | 80 000 | 101.1 | 2 494 | 15 385 | 14.6 | 7.1 GB |
+| Queen 1.x | 4 000 | 110.2 | 1 923 | 7 054 | 14.7 | 5.1 GB |
 | Kafka | 800 | 142.9 | 4 194 | 8 389 | **4.6** | **1.6 GB** |
 | RabbitMQ | 12 000 | 23 727 | 43 515 | 43 515 | 12.0 | 3.5 GB |
 

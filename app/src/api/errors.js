@@ -87,8 +87,8 @@ const SUSPENDED_CODES = new Set([CODE_SUSPENDED, 'suspended'])
  *  · the switch ladder (server/src/switches.rs) answers `*_disabled` for an
  *    operator's runtime pause and `kv_unavailable` / `ephemeral_unavailable`
  *    for a full cell (Verdict::NoRoom);
- *  · each handler answers its OWN `unavailable()` for a pool exhaustion, a
- *    statement timeout or a dead connection — `kv_unavailable`
+ *  · each handler answers its OWN `unavailable()` when the cluster cannot
+ *    answer (no leader, a retry, a deadline that passed) — `kv_unavailable`
  *    (handlers/kv.rs) and `timers_unavailable` (handlers/timers.rs), which is
  *    not the family code the ladder would have used.
  *

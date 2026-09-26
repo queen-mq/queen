@@ -1,13 +1,12 @@
 /**
  * Shared utilities for streaming tests.
  *
- * Tests in test-v2/stream/* are run live against a Queen instance and a
- * Postgres database. Each test:
+ * Tests in test-v2/stream/* are run live against a Queen broker. Each test:
  *   - generates a unique queue/query name to avoid collisions across runs
  *   - sets up source + sink queues
  *   - runs a Stream pipeline for a bounded time
  *   - asserts on the resulting sink-queue contents and/or runner metrics
- *   - stops the stream and lets the global cleanup hook drop the rows
+ *   - stops the stream (the lane's broker is thrown away after the run)
  *
  * Test-name uniqueness is achieved with the test function's name + a
  * monotonic counter so the same suite can be re-run without state bleed.
@@ -20,7 +19,7 @@ let _nameCounter = 0
 
 /**
  * Build a unique queue/query name scoped to a test. The prefix is always
- * "test-stream-" so the global cleanup query in run.js deletes it.
+ * "test-stream-", the suite's test-name convention.
  *
  * @param {string} testName - e.g. fn.name
  * @param {string} suffix   - 'src' | 'sink' | 'query' | etc.
@@ -89,12 +88,12 @@ export async function pushSpread(client, queueName, items) {
  * the broker default of 'new' its cursor would be seeded at the sink's tail
  * and the emits under test would be invisible.
  *
- * NOTE on batch size: we use batch=1 so that each ack triggers
- * `acked_count >= batch_size` in queen.partition_consumers and the lease
- * is released between pops. With a larger batch the lease would stay
- * held until acked_count reached the full batch_size (often never on
- * intermittent emits), and subsequent pops would skip the partition as
- * "leased by another worker." Worth the round-trip overhead in tests.
+ * NOTE on batch size: we use batch=1 so that each ack reaches the end of
+ * the leased batch and the lease is released between pops. With a larger
+ * batch the lease would stay held until the acks reached the end of the
+ * full batch (often never on intermittent emits), and subsequent pops would
+ * skip the partition as "leased by another worker." Worth the round-trip
+ * overhead in tests.
  */
 export async function drainSink(client, queueName, { timeoutMs = 5000, group } = {}) {
   const cg = group || `drain-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
@@ -110,7 +109,7 @@ export async function drainSink(client, queueName, { timeoutMs = 5000, group } =
       .pop()
     if (!popped || popped.length === 0) break
     for (const m of popped) out.push(m)
-    // Pass the consumer group so the SP validates the lease against OUR
+    // Pass the consumer group so the broker validates the lease against OUR
     // group, not the default __QUEUE_MODE__. queen-mq uses `context.group`
     // (NOT `consumerGroup`) for the ack-context shape.
     await client.ack(popped, true, { group: cg })
@@ -186,12 +185,4 @@ export async function runStreamFor(streamFactory, runMs) {
   await sleep(runMs)
   await handle.stop()
   return handle
-}
-
-/**
- * Helpful guard for tests that need a clean queen_streams.queries row for
- * a given query name. Drops it (state cascades) before the test runs.
- */
-export async function dropStreamQuery(dbPool, queryName) {
-  await dbPool.query(`DELETE FROM queen_streams.queries WHERE name = $1`, [queryName])
 }

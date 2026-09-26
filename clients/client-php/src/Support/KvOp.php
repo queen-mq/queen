@@ -13,7 +13,7 @@ namespace Queen\Support;
  *
  * WHAT THIS CLASS DELIBERATELY DOES NOT VALIDATE. The expiry rule — exactly one
  * of `ttlSeconds` (an integer greater than zero) and `forever: true` on every
- * put, putIfAbsent and incr — lives in the broker's kv_apply_v1 and nowhere
+ * put, putIfAbsent and incr — lives in the broker and nowhere
  * else, so all seven clients and the embedded broker inherit it without a line
  * of their own. The same goes for the namespace charset and the key ceiling.
  * Re-implementing them here would add a second opinion that can drift, and the
@@ -28,9 +28,10 @@ namespace Queen\Support;
 final class KvOp
 {
     /**
-     * Fields that are arguments of the stored procedure, never fields of an
-     * operation. The broker rejects all three; naming them here means a caller
-     * finds out at their first unit test rather than in an audit.
+     * Fields that are never fields of an operation: the broker takes the
+     * tenant from the authenticated request. The broker rejects all three;
+     * naming them here means a caller finds out at their first unit test
+     * rather than in an audit.
      */
     private const NOT_AN_INPUT = [
         'tenant' => 'the tenant comes from the authenticated request, never from an operation',
@@ -102,15 +103,14 @@ final class KvOp
     }
 
     /**
-     * An alias that desugars to put + expect:0 inside the stored procedure, so
-     * it is one code path. It travels under its own name because that is the
+     * An alias that desugars to put + expect:0 inside the broker, so it is one
+     * code path. It travels under its own name because that is the
      * name of the thing, and because `applied` — "did I win?" — is the question
      * most often asked of this API.
      *
-     * Two concurrent putIfAbsent serialize: ON CONFLICT DO UPDATE takes the row
-     * lock BEFORE evaluating its WHERE, so the second re-evaluates against the
-     * new row and does not apply. Exactly one wins. The cost is that even a
-     * FAILED conditional holds that row lock until commit.
+     * Two concurrent putIfAbsent serialize: the broker plans every write at one
+     * serial point, so the second is judged against the first one's row and
+     * does not apply. Exactly one wins.
      *
      * And the sentence that has to be said out loud: putIfAbsent plus a TTL is
      * NOT a distributed lock. A lock that expires is not revoked — the old

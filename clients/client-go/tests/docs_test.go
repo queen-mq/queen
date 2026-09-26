@@ -7,8 +7,8 @@ package tests
 // means something, and the error handling a reader should copy. Assertions
 // stay outside the markers. After editing a region, regenerate the partials
 // with `pnpm --dir webdoc gen` or the docs CI check fails on drift. The
-// queues used here (orders, payments, invoices) are wiped by cleanupTestData
-// in helpers_test.go, exactly like the test-go-% queues.
+// queues used here (orders, payments, invoices) have fixed names, so this file
+// expects the fresh, empty broker the harness gives every lane.
 
 import (
 	"context"
@@ -110,8 +110,9 @@ func docsProduceAndConsume(ctx context.Context, client *queen.Queen) error {
 // docsDeduplication is the body of the published deduplication example: the
 // same transaction id twice, the second push writing nothing.
 func docsDeduplication(ctx context.Context, client *queen.Queen) error {
-	// The fixed transaction id below survives reruns because cleanupTestData
-	// purges log_txns for these queues before the suite starts.
+	// The fixed transaction id below is new to the broker only because every
+	// lane starts on a fresh one: rerun against the same broker inside the
+	// queue's dedup window, and the first push is already a duplicate.
 	// docs:start(go-push-dedup)
 	first, err := client.Queue("payments").
 		Partition("customer-42").

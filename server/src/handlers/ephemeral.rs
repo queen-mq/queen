@@ -5,32 +5,13 @@
 //!   * the THREE HOT VERBS — push, pop, ack — which touch this process's heap
 //!     and nothing else;
 //!   * the FIVE MANAGEMENT VERBS — configure, reset, delete and the two status
-//!     reads — of which exactly three (configure, delete, and nothing on the
-//!     status path) take a pooled connection, and only ever to read or write a
-//!     queue's DECLARATION. Never a message.
+//!     reads — of which exactly two (configure and delete) go through the state
+//!     machine, and only ever to write a queue's DECLARATION. Never a message.
 //!
-//! ---------------------------------------------------------------------------
-//! THE PROPERTY THIS FILE EXISTS TO KEEP
-//!
-//! No hot verb touches the pool, builds a statement, or names a table. That is
-//! not hygiene, it is the entire performance premise of the class: a req/reply
-//! inbox costs one hash lookup and a `VecDeque` push, and the moment push, pop
-//! or ack acquires a connection the class is just the durable engine with a
-//! worse durability story. `tests/kv_handler_isolation.rs` greps every source
-//! under `src/handlers/` for the feature's table names and fails the suite on a
-//! hit — including on prose, which is why the two tables are not named anywhere
-//! in this file, not even in the management half: the SQL lives behind the
-//! `db::eph_*` wrappers, which are the only code allowed to bind `p_tenant`.
-//!
-//! ---------------------------------------------------------------------------
-//! WHY THE LONG POLL COSTS NOTHING HERE (§3.4)
-//!
-//! The durable pop parks on a deadline and RE-QUERIES on a backoff, because the
-//! authority is a database that may have been written by another broker. Here
-//! the authority is this process's heap, and a push into it wakes the gate
-//! directly — so the wait is purely event-driven: no `pop_backoff_interval`, no
-//! re-poll, no probe. A missed wake costs the remaining timeout and never
-//! correctness, exactly as on the durable path.
+//! No hot verb reaches the state machine: a req/reply inbox costs one hash
+//! lookup and a `VecDeque` push. A push into the heap wakes a parked pop's gate
+//! directly, so the long poll is purely event-driven; a missed wake costs the
+//! remaining timeout and never correctness.
 //!
 //! ---------------------------------------------------------------------------
 //! THE TENANT (`kv.rs`'s rule, restated because it is the one that bites)
@@ -52,7 +33,6 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 
 use super::{json, qbool, qint, AppState};
-use crate::db;
 use crate::ephemeral::{self, AckOutcome, AckStatus, Refusal, Route};
 use crate::peerclient::FWD_HEADER;
 use crate::switches::{decide_ephemeral, Origin, Surface};
@@ -94,7 +74,7 @@ const MAX_TIMEOUT_MS: i64 = 300_000;
 fn err(status: StatusCode, code: &str, message: &str) -> Response {
     let mut body = String::with_capacity(64 + message.len());
     body.push_str("{\"error\":\"");
-    crate::fusion::json_escape_into(&mut body, message);
+    crate::util::json_escape_into(&mut body, message);
     body.push_str("\",\"code\":\"");
     body.push_str(code);
     body.push_str("\"}");
@@ -586,7 +566,7 @@ pub async fn handle_ephemeral_push(
         Ok(pushed) => {
             // §3.4 — the hotlist-OFF direct wake. Ephemeral never enters the
             // hot list or its ~5 ms coalescing tick: the list exists to make a
-            // wildcard SQL candidate scan cheap, and there is no scan here.
+            // wildcard candidate scan cheap, and there is no scan here.
             let qkey = ephemeral::Ephemeral::qkey(tenant.as_str(), &parsed.queue);
             st.notifier
                 .notify_pushed_batch(&[(qkey, partition.to_string())]);
@@ -779,7 +759,7 @@ fn render_pop(queue: &str, msgs: &[ephemeral::Delivered]) -> Response {
     let mut out =
         String::with_capacity(128 + msgs.iter().map(|m| m.payload.len() + 96).sum::<usize>());
     out.push_str("{\"queue\":\"");
-    crate::fusion::json_escape_into(&mut out, queue);
+    crate::util::json_escape_into(&mut out, queue);
     out.push_str("\",\"messages\":[");
     for (i, m) in msgs.iter().enumerate() {
         if i > 0 {
@@ -788,9 +768,9 @@ fn render_pop(queue: &str, msgs: &[ephemeral::Delivered]) -> Response {
         out.push_str("{\"id\":\"");
         // The id is broker-minted from an epoch, a partition name and a seq;
         // only the partition half can carry anything worth escaping.
-        crate::fusion::json_escape_into(&mut out, &m.id);
+        crate::util::json_escape_into(&mut out, &m.id);
         out.push_str("\",\"partition\":\"");
-        crate::fusion::json_escape_into(&mut out, &m.partition);
+        crate::util::json_escape_into(&mut out, &m.partition);
         out.push_str("\",\"attempts\":");
         out.push_str(&m.attempts.to_string());
         out.push_str(",\"payload\":");
@@ -811,7 +791,7 @@ struct AckOne {
     id: String,
     status: Option<String>,
     /// Accepted and IGNORED, on purpose. The durable wire carries an error
-    /// string because it lands in `log_dlq` and in the trace store; this class
+    /// string because it lands in the DLQ and in the trace store; this class
     /// has neither (§9), so storing it would mean inventing a place to put it.
     /// Refusing the field instead would break every SDK that shares one ack
     /// builder across the two engines, which is the shape §4 asks for.
@@ -937,7 +917,7 @@ fn render_ack(results: &[(String, AckOutcome)]) -> Response {
             out.push(',');
         }
         out.push_str("{\"id\":\"");
-        crate::fusion::json_escape_into(&mut out, id);
+        crate::util::json_escape_into(&mut out, id);
         out.push_str("\",\"outcome\":\"");
         out.push_str(outcome.as_str());
         out.push_str("\"}");
@@ -990,82 +970,9 @@ const OPTION_KEYS: [&str; 7] = [
     "windowBuffer",
 ];
 
-#[derive(Deserialize)]
-struct ConfigureBody {
-    queue: String,
-    /// Absent = declare with the broker defaults, which is a legitimate thing to
-    /// want: the reason to declare a queue may be purely that it must survive a
-    /// restart and appear in the listing (§1.1 tier 2), not that any knob differs.
-    options: Option<serde_json::Value>,
-}
-
-/// Validate the option blob against the closed list and turn it into engine
-/// options. `Err` is the rendered 400.
-fn parse_options(v: &serde_json::Value) -> Result<(ephemeral::QueueOptions, String), Response> {
-    let mut o = ephemeral::QueueOptions::default();
-    let Some(map) = v.as_object() else {
-        return Err(bad_request("options must be an object"));
-    };
-    for k in map.keys() {
-        if !OPTION_KEYS.contains(&k.as_str()) {
-            return Err(bad_request(&format!(
-                "unknown option `{k}`; the ephemeral options are {}",
-                OPTION_KEYS.join(", ")
-            )));
-        }
-    }
-    // Every numeric option is read as an i64 and rejected — not truncated — when
-    // it is not one. A float `ttlSeconds: 1.5` silently becoming 1 is the same
-    // class of invisible surprise as an ignored key.
-    let num = |k: &str| -> Result<Option<i64>, Response> {
-        match map.get(k) {
-            None | Some(serde_json::Value::Null) => Ok(None),
-            Some(x) => match x.as_i64() {
-                Some(n) if n >= 0 => Ok(Some(n)),
-                _ => Err(bad_request(&format!("{k} must be a non-negative integer"))),
-            },
-        }
-    };
-    o.max_bytes = num("maxBytes")?.filter(|n| *n > 0);
-    o.max_length = num("maxLength")?.filter(|n| *n > 0);
-    // 0 is MEANINGFUL on these two and must survive the filter above: it is how
-    // an operator turns an age limit back off on a declared queue.
-    o.ttl_ms = num("ttlSeconds")?.map(|s| s.saturating_mul(1000));
-    o.lease_ms = num("leaseSeconds")?
-        .filter(|n| *n > 0)
-        .map(|s| s.saturating_mul(1000));
-    o.retry_limit = num("retryLimit")?.map(|n| n.clamp(0, u32::MAX as i64) as u32);
-    if let Some(p) = map.get("policy") {
-        let Some(s) = p.as_str().and_then(ephemeral::Policy::parse) else {
-            return Err(bad_request("policy must be \"reject\" or \"dropOldest\""));
-        };
-        o.policy = Some(s);
-    }
-    if let Some(w) = map.get("windowBuffer") {
-        let Some(wo) = w.as_object() else {
-            return Err(bad_request("windowBuffer must be an object {ms?, count?}"));
-        };
-        for k in wo.keys() {
-            if k != "ms" && k != "count" {
-                return Err(bad_request(&format!("unknown windowBuffer field `{k}`")));
-            }
-        }
-        let g = |k: &str| wo.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-        o.window = Some(ephemeral::Window {
-            ms: g("ms"),
-            count: g("count") as usize,
-        });
-    }
-    Ok((o, v.to_string()))
-}
-
-/// `POST /api/v1/ephemeral/configure` — 201 with the stored declaration.
-///
-/// TWO WRITES, DATABASE FIRST. The row is what survives a restart (§1.2), so a
-/// broker that applied the config to RAM and then failed to persist it would
-/// serve a configuration that silently reverts at the next deploy — the worst of
-/// the two failure orders. Persisting first means the opposite failure (row
-/// written, broker dies before applying) self-heals on the next boot load.
+/// `POST /api/v1/ephemeral/configure` — 201 with the stored declaration. The
+/// declaration is replicated state; the rings pick it up on the node that
+/// served the call and on every node at boot.
 pub async fn handle_ephemeral_configure(
     State(st): State<Arc<AppState>>,
     Extension(_authed): Extension<crate::auth::AuthedSub>,
@@ -1075,55 +982,17 @@ pub async fn handle_ephemeral_configure(
     if let Some(r) = gated(&st, tenant.as_str(), Surface::EphAdmin, 0) {
         return r;
     }
-    let parsed: ConfigureBody = match serde_json::from_slice(&body) {
-        Ok(p) => p,
-        Err(e) => return bad_request(&format!("bad body: {e}")),
-    };
-    if let Err(r) = check_name("queue", &parsed.queue) {
-        return r;
-    }
-    let raw = parsed
-        .options
-        .unwrap_or(serde_json::Value::Object(Default::default()));
-    let (opts, blob) = match parse_options(&raw) {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-
-    let client = match st.pool.get().await {
-        Ok(c) => c,
-        Err(_) => {
-            return err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "ephemeral_unavailable",
-                "no database connection is available to persist the declaration",
-            )
-        }
-    };
-    let stored = match db::eph_config_set(&client, tenant.as_str(), &parsed.queue, &blob).await {
-        Ok(t) => t,
-        Err(e) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "ephemeral_configure_failed",
-                &format!("could not store the declaration: {e}"),
-            )
-        }
-    };
-    st.ephemeral
-        .set_config(tenant.as_str(), &parsed.queue, opts, true);
-    // §3.5 — tell the peers to re-read this one row. The frame carries no
-    // options: the TABLE is the authority (the row was written above, before
-    // this line), so a peer reads what was stored rather than what a frame
-    // claimed, and a frame that raced a second `configure` cannot apply the
-    // older of the two.
-    st.ephemeral
-        .broadcast_admin("config_set", tenant.as_str(), &parsed.queue);
-    // The SP's own row, echoed verbatim: the broker must not re-render what it
-    // just stored, or the echo and the table can disagree about what was saved.
-    // The CLAMPED values the engine actually applied are what the status reads
-    // publish — the two are different questions and are answered separately.
-    json(StatusCode::CREATED, stored)
+    // The declaration is replicated state: the state machine stores it and the
+    // node that served the call applies it to its rings (`apply_local_control`).
+    crate::handlers::raft::dispatch_api(
+        &st,
+        tenant.as_str(),
+        "POST",
+        "/api/v1/ephemeral/configure",
+        None,
+        body,
+    )
+    .await
 }
 
 #[derive(Deserialize)]
@@ -1163,11 +1032,9 @@ pub async fn handle_ephemeral_reset(
     // therefore THIS broker's count and not the cell's, which is the honest
     // number to report: a fire-and-forget broadcast cannot know what the peers
     // dropped, and inventing a total would be a sum of unacknowledged frames.
-    st.ephemeral
-        .broadcast_admin("reset", tenant.as_str(), &parsed.queue);
     let mut out = String::with_capacity(64 + parsed.queue.len());
     out.push_str("{\"queue\":\"");
-    crate::fusion::json_escape_into(&mut out, &parsed.queue);
+    crate::util::json_escape_into(&mut out, &parsed.queue);
     out.push_str("\",\"dropped\":");
     out.push_str(&dropped.to_string());
     out.push('}');
@@ -1181,9 +1048,6 @@ pub async fn handle_ephemeral_reset(
 /// durable queue delete follows, and the same reason: the status describes the
 /// outcome of the CALL, not the verdict of the predicate.
 ///
-/// RAM FIRST here, unlike `configure`. The dangerous residue of a half-done
-/// delete is a live ring nobody can see, not a config row: the row is inert
-/// (it only decides what a future boot vivifies) while the ring holds memory.
 pub async fn handle_ephemeral_delete_queue(
     State(st): State<Arc<AppState>>,
     Extension(_authed): Extension<crate::auth::AuthedSub>,
@@ -1196,58 +1060,22 @@ pub async fn handle_ephemeral_delete_queue(
     if let Err(r) = check_name("queue", &queue) {
         return r;
     }
-    let removed = st.ephemeral.remove(tenant.as_str(), &queue);
-    // §3.5 — broadcast BEFORE the row is dropped, and that order is deliberate:
-    // a peer that acts on the frame drops its RAM copy, which is safe whether or
-    // not the row deletion below succeeds (a surviving row is re-vivified empty
-    // by the next refresh, §1.2). Broadcasting only on success would instead
-    // leave every peer holding rings for a queue this broker has already dropped
-    // whenever the database is the thing that failed.
-    st.ephemeral
-        .broadcast_admin("delete", tenant.as_str(), &queue);
-    let declared;
-    match st.pool.get().await {
-        Ok(c) => match db::eph_config_delete(&c, tenant.as_str(), &queue).await {
-            Ok(txt) => {
-                declared = serde_json::from_str::<serde_json::Value>(&txt)
-                    .ok()
-                    .and_then(|v| v.get("deleted").and_then(|x| x.as_bool()))
-                    .unwrap_or(false);
-            }
-            Err(e) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "ephemeral_delete_failed",
-                    &format!("the rings were dropped but the declaration was not: {e}"),
-                )
-            }
-        },
-        Err(_) => {
-            return err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "ephemeral_unavailable",
-                "the rings were dropped but no database connection was available to \
-                 remove the declaration",
-            )
-        }
-    }
-    let mut out = String::with_capacity(80 + queue.len());
-    out.push_str("{\"queue\":\"");
-    crate::fusion::json_escape_into(&mut out, &queue);
-    out.push_str("\",\"deleted\":");
-    out.push_str(if removed || declared { "true" } else { "false" });
-    out.push_str(",\"declared\":");
-    out.push_str(if declared { "true" } else { "false" });
-    out.push('}');
-    json(StatusCode::OK, out)
+    crate::handlers::raft::dispatch_api(
+        &st,
+        tenant.as_str(),
+        "DELETE",
+        &format!("/api/v1/ephemeral/queue/{queue}"),
+        None,
+        Bytes::new(),
+    )
+    .await
 }
 
 /// `GET /api/v1/ephemeral/queues` — tenant-scoped list, declared and implicit.
 ///
 /// ZERO DATABASE, on purpose and as a documented property (§5.3): every number
-/// here is an in-process gauge, so unlike the durable meter — whose 1 s poll is
-/// load-bearing on Postgres — a dashboard may poll this at 1-2 s and it costs
-/// the cell nothing but a map walk.
+/// here is an in-process gauge, so a dashboard may poll this at 1-2 s and it
+/// costs the cell nothing but a map walk.
 pub async fn handle_ephemeral_queues(
     State(st): State<Arc<AppState>>,
     Extension(_authed): Extension<crate::auth::AuthedSub>,
@@ -1264,7 +1092,7 @@ pub async fn handle_ephemeral_queues(
             out.push(',');
         }
         out.push_str("{\"queue\":\"");
-        crate::fusion::json_escape_into(&mut out, &q.name);
+        crate::util::json_escape_into(&mut out, &q.name);
         // The TIER of §1.1, and the one column that says what survives a
         // restart: a declared queue comes back configured and EMPTY, an implicit
         // one does not come back at all.
@@ -1361,12 +1189,12 @@ pub async fn handle_ephemeral_depth(
     };
     let mut out = String::with_capacity(160 + d.partitions.len() * 96 + d.groups.len() * 96);
     out.push_str("{\"queue\":\"");
-    crate::fusion::json_escape_into(&mut out, &d.queue);
+    crate::util::json_escape_into(&mut out, &d.queue);
     out.push_str("\",\"group\":");
     match group {
         Some(g) => {
             out.push('"');
-            crate::fusion::json_escape_into(&mut out, g);
+            crate::util::json_escape_into(&mut out, g);
             out.push('"');
         }
         None => out.push_str("null"),
@@ -1385,7 +1213,7 @@ pub async fn handle_ephemeral_depth(
             out.push(',');
         }
         out.push_str("{\"partition\":\"");
-        crate::fusion::json_escape_into(&mut out, &p.partition);
+        crate::util::json_escape_into(&mut out, &p.partition);
         out.push_str("\",\"pending\":");
         out.push_str(&p.pending.to_string());
         out.push_str(",\"bytes\":");
@@ -1398,7 +1226,7 @@ pub async fn handle_ephemeral_depth(
             out.push(',');
         }
         out.push_str("{\"group\":\"");
-        crate::fusion::json_escape_into(&mut out, &g.group);
+        crate::util::json_escape_into(&mut out, &g.group);
         out.push_str("\",\"pending\":");
         out.push_str(&g.pending.to_string());
         out.push_str(",\"skipped\":");

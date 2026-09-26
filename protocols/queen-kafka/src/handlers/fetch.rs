@@ -14,14 +14,14 @@
 //! ## Any node serves any partition, and no gate says otherwise
 //!
 //! In cluster mode ([`crate::cluster`]) there is NO leadership gate here, on
-//! purpose: `032_log_fetch.sql:11-19` says of the call behind this handler that
-//! it *"is not a pop. No lease is taken, no `queen.log_consumers` row is read,
-//! created or advanced, no watermark is written, nothing is claimed and no SKIP
-//! LOCKED dance runs."* Two facades fetching the same offsets through two
+//! purpose: the call behind this handler (`POST /api/v1/fetch`) is not a pop.
+//! No lease is taken, no consumer cursor is read, created or advanced, and
+//! nothing is claimed. Two facades fetching the same offsets through two
 //! brokers therefore get the same records, and there is no per-partition state
-//! for a refusal to protect. A push made through another broker is seen within
-//! `RECHECK_MS` even with the mesh down (server/src/handlers/fetch.rs:126-131),
-//! which is what makes that true across brokers and not merely within one.
+//! for a refusal to protect. Every broker of a Queen cluster applies every
+//! entry of one replicated log, so a push made through another broker is
+//! readable here once this node has applied it, which is what makes that true
+//! across brokers and not merely within one.
 //!
 //! ## v4..=v6, and why the ceiling is not a shrug
 //!

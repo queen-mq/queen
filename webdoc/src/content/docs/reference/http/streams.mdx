@@ -1,16 +1,17 @@
 ---
 title: Streams routes
-description: "The three /streams/v1 endpoints field by field: query registration and its 409, the state read, and the cycle commit that carries state ops, sink pushes and the source ack."
+description: "The three /streams/v1 endpoints field by field: query registration and its 409, the state read, and the cycle commit that carries state ops, sink pushes and the source ack in one log entry."
 type: reference
 sidebar:
   order: 16
   label: Streams
 sourceOfTruth:
-  - server/src/main.rs
-  - server/src/handlers/streams.rs
-  - server/sql/procedures/007_log_streams.sql
-  - server/sql/procedures/008_streams_register_query_v1.sql
-  - server/sql/procedures/009_streams_state_get_v1.sql
+  - server/src/rsm/facade/real/phase2.rs
+  - server/src/rsm/facade/real/phase2/streams.rs
+  - server/src/rsm/planner/txn.rs
+  - server/src/rsm/planner/ack.rs
+  - server/src/handlers/raft.rs
+  - server/src/auth.rs
 verifiedBy:
   - clients/client-rust/tests/streams.rs
   - clients/client-js/test-v2/streams-unit/cycle.test.js
@@ -18,13 +19,12 @@ verifiedBy:
 digest: >-
   `/streams/v1` is three JSON POSTs and a public versioned contract, not an SDK internal.
   `POST /streams/v1/queries` registers a query by `name` and returns its `query_id`: 409 on a
-  `config_hash` mismatch without `reset`, 403 without an enabled `queen_streams.quota` grant.
-  `POST /streams/v1/state/get` reads state rows for one `query_id` and `partition_id`, filtered
-  by `keys`, `key_prefix` or `ripe_at_or_before`. `POST /streams/v1/cycle` commits `state_ops`,
-  `push_items` and the ack in one transaction. All three are tenant-scoped: a foreign partition
-  or query reads as missing.
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): main.rs registers three new routes, none of them a streams route; nothing this page describes moved.
+  `config_hash` mismatch without `reset`, 403 for a new query of a non-default tenant without an
+  enabled streams grant or at its `maxQueries` cap. `POST /streams/v1/state/get` reads state rows for one `query_id` and
+  `partition_id`, filtered by `keys`, `key_prefix` or `ripe_at_or_before`. `POST /streams/v1/cycle`
+  commits `state_ops`, `push_items` and the source ack as one entry in the replicated log, whole or
+  not at all. All three are tenant-scoped: a query or partition of another tenant answers 404, the
+  same answer a missing one gets.
 ---
 
 The whole streaming engine is three JSON POSTs. `/streams/v1` sits inside the versioned contract
@@ -36,45 +36,53 @@ streaming worker by registering a query, reading its state, and committing cycle
 | --- | --- | --- |
 | `POST /streams/v1/queries` | read-write | Registers or re-registers a query by name, returns its `query_id` |
 | `POST /streams/v1/state/get` | read-only | Reads the state rows for one query and one partition |
-| `POST /streams/v1/cycle` | read-write | Commits state writes, sink pushes and the source ack in one transaction |
+| `POST /streams/v1/cycle` | read-write | Commits state writes, sink pushes and the source ack as one entry in the replicated log |
 
 All three are tenant-scoped. A query `name` is unique per tenant, not global, so the same name
-under two tenants is two independent queries; state reads and cycles reject a partition or query
-that is not the caller's, and the cycle resolves and auto-creates its sink queues under the
+under two tenants is two independent queries; state reads and cycles answer `404` for a partition
+or query that is not the caller's, and the cycle resolves and auto-creates its sink queues under the
 request tenant. On a broker with tenancy off everything lands on the default tenant and none of
 this is observable. See [the model](/use/streams) for what a worker does between these calls, and
 [Isolation](/reference/multi-tenant/isolation/#streams-are-tenant-scoped) for the guarantees.
 
 ## POST /streams/v1/queries
 
-Registration is idempotent on `name`, and it is where a changed operator chain is caught.
+Registration is idempotent on `name`, and it is where a changed operator chain is caught. The node
+answers after a read barrier, so it sees every registration the cluster had committed when the call
+began.
 
 | Field | Type | Required | Meaning |
 | --- | --- | --- | --- |
 | `name` | string | yes | The query's identity within the tenant. This is the SDK's `queryId` |
 | `source_queue` | string | yes | The queue the worker pops from |
-| `sink_queue` | string | no | The queue closed windows are pushed to. An empty string is stored as null |
-| `config_hash` | string | yes | A hash the client computes over the operator chain. The handler rejects a missing or empty value with **400** before the procedure runs |
-| `reset` | boolean | no, default `false` | Delete every state row for this query before rewriting the registration |
+| `sink_queue` | string | no | The queue closed windows are pushed to, stored as sent |
+| `config_hash` | string | yes | A hash the client computes over the operator chain |
+| `reset` | boolean | no, default `false` | Delete every state row for this query when `config_hash` has changed |
+
+A missing or empty `name`, `source_queue` or `config_hash` answers **400** with code
+`bad_request`, and nothing is written.
 
 Four outcomes:
 
-- **The name is new.** The row is inserted and the response carries `fresh: true`.
-- **The name is new but the tenant may not register it.** With tenancy on, a non-default tenant
-  needs an enabled `queen_streams.quota` row on the cell database, and `max_queries` (when set) is
-  an exact cap. No grant, a disabled one, or a full cap is **HTTP 403** with `success: false`,
-  `denied: true` and an error naming which. Nothing is inserted. This is distinct from the 409
-  below on purpose: retrying a 409 with `reset: true` is the documented fix, and retrying a 403
-  that way fixes nothing. The gate applies to **new names only**: re-registering an existing query,
-  hash match or `reset` alike, always passes, so revoking a grant stops new queries without
-  stranding a Runner that is still draining. The default tenant never reads the grant table.
+- **The name is new.** The query is registered and the response carries `fresh: true`.
+- **The name is new but the tenant may not register it.** A tenant other than the default one
+  needs an enabled streams grant: a quota of kind `streams`, written with
+  `POST /api/v1/system/quota`, whose `maxQueries`, when set, is an exact cap on the tenant's
+  registered queries. No grant, a disabled one, or a full cap is **HTTP 403** with `success: false`,
+  `denied: true` and an error that says whether the tenant is not granted or at its cap. Nothing is
+  written. This is distinct from the 409 below
+  on purpose: retrying a 409 with `reset: true` is the documented fix, and retrying a 403 that way
+  fixes nothing. The gate applies to **new names only**: re-registering an existing query, hash
+  match or `reset` alike, always passes, so revoking a grant stops new queries without stranding a
+  Runner that is still draining. The default tenant needs no grant.
 - **The name exists and `config_hash` matches.** `source_queue` and `sink_queue` are updated to the
-  supplied values and the accumulators are kept. `fresh` is `false`.
+  supplied values and the accumulators are kept. `fresh` is `false`, and so is `reset`, even when
+  the request sent `reset: true`.
 - **The name exists and `config_hash` differs.** With `reset` absent or `false` this is **HTTP
-  409**, with `success: false` and an error naming the query. With `reset: true` the broker deletes
-  every `queen_streams.state` row for the query, stores the new hash, and answers 200 with
-  `reset: true`. Names are per-tenant, so the query this resolves, and the `query_id` the 409
-  reveals, can only ever be the caller's own.
+  409**, with `success: false`, the `query_id` and an error naming the mismatch. With `reset: true`
+  the broker deletes every state row of the query and stores the new registration in one entry of
+  the replicated log, and answers 200 with `reset: true`. Names are per-tenant, so the query this
+  resolves, and the `query_id` the 409 reveals, can only ever be the caller's own.
 
 A 200 body carries the identity every later call uses. `query_id` is that value; the name never
 appears on the wire again.
@@ -91,19 +99,21 @@ appears on the wire again.
 ```
 
 <Aside type="caution">
-`reset: true` deletes the accumulators, not just the registration. Every open window for that query
-is gone, and the next cycle starts folding from an empty state while the source cursor stays where
-it was. It is the right answer to the 409 and the wrong answer to a transient startup failure.
+`reset: true` on a changed hash deletes the accumulators, not just the registration. Every open
+window for that query is gone, and the next cycle starts folding from an empty state while the
+source cursor stays where it was. It is the right answer to the 409 and the wrong answer to a
+transient startup failure.
 </Aside>
 
-The 409 is the only 409 the broker emits (see [status codes](/reference/errors)). It exists because
-old accumulators and a new fold shape do not mix: a chain that used to sum and now averages would
-read the old value as if it meant the new thing.
+The 409 exists because old accumulators and a new fold shape do not mix: a chain that used to sum
+and now averages would read the old value as if it meant the new thing. See
+[status codes](/reference/errors) for the other statuses the broker emits.
 
 ## POST /streams/v1/state/get
 
 Read-only, and the only way to see a window before it closes. Closed windows are ordinary messages
-on the sink queue and need nothing from this route.
+on the sink queue and need nothing from this route. The node answers after a read barrier, so it
+sees every cycle the cluster had committed when the read began.
 
 | Field | Type | Required | Meaning |
 | --- | --- | --- | --- |
@@ -111,23 +121,19 @@ on the sink queue and need nothing from this route.
 | `partition_id` | uuid string | yes | The source partition whose state shard you want |
 | `keys` | string array | no | Exact keys. Absent, `null` or `[]` all mean no key filter |
 | `key_prefix` | string | no | Returns keys beginning with this string. An empty string is treated as absent |
-| `ripe_at_or_before` | number | no | Epoch milliseconds. Returns only rows whose `value.windowEnd` is a JSON number at or before it |
+| `ripe_at_or_before` | integer | no | Epoch milliseconds. Returns only rows whose `value.windowEnd` is an integer at or before it |
 
-The filters are ANDed in that order, so `keys` and `key_prefix` together mean both must hold. The
-response is `{"success": true, "rows": [{"key": "…", "value": {…}, "updated_at": "…"}]}`, ordered by
-`key`. **A key that does not exist is absent from `rows`, not present with a null value**, so an
-empty `rows` and an unknown `query_id` look identical from here.
+The filters are ANDed, so `keys` and `key_prefix` together mean both must hold. The response is
+`{"success": true, "rows": [{"key": "…", "value": {…}, "updated_at": "…"}]}`, ordered by `key` in
+byte order. **A key that does not exist is absent from `rows`, not present with a null value.**
 
 `ripe_at_or_before` is what an idle-flush timer uses: ask for the windows that are already due on a
 partition that has stopped receiving, emit them, and delete their rows in the same cycle. A state
-row whose `value` has no numeric `windowEnd` can never match that filter.
+row whose `value` has no integer `windowEnd` can never match that filter.
 
-Missing `query_id` or `partition_id` produces **400**, because the procedure reports `success:
-false` for it and the handler maps that to 400. An `error` field in the result is **500**.
-
-With tenancy on, a `partition_id` that is not the caller's answers **404** `{"error":"not found"}`
-before the procedure runs, the same answer a genuinely missing partition gets, and a `query_id`
-belonging to another tenant reads as empty `rows` exactly like an unknown one. Neither address can
+A missing `query_id` or `partition_id`, or a `query_id` that is not a UUID, answers **400** with
+code `bad_request`. A `query_id` or `partition_id` that does not exist, or belongs to another
+tenant, answers **404** `{"error":"not found"}`: the same answer either way, so neither address can
 be probed for another tenant's existence.
 
 <Aside type="note">
@@ -139,16 +145,16 @@ feature.
 
 ## POST /streams/v1/cycle
 
-One call, one PostgreSQL transaction: the state writes, the sink pushes and the source ack land
-together or not at all. This is the route the [exactly-once argument](/use/streams) rests on.
+One call, one entry in the replicated log: the state writes, the sink pushes and the source ack
+commit together or not at all. This is the route the [exactly-once argument](/use/streams) rests on.
 
 | Field | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `query_id` | uuid string | yes | 400 if absent or empty |
+| `query_id` | uuid string | yes | 400 if absent or not a UUID |
 | `partition_id` | uuid string | yes | The source partition. 400 if absent or empty |
 | `consumer_group` | string | no | Defaults to `__QUEUE_MODE__` when absent or empty. The SDKs send `streams.<queryId>` |
-| `state_ops` | array | no, default `[]` | Applied in order against `queen_streams.state`, scoped to this query and partition |
-| `push_items` | array | no, default `[]` | Sink messages. The broker packs them into segments before the procedure runs |
+| `state_ops` | array | no, default `[]` | Applied in order, scoped to this query and partition |
+| `push_items` | array | no, default `[]` | Sink messages |
 | `ack` | object or `null` | no | The source ack. `null` is an idle-flush cycle: state ops and sink pushes only, no cursor movement |
 | `release_lease` | boolean | no, default `true` | `false` retains the source lease on the un-acked tail |
 
@@ -165,39 +171,45 @@ route; the SDKs compose it from the operator tag, the window key and the user ke
   "push_items": [
     {"queue": "orders.per_minute", "partition": "Default", "payload": {"count": 41}}
   ],
-  "ack": {"transactionId": "…", "leaseId": "…", "status": "completed", "count": 50}
+  "ack": {"leaseId": "…", "status": "completed", "count": 50}
 }
 ```
 
-Any `type` other than `upsert` or `delete` raises inside the element and fails the whole cycle,
-which is the intended outcome: a typo must not commit a partial fold.
+A state op whose `type` is `delete` deletes its key; any other `type`, or none, writes its `value`
+under its key. An op without a string `key` is skipped. `state_ops_applied` in the response counts
+the ops that had a key.
 
 In a `push_items` element, `partition` defaults to `Default` and `payload` may also be sent as
 `data`. An item with an empty `queue` is skipped rather than rejected. You may supply `messageId`
-and `transactionId`, and the broker stamps a UUIDv7 message id and reuses it as the transaction id
+and `transactionId`, and the broker mints a UUIDv7 message id and reuses it as the transaction id
 when you do not. Sink queues resolve within the request tenant, and one that does not exist yet is
-auto-created under it, exactly like push auto-create.
+auto-created under it, exactly like push auto-create. A sink item whose `transactionId` is already
+in the sink partition's deduplication window refuses the whole cycle (`reason: "duplicate"`).
 
-`leaseId` is the worker id the pop returned, and it is the exactly-once guard: the procedure locks
-the cursor row and raises if the lease is absent, held by another worker, or expired, which rolls
-the sink pushes back with it. `status` counts as success for `completed`, `success`, `acked`, `ok`
-and for an absent field; **anything else, including a misspelling, is a nack** and redelivers the
-batch.
+`leaseId` is the worker id the pop returned, and it is the exactly-once guard: with it, the cycle is
+refused whole when the source lease is held by another worker or has expired (`reason:
+"bad_lease"`), which rolls the sink pushes and the state ops back with it. Without a `leaseId` the
+lease is not checked. `status` counts as success for `completed`, `success`, `acked`, `ok` and for
+an absent field, in any letter case; **anything else, including a misspelling, is a nack** and
+redelivers the batch.
 
 ### What the ack does to the cursor
 
 | `status` | `release_lease` | Effect |
 | --- | --- | --- |
-| ok | `true` | `committed` jumps to the recorded `batch_end`, the lease and the retry state are cleared, `total_consumed` grows by `count`. Identical to an ordinary ack of the whole leased batch |
-| ok | `false` | `committed` advances by exactly `count` frames, walked forward over the real `queen.log_segments` ranges so offsets removed by retention are skipped, and the lease is **retained**. This is the gate partial ack |
-| not ok | either | The lease is released and the cursor is untouched, so the whole batch redelivers. The reported `count` is forced to 0 |
+| ok | `true` | The committed position jumps to the end of the leased batch, the lease and the retry state are cleared, and the consumed total grows by `count`. Identical to an ordinary ack of the whole leased batch |
+| ok | `false` | The committed position advances by exactly `count` offsets from the first un-acked offset of the leased batch, never past its end, and the lease is **retained**. This is the gate partial ack |
+| not ok | either | The lease is released and the cursor is untouched, so the whole batch redelivers. The reported `count` is 0 |
 | `ack: null` | either | The lease block is skipped entirely |
+
+An ok ack refuses the cycle (`reason: "no_batch"`) when the group's cursor on the partition holds
+no leased batch. A group that has never popped the partition has no cursor there, and its ack does
+nothing while the rest of the cycle commits.
 
 ### The response
 
-A completed procedure call is always **HTTP 200**, whether the element succeeded or not, so a
-client must read the body rather than the status line. A 500 means the call itself failed, and
-retrying it is safe because the whole call is one transaction.
+A cycle that reaches the state machine answers **HTTP 200** whether it committed or was refused,
+so a client must read the body rather than the status line.
 
 ```json
 {
@@ -205,21 +217,27 @@ retrying it is safe because the whole call is one transaction.
   "query_id": "0193f0c4-...",
   "partition_id": "0193f0c5-...",
   "queueName": "orders",
-  "state_ops_applied": 3,
+  "state_ops_applied": 2,
   "push_results": [
-    {"queue": "orders.per_minute", "partition": "Default", "status": "queued", "baseOffset": 4711}
+    {"queueName": "orders.per_minute", "messageId": "0193f0c6-...", "transactionId": "0193f0c6-...", "status": "created"}
   ],
   "ack_result": {"success": true, "count": 50, "lease_released": true, "dlq": false}
 }
 ```
 
-On failure the same envelope comes back with `"success": false` and an `error` string carrying the
-PostgreSQL message, and nothing committed for that element. Two of those errors are ownership
-verdicts: `partition not found` when the source partition is not the caller's (or does not exist,
-deliberately the same message), and `query not found` for a foreign or unknown `query_id`. With
-tenancy on, a foreign partition usually never reaches the procedure at all: the handler's
-ownership gate answers **404** `{"error":"not found"}` first, the same pre-gate the state read
-has.
+`push_results` has one element per sink item that was not skipped. `ack_result` is `null` for an
+idle-flush cycle.
+
+A refused cycle comes back as `{"success": false, "error": "…", "reason": "…"}`, and nothing in it
+was written: no state op, no sink message, no cursor movement. The `reason` values above
+(`bad_lease`, `no_batch`, `duplicate`) are the ones a worker meets in normal operation.
+
+A status other than 200 means the cycle did not reach a verdict: `400` for a malformed request,
+`404` `{"success": false, "error": "query or partition not found"}` for a query or partition that
+is not the caller's, `413` `name_too_long` for a sink queue or partition name the store cannot
+hold, and the broker's common `503` (with `Retry-After: 1`) and `507` answers, described in
+[HTTP API conventions](/reference/http/). After a `503` with code `timeout` the outcome is
+unknown: the entry may have committed.
 
 <Aside type="caution">
 `"success": false` arrives with a 200. A client that checks only the status code will treat a
@@ -229,22 +247,14 @@ notice it is looping.
 
 ## What the broker adds on this route
 
-Three things happen in the handler rather than in the procedure, and a client implementing the
-protocol by hand inherits all of them:
+Each sink item is framed and hashed by the broker and planned by the same push planner
+[`POST /api/v1/push`](/reference/http/push) uses, inside the cycle's entry, so offsets,
+deduplication and queue auto-creation behave as they do for a push. Stream output is not a second
+class of message: a consumer of the sink queue pops it like any pushed message, and a consumer
+parked on that queue is woken by it.
 
-- **Packing.** `push_items` are grouped by queue and partition, framed, zstd-compressed and hashed
-  broker-side, then pushed through `queen.log_push_one_v1`, the same allocator
-  [`POST /api/v1/push`](/reference/http/push) uses. Stream output is not a second class of message.
-- **Encryption.** Sink payloads for a queue with `encryptionEnabled` are enveloped before packing,
-  and a cipher failure warns and stores plaintext rather than failing the cycle. The flag is read
-  from the request tenant's queue, never from another tenant's same-named one. See
-  [payload encryption](/reference/security/encryption/).
-- **Discoverability and metrics.** Because the procedure commits internally, neither the push nor
-  the ack fast path runs afterwards, so the handler does their bookkeeping: it marks the sink
-  partitions in the hot list (or wakes parked pops directly when the hot list is off) and
-  attributes the cycle's pushes and acks to the per-queue counters itself. Without that step a sink
-  emit stays invisible to consumers until the periodic reseed sweep, and the charts read zero while
-  the queue visibly fills.
+Sink payloads are not encrypted: a 2.0 broker stores them in cleartext even when the sink queue has
+`encryptionEnabled`. See [payload encryption](/reference/security/encryption/).
 
 <CardGrid>
   <LinkCard
@@ -255,11 +265,11 @@ protocol by hand inherits all of them:
   <LinkCard
     href="/reference/errors"
     title="Status codes"
-    description="Every code the broker returns, including the 409 that only registration emits."
+    description="Every code the broker returns, including the 409 that registration emits."
   />
   <LinkCard
-    href="/internals/schema"
-    title="Schema and procedures"
-    description="The queen_streams tables and the stored procedures these three routes call."
+    href="/internals/"
+    title="Internals"
+    description="How a node plans, replicates and applies what these routes send."
   />
 </CardGrid>

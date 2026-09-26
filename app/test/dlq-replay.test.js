@@ -329,23 +329,18 @@ test('500 with no stated row state: the outcome is unknown, and it says so', () 
   }
 })
 
-test('503: push maintenance refuses the move, and the row is untouched', () => {
-  // A move cannot be spooled the way a push is — the spool carries frames, not
-  // the removal of a dead-letter record — so the broker refuses it outright
-  // while the switch is on. That is a state of the cell, not of this row.
-  const v = replayVerdict(apiError(503, {
-    success: false,
-    result: 'maintenance',
-    error: 'push maintenance is on',
-    dlqRowRemoved: false,
-    message: 'Push maintenance is on, so nothing may be written to the log. The dead-letter row is untouched; replay it once maintenance is off',
-  }))
-  assert.equal(v.kind, 'warning')
-  assert.equal(v.removeRow, false)
-  assert.equal(v.refresh, false)
-  assert.match(v.title, /Push maintenance is on/)
-  assert.match(v.detail, /untouched/)
-  assert.match(v.detail, /once the maintenance/)
+test('503 from a cluster that cannot answer: the outcome is unknown, and it says so', () => {
+  // server/src/handlers/raft.rs `err_response`: `no_leader`, `retry` and
+  // `timeout` are 503 + Retry-After with no `dlqRowRemoved`. None of them says
+  // what happened to the row, so it stays and the list is reloaded.
+  for (const code of ['no_leader', 'retry', 'timeout']) {
+    const v = replayVerdict(apiError(503, { error: `cluster answered ${code}`, code }, { code, retryAfter: 1 }))
+    assert.equal(v.kind, 'error', code)
+    assert.equal(v.removeRow, false, 'an unknown outcome must never drop a row')
+    assert.equal(v.refresh, true, code)
+    assert.match(v.title, /outcome is unknown/)
+    assert.doesNotMatch(v.detail, /safely be sent again/)
+  }
 })
 
 test('no answer at all: the outcome is unknown, so nothing is claimed', () => {

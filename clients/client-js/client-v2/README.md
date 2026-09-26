@@ -60,7 +60,7 @@ When connecting to multiple Queen servers, you can choose how requests are distr
 
 #### Affinity Mode (Recommended for Production)
 
-Uses consistent hashing with virtual nodes to route consumer groups to the same backend server. This optimizes database queries by consolidating poll intentions.
+Uses consistent hashing with virtual nodes to route consumer groups to the same backend server.
 
 ```javascript
 const queen = new Queen({

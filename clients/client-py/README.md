@@ -16,7 +16,7 @@
 
 ## What is Queen MQ?
 
-Queen MQ is a PostgreSQL-backed message queue system with a powerful feature set:
+Queen MQ is a partitioned message queue broker that keeps its state in its own replicated log, with a powerful feature set:
 
 - **FIFO Partitions** - Unlimited ordered partitions within queues
 - **Consumer Groups** - Kafka-style consumer groups for scalability
@@ -491,7 +491,7 @@ cancelled = await queen.timers.cancel('orders', 'order:9f1:expire', txn=res['txn
 
 Durations that can be sub-second are in **milliseconds** (`delay_ms`), the ones
 that cannot are in **seconds** (`ttl_seconds`). Only relative delays exist:
-there is one clock and it is the database's. A delay in the past is legal and
+there is one clock and it is the broker's. A delay in the past is legal and
 fires on the first cycle.
 
 `deliverAt` is **"not before"**, never "exactly at".

@@ -339,7 +339,7 @@ var deliberate = []classification{
 	{regexp.MustCompile(`^transactions/commit\.log_end_offset$`),
 		"Kafka advances the partition by N+1 — the records plus the COMMIT MARKER, a control batch it writes " +
 			"into the data partition — and this facade by N, because it writes no markers at all: a committed " +
-			"transaction here is one Postgres transaction of ordinary records. The consequence a client can see " +
+			"transaction here is one broker transaction of ordinary records. The consequence a client can see " +
 			"is measured beside this and is nothing: commit.read_committed_records is 10 on both. The oracle's " +
 			"marker is written after EndTxn returns, so the runner settles on lso == hw before asking, or this " +
 			"row would be the runner's timing rather than a difference"},

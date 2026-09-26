@@ -57,7 +57,7 @@
 //! declared width means deleting and recreating the topic.
 //!
 //! `replication_factor` is the same shape with a shorter argument: one logical
-//! broker, and replication is Postgres's business. Any value including -1 is
+//! broker, and replication is the Queen broker's business. Any value including -1 is
 //! accepted and the response reports 1. Refusing RF>1 would have been the other
 //! defensible choice and is rejected for one measured reason — it breaks every
 //! provisioner whose default is 3, which is most of them.

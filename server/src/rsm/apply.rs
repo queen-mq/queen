@@ -30,8 +30,7 @@
 //!   durable-point cadence, GC batch), never WHAT they are.
 //! - **Enforcement**: `clippy.toml` lists `SystemTime::now`, `Instant::now`,
 //!   `std::env::var*` and `rand::{random,thread_rng}`; `[lints.clippy]` in
-//!   Cargo.toml allows the lint for the rest of the package (the postgres
-//!   class reads clocks and the environment 196 times) and this file,
+//!   Cargo.toml allows the lint for the rest of the package and this file,
 //!   `rsm/state/` and `rsm/store/` re-`deny` it. The two `#[allow]`s below are
 //!   the whole of the exception and each says why at the allow.
 //!
@@ -86,9 +85,8 @@
 
 // I2, enforced rather than reviewed: `clippy.toml` lists the clock,
 // environment and randomness calls this file may not make, `[lints.clippy]` in
-// Cargo.toml switches the lint off for the rest of the package (the postgres
-// class, and every integration test), and this is where it is switched back
-// on.
+// Cargo.toml switches the lint off for the rest of the package and every
+// integration test, and this is where it is switched back on.
 #![deny(clippy::disallowed_methods)]
 
 use std::collections::{BTreeSet, HashMap};
@@ -629,9 +627,9 @@ pub struct ApplyConfig {
     /// a lease, so a delayed or leased queue can push an already-claimable
     /// partition into the future (an under-arm the claim then papers over).
     ///
-    /// PERF-H proved ON correct (never under-arms — claimability-equivalent to
-    /// the SQL), rebuild-equal at every boundary, cadence-independent (the I2
-    /// test) and crash-safe. It is nonetheless shipped OFF (DEFAULT) for one
+    /// PERF-H proved ON correct (never under-arms), rebuild-equal at every
+    /// boundary, cadence-independent (the I2 test) and crash-safe. It is
+    /// nonetheless shipped OFF (DEFAULT) for one
     /// reason and it is NOT correctness: ON changes the value the replicated
     /// `pending` keyspace holds (earliest, not last), so the §12.9 digest moves,
     /// and every differential/crash reference that runs `cfg()` alongside a node
@@ -820,7 +818,7 @@ pub struct ApplyStats {
     pub rows_swept: u64,
     /// Effects that named a row that was not there and were therefore a
     /// no-op: a delete of something already deleted. Counted rather than
-    /// refused, because the SQL's deletes are idempotent too.
+    /// refused, because deletes are idempotent.
     pub missing_rows: u64,
     /// Skip markers applied: entries an operator stepped over
     /// (`QUEEN_RAFT_APPLY_SKIP`).
@@ -2173,7 +2171,7 @@ impl<'s, S: Store> Applier<'s, S> {
                 Ok(())
             }
 
-            // WP-2.2: KV (024). Apply knows no KV semantics (I2): the planner
+            // WP-2.2: KV. Apply knows no KV semantics (I2): the planner
             // decided the value, the version (`kv_version_base + ordinal`,
             // asserted by `Entry::validate` and counted by `execute`), the
             // expiry and both stamps from the entry's `now_us`. Apply writes the
@@ -2201,11 +2199,10 @@ impl<'s, S: Store> Applier<'s, S> {
                 Ok(())
             }
             // A physical delete: a client delete, a lost `expect` that still
-            // prunes an expired row (024 deletes it and answers `absent`), or
-            // one row of the leader's expiry sweep (026). A row that is already
-            // gone is a no-op, never an error — the planner decided against the
-            // same state, so only a replay could meet it, and a replay must
-            // converge.
+            // prunes an expired row, or one row of the leader's expiry sweep.
+            // A row that is already gone is a no-op, never an error — the
+            // planner decided against the same state, so only a replay could
+            // meet it, and a replay must converge.
             Effect::KvDelete { tenant, ns, key } => {
                 if self.writes.del_kv(tenant, ns, key)?.is_none() {
                     self.stats.missing_rows += 1;
@@ -2240,7 +2237,7 @@ impl<'s, S: Store> Applier<'s, S> {
             }
             Effect::TenantPurge { tenant } => self.tenant_purge(tenant),
 
-            // Timers (025, WP-2.3). Plain overwrites of one row and its
+            // Timers (WP-2.3). Plain overwrites of one row and its
             // fire-order index entry, from values the planner computed — no
             // clock here (I2): `deliver_at` and every backoff instant travel in
             // the effect. A fire is NOT a timer kind: it is the push's `Append`
@@ -2278,9 +2275,9 @@ impl<'s, S: Store> Applier<'s, S> {
             } => {
                 match self.writes.timer(tenant, queue, key)? {
                     Some(mut row) => {
-                        // 025 `log_timers_fail_v1`: a new visibility, the attempt
-                        // count the planner decided (unchanged on a transient
-                        // failure), the error. The row stays cancellable.
+                        // A new visibility, the attempt count the planner
+                        // decided (unchanged on a transient failure), the
+                        // error. The row stays cancellable.
                         row.visible_at_us = Some(*visible_at_us);
                         row.attempts = *attempts;
                         row.last_error = last_error.clone();
@@ -2679,7 +2676,7 @@ impl<'s, S: Store> Applier<'s, S> {
     /// COARSE BY CONTRACT, exactly like the ring entry it becomes: the claim
     /// re-verifies everything against the cursor row. `delayed_processing` and
     /// `window_buffer` are the two configured reasons a fresh frame is not
-    /// claimable yet (003, 004).
+    /// claimable yet.
     fn ready_at(&self, tenant: &str, queue: &str, created_at_us: i64) -> Result<i64> {
         let Some(cfg) = self.writes.queue(tenant, queue)? else {
             return Ok(created_at_us);
@@ -2852,7 +2849,7 @@ impl<'s, S: Store> Applier<'s, S> {
         let queue = p.queue.clone();
         let old = self.writes.cursor(pid, group)?;
 
-        // `leases_by_worker` is the derived index `log_renew_lease_v1` walks.
+        // `leases_by_worker` is the derived index a lease renew walks.
         // It mirrors the cursor row exactly: one entry while the row names a
         // worker and an expiry, none otherwise.
         let old_worker = old.as_ref().and_then(|c| c.worker.clone());
@@ -2878,8 +2875,8 @@ impl<'s, S: Store> Applier<'s, S> {
         self.writes.put_cursor(pid, group, row)?;
 
         // Counters (§6.4). `committed` is "last acked offset", so the delta is
-        // the frames this write completed; a seek backwards (010) gives a
-        // negative delta, which is what the postgres oracle does too.
+        // the frames this write completed; a seek backwards gives a negative
+        // delta.
         let old_committed = old.as_ref().map(|c| c.committed).unwrap_or(-1);
         let delta = row.committed - old_committed;
         if delta != 0 {
@@ -2953,8 +2950,8 @@ impl<'s, S: Store> Applier<'s, S> {
     ///
     /// `log_start` is where the payload begins, `txns_start` where the hash
     /// lists begin, and `txns_start ≤ log_start` — the hash lists outlive the
-    /// segments retention deletes, because the dedup probe (003) and
-    /// ack-by-hash below the cursor (005) still read them inside the txns
+    /// segments retention deletes, because the dedup probe and
+    /// ack-by-hash below the cursor still read them inside the txns
     /// window (D10). Each frame is therefore released TWICE, once per
     /// watermark, and only the second release lets its file die (§11.7).
     fn watermark(&mut self, pid: Pid, log_start: u64, txns_start: u64, now_us: i64) -> Result<()> {
@@ -3066,8 +3063,8 @@ impl<'s, S: Store> Applier<'s, S> {
     /// alone: it carries the hash list of offsets above it too, and a row is
     /// the unit D10 stores. Keeping a few hashes longer than asked is exact in
     /// the direction that matters — a duplicate is still found — while
-    /// deleting them early would answer "new" for a transaction id the
-    /// postgres oracle still calls a duplicate.
+    /// deleting them early would answer "new" for a transaction id that is
+    /// still a duplicate.
     fn expire_hashes(&mut self, pid: Pid, from: u64, to: u64) -> Result<()> {
         // STORAGE_V2 Lever 2 (`DEDUP_INDEX=segment`): there are NO `Txns` (or
         // `Dedup`) rows to expire — `record` wrote none. The dedup window is
@@ -3261,16 +3258,13 @@ impl<'s, S: Store> Applier<'s, S> {
         Ok(())
     }
 
-    /// A queue delete (013): the NAME-keyed rows go at once, as one
-    /// transaction, exactly as the SQL does — so the name is reusable
-    /// immediately and a push right after the delete recreates it. The
-    /// pid-keyed data goes in `DeleteChunk`s behind a `GarbageAdd` (§5.2).
-    /// PARITY NOTE for the read paths (WP-2.x): postgres's
-    /// `queen.delete_queue_v1` removes the queue's `log_dlq` rows in the same
-    /// transaction, and §5.2 puts DLQ in the CHUNKED half here, so between this
-    /// call and the last `DeleteChunk` the dead queue's dead letters are still
-    /// in the `dlq` keyspace under `(tenant, queue, id)` — a name a push may
-    /// already have recreated. Their gauges are settled and cannot move again
+    /// A queue delete: the NAME-keyed rows go at once, as one transaction, so
+    /// the name is reusable immediately and a push right after the delete
+    /// recreates it. The pid-keyed data goes in `DeleteChunk`s behind a
+    /// `GarbageAdd` (§5.2), DLQ included, so between this call and the last
+    /// `DeleteChunk` the dead queue's dead letters are still in the `dlq`
+    /// keyspace under `(tenant, queue, id)` — a name a push may already have
+    /// recreated. Their gauges are settled and cannot move again
     /// ([`Applier::queue_gauges_live`]), but a DLQ LISTING that filters only by
     /// name would show them. The reader must skip a dead letter whose pid is in
     /// the `garbage` set, as planners already skip garbage pids.
@@ -3321,8 +3315,8 @@ impl<'s, S: Store> Applier<'s, S> {
         Ok(())
     }
 
-    /// Drop a partition and everything keyed by it (006 cleanup, and the tail
-    /// of a delete whose chunks have finished).
+    /// Drop a partition and everything keyed by it (retention's partition
+    /// cleanup, and the tail of a delete whose chunks have finished).
     fn partition_delete(&mut self, pid: Pid) -> Result<()> {
         let Some(p) = self.writes.partition(pid)? else {
             self.stats.missing_rows += 1;
@@ -3332,8 +3326,8 @@ impl<'s, S: Store> Applier<'s, S> {
         let retained = self.ctr_read(&keys::counter_partition(pid, Counter::RetainedBytes))?;
         // The chunked path settled this partition's share of every group's
         // `pending` gauge at its `GarbageAdd`, while the cursors were still
-        // there to say what it was; a direct `PartitionDelete` (006 cleanup)
-        // settles it here, with everything still in place.
+        // there to say what it was; a direct `PartitionDelete` (retention's
+        // partition cleanup) settles it here, with everything still in place.
         if self.writes.garbage(pid)?.is_none() {
             self.settle_group_pending(pid)?;
         }
@@ -3468,7 +3462,7 @@ impl<'s, S: Store> Applier<'s, S> {
                 continue;
             };
             if let GarbageScope::Group { group } = scope {
-                // A group delete (014) touches only the `(pid, group)` rows,
+                // A group delete touches only the `(pid, group)` rows,
                 // and there is exactly one cursor row per pair: no resume is
                 // needed and none is kept.
                 self.group_scope_chunk(*pid, group)?;
@@ -3543,7 +3537,7 @@ impl<'s, S: Store> Applier<'s, S> {
                     gone += 1;
                 }
             }
-            // A group delete takes the group's dead letters with it (014), and
+            // A group delete takes the group's dead letters with it, and
             // the count they were carrying goes too: the queue survives the
             // group, and its `dlq_count` is a gauge of the rows that exist.
             self.settle_dlq_count(pid, &tenant, &queue, gone)?;

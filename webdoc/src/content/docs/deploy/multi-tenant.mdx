@@ -1,30 +1,30 @@
 ---
 title: Multi-tenant
-description: "Put queen_proxy in front of a broker: per-tenant credentials, quotas and metering, and the path from an empty cell to a tenant pushing through it."
+description: "Turn the embedded proxy into a multi-tenant edge: per-tenant credentials, quotas and metering, and the path from an empty cell to a tenant pushing through it."
 type: how-to
 tier: operate
 sidebar:
   order: 10
 sourceOfTruth:
-  - proxy/src/main.rs
+  - server/src/proxy_embed.rs
+  - proxy/src/app.rs
+  - proxy/src/cp.rs
+  - proxy/src/auth.rs
   - proxy/src/gateway.rs
   - proxy/src/acting.rs
   - proxy/src/config.rs
-  - proxy/migrations/001_init.sql
-  - proxy/migrations/004_lifecycle.sql
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): gateway.rs gained the DLQ replay push blocks, destination admission and a second metering sample; the summary here still holds, and the detail is on the endpoints, quotas and metering pages.
+  - proxy/src/store/data.rs
 ---
 
-`queen_proxy` is a second Rust binary that stands in front of a broker and turns it into
-something you can hand to other people. Both are Apache-2.0, so the multi-tenant service is
-yours to run: for internal teams, for customers, or under a product of your own.
+The proxy inside the broker binary is what turns one Queen into something you can hand to other
+people: for internal teams, for customers, or under a product of your own. Both halves are
+Apache-2.0, so the multi-tenant service is yours to run.
 
-The broker already scopes queues by tenant on its own, behind `QUEEN_TENANCY_HEADER`
+The broker already scopes queues by tenant on its own
 ([broker-native tenancy](/reference/multi-tenant/broker-tenancy)). What the proxy adds is the
-reason to trust that header: it spends the client's credential at the edge, strips it, and
-injects the tenant itself. Around that it holds what a shared broker has no place holding.
-Per-cluster API keys and human logins
+reason to trust the tenant: it spends the client's credential, drops any tenant header the client
+sent, and hands the request to the broker in-process with the tenant it resolved. Around that it
+holds what a shared broker has no place holding: per-cluster API keys and human logins
 ([credentials](/reference/multi-tenant/auth)), plan limits on rate, size and count
 ([quotas](/reference/multi-tenant/quotas)), a route classifier that forwards nothing it cannot
 name ([endpoints](/reference/multi-tenant/endpoints)), and usage counted from the per-item
@@ -32,135 +32,86 @@ statuses the broker actually returned ([metering](/reference/multi-tenant/meteri
 
 ## The shape
 
-A cell is one proxy, one broker, one PostgreSQL for the messages. The proxy needs a second
-PostgreSQL of its own, *pxdb*, carrying the tenants, clusters, keys, plans and usage of the
-whole fleet. The proxy reads it through a 30-second cache, which is what keeps a pxdb outage
-from stopping the data plane.
-
 Three nouns carry the model:
 
 - **Tenant**: the organisation. Owns users and clusters.
-- **Cluster**: the tenant-visible Queen. One hostname, one plan, one queue namespace.
-- **Cell**: one physical stack, on one failure domain.
+- **Cluster**: the tenant-visible Queen. One hostname, one plan, one queue namespace, backed by a
+  broker tenant of its own.
+- **Cell**: one physical Queen deployment, a single node or one raft cluster of nodes, on one
+  failure domain.
 
-A cluster lives on exactly one cell and never spans two. Every limit rests on that: a cluster's
-traffic can only arrive at the one proxy fronting its cell, so the counters are plain in-process
-state, exact with no Redis and nothing to coordinate. One proxy per cell is the assumption the
-code is written against.
+A cluster lives on exactly one cell and never spans two. The proxy's own state, tenants, clusters,
+users, roles, API-key hashes, plans and usage, is stored in the cell's replicated key/value store
+under a system tenant, so it has the same durability as the messages and every node sees it.
 
 Routing is a DNS label. The proxy reads the cluster slug from the first label of the `Host`
-header, so `acme-prod.eu1.example.com` is the cluster `acme-prod`, and one wildcard record
-covers every cluster on the cell.
-
-The exception is a hostname listed in `QUEEN_PROXY_SHARED_HOSTS`: one URL fronting many
-clusters, where the label names nothing and the credential does the routing instead. An API
-key acts on the cluster it is bound to, a browser session names one with
-`x-queen-act-cluster`, and a missing or invalid credential answers `401`, never `421`
-([credentials](/reference/multi-tenant/auth)).
+header, so `acme-prod.eu1.example.com` is the cluster `acme-prod`, and one wildcard record covers
+every cluster on the cell. The exception is a hostname listed in `QUEEN_PROXY_SHARED_HOSTS`: one
+URL fronting many clusters, where the credential does the routing instead
+([Proxy](/deploy/proxy#routing)).
 
 ## Bring up a cell
 
 <Steps>
 
-1. **Mint the cell secret.** The broker holds an HMAC secret; the cell row holds a token signed
-   with it. The same string does not go in two places.
-
-   ```bash
-   CELL_JWT_SECRET=$(openssl rand -hex 32)
-   b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
-   header=$(printf '{"alg":"HS256","typ":"JWT"}' | b64url)
-   claims=$(printf '{"sub":"queen-proxy","role":"admin"}' | b64url)
-   sig=$(printf '%s.%s' "$header" "$claims" | openssl dgst -binary -sha256 -hmac "$CELL_JWT_SECRET" | b64url)
-   CELL_SECRET="$header.$claims.$sig"
-   ```
-
-   The `admin` role is required, because the proxy forwards queue and consumer-group deletions.
-   There is no `exp` on purpose: nothing refreshes this value, so rotate it by minting a new
-   one.
-
-2. **Run the broker,** on a network policy that admits the proxy and nobody else.
-
-   ```bash
-   JWT_ENABLED=true JWT_ALGORITHM=HS256 JWT_SECRET="$CELL_JWT_SECRET" QUEEN_TENANCY_HEADER=true QUEEN_KV_TRUSTED_PROXY=true ./bin/queen
-   ```
-
-   The second of those two is not optional and the broker **exits 1** without it. The tenant
-   header is opaque and validated against nothing, and [key/value state](/use/kv) is addressable
-   purely by name, so a forged header reads and writes another tenant's state knowing only that
-   name. Queues survive a forged header because a caller must still name a queue and an ack
-   carries a lease id it cannot guess; the KV has no such id. Since the KV is part of the engine
-   on every cell and no flag can take it away, the requirement is unconditional: setting
-   `QUEEN_KV_TRUSTED_PROXY=true` is you stating that step 3 is what supplies the header and
-   strips the client's. If that is not true of your deployment, do not run with the header.
-
-3. **Run the proxy.** `PXDB_HOST` is the only variable it refuses to start without, and the
-   eight migrations that create the `queen_proxy` schema are embedded in the binary and applied
-   at boot. Generate `QUEEN_PROXY_JWT_SECRET` once and reuse it: sessions are signed with it, so
-   changing it logs every human out.
+1. **Generate the secrets.** `QUEEN_PROXY_JWT_SECRET` signs human sessions and `QUEEN_PROXY_CP_TOKEN`
+   guards the control plane. Every node gets the same values.
 
    ```bash
    SESSION_SECRET=$(openssl rand -hex 32)
-   docker run -d --name queen-proxy -p 6711:6711 -e PXDB_HOST=10.0.3.20 -e PXDB_PASSWORD=change-me -e QUEEN_PROXY_JWT_SECRET="$SESSION_SECRET" -v queen-proxy-spool:/app/spool ghcr.io/queen-mq/queen-proxy:latest
+   CP_TOKEN=$(openssl rand -hex 32)
    ```
+
+2. **Run the nodes with the proxy on.** On one node:
 
    ```bash
-   curl -s http://127.0.0.1:6711/healthz
+   QUEEN_RAFT_DIR=/var/lib/queen/raft \
+   QUEEN_PROXY_EMBEDDED=true \
+   QUEEN_PROXY_PORT=6711 \
+   QUEEN_PROXY_JWT_SECRET="$SESSION_SECRET" \
+   QUEEN_PROXY_CP_TOKEN="$CP_TOKEN" \
+   QUEEN_PROXY_SPOOL_DIR=/var/lib/queen/raft/proxy-spool \
+   ./bin/queen
    ```
 
-   ```json
-   {"enforce":false,"shared_hosts":0,"status":"ok","tenant_header":true}
-   ```
+   A cluster adds its raft variables to each node ([High availability](/deploy/ha)); a complete
+   three-node file is [Docker Compose](/deploy/compose). With `QUEEN_PROXY_PORT` set, port 6711 is
+   the front door and 6632 the internal broker port, which must stay on a network only you reach.
+   Leave `QUEEN_PROXY_PORT` out and the proxy takes 6632 itself, with no unauthenticated port at
+   all.
 
-   How to run it in production, with Docker or Kubernetes, and why it stays on one replica:
-   [Proxy](/deploy/proxy).
-
-4. **Register the cell.** No SQL function creates one: cells are fleet infrastructure.
-   `base_url` must be `http://`, an assertion that broker traffic is cell-internal with TLS
-   terminated at the proxy edge.
-
-   ```bash
-   psql -h 10.0.3.20 -U postgres -d queen_proxy -v cell_secret="$CELL_SECRET" <<'SQL'
-   INSERT INTO queen_proxy.cells (slug, region, base_url, class, cell_secret)
-   VALUES ('eu1-shared-a', 'eu1', 'http://10.0.3.11:6632', 'shared', :'cell_secret');
-   SQL
-   ```
-
-5. **Point a wildcard DNS record at the proxy,** so every cluster slug on this cell resolves to
+3. **Point a wildcard DNS record at the front door,** so every cluster slug on this cell resolves to
    it.
 
 </Steps>
 
 ## Onboard a tenant
 
-Nothing over HTTP creates a tenant. Every mutation of tenants, clusters, users, keys and roles
-is a SQL function in the `queen_proxy` schema, which is what keeps the audit row and the cache
-invalidation from being optional. One call does the whole onboarding, and unwinds completely if
-any part of it raises.
-
-```sql
-SELECT queen_proxy.bootstrap_tenant(
-  'acme',                    -- tenant slug
-  'Acme Inc',                -- tenant name
-  'acme-prod',               -- cluster slug, and the subdomain
-  'free',                    -- plan code
-  (SELECT id FROM queen_proxy.cells WHERE slug = 'eu1-shared-a'),
-  'ops@acme.example',        -- admin email
-  'initial-password',        -- NULL for an OAuth-only admin
-  'default'                  -- API key name
-);
-```
-
-It returns `{tenant_id, cluster_id, user_id, api_key, password_set, can_login}`. The key is
-plaintext, shown exactly once, and only its sha256 hash is stored; a re-run on the same slugs
-returns the existing ids with a null key. `can_login` is false when the admin has neither a
-password nor a linked OAuth identity, and the call raises a warning saying so: legal for
-API-key-only onboarding, a silent lockout otherwise.
-
-That key is everything a client needs. Same routes, same SDKs, same wire format as a bare
-broker, with the hostname doing the routing:
+One call makes the tenant, the cluster, the admin user and the first API key, in one write: either
+all of it exists afterwards or none of it does.
 
 ```bash
-curl -s -X POST http://acme-prod.eu1.example.com:6711/api/v1/push \
+curl -s -X POST http://127.0.0.1:6711/api/cp/bootstrap \
+  -H "x-queen-cp-token: $CP_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"tenant_slug":"acme","tenant_name":"Acme Inc","cluster_slug":"acme-prod","plan":"free","admin_email":"ops@acme.example","password":"initial-password","key_name":"default"}'
+```
+
+It returns `tenant_id`, `cluster_id`, `user_id`, `api_key`, `password_set` and `can_login`. The key
+is plaintext, shown exactly once, and only its sha256 hash is stored; a re-run on the same slugs
+returns the existing ids with a null key. `cluster_slug` defaults to the tenant slug and `plan` to
+`free`. Leave `password` out for an admin who signs in only through Google or GitHub; `can_login`
+is false when the admin has neither a password nor a linked identity, which is legal for API-key-only
+onboarding and a silent lockout otherwise.
+
+For the first tenant of a cell, the same thing can come from the environment instead, at every
+boot and idempotently: `QUEEN_PROXY_BOOTSTRAP_TENANT` and its companions
+([the bootstrap tenant](/deploy/proxy#the-bootstrap-tenant)).
+
+That key is everything a client needs. Same routes, same SDKs, same wire format as a bare broker,
+with the hostname doing the routing:
+
+```bash
+curl -s -X POST https://acme-prod.eu1.example.com/api/v1/push \
   -H "Authorization: Bearer $API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"items":[{"queue":"orders","partition":"cust-42","payload":{"hello":"world"}}]}'
@@ -168,97 +119,42 @@ curl -s -X POST http://acme-prod.eu1.example.com:6711/api/v1/push \
 
 The plan named in that call decides the numbers: requests and messages a second, queues,
 partitions per queue, parked long polls, payload and batch size, retained bytes and retention
-window. Four plans ship seeded, and a single cluster is raised above its plan with a jsonb
-column rather than a forked plan
-([the data model](/reference/multi-tenant/tenants)).
-
-Afterwards, the same schema carries the rest of the lifecycle, one function per operation so the
-audit row and the cache invalidation are never optional:
-
-```sql
--- another human on the tenant, and their role on one cluster
-SELECT queen_proxy.create_user(:tenant_id, 'dev@acme.example', NULL, 'google');
-SELECT queen_proxy.grant_cluster_role(:cluster_id, 'dev@acme.example', 'admin');
-
--- a second API key, for a service that should be revocable on its own
-SELECT queen_proxy.issue_api_key(:cluster_id, 'ingest-worker', :key_hash, ARRAY['produce']);
-```
-
-A password hash of `NULL` is the OAuth-only user: they exist, they have a role, and they can
-only arrive through Google.
-
-## One hostname for several tenants
-
-Every cluster so far has its own subdomain and the wildcard record covers them all. A cell serving
-a handful of teams often wants the opposite: one URL everybody uses, with the API key deciding
-whose cluster a request lands in. `QUEEN_PROXY_SHARED_HOSTS` names the hostnames that work that way
-([proxy configuration](/deploy/proxy#shared-hosts)).
-
-Onboard the tenants exactly as above. Nothing about them is special, and each call returns its own
-plaintext key once.
-
-```sql
-SELECT queen_proxy.bootstrap_tenant('acme', 'Acme Inc', 'acme-prod', 'free',
-  (SELECT id FROM queen_proxy.cells WHERE slug = 'eu1-shared-a'),
-  'ops@acme.example', NULL, 'default');
-
-SELECT queen_proxy.bootstrap_tenant('globex', 'Globex', 'globex-prod', 'free',
-  (SELECT id FROM queen_proxy.cells WHERE slug = 'eu1-shared-a'),
-  'ops@globex.example', NULL, 'default');
-```
-
-Then name the shared hostname on the proxy and restart it, since the list is read at boot. It is a
-list, so a cell can front one shared name beside the per-cluster subdomains it already serves.
+window. Four plans are seeded, `free`, `dev`, `pro` and `dedicated-s`, and a single cluster is
+raised above its plan with an override rather than a forked plan
+([the data model](/reference/multi-tenant/tenants)):
 
 ```bash
-QUEEN_PROXY_SHARED_HOSTS=queen.eu1.example.com
+curl -s -X PUT http://127.0.0.1:6711/api/cp/clusters/$CLUSTER_ID/overrides \
+  -H "x-queen-cp-token: $CP_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"max_queues": 500}'
 ```
 
-`/healthz` reports how many are listed, a count rather than the names.
+The override keys are the plan's own limit names (`max_req_per_sec`, `max_msgs_per_sec`,
+`max_queues`, `max_partitions_per_queue`, `max_payload_bytes`, `max_retained_bytes` and the rest). A
+key left out inherits the plan's value, a number replaces it, and `null` makes that one limit
+unlimited. A body of `null` clears the whole override.
+
+## More keys
+
+A second API key, for a service that should be revocable on its own, is issued from its hash, so
+the plaintext never reaches the proxy or its logs. Generate the key, keep it, and send only the
+sha256:
 
 ```bash
-curl -s http://127.0.0.1:6711/healthz
+KEY=qk_live_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')
+HASH=$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)
+curl -s -X POST http://127.0.0.1:6711/api/cp/keys \
+  -H "x-queen-cp-token: $CP_TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"cluster_id\":\"$CLUSTER_ID\",\"name\":\"ingest-worker\",\"key_hash\":\"$HASH\",\"scopes\":[\"produce\"]}"
 ```
 
-```json
-{"enforce":false,"shared_hosts":1,"status":"ok","tenant_header":true}
-```
+The scopes are `produce`, `consume`, `read` and `admin`, and a key needs at least one. The answer
+carries the key's id, which is what `DELETE /api/cp/keys/:id` revokes.
 
-Both tenants now use that one URL, and each key lands in its own cluster.
-
-```bash
-curl -s -X POST https://queen.eu1.example.com/api/v1/push \
-  -H "Authorization: Bearer $ACME_KEY" \
-  -H 'Content-Type: application/json' \
-  -d '{"items":[{"queue":"orders","partition":"cust-42","payload":{"from":"acme"}}]}'
-```
-
-```bash
-curl -s -X POST https://queen.eu1.example.com/api/v1/push \
-  -H "Authorization: Bearer $GLOBEX_KEY" \
-  -H 'Content-Type: application/json' \
-  -d '{"items":[{"queue":"orders","partition":"cust-42","payload":{"from":"globex"}}]}'
-```
-
-Neither request names a cluster, and neither can reach the other's `orders`: a key is bound to the
-cluster it was issued on, and `x-queen-act-cluster` beside a key is refused rather than honoured.
-A request carrying no credential gets `401` rather than the `421` a wrong hostname earns, because
-on a shared host there is no wrong hostname to report. People signing in to the dashboard there
-pick a cluster instead, which is what the selector is for
-([console](/reference/multi-tenant/console)).
-
-<Aside type="caution">
-Listing a shared host changes the whole listener rather than that one name. Every unauthenticated
-caller now gets `401` where an unknown host used to answer `421`, which is what keeps the wildcard
-record from being an unauthenticated directory of cluster slugs. The proxy also exits 1 at boot if
-the variable is set without a pxdb, since there would be no `api_keys` table to resolve against:
-[shared hosts](/deploy/proxy#shared-hosts).
-</Aside>
-
-## Human logins with Google
+## Human logins
 
 API keys are for programs. People sign in to the dashboard, and the proxy speaks OAuth for that:
-Google and GitHub, plus local bcrypt passwords. Google needs two variables.
+Google and GitHub, plus local bcrypt passwords. Google needs two variables, on every node:
 
 ```bash
 GOOGLE_CLIENT_ID=...apps.googleusercontent.com
@@ -266,31 +162,19 @@ GOOGLE_CLIENT_SECRET=...
 GOOGLE_ALLOWED_DOMAINS=acme.example,acme.io   # optional, comma separated
 ```
 
-In the Google Cloud console the authorised redirect URI is `<public base>/auth/google/callback`,
-and getting that base right is the one thing that breaks a first setup. The proxy uses
-`QUEEN_PROXY_PUBLIC_URL` when it is set, otherwise it rebuilds the URL from the request's `Host`
-and `X-Forwarded-Proto`. **With `QUEEN_PROXY_AUTH_HOST` on and no public URL set, OAuth is
-switched off rather than guessed**, which is the correct behaviour for a dedicated login host and
-a confusing one if you did not mean it.
-
-`GOOGLE_ALLOWED_DOMAINS` restricts who may sign in, by the account's hosted domain or its email
-domain. A single entry is also passed to Google as the `hd` hint, so the account chooser shows
-that domain first.
+The authorised redirect URI is `<public base>/auth/google/callback`, and the base is
+`QUEEN_PROXY_PUBLIC_URL` when it is set, otherwise the request's `Host` and `X-Forwarded-Proto`.
 
 What happens when someone arrives is worth knowing exactly, because two of the three outcomes are
 refusals:
 
-- The Google identity is already linked to a user: they are logged in.
-- No link, but the **verified** email matches a user: the identity is linked to that user. An
-  unverified email never links, which is what stops an account being claimed by someone who
-  merely typed the address.
-- Neither: the login is **denied**, unless `QUEEN_PROXY_AUTOPROVISION` is on, in which case a
-  user is created with the role in `QUEEN_PROXY_DEFAULT_ROLE`.
+- The identity is already linked to a user: they are logged in.
+- No link, but the **verified** email matches a user: the identity is linked to that user.
+- Neither: the login is **denied**, unless `QUEEN_PROXY_AUTOPROVISION=true`, in which case a user
+  is created with the role in `QUEEN_PROXY_DEFAULT_ROLE`, `viewer` by default.
 
-And the part that makes this safe to leave on: **a session is not cluster-scoped**. The role
-inside the session token is a placeholder, and the real permission is resolved live from the
-cluster role rows. A brand-new Google user with no `grant_cluster_role` can sign in and see
-nothing at all, so auto-provisioning hands out an account, never an authorisation.
+Further users and their per-cluster roles are managed in the dashboard's Users view by an operator
+([Dashboard](/deploy/dashboard)).
 
 ## Turn enforcement on
 
@@ -298,17 +182,20 @@ nothing at all, so auto-provisioning hands out an account, never an authorisatio
 decision is computed, logged and metered, and the request proceeds anyway. Size caps and the
 two push-block quotas are hard regardless of the flag
 ([quotas](/reference/multi-tenant/quotas)). Watch a real workload through it, then set it to
-`true` and confirm on `/healthz`, which reports the flag precisely because a boot log survives
-the process that wrote it.
+`true` on every node.
 
-One proxy per cell, one cell per cluster, one SQL call per tenant, and a `429` contract the SDKs
-already honour.
+Rate limits are counted per node: behind a load balancer spreading over three nodes, a cluster can
+reach up to three times its plan's rate before every node refuses it
+([Proxy](/deploy/proxy#limits-are-per-process)).
+
+One cell, one proxy per node over one replicated state, one control-plane call per tenant, and a
+`429` contract the SDKs already honour.
 
 <CardGrid>
   <LinkCard
     href="/reference/multi-tenant/tenants"
     title="Data model"
-    description="Tables, statuses, the seeded plans, and every provisioning function."
+    description="Tenants, clusters, plans, statuses and the provisioning operations."
   />
   <LinkCard
     href="/reference/multi-tenant/quotas"

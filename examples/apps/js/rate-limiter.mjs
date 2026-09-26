@@ -8,9 +8,9 @@
 //
 // Here the counter is a windowed aggregation over the request stream itself.
 // The window state, the decisions it emits and the acknowledgement of the
-// requests it counted all commit in one PostgreSQL transaction, so the counter
-// cannot drift from the stream it was computed from, and it survives a restart
-// because it is a row rather than a process's memory.
+// requests it counted all commit as one entry in the broker's replicated log,
+// so the counter cannot drift from the stream it was computed from, and it
+// survives a restart because it lives in the broker, not in a process's memory.
 //
 //   api-requests (one partition per API key)
 //     └── streaming query: tumbling window, count per key

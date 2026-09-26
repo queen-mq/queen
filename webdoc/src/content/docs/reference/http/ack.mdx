@@ -7,25 +7,28 @@ sidebar:
   label: ack
 sourceOfTruth:
   - server/src/handlers/data.rs
-  - server/src/handlers/mod.rs
-  - server/sql/procedures/005_log_ack.sql
+  - server/src/handlers/raft.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/planner/ack.rs
+  - server/src/rsm/planner/mod.rs
+  - server/src/rsm/dedup.rs
+  - server/src/rsm/maintenance.rs
 verifiedBy:
   - clients/client-js/test-v2/semantics.js
   - clients/client-js/test-v2/ackwindow.js
   - clients/client-js/test-v2/dlq.js
 digest: >-
   An ack commits a cursor per `(partition, group)`, not a per-message delete: earlier unacked ones
-  complete. `POST /api/v1/ack` takes `transactionId`, `partitionId`, `leaseId`, `error`, `status`
-  (default `completed`), `consumerGroup` (default `__QUEUE_MODE__`); `POST /api/v1/ack/batch` puts
-  items in `acknowledgments`, `consumerGroup` top-level only. Both are read-write; 200 gives
-  per-item `success`, `leaseReleased`, `dlq`, `noop`. `status` is case-sensitive: absent/null,
-  `completed`, `success`, `acked`, `ok` complete; `retry` is budget-free; `dlq` dead-letters at
-  once; anything else, `nack` included, silently becomes `failed`, charging its `(partition,
-  group)` budget `retryLimit` (default 3); exhaustion dead-letters by default. A lease-less ack
-  skips validation and commits. At or below the cursor `completed` is `noop: true`,
-  `failed`/`retry`/`dlq` fail as `already committed`, an unresolvable `transactionId` fails,
-  redelivering if leased.
-# sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
+  complete. `POST /api/v1/ack` takes `transactionId`, `partitionId` (the decimal string a pop
+  returned), `leaseId`, `error`, `status` (default `completed`), `consumerGroup` (default
+  `__QUEUE_MODE__`); `POST /api/v1/ack/batch` puts items in `acknowledgments`, `consumerGroup`
+  top-level only. Both are read-write; 200 gives per-item `success`, `error`, `leaseReleased`,
+  `dlq`, `noop`. `status` is matched case-insensitively: `failed` charges its `(partition, group)`
+  budget `retryLimit` (default 3) and exhaustion dead-letters by default; `retry` is budget-free;
+  `dlq` dead-letters at once; any other value, absent and `nack` included, completes. A
+  lease-less ack skips validation and commits. At or below the cursor `completed` is
+  `noop: true`; `failed`/`retry`/`dlq` there, an unresolvable `transactionId`, and one above the
+  leased batch all fail with one shared error string.
 ---
 
 An acknowledgement is not a per-message delete. Consumption state is one cursor per
@@ -36,7 +39,8 @@ to store, clean up or leak.
 
 On the wire an ack is addressed by `transactionId`, which the broker resolves to an offset
 through the partition's transaction index. Both routes have access level **read-write** and both
-answer `200` with a top-level array, one element per request item, in request order.
+answer a processed call with `200` and a top-level array, one element per request item, in
+request order.
 
 ## Request
 
@@ -47,7 +51,7 @@ answer `200` with a top-level array, one element per request item, in request or
 ```json
 {
   "transactionId": "order-8891-created",
-  "partitionId": "b1c2d3e4-5f60-7180-9a0b-1c2d3e4f5061",
+  "partitionId": "17",
   "consumerGroup": "billing",
   "leaseId": "0198f2c1-9a7b-7d20-8e31-4c5d6e7f8a90",
   "status": "completed"
@@ -57,11 +61,14 @@ answer `200` with a top-level array, one element per request item, in request or
 | Field | Type | Required | Default |
 | --- | --- | --- | --- |
 | `transactionId` | string | in practice yes | empty string, which resolves to nothing |
-| `partitionId` | string (UUID) | yes | empty string, which fails in the database |
+| `partitionId` | string | yes | empty string, which fails as `partitionId is not a partition id` |
 | `status` | string | no | `completed` |
 | `consumerGroup` | string | no | `__QUEUE_MODE__` |
 | `leaseId` | string | no | empty, meaning a lease-less ack |
 | `error` | string | no | absent |
+
+`partitionId` is the value the pop returned with the message: the partition's numeric id written
+as a decimal string, not a UUID. Send it back exactly as you received it.
 
 ### Batch
 
@@ -71,49 +78,56 @@ answer `200` with a top-level array, one element per request item, in request or
 {
   "consumerGroup": "billing",
   "acknowledgments": [
-    { "transactionId": "order-8891-created", "partitionId": "b1c2…5061", "status": "completed", "leaseId": "0198…8a90" },
-    { "transactionId": "order-8892-created", "partitionId": "b1c2…5061", "status": "failed", "leaseId": "0198…8a90", "error": "downstream 502" }
+    { "transactionId": "order-8891-created", "partitionId": "17", "status": "completed", "leaseId": "0198…8a90" },
+    { "transactionId": "order-8892-created", "partitionId": "17", "status": "failed", "leaseId": "0198…8a90", "error": "downstream 502" }
   ]
 }
 ```
 
 The array key is `acknowledgments` (American spelling, no `e` after the `g`). `consumerGroup` is
 top-level only; per-item `consumerGroup` is not read. Each item carries its own `partitionId`,
-`status`, `leaseId` and `error`.
+`status`, `leaseId` and `error`. Both routes read both shapes: a body whose `acknowledgments`
+array is not empty is a batch, and anything else is read as a single ack.
 
 `error` is the failure reason. It is not stored for a plain nack; it is recorded on the
-dead-letter row if this nack is the one that dead-letters the message. When several nacks in a
-group carry reasons, the one whose `transactionId` matches the poison message wins, then the
-first available reason, then the default `Retries exhausted`.
+dead-letter record if this nack is the one that dead-letters the message. When several nacks in
+one `(partition, lease)` group carry reasons, the one whose `transactionId` matches the poison
+message wins, then the first available reason, then the default `Retries exhausted`.
 
 ### Status values
 
-The broker normalises `status` before it reaches SQL:
+The broker lowercases `status` and then matches it:
 
 | You send | Treated as |
 | --- | --- |
 | absent or `null` | `completed` |
-| `completed`, `success`, `acked`, `ok` | `completed` |
-| `retry` | `retry` |
-| `dlq` | `dlq` |
-| **anything else**, including `""`, `Completed`, `FAILED`, `nack` | `failed` |
+| `failed`, in any case | `failed` |
+| `retry`, in any case | `retry` |
+| `dlq`, in any case | `dlq` |
+| **anything else**, including `completed`, `success`, `acked`, `ok`, `""`, `nack` | `completed` |
 
-Matching is exact and case-sensitive. There is no validation error for an unrecognised status.
-It silently becomes a nack, which is the most consequential default in the API. Send one of the
-four documented spellings.
+There is no validation error for an unrecognised status. It silently becomes a completion,
+which commits the message and everything before it: a handler that means to reject a message
+must send `failed`, `retry` or `dlq`, never `nack`.
+
+<Aside type="caution">
+A 1.x broker read an unrecognised `status` as `failed`. The 2.0 broker reads it as `completed`.
+Code that nacks with any spelling other than `failed`, `retry` or `dlq` completes the message on
+2.0.
+</Aside>
 
 ### Leases are optional, and that has teeth
 
 - With a `leaseId`, the ack is validated against the live lease: a mismatched, expired or
-  already-released lease is refused with `invalid or expired lease` and the cursor does not move.
+  already-released lease is refused with `invalid or expired lease` for every item of that
+  `(partition, lease)` group, and the cursor does not move.
 - Without a `leaseId`, validation is skipped and the cursor advances anyway. That is what makes a
   post-expiry ack succeed, and it also means a lease-less ack can advance a cursor while another
   worker holds the batch. Send the `leaseId` you popped with unless you specifically want the
   unvalidated behaviour.
 
-Items are grouped by `(partitionId, leaseId)` and each group is resolved in its own database
-call, so a batch spanning three partitions performs three resolutions, and a failure in one group
-does not affect the others.
+Items are grouped by `(partitionId, leaseId)`, and each group is judged on its own: a refused
+group does not affect the others. All groups of one call travel to the leader as one command.
 
 ## Response
 
@@ -140,9 +154,8 @@ does not affect the others.
 | `success` | boolean | the broker **carried out the instruction you sent** (see below) |
 | `error` | string or `null` | why this item was refused |
 | `leaseReleased` | boolean | this ack ended the lease on that `(partition, group)`; the partition is claimable again |
-| `dlq` | boolean | this ack caused a dead-letter row to be filed |
+| `dlq` | boolean | this item carried `failed` or `dlq`, and its `(partition, lease)` group filed a dead-letter record |
 | `noop` | boolean | the ack was a harmless duplicate: it resolved at or below the committed cursor and changed nothing |
-| `conflated` | integer | present only when the acked lease was served under [conflation](/reference/http/pop#conflation) (1.1.0) and the ack completed cleanly: how many log positions the commit retired without delivering. Absent on every other ack, so a non-conflating result keeps its pre-1.1.0 shape |
 
 <Aside type="caution">
 `success: true` means "instruction executed", not "message completed". A `failed` nack that was
@@ -152,7 +165,7 @@ know what the outcome was, and `dlq` to know whether it was dead-lettered.
 </Aside>
 
 The response does not carry the new cursor value, the remaining retry budget, or how many
-messages were implicitly completed. Those are internal; the inspection routes expose them.
+messages were implicitly completed.
 
 ## What each status does
 
@@ -167,13 +180,13 @@ ack the rest of the batch.
 
 ### failed
 
-An explicit failure. The cursor is clamped just below the failed offset, so the failed message
+An explicit failure. The cursor is clamped below the failed offset, so the failed message
 and everything after it in the batch redelivers. Then:
 
 | Retry budget | Queue's DLQ setting | Outcome |
 | --- | --- | --- |
 | remaining | any | the counter is charged once, the lease is released, and the tail redelivers |
-| exhausted | DLQ enabled (**the default**) | the message is dead-lettered: a row is filed with your `error` as the reason, the cursor moves past it, the lease is released (`dlq: true`) |
+| exhausted | DLQ enabled (**the default**) | the message is dead-lettered: a record is filed with your `error` as the reason, the cursor moves past it, the lease is released (`dlq: true`) |
 | exhausted | DLQ disabled | the poison message is **dropped**: the cursor advances past it, the counter resets, the lease is released, and `dlq` stays `false`. The message is gone and nothing recorded it |
 
 Dead-lettering is disabled only when **both** `deadLetterQueue` and `dlqAfterMaxRetries` are
@@ -181,9 +194,10 @@ explicitly `false` on the queue; either one left at its default keeps it on. An 
 queue dead-letters.
 
 The budget is `retryLimit`, default **3**, counted per `(partition, group)` and reset when a
-batch completes. It is charged **only** by an explicit `failed` ack. A lease that merely expires
-redelivers without consuming any of it, so a crash-looping consumer never exhausts a budget by
-crashing, only by nacking.
+batch completes. With the default of 3, three `failed` acks each release the batch to
+redeliver, and the fourth dead-letters the message. The budget is charged **only** by an
+explicit `failed` ack. A lease that merely expires redelivers without consuming any of it, so a
+crash-looping consumer never exhausts a budget by crashing, only by nacking.
 
 ### retry
 
@@ -195,12 +209,17 @@ life.
 ### dlq
 
 Immediate dead-letter, bypassing whatever budget is left. The cursor advances over the completed
-prefix, the poison message's payload is snapshotted into the dead-letter table, the cursor then
-moves past it and the lease is released. `dlq: true`.
+prefix, the poison message's id and payload are filed as a dead-letter record in the same log
+entry, the cursor then moves past it and the lease is released. `dlq: true`.
+
+`failed`, `retry` and `dlq` act on the group's leased batch on that partition. A lease-less
+signal sent while no batch is leased there (after an ack or a nack released it) has nothing to
+act on; the table under [Acks that cannot do anything](#acks-that-cannot-do-anything) says what
+comes back.
 
 ### Explicit signals are never skipped
 
-Both of these are contract-tested. In one ack call:
+In one ack call:
 
 - The cursor is clamped at the **lowest** explicit `failed`/`retry`/`dlq` position, even when a
   *later* offset in the same call was acked `completed`. Those later completed messages
@@ -214,56 +233,56 @@ earlier acks: the failure wins from its own offset onward.
 
 ## Acks that cannot do anything
 
-An ack can arrive too late or address something the broker cannot resolve. In both cases it is
-**reported**, never silently reported as success.
+An ack can arrive too late or address something the broker cannot resolve:
 
 | Situation | Result |
 | --- | --- |
 | `completed` ack that resolves at or below the cursor | `success: true`, `noop: true` (a duplicate commit, harmless) |
-| `failed`, `retry` or `dlq` that resolves at or below the cursor | `success: false`, `error: "already committed: the cursor moved past this message before this ack"`. The signal can no longer be honoured, and pretending otherwise would lose the nack |
-| a `transactionId` that resolves nowhere: never pushed, or its index entry has been purged | `success: false`, `error: "unresolvable: transaction not in the ack window (hash purged or never pushed); if leased, the message redelivers"` |
-| a `transactionId` that exists in the partition but sits **above the leased batch's end** | `success: false`, the same `unresolvable` error. Under a lease the resolution scan is bounded to the batch, so a message this lease never delivered resolves to nothing |
+| `failed`, `retry` or `dlq` that resolves at or below the cursor | `success: false`, `error: "transaction is unresolvable, already committed, or acknowledgment is stale"`. The signal can no longer be honoured, and pretending otherwise would lose the nack |
+| a `transactionId` that resolves nowhere: never pushed to that partition, or its index entry has been removed | `success: false`, the same error |
+| a `transactionId` that exists in the partition but sits **above the leased batch's end** | `success: false`, the same error. While the group holds a leased batch on the partition, resolution is bounded to that batch |
+| a `leaseId` that is not the live lease | `success: false`, `error: "invalid or expired lease"`, for every item of that `(partition, lease)` group |
+| a lease-less `failed`, `retry` or `dlq` that resolves above the cursor while the group holds no leased batch on that partition | `success: true`, and the signal changes nothing: it acts only on a leased batch. The message is delivered again by the next pop |
 
-The last two are the ones to design against, and they report the same error string for two
-different mistakes.
+The three rows that share one error string are the ones to design against: the string does not
+say which mistake it was.
 
-The purge case is a clock problem. The transaction index is purged on its own schedule, so an ack
-that arrives long after delivery (a handler that ran for hours, a queued retry) may find nothing
-to resolve. The cursor does not move, the message redelivers, and if you were nacking it, that
-nack charged nothing and dead-lettered nothing. Without this report, the client would believe the
-ack landed while the cursor never moved: a silent redelivery livelock. Ack while your lease is
-alive, extending it if you need to.
+The index-removal case is a retention question. The index that resolves a `transactionId`
+outlives its message: an entry is removed only once retention has removed the message and the
+message is older than the larger of the queue's `dedupWindowSeconds`, its
+`completedRetentionSeconds` and 900 seconds. An ack that arrives after that finds nothing to
+resolve and changes nothing, and if it was a nack it charged nothing and dead-lettered nothing.
+Ack while your lease is alive, extending it if you need to.
 
 The out-of-batch case is an addressing problem. A pop hands out the inclusive span
-`(committed, batch_end]`, and while that lease is live the broker resolves acked ids only
-against `queen.log_txns` rows at or below `batch_end`. A `transactionId` for an offset above the
-batch is therefore reported `unresolvable` rather than accepted, which is what acking a message
-your lease did not deliver looks like: an id kept from an earlier batch, or one that belongs to
-another worker's batch. A lease-less ack keeps the unbounded window and never hits this case,
-which is one more way the two behaviours above differ beyond lease validation. That bounded
-scan, and how a `transactionId` becomes an offset at all, are in
-[Ack internals](/internals/ack-internals).
+`(committed, batch_end]`, and while the group holds a leased batch on the partition the broker
+resolves acked ids only within that span, whether or not the ack carries a `leaseId`. A
+`transactionId` for an offset above the batch is therefore reported as unresolvable rather than
+accepted, which is what acking a message your lease did not deliver looks like: an id kept from
+an earlier batch, or one that belongs to another worker's batch. With no batch leased on the
+partition, resolution runs up to the partition's tail. That bounded scan, and how a
+`transactionId` becomes an offset at all, are in [Ack internals](/internals/ack-internals).
 
 ### Error strings you can encounter
 
 | `error` | Meaning |
 | --- | --- |
-| `consumer not found` | this group has no cursor on that partition: it never popped from it |
-| `invalid or expired lease` | a `leaseId` was supplied and it is not the live lease |
-| `already committed: …` | see the table above |
-| `unresolvable: …` | see the table above |
-| `ack flush failed; lease will expire and redeliver` | the commit that would have carried this ack failed; nothing was committed, and the lease expiry redelivers the batch |
-| `pool` | no database connection was available for this group |
-| `partition not owned by tenant` | multi-tenant deployments only: the `partitionId` belongs to another tenant |
-| a raw database message | the group's resolution query failed. An invalid `partitionId` that is not a UUID surfaces here |
+| `invalid or expired lease` | a `leaseId` was supplied and it is not the live lease, including when the group has no cursor on that partition |
+| `transaction is unresolvable, already committed, or acknowledgment is stale` | see the table above; also every item of a lease-less ack from a group that never popped from that partition |
+| `partitionId is not a partition id` | the `partitionId` is missing, or is not a decimal partition id |
+| `no partition <id>` | no partition with that id exists; in a cluster the node first catches up with what the cluster committed and looks again |
+| `partition <id> not owned by this tenant` | multi-tenant deployments only: the `partitionId` belongs to another tenant |
 
 ### Status codes
 
 | Code | When |
 | --- | --- |
 | `200` | the call was processed, whatever the per-item outcomes |
-| `400` | the body is not JSON: `{"error":"bad body: …"}` |
+| `400` | the body is not JSON, or a field has the wrong type: `{"error":"bad ack body: …","code":"bad_body"}` |
 | `403` | authentication is on and the token has no `read-write` role |
+| `413` | code `name_too_long`: the tenant and consumer group names together exceed 447 bytes |
+| `503` | code `no_leader`, `retry` or `timeout`, with `Retry-After: 1` |
+| `500` | code `internal`: a broker fault |
 
 There is no 404 for an unknown `transactionId` and no 409 for a stale lease: both are per-item
 outcomes inside a 200.
@@ -271,6 +290,6 @@ outcomes inside a 200.
 ## Acknowledging in a transaction
 
 If the next thing your handler does is write another message, do the ack and the push in one
-PostgreSQL transaction instead of two calls. See
+transaction instead of two calls: both commit in one entry of the replicated log. See
 [`POST /api/v1/transaction`](/reference/http/transaction). That is how a multi-stage pipeline
 hands work forward without a window in which the ack landed and the next message did not.

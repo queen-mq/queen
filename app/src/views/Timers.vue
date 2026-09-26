@@ -45,8 +45,8 @@
         <p v-if="verdict === 'absent'" style="font-size:13px;">
           <code>/api/v1/timers/*</code> arrived in 1.2.
         </p>
-        <!-- The shared copy says a 503 is "an operator's switch, or a broker
-             that cannot reach its database". Half of that is unreachable HERE,
+        <!-- The shared copy says a 503 is "an operator's switch, or a cluster
+             that cannot answer right now". Half of that is unreachable HERE,
              and saying it would send an operator to a switch that was never on
              this path: switches.rs pins rung 1 to `true` for
              Surface::TimerRead / TimerCancel and quota.rs allows both (§9.6 —
@@ -54,12 +54,12 @@
              timer it can no longer cancel is still pending, and the stop button
              must not switch itself off). So `timers_disabled` is reachable only
              on POST /api/v1/timers, which this page never calls, and the 503 it
-             does meet is handlers/timers.rs `unavailable()`: a pool exhaustion,
-             a statement timeout, a dead connection. The KV page keeps the
-             shared wording, where the switch is real. -->
+             does meet is handlers/timers.rs `unavailable()`: no leader, a
+             retry, a deadline that passed. The KV page keeps the shared
+             wording, where the switch is real. -->
         <p v-else-if="verdict === 'paused'" style="font-size:13px;">
           No operator switch pauses timer reads or cancels — the cell answers
-          this when its database is out of reach.
+          this when the cluster cannot answer (no leader, or a timeout).
         </p>
         <button class="btn btn-ghost" @click="probeAgain">Check again</button>
       </div>
@@ -468,8 +468,8 @@
 // which answers are verdicts rather than failures.
 //
 // NO PRIVATE TICKER, AND NO AUTO-REFRESH. Unlike views/Ephemeral.vue, whose
-// gauges are in-process and free, every call here is a Postgres read on a
-// tenant-scoped, metered, rate-limited route, and a keyset page that re-fetched
+// gauges are in-process and free, every call here is a read of the replicated
+// store on a tenant-scoped, metered, rate-limited route, and a keyset page that re-fetched
 // under the reader would move rows while they are being read. The page refreshes
 // when the operator asks (the shell's Refresh button) and on a cluster switch —
 // and a stable gated verdict short-circuits even that, so a cell that answers

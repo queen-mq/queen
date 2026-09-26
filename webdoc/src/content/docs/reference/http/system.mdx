@@ -1,167 +1,56 @@
 ---
-title: System and internal routes
-description: "Maintenance mode, the kv, timer and ephemeral kill switches, shared state, the stats refresh trigger and the broker-to-broker /internal routes: all admin-gated operator surfaces."
+title: System routes
+description: "The kv, timer and ephemeral kill switches, the Raft membership routes, tenant quotas, shared state and the stats refresh no-op: all admin-gated operator surfaces."
 type: reference
 tier: operate
 status: internal
 sidebar:
   order: 15
-  label: System and internal
+  label: System
 sourceOfTruth:
-  - server/src/handlers/maintenance.rs
-  - server/src/switches.rs
-  - server/src/handlers/status.rs
-  - server/src/internal.rs
-  - server/src/main.rs
   - server/src/auth.rs
-  - server/src/db.rs
-  - server/src/mesh.rs
-  - server/src/file_buffer.rs
-  - server/sql/procedures/018_stats.sql
-verifiedBy:
-  - clients/client-js/test-v2/maintenance.js
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): push maintenance now also refuses a dead-letter replay with 503, stated under the maintenance route; maintenance.rs and switches.rs changed only comments otherwise.
+  - server/src/switches.rs
+  - server/src/handlers/data.rs
+  - server/src/handlers/raft.rs
+  - server/src/rsm/apply.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/real/phase2.rs
+  - server/src/rsm/facade/real/phase2/admin.rs
+  - server/src/rsm/replicator/raft/admin.rs
+  - server/src/rsm/replicator/raft/cluster.rs
+  - server/src/rsm/replicator/raft/network.rs
 ---
 
 Everything on this page is an operator surface, not part of the client API. No SDK
 calls these routes, and a tenant on a shared cell must never reach them.
 
-`route_access_level` maps every path starting with `/api/v1/system/` or `/internal/`
-to **admin**, plus `/api/v1/stats/refresh` explicitly. That mapping only protects
-anything when JWT is on.
+`route_access_level` maps every path starting with `/api/v1/system/` to **admin**, plus
+`/api/v1/stats/refresh` explicitly. That mapping only protects anything when JWT is on.
 
 <Aside type="danger">
 With `JWT_ENABLED=false` (the default), the authorization middleware is a
 transparent pass-through and every one of these routes is open to anyone who can
-reach the port. Two of them change how the whole broker behaves: maintenance mode
-stops all pushes reaching PostgreSQL, and pop maintenance stops all delivery. If the
-broker's port is reachable by anything you do not fully trust, enable JWT or put a
-proxy in front of it.
+reach the port. Several of them change how the whole cluster behaves: the kill switches
+pause KV, timer scheduling or the ephemeral queues for every tenant, and the membership
+routes decide which nodes vote. If the broker's port is reachable by anything you do not
+fully trust, enable JWT or put a proxy in front of it.
 </Aside>
 
-None of these routes are tenant-scoped, with one exception:
-`POST /internal/api/notify` resolves a tenant, because the wake gate it triggers is
-keyed by (tenant, queue). Maintenance mode is a property of the process and the cell,
-not of a tenant.
+None of these routes are tenant-scoped: the switches and the membership belong to the cluster,
+not to a tenant. The membership routes go further and refuse a request that names a tenant.
 
-## Maintenance mode
+## How the flags are stored
 
-Two independent flags, each with a `GET` and a `POST`. Both are stored twice: as an
-in-process `AtomicBool` (the source of truth for hot-path checks) and as a row in
-`queen.system_state` keyed `maintenance_mode` / `pop_maintenance_mode` with the value
-`{"enabled": bool}` (a best-effort mirror for restart and cluster propagation).
+The kill switches below are flags in the replicated state: a `POST` is one entry in the
+replicated log, and every node applies it. The request path checks an in-process copy of each
+flag. The node that answered the `POST` sets its copy at once (in a cluster that is the leader,
+because a follower forwards every `/api/` request to it), and a node reads the stored values when
+it starts. A node that becomes leader later keeps the values it read at its start, so after a
+leader change, send the flag again. The `GET` routes read the stored values.
 
-### GET /api/v1/system/maintenance
-
-Reads both flags **fresh from `queen.system_state`**, so a change made on another
-replica is reflected immediately, and updates the local atomics to match. If the pool
-or the query fails it falls back to the in-process atomics rather than returning an
-error: this route never `500`s.
-
-```json
-{
-  "maintenanceMode": false,
-  "popMaintenanceMode": false,
-  "bufferedMessages": 0,
-  "bufferHealthy": true,
-  "bufferStats": {
-    "pendingCount": 0,
-    "failedCount": 0,
-    "dbHealthy": true,
-    "failedFiles": { "count": 0, "totalBytes": 0, "totalMB": 0.0, "failoverCount": 0, "qos0Count": 0 }
-  }
-}
-```
-
-`bufferStats.failedFiles` is read off the spool directory: `count` and `totalBytes`
-are the finalized `.buf` files still waiting to drain. `failoverCount` mirrors
-`count`; `qos0Count` is always `0`.
-
-### POST /api/v1/system/maintenance
-
-Body: `enabled` (boolean, required). A missing field is a `400`
-(`enabled (boolean) is required`).
-
-```json
-{ "enabled": true }
-```
-
-What enabling it does, in order: sets the in-process flag, mirrors it to
-`queen.system_state`, **pauses** the background spool drain so buffered pushes
-accumulate, and broadcasts a `MAINTENANCE_MODE_SET` frame to mesh peers. Disabling
-it force-finalizes the active spool file and resumes the drain, so the spool replays
-into PostgreSQL.
-
-```json
-{
-  "maintenanceMode": true,
-  "bufferedMessages": 0,
-  "bufferHealthy": true,
-  "message": "Maintenance mode ENABLED. All PUSHes routing to file buffer."
-}
-```
-
-The `message` strings are exact and stable (`Maintenance mode DISABLED. Background
-processor will drain buffer to DB.` on disable) because tooling greps for them.
-
-**Effect on pushes.** While the flag is on, `POST /api/v1/push` never touches
-PostgreSQL. Every item is written to the disk spool and reported with
-`status: "buffered"` at HTTP `201`; an item whose spool write failed reports
-`status: "failed"` and the whole response becomes `500`. A push that omitted
-`transactionId` gets one minted at buffer time, so the buffered result and the replay
-dedup key are both well defined.
-
-**Effect on a dead-letter replay.** The two replay routes are refused instead, with
-`503` and `result: "maintenance"`. A replay is a move, and a move cannot be spooled:
-the spool carries frames, not the deletion of the dead-letter row, so a spooled one
-would land in exactly the pushed-but-still-dead-lettered state the move primitive
-exists to make impossible. Nothing is lost by refusing, because the dead-letter row
-stays where it is and the same replay works once the switch is off.
-
-<Aside type="caution">
-Buffered messages have no offset, no position and no ordering guarantee relative to
-pushes that committed normally: they are replayed when the drain resumes, and they
-deduplicate on replay only if their transaction id is still inside the queue's dedup
-window. Anything that reads its own writes will not see a buffered message until the
-drain has caught up. `GET /api/v1/status/buffers` and the
-`queen_file_buffer_pending` gauge are the two ways to watch the backlog. See
-[Status, health and metrics](/reference/http/status-metrics).
-</Aside>
-
-### GET /api/v1/system/maintenance/pop
-
-```json
-{
-  "popMaintenanceMode": false,
-  "message": "Pop maintenance mode is OFF. Normal operation."
-}
-```
-
-Unlike the push-maintenance `GET`, this one reads only the **in-process** flag. On a
-multi-replica deployment it therefore answers for the replica you happened to reach;
-`GET /api/v1/system/maintenance` is the route that re-reads the database.
-
-### POST /api/v1/system/maintenance/pop
-
-Body: `enabled` (boolean, required).
-
-```json
-{
-  "popMaintenanceMode": true,
-  "message": "Pop maintenance mode ENABLED. All POP operations will return empty arrays."
-}
-```
-
-**Effect on pops.** Every pop route returns HTTP `204` immediately, before touching
-the database. The `204` carries **no body at all** (not even the `paused` flag the
-handler constructs), because announcing a content length on a body that hyper then
-elides poisoned strict HTTP/1.1 clients under empty-poll load. Clients treat `204` as
-"no messages" and retry, so a paused broker looks like an idle one to a consumer.
-That is deliberate, and it is why the flag has an explicit `GET`.
-
-The flip is mirrored to `queen.system_state` and broadcast to mesh peers as
-`POP_MAINTENANCE_MODE_SET`.
+An absent stored flag means **on**. That is the difference between a kill switch and a feature
+flag, and getting it backwards would mean every fresh cell booting with a feature dead and no row
+to explain why.
 
 ## The kv and timer kill switches
 
@@ -170,14 +59,12 @@ Access level **admin**, like every route under `/api/v1/system/`.
 KV and timers have no boot flag. There is no variable that decides whether those routes exist, for
 the same reason there is none for push and for pop, so nothing here is a way to opt into a feature.
 What these three switches are is the other instrument entirely: "stop the bleeding, now", for an
-incident at three in the morning that a rollout does not resolve. They are on the same pattern as
-maintenance mode above, an in-process atomic that is authoritative on the hot path, mirrored into
-`queen.system_state` for propagation and restart.
+incident that a rollout does not resolve.
 
 That is why a paused surface answers **503** with `Retry-After` and never `404`: an operator pulled a
 lever, it is temporary, and the client should come back. A `404` on a KV or timer path means the path
-is wrong. Inside the transaction wire the same pause answers `403`, because a bundle that retries a
-paused surface forever is a client spinning on the hot path with messages in hand.
+is wrong. The switches gate the KV and timer routes only: the `kv` and `timers` riders of
+`POST /api/v1/transaction` are not checked against them.
 
 ### GET /api/v1/system/kv-timers
 
@@ -186,22 +73,14 @@ paused surface forever is a client spinning on the hot path with messages in han
   "kvEnabled": true,
   "timersScheduleEnabled": true,
   "timersFireEnabled": true,
-  "quotaTenants": 12,
-  "quotaAgeMs": 8412,
-  "quotaHot": 1
+  "quotaTenants": 0,
+  "quotaAgeMs": null,
+  "quotaHot": 0
 }
 ```
 
-The three `…Enabled` fields are the switches, and they are what `POST` writes. There is no boot half
-to report beside them any more. The `GET` re-reads the mirror rows before answering and falls back to
-the in-process atomics, so it never fails on a busy pool.
-
-`quotaAgeMs` is the number to look at when limits behave oddly. It is how stale the measurement the
-quota gate is enforcing against has become, and a value that keeps growing means the refresh is
-failing. Enforcement still works, because each broker adds its own local delta to whatever it last
-measured, but nothing is being **released**: a tenant that has come back under its limit stays
-blocked. `quotaHot` counts the tenants above the hot threshold, whose measurement is refreshed on
-the faster cadence.
+The three `…Enabled` fields are the switches, and they are what `POST` writes. `quotaTenants`,
+`quotaAgeMs` and `quotaHot` are fixed values kept for compatibility.
 
 ### POST /api/v1/system/kv-timers
 
@@ -211,59 +90,37 @@ the faster cadence.
 
 | Field | Effect when `false` |
 | --- | --- |
-| `kv` | every KV route answers `503`, and the `kv` array of a transaction is refused permanently. Nothing already stored is affected |
-| `timersSchedule` | no **new** timers are accepted. The ones already scheduled still fire, and cancels are never blocked |
-| `timersFire` | promised messages are **not being delivered** |
+| `kv` | every KV route answers `503`. Nothing already stored is affected |
+| `timersSchedule` | a `POST /api/v1/timers` batch that schedules anything answers `503`, whole, cancels in it included. The timers already scheduled still fire, and `DELETE /api/v1/timers/:queue/*timerKey` and the timer reads are never blocked |
+| `timersFire` | stored and reported, but nothing reads it on 2.0 (see below) |
 
 Each field is independent and an omitted one is left alone. A body that reset the unmentioned ones
-would turn "pause new timers" into "and also stop delivering the ones already promised". A body
+would turn "pause new timers" into "and also stop delivering the ones already promised". The
+answer is the same object as the `GET`. A body that is not an object is a `400`
+(`{"error":"object required"}`), a field that is not a boolean is a `400` naming it, and a body
 with none of the three is a `400`.
 
-An absent mirror row means **on**. That is the difference between a kill switch and a feature flag,
-and getting it backwards would mean every fresh cell booting with the feature dead and no row to
-explain why.
-
-<Aside type="danger">
-`timersFire: false` is the one switch that accumulates damage while it is off. Nothing is lost,
-because `deliverAt` is a floor and the backlog drains oldest first, but the tenant experiences
-promised work that has not arrived, which reads as message loss rather than as lateness. It is
-also the only thing that can stop the fire: no degradation rung touches it, precisely because
-automatic shedding here would produce silent undelivered promises. Watch
-`queen_timers_oldest_late_seconds` while it is off, and expect the backlog to cost a burst of
-fires when you turn it back on.
+<Aside type="caution">
+On 2.0, `timersFire: false` does **not** stop timers from firing. The flag is stored and the
+`GET` reports it, but the state machine does not consult it when it fires a due timer. To stop
+new timers arriving, use `timersSchedule: false`.
 </Aside>
 
-Every flip of any of the three writes a single `sweeper` log line at the instant it happens,
+Every flip of any of the three writes a single `sweeper` log line on the node that flipped it,
 naming the switch and what the operator has just done to the cell. It is on-change only, so a
 switch that has been off for an hour does not write an hour of lines.
 
 ## The ephemeral kill switch
 
-Same instrument, one switch, for the [ephemeral](/reference/http/ephemeral) route family. It is on
-the same pattern as the three above: an in-process atomic mirrored into `queen.system_state`, an
-absent row meaning **on**, and a paused surface answering `503` with `Retry-After` rather than
-`404`.
+Same instrument, one switch, for the [ephemeral](/reference/http/ephemeral) route family: a flag
+in the replicated state, an absent flag meaning **on**, and a paused surface answering `503` with
+`Retry-After` rather than `404`.
 
 ### GET /api/v1/system/ephemeral
 
 ```json
-{
-  "ephemeralEnabled": true,
-  "cellBytes": 8402944,
-  "cellMaxBytes": 268435456,
-  "queues": 314,
-  "grantedTenants": 12,
-  "requireGrant": true,
-  "epoch": "9f3a1c"
-}
+{ "ephemeralEnabled": true }
 ```
-
-Every number here is an in-process gauge: this route reads no table and counts nothing, which is
-what makes it safe to poll during the incident it exists for. `cellBytes` against `cellMaxBytes` is
-the pair a `503 ephemeral_unavailable` is decided on. `grantedTenants` at `0` with `requireGrant`
-true means **every** tenant is being refused, which is the single most confusing state to diagnose
-from the outside. `epoch` is this broker's incarnation id, the one carried inside every ephemeral
-message id, so a support ticket about an ack that answered `stale` can be resolved against it.
 
 ### POST /api/v1/system/ephemeral
 
@@ -271,162 +128,157 @@ message id, so a support ticket about an ack that answered `stale` can be resolv
 { "enabled": false }
 ```
 
-With `enabled: false` every `/api/v1/ephemeral` route answers `503`. Consumers already parked stay
-parked until their own timeout expires, the rings keep their memory until the idle collector
-reaches them, and nothing stored durably is affected, because nothing of this class is stored
-durably except the declarations. Turning it back on resumes service on rings that are, by then,
+```json
+{ "ephemeralEnabled": false, "mirrored": true }
+```
+
+With `enabled: false` the six ephemeral verbs (push, pop, ack, reset and the two status reads)
+answer `503`. The declaration routes, `POST /api/v1/ephemeral/configure` and
+`DELETE /api/v1/ephemeral/queue/:queue`, are not paused. Consumers already parked stay parked
+until their own timeout expires, the rings keep their memory until the idle collector reaches
+them, and nothing stored durably is affected, because nothing of this class is stored durably
+except the declarations. Turning it back on resumes service on rings that are, by then,
 whatever the age and bound limits have left in them.
+
+## Raft membership
+
+Five routes change and report which nodes vote in a cluster. They need the openraft replicator
+(`QUEEN_RAFT_REPLICATOR=openraft`): a node with the `local` replicator answers them `400` with
+code `unsupported`. A request scoped to a tenant (`x-queen-tenant`, with tenancy on) is refused
+with `403` and code `forbidden`. Every node answers them: a follower forwards them to the leader, and with no
+leader known the answer is the usual `503` with `Retry-After: 1`.
+
+The peer addresses are written into the membership, in the log, when the cluster first boots.
+After that, `QUEEN_RAFT_PEERS` only supplies each node's own listen address: editing it does
+not change who votes. These routes do.
+
+| Route | Body | Answer |
+| --- | --- | --- |
+| `GET /api/v1/system/raft/membership` | none | `{"engine":"raft","membership":{...}}` |
+| `POST /api/v1/system/raft/membership/learners` | `{"id":4,"raft":"host:port","http":"host:port"}` | `{"engine":"raft","ok":true,"membership":{...}}` |
+| `POST /api/v1/system/raft/membership/promote` | `{"ids":[4],"force":false}` | same |
+| `PUT /api/v1/system/raft/membership/voters` | `{"voters":[1,2,4],"force":false}` | same |
+| `DELETE /api/v1/system/raft/membership/members/:id` | none | same |
+
+`nodeId` is accepted for `id`, a single `id` for `ids` and a single `voter` for `voters`; `force`
+can also be sent as `?force=true`. An empty body reads as `{}`.
+
+The `membership` object: `nodeId` (the node that took the view), `source` (`leader`, or
+`follower` for a follower's copy of the leader's view, `viewAgeMs` old), `leader`, `term`,
+`voters`, `learners`, `joint` (the voter sets that must agree while a change is between its two
+steps, else `null`), `membershipIndex`, `membershipCommitted`, `changeInFlight`, `lastLogIndex`,
+`committedIndex`, `liveWithinMs`, `promoteMaxLag`, and `members`, each with `nodeId`, `voter`,
+`raft`, `http`, `matched`, `lag`, `lastAckMs` and `live`.
+
+A change runs on the leader and is checked before anything is written:
+
+- **One change at a time.** A change still running, a joint configuration, or a membership entry
+  not yet committed refuses with `in_flight`. A change another leader made in between refuses
+  with `membership_changed` instead of being overwritten.
+- **Quorum.** The voters after the change, and the voters before it, must each have a majority
+  that acknowledged the leader within `liveWithinMs` (the leader counts as live). Otherwise
+  `no_quorum`: a change that leaves the voters unable to commit would stop every write.
+- **No empty cluster.** Removing the last voter is refused with `last_voter`.
+- **Catch-up.** A learner becomes a voter only once it is within `promoteMaxLag` entries of the
+  leader's last one (`QUEEN_RAFT_PROMOTE_MAX_LAG`, default `1000`), else `learner_behind`,
+  unless `force`.
+
+Every change is idempotent, so a caller that lost an answer can repeat it: adding a learner that
+is already there with the same addresses, promoting a voter, removing a node that is not a member,
+or setting the voters they already are, succeeds and writes nothing. A removed voter is dropped
+from the membership, not kept as a learner: stop its process, and do not bring it back with its
+data under the same id without adding it again. Adding a node is therefore two calls: add it as a
+learner, then promote it once its `lag` is small.
+
+`?timeoutMs=` bounds a change (1 ms to 120 s, default 30 s). Past it the answer is `504` with
+code `timeout`, and the change may still complete: read the membership before repeating it. A
+refused change answers `{"ok":false,"code":"...","error":"..."}`:
+
+| Status | Codes |
+| --- | --- |
+| `409` | `in_flight`, `no_quorum`, `last_voter`, `learner_behind`, `already_voter`, `address_mismatch`, `membership_changed`, `leader_changed` |
+| `400` | `bad_request`, `not_a_learner`, `not_a_member`, `unsupported` |
+| `503` | `leader_unreachable`: the leader did not answer |
+
+The read-only views of the cluster, `GET /api/v1/raft/status`, `/members` and `/liveness`, are on
+[Status, health and metrics](/reference/http/status-metrics). The cluster walkthroughs are under
+[Self-hosting](/deploy/).
+
+## POST /api/v1/system/quota
+
+Grants a tenant an allowance for a feature family and stores it as one entry in the replicated
+log. `POST /api/v1/system/quotas` is the same route.
+
+| Field | Meaning |
+| --- | --- |
+| `tenant` (or `tenantId`) | the tenant granted; defaults to the request's own tenant |
+| `kind` | `kv`, `ephemeral` or `streams`; anything else is a `400` |
+| `enabled` | default `true` |
+| `maxRows`, `maxBytes`, `maxTimers`, `maxTimerHorizonSeconds`, `maxReadsPerSecond`, `maxWritesPerSecond`, `maxQueues`, `maxMessagesPerSecond`, `maxQueries` | the limits, each optional and non-negative; the snake_case spellings are accepted too |
+
+The answer echoes the stored grant: `{"success":true,"tenant":...,"kind":...,"enabled":...}`
+followed by every limit field, `null` where it was not sent. A negative limit is a `400`. For
+the `kv` and `ephemeral` kinds the node that answered applies the grant at once, and a node reads
+the stored grants when it starts. [KV and timers](/deploy/state/) shows the route in use.
 
 ## GET /api/v1/system/shared-state
 
-Returns a hard-coded single-node summary:
-
 ```json
 {
-  "enabled": false,
-  "reason": "single_node_segments_broker",
-  "maintenance_mode": false,
-  "pop_maintenance_mode": false
+  "enabled": true,
+  "reason": "raft_state_machine",
+  "appliedIndex": 18342,
+  "durableIndex": 18340,
+  "queues": 12
 }
 ```
 
-<Aside type="caution">
-`enabled` is a literal `false` in the handler. It reports `false` **even when a mesh
-is running with connected peers**: only the two maintenance flags in this body are
-live. Do not use it to decide whether clustering works. The real surface is
-`GET /internal/api/shared-state/stats` below, which reports the transport, the peer
-list and the frame counters.
-</Aside>
+`appliedIndex` is the last log entry this node has applied and `durableIndex` the entry its
+last durable point covered. `queues` counts the queues of the request's tenant.
 
 ## POST /api/v1/stats/refresh
 
-Access level **admin**. Runs `queen.log_refresh_all_stats_v1()` (the same reconciler the
-broker's own loop runs every `STATS_INTERVAL_MS`, scheduled through the `stats_refresh`
-claim row in `queen.maintenance_leases`) and returns
-its summary JSON verbatim, labelled `engine: "segments"` with a `segPartitions` count.
-The route does not touch the schedule: forcing a refresh never delays or doubles the
-background cadence.
-
-Use it to force a refresh instead of waiting out the interval. If the dashboard's numbers
-are stale rather than merely late, check whether that loop is running at all (a large
-`statsAge` on the status routes). It refreshes the counters only: `retainedBytes` is owned
-by the retained-bytes lane (`RETAINED_BYTES_INTERVAL_MS`, advisory lock `737003`) and keeps
-its last value here.
-
-<Aside type="caution">
-Before 2026-07-30 this route ran `queen.refresh_all_stats_v1(true)`, the rows-engine
-reconciler, which recomputes `queen.stats` from `queen.messages` / `queen.partitions`
-(empty on a log-engine deployment) and overwrote the live queue counters with zeros for up
-to one `STATS_INTERVAL_MS`. On an older build, leave the route alone.
-</Aside>
-
-## Internal broker-to-broker routes
-
-Three routes exist for the mesh layer. They are admin-gated and are not a public
-contract: treat their shapes as version-coupled to the broker.
-
-### POST /internal/api/notify
-
-Body: `queue` (required, non-empty), `partition` (optional). A missing queue is a
-`400`.
+Access level **admin**. It answers `200` and does nothing:
 
 ```json
-{ "queue": "orders", "partition": "eu-1" }
+{ "success": true, "refreshed": false, "engine": "raft" }
 ```
 
-Emits exactly the signal a local push emits: wakes this replica's parked long-poll
-pops for that (tenant, queue) and fans the signal out to mesh peers. Returns
-`{"status": "ok"}`. This is the HTTP fallback for a peer that has no mesh
-reachability, and the hook for an external system that wrote to the database out of
-band and wants parked consumers woken now instead of at the next poll interval.
+The counters the status and resource routes report are maintained as log entries apply, so
+there is nothing to refresh. The route exists because every SDK's admin API calls it.
 
-The tenant comes from the same `x-queen-tenant` header every other route uses;
-absent, it is the default tenant. The header is unauthenticated by design, and the
-trust boundary for it is the proxy, which is another reason this path must not be
-reachable from outside the cell.
+## Protect the Raft RPC port
 
-### GET /internal/api/shared-state/stats
+In a cluster each node also listens on its Raft RPC port for votes, log appends, snapshots, the
+membership calls a follower forwards, and the dashboard's gather of the other nodes' rows. The
+listener binds `0.0.0.0` on this node's Raft port unless `QUEEN_RAFT_LISTEN` says otherwise.
 
-### GET /internal/api/inter-instance/stats
-
-Identical bodies; the second is a legacy alias. With a mesh transport running:
-
-```json
-{
-  "server_id": "queen-0",
-  "transport": "tcp-mesh",
-  "port": 6633,
-  "peer_count": 1,
-  "peers": [
-    { "host": "queen-1", "port": 6633, "connected": true, "resolved": true, "resolved_ip": "10.0.0.12" }
-  ],
-  "servers_alive": 1,
-  "servers_dead": 0,
-  "eph_members": 1,
-  "messages_sent": 41022,
-  "messages_received": 40911,
-  "messages_dropped": 0,
-  "signature_failures": 0,
-  "handshake_failures": 0,
-  "sequence_rejections": 0,
-  "enabled": true,
-  "running": true,
-  "maintenance_mode": false,
-  "pop_maintenance_mode": false
-}
-```
-
-With no peers configured, or no transport:
-
-```json
-{
-  "enabled": false,
-  "reason": "no_peers",
-  "maintenance_mode": false,
-  "pop_maintenance_mode": false
-}
-```
-
-`signature_failures` and `handshake_failures` are the same counter under two names.
-`sequence_rejections` is always `0`: there is no sequence tracking. `eph_members`
-counts the live peers that advertised the v2 handshake and therefore participate in
-the [ephemeral](/reference/http/ephemeral) rendezvous ring; during a rolling deploy
-it sits below `servers_alive`, which is the expected reading, not an error.
-
-## Firewall the mesh port
-
-The mesh is framed TCP on `QUEEN_MESH_PORT` (default `6633`), dialled from
-`QUEEN_MESH_PEERS` (the older `QUEEN_UDP_*` variable names survive as aliases,
-which is why the default port comes from `QUEEN_UDP_NOTIFY_PORT` when the new name
-is unset). The listener binds `QUEEN_MESH_BIND_ADDR`, defaulting to the HTTP
-listener's `QUEEN_BIND_ADDR`. Its `HELLO` handshake is
-HMAC'd, but the nonce is generated by the dialer and never tracked, so a captured
-handshake is replayable. After the handshake, frames are unauthenticated JSON.
-The frame set includes `MAINTENANCE_MODE_SET` and `POP_MAINTENANCE_MODE_SET`.
-
-Anyone who can open a TCP connection to that port can therefore stop the cell from
-accepting pushes or delivering messages, without any token. **Restricting the mesh
-port to the broker replicas themselves is a requirement, not a hardening tip.**
+With `QUEEN_RAFT_TOKEN` set, every RPC carries it in the `x-queen-raft-token` header and every
+node refuses a request without it. Without it, anyone who can reach the port can vote, append
+and install snapshots. Set the same token on every node, and keep the port reachable by the
+cluster's nodes only.
 
 ## No migration routes
 
-There is no `/api/v1/migration/*` surface: those routes were removed. Backing up
-Queen is a plain `pg_dump` of the database, and the offline rows-to-segments
-conversion is a CLI subcommand of the binary, not an HTTP endpoint.
+There is no `/api/v1/migration/*` surface, and no route backs up or restores a node's data
+directory.
 
 ## Access levels
 
 | Route | Level |
 | --- | --- |
-| `GET /api/v1/system/maintenance` | admin |
-| `POST /api/v1/system/maintenance` | admin |
-| `GET /api/v1/system/maintenance/pop` | admin |
-| `POST /api/v1/system/maintenance/pop` | admin |
+| `GET /api/v1/system/kv-timers` | admin |
+| `POST /api/v1/system/kv-timers` | admin |
+| `GET /api/v1/system/ephemeral` | admin |
+| `POST /api/v1/system/ephemeral` | admin |
+| `GET /api/v1/system/raft/membership` | admin |
+| `POST /api/v1/system/raft/membership/learners` | admin |
+| `POST /api/v1/system/raft/membership/promote` | admin |
+| `PUT /api/v1/system/raft/membership/voters` | admin |
+| `DELETE /api/v1/system/raft/membership/members/:id` | admin |
+| `POST /api/v1/system/quota`, `POST /api/v1/system/quotas` | admin |
 | `GET /api/v1/system/shared-state` | admin |
 | `POST /api/v1/stats/refresh` | admin |
-| `POST /internal/api/notify` | admin |
-| `GET /internal/api/shared-state/stats` | admin |
-| `GET /internal/api/inter-instance/stats` | admin |
 
 Deployment guidance for these surfaces (what to expose, where to terminate TLS, how
 the proxy classifies routes) is in the [self-hosting section](/deploy/).

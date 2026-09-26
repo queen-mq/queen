@@ -11,17 +11,18 @@
 sequenceDiagram
   participant C as client
   participant B as broker
-  participant PG as PostgreSQL
+  participant L as replicated log
   C->>B: push, naming a queue and a partition
-  B->>PG: create both if absent, store the message
-  PG-->>B: offset allocated
+  B->>L: one entry: create both if absent, append the message at the next offset
+  L-->>B: committed
   B-->>C: 201, per-item status queued
   C->>B: pop, with a batch size and a wait
-  B->>PG: claim the partition under a lease
-  PG-->>B: messages from committed + 1
-  B-->>C: 200, the messages and a leaseId
+  B->>L: one entry: claim the partition under a lease
+  L-->>B: committed
+  B-->>C: 200, messages from committed + 1 and a leaseId
   C->>B: ack, by transactionId and partitionId
-  B->>PG: move committed past it, release the lease
+  B->>L: one entry: move committed past it, release the lease
+  L-->>B: committed
   B-->>C: 200, success true on the item
-  Note over PG: nothing was deleted.<br/>The cursor moved.
+  Note over L: nothing was deleted.<br/>The cursor moved.
 `}</pre>

@@ -1,372 +1,202 @@
 ---
 title: Proxy
-description: "Deploy queen_proxy with Docker or Kubernetes, in front of one broker as a single-tenant front door or as the multi-tenant edge, and why it runs one replica."
+description: "The proxy runs inside the broker process: its two port layouts, the bootstrap tenant, the control plane, TLS, and the variables that shape it."
 type: how-to
 tier: operate
 sidebar:
   order: 8
 sourceOfTruth:
-  - proxy/src/main.rs
+  - server/src/proxy_embed.rs
+  - server/src/main.rs
+  - proxy/src/app.rs
   - proxy/src/config.rs
-  - proxy/src/acting.rs
-  - proxy/src/cache.rs
-  - proxy/src/oauth.rs
-  - proxy/src/db.rs
-  - proxy/src/pgtls.rs
-  - proxy/src/auth.rs
+  - proxy/src/cp.rs
   - proxy/src/gateway.rs
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): gateway.rs gained the DLQ replay gates, destination admission and metering; the configuration, timeouts and TLS behaviour this page documents are unchanged.
+  - proxy/src/limits.rs
+  - proxy/src/harden.rs
 ---
 
-`queen_proxy` is a second Rust binary that stands in front of a broker. It does two jobs, and
-most deployments want only one of them.
+The proxy is a front door built into the broker. It does two jobs, and most deployments want only
+one of them.
 
-As a **front door**, it terminates human identity: the dashboard, Google or GitHub logins, and
+As a **front door**, it terminates human identity: the dashboard login, Google or GitHub, and
 per-cluster roles. The broker has no concept of a user, so this is where one lives.
 
-As a **multi-tenant edge**, it also spends API keys, injects the tenant, enforces plan quotas and
-meters usage. That is [multi-tenant](/deploy/multi-tenant); this page is how to run the process
-either way.
+As a **multi-tenant edge**, it also spends API keys, sets the tenant, enforces plan quotas and
+meters usage. That is [multi-tenant](/deploy/multi-tenant); this page is how to run it either way.
 
-## What it needs
-
-One PostgreSQL of its own, *pxdb*, which can be a separate database or just a separate schema on
-the broker's. The proxy owns the `queen_proxy` schema there and applies its eight migrations at
-boot, so nothing has to be created first.
-
-Point it **directly at PostgreSQL, not through a pooler**. It holds a permanent dedicated
-`LISTEN` connection outside its pool, which is exactly the kind of long-lived session a
-transaction-mode pooler recycles underneath.
-
-## Docker
+## Turning it on
 
 ```bash
-docker run -d --name queen-proxy -p 6711:6711 \
-  -e PXDB_HOST=10.0.3.20 \
-  -e PXDB_PASSWORD=change-me \
-  -e QUEEN_PROXY_JWT_SECRET="$(openssl rand -hex 32)" \
-  -v queen-proxy-spool:/app/spool \
-  ghcr.io/queen-mq/queen-proxy:latest
+QUEEN_PROXY_EMBEDDED=true
+QUEEN_PROXY_JWT_SECRET=...     # openssl rand -hex 32, the same on every node
 ```
 
-`PXDB_HOST` is the only variable it refuses to start without. Keep `QUEEN_PROXY_JWT_SECRET`
-stable: sessions are signed with it, so changing it logs every human out. The spool volume is
-where metering that could not be written yet is parked, so losing it loses usage rather than
-traffic.
+That is the whole switch. The proxy starts inside the broker process, keeps its tables in the
+broker's replicated key/value store under a system tenant of its own, and reaches the broker
+in-process, without a socket in between. There is no second service to deploy and no database to
+give it, and on a cluster every node runs the same proxy over the same replicated state, so a key
+issued through one node works on all of them.
 
-Leave the JWT variables out entirely and the proxy still starts, because an API-key-only proxy is
-a supported shape. It warns at boot that it has no signer, and a console login then answers 503
-instead of issuing a session. What it refuses to start with is JWT material it cannot use: a
-private key that does not parse, or a public key it cannot verify with. Supplied and broken is a
-mistake; absent is a choice.
+`QUEEN_PROXY_JWT_SECRET` signs human sessions with HS256; `QUEEN_PROXY_JWT_ED25519_PEM`, an
+Ed25519 private key in PEM, does the same with EdDSA. Every node has to hold the same material,
+because a session minted by one node is presented to another. Leave both out and the proxy still
+starts, since an API-key-only front door is a supported shape: it warns at boot, and the console
+login answers `503` instead of issuing a session. Material that is supplied and does not load is a
+boot failure.
 
-```bash
-curl -s http://127.0.0.1:6711/healthz
-```
+## Two port layouts
 
-```json
-{"enforce":false,"shared_hosts":0,"status":"ok","tenant_header":true}
-```
+Where the proxy listens decides what the broker port is.
 
-## Kubernetes
+| `QUEEN_PROXY_PORT` | The proxy serves | `PORT` serves |
+| --- | --- | --- |
+| unset, or equal to `PORT` | `PORT` | nothing else: the broker router has no socket, so every request needs a key or a session |
+| another port, for example `6711` | that port | the broker router directly, with its own JWT and tenancy settings: an internal port for trusted clients, probes and scrapers |
 
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: queen-proxy
-spec:
-  # One. See "Why one replica" below before changing this.
-  replicas: 1
-  selector:
-    matchLabels: { app: queen-proxy }
-  template:
-    metadata:
-      labels: { app: queen-proxy }
-    spec:
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 10001
-      containers:
-        - name: queen-proxy
-          image: ghcr.io/queen-mq/queen-proxy:1.0.0
-          command: ["/app/bin/queen-proxy"]
-          ports:
-            - containerPort: 6711
-          env:
-            - name: PXDB_HOST
-              value: postgres.internal
-            - name: PXDB_PORT           # direct, not the pooler
-              value: "5432"
-            - name: PXDB_DB
-              value: queen
-            - name: PXDB_USER
-              value: queen_owner
-            - name: PXDB_PASSWORD
-              valueFrom:
-                secretKeyRef: { name: queen-postgres, key: PG_PASSWORD }
-            - name: QUEEN_PROXY_JWT_SECRET
-              valueFrom:
-                secretKeyRef: { name: queen-proxy, key: JWT_SECRET }
-            - name: QUEEN_PROXY_PUBLIC_URL
-              value: https://queen.example.com
-            - name: QUEEN_PROXY_COOKIE_DOMAIN
-              value: queen.example.com
-          startupProbe:
-            httpGet: { path: /healthz, port: 6711 }
-            periodSeconds: 5
-          readinessProbe:
-            httpGet: { path: /healthz, port: 6711 }
-            periodSeconds: 10
-          livenessProbe:
-            httpGet: { path: /healthz, port: 6711 }
-            periodSeconds: 20
-```
+The second layout is the one to use when in-cluster consumers should keep dialling 6632 with no
+credential while humans and external clients come through 6711. Port 6632 then must never be
+exposed beyond the network you trust. On the proxy's port, `/health` passes straight through to the broker
+for probes, and `/metrics` and `/metrics/prometheus` answer only with the control-plane token.
 
-Routing is the **first DNS label of the `Host` header**, matched against a cluster slug, so
-`queen-prod.example.com` acts on the cluster `queen-prod` and one wildcard record covers the rest.
+## State and the spool
+
+Nothing the proxy knows lives outside the data directory. Tenants, clusters, users, roles, API-key
+hashes, plans and the usage rollup are rows in the replicated key/value store, written through the
+same log as every other write, so they survive a node and follow the cluster's quorum.
+
+The one local path is the meter's spool, where usage that could not be written yet is parked:
+`QUEEN_PROXY_SPOOL_DIR`, default `./queen-proxy-spool`, relative to the working directory. Put it on
+the data volume, for example `/var/lib/queen/raft/proxy-spool`: on a read-only root filesystem the
+default is not writable, and losing the spool loses usage rather than traffic.
+
+## The bootstrap tenant
+
+A fresh cell has no tenants, and a proxy with no tenants routes nothing. The first one can come from
+the environment:
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `QUEEN_PROXY_BOOTSTRAP_TENANT` | unset | Tenant slug. The cluster gets the same slug. Unset: no bootstrap |
+| `QUEEN_PROXY_BOOTSTRAP_EMAIL` | `admin@localhost` | The admin user |
+| `QUEEN_PROXY_BOOTSTRAP_PASSWORD` | unset | The admin's password. Unset: the admin signs in through OAuth, or not at all |
+| `QUEEN_PROXY_BOOTSTRAP_PLAN` | `dev` | The cluster's plan code |
+| `QUEEN_PROXY_BOOTSTRAP_API_KEY` | unset | A plaintext API key to issue on that cluster, with all four scopes |
+
+The bootstrap runs at every boot, on every node, and is idempotent: a restart or a second node
+changes nothing. The key must start with `qk_`, because the proxy treats a bearer token as an API
+key only with that prefix. Generate one with
+`qk_live_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')` and keep it in a secret.
+
+## The control plane
+
+Everything after the bootstrap goes through `/api/cp/*` on the proxy's port, guarded by
+`QUEEN_PROXY_CP_TOKEN` in the `x-queen-cp-token` header. With no token configured the whole surface
+answers `404`, as if it did not exist.
+
+| Route | Does |
+| --- | --- |
+| `POST /api/cp/bootstrap` | A tenant, its cluster, an admin and a first API key, in one call |
+| `POST /api/cp/tenants` | A tenant |
+| `POST /api/cp/clusters` | A cluster, creating its tenant if needed |
+| `GET /api/cp/clusters/:slug` | A cluster's ids |
+| `PUT /api/cp/clusters/:id/overrides` | Limits above or below the plan for one cluster (`null` clears them) |
+| `PUT /api/cp/clusters/:id/status` | The cluster's status |
+| `GET /api/cp/clusters/:id/usage` | The last hour of metered minutes |
+| `POST /api/cp/keys` | An API key, from its sha256 hash: the plaintext never reaches the proxy |
+| `DELETE /api/cp/keys/:id` | Revokes a key |
+
+The walkthrough is [multi-tenant](/deploy/multi-tenant).
+
+## Routing
+
+A request's cluster is the **first DNS label of the `Host` header**, matched against a cluster slug,
+so `acme-prod.example.com` acts on the cluster `acme-prod` and one wildcard record covers the rest.
 A port-forward therefore needs the header spelled out, or the request has no cluster:
 
 ```bash
-curl -H "Host: queen-prod.example.com" http://127.0.0.1:6711/api/v1/queues
+curl -H "Host: acme-prod.example.com" -H "Authorization: Bearer $KEY" http://127.0.0.1:6711/api/v1/resources/queues
 ```
 
-One hostname can be made to front several clusters instead, with the credential doing the
-routing rather than the label: [shared hosts](#shared-hosts) below.
+`QUEEN_PROXY_SHARED_HOSTS` lists full hostnames that front several clusters at once: on a listed
+host the label names nothing, and the credential does the routing. An API key acts on the cluster
+it was issued on; a human session names its cluster with `x-queen-act-cluster`. Configuring any
+shared host changes what the whole listener tells strangers: an unauthenticated caller gets `401`
+where an unknown host used to answer `421`, so that the wildcard record is not a directory of
+cluster slugs ([credentials](/reference/multi-tenant/auth)).
 
-## Configuration
-
-Every setting is an environment variable, parsed the way the broker parses its own: only the
-literal `true` is truthy, an integer that does not parse falls back to its default instead of
-failing the boot, and an optional variable set to the empty string counts as unset.
-
-### The listener and TLS
-
-| Variable | Default | What it does |
-| --- | --- | --- |
-| `QUEEN_PROXY_PORT` | `6711` | Bind port, plaintext or TLS: there is one listener either way. |
-| `QUEEN_PROXY_BIND_ADDR` | `0.0.0.0` | Bind host, every interface by default. A host or IP only, so a value carrying its own port exits 1 at boot instead of binding somewhere unintended. |
-| `QUEEN_PROXY_TLS_CERT` | unset | Path to a PEM certificate chain. |
-| `QUEEN_PROXY_TLS_KEY` | unset | Path to the matching PEM private key. |
-
-The two TLS variables are both or neither. Set both and the proxy serves HTTPS itself on rustls
-with the ring provider, logging `TLS listener enabled (rustls/ring)`; set neither and it serves
-plaintext, which is the default. **Setting exactly one is a boot failure, not a downgrade**: the
-process logs the missing half and exits 1 before the port is bound, so a half-configured listener
-can never quietly answer in the clear. Both files are read and parsed before the bind for the same
-reason. The key may be a `PRIVATE KEY`, `RSA PRIVATE KEY` or `EC PRIVATE KEY` block, and the cert
-file must contain at least one `CERTIFICATE` block.
-
-<Aside type="caution">
-The proxy speaks **plaintext HTTP upstream to the broker**, whatever the listener does. That leg is
-assumed to be inside the cell network, so `QUEEN_PROXY_TLS_CERT` protects the client-to-proxy hop
-only.
-</Aside>
-
-### The control-plane database
-
-| Variable | Default | What it does |
-| --- | --- | --- |
-| `PXDB_HOST` | unset | Hostname of pxdb. **Its presence is the switch**: unset means no control plane at all. |
-| `PXDB_PORT` | `5432` | Port. Point it at PostgreSQL directly, not at a pooler. |
-| `PXDB_USER` | `postgres` | Role the proxy connects as. |
-| `PXDB_PASSWORD` | empty | Password for that role. |
-| `PXDB_DB` | `queen_proxy` | Database name. The proxy owns the `queen_proxy` schema inside it. |
-| `PXDB_USE_SSL` | `false` | `true` connects over TLS. |
-| `PXDB_SSL_REJECT_UNAUTHORIZED` | `true` | With SSL on, `true` validates the chain against the Mozilla roots compiled into the binary; `false` encrypts and accepts any certificate. |
-| `PXDB_SSL_ROOT_CERT` | unset | The PEM content of a CA to validate the chain against instead of those roots. |
-| `PXDB_POOL_SIZE` | `16` | Maximum pooled connections. The dedicated `LISTEN` connection sits outside this pool, so budget one more. |
-
-The three SSL variables behave exactly like the broker's `PG_USE_SSL`,
-`PG_SSL_REJECT_UNAUTHORIZED` and `PG_SSL_ROOT_CERT`
-([PostgreSQL TLS](/reference/security/postgres-tls)), down to the same code: both services
-compile the same connector module. Most managed PostgreSQL presents a privately rooted chain, so
-`PXDB_SSL_REJECT_UNAUTHORIZED=true` alone fails validation; the answer is `PXDB_SSL_ROOT_CERT` with
-that provider's CA, which keeps verification on. It takes the certificate content, not a path, and a
-multi-line value does not survive `docker --env-file`. A malformed value is a boot failure, and a CA
-supplied beside `PXDB_SSL_REJECT_UNAUTHORIZED=false` wins over it, with a warning. Both connections
-use it: the pool, and the dedicated `LISTEN` connection.
-
-Two things about pxdb are boot failures rather than degraded modes. An unreachable database is one:
-the proxy takes a connection and runs `SELECT 1` before it serves anything, and a failure there, or
-in the migrations that follow, logs and exits 1. Leaving `PXDB_HOST` unset is the other, unless
-`QUEEN_PROXY_DEV_CELL_URL` is set instead; with neither, the process logs `nothing to serve` and
-exits 1 rather than starting an empty proxy.
-
-### Shared hosts
-
-| Variable | Default | What it does |
-| --- | --- | --- |
-| `QUEEN_PROXY_SHARED_HOSTS` | unset | Comma-separated hostnames that front many clusters. On one of these the cluster is resolved from the credential instead of from the `Host` label. |
-
-Entries are **full hostnames**, not first labels: `queen.example.com`, not `queen`. Each is
-lowercased, and a `:port` or a trailing root dot is stripped, so a value pasted out of a browser
-bar or a zone file still matches the header a client sends. The comparison is against the whole
-name on purpose: matching a first label would quietly make every `queen.*` domain this proxy
-answers on shared too, so a bare `queen` matches nothing rather than widening the feature.
-
-On a listed host the label names nothing, so the credential does the routing. An API key acts on
-the cluster it was issued on, with no header needed: `queen_proxy.api_keys` already joins straight
-through to the cluster, so the key was always the authority and the label was only ever routing.
-Sending `x-queen-act-cluster` beside a key is still refused with `403`, not ignored, exactly as on
-a per-cluster hostname. A human session names its cluster with that header, or with a `cluster`
-claim, and is then checked against `cluster_roles` by the same matrix used everywhere else
-([credentials](/reference/multi-tenant/auth#shared-hosts)); a session naming none gets `403 this
-host serves several clusters; name one with x-queen-act-cluster`, which is the question the
-dashboard's cluster selector exists to answer ([console](/reference/multi-tenant/console)).
-
-That is the shape a self-hosted cell usually wants: one URL, several teams, each landing in its own
-cluster carrying nothing but its own key. The walkthrough is
-[one hostname for several tenants](/deploy/multi-tenant). `/healthz` reports how many hosts are
-listed, a count and not the list, since that endpoint is unauthenticated.
-
-<Aside type="caution">
-Configuring **any** shared host changes what the **whole listener** tells strangers. The `421` for
-a hostname that resolves to no cluster is withheld until the caller presents a live credential, and
-the pre-auth status gates wait for authentication too, so an anonymous caller gets `401` where it
-previously got `421`. A shared host normally sits behind a wildcard record, so every other
-`*.example.com` arrives on the same socket, and a `401` for a slug that exists beside a `421` for
-one that does not is an unauthenticated way to read off every tenant's cluster slug, and through
-the status gate each one's suspended or deleting state. Leave the variable unset and none of this
-moves.
-</Aside>
-
-Two more things to know before setting it.
-
-Boot is **fatal** when `QUEEN_PROXY_SHARED_HOSTS` is set and `PXDB_HOST` is not. A shared host
-resolves its cluster out of `queen_proxy.api_keys` and `cluster_roles`, and without a pxdb neither
-table exists, so every request to a listed host would answer `401` forever. The proxy names the
-hosts and exits 1 rather than serving that, on the same reasoning as the half-configured TLS
-listener above: a half-configured feature is a misconfiguration, not a degraded mode.
-
-`QUEEN_PROXY_DEFAULT_CLUSTER` is a different feature and is **not** the way to serve several
-tenants. It maps every unresolvable `Host` to one cluster, where this maps a named host to
-whichever cluster the credential belongs to. The two cannot interact, because the shared-host check
-runs first and never reaches the default; see [the single-tenant front
-door](#the-single-tenant-front-door) for why the default is the wrong tool as soon as a second
-cluster exists.
-
-### Timeouts
-
-| Variable | Default | What it does |
-| --- | --- | --- |
-| `QUEEN_PROXY_UPSTREAM_TIMEOUT_MS` | `35000` | Ceiling on one broker call, for every request that is not a long-poll pop. |
-| `QUEEN_PROXY_LONGPOLL_MAX_MS` | `90000` | Clamp on the wait a client may ask for on `wait=true`. |
-| `QUEEN_PROXY_LONGPOLL_MARGIN_MS` | `10000` | Added on top of that clamped wait. |
-
-A long-poll pop does not use `QUEEN_PROXY_UPSTREAM_TIMEOUT_MS` at all. Its budget is the client's
-`timeout` query parameter, or 30000 ms when absent, clamped to `QUEEN_PROXY_LONGPOLL_MAX_MS` and
-then increased by `QUEEN_PROXY_LONGPOLL_MARGIN_MS`, so the broker's own wait always expires first
-and the client gets an empty pop rather than a gateway error. When a timeout does fire, the proxy
-answers its own `504 {"code":"upstream_timeout"}`, records the request and does not bill it
-([usage metering](/reference/multi-tenant/metering)).
-
-### Cache staleness and token revocation
-
-| Variable | Default | What it does |
-| --- | --- | --- |
-| `QUEEN_PROXY_STALE_GRACE_MS` | `600000` | How long past a cache entry's TTL the last known-good cluster row may still be served, and only when pxdb failed to answer. |
-| `QUEEN_PROXY_REVOCATION_SWEEP_MS` | `3600000` | Interval of `queen_proxy.sweep_revoked_tokens()`. `0` disables the sweep. |
-
-`QUEEN_PROXY_STALE_GRACE_MS` is fail-open for known-good rows only. A clean answer of "no such row"
-is refused immediately whatever the window says, so the grace covers a pxdb outage and never covers
-a deleted cluster. It is also the number to read as the worst case in the other direction: nothing
-is refreshed while pxdb is down, so a suspension, a deletion or a key revocation decided during the
-outage takes up to this long to bite. Ten minutes is the default trade.
-
-The revocation sweep is pure garbage collection, since a deny-list row whose own `exp` has passed
-can no longer change a verification's outcome. Its first tick fires immediately at startup, and the
-whole task is skipped with a log line when there is no pxdb. The deny-list policy for a failed
-lookup is a different variable, `QUEEN_PROXY_REVOCATION_STRICT`
-([credentials and authorization](/reference/multi-tenant/auth)).
-
-### Dev only
-
-| Variable | Default | What it does |
-| --- | --- | --- |
-| `QUEEN_PROXY_DEV_INSECURE` | `false` | `true` skips authentication on the data plane entirely. |
-
-<Aside type="danger">
-`QUEEN_PROXY_DEV_INSECURE=true` does not weaken authentication, it removes it. Every request
-becomes an API-key principal with all four scopes and a nil key id, before any credential is read,
-so anything that can reach the port can produce, consume and administer queues on the cluster the
-`Host` header resolves to. Never set it anywhere a network can reach.
-</Aside>
-
-Two surfaces refuse to work in that mode, deliberately.
-The [cluster console API](/reference/multi-tenant/console) requires a human session and answers
-`403` to the synthetic API-key principal, and `x-queen-act-cluster` is rejected with a `403` naming
-dev-insecure, because there is no session to check the act-as against.
-
-## Why one replica
-
-The broker scales by starting more copies, and the proxy does not. Rate limits, the parked
-long-poll gauges and the admission registry are **per-process, with no shared store**, so three
-replicas admit three times the configured caps.
-
-That is a deliberate trade: exact counters with nothing to coordinate, on the assumption of one
-proxy per cell. Run one replica and let Kubernetes restart it; a rolling update briefly runs two,
-which is a short overshoot of the limits rather than a correctness problem, since the proxy holds
-no session state that a restart could lose.
+`QUEEN_PROXY_DEFAULT_CLUSTER` is a different feature: it maps every unresolvable `Host` to one
+cluster. That is harmless while exactly one cluster exists and a cross-cluster misroute the moment
+there are two, so it is only for a cell that will only ever hold one.
 
 ## The single-tenant front door
 
-The way this is deployed at Smartness is worth describing, because it is the common case and it is
-not the multi-tenant one.
+The common case is not the multi-tenant one: one team, one cluster, workloads inside the network
+and humans on the console. Run the proxy on its own port, keep the workloads on `PORT` with no
+credential, and set `QUEEN_PROXY_TENANT_HEADER=false`. The proxy then stops setting a tenant of its
+own, still drops any `x-queen-tenant` a client sends, and console and API-key traffic land in the
+broker's default tenant, the same one the workloads on `PORT` use. Without it the bootstrap cluster
+gets a broker tenant of its own, and the console shows none of the queues the workloads created.
+That setting is right for a single-tenant cell and wrong for a multi-tenant one.
 
-**The proxy is not on the data path.** Every workload dials the broker's own Service directly,
-carries no credential, and never meets the proxy. The proxy exists for the dashboard and the
-humans who log into it, which is why it can be deployed, upgraded and broken independently of the
-brokers moving messages.
+## TLS
 
-With one tenant there is one cluster row, and the broker's tenancy is the fixed default tenant
-`00000000-0000-0000-0000-000000000001`, which the proxy injects and the broker recognises. Nothing
-else changes: the same binary, the same pxdb, one `bootstrap_tenant` call instead of many.
+The proxy's listener serves TLS itself when `QUEEN_TLS_CERT` and `QUEEN_TLS_KEY`, both paths to PEM
+files, are set. The two are both or neither: setting exactly one is a boot failure, not a
+downgrade, so a half-configured listener never quietly answers in the clear. With neither, the
+listener is plaintext and TLS belongs to whatever is in front of it. The broker port behind it has
+no TLS in either case.
 
-<Aside type="caution">
-**`QUEEN_PROXY_DEFAULT_CLUSTER` is not the way to do this.** It answers every unresolvable `Host`
-with that cluster, so an in-cluster caller using the Service DNS, a raw pod-IP request or a
-spoofed header all silently act on it. It is harmless while exactly one cluster row exists and a
-cross-cluster misroute the moment there are two. Leave it unset and let the `Host` resolve, even
-with a single tenant.
+## Limits are per process
+
+Rate limits and the parked long-poll gauges are counted in the process, with no shared store: a
+cluster's traffic is limited by each node's proxy on what that node sees. Behind a load balancer
+spreading over three nodes, a cluster can therefore reach up to three times its plan's rate before
+every node refuses it.
+
+`QUEEN_PROXY_ENFORCE` defaults to `false`, which is shadow mode: every rate and quota decision is
+computed, logged and metered, and the request proceeds anyway. Size caps and the two push-block
+quotas are hard regardless ([quotas](/reference/multi-tenant/quotas)).
+
+## Other variables
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `QUEEN_PROXY_PUBLIC_URL` | unset | The public base URL, used for OAuth redirects and the session audience |
+| `QUEEN_PROXY_COOKIE_DOMAIN` | unset | The session cookie's domain |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | unset | Google login; `GOOGLE_ALLOWED_DOMAINS` restricts it |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | unset | GitHub login |
+| `QUEEN_PROXY_AUTOPROVISION` | `false` | Create a user on a first OAuth login, with `QUEEN_PROXY_DEFAULT_ROLE` (`viewer`) |
+| `QUEEN_PROXY_OPERATOR_ENABLED` | `false` | Lets live operators open cell-wide routes |
+| `QUEEN_EDGE_TRUSTED_PROXIES` | unset | Load balancer ranges whose forwarded client address the edge believes |
+| `QUEEN_PROXY_UPSTREAM_TIMEOUT_MS` | `35000` | Ceiling on one broker call that is not a long-poll pop |
+| `QUEEN_PROXY_LONGPOLL_MAX_MS` | `90000` | Clamp on the wait a client may ask for on `wait=true` |
+| `QUEEN_PROXY_LONGPOLL_MARGIN_MS` | `10000` | Added on top of that clamped wait, so the broker's wait expires first |
+| `QUEEN_PROXY_STALE_GRACE_MS` | `600000` | How long a last known-good cluster row may be served when the store does not answer |
+
+<Aside type="danger">
+`QUEEN_PROXY_DEV_INSECURE=true` does not weaken authentication, it removes it: every request
+becomes an API-key principal with all four scopes before any credential is read. Never set it
+anywhere a network can reach.
 </Aside>
 
-For a laptop or a demo, where there is no pxdb at all, the static form is the honest one:
-`QUEEN_PROXY_DEV_CELL_URL` points at a broker, `QUEEN_PROXY_DEV_CELL_TOKEN` carries its cell
-token, and `QUEEN_PROXY_DEV_TENANT` defaults to the same fixed tenant.
+## Registering the OAuth redirect
 
-## Bringing one up in order
-
-<Steps>
-
-1. **Create the database or schema** and the role the proxy will use.
-
-2. **Boot the proxy once.** It applies its migrations and starts answering `/healthz`. Until the
-   control plane has rows, the dashboard's own API calls answer `421` and the site looks dead
-   rather than empty, so do not announce it yet.
-
-3. **Bootstrap the control plane**: the cell row, then `bootstrap_tenant`
-   ([multi-tenant](/deploy/multi-tenant)).
-
-4. **Register the OAuth redirect** as `<public url>/auth/google/callback`. The path matters: `/api`
-   is the proxy's own prefix, so a redirect under it is rejected before it reaches the OAuth
-   handler rather than logging anyone in.
-
-5. **Point DNS at it**, wildcard if there will be more than one cluster.
-
-</Steps>
+Register `<public url>/auth/google/callback` with Google. The path matters: `/api` is the proxy's
+own prefix, so a redirect under it is rejected before it reaches the OAuth handler rather than
+logging anyone in. With `QUEEN_PROXY_PUBLIC_URL` unset, the proxy rebuilds the base from the
+request's `Host` and `X-Forwarded-Proto`.
 
 <CardGrid>
   <LinkCard
     href="/deploy/multi-tenant"
     title="Multi-tenant"
-    description="Cells, tenants, clusters, API keys, quotas and the Google login policy."
+    description="Tenants, clusters, API keys, quotas and the Google login policy."
   />
   <LinkCard
     href="/deploy/dashboard"
     title="Dashboard"
-    description="The same bundle the broker serves, with real users and per-cluster roles once the proxy is in front."
+    description="The same bundle the broker serves, with real users and per-cluster roles behind the proxy."
   />
   <LinkCard
     href="/reference/multi-tenant/endpoints"

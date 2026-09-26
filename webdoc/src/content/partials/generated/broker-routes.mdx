@@ -6,12 +6,14 @@ description: "Every HTTP route the broker registers, with its access level and w
 {/* GENERATED FILE. Do not edit by hand.
     Regenerate with: pnpm --dir webdoc gen
     Source of truth:
-      - server/src/main.rs (Router::new chain)
+      - server/src/handlers/raft.rs (build_raft_router)
+      - server/src/rsm/facade/real/phase2.rs (api_impl)
+      - server/src/rsm/facade/real/phase2/reads.rs (api_dynamic)
       - server/src/auth.rs (route_access_level)
       - server/src/handlers/*.rs (Tenant extension)
 */}
 
-Queen's broker registers **93 method + path pairs**. Every row below is read out of the router and the authorization table at build time.
+Queen's broker serves **98 method + path pairs**. Every row below is read out of the router, the generic adapter behind it and the authorization table at build time.
 
 ### Message plane
 
@@ -37,7 +39,10 @@ Queen's broker registers **93 method + path pairs**. Every row below is read out
 | `DELETE` | `/api/v1/resources/queues/:queue` | admin | yes |
 | `GET` | `/api/v1/resources/queues/:queue` | read-only | yes |
 | `GET` | `/api/v1/resources/queues/:queue/depth` | read-only | yes |
+| `GET` | `/api/v1/resources/queues/:queue/sizes` | read-only | yes |
+| `POST` | `/api/v1/resources/quota` | read-write | yes |
 | `GET` | `/api/v1/resources/tasks` | read-only | yes |
+| `DELETE` | `/api/v1/resources/tenant` | read-write | yes |
 
 ### Consumer groups
 
@@ -51,6 +56,7 @@ Queen's broker registers **93 method + path pairs**. Every row below is read out
 | `POST` | `/api/v1/consumer-groups/:group/queues/:queue/seek` | read-write | yes |
 | `POST` | `/api/v1/consumer-groups/:group/subscription` | read-write | yes |
 | `GET` | `/api/v1/consumer-groups/lagging` | read-only | yes |
+| `POST` | `/api/v1/consumer-groups/positions` | read-write | yes |
 
 ### Messages, DLQ and traces
 
@@ -74,7 +80,6 @@ Queen's broker registers **93 method + path pairs**. Every row below is read out
 | --- | --- | --- | --- |
 | `GET` | `/api/v1/analytics/dlq-signatures` | read-only | yes |
 | `GET` | `/api/v1/analytics/partition-liveness` | read-only | yes |
-| `GET` | `/api/v1/analytics/postgres-stats` | read-only | no |
 | `GET` | `/api/v1/analytics/queue-lag` | read-only | yes |
 | `GET` | `/api/v1/analytics/queue-ops` | read-only | yes |
 | `GET` | `/api/v1/analytics/queue-parked-replicas` | read-only | yes |
@@ -83,9 +88,8 @@ Queen's broker registers **93 method + path pairs**. Every row below is read out
 | `GET` | `/api/v1/analytics/worker-metrics` | read-only | no |
 | `GET` | `/api/v1/analytics/workload` | read-only | yes |
 | `POST` | `/api/v1/stats/refresh` | admin | no |
-| `GET` | `/api/v1/status` | read-only | no |
+| `GET` | `/api/v1/status` | read-only | yes |
 | `GET` | `/api/v1/status/analytics` | read-only | yes |
-| `GET` | `/api/v1/status/buffers` | read-only | no |
 | `GET` | `/api/v1/status/queues` | read-only | yes |
 | `GET` | `/api/v1/status/queues/:queue` | read-only | yes |
 | `GET` | `/health` | public | no |
@@ -137,11 +141,29 @@ Queen's broker registers **93 method + path pairs**. Every row below is read out
 | `POST` | `/api/v1/system/ephemeral` | admin | no |
 | `GET` | `/api/v1/system/kv-timers` | admin | no |
 | `POST` | `/api/v1/system/kv-timers` | admin | no |
-| `GET` | `/api/v1/system/maintenance` | admin | no |
-| `POST` | `/api/v1/system/maintenance` | admin | no |
-| `GET` | `/api/v1/system/maintenance/pop` | admin | no |
-| `POST` | `/api/v1/system/maintenance/pop` | admin | no |
+| `POST` | `/api/v1/system/quota` | admin | no |
+| `POST` | `/api/v1/system/quotas` | admin | no |
+| `GET` | `/api/v1/system/raft/membership` | admin | no |
+| `POST` | `/api/v1/system/raft/membership/learners` | admin | no |
+| `DELETE` | `/api/v1/system/raft/membership/members/:id` | admin | no |
+| `POST` | `/api/v1/system/raft/membership/promote` | admin | no |
+| `PUT` | `/api/v1/system/raft/membership/voters` | admin | no |
 | `GET` | `/api/v1/system/shared-state` | admin | no |
+
+### Cluster (raft)
+
+| Method | Path | Access level | Tenant-scoped |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/raft/liveness` | read-write | no |
+| `GET` | `/api/v1/raft/members` | read-write | no |
+| `GET` | `/api/v1/raft/status` | read-write | no |
+
+### Reads by offset
+
+| Method | Path | Access level | Tenant-scoped |
+| --- | --- | --- | --- |
+| `POST` | `/api/v1/fetch` | read-only | yes |
+| `POST` | `/api/v1/partitions/changed` | read-only | yes |
 
 ### Dashboard identity (broker-direct)
 
@@ -151,19 +173,4 @@ Queen's broker registers **93 method + path pairs**. Every row below is read out
 | `POST` | `/auth/logout` | public | no |
 | `GET` | `/auth/me` | public | no |
 
-### Internal (broker-to-broker)
-
-| Method | Path | Access level | Tenant-scoped |
-| --- | --- | --- | --- |
-| `GET` | `/internal/api/inter-instance/stats` | admin | no |
-| `POST` | `/internal/api/notify` | admin | yes |
-| `GET` | `/internal/api/shared-state/stats` | admin | no |
-
-### Ungrouped
-
-| Method | Path | Access level | Tenant-scoped |
-| --- | --- | --- | --- |
-| `POST` | `/api/v1/fetch` | read-only | yes |
-| `POST` | `/api/v1/partitions/changed` | read-only | yes |
-
-69 of these handlers resolve a tenant from the request; 15 `/api/v1/*` routes do not and are therefore cell-wide reads or operator surfaces.
+73 of these handlers resolve a tenant from the request; 18 `/api/v1/*` routes do not and are therefore cell-wide reads or operator surfaces.

@@ -356,8 +356,8 @@ is dropped and counted. There is no DLQ on this class.`,
 var ephemeralConfigureCmd = &cobra.Command{
 	Use:   "configure <queue>",
 	Short: "Declare an ephemeral queue and its bounds",
-	Long: `Declare a queue: the OPTIONS are persisted in PostgreSQL, so the
-configuration survives a restart and the queue comes back declared and EMPTY.
+	Long: `Declare a queue: the OPTIONS are persisted in the broker's replicated log,
+so the configuration survives a restart and the queue comes back declared and EMPTY.
 
 Optional in every sense — a push or a pop that names an unknown queue creates it
 implicitly with the tenant defaults. Declare when you want non-default bounds,
@@ -484,9 +484,7 @@ var ephemeralQueuesCmd = &cobra.Command{
 	Short:   "List this tenant's ephemeral queues, declared and implicit",
 	Long: `List the live ephemeral queues with their gauges.
 
-Free to poll: the numbers are read out of the broker's own memory, with no
-database behind them — unlike the durable meter, whose 1s poll is load-bearing
-on PostgreSQL.`,
+Free to poll: the numbers are read out of the broker's own memory.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c, cleanup, err := newClient()
 		if err != nil {

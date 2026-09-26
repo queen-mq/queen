@@ -303,7 +303,7 @@ qw_kv_delete_body() {
 # Timer operations (§4).
 #
 # `delayMs` is RELATIVE and in milliseconds; an absolute instant is not
-# expressible on this wire, on purpose: one clock, Postgres's, and no
+# expressible on this wire, on purpose: one clock, the broker's, and no
 # inter-broker skew can enter anywhere. A delay in the past is LEGAL and fires on
 # the first cycle.
 #

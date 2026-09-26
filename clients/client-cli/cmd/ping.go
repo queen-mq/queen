@@ -16,8 +16,8 @@ var pingCmd = &cobra.Command{
 	Use:   "ping",
 	Short: "Health-check the broker and exit non-zero on failure",
 	Long: `Calls GET /health on the configured server. Exits 0 when the
-server reports 'healthy' (database connected), 2 otherwise. Useful for
-liveness probes in shell scripts and CI pipelines.`,
+server reports 'healthy' (a leader is known and the node is caught up),
+2 otherwise. Useful for liveness probes in shell scripts and CI pipelines.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c, cleanup, err := newClient()
 		if err != nil {
@@ -33,14 +33,14 @@ liveness probes in shell scripts and CI pipelines.`,
 			return clierr.Server(fmt.Errorf("server unreachable: %w", err))
 		}
 		status, _ := h["status"].(string)
-		db, _ := h["database"].(string)
-		if status != "healthy" || (db != "" && db != "connected") {
-			return clierr.Server(fmt.Errorf("unhealthy: status=%s database=%s", status, db))
+		engine, _ := h["engine"].(string)
+		if status != "healthy" {
+			return clierr.Server(fmt.Errorf("unhealthy: status=%s", status))
 		}
 		view := output.View{
 			Columns: []output.Column{
 				{Header: "STATUS"},
-				{Header: "DATABASE"},
+				{Header: "ENGINE"},
 				{Header: "VERSION"},
 				{Header: "LATENCY"},
 			},
@@ -50,10 +50,10 @@ liveness probes in shell scripts and CI pipelines.`,
 			return err
 		}
 		row := map[string]any{
-			"status":   status,
-			"database": db,
-			"version":  h["version"],
-			"latency":  latency.Round(time.Millisecond).String(),
+			"status":  status,
+			"engine":  engine,
+			"version": h["version"],
+			"latency": latency.Round(time.Millisecond).String(),
 		}
 		return r.Render(row)
 	},

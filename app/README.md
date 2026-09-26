@@ -37,8 +37,8 @@ choice wins, otherwise the OS preference is honoured only when it asks for light
   work grouped by namespace or task
 - **Ephemeral** — the in-memory queue class, on its own page
 - **System** and **Users** — cell-level health, PostgreSQL internals (or, on a raft-mode broker,
-  the replicated log and the Raft cluster's members), the maintenance switches and account
-  management (operators only; both say "cell" on screen)
+  the replicated log and the Raft cluster's members) and account management (operators only;
+  both say "cell" on screen)
 
 There is **no pop inspector**, and there will not be one: a pop from a console takes a lease,
 steals from a real consumer and burns a retry attempt with nobody to ack it.

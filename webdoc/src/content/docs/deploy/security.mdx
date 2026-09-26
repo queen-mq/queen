@@ -1,6 +1,6 @@
 ---
 title: Security
-description: "One plaintext listener and five trust boundaries: what the broker enforces, what you put around it, and where the detail for each mechanism lives."
+description: "One plaintext broker listener, one raft port and five trust boundaries: what the broker enforces, what the embedded proxy adds, and where the detail for each mechanism lives."
 type: how-to
 tier: operate
 sidebar:
@@ -9,44 +9,38 @@ sourceOfTruth:
   - server/src/main.rs
   - server/src/auth.rs
   - server/src/config.rs
-  - server/src/mesh.rs
   - server/src/tenant.rs
   - server/src/encryption.rs
-  - server/src/pgtls.rs
-  - server/sql/procedures/002_streams_schema.sql
-  - proxy/src/main.rs
-  - proxy/src/gateway.rs
-  - proxy/src/routes.rs
+  - server/src/proxy_embed.rs
+  - server/src/rsm/replicator/raft/network.rs
+  - server/src/rsm/replicator/raft/cluster.rs
+  - proxy/src/harden.rs
+  - proxy/src/cp.rs
 digest: >-
-  One plaintext listener on `0.0.0.0:PORT` serves the HTTP API and dashboard; no TLS listener, no
-  CORS layer. `JWT_ENABLED` is `false` by default; off, every route answers any caller, `DELETE
-  /api/v1/resources/queues/:queue` included, dashboard as full admin. `/metrics/prometheus` is
-  public, no switch; its per-queue series carry no tenant label. `PG_USE_SSL` is `false` by
-  default; on, most managed PostgreSQL fails Mozilla-root validation, so pin its CA in
-  `PG_SSL_ROOT_CERT`; `PG_SSL_REJECT_UNAUTHORIZED=false` skips verification entirely. Encryption needs
+  The broker port (`PORT`, bound on `QUEEN_BIND_ADDR`, default `0.0.0.0`) is plaintext HTTP
+  serving the API and dashboard, with no CORS layer; `JWT_ENABLED` is `false` by default, and off
+  every route answers any caller. `/metrics/prometheus` is public on that port and its per-queue
+  series carry no tenant label. The embedded proxy (`QUEEN_PROXY_EMBEDDED=true`) authenticates API
+  keys and sessions, and serves TLS itself when `QUEEN_TLS_CERT` and `QUEEN_TLS_KEY` are both set
+  (one alone fails the boot); on its port `/metrics*` needs the control-plane token. The raft port
+  between cluster nodes is plaintext HTTP authenticated by `QUEEN_RAFT_TOKEN`, checked from the
+  headers before the body is read; unset, anything that reaches the port can vote, append and
+  forward commands, so it belongs on a private network. Payload encryption needs
   `QUEEN_ENCRYPTION_KEY` plus the queue's `encryptionEnabled`; one alone stores plaintext, no
-  error. On `QUEEN_MESH_PORT`, frames after the replayable HMAC `HELLO` handshake are
-  unauthenticated JSON; firewalling is mandatory. `002_streams_schema.sql` grants
-  every `queen_streams` table to `PUBLIC`. With native tenancy on,
-  `x-queen-tenant` is checked for shape, never authority, and `QUEEN_TENANCY_HEADER=1` refuses to
-  boot unless `QUEEN_KV_TRUSTED_PROXY=1` is set with it.
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): main.rs's three new routes, auth.rs's explicit read-only arm for POST /api/v1/resources/kv/list, and the proxy's reclassification of the two replay routes to queue admin. This page states no route classes, so nothing on it moved.
+  error. `QUEEN_TENANCY_HEADER=1` refuses to boot unless `QUEEN_KV_TRUSTED_PROXY=1` is set with it.
 ---
 
-The broker is one process with one plaintext listener. It binds `PORT` on `QUEEN_BIND_ADDR`, which
-defaults to `0.0.0.0` and so answers on every interface, serves the HTTP API and the dashboard from
-that single port, and authenticates nobody until you turn JWT on. There is no TLS listener and no
-CORS layer in the binary, so most of a deployment's security is what you put around it.
+The broker is one process with one plaintext HTTP listener. It binds `PORT` on `QUEEN_BIND_ADDR`,
+which defaults to `0.0.0.0` and so answers on every interface, serves the HTTP API and the
+dashboard from that single port, and authenticates nobody until you turn JWT on. That listener has
+no TLS and no CORS layer. A cluster opens a second listener, the raft port, for its peers.
 
-Because there is no TLS and no CORS, the bind address is one of the few controls the binary itself
-gives you. `QUEEN_BIND_ADDR=127.0.0.1` makes the broker reachable only through something on the
-same host, which is the right setting when a TLS terminator or `queen_proxy` runs beside it. It is
-the wrong setting in Kubernetes, where the kubelet's probes and the Service both arrive on the pod
-IP. Narrowing it moves the mesh listener with it unless `QUEEN_MESH_BIND_ADDR` says otherwise, and
-neither one changes `QUEEN_MESH_ADVERTISE_HOST`, which is the address peers are told to dial.
+Because the broker port has no TLS, the bind address is one of the few controls the binary itself
+gives you there. `QUEEN_BIND_ADDR=127.0.0.1` makes it reachable only through something on the same
+host. It is the wrong setting in Kubernetes, where the kubelet's probes and the Service both arrive
+on the pod IP.
 
-Generate the two secrets, keep them, and boot with everything the broker does implement turned on:
+Generate the secrets, keep them, and boot with everything the broker implements turned on:
 
 ```bash
 JWT_SECRET="$(openssl rand -hex 32)"
@@ -56,18 +50,22 @@ echo "$JWT_SECRET" "$QUEEN_ENCRYPTION_KEY"   # both are needed again later
 
 ```bash
 JWT_ENABLED=true JWT_ALGORITHM=HS256 JWT_SECRET="$JWT_SECRET" \
-  PG_USE_SSL=true \
   QUEEN_ENCRYPTION_KEY="$QUEEN_ENCRYPTION_KEY" \
+  QUEEN_RAFT_DIR=/var/lib/queen/raft \
   ./bin/queen
 ```
 
 The boundaries, and who defends each one:
 
-- HTTP API and dashboard, on `PORT`: optional JWT per route, with TLS terminated by [`queen_proxy`](/deploy/proxy) or by whatever else you put in front, and network policy yours.
-- Broker to PostgreSQL: optional TLS, off by default.
-- The mesh between brokers, on `QUEEN_MESH_PORT`: an HMAC handshake and then nothing, so the firewall is yours and not optional.
-- Payloads at rest: optional AES-256-GCM on flagged queues, with key management yours.
-- `x-queen-tenant`, where native tenancy is on: checked for shape and never for authority, so the gateway that sets it is yours.
+- HTTP API and dashboard, on `PORT`: optional JWT per route, plaintext, with TLS terminated by the
+  [embedded proxy](/deploy/proxy) or by whatever else you put in front, and network policy yours.
+- The raft port between cluster nodes: a shared token, plaintext, so the network is yours and not
+  optional.
+- Payloads at rest in the data directory: optional AES-256-GCM on flagged queues, with key
+  management yours.
+- The data directory itself: everything the node knows, on a disk you own.
+- `x-queen-tenant`, where native tenancy is on: checked for shape and never for authority, so the
+  gateway that sets it is yours.
 
 <Aside type="danger">
 The last of those is the one boundary the broker refuses to let you leave undeclared.
@@ -77,90 +75,90 @@ exception and nothing to switch off instead.
 The reason is that [key/value state](/use/kv) is addressable purely by name. For queues a forged
 header is bad and bounded: a caller still has to name a queue, and an ack carries a lease id the
 broker minted and a caller cannot guess. In the KV there is no such id, so the only gate is the
-tenant in the `WHERE` clause and the tenant is the header, which makes a forged one a read and a
-write of another tenant's state knowing only its name. The KV is part of the engine on every cell,
-so there is no longer any flag that could take it away to make an unvalidated header safe: choosing
-the header mode is itself the assertion that something in front sets it and strips the client's, and
-`QUEEN_KV_TRUSTED_PROXY=1` is where you write that assertion down. If you cannot make it, do not run
-with the header. An operator who needs to stop KV traffic on a live cell wants the runtime kill
-switch instead, which is a different instrument for a different problem
-([KV and timers](/deploy/state)).
+tenant, and the tenant is the header, which makes a forged one a read and a write of another
+tenant's state knowing only its name. Choosing the header mode is itself the assertion that
+something in front sets it and strips the client's, and `QUEEN_KV_TRUSTED_PROXY=1` is where you
+write that assertion down. If you cannot make it, do not run with the header. The embedded proxy
+does not need it: it hands requests to the broker in-process, with the tenant it resolved from the
+credential.
 </Aside>
 
-One more surface has no switch at all: `/metrics/prometheus` is public, broker authentication
-cannot protect it, and its per-queue series carry no tenant label, so keep it off any network a
-customer can reach ([Prometheus metrics](/reference/prometheus)).
+One more surface has no switch on the broker port: `/metrics/prometheus` is public there, broker
+authentication cannot protect it, and its per-queue series carry no tenant label, so keep that port
+off any network a customer can reach ([Prometheus metrics](/reference/prometheus)).
 
-## The front door is in this repository
+## The front door is in the same binary
 
-`queen_proxy` (Apache-2.0, in `proxy/`) is the component the boundaries above assume. It terminates
-TLS itself: set `QUEEN_PROXY_TLS_CERT` and `QUEEN_PROXY_TLS_KEY` and it serves rustls/ring directly,
-failing at boot rather than serving plaintext if only one of the two is set. It authenticates two
-credential kinds, an opaque cluster API key and a human session token, classifies every broker path
-against a fail-closed table that forwards nothing it cannot name, strips the caller's
-`Authorization` header and substitutes the cell's own token where the cell has one, and appends a
-`queen_proxy.operations` row on every mutating control-plane function, a table nothing deletes
-from. It is worth running in front of a single-tenant broker for those properties alone.
+The proxy runs inside the broker process with `QUEEN_PROXY_EMBEDDED=true`, and it is the component
+the boundaries above assume. It authenticates two credential kinds, an opaque cluster API key and a
+human session, classifies every broker path against a fail-closed table that forwards nothing it
+cannot name, and hands the request to the broker in-process with the tenant it resolved from the
+credential. An `x-queen-tenant` sent by the client is dropped, not honoured.
 
-Neither TLS variable is set by default, and unset means the proxy serves its own plaintext listener
-on `QUEEN_PROXY_PORT`, so a proxy in front of the broker is not by itself a TLS deployment. The
-variables, the timeouts and the pxdb settings are in [proxy configuration](/deploy/proxy); the
-classification table is in [endpoints a tenant can reach](/reference/multi-tenant/endpoints).
+It serves TLS itself: set `QUEEN_TLS_CERT` and `QUEEN_TLS_KEY`, both PEM paths, and its listener
+speaks HTTPS; set neither and it serves plaintext. Setting exactly one is a boot failure, not a
+downgrade. On the proxy's port, `/metrics` and `/metrics/prometheus` answer only with the
+control-plane token (`x-queen-cp-token`, the value of `QUEEN_PROXY_CP_TOKEN`) and `404` without it,
+and `/api/cp/*` answers `404` altogether when no token is configured.
+
+Where the proxy listens decides what else is exposed. Without `QUEEN_PROXY_PORT`, the proxy fronts
+`PORT` and the broker router has no socket of its own: every request goes through a credential.
+With `QUEEN_PROXY_PORT` set to another port, the proxy serves that one and `PORT` stays the plain
+broker, with its own JWT and tenancy settings: an internal port for clients inside the network,
+probes and scrapers, which must not face the internet. The variables are in
+[Proxy](/deploy/proxy); the classification table is in
+[endpoints a tenant can reach](/reference/multi-tenant/endpoints).
 
 ## Authentication
 
 `JWT_ENABLED` is `false` by default, and off means open: every route answers anything that can open
-a TCP connection, `DELETE /api/v1/resources/queues/:queue` and `POST /api/v1/system/maintenance`
-included, and the dashboard boots as a full admin. The boot log states the mode in one line, so
-read it instead of assuming.
+a TCP connection, `DELETE /api/v1/resources/queues/:queue`, `POST /api/v1/system/kv-timers` and
+the raft membership routes included, and the dashboard boots as a full admin. The boot log states
+the mode in one line, so read it instead of assuming.
 
 Turned on, each route carries an access level and each token carries roles. `/health`, the metrics
 endpoints, the dashboard shell and the identity routes stay public whatever you do. The algorithms,
 JWKS rotation, boot-time validation and the five access levels, which are a set and not a ladder,
 are in [broker authentication](/reference/security/jwt).
 
+## The raft port
+
+The nodes of a cluster talk to each other over plain HTTP on the raft port: votes, log entries,
+snapshots, the writes a follower forwards to the leader, membership changes and the dashboard's
+cross-node reads. Every request carries `QUEEN_RAFT_TOKEN` in the `x-queen-raft-token` header, and
+the receiving node checks it from the headers before it reads the body, so a wrong token costs the
+sender a `401` and the receiver nothing. Bodies are capped, a vote far below a log append.
+
+Leave the token unset and the port accepts anyone: whoever can connect can vote in elections,
+append entries and push commands into the cluster. With it set, whoever can read the traffic can
+read the token, because the port has no TLS. Bind it to a private network, allow it only from the
+other nodes' addresses, and keep it off every Service a client uses. Generate the token with
+`openssl rand -hex 32` and give every node the same value.
+
 ## Payload encryption at rest
 
 Encryption needs two things true at once: `QUEEN_ENCRYPTION_KEY` on the process and
 `encryptionEnabled` on the queue. With only one of them the broker stores plaintext and raises no
 error, so confirm the `encryption service initialized (AES-256-GCM)` line at boot before trusting
-the flag. It covers the payload on every write path, the disk spool included, and it is the one
-control that still holds when someone walks off with a database dump
+the flag. Every node of a cluster needs the same key, since every node stores every payload. It is
+the one control that still holds when someone walks off with a copy of a data directory
 ([payload encryption at rest](/reference/security/encryption)).
 
-## PostgreSQL TLS
+## The data directory
 
-`PG_USE_SSL` is `false` by default, which means every message you store crosses a plaintext
-connection. Turn it on whenever the database is not on localhost. With it on, the broker validates
-the server's chain against the Mozilla roots compiled into the binary, and most managed PostgreSQL
-fails that check because its chain is rooted in a private CA. The answer is `PG_SSL_ROOT_CERT`,
-holding that provider's CA certificate as PEM content: verification stays on, against the CA you
-named and only that one. `PG_SSL_REJECT_UNAUTHORIZED=false` remains as a last resort for a provider
-that will not publish its CA, and it encrypts the connection without proving whose key answered
-([PostgreSQL TLS](/reference/security/postgres-tls)).
+Everything a node knows is in `QUEEN_RAFT_DIR`: the payloads (plaintext unless the queue is
+encrypted), the key/value store, timers, consumer offsets, and, with the embedded proxy, its
+tenants, users and API-key hashes. Treat the volume, and any copy of it, with the care you give the
+credentials: it is not a cache.
 
-Inside the database, `002_streams_schema.sql` grants `queen_streams.queries`,
-`queen_streams.state` and `queen_streams.quota` to `PUBLIC`, so any role that can connect reads
-and rewrites stream definitions, stream state and the per-tenant streams grants, whatever the
-HTTP layer allows ([the schema](/internals/schema)).
-
-## The mesh port
-
-Notifications between brokers travel over framed TCP on `QUEEN_MESH_PORT`. The `HELLO` handshake is
-HMAC'd but replayable, and every frame after it is unauthenticated JSON, maintenance-mode flips
-included: whoever can connect can divert a replica's pushes to its disk spool, or make its pops
-answer empty. Bind the port to a private network and allow it only from the other brokers'
-addresses. `QUEEN_SYNC_SECRET` raises the bar from connecting to capturing one handshake, and does
-not replace the firewall ([the mesh](/internals/mesh)).
-
-TLS in front, JWT on, `PG_USE_SSL` true with a CA to verify it against, a key on the queues that
-need one, and a mesh port only the brokers can reach.
+JWT on or the proxy in front, TLS on the proxy port, a raft port only the nodes can reach, a key on
+the queues that need one, and volumes you would not hand out.
 
 <CardGrid>
   <LinkCard
     href="/deploy/ha"
     title="High availability"
-    description="More than one broker on one database, and what the mesh between them is for."
+    description="Voters, quorum, and the raft port every node needs to reach."
   />
   <LinkCard
     href="/reference/multi-tenant/broker-tenancy"

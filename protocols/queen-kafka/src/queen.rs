@@ -526,19 +526,18 @@ pub const FETCH_ERR_OUT_OF_RANGE: &str = "OFFSET_OUT_OF_RANGE";
 
 /// Parse the broker's segment timestamp into epoch milliseconds.
 ///
-/// The format is fixed and narrow — `to_char(created_at,
-/// 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')` in 032_log_fetch.sql — so this parses that
-/// and nothing else rather than pulling in a date-time crate for one field.
-/// Anything that is not exactly that shape answers `None`, which becomes
-/// "unknown timestamp" on the Kafka side; a wrong instant would be worse than
-/// no instant, because a consumer's time-based tooling would believe it.
+/// The format is fixed and narrow — `YYYY-MM-DDTHH:MM:SS`, a fraction, `Z`:
+/// milliseconds from a raft broker (`iso_from_us` in
+/// server/src/rsm/facade/real.rs), microseconds from an older one — so this
+/// parses that and nothing else rather than pulling in a date-time crate for
+/// one field. Anything that is not exactly that shape answers `None`, which
+/// becomes "unknown timestamp" on the Kafka side; a wrong instant would be
+/// worse than no instant, because a consumer's time-based tooling would
+/// believe it.
 ///
-/// The trailing `Z` is taken at its word. `to_char` renders a `TIMESTAMPTZ` in
-/// the SESSION time zone and the broker sets none, so an operator running
-/// Postgres on a non-UTC `timezone` GUC would have the broker stamp local time
-/// under a `Z`. That is C2's to fix if it ever bites; here it can only move a
-/// FALLBACK timestamp (a Kafka-produced record carries its own in the
-/// envelope), never an offset.
+/// The trailing `Z` is taken at its word: the broker renders the instant from
+/// its own clock in UTC. It can only ever move a FALLBACK timestamp (a
+/// Kafka-produced record carries its own in the envelope), never an offset.
 fn epoch_millis(ts: &str) -> Option<i64> {
     let ts = ts.strip_suffix('Z').unwrap_or(ts);
     let (date, time) = ts.split_once('T')?;
@@ -557,8 +556,8 @@ fn epoch_millis(ts: &str) -> Option<i64> {
         return None;
     }
     // Sub-second digits are truncated, not rounded: Kafka timestamps are
-    // milliseconds and the broker renders microseconds, so the three digits
-    // past the millisecond are precision the destination cannot carry.
+    // milliseconds, and any digit past the third (an older broker renders
+    // microseconds) is precision the destination cannot carry.
     let millis: i64 = format!("{frac:0<3}")[..3].parse().ok()?;
     let num = |s: &str| s.parse::<i64>().ok();
     let (y, mo, da) = (num(y)?, num(mo)?, num(da)?);
@@ -1078,27 +1077,25 @@ pub trait QueenApi: Send + Sync + 'static {
         None
     }
 
-    /// `POST /api/v1/transaction` — records and KV writes in ONE Postgres
-    /// transaction (M9, [`crate::txn`]).
+    /// `POST /api/v1/transaction` — records and KV writes in ONE broker
+    /// transaction (M9, [`crate::txn`]): one state-machine command, one raft
+    /// entry.
     ///
     /// The only call in the facade that is not a single-kind operation, and the
     /// only one whose failure taxonomy includes a lost precondition. The
-    /// guarantee is the stored procedure's own
-    /// (server/sql/procedures/005_log_ack.sql, `log_transaction_wire_v1`):
-    /// *"All-or-nothing by construction: one call = one transaction, every
-    /// failure path RAISEs, so a duplicate push or a rejected ack rolls back
-    /// every other operation in the batch"*, and *"a KV precondition marked
-    /// `required:true` raises 23514 out of `kv_apply_v1` and rolls the bundle
-    /// back the same way"*. That second sentence is what makes a fenced
-    /// transaction write exactly zero records.
+    /// guarantee is the broker's own: the call is applied all or nothing, so a
+    /// duplicate push or a rejected ack rolls back every other operation in the
+    /// batch, and a KV precondition marked `required: true` that does not hold
+    /// rolls the bundle back the same way (`reason: "kv_precondition"`). That
+    /// second property is what makes a fenced transaction write exactly zero
+    /// records.
     ///
     /// Answers one [`KvAnswer`] per operation of `kv`, aligned by the `opIndex`
     /// the wire stamps on every rider result. The push echoes are checked and
-    /// then dropped: the wire builds them without the `baseOffset` the stored
-    /// procedure returned (server/src/handlers/data.rs), and a transactional
-    /// producer has already been answered `base_offset = -1` for every record
-    /// by the time this call is made, so there is nothing an offset here could
-    /// be told to.
+    /// then dropped: the wire builds them without a `baseOffset`, and a
+    /// transactional producer has already been answered `base_offset = -1` for
+    /// every record by the time this call is made, so there is nothing an
+    /// offset here could be told to.
     ///
     /// `kv` must already be within [`WIRE_KV_MAX_OPS`] and
     /// [`WIRE_KV_MAX_KEYS`], which are tighter than the `/api/v1/kv` ceilings.
@@ -1475,8 +1472,8 @@ impl QueenApi for HttpQueen {
             // (cursor scans, segment files, retained bytes) and the tenant-wide
             // KV scan the dashboard's list carries — at 500k partitions that
             // enrichment is seconds of work per call, and this list is re-read
-            // every few seconds by every facade. A Postgres broker does not
-            // know the value and answers the enriched list as before, which is
+            // every few seconds by every facade. An older broker that does not
+            // know the value answers the enriched list as before, which is
             // everything this reads and more.
             let body = self
                 .call(
@@ -4809,7 +4806,7 @@ mod tests {
             normalize_base_url("  https://cloud.queenmq.com  ").unwrap(),
             "https://cloud.queenmq.com"
         );
-        for bad in ["queen-mq-v1:6632", "", "ftp://host", "postgres://h/db", "/"] {
+        for bad in ["queen-mq-v1:6632", "", "ftp://host", "tcp://h:9092", "/"] {
             assert!(normalize_base_url(bad).is_err(), "{bad} was accepted");
         }
     }

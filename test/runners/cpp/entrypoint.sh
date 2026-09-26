@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# C++ client test: ~40 HTTP assertions against the broker. No Postgres access.
+# C++ client test: ~40 HTTP assertions against the broker, plus the broker-free
+# wire-contract binaries.
 set -eu
 
 /usr/local/bin/wait-for-broker

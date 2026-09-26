@@ -8,31 +8,31 @@ sidebar:
 sourceOfTruth:
   - server/src/ephemeral.rs
   - server/src/handlers/ephemeral.rs
-  - server/sql/procedures/030_ephemeral.sql
+  - server/src/handlers/raft.rs
+  - server/src/rsm/facade/real/phase2/admin.rs
+  - server/src/rsm/facade/real.rs
   - server/src/config.rs
   - clients/client-js/client-v2/ephemeral/Ephemeral.js
 verifiedBy:
-  - server/tests/ephemeral_semantics.rs
   - clients/client-js/test-v2/ephemeral-unit/ephemeralWire.test.js
   - clients/client-go/ephemeral_wire_test.go
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 An ephemeral queue is a queue whose contents live in the broker's memory. The configuration of a
 declared one is durable. Everything in it is not: a clean exit, a crash, a deploy and a move to
-another broker each leave the queue empty, and none of those is a fault. That is the contract, and
+another node each leave the queue empty, and none of those is a fault. That is the contract, and
 the whole of the trade.
 
-The durable engine writes every message to PostgreSQL, which is what pays for replay, retention,
-dead-lettering and a handoff that shares your transaction. A request/reply inbox, a presence
-fan-out or a cache invalidation uses none of that and pays for all of it: thousands of short-lived
-partitions, a serial claim transaction per pop, and a history nobody will ever read. On this class
-there is no database in the path at all, so a pop parks on a memory gate and answers in transport
-time.
+The durable engine writes every message to the replicated log on disk, which is what pays for
+replay, retention, dead-lettering and a handoff that shares your transaction. A request/reply
+inbox, a presence fan-out or a cache invalidation uses none of that and pays for all of it:
+thousands of short-lived partitions, a claim committed through the log for every pop, and a history
+nobody will ever read. On this class there is no log and no disk in the path at all, so a pop parks
+on a memory gate and answers in transport time.
 
-The two families share the broker process and nothing else. No table, no stored procedure, no code
-path, and no name: a durable queue and an ephemeral queue may both be called `inbox` and they are
-unrelated objects. [Ephemeral routes](/reference/http/ephemeral) is the wire, verb by verb.
+The two families share the broker process and nothing else. They share no log, no code path and no
+name: a durable queue and an ephemeral queue may both be called `inbox` and they are unrelated
+objects. [Ephemeral routes](/reference/http/ephemeral) is the wire, verb by verb.
 
 ## What survives what
 
@@ -44,11 +44,9 @@ dead-letter rows and the queue's configuration.
 | Clean process exit | everything | the declared configuration, and nothing else |
 | Crash | everything | the declared configuration, and nothing else |
 | Deploy or rolling restart | everything | the declared configuration, and nothing else |
-| Failover to another broker | everything | the declared configuration, and nothing else |
-| PostgreSQL restart | everything, and a push during the outage spools to disk and replays | nothing of it is in PostgreSQL except the declaration, so nothing changes |
+| Failover to another node | everything | the declared configuration, and nothing else |
 
-An implicit queue has no declared configuration, so it survives none of the first four rows in any
-form. It is re-created by the next push or pop that names it, with the tenant defaults, as a new
+An implicit queue has no declared configuration, so it survives none of these rows in any form. It is re-created by the next push or pop that names it, with the tenant defaults, as a new
 and empty queue.
 
 ## What can be lost, and what is still promised
@@ -59,7 +57,7 @@ are promised about what is left.
 | | `autoAck: true` | Explicit ack (the default) |
 | --- | --- | --- |
 | Durable queue | at-most-once: the cursor commits at delivery | at-least-once, with no expiry on that promise |
-| Ephemeral queue | at-most-once: the cursor advances at delivery, and no lease is kept | at-least-once for as long as the owning broker lives |
+| Ephemeral queue | at-most-once: the cursor advances at delivery, and no lease is kept | at-least-once for as long as the node holding it lives |
 
 An ephemeral queue read with explicit acks **is at-least-once**. An unacknowledged message
 redelivers when its lease expires (`leaseSeconds`, 30 by default) with `attempts` incremented, and
@@ -98,13 +96,13 @@ empty, because the contents are gone.
 | --- | --- | --- |
 | Created by | the first `push` or `pop` that names it | `configure` |
 | Options | the tenant defaults | what you set, clamped to the broker's ceilings |
-| In PostgreSQL | never | the options, and only the options |
+| In the replicated state | never | the options, and only the options |
 | After a restart | it does not come back | it comes back as configured, and empty |
 | In the listing | while it is alive, as `tier: "implicit"` | always, as `tier: "declared"` |
 | Collected | after `QUEEN_EPHEMERAL_IMPLICIT_IDLE_S` (300 s) of being empty and unpolled | never, until you delete it |
 
 The implicit tier is not a convenience. A request/reply workload is thousands of short-lived
-per-client inboxes, and one PostgreSQL row per inbox would rebuild the per-partition cost this
+per-client inboxes, and one replicated record per inbox would rebuild the per-partition cost this
 class exists to remove. An inbox that is created by the message naming it, and collected when it
 goes quiet, is the shape that makes the workload affordable.
 
@@ -126,28 +124,28 @@ invalidation that a newer one has already superseded.
 
 ## Failover is a Redis restart
 
-That is the framing to carry, and it is exact. When a broker holding an ephemeral queue goes away,
+That is the framing to carry, and it is exact. When the node holding an ephemeral queue goes away,
 the queue comes back empty, the same way a Redis instance comes back empty when it restarts
 without persistence. The messages that were in flight are gone, and the client that was waiting on
 them has to be written to survive that. Request/reply already is: it has a timeout for this exact
 class of failure, which is what makes it the right first tenant of a class that survives nothing.
 
-Across a cell of more than one broker, a request may land on any of them. Ownership of a
-`(queue, partition)` and the forwarding that follows from it are internal to the brokers: there is
-no lease to take, no rebalance to wait out and nothing for a client to configure. A membership
-change moves ownership and **empties the queues that moved**, which is the same row of the table
-above, reached a different way. An acknowledgement carrying an identifier minted by an incarnation
-that is gone answers `stale` rather than an error, so a client reconnecting after a restart
-flushes its outstanding acks and learns what happened instead of retrying into a wall.
+Nothing replicates the contents. On a cluster each node keeps, in its own memory, the ephemeral
+queues of the requests it serves, so a push and a pop meet only when the same node serves both, and
+a client that moves to another node finds the queue empty there: the same row of the table above,
+reached a different way. A declared configuration is replicated, but it takes effect at once only on
+the node that served the `configure`; the other nodes load it when they restart. An acknowledgement carrying an identifier minted by an incarnation that is
+gone answers `stale` rather than an error, so a client reconnecting after a restart flushes its
+outstanding acks and learns what happened instead of retrying into a wall.
 
-Membership flaps therefore cost content, never correctness. On a durable queue that trade would be
-a bug. Here it is the contract, and it is the deep reason distribution on this class is cheap.
+A restart or a move to another node therefore costs content, never correctness. On a durable queue
+that trade would be a bug. Here it is the contract.
 
 ## Bounds, and what pressure looks like
 
 Three budgets are checked on every push, from the narrowest outwards, and the first one to refuse
 is the answer: the queue's own `maxBytes` and `maxLength`, then the tenant's allowance, then the
-broker's total ephemeral footprint (`QUEEN_EPHEMERAL_MAX_BYTES`, 256 MiB).
+node's total ephemeral footprint (`QUEEN_EPHEMERAL_MAX_BYTES`, 256 MiB).
 
 The first of those is the one you design with, and its `policy` is the design decision:
 
@@ -193,7 +191,7 @@ const { pushed } = await queen.ephemeral.push(QUEUE, [
 ], { partition: ROOM })
 console.log('pushed', pushed)
 
-// queues and depth: gauges read out of the broker's own memory, with no database
+// queues and depth: gauges read out of the broker's own memory, with no log
 // behind them, so a dashboard can poll them every second for free.
 console.log(await queen.ephemeral.queues())
 console.log(await queen.ephemeral.depth(QUEUE))
@@ -224,7 +222,7 @@ console.log('the audit group saw', audit.messages.length)
 const { dropped } = await queen.ephemeral.reset(QUEUE)
 console.log('reset dropped', dropped)
 
-// delete: the contents, the cursors, and the declared configuration in PostgreSQL.
+// delete: the contents, the cursors, and the declared configuration in the replicated state.
 await queen.ephemeral.delete(QUEUE)
 
 await queen.close()

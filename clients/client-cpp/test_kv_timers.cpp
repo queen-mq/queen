@@ -16,8 +16,8 @@
  * was the entire reason the bundle existed (§8.2, §10.4). No amount of
  * end-to-end testing sees that; a byte comparison of the request body does.
  *
- * These run against an in-process httplib::Server on localhost -- no broker, no
- * Postgres, so the suite is self-contained:
+ * These run against an in-process httplib::Server on localhost -- no broker,
+ * so the suite is self-contained:
  *
  *   make kvtimers && ./bin/test_kv_timers
  *
@@ -415,7 +415,7 @@ void test_timer_schedule_body() {
     check(call.method == "POST", "schedule goes through POST, got " + call.method);
     check(call.target == "/api/v1/timers", "schedule path, got " + call.target);
     // §20.6: delayMs, a RELATIVE duration in milliseconds. An absolute instant
-    // is not expressible on this wire on purpose -- one clock, Postgres's.
+    // is not expressible on this wire on purpose -- one clock, the broker's.
     // Payload is base64 (§4.1).
     const std::string payload_b64 = util::base64_encode(json{{"kind", "expire"}}.dump());
     check_body(call,

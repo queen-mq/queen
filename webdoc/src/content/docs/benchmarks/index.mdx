@@ -1,6 +1,6 @@
 ---
 title: Benchmarks
-description: "Every published figure with its conditions, and the hardware behind it."
+description: "Every published figure with its conditions, and the hardware behind it: archived runs of Queen 1.x, whose storage was PostgreSQL."
 type: overview
 sidebar:
   order: 1
@@ -12,8 +12,11 @@ sourceOfTruth:
   - benchmark-queen/laravel-supervisors/QUALIFICATION_SUMMARY_20260829.md
   - benchmark-queen/laravel-supervisors/QUALIFICATION_REPORT_20260829.md
 digest: >-
-  The two headline figures, each with the conditions that make it true. Sustained throughput:
-  86,369,975,300 messages in 24 hours, about 1,000,000 msg/s per side, 0 restarts and broker
+  Every run on these pages measured Queen 1.x, whose storage was PostgreSQL; 2.0 replaced that
+  storage with a replicated log, so the figures describe the 1.x engine and not 2.0, and no 2.0
+  figure is published here. The two headline 1.x figures, each with the conditions that make it
+  true. Sustained throughput: 86,369,975,300 messages in 24 hours, about 1,000,000 msg/s per
+  side, 0 restarts and broker
   resident memory flat near 4.1 GB, on Queen 1.0.0 with explicit acks on leased pops,
   deduplication on with a 60 second window, 200 partitions, 600 consumers, push batch 100 and
   256-byte payloads, broker and PostgreSQL 18 co-located on one 32 vCPU / 62 GiB machine, loaders
@@ -23,6 +26,12 @@ digest: >-
   off, 300 consumers, over one hour. Both are single-shape runs, and neither is a claim about a
   shape that was not measured.
 ---
+
+<Aside type="caution">
+Every run on these pages measured **Queen 1.x**, whose storage was PostgreSQL. 2.0 replaced that
+storage with a replicated log, so these figures describe the 1.x engine and not 2.0. They are kept
+as records of what 1.x did under stated conditions.
+</Aside>
 
 A number appears here only when an archived artifact under `benchmark-queen/` records what
 produced it: the loader's stdout, the configuration line it printed, the host shape, the broker
@@ -45,9 +54,10 @@ Also: [cross-broker comparison](/benchmarks/comparison) and
 
 How fast one shape goes is one kind of evidence. Whether the clients and the broker agree about
 what the API means, on more than one topology, is the other.
-[Conformance](/benchmarks/conformance) is that matrix: six client suites on three topologies
-each, the broker's own unit tests, an HA mesh assertion and a two-tenant isolation suite recorded
-at 45 assertions and 0 failures, every cell in its own throwaway stack. The harness itself, and
+[Conformance](/benchmarks/conformance) is the 1.x record of that matrix: six client suites on
+three PostgreSQL topologies each, the broker's own unit tests, an HA mesh assertion and a
+two-tenant isolation suite recorded at 45 assertions and 0 failures, every cell in its own
+throwaway stack. The harness itself, and
 how to run a subset of it, is [Testing](/internals/contributing/testing/).
 
 ## How to read a figure

@@ -205,9 +205,13 @@ a UUID. A malformed value is sent as-is and rejected by the broker.
 </Aside>
 
 `PushBuilder` exposes `onSuccess(Closure)`, `onError(Closure)`, `onDuplicate(Closure)` and
-`execute(): mixed`. `execute()` returns the broker's per-item array for a direct push; a buffered
-push returns without sending once the buffer accepts the message. At `maxSize` waiting messages
-the add flushes inline and keeps retrying under a `maxWaitMillis` deadline; if the deadline
+`execute(): mixed`. `execute()` returns the broker's per-item array for a direct push. A 2.0
+broker answers each item `queued`, `duplicate` or `error`. Per item, `onError` fires (and
+`execute()` throws when it is absent) only for `failed`, a status the 2.0 broker never returns:
+an `error` item reaches no callback and throws nothing, so check each item's `status` in the
+returned array. A buffered push returns without sending once the buffer accepts the message. At
+`maxSize` waiting messages the add flushes inline and keeps retrying under a `maxWaitMillis`
+deadline; if the deadline
 expires it throws `RuntimeException` and the message was **not** accepted. PHP has no background
 flusher to wait on, which is why the bound is a deadline here rather than an open-ended park.
 
@@ -327,16 +331,17 @@ silent loss.
 
 Read-only. Replay lives on the admin façade: `retryMessage(string $partitionId, string $transactionId)`.
 
-Since broker 1.6.0 that route runs on a **move**: one transaction claims the newest dead-letter
-row at the address, pushes it back into the log and deletes the row, and the replayed message
-carries the deterministic transaction id `dlq:<dead-letter row id>`. A second call for the same
-address answers `404` rather than replaying a second copy, only the addressed consumer group's
-record is removed, and a `result: "duplicate"` verdict means nothing was written and nothing was
-removed. See [Messages and dead letters](/reference/http/messages-dlq).
+Since broker 1.6.0 that route runs on a **move**: one transaction pushes a dead-letter row at the
+address back into the log and deletes the row (on a 2.0 broker, one entry in the replicated log),
+and the replayed message carries the deterministic transaction id `dlq:<dead-letter row id>`. A
+second call for the same address answers `404` rather than replaying a second copy, only the
+addressed consumer group's record is removed, and a `result: "duplicate"` verdict means nothing
+was written and nothing was removed. See [Messages and dead letters](/reference/http/messages-dlq).
 
 ## `TransactionBuilder`
 
-`$queen->transaction()`. Pushes and acks in one PostgreSQL transaction, all-or-nothing.
+`$queen->transaction()`. Pushes and acks in one transaction: one entry in the replicated log,
+all-or-nothing.
 
 | Method | Notes |
 | --- | --- |
@@ -401,7 +406,6 @@ upgrade.
 | `getAnalytics(array $params = [])` | `GET /api/v1/status/analytics` |
 | `getSystemMetrics(array $params = [])` | `GET /api/v1/analytics/system-metrics` |
 | `getWorkerMetrics(array $params = [])` | `GET /api/v1/analytics/worker-metrics` |
-| `getPostgresStats()` | `GET /api/v1/analytics/postgres-stats` |
 
 ### Consumer groups
 
@@ -415,6 +419,8 @@ upgrade.
 | `refreshConsumerStats()` | `POST /api/v1/stats/refresh` |
 
 `seekConsumerGroup` posts `$options` verbatim: `['toEnd' => true]` or `['timestamp' => '<RFC3339>']`.
+A 2.0 broker answers `refreshConsumerStats()` with a 200 and `"refreshed": false`: its counters
+are updated as log entries apply, so there is nothing to refresh.
 
 ### System
 
@@ -422,10 +428,6 @@ upgrade.
 | --- | --- |
 | `health()` | `GET /health` |
 | `metrics()` | `GET /metrics` |
-| `getMaintenanceMode()` | `GET /api/v1/system/maintenance` |
-| `setMaintenanceMode(bool $enabled)` | `POST /api/v1/system/maintenance` |
-| `getPopMaintenanceMode()` | `GET /api/v1/system/maintenance/pop` |
-| `setPopMaintenanceMode(bool $enabled)` | `POST /api/v1/system/maintenance/pop` |
 
 ## Errors
 

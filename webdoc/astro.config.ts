@@ -9,8 +9,8 @@ import { tableScroll } from "@cloudflare/nimbus-docs/markdown";
 // claim; these three add the software itself, its source and its publisher.
 // Deliberately no `softwareVersion`: the repository and the registries
 // disagree on it, and a hardcoded version here goes stale without failing
-// anything. `softwareRequirements` follows selfhost/postgres.mdx, where the
-// floor is 15 (14 fails on the `NULLS NOT DISTINCT` index).
+// anything. No `softwareRequirements` either: since 2.0 the broker needs
+// nothing beside itself but a data directory on local disk.
 const structuredData = {
   "@context": "https://schema.org",
   "@graph": [
@@ -30,7 +30,6 @@ const structuredData = {
       applicationSubCategory: "Message broker",
       operatingSystem: "Linux",
       programmingLanguage: "Rust",
-      softwareRequirements: "PostgreSQL 15+",
       license: "https://www.apache.org/licenses/LICENSE-2.0",
       downloadUrl: "https://ghcr.io/queen-mq/queen",
       url: "https://queenmq.com/",
@@ -52,7 +51,7 @@ const nimbusConfig = defineNimbusConfig({
   site: "https://queenmq.com",
   title: "Queen MQ",
   description:
-    "A message queue on the PostgreSQL you already run: one ordered FIFO lane per entity, consumer groups, replay, a dead-letter queue and a dashboard, in one binary.",
+    "A transactional message broker in one binary: one ordered FIFO lane per entity, consumer groups, replay, a dead-letter queue, key/value state, timers and a dashboard, replicated with Raft.",
   locale: "en",
   homeLabel: "Queen MQ",
   github: "https://github.com/queen-mq/queen",

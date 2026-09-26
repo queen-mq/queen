@@ -44,7 +44,7 @@ func TestDLQ_FailingMessageReachesDLQ(t *testing.T) {
 		}
 	}
 
-	// Allow the DLQ stored procedure to commit.
+	// Poll until the DLQ listing shows the failed messages.
 	var rows []map[string]any
 	retry(t, 5*time.Second, func() error {
 		rows = listDLQRows(t, q)

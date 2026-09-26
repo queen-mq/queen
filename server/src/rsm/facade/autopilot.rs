@@ -1,22 +1,20 @@
 //! Pop autopilot on the raft engine: `autopilot=true` on a wildcard pop hands
-//! the broker the dimensions the client left unset — the Postgres engine's wire
-//! contract (`crate::pop_autopilot`): an explicit `partitions` or `batch` is the
-//! client's and is never touched, and the choice is echoed in the body as
-//! `"autopilot":{"partitions":W,"batch":B}`.
+//! the broker the dimensions the client left unset. An explicit `partitions` or
+//! `batch` is the client's and is never touched, and the choice is echoed in the
+//! body as `"autopilot":{"partitions":W,"batch":B}`.
 //!
 //! The raft planner claims from exact state, so the inputs are exact too:
 //!
 //! - **W, the claim width**: the group's partitions ready NOW (the `pending`
 //!   rows due, read from the store at the pop) divided among this lane's pops
-//!   in flight on this node, clamped to `[1, 64]` (the checkout ceiling the
-//!   Postgres engine measured). A pop's claim stops once its batch is full —
-//!   the batch is the budget of the WHOLE pop — so over a backlog the first
-//!   partition fills it and W is moot; W pays when partitions are sparse, where
-//!   one pop and one ack collect a batch from several partitions instead of
-//!   one pop and one ack per partition. Dividing by the live pops keeps one
-//!   consumer from leasing every ready partition while the others idle.
-//! - **B, the batch**: DRAIN-AWARE, the follow-up the Postgres controller named
-//!   (`AUTO_BATCH_DEFAULT`'s note): the lane's measured drain rate — messages a
+//!   in flight on this node, clamped to `[1, 64]`. A pop's claim stops once its
+//!   batch is full — the batch is the budget of the WHOLE pop — so over a
+//!   backlog the first partition fills it and W is moot; W pays when partitions
+//!   are sparse, where one pop and one ack collect a batch from several
+//!   partitions instead of one pop and one ack per partition. Dividing by the
+//!   live pops keeps one consumer from leasing every ready partition while the
+//!   others idle.
+//! - **B, the batch**: DRAIN-AWARE: the lane's measured drain rate — messages a
 //!   consumer acknowledges per second of lease, from each lease's delivery to
 //!   its ack — times a drain budget (`QUEEN_RAFT_AUTOPILOT_DRAIN_MS`, 200 ms),
 //!   clamped to `[QUEEN_RAFT_AUTOPILOT_BATCH_MIN, …_MAX]` (100, 1000). A cold

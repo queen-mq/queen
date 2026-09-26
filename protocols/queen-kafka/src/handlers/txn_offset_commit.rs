@@ -2,7 +2,7 @@
 //!
 //! The second half of KIP-447, and the request that makes exactly-once
 //! processing exactly-once: the offsets committed here are written **in the
-//! same Postgres transaction as the records the loop produced**, so a crash
+//! same broker transaction as the records the loop produced**, so a crash
 //! cannot leave "the output was written and the input was not consumed" or the
 //! other way round. Nothing is written when this request is answered — the
 //! offsets are STAGED, and `EndTxn(commit)` is what writes them

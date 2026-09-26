@@ -21,7 +21,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestDepthRowUsesTheServersPartitionsPending(t *testing.T) {
-	// Since 1.1.0 the SP computes the non-empty count inside the aggregate it
+	// Since 1.1.0 the broker computes the non-empty count inside the aggregate it
 	// was already running (§2.5). queenctl must stop recomputing it client-side:
 	// its own scan is over the partitions array, which is exactly the thing an
 	// operator caps with -o json on a 100k-partition queue.
@@ -111,7 +111,7 @@ func TestDepthRowOmitsEffectiveForANonConflatingGroup(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestConsumerGroupTableShowsConflation(t *testing.T) {
-	// §2.6 fixes M7 (the SP hard-coded subscriptionMode to NULL and had no
+	// §2.6 fixes M7 (the broker hard-coded subscriptionMode to NULL and had no
 	// conflation field at all). Without a column here the policy that decides
 	// how MESSAGES and LAG on the same row should be read is invisible.
 	fb := newFakeBroker(t)
@@ -171,7 +171,7 @@ func TestConsumerGroupTableSurvivesAnOlderBroker(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// `cg describe` keeps every field the SP now sends
+// `cg describe` keeps every field the broker now sends
 // ---------------------------------------------------------------------------
 
 func TestConsumerGroupDescribeCarriesConflation(t *testing.T) {

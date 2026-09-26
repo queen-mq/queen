@@ -240,7 +240,8 @@ def parse_progress(path: Path, fields: dict[str, str]) -> list[dict]:
 
 
 def fig_soak24(out: Path, theme: Theme) -> str:
-    """24 hours: broker memory and PostgreSQL CPU. Two panels, never two y-axes."""
+    """24 hours of Queen 1.x (PostgreSQL storage): broker memory and PostgreSQL CPU.
+    An archived 1.x run, kept as a record. Two panels, never two y-axes."""
     rows = read_csv(BENCH / "2026-08-11-soak24-1M" / "raw" / "bench" / "bench.csv")
     rows = [r for r in rows if r.get("queen_mem_mb")]
     rows = decimate(rows, 900)

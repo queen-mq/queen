@@ -406,7 +406,7 @@ async fn session_principal(
         }
         ActDecision::RefuseCluster => {
             // A signature-valid session whose user row is gone (user deleted,
-            // or a dev pxdb reset) is a dead session, not a permission
+            // or a dev store reset) is a dead session, not a permission
             // problem: 401 sends the SPA back to login instead of parking it
             // on a 403 it can never resolve.
             if !st.keys.user_exists(&st.store, session.claims.user_id).await {
@@ -632,17 +632,17 @@ mod tests {
 
     // ---- routing: which of the three shapes a Host lands in ----------------
 
-    /// A whole `St` with no pxdb behind it. Every cluster lookup therefore
+    /// A whole `St` with no store behind it. Every cluster lookup therefore
     /// MISSES, which is exactly the condition these tests are about: what the
     /// proxy answers for a Host that names no cluster, with and without shared
     /// hosts configured.
     fn st_with(shared: &[&str], default_cluster: Option<&str>) -> St {
         let mut cfg = crate::config::test_config(shared);
         cfg.default_cluster = default_cluster.map(str::to_string);
-        let cache = crate::cache::ClusterCache::new(&cfg, None);
+        let cache = crate::cache::ClusterCache::new(&cfg, crate::store::Store::None);
         let limits = crate::limits::Limits::new(&cfg);
         let meter = std::sync::Arc::new(crate::meter::Meter::new(&cfg));
-        let registry = crate::registry::Registry::new(None);
+        let registry = crate::registry::Registry::new(crate::store::Store::None);
         let keys = crate::auth::Keys::from_config(&cfg);
         let mut connector = hyper_util::client::legacy::connect::HttpConnector::new();
         connector.set_nodelay(true);
@@ -651,7 +651,6 @@ mod tests {
                 .build::<_, axum::body::Body>(connector);
         std::sync::Arc::new(crate::state::AppState {
             cfg,
-            db: None,
             store: crate::store::Store::None,
             upstream: crate::upstream::Upstream::Http(upstream),
             cache,
@@ -697,7 +696,7 @@ mod tests {
         // the same status, the same code, the same body.
         let resp = unknown_host_refusal(&st, &host_hdrs("nosuch.example.test")).await;
         assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
-        // An unknown key is the same 401 (no pxdb here, so every hash misses),
+        // An unknown key is the same 401 (no store here, so every hash misses),
         // which is the half that makes presenting garbage no better than
         // presenting nothing.
         let mut h = host_hdrs("nosuch.example.test");
@@ -736,7 +735,7 @@ mod tests {
         // The data plane has always honoured it; the console never did, and
         // widening it silently would widen an operator's reach from one cluster
         // to every cluster on the cell (`decide_act` -> Act(Admin) with no
-        // membership row). With no pxdb the reference resolves to nothing, so
+        // membership row). With no store the reference resolves to nothing, so
         // the two paths are told apart by WHICH refusal they produce: the
         // act-as path answers 403, the Host path 421.
         let st = st_with(&[], None);

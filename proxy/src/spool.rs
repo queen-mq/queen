@@ -1,8 +1,8 @@
-//! Disk spool for meter samples when pxdb is down. OWNER: Agent D.
+//! Disk spool for meter samples when the KV is down. OWNER: Agent D.
 //! Simplified single-writer JSONL sibling of the broker's file_buffer.rs
 //! (server/src/file_buffer.rs) pattern — no binary frames, no per-message
-//! dedup concerns (usage rollups are additive/idempotent by construction via
-//! the UPSERT), so the elaborate .tmp->.buf finalize dance isn't needed:
+//! dedup concerns (a spooled row is usage to add, and the replay records its
+//! progress), so the elaborate .tmp->.buf finalize dance isn't needed:
 //! files are written directly as `meter-<epoch_ms>.buf` and are only ever
 //! read back by `recover()`, which runs exactly once, at process startup,
 //! strictly before this process's own spool writer can produce anything —
@@ -13,16 +13,15 @@
 //! "best-effort", matching the task spec; a lost tail on an unclean crash is
 //! acceptable for usage metering (unlike message payloads). Circuit breaker:
 //! minimal — after 3 consecutive recovery failures, sleep 30s before trying
-//! the next file, so a startup recovery pass against a still-down DB never
+//! the next file, so a startup recovery pass against a still-down store never
 //! hammers it.
 //!
 //! Two replay shapes, one file format (a row is always usage to ADD):
-//! `recover` hands a whole file to one persist call (the Postgres UPSERT,
-//! one transaction); `recover_chunked` (the broker's KV, whose atomic batch
-//! is small) hands it over a chunk at a time and records the rows already
-//! applied in a `<file>.done` sidecar, so a file that fails halfway resumes
-//! after its applied prefix instead of adding it twice. Both honour the
-//! sidecar.
+//! `recover` hands a whole file to one persist call; `recover_chunked` (the
+//! broker's KV, whose atomic batch is small) hands it over a chunk at a time
+//! and records the rows already applied in a `<file>.done` sidecar, so a file
+//! that fails halfway resumes after its applied prefix instead of adding it
+//! twice. Both honour the sidecar.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -70,7 +69,7 @@ impl Spool {
 
     /// Append rows as JSONL to the active spool file, rotating past
     /// `rotate_bytes`. Best-effort: an I/O error drops that row with a warn
-    /// (the spool is already the last resort after a DB write failed — there
+    /// (the spool is already the last resort after a store write failed — there
     /// is no further fallback).
     pub fn write(&self, rows: &[UsageRow]) {
         if rows.is_empty() {
@@ -138,11 +137,11 @@ impl Spool {
     }
 
     /// One-shot recovery: replay every existing `*.buf` file (oldest first)
-    /// through `persist` — normally the DB UPSERT — deleting each file that
+    /// through `persist` — one call per file — deleting each file that
     /// fully succeeds. Minimal circuit breaker: after `BREAKER_THRESHOLD`
     /// consecutive failures (read errors or persist errors both count),
     /// sleep `cooldown` before moving on to the next file, so a startup pass
-    /// against a still-down DB backs off instead of hammering it. A file
+    /// against a still-down store backs off instead of hammering it. A file
     /// that fails is left in place for the next process restart's recovery
     /// pass (this call never retries the same file within itself).
     pub async fn recover<F, Fut>(&self, persist: F)

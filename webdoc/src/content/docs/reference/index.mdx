@@ -6,10 +6,9 @@ sidebar:
   order: 1
 sourceOfTruth:
   - server/src/main.rs
+  - server/src/handlers/raft.rs
   - server/src/auth.rs
   - server/src/config.rs
-# sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): main.rs and auth.rs gained the replay and KV console routes; nothing this page describes moved.
 ---
 
 This section is lookup material. Every page names the source files that govern it and the test
@@ -19,16 +18,18 @@ from the code when the site is built. [The documentation site](/internals/contri
 covers both mechanisms: what those two frontmatter fields oblige a page to, and which generator
 emits which table.
 
-The current broker and proxy line is **1.5.3**. The JavaScript, Python, Go and Rust clients,
-`queen-protocol` and `queenctl` remain on their compatible **1.3.0** releases; PHP is prepared for
-Packagist but has no tagged release, and C++ is consumed directly from a repository tag or commit.
+This section describes **Queen 2.0**: one binary, with the multi-tenant proxy and the Kafka
+facade able to run in the same process, and all state in each node's data directory. The
+JavaScript, Python, Go and Rust clients, `queen-protocol` and `queenctl` remain on their compatible
+**1.3.0** releases; PHP is prepared for Packagist but has no tagged release, and C++ is consumed
+directly from a repository tag or commit.
 
 ## What is generated from source
 
 | Table | Extracted from | Appears on |
 | --- | --- | --- |
-| Every route, with its access level and whether it resolves a tenant | the axum router in `server/src/main.rs` plus the access-level map in `server/src/auth.rs` | [HTTP conventions](/reference/http) and [Route table](/reference/http/routes) |
-| Every environment variable with the default the code applies | `server/src/config.rs`, plus `server/src/fusion.rs` for the experiment-only overrides | the configuration page in this section |
+| Every route, with its access level and whether it resolves a tenant | the broker's router plus the access-level map in `server/src/auth.rs` | [HTTP conventions](/reference/http) and [Route table](/reference/http/routes) |
+| Every environment variable `server/src/config.rs` reads, with the default the code applies | `server/src/config.rs` | the configuration page in this section, beside hand-written tables for the variables read elsewhere |
 | Every Prometheus metric family | the broker's metrics module | the Prometheus page in this section |
 | What a tenant may call through the multi-tenant gateway | `proxy/` | the proxy pages in [Self-hosting](/deploy/) |
 
@@ -53,7 +54,7 @@ inspection or operations.
   <LinkCard
     href="/reference/http/push"
     title="POST /api/v1/push"
-    description="Every request field, the per-item response array, all four item statuses, and how deduplication decides."
+    description="Every request field, the per-item response array, every item status, and how deduplication decides."
   />
   <LinkCard
     href="/reference/http/pop"
@@ -68,7 +69,7 @@ inspection or operations.
   <LinkCard
     href="/reference/http/transaction"
     title="POST /api/v1/transaction"
-    description="Pushes and acks in one PostgreSQL transaction: the bundle shape, every rollback cause, and the result array."
+    description="Pushes and acks in one entry of the replicated log: the bundle shape, every rollback cause, and the result array."
   />
   <LinkCard
     href="/reference/http/lease"
@@ -121,7 +122,7 @@ down, not on the route page.
 
 | The question a route page raises | The page that answers it |
 | --- | --- |
-| Why a push of N partitions costs one commit, and where the second deduplication layer sits | [Life of a push](/internals/life-of-a-push) |
+| What a push goes through before it is answered, and where deduplication sits | [Life of a push](/internals/life-of-a-push) |
 | Why a pop can return 204 while the queue has messages, and what a lease costs | [Life of a pop](/internals/life-of-a-pop) |
-| Why the broker makes a request wait instead of answering 429, and why raising the ceiling does nothing | [Flow control](/internals/flow-control) |
+| Why a push waits for room before the broker answers 429 | [Flow control](/internals/flow-control) |
 | What the suites named under **Verified by** at the foot of each page actually run | [Testing](/internals/contributing/testing) |

@@ -383,7 +383,7 @@ impl Config {
                  broker list every client is handed has to be the same list. Give this facade a \
                  Queen token, or unset QUEEN_KAFKA_NODE_ID for single-node mode.\n\
                  All facades of one cluster must present credentials of ONE Queen tenant: \
-                 queen.kv is keyed by tenant, so two tenants are two registries and each facade \
+                 Queen's KV is keyed by tenant, so two tenants are two registries and each facade \
                  would see only itself.",
                 node_id.unwrap_or_default()
             ));

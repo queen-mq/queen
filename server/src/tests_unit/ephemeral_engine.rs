@@ -1,5 +1,5 @@
 //! The ephemeral engine's pure logic — EPHEMERAL_QUEUES.md §7.1, the half that
-//! needs no PostgreSQL and no HTTP stack.
+//! needs no HTTP stack.
 //!
 //! Every test here pins one sentence of the plan, and the sentence is quoted in
 //! the doc comment so a later reader can tell an intentional rule from an

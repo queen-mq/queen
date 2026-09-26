@@ -1,4 +1,4 @@
-# Two-tenant isolation runner over the HA pair (curl + jq). Build context = repo root.
+# Two-tenant isolation runner (curl + jq). Build context = repo root.
 #   docker build -f test/runners/tenancy/Dockerfile -t queen-test-runner-tenancy .
 FROM alpine:3.20
 

@@ -1,10 +1,8 @@
-//! `rsm/facade.rs` — the storage seam the HTTP handlers call in raft mode
+//! `rsm/facade.rs` — the storage seam the HTTP handlers call
 //! (PLAN_RAFT.md §3.2 "receiver pipeline", §3.4 map row `mod.rs`, WP-1.7).
 //!
-//! In `QUEEN_STORAGE=postgres` (the default until GA, D1) nothing here is
-//! reached: the handlers take their existing Postgres path. In
-//! `QUEEN_STORAGE=raft` the receiver does its pre-work (§9.1) and hands a typed
-//! command to this facade instead of a pooled connection. The facade is the
+//! The receiver does its pre-work (§9.1) and hands a typed command to this
+//! facade. The facade is the
 //! trait; [`build`] installs the real phase-2 implementation at the composition
 //! root. [`NotReady`] remains only as the explicit bootstrap/test fallback and
 //! answers with [`RsmError::Unsupported`].
@@ -46,10 +44,9 @@ mod remote;
 // ---------------------------------------------------------------------------
 
 /// LMDB's maximum key length (heed 0.22, the default 511-byte `MDB_MAXKEYSIZE`).
-/// The store adapter (WP-1.2) refuses a longer key with a typed `KeyTooLong`; a
-/// key postgres would accept (its name columns are `TEXT`) is one the store
-/// cannot hold, so the receiver must reject it FIRST — with a clear 413 — rather
-/// than let a valid-looking request fail deep in apply.
+/// The store adapter (WP-1.2) refuses a longer key with a typed `KeyTooLong`,
+/// so the receiver must reject it FIRST — with a clear 413 — rather than let a
+/// valid-looking request fail deep in apply.
 pub const MAX_STORE_KEY_BYTES: usize = 511;
 
 /// Bytes reserved, per composite key, for the keyspace tag byte, the field
@@ -419,6 +416,9 @@ pub struct TxnReq {
 /// A transaction outcome: the rendered response body (HTTP 200 either way).
 #[derive(Clone, Debug)]
 pub struct TxnOut {
+    /// 200 for a commit and for a rollback verdict (`success:false`); 400/413
+    /// for a body the wire refuses before anything is planned.
+    pub status: u16,
     pub body: String,
 }
 
@@ -516,8 +516,6 @@ pub struct RsmBootstrap {
     /// Fatal durable-state read failure discovered before the listener opens.
     /// The composition root refuses boot instead of silently using defaults.
     pub startup_error: Option<String>,
-    pub maintenance: bool,
-    pub pop_maintenance: bool,
     pub kv_enabled: bool,
     pub timers_schedule_enabled: bool,
     pub timers_fire_enabled: bool,
@@ -534,8 +532,6 @@ impl Default for RsmBootstrap {
     fn default() -> Self {
         Self {
             startup_error: None,
-            maintenance: false,
-            pop_maintenance: false,
             kv_enabled: true,
             timers_schedule_enabled: true,
             timers_fire_enabled: true,
@@ -705,7 +701,7 @@ pub trait Rsm: Send + Sync {
     async fn renew(&self, ctx: ReqCtx, req: RenewReq) -> Result<RenewOut, RsmError>;
     /// `POST /api/v1/transaction` (Phase B): push + ack all-or-nothing.
     async fn transaction(&self, ctx: ReqCtx, req: TxnReq) -> Result<TxnOut, RsmError>;
-    /// The head of a group's DLQ stream (005), read on the ack path.
+    /// The head of a group's DLQ stream, read on the ack path.
     async fn dlq_head(&self, ctx: ReqCtx, req: DlqHeadReq) -> Result<DlqHeadOut, RsmError>;
     /// A cheap indexed pending probe for the long-poll gate (§9.5). A local
     /// stale read on a follower; never parks by itself.
@@ -760,7 +756,7 @@ pub trait Rsm: Send + Sync {
     }
 
     /// Phase-2 admin/read/streams surface. Implementations return the final
-    /// wire status/body so the Postgres and RSM internals remain separated.
+    /// wire status/body.
     async fn api(&self, _ctx: ReqCtx, _req: ApiReq) -> Result<ApiOut, RsmError> {
         Err(RsmError::Unsupported)
     }

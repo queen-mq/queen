@@ -1,32 +1,34 @@
 ---
 title: Life of a push
-description: "From an HTTP body to committed rows: grouping, two layers of deduplication, and why N partitions cost one commit and one fsync."
+description: "From an HTTP body to an applied entry: the admission budget taken before the body is read, one command per partition, the planner's dedup probe and gapless offsets, one entry per planning cycle, one fsync per touched queue log, and the answer after local apply."
 type: concept
 tier: internals
 sidebar:
   order: 3
 sourceOfTruth:
-  - server/src/handlers/data.rs
-  - server/src/fusion.rs
-  - server/src/frames.rs
-  - server/sql/procedures/003_log_push.sql
+  - server/src/handlers/raft.rs
+  - server/src/rsm/admit.rs
+  - server/src/rsm/facade/mod.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/remote.rs
+  - server/src/rsm/batcher.rs
+  - server/src/rsm/entry.rs
+  - server/src/rsm/planner/push.rs
+  - server/src/rsm/planner/timers.rs
+  - server/src/rsm/replicator/local.rs
+  - server/src/rsm/replicator/raft/log_store.rs
+  - server/src/rsm/apply.rs
 verifiedBy:
+  - server/src/rsm/tests/planner_push.rs
   - clients/client-js/test-v2/push.js
-# sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
 ---
 
-A push request is not a transaction. It is a set of frames handed to a background layer that
-decides, per partition, when to commit, and that can commit several partitions together.
-[`POST /api/v1/push`](/reference/http/push/) is the route contract: the body, the four per-item
-statuses, the deduplication rules. This page is what happens behind it.
-
-Nothing in that layer waits on a timer. When the push lane is uncontended a group dispatches on
-arrival, so a single low-rate push costs about one database round trip. **Coalescing here is
-emergent, not timed:** while a partition has a flush in flight the next segment accumulates, so
-batches fatten only when load produces them. Under load, one PostgreSQL transaction then carries
-the writes of many concurrent HTTP requests across many partitions. That is where most of the
-broker's throughput comes from, and it is the single most important thing to understand about the
-write path.
+A push is not written by the request that carries it. The request is turned into commands, one per
+partition, and the leader's batcher plans every command that arrived during a cycle into one entry
+of the replicated log. The HTTP answer comes back only when that entry has been written, fsynced,
+committed and applied on the node that took the request.
+[`POST /api/v1/push`](/reference/http/push/) is the route contract: the body, the per-item statuses,
+the deduplication rules. This page is what happens behind it.
 
 Here is the flow a client sees:
 
@@ -37,286 +39,174 @@ And here is what happens behind it.
 <pre class="mermaid">{`
 sequenceDiagram
   participant C as client
-  participant H as push handler
-  participant F as fusion shard
-  participant PG as PostgreSQL
-  C->>H: POST /api/v1/push with an items array
-  H->>H: mint ids, layer-1 dedup, group by queue and partition
-  H->>F: one submission per group
-  F->>F: accumulate, then pick ready not-in-flight partitions
-  F->>PG: log_push_multi_v1 with N segments
-  PG->>PG: lock partition rows by ascending id, allocate offsets
-  PG-->>F: one commit, one fsync, results in input order
-  F-->>H: verdict routed to every request that fed a segment
-  H-->>C: 201 with one result per item
+  participant R as receiver
+  participant B as batcher and planner (leader)
+  participant L as log writer
+  participant A as apply thread
+  C->>R: POST /api/v1/push with an items array
+  R->>R: admission, parse, mint ids, hash, pack frames
+  R->>B: one push command per queue and partition
+  B->>B: probe dedup, allocate offsets, one entry per cycle
+  B->>L: propose the entry
+  L->>L: write records, one fsync per touched queue log
+  L->>A: committed entry, in index order
+  A->>A: append, hash list, counters, wakes
+  A-->>B: applied at this index
+  B-->>R: one outcome per command
+  R-->>C: 201 with one result per item
 `}</pre>
 
-The commit boundary belongs to the shard rather than to the request, which is what makes the
-two fan-ins possible: several partitions ride one transaction, and several still-waiting
-requests can have contributed frames to any one of them.
+## 1. The edge: admission before the body
 
-## 1. The handler: mint, dedup, group
+The push route carries an admission layer (`admit_edge` in `server/src/handlers/raft.rs`) that runs
+after authentication and tenant resolution and before the body is read. It takes permits from one
+process-wide byte budget, sized by the request's `Content-Length` (64 KiB for a request without
+one). A push that has to wait for room holds only its connection: its bytes stay in the socket and
+TCP slows the sender. If no room frees within the hold, the answer is `429` with a `Retry-After`
+between 1 and 5 seconds. The permits are returned when the reply is ready.
+[Flow control](/internals/flow-control) has the budget, the hold and the disk gate that answers
+`507`.
 
-[`POST /api/v1/push`](/reference/http/push/) takes a body with an `items` array. An empty array
-answers `201` with `[]` immediately.
+## 2. The receiver: parse, bound, dedup inside the request, group
 
-For each item the handler:
+The receiver is `push_impl` in `server/src/rsm/facade/real.rs`. An empty `items` array answers `201`
+with `[]` at once. A `transactionId` longer than 65,535 bytes rejects the request before anything is
+submitted. For each item the receiver:
 
 - mints a UUIDv7 message id;
 - resolves the transaction id: the client's `transactionId` if present, otherwise the minted
-  message id as a string, so every frame has one;
+  message id as a string, so every message has one;
 - resolves the partition, defaulting to `Default`;
-- checks **layer-1 deduplication**: a map keyed on `queue \x1f partition \x1f transactionId`
-  inside *this request*. First occurrence wins and becomes a "leader"; a repeat becomes a
-  follower, produces no frame at all, and copies the leader's final message id when the response
-  is rendered. "Final" matters: if the leader itself turns out to be a duplicate of something
-  already stored, the follower reports the pre-existing id too;
-- encrypts the payload when the queue has `encryption_enabled` (the flag is memoised per queue,
-  so a 1000-item push over three queues does at most three lookups).
+- checks the name budget: the tenant, the queue and the partition together may take at most 447
+  bytes (LMDB's 511-byte key limit minus a reserve for the rest of the key), else the request fails
+  with `413`;
+- **deduplicates inside the request**, keyed on `(queue, partition, transactionId)`. The first
+  occurrence leads; a repeat produces no frame and inherits the leader's final verdict, message id
+  and offset when the response is rendered, so if the leader turns out to duplicate something
+  already stored, the repeat reports the original too;
+- hashes the transaction id with `xxh3_128` (16 bytes);
+- encrypts the payload when the queue is configured for encryption;
+- packs one frame per message: flags, message id, transaction id, the producer subject taken from
+  validated authentication (never from the body), and the payload.
 
-Frames are then grouped by `(queue, partition)`. The number of groups becomes the request's
-pending counter: the HTTP response resolves when every group it contributed to has committed.
+The surviving items are grouped by `(queue, partition)`, and each group becomes one push command. A
+request that names three partitions is three commands. They are submitted together and the response
+waits for all of them, but they are separate commands: they can land in different entries, and a
+push request is not atomic across partitions. Use
+[`POST /api/v1/transaction`](/reference/http/transaction/) when several writes must commit together.
 
-If the broker is in maintenance mode, none of this reaches PostgreSQL: every item is written to
-the disk spool and reported with status `buffered`, and the background drain replays it when
-maintenance ends.
+## 3. The cycle: many commands, one entry
 
-## 2. Fusion: one accumulating segment per partition
+On the leader, the batcher (`server/src/rsm/batcher.rs`) drains the bounded command channel
+(`QUEEN_RAFT_COMMAND_QUEUE_DEPTH`, 1024 commands) into a cycle. A cycle is cut at 4096 commands, at
+an estimated 4 MiB, or after 5 ms of planning, and the rest waits for the next one. Every command
+that is not a plain push (acks, pops, renewals, transactions, KV, timers) waits in a priority lane
+that each cycle drains before any push, so consumption does not wait behind a burst of writes. Each
+command's request id is looked up first: a command already planned and committed is answered from
+its recorded outcome and never planned twice. That lookup is what makes a follower's retry of a
+forwarded command safe after a lost answer or a leader change.
 
-Each group is submitted to the fusion layer, which hashes `queue + partition` to one of
-`QUEEN_V2_FUSION_SHARDS` shards (default 8). A shard owns a disjoint set of partitions, so all
-of its state is single-task-local and needs no locking.
+Nothing waits on a timer. While up to 4 entries are in flight (`QUEEN_RAFT_PIPELINE`), the commands
+that arrive join the next cycle, so an entry carries one command at low load and many under load.
+Batching is emergent, not configured.
 
-Inside a shard, frames accumulate into a group keyed `tenant \x1f queue \x1f partition`. The
-tenant is part of the key, so two tenants pushing to a queue called `orders` accumulate separate
-segments.
+## 4. The planner: probe, then allocate
 
-Three rules govern dispatch:
+`plan_push` (`server/src/rsm/planner/push.rs`) plans one command, reading committed state through a
+store read transaction plus an **overlay** of every entry still in flight and every command planned
+earlier in the same cycle. The overlay is how the second push to a partition in one cycle sees the
+first one's offsets and hashes before either has applied.
 
-### Fire-on-idle
+1. **Resolve the queue.** A queue that does not exist yet is created by this push: a `QueueUpsert`
+   effect with the implicit defaults (lease 60 s, retry limit 3, dead-lettering on, dedup window
+   3600 s).
+2. **Resolve the partition.** A partition that does not exist yet gets a `PartitionCreate` effect
+   and the next partition id from the one counter in `meta`.
+3. **Probe for duplicates**, only on an existing partition and only when the queue's
+   `dedupWindowSeconds` is above 0. Each item's hash is looked up in the committed hash lists and in
+   the overlay; an occurrence counts when it was appended inside the window. A duplicate keeps the
+   **original** occurrence's offset and contributes nothing to the append.
+   [Deduplication](/internals/dedup) has the details.
+4. **Allocate.** The survivors get one gapless run of offsets starting at the partition's
+   `last_offset + 1`, and one timestamp, `max(now, last_created_at + 1 µs)`, so timestamps are
+   strictly monotone per partition.
+5. **Build the `Append` effect**: the survivors' frames concatenated as they were packed, never
+   repacked, and their 16-byte hashes in frame order.
 
-On arrival, if the push lane is uncontended (the shard is under its concurrent-bundle cap and a
-push admission slot is *immediately* available), the ready partitions dispatch right now, with no
-hold timer. A single low-rate push therefore commits in about one database round trip. If no permit is free, the lane is contended, so the group stays and keeps
-accumulating. **The wait a contended push pays is the per-partition in-flight gate, not a
-configured linger.**
+A push whose every item is a duplicate emits no effect: it is answered at once and never logged. A
+command whose planned size exceeds `QUEEN_RAFT_ENTRY_MAX_BYTES` (96 MiB) is refused, and its items
+come back with status `error`.
 
-### One flush in flight per partition
+The planner stamps `now` for the whole cycle; apply has no clock. Every time and every id the entry
+needs is decided here and carried in the effects.
 
-While a partition's flush is in flight, its next segment accumulates and is dispatched only after
-the previous flush *commits*. Two flushes therefore
-never race on `UPDATE log_partitions SET last_offset = last_offset + n`, and per-partition offset
-order equals commit order. The completion signal is sent after the commit, not before, which is
-what makes that guarantee hold rather than merely usually hold. Fusing many requests into one
-transaction therefore cannot reorder a partition, however large the bundle gets.
+## 5. The log: written and fsynced before anything applies it
 
-### Cross-partition bundling
+The batcher proposes the entry through the replicator. With the local replicator, the writer thread
+takes every pending entry into one group (at most 4096 entries or 4 MiB), writes each `Append`'s
+payload as a message record into its queue's log and the entry's payload-free record into the logs
+the entry touches, and fsyncs each touched log once. Only then does the group go to apply. With
+`QUEEN_QLOG_SHARDS=K`, queues share `K` logs, so a group fsyncs at most `K` files however many queues
+it touches. The log writer also compresses each payload (zstd level `QUEEN_RAFT_QLOG_ZSTD_LEVEL`,
+default 1); on the node that plans the command, the receiver starts that compression early, while
+the command waits for its cycle.
 
-Each dispatch collects up to `QUEEN_V2_BUNDLE_MAX` ready, not-in-flight partitions and commits
-all of their segments in one `log_push_multi_v1`
-transaction: **one commit and one fsync for N partitions.** The in-flight gate *is* the bundle
-selector: it already guarantees the chosen partitions are disjoint. The bundle size auto-tunes
-to load. Idle means one ready partition and a bundle of one; busy means many partitions
-accumulate while permits are scarce, and a freed permit fires a large bundle. Commit rate is
-thereby decoupled from partition count.
+With the openraft replicator the leader appends the entry through the same group write, followers
+append it the same way, and the entry commits once a majority of voters hold it.
 
-The broker exposes the ratio directly. `queen_batch_items_fired_total` and
-`queen_fusion_items_per_batch` are on [`/metrics/prometheus`](/reference/prometheus/), and the
-`fusion` log target emits a `bundle summary` line about every ten seconds with `commits`, `segments` and
-`segments_per_commit`. Segments far exceeding commits is the direct evidence that fusion is
-coalescing across partitions.
+## 6. Apply
 
-`QUEEN_V2_FUSION_HOLD_MS` (default 3) is a **liveness backstop tick**, not a batching window.
-It exists so a group held because a permit was freed on another shard eventually gets retried.
-Lowering it does nothing under load, because arrivals and completions already wake the shard.
+The apply thread executes the entry's effects in order, on every node. For an `Append` it checks that
+`base_offset` is the partition's next offset (a mismatch stops the node: the planner and this node
+disagree about the log), records the hash list as one `txns` row, moves the partition's
+`last_offset`, `last_write_at` and `oldest_live_at`, bumps the counters at partition, queue and tenant
+scope, and updates the `pending` rows that make the partition a candidate for each subscribed group.
+The payload itself is not copied: it is already in the queue log. Apply then wakes parked pops: one
+per group whose partition became claimable.
 
-<Aside type="note">
-`QUEEN_V2_FUSION_FRAMES` is still parsed and still printed in the boot configuration block, but
-it is no longer a flush trigger. Segment size is emergent (see below). There is also an
-experiment-only frame floor (`QUEEN_V2_FUSION_MIN_FRAMES`, default 0 = off) that can delay a
-still-small segment to fatten it; the source marks it as not part of any compatibility promise,
-and with the default the dispatch logic is byte-identical to having no floor at all.
-</Aside>
+## 7. The answer
 
-## 3. Building the segment
+When the entry has applied on this node, the batcher answers each command from its recorded outcome,
+and the receiver renders one result per input item, in input order:
+`{index, message_id, transaction_id, queueName, status, offset}`.
 
-For each group in the bundle, the flush does **layer-2 deduplication**: intra-flush, first-wins,
-comparing the 16-byte `xxh3_128` hashes rather than composed strings. This is the same identity
-SQL will compare, so a broker-local collision behaves exactly like a SQL one. The first frame
-carrying a hash is the leader and the only one that reaches the segment; later same-hash frames
-inherit its verdict.
+- `queued` carries the message's offset.
+- `duplicate` carries the **original** message's offset and message id. The id is read back from the
+  original's frame in this node's queue log.
+- `error` marks the items of a command the planner refused.
 
-Then it builds two byte arrays per segment:
+The broker never answers `buffered`: there is no spool. When a write cannot be taken (no leader, an
+election, a lost quorum, a planning deadline), the whole request fails with `503` and
+`Retry-After: 1`, sometimes with a `leader` hint, and the client retries.
 
-- the **hash blob**: `16 × K` bytes, one `xxh3_128` per frame in frame order, so position `k` in
-  the blob is packed frame `k`;
-- the **payload blob**: the packed frames, zstd-compressed.
-
-Push payloads are zero-copy on ingest: a plaintext frame's payload is a refcounted slice of the
-HTTP request body, so dropping a flushed bundle decrements refcounts instead of freeing one
-allocation per message.
-
-## 4. One transaction, N segments
-
-The bundle is sent as typed parallel arrays (`text[]`, `text[]`, `int4[]`, `bytea[]`, `int8[]`,
-`bytea[]`, `uuid[]`) to a `prepare_cached` statement. No JSONB is parsed on the hot path.
-
-```sql
-queen.log_push_multi_v1(
-    p_queues     TEXT[],
-    p_partitions TEXT[],
-    p_msg_counts INT[],
-    p_hashes     BYTEA[],
-    p_verified   INT8[],
-    p_blobs      BYTEA[],
-    p_tenants    UUID[] DEFAULT NULL
-) RETURNS JSONB
-```
-
-Inside, in order:
-
-1. **Alignment guard.** Any array of a different length raises. A silent misalignment would
-   demux the wrong verdict to the wrong request.
-2. **Provisioning skip.** One cheap existence count over `unnest(queues, partitions, tenants)`.
-   Only if something is missing do the two `INSERT ... ON CONFLICT DO NOTHING` statements run:
-   **one** insert into `queen.queues` (the queue's identity and configuration are one row; the
-   namespace and task are derived from the dotted name), then `log_partitions`, whose `queue_id`
-   references that row. Each insert is `ORDER BY`-ed on its unique key, because
-   `ON CONFLICT DO NOTHING` takes speculative locks in row order and two bundles creating
-   overlapping partition sets in different orders would convoy exactly as unordered row locks do.
-3. **One set-based pre-lock.** A single statement locks every partition row in the bundle,
-   `ORDER BY p.id FOR UPDATE OF p`. Ascending `log_partitions.id` is the intra-space order of the
-   partition space, shared with the transaction wire and the retention steps, and it is why no
-   combination of those three can deadlock. It is one space of
-   [six](/internals/schema#the-one-global-lock-order): the transaction wire acquires `queen.kv` and
-   `queen.log_timers` **before** it reaches this pre-lock, and nothing that holds a partition lock
-   ever waits for either of them. This path takes neither, which is why nothing here changed when
-   they arrived.
-4. **A bundle timestamp**, taken once after the locks.
-5. **Per segment, in ascending partition id order**, a call to `queen.log_push_one_v1` with the
-   partition id, deduplication window and tenant already resolved (the callee must not re-resolve
-   them per segment).
-6. **A completeness guard.** Every input ordinal must produce exactly one result, or the whole
-   bundle raises.
-
-Results come back as a JSON array in input order, so the broker can route each verdict to the
-requests whose frames landed in that segment.
-
-## 5. The allocator, under the partition lock
-
-`log_push_one_v1` is the single allocator code path: the transaction wire, the streams cycle, the
-sweeper's timer fire and the disk spool's replay reach it too, so there is exactly one place where
-an offset is assigned.
-
-It first checks that the hash blob is `16 × msg_count` bytes and raises if not. A stride
-mismatch would mis-address acks silently, so it fails loudly.
-
-Then it splits on the deduplication window:
-
-**Window greater than zero.** Take the partition row lock first:
-
-```sql
-SELECT last_offset, txns_start FROM queen.log_partitions WHERE id = v_pid FOR UPDATE;
-```
-
-Stamp `clock_timestamp()` while holding it. Probe `queen.log_txns` over
-`(GREATEST(p_verified, txns_start - 1), last_offset]`, time-capped by the window, joining the
-stored hashes against the incoming ones. On a match, **return `duplicate` having written
-nothing**: no allocator bump, no inserts, and therefore no rollback and no savepoint. Other
-segments in the same bundle commit untouched. Only a clean probe proceeds to allocate.
-
-**Window zero.** Skip the probe entirely and go straight to the single
-`UPDATE ... RETURNING` fast path; that `UPDATE` takes the same row lock and is the whole
-serialization story.
-
-The allocation itself is one statement:
-
-```sql
-UPDATE queen.log_partitions SET
-    last_offset    = last_offset + p_msg_count,
-    oldest_live_at = COALESCE(oldest_live_at, clock_timestamp()),
-    oldest_txn_at  = COALESCE(oldest_txn_at,  clock_timestamp()),
-    last_write_at  = CASE WHEN clock_timestamp() - last_write_at > interval '1 second'
-                          THEN clock_timestamp() ELSE last_write_at END
-WHERE id = v_pid
-RETURNING last_offset;
-```
-
-`base_offset = last_offset - msg_count + 1`. The `CASE` is the quantization that keeps the update
-HOT despite `last_write_at` being indexed. The two `COALESCE`s maintain the retention work-list
-watermarks (the `created_at` of the row at each purge watermark), which are indexed too: for a
-partition already holding data they write back the stored value byte-identically and the update
-stays HOT, so only the empty-to-non-empty transition, this push creating the partition's first
-live row, actually touches their indexes. [Retention](/internals/retention) is their reader.
-
-Finally two inserts: the segment, and the `log_txns` row (unconditional even with deduplication
-off; [the storage model](/internals/storage-model) has why).
-
-<Aside type="note">
-Because the timestamp is stamped while the partition row lock is held, `created_at` is monotone
-per partition in commit order. Time-based retention and timestamp subscriptions are both a
-single forward primary-key walk as a direct result. The push path pays one `clock_timestamp()`
-call for it.
-</Aside>
-
-## 6. Rendering the response
-
-The flush parses the per-segment results and writes each frame's verdict into its owning
-request's result slot.
-
-- `queued` carries `baseOffset` and `createdAt`. Frame `k` of the segment is at offset
-  `baseOffset + k`.
-- `duplicate` carries `dups: [{i, off}]`, the incoming frame index and the **original**
-  occurrence's absolute offset. The broker then resolves the canonical message id by fetching the
-  covering segment with `queen.log_segment_at_v1(pid, off)` and unpacking frame `off - base` in
-  Rust. This is a rare path and uses plain, uncached queries. If retention already deleted that
-  segment, the id is reported as the zero UUID.
-- A whole-bundle failure (pool exhaustion, statement timeout, an unparseable result) resolves
-  every participant to `error`.
-
-Once every group of a request has reported, the handler wakes, renders the per-item array and
-answers `201`.
-
-Two things happen after that:
-
-**Discovery.** Each pushed `(tenant, queue, partition)` is marked pending on the
-[hot-list rings](/internals/hotlist/), quietly: the local wake is coalesced into a 5 ms tick, so a
-hot queue costs at most one wake per
-tick instead of one wake per push (each of which is itself proportional to the number of parked
-consumers). Peers still get an immediate batched `MESSAGE_AVAILABLE`. With `QUEEN_HOTLIST=0` the
-push instead wakes parked pops directly with partition hints.
-
-**Error spooling.** Items that came back `error` (meaning the transaction that would have stored
-them failed) are written to [the disk spool](/deploy/ha/) and relabelled `buffered`, so a
-client that only checks the HTTP status code does not silently lose them. The background drain
-replays them, and
-deduplication on the preserved `transactionId` makes the replay idempotent. A spool write failure
-downgrades the item to `failed`.
+On a follower of a cluster (with `QUEEN_RAFT_CLIENT_OFFLOAD`, the default), steps 1 and 2 run on the
+follower, the prepared commands go to the leader over the Raft RPC listener, and the follower waits
+until it has applied the entry's index before it renders the same answer from its own state. The
+leader applies its own admission budget to those commands.
 
 ## Failure modes worth predicting
 
-| What happens | What the client sees | What is in the database |
+| What happens | What the client sees | What is stored |
 | --- | --- | --- |
-| Duplicate inside one request body | later items report `duplicate` with the first item's id | one copy |
-| Duplicate against a previous push, inside the window | `duplicate` plus the original message id | one copy; nothing was written |
-| Duplicate whose original segment was already retained away | `duplicate` with the zero UUID as `messageId` | one copy; the original is gone |
-| Statement timeout on the bundle | `error`, then `buffered` if the spool accepted it | nothing: the transaction rolled back |
-| Statement timeout, spool write also failed | `failed` | nothing |
-| Maintenance mode | `buffered` for every item | nothing until the drain runs |
+| Duplicate inside one request body | later items report `duplicate` with the first item's message id and offset | one copy |
+| Duplicate of an earlier push, inside the window | `duplicate` with the original's message id and offset | nothing new; an all-duplicate command is not even logged |
+| The byte budget stays full for the whole hold | `429`, `Retry-After` 1 to 5 s | nothing |
+| The node that takes the request is in push maintenance mode | `503` with `{"success":false,"error":"maintenance"}` | nothing |
+| The data directory's filesystem at `QUEEN_RAFT_DISK_HIGH_PCT` (85%) | `507` | nothing |
+| Tenant, queue and partition names over 447 bytes | `413` | nothing |
+| A body over `QUEEN_MAX_BODY_BYTES` (64 MiB) | `413` | nothing |
+| A planned command over `QUEEN_RAFT_ENTRY_MAX_BYTES` | that command's items report `error` | nothing for that partition |
+| No leader, or leadership lost while the entry was in flight | `503`, `Retry-After: 1` | the entry may or may not have committed. A retry that reuses the same `transactionId` inside the dedup window is answered `duplicate` for whatever did commit |
 
-A statement timeout also has a server-side consequence: `tokio::time::timeout` only drops the
-client future, so the broker sends an out-of-band cancel request on a fresh connection and
-quarantines the pooled connection instead of recycling it. Otherwise abandoned-but-still-running
-statements would keep holding their locks.
+That last row is the reason to always send a `transactionId`. Without one, the minted message id is
+the transaction id, a retry mints a new one, and a push that committed before its answer was lost is
+stored twice.
 
-## Why bundling is the interesting part
+## Why one entry per cycle is the interesting part
 
-Throughput on this write path is `WAL flush rate × messages per flush`. An fsync costs roughly
-the same regardless of how much it carries, so the lever is messages per commit, and there are
-two ways to pull it. A client can push larger batches, which makes each segment bigger. Or many
-partitions can share one commit, which is what fusion does without the client knowing.
-
-That is also why there is no server-side segment size setting. The size a segment reaches is
-exactly what arrived during the previous flush's round trip: short round trips give small
-segments, and load gives large ones, automatically. Setting a threshold would either add latency
-at low rates or cap the benefit at high ones.
+The cost of a write group is mostly its fsyncs, one per touched queue log, not its bytes. The lever
+is messages per fsync, and the design pulls it twice without a timer: the batcher folds every command
+that arrived during the previous cycle into one entry, and the log writer folds every entry pending
+when its last fsync finished into one group. A client that pushes
+larger batches makes each `Append` bigger; many clients pushing at once make each entry and each
+group bigger. Neither needs a server-side batch size, and there is none.

@@ -1,8 +1,8 @@
 //! Cell-operator account management (`/api/operator/*`).
 //!
 //! These routes are served directly by the proxy because users, tenants and
-//! cluster roles live in the proxy's own store (pxdb, or the broker's KV in
-//! the single binary — every read and write goes through `store::web`)
+//! cluster roles live in the proxy's own store (the broker's KV, under the
+//! proxy's system tenant — every read and write goes through `store::web`)
 //! rather than in the broker's queues. Every request first resolves the
 //! acting cluster and requires a live human operator. The acting cluster
 //! supplies the cell boundary: callers can only see tenants with a cluster on
@@ -52,7 +52,7 @@ async fn operator_ctx(
         return Err(errors::json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "not_configured",
-            "operator user management requires pxdb",
+            "operator user management requires a store",
         ));
     }
 
@@ -327,7 +327,7 @@ async fn change_role(
     };
 
     // The last-admin guard is decided on the same reads the write commits on
-    // (Postgres: LOCK TABLE cluster_roles; KV: version-checked admin seats).
+    // (version-checked admin seats).
     if let Err(refusal) = web::operator_change_role(
         &st.store,
         ctx.cluster_id,

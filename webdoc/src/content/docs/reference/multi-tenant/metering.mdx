@@ -1,6 +1,6 @@
 ---
 title: Usage metering
-description: "How usage is counted from response statuses, aggregated per minute, spooled to disk during an outage, rolled up daily, and turned into warnings and blocks."
+description: "How usage is counted from response statuses, aggregated per minute on each node, written to the replicated key/value store, spooled to disk only when it cannot be, rolled up daily, and turned into warnings and blocks."
 type: reference
 tier: operate
 sidebar:
@@ -10,15 +10,12 @@ sourceOfTruth:
   - proxy/src/meter.rs
   - proxy/src/gateway.rs
   - proxy/src/spool.rs
-  - proxy/migrations/001_init.sql
-  - proxy/migrations/004_lifecycle.sql
-  - proxy/migrations/005_usage_prune.sql
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): gateway.rs grew a third
-# source of `push` messages, a replay that moved one, booked on a second sample with reqs = 0;
-# the row-id replay's request is now buffered for its destination override and the address-keyed
-# one is not, which the request-bytes paragraph now says. Both are written down above; nothing
-# else in meter.rs, spool.rs or the migrations moved.
+  - proxy/src/app.rs
+  - proxy/src/config.rs
+  - proxy/src/cp.rs
+  - proxy/src/store/usage.rs
+  - proxy/src/store/web.rs
+  - server/src/proxy_embed.rs
 ---
 
 Usage is counted **after** the response, from what the broker actually did, not from
@@ -41,9 +38,12 @@ cluster id, carrying four counters:
 Recording is deliberately silent: no log line on the per-request path. Rates and sizes
 belong in aggregated blocks, not per-message lines.
 
+Every node runs its own proxy and keeps its own accumulators, for the requests that node
+served.
+
 ## Op classes
 
-`usage_minutes.op_class` is one of five values, constrained by the schema:
+The op class is one of five values:
 
 | Class | Which requests |
 | --- | --- |
@@ -54,7 +54,7 @@ belong in aggregated blocks, not per-message lines.
 | `read` | Everything else that is metered: reads, gated surfaces, operator surfaces, and the consume routes that are not pops (ack, lease extension) |
 
 Ack and lease-extension calls metering as `read` is worth knowing when you read the
-table: `delivery` counts deliveries, not acknowledgements.
+figures: `delivery` counts deliveries, not acknowledgements.
 
 ## What counts as a billable message
 
@@ -67,18 +67,15 @@ A `201` response body is a top-level array of per-item results. Each item's `sta
 decides:
 
 - `queued` → billed.
-- `buffered` → billed. The message was accepted; the cell is spooling to disk because it
-  is in maintenance or its database is unreachable.
 - `duplicate` → **not** billed. Deduplication stored nothing.
-- `error`, `failed` → **not** billed.
+- `error` → **not** billed.
+
+The parser also knows `buffered` (billed like `queued`) and `failed` (not billed). The 2.0
+broker returns neither: it answers each item `queued` with its offset, `duplicate` with the
+original's, or `error`.
 
 A response that will not parse bills `msgs = 0` with a warning. Under-billing something
 unrecognised beats billing something that did not happen.
-
-The same parse feeds one more signal: when a clear majority of items came back
-`buffered`, the proxy logs (at most one line per 30 seconds, cell-wide) that the cell
-is spooling pushes to disk. A single `buffered` item can be one item's bad luck; a
-majority is the cell not writing to PostgreSQL right now.
 
 </AccordionContent>
 </Accordion>
@@ -90,12 +87,12 @@ majority is the cell not writing to PostgreSQL right now.
 The push operations are counted on the way **in**, when the body is parsed for the size
 caps and the message bucket. What decides whether they are billed is the response body,
 not the status line: the broker answers `200` on a rollback too, with
-`{transactionId, success:false, error, results:[]}`.
+`{transactionId, success:false, reason, error, results:[]}`.
 
 - `success: true` → bill the counted push operations, minus any that came back
   `duplicate: true` (first-wins deduplication inside the batch stored nothing new).
-- `success: false` → bill zero. The stored procedure raised and the whole transaction
-  was undone, so nothing was stored whatever the request contained.
+- `success: false` → bill zero. The transaction is one entry in the replicated log and
+  applies whole or not at all, so nothing was stored whatever the request contained.
 - A shape the proxy cannot read → bill zero, with a warning.
 
 </AccordionContent>
@@ -130,8 +127,9 @@ puts stream output in the same `usage_days` rows as ordinary pushes and under th
 monthly message quota.
 
 Not billed: `duplicate` groups (deduplication stored nothing, same rule as push), a
-cycle whose body says `success: false` (the transaction rolled back, sink writes
-included), and a response the proxy cannot parse (`msgs = 0` with a warning).
+cycle whose body says `success: false` (the cycle is one entry in the replicated log and
+rolled back whole, sink writes included), and a response the proxy cannot parse
+(`msgs = 0` with a warning).
 
 Nothing else in a cycle is a billable message. The source pop was already metered as
 `delivery` on its own request, and the ack advances a cursor, keeping the reqs-only
@@ -175,10 +173,10 @@ storage estimate learns about a replay only at the next retained-bytes computati
 <AccordionContent>
 
 - **Upstream 5xx**: `reqs = 1`, `msgs = 0`, logged separately, body streamed straight
-  through with no buffering.
-- **Upstream timeout** (the proxy's own `504`) and **upstream unreachable** (its own
-  `502`): the request is recorded with `msgs = 0` and a log line saying it was not
-  billed.
+  through with no buffering. On the 2.0 broker that includes the `503` a node answers
+  while it has no leader and the `507` it answers when its data disk is full.
+- **Upstream timeout** (the proxy's own `504`): the request is recorded with `msgs = 0`
+  and a log line saying it was not billed.
 - **Refused at the proxy** (`401`, `403`, `413`, `429`, `421`) is not metered at all.
   Those responses return before the metering step, so `usage_minutes` reflects work the
   cell was actually asked to do.
@@ -191,82 +189,86 @@ Responses that need parsing are buffered with a 64 MiB ceiling, matching the bro
 own default body cap, so a legitimate pop batch of large messages still relays. A
 response above it answers `502` rather than being silently truncated or mis-billed.
 
-## From memory to the database
+## From memory to the store
 
-Every `QUEEN_PROXY_METER_FLUSH_MS` (default 15000) the flush task drains every
-accumulator whose minute is **strictly before** the current one, and UPSERTs the rows
-into `queen_proxy.usage_minutes` inside one transaction:
+Usage lives in the proxy's state in the replicated key/value store, in two sets of
+documents: `usage_minutes` and `usage_days`.
 
-```sql
-ON CONFLICT (cluster_id, minute, op_class) DO UPDATE SET
-  reqs = usage_minutes.reqs + EXCLUDED.reqs,
-  msgs = usage_minutes.msgs + EXCLUDED.msgs, …
-```
+Every `QUEEN_PROXY_METER_FLUSH_MS` (default 15000) the flush task writes every
+accumulator that holds usage not yet written, the open minute included, so the console
+and the monthly quota see current traffic. Each node writes only its own rows, one per
+`(cluster, minute, op class, node)`, and every reader sums the nodes. The node is named
+by `QUEEN_SERVER_ID`, else `HOSTNAME`, else `node-<QUEEN_RAFT_NODE_ID>`. Two processes
+that share a name overwrite each other's minutes, so keep it unique per node and stable
+across restarts.
 
-The UPSERT **adds**, which is what makes the whole pipeline idempotent-by-addition and
-the spool below safe. The current minute is left in place, still accumulating, so
-concurrent requests for the same minute are not split across flushes for no reason.
+A write sets the node's cumulative total for that minute rather than adding to it. A
+retry after a lost answer therefore writes the same value again, and no two nodes ever
+update one row.
 
-At shutdown the drain takes **everything, including the open minute**. Otherwise every
-restart would silently lose up to a minute of usage per cluster per op class. It is
-bounded by `QUEEN_PROXY_SHUTDOWN_DRAIN_MS` and falls back to the spool, so a dead
-control-plane database cannot turn a deploy into a hang.
+A flush that fails (no leader, a timeout) keeps its usage in memory, and the next tick
+retries it. Only when more than 50,000 closed `(cluster, op class, minute)` keys are
+waiting does a node move them to the disk spool, so a leader election does not cost a
+trip to the disk.
+
+At shutdown the drain writes everything still in memory, including the open minute, and
+spools what the store did not take. It is bounded by `QUEEN_PROXY_SHUTDOWN_DRAIN_MS`
+(default 5000), so a store without a leader cannot turn a deploy into a hang.
 
 ## The disk spool
 
-When the flush fails (pxdb down, failing over, mid-migration), the rows are appended as
-JSONL to `QUEEN_PROXY_SPOOL_DIR`:
+Usage a node could not write for too long, and usage the shutdown drain could not write,
+is appended as JSONL to `QUEEN_PROXY_SPOOL_DIR` (default `./queen-proxy-spool`). Every
+spooled row is usage to add.
 
 | Property | Behaviour |
 | --- | --- |
 | File name | `meter-<epoch_ms>-<seq>.buf`, so lexical order is FIFO order |
 | Rotation | Size-based at 5 MB |
 | Durability | `flush`, not `fsync` per line: best-effort, because a lost tail of usage on an unclean crash is acceptable where a lost message would not be |
-| Recovery | Once, at process start, strictly before this process can write anything of its own |
-| Circuit breaker | After 3 consecutive recovery failures, sleep 30 s before the next file, so a startup recovery against a still-down database does not hammer it |
+| Recovery | Once, at process start, before the first flush. A file is added onto this node's rows a chunk at a time, and a `<file>.done` sidecar records how many rows are applied, so a file that fails halfway resumes after its applied prefix on the next start |
+| Circuit breaker | After 3 consecutive recovery failures, sleep 30 s before the next file, so a startup recovery against a store that still does not answer does not hammer it |
 
-Recovery is at-least-once: a commit whose acknowledgement is lost is replayed on the
-next start and re-added by the UPSERT. That is the deliberate trade: usage that can be
-over-counted once is recoverable, usage that is dropped is gone.
+Recovery is at-least-once: a chunk whose write landed but whose answer was lost is added
+again on the next start. That is the deliberate trade: usage that can be over-counted
+once is recoverable, usage that is dropped is gone. The days a replay wrote to are rolled
+up again on the next roll-up pass, even when they are behind its usual window.
 
 If `QUEEN_PROXY_SPOOL_DIR` cannot be created, the proxy warns at construction and keeps
-running. Usage is then lost whenever a flush fails, so put that directory on a volume
-that survives a container restart.
+running. Usage is then lost whenever it would have been spooled. The default is relative
+to the working directory and is not writable on a read-only root filesystem, so put the
+spool on the data volume, for example `/var/lib/queen/raft/proxy-spool`.
 
-## Roll-up and pruning
+## Roll-up and retention
 
 The roll-up task ticks every `QUEEN_PROXY_ROLLUP_MS` (default hourly, first tick
-immediately) and does two things in a fixed order:
+immediately) on every node.
 
-<Steps>
+It folds **closed** days out of `usage_minutes` into `usage_days`, aggregated by
+`(cluster, day, op_class)` and summed over the nodes. The day is the UTC calendar day,
+pinned to UTC rather than the server's timezone so a roll-up produces the same rows on any
+node and month boundaries are stable. It recomputes each day rather than adding to it, and
+writes only the rows that differ, so it is idempotent: extra runs, or a second node
+running the same pass, cost an aggregate pass and change nothing. That is why hourly is
+fine. Each pass recomputes from the day before the last rolled-up day through yesterday.
 
-1. `queen_proxy.rollup_usage_days()` folds **closed** days out of `usage_minutes` into
-   `usage_days`, aggregated by `(cluster, day, op_class)`. The day is the UTC calendar
-   day, pinned to UTC rather than the server's timezone so a roll-up produces the same
-   rows on any instance and month boundaries are stable. It recomputes each day rather
-   than adding to it, so it is idempotent: extra runs cost an aggregate pass and change
-   nothing. That is why hourly is fine.
-
-2. `queen_proxy.prune_usage_minutes(keep_days)` deletes minute rows whose day is
-   already in `usage_days` and older than `QUEEN_PROXY_USAGE_KEEP_DAYS` (default 90).
-
-</Steps>
-
-The order matters: the prune is gated on the day existing in `usage_days`, so running it
-first would simply skip the days this pass just folded in. A failed roll-up therefore
-makes the prune a no-op rather than a data loss, and the tick returns early instead of
-paying for the round trip.
+Minute rows are not pruned by a task: each one carries a TTL. A minute of UTC day `D`
+expires at the start of day `D + QUEEN_PROXY_USAGE_KEEP_DAYS + 2` (default 90 days, at
+least 1), so every minute of a day expires at the same instant and a day is never half
+gone. The roll-up never recomputes a day within one day of that instant, and a day whose
+minutes have expired keeps its figure.
 
 Minutes are the evidence behind a billing dispute, which is why the retention window is
 generous. `usage_days` is kept indefinitely either way.
 
 ## The warn and block chain
 
-The same tick evaluates the monthly allowance. One query returns, for every cluster with
-an allowance, its calendar-month message count and the month itself, all from one
-`now()`, so month and count cannot disagree across a boundary. The count comes from
-`queen_proxy.cluster_month_msgs`, which reads `usage_days` **plus** the not-yet-rolled
-`usage_minutes` remainder, so it includes traffic from the current hour.
+The same tick evaluates the monthly allowance. One pass reads, for every cluster with an
+allowance (from its plan or a cluster override) that is not being deleted, its
+calendar-month message count and the month itself, both from one clock reading, so month
+and count cannot disagree across a boundary. The count is, for each UTC day of the month,
+the larger of the rolled-up figure and the live minute rows, so it includes today's
+traffic up to each node's last flush.
 
 | Level | Condition | Outbox event | Effect |
 | --- | --- | --- | --- |
@@ -276,35 +278,33 @@ an allowance, its calendar-month message count and the month itself, all from on
 Each level is announced once per cluster per month, and only upward. A repeat announces
 nothing, and a count that wobbles back down announces nothing. Two things enforce that:
 in-process state for the common case, and a lookup against the outbox for an existing
-`(kind, cluster_id, month)` event, which is needed because a proxy restart mid-month
-would otherwise re-announce every cluster already over the line. That lookup is
-best-effort: if the query itself errors the event is emitted anyway, because a
+`(kind, cluster_id, month)` event, which is needed because a restart mid-month, or another
+node running the same pass, would otherwise re-announce every cluster already over the
+line. That lookup is best-effort: if it fails the event is emitted anyway, because a
 duplicate control-plane event beats a swallowed one.
 
-The block is released when the count falls back under, when the quota is lifted, when a
-new month starts the count near zero, or when the cluster stops being listed at all.
-A failed read releases nothing: having no evidence is not evidence that a block should
-be lifted.
+Every node runs this pass and holds its own block flags. A block is released when the
+count falls back under, when the quota is lifted, when a new month starts the count near
+zero, or when the cluster stops being listed at all. A failed read releases nothing:
+having no evidence is not evidence that a block should be lifted.
 
-`queen_proxy.outbox` is insert-only from the proxy's side. Draining it (sending the
-email, opening the ticket, calling the billing system) is a job for something else,
-which is the whole point of the table.
+The outbox is part of the proxy's state. The proxy writes events to it, and no route of the
+proxy reads them back: draining it (sending the email, opening the ticket, calling the
+billing system) is a job for something else.
 
 ## Reading usage
 
-The cluster console exposes it per cluster at `GET /api/console/usage`, human sessions
-only. Directly:
+The cluster console exposes it per cluster, human sessions only: `GET /api/console/usage`
+returns per-minute rows for up to 168 hours, summed over the nodes, and
+`GET /api/console/overview` carries the month-to-date count. The control plane returns the
+last hour of a cluster's minutes, summed over the nodes, on the control-plane token:
 
-```sql
-SELECT day, op_class, msgs, reqs, bytes_in, bytes_out
-FROM queen_proxy.usage_days
-WHERE cluster_id = '…'
-ORDER BY day DESC, op_class;
+```bash
+curl -s http://127.0.0.1:6711/api/cp/clusters/$CLUSTER_ID/usage \
+  -H "x-queen-cp-token: $CP_TOKEN"
 ```
 
-```sql
-SELECT queen_proxy.cluster_month_msgs('…cluster-uuid…', date_trunc('month', now() AT TIME ZONE 'UTC')::date);
-```
+No route returns the daily rows.
 
 ## What metering is not
 
@@ -312,7 +312,7 @@ SELECT queen_proxy.cluster_month_msgs('…cluster-uuid…', date_trunc('month', 
   through the registry reconciler, on a separate path, and are not in `usage_minutes`.
   See [Quotas and rate limits](/reference/multi-tenant/quotas/).
 - **Not a per-queue breakdown.** The finest grain is `(cluster, minute, op class)`.
-- **Not exactly-once.** Spool recovery can over-count a batch once. Design any invoice
-  on top of `usage_days` with that in mind.
+- **Not exactly-once.** The periodic write is idempotent, but a spool replay can
+  over-count a batch once. Design any invoice on top of these figures with that in mind.
 - **Not a substitute for the broker's own metrics.** These numbers describe traffic
   through the gateway, not what the storage engine did with it.

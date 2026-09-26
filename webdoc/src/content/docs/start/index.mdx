@@ -7,29 +7,32 @@ sidebar:
   order: 1
 sourceOfTruth:
   - server/src/main.rs
-  - server/sql/procedures/001_log_schema.sql
+  - server/src/rsm/mod.rs
+  - server/src/rsm/replicator/raft/mod.rs
+  - server/src/rsm/facade/groups.rs
+  - server/src/proxy_embed.rs
 digest: >-
   Queen MQ is high-performance transactional messaging for applications that need an ordered
-  stream per entity: a Rust broker keeping all state in PostgreSQL 15 or newer, with no
-  extensions and no migrations. Its defining abstraction is one logical ordered partition per
-  application entity, created by the first push that names it, giving per-entity FIFO ordering
-  with no head-of-line blocking. One call can acknowledge input, write
-  application state, push output and schedule a timer in one PostgreSQL transaction. The three
-  scaling axes are distinct: partitions scale application cardinality, brokers scale serving
-  capacity inside a cell (three replicas the ceiling), cells scale the deployment. A cell is
-  PostgreSQL plus stateless brokers, optionally fronted by the queen_proxy gateway, and is both
-  the scaling and the failure boundary. Apache 2.0, ghcr.io/queen-mq/queen.
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): main.rs registers three new routes; nothing this page describes moved.
+  stream per entity: one Rust binary per node, keeping its state in a replicated log on the node's
+  own disk, with no external database. Its defining abstraction is one logical ordered partition
+  per application entity, created by the first push that names it, giving per-entity FIFO ordering
+  with no head-of-line blocking. One call can acknowledge input, write application state, push
+  output and schedule a timer as one entry in the replicated log: all of it applies or none of it
+  does. A deployment is one node, or a raft cluster of three or five voters that keeps serving
+  through the loss of a minority; one leader orders every write and every node holds a full copy.
+  Partitions scale application cardinality, nodes buy availability, raft groups spread tenants over
+  leaders, and cells scale the deployment. The proxy (API keys, tenants, quotas) and the Kafka
+  facade run inside the same process when switched on. Apache 2.0, ghcr.io/queen-mq/queen.
 ---
 
 **High-performance transactional messaging for applications that need an ordered stream per
 entity.**
 
-Queen is a message broker written in Rust that keeps every byte of its state in PostgreSQL. Its
-defining abstraction is one logical ordered partition per application entity, a customer, an
-account, a conversation, a device, a workflow, a session or a job, created by the first push that
-names it and never provisioned in advance.
+Queen is a message broker written in Rust. Each node is one binary that keeps its state in a
+replicated log on its own disk, with no external database. Its defining abstraction is one logical
+ordered partition per application entity, a customer, an account, a conversation, a device, a
+workflow, a session or a job, created by the first push that names it and never provisioned in
+advance.
 
 ## The problem
 
@@ -64,7 +67,7 @@ assigned, nothing rebalances when a consumer restarts.
 <Render file="snippets/js-push" />
 
 The `transactionId` is optional and is the idempotency key: give it your own and a retry of the
-same push writes nothing the second time.
+same push, inside the queue's deduplication window, writes nothing the second time.
 
 Consumers choose how they read: which partition, how many at once, batch size, consumer group,
 lease time.
@@ -81,9 +84,9 @@ The whole of it, in one page: [the model](/use/model).
 
 ## Transactional processing
 
-The second reason Queen exists, and the reason PostgreSQL is not an implementation detail. One
-[`POST /api/v1/transaction`](/reference/http/transaction) bundles acknowledgements, pushes,
-key/value writes and timer operations into a single PostgreSQL transaction.
+The second reason Queen exists. One [`POST /api/v1/transaction`](/reference/http/transaction)
+bundles acknowledgements, pushes, key/value writes and timer operations into one entry of the
+replicated log, and an entry applies whole or not at all.
 
 <Render file="snippets/js-transaction" />
 
@@ -91,14 +94,14 @@ The bundle is N to M: one call may acknowledge batches leased from any number of
 queues and consumer groups, and push to any number of queues and partitions, which is what makes
 a fan-in stage possible. This is what replaces transactional outbox tables, a separate store for
 idempotency markers, and the reconciliation code that exists only because the broker's commit and
-the database's commit were two different commits.
+the application store's commit were two different commits.
 
 <Aside type="caution">
 Atomicity covers broker state, not the network. If the response is lost you do not know whether
 it committed, and a blind retry duplicates the pushes unless your transaction ids are
 deterministic and the retry lands inside the deduplication window. Queen does not make an
 external HTTP call exactly-once, and no broker can. The one case that *is* exactly-once end to
-end is when the effect is itself a row in this PostgreSQL, written through the
+end is when the effect is itself state in this broker, written through the
 [key/value rider](/use/kv): marker, effect, output and cursor advance become a single commit.
 </Aside>
 
@@ -107,10 +110,10 @@ end is when the effect is itself a row in this PostgreSQL, written through the
 ```text
 Application entity        the thing whose order matters
     ▼  Partition key      your ordering boundary, chosen by you
-    ▼  Ordered stream     one row, created on demand, strict FIFO
-    ▼  Transaction        ack + state + output in one commit
-    ▼  PostgreSQL         the single source of truth
-    ▼  Stateless brokers  hold nothing durable; restart freely
+    ▼  Ordered stream     one lane, created on demand, strict FIFO
+    ▼  Transaction        ack + state + output in one log entry
+    ▼  Replicated log     one leader orders it, every node applies it
+    ▼  Node               one binary, a full copy on its own disk
     ▼  Cell               one deployment, one failure domain
     ▼  Region             where a cell physically lives
 ```
@@ -121,24 +124,12 @@ is that these two halves should scale independently of each other.
 ## What has been measured
 
 Every figure on this site names the run that produced it, and a figure without an archived
-artifact recording its configuration does not get published. The two headline runs are Queen
-1.0.0, one broker against one PostgreSQL 18 on a 32 vCPU / 62 GiB machine, with
-`synchronous_commit` left `on`.
-
-- [**86,369,975,300 messages in 24 hours**](/benchmarks/soak-24h), about 1,000,000 a second in
-  each direction, pushed, popped and acknowledged, with explicit acks and deduplication on. Zero
-  restarts, broker memory flat near 4.1 GB.
-- [**1,000,000 ordered partitions in one queue**](/benchmarks/cardinality-1m), none preallocated,
-  created during the run at a thousand a second while serving 200,000 messages a second. Zero
-  push, pop or ack errors over 722 million messages.
-- [**0 order violations**](/benchmarks/ordered-pipeline) across four stages and 1,000 partitions,
-  over 88,503,408 verified messages, with zero duplicates and zero gaps.
-- [**0 cross-tenant deliveries**](/benchmarks/multitenant-cell) over an hour with twelve tenants
-  sharing one queue name and one consumer group name.
-
-These are single-shape runs. They say nothing about your throughput, latency, PostgreSQL sizing,
-disk, retention capacity or partition distribution, which follow from your workload, payloads and
-hardware: read [method and rig](/benchmarks/method) before quoting a number.
+artifact recording its configuration does not get published. The runs published so far measured
+Queen 1.x, whose storage was PostgreSQL; 2.0 replaced that storage with the replicated log, so
+those figures describe the 1.x engine and not this one. They are kept, with their conditions, under
+[Benchmarks](/benchmarks). Read [method and rig](/benchmarks/method) before quoting any number:
+single-shape runs say nothing about your throughput, latency, sizing, disk, retention capacity or
+partition distribution, which follow from your workload, payloads and hardware.
 
 ## Application scale is not infrastructure scale
 
@@ -149,9 +140,9 @@ infrastructure object, either a topic partition with its own files and replicas 
 server-side queue. Doubling your customers means doubling something an operator has to think
 about.
 
-In Queen a partition is a row. A million of them measured 315 MB in total, and the serve path
-does not care how many exist. **Millions of logical entity streams do not require millions of
-infrastructure objects.**
+In Queen a partition is an entry in the node's ordered store and a range of offsets in its queue's
+log. It is not a file, a process or a replica set of its own. **Millions of logical entity streams
+do not require millions of infrastructure objects.**
 
 ## Three kinds of scale
 
@@ -161,65 +152,59 @@ mis-size a deployment.
 | Axis | What it scales | What it does not |
 | --- | --- | --- |
 | **Partitions** | Application cardinality. Add entities freely: nothing is provisioned, no process is created, no rebalance runs | Make one hot lane parallel |
-| **Brokers** | Serving capacity and availability inside a cell. Three replicas is the designed ceiling | Raise the ceiling past the database, which is what actually bounds throughput |
+| **Nodes** | Availability. Three voters survive one failure, five survive two, and any node serves any client | Write throughput: every write goes through one leader and lands on every voter |
 | **Cells** | The deployment. Capacity grows by adding cells, not by growing one system | Solve cross-region replication or global ordering |
+
+Inside one cell, `QUEEN_RAFT_GROUPS` runs several independent raft groups per process, each with
+its own leader and log, and places each tenant in one of them, so a cell with many tenants spreads
+its writes over several leaders ([High availability](/deploy/ha#several-raft-groups-per-process)).
 
 ## Inside a cell
 
-A cell is PostgreSQL plus one or more stateless brokers, optionally fronted by
-[`queen_proxy`](/deploy/proxy). It is at once the scaling boundary, the failure boundary and the
-unit of upgrade and operational ownership. Cells do not coordinate with each other to process
-messages.
+A cell is one Queen node or a raft cluster of them, optionally with the proxy switched on in the
+same process. It is at once the scaling boundary, the failure boundary and the unit of upgrade and
+operational ownership. Cells do not coordinate with each other to process messages.
 
 <pre class="mermaid">{`
 flowchart LR
-  C["clients<br/>six SDKs, queenctl, curl"] -->|HTTP| P["Queen Proxy<br/>optional: tenancy, quotas"]
-  P -->|HTTP| B["Queen brokers<br/>stateless, hold nothing durable"]
-  C -.->|HTTP, with no proxy| B
-  B -->|stored procedures| PG[("PostgreSQL<br/>the only durable state")]
+  C["clients<br/>six SDKs, queenctl, curl, Kafka clients"] -->|HTTP| N1["Queen node<br/>leader"]
+  C -->|HTTP| N2["Queen node<br/>follower"]
+  N2 -.->|forwards writes| N1
+  N1 -->|replicated log| N2
+  N1 -->|replicated log| N3["Queen node<br/>follower"]
+  N1 --- D1[("local disk")]
+  N2 --- D2[("local disk")]
+  N3 --- D3[("local disk")]
 `}</pre>
 
-**PostgreSQL is the durable source of truth, and the brokers hold nothing authoritative.**
-Messages, offsets, leases, deduplication state, queue configuration and dead letters are all
-rows. That is why a broker can be added, removed, restarted or rolled without a rebalance, and
-why deduplication stays exact across replicas with no coordination protocol at all. Brokers do
-exchange hints over a [mesh port](/internals/mesh) to shorten latency, but nothing on that wire
-is authoritative and a dropped hint costs nothing but time.
+**The log is the durable source of truth, and every node holds a full copy of it.** Messages,
+offsets, leases, deduplication state, queue configuration, dead letters, key/value state and timers
+are all state the log produces. One leader orders every write into it; a write is answered once a
+majority of the voters have it on disk; every node applies the same entries in the same order. That
+is why deduplication and leases stay exact across nodes, and why a client can talk to any node: a
+follower forwards writes to the leader and holds reads until it has applied what was committed when
+they began.
 
-**The failure domain is PostgreSQL.** Queen does not replicate itself, so keeping the database
-alive is PostgreSQL's own tooling. While it is unreachable, pushes spool to a node-local disk
-buffer and are replayed later, and reads fail safely because an unacknowledged lease redelivers
-([high availability](/deploy/ha)).
-
-## Why PostgreSQL
-
-Not because the bytes needed somewhere to live. PostgreSQL is chosen for what it lets the
-*application* do.
-
-- **Messaging state and application state share a transaction.** This is the whole reason for the
-  design, and no other storage choice offers it.
-- Durability, ACID, replication, PITR, backup and recovery you already know how to operate.
-- SQL introspection: your messages are rows, queryable with the tools you already have.
-- No extensions and no migration step. The broker carries its own schema and applies it at boot.
-  PostgreSQL 15 or newer.
-
-The trade, plainly: the database is the throughput ceiling and the single failure domain.
+**The failure domain is the majority.** A cluster of three keeps serving through the loss of one
+node, a cluster of five through two, and a leader that stops gracefully hands leadership over
+before it drains. Losing a majority stops writes until it is back ([high availability](/deploy/ha)).
+A single node is its own failure domain.
 
 ## Many tenants, one cell
 
-[`queen_proxy`](/deploy/multi-tenant) is a second Rust binary and the tenant-facing boundary.
-Queen core stays focused on messaging, and everything a shared broker has no business holding
-lives in the proxy: per-cluster API keys and human logins, plan limits on rate, size and count,
-and usage metering.
+The proxy is the tenant-facing boundary, and it runs inside the broker process when
+`QUEEN_PROXY_EMBEDDED=true`. Queen core stays focused on messaging, and everything a shared broker
+has no business holding lives in the proxy: per-cluster API keys and human logins, plan limits on
+rate, size and count, and usage metering. Its own state lives in the same replicated log, under a
+system tenant.
 
-Isolation is split across both processes on purpose. The broker scopes queue identity natively as
-`(tenant, name)` in SQL on every read and write, so two tenants both owning a queue called
-`orders` own different queues. The proxy is what makes the tenant identity driving that scoping
-trustworthy. Neither half is sufficient alone ([isolation](/reference/multi-tenant/isolation)).
+Isolation is split across both halves on purpose. The broker scopes queue identity natively as
+`(tenant, name)` on every read and write, so two tenants both owning a queue called `orders` own
+different queues. The proxy is what makes the tenant identity driving that scoping trustworthy.
+Neither half is sufficient alone ([isolation](/reference/multi-tenant/isolation)).
 
 A **cluster** is the tenant-visible Queen: one hostname, one plan, one namespace. A **cell** is
-the physical stack it runs on. A cluster lives on exactly one cell and never spans two, which is
-why the proxy's quota accounting is exact in-process state with nothing to coordinate.
+the physical deployment it runs on. A cluster lives on exactly one cell and never spans two.
 
 ## What is in the box
 
@@ -228,32 +213,24 @@ why the proxy's quota accounting is exact in-process state with nothing to coord
   retry budgets and a real [dead-letter queue](/reference/http/messages-dlq), long-poll
   consumption, retention by age and by completion.
 - **Exactly-once building blocks**: [deduplication at push](/internals/dedup) keyed on your
-  transaction id, exact rather than probabilistic, evaluated inside PostgreSQL so a duplicate
-  writes nothing; transactional `ack + kv + push + timers` in one commit.
+  transaction id, exact rather than probabilistic, so a duplicate writes nothing; transactional
+  `ack + kv + push + timers` in one commit.
 - **State and time**: [`queen.kv`](/use/kv) with optimistic locking and an expiry on every write,
   [timers](/use/timers) that stay cancellable until they fire, delayed delivery, window-buffer
   debounce, and [conflation](/reference/http/pop#conflation) for last-value delivery.
 - **Stream processing**: an [operator chain](/use/streams) that runs in your process with state in
-  the same PostgreSQL. Four window types, event time with watermarks, per-message gating, and one
+  the same broker. Four window types, event time with watermarks, per-message gating, and one
   cycle that commits state, sink pushes and the ack together.
-- **Ephemeral queues**: an [in-memory class](/use/ephemeral) with no database in the path, for
+- **Ephemeral queues**: an [in-memory class](/use/ephemeral) with no disk in the path, for
   request/reply, signalling and cache invalidation.
-- **Operations**: one stateless binary serving HTTP on port 6632, six SDKs plus
+- **Operations**: one binary serving HTTP on port 6632, six SDKs plus
   [`queenctl`](/reference/queenctl), a [dashboard](/deploy/dashboard) in the same binary on the
-  same port, [Prometheus metrics](/reference/prometheus), [JWT auth](/reference/security/jwt) and
-  a disk spool for database outages.
-- **Other brokers' wire protocols**, in the same image as the broker and off until you switch
-  them on. `queen-kafka` advertises 32 Kafka API keys, so an unmodified Kafka producer or consumer
-  reaches Queen by changing `bootstrap.servers` and nothing else; `queen-sqs` answers the SQS and
-  SNS protocols, so an unmodified AWS SDK reaches it by changing `endpoint_url`. The contracts are
-  [reference/kafka](/reference/kafka) and [reference/sqs](/reference/sqs), running them is
-  [deploy/kafka](/deploy/kafka) and [deploy/sqs](/deploy/sqs).
-- **The log lands in your data lake.** `queen-s3`, in the same image and off until you switch
-  it on, reads a queue through the broker's own API and writes JSONL or Parquet into any
-  S3-compatible bucket under a Hive layout, exactly once, at any partition cardinality, with the
-  per-entity order kept as two columns. DuckDB, Spark, ClickHouse and the rest read it without
-  Queen. What the objects contain is [reference/s3](/reference/s3), running it is
-  [deploy/s3](/deploy/s3).
+  same port, [Prometheus metrics](/reference/prometheus), [JWT auth](/reference/security/jwt),
+  payload encryption and a raft cluster for failover.
+- **The Kafka wire protocol**, in the same process and off until you switch it on. The facade
+  advertises 32 Kafka API keys, so an unmodified Kafka producer or consumer reaches Queen by
+  changing `bootstrap.servers` and nothing else. The contract is [reference/kafka](/reference/kafka),
+  running it is [deploy/kafka](/deploy/kafka).
 
 ## When something else is the better tool
 
@@ -267,8 +244,8 @@ workloads that need them.
   and log directories does not apply.
 - **A single ordered stream that must itself scale horizontally.** One lane is sequential. If your
   ordering boundary is everything, Queen's core idea does nothing for you.
-- **Storage that scales independently of the database**, or a system that replicates itself across
-  regions. Retention lives in PostgreSQL, which is also the one failure domain.
+- **Storage that scales beyond one machine's disk**, or a system that replicates itself across
+  regions. Every voter holds a full copy of the state, so retention is bounded by one node's disk.
 - **Rich content-based routing.** No exchanges, no bindings, no header matching. That is
   RabbitMQ's strength.
 - **No server to operate at all.** That is Amazon SQS.
@@ -297,7 +274,7 @@ abstraction, and Queen makes *application entities* the fundamental ordering abs
   <LinkCard
     href="/deploy"
     title="Deploy Queen"
-    description="One binary next to a PostgreSQL, and what changes when you want it highly available."
+    description="One binary and a data directory, and three of them when a node failure must not stop writes."
   />
   <LinkCard
     href="/benchmarks"

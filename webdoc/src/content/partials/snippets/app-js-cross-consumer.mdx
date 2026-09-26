@@ -72,9 +72,9 @@ await queen.queue(TOPIC)
   .consume(async (messages) => {
     // Show the raw envelope once, from the first REAL batch. Doing this with a
     // throwaway consumer group instead would register a cursor that never
-    // advances -- and retention rule 2 is capped at MIN(committed) across a
-    // partition's consumer rows, so that idle group would pin the whole backlog
-    // from ever being reclaimed (server/sql/procedures/006_log_maintenance.sql).
+    // advances -- and completed-message retention is capped at MIN(committed)
+    // across a partition's consumer groups, so that idle group would pin the
+    // whole backlog from ever being reclaimed (server/src/rsm/maintenance.rs).
     if (!shownEnvelope) {
       shownEnvelope = true
       console.log('raw Queen payload as stored by the Kafka facade:')

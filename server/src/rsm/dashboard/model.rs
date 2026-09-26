@@ -1,19 +1,17 @@
 //! The node-local observability rows of raft mode (PLAN_RAFT.md D17, §14.6).
 //!
-//! Each struct is the raft-mode twin of one Postgres metrics table. A node
-//! writes only its OWN rows (its own HTTP clients, its own process) into its
-//! `local.db`, exactly as a Postgres-mode replica inserts only its own rows;
-//! a dashboard read gathers the rows of every node and the views in
-//! [`super::node_views`] / [`super::queue_views`] re-aggregate them the way
-//! the stored procedures do.
+//! Each struct is one node's local metrics row. A node writes only its OWN
+//! rows (its own HTTP clients, its own process) into its `local.db`; a
+//! dashboard read gathers the rows of every node and the views in
+//! [`super::node_views`] / [`super::queue_views`] re-aggregate them.
 //!
-//! | row | Postgres table | written by | gathered |
-//! |---|---|---|---|
-//! | [`WorkerRow`] | `queen.worker_metrics` | the collector, one per node per flush | yes |
-//! | [`SystemRow`] | `queen.system_metrics` | the collector, one per node per flush | yes |
-//! | [`QueueRow`] | `queen.queue_lag_metrics` | the collector, one per node, queue and minute with activity | yes (merged, [`merge_queue_rows`]) |
-//! | [`ParkedRow`] | `queen.queue_parked_replica` | the collector, one per node, queue and minute with parked long-polls | yes |
-//! | [`ChurnRow`] | the partition-lifecycle columns of `queue_lag_metrics` | apply, identical on every node | NO: served from the answering node |
+//! | row | written by | gathered |
+//! |---|---|---|
+//! | [`WorkerRow`] | the collector, one per node per flush | yes |
+//! | [`SystemRow`] | the collector, one per node per flush | yes |
+//! | [`QueueRow`] | the collector, one per node, queue and minute with activity | yes (merged, [`merge_queue_rows`]) |
+//! | [`ParkedRow`] | the collector, one per node, queue and minute with parked long-polls | yes |
+//! | [`ChurnRow`] | apply, identical on every node | NO: served from the answering node |
 //!
 //! Times are epoch microseconds (UTC). The pure helpers at the bottom
 //! ([`iso_us`], [`parse_ts_us`], [`trunc_us`]) are the only time functions the
@@ -21,14 +19,13 @@
 
 use serde::{Deserialize, Serialize};
 
-/// `queen.worker_metrics`: one row per node per flush (default every 60 s).
-/// `at_us` is the flush time truncated to the second, like the Postgres
-/// insert's `date_trunc('second', NOW())`; the counters are the deltas since
-/// the node's previous flush.
+/// One row per node per flush (default every 60 s). `at_us` is the flush
+/// time truncated to the second; the counters are the deltas since the
+/// node's previous flush.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct WorkerRow {
     pub at_us: i64,
-    /// The node as the dashboard names it (Postgres: the replica hostname).
+    /// The node as the dashboard names it.
     pub hostname: String,
     /// Always 0: one async worker per process.
     pub worker_id: i32,
@@ -54,19 +51,18 @@ pub struct WorkerRow {
     pub lag_count: i64,
 }
 
-/// `queen.system_metrics`: one row per node per flush. `metrics_json` is the
-/// same nested JSON the Postgres collector writes into the `metrics` JSONB
-/// column (every numeric leaf `{avg,min,max,last}`), with a `raft` family in
-/// place of the `database` pool family. Kept as a string so the row encodes
-/// in any serde format.
+/// One row per node per flush. `metrics_json` is nested JSON (every numeric
+/// leaf `{avg,min,max,last}`), with a `raft` family in place of the old
+/// database-pool family. Kept as a string so the row encodes in any serde
+/// format.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SystemRow {
     pub at_us: i64,
     pub hostname: String,
     pub port: i32,
-    /// `"worker-0"`, as in Postgres mode.
+    /// `"worker-0"`.
     pub worker_id: String,
-    /// The flush interval in seconds (Postgres: `sample_count`).
+    /// The flush interval in seconds.
     pub sample_count: i32,
     pub metrics_json: String,
 }
@@ -74,18 +70,17 @@ pub struct SystemRow {
 /// `queen.queue_lag_metrics` (the per-queue ops columns): one row per node,
 /// queue and minute bucket in which the queue saw any activity. `bucket_us` is
 /// the flush time truncated to the minute. Rows of several nodes for the same
-/// `(bucket_us, tenant, queue)` are merged by [`merge_queue_rows`] exactly as
-/// the Postgres upsert merges replicas.
+/// `(bucket_us, tenant, queue)` are merged by [`merge_queue_rows`].
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct QueueRow {
     pub bucket_us: i64,
     pub tenant: String,
     pub queue: String,
-    /// Messages delivered by pops (Postgres `pop_count`).
+    /// Messages delivered by pops.
     pub pop_messages: i64,
     pub push_requests: i64,
     pub push_messages: i64,
-    /// Pops that came back empty (Postgres `pop_empty_count`).
+    /// Pops that came back empty.
     pub pop_empty: i64,
     pub transactions: i64,
     pub ack_requests: i64,
@@ -149,8 +144,8 @@ pub struct RetentionRow {
 }
 
 /// Merge queue rows of several nodes into one row per
-/// `(bucket_us, tenant, queue)`, the way the Postgres upsert does: counters
-/// add, `avg_lag_ms` is the `lag_count`-weighted mean, `max_lag_ms` the max,
+/// `(bucket_us, tenant, queue)`: counters add, `avg_lag_ms` is the
+/// `lag_count`-weighted mean, `max_lag_ms` the max,
 /// `parked_count` adds (each node's minute-average of its own long-polls).
 /// The result is sorted by `(bucket_us, tenant, queue)`.
 pub fn merge_queue_rows(rows: impl IntoIterator<Item = QueueRow>) -> Vec<QueueRow> {
@@ -194,9 +189,8 @@ pub fn merge_queue_rows(rows: impl IntoIterator<Item = QueueRow>) -> Vec<QueueRo
 pub const US_PER_SEC: i64 = 1_000_000;
 pub const US_PER_MIN: i64 = 60 * US_PER_SEC;
 
-/// `us` truncated to a multiple of `step_us` (Postgres `date_trunc` for
-/// minute / hour / day steps, and the `to_timestamp(floor(epoch/step)*step)`
-/// bucketing of the stored procedures for any other step).
+/// `us` truncated to a multiple of `step_us` (floor-divide then multiply back;
+/// used for minute / hour / day steps and any other step alike).
 pub fn trunc_us(us: i64, step_us: i64) -> i64 {
     if step_us <= 0 {
         return us;
@@ -220,9 +214,9 @@ pub fn iso_us(us: i64) -> String {
     )
 }
 
-/// Parse an ISO-8601 / RFC 3339 timestamp the way Postgres' `::timestamptz`
-/// reads a filter: `YYYY-MM-DD`, `YYYY-MM-DDTHH:MM[:SS[.fff…]]` with `T` or a
-/// space, and an optional `Z` / `+HH[:MM]` / `-HH[:MM]` offset (none = UTC).
+/// Parse an ISO-8601 / RFC 3339 timestamp: `YYYY-MM-DD`,
+/// `YYYY-MM-DDTHH:MM[:SS[.fff…]]` with `T` or a space, and an optional `Z` /
+/// `+HH[:MM]` / `-HH[:MM]` offset (none = UTC).
 /// `None` when it does not parse.
 pub fn parse_ts_us(s: &str) -> Option<i64> {
     let s = s.trim();

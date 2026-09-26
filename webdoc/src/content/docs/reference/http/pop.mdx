@@ -8,30 +8,33 @@ sidebar:
 sourceOfTruth:
   - server/src/handlers/data.rs
   - server/src/handlers/mod.rs
+  - server/src/handlers/raft.rs
   - server/src/config.rs
-  - server/sql/procedures/004_log_pop.sql
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/autopilot.rs
+  - server/src/rsm/planner/pop.rs
+  - server/src/rsm/planner/mod.rs
 verifiedBy:
   - clients/client-js/test-v2/pop.js
   - clients/client-js/test-v2/consume.js
   - clients/client-js/test-v2/semantics.js
   - clients/client-py/tests/test_pop.py
 digest: >-
-  A pop claims a leased batch and removes nothing, but a queue-scoped pop creates a missing
-  queue's `queen.queues` row. Read-write `GET` routes: `/api/v1/pop/queue/:queue`, that path +
-  `/partition/:partition`, and `/api/v1/pop` discovery (needs `namespace`/`task`). Defaults:
-  `batch` 200 (call-wide budget), `partitions` 1, `autoAck` and `wait` false, `timeout` 30000 ms
-  (needs `wait=true`), `consumerGroup` `__QUEUE_MODE__`, `subscriptionMode` `new` (seeds absent
-  cursors, never in queue mode), `leaseSeconds` the queue's `leaseTime`, else 60. 200 gives
-  `leaseId`, `messages` of `id`, `transactionId`, `data`, `partitionId`, absolute `offset` and
-  `deliveryAttempt`;
-  ack per-message `partitionId`. A bare `204` covers idle, `delayedProcessing`/`windowBuffer`
-  holdback, pop maintenance, procedure errors, `wait=true` timeouts. One live leased batch per
-  `(partition, group)` caps parallelism at the partition count; expiry redelivers, `autoAck=true`
-  is at-most-once.
-# sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
+  A pop claims a leased batch and removes nothing, but a pop on `/api/v1/pop/queue/:queue`
+  creates a missing queue with a push's defaults. Read-write `GET` routes:
+  `/api/v1/pop/queue/:queue`, that path + `/partition/:partition`, and `/api/v1/pop` discovery
+  (needs `namespace`/`task`). Defaults: `batch` 200 (call-wide budget), `partitions` 1 (clamped to
+  1–64), `autoAck` and `wait` false, `timeout` 30000 ms (needs `wait=true`, capped at 60000),
+  `consumerGroup` `__QUEUE_MODE__`, `subscriptionMode` `new` (seeds absent cursors, never in queue
+  mode), `leaseSeconds` the queue's `leaseTime`, else 60 (60 on discovery). 200 gives `leaseId`,
+  `messages` of `id`, `transactionId`, `data`, `partitionId` (a decimal string), absolute
+  `offset` and `deliveryAttempt`; ack per-message `partitionId`. A bare `204` covers idle,
+  `delayedProcessing`/`windowBuffer` holdback and `wait=true` timeouts; the discovery route
+  never long-polls. One live leased batch per `(partition, group)` caps
+  parallelism at the partition count; expiry redelivers, `autoAck=true` is at-most-once.
 ---
 
-A pop claims a **leased batch**: a contiguous span of offsets just past the consumer group's
+A pop claims a **leased batch**: a contiguous span of offsets right after the consumer group's
 cursor in one or more partitions, held for a lease duration so no other worker in that group can
 take them. It never removes anything. All three routes are `GET`, take their parameters in the
 query string, have access level **read-write**, and return the same response shape.
@@ -47,16 +50,16 @@ query string, have access level **read-write**, and return the same response sha
 | Parameter | Type | Default | Applies to |
 | --- | --- | --- | --- |
 | `batch` | integer | `200` | all three |
-| `partitions` | integer | `1` | queue-scoped and discovery |
+| `partitions` | integer | `1` | `GET /api/v1/pop/queue/:queue` and discovery |
 | `autoAck` | boolean | `false` | all three |
-| `wait` | boolean | `false` | all three |
+| `wait` | boolean | `false` | the two queue-scoped routes; see [Long polling](#long-polling) |
 | `timeout` | integer, ms | `30000` | all three |
-| `leaseSeconds` | integer | the queue's `leaseTime`, else `60` | all three |
+| `leaseSeconds` | integer | the queue's `leaseTime`, else `60`; `60` on discovery | all three |
 | `consumerGroup` | string | `__QUEUE_MODE__` | all three |
 | `subscriptionMode` | string | `new` (`DEFAULT_SUBSCRIPTION_MODE`) | all three |
 | `subscriptionFrom` | string | empty | all three |
 | `conflation` | boolean | `false` | all three |
-| `autopilot` | boolean | `false` | queue-scoped, with a `consumerGroup` |
+| `autopilot` | boolean | `false` | `GET /api/v1/pop/queue/:queue` |
 | `namespace` | string | empty | discovery only |
 | `task` | string | empty | discovery only |
 
@@ -64,16 +67,20 @@ query string, have access level **read-write**, and return the same response sha
 touches, not a per-partition limit. The budget is consumed partition by partition until it runs
 out.
 
-`partitions` caps how many partitions one call may claim. `0` or a negative value means **no
-cap**. It is ignored by the single-partition route, which by definition claims one.
+`partitions` caps how many partitions one call may claim. It is clamped to 1–64: `0` or a
+negative value is read as `1`, and anything above 64 as `64`. It is ignored by the
+single-partition route, which by definition claims one.
 
 `timeout` is the long-poll deadline in milliseconds. Its default comes from `DEFAULT_TIMEOUT`,
 falling back to `POP_DEFAULT_TIMEOUT_MS`, falling back to `30000`; `DEFAULT_TIMEOUT` wins when
-both are set. It only has an effect when `wait=true`.
+both are set. It only has an effect when `wait=true`. The broker caps a request's deadline at
+60000 ms, so a larger `timeout` waits 60 seconds.
 
 `leaseSeconds` overrides the queue's configured lease for this call only. Values of `0` or less
-are treated as absent, so the queue value applies: **60 seconds** for a queue created implicitly
-by a push, **300 seconds** for one created or updated through `/api/v1/configure`.
+are treated as absent. On the queue-scoped routes the queue's `leaseTime` then applies: **60
+seconds** for a queue created implicitly by a push, **300 seconds** for one created through
+`/api/v1/configure`. On the discovery route the default is 60 seconds whatever the matched
+queues' `leaseTime`; send `leaseSeconds` to change it.
 
 `consumerGroup` omitted means queue mode, which is implemented as the reserved group name
 `__QUEUE_MODE__`. Queue mode is an ordinary group with a reserved name: it has its own cursor
@@ -81,15 +88,26 @@ like any other, and two consumers that both omit `consumerGroup` share it.
 
 `subscriptionMode` and `subscriptionFrom` **seed a cursor that does not exist yet** and are
 ignored for a `(partition, group)` that has already been contacted. `subscriptionMode=all`
-starts at the oldest retained message; `new` (the default) skips the existing backlog.
-`subscriptionFrom` takes `now` or an ISO-8601 timestamp; an unparseable timestamp is ignored.
-Queue mode is deliberately excluded from seeding, so a queue-mode pop never skips backlog even
-if it carries these parameters. When a group registered a durable subscription, that record wins
-over the pop-carried intent.
+starts at the oldest retained message; `new` (the default) skips the backlog stored before the
+group's first pop; any other value is read as `all`. `subscriptionFrom` takes `now` or an
+ISO-8601 timestamp, and starts at the first message stored at or after it; an unparseable
+timestamp is ignored. Queue mode is deliberately excluded from seeding, so a queue-mode pop never
+skips backlog even if it carries these parameters. A group's first pop on
+`GET /api/v1/pop/queue/:queue` or on the discovery route registers the group with the
+subscription that pop carried (the single-partition route registers a group only when it
+conflates). From then on that stored subscription, or one registered through the consumer-group
+routes, seeds the group's cursor on every partition it reaches, whatever later pops carry.
 
 The discovery route requires at least one of `namespace` and `task`. With neither, it returns
 `400` with `{"success":false,"error":"namespace or task is required","messages":[]}` rather than
 scanning every queue.
+
+One side effect to know about: a pop on `GET /api/v1/pop/queue/:queue` for a queue that does not
+exist **creates the queue**, with the defaults a push would give it (`namespace` and `task`
+derived from the dotted name, `leaseTime` 60), and registers the group on it before answering
+204. That is deliberate, because a group may subscribe before the first push. It does mean a typo
+in a consumer's queue name leaves an empty queue behind rather than nothing. The single-partition
+and discovery routes create nothing.
 
 ## Conflation
 
@@ -121,8 +139,8 @@ same queue reads everything.
 `partitions` defaults to `1`, and a conflating pop yields at most one message per
 partition, so for a conflating group it is the partition cap, not `batch`, that
 sizes a call. The broker therefore reads `partitions` as `batch` when you leave it
-out, capped at **64**, which is the checkout width the engine is measured on. A
-conflating pop returns at most 64 messages per round trip whatever `batch` says.
+out, capped at **64**. A conflating pop returns at most 64 messages per round trip
+whatever `batch` says.
 
 Two combinations are refused with `400` rather than warned about, because the
 silent version of each is unfixable in production:
@@ -137,16 +155,10 @@ conflation collapses the entire retained history to one message per partition
 ("rebuild the world once, then stay current"), `new` plus conflation skips the
 history in the seed and delivers only live changes.
 
-Retries are unaffected. The retry budget lives on the `(partition, group)` row and
-is charged only by an explicit `failed` ack, so it survives supersession: a poison
-partition under a hot producer still dead-letters on schedule, and the message
-filed is the tail of the last attempt.
-
-One side effect to know about: a queue-scoped pop on a queue that does not exist **creates its
-`queen.queues` configuration row** (column defaults, `namespace` and `task` derived from the
-dotted name) before answering 204. That is deliberate, because a group may subscribe before the
-first push and its durable subscription record hangs off the queue's id. It does mean a typo in a
-consumer's queue name now leaves an empty queue behind rather than nothing.
+Retries are unaffected. The retry budget lives on the `(partition, group)` cursor
+and is charged only by an explicit `failed` ack, so it survives supersession: a
+poison partition under a hot producer still dead-letters on schedule, and the
+message filed is the tail of the last attempt.
 
 ## Response
 
@@ -157,7 +169,7 @@ consumer's queue name now leaves an empty queue behind rather than nothing.
   "success": true,
   "queue": "orders.created",
   "partition": "customer-42",
-  "partitionId": "b1c2d3e4-5f60-7180-9a0b-1c2d3e4f5061",
+  "partitionId": "17",
   "leaseId": "0198f2c1-9a7b-7d20-8e31-4c5d6e7f8a90",
   "consumerGroup": "billing",
   "messages": [
@@ -167,12 +179,13 @@ consumer's queue name now leaves an empty queue behind rather than nothing.
       "traceId": null,
       "data": { "orderId": 8891, "total": 4200 },
       "producerSub": null,
-      "createdAt": "2026-07-30T11:02:44.512873Z",
-      "offset": 8192,
-      "partitionId": "b1c2d3e4-5f60-7180-9a0b-1c2d3e4f5061",
+      "createdAt": "2026-07-30T11:02:44.512Z",
+      "partitionId": "17",
       "partition": "customer-42",
       "leaseId": "0198f2c1-9a7b-7d20-8e31-4c5d6e7f8a90",
-      "consumerGroup": "billing"
+      "consumerGroup": "billing",
+      "deliveryAttempt": 1,
+      "offset": 8192
     }
   ],
   "partitionsClaimed": 1
@@ -193,57 +206,55 @@ consumer's queue name now leaves an empty queue behind rather than nothing.
 | `partitionsClaimed` | integer | how many partitions this call claimed |
 | `conflation` | boolean | present, and always `true`, only when this pop was served under [conflation](#conflation) |
 | `conflationConflict` | boolean | present, and always `true`, only when this request declared a conflation policy the group does not have |
-| `autopilot` | object | present only when this request sent `autopilot=true` and the broker resolved at least one knob for it: `partitions` and `batch` are the values the claim actually used, and `waitMs` is the pacing the broker advises for an empty-poll loop |
+| `autopilot` | object | present only when this request sent `autopilot=true` and the broker chose at least one knob for it: `partitions` and `batch` are the values the claim actually used |
+
+A `partitionId` is the partition's numeric id written as a decimal string (`"17"`), not a UUID.
+Treat it as opaque and send it back exactly as the pop returned it.
 
 ### Autopilot
 
 `autopilot=true` asks the broker to choose the knobs you did **not** send.
 `partitions` is the sweep width of one claim, and its right value is a fact about
-the broker (how many partitions of this queue currently hold work for your group,
-and how long they have been waiting) rather than about your consumer. It also
-moves: a queue's partition count grows for years, so a number that was right when
-it was typed is wrong later. On a measured cloud cell the same workload ran at a
-2376 ms ready-age tail with `partitions=5000` and at 5 ms with `partitions=10`.
+the broker (how many partitions of this queue currently hold work for your group)
+rather than about your consumer. It also moves: a queue's partition count grows,
+so a number that was right when it was typed is wrong later.
 
 The choice is **per parameter**. A knob you send is yours and is never
 overridden: `autopilot=true&partitions=1` is a manual width of 1 with an
 automatic batch. Send neither and both are chosen. Send both and nothing is,
 which is exactly the request you would have sent without the flag.
 
-Omitting `autopilot` entirely keeps today's behaviour byte for byte, response
-included, which is what every existing consumer does. The broker applies the
-choice on the queue-scoped route for a pop that names a `consumerGroup`; the
-pinned-partition and discovery routes accept the parameter and ignore it, since a
-pinned pop is one partition by definition and has no width to choose. Two more
-positions accept it and do nothing with it, for the same kind of reason. A
-conflating pop keeps its own meaning for `partitions`, the message budget rather
-than a sweep width, so the feature that already owns that dimension keeps it. And
-the controller reads the hot-list ring for every input it has, so a deployment
-running the legacy candidate scan with `QUEEN_HOTLIST=0` has nothing for it to
-read: there too the request resolves to the defaults below.
+What the node that serves the pop chooses, from the group's own state:
 
-Operators can disable the whole thing with `QUEEN_POP_AUTOPILOT=off`, or watch
-what it would choose without letting it act with `QUEEN_POP_AUTOPILOT=shadow`; in
-both positions a request that sent the flag simply gets today's defaults and no
-`autopilot` object in the response. The six constants that tune the law, and what
-the broker logs about its own decisions, are in the
-[configuration reference](/reference/config).
+- `partitions`: the group's partitions that are ready now, divided among the group's
+  autopilot pops in flight on that node, clamped to 1–64.
+- `batch`: the group's measured drain rate (messages acknowledged per second of lease)
+  times 200 ms, clamped to 100–1000. A group with no measurement yet starts at 100.
+  `QUEEN_RAFT_AUTOPILOT_DRAIN_MS`, `QUEEN_RAFT_AUTOPILOT_BATCH_MIN` and
+  `QUEEN_RAFT_AUTOPILOT_BATCH_MAX` move those three numbers.
+
+A pop that omits `autopilot` is served, and answered, as if the parameter did not
+exist, which is what every existing consumer relies on. The broker applies the choice only on
+`GET /api/v1/pop/queue/:queue`, with or without a `consumerGroup`. The
+single-partition and discovery routes accept the parameter and ignore it, since a
+pinned pop is one partition by definition and has no width to choose. A conflating
+pop ignores it too: it keeps its own meaning for `partitions`, the message budget
+rather than a sweep width, so the feature that already owns that dimension keeps it.
 
 ### Conflation in the response
 
-Both keys are emitted **only when true**, so a deployment that never asks for
-conflation gets byte-identical responses to a pre-1.1.0 broker's.
+Both keys are emitted **only when true**, so the response to a pop that never
+mentions conflation carries neither.
 
 `conflation` reports what the broker **applied**, never what the request asked
 for, and it rides every conflating response including empty ones. That is
 load-bearing: no SDK negotiates a version with the broker, so a client that sends
-`conflation=true` to an older broker has the parameter silently ignored and
+`conflation=true` to a broker without conflation has the parameter silently ignored and
 quietly drains the whole backlog one message at a time. The echo is the only
 evidence there is, and because it is present on empty pops the client can raise on
 its first round trip, before a single message is handled. Every SDK does exactly
 that: requested conflation, no echo, no explanation, and the consume loop stops
-with *"conflation was requested but this broker did not apply it, requires broker
->= 1.1.0"*.
+with an error saying the broker did not apply conflation.
 
 `conflationConflict` is the explanation that keeps that check from firing on a
 disagreement. A group registered without conflation answers a `conflation=true`
@@ -270,13 +281,13 @@ message's own `partitionId`.
 | `traceId` | string or `null` | `null` unless the message was written by a transaction that supplied one |
 | `data` | any JSON value | the payload, spliced back verbatim; decrypted transparently if it was encrypted |
 | `producerSub` | string or `null` | the `sub` of the JWT that pushed it, when authentication was on |
-| `createdAt` | string | the timestamp of the **segment** that holds this message |
-| `offset` | integer | the message's absolute zero-based position in its partition |
+| `createdAt` | string | the creation time of the **write** that stored this message |
 | `partitionId` | string | this message's partition id, the one to ack with |
 | `partition` | string | this message's partition name |
 | `leaseId` | string | repeated on every message for convenience; empty on `autoAck` |
 | `consumerGroup` | string | repeated on every message |
 | `deliveryAttempt` | integer | 1-based delivery count for this consumer group's current partition batch; increments when the same batch is redelivered after a nack or lease expiry, and is always `1` with `autoAck` |
+| `offset` | integer | the message's absolute zero-based position in its partition |
 
 `deliveryAttempt` belongs to the `(partition, consumerGroup)` claim, not to the stored message.
 Every message from the same claimed partition in one response therefore carries the same value;
@@ -299,63 +310,57 @@ These absences are deliberate and each one has a consequence:
   the remaining message state is a cursor per `(partition, group)`, not mutable state stored on
   the message.
 
-`createdAt` is the **segment's** creation timestamp, not the message's. A segment holds many
-frames, and the broker coalesces concurrent pushes to the same partition into one segment, so
-messages written by the same call (and messages from different calls that were coalesced)
-all report an identical `createdAt`. It orders segments, not messages inside a segment; ordering
-inside a partition is the offset order in which `messages` is returned. PostgreSQL converts it to
-UTC explicitly before formatting the literal `Z` suffix, so the wire value is independent of the
-database session timezone.
+`createdAt` is the time the leader stamped on the write that stored the message, not a
+per-message clock. Every message one push stored in one partition carries the same value. The
+wire value is UTC at millisecond precision with a literal `Z` suffix, so two writes within the
+same millisecond can show the same `createdAt`. It orders writes, not messages; ordering inside
+a partition is the offset order in which `messages` is returned.
 
 `offset` is informational on the HTTP surface: acknowledgements are still addressed by
-`transactionId`, not by an "ack through offset" parameter. It is computed as the segment's base
-sequence plus the frame index, so partial and multi-segment claims keep the absolute partition
-position rather than restarting at zero.
+`transactionId`, not by an "ack through offset" parameter. It is the message's absolute position
+in its partition, so partial and multi-write claims keep the absolute partition position rather
+than restarting at zero.
 
 ### An empty pop is a 204 with no body
 
 When nothing is delivered, the response is `204 No Content` with **no body at all**. There is
-nothing to parse; check the status first. Three different situations all produce that same bare
-204:
+nothing to parse; check the status first. Two different situations produce that same bare 204:
 
-1. Nothing is available for this group.
-2. **Pop maintenance is on.** The handler builds `{"messages":[],"paused":true}`, and the flag is
-   dropped along with the body. Consumers cannot distinguish a paused broker from an idle queue.
-3. The pop's stored procedure reported an error. The error text is discarded with the body.
+1. Nothing is available for this group. That includes a queue or, on the single-partition route,
+   a partition that does not exist, and messages held back by a
+   [visibility delay](#visibility-delays).
+2. A long poll (`wait=true`) whose `timeout` elapsed.
 
 The one exception is a request that mentioned [conflation](#conflation). Dropping
-the body there would drop the echo the client uses to tell a 1.1.0 broker from an
-older one, and it would read the silence as a version mismatch and stop
-consuming, on an idle queue and on an operator's routine pop-maintenance pause.
-So a pop whose answer has anything to say about conflation keeps its `200` and its
-body:
+the body there would drop the echo the client uses to tell a broker that conflates
+from one that does not, and it would read the silence as a version mismatch and stop
+consuming on an idle queue. So a pop whose answer has anything to say about
+conflation keeps its `200` and its body:
 
 - an empty **conflating** pop: `{"messages":[],"conflation":true, ...}`
 - an empty **conflicting** pop: `{"messages":[],"conflationConflict":true, ...}`
-- pop maintenance, for a request that sent `conflation=true`:
-  `{"messages":[],"paused":true,"conflation":true}`, the only response where
-  `paused` reaches the client. It means "the pop never ran", not "the policy was
-  refused"
 
-Transport-level failures do come back with a body: `500` with `{"error":"pool"}` when no
-database connection is available, or `{"error":"pop failed"}` when the statement timed out and
-was cancelled.
+A pop that fails does not look like an empty one: it answers with an error status and a body.
+An error raised by the state machine is `{"error":"…","code":"…"}`.
 
 | Code | When |
 | --- | --- |
 | `200` | at least one message delivered, or the answer carries a conflation key |
-| `204` | nothing delivered, pop maintenance, or a stored-procedure error (no body) |
+| `204` | nothing delivered (no body) |
 | `400` | discovery pop with neither `namespace` nor `task`; `conflation=true` without `consumerGroup` or with `autoAck=true`; a query parameter that fails to deserialize |
 | `403` | authentication is on and the token has no `read-write` role |
-| `500` | no pool connection, or a cancelled statement |
+| `413` | code `name_too_long`: the tenant, queue and the longer of the consumer group and partition names together exceed 447 bytes |
+| `503` | code `no_leader`, `retry` or `timeout`, with `Retry-After: 1` |
+| `500` | code `internal`: a broker fault, for example a stored payload the node cannot read |
 
 ## Leases and concurrency
 
 A non-`autoAck` pop takes a lease on the span `(committed, batch_end]` for the
-`(partition, group)` pair, and the lease id is the id the pop minted for itself. Exactly **one
-live leased batch exists per `(partition, group)`**. That is the ordering guarantee, and it is
-also the concurrency limit: a queue with one partition cannot be consumed in parallel by one
-group, no matter how many workers poll it. Parallelism comes from having more partitions.
+`(partition, group)` pair, and the lease id is the id the pop minted for itself: every partition
+one pop claims shares it. Exactly **one live leased batch exists per `(partition, group)`**.
+That is the ordering guarantee, and it is also the concurrency limit: a queue with one partition
+cannot be consumed in parallel by one group, no matter how many workers poll it. Parallelism
+comes from having more partitions.
 
 Other workers polling a leased partition are not blocked. They skip it and look elsewhere,
 which is why a wildcard pop with `partitions=1` and many hot partitions still spreads out
@@ -365,33 +370,29 @@ When the lease expires without an ack, the batch becomes claimable again and red
 expiry **never** consumes retry budget; only an explicit `failed` ack does. That is at-least-once
 delivery: design handlers to tolerate a repeat.
 
-`autoAck=true` is different in kind. The cursor is committed inside the pop's own transaction,
-before the response is written, and the response carries an empty `leaseId`. If the client dies
-after the commit and before it processes the batch, those messages are gone: at-most-once. Use
-it for throughput on data you can afford to lose, never for work you must not drop.
+`autoAck=true` is different in kind. The cursor is committed by the same log entry that records
+the claim, before the response is written, and the response carries an empty `leaseId`. If the
+client dies after that commit and before it processes the batch, those messages are gone:
+at-most-once. Use it for throughput on data you can afford to lose, never for work you must not
+drop.
 
 ## Long polling
 
 With `wait=false` (the default) a pop is a single attempt: it returns whatever is claimable now,
 otherwise 204.
 
-With `wait=true` the call parks until either messages arrive or `timeout` elapses. A write that
-lands messages wakes parked pops: on the queue-scoped routes, one to that queue; on the discovery
-route, any within the same scope. A push is the usual one, and a timer firing, a stream cycle's
-sink emit and the disk spool replaying after an outage wake them on the same path. Between wakes the pop re-checks on an interval that backs
-off (`POP_WAIT_INITIAL_INTERVAL_MS` 100 ms, growing after `POP_WAIT_BACKOFF_THRESHOLD` 3
-consecutive empty waits by `POP_WAIT_BACKOFF_MULTIPLIER` 2.0, capped at
-`POP_WAIT_MAX_INTERVAL_MS` 1000 ms), and a wake resets the backoff. A parked pop holds **no
-PostgreSQL connection** (the connection is released before parking), so thousands of idle
-long-poll consumers do not consume pool capacity.
+With `wait=true` a pop on one of the two queue-scoped routes parks until messages arrive or
+`timeout` elapses. The discovery route does not park: with nothing to deliver it answers 204 at
+once, whatever `wait` says.
 
-Each re-check is gated: instead of running the full pop procedure, a parked pop first asks a
-cheap indexed pending probe (one watermark comparison, no admission permit) and keeps parking on
-a definitive "nothing to deliver". This holds on all three routes: the wildcard scan, the
-single-partition route, and discovery. The probe deliberately answers "maybe" on a consumer
-group's first contact, so subscription registration and `subscriptionMode=new` seeding keep
-their exact timing. An idle parked consumer therefore costs point lookups, not full pop calls;
-`QUEEN_POP_PENDING_GATE=false` disables the gate on the single-partition and discovery routes.
+A parked pop waits on the node that serves it. When an entry applies on that node that makes one
+of the group's partitions claimable (a push appending to it, or an ack releasing a lease), one
+parked pop of that group is woken and claims again. A pop parked on the single-partition route is
+woken by any push to its queue. Work that becomes claimable only because time passed, such as an
+expired lease or a message crossing its `delayedProcessing` deadline, wakes nobody: a parked pop
+finds it on its periodic re-check, every `QUEEN_RAFT_POP_PARK_RECHECK_MS` (default 5000 ms).
+With less than `QUEEN_RAFT_POP_SUBMIT_MIN_MS` (default 100 ms) of `timeout` left, a parked pop
+does not claim again, so nothing is leased for a caller that is about to give up.
 
 A long poll that times out returns 204, not an error.
 
@@ -399,20 +400,16 @@ A long poll that times out returns 204, not an error.
 
 Two queue options can make a message that is committed still not deliverable:
 
-- `delayedProcessing`: only segments at least that many seconds old are delivered.
+- `delayedProcessing`: only messages stored at least that many seconds ago are delivered.
 - `windowBuffer`: if the partition received anything within that many seconds, the pop delivers
   **nothing** from that partition, so writes can accumulate into fatter batches.
 
-Both are enforced in SQL, so they apply to every pop route. If a pop returns 204 on a queue you
-just wrote to, check these before anything else.
+The leader applies both when it plans a claim, so they apply to every pop route. If a pop returns
+204 on a queue you wrote to a moment ago, check these before anything else. A parked long poll notices
+the end of either delay on its periodic re-check, not at the instant it ends.
 
-A third option trades latency for commit efficiency rather than hiding messages:
-
-- `minPopWaitTime`: milliseconds a **non-empty but under-full** batch may be held back so that
-  one database commit carries more messages. It never delays an empty queue (that is the
-  long-poll's case), never applies when `wait=false` or `batch` is 1, ends as soon as the batch
-  fills, and never outlives the caller's `timeout`. It is `0` (off) by default, is clamped to
-  60000, and takes effect on the queue-scoped wildcard route.
+`minPopWaitTime` is accepted by `/api/v1/configure` and stored with the queue, but the 2.0 pop
+path does not read it: it has no effect on delivery.
 
 ## Examples
 
@@ -432,7 +429,7 @@ The SDKs' higher-level consume loop pops, dispatches, acks and repeats:
 
 <Render file="snippets/js-consume" />
 
-Raw HTTP, one partition, leased for 120 seconds, long-polling for up to 10 seconds:
+Raw HTTP, up to four partitions, leased for 120 seconds, long-polling for up to 10 seconds:
 
 ```bash
 curl -sS -i 'http://localhost:6632/api/v1/pop/queue/orders.created?consumerGroup=billing&batch=50&partitions=4&wait=true&timeout=10000&leaseSeconds=120'

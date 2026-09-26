@@ -84,8 +84,8 @@ impl ErrorCode {
     }
 }
 
-/// A JSON error body. Every field is optional because the broker, the proxy and
-/// the stored procedures each populate a different subset.
+/// A JSON error body. Every field is optional because the broker's routes and
+/// the proxy each populate a different subset.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ErrorBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]

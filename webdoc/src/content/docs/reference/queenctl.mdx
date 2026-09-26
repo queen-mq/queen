@@ -20,7 +20,6 @@ sourceOfTruth:
   - clients/client-cli/cmd/lag.go
   - clients/client-cli/cmd/lease.go
   - clients/client-cli/cmd/login.go
-  - clients/client-cli/cmd/maintenance.go
   - clients/client-cli/cmd/messages.go
   - clients/client-cli/cmd/metrics.go
   - clients/client-cli/cmd/namespace_task.go
@@ -45,8 +44,10 @@ sourceOfTruth:
   - clients/client-cli/internal/sdk/sdk.go
   - clients/client-cli/Makefile
   - clients/client-go/operation_builder.go
-  - server/sql/procedures/012_configure.sql
   - server/src/main.rs
+  - server/src/handlers/raft.rs
+  - server/src/rsm/facade/real/phase2.rs
+  - server/src/rsm/facade/real/phase2/admin.rs
 digest: >-
   A single static Go binary; the only documented install is a repository-checkout build: `make -C
   clients/client-cli build` writes `clients/client-cli/bin/queenctl`, `make install` runs `go
@@ -54,19 +55,17 @@ digest: >-
   `--token`/`$QUEEN_TOKEN`, `~/.queen/config.yaml`. Core commands: `push`, `pop`, `tail`, `ack`,
   `apply -f`, `status`, `ping`. `pop` and `tail` always emit NDJSON; `-o` is `table` on a TTY,
   `json` on a pipe. Exit codes: `0` success, `1` user error, `2` server error or unreachable, `3`
-  auth, `4` no-op (an empty pop). `pop --auto-ack` commits inside the pop transaction, so messages
-  lost after the pop are never redelivered. `tail` without `--cg` advances the real
+  auth, `4` no-op (an empty pop). `pop --auto-ack` commits the cursor as part of the pop, so
+  messages lost after the pop are never redelivered. `tail` without `--cg` advances the real
   `queenctl-tail` group. `queue configure` MERGES and sends only typed flags, so `--dlq=false`
   disables dead-lettering; `apply -f` sends `mode: replace` and refuses unknown keys.
   `dlq drain` deletes, `dlq retry` MOVES one address (second run 404) and requires `--yes`;
   `partition seek` is end only.
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): queue configure now merges and sends only the flags that were typed (so --dlq=false disables dead-lettering), apply -f sends mode replace, refuses a manifest key it cannot bind, and now puts every key the manifest writes on the wire with the value it wrote (an explicit false and an explicit zero included), and dlq retry runs on the move primitive.
 ---
 
 `queenctl` is a single static Go binary built on the [Go client](/reference/sdk/go). It exposes the
 broker's data plane (push, pop, ack, transaction, lease) and its management plane (queues,
-partitions, consumer groups, DLQ, traces, maintenance, metrics, analytics). Version 1.3.0, aligned
+partitions, consumer groups, DLQ, traces, metrics, analytics). Version 1.3.0, aligned
 with the broker's 1.3 line.
 
 Every command below is registered in `clients/client-cli/cmd`. Nothing else is: if a name is not
@@ -259,7 +258,7 @@ One-shot pop, printed as NDJSON. The queue argument is optional: omit it and use
 | `-n`, `--limit <n>` | `1` | Maximum messages printed. |
 | `--batch <n>` | `--limit` | Batch size sent to the broker. |
 | `--max-partitions <n>` | `1` | Claim up to N partitions in one call. |
-| `--auto-ack` | `false` | Ack server-side, inside the pop transaction. |
+| `--auto-ack` | `false` | Ack server-side, as part of the pop. |
 | `--wait` | `true` | Long-poll until messages arrive or the timeout fires. |
 | `--timeout <dur>` | `10s` | Long-poll timeout. |
 | `--namespace <name>` | none | Filter the queue-less pop by namespace. |
@@ -272,7 +271,7 @@ Each emitted line carries `queue`, `partition`, `transactionId`, `partitionId`, 
 `retryCount` and `data`, plus `leaseId` and `producerSub` when present. An empty pop exits `4`.
 
 <Aside type="danger">
-`--auto-ack` commits the cursor inside the pop transaction. If your shell pipeline dies after the
+`--auto-ack` commits the cursor as part of the pop. If your shell pipeline dies after the
 pop and before you have processed the output, those messages are gone, and nothing will redeliver
 them. Omit it and ack explicitly with `queenctl ack --batch`.
 </Aside>
@@ -334,7 +333,8 @@ exhausted, the dead-letter path.
 
 ### `queenctl tx -f <bundle.json>`
 
-Posts a bundle to `/api/v1/transaction`: pushes and acks in one PostgreSQL transaction.
+Posts a bundle to `/api/v1/transaction`: pushes and acks in one entry of the replicated log,
+all-or-nothing.
 
 | Flag | Default |
 | --- | --- |
@@ -377,7 +377,7 @@ Renews one lease, `POST /api/v1/lease/:leaseId/extend`. No flags of its own.
 `queue stats` flags: `--namespace`, `--task`.
 `queue depth` flags: `--group` (none). It is the cheap sibling of `queue describe`:
 one `GET /api/v1/resources/queues/:queue/depth`, watermark arithmetic only, no
-segment scan. The table view is a four-column summary (`pending`, `partitions`,
+scan of stored messages. The table view is a four-column summary (`pending`, `partitions`,
 `partitionsPending`, `effective`) while `-o json` prints the full per-partition
 array. `partitionsPending` comes from the broker on 1.1.0 and is
 derived client-side against older ones. `effective` appears only for a
@@ -442,9 +442,9 @@ block, which is what to assert against in tests. Without `-o`, it prints `config
 | `describe <queue> <partition>` | `get`, `show` | exactly two | none |
 | `seek <queue> <partition>` | none | exactly two | `--cg` (required), `--to` (default `end`) |
 
-`partition seek` only supports seek-to-end: the stored procedure behind
-`POST /api/v1/consumer-groups/:cg/queues/:q/partitions/:p/seek` takes no timestamp. `--to` accepts
-`end`, `now`, `latest` or an empty value; anything else exits `1`. For a timestamp, use
+`partition seek` only supports seek-to-end, through
+`POST /api/v1/consumer-groups/:cg/queues/:q/partitions/:p/seek`. `--to` accepts `end`, `now`,
+`latest` or an empty value; anything else exits `1`. For a timestamp, use
 `queenctl cg seek`, which is queue-wide.
 
 ### `queenctl namespace` (aliases `namespaces`, `ns`)
@@ -470,6 +470,9 @@ block, which is what to assert against in tests. Without `-o`, it prints `config
 
 `cg delete` without `--queue` deletes the group everywhere; with it, only for that queue.
 `--metadata` also removes the subscription metadata rows. `--yes` is required.
+
+`cg refresh-stats` calls `POST /api/v1/stats/refresh`, which a 2.0 broker answers `200` with
+`"refreshed":false`: counters are maintained as entries apply, so there is nothing to refresh.
 
 ### `queenctl lag`
 
@@ -498,8 +501,8 @@ Moves a consumer group's cursor so the next pop returns messages from `--to` onw
 `queenctl cg seek <cg> <queue>` is the same operation with the arguments the other way round.
 
 <Aside type="note">
-Replay is segment-granular. Seeking to a timestamp rewinds to a segment boundary at or before it,
-so a replay can start slightly earlier than the instant you named, never later.
+Seeking to a timestamp puts the group's cursor on each partition just before the first message
+stored at or after that instant, so the replay starts at that message.
 </Aside>
 
 ## Messages, DLQ and traces
@@ -536,8 +539,8 @@ replay.**
 
 `retry` is the replay, one address at a time. It wraps
 [`POST /api/v1/messages/:partitionId/:transactionId/retry`](/reference/http/messages-dlq), which
-since 1.6.0 **moves** the newest dead-letter snapshot at that address: claim the row under a lock,
-push the frame to its own queue and partition, delete the row, one transaction.
+**moves** a dead-letter snapshot at that address: it pushes the frame back to its own queue and
+partition and deletes the row, in one entry of the replicated log.
 
 It still requires `--yes`, and the reason changed. It is now idempotent by row: the replayed frame
 carries the derived transaction id `dlq:<row id>`, and a second run answers `404` because the row
@@ -552,15 +555,16 @@ Three results are worth recognising at the prompt:
 - **A `500` whose `dlqRowRemoved` is `null`** means the broker never learned whether the move
   committed. The command prints a warning telling you to re-read the address with `dlq list`
   first: if the row is gone, the move happened.
-- **A `503`** is push maintenance. A move cannot be spooled, so it is refused and the row stays.
+- **A `503`** is a node that could not reach a leader. Nothing is spooled: the move was refused and
+  the row stays.
 
 The replay lands at the tail of the partition, out of order for its key, and its age clock restarts
 at the destination. `queenctl` sends the request exactly once and never resends it on a 5xx, so the
 verdict you read is the one that happened.
 
 <Aside type="note">
-On an address dead-lettered by several consumer groups, the broker replays the most recent snapshot
-and removes **only that group's record**. The other groups' records survive. That is the difference
+On an address dead-lettered by several consumer groups, the broker replays one group's record and
+removes **only that record**. The other groups' records survive. That is the difference
 from `messages delete`, which removes every group's record for the address.
 </Aside>
 
@@ -589,23 +593,24 @@ name it prints the detailed view.
 
 ### `queenctl ping`
 
-Calls `/health`. Exits `0` when the broker reports `healthy` with the database connected, `2`
-otherwise. Prints status, database, version and measured latency.
+Calls `/health`. Exits `0` when the broker reports `healthy`, `2` otherwise, including the `503`
+(`"status":"settling"`) a node answers while it knows no leader. Prints status, version and
+measured latency; the database column stays empty against a 2.0 broker, which reports none.
 
 | Flag | Default |
 | --- | --- |
 | `--timeout <dur>` | `5s` |
 
 <Aside type="caution">
-`/health` performs a real database round-trip and returns 503 when PostgreSQL is unreachable. That
-makes `ping` a good readiness check and a poor liveness check. Wiring it to a liveness probe
-restarts a broker that is deliberately spooling writes to disk while the database is away.
+`/health` answers 503 while the node knows no leader, which is what an election or a lost quorum
+looks like. That makes `ping` a good readiness check and a poor liveness check: wiring it to a
+liveness probe restarts nodes during the event they need to ride out.
 </Aside>
 
 ### `queenctl version`
 
-Prints the CLI's build metadata, then probes the server for its version, status and database state,
-and echoes the active context. `--short` prints only the CLI version and contacts nothing.
+Prints the CLI's build metadata, then probes the server for its version and status (the database
+line prints `-` against a 2.0 broker), and echoes the active context. `--short` prints only the CLI version and contacts nothing.
 
 ### `queenctl metrics`
 
@@ -617,8 +622,8 @@ queenctl metrics --prometheus | grep queue_pop_messages
 ```
 
 <Aside type="caution">
-Both endpoints are process-wide (host CPU, worker lifetimes, PostgreSQL internals) and cannot be
-scoped to one tenant, so a proxy refuses them to tenant credentials. When that happens the command
+Both endpoints are process-wide (host resources, the node's raft state, every tenant's queues) and
+cannot be scoped to one tenant, so a proxy refuses them to tenant credentials. When that happens the command
 says so and points at `queenctl analytics queue-ops` / `queue-lag`, which are per-queue.
 </Aside>
 
@@ -636,9 +641,8 @@ forms as `replay --to`.
 | `retention` | `GET /api/v1/analytics/retention` |
 | `system` | `GET /api/v1/analytics/system-metrics` |
 | `worker` | `GET /api/v1/analytics/worker-metrics` |
-| `postgres` | `GET /api/v1/analytics/postgres-stats` |
 
-`system`, `worker` and `postgres` are operator-only through a proxy.
+`system` and `worker` are operator-only through a proxy.
 
 ## Operations
 
@@ -701,21 +705,10 @@ fields cannot tell a written `false` from a key nobody wrote, and the SDK omits 
 field on its way to the wire. The line that reads as the clearest statement of intent in a manifest
 was the one guaranteed not to survive it. `apply` now reads the YAML mapping key by key and sends
 each option explicitly, so absence in the file is the only thing `replace` acts on. An explicit
-`null` is accepted too and asks for that option's default, which is what leaving the key out
-already means.
+`null` is not a way to ask for a default against a 2.0 broker: `apply` sends it as written, and the
+broker refuses a `null` numeric or boolean option with `400`. Leaving the key out is what asks for
+the default under `replace`.
 </Aside>
-
-### `queenctl maintenance` (alias `maint`)
-
-| Subcommand | Flags |
-| --- | --- |
-| `get` | none |
-| `on` | `--yes` (required) |
-| `off` | none |
-
-`--pop` is a persistent flag on the parent, so it applies to all three: it scopes the operation to
-pop-only maintenance (`/api/v1/system/maintenance/pop`) instead of push maintenance
-(`/api/v1/system/maintenance`).
 
 ### `queenctl bench`
 
@@ -807,7 +800,7 @@ are the grants, the quotas and the runtime kill switches described under
 [Self-hosting](/deploy/).
 
 Those controls do have a place at a prompt, and they already have one: they are
-`POST /api/v1/system/kv-timers` and rows in `queen.kv_quota`, not a `kv put`.
+`POST /api/v1/system/kv-timers` and the quota routes, not a `kv put`.
 
 ## Related
 

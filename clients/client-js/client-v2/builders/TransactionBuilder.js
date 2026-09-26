@@ -204,7 +204,7 @@ export class TransactionBuilder {
    *
    * `putIfAbsent` with `required:true`, so a marker that already exists ABORTS
    * the transaction: the push and the ack roll back together with it. That is
-   * what makes "the email is sent exactly once" a property of the database
+   * what makes "the email is sent exactly once" a property of the broker
    * rather than a hope about redelivery.
    *
    * The verdict is RETURNED by `commit()`, not thrown -- see there.

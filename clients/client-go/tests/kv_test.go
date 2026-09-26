@@ -7,13 +7,13 @@
 // has it, and so these tests now simply run. A test that skips says nothing, and
 // that was tolerable only while the 404 was a legitimate configuration.
 //
-// Every key written here lives under a namespace this package's cleanupTestData
-// purges. That purge is not cosmetic (§10.4): without it a putIfAbsent test is
-// green on the first run and red forever after, and an incr accumulates between
-// runs.
+// Every key written here lives under a namespace minted per test (kvNamespace),
+// and every lane runs on a fresh broker, so no state carries over between runs
+// (§10.4): a putIfAbsent cannot lose to a marker an earlier run left, and an
+// incr cannot accumulate across runs.
 //
 // And no test here uses Forever: an example that fails would leave immortal
-// state in a shared test database.
+// state in a shared test broker.
 
 package tests
 
@@ -29,7 +29,7 @@ import (
 )
 
 // kvNamespace mints a namespace matching the server's charset
-// (^[a-z0-9][a-z0-9._-]{0,63}$) under the prefix cleanupTestData purges.
+// (^[a-z0-9][a-z0-9._-]{0,63}$), unique per test and per run.
 func kvNamespace(prefix string) string {
 	return fmt.Sprintf("test-go-kv-%s-%d", prefix, time.Now().UnixNano())
 }
@@ -135,7 +135,7 @@ func TestKVPutIfAbsentIsWonExactlyOnce(t *testing.T) {
 		t.Fatalf("first putIfAbsent: %v", err)
 	}
 	if !first.Applied {
-		t.Fatalf("the first putIfAbsent must win: %+v (is cleanupTestData purging queen.kv?)", first)
+		t.Fatalf("the first putIfAbsent must win: %+v", first)
 	}
 
 	second, err := kv.PutIfAbsent(ctx, ns, "saga-7", map[string]interface{}{"owner": "worker-2"}, queen.TTLSeconds(120))
@@ -237,7 +237,7 @@ func TestKVIncrIsARateLimiterInOneCall(t *testing.T) {
 			t.Fatalf("incr %d: %v", i, err)
 		}
 		if !res.Applied || res.Value != int64(i) {
-			t.Fatalf("incr %d = %+v (is cleanupTestData purging queen.kv?)", i, res)
+			t.Fatalf("incr %d = %+v", i, res)
 		}
 	}
 	refused, err := kv.Incr(ctx, ns, "acme", 1, queen.TTLSeconds(60), queen.KVIncrOptions{Max: queen.Int64(3)})

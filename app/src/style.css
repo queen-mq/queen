@@ -105,7 +105,7 @@
 
     /* ---- Scope — WHOSE numbers these are, never how they are doing. Every
            CELL mark (the chip on a row, the CELL · OPERATOR band, the tag,
-           the strip's inset rule, the maintenance pill, the operator nav
+           the strip's inset rule, the operator nav
            group) is drawn in this one hue. It is the informational blue
            above, kept one alias away so the two roles can diverge later
            without a sweep. Two properties matter and are why it is not just
@@ -586,23 +586,6 @@
 .top-btn:hover { color: var(--text-hi); background: var(--ink-4); border-color: var(--bd); }
 .top-btn svg { width: 13px !important; height: 13px !important; }
 
-.maint-group {
-  display: flex; align-items: center;
-  border-radius: var(--r-control); border: 1px solid var(--bd); overflow: hidden; flex-shrink: 0;
-  background: var(--ink-2);
-}
-
-/* Maintenance is cell-wide: the badge says so at the control itself, so the
-   scope is never inferred from where the button happens to sit. Scope hue,
-   not amber — the pill states WHO the switch affects, and it says that while
-   maintenance is off. The amber below is the switch's own state. */
-.maint-scope {
-  font-size: 9px; font-weight: 700; letter-spacing: .08em;
-  padding: 0 6px; align-self: stretch; display: flex; align-items: center;
-  color: var(--scope-400); background: var(--scope-glow);
-  border-right: 1px solid var(--bd);
-}
-
 /* Status banner strip below the topbar */
 .topbar-wrap {
   position: relative; z-index: 5;
@@ -642,16 +625,6 @@
 @media (max-width: 700px) {
   .status-banner { padding: 8px 14px 8px 48px; font-size: 12px; }
 }
-.maint-btn {
-  display: flex; align-items: center; gap: 4px;
-  padding: 4px 9px; font-size: 11px; font-weight: 500;
-  color: var(--text-mid); cursor: pointer; border: none; transition: color .12s, background .12s;
-  background: transparent;
-}
-.maint-btn:hover { color: var(--text-hi); background: var(--ink-4); }
-.maint-btn.on { color: var(--warn-400); }
-.maint-btn.on { background: var(--warn-glow); }
-.maint-btn svg { width: 12px !important; height: 12px !important; }
 
 .search-dropdown {
   position: absolute; top: 100%; left: 0; right: 0; margin-top: 4px;
@@ -830,7 +803,6 @@
   .pulse { display: inline-block; width: 7px; height: 7px; border-radius: var(--r-pill); background: var(--ok-500); position: relative; }
   .pulse::after { content: ""; position: absolute; inset: -3px; border-radius: var(--r-pill); background: var(--ok-500); opacity: .25; animation: pulse-ring 2.4s ease-out infinite; }
   @keyframes pulse-ring { 0% { transform: scale(.6); opacity: .35; } 100% { transform: scale(1.8); opacity: 0; } }
-  .pulse-amber { background: var(--warn-400); } .pulse-amber::after { background: var(--warn-400); }
   .pulse-ember { background: var(--ember-400); } .pulse-ember::after { background: var(--ember-400); }
 
   /* --- Loading --- */
@@ -1337,7 +1309,6 @@
 /* Mobile topbar — must be last to win cascade */
 @media (max-width: 700px) {
   .cmd-search { display: none !important; }
-  .maint-group { display: none !important; }
   .crumbs { flex: 1; text-align: center; justify-content: center; }
 }
 

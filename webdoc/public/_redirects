@@ -29,8 +29,8 @@
 /server.html              /deploy/                         301
 /dashboard                /deploy/dashboard/               301
 /dashboard.html           /deploy/dashboard/               301
-/sizing                   /deploy/postgres/                301
-/sizing.html              /deploy/postgres/                301
+/sizing                   /deploy/                         301
+/sizing.html              /deploy/                         301
 /visual-tour              /start/                          301
 /visual-tour.html         /start/                          301
 /benchmarks.html          /benchmarks/                     301
@@ -127,10 +127,10 @@
 /selfhost/deploy/                       /deploy/                           301
 /selfhost/configuration                 /deploy/                           301
 /selfhost/configuration/                /deploy/                           301
-/selfhost/postgres                      /deploy/postgres/                  301
-/selfhost/postgres/                     /deploy/postgres/                  301
-/selfhost/sizing                        /deploy/postgres/                  301
-/selfhost/sizing/                       /deploy/postgres/                  301
+/selfhost/postgres                      /deploy/                           301
+/selfhost/postgres/                     /deploy/                           301
+/selfhost/sizing                        /deploy/                           301
+/selfhost/sizing/                       /deploy/                           301
 /selfhost/kubernetes                    /deploy/kubernetes/                301
 /selfhost/kubernetes/                   /deploy/kubernetes/                301
 /selfhost/probes-restarts               /deploy/kubernetes/                301
@@ -155,8 +155,8 @@
 /selfhost/security/jwt/                 /reference/security/jwt/           301
 /selfhost/security/encryption           /reference/security/encryption/    301
 /selfhost/security/encryption/          /reference/security/encryption/    301
-/selfhost/security/postgres-tls         /reference/security/postgres-tls/  301
-/selfhost/security/postgres-tls/        /reference/security/postgres-tls/  301
+/selfhost/security/postgres-tls         /deploy/security/                  301
+/selfhost/security/postgres-tls/        /deploy/security/                  301
 /selfhost/multi-tenant                  /deploy/multi-tenant/              301
 /selfhost/multi-tenant/                 /deploy/multi-tenant/              301
 /selfhost/multi-tenant/proxy            /deploy/multi-tenant/              301
@@ -201,3 +201,29 @@
 # original URL is the live one again and the Reference path keeps working.
 /reference/embed                        /use/embed/                        301
 /reference/embed/                       /use/embed/                        301
+
+# Queen 2.0 removed the PostgreSQL storage class, the SQS facade and the S3
+# sink (2026-09-26). The pages that documented them were deleted; every URL
+# they were published under keeps a 301 to the page that now answers the
+# nearest question, so an indexed link lands somewhere true rather than on a
+# 404.
+/deploy/postgres                        /deploy/                           301
+/deploy/postgres/                       /deploy/                           301
+/deploy/sqs                             /deploy/                           301
+/deploy/sqs/                            /deploy/                           301
+/deploy/s3                              /deploy/                           301
+/deploy/s3/                             /deploy/                           301
+/reference/sqs                          /reference/                        301
+/reference/sqs/                         /reference/                        301
+/reference/s3                           /reference/                        301
+/reference/s3/                          /reference/                        301
+/reference/security/postgres-tls        /deploy/security/                  301
+/reference/security/postgres-tls/       /deploy/security/                  301
+/internals/hotlist                      /internals/                        301
+/internals/hotlist/                     /internals/                        301
+/internals/mesh                         /internals/                        301
+/internals/mesh/                        /internals/                        301
+/internals/schema                       /internals/                        301
+/internals/schema/                      /internals/                        301
+/internals/legacy                       /internals/                        301
+/internals/legacy/                      /internals/                        301

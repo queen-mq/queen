@@ -220,8 +220,11 @@ done.
 | `TraceID(id string)` | Trace id, forwarded only when it is a valid UUID. |
 | `Execute(ctx) ([]PushResponse, error)` | Sends `POST /api/v1/push`, or enqueues when `Buffer` is set. |
 
-`PushResponse` carries `Status` (`"queued"`, `"duplicate"`, `"failed"`), `TransactionID` and
-`Error`. The client mints a UUIDv7 `transactionId` for items that have none.
+`PushResponse` carries `Status`, `TransactionID` and `Error`. `Status` is the broker's item
+status, copied verbatim: a 2.0 broker answers `"queued"`, `"duplicate"` or `"error"`. The type's
+comment also names `"failed"`, which the 2.0 broker does not return. A buffered `Execute` returns
+`"buffered"` for every item; that status comes from the client, not from the broker. The client
+mints a UUIDv7 `transactionId` for items that have none.
 
 <Render file="snippets/go-push" />
 
@@ -342,24 +345,24 @@ not as silent loss.
 | `Get(ctx) (*DLQResponse, error)` | `DLQResponse{Messages []Message, Total int}` |
 
 The listing is read-only, but `Admin.RetryMessage(ctx, partitionID, transactionID)` replays.
-Since broker 1.6.0 it runs on a **move**: one transaction claims the newest dead-letter row at
-the address under a row lock, pushes the snapshot back into the log and deletes that row. Only
+Since broker 1.6.0 it runs on a **move**: one transaction pushes the snapshot of a dead-letter
+row at the address back into the log and deletes that row. On a 2.0 broker that transaction is
+one entry in the replicated log, so the push and the delete apply together or not at all. Only
 dead-lettered addresses replay, and a live one answers `404`.
 
 It is now **idempotent by row**. The replayed frame carries the deterministic transaction id
-`dlq:<dead-letter row id>`, a second call for the same address answers `404` because the row is
-gone, and two concurrent callers serialise on the lock so the loser is told the row is gone
-rather than pushing a second copy. Only the addressed consumer group's record is removed: an
-address can carry one row per group, and the others stay where they were. A `result:"duplicate"`
-verdict means nothing was written **and nothing was removed**, and a `503` means push
-maintenance is on, which refuses the move and leaves the row. The client still sends it with
-failover retry disabled, because it is a write and a blind resend by the transport would hide a
-verdict the caller has to read. `Admin.MoveMessageToDLQ` is still a stub, because the broker
+`dlq:<dead-letter row id>`, and a second call for the same address answers `404` because the row
+is gone. Only the addressed consumer group's record is removed: an address can carry one row per
+group, and the others stay where they were. A `result:"duplicate"` verdict means nothing was
+written **and nothing was removed**. The client still sends it with failover retry disabled,
+because it is a write and a blind resend by the transport would hide a verdict the caller has to
+read. `Admin.MoveMessageToDLQ` is still a stub, because the broker
 registers no force-move route.
 
 ## `*TransactionBuilder`
 
-`client.Transaction()`. Pushes and acks in one PostgreSQL transaction, all-or-nothing.
+`client.Transaction()`. Pushes and acks in one transaction: one entry in the replicated log,
+all-or-nothing.
 
 | Method | Notes |
 | --- | --- |
@@ -424,7 +427,6 @@ than exposing a partitions collection.
 | `GetRetentionAnalytics(ctx, from, to)` | `GET /api/v1/analytics/retention` |
 | `GetSystemMetrics(ctx, from, to)` | `GET /api/v1/analytics/system-metrics` |
 | `GetWorkerMetrics(ctx, from, to)` | `GET /api/v1/analytics/worker-metrics` |
-| `GetPostgresStats(ctx)` | `GET /api/v1/analytics/postgres-stats` |
 
 `GetStatusParams` carries `Queue`, `Namespace`, `Task`.
 
@@ -441,7 +443,9 @@ than exposing a partitions collection.
 | `RefreshConsumerStats(ctx)` | `POST /api/v1/stats/refresh` |
 
 `SeekConsumerGroupOptions` carries `Timestamp string` (RFC3339) and `ToEnd bool`, which are
-mutually exclusive. The wire body is `{"toEnd": true}` or `{"timestamp": "…"}`.
+mutually exclusive. The wire body is `{"toEnd": true}` or `{"timestamp": "…"}`. A 2.0 broker
+answers `RefreshConsumerStats` with a 200 and `"refreshed": false`: its counters are updated as
+log entries apply, so there is nothing to refresh.
 
 ### System
 
@@ -450,10 +454,6 @@ mutually exclusive. The wire body is `{"toEnd": true}` or `{"timestamp": "…"}`
 | `Health(ctx)` | `GET /health` | map |
 | `Metrics(ctx)` | `GET /metrics` | `(string, error)`: the raw body when it is not JSON, `""` when it parsed as JSON |
 | `PrometheusMetrics(ctx)` | `GET /metrics/prometheus` | `(string, error)` |
-| `GetMaintenanceMode(ctx)` | `GET /api/v1/system/maintenance` | map |
-| `SetMaintenanceMode(ctx, enabled)` | `POST /api/v1/system/maintenance` | map |
-| `GetPopMaintenanceMode(ctx)` | `GET /api/v1/system/maintenance/pop` | map |
-| `SetPopMaintenanceMode(ctx, enabled)` | `POST /api/v1/system/maintenance/pop` | map |
 
 ## Errors
 

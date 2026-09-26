@@ -10,8 +10,8 @@
 //   404 / route_blocked / not_an_api_response   the route is NOT HERE
 //   403 feature_gated                           here, NOT IN THE PLAN
 //   503 kv_disabled / timers_disabled           here, granted, PAUSED by an
-//       / kv_unavailable / timers_unavailable   operator, or the cell cannot
-//       / ephemeral_*                           reach its database right now
+//       / kv_unavailable / timers_unavailable   operator, or the cluster cannot
+//       / ephemeral_*                           answer right now
 //   anything else                               TRANSIENT
 //
 // The first three are states to RENDER — one quiet card, no poll, no toast
@@ -103,7 +103,7 @@ export function describeVerdict(verdict, family) {
       return {
         title: `${f.subject} ${f.be} not being served right now`,
         detail:
-          `The cell answered 503 — an operator's switch, or a broker that cannot reach its database. ` +
+          `The cell answered 503 — an operator's switch, or a cluster that cannot answer right now (no leader, or a timeout). ` +
           `It is neither your permissions nor your plan, and a retry is the only cure.`,
       }
     default:

@@ -7,8 +7,6 @@
     "keywords": [
         "message-queue",
         "queue",
-        "postgresql",
-        "postgres",
         "laravel",
         "broker",
         "fifo",

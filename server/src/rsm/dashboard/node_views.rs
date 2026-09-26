@@ -1,68 +1,60 @@
-//! Raft-mode ports of the dashboard's node-metric stored procedures.
+//! Raft-mode implementations of the dashboard's node-metric views.
 //!
-//! Postgres answers three operator routes of the dashboard with stored
-//! procedures over the per-replica metric tables. Raft mode has no database:
-//! every node keeps its own [`WorkerRow`] / [`SystemRow`] / [`QueueRow`] rows
-//! (see [`super::model`]), a dashboard read gathers every node's rows, and the
-//! functions below re-aggregate them into the JSON the Postgres path serves
-//! (same keys, nesting, types, null / 0 / `[]` semantics, ordering and bucket
-//! rules), so the Vue dashboard (app/src) works unchanged.
+//! Raft mode has no database: every node keeps its own [`WorkerRow`] /
+//! [`SystemRow`] / [`QueueRow`] rows (see [`super::model`]), a dashboard read
+//! gathers every node's rows, and the functions below aggregate them into the
+//! JSON the dashboard expects (same keys, nesting, types, null / 0 / `[]`
+//! semantics, ordering and bucket rules), so the Vue dashboard (app/src)
+//! works unchanged.
 //!
-//! | function | stored procedure | route (Postgres handler) |
-//! |---|---|---|
-//! | [`system_metrics_json`] | `queen.get_system_metrics_v1` (015_status.sql:19) | `GET /api/v1/analytics/system-metrics` (handlers/analytics.rs:84) |
-//! | [`worker_metrics_json`] | `queen.get_worker_metrics_timeseries_v1` (019_worker_metrics.sql:1094) | `GET /api/v1/analytics/worker-metrics` (handlers/analytics.rs:97) |
-//! | [`status_json`] | `queen.get_status_v3` (019_worker_metrics.sql:711) | `GET /api/v1/status` (handlers/status.rs:106) |
+//! | function | route |
+//! |---|---|
+//! | [`system_metrics_json`] | `GET /api/v1/analytics/system-metrics` (handlers/analytics.rs:84) |
+//! | [`worker_metrics_json`] | `GET /api/v1/analytics/worker-metrics` (handlers/analytics.rs:97) |
+//! | [`status_json`] | `GET /api/v1/status` (handlers/status.rs:106) |
 //!
-//! None of the three handlers post-processes the SP result: it is served
-//! verbatim through `sp_result_to_response`, so these functions return the
-//! whole body.
+//! None of the three handlers post-processes the result: it is served
+//! verbatim, so these functions return the whole body.
 //!
-//! Rules shared by the three, each reproduced from the SQL on purpose:
+//! Rules shared by the three, kept consistent on purpose:
 //!
 //! * **Rows in**: pass every retained row of every node, not only the rows of
-//!   `[from, to]` (and note `DashStore::range` is half-open where the SQL's
-//!   range is closed). The range is applied here; the lifetime totals,
-//!   `statsAge` and the 2- / 5-minute worker lists read outside it.
-//! * **Filters** are the object the Postgres handler builds with
-//!   `filters_from_query(params, KEYS)` (handlers/mod.rs:671, non-empty query
-//!   values only); the `*_FILTER_KEYS` constants are those KEYS. A value is read
-//!   like `p_filters->>'key'`: a JSON string as is, JSON null or a missing key
-//!   as SQL NULL, any other JSON value as its JSON text.
+//!   `[from, to]` (`DashStore::range` is half-open: `to` itself is excluded).
+//!   The range is applied here; the lifetime totals, `statsAge` and the 2- /
+//!   5-minute worker lists read outside it.
+//! * **Filters** are the object built with `filters_from_query(params, KEYS)`
+//!   (handlers/mod.rs:671, non-empty query values only); the `*_FILTER_KEYS`
+//!   constants are those KEYS. A value is read as a JSON string as is, JSON
+//!   null or a missing key as null, any other JSON value as its JSON text.
 //! * **Range**: `from` / `to` default to `now - 1 h` / `now`, both bounds
 //!   inclusive. A value that does not parse (or a `workerId` that is not an
-//!   integer) answers `{"error": "<Postgres' message>"}`: that is where the SP
-//!   raises and the Postgres handler answers HTTP 500, so a caller maps a
-//!   top-level `error` key to 500 the way `sp_result_to_response` does.
+//!   integer) answers `{"error": "<message>"}`: a caller maps a top-level
+//!   `error` key to 500.
 //! * **Bucket width** from the range length in minutes (`EXTRACT(EPOCH ...) / 60`
 //!   assigned to an INTEGER, i.e. rounded half away from zero): `<= 60` gives 1,
 //!   `<= 360` gives 5, `<= 1440` gives 15, `<= 10080` gives 60, anything longer
 //!   360. A row's bucket is `date_trunc('minute', t) - (minute_of_hour(t) %
 //!   width)` minutes in UTC, so the 360-minute width buckets by the HOUR while
-//!   the per-second rates still divide by 21 600 s. A quirk of the SQL, kept.
+//!   the per-second rates still divide by 21 600 s.
 //! * **Timestamps**: `timeRange` and the system-metrics points are
 //!   `YYYY-MM-DDTHH:MM:SS.mmmZ`, the throughput points and `lastSeen`
-//!   `YYYY-MM-DDTHH:MM:SSZ` (the SQL's two `to_char` masks).
+//!   `YYYY-MM-DDTHH:MM:SSZ`.
 //! * **Numbers**: sums, counts and `ROUND(x)` are JSON integers; `ROUND(x, n)`
-//!   and the SQL's unrounded numeric divisions are JSON floats (same value,
-//!   Postgres prints more trailing digits). Integer arithmetic is exact (i128)
-//!   and rounds half away from zero like `numeric`.
+//!   and unrounded numeric divisions are JSON floats. Integer arithmetic is
+//!   exact (i128) and rounds half away from zero like `numeric`.
 //! * **Duplicate rows** collapse the way the tables' unique keys collapse them:
 //!   `system_metrics` keeps the LAST row per `(timestamp, hostname, port,
 //!   worker_id)` (its insert upserts), `worker_metrics` the FIRST per
 //!   `(hostname, worker_id, pid, bucket_time)` (its insert does nothing on
 //!   conflict, and neither does the summary trigger).
-//! * **Lifetime totals**: Postgres keeps them in `queen.worker_metrics_summary`
-//!   (019_worker_metrics.sql:376), a trigger rollup of every `worker_metrics`
-//!   row ever inserted (update_worker_metrics_summary, :400). Here they are the
-//!   sums over ALL worker rows passed in, whatever the range: they cover what
-//!   the nodes still retain, not the cell's whole life.
+//! * **Lifetime totals**: here they are the sums over ALL worker rows passed
+//!   in, whatever the range: they cover what the nodes still retain, not the
+//!   cell's whole life.
 //! * **Not measured in raft mode**: `worker_metrics.db_connections` /
-//!   `avg_free_slots` / `min_free_slots` (the Postgres pool gauges) have no
-//!   [`WorkerRow`] field, so every key read from them is null; the job-queue and
-//!   backoff keys are null in Postgres too (`NULLIF(.., 0)` over columns nothing
-//!   writes). The `database` gauge family is absent from raft `metrics_json`,
-//!   so its leaves and the `dbPool*` points are null.
+//!   `avg_free_slots` / `min_free_slots` have no [`WorkerRow`] field, so every
+//!   key read from them is null; the job-queue and backoff keys are null too.
+//!   The `database` gauge family is absent from raft `metrics_json`, so its
+//!   leaves and the `dbPool*` points are null.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -75,8 +67,8 @@ use super::model::*;
 pub const SYSTEM_METRICS_FILTER_KEYS: [&str; 4] = ["from", "to", "hostname", "workerId"];
 
 /// Query keys `GET /api/v1/analytics/worker-metrics` turns into the filter
-/// object (handlers/analytics.rs:101). `queue` is forwarded, but the SP never
-/// reads it.
+/// object (handlers/analytics.rs:101). `queue` is forwarded, but it is never
+/// used to filter.
 pub const WORKER_METRICS_FILTER_KEYS: [&str; 5] = ["from", "to", "queue", "hostname", "workerId"];
 
 /// Query keys `GET /api/v1/status` turns into the filter object
@@ -87,11 +79,10 @@ pub const STATUS_FILTER_KEYS: [&str; 5] = ["from", "to", "queue", "namespace", "
 // Inputs of status_json
 // ---------------------------------------------------------------------------
 
-/// Everything `queen.get_status_v3` (019_worker_metrics.sql:711) reads besides
-/// `worker_metrics` and `system_metrics`. Postgres reads these from replicated
-/// tables; in raft mode they come from the answering node's store. The view is
-/// cell-wide: the SP has no tenant predicate anywhere, so nothing here is
-/// tenant-filtered.
+/// Everything [`status_json`] reads besides `worker_metrics` and
+/// `system_metrics`. In raft mode they come from the answering node's store.
+/// The view is cell-wide: there is no tenant predicate anywhere, so nothing
+/// here is tenant-filtered.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StatusState {
     /// Every queue of every tenant, each with its `queen.stats` 'queue' row
@@ -100,29 +91,27 @@ pub struct StatusState {
     /// `total_messages > 0`), the cell-wide `messages.pending` / `processing`
     /// sums (never filtered, 019:979), and the namespace / task lookup of the
     /// queue-scoped throughput branch: that branch's `JOIN queen.queues`, so
-    /// rows of a queue that is not listed here are dropped, as the FK cascade
-    /// drops them in Postgres.
+    /// rows of a queue that is not listed here are dropped.
     pub queues: Vec<StatusQueue>,
     /// `queen.queue_lag_metrics` counters: every tenant's [`QueueRow`]s,
     /// merged across nodes ([`merge_queue_rows`]). Read only when a `queue`,
     /// `namespace` or `task` filter is set (019:761).
     pub queue_rows: Vec<QueueRow>,
-    /// The partition-lifecycle rows ([`ChurnRow`], the answering node's).
-    /// Postgres keeps them in `queue_lag_metrics` too, so a bucket that only
-    /// saw partitions created or deleted is still a throughput point, with
-    /// every counter 0. Read only when a queue / namespace / task filter is set.
+    /// The partition-lifecycle rows ([`ChurnRow`], the answering node's). A
+    /// bucket that only saw partitions created or deleted is still a
+    /// throughput point, with every counter 0. Read only when a queue /
+    /// namespace / task filter is set.
     pub churn_rows: Vec<ChurnRow>,
-    /// `queen.log_consumers` rows (019:1026). Any cursor may be passed: only
-    /// the rows whose `lease_expires_us` is set and later than `now_us` count,
-    /// the SP's `lease_expires_at > NOW()` (it does not look at `worker_id`).
+    /// Consumer-group lease rows. Any cursor may be passed: only the rows
+    /// whose `lease_expires_us` is set and later than `now_us` count (it does
+    /// not look at `worker_id`).
     pub leases: Vec<StatusLease>,
     /// `queen.log_dlq`, aggregated (019:1044).
     pub dlq: StatusDlq,
 }
 
-/// One queue and its `queen.stats` 'queue' row, as
-/// `queen.log_refresh_all_stats_v1` (011_log_stats.sql:106) writes it. A queue
-/// with no stats row yet reads as all zeros, exactly like the SQL's COALESCEs.
+/// One queue and its aggregated stats row. A queue with no stats row yet
+/// reads as all zeros.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StatusQueue {
     /// `queen.queues.id` as text (raft: the queue's UUID string).
@@ -132,13 +121,12 @@ pub struct StatusQueue {
     pub tenant: String,
     /// `queen.queues.name`.
     pub name: String,
-    /// `queen.queues.namespace`; `None` is SQL NULL (emitted as null, matched
-    /// by no namespace filter). An empty string is a value, as in Postgres.
+    /// `queen.queues.namespace`; `None` is emitted as null (matched by no
+    /// namespace filter). An empty string is a value, not the same as absent.
     pub namespace: Option<String>,
-    /// `queen.queues.task`; `None` is SQL NULL.
+    /// `queen.queues.task`; `None` is emitted as null.
     pub task: Option<String>,
-    /// `stats.child_count`: the queue's live partitions (`queen.log_partitions`
-    /// rows).
+    /// `stats.child_count`: the queue's live partitions.
     pub partitions: i64,
     /// `stats.total_messages`: retained frames, the sum over the partitions of
     /// `GREATEST(last_offset - log_start + 1, 0)`.
@@ -156,8 +144,7 @@ pub struct StatusQueue {
     pub completed_messages: i64,
 }
 
-/// One `queen.log_consumers` row (001_log_schema.sql:217), reduced to what the
-/// lease block reads.
+/// One consumer-group lease row, reduced to what the lease block reads.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StatusLease {
     /// `partition_id` (raft: the partition's pid). Only compared for equality
@@ -165,30 +152,30 @@ pub struct StatusLease {
     pub partition_id: u64,
     /// `committed`: the last acked offset, -1 when nothing is acked.
     pub committed: i64,
-    /// `batch_end`: inclusive end of the leased batch; `None` is SQL NULL.
+    /// `batch_end`: inclusive end of the leased batch; `None` when unset.
     pub batch_end: Option<i64>,
-    /// `lease_expires_at` in epoch microseconds; `None` is SQL NULL.
+    /// `lease_expires_at` in epoch microseconds; `None` when unset.
     pub lease_expires_us: Option<i64>,
 }
 
-/// `queen.log_dlq` (005_log_ack.sql:60) aggregated over every tenant.
+/// Dead-letter counts aggregated over every tenant.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StatusDlq {
     /// `SELECT COUNT(*) FROM queen.log_dlq`.
     pub current_messages: i64,
     /// `COUNT(DISTINCT partition_id)` over `queen.log_dlq`.
     pub affected_partitions: i64,
-    /// Row counts per distinct `error` text. The view groups them by
-    /// `COALESCE(error, 'unknown')`, orders by count descending (ties by error
-    /// text; Postgres leaves them unspecified) and keeps five. Entries with a
-    /// count below 1 are ignored: a group exists only when it has rows.
+    /// Row counts per distinct `error` text. The view groups them by error
+    /// text (defaulting to `"unknown"`), orders by count descending (ties are
+    /// unspecified) and keeps five. Entries with a count below 1 are ignored:
+    /// a group exists only when it has rows.
     pub errors: Vec<DlqErrorCount>,
 }
 
 /// Rows of `queen.log_dlq` carrying one `error` text.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DlqErrorCount {
-    /// `error`; `None` is SQL NULL and reports as `"unknown"`.
+    /// `error`; `None` reports as `"unknown"`.
     pub error: Option<String>,
     pub count: i64,
 }
@@ -197,8 +184,7 @@ pub struct DlqErrorCount {
 // GET /api/v1/analytics/system-metrics
 // ---------------------------------------------------------------------------
 
-/// Port of `queen.get_system_metrics_v1` (015_status.sql:19), the body of
-/// `GET /api/v1/analytics/system-metrics` (handlers/analytics.rs:84).
+/// The body of `GET /api/v1/analytics/system-metrics` (handlers/analytics.rs:84).
 ///
 /// Filters ([`SYSTEM_METRICS_FILTER_KEYS`]): `from`, `to`, `hostname` (exact),
 /// `workerId` (exact text: the rows' `"worker-0"`). One point per replica
@@ -208,18 +194,17 @@ pub struct DlqErrorCount {
 /// that carry the leaf, `last` is the bucket's latest row's value (null when
 /// that row lacks it).
 ///
-/// The SQL names every path it aggregates rather than walking the object, so
-/// this does too: `database` and `threadpool` come out as null leaves (raft
-/// rows carry no `database` family and no collector writes `threadpool`),
-/// `uptime_seconds` is dropped, and `shared_state` keeps its mixed shape
-/// (`enabled` is `bool_or`, the counters are the latest row's `last`,
-/// `queue_backoff_summary` the latest value present; the raft collector
-/// writes no `shared_state`, so all of it is null there, where Postgres rows
-/// read `false` / 0 / `[]`; no view reads it). The one addition to the
-/// SP's shape is the raft family, `raft.{inflight, applied_lag, log_bytes,
-/// log_files, map_used_pct}`, aggregated like the SQL's gauges. Replicas are
-/// ordered by `(hostname, port, workerId)` (the SQL leaves the order
-/// unspecified), points by time ascending.
+/// This function names every path it aggregates explicitly rather than
+/// walking the object: `database` and `threadpool` come out as null leaves
+/// (raft rows carry no `database` family and no collector writes
+/// `threadpool`), `uptime_seconds` is dropped, and `shared_state` keeps its
+/// mixed shape (`enabled` is `bool_or`, the counters are the latest row's
+/// `last`, `queue_backoff_summary` the latest value present; the raft
+/// collector writes no `shared_state`, so all of it is null there; no view
+/// reads it). There is also a `raft.{inflight, applied_lag, log_bytes,
+/// log_files, map_used_pct}` family, aggregated the same way as the other
+/// gauges. Replicas are ordered by `(hostname, port, workerId)`, points by
+/// time ascending.
 pub fn system_metrics_json(filters: &Map<String, Value>, now_us: i64, rows: &[SystemRow]) -> Value {
     let range = match Range::resolve(filters, now_us) {
         Ok(r) => r,
@@ -293,8 +278,8 @@ impl GaugeSample {
     }
 }
 
-/// The `metrics` object of one point: the `jsonb_build_object` of
-/// 015_status.sql:76, path by path, plus the raft family.
+/// The `metrics` object of one point, built path by path, plus the raft
+/// family.
 fn gauge_metrics(s: &[GaugeSample]) -> Value {
     let g = |path: &[&str]| leaf_stats(s, path);
     let last = |path: &[&str]| latest_leaf_last(s, path);
@@ -433,8 +418,8 @@ fn bool_or(samples: &[GaugeSample], path: &[&str]) -> Value {
 }
 
 /// `(array_agg(path ORDER BY timestamp DESC) FILTER (WHERE path IS NOT
-/// NULL))[1]`: the latest sample in which the key is present. A JSON null is
-/// present (it is not SQL NULL).
+/// NULL))[1]`: the latest sample in which the key is present. A JSON null
+/// still counts as present; only a missing key does not.
 fn latest_present(samples: &[GaugeSample], path: &[&str]) -> Value {
     samples
         .iter()
@@ -448,24 +433,23 @@ fn latest_present(samples: &[GaugeSample], path: &[&str]) -> Value {
 // GET /api/v1/analytics/worker-metrics
 // ---------------------------------------------------------------------------
 
-/// Port of `queen.get_worker_metrics_timeseries_v1` (019_worker_metrics.sql:1094),
-/// the body of `GET /api/v1/analytics/worker-metrics` (handlers/analytics.rs:97).
+/// The body of `GET /api/v1/analytics/worker-metrics` (handlers/analytics.rs:97).
 ///
 /// Filters ([`WORKER_METRICS_FILTER_KEYS`]): `from`, `to`, `hostname`,
-/// `workerId` (cast to integer; not an integer answers the SQL's error) and
-/// `queue`, which the SP ignores. `hostname` / `workerId` narrow `timeSeries`
+/// `workerId` (cast to integer; not an integer answers with an error) and
+/// `queue`, which is ignored. `hostname` / `workerId` narrow `timeSeries`
 /// only.
 ///
 /// * `timeSeries`: one point per bucket over the rows of every node, newest
 ///   first; counters summed, `avgEventLoopLagMs` = `ROUND(AVG(..))`,
 ///   `avgLagMs` = `ROUND(Σ(avg_lag × lag_count) / Σ lag_count)` (0 when no lag
 ///   was sampled), per-second rates = `ROUND(sum / (bucketMinutes × 60), 2)`,
-///   `jobsDone` = push requests (what the Postgres insert writes there).
+///   `jobsDone` = push requests.
 /// * `workers`: rows of the last 5 minutes by `(hostname, workerId)`, no
 ///   filter applied.
-/// * `queues`: the [`QueueRow`]s in range grouped by queue NAME (the SQL joins
-///   `queen.queues` without a tenant predicate, so pass every tenant's rows
-///   for parity), `avgLagMs` weighted by `pop_count`, ordered by `popCount`
+/// * `queues`: the [`QueueRow`]s in range grouped by queue NAME (not
+///   tenant-filtered: pass every tenant's rows), `avgLagMs` weighted by
+///   `pop_count`, ordered by `popCount`
 ///   descending (ties by name).
 /// * `summary`: the lifetime totals (see the module notes) over every row.
 pub fn worker_metrics_json(
@@ -474,7 +458,7 @@ pub fn worker_metrics_json(
     workers: &[WorkerRow],
     queues: &[QueueRow],
 ) -> Value {
-    // Statement order of the SQL: from, to, hostname, workerId, bucket width.
+    // Validation order: from, to, hostname, workerId, bucket width.
     let (from_us, to_us) = match parse_range(filters, now_us) {
         Ok(r) => r,
         Err(e) => return error_json(e),
@@ -618,8 +602,8 @@ pub fn worker_metrics_json(
 // GET /api/v1/status
 // ---------------------------------------------------------------------------
 
-/// Port of `queen.get_status_v3` (019_worker_metrics.sql:711), the body of
-/// `GET /api/v1/status` (handlers/status.rs:106; the handler adds nothing).
+/// The body of `GET /api/v1/status` (handlers/status.rs:106; the handler adds
+/// nothing).
 ///
 /// Filters ([`STATUS_FILTER_KEYS`]): `from`, `to`, `queue`, `namespace`, `task`.
 ///
@@ -641,10 +625,7 @@ pub fn worker_metrics_json(
 ///   come from `state`; `messages.total` / `completed` / `failed` /
 ///   `deadLetter` / `requests` / `batchEfficiency`, `errors` and
 ///   `deadLetterQueue.totalMessages` are the lifetime totals of the worker rows.
-/// * `statsAge`: seconds since the newest worker row (Postgres: since the
-///   summary's last trigger update), -1 when there is none. Postgres never
-///   reaches -1 (the summary row is seeded at schema creation), so an empty
-///   raft cell reads -1 where a fresh Postgres cell reads its age.
+/// * `statsAge`: seconds since the newest worker row, -1 when there is none.
 pub fn status_json(
     filters: &Map<String, Value>,
     now_us: i64,
@@ -935,7 +916,7 @@ pub fn status_json(
 // Accumulators
 // ---------------------------------------------------------------------------
 
-/// The per-group sums of `queen.worker_metrics` the two worker-row SPs take.
+/// The per-group sums the two worker-row views take.
 #[derive(Default)]
 struct WorkerAcc {
     rows: i128,
@@ -1064,7 +1045,7 @@ impl SystemAcc {
     }
 }
 
-/// SQL `AVG` over the non-NULL values.
+/// The average over the present (non-`None`) values.
 #[derive(Default)]
 struct Mean {
     sum: f64,
@@ -1084,9 +1065,8 @@ impl Mean {
     }
 }
 
-/// `queen.worker_metrics_summary` (019_worker_metrics.sql:376) derived from the
-/// rows: what its insert trigger would have summed, plus the newest row as its
-/// `last_updated_at`.
+/// The lifetime summary derived from the rows: every numeric field summed,
+/// plus the newest row's timestamp as its `last_updated_at`.
 #[derive(Default)]
 struct Totals {
     push_requests: i128,
@@ -1155,7 +1135,7 @@ fn dedup_systems(rows: &[SystemRow]) -> Vec<&SystemRow> {
 // Filters, range and buckets
 // ---------------------------------------------------------------------------
 
-/// The resolved `from` / `to` and the bucket width the SQL derives from them.
+/// The resolved `from` / `to` and the bucket width derived from them.
 struct Range {
     from_us: i64,
     to_us: i64,
@@ -1215,8 +1195,7 @@ fn timestamptz_error(s: &str) -> String {
 }
 
 /// `v_duration_minutes := EXTRACT(EPOCH FROM (to - from)) / 60` (numeric
-/// assigned to INTEGER: rounded half away from zero, out of range raises) and
-/// the width CASE of every SP here.
+/// assigned to INTEGER: rounded half away from zero, out of range raises).
 fn bucket_minutes_for(from_us: i64, to_us: i64) -> Result<i64, String> {
     let minutes = div_round(
         i128::from(to_us) - i128::from(from_us),
@@ -1236,7 +1215,7 @@ fn bucket_minutes_for(from_us: i64, to_us: i64) -> Result<i64, String> {
 
 /// `date_trunc('minute', t) - (EXTRACT(minute FROM t)::integer % width) *
 /// INTERVAL '1 minute'` in UTC. The minute of the hour never reaches 360, so a
-/// 360-minute width truncates to the hour, exactly like the SQL.
+/// 360-minute width truncates to the hour.
 fn bucket_start(t_us: i64, bucket_minutes: i64) -> i64 {
     let minute = trunc_us(t_us, US_PER_MIN);
     let minute_of_hour = minute.div_euclid(US_PER_MIN).rem_euclid(60);
@@ -1252,8 +1231,8 @@ fn filter_text(filters: &Map<String, Value>, key: &str) -> Option<String> {
     }
 }
 
-/// `(p_filters->>'key')::integer`, with Postgres' error text when the value is
-/// not a (32-bit) integer.
+/// `(p_filters->>'key')::integer`, with the exact error text below when the
+/// value is not a (32-bit) integer.
 fn filter_int(filters: &Map<String, Value>, key: &str) -> Result<Option<i32>, String> {
     let Some(s) = filter_text(filters, key) else {
         return Ok(None);
@@ -1272,7 +1251,7 @@ fn filter_int(filters: &Map<String, Value>, key: &str) -> Result<Option<i32>, St
 // JSON and numeric helpers
 // ---------------------------------------------------------------------------
 
-/// The `{"error": ...}` body of the SP-raises path.
+/// The `{"error": ...}` body used whenever a filter fails to parse.
 fn error_json(message: String) -> Value {
     json!({ "error": message })
 }
@@ -1351,9 +1330,9 @@ fn div_round(num: i128, den: i128) -> i128 {
     }
 }
 
-/// `num / den` as a float (the SQL's unrounded numeric division). One
-/// correctly rounded division while both operands are exact in an f64, the
-/// exact integer part first beyond that. 0 when `den` is 0.
+/// `num / den` as a float. One correctly rounded division while both
+/// operands are exact in an f64, the exact integer part first beyond that.
+/// 0 when `den` is 0.
 fn ratio(num: i128, den: i128) -> f64 {
     const EXACT: u128 = 1 << 53;
     if den == 0 {
@@ -1663,7 +1642,7 @@ mod tests {
         )
         .get("error")
         .is_some());
-        // A JSON null filter is SQL NULL: the default applies.
+        // A JSON null filter is treated as absent: the default applies.
         let mut f = Map::new();
         f.insert("from".to_string(), Value::Null);
         assert_eq!(
@@ -2172,7 +2151,7 @@ mod tests {
                 push_messages: 7,
                 ..qrow("orders", t("2026-09-24T10:06:00Z"))
             },
-            // No catalog entry: a deleted queue's rows are gone in Postgres.
+            // No catalog entry: as if the queue that owned these rows was deleted.
             QueueRow {
                 push_messages: 5,
                 ..qrow("ghost", t("2026-09-24T10:05:00Z"))

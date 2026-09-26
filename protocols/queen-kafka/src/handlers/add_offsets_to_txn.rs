@@ -7,7 +7,7 @@
 //! the transaction coordinator can add the `__consumer_offsets` partition to
 //! the transaction and put a marker in it at the end. Here there are no
 //! markers and no `__consumer_offsets`: the offsets are KV writes that ride
-//! **in the same Postgres transaction as the records** ([`crate::txn`]), which
+//! **in the same broker transaction as the records** ([`crate::txn`]), which
 //! is what makes the loop atomic without a second coordinator agreeing to
 //! anything.
 //!

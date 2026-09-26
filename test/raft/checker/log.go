@@ -2,7 +2,7 @@ package main
 
 // The run log: the ONLY thing the checkers read.
 //
-// Every harness (difffuzz, crash, kill, flatness) writes the same file so that
+// Every harness (crash, kill, flatness) writes the same file so that
 // one set of checkers judges all of them, and so that a failed run can be
 // judged again, later, by a newer checker. That is the pgless lesson in §13.6:
 // a kill run whose evidence is console output cannot be re-judged.
@@ -79,7 +79,7 @@ type Event struct {
 	Kind Kind   `json:"kind"`
 
 	// Who produced the line.
-	Writer string `json:"writer,omitempty"` // "difffuzz", "kill", "collector@node-1", …
+	Writer string `json:"writer,omitempty"` // "kill", "collector@node-1", …
 	Node   string `json:"node,omitempty"`   // broker node id, when the line is node-side
 
 	// Message identity. TxnID + PayloadHash is the pair §13.7 names: the id

@@ -8,9 +8,8 @@ import (
 	"testing"
 )
 
-// The server (routes/ack.cpp + queen.ack_messages_v2) responds to both
-// /api/v1/ack and /api/v1/ack/batch with a top-level JSON array, one item per
-// acknowledgment in request order:
+// The broker responds to both /api/v1/ack and /api/v1/ack/batch with a
+// top-level JSON array, one item per acknowledgment in request order:
 //
 //	[{"index":0,"transactionId":"...","success":false,"error":"Invalid or expired lease",
 //	  "queueName":"q","partitionName":"Default","leaseReleased":false,"dlq":false}]

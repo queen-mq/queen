@@ -1,10 +1,11 @@
 // Ack-window honesty (2026-07-30, parity with client-js test-v2/ackwindow.js).
 //
-// log_ack_by_hash_v1 resolves txn hashes through the queen.log_txns sidecar.
-// A hash that cannot be resolved (purged row, or a transactionId that never
-// existed) is correctly NOT acked — but the broker used to report those items
-// as success=true (they land in neither noopHashes nor staleHashes), so the
-// client believed the ack committed while the cursor never moved. Worst
+// The broker resolves an acked transactionId through the partition's index of
+// transaction hashes. A hash that cannot be resolved (one retention already
+// purged, or a transactionId that never existed) is correctly NOT acked — but
+// the broker used to report those items as success=true (they land in neither
+// noopHashes nor staleHashes), so the client believed the ack committed while
+// the cursor never moved. Worst
 // variant: a `failed` nack in that state was swallowed whole — no retry
 // charge, no DLQ — with an ok answer.
 //

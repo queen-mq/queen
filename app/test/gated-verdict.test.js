@@ -74,18 +74,18 @@ test('503 with a switch code is the cell, not the caller', async () => {
     assert.equal(gatedVerdict(paused), 'paused', code)
   }
   // THE ONE THE TIMERS PAGE ACTUALLY MEETS. handlers/timers.rs unavailable()
-  // mints `timers_unavailable` — not the ladder's family code — for a pool
-  // exhaustion, a statement timeout or a dead connection, and it is the ONLY
-  // 503 the four routes this dashboard calls can produce: switches.rs pins
-  // rung 1 to true for TimerRead/TimerCancel and quota.rs allows both, so
-  // `timers_disabled` is reachable only on POST /api/v1/timers.
-  const exhausted = await failWith({ error: 'timers_unavailable', reason: 'timers_pool_exhausted' }, { status: 503 })
-  assert.equal(gatedVerdict(exhausted), 'paused')
-  assert.equal(refusalCode(exhausted), 'timers_unavailable')
+  // mints `timers_unavailable` — not the ladder's family code — when the
+  // cluster cannot answer (no leader, a retry, a deadline that passed), and it
+  // is the ONLY 503 the four routes this dashboard calls can produce:
+  // switches.rs pins rung 1 to true for TimerRead/TimerCancel and quota.rs
+  // allows both, so `timers_disabled` is reachable only on POST /api/v1/timers.
+  const noLeader = await failWith({ error: 'timers_unavailable', reason: 'no_leader' }, { status: 503 })
+  assert.equal(gatedVerdict(noLeader), 'paused')
+  assert.equal(refusalCode(noLeader), 'timers_unavailable')
 
   // handlers/kv.rs answers the same conditions with its own code.
-  const kvExhausted = await failWith({ error: 'kv_unavailable', reason: 'kv_pool_exhausted' }, { status: 503 })
-  assert.equal(gatedVerdict(kvExhausted), 'paused')
+  const kvNoLeader = await failWith({ error: 'kv_unavailable', reason: 'kv_no_leader' }, { status: 503 })
+  assert.equal(gatedVerdict(kvNoLeader), 'paused')
 })
 
 test('everything else is transient and keeps the last-good rows', async () => {
@@ -126,7 +126,7 @@ test('the verdicts a page renders itself are exactly what the client keeps quiet
     [{ error: 'not in your plan', code: 'feature_gated' }, 403],
     [{ error: 'feature_gated', reason: 'feature_gated' }, 403],
     [{ error: 'kv_disabled', reason: 'switch' }, 503],
-    [{ error: 'timers_unavailable', reason: 'timers_pool_exhausted' }, 503],
+    [{ error: 'timers_unavailable', reason: 'timers_timeout' }, 503],
     [{ error: 'ephemeral_unavailable', reason: 'switch' }, 503],
   ]
   for (const [body, status] of cases) {

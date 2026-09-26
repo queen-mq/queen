@@ -15,26 +15,34 @@ sourceOfTruth:
   - protocols/queen-kafka/src/coordinator/mod.rs
   - protocols/queen-kafka/src/coordinator/group.rs
   - protocols/queen-kafka/src/offsets.rs
+  - protocols/queen-kafka/src/handlers/end_txn.rs
   - protocols/queen-kafka/src/records.rs
   - protocols/queen-kafka/src/txn.rs
   - protocols/queen-kafka/src/idempotent.rs
+  - protocols/queen-kafka/src/queen.rs
+  - protocols/queen-kafka/src/boot.rs
+  - protocols/queen-kafka/src/identity.rs
+  - server/src/kafka_inproc.rs
+  - server/src/main.rs
 ---
 
-`queen-kafka` is a separate binary that speaks the Kafka wire protocol to clients and plain
-HTTP to a Queen broker or proxy as an ordinary client. An unmodified Kafka producer or
-consumer reaches Queen by changing `bootstrap.servers`, and nothing else. Running it is
-[the operator page](/deploy/kafka); this page is the contract a client gets.
+`queen-kafka` runs inside the broker process when `QUEEN_KAFKA_EMBEDDED=true`. It speaks the
+Kafka wire protocol to clients and calls the broker's own router in-process, meeting the same
+routes, authentication, tenancy, push admission and forwarding to the leader that an HTTP client
+meets. A Kafka produce is a Queen push and a Kafka fetch is Queen's `POST /api/v1/fetch`. An
+unmodified Kafka producer or consumer reaches Queen by changing `bootstrap.servers`, and nothing
+else. Running it is [the operator page](/deploy/kafka); this page is the contract a client gets.
 
 <Aside type="caution">
-The facade ships in the broker image and is started by `QUEEN_KAFKA_EMBEDDED=true`. What is
-narrower than the broker's own guarantees is the verification behind this page: the behaviour
+The facade is part of the broker binary and runs in its process when `QUEEN_KAFKA_EMBEDDED=true`.
+What is narrower than the broker's own guarantees is the verification behind this page: the behaviour
 below is checked by the facade's own compatibility suite rather than by a released client matrix,
 and the deviations at the bottom are the ones known today rather than a closed list.
 </Aside>
 
 The mapping is small enough to state in four lines. A Kafka topic is a Queen queue. Kafka
 partition `n` is Queen partition `n`. One record is one Queen message, wrapped in the payload
-envelope below. In the default single-node mode there is exactly one broker, node 0, and it is the
+envelope below. In the default mode there is exactly one Kafka broker, node 0, and it is the
 facade itself: it advertises itself as leader of every partition and answers `FindCoordinator` with
 its own address, whatever the Queen cluster behind it looks like. Two or three facades can instead
 present themselves to clients as one Kafka cluster, which is an operator decision described on
@@ -71,8 +79,8 @@ producer taking the same id bumps the epoch, and the first is answered `PRODUCER
 on. A transactional `Produce` writes nothing, it stages the records in that process.
 `AddOffsetsToTxn` and `TxnOffsetCommit` stage the consumer offsets beside them. `EndTxn(commit)`
 sends the whole stage as one `POST /api/v1/transaction`, with the fence check as the first operation
-of the bundle, so the records and the offsets commit in one PostgreSQL transaction or neither of
-them does. `EndTxn(abort)` drops the stage and writes nothing at all.
+of the bundle, so the records and the offsets commit in one entry of the replicated log or neither
+of them does. `EndTxn(abort)` drops the stage and writes nothing at all.
 
 That covers the stock Java transactional producer, Spring's `KafkaTransactionManager`, franz-go's
 `GroupTransactSession` and librdkafka's transactional API: consume, transform, produce and commit,
@@ -124,9 +132,10 @@ to avoid them.
 `offsets.retention.minutes`, seven days by default. The facade never does. A committed offset
 that expired would be a consumer group silently resuming from `auto.offset.reset`, which is
 either a replay of the whole topic or a jump past everything it had not read. The cost is
-stated rather than hidden: a facade that has served a million throwaway group ids holds a
-million keys. `DeleteGroups` and `OffsetDelete` are both advertised and both remove them
-irreversibly, so removal here is an administrator's action rather than a timer nobody set.
+stated rather than hidden: a facade that has served a million throwaway group ids holds the
+committed offsets of a million groups. `DeleteGroups` and `OffsetDelete` are both advertised and
+both remove them irreversibly, so removal here is an administrator's action rather than a timer
+nobody set.
 
 ## Deviations from a real broker
 
@@ -172,13 +181,14 @@ nothing was sent back for it to read. The request is still processed exactly as 
 anything that went wrong is written to the facade's log, which is the only place a
 fire-and-forget producer's failures exist at all.
 
-**`acks=1` and `acks=-1` are the same path.** Every push is a durable, synchronously committed
-write. Queen has no in-memory tier to make `acks=1` cheaper with today, so both are answered
+**`acks=1` and `acks=-1` are the same path.** Every push is answered once its entry is committed
+to the replicated log. The facade has no cheaper tier to answer `acks=1` from, so both are answered
 from the durable path, which is the safe direction to be wrong in.
 
 **`timeout_ms` on a produce is not acted on.** It is how a Kafka leader bounds waiting for its
-followers, and there are no followers here. What bounds the wait is the facade's own ten-second
-budget for a call to Queen, well below every client's 30 second `request.timeout.ms`.
+followers; here replication is the raft log's business, not the facade's. What bounds the wait is
+the facade's own ten-second budget for a call to Queen, well below every client's 30 second
+`request.timeout.ms`.
 
 **Topics beginning with `__` do not exist.** Kafka's internal topics are answered
 `UNKNOWN_TOPIC_OR_PARTITION` on Metadata, Fetch, ListOffsets and OffsetCommit alike, so a name
@@ -194,9 +204,8 @@ request that names an absent topic creates it.
 **A concrete timestamp answers "no match".** `ListOffsets` resolves the two sentinels exactly:
 `-1` is the high watermark and `-2` is the log start. Any other timestamp is answered offset
 `-1` with error code 0, which is the protocol's own "this broker found no match" and is what
-`offsetsForTimes` returns null for. Queen keys segments by offset and has no per-segment time
-index, so the alternative would be a scan or an approximate answer, and an approximate answer is
-a consumer silently starting somewhere other than where it asked. The partition is still probed
+`offsetsForTimes` returns null for. The alternative would be a scan or an approximate answer,
+and an approximate answer is a consumer silently starting somewhere other than where it asked. The partition is still probed
 for existence, so a timestamp query against a topic that is not there is still
 `UNKNOWN_TOPIC_OR_PARTITION`.
 
@@ -228,20 +237,20 @@ name a partition by number, so lanes called `Default`, `eu-west` or a tenant id 
 not addressable. Producing through the facade always creates numeric lanes, so this affects only
 queues that Kafka clients share with native producers.
 
-**Committed offsets live in Queen's key/value store, not in a consumer group.** One key per
-(group, topic, partition) under the `queen-kafka` namespace, spelled
-`qk:group:<group>:<topic>:<partition>` with everything outside `[A-Za-z0-9._-]` percent-encoded.
-They survive a facade restart, and they are still not the broker's native consumer-group cursor:
-KV is the single source of truth for a Kafka group's position and nothing outside the facade
-writes one.
+**Committed offsets are Queen consumer-group positions by default.** With
+`QUEEN_KAFKA_OFFSET_STORE=positions`, the default, a committed offset is the broker's own cursor
+for (group, queue, partition), written through the transaction's `positions` rider and read back
+through `POST /api/v1/consumer-groups/positions`. One commit is one entry in the replicated log
+whatever its width, and a Kafka group is a Queen consumer group: the consumer-group views show its
+lag beside every native group, and a native consumer of the same group name resumes where it
+committed. The transactional fence and the group's index row stay in Queen's key/value store.
 
-They are no longer invisible, though. The three consumer-group views read both stores and mark
-every row with an additive `kind` of `queen` or `kafka`, applying the same lag arithmetic to
-each, so a Kafka group's lag stands beside a native one and matches what Kafka's own admin API
-reports for it. That mirror is read only. One place it cannot show both is the single-group
-detail view, which is keyed by queue name: where a Queen group and a Kafka group share a name on
-one queue the native entry wins, and the `kind` field says which store the answer came from. The
-list view renders both.
+`QUEEN_KAFKA_OFFSET_STORE=kv` keeps the offsets in the key/value store instead, one key per
+(group, topic, partition) under the `queen-kafka` namespace, spelled
+`qk:group:<group>:<topic>:<partition>` with everything outside `[A-Za-z0-9._-]` percent-encoded. A
+facade that reaches Queen over an explicit `QUEEN_URL` always uses this store. Those keys are not
+shown in a 2.0 broker's consumer-group views. Offsets are not moved from one store to the other
+when the setting changes. Either way they survive a facade restart.
 
 **A facade restart is a broker restart.** Group membership is in memory and nothing else in the
 facade is durable. A restarted process knows no members, answers `UNKNOWN_MEMBER_ID` to the
@@ -254,9 +263,11 @@ two strangers pick and a registry keyed by the group id alone would put two tena
 The identity comes from asking Queen `GET /auth/me` once per credential, and everything turns on
 whether that answer names the tenant.
 
-In **Queen Cloud** it does. The proxy resolves an api-key bearer through its normal credential
-path, so a key rotation or a per-service key resolves to the same tenant and the two credentials
-are ONE group over one set of committed offsets, which is what a group of that name should be.
+Through the proxy it does. When the facade reaches Queen through the proxy (an explicit
+`QUEEN_URL` naming it keeps the facade on HTTP to that address), the proxy resolves an api-key
+bearer through its normal credential path, so a key rotation or a per-service key resolves to the
+same tenant and the two credentials are ONE group over one set of committed offsets, which is what
+a group of that name should be.
 
 Against a **broker with `JWT_ENABLED` set** it does not: the endpoint does not identify a bearer,
 so the identity falls back to the hashed credential and the old behaviour stands. Two consumers of
@@ -297,9 +308,10 @@ anything the facade did not write is passed through rather than misread.
 
 ## Throttling
 
-A Cloud tenant that is frozen or over its rate cap gets a `429` from the proxy with a
-`Retry-After`. Kafka has a field for exactly that, and the facade puts the same number in it on
-the three responses in the hot path.
+When Queen answers a call with `429` and a `Retry-After` (the broker's push admission, after a push
+waited the whole hold for room, or a rate cap when the facade reaches Queen through the proxy), Kafka has a
+field for exactly that, and the facade puts the same number in it on the three responses in the
+hot path.
 
 | Response | `throttle_time_ms` | What the partitions say |
 | --- | --- | --- |

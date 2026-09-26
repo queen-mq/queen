@@ -8,8 +8,10 @@ outside the markers.
 
 After editing a marked region, regenerate the partials with
 `pnpm --dir webdoc gen` or the docs CI check fails on drift. The queues used
-here (orders, payments) are wiped by the cleanup fixture in conftest.py, which
-is what lets the dedup example keep a fixed transactionId across runs.
+here (orders, payments) and the dedup example's transactionId are fixed, so
+this test expects a fresh broker, which the harness gives every lane. Rerun it
+against the same broker and it can see the previous run's messages; inside
+the dedup window the dedup example's FIRST push is already a duplicate.
 """
 
 import pytest

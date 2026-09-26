@@ -1,16 +1,24 @@
 ---
 title: "POST /api/v1/push"
-description: "Produce messages: the request body field by field, the per-item response array, all four item statuses, and exactly how deduplication decides."
+description: "Produce messages: the request body field by field, the per-item response array, the three item statuses, the error answers, and exactly how deduplication decides."
 type: reference
 sidebar:
   order: 4
   label: push
 sourceOfTruth:
   - server/src/handlers/data.rs
-  - server/src/fusion.rs
-  - server/sql/procedures/003_log_push.sql
-  - server/sql/procedures/004_log_pop.sql
-  - server/sql/procedures/012_configure.sql
+  - server/src/handlers/raft.rs
+  - server/src/rsm/admit.rs
+  - server/src/rsm/batcher.rs
+  - server/src/rsm/facade/mod.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/real/phase2.rs
+  - server/src/rsm/planner/push.rs
+  - server/src/rsm/planner/mod.rs
+  - server/src/rsm/planner/pop.rs
+  - server/src/rsm/planner/timers.rs
+  - server/src/rsm/maintenance.rs
+  - server/src/encryption.rs
 verifiedBy:
   - clients/client-js/test-v2/push.js
   - clients/client-py/tests/test_push.py
@@ -20,20 +28,20 @@ digest: >-
   `{"items":[...]}`; per item, `queue` and `payload` are required, `partition` defaults to
   `"Default"`, `transactionId` to the minted message id, and `data` without `payload` gives 400.
   Success is `201 Created` plus a top-level array of `index`, `message_id`, `transaction_id`,
-  `queueName`, `status`, one per item in request order. `status`: `queued`, `duplicate`,
-  `buffered` (on-disk spool, drained later) or `failed` (exists nowhere, retry); both still return
-  201, so the code alone cannot detect loss. Also 400 non-JSON or missing
-  `items`/`queue`/`payload`, 403 auth on and no writer role, 413 over 64 MiB, 500 maintenance mode
-  plus a failed spool write. Commits are per `(queue, partition)` group, not per request. Dedup:
-  on by default, exact, per partition, keyed on `transactionId` within the queue's
+  `queueName`, `status` and, for a stored or duplicate item, `offset`, one per item in request
+  order. `status` is `queued`, `duplicate` (nothing written; the original's id and offset) or
+  `error` (the leader refused that item's `(queue, partition)` group; nothing of the group
+  written); all three return 201, so the code alone cannot detect a refusal. The 2.0 broker does
+  not return `buffered`. Also 400 `bad_body`, 403 no writer role, 413 body over
+  `QUEEN_MAX_BODY_BYTES` (default 64 MiB) or `name_too_long`, 429 `overloaded`, 503
+  `no_leader`/`retry`/`timeout` with `Retry-After: 1`, 507 `storage_full`. Each `(queue,
+  partition)` group is its own command to the leader: the commit boundary is the group, not the
+  request. Dedup: on by default, per partition, keyed on `transactionId` within the queue's
   `dedupWindowSeconds` (default 3600, `0` disables).
-# sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the two /configure sentences are rewritten for the merge rule; the push path itself is unchanged.
 ---
 
-One call writes one or more messages to one or more queues. Access level **write-only**, which
-is the only route a `write-only` token can reach. The response is always a top-level array with
-one element per request item, in request order.
+One call writes one or more messages to one or more queues. Access level **write-only**. A
+processed push answers a top-level array with one element per request item, in request order.
 
 ## Request
 
@@ -72,23 +80,25 @@ Notes that change behaviour:
   [`POST /api/v1/transaction`](/reference/http/transaction).
 - Items in one call may target different queues and different partitions.
 - `"items": []` is accepted and returns `201` with an empty array.
-- When authentication is enabled, the validated token's `sub` is stamped onto every frame and
+- A `transactionId` longer than 65,535 bytes fails the whole request with a `400`.
+- When authentication is enabled, the validated token's `sub` is stamped onto every message and
   echoed by pops as `producerSub`. A `producerSub` supplied in the request body is never
   honoured.
 
 ### Queues and partitions are created by pushing
 
-If the queue does not exist, the first push creates it, together with its configuration row and
-its first partition. `namespace` and `task` are derived from a dotted name (`orders.created`
+If the queue does not exist, the first push creates it, together with its configuration and its
+first partition. `namespace` and `task` are derived from a dotted name (`orders.created`
 becomes namespace `orders`, task `created`), so a queue that was never explicitly configured is
 still discoverable by a namespace or task pop. Queue options keep their defaults, which is where
 the two-valued `leaseTime` comes from: a queue created implicitly by a push leases for **60
-seconds**, while a queue created or updated through `/api/v1/configure` leases for **300
-seconds**.
+seconds**, while a queue created through `/api/v1/configure` leases for **300 seconds**.
 
-Partitions are created on first push to that partition name, and deleted automatically only
-once they are empty and have been idle for `PARTITION_CLEANUP_DAYS` (30). A push to a name
-whose partition was reclaimed simply creates it again, with a new id and offsets from 0.
+Partitions are created on first push to that partition name. With
+`QUEEN_PARTITION_CLEANUP_ENABLED` on (the default), a partition is deleted automatically only
+once it holds no retained message and no dead-letter record, and has seen no write and no lease
+for `PARTITION_CLEANUP_DAYS` (default 30). A push to a name whose partition was deleted creates
+it again, with a new id and offsets from 0.
 
 ## Response
 
@@ -101,7 +111,8 @@ whose partition was reclaimed simply creates it again, with a new id and offsets
     "message_id": "0198f2c1-4d3a-7c10-9f2b-6a1e5d0c7b83",
     "transaction_id": "order-8891-created",
     "queueName": "orders.created",
-    "status": "queued"
+    "status": "queued",
+    "offset": 8192
   }
 ]
 ```
@@ -112,101 +123,113 @@ whose partition was reclaimed simply creates it again, with a new id and offsets
 | `message_id` | string (UUIDv7) | the stored message's id; for a duplicate, the id of the **original** message |
 | `transaction_id` | string | the deduplication key actually used: your `transactionId`, or the minted message id when you omitted it |
 | `queueName` | string | the queue the item targeted |
-| `status` | string | one of the four values below |
+| `status` | string | one of the three values below |
+| `offset` | integer | the message's zero-based position in its partition; for a duplicate, the original's. Absent on `error` |
 
 The mixed casing (`message_id` and `transaction_id` snake_case, `queueName` camelCase) is the
 wire contract, not a typo, and clients depend on it.
 
-There is no `partition`, no `partitionId`, no offset and no `createdAt` in a push result. The
-offset a message landed on is never returned to a producer; positions are internal to the
-storage engine and are only ever used through cursors.
+There is no `partition`, no `partitionId` and no `createdAt` in a push result. `offset` is
+informational: consumers address messages by `transactionId`, and consumption state is a cursor
+per `(partition, consumer group)`.
 
 ### Item statuses
 
 | `status` | What happened | What to do |
 | --- | --- | --- |
 | `queued` | stored and committed | nothing |
-| `duplicate` | an earlier message with the same `transactionId` already exists in this partition, inside the deduplication window; **nothing was written** | nothing. This is the idempotent outcome |
-| `buffered` | the message went to the broker's on-disk spool instead of PostgreSQL, and a background drain will replay it: either because the database transaction failed, or because the broker is in maintenance mode, which diverts **every** push to the spool | treat as accepted; if maintenance mode is off, investigate the database |
-| `failed` | the write did not reach PostgreSQL **and** the spool write also failed; the message exists nowhere | retry it |
+| `duplicate` | an earlier message with the same `transactionId` is stored in this partition inside the deduplication window, or an earlier item of the same request has the same `(queue, partition, transactionId)`; **nothing was written** | nothing. This is the idempotent outcome |
+| `error` | the leader refused this item's `(queue, partition)` group as a request it will not run, for example a group whose planned size exceeds `QUEEN_RAFT_ENTRY_MAX_BYTES` (default 96 MiB); nothing of that group was written, and `message_id` is an id that was never stored | change the request; the same group sent again unchanged is refused again |
 
-Replay from the spool preserves the `transactionId`, so deduplication makes it idempotent: a
-message that was both buffered and (by your own retry) pushed again lands once.
+The 2.0 broker does not return `buffered` or `failed`. When a node cannot take a write (no
+leader, an election, a lost quorum, a full disk), the whole request fails with one of the status
+codes below and the client retries it.
 
 <Aside type="caution">
-`buffered` and `failed` come back with HTTP **201**. A client that checks only the status code
-cannot tell a healthy push from one that lost every message. Inspect each element's `status`.
+`error` comes back with HTTP **201**. A client that checks only the status code cannot tell a
+push that stored every message from one whose groups were refused. Inspect each element's
+`status`.
 </Aside>
 
 ### Status codes
 
+An error raised by the state machine has the body `{"error":"…","code":"…"}`; a `retry` may add
+`"leader":"<hint>"`.
+
 | Code | When |
 | --- | --- |
-| `201` | the normal path, whatever the per-item statuses; also the maintenance-mode path when every item spooled |
-| `400` | the body is not JSON, or `items` / `queue` / `payload` is missing: `{"error":"bad body: …"}` |
+| `201` | the request was processed, whatever the per-item statuses |
+| `400` | the body is not JSON, `items` / `queue` / `payload` is missing, or a `transactionId` exceeds 65,535 bytes: `{"error":"bad push body: …","code":"bad_body"}` |
 | `403` | authentication is on and the token has no writer role |
-| `413` | the body exceeds 64 MiB |
-| `500` | maintenance mode is on and at least one spool write failed |
+| `413` | the body exceeds `QUEEN_MAX_BODY_BYTES` (default 64 MiB); or code `name_too_long`: an item's tenant, queue and partition names together exceed 447 bytes |
+| `429` | code `overloaded`: the push admission budget stayed full for the whole hold; `Retry-After` is 1 to 5 seconds |
+| `503` | code `no_leader`, `retry` or `timeout`, with `Retry-After: 1` |
+| `507` | code `storage_full`: the node is above its disk high-water mark (`QUEEN_RAFT_DISK_HIGH_PCT`, default 85% used) |
+| `500` | code `internal`: a broker fault |
+
+A push is charged its `Content-Length` against the admission budget before its body is read.
+When the budget is spent a new push waits for room, so a steady producer slows down rather than
+failing; only after the hold is it refused with `429`.
+[HTTP API conventions](/reference/http/) gives the budget, the hold and the disk gate.
+
+A `503` with code `timeout` does not say whether anything was stored. Retry with the same
+`transactionId`s and the items that were stored come back `duplicate`.
 
 ## Atomicity
 
-Items are grouped by `(queue, partition)`, and each group becomes one segment. **The commit
-boundary is the group, not the request.** A push spanning three partitions can have one group
-committed and another `failed`, which is exactly what the per-item statuses report. If you need
-several writes to land together, use
-[`POST /api/v1/transaction`](/reference/http/transaction), which runs the whole bundle in one
-PostgreSQL transaction.
+The items of a push are grouped by `(queue, partition)`, and each group becomes one command to
+the leader. **The commit boundary is the group, not the request.** The groups of one request are
+planned and answered separately: one group can come back `error` while another is stored, and a
+request that fails with a `503` may already have stored some of its groups. If you need several
+writes to land together, use [`POST /api/v1/transaction`](/reference/http/transaction), which
+commits the whole bundle as one entry in the replicated log.
 
-The handler does not answer until every group has committed. There is no batching delay in front
-of that commit: when the push lane is uncontended the segment dispatches on arrival, so a single
-low-rate push costs about one database round trip. Coalescing is emergent, not timed. While a
-partition has a flush in flight the next segment accumulates, so batches fatten only when load
-produces them, and `QUEEN_V2_FUSION_HOLD_MS` (default 3) is a liveness backstop tick, not a
-linger window.
+The handler answers once every group has been committed and applied on the node that answers.
+There is no linger window in front of that commit: each planning cycle on the leader takes the
+commands waiting at its start into one log entry, so one commit serves many requests when load
+produces them, and batches grow only then.
 
-Coalescing never reorders a partition either. At most one flush per `(queue, partition)` is in
-flight, and the next segment is dispatched only after the previous one commits, so a partition's
-offsets are assigned in commit order no matter how many requests were fused into the same
-transaction. The commit timestamp is taken under the same partition row lock, so `created_at` is
-monotone per partition as well.
-
-Bundling is the other half: one transaction can carry the segments of many partitions, which is
-what makes one commit and one fsync serve many messages.
-[Life of a push](/internals/life-of-a-push/) walks the whole path, shard by shard.
+A partition is never reordered. The leader plans commands one at a time, so a partition's
+offsets are gapless and assigned in planning order, and each write to a partition is stamped
+with a creation time strictly later than the previous one's.
+[Life of a push](/internals/life-of-a-push/) walks the whole path.
 
 ## Deduplication
 
-Deduplication is **on by default**, exact, and scoped to one partition. The key is the item's
-`transactionId`; the bound is the queue's `dedupWindowSeconds`, whose default is **3600**.
-Setting it to `0` disables deduplication for that queue.
+Deduplication is **on by default** and scoped to one partition. The key is the item's
+`transactionId` (the leader compares a 128-bit hash of it); the bound is the queue's
+`dedupWindowSeconds`, whose default is **3600**. Setting it to `0` disables deduplication for
+that queue.
 
 Two layers run, in this order:
 
 1. **Within one request.** The first item for a given `(queue, partition, transactionId)` wins.
-   Later items in the same body produce no frame and come back `duplicate`, carrying the
-   winner's `message_id`.
-2. **In the database.** Before allocating an offset, the push probes the partition's transaction
-   index for the incoming hashes while holding the partition's row lock. A hit returns
-   `duplicate` having written nothing at all: there is no insert to roll back, and no
-   subtransaction. A clean probe proceeds to allocate.
+   Later items in the same body are not written and come back `duplicate`, carrying the
+   winner's `message_id` and `offset`.
+2. **On the leader.** Before it allocates offsets, the leader probes the partition for each
+   incoming `transactionId` among the messages stored inside the window and the entries it has
+   not finished committing. A hit returns `duplicate` having written nothing. A partition that
+   this push creates has nothing to probe.
 
-Because the probe happens under the same row lock that serializes writes to the partition, two
-concurrent pushes of the same `transactionId` cannot both succeed.
+Because the leader plans commands one at a time and its probe covers entries still in flight, two
+concurrent pushes of the same `transactionId` to one partition cannot both be stored.
 
 <Render file="snippets/js-push-dedup" />
 
-What you get back for a duplicate is the **original** message's id, resolved from the stored
-segment. If the original can no longer be read (retention removed its segment, for instance),
-the id comes back as the all-zeros UUID `00000000-0000-0000-0000-000000000000`, the
-"original unknown" sentinel. The `status` is still `duplicate`.
+What you get back for a duplicate is the **original** message's `message_id` and `offset`, read
+from the stored message.
+
+An item sent without a `transactionId` is keyed on the message id minted for it, which is new on
+every attempt: a retry of such an item is stored again.
 
 <Aside type="note">
 Deduplication is what makes a push retry safe. The window is a time bound, not a memory of
-everything ever written: a retry that arrives after `dedupWindowSeconds` will be accepted as a
-new message. Choose the window to cover your worst-case retry horizon. Since 1.6.0
-`/api/v1/configure` merges, so omitting `dedupWindowSeconds` on a later call leaves the window
-where it is; it goes back to 3600 on a create, on an explicit `null`, and under
-`"mode": "replace"`.
+everything ever written: a retry that arrives more than `dedupWindowSeconds` after the original
+was stored is accepted as a new message. Choose the window to cover your worst-case retry
+horizon. `/api/v1/configure` merges, so omitting `dedupWindowSeconds` on a later call leaves the
+window where it is. The default, 3600, applies to a queue created by a push or by
+`/api/v1/configure` without the field, and a `"mode": "replace"` call that omits the field puts
+it back.
 </Aside>
 
 ## Delayed delivery
@@ -215,22 +238,21 @@ A push has no per-message delay field. The delay is a queue option,
 [`delayedProcessing`](/reference/queue-options/), an integer number of seconds defaulting to `0`,
 set through `/api/v1/configure` and applied to **every** message the queue receives. A message
 pushed to a queue with `delayedProcessing: 30` is stored and committed immediately, and becomes
-poppable 30 seconds after that commit.
+poppable 30 seconds after that.
 
-The cut is enforced in SQL on the pop path, not in the producer: a pop delivers only segments
-whose `created_at` is at least `delayedProcessing` seconds old. The broker's in-memory scheduler
-only schedules a revisit for the deadline, it never bypasses the cut, so a delayed message cannot
-be delivered early by a consumer that polls at the wrong moment.
+The leader enforces the cut when it plans a claim: a pop delivers only messages stored at least
+`delayedProcessing` seconds ago. The check sits on the claim path, not in the producer, so a
+delayed message cannot be delivered early by a consumer that polls at the wrong moment.
 
-Nothing is reordered by the delay. Commit timestamps are monotone per partition, so the deadline
-cuts a contiguous recent tail of the partition rather than holding individual messages back past
-their neighbours: the same messages come out in the same order, later. The in-flight backlog the
-delay creates is bounded by push rate times the delay.
+Nothing is reordered by the delay. Creation times strictly increase along a partition, so the
+deadline cuts a contiguous recent tail of the partition rather than holding individual messages
+back past their neighbours: the same messages come out in the same order, later. The in-flight
+backlog the delay creates is bounded by push rate times the delay.
 
 Changing the option applies to messages that are already stored: raising it hides messages that
 were visible a moment ago, and lowering it exposes them. `/api/v1/configure` merges, so omitting
-`delayedProcessing` on a later call leaves it alone; send it as `null`, or send the whole
-configuration with `"mode": "replace"`, to put it back to `0`.
+`delayedProcessing` on a later call leaves it alone; send `0`, or send the whole configuration
+with `"mode": "replace"`, to put it back to `0`.
 
 ## Examples
 
@@ -258,7 +280,8 @@ curl -sS -X POST http://localhost:6632/api/v1/push -H 'content-type: application
 ## Encryption at rest
 
 If the queue has `encryptionEnabled` and the broker has a valid `QUEEN_ENCRYPTION_KEY`, payloads
-are encrypted before they are packed into a segment, and pops decrypt them transparently. A
+are encrypted before they are written to the log, and pops decrypt them transparently. A
 malformed or wrong-length key **disables encryption and stores plaintext** with only a warning
-in the log. It is not a boot failure and not a push failure. [Self-hosting](/deploy/) covers
-key handling.
+in the log. It is not a boot failure and not a push failure. In a cluster every node needs the
+same key: the node that handles a push encrypts it, and the node that serves a pop decrypts it.
+[Self-hosting](/deploy/) covers key handling.

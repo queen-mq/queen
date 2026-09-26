@@ -1,6 +1,6 @@
 ---
 title: Testing
-description: "One command builds the broker and every runner image, runs each suite against each topology as an isolated Compose project, and prints a matrix. Plus what is green today."
+description: "One command builds the product image and one runner image per suite, runs each suite against each topology as its own Compose project on an empty broker, and prints a matrix. Plus the tenancy parity gate, what CI runs, and the Jepsen harness."
 type: how-to
 tier: internals
 sidebar:
@@ -10,118 +10,123 @@ sourceOfTruth:
   - test/compose/docker-compose.single.yml
   - test/compose/docker-compose.ha.yml
   - test/runners/common/wait-for-broker.sh
-  - test/runners/mesh/mesh-check.sh
   - test/runners/tenancy/tenancy-check.sh
+  - test/runners/rust/Dockerfile
   - test/runners/js/entrypoint.sh
   - test/runners/go/entrypoint.sh
   - test/runners/py/entrypoint.sh
   - test/runners/cli/entrypoint.sh
   - test/runners/cpp/entrypoint.sh
   - test/runners/rust-client/entrypoint.sh
+  - test/runners/laravel/entrypoint.sh
+  - test/jepsen/run-matrix.sh
+  - server/tests/embedded_raft_smoke.rs
+  - server/src/config.rs
   - .github/workflows/tests.yml
 verifiedBy:
   - test/run.sh
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
-`test/run.sh` is the whole thing. It builds a broker image from the current tree, builds one
-runner image per language, then runs every selected suite against every applicable topology as
-its own `docker compose` project on its own private network, in parallel, and prints a
-pass/fail matrix.
+`test/run.sh` is the whole thing. It builds the broker image from the current tree, builds one
+runner image per suite, then runs every selected suite against every applicable topology as its
+own `docker compose` project on its own private network, in parallel, and prints a pass/fail
+matrix.
 
 ```bash
 test/run.sh
 ```
 
-Requirements are Docker and Compose v2. Nothing binds a host port and every PostgreSQL runs on
-`tmpfs`, so runs are disposable and cannot collide with each other or with a database you are
-using locally.
+Requirements are Docker and Compose v2. Nothing binds a host port. Each broker keeps its state in a
+data directory on a Compose volume, and `run.sh` takes every project down with its volumes
+(`down -v`), so every cell starts on an empty broker and there is no cleanup to run. There is no
+database in any stack.
 
 ## What it builds
 
-The broker image is built from `server/Dockerfile` and tagged `queen:test`. Because that
-Dockerfile copies `server/webapp` into the build context rather than building the dashboard,
-the dashboard has to exist first. See
-[Building and developing](/internals/contributing). Runner images come from
-`test/runners/<suite>/Dockerfile`. `--no-build-broker` reuses an existing `queen:test`,
-and `--no-build` reuses everything.
+The broker image is the product image: the repository's root `Dockerfile`, built with the repository
+root as context and tagged `queen:test` (`QUEEN_TEST_BROKER_DOCKERFILE` picks another Dockerfile).
+Runner images come from `test/runners/<suite>/Dockerfile`, each also built from the repository
+root. `--no-build-broker` reuses an existing `queen:test`, and `--no-build` reuses everything.
 
 ## Suites
 
 | Suite | What it runs | Topologies |
 | --- | --- | --- |
-| `js` | `clients/client-js/test-v2`: the broker-free unit tests including the proxy 429 contract, then the integration run (`run.js`, human plus stream buckets in one process) | `single`, `ha`, `tenanted` |
-| `go` | the root-package unit tests, then `./tests/` and `./tests/streams_integration/` with `-count=1` so the cache never hides a live-broker failure | `single`, `ha`, `tenanted` |
-| `py` | the whole `pytest` tree under `clients/client-py/tests`, streams included | `single`, `ha`, `tenanted` |
-| `cli` | the `queenctl` end-to-end suite, which needs the Go workspace and `QUEEN_E2E=1` | `single`, `ha`, `tenanted` |
-| `cpp` | `test_retry429`, `test_kv_timers` and `test_conflation` (all self-contained, no broker) then `test_client` against the broker | `single`, `ha`, `tenanted` |
-| `laravel` | the PHP client: `phpunit --testsuite Unit` first (broker-free, and it is the half that pins the exact JSON wire shape) then the `Integration` testsuite | `single`, `ha`, `tenanted` |
-| `rust-client` | `cargo test` in `clients/client-rust`: the lib unit tests, then each integration binary in turn. `QUEEN_TEST_URL` is what turns the integration tests on; without it they skip | `single`, `ha`, `tenanted` |
-| `rust` | the broker's in-process unit tests, `cargo test`, no stack and no PostgreSQL | `unit` |
-| `mesh` | asserts the two brokers of an HA pair see each other with zero handshake failures | `ha` |
-| `tenancy` | two-tenant isolation over the HA pair with the trusted tenant header | `ha-tenanted` |
-| `http` | every kv/timer route driven at the raw HTTP wire with no SDK in the way: the executable specification the SDK suites are read against | `single` |
-| `conflation` | the conflation end-to-end scenarios at the raw HTTP wire, no SDK in the way | `single` |
+| `js` | `clients/client-js/test-v2`: the broker-free unit tests (the proxy 429 contract, the kv, timer and transaction wire shapes, conflation), then the integration run (`run.js`, human and stream buckets in one process) | client lanes |
+| `go` | the root package's broker-free unit tests, then `./tests/` and `./tests/streams_integration/` with `-count=1` so the cache never hides a live-broker failure | client lanes |
+| `py` | the whole `pytest` tree of the Python client, streams included | client lanes |
+| `cli` | the `queenctl` end-to-end suite, which needs the Go workspace and `QUEEN_E2E=1` | client lanes |
+| `cpp` | `test_retry429`, `test_kv_timers` and `test_conflation` (broker-free), then `test_client` against the broker | client lanes |
+| `laravel` | the PHP client: `phpunit --testsuite Unit` first (broker-free, and the half that pins the exact JSON wire shape), then the `Integration` testsuite | client lanes |
+| `rust-client` | `cargo test` in `clients/client-rust`: the lib unit tests, then each integration binary in turn. `QUEEN_TEST_URL` turns the integration tests on, and `QUEEN_TEST_STRICT=1` makes skipping them a failure | client lanes |
+| `rust` | the broker's own tests, `cargo test --locked` in `server/`: the in-process unit tests (the state machine, codecs, encryption, frames) and `tests/embedded_raft_smoke.rs`, which runs the embedded `queen::Broker` on a data directory under the temporary folder. No stack | `unit` |
+| `tenancy` | two-tenant isolation with the trusted tenant header | `tenanted`, and `ha-tenanted` when `ha` is asked for |
+| `http` | every kv and timer route driven at the raw HTTP wire with no SDK in the way: the executable specification the SDK suites are read against | `single` |
+| `conflation` | the conflation end-to-end scenarios at the raw HTTP wire | `single` |
+| `txnsemantics` | a transaction's all-or-nothing at the raw HTTP wire: a lost kv precondition rolls back the push and the timer, and the results stay index-aligned | `single` |
 
-Environment-variable naming diverges between suites. The JavaScript suite reads
-`QUEEN_SERVER_URL`, the Go and Python streams tests read `QUEEN_URL`, the CLI reads
-`QUEEN_SERVER`. Each runner's entrypoint maps one canonical set
-(`QUEEN_HTTP_URL`, `QUEEN_PG_*`) onto whatever its suite actually reads. Two of those mappings
-are the difference between running and silently passing: the CLI suite's `TestMain` exits 0
-having run nothing without `QUEEN_E2E=1`, and the Go streams tests target localhost and skip
-if only `QUEEN_SERVER_URL` is set.
+The client lanes are `single` and `tenanted` by default, plus `ha` when it is asked for.
+
+Each runner's entrypoint maps one canonical variable, `QUEEN_HTTP_URL`, onto whatever its suite
+reads: `QUEEN_SERVER_URL` for JavaScript, both `QUEEN_SERVER_URL` and `QUEEN_URL` for Go and Python,
+`QUEEN_SERVER` for the CLI, `QUEEN_TEST_URL` for the Rust client. Two of those mappings are the
+difference between running and silently passing: the CLI suite's `TestMain` exits 0 having run
+nothing without `QUEEN_E2E=1`, and the Go and Python streams tests read `QUEEN_URL`, not
+`QUEEN_SERVER_URL`.
 
 ## Topologies
 
 | Topology | Stack | `QUEEN_TENANCY_HEADER` |
 | --- | --- | --- |
-| `single` | one PostgreSQL, one broker | off |
-| `ha` | one PostgreSQL, `queen-a` and `queen-b` as a framed-TCP mesh pair; client suites hit `queen-a` | off |
-| `tenanted` | the `single` stack, but the broker starts with native tenant scoping on while the suite sends **no** tenant header | on |
-| `ha-tenanted` | the `ha` pair with the flag on. Substrate for the `tenancy` suite only. | on |
+| `single` | one broker, a single raft voter (the local replicator) | off |
+| `tenanted` | the `single` stack, with native tenant scoping on while the suite sends **no** tenant header | on |
+| `ha` | three brokers as one cluster (`QUEEN_RAFT_REPLICATOR=openraft`, node ids 1 to 3, one `QUEEN_RAFT_PEERS` list, a shared `QUEEN_RAFT_TOKEN`); the client suites talk to `queen-1`, leader or follower. Opt-in: `--topo single,ha` | off |
+| `ha-tenanted` | the `ha` cluster with the flag on. Substrate for the `tenancy` suite only | on |
+
+`raft1` is still accepted, as an alias of `single`.
+
+Every broker runs with `RETENTION_INTERVAL=5000` pinned, because the CLI suite's retention tests
+size their wait from `QUEEN_RETENTION_INTERVAL_MS` in the runner, which has to say the same number.
+Two more settings exist for the tenant header. `QUEEN_KV_TRUSTED_PROXY=1` satisfies the boot
+interlock that refuses the header without it. `QUEEN_KV_REQUIRE_GRANT` is off
+(`QUEEN_TEST_KV_REQUIRE_GRANT=true` turns it on): with the header on it would otherwise default to
+true, every kv call of the `tenanted` lane would answer 403 for want of a grant, and that lane could
+never match `single`.
 
 The `tenanted` lane exists to prove a negative. Turning native tenant scoping on must change
-nothing for a client that sends no tenant header: that is the default-tenant path, and it is
-what every cloud cell serves. So `run.sh` runs the unmodified suite on both lanes and compares
+nothing for a client that sends no tenant header: that is the default-tenant path. So `run.sh`
+runs the unmodified suite on both lanes and compares
 them, printing a `TENANCY PARITY` verdict. The exit code is the hard gate; because an exit code
 is coarse (99 of 112 and 100 of 112 are both `rc=1`), it also parses each suite's printed pass
 tally where one exists and compares that too. A divergence fails the run **in either
 direction**. A behaviour change caused by the flag is a regression even when the flag-on side
 is the greener one.
 
-The `tenanted` and `ha-tenanted` lanes reuse the `single` and `ha` compose files respectively,
-with `QUEEN_TEST_TENANCY` exported by `run.sh`. Duplicating the stack definitions would let
-the two lanes drift, which is exactly what the parity gate exists to catch.
+The `tenanted` and `ha-tenanted` lanes reuse the `single` and `ha` compose files, with
+`QUEEN_TEST_TENANCY` exported by `run.sh`. Duplicating the stack definitions would let the two
+lanes drift, which is exactly what the parity gate exists to catch.
 
 ## Isolation
 
-Each pair of suite and topology is its own Compose project, so it gets a private network and
-its own PostgreSQL and broker. This is not tidiness. The JavaScript, Go and Python suites all
-wipe the *same* test-queue name patterns (`test-%`, `edge-%`, `pattern-%`, `workflow-%`), and
-the CLI suite flips broker-global maintenance mode. On a shared stack they would corrupt each
-other's results. Parallelism is therefore per stack, four at a time by default (`-j N`, or
-`QUEEN_TEST_MAX_PARALLEL`).
+Each pair of suite and topology is its own Compose project, with its own network, broker or brokers,
+and data volumes. This is not tidiness: the suites share test-queue name patterns, and on a shared
+stack they would corrupt each other's results. Parallelism is therefore per stack, four at a time by
+default (`-j N`, or `QUEEN_TEST_MAX_PARALLEL`).
 
 ## How readiness is gated
 
-The runtime broker image is `debian:bookworm-slim` carrying only the `queen` binary and none
-of the tooling a healthcheck would need, in particular no `curl`. So readiness cannot be a
-Compose healthcheck on the broker; it lives in the runner, which does have `curl`. Every runner
-entrypoint calls
+The runtime broker image carries no probe tooling, so readiness is not a Compose healthcheck on the
+broker; it lives in the runner, which has `curl`. Every runner calls
 `test/runners/common/wait-for-broker.sh` first, which blocks on `curl -fsS` against each URL in
-`QUEEN_WAIT_URLS` until it succeeds, up to `QUEEN_WAIT_TIMEOUT` seconds (default 180), and
-exits 97 on timeout.
-
-That gate is stronger than it looks. The broker applies `schema.sql` and every stored procedure
-*before* it binds its HTTP listener, and `/health` performs a real database round-trip and
-answers 503 while PostgreSQL is unreachable. A 200 from `/health` therefore means broker plus
-PostgreSQL plus schema, all three, with no init SQL to mount.
+`QUEEN_WAIT_URLS` until it succeeds, up to `QUEEN_WAIT_TIMEOUT` seconds (default 180), and exits 97
+on timeout. A broker's `/health` answers `503` (`"status":"settling"`) until its state machine is
+open and a leader is known, and `200` from then on. On `ha` the runner waits for all three nodes.
 
 ## Running a subset
 
 <Steps>
 
-1. One suite, all its topologies.
+1. One suite, all its default topologies.
 
    ```bash
    test/run.sh --suite js
@@ -139,13 +144,19 @@ PostgreSQL plus schema, all three, with no init SQL to mount.
    test/run.sh --suite js --topo single,tenanted
    ```
 
-4. The two-tenant isolation suite, which brings its own topology.
+4. A suite on the three-node cluster as well.
+
+   ```bash
+   test/run.sh --suite js --topo single,ha
+   ```
+
+5. The two-tenant isolation suite, which brings its own topology.
 
    ```bash
    test/run.sh --suite tenancy
    ```
 
-5. Leave the stacks up afterwards to poke at them.
+6. Leave the stacks up afterwards to poke at them.
 
    ```bash
    test/run.sh --suite go --keep
@@ -153,53 +164,26 @@ PostgreSQL plus schema, all three, with no init SQL to mount.
 
 </Steps>
 
-`--topo` filters only the client lanes; `mesh` and `tenancy` always supply their own topology.
-Logs for every cell land in a temporary directory printed at the start of the run, and the
-tail of every failing cell is echoed at the end.
+Logs for every cell land in a temporary directory printed at the start of the run, and the tail of
+every failing cell is echoed as it fails and again at the end.
 
-## What the tenancy suite actually asserts
+## What the tenancy suite asserts
 
-`test/runners/tenancy/tenancy-check.sh` drives the HA pair directly with the trusted
-`x-queen-tenant` header and no proxy in the picture. Every scenario deliberately uses the *same*
-queue name, the *same* partition name and the *same* consumer-group name for both tenants, with
-traffic on both brokers, so shared-name collisions are the default rather than the exception.
-It checks that queue identity and configuration are per-tenant and read back consistently on
-both brokers; that no message crosses tenants; that a foreign partition id cannot advance
-another tenant's cursor; that deduplication keys are per-tenant while within-tenant
-deduplication still fires; that listings are scoped; that a consumer-group *name* shared by two
-tenants keeps independent cursors; that one tenant's claim-and-ack cannot hide the other's
-pending message through the in-process hot-list ring; and that a push by one tenant delivers
-nothing to another's parked long poll.
+`test/runners/tenancy/tenancy-check.sh` drives the brokers directly with the trusted
+`x-queen-tenant` header and `QUEEN_TENANCY_HEADER=true`, with no proxy in the picture. Every
+scenario uses the *same* queue name, the *same* partition name and the *same* consumer-group name
+for both tenants, with traffic through both of its URLs: two nodes of the cluster on `ha-tenanted`
+(a follower forwards to the leader, so the traffic crosses nodes), the single node twice on
+`tenanted`. It checks that queue identity and configuration are per tenant; that no message crosses
+tenants; that a foreign partition id cannot advance another tenant's cursor; that deduplication keys
+do not collide across tenants; that listings are scoped; that a consumer-group name shared by two
+tenants keeps independent cursors; that one tenant's claim and ack cannot hide or delay the other's
+message under the same names; and that one tenant's push delivers nothing to another's parked long
+poll.
 
 It also refuses to pass vacuously. A probe up front configures one queue name for two tenants
 with different lease times and aborts if the broker does not keep them apart, so the lane can
 never "pass" by comparing the default tenant with itself.
-
-Expected-but-harmless crosstalk is printed as `note` lines rather than asserted, because it is
-wasted work and not a correctness property: PostgreSQL is the authority on those paths and
-every stored-procedure call carries the tenant, so the cost is a re-query, not a leak.
-
-## What is green on this tree
-
-Verified green: the broker's in-process unit tests, `queen_proxy`'s own unit tests, the C++
-client suite plus its 14 proxy-contract assertions, the `mesh` suite, the `tenancy` suite at 45
-assertions and 0 failures, the JavaScript unit tests at 91 of 91, and the Go
-`./streams/...` package at 13 of 13. The core messaging surface (push, pop, ack, transactions,
-deduplication, consumer groups, dead-letter queue, subscription modes, watermarks and the ack
-window) is green in five languages.
-
-Two failures are known and deterministic: `TestGateTokenBucketBasic` in the Go client, and
-`TestLoad_BenchSmoke` in the CLI, which is a benchmark deadline rather than a semantic check.
-Streaming window arithmetic has been the noisy part of the suite historically; this site
-therefore makes no per-test verification claim about window arithmetic, and the pages that show
-streams do not claim a specific test proves them.
-
-<Aside type="note">
-One count in the tree is stale and will mislead you. `test/README.md` and a comment in
-`tests.yml` still say the `rust` suite is "50 in-process unit tests"; counting `#[test]`
-and `#[tokio::test]` attributes under `server/src` gives 549 today. `queen_proxy`'s suite is
-**not** part of `test/run.sh` at all. Run it with `cargo test` inside `proxy/`.
-</Aside>
 
 ## A defect in the harness
 
@@ -223,35 +207,23 @@ Two consequences for anyone reading a green matrix:
   suites that print a tally, a truncated run shows up as a tally mismatch rather than as a
   silent pass. Suites that print no tally have no such backstop.
 
-The fix is to assert on the runner's own printed summary rather than on the Compose exit code.
-Until then, treat the matrix as a fast screen and the per-cell logs as the evidence.
-
 ## In CI
 
-`.github/workflows/tests.yml` is the same harness. It compiles the broker once into an artifact
-so the matrix cells load an image instead of recompiling Rust in every cell, then runs one cell
-each for `js`, `go`, `py`, `cli`, `cpp`, `rust-client`, `mesh` and `http` with
-`test/run.sh --suite <name> --no-build-broker -j 1`; the `laravel`, `tenancy` and `conflation`
-suites run locally only. The broker's unit tests run natively in their own job with
-`cargo test --manifest-path server/Cargo.toml --locked`, and three more jobs cover what the
-matrix cannot: the Rust client and `queen-protocol` unit tests plus `rustfmt` and `clippy`, a
-`cargo check` on the client's declared MSRV (1.86), and one on the server's (1.88) that also
-proves the lean `--no-default-features` library shape still builds.
-
-No other workflow runs tests. The C++-era `cli.yml` and `cpp-server-build.yml` are deleted;
-the `cli` matrix cell above is where `queenctl`'s suite runs now, against the broker built
-from the same tree. What remains beside `tests.yml` is `docker-build.yml`, `release-cli.yml`
-and the docs site's `docs.yml`, none of which executes a test suite.
+`.github/workflows/tests.yml` is the same harness. It builds the product image once, from the root
+`Dockerfile`, and shares it as an artifact, so the matrix cells load an image instead of compiling
+Rust in every cell. It then runs one cell each for `js`, `go`, `py`, `cli`, `cpp`, `laravel`,
+`rust-client` and `http` with `test/run.sh --suite <name> --no-build-broker -j 1`; the `tenancy`,
+`conflation` and `txnsemantics` suites run locally only. The broker's unit tests run natively in
+their own job (`cargo test --manifest-path server/Cargo.toml --locked`). The other jobs cover what
+the matrix cannot: the PHP client's unit suite on PHP 8.3 and 8.4 and its Redis integration, the
+Laravel supervisor harness, the unit tests of `queen-protocol`, the Rust client and the supervisor
+with `rustfmt` and `clippy`, the Kafka facade's own tests, and `cargo check` on each declared
+minimum Rust version: 1.86 for the client, 1.88 for the supervisor and for the broker, whose check
+also proves the lean `--no-default-features` library still builds.
 
 ## Deeper gates, run by hand
 
-- `server/mesh-verify.sh` builds its own debug binary and drives two brokers on localhost to
-  check cross-replica wake latency, dead-peer detection and reconnection. The `mesh` suite only
-  asserts the pair is connected; this is the behavioural gate.
-- `proxy/scripts/isolation-smoke.sh` runs two-tenant isolation *through* the proxy
-  against the development cell, asserting on response content rather than status codes, and
-  covering blocked operator surfaces, API-key scopes, revocation, storage quota and meters.
-  With `QUEEN_PROXY_ENFORCE=true` it adds live 429 checks; in shadow mode those are reported as
-  counted skips, never as silent passes.
-- `proxy/scripts/sdk-smoke/run.sh` drives the JavaScript, Python and Go SDKs through the
-  proxy.
+`test/jepsen/` is a Jepsen harness (Clojure, `lein run test`) run from a control node against a
+cluster of test nodes. `test/jepsen/run-matrix.sh` runs a list of tests one after another, one line
+of `lein run test` arguments per test, and appends one summary line per test: valid, invalid,
+unknown or crashed, with the path to its store and its log.

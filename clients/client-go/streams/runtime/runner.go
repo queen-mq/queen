@@ -166,8 +166,8 @@ type Runner struct {
 	nowMs func() int64
 	// partLocks serialises the pop/cycle loop against the idle-flush goroutine
 	// per partition. Both paths do read(state) -> compute -> commit against the
-	// same (query_id, partition_id) rows; the server's advisory lock only
-	// serialises the COMMITS, so an unsynchronised flush can re-emit a window
+	// same (query_id, partition_id) rows; the broker serialises only the
+	// COMMITS, so an unsynchronised flush can re-emit a window
 	// the cycle just emitted+deleted (duplicate) or clobber a freshly-reduced
 	// accumulator (drop). Guarded by mu.
 	partLocks map[string]*sync.Mutex

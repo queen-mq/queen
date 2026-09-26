@@ -23,7 +23,7 @@
  * become the first.
  *
  * Like its siblings it serves its own responses from an in-process
- * httplib::Server, so it needs neither a broker nor Postgres:
+ * httplib::Server, so it needs no broker:
  *
  *   make ephemeral && ./bin/test_ephemeral
  *

@@ -65,9 +65,9 @@ json messages = client.queue("orders").group("billing").batch(10).pop();
 ```
 
 The queue and the partition are created by the push. It takes a `std::vector<json>` and returns
-the broker's array, one entry per item, each carrying a `status` of `queued`, `duplicate`,
-`buffered` or `failed`; supply your own `transactionId` and a retry inside the dedup window
-writes nothing a second time. `pop()` leases a batch back.
+the broker's array, one entry per item, each carrying a `status` of `queued`, `duplicate` or
+`error`; supply your own `transactionId` and a retry inside the dedup window writes nothing a
+second time. `pop()` leases a batch back.
 
 ## Consume
 

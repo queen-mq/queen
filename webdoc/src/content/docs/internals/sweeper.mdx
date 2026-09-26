@@ -1,209 +1,81 @@
 ---
-title: Sweeper internals
-description: "One background component with two clocks: a due-driven timer fire, a slow KV prune, no leader election, SKIP LOCKED everywhere, shards that spread contention without partitioning responsibility, and a local wake whose net is the sleep ceiling."
+title: Background loops
+description: "What runs in the background on a 2.0 node: four leader steps planned into the replicated log (request-id expiry, KV expiry, the timer fire, retention), no lease sweep, and the loops each node runs on its own (queue-log reclaim and sealing, the ephemeral backstop, the dashboard collector)."
 type: concept
 tier: internals
 sidebar:
   order: 14
 sourceOfTruth:
-  - server/src/sweeper.rs
-  - server/src/notify.rs
-  - server/src/handlers/mod.rs
-  - server/sql/procedures/025_log_timers.sql
-  - server/sql/procedures/026_kv_sweeper.sql
-  - server/src/config.rs
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+  - server/src/rsm/batcher.rs
+  - server/src/rsm/planner/kv.rs
+  - server/src/rsm/planner/timers.rs
+  - server/src/rsm/maintenance.rs
+  - server/src/rsm/apply.rs
+  - server/src/rsm/store/rows.rs
+  - server/src/rsm/qlog/set.rs
+  - server/src/ephemeral.rs
+  - server/src/main.rs
+  - server/src/rsm/dashboard/collector.rs
 ---
 
-The sweeper is one background task that does three jobs: it fires due timers out of `queen.log_timers`
-into the log, it prunes expired rows out of `queen.kv`, and it runs the in-RAM backstop of the
-ephemeral queue family (lease expiry, ttl head-drop and implicit-queue collection on the rings nobody
-is touching). It is spawned on every broker, because the surfaces it serves are on every broker.
+There is no sweeper task on a 2.0 node. Background work comes in two kinds, split by what it
+changes:
 
-<Aside type="note">
-`QUEEN_SWEEPER=false` is the one boot-time knob left in this area, and it decides whether this task is
-spawned, not whether the surfaces exist. With it off keys are never pruned and timers never fire: they
-are not lost, they wait, and the choice is logged at boot. An idle ephemeral ring also stops
-reclaiming, though nothing is served wrongly: expiry, ttl and GC all run again on the next touch. It
-is for a cell whose maintenance is being carried elsewhere, and for the tests that stand in for the
-sweeper themselves.
-</Aside>
+- **Work that changes replicated state** is planned by the leader, in the same batcher cycle as the
+  client commands, and travels in the replicated log like a client write. Every node applies the same
+  effects, so a follower never sweeps on its own and two nodes never race over one row.
+- **Work on one node's own files or memory** runs on every node, on its own clock, and never enters
+  the log.
 
-## Two clocks, and the asymmetry is a principle
+## Leader steps
 
-A late fire is product latency and the customer sees it. A late prune is invisible: `kv_live_v1`
-already hides an expired row from the first read after its instant, so nothing about the answers
-changes, and the only cost is table size.
+| Step | Cadence | Bound per step | Effects |
+| --- | --- | --- | --- |
+| Request-id expiry | every 10 s | 4096 outcomes | `RequestIdsExpire`: forgets the recorded outcomes older than `QUEEN_RAFT_REQUEST_ID_WINDOW_S` (default 60) |
+| [KV expiry](/internals/kv) | `QUEEN_RAFT_KV_SWEEP_MS` (default 1000) | `QUEEN_RAFT_KV_SWEEP_LIMIT` keys (default 512) | one `KvDelete` per expired key |
+| [Timer fire](/internals/timers) | `QUEEN_RAFT_TIMER_TICK_MS` (default 50; `0` never), and every cycle that plans a timers command | `QUEEN_RAFT_TIMER_FIRE_BATCH` timers (default 256) and `QUEEN_RAFT_TIMER_FIRE_MAX_BYTES` (default 4 MiB) | the pushes, then a `TimerDelete`, a `TimerBackoff` or a dead letter per timer |
+| [Retention](/internals/retention) | `RETENTION_INTERVAL` ms (default 5000) | `RETENTION_BATCH_SIZE` effects (default 1000) | `Watermark`, `PartitionDelete`, `DeleteChunk`, `TraceExpire` |
 
-So the fire is **due-driven**, computed from the nearest `visible_at` the server reports, and the
-prune has its own slow sub-cadence, `QUEEN_KV_EXPIRE_EVERY_MS` (default 1000 ms) with a per-call
-budget of `QUEEN_KV_EXPIRE_BATCH` rows (default 1000). The usage rollup that feeds the quota gauges
-runs on a third, much slower gate, `QUEEN_KV_USAGE_EVERY_MS` (default 300000 ms).
+The recorded outcomes are what let a command that was forwarded or retried after a leader change,
+with the same request id, get the first attempt's answer instead of being applied twice.
 
-The shape has an in-house precedent: `retention.rs` gives empty-partition cleanup its own slow clock
-under the same rule, which is that a phase whose cost tracks **space** rather than **work** should not
-be paced by the phase that tracks work.
+What the four steps share:
 
-That invisibility is also why the prune has an alarm attached to it. An unpruned table is a failure
-that disguises itself as health: reads stay perfectly correct while the heap grows, and
-`vacuum_truncate = off` on `queen.kv` means the heap never gives pages back, so the peak is permanent.
-`kv_expire_step_v1` therefore computes the number of expired-but-present rows on every pass, including
-the passes where it deletes nothing.
+- **Only the leader plans them**, and only while its pipeline can take another entry. On a follower
+  the ticks plan nothing.
+- **They are planned after the cycle's client commands**, against committed state plus the entries
+  still in flight. A client write in the same cycle wins: a key it rewrote is not swept, a timer it
+  cancelled does not fire, a partition it pushed to is not deleted.
+- **Each step is one command** with its own request id, added to the cycle's entry and answered by
+  nobody. It commits, applies and replays exactly like a client write.
+- **A step that finds more work than its bound** runs again in the next cycle; that holds for
+  request-id expiry, the fire and retention. The KV sweep waits for its next tick.
+- **A cycle that cannot read the store** leaves the KV sweep, the fire and retention to their next
+  tick; request-id expiry stays due.
 
-## Leaderless, which is the opposite of retention
+## No lease sweep
 
-`retention.rs` takes transaction-scoped advisory lock `737001` and exactly one replica sweeps per
-cycle. The stats reconciler takes `737002`. The sweeper is deliberately the opposite on both axes: due-driven
-instead of interval-driven, and **leaderless**, because every replica has to drain in parallel while
-sharing the work.
+Message leases expire without a background step. A claim judges a lease against the state machine's
+clock, so a cursor whose lease has passed is claimable by the next pop. When a pop leases a
+partition, apply records the partition as ready for that consumer group again at the lease's
+expiry, which is how the next pop after that instant finds it.
 
-The sharing mechanism is `FOR UPDATE ... SKIP LOCKED`, not an election. The claim takes rows nobody
-else holds, the fire verifies its own claimed rows the same way, and the KV prune deletes under it as
-well. That is what makes three of the four phases vertices that **never wait**, and a vertex that
-never waits cannot be an edge of the wait-for graph, whatever order it visits. It is the reason
-`SKIP LOCKED` is written on the prune rather than a plain `FOR UPDATE` that would "only block for a
-moment": the prune runs continuously against the space that the transaction wire holds the longest.
+## Node-local loops
 
-The sweeper also takes **no advisory lock at all**. It consumes no number, so it cannot close a cycle
-through the advisory space, and `737003` stays reserved for the work that claimed it first. Whoever
-adds one later has to take it before touching `queen.kv` or `queen.log_timers`, or not take it.
-
-## Shards spread contention, they do not partition responsibility
-
-Both tables carry a generated `shard` column, `hashtextextended(name, 0) & 63`, fixed at 64
-permanently. `QUEEN_SWEEPER_SHARDS` does not exist and must not.
-
-Every broker scans **every** shard. The only thing derived from a process's own identity is which
-shard it **starts** at, rotated on each cycle, so that N brokers do not all queue on the same head of
-the index. Coordination is entirely `SKIP LOCKED`.
-
-The reason is a failure mode rather than elegance. Any ownership scheme orphans the shards of a broker
-that dies, and an orphaned timer never fires, which is the worst failure this feature can have. Two
-brokers doing a little redundant scanning is a cost; a timer that silently never arrives is a defect.
-
-The shards buy two things in exchange: a wake-up computation of fixed cost, 64 single-row index seeks
-instead of a scan, and a starting point that differs per broker.
-
-## The cycle
-
-```text
-A. PROBE       one read-only call, one server now(), returns nextInMs, due count, lateness
-B. DRAIN       claim and fire in the SAME iteration, under a lease budget
-C. SUB-CLOCKS  usage rollup, then KV prune, then the ephemeral backstop, each on its own gate
-D. SLEEP       due-driven, clamped, interruptible by the local wake
-```
-
-**Claim and fire in the same iteration.** The naive form claims `QUEEN_SWEEPER_CYCLE_MAX_ROWS`
-(default 5000) in batches of `QUEEN_SWEEPER_CLAIM_BATCH` (default 200) and then fires them. When fires
-are slow, which is exactly what happens under load because they contend for partitions with the
-pushes, the first batch's lease expires before the last fire commits. Another broker re-claims those
-rows, this broker's fire finds different tokens, every packed segment comes back stale and is thrown
-away, and two brokers steal work from each other while lateness climbs and the fired count stays low.
-That is a livelock, and it is observable only as "the sweeper is slow". The ceiling that prevents it
-is a budget: stop claiming once this pass has spent half of `QUEEN_SWEEPER_LEASE_MS` (default 30000).
-
-**The fire transaction is capped in bytes, not in rows.** Retention's lesson does not transfer: its
-step cost is per row, so a bigger batch absorbs no more work and only stalls pushes. Here the cost is
-per byte of WAL, so the cap is `QUEEN_SWEEPER_MAX_FIRE_BYTES` (default 8 MiB) and a batch over it
-splits into several calls, each its own transaction.
-
-**An empty claim backs off with jitter.** When the probe says work is due but the claim takes nothing,
-another broker is draining it. Returning to the 5 ms floor is a spin: five brokers, one burst, one
-drains and four probe two hundred times a second each, which is roughly eight hundred extra queries
-per second landing exactly while the fire is writing WAL. The empty claim lands in a jittered 25 ms to
-200 ms band instead, and the floor applies only when work is genuinely available.
-
-**The ephemeral backstop is the phase without a database.** Every RAM-class ring already runs its
-lease expiry, its ttl head-drop and its implicit GC opportunistically on every touch, so this pass
-only ever finds work on rings nobody is touching, and for those the deadline that matters is the
-lease, which the local wake already rings to the millisecond. It runs at most once a second, a
-constant rather than a knob, because it is not a lever on anything an operator can observe: one
-second is simply the floor under a lost hint. It takes no connection, no lane slot and no lock
-outside the engine's own maps, and it deliberately does not feed the idle backoff, whose job is to
-keep an empty timer table from spinning the loop.
-
-The sleep itself is computed from four bands and nothing else, with no clock and no randomness inside
-the function, so both ends of every band are assertable in a test rather than sampled and hoped over.
-
-| Knob | Default | What it bounds |
+| Loop | Cadence | What it does |
 | --- | --- | --- |
-| `QUEEN_SWEEPER_MIN_SLEEP_MS` | 5 | Floor when there is work. A zero here would be a busy wait holding a maintenance slot and a pooled connection |
-| `QUEEN_SWEEPER_MAX_SLEEP_MS` | 1000 | Ceiling while work exists. See the next section: this **is** the recovery window |
-| `QUEEN_SWEEPER_IDLE_MAX_SLEEP_MS` | 30000 | Cap on the doubling backoff once both tables have been empty for `QUEEN_SWEEPER_IDLE_AFTER_CYCLES` cycles |
-| `QUEEN_SWEEPER_PARALLELISM` | 1 | Concurrent fires. The default is a decision, not caution: a fire is a writing transaction holding partition locks, so two of them on the same partitions contend for the serialiser the pushes use |
+| Queue-log reclaim | each `RETENTION_INTERVAL` tick, on every node | unlinks or rewrites the sealed queue-log files the watermarks made dead ([Retention](/internals/retention)); `QUEEN_QLOG_RECLAIM=false` turns it off |
+| Queue-log idle pass | at most every 5 s, on the queue-log writer's thread when it writes | seals an active file whose data is older than `QUEEN_QLOG_SEAL_AGE_S` (default 600, `0` never) and removes the directory of a per-queue log with nothing left, at most 64 seals and removals per pass |
+| Ephemeral backstop | once a second | expires leases, drops messages past their ttl and collects idle implicit queues on the ephemeral rings nobody touched; a ring does the same on every touch, so a busy queue needs nothing from it |
+| Dashboard collector | `METRICS_FLUSH_MS` (default 60000) | writes this node's rows into `dash.db` ([Counters, rates and lag](/internals/stats)) |
 
-## The wake is local, and the sleep ceiling is its net
+Ephemeral queues keep their contents in one node's memory, outside the replicated log, which is why
+their backstop is local.
 
-Scheduling a timer rings an in-process waker: an atomic holding the nearest locally committed delivery
-instant, plus a notification. Both seams that can create a timer, the HTTP handler and the transaction
-wire, ring it **after** the commit and never before, because a wake for a transaction that then rolls
-back teaches the loop that work exists which does not. The hint applies only when the new instant is
-earlier than the one already promised, so scheduling a million timers for next week produces exactly
-one wake. A hint that arrives during a sleep cuts it short and resets the idle backoff, which is what
-makes a 30 s empty-table sleep safe to have at all.
+## The timer backoff knobs
 
-The waker lives in the notifier module, beside the wake gates the long-poll parks on, and not in the
-sweeper's own module. The reason is the twin module lists of the binary and the library: the sweeper
-is compiled into the binary alone, since the embedded broker runs none, while both seams are compiled
-into the library as well, and a handler that named the sweeper would not build there. That split is
-why nothing rang the waker from 1.0.3 through 1.5.1: a timer scheduled while the table had been empty
-waited out the idle backoff, up to `QUEEN_SWEEPER_IDLE_MAX_SLEEP_MS`, whatever its delay.
-
-**The fire announces its commit the way a push does.** Landing a frame in the log is not the same as
-delivering it. The queue-scoped pop routes consult their group rings on the [hot-list](/internals/hotlist),
-not the log, so a partition no ring was told about stays invisible until the periodic reseed
-(`QUEEN_HOTLIST_RESEED_MS`, 30 s), and a parked long-poll is woken only by that reseed's promotion.
-Every path that lands frames therefore announces after its commit through one shared function: the
-push, the streams cycle, the spool drain and the fire, which announces every segment the procedure
-reports as fired. The partition is marked on every group ring of the queue, the local wake is
-coalesced into the hot-list's wake tick, and peers get the batched message-available frame. From
-1.0.3 through 1.5.1 the fire only counted its verdicts, and a fired timer reached a parked consumer
-about 30 s after it fired; the pinned partition route, which reads the log directly, never noticed.
-
-There is deliberately no `LISTEN`/`NOTIFY`. It would need a dedicated connection held open forever
-outside the pool, which the pool does not offer, and PostgreSQL's notify queue is a shared area that,
-when full, makes the **committing** transaction fail. A failure of the wake-up would become a failure
-of the user's schedule. A wake-up must be losable and must never do damage.
-
-There is also no mesh frame for due timers. What makes that safe is `QUEEN_SWEEPER_MAX_SLEEP_MS`: with
-the local wake reaching only this process, one second is the worst-case delay for a timer scheduled on
-a different broker. That is correct rather than merely tolerable, because `deliverAt` is a floor and
-never an appointment. Nobody may tie the correctness of this feature to the mesh.
-
-## Priority, and what the sweeper is allowed to drop
-
-Internal priority, from the top: **fire, then usage rollup, then KV prune**. It sheds from the
-bottom. The ephemeral backstop sits outside this ladder entirely: every rung is a response to
-database pressure, and shedding a phase that costs the database nothing would relieve nothing while
-letting a cell under pressure stop reclaiming the one resource with no database behind it to absorb
-the overrun.
-
-The prune goes first because its cost is purely disk while reads stay correct. The rollup goes second
-because it is precision, not delivery. Both are allowed to be skipped entirely: on a configuration
-error, that is a SQLSTATE class 42, each degrades to off and the loop keeps serving, which is also why
-they live in their own file and why a broker boots and answers correctly without it.
-
-**The fire never switches itself off.** Under pressure it shrinks the batch and lengthens the sleep,
-and the visible result is a rising fire lag. Turning it off would convert a delay into what the
-customer reads as loss. The two operator kill switches are separate, one for scheduling and one for
-firing, because the halves have opposite costs: stopping the schedule is harmless and instant, while
-stopping the fire accumulates work that has already been promised.
-
-Two inherited rules are worth repeating because breaking either is silent. The task takes its
-admission slot **before** its connection, never the other way round, since inverting the two deadlocks
-the pool under load. And it runs in the maintenance lane, never the push lane.
-
-## Numbers on this page that are not measured
-
-The dated blocks in `001_log_schema.sql` are the house formula: a setting carries the date it was
-measured, the symptom that produced it, and the number observed. These carry no such block.
-
-| Number | Status |
-| --- | --- |
-| The cost of the usage rollup above roughly five million rows | Not measured. It is the number that decides the threshold beyond which the rollup has to degrade to sampling |
-| How many timers per second a machine sustains before autovacuum on `queen.log_timers` enters the profile | Not measured |
-| Autovacuum workers occupied by the two new tables in steady state | Not measured, against a global `autovacuum_max_workers` that defaults to 3. If it bites, the first symptom is the log slowing down with no visible culprit, so the number is worth having before a cell turns the feature on |
-| `fillfactor = 70` on both tables | By analogy with `queen.log_partitions`, not measured |
-
-Each is to be replaced with a measured number after the first soak on a test rig, in the style of those
-dated blocks, and never with one taken from a live stack.
+Four `QUEEN_SWEEPER_*` variables are still read, all by the fire step's backoff:
+`QUEEN_SWEEPER_BACKOFF_MIN_MS` (default 1000), `QUEEN_SWEEPER_BACKOFF_MAX_MS` (default 60000),
+`QUEEN_SWEEPER_TRANSIENT_BACKOFF_MS` (default 1000) and `QUEEN_SWEEPER_MAX_ATTEMPTS` (default 5).
+Their names come from 1.x; what they do is on [Timer internals](/internals/timers). No other
+`QUEEN_SWEEPER_*` variable is read.

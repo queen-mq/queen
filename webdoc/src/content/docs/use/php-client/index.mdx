@@ -60,7 +60,7 @@ $results = $client->queue('orders')
 ```
 
 The queue and the partition are created by that call. `execute()` returns the broker's array,
-one entry per item, each carrying a `status` of `queued`, `duplicate`, `buffered` or `failed`.
+one entry per item, each carrying a `status` of `queued`, `duplicate` or `error`.
 Pass your own `transactionId` and a retry inside the dedup window writes nothing a second time.
 
 ## Consume

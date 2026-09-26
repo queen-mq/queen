@@ -2,18 +2,21 @@
 #
 # compat/transactions -- the M9 TRANSACTIONS acceptance suite.
 #
-# It brings up its OWN stack: a throwaway Postgres, a debug broker and THREE
-# debug facades, because three of the checks need a facade configured
-# differently from the others and reconfiguring one mid-suite would make every
-# earlier result unreproducible.
+# It brings up its OWN stack: a debug broker (one raft node on a throwaway data
+# directory) and THREE debug facades, because three of the checks need a facade
+# configured differently from the others and reconfiguring one mid-suite would
+# make every earlier result unreproducible.
 #
 #   127.0.0.1:32912   the facade under test, single-node, 4 partitions
 #   127.0.0.1:32913   the same binary with QUEEN_KAFKA_NODE_ID set (scenario 7)
 #   127.0.0.1:32914   the same binary with the transaction caps at their floor
 #                     and 70 partitions per topic (scenario 6)
 #
-# Nothing it starts outlives it. The container name and every port are its own
-# and are overridable, so it can run beside compat/rig.sh.
+# Nothing it starts outlives it, and the broker's data directory is removed at
+# exit. Every port is its own and overridable, so it can run beside
+# compat/rig.sh. The broker's disk gate (QUEEN_RAFT_DISK_HIGH_PCT, 85 by
+# default) runs at 99.5 unless that variable says otherwise: a throwaway rig on
+# a developer disk is not what it protects.
 #
 #   protocols/queen-kafka/compat/transactions/run.sh              # everything
 #   protocols/queen-kafka/compat/transactions/run.sh s1 s3        # only those scenarios
@@ -31,7 +34,7 @@
 #   eos  A6   exactly-once consume-transform-produce with an induced crash
 #   go        a quick compat/go run, for the regression half of A11
 #
-# Requires docker, cargo, go and a JDK 17 or newer. The kafka-clients jars are
+# Requires cargo, go and a JDK 17 or newer. The kafka-clients jars are
 # fetched from Maven Central on first use and cached OUTSIDE the repository, the
 # same way compat/java-matrix does it; set JARS_CACHE to a populated directory
 # to run with no network.
@@ -40,13 +43,12 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../../../.." && pwd)"
 
-PG_HOST_PORT="${PG_HOST_PORT:-32910}"
 BROKER_PORT="${BROKER_PORT:-32911}"
 KAFKA_PORT="${KAFKA_PORT:-32912}"
 KAFKA_CLUSTER_PORT="${KAFKA_CLUSTER_PORT:-32913}"
 KAFKA_TIGHT_PORT="${KAFKA_TIGHT_PORT:-32914}"
-CONTAINER="${CONTAINER:-qkt-acc-pg}"
 PARTITIONS="${PARTITIONS:-4}"
+DISK_HIGH_PCT="${QUEEN_RAFT_DISK_HIGH_PCT:-99.5}"
 # Wider than MAX_TXN_OFFSETS (62) so one sendOffsetsToTransaction can exceed it.
 TIGHT_PARTITIONS="${TIGHT_PARTITIONS:-70}"
 KAFKA_VERSION="${KAFKA_VERSION:-4.3.1}"
@@ -66,6 +68,8 @@ done
 [ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(s2 s1 s3 s8 s6 s7 s4 eos go)
 
 LOGDIR="$(mktemp -d -t queen-kafka-txn.XXXXXX)"
+# The broker's whole state; removed at teardown, where the logs are kept.
+RAFT_DIR="$LOGDIR/raft"
 BROKER_LOG="$LOGDIR/broker.log"
 FACADE_LOG="$LOGDIR/facade.log"
 CLUSTER_LOG="$LOGDIR/facade-cluster.log"
@@ -89,16 +93,15 @@ cleanup() {
   if [ "$KEEP" = 1 ]; then
     echo
     echo "--keep: the stack is still up."
-    echo "  postgres : container $CONTAINER on 127.0.0.1:$PG_HOST_PORT"
-    echo "  broker   : pid ${BROKER_PID:-none}, http://127.0.0.1:$BROKER_PORT, log $BROKER_LOG"
+    echo "  broker   : pid ${BROKER_PID:-none}, http://127.0.0.1:$BROKER_PORT, data $RAFT_DIR, log $BROKER_LOG"
     echo "  facade   : pid ${fpid:-none}, 127.0.0.1:$KAFKA_PORT, log $FACADE_LOG"
     echo "  cluster  : pid ${CLUSTER_PID:-none}, 127.0.0.1:$KAFKA_CLUSTER_PORT, log $CLUSTER_LOG"
     echo "  tight    : pid ${TIGHT_PID:-none}, 127.0.0.1:$KAFKA_TIGHT_PORT, log $TIGHT_LOG"
-    echo "  tear down: kill ${BROKER_PID:-} ${fpid:-} ${CLUSTER_PID:-} ${TIGHT_PID:-}; docker rm -f $CONTAINER"
+    echo "  tear down: kill ${BROKER_PID:-} ${fpid:-} ${CLUSTER_PID:-} ${TIGHT_PID:-}; rm -rf $RAFT_DIR"
     exit $code
   fi
   say "tearing down"
-  # Only pids this script recorded, and only the container it named.
+  # Only pids this script recorded, and only the data directory it made.
   for pid in "$TIGHT_PID" "$CLUSTER_PID" "$fpid" "$BROKER_PID"; do
     [ -n "$pid" ] && kill "$pid" 2>/dev/null
   done
@@ -106,13 +109,12 @@ cleanup() {
   for pid in "$TIGHT_PID" "$CLUSTER_PID" "$fpid" "$BROKER_PID"; do
     [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
   done
-  docker rm -f "$CONTAINER" >/dev/null 2>&1
+  rm -rf "$RAFT_DIR"
   echo "logs kept at $LOGDIR"
   exit $code
 }
 trap cleanup EXIT INT TERM
 
-command -v docker >/dev/null || { echo "docker not found" >&2; exit 2; }
 command -v cargo  >/dev/null || { echo "cargo not found" >&2; exit 2; }
 command -v go     >/dev/null || { echo "go not found" >&2; exit 2; }
 command -v java   >/dev/null || { echo "java not found" >&2; exit 2; }
@@ -136,32 +138,16 @@ for d in com/github/luben/zstd-jni/1.5.6-10/zstd-jni-1.5.6-10.jar \
   fetch "$d" "$JARS" || exit 1
 done
 
-# --------------------------------------------------------------------- postgres
-say "postgres on 127.0.0.1:$PG_HOST_PORT (tmpfs, thrown away at exit)"
-docker rm -f "$CONTAINER" >/dev/null 2>&1
-docker run -d --name "$CONTAINER" \
-  -e POSTGRES_PASSWORD=postgres -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres \
-  -e PGDATA=/var/lib/postgresql/data/pgdata \
-  -p "$PG_HOST_PORT":5432 \
-  --tmpfs /var/lib/postgresql/data:rw,size=2g \
-  postgres:16 -c max_connections=400 >/dev/null || exit 1
-for _ in $(seq 1 60); do
-  docker exec "$CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break
-  sleep 1
-done
-docker exec "$CONTAINER" pg_isready -U postgres >/dev/null 2>&1 || {
-  echo "postgres never became ready" >&2; docker logs "$CONTAINER" | tail -20; exit 1; }
-
 # ----------------------------------------------------------------------- builds
 say "building the broker and the facade (debug)"
 ( cd "$REPO_ROOT/server" && cargo build ) || exit 1
 ( cd "$REPO_ROOT/protocols/queen-kafka" && cargo build ) || exit 1
 
 # ----------------------------------------------------------------------- broker
-say "broker on 127.0.0.1:$BROKER_PORT"
-PG_HOST=127.0.0.1 PG_PORT="$PG_HOST_PORT" PG_USER=postgres PG_PASSWORD=postgres \
-PG_DATABASE=postgres PORT="$BROKER_PORT" QUEEN_BIND_ADDR=127.0.0.1 \
-QUEEN_APPLY_SCHEMA=true DB_POOL_SIZE=32 LOG_LEVEL=info \
+say "broker on 127.0.0.1:$BROKER_PORT (one raft node, data in $RAFT_DIR)"
+mkdir -p "$RAFT_DIR" || exit 1
+QUEEN_RAFT_DIR="$RAFT_DIR" QUEEN_RAFT_DISK_HIGH_PCT="$DISK_HIGH_PCT" \
+PORT="$BROKER_PORT" QUEEN_BIND_ADDR=127.0.0.1 LOG_LEVEL=info \
   "$REPO_ROOT/server/target/debug/queen" > "$BROKER_LOG" 2>&1 &
 BROKER_PID=$!
 for _ in $(seq 1 90); do

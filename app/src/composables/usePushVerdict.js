@@ -4,36 +4,26 @@
 //
 // THE HTTP STATUS IS NOT THE OUTCOME. The broker answers 201 with a bare JSON
 // ARRAY of per-item results — `{index, message_id, transaction_id, queueName,
-// status, offset?}`, mixed casing and all (server/src/handlers/data.rs
-// `render_push_results`) — and only one of the five statuses means the message
-// is on the queue (crates/queen-protocol/src/push.rs `PushStatus`):
+// status, offset?}`, mixed casing and all (server/src/rsm/facade/real.rs
+// `render_push`) — and only one of its three statuses means the message is on
+// the queue:
 //
 //   queued     stored, and `offset` is its absolute position in the partition
 //   duplicate  the transaction id is already inside the queue's dedup window:
 //              NOTHING was written and the ids are the pre-existing message's
-//   buffered   the message is on the broker's on-disk spool: accepted, not in
-//              the queue, not consumable yet. TWO causes, and the status does
-//              not say which — push maintenance is on (`buffer_all`), or the
-//              database write failed and the broker spooled it instead and
-//              re-labelled the item (`handle_push`, RUSTFIX item 1)
-//   error      the database transaction that would have stored it failed
-//   failed     the store AND the spool write both failed — the only status
-//              that means the broker is holding nothing at all
+//   error      the broker refused the write for this item: nothing was written
 //
-// A modal that closed on 201 would report three different things as success,
-// two of which never reached the queue. Hence `pushVerdict`: one mapping, in
-// one place, that every entry point renders.
+// `buffered` and `failed` were 1.x statuses (its disk spool). The 2.0 broker
+// never answers them, so they are not in the table below and render like any
+// status this file does not know: never as a success.
 //
-// `buffered` and `failed` arrive BOTH ways: with 201 from `handle_push`, which
-// spools the items whose DB transaction failed and re-labels them, and with
-// 500 from `buffer_all` when a maintenance spool write failed. So the call
-// site hands this function the array it finds on the rejection as well as the
-// one it gets from a 2xx — and a 500 is not the signal, the status is.
+// A modal that closed on 201 would report a duplicate and an error as success,
+// and neither reached the queue. Hence `pushVerdict`: one mapping, in one
+// place, that every entry point renders.
 //
-// There is no per-item error TEXT to render: `ItemResult.status` is a
-// `&'static str` and `render_push_results` emits nothing beside it
-// (server/src/fusion.rs), so the sentences below are the dashboard's own and
-// the operator's next step after an `error` or a `failed` is the Messages list.
+// There is no per-item error TEXT to render: an item carries its status and
+// nothing beside it, so the sentences below are the dashboard's own and the
+// operator's next step after an `error` is the Messages list.
 //
 // Pure, and no import that reaches Vue or the alias-resolved shell: the node
 // test runner imports this file directly.
@@ -76,30 +66,12 @@ const VERDICTS = {
       'A message with this transaction id is already inside the queue’s dedup window, ' +
       'so this push stored nothing. The ids below belong to that existing message, not to a new one.',
   },
-  buffered: {
-    kind: 'warning',
-    title: 'Buffered on the broker, not on the queue',
-    detail:
-      'The broker put the message on its on-disk spool instead of the queue — either push ' +
-      'maintenance is on, or the database write failed and the broker rode it out. It is accepted ' +
-      'and it is replayed into the queue when the spool drains, but nothing can consume it yet: ' +
-      'check the maintenance switch and the broker’s database health. The transaction id below ' +
-      'is the handle that survives the spool — the replay mints the message its own id.',
-  },
   error: {
     kind: 'error',
     title: 'The broker did not store the message',
     detail:
-      'The database transaction that would have written it failed. Nothing was written, ' +
+      'The broker refused the write for this message. Nothing was written, ' +
       'so the same push can be sent again.',
-  },
-  failed: {
-    kind: 'error',
-    title: 'Not accepted — the message is lost',
-    detail:
-      'The broker could write the message neither to the database nor to its on-disk spool, so it ' +
-      'is holding nothing. This is the one push status that means the message is gone: send it ' +
-      'again once the broker is healthy.',
   },
 }
 
@@ -134,9 +106,8 @@ export function worstResult(results) {
  * 'success' | 'warning' | 'error' and only 'success' means the message reached
  * the queue.
  *
- * Takes the whole array (from a 2xx body, or from `ApiError.body` on the 500
- * that carries `failed` items) — never a single item — because "how many
- * results came back" is itself part of the verdict.
+ * Takes the whole array (the 2xx body) — never a single item — because "how
+ * many results came back" is itself part of the verdict.
  */
 export function pushVerdict(results) {
   if (!Array.isArray(results) || results.length === 0) {
@@ -175,15 +146,14 @@ export function pushVerdict(results) {
 }
 
 /**
- * `PushStatus::accepted()` (crates/queen-protocol/src/push.rs): the three
- * statuses where the broker took responsibility for the message, and so the
- * only ones whose ids name anything at all.
+ * The statuses where the broker took responsibility for the message, and so
+ * the only ones whose ids name anything at all.
  *
  * Exported rather than repeated in the modal because the rule is the point: a
  * message id printed beside “the message is lost” names a message that does
  * not exist, which is the class of lie this form exists to remove.
  */
-export const ACCEPTED_STATUSES = ['queued', 'duplicate', 'buffered']
+export const ACCEPTED_STATUSES = ['queued', 'duplicate']
 
 /** Does this status carry ids worth rendering? */
 export function showsIds(status) {
@@ -191,27 +161,12 @@ export function showsIds(status) {
 }
 
 /**
- * Does this status carry a MESSAGE id worth rendering?
- *
- * Not for `buffered`: the spool record has no message id (`WriteEvent`,
- * server/src/file_buffer.rs, carries queue/partition/tenant/transactionId/
- * payload and nothing else) and the drain mints a fresh one for every replayed
- * event (`build_segment`). The id the broker returns beside a buffered status
- * was minted to fill the response and will never identify a row. The
- * transaction id IS preserved through the spool, so that is the handle the
- * verdict points at.
- */
-export function showsMessageId(status) {
-  return showsIds(status) && status !== 'buffered'
-}
-
-/**
  * The offset to render for a result, or `null` when the broker allocated none.
  *
- * `render_push_results` OMITS the key rather than sending null whenever no
- * offset exists (buffered, failed, error, and every broker older than the
- * field), so the absent case must not fall through to `0` — position 0 is the
- * head of the partition, which is a claim about where the message landed.
+ * `render_push` OMITS the key rather than sending null whenever no offset
+ * exists (an `error` item, and every broker older than the field), so the
+ * absent case must not fall through to `0` — position 0 is the head of the
+ * partition, which is a claim about where the message landed.
  */
 export function offsetLine(item) {
   const off = item?.offset

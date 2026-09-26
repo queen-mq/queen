@@ -10,8 +10,8 @@
  *
  * After editing a marked region, regenerate the partials with
  * `pnpm --dir webdoc gen` or the docs CI check fails on drift. The queues used
- * here (orders, payments, invoices) are wiped by cleanupTestData in run.js
- * before every suite run, exactly like the test-% queues.
+ * here (orders, payments, invoices) start empty because every suite run gets a
+ * fresh broker (test/run.sh), exactly like the test-% queues.
  */
 
 export async function docsProduceAndConsume(client) {
@@ -65,8 +65,9 @@ export async function docsProduceAndConsume(client) {
 }
 
 export async function docsDeduplication(client) {
-    // The fixed transactionId below survives reruns because cleanupTestData
-    // purges log_txns for these queues before the suite starts.
+    // The fixed transactionId below survives reruns because every run gets a
+    // fresh broker (test/run.sh creates its data volume empty and destroys it
+    // with `down -v`), so no earlier run's dedup entry is ever there.
     // docs:start(js-push-dedup)
     const first = await client
       .queue('payments')

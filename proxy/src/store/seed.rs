@@ -1,6 +1,6 @@
-//! First boot of the single binary: what the Postgres migrations seed
-//! (002's plans, with 009's kv/timers/ephemeral families on) plus this cell,
-//! written into the KV layout once. Every node runs it at boot; the unique
+//! First boot of the single binary: the layout version, the default plans
+//! (with the kv/timers/ephemeral families on) and this cell, written into the
+//! KV layout once. Every node runs it at boot; the unique
 //! index of each row (`putIfAbsent` + `required`) makes exactly one write win
 //! and the rest no-ops, so it is safe to race.
 
@@ -20,7 +20,7 @@ fn now_us() -> i64 {
 /// The slug of the cell a single-binary node serves (it is its own cell).
 pub const SELF_CELL: &str = "local";
 
-/// 002_functions.sql's plan rows (≈402), features per 009.
+/// The default plan rows and their features.
 fn plans(now: i64) -> Vec<PlanDoc> {
     let fam = |extra: &[(&str, bool)]| {
         let mut f = json!({"kv": true, "timers": true, "ephemeral": true});
@@ -62,7 +62,7 @@ fn plans(now: i64) -> Vec<PlanDoc> {
 pub async fn seed(kv: &dyn KvBackend) -> Result<bool, KvError> {
     let now = now_us();
     let mut wrote = false;
-    let meta = MetaDoc { version: schema::SCHEMA_VERSION, ..Default::default() };
+    let meta = MetaDoc { version: schema::SCHEMA_VERSION };
     wrote |= once(kv, vec![kv::put_op(ns::META, &schema::key("schema"), &meta, Expect::Absent, Ttl::Forever, true)]).await?;
     for plan in plans(now) {
         wrote |= once(

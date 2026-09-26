@@ -101,10 +101,9 @@ var partitionDescribeCmd = &cobra.Command{
 var partitionSeekCmd = &cobra.Command{
 	Use:   "seek <queue> <partition>",
 	Short: "Seek a single partition's CG cursor to its end",
-	Long: `Server-side, partition-scoped seek only supports seek-to-end (the
-underlying SP queen.seek_partition_v1 has no timestamp argument). The
---to flag is therefore restricted to 'end'/'now'/'latest'. To seek to a
-timestamp, use 'queenctl cg seek' (queue-wide) instead.
+	Long: `Partition-scoped seek here only seeks to the end: the --to flag is
+restricted to 'end'/'now'/'latest'. To seek to a timestamp, use
+'queenctl cg seek' (queue-wide) instead.
 
 Server route: POST /api/v1/consumer-groups/:cg/queues/:q/partitions/:p/seek.`,
 	Args: cobra.ExactArgs(2),

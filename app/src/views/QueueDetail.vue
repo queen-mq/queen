@@ -451,9 +451,9 @@
               <span class="qd-config-hint">how long a lease is held</span>
             </div>
             <!-- The three the broker STORES and never READS (D2, re-confirmed
-                 against the procedures 2026-09-11: `ttl`, `max_queue_size` and
-                 `retry_delay` appear in 011_log_stats and 012_configure and in
-                 no push, pop, ack or maintenance path). They stay on this card
+                 against the raft code 2026-09-26: `ttl`, `max_queue_size` and
+                 `retry_delay` are written to the queue row and echoed, and read
+                 by no push, pop, ack or maintenance path). They stay on this card
                  because the values are really on the row — a queue configured
                  with `maxSize: 1000` has that number, and hiding it would make
                  the page disagree with the API — but they are dimmed and say so
@@ -684,8 +684,8 @@ const getTimeRangeParams = () => {
 
 // The queue's identity + config come from /api/v1/status/queues/:name, the
 // only endpoint that describes a log queue. The old `get_queue_v2` fallback
-// read the rows-engine tables (empty under the log engine) and rendered a
-// healthy queue as 0 partitions / 0 messages / no config, so it is gone.
+// read tables that no longer held any queue and rendered a healthy queue as
+// 0 partitions / 0 messages / no config, so it is gone.
 const queueData = computed(() => statusData.value?.queue || null)
 
 // History (oldest → newest). The queue-ops endpoint returns one row per

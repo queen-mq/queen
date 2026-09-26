@@ -25,7 +25,7 @@ import {
 test('the first page asks for a namespace and nothing else', () => {
   const body = kvListBody({ namespace: 'orders', limit: 100 })
   assert.deepEqual(body, { namespace: 'orders', includeExpired: true, limit: 100 })
-  // Not `prefix: ''`, not `after: null`: the SP reads both as absent, but a
+  // Not `prefix: ''`, not `after: null`: the broker reads both as absent, but a
   // body that carries them makes the request read as a filtered one.
   assert.equal('prefix' in body, false)
   assert.equal('after' in body, false)
@@ -34,7 +34,7 @@ test('the first page asks for a namespace and nothing else', () => {
 test('includeExpired is sent on every page, and it is true', () => {
   // D5: an expired row still counts in the namespace figure beside the list, so
   // a page that hid them would contradict the count it prints. The ROUTE
-  // defaults to false — it matches its stored procedure and §5.7, so a caller
+  // defaults to false — it matches §5.7, so a caller
   // who did not ask is not handed rows every other KV read treats as absent —
   // which is exactly why showing them has to be said here, on every call.
   for (const body of [
@@ -46,23 +46,23 @@ test('includeExpired is sent on every page, and it is true', () => {
 })
 
 test('an empty cursor is not a cursor', () => {
-  // Under COLLATE "C" every key sorts after the empty string, so an `after: ""`
-  // that was taken as a cursor would answer an empty first page forever. The SP
-  // NULLIFs it; this never sends it.
+  // In byte order every key sorts after the empty string, so an `after: ""`
+  // that was taken as a cursor would answer an empty first page forever. The
+  // broker ignores it; this never sends it.
   assert.equal('after' in kvListBody({ namespace: 'orders', after: '' }), false)
   assert.equal('after' in kvListBody({ namespace: 'orders', after: null }), false)
   assert.equal(kvListBody({ namespace: 'orders', after: 'wh.deliver:b15f' }).after, 'wh.deliver:b15f')
 })
 
 test('the prefix travels verbatim — it is a byte range, not a search box', () => {
-  // `%` and `_` are ordinary bytes to `starts_with` (024_kv.sql), and a
+  // `%` and `_` are ordinary bytes to a byte-prefix scan, and a
   // trailing space is a legal byte in a key: trimming or escaping either here
   // would silently answer a different question than the operator asked.
   assert.equal(kvListBody({ namespace: 'g', prefix: '100%_' }).prefix, '100%_')
   assert.equal(kvListBody({ namespace: 'g', prefix: 'order ' }).prefix, 'order ')
 })
 
-test('a limit is passed through for the stored procedure to clamp', () => {
+test('a limit is passed through for the broker to clamp', () => {
   assert.equal(kvListBody({ namespace: 'orders', limit: 250 }).limit, 250)
   // 1..1000 is clamped server-side and never rejected, so nothing here
   // second-guesses it — but a missing limit is omitted rather than guessed.
@@ -71,7 +71,7 @@ test('a limit is passed through for the stored procedure to clamp', () => {
   assert.equal('limit' in kvListBody({ namespace: 'orders', limit: Number.NaN }), false)
 })
 
-test('the page budget the sentences quote is the stored procedure\'s', () => {
+test('the page budget the sentences quote is the broker\'s', () => {
   assert.equal(KV_PAGE_BUDGET_BYTES, 4 * 1024 * 1024)
 })
 
@@ -193,7 +193,7 @@ test('namespaces keep the broker\'s byte order and carry exact counts', () => {
   assert.equal(rows[2].label, 'orders · 0 keys')
 })
 
-test('the bare array the stored procedure returns is accepted too', () => {
+test('a bare namespace array is accepted too', () => {
   assert.equal(namespaceOptions([{ namespace: 'orders', keys: 3 }])[0].keys, 3)
   // A row without a namespace is not a namespace; a body that is not a listing
   // is an empty selector, never a crash on a page whose job is to render.
@@ -207,21 +207,19 @@ test('the bare array the stored procedure returns is accepted too', () => {
 // The tenant footprint on the scope strip
 // ---------------------------------------------------------------------------
 
-test('a sweeper zero the namespace listing contradicts is not a measurement', () => {
-  // The broker sends `kvRows: 0` both for "this tenant holds nothing" and for
-  // "queen.kv_usage has no row for this tenant yet" (handlers/queues.rs omits
-  // the field only when the READ failed), and the usage phase runs every five
-  // minutes and can be switched off. Printing `≈ 0 live keys` beside a selector
-  // that says 30,000 is the one reading an operator files as a bug.
+test('a zero the namespace listing contradicts is not a measurement', () => {
+  // The queue listing is TTL-cached and shared, so its `kvRows: 0` can predate
+  // the keys the namespace listing just counted. Printing `0 keys` beside a
+  // selector that says 30,000 is the one reading an operator files as a bug.
   const ns = [{ namespace: 'perf', keys: 30_000 }]
   assert.equal(sweeperUsageIsMeasured(0, ns), false)
   // A real zero is still printed: with nothing in any namespace the two figures
   // agree, and silence there would hide a working measurement.
   assert.equal(sweeperUsageIsMeasured(0, []), true)
   assert.equal(sweeperUsageIsMeasured(0, [{ namespace: 'orders', keys: 0 }]), true)
-  // Any positive snapshot is a measurement, whatever the selector says — the
-  // two count different populations (live rows vs every row) and are allowed to
-  // disagree; only the zero is unreadable.
+  // Any positive figure is a measurement, whatever the selector says — the two
+  // are read at different moments and are allowed to disagree; only the zero
+  // is unreadable.
   assert.equal(sweeperUsageIsMeasured(27_000, ns), true)
   assert.equal(sweeperUsageIsMeasured(1, ns), true)
   // `null` is "the broker did not say", which the strip already renders as

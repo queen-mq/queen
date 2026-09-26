@@ -13,9 +13,9 @@
 # The release was not slow, it was in the wrong place. A compensation is not a
 # timeout, it is an obligation, and an obligation has to outlive the process
 # that took it on. Here the gate, the saga state, the compensation timer, the
-# payment request and the acknowledgement are ONE PostgreSQL transaction. If the
-# room is held, the compensation exists. If the room is not held, nothing else
-# happened either.
+# payment request and the acknowledgement are ONE transaction, one entry in the
+# broker's replicated log. If the room is held, the compensation exists. If the
+# room is not held, nothing else happened either.
 #
 #   bookings
 #     |-- group "reserver"    ONE bundle: gate + state + timer + push + ack
@@ -256,8 +256,8 @@ for booking in $SUBMISSIONS; do
                payload: {bookingId: $booking, room: $room, cents: $cents}}]}')"
   request POST /api/v1/push "$body"
   [ "$STATUS" = 201 ] || fail "push of $booking returned HTTP $STATUS"
-  # HTTP 201 is not proof the message was stored: "buffered" and "failed" also
-  # come back 201. The per-item status is the only answer.
+  # HTTP 201 is not proof the message was stored: an item the broker refused
+  # comes back "error" inside a 201. The per-item status is the only answer.
   [ "$(jq -r '.[0].status' "$OUT")" = queued ] \
     || fail "push of $booking came back $(jq -r '.[0].status' "$OUT")"
   index=$((index + 1))
@@ -296,7 +296,7 @@ handle_reserve() {
   #          deploy and this machine. The key is ours, which is the entire
   #          reason it can be cancelled later by name. The payload is base64,
   #          and delayMs is milliseconds from now -- an absolute instant is not
-  #          expressible, because deliverAt is computed in PostgreSQL and there
+  #          expressible, because deliverAt is computed by the broker and there
   #          is exactly one clock.
   # push:    partitioned by booking, so every message about one booking is in
   #          one lane.

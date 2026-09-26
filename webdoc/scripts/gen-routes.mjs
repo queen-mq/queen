@@ -2,59 +2,35 @@
  * Generate the broker's HTTP route table from the router itself.
  *
  * Three facts per route, each derived rather than transcribed:
- *   path + method  — parsed out of the `Router::new()` chain in main.rs
- *   access level   — `auth::route_access_level`, mirrored below behind a
- *                    fingerprint guard
- *   tenant-scoped  — whether the handler takes the `Tenant` request extension
+ *   path + method  the raft router's `.route(` chain plus the generic
+ *                  adapter's arms (`brokerRoutes` in lib/source.mjs)
+ *   access level   `auth::route_access_level`, mirrored below behind a
+ *                  fingerprint guard
+ *   tenant-scoped  whether the handler reads the tenant: the `Tenant` request
+ *                  extension for a router handler, the request context for an
+ *                  adapter handler. `/api/v1/system/*` is the cell's by
+ *                  definition, whatever the handler takes.
  *
  * The old hand-written site drifted into documenting two routes that never
  * existed. This is the fix for that class of bug.
  */
 
 import {
+  adapterIgnoresCtx,
   assertFingerprint,
+  brokerRoutes,
   cell,
   emitPartial,
   fnBody,
   isCheck,
-  ROUTER_BUILDER,
+  RAFT_ADAPTER,
+  RAFT_ADAPTER_DYNAMIC,
+  RAFT_ROUTER,
   repoRead,
   rustFiles,
-  sliceBlock,
 } from "./lib/source.mjs";
 
-const MAIN = "server/src/main.rs";
 const AUTH = "server/src/auth.rs";
-
-// ---------------------------------------------------------------------------
-// 1. Routes, straight out of the router chain
-// ---------------------------------------------------------------------------
-
-function parseRoutes(text) {
-  const block = sliceBlock(text, ROUTER_BUILDER, ".with_state(state);");
-  const routes = [];
-  const re = /\.route\(\s*"([^"]+)"\s*,/g;
-  let m;
-  while ((m = re.exec(block))) {
-    const path = m[1];
-    // The method router runs from the comma to the closing paren of `.route(`.
-    // Slice generously and stop at the next `.route(` — the method calls we
-    // want are always inside that window.
-    const rest = block.slice(re.lastIndex, re.lastIndex + 400);
-    const stop = rest.indexOf(".route(");
-    const window = stop === -1 ? rest : rest.slice(0, stop);
-    const verbs = [...window.matchAll(/\b(get|post|put|patch|delete|head|options)\(\s*([\w:]+)/g)];
-    if (verbs.length === 0) continue;
-    for (const [, verb, handlerPath] of verbs) {
-      routes.push({
-        path,
-        method: verb.toUpperCase(),
-        handler: handlerPath.split("::").pop(),
-      });
-    }
-  }
-  return routes;
-}
 
 // ---------------------------------------------------------------------------
 // 2. Access level — mirror of server/src/auth.rs `route_access_level`
@@ -92,7 +68,7 @@ function parseRoutes(text) {
 // is read-only, immediately after the two arms it shares its shape with (a pure
 // read whose request is a body). It is a POST because its cursor is a KEY, and a
 // key in a query string is recorded by every access log between the browser and
-// the database; without the arm it reaches the read-write fallthrough and the
+// the broker; without the arm it reaches the read-write fallthrough and the
 // published table says a read-only token cannot browse. Its GET sibling
 // (`/api/v1/resources/kv/namespaces`) needs no arm: it is already inside the
 // `m === "GET"` block's `/api/v1/resources/` read.
@@ -136,9 +112,9 @@ function accessLevel(method, path) {
   // cursor. Outside the GET block because the batch request is a body.
   if (m === "POST" && path === "/api/v1/fetch") return "read-only";
 
-  // PLAN_S3_SINK.md §5.1: the fetch arm's twin. Two indexed selects, nothing
-  // leased and nothing moved, and it hands out strictly less than the fetch
-  // beside it. Method-exact, so a future verb on the path does not inherit it.
+  // The fetch arm's twin: partition discovery, nothing leased and nothing
+  // moved, and it hands out strictly less than the fetch beside it.
+  // Method-exact, so a future verb on the path does not inherit it.
   if (m === "POST" && path === "/api/v1/partitions/changed") return "read-only";
 
   // PLAN_DASHBOARD_ACTIONS.md §2.5: the console's KV page. A read whose cursor
@@ -162,14 +138,15 @@ function accessLevel(method, path) {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Tenant scoping — does the handler take the Tenant extension?
+// 3. Tenant scoping
 // ---------------------------------------------------------------------------
 
+/** Router handlers: does the handler take the Tenant extension? */
 function tenantScopedHandlers() {
   const scoped = new Set();
   const known = new Set();
   for (const { text } of rustFiles("server/src")) {
-    const re = /pub async fn (\w+)\s*\(([\s\S]*?)\)\s*->/g;
+    const re = /pub(?:\([^)]*\))? async fn (\w+)\s*\(([\s\S]*?)\)\s*->/g;
     let m;
     while ((m = re.exec(text))) {
       const [, name, args] = m;
@@ -178,6 +155,16 @@ function tenantScopedHandlers() {
     }
   }
   return { scoped, known };
+}
+
+/** Adapter handlers that exist, by name (`async fn` in the phase2 files). */
+function adapterHandlers() {
+  const known = new Set();
+  const files = [RAFT_ADAPTER, ...rustFiles("server/src/rsm/facade/real/phase2").map((f) => f.path)];
+  for (const f of files) {
+    for (const [, name] of repoRead(f).matchAll(/async fn (\w+)\s*\(/g)) known.add(name);
+  }
+  return known;
 }
 
 // ---------------------------------------------------------------------------
@@ -207,8 +194,9 @@ const GROUPS = [
   // without this entry the family lands in "Ungrouped".
   ["Ephemeral queues", (p) => /^\/api\/v1\/ephemeral(\/|$)/.test(p)],
   ["Operator surfaces", (p) => p.startsWith("/api/v1/system")],
+  ["Cluster (raft)", (p) => p.startsWith("/api/v1/raft/")],
+  ["Reads by offset", (p) => p === "/api/v1/fetch" || p === "/api/v1/partitions/changed"],
   ["Dashboard identity (broker-direct)", (p) => p.startsWith("/auth/")],
-  ["Internal (broker-to-broker)", (p) => p.startsWith("/internal/")],
 ];
 
 function groupOf(path) {
@@ -220,7 +208,6 @@ function groupOf(path) {
 
 function main() {
   const check = isCheck();
-  const mainText = repoRead(MAIN);
   const authText = repoRead(AUTH);
 
   assertFingerprint(
@@ -229,20 +216,27 @@ function main() {
     ACCESS_FINGERPRINT,
   );
 
-  const routes = parseRoutes(mainText);
+  const routes = brokerRoutes();
   if (routes.length < 40) {
-    throw new Error(`only parsed ${routes.length} routes out of ${MAIN} — the parser is broken`);
+    throw new Error(`only parsed ${routes.length} routes out of ${RAFT_ROUTER} and ${RAFT_ADAPTER}: the parser is broken`);
   }
 
   const { scoped, known } = tenantScopedHandlers();
-  const missing = routes.filter((r) => !known.has(r.handler)).map((r) => r.handler);
+  const adapterKnown = adapterHandlers();
+  const ignoresCtx = adapterIgnoresCtx();
+  const missing = routes
+    .filter((r) => (r.via === "router" ? !known.has(r.handler) : !adapterKnown.has(r.handler)))
+    .map((r) => r.handler);
   if (missing.length) {
-    throw new Error(`handlers referenced by the router but not found in server/src: ${[...new Set(missing)].join(", ")}`);
+    throw new Error(`handlers referenced by the router or the adapter but not found in server/src: ${[...new Set(missing)].join(", ")}`);
   }
 
   for (const r of routes) {
     r.level = accessLevel(r.method, r.path);
-    r.tenant = scoped.has(r.handler);
+    const cellWide = r.path.startsWith("/api/v1/system/");
+    r.tenant =
+      !cellWide &&
+      (r.via === "router" ? scoped.has(r.handler) : r.passesCtx && !ignoresCtx.has(r.handler));
     r.group = groupOf(r.path);
   }
 
@@ -255,8 +249,9 @@ function main() {
   const order = [...GROUPS.map(([n]) => n), "Ungrouped"];
   const lines = [];
   lines.push(
-    `Queen's broker registers **${routes.length} method + path pairs**. ` +
-      `Every row below is read out of the router and the authorization table at build time.`,
+    `Queen's broker serves **${routes.length} method + path pairs**. ` +
+      `Every row below is read out of the router, the generic adapter behind it and the ` +
+      `authorization table at build time.`,
     "",
   );
 
@@ -286,7 +281,13 @@ function main() {
     name: "broker-routes",
     title: "broker route table",
     description: "Every HTTP route the broker registers, with its access level and whether it is tenant-scoped.",
-    sources: [`${MAIN} (Router::new chain)`, `${AUTH} (route_access_level)`, "server/src/handlers/*.rs (Tenant extension)"],
+    sources: [
+      `${RAFT_ROUTER} (build_raft_router)`,
+      `${RAFT_ADAPTER} (api_impl)`,
+      `${RAFT_ADAPTER_DYNAMIC} (api_dynamic)`,
+      `${AUTH} (route_access_level)`,
+      "server/src/handlers/*.rs (Tenant extension)",
+    ],
     body: lines.join("\n"),
     check,
   });

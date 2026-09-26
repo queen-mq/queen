@@ -25,7 +25,7 @@ type TokenBucketGateOptions struct {
 // TokenBucketGate returns a GateFn suitable for Stream.Gate(...).
 //
 // The bucket state lives in ctx.State (which the runtime persists per-key in
-// queen_streams.state on every ALLOWED message).
+// the broker on every ALLOWED message).
 //
 //	gateFn := helpers.TokenBucketGate(helpers.TokenBucketGateOptions{
 //	    Capacity:     100,

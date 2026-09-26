@@ -1,10 +1,8 @@
 //! The dashboard's data in raft mode (PLAN_RAFT.md D17, §14.6, WP-2.8/4.8).
 //!
-//! Postgres mode keeps per-replica metric rows in shared tables and one
-//! stored procedure per dashboard read re-aggregates them. Raft mode has no
-//! shared database: every node keeps its OWN rows ([`model`]) in its
-//! `local.db`, a dashboard read gathers the rows of every node, and pure views
-//! port the stored procedures over them.
+//! Every node keeps its OWN rows ([`model`]) in its `local.db`, a dashboard
+//! read gathers the rows of every node, and pure views build the answers from
+//! them.
 
 pub mod collector;
 pub mod model;
@@ -13,8 +11,7 @@ pub mod queue_views;
 pub mod store;
 
 /// This node as the dashboard names it: `QUEEN_SERVER_ID`, else `HOSTNAME`,
-/// else `node-<raft node id>` — stable across restarts, unlike the random
-/// `queen-xxxxxxxx` fallback Postgres mode uses for its replica rows.
+/// else `node-<raft node id>` — stable across restarts.
 pub fn node_label(node_id: u64) -> String {
     ["QUEEN_SERVER_ID", "HOSTNAME"]
         .iter()

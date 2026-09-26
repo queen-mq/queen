@@ -47,7 +47,7 @@ function snippet(raw: string, id: string): string {
 
 /** The page's `<h1>`, verbatim. */
 export const HOME_HEADLINE =
-  "High-performance transactional messaging on PostgreSQL, with an ordered stream per entity.";
+  "High-performance transactional messaging, with an ordered stream per entity.";
 
 /**
  * One line describing the page, for the index and corpus rows that list it.
@@ -56,7 +56,7 @@ export const HOME_HEADLINE =
  */
 export const HOME_SUMMARY =
   "The landing page: what Queen MQ is, the entity-per-partition model it is built on, how " +
-  "partitions, brokers and cells scale differently, and the measured numbers with the " +
+  "partitions, nodes and cells scale differently, and the measured numbers with the " +
   "conditions they were measured under.";
 
 /** The eyebrow above the headline. */
@@ -68,8 +68,8 @@ const HOME_EYEBROW = "Queen MQ · Apache 2.0";
  */
 const HOME_LEAD =
   "You can offload most of your complex application logic to Queen.\n\n" +
-  "Queen is a message broker written in Rust that keeps every byte of its state in " +
-  "PostgreSQL. Its defining abstraction is **one logical ordered partition per application " +
+  "Queen is a message broker written in Rust: one binary per node, keeping its state in a " +
+  "replicated log on its own disk. Its defining abstraction is **one logical ordered partition per application " +
   "entity**, a customer, an account, a conversation, a device, a workflow, a session or a " +
   "job, created by the first push that names it and never provisioned in advance.";
 
@@ -86,7 +86,7 @@ const HOME_FEATURES = [
   "Ephemeral queues",
   "Multi-tenancy",
   "Kafka wire protocol",
-  "SQS and SNS wire protocols",
+  "Raft replication",
 ];
 
 /**
@@ -103,7 +103,8 @@ const HOME_MAP =
   "entities at modest rate, its reads rescanning the standing backlog. SQS FIFO closes a " +
   "dashed corner at its published rate quota and its in-flight cap. Queen's region is the " +
   "largest, and it is a square: a million messages a second sustained for 24 hours, and a " +
-  "million ordered lanes in one database, from two separate runs.";
+  "million ordered lanes in one queue, from two separate runs of Queen 1.x, whose storage " +
+  "was PostgreSQL.";
 
 const HOME_MAP_CAPTION =
   "Each frontier is where a system stops keeping one ordered lane per entity: measured on " +
@@ -121,43 +122,39 @@ const differentiators = [
   },
   {
     title: "Ack the input, write the state and push the output in one commit",
-    body: "One transaction bundles acknowledgements, pushes, key/value writes and timer operations, across any number of partitions, queues and consumer groups. That is what replaces transactional outbox tables, a separate store for idempotency markers, and the reconciliation code that exists only because the broker's commit and the database's commit were two different commits.",
+    body: "One transaction bundles acknowledgements, pushes, key/value writes and timer operations, across any number of partitions, queues and consumer groups, into one entry of the replicated log. That is what replaces transactional outbox tables, a separate store for idempotency markers, and the reconciliation code that exists only because the broker's commit and the application store's commit were two different commits.",
   },
   {
     title: "Application scale is not infrastructure scale",
-    body: "In most brokers a per-entity ordering guarantee means a per-entity infrastructure object, either a topic partition with its own files and replicas or a live server-side queue. In Queen a partition is a row. A million of them measured 315 MB in total, and the serve path does not care how many exist.",
+    body: "In most brokers a per-entity ordering guarantee means a per-entity infrastructure object, either a topic partition with its own files and replicas or a live server-side queue. In Queen a partition is an entry in the node's ordered store and a range of offsets in its queue's log: not a file, a process or a replica set of its own.",
   },
   {
-    title: "Partitions, brokers and cells scale different things",
-    body: "Partitions scale application cardinality. Brokers scale serving capacity and availability inside a cell, with three replicas the designed ceiling. Cells scale the deployment: capacity grows by adding cells, not by growing one system, and there is no global cluster to join and no cross-cell coordination in the message path.",
+    title: "Partitions, nodes and cells scale different things",
+    body: "Partitions scale application cardinality. Nodes buy availability: three voters survive one failure and five survive two, and any node serves any client. Cells scale the deployment: capacity grows by adding cells, not by growing one system, and there is no global cluster to join and no cross-cell coordination in the message path.",
   },
   {
-    title: "PostgreSQL is the durable source of truth",
-    body: "Not somewhere to put the bytes. Messaging state and application state share a transaction, which is the whole reason for the design, and durability, replication, backup and SQL introspection are the ones you already operate. The trade is plain: the database is the throughput ceiling and the single failure domain.",
+    title: "One binary, no external database",
+    body: "Each node keeps its state in a replicated log on its own disk. One leader orders every write, a write is answered once a majority of the voters have it on disk, and every node applies the same entries to its own full copy. Messaging state and application state share that log, which is the whole reason for the design.",
   },
   {
-    title: "Brokers hold nothing authoritative",
-    body: "Messages, offsets, leases, deduplication state, queue configuration and dead letters are all rows, so a broker can be added, removed, restarted or rolled without a rebalance, and deduplication stays exact across replicas with no coordination protocol at all.",
+    title: "Any node serves any client",
+    body: "Messages, offsets, leases, deduplication state, queue configuration and dead letters are the state the log produces, so every node holds all of it. A follower forwards writes to the leader and holds reads until it has applied what was committed when they began, and a leader that stops gracefully hands leadership over first.",
   },
   {
     title: "Key/value state, timers and windows are part of the engine",
     body: "A key/value write can share the transaction with a push and an ack, which a store standing beside the broker cannot do at any price. A timer is a scheduled message you can cancel and reprogram until it fires. Tumbling, sliding, session and cron windows commit their state, their output and their acks together. None of it is a flag you turn on.",
   },
   {
-    title: "Many tenants on one cell, isolation enforced in SQL",
+    title: "Many tenants on one cell, isolation enforced in the broker",
     body: "The broker scopes queue identity natively as (tenant, name), so two tenants both owning a queue called orders own different queues. The proxy is the tenant-facing boundary that makes the identity driving that scoping trustworthy. Neither half is sufficient alone.",
   },
   {
     title: "Plain HTTP, six SDKs, one binary",
-    body: "No custom wire protocol, no JVM, no Erlang, no ZooKeeper. Anything that can make an HTTP request is a first-class client, and curl is one.",
+    body: "No custom wire protocol, no JVM, no Erlang, no ZooKeeper, no database to run beside it. Anything that can make an HTTP request is a first-class client, and curl is one.",
   },
   {
     title: "Kafka clients reach it by changing one line",
-    body: "queen-kafka is a facade that ships in the same image as the broker and stays off until you switch it on. It advertises 32 Kafka API keys, transactions included, so an unmodified producer or consumer moves across by changing bootstrap.servers and nothing else. It holds no database connection and stores nothing durable: it is a Queen client like any SDK is, and what it deliberately does not do is written down.",
-  },
-  {
-    title: "So do SQS and SNS clients",
-    body: "queen-sqs answers both Amazon wire protocols out of that same image, so an unmodified AWS SDK moves across by changing endpoint_url. Nothing durable lives in the process, so any instance answers any request and an ordinary load balancer in front is the supported shape rather than a hazard.",
+    body: "The Kafka facade runs inside the broker process and stays off until you switch it on. It advertises 32 Kafka API keys, transactions included, so an unmodified producer or consumer moves across by changing bootstrap.servers and nothing else. It stores nothing durable of its own: offsets and records are Queen's, and what it deliberately does not do is written down.",
   },
 ];
 
@@ -182,7 +179,7 @@ const proof = [
   {
     figure: "1M",
     unit: "ordered partitions",
-    body: "A million FIFO lanes in one PostgreSQL, none preallocated, created during the run at a thousand a second while serving 200,000 messages a second. Zero push, pop or ack errors over 722 million messages.",
+    body: "A million FIFO lanes in one queue, none preallocated, created during the run at a thousand a second while serving 200,000 messages a second. Zero push, pop or ack errors over 722 million messages.",
     href: "/benchmarks/cardinality-1m",
   },
   {
@@ -208,8 +205,9 @@ const HOME_LIMITS =
   "Queen has real limits, and some workloads are better served elsewhere. One ordered " +
   "lane is sequential, so if your ordering boundary is everything, the core idea does " +
   "nothing for you. In-group parallelism is bounded by how many distinct entities you " +
-  "push to. One PostgreSQL is both the throughput ceiling and the failure domain, there " +
-  "is no tiered object storage and no cross-region replication, and the Kafka facade " +
+  "push to. Every write goes through one leader and every voter holds a full copy, so one " +
+  "node's disk bounds retention, there is no tiered object storage and no cross-region " +
+  "replication, and the Kafka facade " +
   "speaks the wire protocol but not the ecosystem around it, so log compaction, Kafka " +
   "Streams, Connect's exactly-once source and the Schema Registry's compacted topic all " +
   "stay out.";
@@ -259,9 +257,9 @@ export function homepageBody(): string {
 
   lines.push("## Transactional processing", "");
   lines.push(
-    "The second reason Queen exists, and the reason PostgreSQL is not an implementation " +
-      "detail. A single call bundles acknowledgements, pushes, key/value writes and timer " +
-      "operations into one PostgreSQL transaction.",
+    "The second reason Queen exists. A single call bundles acknowledgements, pushes, " +
+      "key/value writes and timer operations into one entry of the replicated log, which " +
+      "applies whole or not at all.",
     "",
     "```text",
     "consume input",
@@ -276,7 +274,7 @@ export function homepageBody(): string {
     "",
     "Atomicity covers broker state, not the network. Queen does not make an external HTTP " +
       "call exactly-once, and no broker can. The one case that is exactly-once end to end is " +
-      "when the effect is itself a row in this PostgreSQL, written through the key/value " +
+      "when the effect is itself state in this broker, written through the key/value " +
       "rider: marker, effect, output and cursor advance become a single commit. " +
       `[The bundle shape and every rollback cause](${url("/reference/http/transaction/")})`,
     "",
@@ -318,29 +316,29 @@ export function homepageBody(): string {
     "- **Partitions scale application cardinality.** Add entities freely. Nothing is " +
       "provisioned, no process is created, no rebalance runs. Millions of logical entity " +
       "streams do not require millions of infrastructure objects.",
-    "- **Brokers scale capacity inside a cell.** Stateless replicas of one binary against one " +
-      "PostgreSQL, covering a process dying, a rolling restart, one node's network. Three " +
-      "replicas is the designed ceiling: past that the bottleneck is the database, not the " +
-      "broker count.",
-    "- **Cells scale the deployment.** A cell is PostgreSQL plus one or more stateless " +
-      "brokers, optionally fronted by the proxy. Capacity grows by adding cells, not by " +
-      "growing one system: no global cluster to join, no cross-cell coordination in the " +
-      "message path.",
+    "- **Nodes buy availability inside a cell.** Three or five voters of one binary, each " +
+      "with a full copy on its own disk, covering a process dying, a rolling restart, one " +
+      "node's network. Every write goes through one leader, so more nodes buy availability, " +
+      "not write throughput.",
+    "- **Cells scale the deployment.** A cell is one Queen node or a raft cluster of them, " +
+      "with the proxy optionally running in the same process. Capacity grows by adding " +
+      "cells, not by growing one system: no global cluster to join, no cross-cell " +
+      "coordination in the message path.",
     "",
     "```text",
-    "                    Queen Cell",
-    "     ┌────────────────────────────────────┐",
-    "     │  Queen Broker ──┐                  │",
-    "     │  Queen Broker ──┼──► PostgreSQL    │  the only durable state",
-    "     │  Queen Broker ──┘                  │",
-    "     │  Queen Proxy  (optional)           │  tenant-facing boundary",
-    "     └────────────────────────────────────┘",
+    "                         Queen Cell",
+    "     ┌──────────────────────────────────────────────┐",
+    "     │  Queen node (leader)    ──► local disk       │",
+    "     │  Queen node (follower)  ──► local disk       │  one replicated log,",
+    "     │  Queen node (follower)  ──► local disk       │  a full copy on each",
+    "     │  proxy, Kafka facade: in the same process    │  optional",
+    "     └──────────────────────────────────────────────┘",
     "```",
     "",
     "A cell is at once the scaling boundary, the failure boundary and the unit of upgrade and " +
-      "operational ownership. The failure domain is PostgreSQL: Queen does not replicate " +
-      "itself, and keeping the database alive is PostgreSQL's own tooling. " +
-      `[Replicas, the mesh, and surviving a database outage](${url("/deploy/ha/")})`,
+      "operational ownership. The failure domain is the majority: a cluster keeps serving " +
+      "while most of its voters are up, and stops taking writes when they are not. " +
+      `[Voters, quorum, failover and replacing a node](${url("/deploy/ha/")})`,
     "",
   );
 
@@ -350,9 +348,11 @@ export function homepageBody(): string {
   lines.push("## Measured, with the conditions attached", "");
   lines.push(
     "Every number on this site names the run that produced it. A figure without an " +
-      "archived artifact recording its configuration does not get published here. These are " +
-      "single-shape runs: they say nothing about your throughput, latency, PostgreSQL sizing " +
-      "or retention capacity, which follow from your workload, payloads and hardware.",
+      "archived artifact recording its configuration does not get published here. The runs " +
+      "below measured Queen 1.x, whose storage was PostgreSQL; 2.0 replaced that storage with " +
+      "the replicated log, so they describe the 1.x engine. They are single-shape runs: they " +
+      "say nothing about your throughput, latency, sizing or retention capacity, which follow " +
+      "from your workload, payloads and hardware.",
     "",
   );
   for (const item of proof) {
@@ -367,8 +367,8 @@ export function homepageBody(): string {
   lines.push(
     `- [Use it](${url("/start/quickstart")}): the model in one page, the SDKs, and worked examples.`,
     `- [Pick your SDK](${url("/use/js-client")}): JavaScript, Python, Go, Rust, PHP and C++, plus queenctl and plain HTTP.`,
-    `- [Host it](${url("/deploy")}): deployment, PostgreSQL, high availability, security, operations.`,
-    `- [Understand it](${url("/internals")}): segments, offsets, the push and pop paths, the schema underneath.`,
+    `- [Host it](${url("/deploy")}): deployment, high availability, security, operations.`,
+    `- [Understand it](${url("/internals")}): the replicated log, offsets, the push and pop paths, the storage underneath.`,
     "- [Source on GitHub](https://github.com/queen-mq/queen)",
     "",
   );

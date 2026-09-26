@@ -1,7 +1,7 @@
 // docs:start(app-go-saga)
 //
-// A booking saga whose compensation is a timer, and whose every step is a row
-// in the same PostgreSQL as the queue.
+// A booking saga whose compensation is a timer, and whose every step is a KV
+// entry in the same broker state as the queue.
 //
 // The war story is a room hold that never came back. A booking system held
 // inventory when a reservation started and released it when the payment either
@@ -13,10 +13,10 @@
 // The release was not slow, it was in the wrong place. A compensation is not a
 // timeout, it is an obligation, and an obligation has to outlive the process
 // that took it on. Here the gate, the saga state, the compensation timer, the
-// payment request and the acknowledgement are ONE PostgreSQL transaction. If
-// the room is held, the compensation exists. If the room is not held, nothing
-// else happened either. There is no interval in between for a deploy to land
-// in.
+// payment request and the acknowledgement are ONE transaction, one entry in
+// the broker's replicated log. If the room is held, the compensation exists.
+// If the room is not held, nothing else happened either. There is no interval
+// in between for a deploy to land in.
 //
 //	bookings
 //	  |-- group "reserver"   ONE bundle: gate + state + timer + push + ack

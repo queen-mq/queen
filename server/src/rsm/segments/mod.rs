@@ -75,7 +75,7 @@
 //!   readable by another node.
 //! - It decides nothing about retention. It counts what is live and refuses to
 //!   unlink what is not dead ([`Segments::gc_candidates`]); WHEN a segment
-//!   stops being live is the retention loop's call (§8, 006).
+//!   stops being live is the retention loop's call (§8).
 //!
 //! # The five things it guarantees
 //!
@@ -582,9 +582,9 @@ pub struct Frame {
     pub base_offset: u64,
     pub count: u32,
     pub created_at_us: i64,
-    /// `16 * count` bytes, frame order (D10, 005).
+    /// `16 * count` bytes, frame order (D10).
     pub hashes: Vec<u8>,
-    /// The packed, zstd'd frames: the exact bytes `log_segments.blob` holds.
+    /// The packed, zstd'd frames.
     pub blob: Vec<u8>,
 }
 
@@ -614,7 +614,7 @@ pub struct DedupFrame {
 
 /// What a release retires. A file lives while EITHER of them is above zero
 /// (§11.7): the hash lists outlive the segments retention deletes, because the
-/// dedup probe (003) and ack-by-hash below the cursor (005) still read them
+/// dedup probe and ack-by-hash below the cursor still read them
 /// inside the txns window (D10).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Release {

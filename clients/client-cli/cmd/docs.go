@@ -37,7 +37,7 @@ var docsLinks = []struct{ Title, URL string }{
 	{"Self-hosting", docsSite + "/deploy/"},
 	{"Operations", docsSite + "/deploy/operations/"},
 	{"Dashboard", docsSite + "/deploy/dashboard/"},
-	{"PostgreSQL / sizing", docsSite + "/deploy/postgres/"},
+	{"High availability", docsSite + "/deploy/ha/"},
 	{"Internals", docsSite + "/internals/"},
 	{"Benchmarks", docsSite + "/benchmarks/"},
 }
@@ -65,7 +65,7 @@ var docsTopics = map[string]string{
 	"quickstart":   "/start/quickstart/",
 	"reference":    "/reference/",
 	"server":       "/deploy/",
-	"sizing":       "/deploy/postgres/",
+	"sizing":       "/deploy/",
 	"streams":      "/use/streams/",
 	"timers":       "/use/timers/",
 }

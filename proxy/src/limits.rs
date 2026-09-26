@@ -62,7 +62,7 @@ pub enum Decision {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PushBlock {
     /// Retained bytes over `max_retained_bytes` (registry reconciler ->
-    /// storage-quota pump in main.rs).
+    /// storage-quota pump in app.rs).
     Storage,
     /// Calendar-month messages at or over `plans.monthly_msgs_quota` (the
     /// rollup task, meter::spawn_rollup).
@@ -241,7 +241,7 @@ pub struct Limits {
     parked: Vec<Mutex<HashMap<Uuid, ParkedEntry>>>,
     push_blocked: RwLock<HashSet<(Uuid, PushBlock)>>,
     /// Per-cluster storage estimate, sharded like the buckets. Read on every
-    /// push (`storage_over_cap`), written by the storage pump in main.rs
+    /// push (`storage_over_cap`), written by the storage pump in app.rs
     /// (`publish_retained`) and by the produce path (`note_accepted_bytes`).
     storage: Vec<Mutex<HashMap<Uuid, StorageAccount>>>,
     gc_next: Mutex<Instant>,
@@ -352,7 +352,7 @@ impl Limits {
     }
 
     /// Storage quota state, updated by the registry reconciler (the
-    /// storage-quota pump in main.rs). Kept as the reason-less signature the
+    /// storage-quota pump in app.rs). Kept as the reason-less signature the
     /// pump already calls; it is `PushBlock::Storage` and nothing else.
     pub fn set_push_blocked(&self, cluster_id: Uuid, blocked: bool) {
         self.set_push_blocked_reason(cluster_id, PushBlock::Storage, blocked);
@@ -451,7 +451,7 @@ impl Limits {
     }
 
     /// Publish the reconciler's latest retained-bytes total for a cluster, from
-    /// the storage pump in main.rs.
+    /// the storage pump in app.rs.
     ///
     /// The in-flight counter is reset only when the VALUE CHANGES, which is the
     /// only evidence of a fresh computation the broker gives us: its
@@ -878,7 +878,7 @@ mod tests {
         assert_eq!(limits.push_block_reason(id), None);
         limits.set_push_blocked(id, true);
         // The reason-less setter is the storage one — that is what the
-        // storage-quota pump in main.rs calls.
+        // storage-quota pump in app.rs calls.
         assert_eq!(limits.push_block_reason(id), Some(PushBlock::Storage));
         limits.set_push_blocked(id, false);
         assert_eq!(limits.push_block_reason(id), None);

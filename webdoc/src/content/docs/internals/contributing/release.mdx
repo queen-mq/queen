@@ -1,6 +1,6 @@
 ---
 title: How Queen ships
-description: "The registries a release touches, what CI publishes from verified tags, what a maintainer uploads, where each version number lives, and the one boundary a rollback cannot cross."
+description: "The registries a release touches, what CI publishes from verified tags, what a maintainer uploads, where each version number lives, and what an older binary cannot read on a rollback."
 type: reference
 tier: internals
 sidebar:
@@ -9,6 +9,10 @@ sidebar:
 sourceOfTruth:
   - server/server.json
   - server/build.rs
+  - server/Cargo.toml
+  - proxy/Cargo.toml
+  - crates/queen-protocol/Cargo.toml
+  - clients/client-rust/Cargo.toml
   - build.sh
   - .github/workflows/docker-build.yml
   - .github/workflows/release-cli.yml
@@ -18,8 +22,9 @@ sourceOfTruth:
   - clients/client-py/pyproject.toml
   - clients/client-php/composer.json
   - clients/client-go/go.mod
-  - server/src/schema.rs
-# sourceOfTruth re-read 2026-09-11 (through 02ced48f): the version sentence now reads 1.6.0, which is the bump this page describes the mechanics of; nothing else moved.
+  - server/src/rsm/store/integrity.rs
+  - server/src/rsm/effect.rs
+  - server/src/main.rs
 ---
 
 A release touches the broker image, six client SDKs and the CLI, across seven package registries
@@ -36,8 +41,7 @@ maintainer upload. Knowing which is which is the point of this page.
 - `build.sh` reads `version` with `jq` to tag the broker image it builds or pushes locally.
 - `.github/workflows/docker-build.yml` reads `version` with `jq` for the same purpose in CI.
 
-Neither reads `name`: the image name is `queen` in both, and both take the proxy image's
-version from `proxy/Cargo.toml` instead.
+Neither reads `name`: the image name is `queen` in both.
 
 Everything else carries its own version, or none at all.
 
@@ -72,8 +76,9 @@ infer the installed SDK version from the broker tag: read the manifest or compon
 table above. A patch that rebuilds only one component moves only that component.
 
 <Aside type="note">
-Today the broker (`server/server.json`, mirrored in `server/Cargo.toml`) and proxy
-(`proxy/Cargo.toml`) carry `1.6.0`. The JavaScript, Python and Rust clients and
+Today the broker (`server/server.json`, mirrored in `server/Cargo.toml`) carries `2.0.0-alpha.4`.
+The proxy crate (`proxy/Cargo.toml`) still says `1.6.0`; it is a library linked into the broker and
+has no image or package of its own. The JavaScript, Python and Rust clients and
 `queen-protocol` carry `1.3.0`, with `v1.3.0` tags covering the Go module and the CLI. The first Packagist release
 will receive its own bare tag in `queen-mq/php-client`, generated from the corresponding
 `clients/client-php/vX.Y.Z` source tag. The release before
@@ -85,27 +90,23 @@ The betas behaved the same way, with the broker at
 (`app/package.json`) and the operator console (`proxy/console/package.json`) still say
 `1.0.0`: both are private and neither is ever published separately. The Go module, the CLI
 and the Packagist package take their version from git tags, so they are aligned by tagging at
-release time and not by editing a file. `README.md` points at `ghcr.io/queen-mq/queen:latest`,
-but its prose still carries 0.16-era numbers.
+release time and not by editing a file.
 </Aside>
 
 ## What CI publishes
 
-### The container images
+### The container image
 
-`.github/workflows/docker-build.yml` publishes **two** images to GHCR, as a matrix over the two
-Dockerfiles:
+`.github/workflows/docker-build.yml` publishes **one** image to GHCR, `ghcr.io/queen-mq/queen`,
+built from the root `Dockerfile` and versioned from `server/server.json`. It is the single binary
+(the broker with the embedded proxy and its operator console, the Kafka facade and the dashboard)
+plus `queenctl`.
 
-| Image | Dockerfile | Version from |
-| --- | --- | --- |
-| `ghcr.io/queen-mq/queen` | `Dockerfile` | `server/server.json` |
-| `ghcr.io/queen-mq/queen-proxy` | `proxy/Dockerfile` | `proxy/Cargo.toml` |
-
-Both build for `linux/amd64` and `linux/arm64` from the repository root: the proxy crate embeds
-`../server/webapp/dist`, so its context cannot be `proxy/`. Each gets three tags: its own
-version, `sha-<short>`, and `latest`. The broker also receives `QUEENCTL_VERSION` and
-`QUEENCTL_COMMIT` as build arguments so that `queenctl version` inside the container matches what
-the broker reports.
+It builds for `linux/amd64` and `linux/arm64` from the repository root, because the broker takes
+the proxy, the Kafka facade and `queen-protocol` by relative path. It gets three tags: its
+version, `sha-<short>`, and `latest`. The build also receives `QUEENCTL_VERSION` and
+`QUEENCTL_COMMIT` as build arguments, so that `queenctl version` inside the container matches the
+tag the image was published under.
 
 Docker Hub is an opt-in **mirror** of the same build, not a second build: with
 `vars.DOCKERHUB_NAMESPACE` plus the `DOCKER_USERNAME` and `DOCKER_PASSWORD` secrets configured,
@@ -116,12 +117,11 @@ request never mirrors because secrets do not reach forked pull requests.
 Authentication for GHCR is the workflow's own `GITHUB_TOKEN` under
 `permissions: packages: write`, so that registry needs no secrets to rotate; the two Docker
 Hub secrets exist only if the mirror does. Layer caching is the GitHub Actions cache, **scoped
-per image**
-(`scope=${{ matrix.image }}`); a shared scope would make the two matrix legs evict each other's
-layers and cold-build every run.
+per image** (`scope=${{ matrix.image }}`), so a second image added to the matrix later cannot evict
+this one's layers.
 
 Triggers are a push to the **`release` branch**, a **`v*` tag**, or `workflow_dispatch`. A pull
-request against `release` builds both images without pushing.
+request against `release` builds the image without pushing.
 
 <Aside type="note">
 A GHCR package is **private** the first time it is published. Flip it once, by hand, under
@@ -211,31 +211,34 @@ PHP source tag: the PHP release workflow verifies the pinned supervisor archives
 mirrors `clients/client-php/vX.Y.Z` as Packagist `vX.Y.Z`. Finally create the CLI tag, which
 triggers its own workflow.
 
-## Rollback, and the one place additivity stops
+## Rollback, and what an older binary cannot read
 
-Schema application is idempotent by construction: `server/src/schema.rs` re-applies `schema.sql`
-and the 33 stored-procedure files at every boot (the [schema catalogue](/internals/schema) has
-the mechanism), so re-applying is always safe, and rolling the broker image back to a previous
-1.x is safe at the database level. Note that the procedures are embedded in the binary, so the
-binary and the procedures roll together: you cannot roll one back independently.
+A node's state is its data directory, so rolling the broker image back is a question of whether the
+older binary can read what the newer one wrote. Two formats decide it:
 
-The boundary into 1.0 is the exception, and it is a wall rather than a teardown. The boot apply
-only creates: the teardown and migration files that once dropped the retired engines were
-themselves deleted from the tree (see [Retired objects](/internals/legacy)), so nothing removes,
-converts or migrates an older database's objects at boot.
+- **The ordered store** (`store/` in the data directory) carries a format number. A build refuses a
+  store whose format is newer than it knows. A store written before value checksums (format 0) is
+  migrated to format 1 the first time a newer build opens it, and a build that predates format 1
+  cannot read the result.
+- **The replicated log** carries effects at the kind and version the writer knew. A build that meets
+  an effect kind, an effect version or an entry format it does not know stops the node rather than
+  skip the entry. In a cluster, a node rolled back behind an effect the others already write stops
+  at the first such entry.
+
+Rolling back is therefore safe only to a build that reads both. Release notes have to say when a
+release changes either.
 
 <Aside type="danger">
-Do not point a 1.0 broker at a database written by a pre-1.0 broker. There is no data migration
-and no boot-time cleanup: the log engine is a greenfield replacement, and the supported move
-across that boundary is a fresh database. Take a `pg_dump` first if the old data matters.
+There is no path back into 1.x, and none forward from it: a 2.0 broker does not read a 1.x
+PostgreSQL database, nothing migrates one, and messages do not carry over. Moving from 1.x is a new
+deployment that clients reach by changing the host they talk to.
 </Aside>
 
 ## Stale release material
 
-The pre-1.0 release checklist, `developer/14-release.md`, is stale like the rest of `developer/`;
-for what each release actually changed, read `CHANGELOG.md` at the repository root.
+For what each release actually changed, read `CHANGELOG.md` at the repository root.
 
-The CI that was stale the same way is gone: `cpp-server-build.yml` (C++ `make` targets that no
+The CI that had gone stale is gone too: `cpp-server-build.yml` (C++ `make` targets that no
 longer existed) and `cli.yml` (an end-to-end suite pinned to a pre-log-engine `0.14.3` broker
 image) have both been deleted. The active release workflows are `docker-build.yml`,
 `release-cli.yml`, `release-supervisor.yml` and `release-php-client.yml`; the CLI's end-to-end
@@ -245,7 +248,8 @@ suite runs in the `cli` cell of the tests matrix, against the broker built from 
 
 - Smoke-test the published packages from a clean directory rather than a local link: install
   `queen-mq` from npm and from PyPI, and `go get` the client module at the new version.
-- Write release notes covering schema changes, new environment variables and anything removed.
-  A removed route or environment variable is a major-version change.
+- Write release notes covering new environment variables, anything removed, and any change an
+  older binary cannot read (the store format, an effect or the entry format). A removed route or
+  environment variable is a major-version change.
 - Re-check that the published image tag in these docs matches what was pushed. It appears in
   [Start here](/start) and [Self-hosting](/deploy/).

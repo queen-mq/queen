@@ -1,14 +1,16 @@
 """
 KV integration tests -- against a real broker (PLAN_KV_TIMERS.md §5).
 
-Every namespace here starts with ``test-`` so ``cleanup_test_data`` purges it.
-That purge is MANDATORY and not cosmetic (§10.4): without it the putIfAbsent
-tests below are green on their first run and red forever after, and the incr
-tests accumulate across runs until a rate-limit assertion fails with a number
-nobody can explain from the test source.
+The namespace (``test-kv-py``) and every key in it are FIXED, not per-run, so
+this file expects a broker that has never seen them. The harness gives every
+lane a fresh broker, so that holds there. Rerun it against the same broker
+before the previous run's keys expire (every key below expires within 60 s)
+and the putIfAbsent, once and incr tests fail on the last run's winner,
+marker and counter, with a number nobody can explain from the test source
+(§10.4).
 
 ``forever`` appears nowhere in this file, deliberately: a test that goes wrong
-must not be able to leave immortal state in a shared test database.
+must not be able to leave immortal state on a shared broker.
 """
 
 import asyncio
@@ -42,8 +44,8 @@ async def test_a_missing_key_is_a_200_with_found_false(client):
 
 @pytest.mark.asyncio
 async def test_a_null_value_is_a_value(client):
-    """§5.5: `'null'::jsonb` is legal, and {found:true, value:null} is not the
-    same thing as {found:false}. No SDK may collapse them."""
+    """§5.5: a JSON `null` is a legal value, and {found:true, value:null} is not
+    the same thing as {found:false}. No SDK may collapse them."""
     await client.kv.put(NS, "explicit:null", None, ttl_seconds=60)
     got = await client.kv.get(NS, "explicit:null")
     assert got["found"] is True
@@ -53,8 +55,10 @@ async def test_a_null_value_is_a_value(client):
 
 @pytest.mark.asyncio
 async def test_put_if_absent_has_exactly_one_winner(client):
-    """§5.3: Postgres takes the row lock BEFORE evaluating the condition, so N
-    concurrent callers serialise and the losers re-evaluate against the new row."""
+    """§5.3: every KV write passes the broker's planner, one serial point, and
+    the condition is judged there against the row the previous writer left. So
+    N concurrent callers serialise and each loser is judged against the
+    winner's row."""
     key = "claim:one-winner"
     results = await asyncio.gather(
         *[client.kv.put_if_absent(NS, key, {"by": i}, ttl_seconds=60) for i in range(8)]

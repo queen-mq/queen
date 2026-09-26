@@ -24,7 +24,6 @@ import {
   lossSeverity,
   numTone,
   pendingDriftSeverity,
-  poolSeverity,
   quorumSeverity,
   raftHeartbeatSeverity,
   raftLagSeverity,
@@ -166,18 +165,11 @@ test('queue lag in ms ranks fresh / quiet / late / stalled', () => {
   assert.equal(lagMsSeverity(90_000), 'bad')
 })
 
-test('event loop and pool saturation are host degradation, and stay', () => {
+test('event loop lag is host degradation, and stays', () => {
   assert.equal(eventLoopSeverity(0), '')
   assert.equal(eventLoopSeverity(12), '')
   assert.equal(eventLoopSeverity(50), 'warn')
   assert.equal(eventLoopSeverity(100), 'bad')
-
-  assert.equal(poolSeverity({ active: 4, size: 96 }), '')
-  assert.equal(poolSeverity({ active: 70, size: 96 }), '')        // 73% — room left
-  assert.equal(poolSeverity({ active: 80, size: 96 }), 'warn')    // 83% — queueing soon
-  assert.equal(poolSeverity({ active: 96, size: 96 }), 'bad')     // full: requests wait
-  assert.equal(poolSeverity({ active: null, size: 96 }), '')
-  assert.equal(poolSeverity({ active: 10, size: 0 }), '')
 })
 
 // ---------------------------------------------------------------------------

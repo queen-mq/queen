@@ -3,8 +3,8 @@
  * factories that return a function suitable for `.gate(fn)` on a Stream.
  *
  * The point of these helpers is purely ergonomic: the user shouldn't have to
- * re-write the refill math every time. The semantics (per-key state in
- * queen_streams.state, partial-ack on deny, FIFO order on lease expiry) all
+ * re-write the refill math every time. The semantics (per-key state in the
+ * broker, partial-ack on deny, FIFO order on lease expiry) all
  * come from the underlying Stream `.gate()` runtime — these factories only
  * decide HOW each request consumes from the bucket.
  *
@@ -31,7 +31,7 @@
  *
  * Returns a `(msg, ctx) => boolean` function suitable for `.gate(fn)`.
  * The bucket state lives in `ctx.state` (which the runtime persists per-key
- * in queen_streams.state on every ALLOWED message).
+ * in the broker on every ALLOWED message).
  *
  * @param {object} opts
  * @param {number}                 opts.capacity        Max tokens in the bucket (= max burst).
@@ -75,7 +75,7 @@ export function tokenBucketGate({
       ctx.state.tokens -= cost
       // Lightweight observability: the SDK persists ctx.state on ALLOW only,
       // so these counters automatically reflect "what the bucket actually let
-      // through" and can be inspected via SQL on queen_streams.state.
+      // through".
       ctx.state.allowedTotal = (ctx.state.allowedTotal || 0) + 1
       ctx.state.consumedTotal = (ctx.state.consumedTotal || 0) + cost
       return true

@@ -13,9 +13,9 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
-    // dev-only: proxy API calls to a locally running queen-proxy dev cell
-    // (CONTRACTS.md's reserved port for this crate's proxy, :6711) so `npm
-    // run dev` works against real data without CORS juggling.
+    // dev-only: proxy API calls to a local broker serving the embedded proxy
+    // on :6711 (QUEEN_PROXY_EMBEDDED=true QUEEN_PROXY_PORT=6711) so `npm run
+    // dev` works against real data without CORS juggling.
     port: 4001,
     proxy: {
       '/api': { target: 'http://127.0.0.1:6711', changeOrigin: true },

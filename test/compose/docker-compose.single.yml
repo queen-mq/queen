@@ -1,13 +1,20 @@
-# Single-node stack: one Postgres + one broker + one test runner.
-# The project name (docker compose -p ...) makes each (suite) invocation an
-# isolated network namespace, so nothing here publishes host ports — runners
-# reach the broker/PG by service name inside the project's own network.
+# Single-node stack: ONE raft broker + one test runner. There is no database:
+# the broker is a single raft voter (the local replicator) whose state lives in
+# QUEEN_RAFT_DIR on the `raftdata` volume below.
 #
-# QUEEN_TEST_TENANCY selects the lane: `false` (topology `single`) is the OSS
+# The project name (docker compose -p ...) makes each (suite x topology)
+# invocation an isolated network namespace, so nothing here publishes host
+# ports: the runner reaches the broker by service name. test/run.sh always tears
+# the project down with `down -v`, so every lane boots on an EMPTY data
+# directory — which is what the suites' fixed-name fixtures (e.g. the docs
+# snippets' fixed transactionIds) rely on: there is no cleanup to run.
+#
+# QUEEN_TEST_TENANCY selects the lane: `false` (topology `single`) is the
 # flag-off path; `true` (topology `tenanted`) starts the broker with native
-# tenant scoping ON — the configuration every cloud cell actually runs — while
-# the runner sends NO x-queen-tenant header, i.e. the default-tenant path, whose
-# results must be IDENTICAL to the flag-off lane.
+# tenant scoping ON while the client suites send NO x-queen-tenant header, i.e.
+# the default-tenant path, whose results must be IDENTICAL to the flag-off lane
+# (run.sh's TENANCY PARITY gate). The `tenancy` suite also runs here with the
+# flag on, sending the header itself (QUEEN_A_URL = QUEEN_B_URL = this node).
 #
 # Bring up via test/run.sh, which sets QUEEN_RUNNER_IMAGE. Standalone example:
 #   QUEEN_RUNNER_IMAGE=queen-test-runner-js \
@@ -15,83 +22,36 @@
 #     up --abort-on-container-exit --exit-code-from runner
 
 services:
-  pg:
-    image: postgres:16
-    environment:
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: postgres
-    tmpfs:
-      - /var/lib/postgresql/data   # ephemeral + fast; wiped with the container
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
-      interval: 2s
-      timeout: 3s
-      retries: 40
-
   broker:
     image: queen:test
-    depends_on:
-      pg:
-        condition: service_healthy
+    # No `depends_on`: nothing to wait for. /health answers 503 ("settling")
+    # until the state machine is open and ready, then 200; the runner's
+    # wait-for-broker gates on that.
     environment:
-      PG_HOST: pg
-      PG_PORT: "5432"
-      PG_USER: postgres
-      PG_PASSWORD: postgres
-      PG_DATABASE: postgres
-      QUEEN_APPLY_SCHEMA: "1"     # 0/false/no/off would skip
+      # The raft data directory: required (the broker refuses to boot without
+      # it). On the `raftdata` volume, so each lane starts empty.
+      QUEEN_RAFT_DIR: /var/lib/queen/raft
       PORT: "6632"
-      # Pop fusion follows the env so the same matrix validates both sides of
-      # the flag (QUEEN_POP_FUSION unset = off = today's byte-identical path).
-      QUEEN_POP_FUSION: "${QUEEN_POP_FUSION:-0}"
-      DB_POOL_SIZE: "32"          # small test PG — stay well under max_connections
+      # The leader's maintenance cadence (retention, trace expiry). 5000 is the
+      # default; it is pinned here because the runner's
+      # QUEEN_RETENTION_INTERVAL_MS below must say the same number.
+      RETENTION_INTERVAL: "5000"
       QUEEN_TENANCY_HEADER: "${QUEEN_TEST_TENANCY:-false}"
-      # There is nothing here to turn kv and timers ON. Both surfaces are part of
-      # the engine, like push and pop, and the two boot flags that used to gate
-      # them are gone (PLAN_KV_TIMERS.md §16 superseded). A broker that answers
-      # 404 on /api/v1/kv or /api/v1/timers is a bug, not a lane running with a
-      # feature off, and every suite below may assume the surfaces exist.
-      # To PAUSE them on a running broker an operator uses the runtime kill
-      # switch (POST /api/v1/system/kv-timers), which is not a boot knob.
-      #
-      # Required by the broker's boot interlock whenever the tenant header is on
-      # — no kv term in it any more: with the header on the tenant is opaque and
-      # validated against nothing, so any caller could address another tenant's
-      # key space BY NAME. The affirmation is truthful here — the runner is the
-      # only client on this network and sends no header, so the default tenant is
-      # the only one in play — and without it the `tenanted` topology would fail
-      # to boot. Harmless on the `single` lane, where the header is off.
+      # Required by the broker's boot interlock whenever the tenant header is on:
+      # with the header on, the tenant is opaque and validated against nothing,
+      # so any caller could address another tenant's key space BY NAME. The
+      # affirmation is truthful here — the runner is the only client on this
+      # network. Harmless on the `single` lane, where the header is off.
       QUEEN_KV_TRUSTED_PROXY: "1"
-      # §9.4: with QUEEN_TENANCY_HEADER on, QUEEN_KV_REQUIRE_GRANT DERIVES to true,
-      # and then the ABSENCE of a queen.kv_quota row is a 403 `feature_gated`. That
-      # rule is correct for a cloud cell, where granting a tenant is provisioning
-      # the control plane does before the tenant ever calls. It cannot be satisfied
-      # HERE, and the reason is a bring-up order, not a policy: queen.kv_quota is
-      # created by the broker itself at boot (QUEEN_APPLY_SCHEMA=1), so there is no
-      # moment before the listener opens at which anything could have inserted the
-      # row, and a grant written afterwards is a race against the runner's first kv
-      # call. Left derived, every kv test in every SDK suite answers 403 on the
-      # `tenanted` lane -- which is exactly what happened -- and the lane can never
-      # meet the invariant it exists to assert, that its results are IDENTICAL to
-      # `single`. So the rule is turned off for the test stack and not weakened for
-      # the product: the affirmation is true on this network (one runner, one
-      # default tenant, all granted), the derivation itself is covered by
-      # tests_unit/quota_gate.rs, and the 403 is covered by tests_unit/switch_levels.rs
-      # rung 3. Set it to `true` to bring the denial back for a one-off check.
+      # With QUEEN_TENANCY_HEADER on, QUEEN_KV_REQUIRE_GRANT DERIVES to true and
+      # the ABSENCE of a per-tenant kv grant is a 403 `feature_gated`. Correct for
+      # a cloud cell (granting is provisioning), unsatisfiable here: nothing can
+      # grant the default tenant before the runner's first kv call. Left derived,
+      # every kv test answers 403 on the `tenanted` lane and the lane can never be
+      # IDENTICAL to `single`. Set it to `true` for a one-off check of the denial.
       QUEEN_KV_REQUIRE_GRANT: "${QUEEN_TEST_KV_REQUIRE_GRANT:-false}"
-      # Timer delivery latency in a TEST stack. A broker whose timer table is
-      # empty backs its sweep off progressively up to
-      # QUEEN_SWEEPER_IDLE_MAX_SLEEP_MS (30 s in production), and what would cut
-      # that short is the local in-process wake, which PLAN_KV_TIMERS.md §7.4
-      # declares and the broker has not implemented yet. So the first timer
-      # scheduled on an otherwise idle broker waits out most of that sleep --
-      # measured at 17 s for one asked to fire in 500 ms. Every suite that
-      # asserts a timer actually arrived would pay it. This is a harness knob,
-      # not a product default: the production ceiling stays where it is.
-      QUEEN_SWEEPER_IDLE_MAX_SLEEP_MS: "1000"
-      FILE_BUFFER_DIR: /var/lib/queen/buffers
-    tmpfs:
-      - /var/lib/queen/buffers
+    volumes:
+      - raftdata:/var/lib/queen/raft
 
   runner:
     image: ${QUEEN_RUNNER_IMAGE:?set QUEEN_RUNNER_IMAGE (e.g. queen-test-runner-js)}
@@ -100,13 +60,13 @@ services:
     environment:
       QUEEN_HTTP_URL: http://broker:6632
       QUEEN_WAIT_URLS: http://broker:6632/health
-      QUEEN_PG_HOST: pg
-      QUEEN_PG_PORT: "5432"
-      QUEEN_PG_USER: postgres
-      QUEEN_PG_PASSWORD: postgres
-      QUEEN_PG_DB: postgres
-      # Tells the CLI suite's retention tests what cadence the broker above runs
-      # at -- it configures NOTHING, it only sizes their wait. Unset, they
-      # t.Skip, which is how they sat dead in CI since they were written.
-      # Must equal the broker's RETENTION_INTERVAL (unset above = 5000 default).
+      # The `tenancy` suite drives two broker URLs; on one node both are it.
+      QUEEN_A_URL: http://broker:6632
+      QUEEN_B_URL: http://broker:6632
+      # Tells the CLI suite's retention tests the broker's RETENTION_INTERVAL
+      # above -- it configures NOTHING, it only sizes their wait. Unset, they
+      # t.Skip. Must equal the broker's RETENTION_INTERVAL.
       QUEEN_RETENTION_INTERVAL_MS: "5000"
+
+volumes:
+  raftdata:

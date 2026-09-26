@@ -1,13 +1,11 @@
-//! The raft-mode metrics collector: Postgres mode's `syscollect.rs` loop with
-//! the node's [`DashStore`](super::store::DashStore) as its sink instead of
-//! the metrics tables (PLAN_RAFT.md §10.2: "metrics collector → local.db").
+//! The raft-mode metrics collector, with the node's
+//! [`DashStore`](super::store::DashStore) as its sink (PLAN_RAFT.md §10.2:
+//! "metrics collector → local.db").
 //!
 //! Every `METRICS_FLUSH_MS` (default 60 s) it diffs the process counters the
 //! raft facade feeds ([`crate::metrics::global`]) into one [`WorkerRow`], one
-//! [`SystemRow`] (CPU, RSS, and the raft family in place of the database
-//! pool), and a [`QueueRow`] / [`ParkedRow`] per queue with activity — the
-//! same deltas, rounding and "only queues with activity" rule as
-//! `syscollect::run_loop`, so a row means the same thing on both engines.
+//! [`SystemRow`] (CPU, RSS, and the raft family), and a [`QueueRow`] /
+//! [`ParkedRow`] per queue with activity.
 //!
 //! One thread per process, started by the first facade that opens.
 
@@ -143,7 +141,7 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
         // --- system row ---------------------------------------------------
         let (user_us, sys_us, rss) = crate::syscollect::rusage();
         let secs = interval.as_secs_f64().max(1.0);
-        // percent × 100, the unit System.vue divides by 100 (syscollect.rs).
+        // percent × 100, the unit System.vue divides by 100.
         let cpu_user = user_us.saturating_sub(last_user_us) as f64 / (secs * 100.0);
         let cpu_sys = sys_us.saturating_sub(last_sys_us) as f64 / (secs * 100.0);
         last_user_us = user_us;
@@ -167,6 +165,7 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
         // --- per-queue rows (only queues with activity) --------------------
         let mut parked = crate::syscollect::drain_parked_avg(&metrics, interval);
         let mut queue_rows = Vec::new();
+        let mut conflated_now: Vec<(String, String, i64)> = Vec::new();
         let mut parked_rows = Vec::new();
         for (key, cur) in &now_pq {
             let prev = last_pq.get(key).copied().unwrap_or_default();
@@ -218,8 +217,12 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
                     parked_count: parked_avg,
                 });
             }
+            if row.conflated > 0 {
+                conflated_now.push((row.tenant.clone(), row.queue.clone(), row.conflated));
+            }
             queue_rows.push(row);
         }
+        *LAST_CONFLATED.lock().unwrap_or_else(|p| p.into_inner()) = conflated_now;
         // Queues that only had parked long-polls this interval.
         for (key, parked_avg) in parked {
             if parked_avg == 0 {
@@ -256,9 +259,8 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
     }
 }
 
-/// The `metrics` JSON of a [`SystemRow`]: Postgres mode's shape
-/// (`syscollect::build_system_metrics_json`, every leaf `{avg,min,max,last}`)
-/// without the `database` pool family, plus `raft`.
+/// The `metrics` JSON of a [`SystemRow`] (every leaf `{avg,min,max,last}`),
+/// plus `raft`.
 fn system_json(uptime: u64, cpu_user: f64, cpu_sys: f64, rss: u64, raft: Option<[f64; 5]>) -> Value {
     fn m(v: f64) -> Value {
         json!({ "avg": v, "min": v, "max": v, "last": v })
@@ -284,4 +286,16 @@ fn system_json(uptime: u64, cpu_user: f64, cpu_sys: f64, rss: u64, raft: Option<
         );
     }
     body
+}
+
+/// The last bucket's conflated count per (tenant, queue): what
+/// `queen_queue_conflated_per_minute` exports on `/metrics/prometheus`.
+static LAST_CONFLATED: std::sync::Mutex<Vec<(String, String, i64)>> =
+    std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn last_conflated() -> Vec<(String, String, i64)> {
+    LAST_CONFLATED
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
 }

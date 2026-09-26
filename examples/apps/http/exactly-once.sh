@@ -13,10 +13,10 @@
 # not commit with the acknowledgement, and any window between the two is a
 # window in which the work happens twice.
 #
-# Here the marker is a row in the same PostgreSQL as the queue, written in the
-# same transaction as the ack. There is no window. Either the order is marked
-# and acknowledged, or neither, and a redelivery finds the marker and does
-# nothing.
+# Here the marker is a KV entry in the same broker state as the queue, written
+# in the same transaction as the ack. There is no window. Either the order is
+# marked and acknowledged, or neither, and a redelivery finds the marker and
+# does nothing.
 #
 #   orders
 #     ├── group "charger"  marker + ack in ONE transaction
@@ -227,8 +227,8 @@ for order in $ORDER_IDS; do
                payload: {orderId: $order, cents: $cents}}]}')"
   request POST /api/v1/push "$body"
   [ "$STATUS" = 201 ] || fail "push of $order returned HTTP $STATUS"
-  # HTTP 201 is not proof the message was stored: "buffered" and "failed" also
-  # come back 201. The per-item status is the only answer.
+  # HTTP 201 is not proof the message was stored: an item the broker refused
+  # comes back "error" inside a 201. The per-item status is the only answer.
   [ "$(jq -r '.[0].status' "$OUT")" = queued ] \
     || fail "push of $order came back $(jq -r '.[0].status' "$OUT")"
   cents=$((cents + 1))

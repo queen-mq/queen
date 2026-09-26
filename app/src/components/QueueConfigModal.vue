@@ -254,7 +254,8 @@
 // re-parsed every option from defaults on every call, so an edit form that
 // posted three fields reset the other eighteen: dedup back to 3600, retention
 // off, the sink hold off — silently, on a queue the operator meant to nudge.
-// The broker now merges (012_configure.sql), and this form is built on that:
+// The broker now merges (server/src/rsm/facade/real/phase2.rs api_configure),
+// and this form is built on that:
 // it posts `configDiff`, the keys the operator actually touched, and nothing
 // else. That is also what makes it concurrency-safe: an option a colleague
 // changed while this modal was open is not in the diff, so it is not

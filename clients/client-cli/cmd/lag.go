@@ -47,8 +47,8 @@ for alerting pipelines.`,
 // while the work left is one handler run per non-empty partition
 // (PLAN_CONFLATION §5.3). A group sitting at four million messages is healthy
 // when that column says "yes" and an incident when it says "-", and until
-// §2.6 taught get_consumer_groups_v4 to join consumer_groups_metadata there was
-// no way to tell the two apart from here.
+// §2.6 taught the consumer-groups route to report conflation there was no way
+// to tell the two apart from here.
 func consumerGroupsView() output.View {
 	return output.View{
 		Columns: []output.Column{

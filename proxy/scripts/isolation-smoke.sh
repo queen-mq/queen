@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
-# Two-tenant isolation smoke THROUGH THE PROXY, against the dev cell
-# (scripts/dev-cell.sh up must be running: pxdb :5465, broker :6710 with
-# QUEEN_TENANCY_HEADER=true, proxy :6711, seed-dev.sql applied).
+# Two-tenant isolation smoke THROUGH THE PROXY, against a single-binary node
+# (the broker with QUEEN_PROXY_EMBEDDED=true). The node must have:
+#   * QUEEN_PROXY_CP_TOKEN set, and this script run with the same value plus
+#     QUEEN_SMOKE_CP=http://<node>/api/cp -- provisioning goes through the
+#     control-plane API;
+#   * cluster `dev` bootstrapped with the key below:
+#     QUEEN_PROXY_BOOTSTRAP_TENANT=dev
+#     QUEEN_PROXY_BOOTSTRAP_API_KEY=qk_dev_devdevdevdevdevdevdevdevdevdevdevdevdev
+#   * optionally QUEEN_PROXY_SHARED_HOSTS=shared.local (section 20) and
+#     QUEEN_PROXY_ENFORCE=true (the live 429 checks).
 #
 # Derived from the T3/§5 checklist (PLAN_QUEEN_PROXY_CLOUD.md): same queue name
 # on two clusters of the same cell, scoped listings and aggregates asserted on
@@ -10,11 +17,11 @@
 # revocation, key/cluster binding, blocked operator surfaces, storage quota,
 # meters, SHARED-HOST key routing (section 20, decision z: one hostname, the
 # cluster from the credential) -- plus a live 429 check when the proxy runs with
-# QUEEN_PROXY_ENFORCE=true (`QUEEN_PROXY_ENFORCE=true scripts/dev-cell.sh up`).
-# In shadow mode those three checks are reported as COUNTED SKIPS, never as
-# silent passes, so the printed tally means the same thing in both modes.
+# QUEEN_PROXY_ENFORCE=true. In shadow mode those three checks are reported as
+# COUNTED SKIPS, never as silent passes, so the printed tally means the same
+# thing in both modes.
 #
-# What it provisions on the dev cell's pxdb (idempotent, reuses what exists):
+# What it provisions through the control plane (idempotent, reuses what exists):
 #   * cluster `two`  (tenant-two,  plan free) -- tenant B, the adversary
 #   * cluster `pro1` (tenant-pro1, plan pro)  -- traces need a plan with the
 #   * cluster `pro2` (tenant-pro2, plan pro)     traces feature; the seeded free
@@ -35,30 +42,22 @@
 # clears every override it set -- important, since the storage-quota section
 # parks a 64-byte max_retained_bytes on cluster `dev` mid-run.
 #
-# Needs: docker (qpx-pg), curl, jq, openssl, shasum, perl (sub-second clock for
-# the §19e wake-latency assertion).
+# Needs: curl, jq, openssl, shasum, perl (sub-second clock for the §19e
+# wake-latency assertion).
 set -uo pipefail
 
 P=${QUEEN_SMOKE_URL:-http://127.0.0.1:6711}
-# Single binary (no pxdb): provisioning goes through the control-plane API
-# instead of psql -- QUEEN_SMOKE_CP=http://<node>/api/cp plus the node's
-# QUEEN_PROXY_CP_TOKEN. The checks that read Postgres rows directly are then
-# reported as counted skips.
 SMOKE_CP=${QUEEN_SMOKE_CP:-}
 CP_TOKEN=${QUEEN_PROXY_CP_TOKEN:-}
 SH=${QUEEN_SMOKE_SHARED_HOST:-shared.local}
-KEY_A="qk_dev_devdevdevdevdevdevdevdevdevdevdevdevdev"   # seeded (cluster: dev)
+KEY_A="qk_dev_devdevdevdevdevdevdevdevdevdevdevdevdev"   # bootstrapped (cluster: dev), see header
 RUN=$(date +%s | tail -c 7)
 PASS=0; FAIL=0; SKIP=0
 TMP=$(mktemp -d); BODYF="$TMP/body"; HDRF="$TMP/hdr"
-# Startup line of the proxy that fronts this cell -- the only place the
-# enforce/shadow mode is observable from outside the process.
-PROXY_LOG="${QUEEN_PROXY_LOG:-$(cd "$(dirname "$0")/.." && pwd)/.devcell/proxy.log}"
-# Same, for the broker behind it: section 19 needs to know the hot-list is ON
-# (its boot line) before it can claim to have exercised the candidate ring.
-BROKER_LOG="${QUEEN_BROKER_LOG:-$(cd "$(dirname "$0")/.." && pwd)/.devcell/broker.log}"
 
 command -v jq >/dev/null || { echo "isolation-smoke: jq is required" >&2; exit 2; }
+{ [ -n "$SMOKE_CP" ] && [ -n "$CP_TOKEN" ]; } || {
+  echo "isolation-smoke: set QUEEN_SMOKE_CP (http://<node>/api/cp) and QUEEN_PROXY_CP_TOKEN" >&2; exit 2; }
 
 say()  { printf '%s\n' "$*"; }
 ok()   { PASS=$((PASS+1)); say "  ok  - $1"; }
@@ -73,7 +72,6 @@ want_in()  { if has "$2" "$3"; then ok "$1"; else bad "$1 (no '$2' in: $(short "
 want_out() { if has "$2" "$3"; then bad "$1 (leaked '$2' in: $(short "$3"))"; else ok "$1"; fi; }
 j()    { printf '%s' "$2" | jq -r "$1" 2>/dev/null; }   # j <filter> <json>
 
-px()   { docker exec -i qpx-pg psql -qtA -U postgres -d queen_proxy "$@"; }
 cpapi() { # method path [json] -> body   (a non-2xx is logged, never silent)
   local args=(-s -o "$TMP/cp.body" -w '%{http_code}' -X "$1" -H "x-queen-cp-token: $CP_TOKEN")
   [ -n "${3:-}" ] && args+=(-H 'Content-Type: application/json' -d "$3")
@@ -82,12 +80,10 @@ cpapi() { # method path [json] -> body   (a non-2xx is logged, never silent)
   cat "$TMP/cp.body"
 }
 cluster_id() { # slug -> uuid (empty when absent)
-  if [ -n "$SMOKE_CP" ]; then cpapi GET "/clusters/$1" | jq -r '.id // empty'
-  else px -c "SELECT id FROM queen_proxy.clusters WHERE slug='$1'"; fi
+  cpapi GET "/clusters/$1" | jq -r '.id // empty'
 }
 revoke_key() { # key uuid
-  if [ -n "$SMOKE_CP" ]; then cpapi DELETE "/keys/$1" >/dev/null; say "  ...  revoked key $1 at $(date +%T)" >&2
-  else px -c "SELECT queen_proxy.revoke_api_key('$1'::uuid)" >/dev/null; fi
+  cpapi DELETE "/keys/$1" >/dev/null; say "  ...  revoked key $1 at $(date +%T)" >&2
 }
 
 req() { # method host key path [body] -> "code|body"
@@ -123,46 +119,20 @@ hdr() { grep -i "^$1:" "$HDRF" | tail -1 | tr -d '\r' | sed "s/^[^:]*:[[:space:]
 
 # --- control-plane helpers ---------------------------------------------------
 ensure_cluster() { # tenant-slug tenant-name cluster-slug plan -> cluster uuid
-  if [ -n "$SMOKE_CP" ]; then
-    cpapi POST /clusters "{\"tenant_slug\":\"$1\",\"tenant_name\":\"$2\",\"slug\":\"$3\",\"plan\":\"$4\"}" | jq -r '.id // empty'
-    return
-  fi
-  px >/dev/null <<SQL
-DO \$\$
-DECLARE t uuid; cell uuid;
-BEGIN
-  SELECT id INTO cell FROM queen_proxy.cells WHERE slug='local';
-  IF NOT EXISTS (SELECT 1 FROM queen_proxy.clusters WHERE slug='$3') THEN
-    SELECT id INTO t FROM queen_proxy.tenants WHERE slug='$1';
-    IF t IS NULL THEN t := queen_proxy.create_tenant('$1','$2'); END IF;
-    PERFORM queen_proxy.create_cluster(t,'$3','$4',cell);
-  END IF;
-END \$\$;
-SQL
-  px -c "SELECT id FROM queen_proxy.clusters WHERE slug='$3'"
+  cpapi POST /clusters "{\"tenant_slug\":\"$1\",\"tenant_name\":\"$2\",\"slug\":\"$3\",\"plan\":\"$4\"}" | jq -r '.id // empty'
 }
-issue_key() { # cluster-uuid label scopes-sql -> "plaintext|key uuid"
+issue_key() { # cluster-uuid label scopes (single-quoted, comma-separated) -> "plaintext|key uuid"
   local k h id
   k="qk_dev_$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '=' | cut -c1-43)"
   h=$(printf '%s' "$k" | shasum -a 256 | cut -d' ' -f1)
-  if [ -n "$SMOKE_CP" ]; then
-    id=$(cpapi POST /keys "{\"cluster_id\":\"$1\",\"name\":\"iso-$RUN-$2\",\"key_hash\":\"$h\",\"scopes\":[$(printf '%s' "$3" | tr "'" '"')]}" | jq -r '.id // empty')
-    echo "$id" >> "$TMP/issued"
-    printf '%s|%s' "$k" "$id"
-    return
-  fi
-  id=$(px -c "SELECT queen_proxy.issue_api_key('$1'::uuid,'iso-$RUN-$2','$h',ARRAY[$3])")
+  id=$(cpapi POST /keys "{\"cluster_id\":\"$1\",\"name\":\"iso-$RUN-$2\",\"key_hash\":\"$h\",\"scopes\":[$(printf '%s' "$3" | tr "'" '"')]}" | jq -r '.id // empty')
+  echo "$id" >> "$TMP/issued"
   printf '%s|%s' "$k" "$id"
 }
 set_ovr() { # cluster-uuid json|NULL
   local v
-  if [ -n "$SMOKE_CP" ]; then
-    if [ "$2" = "NULL" ]; then v=null; else v=$2; fi
-    cpapi PUT "/clusters/$1/overrides" "$v" >/dev/null
-    return
-  fi
-  if [ "$2" = "NULL" ]; then v="NULL"; else v="'$2'::jsonb"; fi
-  px -c "SELECT queen_proxy.set_limit_override('$1'::uuid, $v)" >/dev/null
+  if [ "$2" = "NULL" ]; then v=null; else v=$2; fi
+  cpapi PUT "/clusters/$1/overrides" "$v" >/dev/null
 }
 
 # Wide enough that the smoke's own traffic never trips a limit; `rl` is the
@@ -174,7 +144,7 @@ WIDE_Q='{"max_req_per_sec":500,"req_burst":2000,"max_msgs_per_sec":5000,"msgs_bu
 CID_A=""; CID_B=""; CID_P1=""; CID_P2=""; CID_RL=""
 KEY_B=""; KEY_P1=""
 cleanup() {
-  # Drop this run's queues, so a long-lived dev cell does not accumulate ~10
+  # Drop this run's queues, so a long-lived node does not accumulate ~10
   # queues per smoke run (and eventually meet the max_queues cap). Best-effort
   # and silent: a cleanup failure must not be mistaken for a check.
   for q in "orders-$RUN" "ret-$RUN" "iso-a-$RUN" "adv-$RUN" "scope-$RUN" "quota-$RUN" "hot-$RUN" "hot4-$RUN" "sh20-$RUN"; do
@@ -185,19 +155,9 @@ cleanup() {
   done
   [ -n "$KEY_P1" ] && req DELETE pro1 "$KEY_P1" "/api/v1/resources/queues/tq-$RUN" >/dev/null 2>&1
   for c in $CID_A $CID_B $CID_P1 $CID_P2; do [ -n "$c" ] && set_ovr "$c" NULL; done
-  # best-effort: revoke every key this run issued, so a dev pxdb does not
-  # accumulate one live key per smoke run.
+  # best-effort: revoke every key this run issued, so a long-lived node does
+  # not accumulate one live key per smoke run.
   [ -r "$TMP/issued" ] && while read -r id; do revoke_key "$id" 2>/dev/null; done < "$TMP/issued"
-  [ -n "$SMOKE_CP" ] || px >/dev/null 2>&1 <<SQL || true
-DO \$\$
-DECLARE r RECORD;
-BEGIN
-  FOR r IN SELECT id FROM queen_proxy.api_keys
-            WHERE name LIKE 'iso-$RUN-%' AND revoked_at IS NULL LOOP
-    PERFORM queen_proxy.revoke_api_key(r.id);
-  END LOOP;
-END \$\$;
-SQL
   rm -rf "$TMP"
 }
 
@@ -208,7 +168,7 @@ say "== two-tenant isolation through the proxy (run $RUN) =="
 # ============================================================================
 CID_A=$(cluster_id dev)
 if [ -z "$CID_A" ]; then
-  say "  FAIL- cluster 'dev' not seeded; run scripts/dev-cell.sh up first"; exit 2
+  say "  FAIL- cluster 'dev' not found; start the node with QUEEN_PROXY_BOOTSTRAP_TENANT=dev (see header)"; exit 2
 fi
 CID_B=$(ensure_cluster tenant-two  'Tenant Two'      two  free)
 CID_P1=$(ensure_cluster tenant-pro1 'Tenant Pro One'  pro1 pro)
@@ -227,17 +187,13 @@ R=$(issue_key "$CID_A"  tmp    "'read'"); KEY_TMP=${R%%|*}; KEY_TMP_ID=${R#*|}
 
 for c in "$CID_A" "$CID_B" "$CID_P1" "$CID_P2"; do set_ovr "$c" "$WIDE"; done
 
-# enforce/shadow, straight off the proxy's own startup line (`queen-proxy up
-# addr=... enforce=<bool>`); tr/sed strip the ANSI colouring.
+# enforce/shadow, asked of the proxy itself: /healthz reports the switch.
 ENFORCING=unknown
-if [ -r "$PROXY_LOG" ]; then
-  LINE=$(grep -a "queen-proxy up" "$PROXY_LOG" | tail -1 | tr -cd '[:print:]\n' | sed 's/\[[0-9;]*m//g')
-  case "$LINE" in
-    *enforce=true*)  ENFORCING=yes ;;
-    *enforce=false*) ENFORCING=no  ;;
-  esac
-fi
-say "  ...  proxy enforcing: $ENFORCING (log: $PROXY_LOG)"
+case "$(j '.enforce' "$(curl -s "$P/healthz")")" in
+  true)  ENFORCING=yes ;;
+  false) ENFORCING=no  ;;
+esac
+say "  ...  proxy enforcing: $ENFORCING (/healthz)"
 
 # The limit override above only reaches the proxy when its host-cache entry
 # expires (30s TTL). Wait it out -- but only when enforcing, and only for as
@@ -341,7 +297,7 @@ check "B key on dev host -> 403" 403 "${KB_ON_A%%|*}"
 # ============================================================================
 # 6. blocked operator surfaces and discovery pop
 # ============================================================================
-for path in /api/v1/pop /api/v1/status /api/v1/analytics/postgres-stats /metrics/prometheus; do
+for path in /api/v1/pop /api/v1/status /metrics/prometheus; do
   R=$(req GET dev "$KEY_A" "$path")
   check "blocked $path" 404 "${R%%|*}"
 done
@@ -359,8 +315,8 @@ else bad "cross-tenant dedup collision: $(short "$D1") / $(short "$D2")"; fi
 # 8. scoped aggregates (Track B2) -- CONTENT, not just HTTP 200
 # ============================================================================
 # 8a. retainedBytes must be present AND track what A actually pushed. The
-# broker refreshes its stats table on STATS_INTERVAL_MS (10s in the dev cell),
-# so poll rather than read once.
+# broker refreshes its stats on its own cadence, so poll rather than read
+# once.
 PUSHED=$(( ${#PAYLOAD} * 4 ))
 DEADLINE=$((SECONDS+60)); RB_SEEN=""
 while [ $SECONDS -lt $DEADLINE ]; do
@@ -669,8 +625,9 @@ fi
 
 # ============================================================================
 # 16. storage quota e2e: tiny override -> storage_quota_exceeded -> clear ->
-#     unblocked. Cadence: broker stats refresh (~10s) + proxy reconcile (10s in
-#     the dev cell) + pump (10s) => allow up to ~90s per transition.
+#     unblocked. Cadence: broker stats refresh (~10s) + proxy reconcile
+#     (QUEEN_PROXY_RECONCILE_MS; run the node with 10000) + pump (10s) => allow
+#     up to ~90s per transition.
 # ============================================================================
 QUOTAQ="quota-$RUN"
 set_ovr "$CID_A" "$WIDE_Q"
@@ -723,14 +680,10 @@ want_out "queue-lag hides B's queue from A"          "\"$QB\"" "$QL"
 say "  ...  waiting for the usage_minutes flush"
 DEADLINE=$((SECONDS+120)); ROWS=0
 while [ $SECONDS -lt $DEADLINE ]; do
-  if [ -n "$SMOKE_CP" ]; then
-    ROWS=0
-    for c in "$CID_A" "$CID_B"; do
-      [ "$(cpapi GET "/clusters/$c/usage" | jq '[.minutes[]?.msgs]|add // 0')" -gt 0 ] 2>/dev/null && ROWS=$((ROWS+1))
-    done
-  else
-    ROWS=$(px -c "SELECT count(DISTINCT cluster_id) FROM queen_proxy.usage_minutes WHERE msgs > 0")
-  fi
+  ROWS=0
+  for c in "$CID_A" "$CID_B"; do
+    [ "$(cpapi GET "/clusters/$c/usage" | jq '[.minutes[]?.msgs]|add // 0')" -gt 0 ] 2>/dev/null && ROWS=$((ROWS+1))
+  done
   [ "${ROWS:-0}" -ge 2 ] 2>/dev/null && break
   sleep 5
 done
@@ -760,15 +713,7 @@ else bad "usage_minutes only has msgs>0 for ${ROWS:-0} cluster(s)"; fi
 # ============================================================================
 HQ="hot-$RUN"; HG="hg-$RUN"
 
-HL_ON=no-log
-if [ -r "$BROKER_LOG" ]; then
-  if grep -aq "QUEEN_HOTLIST on" "$BROKER_LOG"; then HL_ON=yes; else HL_ON=no; fi
-fi
-if [ -n "$SMOKE_CP" ]; then
-  skip "broker runs with the hot-list ON (a Postgres-engine structure; raft pops read the log index)"
-else
-  check "broker runs with the hot-list ON (the ring IS the pop path)" yes "$HL_ON"
-fi
+skip "broker runs with the hot-list ON (raft pops read the log index; there is no ring)"
 
 # autoAck throughout: the ring's leased-Took arm parks a claimed partition on the
 # lease wheel, which would make the second half of this section depend on a 300s
@@ -910,10 +855,10 @@ fi
 #     On a host listed in QUEEN_PROXY_SHARED_HOSTS the cluster is resolved from
 #     the CREDENTIAL, not from the Host label: an api key names its own cluster,
 #     a human session names one with x-queen-act-cluster and is checked against
-#     cluster_roles. dev-cell.sh configures `shared.local` for this.
+#     cluster_roles. Run the node with QUEEN_PROXY_SHARED_HOSTS=shared.local.
 #
 #     Self-detecting, and the detector is itself the load-bearing assertion:
-#     WITHOUT the feature, dev-cell.sh's QUEEN_PROXY_DEFAULT_CLUSTER=dev turns
+#     WITHOUT the feature, a QUEEN_PROXY_DEFAULT_CLUSTER=dev turns
 #     any unresolvable Host into cluster `dev`, so B's key on `shared.local`
 #     would be a 403 key/cluster mismatch. A 200 means the shared path ran AND
 #     that the default cluster did not absorb the host -- the two knobs are
@@ -921,7 +866,6 @@ fi
 # ============================================================================
 SHQ="sh20-$RUN"          # the SAME queue name on both clusters
 SHB="sh20b-$RUN"         # exists on cluster `two` only
-cellpx() { docker exec -i qcell-pg psql -qtA -U postgres -d queen "$@"; }
 
 SHPROBE=$(req GET $SH "$KEY_B" /api/v1/resources/queues)
 if [ "${SHPROBE%%|*}" != "200" ]; then
@@ -949,13 +893,7 @@ else
   # The tenant-header injection, asserted where it actually lands: two rows of
   # the same queue NAME in the cell, one per cluster's broker_tenant_uuid --
   # both created through the one shared hostname.
-  if [ -n "$SMOKE_CP" ]; then
-    skip "x-queen-tenant followed the key, not the host (broker rows: SQL on the cell, none in a single binary; the pops above assert it)"
-  else
-    SHTEN=$(cellpx -c "SELECT string_agg(tenant_id::text, ',' ORDER BY tenant_id::text) FROM queen.queues WHERE name='$SHQ'")
-    SHWANT=$(px -c "SELECT string_agg(broker_tenant_uuid::text, ',' ORDER BY broker_tenant_uuid::text) FROM queen_proxy.clusters WHERE slug IN ('dev','two')")
-    check "x-queen-tenant followed the key, not the host (broker rows)" "$SHWANT" "$SHTEN"
-  fi
+  skip "x-queen-tenant followed the key, not the host (no broker-row readout in a single binary; the pops above assert it)"
 
   # --- scoped listings: content, not just status ----------------------------
   req POST $SH "$KEY_B" /api/v1/push \

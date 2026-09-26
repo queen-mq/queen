@@ -4,9 +4,18 @@ Comprehensive test suite for the Queen Python client with 100% parity to the Nod
 
 ## Prerequisites
 
-1. **Queen server running** on `http://localhost:6632`
-2. **PostgreSQL accessible** (default: localhost:5432)
-3. **Python dependencies installed**
+1. **A fresh Queen server running** on `http://localhost:6632`
+
+```bash
+docker run -d --name queen -p 6632:6632 -e QUEEN_RAFT_DIR=/var/lib/queen/raft \
+  -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:latest
+```
+
+The integration tests expect an empty broker, and nothing cleans up after
+them (most use fixed queue names), so give every run a fresh one: see
+[Tests Pass Once, Then Fail](#tests-pass-once-then-fail).
+
+2. **Python dependencies installed**
 
 ```bash
 # Install with dev dependencies
@@ -80,14 +89,11 @@ pytest tests/ -vs
 
 ### Environment Variables
 
-Configure database connection:
+Point the tests at a broker other than `http://localhost:6632`:
 
 ```bash
-export PG_HOST=localhost
-export PG_PORT=5432
-export PG_DB=postgres
-export PG_USER=postgres
-export PG_PASSWORD=postgres
+export QUEEN_SERVER_URL=http://localhost:6632  # the `client` fixture (conftest.py)
+export QUEEN_URL=http://localhost:6632         # streams_integration/ and test_auth.py
 
 # Run tests
 pytest tests/
@@ -136,7 +142,7 @@ pytest tests/ -s
 - Tumbling / sliding / session / cron windows, operators,
   event-time, recovery, throughput, combined pipelines.
 
-The integration tests require a running Queen server + PostgreSQL;
+The integration tests require a running (fresh) Queen server;
 unit tests run with an in-process fake server.
 
 ## Fixtures
@@ -144,8 +150,10 @@ unit tests run with an in-process fake server.
 Tests use pytest fixtures defined in `conftest.py`:
 
 - `client` - Fresh Queen client instance per test
-- `db_pool` - PostgreSQL connection pool for verification
-- `cleanup_test_data` - Automatic cleanup before/after tests
+
+There is no cleanup fixture: the tests reach the broker only over its HTTP
+API and expect it to start empty. The repo harness (`test/run.sh`) brings up
+a fresh broker for every lane.
 
 ## Test Patterns
 
@@ -262,30 +270,22 @@ tests/test_complete.py .                           [100%]
 ```bash
 # Check Queen server is running
 curl http://localhost:6632/health
-
-# Check PostgreSQL is accessible
-psql -h localhost -U postgres -d postgres -c "SELECT 1"
-```
-
-### Database Permission Errors
-
-```bash
-# Make sure test user has permissions
-psql -h localhost -U postgres -d postgres
-> GRANT ALL ON SCHEMA queen TO postgres;
-> GRANT ALL ON ALL TABLES IN SCHEMA queen TO postgres;
 ```
 
 ### Tests Hang
 
 Some tests use sleep to wait for conditions (lease expiry, buffering). This is expected behavior matching the Node.js tests.
 
-### Cleanup Failed
+### Tests Pass Once, Then Fail
+
+Most tests use fixed queue names and nothing cleans up after them, so a
+second run against the same broker sees the first run's data. Start over
+with a fresh broker:
 
 ```bash
-# Manual cleanup
-psql -h localhost -U postgres -d postgres
-> DELETE FROM queen.queues WHERE name LIKE 'test-%';
+docker rm -f queen && docker volume rm queen-data
+docker run -d --name queen -p 6632:6632 -e QUEEN_RAFT_DIR=/var/lib/queen/raft \
+  -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:latest
 ```
 
 ## Continuous Integration
@@ -302,18 +302,10 @@ jobs:
     runs-on: ubuntu-latest
     
     services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-      
       queen:
         image: ghcr.io/queen-mq/queen:latest
         env:
-          PG_HOST: postgres
-          PG_PASSWORD: postgres
+          QUEEN_RAFT_DIR: /var/lib/queen/raft
         ports:
           - 6632:6632
     

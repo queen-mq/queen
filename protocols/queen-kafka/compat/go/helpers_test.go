@@ -4,8 +4,8 @@
 // consume, long-poll wake-ups, ListOffsets bounds, OFFSET_OUT_OF_RANGE,
 // acks=0 and a concurrency smoke.
 //
-// Nothing here starts a stack. `compat/rig.sh` does that — Postgres, broker,
-// facade — and then runs `go test ./...` against it, which is what makes this
+// Nothing here starts a stack. `compat/rig.sh` does that — broker, facade —
+// and then runs `go test ./...` against it, which is what makes this
 // package re-runnable from any later workflow:
 //
 //	protocols/queen-kafka/compat/rig.sh                # stand up, run, tear down

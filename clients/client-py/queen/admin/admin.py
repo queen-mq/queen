@@ -447,52 +447,6 @@ class Admin:
         logger.log("Admin.metrics", {})
         return await self._http_client.get("/metrics")
 
-    async def get_maintenance_mode(self) -> Dict[str, Any]:
-        """
-        Get push maintenance mode status
-
-        Returns:
-            Maintenance status
-        """
-        logger.log("Admin.get_maintenance_mode", {})
-        return await self._http_client.get("/api/v1/system/maintenance")
-
-    async def set_maintenance_mode(self, enabled: bool) -> Dict[str, Any]:
-        """
-        Set push maintenance mode
-
-        Args:
-            enabled: Enable or disable maintenance mode
-
-        Returns:
-            Result
-        """
-        logger.log("Admin.set_maintenance_mode", {"enabled": enabled})
-        return await self._http_client.post("/api/v1/system/maintenance", {"enabled": enabled})
-
-    async def get_pop_maintenance_mode(self) -> Dict[str, Any]:
-        """
-        Get pop maintenance mode status
-
-        Returns:
-            Maintenance status
-        """
-        logger.log("Admin.get_pop_maintenance_mode", {})
-        return await self._http_client.get("/api/v1/system/maintenance/pop")
-
-    async def set_pop_maintenance_mode(self, enabled: bool) -> Dict[str, Any]:
-        """
-        Set pop maintenance mode
-
-        Args:
-            enabled: Enable or disable pop maintenance mode
-
-        Returns:
-            Result
-        """
-        logger.log("Admin.set_pop_maintenance_mode", {"enabled": enabled})
-        return await self._http_client.post("/api/v1/system/maintenance/pop", {"enabled": enabled})
-
     async def get_system_metrics(self, **params: Any) -> Dict[str, Any]:
         """
         Get system metrics (CPU, memory, connections, etc.)
@@ -520,16 +474,6 @@ class Admin:
         logger.log("Admin.get_worker_metrics", {"params": params})
         query_string = self._build_query_string(params)
         return await self._http_client.get(f"/api/v1/analytics/worker-metrics{query_string}")
-
-    async def get_postgres_stats(self) -> Dict[str, Any]:
-        """
-        Get PostgreSQL statistics
-
-        Returns:
-            PostgreSQL stats
-        """
-        logger.log("Admin.get_postgres_stats", {})
-        return await self._http_client.get("/api/v1/analytics/postgres-stats")
 
     # ===========================
     # Helper Methods

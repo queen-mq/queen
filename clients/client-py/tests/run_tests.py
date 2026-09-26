@@ -8,39 +8,15 @@ import os
 import sys
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Callable
-import asyncpg
 
 from queen import Queen
 
-# Test configuration
+# Test configuration. There is no cleanup step: the tests expect a fresh
+# broker (the harness brings one up per lane), and most use fixed queue names,
+# so rerunning against the same broker needs a fresh one too.
 TEST_CONFIG = {
-    "base_urls": ["http://localhost:6632"],
-    "db_config": {
-        "host": os.environ.get("PG_HOST", "localhost"),
-        "port": int(os.environ.get("PG_PORT", 5432)),
-        "database": os.environ.get("PG_DB", "postgres"),
-        "user": os.environ.get("PG_USER", "postgres"),
-        "password": os.environ.get("PG_PASSWORD", "postgres"),
-    },
+    "base_urls": [os.environ.get("QUEEN_SERVER_URL", "http://localhost:6632")],
 }
-
-# Global database pool
-db_pool = None
-
-
-async def init_db():
-    """Initialize database pool"""
-    global db_pool
-    db_pool = await asyncpg.create_pool(**TEST_CONFIG["db_config"])
-    await db_pool.fetchval("SELECT 1")
-    return db_pool
-
-
-async def close_db():
-    """Close database pool"""
-    global db_pool
-    if db_pool:
-        await db_pool.close()
 
 
 def log(success: bool, *args):
@@ -75,21 +51,6 @@ class TestResults:
         print("=" * 80)
         print(f"Overall Results: {passed}/{total} tests passed, {failed}/{total} tests failed")
         print("=" * 80)
-
-
-async def cleanup_test_data():
-    """Cleanup test data"""
-    try:
-        await db_pool.execute(
-            """DELETE FROM queen.queues 
-               WHERE name LIKE 'test-%' 
-               OR name LIKE 'edge-%' 
-               OR name LIKE 'pattern-%' 
-               OR name LIKE 'workflow-%'"""
-        )
-        log(True, "Test data cleaned up")
-    except Exception as error:
-        log(False, f"Cleanup error: {error}")
 
 
 async def run_test(test_func: Callable, client: Queen, results: TestResults):
@@ -130,7 +91,6 @@ async def main():
     
     # Initialize
     client = Queen(TEST_CONFIG["base_urls"][0])
-    await init_db()
     results = TestResults()
     
     # Collect all test functions
@@ -165,8 +125,6 @@ async def main():
         # Consume tests
         test_consume.test_consumer,
         test_consume.test_consumer_trace,
-        test_consume.test_consumer_namespace,
-        test_consume.test_consumer_task,
         test_consume.test_consumer_with_partition,
         test_consume.test_consumer_batch_consume,
         test_consume.test_consumer_ordering,
@@ -175,7 +133,6 @@ async def main():
         test_consume.test_consumer_ordering_concurrency_with_buffered_push,
         test_consume.test_consumer_group,
         test_consume.test_consumer_group_with_partition,
-        test_consume.test_manual_ack,
         test_consume.test_retries,
         test_consume.test_retries_consumer_group,
         test_consume.test_auto_renew_lease,
@@ -225,7 +182,6 @@ async def main():
         elif arg == "streams":
             # Hand off to pytest for the streaming integration suite.
             import subprocess
-            await close_db()
             await client.close()
             ret = subprocess.call(
                 [sys.executable, "-m", "pytest", "tests/streams_integration/", "-v"],
@@ -250,15 +206,12 @@ async def main():
             print("  python -m pytest tests/streams_integration/ -v")
             print("\n⚙ Streaming unit tests (no broker needed):")
             print("  python -m pytest tests/streams_unit/ -v")
-            await close_db()
+            await client.close()
             sys.exit(1)
     else:
         tests_to_run = human_tests
         log(True, f"Running all tests ({len(human_tests)} tests)...")
-    
-    # Cleanup before tests
-    await cleanup_test_data()
-    
+
     # Run tests
     for test_func in tests_to_run:
         await run_test(test_func, client, results)
@@ -266,8 +219,6 @@ async def main():
     # Print results
     results.print_results()
     
-    # Cleanup after tests
-    await close_db()
     await client.close()
 
 

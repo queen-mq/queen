@@ -116,8 +116,7 @@ static POINTS_ARMED: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 
 /// Read `QUEEN_TEST_FAULTS` once at boot. A no-op — and cheap forever after —
 /// unless the variable names at least one point. Called from the raft boot
-/// paths (`run_raft`, `embedded::boot`); the postgres class never reaches a
-/// fault point, so it does not call this.
+/// paths (`run_raft`, `embedded::boot`).
 pub fn init_from_env() {
     let Ok(spec) = std::env::var("QUEEN_TEST_FAULTS") else {
         return;

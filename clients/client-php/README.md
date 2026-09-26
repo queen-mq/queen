@@ -4,7 +4,8 @@
 [Queen MQ](https://queenmq.com).**
 
 Your jobs stay ordinary Laravel jobs. What changes underneath them is the backlog — Redis becomes
-Queen on PostgreSQL — and the control plane, where Horizon's PHP master becomes a Rust one.
+the Queen broker and its own replicated log — and the control plane, where Horizon's PHP master
+becomes a Rust one.
 
 ```bash
 composer require queen-mq/php-client
@@ -18,7 +19,7 @@ PHP 8.3 / 8.4 · Apache-2.0
 ```text
    Horizon                              Queen
    ───────                              ─────
-   dispatch() ──► Redis                 dispatch() ──► Queen ──► PostgreSQL
+   dispatch() ──► Redis                 dispatch() ──► Queen
                     │                                     │
    horizon master ──┤  65.0 MiB PHP     queen-supervisor ─┤  2.9 MiB Rust
                     │                                     │
@@ -27,8 +28,8 @@ PHP 8.3 / 8.4 · Apache-2.0
 
 Median proportional set size of the orchestrator alone, from the
 [supervisor benchmark](https://queenmq.com/benchmarks/laravel-supervisors). It is a control-plane
-number, not a whole-stack claim: Queen still runs a broker and PostgreSQL. The PHP reference master
-measures 35.1 MiB.
+number, not a whole-stack claim: Queen still runs a broker. The PHP reference master measures
+35.1 MiB.
 
 ---
 
@@ -38,8 +39,9 @@ measures 35.1 MiB.
 partition per ordering key — `customer:4471`, `account:9`, `device:aa:bb` — created by the first
 push that names it. One customer's jobs never queue behind another customer's.
 
-**The backlog lives in the database you already back up.** Queue state is PostgreSQL rows, inside
-your transactions, your replicas, your PITR window. No second durability story for Redis.
+**The backlog lives on disk, in the broker's replicated log.** The broker answers a push once it is
+fsynced — on a three- or five-node cluster, once a majority of the nodes have it on disk. One binary
+and one data directory per node, and no external database to run next to it.
 
 **A control plane that is not a Laravel application.** The Rust supervisor loads Artisan once to
 resolve configuration, then leaves only Rust and your ordinary `queue:work` processes resident.

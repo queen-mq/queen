@@ -22,7 +22,7 @@ __all__ = ["schedule", "cancel", "encode_payload", "delay_ms_of", "SERVER_OWNED"
 
 
 #: Fields the SERVER owns, in both spellings a caller might reach for. Present
-#: in an op they are a 22023 at the broker and a rejection at the edge, never a
+#: in an op they are a refusal at the broker and a rejection at the edge, never a
 #: silent drop (§4.2): a tenant posting ``{"producerSub": "billing-service"}``
 #: would otherwise get, one second later, a frame in the log whose provenance is
 #: attested by the broker and forged by the client -- and ``producer_sub`` is the
@@ -30,7 +30,7 @@ __all__ = ["schedule", "cancel", "encode_payload", "delay_ms_of", "SERVER_OWNED"
 #:
 #: ``deliverAt`` and ``delaySeconds`` are in the list for a different reason:
 #: they are the two things somebody will try to send instead of ``delayMs``, and
-#: a named refusal here is better than a 22023 three layers down.
+#: a named refusal here is better than a broker refusal three layers down.
 SERVER_OWNED = (
     "producerSub",
     "producer_sub",
@@ -89,9 +89,9 @@ def delay_ms_of(delay_ms: Optional[Any], delay: Optional[Any]) -> int:
     ``ttlSeconds``.
 
     ONLY RELATIVE DURATIONS. An absolute instant is not expressible on this
-    wire: ``deliver_at`` is computed in Postgres as ``now() + interval``, so
-    there is one clock and no inter-broker skew can enter anywhere. A delay in
-    the PAST is legal and fires on the first cycle.
+    wire: ``deliver_at`` is computed by the broker as now + the delay, so
+    there is one clock, the broker's, and no client's skew can enter anywhere.
+    A delay in the PAST is legal and fires on the first cycle.
     """
     if delay is not None and delay_ms is not None:
         raise ValueError("pass either delay_ms=<int> or delay=<timedelta>, not both")

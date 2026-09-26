@@ -297,7 +297,7 @@
 
       // trust
       const cache=d.health?.shared_state?.queue_config_cache; const sid=d.health?.shared_state?.server_id||'';
-      m.trust={ status:d.health?.status||'unknown', db:d.health?.database||'—', cache: cache? (cache.hit_rate*100).toFixed(2)+'%':'—', replicas:d.sysm?.replicaCount ?? (d.sysm?.replicas?.length||1), workers:d.status?.workers?.length||0, age:(d.status?.statsAge ?? ov.statsAge ?? '—'), node:(sid.split(':')[0]||'—').slice(0,12), version:d.health?.version||'—', maint:!!d.health?.shared_state?.maintenance_mode };
+      m.trust={ status:d.health?.status||'unknown', db:d.health?.database||'—', cache: cache? (cache.hit_rate*100).toFixed(2)+'%':'—', replicas:d.sysm?.replicaCount ?? (d.sysm?.replicas?.length||1), workers:d.status?.workers?.length||0, age:(d.status?.statsAge ?? ov.statsAge ?? '—'), node:(sid.split(':')[0]||'—').slice(0,12), version:d.health?.version||'—' };
 
       const S={};
       // Throughput
@@ -357,7 +357,6 @@
       $('#t-status').textContent=m.trust.status; $('#t-db').textContent=m.trust.db; $('#t-cache').textContent=m.trust.cache;
       $('#t-rep').textContent=m.trust.replicas; $('#t-wrk').textContent=m.trust.workers; $('#t-age').textContent=(m.trust.age==='—'?'—':m.trust.age+'s'); $('#t-node').textContent=m.trust.node;
       $('#foot-ver').textContent='v'+m.trust.version; $('#nav-dlq').textContent=formatNumber(m.dlqBadge);
-      const ts=$('#top-status'); ts.innerHTML = m.trust.maint? '<span class="dot" style="background:var(--warn)"></span> push paused' : '<span class="pulse"></span> operational';
       // counts
       $('#c-msgs').textContent=formatNumber(m.counts.msgs); $('#c-queues').textContent=formatNumber(m.counts.queues);
       $('#c-parts').textContent=formatNumber(m.counts.parts); $('#c-cgs').textContent=formatNumber(m.counts.cgs);

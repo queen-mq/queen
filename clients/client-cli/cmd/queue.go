@@ -276,10 +276,10 @@ incident.`,
 // Two of the four numbers come from the broker since 1.1.0:
 //
 //   - partitionsPending replaces the count queenctl used to derive by walking
-//     the partitions array. The SP folds it into an aggregate it was already
+//     the partitions array. The broker folds it into an aggregate it was already
 //     running (§2.5), and the server's answer is the right one even when the
 //     array a client holds is not the whole queue.
-//   - effective (the SP's effectivePending) is what a conflating group actually
+//   - effective (the broker's effectivePending) is what a conflating group actually
 //     has left to DO. The broker sends it for every group, but it is surfaced
 //     only for a conflating one: elsewhere it equals pending by construction,
 //     and a duplicated number in a four-line summary only invites the question

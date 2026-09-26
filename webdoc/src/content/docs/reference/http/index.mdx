@@ -1,6 +1,6 @@
 ---
 title: HTTP API conventions
-description: "Base URL, authentication and access levels, error bodies, the empty-204 rule and the body cap: the rules every Queen route follows."
+description: "Base URL, which node answers in a cluster, authentication and access levels, error bodies and codes, the empty-204 rule and the body cap: the rules every Queen route follows."
 type: reference
 sidebar:
   order: 2
@@ -8,26 +8,32 @@ sidebar:
 sourceOfTruth:
   - server/src/main.rs
   - server/src/auth.rs
-  - server/src/handlers/mod.rs
-  - server/src/handlers/static_files.rs
-  - server/src/handlers/status.rs
+  - server/src/config.rs
   - server/src/tenant.rs
+  - server/src/handlers/mod.rs
+  - server/src/handlers/data.rs
+  - server/src/handlers/raft.rs
+  - server/src/handlers/static_files.rs
+  - server/src/handlers/standalone.rs
+  - server/src/rsm/admit.rs
+  - server/src/rsm/facade/mod.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/real/phase2.rs
 digest: >-
   One HTTP API version, v1, the path itself being the version, with no negotiation. The broker
-  binds 0.0.0.0 on PORT, default 6632, so a local base URL is http://localhost:6632. It has no TLS
-  listener and no CORS layer, so 6632 must sit behind something that terminates TLS and must never
-  face a browser or the internet. On the message plane the broker never returns 429: its adaptive
-  admission arbiter makes a request wait for a slot rather than rejecting it, and 429 comes from
-  the multi-tenant gateway. The kv and timer routes are the exception, with a per-tenant
-  rate limiter in the broker itself. Retry safety differs per route: a push is safe to retry
-  blindly only when the caller sends its own transactionId, in which case the retry returns a
-  status of duplicate and writes nothing; ack and lease extend are safe, and an ack landing below
-  the cursor is reported as a noop rather than double-committing; a transaction is safe only with
-  deterministic transactionIds; a pop never is, because a retry is a new claim rather than a
-  repeat; and a kv incr never is, because it has no precondition and counts twice. Every 204 has
-  no body at all, deliberately.
-# sourceOfTruth re-read 2026-09-09 (through ff644495): the three analytics routes 1.5.3 adds are already in the generated table; the conventions are unchanged.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): auth.rs gained one explicit read-only arm, POST /api/v1/resources/kv/list, because a read whose cursor is a key has to travel in a body; the level matrix and the write-only set are unchanged.
+  binds QUEEN_BIND_ADDR (default 0.0.0.0) on PORT (default 6632), so a local base URL is
+  http://localhost:6632. Its router has no TLS and no CORS layer. In a cluster any node serves
+  clients: a follower forwards every /api/ and /streams/ request to the leader, except the
+  /api/v1/raft/* views. Errors raised by the state machine are {"error","code"}: 503 with
+  Retry-After: 1 for no_leader, retry and timeout; 429 overloaded with a Retry-After of 1 to 5 s
+  once the push admission budget stays full for its hold; 507 storage_full above the disk
+  high-water mark; 413 name_too_long; 400 with the planner's own code. A push answers 201 with a
+  per-item status (queued, duplicate or error), so a 2xx does not mean every item was stored.
+  Retry safety differs per route: a push is safe to retry blindly only when the caller sends its
+  own transactionId (the retry answers duplicate and writes nothing); an ack and a lease extension
+  are safe; a transaction is safe only with deterministic transactionIds; a pop never is, because
+  a retry is a new claim; a kv incr never is, because it has no precondition and counts twice.
+  Every 204 has no body at all, deliberately.
 ---
 
 Queen's broker speaks plain HTTP/1.1 with JSON bodies. There is no binary protocol, no
@@ -38,13 +44,14 @@ pages only document what is specific to that route.
 ## Base URL and versioning
 
 The broker binds `PORT`, which defaults to **6632**, on `QUEEN_BIND_ADDR`, which defaults to
-`0.0.0.0`. A local broker is therefore at `http://localhost:6632`.
+`0.0.0.0`. A local broker is therefore at `http://localhost:6632`. When the embedded proxy is
+on (`QUEEN_PROXY_EMBEDDED=true`) it serves `PORT` itself unless `QUEEN_PROXY_PORT` names
+another port; [Self-hosting](/deploy/) covers both layouts.
 
 | Prefix | What lives there |
 | --- | --- |
-| `/api/v1/…` | the whole public API: message plane, queues, consumer groups, messages, DLQ, traces, status, analytics, system |
+| `/api/v1/…` | the whole public API: message plane, queues, consumer groups, messages, DLQ, traces, status, analytics, system, the Raft views |
 | `/streams/v1/…` | the stream-processing surface: three JSON POSTs, documented in [Streams routes](/reference/http/streams) |
-| `/internal/api/…` | broker-to-broker calls; not a client API |
 | `/health`, `/metrics`, `/metrics/prometheus`, `/status` | operational endpoints |
 | everything else | the embedded dashboard SPA, served from assets compiled into the binary |
 
@@ -53,15 +60,35 @@ released in alignment. A path is the API version: there is no `Accept` header ne
 version query parameter.
 
 <Aside type="caution">
-The broker has **no TLS listener and no CORS layer**. It expects to sit behind something that
-terminates TLS: the multi-tenant gateway in `proxy/`, or your own reverse proxy. Do not
-expose port 6632 to a browser or to the internet directly. See [Self-hosting](/deploy/).
+The broker router has **no TLS listener and no CORS layer**. Put it behind something that
+terminates TLS: the embedded proxy or your own reverse proxy. Do not expose the broker router's
+port to a browser or to the internet directly. See [Self-hosting](/deploy/).
 </Aside>
 
-Anything the router does not match falls through to the dashboard. That fallback answers a
-JSON **404** (`{"error":"Not Found","code":"no_such_route"}`) for any path starting with
-`/api/` and for any non-`GET`/`HEAD` request, so a call to a route that does not exist fails
-loudly instead of returning the SPA's HTML with a 200.
+A path under `/api/` or `/streams/` that the broker does not serve answers a JSON **404**:
+
+```json
+{"code":"no_such_route","error":"not found","path":"/api/v1/does-not-exist"}
+```
+
+Any other path falls through to the dashboard, which answers a JSON 404
+(`{"error":"Not Found","code":"no_such_route"}`) for any non-`GET`/`HEAD` request and for an
+`/auth/` path it does not serve. A call to a route that does not exist therefore fails loudly
+instead of returning the SPA's HTML with a 200.
+
+## Which node answers
+
+A single node answers every request itself. In a cluster, any node takes client requests: a
+follower forwards every `/api/` and `/streams/` request to the leader and relays its answer, so a
+client does not have to find the leader. The node you reached answers these itself:
+
+- the `/api/v1/raft/*` views (`status`, `members`, `liveness`), because they describe that node;
+- everything outside `/api/` and `/streams/`: `/health`, `/status`, `/metrics`,
+  `/metrics/prometheus`, the dashboard and its `/auth/` routes.
+
+While no leader is known (an election is running, or the cluster has no quorum) a request that
+would be forwarded answers `503` with code `no_leader` and `Retry-After: 1`. A leader that cannot
+be reached, or does not answer in time, gives `503` with code `retry`. Retry both.
 
 ## Authentication
 
@@ -78,6 +105,11 @@ RS256/384/512 and EdDSA, selected by `JWT_ALGORITHM` (or `auto`); the verificati
 from a static PEM or from a JWKS endpoint cached per `kid`. Role claim names are remappable.
 The [configuration page](/reference/config/) lists every `JWT_*` variable, and
 [Self-hosting](/deploy/) covers key distribution.
+
+When the embedded proxy serves `PORT` (`QUEEN_PROXY_EMBEDDED=true` without `QUEEN_PROXY_PORT`),
+clients authenticate to the proxy, and the broker router behind it runs with its own JWT check
+off and tenancy on. With `QUEEN_PROXY_PORT` set to another port, `PORT` serves the broker router
+directly with the settings on this page.
 
 Two failure codes, and they mean different things:
 
@@ -117,7 +149,7 @@ dashboard-identity routes `/auth/me`, `/auth/login` and `/auth/logout`. The last
 public so they can answer the auth question themselves: with JWT on, `/auth/me` returns `401`
 from its own handler and `/auth/login` serves the page that says the dashboard needs the proxy.
 `/metrics/prometheus` being public is deliberate for scraping and is a hazard in a multi-tenant
-deployment, where per-queue series sum across tenants; see [Self-hosting](/deploy/).
+deployment, because nothing on it is scoped to a tenant; see [Self-hosting](/deploy/).
 
 A second, independent exemption list is `JWT_SKIP_PATHS`, which defaults to
 `/health,/metrics/prometheus,/metrics,/`. Entries match a path exactly, or as a prefix when the
@@ -128,16 +160,18 @@ unauthenticated surface.
 
 Bodies are JSON. The broker reads the raw bytes and parses them as JSON without inspecting
 `Content-Type`, so sending `application/json` is good manners rather than a requirement. A
-body that does not parse returns **400** with the parser's message:
+body that does not parse returns **400** with code `bad_body` and the parser's message:
 
 ```json
-{"error":"bad body: expected value at line 1 column 1"}
+{"error":"bad push body: expected value at line 1 column 1","code":"bad_body"}
 ```
+
+`POST /api/v1/transaction` is the exception: a malformed bundle answers `200` with
+`success:false` and `reason:"bad_request"`. See [its page](/reference/http/transaction).
 
 Query parameters on the message-plane routes are typed, not free-form strings: `batch=abc` is a
 deserialization failure for the whole query string rather than a silently-ignored parameter, and
-it is rejected by the extractor before the handler runs. Management routes that take filter
-parameters read them as strings and additionally accept `1`/`0` and `yes`/`no` for booleans.
+it is rejected by the extractor before the handler runs.
 
 The request body cap is **64 MiB** (`QUEEN_MAX_BODY_BYTES`, default `67108864`). A larger body
 is rejected by the body-limit layer before any handler runs. The cap applies per request, so a
@@ -146,8 +180,7 @@ push of many small messages is bounded by the sum of their payloads plus JSON fr
 ## Responses
 
 Successful API responses carry `Content-Type: application/json`. The exception is
-`/metrics/prometheus`, which returns `text/plain; version=0.0.4; charset=utf-8` with
-`Cache-Control: no-cache`.
+`/metrics/prometheus`, which returns `text/plain; version=0.0.4`.
 
 ### Every 204 has no body at all
 
@@ -160,40 +193,59 @@ snowballs into `ECONNRESET` storms. The bodies that were dropped carried nothing
 Consequences you have to design around:
 
 - **Check the status code before parsing.** A 204 has no JSON to parse.
-- Any diagnostic the handler wanted to attach to an empty result is lost. Pop maintenance mode
-  is the clearest case: the handler builds `{"messages":[],"paused":true}`, and the client sees
-  a bare 204 indistinguishable from an empty queue.
-- An error reported *inside* a pop stored procedure's result also renders as an empty pop, and
-  therefore as a 204 with no text. Genuine transport-level failures (no pool connection, a
-  statement timeout) come back as 500 with a body.
+- An empty result carries no diagnostic: the client sees the same bare 204 for an idle queue,
+  messages held back by a visibility delay and a long poll that timed out. A pop whose answer
+  has something to say about [conflation](/reference/http/pop#conflation-in-the-response) is
+  the one exception: it keeps its `200` and its body, such as
+  `{"messages":[],"conflation":true, ...}` for an empty conflating pop.
+- A pop that fails does not look like an empty one: it answers with an error status and a body
+  (see the codes below).
 
 ### Errors
 
-Every error the broker produces itself is a flat object with one key:
+Every error body is a JSON object with an `error` string, JSON-escaped so it is always parseable.
+An error raised by the state machine also carries a stable `code`, and a retry that knows the
+leader names it:
 
 ```json
-{"error":"invalid or expired lease"}
+{"error":"not the leader; retry against 2","code":"retry","leader":"2"}
 ```
 
-The message is JSON-escaped, so it is always parseable. There is no error code enum, no
-`details` object and no `retryAfter`; the HTTP status plus this string is the whole contract.
+| Status | `code` | Meaning | `Retry-After` |
+| --- | --- | --- | --- |
+| `503` | `no_leader` | no leader is known (an election, or no quorum) | `1` |
+| `503` | `retry` | the command was not appended; send it again (a `leader` hint may be present) | `1` |
+| `503` | `timeout` | the request deadline elapsed before the answer | `1` |
+| `429` | `overloaded` | the push admission budget stayed full for the whole hold | 1 to 5 s |
+| `507` | `storage_full` | the data directory's filesystem is above `QUEEN_RAFT_DISK_HIGH_PCT` (default 85) used | none |
+| `413` | `name_too_long` | a queue, partition or consumer group name makes a store key longer than the limit | none |
+| `400` | the refusal's own code, e.g. `bad_body` | a request the client must fix, not retry | none |
+| `500` | `internal` | a broker fault | none |
 
-### Some routes return a stored procedure's JSON verbatim
+A `timeout` does not say whether the command committed: the write may still have applied. That is
+why the retry table below matters.
 
-Queen's management surface is implemented in PostgreSQL. Many routes (`/api/v1/configure` and
-most of the `resources`, `status`, `analytics`, `consumer-groups`, `messages`, `dlq` and `traces`
-handlers) pass the stored procedure's JSON straight through without reshaping it, because
-clients assert on those exact keys. Two things follow:
+Some refusals come from the route's own handler before the state machine is involved, and carry
+no `code`, among them the pop refusals (`{"success":false,"error":"...","messages":[]}`).
 
-- The shape of those responses is the stored procedure's shape, including keys that only make
-  sense internally.
-- When such a result carries an `error` key, the broker maps it to a status code by inspecting
-  the text: **404** if the message contains `not found` (case-insensitive), otherwise **500**.
-  The original body is preserved.
+**Push admission (`429`).** The commands that grow storage (pushes, transactions, KV puts, timer
+schedules) share a byte budget, `QUEEN_RAFT_ADMIT_MAX_MB` (default 64, `0` turns it off). An HTTP
+push or transaction is charged its `Content-Length` before its body is read. When the budget is
+spent a new command waits for room, so a normal producer only slows down; after the hold
+(`QUEEN_RAFT_ADMIT_HOLD_MS`, default 15000 ms, jittered by ±25%) it is refused with `429` and a
+`Retry-After` jittered over 1 to 5 s. Acks and pops never take budget.
 
-The message-plane routes on the following pages are the opposite: their bodies are assembled by
-hand in the broker, field by field, and the fields that are *absent* are as load-bearing as the
-ones that are present.
+**Disk gate (`507`).** Writes are refused once the data directory's filesystem is
+`QUEEN_RAFT_DISK_HIGH_PCT` used (default 85) and accepted again below `QUEEN_RAFT_DISK_LOW_PCT`
+(default 80).
+
+### Management routes and their shapes
+
+Routes outside the message plane, KV, timers, the ephemeral verbs, the operational endpoints and
+the Raft membership are answered by the state machine's generic adapter. It renders the response
+shapes the per-route pages document, which are the shapes the 1.x broker served, so existing
+clients keep working. The message-plane routes on the following pages assemble their bodies field
+by field, and the fields that are *absent* are as load-bearing as the ones that are present.
 
 ### A 2xx does not mean every item succeeded
 
@@ -203,40 +255,36 @@ element describes one item.
 
 | Route | Status on a processed call | Where the real outcome is |
 | --- | --- | --- |
-| `POST /api/v1/push` | `201` | each element's `status`: `queued`, `duplicate`, `buffered` or `failed` |
+| `POST /api/v1/push` | `201` | each element's `status`: `queued`, `duplicate` or `error` |
 | `POST /api/v1/ack`, `/ack/batch` | `200` | each element's `success`, `error`, `noop`, `dlq`, `leaseReleased` |
-| `POST /api/v1/transaction` | `200` | top-level `success`; a failure is `success:false` with `error` and an empty `results` |
+| `POST /api/v1/transaction` | `200` | top-level `success`; a rollback is `success:false` with `reason`, `error` and an empty `results` |
 
-A client that only checks `res.ok` will silently lose messages: a push whose database
-transaction failed still returns 201, with the affected items marked `buffered` (spooled to
-disk for replay) or `failed` (not stored anywhere).
+A client that only checks `res.ok` can lose messages: a push stores each `(queue, partition)`
+group of its items as its own command, and the items of a group the state machine refused come
+back as `status:"error"` inside a `201`.
 
 ### Status codes used by the message plane
 
 | Code | When |
 | --- | --- |
 | `200` | a pop that delivered messages; every ack; a lease extension; a transaction that was processed, including one that rolled back |
-| `201` | every push the broker processed, including one whose items were spooled to disk |
-| `204` | a pop with nothing to deliver, pop maintenance, or a pop whose stored procedure reported an error. No body |
-| `400` | unparseable body, a missing required field, an unknown transaction operation type, a discovery pop with neither `namespace` nor `task`, or a malformed `x-queen-tenant` when tenancy is on |
+| `201` | every push the broker processed, including one with items marked `error` |
+| `204` | a pop with nothing to deliver. No body |
+| `400` | unparseable body (`bad_body`), a missing required field, a discovery pop with neither `namespace` nor `task`, a conflation request the pop refuses, a planner rejection, or a malformed `x-queen-tenant` when tenancy is on |
 | `401` / `403` | authentication and authorization, as above |
-| `404` | a path the router does not match, or a stored-procedure error whose text contains `not found` |
-| `413` | the request body exceeds the cap |
-| `500` | no PostgreSQL connection available (`{"error":"pool"}`), a pop that failed at the transport level, a failed lease renewal, or a stored-procedure error that is not a not-found |
-| `503` | `/health` only, when the database round-trip fails |
-
-On the message plane the broker never returns **429**: it has no per-client rate limiter there. Its
-internal admission arbiter is adaptive and makes a request *wait* for a slot rather than rejecting
-it, and rate limiting on those routes comes from the multi-tenant gateway rather than from the
-broker.
+| `404` | a path the broker does not serve |
+| `413` | the request body exceeds the cap, or a name is too long (`name_too_long`) |
+| `429` | push admission (`overloaded`), on push and transaction |
+| `500` | a broker fault (`internal`) |
+| `503` | no leader (`no_leader`), a retry (`retry`) or an elapsed deadline (`timeout`) |
+| `507` | the disk gate (`storage_full`) |
 
 The [kv](/reference/http/kv), [timer](/reference/http/timers) and
-[ephemeral](/reference/http/ephemeral) routes are the exception, and they are the exception on
-purpose. They are the surfaces whose call rate is decided by an end user of the customer rather than
-by a volume of messages, so a defence that lived only in the gateway would not be a defence of the
-product: self-hosted and dedicated deployments without a gateway are real. Those routes carry a
-per-tenant token bucket in the broker itself and answer `429` with `Retry-After`. They also answer
-`403` and `503` where the message plane has no equivalent, and
+[ephemeral](/reference/http/ephemeral) routes add limits of their own, on purpose. They are the
+surfaces whose call rate is decided by an end user of the customer rather than by a volume of
+messages, so a defence that lived only in a gateway would not be a defence of the product. Those
+routes carry per-tenant limits in the broker itself and can answer `429` with `Retry-After`. They
+also answer `403` and `503` where the message plane has no equivalent, and
 [their pages](/reference/http/kv) carry the one sentence that separates the three.
 
 ## Retrying safely
@@ -247,7 +295,7 @@ per-tenant token bucket in the broker itself and answer `429` with `Retry-After`
 | `GET /api/v1/pop` | no | a pop takes a lease and may deliver a different batch; retrying is a new claim, not a repeat |
 | `POST /api/v1/ack` | yes | an ack that lands below the cursor is reported `noop:true` rather than double-committing |
 | `POST /api/v1/lease/:leaseId/extend` | yes | renewal never shortens a lease |
-| `POST /api/v1/transaction` | only with deterministic `transactionId`s | the whole bundle re-runs; dedup is what makes the pushes idempotent |
+| `POST /api/v1/transaction` | only with deterministic `transactionId`s | a re-sent bundle whose pushes were already stored rolls back whole on the duplicate, so nothing in it is written twice |
 | `POST /api/v1/timers` | yes | schedule and reschedule are the same upsert on `(queue, timerKey)`, so a repeat replaces rather than duplicating |
 | `DELETE /api/v1/timers/:queue/*timerKey` | yes | the second cancel answers `absent`, which is `ok:false` and not an error |
 
@@ -271,12 +319,12 @@ in a transaction whose failure you can observe, or accept that a retry may doubl
 ## The tenant-scoped column
 
 The generated route table has a **Tenant-scoped** column. It records whether that handler
-resolves a tenant identity for the request and threads it into the SQL that resolves queues by
-name. Native tenant scoping is **off by default**; with it off, every request resolves to a
-single default tenant and the column tells you which handlers would participate if it
-were on. It is an operator-level feature of multi-tenant deployments, not a client-facing one.
-[Self-hosting](/deploy/) and [Internals](/internals) cover it, including which routes are
-*not* scoped and what that implies.
+resolves a tenant identity for the request and hands it to the state machine, which keeps every
+queue, consumer group and key under its tenant. Native tenant scoping is **off by default**; with
+it off, every request resolves to a single default tenant and the column tells you which handlers
+would participate if it were on. It is an operator-level feature of multi-tenant deployments, not
+a client-facing one. [Self-hosting](/deploy/) and [Internals](/internals) cover it, including
+which routes are *not* scoped and what that implies.
 
 ## Every route
 

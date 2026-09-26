@@ -23,8 +23,6 @@ sourceOfTruth:
   - webdoc/scripts/gen-snippets.mjs
   - webdoc/scripts/lib/source.mjs
   - .github/workflows/docs.yml
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): gen-proxy-routes.mjs gained the two replay arms, a write-inherits-read assertion and a new CLASSIFY_FINGERPRINT; gen-routes.mjs and gen-openapi.mjs gained the KV console access arm and the matching tag. The workflow this page describes is unchanged.
 ---
 
 This site exists because the previous one drifted far enough from the implementation to
@@ -68,7 +66,7 @@ by `astro-og-canvas`; icons are Phosphor through `astro-icon`.
         - start/
         - use/
         - reference/
-        - selfhost/
+        - deploy/
         - internals/
         - benchmarks/
       - partials/
@@ -170,27 +168,31 @@ naming the sources it read and the command to regenerate.
 
 | Generator | Partial | Derived from |
 | --- | --- | --- |
-| `gen-routes.mjs` | `generated/broker-routes` | the `Router::new()` chain in `server/src/main.rs`, the access table in `server/src/auth.rs`, and whether each handler takes the `Tenant` extension |
-| `gen-config.mjs` | `generated/broker-config` | every `env_bool` / `env_int` / `env_f64` / `env_str` call site in `server/src/config.rs`, plus the raw `std::env::var` reads in `server/src/fusion.rs` |
-| `gen-metrics.mjs` | `generated/broker-metrics` | the Prometheus exposition assembled in `server/src/metrics.rs` and `server/src/handlers/status.rs` |
+| `gen-routes.mjs` | `generated/broker-routes` | the raft router in `server/src/handlers/raft.rs` and the generic adapter behind it (`server/src/rsm/facade/real/phase2.rs`), the access table in `server/src/auth.rs`, and whether each handler reads the tenant |
+| `gen-config.mjs` | `generated/broker-config` | every `env_bool` / `env_int` / `env_f64` / `env_str` / `env_pct` call site in `server/src/config.rs`, plus the curated variables read at their own call site |
+| `gen-metrics.mjs` | `generated/broker-metrics` | the Prometheus exposition assembled in `server/src/metrics.rs`, `server/src/rsm/timing.rs`, `server/src/rsm/facade/real.rs` and `server/src/rsm/admit.rs` |
 | `gen-proxy-routes.mjs` | `generated/proxy-route-classes` | the request classifier in `proxy/src/routes.rs`, applied to the broker's real route list |
-| `gen-openapi.mjs` | `generated/openapi-coverage`, plus `public/openapi/queen-{broker,proxy}.json` | both routers, each handler's `Query<T>` extractor and body struct, the `StatusCode` variants each handler can return, and the access table |
+| `gen-openapi.mjs` | `generated/openapi-coverage`, plus `public/openapi/queen-{broker,proxy}.json` | the broker's routes as `gen-routes.mjs` reads them and the proxy's `router()` in `proxy/src/app.rs`, each router handler's `Query<T>` extractor and body struct, the `StatusCode` variants each can return, and the access table |
 | `gen-kafka-apis.mjs` | `generated/kafka-support-matrix` | the `ADVERTISED` table in `protocols/queen-kafka/src/versions.rs`, which is both the ApiVersions answer and the gate every request is checked against |
 | `gen-charts.mjs` | `public/charts/*.svg` | the archived CSV and stdout artifacts under `benchmark-queen/`, plotted by `charts.py` |
 | `gen-snippets.mjs` | `snippets/*` and `snippets/index` | marked regions of the client test suites |
 
 ### Routes
 
-The router chain is sliced out of `main.rs` between `let app = Router::new()` and
-`.with_state(state);`, and each `.route("…", …)` is paired with the HTTP verbs in the method
-router that follows it. Tenant scoping is not transcribed either: the generator walks every
-`.rs` file under `server/src`, collects the signature of each `pub async fn`, and marks a route
-tenant-scoped when its handler takes `tenant::Tenant` or `Extension<Tenant>`.
+The broker serves its API from two places, and `brokerRoutes` in `scripts/lib/source.mjs` reads
+both. The router chain is sliced out of `build_raft_router` in `server/src/handlers/raft.rs`, up
+to its `.fallback(raft_fallback)`, and each `.route("…", …)` is paired with the HTTP verbs in the
+method router that follows it. Every other `/api` and `/streams` request falls through to the
+generic adapter, whose `(method, path)` arms in `api_impl` and path-pattern arms in `api_dynamic`
+are parsed the same way; the four queue-prefix arms that dispatch on `strip_prefix` are mirrored
+behind a fingerprint. Tenant scoping is not transcribed either: a router route is tenant-scoped
+when its handler takes `tenant::Tenant` or `Extension<Tenant>`, an adapter route when its arm hands
+the request context to a handler that reads it, and `/api/v1/system/*` never is.
 
 Two sanity gates protect against a silently broken parser. Fewer than 40 parsed routes is a
-hard error, and so is a handler that the router references but that does not exist under
-`server/src`, which is precisely the class of bug that produced the two imaginary routes on the
-old site.
+hard error, and so is a handler that the router or the adapter references but that does not
+exist under `server/src`, which is precisely the class of bug that produced the two imaginary
+routes on the old site.
 
 ### Configuration
 
@@ -198,29 +200,28 @@ Defaults are read out of the call site, including nested ones. A nested call is 
 expresses a legacy alias:
 
 ```rust
-env_int("QUEEN_MESH_PORT", env_int("QUEEN_UDP_NOTIFY_PORT", 6633))
+env_int("DEFAULT_TIMEOUT", env_int("POP_DEFAULT_TIMEOUT_MS", 30000))
 ```
 
-The generator reads that as variable `QUEEN_MESH_PORT`, also read as
-`QUEEN_UDP_NOTIFY_PORT`, with a real default of `6633`. Trailing Rust noise (`.max(1)`,
-`as usize`, `.to_string()`) is stripped. Fewer than 60 parsed variables is a hard error.
+The generator reads that as variable `DEFAULT_TIMEOUT`, also read as
+`POP_DEFAULT_TIMEOUT_MS`, with a real default of `30000`. Trailing Rust noise (`.max(1)`,
+`as usize`, `.to_string()`) is stripped. Fewer than 40 parsed variables is a hard error.
 
-Three curated lists shape presentation only, never content. `GROUPS` decides which section a
-variable appears under; an unclassified variable still appears, in `Other`, so a new knob cannot
-ship undocumented. `EXPERIMENTAL` and `INERT` move a variable into its own labelled table:
-`EXPERIMENTAL` for knobs the source itself calls experiment-only, `INERT` for variables the
-broker still parses and still prints in its boot log while wired to nothing. Both are still
-**published**, because silence about a live-looking variable is how the previous site went
-stale.
+The raft engine, the embedded proxy switch and a few request ceilings read their variables
+where they are used rather than through `config.rs`. Those are listed in `EXTRA_VARS`, each with
+the file that reads it and the default that file applies, and the generator fails when a listed
+file no longer names its variable, so the curated list cannot outlive the code. `GROUPS` decides
+which section a variable appears under; an unclassified variable still appears, in `Other`, so a
+new knob cannot ship undocumented.
 
 ### Metrics
 
-The exposition is built in two places with two different shapes, so both are parsed: helper
-calls in `metrics.rs`, and raw `# HELP` / `# TYPE` strings in `handlers/status.rs`, some of them
-templated over a nearby array of family names. Then every `"queen_*"` string literal in either
-file is checked against what was parsed. An unmatched family is reported on the console and
-published with no help text rather than dropped. The failure mode is a visibly incomplete row,
-never a missing one. Fewer than 25 families is a hard error.
+The exposition is concatenated from four emitters in several shapes, so all are parsed: helper
+calls in `metrics.rs`; `(name, help, &histogram)` tuples rendered as summaries, split
+`# HELP` / `# TYPE` literals and one `let` template in `rsm/timing.rs`; and raw `# HELP` /
+`# TYPE` strings in `rsm/facade/real.rs` and `rsm/admit.rs`. Then every `"queen_*"` string literal
+in those files is checked against what was parsed, and an unmatched family is a hard error rather
+than a row with empty cells. Fewer than 25 families is a hard error too.
 
 ### Proxy route classes
 
@@ -237,17 +238,20 @@ before classifying, so prefix rules match the way they will at runtime.
 ### OpenAPI documents
 
 `gen-openapi.mjs` emits `public/openapi/queen-broker.json` and `public/openapi/queen-proxy.json`
-as OpenAPI 3.1, plus a small coverage partial. Paths and methods come from the routers; query
-parameters from each handler's `Query<T>` extractor, walking the struct's serde renames and
-optionality, or from the literal keys a `Query<HashMap<..>>` handler reads by name; request
-bodies from the struct the handler passes to `serde_json::from_slice`, resolved recursively;
-response status codes from every `StatusCode` variant reachable in the handler body.
+as OpenAPI 3.1, plus a small coverage partial. Paths and methods come from the routers; for a
+route the raft router serves, query parameters come from its handler's `Query<T>` extractor,
+walking the struct's serde renames and optionality, or from the literal keys a
+`Query<HashMap<..>>` handler reads by name; request bodies from the struct the handler passes to
+`serde_json::from_slice`, resolved recursively; response status codes from every `StatusCode`
+variant reachable in the handler body. A route the generic adapter serves reads its own query
+string and body, so its operation asserts the path, the method, the access level and the tenant
+scoping, and says that the rest is on the reference page.
 
 Two things resist derivation and are marked rather than guessed. Success bodies on the hot paths
 are assembled by string concatenation, so their schema is left **unconstrained**, deliberately
 not `type: object`, since some of those routes answer with a top-level array and asserting
-"object" would be a false statement. And some listing handlers forward their whole query map to
-a stored procedure, so their parameters cannot be recovered from Rust. Both cases carry an
+"object" would be a false statement. And some listing handlers pass their whole query string
+through unparsed, so their parameters cannot be recovered from a Rust signature. Both cases carry an
 `x-queen-*` extension saying so; see [OpenAPI documents](/reference/openapi).
 
 Before writing, the generator runs a structural self-check over both documents: duplicate
@@ -321,8 +325,10 @@ a `docs:start` inside an already-open region. Common leading indentation is stri
 snippet extracted from inside a test function reads as top-level code. An index partial lists
 the whole inventory.
 
-The scanned directories are the JavaScript, Python, Go, C++ and Rust client test trees, plus
-`examples/full` for the whole programs behind [Full examples](/use/full-examples/).
+The scanned directories are the JavaScript, Python, Go, C++ and Rust client test trees, the
+embedded broker's end-to-end test under `server/tests`, and the example programs under
+`examples/` (`full`, `tutorials`, `apps` and `cross-protocol`), the whole programs behind
+[Full examples](/use/full-examples/) and the tutorials.
 
 ## The drift guards
 
@@ -342,6 +348,7 @@ new fingerprint in.
 | Mirrored function | Guarded in |
 | --- | --- |
 | `route_access_level` in `server/src/auth.rs` | `gen-routes.mjs` (and re-derived in `gen-openapi.mjs`) |
+| the queue-prefix arms of `api_impl` in `server/src/rsm/facade/real/phase2.rs` | `scripts/lib/source.mjs`, shared by the three route generators |
 | `classify` in `proxy/src/routes.rs` | `gen-proxy-routes.mjs` |
 | `is_operator_route` in `proxy/src/routes.rs` | `gen-proxy-routes.mjs` |
 | `ADVERTISED` in `protocols/queen-kafka/src/versions.rs` | `gen-kafka-apis.mjs` |
@@ -375,9 +382,8 @@ materializes at `astro:build:done`, so linting before building checks links agai
 route map, or none at all on a clean checkout.
 
 Its path filter is the other interesting part: because the generators read code, the workflow
-triggers on changes to `server/src/**`, `server/sql/**`, the proxy's router, console and auth
-modules, and every client/example tree scanned by the snippet generator, not only on changes
-under `webdoc/**`.
+triggers on changes to `server/src/**`, the proxy's router, console and auth modules, and every
+client/example tree scanned by the snippet generator, not only on changes under `webdoc/**`.
 
 The workflow builds and gates; it does not deploy. Deployment is Cloudflare Pages against
 `dist/`.

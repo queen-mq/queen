@@ -938,7 +938,7 @@ fn alone(state: &ClusterState, ticks: u64) {
             "this facade is the only node in its cluster registry. If that is not intended, the \
              other facades are writing somewhere else: every node of one cluster must set the \
              same QUEEN_KAFKA_CLUSTER, and must present credentials of ONE Queen tenant — \
-             queen.kv is keyed by tenant, so two tenants are two registries and each facade sees \
+             Queen's KV is keyed by tenant, so two tenants are two registries and each facade sees \
              only itself."
         );
     }

@@ -1,6 +1,6 @@
 ---
 title: Environment variables
-description: "How the broker reads configuration, which variables an operator actually touches, and every variable with the default the code applies."
+description: "How the broker reads configuration, which variables an operator actually touches on a raft node, and every variable with the default the code applies."
 type: reference
 tier: operate
 sidebar:
@@ -10,38 +10,200 @@ sourceOfTruth:
   - server/src/config.rs
   - server/src/main.rs
   - server/src/obs.rs
-  - server/src/schema.rs
   - server/src/encryption.rs
+  - server/src/proxy_embed.rs
+  - server/src/kafka_inproc.rs
+  - server/src/rsm/replicator/node.rs
+  - server/src/rsm/replicator/raft/cluster.rs
+  - server/src/rsm/replicator/raft/mod.rs
+  - server/src/rsm/qlog/set.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/groups.rs
+  - server/src/rsm/admit.rs
+  - server/src/rsm/batcher.rs
+  - server/src/rsm/maintenance.rs
+  - server/src/rsm/planner/timers.rs
+  - server/src/rsm/dashboard/collector.rs
+  - server/src/rsm/timing.rs
 digest: >-
-  Most of the configuration table is measured engine tuning that should be left alone. In practice
-  a deployment sets: PG_HOST, PG_PORT, PG_PASSWORD, PG_USER and PG_DATABASE to reach PostgreSQL,
-  where PG_USER and PG_DATABASE both default to postgres, PG_PORT to 5432 and PG_HOST to
-  localhost; DB_POOL_SIZE, default 160, with QUEEN_STMT_TIMEOUT_MS; PG_USE_SSL and
-  PG_SSL_ROOT_CERT; PORT, default 6632; the JWT_ variables, with JWT_ENABLED false by
-  default so the middleware passes every request through; QUEEN_MESH_PORT, default 6633, with
-  QUEEN_MESH_PEERS and QUEEN_SYNC_SECRET; FILE_BUFFER_DIR, default /var/lib/queen/buffers;
-  RETENTION_INTERVAL, default 5000 milliseconds; QUEEN_MAX_BODY_BYTES, default 67108864, which is
-  64 MiB and returns 413 above it; QUEEN_ENCRYPTION_KEY, which must be 64 hexadecimal characters,
-  because a malformed or wrong-length key logs one warning, disables encryption and then stores
-  plaintext on queues flagged for it; LOG_LEVEL, default info, accepting EnvFilter syntax and
-  overridden by RUST_LOG; DEFAULT_SUBSCRIPTION_MODE, default new; QUEEN_APPLY_SCHEMA, default
-  true; and QUEEN_TENANCY_HEADER.
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): main.rs registers three new routes and introduces no environment variable; the generated table is current.
+  Every knob is an environment variable read once at boot; there is no config file and no reload.
+  A node sets: QUEEN_RAFT_DIR, the data directory, default /var/lib/queen/raft, on a persistent
+  volume; for a cluster of 3 or 5 voters QUEEN_RAFT_REPLICATOR=openraft, QUEEN_RAFT_NODE_ID (a
+  number from 1, or ordinal), QUEEN_RAFT_PEERS (id=raft_host:raft_port/http_host:http_port for
+  every voter) and QUEEN_RAFT_TOKEN (the same secret on every node); PORT, default 6632; the JWT_
+  variables, with JWT_ENABLED false by default; QUEEN_RAFT_DISK_HIGH_PCT, default 85, and
+  QUEEN_RAFT_DISK_LOW_PCT, default 80, the disk gate that refuses growing writes with 507;
+  QUEEN_QLOG_SHARDS, default 0 (one log per queue), fixed when the data directory is created;
+  QUEEN_PROXY_EMBEDDED and QUEEN_PROXY_PORT for the proxy in the same process;
+  QUEEN_KAFKA_EMBEDDED with QUEEN_KAFKA_ADVERTISED_ADDR, which has no default; RETENTION_INTERVAL,
+  default 5000 milliseconds; QUEEN_MAX_BODY_BYTES, default 67108864, which is 64 MiB and returns 413
+  above it; QUEEN_ENCRYPTION_KEY, 64 hexadecimal characters, because a malformed or wrong-length key
+  logs one warning, disables encryption and then stores plaintext on queues flagged for it; LOG_LEVEL,
+  default info, overridden by RUST_LOG; QUEEN_TENANCY_HEADER, which needs QUEEN_KV_TRUSTED_PROXY. The
+  1.x PostgreSQL, spool, mesh, hot-list, fusion and admission variables no longer exist and are
+  ignored.
 ---
 
 The broker has no configuration file and no command-line flags. Every knob is an
-environment variable, read once by `config::load()` during boot, before the HTTP
-listener binds. There is no reload: changing a variable means restarting the
-process. The one argument the binary accepts is the subcommand `migrate`, which
-exists only to report that offline migration was retired and exit non-zero.
+environment variable, read once during boot, before the HTTP listener binds.
+There is no reload: changing a variable means restarting the process.
 
-## One boolean parser
+## Which variables actually matter
 
-Every boolean in the broker goes through the same parser, so `=on`, `=1` and
-`=true` mean the same thing everywhere. The accepted spellings are
-`true/false`, `1/0`, `yes/no`, `on/off`, case-insensitive, surrounding
-whitespace trimmed.
+Most knobs are tuning that should be left alone. In practice a node sets
+variables from these groups only.
+
+| Purpose | Variables |
+| --- | --- |
+| Keep the node's state | `QUEEN_RAFT_DIR` (default `/var/lib/queen/raft`). Mount a persistent volume there. See [the data directory](#the-data-directory) |
+| Run a cluster | `QUEEN_RAFT_REPLICATOR=openraft`, `QUEEN_RAFT_NODE_ID`, `QUEEN_RAFT_PEERS`, `QUEEN_RAFT_TOKEN`. See [the cluster set](#the-cluster-set) |
+| Stop writes before the disk fills | `QUEEN_RAFT_DISK_HIGH_PCT`, `QUEEN_RAFT_DISK_LOW_PCT`. See [the disk gate](#the-disk-gate) |
+| Fsync fewer files when a node holds many queues | `QUEEN_QLOG_SHARDS`, fixed when the data directory is created. See [queue-log layout](#queue-log-layout) |
+| Serve on a different port or interface | `PORT` (default `6632`), `QUEEN_BIND_ADDR` |
+| Turn on authentication | `JWT_ENABLED`, `JWT_ALGORITHM`, then `JWT_SECRET` or `JWT_PUBLIC_KEY` or `JWT_JWKS_URL` |
+| Run the multi-tenant proxy in the same process | `QUEEN_PROXY_EMBEDDED`, `QUEEN_PROXY_PORT`, and the proxy's own `QUEEN_PROXY_*` settings. See [the proxy](/deploy/proxy/) |
+| Serve the Kafka wire protocol | `QUEEN_KAFKA_EMBEDDED`, `QUEEN_KAFKA_ADVERTISED_ADDR`. See [Kafka](/reference/kafka/) |
+| Change the maintenance cadence | `RETENTION_INTERVAL` |
+| Accept larger request bodies | `QUEEN_MAX_BODY_BYTES` |
+| Encrypt payloads at rest | `QUEEN_ENCRYPTION_KEY`, the same value on every node |
+| Shape the logs | `LOG_LEVEL`, `QUEEN_LOG_JSON` |
+| Scope queues by tenant behind a proxy | `QUEEN_TENANCY_HEADER`, with `QUEEN_KV_TRUSTED_PROXY`. See [Self-hosting](/deploy/) |
+| Shape the KV and timer surfaces | Nothing turns them on: every broker serves them. Their knobs are ceilings and cadences that should be left alone, and pausing a live surface is a runtime call (`POST /api/v1/system/kv-timers`) rather than a variable; in a cluster it takes effect at once only on the node that served it. The one variable that stops timers from firing is `QUEEN_RAFT_TIMER_TICK_MS=0`, on every node. See [kv](/reference/http/kv), [timers](/reference/http/timers) and [KV and timers](/deploy/state) |
+
+`LOG_LEVEL` accepts the full `EnvFilter` syntax, not just a bare level:
+`info,rsm=debug` works. `RUST_LOG` takes precedence over it, and an
+unparseable filter falls back to `info`.
+
+## The data directory
+
+`QUEEN_RAFT_DIR` (default `/var/lib/queen/raft`) is the only place a node keeps
+state. It holds the queue logs (`qlog/`), the ordered store (`store/`), the raft
+state when the node is part of a cluster (`raft/`), and `dash.db`, the node's
+dashboard history. There is no external database and no disk spool. Mount a
+persistent volume there: a node that loses the directory loses its copy of the
+data.
+
+The boot refuses an empty `QUEEN_RAFT_DIR` and creates the directory when it is
+missing. A data directory belongs to the replicator that created it: a directory
+written by the `openraft` replicator is refused by the `local` one, and the other
+way round.
+
+`QUEEN_RAFT_READY_LAG_MS` (default `2000`) is the apply lag under which
+`GET /health` answers `200`; above it, or with no leader known, `/health` answers
+`503` with `"status":"settling"`.
+
+## The cluster set
+
+A single node needs none of these: the default `local` replicator has no network
+and no consensus. A cluster runs 3 or 5 voters, because raft needs a majority: 3
+tolerate one failure, 5 tolerate two. These variables are read by the replicator,
+not by `config.rs`; the generated table below lists them as well, from the files
+that read them.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `QUEEN_RAFT_REPLICATOR` | `local` | `local`, or `openraft` (also spelled `raft`) for a cluster. Any other value fails the boot. |
+| `QUEEN_RAFT_NODE_ID` | `1` | This node's id: a number from 1, or `ordinal`, which takes the trailing number of `HOSTNAME` plus one, so StatefulSet pod `queen-0` is node 1. |
+| `QUEEN_RAFT_PEERS` | unset | Every voter of the initial membership, this node included: `id=raft_host:raft_port/http_host:http_port,...`. Raft RPCs go to the first address; a follower forwards client requests to the leader's second one. Setting it with the `local` replicator fails the boot. |
+| `QUEEN_RAFT_TOKEN` | unset | The shared secret every raft RPC carries (header `x-queen-raft-token`). Without it, any host that reaches the raft port can send votes and appends. Set the same value on every node, for example from `openssl rand -hex 32`. |
+| `QUEEN_RAFT_LISTEN` | `0.0.0.0:<this node's raft port>` | The address the raft RPC listener binds. |
+| `QUEEN_RAFT_JOIN` | off | For a node joining a cluster that already exists: it does not initialize a cluster of its own, and it answers `503` until the leader adds it as a learner. |
+| `QUEEN_RAFT_GROUPS` | `1` | Raft groups per process, at most 64, the same value on every node. A tenant lives in exactly one group, and group `g` uses the node's raft port plus `g`. |
+
+For example, node 2 of three:
+
+```bash
+QUEEN_RAFT_REPLICATOR=openraft
+QUEEN_RAFT_NODE_ID=2
+QUEEN_RAFT_PEERS=1=<host1>:7400/<host1>:6632,2=<host2>:7400/<host2>:6632,3=<host3>:7400/<host3>:6632
+QUEEN_RAFT_TOKEN=<same secret on all three>
+```
+
+Port 7400 is the raft port the Helm chart uses, not a code default: the raft
+port is whatever `QUEEN_RAFT_PEERS` says. The peer list is written into the raft
+membership at first boot. After that, the environment only supplies this node's
+own listen address and the token, and membership changes go through
+`/api/v1/system/raft/membership`. The walkthrough is in
+[High availability](/deploy/ha/).
+
+## The disk gate
+
+Writes that grow storage (pushes, transactions carrying pushes, KV puts, timer
+schedules, traces) are refused with `507` `storage_full` once the filesystem
+holding the data directory is `QUEEN_RAFT_DISK_HIGH_PCT` percent used (default
+`85`). They are accepted again once it is back under `QUEEN_RAFT_DISK_LOW_PCT`
+(default `80`). A value that does not parse, or lies outside 1 to 100, keeps the
+default. Pops, acks and deletes are not gated, so consumers can drain. The same
+gate closes at 85 percent of the store's memory map and reopens under 80 percent;
+those two numbers are fixed. `queen_raft_storage_full` on
+[`/metrics/prometheus`](/reference/prometheus) is `1` while the gate is closed.
+
+## Queue-log layout
+
+`QUEEN_QLOG_SHARDS` (default `0`) sets how many shared queue logs a **new** data
+directory gets. `0` means one log per queue. A value `K` from 1 to 4096 routes
+every queue's records to shared log `queue_id % K`, so one commit fsyncs at most
+`K` logs however many queues it touches; larger values are capped at 4096. The
+count is written into the data directory when it is created, and an existing
+directory keeps its layout: a different value later only logs a warning.
+
+## The proxy and the Kafka facade
+
+`QUEEN_PROXY_EMBEDDED=true` runs the multi-tenant proxy inside the broker
+process. Without `QUEEN_PROXY_PORT`, the proxy serves `PORT` and the broker
+router has no socket of its own, so every client needs an API key or a session.
+With `QUEEN_PROXY_PORT` set to another port, the proxy serves that port and
+`PORT` serves the broker router directly, with its own JWT and tenancy settings:
+an internal port for clients inside the network, scrapers and probes, never
+internet-facing. The proxy's own settings (`QUEEN_PROXY_*`) are described in
+[the proxy](/deploy/proxy/).
+
+`QUEEN_KAFKA_EMBEDDED=true` runs the Kafka wire facade inside the broker
+process. `QUEEN_KAFKA_ADVERTISED_ADDR`, the `host:port` Kafka clients are told to
+connect to, has no default: without it the boot fails naming the variable. The
+listener binds `QUEEN_KAFKA_ADDR` (default `0.0.0.0:9092`). The rest is in
+[Kafka](/reference/kafka/).
+
+## Names kept from 1.x
+
+These variables kept their names because the raft node reads them with the same
+meaning. They are in the generated table below as well:
+
+| Variable | Default | On a raft node |
+| --- | --- | --- |
+| `RETENTION_INTERVAL` | `5000` ms | How often the leader plans a maintenance pass (retention, partition cleanup). |
+| `RETENTION_BATCH_SIZE` | `1000` | The most rows one maintenance entry considers. |
+| `PARTITION_CLEANUP_DAYS` | `30` | An empty partition with no write, lease or new consumer group for this many days, and no dead letters, is deleted. |
+| `QUEEN_PARTITION_CLEANUP_ENABLED` | on | `0`, `false`, `off` or `no` keeps idle empty partitions forever. |
+| `METRICS_FLUSH_MS` | `60000` | How often the dashboard collector writes the node's counters to `dash.db`. A value under 1000 keeps the default. |
+| `QUEEN_SWEEPER_BACKOFF_MIN_MS` | `1000` | Backoff after a timer fire fails permanently: `min(min * 2^attempts, max)`. |
+| `QUEEN_SWEEPER_BACKOFF_MAX_MS` | `60000` | The ceiling of that backoff. |
+| `QUEEN_SWEEPER_TRANSIENT_BACKOFF_MS` | `1000` | Backoff after a transient fire failure, which spends no attempt. |
+| `QUEEN_SWEEPER_MAX_ATTEMPTS` | `5` | Permanent failures after which a timer is dead-lettered into its destination queue's DLQ. |
+
+`QUEEN_STMT_TIMEOUT_MS`, `DEFAULT_TIMEOUT` (with its alias
+`POP_DEFAULT_TIMEOUT_MS`) and `DEFAULT_SUBSCRIPTION_MODE` are read by
+`config.rs` and appear in the table. On a raft node `QUEEN_STMT_TIMEOUT_MS` is the
+deadline of an ack, a transaction and a lease extension, capped at 60 seconds.
+
+### Variables that no longer exist
+
+The 1.x PostgreSQL connection, pool and TLS settings (`PG_*`, `DB_POOL_SIZE`,
+`PG_USE_SSL`, `PG_SSL_REJECT_UNAUTHORIZED`, `PG_SSL_ROOT_CERT`), the disk spool
+(`FILE_BUFFER_*`), the mesh (`QUEEN_MESH_*`, `QUEEN_UDP_*`, `QUEEN_SYNC_*`), the
+hot-list, fusion, ack-fusion, pop-fusion, admission and pop-autopilot knobs
+(`QUEEN_HOTLIST_*`, `QUEEN_V2_FUSION_*`, `QUEEN_ACK_FUSION_*`,
+`QUEEN_POP_FUSION_*`, `QUEEN_ADMISSION_*`, `QUEEN_POP_AUTOPILOT*`),
+`QUEEN_APPLY_SCHEMA`, `RETENTION_PARALLELISM`, the stats refresh intervals,
+`QUEEN_STORAGE`, `QUEEN_SQS_*`, `QUEEN_S3_*` and `PXDB_*` no longer exist and are
+ignored. A 2.0 node has no database to reach and one storage class, so there is
+nothing for them to configure.
+
+## How booleans parse
+
+Every boolean read by `config.rs` goes through one parser, so `=on`, `=1` and
+`=true` mean the same thing there. The accepted spellings are `true/false`,
+`1/0`, `yes/no`, `on/off`, case-insensitive, surrounding whitespace trimmed.
 
 Three outcomes, and only three:
 
@@ -54,218 +216,98 @@ Three outcomes, and only three:
 
 That last rule exists because the alternative failed in both directions: a
 strict parser with a silent fallback turned `JWT_ENABLED=1` into a broker
-running with authentication off and nothing in the log. Booleans read outside
-`config.rs` (`QUEEN_LOG_JSON`, `QUEEN_APPLY_SCHEMA`, `QUEEN_V2_BUNDLE_LOG`)
-are validated eagerly at the same moment, so every boolean mistake in a
-deployment surfaces on the same boot with the same message.
+running with authentication off and nothing in the log. `QUEEN_LOG_JSON`, which
+is read before logging starts, is validated at the same moment.
+
+A few switches are read where they are used, with their own rule and no boot
+error. `QUEEN_PROXY_EMBEDDED` and `QUEEN_RAFT_JOIN` are on for `1`, `true`,
+`yes` or `on` (any case) and off for anything else. `QUEEN_RAFT_METRICS` and
+`QUEEN_PARTITION_CLEANUP_ENABLED` are on unless set to `0`, `false`, `off` or
+`no`.
 
 <Aside type="caution">
-Numbers are **not** strict. An unparseable integer or float silently resolves to
-the default: `DB_POOL_SIZE=16O` (letter O) yields 160, not an error. The
-protection against that is the boot block below, not the parser.
+Numbers are **not** strict. An unparseable integer silently resolves to the
+default: `QUEEN_RAFT_READY_LAG_MS=2OOO` (letter O) yields 2000, not an error.
+The protection against that is the boot block below, not the parser.
 </Aside>
-
-Several numeric knobs are also clamped after parsing. Interval and size knobs
-are floored at 1, and `STATS_INTERVAL_MS`, `RETAINED_BYTES_INTERVAL_MS` and
-`METRICS_FLUSH_MS` are floored at 1000 ms: a value below the floor is raised
-without comment.
-
-One clamp does comment, because the value it protects is a correctness
-invariant rather than a sanity floor. `QUEEN_HOTLIST_RESEED_WINDOW_MS` is held
-to at least one `QUEEN_HOTLIST_RESEED_MS` plus that interval's de-phasing
-offset, which is the longest gap two consecutive passes of one ring can leave;
-below it there is a band of writes no pass ever covers. It is also held below a
-one-week ceiling. Either way the broker logs a `boot` warning naming the
-variable, the value you set and the value in force.
 
 ## The effective configuration is printed at boot
 
-After the JWT configuration is validated, the broker emits one `boot` block per
-subsystem (`config: server`, `postgres`, `auth`, `sync`, `engine`, `flow`,
-`jobs`, `file_buffer`, `security`, `logging`) carrying the values it actually
-resolved. A misspelled variable, a defaulted knob, or a value that came from a
-legacy alias is visible there instead of having to be inferred from behaviour.
-Read that block first when a setting appears not to have taken effect.
+After the JWT configuration is validated, the broker logs one `boot` line per
+subsystem, headed `config: server`, `config: storage`, `config: auth` and so on,
+carrying the values it actually resolved. The data directory and the disk gate
+are in `config: storage`, and the `listening` line repeats the version, the
+address and the data directory. A misspelled variable or a defaulted knob is
+visible there instead of having to be inferred from behaviour. Read those lines
+first when a setting appears not to have taken effect.
 
-Secrets are masked, never printed: `JWT_SECRET`, `PG_PASSWORD`,
-`QUEEN_ENCRYPTION_KEY` and `QUEEN_SYNC_SECRET` render as `<unset>` or
-`<set:32 chars>`. That is enough to tell "I forgot to mount the secret" from "I
-mounted the wrong one" without putting key material into a log shipper.
+Secrets are masked, never printed: `JWT_SECRET`, `JWT_PUBLIC_KEY` and
+`QUEEN_ENCRYPTION_KEY` render as `<unset>` or `<set:32 chars>`. That is enough to
+tell "I forgot to mount the secret" from "I mounted the wrong one" without
+putting key material into a log shipper.
 
 ## What kills the boot
 
 The broker prefers to die at startup over serving in a state you did not ask
-for. All five of these exit 1:
+for. All of these exit 1:
 
-- an unparseable boolean, as above;
+- an unparseable boolean read by `config.rs`, as above;
 - `JWT_ENABLED=true` with no usable key material for the configured algorithm,
   or an algorithm outside `HS256`, `HS384`, `HS512`, `RS256`, `RS384`, `RS512`,
   `EdDSA`, `auto`;
 - `QUEEN_TENANCY_HEADER=1` with no `QUEEN_KV_TRUSTED_PROXY=1`;
-- a schema apply failure (unless `QUEEN_APPLY_SCHEMA=0`);
-- failure to bind `$PORT` on `$QUEEN_BIND_ADDR`, including a `QUEEN_BIND_ADDR` that
-  carries a port of its own instead of a bare host or IP.
+- an empty `QUEEN_RAFT_DIR`, or a data directory the state machine cannot open,
+  including one written by the other replicator;
+- a cluster set that does not hold together: an unknown `QUEEN_RAFT_REPLICATOR`,
+  a `QUEEN_RAFT_PEERS` that does not parse or does not list
+  `QUEEN_RAFT_NODE_ID`, or `QUEEN_RAFT_PEERS` with the `local` replicator;
+- `QUEEN_KAFKA_EMBEDDED=true` without a usable `QUEEN_KAFKA_ADVERTISED_ADDR`;
+- failure to bind `$PORT` on `$QUEEN_BIND_ADDR`, including a `QUEEN_BIND_ADDR`
+  that carries a port of its own instead of a bare host or IP, or failure to bind
+  `QUEEN_PROXY_PORT`.
 
-The third is a safety interlock rather than a validation, and it is keyed on the
-tenancy mode alone. The tenant header is opaque and validated against nothing, so
-the trust boundary is the network in front of the broker. That is tolerable for
-queues, where an ack still has an ownership gate on an id the caller cannot
-guess, and it is not tolerable for key/value state, which has no opaque id at
-all: the only gate is the tenant in the `WHERE` clause, and the tenant comes from
-the header. Setting `QUEEN_KV_TRUSTED_PROXY=1` is the operator asserting that a
-proxy supplies that header and strips the client's. An interlock that defaulted
-to permissive would be no interlock.
-
-The unsafe thing there is not the key/value surface, it is an opaque tenant
-identity that nothing validates; the KV only made it visible, by being the first
-surface addressable purely by name. So the requirement is unconditional: there is
-no flag that switches the KV off to make an unvalidated tenant header safe, and
-there should not be one, because a fleet where the engine is missing on some
-cells is worse than a boot that names the variable to set. An operator who has to
-take the KV down on a running cell wants the runtime kill switch instead, which is
-a different instrument for a different problem. See [KV and timers](/deploy/state).
+The tenancy interlock is a safety rule rather than a validation. The tenant
+header is opaque and validated against nothing, so the trust boundary is the
+network in front of the broker. That is tolerable for queues, where an ack still
+has an ownership gate on an id the caller cannot guess, and it is not tolerable
+for key/value state, which is addressed purely by name: the only gate is the
+tenant, and the tenant comes from the header. Setting `QUEEN_KV_TRUSTED_PROXY=1`
+is the operator asserting that a proxy supplies that header and strips the
+client's. There is no flag that switches the KV off to make an unvalidated tenant
+header safe; an operator who has to take the KV down on a running node wants the
+runtime kill switch instead. See [KV and timers](/deploy/state).
 
 One important omission from that list: a malformed `QUEEN_ENCRYPTION_KEY` (not
 64 hex characters, or not hex) logs a single warning and **disables
 encryption**. Queues flagged `encryptionEnabled` then store plaintext and the
-pushes succeed. Grep the boot `config: security` block for
-`encryption_key=<set:64 chars>` before trusting at-rest encryption.
-
-## Which variables actually matter
-
-Most of the table below is measured engine tuning that should be left alone. In
-practice a deployment sets variables from these groups only.
-
-| Purpose | Variables |
-| --- | --- |
-| Reach PostgreSQL | `PG_HOST`, `PG_PORT`, `PG_USER`, `PG_PASSWORD`, `PG_DATABASE` |
-| Size the connection pool and bound statements | `DB_POOL_SIZE`, `QUEEN_STMT_TIMEOUT_MS` |
-| Move the write-admission band, or reserve pool headroom | `QUEEN_ADMISSION_MIN`, `QUEEN_ADMISSION_MAX`, `QUEEN_ADMISSION_POOL_RESERVE`. See [flow control](/internals/flow-control/) |
-| Re-weight which lane wakes first when the budget is exhausted | `QUEEN_ADMISSION_SHARE_PUSH`, `QUEEN_ADMISSION_SHARE_POP`, `QUEEN_ADMISSION_SHARE_ACK`, `QUEEN_ADMISSION_SHARE_MAINT` |
-| Encrypt broker-to-PostgreSQL traffic, and verify whose database answered | `PG_USE_SSL`, `PG_SSL_ROOT_CERT`, `PG_SSL_REJECT_UNAUTHORIZED`. See [PostgreSQL TLS](/reference/security/postgres-tls/) |
-| Serve on a different port | `PORT` |
-| Turn on authentication | `JWT_ENABLED`, `JWT_ALGORITHM`, then `JWT_SECRET` or `JWT_PUBLIC_KEY` or `JWT_JWKS_URL` |
-| Run more than one broker | `QUEEN_MESH_PEERS`, `QUEEN_MESH_PORT`, `QUEEN_SYNC_SECRET` |
-| Survive a database outage | `FILE_BUFFER_DIR` (must be writable and persistent) |
-| Change the maintenance cadence | `RETENTION_INTERVAL` |
-| Delete faster than one partition at a time | `RETENTION_PARALLELISM`, raised together with `QUEEN_ADMISSION_SHARE_MAINT` |
-| Put N pop claims in one transaction | `QUEEN_POP_FUSION` |
-| Watch, or stop, the broker sizing the pops it was asked to size | `QUEEN_POP_AUTOPILOT`. See [pop autopilot](/reference/http/pop#autopilot) |
-| Accept larger request bodies | `QUEEN_MAX_BODY_BYTES` |
-| Encrypt payloads at rest | `QUEEN_ENCRYPTION_KEY` |
-| Shape the logs | `LOG_LEVEL`, `QUEEN_LOG_JSON`, `QUEEN_LOG_RATES_MS` |
-| Let a privileged role own the DDL | `QUEEN_APPLY_SCHEMA` |
-| Scope queues by tenant behind a proxy | `QUEEN_TENANCY_HEADER`. See [Self-hosting](/deploy/) |
-| Shape the KV and timer surfaces | Nothing turns them on: every broker serves them. The forty-odd `QUEEN_KV_*`, `QUEEN_TIMERS_*` and `QUEEN_SWEEPER*` knobs are ceilings and cadences that should be left alone, and pausing a live surface is a runtime call rather than a variable. See [kv](/reference/http/kv), [timers](/reference/http/timers) and [KV and timers](/deploy/state) |
-
-Two conventions in that list are worth stating explicitly.
-
-`LOG_LEVEL` accepts the full `EnvFilter` syntax, not just a bare level:
-`info,queen::pop=debug` works. `RUST_LOG` takes precedence over it, and an
-unparseable filter falls back to `info`.
-
-`PG_DATABASE` resolves through a non-empty chain (`PG_DATABASE`, then the
-legacy `PG_DB`, then `postgres`), so an explicitly empty value falls through.
-Every other string variable keeps a present-but-empty value verbatim, which is
-how `JWT_SKIP_PATHS=""` can be used to clear the default skip list.
-
-## Every accelerator has an off switch
-
-The broker-side fast paths are all optional, and none of them is load-bearing for
-correctness. Each one has a kill switch that reverts to the path the broker used
-before that optimisation existed, so an accelerator you do not trust can be
-turned off in a deployment without giving up a guarantee. What you give up is
-throughput, and the table says how much of what.
-
-| Accelerator | Variable | Default | What the off switch reverts to, and what it costs |
-| --- | --- | --- | --- |
-| Wildcard candidate hot list | `QUEEN_HOTLIST` | on | The per-pop SQL candidate scan, which is the pre-hot-list path. Candidate scans reappear in the PostgreSQL profile. It also takes `windowBuffer` back to the SQL-only debounce, which has no early promotion, so a partition written to more often than every `windowBuffer` seconds stops being delivered at all. It also takes pop autopilot with it: the controller reads the ring and nothing else, so on the SQL scan an opted-in request resolves to the server-side defaults. |
-| Windowed hot-list reseed | `QUEEN_HOTLIST_RESEED_FULL_MS` | `300000` ms | `0` makes every reseed a full walk over every partition of the queue again, and switches off the repair paths that exist only because a windowed pass cannot see a cursor move. |
-| Ack registry | `QUEEN_ACK_REGISTRY` | on, `64` MB (`QUEEN_ACK_REGISTRY_MB`) | Every ack takes `queen.log_ack_by_hash_v1` and resolves its hashes in PostgreSQL, instead of a full-batch completed ack becoming one positional cursor advance. Under the cap the registry already evicts whole entries onto that same path, so the switch only makes it unconditional. |
-| Ack fusion | `QUEEN_ACK_FUSION` | on | The synchronous `queen.log_ack_at_v1` fast path, byte-identical to the pre-fusion behaviour: one commit and one fsync per ack rather than one per flush for N cursor advances. |
-| Deduplication cache | `QUEEN_DEDUP_CACHE` | on, `512` MB (`QUEEN_DEDUP_CACHE_MB`) | The broker always sends `p_verified = -1` and SQL probes the full deduplication window on every push. Deduplication stays exact either way: the cache is a way to skip a probe, never a way to decide one. |
-| Retention fan-out | `RETENTION_PARALLELISM` | `1` | `1` is already the off position, the historical serial cycle, so an upgrade changes nothing until you raise it. That serial cycle measured about 13,800 step rows per second on the 2026-08-10 rig, just under the roughly 14,600 that sustaining 1,000,000 msg/s needs, which is what raising it (ceiling 16) buys. Each worker holds one maintenance-lane admission slot and one pooled connection while it runs. |
-| Pop fusion | `QUEEN_POP_FUSION` | off | The only accelerator that ships off. Set it and N pop claim legs share one transaction and one commit, and the Pop lane takes one admission slot per fused flush instead of one per claim. |
-| Partition cleanup | `QUEEN_PARTITION_CLEANUP_ENABLED` | on | Empty partitions idle for `PARTITION_CLEANUP_DAYS` (30) are kept forever instead of being deleted. |
-| Pop autopilot | `QUEEN_POP_AUTOPILOT` | on | The server-side defaults for the knobs an opted-in client left out: batch 200, one partition. A client that does not send `autopilot=true` is unaffected in every position, so this switch is about what the controller may do, never about whether the surface exists. It is the one switch here with a third position, described below. |
-
-Pop autopilot is the one entry with three positions rather than two, and the
-third is the reason to reach for it. `shadow` computes the decision, reports it
-and does not apply it, so a deployment can read what the controller would have
-chosen for a week before letting it choose. `off` removes the controller
-outright, including its in-memory lane state and its logs. Both positions answer
-an opted-in request with today's defaults and no `autopilot` object in the
-response, which is exactly what a broker older than 1.2 does, so a client needs
-no capability check either way.
-
-Six constants tune the law rather than switch it. `QUEEN_POP_AUTOPILOT_BATCH`
-(100) is the batch handed to a consumer that delegated that dimension, and only
-to such a consumer: a client that sends its own `batch` is never touched by it.
-`QUEEN_POP_AUTOPILOT_TARGET_AGE_MS` (25) is the ready-age the width loop steers
-to. `QUEEN_POP_AUTOPILOT_DWELL_MS` (500) and `QUEEN_POP_AUTOPILOT_DWELL_POPS`
-(16) bound how often one `(tenant, queue, group)` may change its width in either
-direction, which is what stops the loop limit-cycling.
-`QUEEN_POP_AUTOPILOT_MAX_LANES` (50000) bounds the in-memory state on a cell with
-very many queues; past it the controller stops creating lanes and those lanes
-degrade to today's defaults rather than a live one being evicted.
-`QUEEN_POP_AUTOPILOT_BURST_CAP` (0, disabled) lets a delegated width jump for one
-request to what is ready at that instant, capped, without the feedback loop
-losing ownership of the steady width.
-
-Two of these are validated at boot rather than corrected. A
-`QUEEN_POP_AUTOPILOT` that is not a mode, and a `QUEEN_POP_AUTOPILOT_BATCH`
-outside its range, both kill the boot naming the value. Resolving a typo to the
-default silently is how a fleet ends up running on a number nobody chose.
-
-One accelerator is absent from that table because it has no switch: **push fusion
-has no enable flag**. Cross-request push fusion is always on, and
-`QUEEN_V2_FUSION_SHARDS` (8), `QUEEN_V2_FUSION_FRAMES` (500) and
-`QUEEN_V2_FUSION_HOLD_MS` (3 ms) shape it rather than disable it.
-
-The boot block prints the resolved state of most of these, so a deployment that
-thinks it turned one off can confirm it without inferring from throughput:
-`config: engine` carries `hotlist`, `dedup_cache`, `ack_registry`, `ack_fusion`
-and the reseed intervals, `config: jobs` carries `retention_parallelism` and
-`partition_cleanup`, and `config: flow` carries all seven `pop_autopilot` knobs
-next to the pop and admission ones. `QUEEN_POP_FUSION` is the exception: it
-prints nothing at boot in either state and has no counter of its own, so the
-deployment's own environment is the only record of whether it is on.
-
-Pop autopilot also says what it is doing while it runs, on its own `autopilot`
-log target. A rate-limited `info` line carries the mode, the width and batch it
-last chose, and running counts of requests, adjustments and live lanes, each line
-reporting how many it suppressed. A `warn` line fires once per lane, re-armed
-daily, when a client's explicit width and the controller's choice diverge widely:
-that one is diagnostic only, and it says so, because an explicit value is never
-overridden.
+pushes succeed. Grep the boot `config: security` line for
+`encryption_key=<set:64 chars>` before trusting at-rest encryption. Set the
+same key on every node and check the line on each: any node can serve a push or
+a pop.
 
 ## The variables
 
-Defaults below are the ones the code applies, extracted from `config.rs` at
-build time. Where a variable has an alias, both names read the same setting and
-the newer name wins.
+Defaults below are the ones the code applies, extracted at build time from
+`config.rs` and, for the variables read at their own call site (the cluster set,
+`QUEEN_QLOG_SHARDS`, the names kept from 1.x, the proxy and Kafka switches), from
+the file that reads each one. The proxy's own `QUEEN_PROXY_*` settings and the
+facade's `QUEEN_KAFKA_*` settings are on [the proxy](/deploy/proxy/) and
+[Kafka](/deploy/kafka/) pages. Where a variable has an alias, both names read
+the same setting and the newer name wins.
 
-A handful of rows carry a **derivation** rather than a literal, because that is
-what the code applies. `QUEEN_ADMISSION_INIT` and `QUEEN_ADMISSION_MIN` come from
-the pool size; `QUEEN_HOTLIST_RESEED_WINDOW_MS` is rewritten before `load()`
-returns; `QUEEN_KV_POOL_SIZE` is `DB_POOL_SIZE / 10` clamped to 4..32;
-`QUEEN_KV_REQUIRE_GRANT` takes the value of `QUEEN_TENANCY_HEADER`; and
-`QUEEN_TIMERS_MAX_PAYLOAD_BYTES` is the smaller of its own literal and the
-plan's message payload ceiling, since a timer becomes a message and an
-independent ceiling would be a way around the plan's. The extractor reads the
-call site, which for these is an expression rather than a number, so each of them
-is stated here with its derivation instead of published as whatever the
-expression happened to look like.
+A few rows carry a **derivation** rather than a literal, because that is what
+the code applies: `QUEEN_KV_REQUIRE_GRANT` and `QUEEN_EPHEMERAL_REQUIRE_GRANT`
+take the value of `QUEEN_TENANCY_HEADER`, and `DEFAULT_TIMEOUT` falls back to
+`POP_DEFAULT_TIMEOUT_MS`, then to 30000.
 
 <Render file="generated/broker-config" />
 
 ### Node identity
 
-One variable does not appear in the table because it is not read through the
-same helper: `QUEEN_SERVER_ID` names this instance in mesh heartbeats and peer
-stats. Unset, the broker uses `HOSTNAME`; with neither, it generates
-`queen-<8 hex>`. The value is cosmetic (nothing routes on it), but it is what
-makes a peer list readable in the `config: sync` boot block.
+`QUEEN_SERVER_ID` names this node on the dashboard's cell pages and in
+`/auth/me`. Unset, the broker uses `HOSTNAME`; with neither, it generates
+`queen-<8 hex>`. The value is cosmetic: nothing routes on it. The raft node id is
+`QUEEN_RAFT_NODE_ID`, above.
 
 ## Related pages
 

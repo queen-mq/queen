@@ -18,21 +18,18 @@
           </p>
 
           <!-- The outcome, and the only thing on screen that may call a push a
-               success. The form stays under it so a duplicate or a buffered
-               answer can be acted on without retyping the message. -->
+               success. The form stays under it so a duplicate or an error
+               can be acted on without retyping the message. -->
           <div v-if="verdict" class="push-verdict" :class="`push-verdict-${verdict.kind}`">
             <strong>{{ verdict.title }}</strong>
             <p>{{ verdict.detail }}</p>
 
-            <!-- Ids only for the three statuses where the broker took
-                 responsibility for the message (PushStatus::accepted): after an
-                 `error` or a `failed` nothing was stored, and a message id
-                 beside that sentence would name something that does not exist. -->
+            <!-- Ids only for the statuses where the broker took
+                 responsibility for the message (`queued`, `duplicate`): after
+                 an `error` nothing was stored, and a message id beside that
+                 sentence would name something that does not exist. -->
             <dl v-if="showIds" class="push-ids">
-              <!-- Not for a `buffered` result: the spool keeps no message id
-                   and the drain mints a new one, so the id the broker returned
-                   there names nothing (`showsMessageId`). -->
-              <div v-if="showMessageId">
+              <div>
                 <dt>Message id</dt>
                 <dd class="font-mono">{{ result.message_id }}</dd>
               </div>
@@ -144,9 +141,9 @@
           <template v-else>
             <!-- Cancel is disabled in flight for the same reason the modal is
                  the only place a verdict is rendered: the push has already
-                 left, `failed` comes back with 201 and therefore raises no
-                 toast, and a modal dismissed mid-request would drop the one
-                 report that a message was lost. -->
+                 left, an `error` item comes back with 201 and therefore raises
+                 no toast, and a modal dismissed mid-request would drop the one
+                 report that the message was not stored. -->
             <button type="button" class="btn btn-ghost" :disabled="submitting" @click="emit('close')">Cancel</button>
             <!-- Disabled in flight: a push is not idempotent unless the caller
                  made it so, and a second click would enqueue a second message. -->
@@ -169,16 +166,16 @@
 // The rule this component exists to enforce: 201 is not success. The broker
 // answers a push with one result per item and only `queued` means the message
 // is on the queue, so the modal renders `pushVerdict` and closes itself for
-// nothing — a `duplicate` (nothing written), a `buffered` (on the broker's
-// spool, not consumable) and an `error` all leave the form up with the message
-// still in it. See composables/usePushVerdict.js for the mapping.
+// nothing — a `duplicate` (nothing written) and an `error` (refused, nothing
+// written) both leave the form up with the message still in it. See
+// composables/usePushVerdict.js for the mapping.
 import { computed, ref, watch } from 'vue'
 
 import Autocomplete from '@/components/Autocomplete.vue'
 import { messages as messagesApi } from '@/api'
 import {
   describePushRefusal, offsetLine, parsePayload, payloadToText, pushVerdict,
-  showsIds, showsMessageId, worstResult,
+  showsIds, worstResult,
 } from '@/composables/usePushVerdict'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
@@ -238,11 +235,9 @@ const targetQueue = computed(() =>
 )
 
 const queued = computed(() => verdict.value?.kind === 'success')
-// PushStatus::accepted(), and the buffered exception to it, live in the
-// composable so `test/push.test.js` holds them; this component only renders
-// what they answer.
+// Which statuses carry ids lives in the composable so `test/push.test.js`
+// holds it; this component only renders what it answers.
 const showIds = computed(() => showsIds(result.value?.status))
-const showMessageId = computed(() => showsMessageId(result.value?.status))
 const offset = computed(() => offsetLine(result.value))
 
 // Every submit carries a token. `resetForm` bumps it, so a push that is still
@@ -275,7 +270,7 @@ watch(() => props.open, (isOpen) => {
   if (!props.queueFixed) fetchQueues()
 }, { immediate: true })
 
-/** Render an answer — the array from a 201, or the one a 500 carried. */
+/** Render an answer: the results array from a 201. */
 const report = (results) => {
   verdict.value = pushVerdict(results)
   result.value = worstResult(results)
@@ -333,15 +328,6 @@ const submit = async () => {
     report(res.data)
   } catch (err) {
     if (token !== submitSeq) return
-    // A spool write that failed under maintenance answers 500 with the SAME
-    // per-item results array (`buffer_all`), and that array is one of the two
-    // places `failed` is ever reported — the other is a 201 from `handle_push`.
-    // Reading it is what turns "HTTP 500" into "the message is lost", which is
-    // a different sentence.
-    if (Array.isArray(err?.body)) {
-      report(err.body)
-      return
-    }
     refusal.value = describePushRefusal(err)
   } finally {
     if (token === submitSeq) submitting.value = false

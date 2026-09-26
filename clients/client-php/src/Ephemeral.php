@@ -26,8 +26,8 @@ use Queen\Http\Retry429Policy;
  * WHAT THIS CLASS IS ABOUT, BEFORE ANY SIGNATURE: contents survive NOTHING
  * (§1.2). Not a restart, not a crash, not a deploy, not the ownership move a
  * membership change causes. Treat a failover like a Redis restart. Declared
- * CONFIGURATION is durable — it lives in PG and comes back after a restart, as
- * configured and EMPTY. There is no replay, no history, no subscriptionMode and
+ * CONFIGURATION is durable — it lives in the broker's replicated log and comes
+ * back after a restart, as configured and EMPTY. There is no replay, no history, no subscriptionMode and
  * no DLQ, because none of those concepts has a referent when there is no
  * history to have.
  *
@@ -108,9 +108,9 @@ class Ephemeral
     // ===========================
 
     /**
-     * Declare a queue and its bounds. Persists the OPTIONS in PG (§1.1): the
-     * configuration survives a restart, the contents never do, and the queue
-     * comes back declared and empty.
+     * Declare a queue and its bounds. Persists the OPTIONS in the broker's
+     * replicated log (§1.1): the configuration survives a restart, the contents
+     * never do, and the queue comes back declared and empty.
      *
      * Optional in every sense — a push or a pop that names an unknown queue
      * creates it implicitly with the tenant defaults. Declare when you want
@@ -150,7 +150,7 @@ class Ephemeral
         return $this->call('POST', '/api/v1/ephemeral/reset', ['queue' => $queue], queue: $queue);
     }
 
-    /** Delete the queue: contents, cursors, and the declared configuration in PG. */
+    /** Delete the queue: contents, cursors, and the declared configuration. */
     public function delete(string $queue): mixed
     {
         $this->requireQueue($queue);
@@ -386,9 +386,7 @@ class Ephemeral
     /**
      * Every ephemeral queue this tenant currently has, declared and implicit.
      *
-     * Free to poll: the gauges are read out of the broker's own memory, with no
-     * database behind them — unlike the durable meter, whose 1s poll is
-     * load-bearing on PG.
+     * Free to poll: the gauges are read out of the broker's own memory.
      */
     public function queues(): mixed
     {

@@ -143,7 +143,7 @@ struct Acc {
     window_key: String,
     acc: Value,
     touched: bool,
-    /// Already in the database, so closing it needs a delete.
+    /// Already in the broker, so closing it needs a delete.
     seeded: bool,
 }
 

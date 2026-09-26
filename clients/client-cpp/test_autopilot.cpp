@@ -30,7 +30,7 @@
  *      never heard of, all have to work.
  *
  * Like its siblings this runs against an in-process httplib::Server -- no
- * broker, no Postgres:
+ * broker:
  *
  *   make autopilot && ./bin/test_autopilot
  *

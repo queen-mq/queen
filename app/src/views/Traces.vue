@@ -206,7 +206,7 @@
                   <span
                     v-else
                     class="chip chip-mute"
-                    title="This trace's partition resolves on neither engine, so the broker cannot name its queue."
+                    title="This trace's partition does not resolve to a queue on this broker, so it cannot name its queue."
                   >
                     not recorded
                   </span>
@@ -454,7 +454,7 @@ const uniqueQueues = computed(() => {
   return queues.size
 })
 
-/** A trace whose partition resolves on neither engine carries no queue name. */
+/** A trace whose partition does not resolve to a queue carries no queue name. */
 const queueAttributionAvailable = computed(() => traces.value.some(t => t.queue_name))
 
 const shownFrom = computed(() => (traces.value.length ? offset.value + 1 : 0))

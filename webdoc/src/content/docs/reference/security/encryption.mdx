@@ -8,35 +8,36 @@ sidebar:
   label: Payload encryption
 sourceOfTruth:
   - server/src/encryption.rs
-  - server/src/handlers/data.rs
-  - server/src/handlers/messages.rs
-  - server/src/handlers/streams.rs
-  - server/src/db.rs
-  - server/sql/procedures/012_configure.sql
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the configure warning is rewritten for the merge rule, and the write-path list gains the dead-letter move, which decrypts the stored snapshot and envelopes for the destination queue.
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/real/phase2.rs
+  - server/src/rsm/facade/real/phase2/admin.rs
+  - server/src/rsm/facade/real/phase2/reads.rs
+  - server/src/rsm/facade/real/phase2/streams.rs
 ---
 
-Queen can encrypt message payloads with AES-256-GCM before they are written to
-PostgreSQL, so a database dump, a stolen backup or a read-only replica does not
-yield message contents. It needs exactly two things true at once: a key on the
-process and a flag on the queue. **With only one of the two in place the broker
-stores plaintext without raising an error.**
+Queen can encrypt message payloads with AES-256-GCM before they enter the
+replicated log, so every node stores them as ciphertext and a copy of a node's
+data directory (a stolen volume, a snapshot of the disk) does not yield message
+contents. It needs exactly two things true at once: a key on the process and a
+flag on the queue. **With only one of the two in place the broker stores
+plaintext without raising an error.**
 
 ## Enabling it
 
 <Steps>
 
 1. Generate 32 random bytes as **64 hexadecimal characters**, set
-   `QUEEN_ENCRYPTION_KEY` to them, and restart. Every broker sharing the database
-   needs the same key, or messages one writes are unreadable to another.
+   `QUEEN_ENCRYPTION_KEY` to them on every node, and restart. Every node of a
+   cluster needs the same key: any node can serve a push or a pop, so a node with
+   no key writes plaintext, and a node with another key writes envelopes the others
+   cannot read.
 
    ```bash
    openssl rand -hex 32
    ```
 
-2. Confirm the boot log line. If it is absent, encryption is off: see
-   [the silent failure](#a-bad-key-silently-stores-plaintext).
+2. Confirm the boot log line on every node. If it is absent, encryption is off
+   there: see [the silent failure](#a-bad-key-silently-stores-plaintext).
 
    ```text
    encryption service initialized (AES-256-GCM)
@@ -51,67 +52,57 @@ stores plaintext without raising an error.**
 
 </Steps>
 
-Since 1.6.0 `/configure` [merges](/reference/queue-options), so a later call that does
-not repeat `encryptionEnabled: true` leaves the flag alone. Two ways to turn it off
-remain, and both are explicit: send `encryptionEnabled: false` (or `null`), or send the
-whole configuration with `"mode": "replace"`, where an omitted flag means the default,
+`/configure` [merges](/reference/queue-options), so a later call that does not
+repeat `encryptionEnabled: true` leaves the flag alone. Two ways to turn it off
+remain, and both are explicit: send `encryptionEnabled: false`, or send the whole
+configuration with `"mode": "replace"`, where an omitted flag means the default,
 which is off.
 
 <Aside type="caution">
 A manifest is the case to watch. `queenctl apply -f` sends `"mode": "replace"` because a
 declarative source means the whole configuration, so a manifest that does not carry
 `encryptionEnabled: true` turns encryption off for that queue and subsequent pushes store
-plaintext. Keep the flag in the file, not only in the call that first set it. Against a broker
-older than 1.6.0 every caller replaces, so the same rule applies to every call.
+plaintext. Keep the flag in the file, not only in the call that first set it.
 </Aside>
 
-The change takes effect on the next push everywhere: the handler drops the serving broker's
-cached encryption flag as well as its cached lease time, and broadcasts the same invalidation to
-mesh peers, so no node keeps enveloping for a queue the others treat as plaintext.
+The flag is part of the queue's configuration in the replicated store, and every
+push reads it there, with no cache in between. A change applies to the pushes
+that follow it.
 
 ## What gets encrypted
 
-The flag lives on `queen.queues.encryption_enabled`, written by
-`configure_queue_v1`, and the broker caches the answer per tenant and queue.
-Encryption applies when the key is loaded **and** the flag is true, on all five
-write paths: `POST /api/v1/push`, `POST /api/v1/transaction`, the stream emit
-path, the disk spool the broker falls back to when PostgreSQL is unreachable,
-so a payload buffered to local disk during an outage is enveloped before it is
-written rather than after it is replayed, and the dead-letter move behind the two
-replay routes. The move is the one that reads an envelope as well as writing
-one: the dead-letter snapshot is stored exactly as it was, so on an encrypted
-queue it **is** the envelope. The broker decrypts it, then asks the same question
-the push path asks about the **destination** queue, and envelopes for that answer.
-Two consequences worth stating. Replaying into a different queue re-encrypts for
-the destination, so a move out of an encrypted queue into a plaintext one stores
-plaintext, and the other way round stores an envelope. And the decryption step
-falls back to the stored bytes when it cannot read them, which is the normal path
-for a plaintext snapshot and the degraded one for an envelope whose key is gone
-or has changed: the same fallback the message reader uses, with the same
-consequence that what moves is the envelope rather than its contents. A timer payload is enveloped too, at
-**schedule** time rather than at fire, on the timers route and on a
-transaction's timer operations alike: the fire runs inside the sweeper,
-possibly days later, so a late envelope would leave the payload in cleartext at
-rest until then. The consequences of encrypting early are declared on
+Encryption applies when the key is loaded **and** the queue's flag is true, on
+these write paths: `POST /api/v1/push`, `POST /api/v1/transaction`, a timer's
+payload, and the dead-letter move behind the two replay routes.
+
+A timer payload is enveloped at **schedule** time rather than at fire, on the
+timers route and on a transaction's `timers` rider alike: the fire is planned by
+the leader, possibly days later, so a late envelope would leave the payload in
+cleartext at rest until then. The consequences of encrypting early are declared on
 [timers](/reference/http/timers/#encryption-happens-at-schedule).
 
-Two cases resolve to "no encryption", both without an error: a queue with no
-`queen.queues` row yet (created implicitly by a push, never `/configure`d), and a
-flag lookup that could not reach the database.
+The dead-letter move is the one path that reads an envelope as well as writing
+one. The broker decrypts the stored snapshot, then asks the same question the push
+path asks about the **destination** queue, and envelopes for that answer. So
+replaying into a different queue re-encrypts for the destination: a move out of
+an encrypted queue into a plaintext one stores plaintext, and the other way round
+stores an envelope. When the snapshot cannot be decrypted (a plaintext snapshot,
+or an envelope whose key is gone or has changed), the move takes the stored bytes
+as the payload.
 
-**A stream's sink output is enveloped like any other write.** Before
-`POST /streams/v1/cycle` packs a cycle's `push_items`, the broker resolves
-`encryptionEnabled` for each sink queue and encrypts that queue's payloads, so a
-closed window lands in the log as ciphertext exactly as a pushed message does. The
-flag is resolved on the request's tenant, never on another tenant's same-named
-queue, so a sink is enveloped by its owner's own configuration. Consumers of the
-sink queue decrypt by shape on the way out, so nothing downstream has to know a
-stream produced the message.
+One case resolves to "no encryption" without an error: a push to a queue that has
+no configuration yet, because that push creates the queue with the flag off.
 
-Only the payload is enveloped. The `transactionId`, trace name, queue and
-partition names, offsets, timestamps, `producerSub`, consumer-group cursors and
-DLQ metadata are not, so anyone with database access still sees the shape of your
-traffic, the names of your queues, and the identity of your producers.
+**A stream's sink output is not enveloped.** On a 2.0 broker
+`POST /streams/v1/cycle` writes the messages it emits to a sink queue as
+plaintext, whatever that queue's `encryptionEnabled` says.
+
+Only message payloads are enveloped. The `transactionId`, trace name, queue and
+partition names, offsets, timestamps, `producerSub`, consumer-group cursors, DLQ
+metadata and key/value state are stored as they are, so anyone who can read a
+node's data directory still sees the shape of your traffic, the names of your
+queues, and the identity of your producers. Encrypting the volume itself is the
+operator's business, outside Queen.
 
 ## The stored envelope
 
@@ -124,26 +115,23 @@ traffic, the names of your queues, and the identity of your producers.
 ```
 
 Standard base64 with padding, `authTag` in camelCase. The envelope stores all 16
-IV bytes but only the **first 12** are fed to the cipher: the previous
+IV bytes but only the **first 12** are fed to the cipher: the earlier
 OpenSSL-based implementation never set the GCM IV length, so it used OpenSSL's
-default 12-byte nonce, and matching that byte for byte is what keeps messages
-written by 0.16.0 readable here, and vice versa.
+default 12-byte nonce, and the format keeps that byte for byte.
 
 ## Reading it back
 
-Decryption is triggered by *shape*, not by the stored flag: any payload that
-parses as a JSON object carrying `encrypted`, `iv` and `authTag` string fields is
-decrypted. That is why a queue whose flag has since been turned off still returns
-readable messages, and why messages migrated from an older broker decrypt without
-touching their flags. The `isEncrypted` field in a message detail response reports
-the stored per-message flag, a separate thing from whether the broker just
-decrypted it.
+Each stored message carries its own flag saying whether it was stored as an
+envelope, and a read decrypts exactly the messages whose flag is set. That is why
+a queue whose `encryptionEnabled` has since been turned off still returns readable
+messages. The `isEncrypted` field in a message detail response reports that
+stored per-message flag.
 
 Three refusals, all of which return the payload **as stored**:
 
 | Refusal | Behaviour |
 | --- | --- |
-| No key configured | The read serves the envelope JSON itself: a consumer receives `{"encrypted":"…","iv":"…","authTag":"…"}` as its message body. That is the signal that a broker in the group is missing the key |
+| No key configured | The read serves the envelope JSON itself: a consumer receives `{"encrypted":"…","iv":"…","authTag":"…"}` as its message body. That is the signal that the node serving the read is missing the key |
 | Wrong key | GCM tag verification fails and the envelope is served as-is. No error, no log line on the read path |
 | Wrong sizes | An IV or tag that is not 16 bytes is rejected without attempting the cipher |
 
@@ -169,28 +157,21 @@ encryption for the whole process and lets the broker start normally*:
 With encryption disabled, a queue whose flag is `true` keeps accepting pushes and
 stores every payload in plaintext: the push succeeds, the response says `queued`,
 and only the boot log shows it. The same design covers a runtime cipher failure:
-if the cipher call fails for an individual message, the broker warns (sampled at
-one line per 10,000 occurrences, so it cannot flood stderr at ingest rate) and
-stores that message in plaintext rather than failing the push.
-
-The streams cycle degrades the same way and for the same reason. A cipher failure
-on a sink payload logs `encryption failed; stored plaintext` under the `streams`
-target, with the queue name and a `suppressed` count on the same 1-in-10,000
-sampler, and the cycle commits: the window result, the state writes and the source
-ack are one transaction, so failing the encryption would mean replaying the whole
-window rather than storing one message in the clear. Alert on that log line, since
-the cycle response reports success either way.
+if the cipher call fails for an individual message, the broker logs
+`encryption failed; stored plaintext` with the queue name and stores that message
+in plaintext rather than failing the push.
 
 Verify at the deployment level, since the queue's flag alone does not tell you
 whether the key loaded:
 
 <Steps>
 
-1. Grep the boot log for `encryption service initialized`. Its absence, with a key
-   set, means the key is malformed.
+1. Grep the boot log of every node for `encryption service initialized`. Its
+   absence, with a key set, means the key is malformed.
 
-2. Push one message to a flagged queue and read the row directly in PostgreSQL: a
-   segment's frames should not contain your plaintext.
+2. Push one message to a flagged queue and read it back with
+   `GET /api/v1/messages/:partitionId/:transactionId`: `isEncrypted` must be
+   `true`.
 
 3. Make that check part of the deploy, not a one-off. A key arriving from a secret
    store as an empty string, or with a trailing newline, fails the 64-character
@@ -201,9 +182,9 @@ whether the key loaded:
 ## Rotation
 
 Rotation is a drain-then-restart operation: drain the affected queues first
-(consume to the head, or let retention age the old segments out), then restart
-every broker in the group with the new key at the same moment. Verify the drain
-with the queue's own depth, not with elapsed time.
+(consume to the head, or let retention age the old records out), then restart
+every node with the new key at the same moment. Verify the drain with the queue's
+own depth, not with elapsed time.
 
 The drain is what makes it safe. One key is loaded per process and decryption
 tries only that key, so every message still in the log written under the old key
@@ -213,7 +194,5 @@ becomes an undecryptable envelope from the instant the new key is in place.
 
 - [Trust boundaries](/deploy/security/): what else is and is not protected in a
   Queen deployment.
-- [PostgreSQL TLS](/reference/security/postgres-tls/): protecting the payload in
-  transit to the database, a different problem from protecting it at rest.
 - The `QUEEN_ENCRYPTION_KEY` entry, and the boot block that masks it, are in the
   [configuration reference](/reference/config/).

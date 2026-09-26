@@ -1,5 +1,5 @@
 """
-End-to-end test for queen-streams against a live Queen server + PG.
+End-to-end test for queen-streams against a live Queen server.
 
 1:1 port of e2e.test.js. Skipped automatically when QUEEN_URL is unset to
 ``"skip"`` or the broker is unreachable.

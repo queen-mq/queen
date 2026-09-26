@@ -1,27 +1,28 @@
 ---
 title: "POST /api/v1/transaction"
-description: "Pushes, acks and the key/value and timer riders in a single PostgreSQL transaction: the bundle shape, the six-step lock order, every rollback cause, the result array, and the one case that is exactly-once."
+description: "Pushes, acks and the key/value and timer riders committed as one entry in the replicated log: the bundle shape, how an ack's lease is found, every rollback cause, the result array, and the one case that is exactly-once."
 type: reference
 sidebar:
   order: 7
   label: transaction
 sourceOfTruth:
   - server/src/handlers/data.rs
-  - server/sql/procedures/005_log_ack.sql
-  - server/sql/procedures/003_log_push.sql
-  - server/sql/procedures/024_kv.sql
-  - server/sql/procedures/025_log_timers.sql
-  - crates/queen-protocol/src/transaction.rs
+  - server/src/handlers/raft.rs
+  - server/src/rsm/batcher.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/planner/txn.rs
+  - server/src/rsm/planner/ack.rs
+  - server/src/rsm/planner/push.rs
+  - server/src/rsm/planner/kv.rs
+  - server/src/rsm/planner/timers.rs
 verifiedBy:
   - clients/client-js/test-v2/transaction.js
   - clients/client-js/test-v2/semantics.js
-# sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): 024_kv.sql gained the two console read functions, which no transaction rider can call; the rider's own limits are unchanged.
 ---
 
-One call, one PostgreSQL transaction, all or nothing. This is how a pipeline stage hands work
-forward: acknowledge the message you just processed **and** write the next stage's message so
-that either both are durable or neither is. Access level **read-write**.
+One call, one entry in the replicated log, all or nothing. This is how a pipeline stage hands
+work forward: acknowledge the message you have processed **and** write the next stage's message
+so that either both are durable or neither is. Access level **read-write**.
 
 The route exists because the alternative (ack then push, or push then ack) always has a window.
 Ack first and a crash loses the work; push first and a crash duplicates it. Here both operations
@@ -45,15 +46,17 @@ happened.
     {
       "type": "ack",
       "transactionId": "order-8891-created",
-      "partitionId": "b1c2d3e4-5f60-7180-9a0b-1c2d3e4f5061",
+      "partitionId": "17",
       "consumerGroup": "merge",
+      "leaseId": "0198f2c1-9a7b-7d20-8e31-4c5d6e7f8a90",
       "status": "completed"
     },
     {
       "type": "ack",
       "transactionId": "payment-7742-settled",
-      "partitionId": "c2d3e4f5-6071-8290-ab1c-2d3e4f506172",
+      "partitionId": "42",
       "consumerGroup": "merge",
+      "leaseId": "0198f2c1-9a7b-7d20-8e31-4c5d6e7f8b01",
       "status": "completed"
     },
     {
@@ -67,27 +70,21 @@ happened.
         }
       ]
     }
-  ],
-  "requiredLeases": [
-    "0198f2c1-9a7b-7d20-8e31-4c5d6e7f8a90",
-    "0198f2c1-9a7b-7d20-8e31-4c5d6e7f8b01"
   ]
 }
 ```
 
-Inside the stored procedure this is a loop, not a special case. One set-based statement pre-locks
-every push partition in the bundle in ascending `queen.log_partitions.id` order, then a push loop
-runs over N push elements, then an ack loop runs over N ack elements in ascending
-`(partitionId, consumerGroup)` order. Nothing on that path assumes one of each.
+On the leader this is one command, not a special case. Every push group and every ack in it is
+planned against the same state, one after another, and only if all of them pass is the result
+written, as one entry.
 
-The step that makes several leases work is lease resolution. Each ack group's lease is read from
-its own `queen.log_consumers` row rather than from the request, because `requiredLeases` carries
-no lease-to-partition mapping and its single-hint fallback goes ambiguous the moment two distinct
-leases appear. Exactly one live lease exists per `(partition, group)`, so the consumer row is
-authoritative and a bundle carrying several distinct leases resolves correctly. The full
-resolution order is spelled out under "How the lease for an ack is found" below.
+With several leases in one bundle, put each ack's `leaseId` on its own operation, as above.
+`requiredLeases` carries no lease-to-partition mapping, so the broker uses it only when the whole
+request names exactly one distinct lease id; with two or more, an ack without its own `leaseId`
+is lease-less and its lease is not checked. The full rule is under "How the lease for an ack is
+found" below.
 
-Two contract tests in `clients/client-js/test-v2/transaction.js` cover exactly this shape:
+Two contract tests in `clients/client-js/test-v2/transaction.js` cover this shape:
 `transactionWithPartitions` acks two partitions of one queue in a single bundle, and
 `transactionMultipleQueues` acks from two queues and pushes the merged result to a third.
 
@@ -99,7 +96,7 @@ Two contract tests in `clients/client-js/test-v2/transaction.js` cover exactly t
     {
       "type": "ack",
       "transactionId": "order-8891-created",
-      "partitionId": "b1c2d3e4-5f60-7180-9a0b-1c2d3e4f5061",
+      "partitionId": "17",
       "consumerGroup": "billing",
       "status": "completed"
     },
@@ -121,20 +118,22 @@ Two contract tests in `clients/client-js/test-v2/transaction.js` cover exactly t
 
 | Field | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `operations` | array | yes | the operations, in order; a missing or non-array value is a `400` |
+| `operations` | array | yes, unless a rider is present | the operations, in order |
 | `requiredLeases` | array of strings | no | lease ids the acks belong to; this is where the SDK builders put the popped `leaseId` |
 | `kv` | array | no | key/value operations riding the bundle; see "kv and timers riders" |
 | `timers` | array | no | timer schedules and cancels riding the bundle; see "kv and timers riders" |
 
-Only two operation types exist: `push` and `ack`. **Any other `type` fails the whole call with a
-`400`** and nothing is written, including a type the broker does not recognise. The check runs
-before any database work.
+Only two operation types exist: `push` and `ack`. **Any other `type`, or a missing one, fails
+the whole call** with `success: false` and `reason: "bad_request"`, and nothing is written. The
+check runs before the bundle reaches the leader. A body that is not JSON, or that has neither
+operations nor a rider, fails the same way. All of these answer HTTP `200`: see the status codes
+below.
 
-`kv` and `timers` are the two riders, and they are separate arrays rather than new `operations`
-types on purpose: they commit in their own step of the lock order, before anything else in the
-bundle. A bundle that uses neither carries neither key, so its body is byte-identical to the one
-it sent before the riders existed. `operations` may be empty when a rider is present: a bundle
-that only writes a key is a legitimate bundle.
+`kv` and `timers` are the two riders, and they are top-level arrays rather than `operations`
+types: an `operations` element whose `type` is `kv`, `timer` or `timers` is refused with a
+message naming the top-level arrays. A bundle that uses neither carries neither key. `operations`
+may be empty or absent when a rider is present: a bundle that only writes a key is a legitimate
+bundle.
 
 ### push operations
 
@@ -147,103 +146,105 @@ operation object *is* the item:
 
 | Field | Type | Default |
 | --- | --- | --- |
-| `queue` | string | empty string. Supply it |
-| `partition` | string | `"Default"` |
-| `payload` | any JSON value | `{}` when neither `payload` nor `data` is present |
-| `data` | any JSON value | an accepted alias for `payload` |
+| `queue` | string | required |
+| `partition` | string | `"Default"`, also for an empty string |
+| `payload` | any JSON value | required |
 | `transactionId` | string | the message id the broker mints |
-| `traceId` | string (UUID) | absent; **this is the only write path that stores a trace id** |
+| `traceId` | string (UUID) | absent; a value that is not a UUID is ignored |
 
-Two differences from [`POST /api/v1/push`](/reference/http/push) are worth internalising: here
-`data` is accepted as an alias for `payload` and a missing payload defaults to an empty object
-rather than failing the parse, and here `traceId` is honoured instead of ignored.
+Next to [`POST /api/v1/push`](/reference/http/push): here `traceId` is stored and comes back on
+the popped message, where the push route ignores it. As on the push route, `payload` is required
+and `data` is not read on raw HTTP; a push operation missing `queue` or `payload` fails the whole
+call with `bad_request`. The JavaScript and Python builders accept `data` and send it as
+`payload`.
 
 ### ack operations
 
 | Field | Type | Default |
 | --- | --- | --- |
 | `transactionId` | string | empty |
-| `partitionId` | string (UUID) | empty |
+| `partitionId` | string | required: the decimal partition id the pop returned; a missing or non-numeric value fails the whole call with `bad_request` |
 | `status` | string | `completed` |
 | `consumerGroup` | string | `__QUEUE_MODE__` |
 | `leaseId` | string | absent; falls back to the resolution order below |
 | `error` | string | absent; the reason recorded if this ack dead-letters |
 
-`status` is normalised exactly as on the [ack route](/reference/http/ack): `completed`, `retry`
-and `dlq` survive to SQL, anything unrecognised becomes `failed`. `retry` and `dlq` behave
-identically inside a transaction: they are not collapsed to a boolean.
+`status` is read exactly as on the [ack route](/reference/http/ack#status-values):
+case-insensitively, `failed`, `retry` and `dlq` keep their meaning, and any other value
+completes. `retry` and `dlq` behave inside a transaction as they do on the ack route.
 
 ### How the lease for an ack is found
 
-Acks are validated against the live lease, and the SDK builders put the lease id in
-`requiredLeases` rather than on each operation. The broker resolves each ack group's lease in
-this order:
+An ack is validated against the live lease when a lease applies to it. The broker picks each
+ack's lease in this order:
 
 1. a `leaseId` on the operation itself, if you sent one;
-2. the current lease holder for that `(partition, consumerGroup)`, read from the consumer row,
-   which is authoritative because exactly one live lease exists per pair;
-3. the single unambiguous entry in `requiredLeases`, if there is exactly one distinct value.
+2. otherwise the request's single lease id, when `requiredLeases` and the operations' own
+   `leaseId`s together name exactly one distinct value.
 
-If no lease information appears anywhere in the request, every ack is treated as a lease-less
-ack: the lease check is skipped and the cursor still advances, matching the direct ack route. If
-you *did* supply a lease and it is expired or wrong, the ack fails and the transaction rolls
-back.
+With neither, the ack is lease-less: the lease check is skipped and the cursor still advances,
+matching the direct ack route. If a lease applies and it is expired or wrong, the ack is refused
+and the transaction rolls back.
 
 ### kv and timers riders
 
 The riders are what let an application's own state commit with the cursor advance. A key/value
-write, the pushed output and the ack are one commit, so there is no state in which the work is
-marked done and the message will be redelivered, or acknowledged and unmarked.
+write, the pushed output and the ack are one entry in the log, so there is no state in which the
+work is marked done and the message will be redelivered, or acknowledged and unmarked.
 
 ```json
 {
   "operations": [
-    { "type": "ack", "transactionId": "order-8891-created", "partitionId": "b1c2…", "consumerGroup": "billing", "status": "completed" }
+    { "type": "ack", "transactionId": "order-8891-created", "partitionId": "17", "consumerGroup": "billing", "status": "completed" }
   ],
   "requiredLeases": ["0198f2c1-9a7b-7d20-8e31-4c5d6e7f8a90"],
   "kv": [
     { "op": "putIfAbsent", "ns": "charges", "key": "charge:8891", "value": { "chargeId": "ch_1" }, "ttlSeconds": 86400, "required": true }
   ],
   "timers": [
-    { "op": "schedule", "queue": "reminders", "key": "order-8891", "delaySeconds": 86400, "payload": { "orderId": 8891 } }
+    { "op": "schedule", "queue": "reminders", "timerKey": "order-8891", "delayMs": 86400000, "txn": "reminder-order-8891", "payload": "eyJvcmRlcklkIjo4ODkxfQ==" }
   ]
 }
 ```
+
+A `kv` op has the shape of the [kv route](/reference/http/kv)'s ops. A `timers` op has the shape
+of [`POST /api/v1/timers`](/reference/http/timers): `timerKey`, `delayMs` in milliseconds, `txn`,
+and `payload` as base64.
 
 **`required` is an opt-in escalation, and it is the whole difference between a report and a
 gate.** Without it, a `putIfAbsent` whose key already exists comes back `applied: false` and the
 bundle still commits, ack included. With it, the lost precondition **rolls the whole bundle
 back**, so a concurrent worker that got there first is the only one whose ack lands.
 
-Two limits apply to the riders on this route and not to `POST /api/v1/kv`, because a bundle holds
-the outermost lock of the call while it runs: the per-call ceilings drop to **64 operations and
-256 keys**, and `getPrefix` is refused outright. An unbounded read under the outermost lock space
-is the one shape that cannot be allowed here; run it outside the bundle.
+Two limits apply to the riders on this route and not to `POST /api/v1/kv`: the per-call ceilings
+drop to **64 operations and 256 keys**, and `getPrefix` is refused outright
+(`kv_get_prefix_not_allowed_in_transaction`). Run a prefix read outside the bundle.
 
 ## Atomicity
 
-The whole bundle runs inside one call to one stored procedure, which is one transaction. Every
-failure path raises, so any single failure takes every other operation down with it.
+The whole bundle is one command. The leader plans it all-or-nothing and writes every effect of
+it into **one entry in the replicated log**; every node applies that entry whole. Any refusal
+while planning discards the whole bundle, so nothing of it is written.
 
-A transaction rolls back when:
+A bundle fails whole, and nothing is written, when:
 
-| Cause | Detail |
-| --- | --- |
-| a **duplicate push** | any pushed `transactionId` that already exists in its partition inside the deduplication window aborts the bundle with a `QDUP` error. Unlike `/api/v1/push`, where a duplicate is a per-item `duplicate` status, here it is a rollback |
-| an **ack the broker cannot resolve** | every acked `transactionId` must resolve in its partition's index. One that resolves nowhere (never pushed, or its index row has aged past the txns window) makes the stored procedure raise `QTXN ack references unknown transactionId; transaction rolled back`, and the rollback takes the pushes and riders with it, so nothing is written. An ack at or below the cursor is not this case: it resolves as already committed |
-| a **rejected ack** | an invalid or expired lease, or a position beyond the leased batch |
-| a **foreign partition** | multi-tenant deployments: an acked `partitionId` that belongs to another tenant |
-| a **lost KV precondition** | a `kv` op carrying `required: true` whose precondition did not hold. This is the expected outcome of a legitimate redelivery rather than a fault, and it has its own response shape below |
-| a **timer beyond the horizon** | a `timers` schedule further out than this cell allows, reported as `timer_horizon_exceeded` |
+| Cause | `reason` | Detail |
+| --- | --- | --- |
+| a **duplicate push** | `duplicate` | any pushed `transactionId` already stored in its partition inside the deduplication window: `QDUP a pushed message to <queue>/<partition> is a duplicate (original offset <n>); the transaction rolled back`. Unlike `/api/v1/push`, where a duplicate is a per-item `duplicate` status, here it is a rollback |
+| a **rejected ack** | `rejected_ack` | an ack the cursor does not honour: a lease that applies and is not the live one, a group that never popped that partition, a `transactionId` that resolves nowhere or above the leased batch, or a `failed`, `retry` or `dlq` at or below the cursor: `QTXN <n> acked message(s) on partition <id> are not leased by this worker or were already acked; the transaction rolled back`. A `completed` ack at or below the cursor is not this case: it is a no-op and the bundle commits |
+| an **unknown or foreign partition** | `rejected_ack` | an acked `partitionId` that does not exist, or, in multi-tenant deployments, one that belongs to another tenant |
+| a **lost KV precondition** | `kv_precondition` | a `kv` op carrying `required: true` whose precondition did not hold. This is the expected outcome of a legitimate redelivery rather than a fault, and it has its own response shape below |
+| an **invalid request** | `bad_request`, or the KV rider's own reason such as `kv_too_many_ops` | caught before the bundle reaches the leader: see Request above |
+| a **refused plan** | the leader's own code, such as `too_large` | for example a push group whose planned size exceeds `QUEEN_RAFT_ENTRY_MAX_BYTES` (default 96 MiB) |
 
-Intra-bundle duplicate pushes are the one exception, and they are resolved before SQL: two push
-items with the same `transactionId` in the same `(queue, partition)` inside one transaction are
-first-wins. The second is echoed as a result with `duplicate: true`, produces no frame, and does
-**not** roll the transaction back.
+Intra-bundle duplicate pushes are the one exception, and they are resolved before the bundle
+reaches the leader: two push items with the same `transactionId` in the same
+`(queue, partition)` inside one transaction are first-wins. The second is echoed as a result with
+`duplicate: true`, is not written, and does **not** roll the transaction back.
 
-Deadlock safety comes from a fixed total lock order shared with the ordinary push path, so
-concurrent transactions touching overlapping sets can never form a cycle. The six steps of that
-order are under "What the atomicity is made of" below.
+There is no lock order to respect and no deadlock to avoid: the leader plans commands one at a
+time, so two bundles that touch the same partitions are planned one after the other, each against
+the state the previous one left.
 
 ## Response
 
@@ -264,15 +265,17 @@ order are under "What the atomicity is made of" below.
 | --- | --- | --- |
 | `transactionId` | string | an id the broker mints for **this call**; it is not any message's deduplication key |
 | `success` | boolean | whether the transaction committed |
-| `results` | array | one element per flattened operation, indexed in request order; empty on failure |
+| `results` | array | one element per pushed item and per ack, in request order, then one per `kv` op and one per `timers` op; empty on failure |
 
 Push results carry `index`, `type: "push"`, `success`, `transactionId` (the deduplication key
 used), `messageId` and `queueName`, plus `duplicate: true` for an intra-bundle duplicate. Ack
-results carry `index`, `type: "ack"`, `success`, `transactionId`, `error` and `dlq`.
+results carry `index`, `type: "ack"`, `success`, `transactionId`, `error` and `dlq` (`true` for
+an ack sent with status `dlq`). A rider's result is that op's result on its own route, with
+`type: "kv"` or `type: "timer"`, its `index` in `results`, and its `opIndex` within its array.
 
-Because the transaction is all-or-nothing, every element of a successful `results` array says
-`success: true`. Per-operation failure does not exist here. Read the top-level `success` first,
-and treat `results` as an echo that tells you which message ids were assigned.
+Because the transaction is all-or-nothing, every push and ack element of a successful `results`
+array says `success: true`. Per-operation failure does not exist here. Read the top-level
+`success` first, and treat `results` as an echo that tells you which message ids were assigned.
 
 Failure keeps the same shape, with the reason at the top level:
 
@@ -281,15 +284,15 @@ Failure keeps the same shape, with the reason at the top level:
   "transactionId": "0198f2c1-b0c1-7e40-8a52-9d0e1f2a3b4c",
   "success": false,
   "reason": "duplicate",
-  "error": "QDUP duplicate messages in queue \"invoices.requested\" partition \"customer-42\"; transaction rolled back",
+  "error": "QDUP a pushed message to invoices.requested/customer-42 is a duplicate (original offset 17); the transaction rolled back",
   "results": []
 }
 ```
 
-`reason` is a code from a closed taxonomy and is the only thing to branch on: `bad_request`,
-`duplicate`, `ack_rejected`, `kv_precondition`, `timer_horizon_exceeded`, `payload_too_large`,
-`misaligned`, `db_error`. Matching on the prose in `error` is what the code exists to end. The
-full table is in [Errors and status codes](/reference/errors/).
+`reason` is a stable code and the only thing to branch on: `bad_request`, `duplicate`,
+`rejected_ack`, `kv_precondition`, the KV rider's own validation reasons (`kv_…`), and the
+leader's refusal codes such as `too_large`. Matching on the prose in `error` is what the code
+exists to end. [Errors and status codes](/reference/errors/) covers the codes across routes.
 
 **A lost `required` precondition carries more**, because the caller usually wants to know who won
 without a second round trip:
@@ -299,111 +302,100 @@ without a second round trip:
   "transactionId": "0198f2c1-b0c1-7e40-8a52-9d0e1f2a3b4c",
   "success": false,
   "reason": "kv_precondition",
-  "failedIndex": 0,
+  "error": "QKV a required KV precondition failed; the transaction rolled back",
+  "failedIndex": 1,
   "kvReason": "exists",
   "version": 90101,
   "value": { "chargeId": "ch_1" },
+  "ok": false,
   "results": []
 }
 ```
 
-`failedIndex` is in the flat index space of `results`. `value` and `version` are the winner's, so
-a consumer that lost the gate can return the original result rather than recomputing it. Note
-that nothing in the bundle committed, **including the ack**: a consumer on this path still has to
-take the message off its own cursor with a separate ack, or it will be redelivered forever.
+`failedIndex` is in the flat index space of `results`: in the riders example above, one operation
+comes first, so the first `kv` op is index 1. `value` and `version` are the winner's, so a
+consumer that lost the gate can return the original result rather than recomputing it. Note that
+nothing in the bundle committed, **including the ack**: a consumer on this path still has to take
+the message off its own cursor with a separate ack, or it will be redelivered forever.
 
 ### Status codes
 
+Errors other than a rollback have the body `{"error":"…","code":"…"}`.
+
 | Code | When |
 | --- | --- |
-| `200` | the call was processed, **including a rollback**, which is `success: false` with an `error` |
-| `400` | the body is not JSON, `operations` is missing or not an array, or an operation has an unrecognised `type` |
+| `200` | the call was processed, **including a rollback** and a request refused before it reached the leader: `success: false` with `reason` and `error` |
+| `400` | a pushed `transactionId` longer than 65,535 bytes (code `bad_request`) |
 | `403` | authentication is on and the token has no `read-write` role |
-| `413` | the body exceeds 64 MiB |
-| `500` | no database connection was available |
+| `413` | the body exceeds `QUEEN_MAX_BODY_BYTES` (default 64 MiB), or code `name_too_long`: a queue or partition name too long for a store key |
+| `429` | code `overloaded`: the push admission budget stayed full for the whole hold, as on [push](/reference/http/push#status-codes) |
+| `503` | code `no_leader`, `retry` or `timeout`, with `Retry-After: 1` |
+| `507` | code `storage_full`: the bundle writes (a push, a KV put or increment, or a timer schedule) and the node is above its disk high-water mark. A bundle of acks alone is not refused |
+| `500` | code `internal`: a broker fault |
 
 A rolled-back transaction is a `200`. Check `success`, not the status code.
 
 ## What the atomicity is made of
 
-**There is no coordinator.** The bundle travels as one cached prepared statement in one round
-trip, a single `SELECT` over `queen.log_transaction_wire_v1`, executed on one pooled connection.
-The atomicity is PostgreSQL's own, and the whole bundle is one server-side statement inside it.
+**There is no coordinator.** The bundle travels as one request, becomes one command on the
+leader, and is written as one entry of the replicated log. The atomicity is the log's: an entry
+is committed whole, and every node applies it whole, in log order.
 
 Read it as four absences:
 
 - **No producer epoch and no fencing token.** Nothing has to be registered or leased before you
   are allowed to write.
-- **No two-phase commit and no prepared transaction.** Nothing is ever left in a prepared state,
-  so a crash cannot strand a bundle that an operator then has to find and `ROLLBACK PREPARED` by
-  hand.
-- **No coordinator log** to compact, replicate, or lose track of.
+- **No two-phase commit and no prepared transaction.** Nothing is ever left in a prepared state
+  for an operator to find and resolve by hand.
+- **No separate transaction log.** The bundle is an ordinary entry of the one replicated log.
 - **No half-applied state.** The call either committed or it did not, so there is nothing for an
   operator to reconcile. Recovery is a client-side retry, and the next section is about what
   makes that retry safe.
 
-What holds concurrent bundles apart is a lock order rather than a protocol, and it is one total
-order in six steps: the `kv` ops first, then the `timers` ops, then provisioning of any missing
-queue or partition rows, then one set-based pre-lock over every push partition in ascending
-`queen.log_partitions.id` order, then the pushes, then the acks in ascending
-`(partition_id, consumer_group)` order. Consumer-row locks are only ever taken after every
-partition-row lock, so the two lock spaces cannot form a cross-space cycle. The same partition
-pre-lock is used by the ordinary push path and by retention, which is why a transaction cannot
-deadlock against either.
-
-The riders sit at the **top** of that order rather than the bottom, and the reason is that for
-them failure is the common path. An idempotency marker loses on every legitimate redelivery, and
-losing at the first step costs one insert and a raise before a single partition lock is taken.
-At the bottom it would cost the entire bundle written and then thrown away, which would make the
-most frequent outcome of the feature its most expensive one. Timers have no choice in any case:
-the sweeper's fire takes timers before partitions, so timers at the bottom would deadlock against
-it immediately. The rule is that both riders sit at the top together, never one at each end: a
-split introduces arcs in both directions inside one protocol, and each half still looks correct
-on its own in review.
-
-The boundary is worth stating plainly: the guarantee covers everything inside that one
-PostgreSQL, meaning the pushed messages, the committed cursors, any dead-letter rows and, since
-the riders exist, your own key/value state and timers. It covers nothing outside it. If the same
+The boundary is worth stating plainly: the guarantee covers everything the broker stores,
+meaning the pushed messages, the committed cursors, any dead-letter records and, through the
+riders, your own key/value state and timers. It covers nothing outside the broker. If the same
 handler also charged a card or called a third-party API, that side effect is not in the
 transaction and still needs its own idempotency key.
 
 ## It is not exactly-once end to end
 
 The commit is atomic; the round trip is not. If the response is lost (a dropped connection, a
-timeout on your side), you do not know whether the transaction committed. Retrying duplicates the
-pushes **unless** their `transactionId`s are deterministic and the retry arrives inside the
-queue's deduplication window.
+timeout on your side, or a `503` with code `timeout`), you do not know whether the transaction
+committed. Retrying duplicates the pushes **unless** their `transactionId`s are deterministic and
+the retry arrives inside the queue's deduplication window.
 
 The pattern that makes this safe is to derive each pushed `transactionId` from the input you are
 processing rather than generating a fresh UUID: `invoice-for-order-8891`, not `crypto.randomUUID()`.
 Then a retried transaction either commits once or aborts on the duplicate, and both end states
 are the same one. With random ids, a retry after a lost response writes the message twice.
 
-That does mean a retry of an already-committed transaction comes back `success: false` with a
-`QDUP` error. It is not a new failure to act on: the duplicate proves the message is already
-stored, and the acks of the original attempt committed with it. Distinguish `QDUP` from the other
-rollback causes before you retry again.
-
-The ack side of the retry is safe on its own: a second attempt at the same ack resolves at or
-below the cursor and is reported as already committed rather than double-committing.
+That does mean a retry of an already-committed transaction comes back `success: false` with
+`reason: "duplicate"`. It is not a new failure to act on: the duplicate proves the message is
+already stored, and the acks of the original attempt committed with it. The leader judges the
+pushes before the acks, so a retried bundle that pushes reports `duplicate` first. A retried
+bundle with no pushes can come back `rejected_ack` for the same reason, when its ack carries a
+lease the first attempt released; a lease-less `completed` ack is a no-op on the retry instead.
+Tell these apart from the other rollback causes before you retry again.
 
 ### The one case where it is exactly-once
 
 The heading above stays true for **external** effects, and it is worth naming the case it does
 not cover, because that case is most internal work.
 
-When the effect is itself a row in this PostgreSQL, written through the `kv` rider, there is no
-second system and no second commit. The effect, the marker, the pushed output and the cursor
-advance are one `COMMIT`. Not "atomic enough": one. There is no interleaving left to describe,
-and no reconciliation to write, because there is no state in which some of it happened.
+When the effect is itself a key written through the `kv` rider, there is no second system and no
+second commit. The effect, the marker, the pushed output and the cursor advance are one log
+entry. Not "atomic enough": one. There is no interleaving left to describe, and no reconciliation
+to write, because there is no state in which some of it happened.
 
 What keeps the external case out of reach is not a limitation of this route. There is no atomic
-commit protocol between a database and a non-transactional remote service, so a crash between the
+commit protocol between the broker and a non-transactional remote service, so a crash between the
 charge and the commit is unclosable by any broker. What closes it is the remote service's own
 idempotency key, and the natural value for that key is the one you already minted for the marker.
 
 One property does carry into the external case, and it is the reason to put the marker here
 rather than beside the broker: the ack travels with the bundle, so if the lease expired while the
-work was running, the ack is refused and the marker is refused with it. A compare-and-swap in a
-second store cannot do that. It succeeds from a worker that no longer owns the message, because
-nothing in that store knows the message was taken away.
+work was running, the ack is refused and the marker is refused with it, as long as the ack carries
+its lease (on the operation, or as the request's one lease). A compare-and-swap in a second store
+cannot do that. It succeeds from a worker that no longer owns the message, because nothing in
+that store knows the message was taken away.

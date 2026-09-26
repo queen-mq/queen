@@ -60,22 +60,23 @@ let inflightEpoch = -1
 // fields next to `queues`, put there because those two tables have no queue to
 // hang off and the proxy's reconciler already polls this route.
 //
-// They are a SWEEPER SNAPSHOT (a primary-key read of a cached measurement, up
-// to a few minutes old), never a live count, which is why every surface that
-// renders one marks it `≈`.
+// They are computed when the listing is read: `kvRows` / `kvBytes` count every
+// KV row the tenant stores, expired ones awaiting sweep included, and their key
+// and value bytes (server/src/rsm/facade/real/phase2.rs api_list_queues). That
+// route sends `timerRows` / `timerBytes` as 0: it does not measure the timer
+// footprint.
 //
 // NULL IS "THE BROKER DID NOT SAY", AND IT IS NOT THE ONLY UNMEASURED STATE.
-// The four fields are OMITTED only when the read itself FAILED
-// (handlers/queues.rs logs and skips them); a tenant whose row the sweeper has
-// not written yet gets an explicit `0`, because the snapshot lookup returning
-// no row is `unwrap_or((0,0,0,0))`. So:
+// A field is absent when the broker did not send it; a `0` can be stale (this
+// store is TTL-cached and shared by every page) or, for the timer fields, no
+// measurement at all. So:
 //
 //   · nothing here may coerce a MISSING field into 0 — which is exactly what
 //     `payload.kvRows || 0` does, and why toNum is used instead;
 //   · a ZERO is not by itself a measurement. The page that renders one decides
 //     with a witness it already has — the KV namespace listing
 //     (useKvView.js sweeperUsageIsMeasured) or the timer page on screen
-//     (useTimers.js timerUsageIsMeasured) — because a confident `≈ 0` beside a
+//     (useTimers.js timerUsageIsMeasured) — because a confident `0` beside a
 //     full page of rows is worse than saying nothing.
 // ---------------------------------------------------------------------------
 const kvRows = ref(null)

@@ -204,10 +204,13 @@ with `traceId: null`. Push inside a transaction when a trace id has to survive. 
 
 Awaitable: `await` executes the push. `on_success(cb)`, `on_error(cb)` and `on_duplicate(cb)`
 register callbacks and return the builder. Awaiting a non-buffered push resolves to the broker's
-per-item array; a buffered push resolves to a buffered marker once the buffer has accepted the
-messages, without sending anything. While the buffer sits at `max_size` the await parks until
-the flusher drains below the bound, so under overload the producer degrades to the flush rate
-instead of growing the heap.
+per-item array. A 2.0 broker answers each item `queued`, `duplicate` or `error`. Per item,
+`on_error` fires (and the await raises when it is absent) only for `failed`, a status the 2.0
+broker never returns: an `error` item reaches no callback and raises nothing, so check each
+item's `status` in the returned array. A buffered push resolves to a buffered marker once the
+buffer has accepted the messages, without sending anything. While the buffer sits at `max_size`
+the await parks until the flusher drains below the bound, so under overload the producer
+degrades to the flush rate instead of growing the heap.
 
 ### Consuming
 
@@ -327,7 +330,8 @@ Read-only. Replay lives on the admin façade: `admin.retry_message(partition_id,
 
 ## `TransactionBuilder`
 
-`client.transaction()`. Pushes and acks in one PostgreSQL transaction, all-or-nothing.
+`client.transaction()`. Pushes and acks in one transaction: one entry in the replicated log,
+all-or-nothing.
 
 | Method | Notes |
 | --- | --- |
@@ -382,7 +386,6 @@ broker's JSON body verbatim. Methods taking `**params` build a query string, dro
 | `get_analytics(**params)` | `GET /api/v1/status/analytics` |
 | `get_system_metrics(**params)` | `GET /api/v1/analytics/system-metrics` |
 | `get_worker_metrics(**params)` | `GET /api/v1/analytics/worker-metrics` |
-| `get_postgres_stats()` | `GET /api/v1/analytics/postgres-stats` |
 
 ### Consumer groups
 
@@ -396,6 +399,8 @@ broker's JSON body verbatim. Methods taking `**params` build a query string, dro
 | `refresh_consumer_stats()` | `POST /api/v1/stats/refresh` |
 
 `seek_consumer_group` posts `options` verbatim: `{"toEnd": True}` or `{"timestamp": "<RFC3339>"}`.
+A 2.0 broker answers `refresh_consumer_stats()` with a 200 and `"refreshed": false`: its counters
+are updated as log entries apply, so there is nothing to refresh.
 
 ### System
 
@@ -403,10 +408,6 @@ broker's JSON body verbatim. Methods taking `**params` build a query string, dro
 | --- | --- |
 | `health()` | `GET /health` |
 | `metrics()` | `GET /metrics` |
-| `get_maintenance_mode()` | `GET /api/v1/system/maintenance` |
-| `set_maintenance_mode(enabled)` | `POST /api/v1/system/maintenance` |
-| `get_pop_maintenance_mode()` | `GET /api/v1/system/maintenance/pop` |
-| `set_pop_maintenance_mode(enabled)` | `POST /api/v1/system/maintenance/pop` |
 
 ## Streaming SDK
 

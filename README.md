@@ -7,19 +7,20 @@
 
 # Queen MQ
 
-**High-performance transactional messaging on PostgreSQL, with an ordered stream per entity.**
+**High-performance transactional messaging, with an ordered stream per entity.**
 
 **You can offload most of your complex application logic to Queen.**
 
-Queen is a message broker written in **Rust** that keeps every byte of its state in **PostgreSQL**. Its
-defining abstraction is one logical ordered partition per application entity (a customer, an
-account, a conversation, a device, a workflow, a session, a job), created by the first push that
-names it, never provisioned in advance.
+Queen is a message broker written in **Rust**: one binary per node, keeping its state in a
+**replicated log** on the node's own disk, with no external database. Its defining abstraction is
+one logical ordered partition per application entity (a customer, an account, a conversation, a
+device, a workflow, a session, a job), created by the first push that names it, never provisioned
+in advance.
 
-[Documentation](https://queenmq.com) · [Benchmarks](https://queenmq.com/benchmarks) · [Quickstart](https://queenmq.com/start/quickstart) · [Try it](https://queenmq.cloud) · Apache-2.0 · v1.6.0
+[Documentation](https://queenmq.com) · [Benchmarks](https://queenmq.com/benchmarks) · [Quickstart](https://queenmq.com/start/quickstart) · [Try it](https://queenmq.cloud) · Apache-2.0 · v2.0.0-alpha
 
 
-Queen speaks HTTP, but is also protocol-compatible with Kafka and SQS clients.
+Queen speaks HTTP, but is also protocol-compatible with Kafka clients.
 
 [Free on Queen Cloud](https://queenmq.cloud). The same broker, hosted.
 </div>
@@ -49,7 +50,7 @@ leases with explicit ack, nack, retry and dlq · replay and seek by offset or ti
 budgets and a real dead-letter queue, replayable · long-poll consumption · retention by age and by
 completion · durable by default.
 
-**Exactly once, in one Postgres commit.** Deduplication at push, keyed on your transaction id
+**Exactly once, in one log entry.** Deduplication at push, keyed on your transaction id
 ([dedup](https://queenmq.com/internals/dedup)) · `ack + kv + push + timers` commit together or not
 at all.
 
@@ -60,40 +61,23 @@ cancellable until they fire · delayed delivery · window-buffer debounce · con
 delivery per partition.
 
 **Stream processing in your process.** An [operator chain](https://queenmq.com/use/streams) with
-state in the same PostgreSQL: no job manager, no changelog topic, no state store to deploy. Four
+state in the same broker: no job manager, no changelog topic, no state store to deploy. Four
 window types (tumbling, sliding, session, cron), map/filter/aggregate, event time with watermarks,
 per-message gating. One cycle commits state, sink pushes and the ack together.
 
-**Ephemeral queues, no database in the path.** An
+**Ephemeral queues, no disk in the path.** An
 [in-memory class](https://queenmq.com/use/ephemeral) for request/reply, signalling, presence
 fan-out and cache invalidation: the shapes that should not pay for replay and retention.
 
-**Kafka and SQS clients connect directly.** Since 1.4.0 Queen speaks both wire protocols, so an
-existing client moves over by changing its connection URL. The supported
-surface, and every place behaviour differs from the real thing, are in
-[reference/kafka](https://queenmq.com/reference/kafka) and
-[reference/sqs](https://queenmq.com/reference/sqs). 
+**Kafka clients connect directly.** The Kafka facade runs inside the broker process when switched
+on, so an existing client moves over by changing its connection URL. The supported surface, and
+every place behaviour differs from the real thing, are in
+[reference/kafka](https://queenmq.com/reference/kafka).
 
-**The log lands in your data lake.** Since 1.5.0 a sink connector ships in the same image: it reads
-a queue through the broker's own API and writes JSONL or Parquet into any S3-compatible bucket,
-under a Hive layout DuckDB, Spark, Trino, ClickHouse and Snowflake read with nothing in front of
-them. One object per closed time window, committed exactly once, so a crash or a retry rewrites the
-same object rather than adding a second copy of a row. Windows are per queue, not per partition,
-which is what makes a queue with a million partitions one object an hour instead of a million
-objects: [reference/s3](https://queenmq.com/reference/s3) and
-[deploy/s3](https://queenmq.com/deploy/s3).
-
-**One binary, no sidecars.** Stateless, and curl is a first-class client · six SDKs (JavaScript,
+**One binary, no sidecars, no database.** curl is a first-class client · six SDKs (JavaScript,
 Python, Go, Rust, C++, PHP/Laravel) plus `queenctl` · a dashboard served by the same binary on the
-same port · Prometheus metrics · JWT/JWKS auth · payload encryption · disk spool for database
-outages · multi-tenant · HA replicas.
-
-**~1M msg/s each way, with `synchronous_commit` left on.** 86.4B messages pushed, popped and
-acknowledged in a 24-hour soak, 0 restarts, broker memory flat at ~4.1 GB · 1M ordered
-partitions in one queue, none preallocated, created at 1,000/s while the run served 200,000
-msg/s · 88.5M messages across four stages with 0 duplicates, 0 gaps, 0 order violations. Every
-figure's conditions, and what they do not establish, are in
-[Published benchmarks](#published-benchmarks).
+same port · Prometheus metrics · JWT/JWKS auth · payload encryption · the multi-tenant proxy in the
+same process · Raft replication over three or five nodes.
 
 ---
 
@@ -108,8 +92,8 @@ customer C  ──►  C1 ──► C2 ──► C3            C is not held up 
 ```
 
 Each lane is created by the push that first names it. Nothing is preallocated, nothing rebalances
-when a consumer restarts. A partition is a row: a million of them measured 315 MB, and the serve
-path does not care how many exist.
+when a consumer restarts. A partition is an entry in the node's ordered store and a range of
+offsets in its queue's log: not a file, a process or a replica set of its own.
 
 **Two limits.** A hot partition stays sequential by design, so twenty workers on a one-partition
 queue is one worker's throughput and nineteen idle pollers: add lanes, not workers. And do not pick
@@ -119,7 +103,8 @@ a key for its cardinality. A partition per message is not a supported shape.
 ## Transactional processing
 
 One [`POST /api/v1/transaction`](https://queenmq.com/reference/http/transaction) bundles
-acknowledgements, pushes, key/value writes and timer operations into **one PostgreSQL transaction**:
+acknowledgements, pushes, key/value writes and timer operations into **one entry of the replicated
+log**, applied whole or not at all:
 
 ```text
 consume input
@@ -138,11 +123,14 @@ fan-in stage possible.
 **Where the guarantee stops.** Atomicity covers broker state, not the network: if the response is
 lost, a blind retry duplicates the pushes unless your transaction ids are deterministic and the
 retry lands inside the deduplication window. No broker makes an external HTTP call exactly-once. The
-case that *is* exactly-once end to end is an effect written as a row in this PostgreSQL through the
-`kv` rider, where marker, effect, output and cursor advance become a single `COMMIT`.
+case that *is* exactly-once end to end is an effect written as state in this broker through the
+`kv` rider, where marker, effect, output and cursor advance become a single commit.
 [Every rollback cause](https://queenmq.com/reference/http/transaction).
 
 ## Published benchmarks
+
+These runs measured **Queen 1.x**, whose storage was PostgreSQL. 2.0 replaced that storage with the
+replicated log, so the figures describe the 1.x engine, not 2.0; they stay published as records.
 
 | Run | Result | The conditions that make it true |
 | --- | --- | --- |
@@ -158,48 +146,45 @@ PostgreSQL 18; the pipeline and multi-tenant runs predate the 1.0.0 tag.
 sizing, disk or partition distribution: those follow from your workload, payloads and hardware. Read
 [method and rig](https://queenmq.com/benchmarks/method) before quoting a number.
 
-## Why PostgreSQL
+## One replicated log
 
-Messaging state and application state share a transaction: the whole reason for the design, and
-something no other storage choice offers. Beyond that, durability, ACID, replication, PITR and
-backup you already know how to operate · SQL introspection, because your messages are rows · no
-extensions and no migration step, since the broker applies its own schema at boot. PostgreSQL 15+.
+Messaging state and application state share one log: queues, offsets, leases, deduplication, the
+key/value store and timers are all state that the same entries produce, which is why a transaction
+can span them. One leader orders every write, a write is answered once a majority of the voters
+have it on disk, and every node applies the log to its own full copy. Three voters keep serving
+through one failure, five through two ([high availability](https://queenmq.com/deploy/ha)).
 
-The trade, plainly: the database is the throughput ceiling and the single failure domain.
+The trade, plainly: every write goes through one leader and every voter holds a full copy, so one
+node's disk bounds retention and more nodes buy availability, not write throughput.
 
-## Queen Proxy and multi-tenancy
+## The proxy and multi-tenancy
 
-`queen_proxy` is a second Rust binary and the tenant-facing boundary, holding what a shared broker
-has no business holding: per-cluster API keys and human logins, plan limits on rate, size and count,
-and usage metering ([multi-tenant](https://queenmq.com/deploy/multi-tenant)).
+The proxy is the tenant-facing boundary and runs inside the broker process
+(`QUEEN_PROXY_EMBEDDED=true`), holding what a shared broker has no business holding: per-cluster
+API keys and human logins, plan limits on rate, size and count, and usage metering
+([multi-tenant](https://queenmq.com/deploy/multi-tenant)). Its own state lives in the same
+replicated log, under a system tenant.
 
-**Isolation is split across both processes on purpose.** The broker scopes queue identity natively
-as `(tenant, name)` in SQL on every read and write, so two tenants owning a queue called `orders`
-own different queues; the proxy is what makes that tenant identity trustworthy. Neither half is
+**Isolation is split across both halves on purpose.** The broker scopes queue identity natively
+as `(tenant, name)` on every read and write, so two tenants owning a queue called `orders` own
+different queues; the proxy is what makes that tenant identity trustworthy. Neither half is
 sufficient alone ([isolation](https://queenmq.com/reference/multi-tenant/isolation)).
 
 A **cluster** is the tenant-visible Queen, one hostname and one namespace; a **cell** is the
-physical stack it runs on. A cluster never spans two cells, which is why quota accounting is exact
-in-process state with nothing to coordinate. Operators place clusters onto cells, so customers
-address a region and never a cell, and the control plane stays out of the message data path: its
-outage does not stop a cell that is already running.
+physical deployment it runs on. A cluster never spans two cells.
 
 ## Quick start
 
-Docker and about five minutes. Nothing is installed into PostgreSQL; there is no migration to run.
+Docker and about two minutes. There is no database to run and no migration to apply.
 
 ```bash
-docker network create queen
-docker run -d --name queen-pg --network queen -e POSTGRES_PASSWORD=postgres postgres:16
-docker run -d --name queen --restart on-failure:10 --network queen -p 6632:6632 \
-  -e PG_HOST=queen-pg -e PG_PASSWORD=postgres \
-  -v queen-spool:/var/lib/queen/buffers ghcr.io/queen-mq/queen:latest
+docker run -d --name queen -p 6632:6632 -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:latest
 curl -s http://localhost:6632/health
 ```
 
-The restart policy covers the seconds PostgreSQL spends initialising: the broker refuses to start
-against a database it cannot reach. Open `http://localhost:6632` for the bundled dashboard. The
-queue *and* the partition are created by this call:
+The volume holds the data directory: without it the messages go with the container. Open
+`http://localhost:6632` for the bundled dashboard. The queue *and* the partition are created by
+this call:
 
 ```bash
 curl -X POST http://localhost:6632/api/v1/push -H 'content-type: application/json' -d '{
@@ -210,17 +195,17 @@ curl -X POST http://localhost:6632/api/v1/push -H 'content-type: application/jso
 ```
 
 `transactionId` is your idempotency key: a retry of the same push writes nothing the second time.
-Full walkthrough in the [Quickstart](https://queenmq.com/start/quickstart); the whole stack with
-proxy and two brokers in [Compose](https://queenmq.com/deploy/compose).
+Full walkthrough in the [Quickstart](https://queenmq.com/start/quickstart); a three-node cluster
+with the proxy in [Compose](https://queenmq.com/deploy/compose).
 
 ## Documentation
 
 - **[The model](https://queenmq.com/use/model)**: queues, partitions, groups, offsets, leases, retention.
 - **[Transactions](https://queenmq.com/reference/http/transaction)**: bundle shape, rollback causes, the exactly-once boundary.
-- **[KV](https://queenmq.com/use/kv)** · **[Timers](https://queenmq.com/use/timers)** · **[Streams](https://queenmq.com/use/streams)** · **[Ephemeral](https://queenmq.com/use/ephemeral)** · **[S3 lake](https://queenmq.com/reference/s3)**: beyond push and pop.
-- **[Deploy](https://queenmq.com/deploy)** · [PostgreSQL](https://queenmq.com/deploy/postgres) · [HA](https://queenmq.com/deploy/ha) · [Kubernetes](https://queenmq.com/deploy/kubernetes) · [Kafka](https://queenmq.com/deploy/kafka) · [SQS](https://queenmq.com/deploy/sqs) · [S3 sink](https://queenmq.com/deploy/s3).
+- **[KV](https://queenmq.com/use/kv)** · **[Timers](https://queenmq.com/use/timers)** · **[Streams](https://queenmq.com/use/streams)** · **[Ephemeral](https://queenmq.com/use/ephemeral)**: beyond push and pop.
+- **[Deploy](https://queenmq.com/deploy)** · [HA](https://queenmq.com/deploy/ha) · [Kubernetes](https://queenmq.com/deploy/kubernetes) · [Operations](https://queenmq.com/deploy/operations) · [Kafka](https://queenmq.com/deploy/kafka).
 - **[Multi-tenant](https://queenmq.com/deploy/multi-tenant)** · [Proxy](https://queenmq.com/deploy/proxy) · [Isolation](https://queenmq.com/reference/multi-tenant/isolation).
-- **[Internals](https://queenmq.com/internals)**: storage model, life of a push and a pop, dedup, retention, mesh.
+- **[Internals](https://queenmq.com/internals)**: the replicated log, storage model, life of a push and a pop, dedup, retention.
 - **[Benchmarks](https://queenmq.com/benchmarks)** · [method and rig](https://queenmq.com/benchmarks/method) · [comparison](https://queenmq.com/start/compare).
 - **[HTTP reference](https://queenmq.com/reference/http)** · **[SDKs](https://queenmq.com/reference/sdk/javascript)**: routes and clients.
 

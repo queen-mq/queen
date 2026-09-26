@@ -1,37 +1,38 @@
 ---
 title: Prometheus metrics
-description: "What GET /metrics/prometheus exposes, how process and cluster series differ, and why the endpoint must never be handed to a tenant."
+description: "What GET /metrics/prometheus exposes on a raft node, why every series is node-local, and why the endpoint must never be handed to a tenant."
 type: reference
 tier: operate
 sidebar:
   order: 17
   label: Prometheus
 sourceOfTruth:
+  - server/src/handlers/raft.rs
   - server/src/metrics.rs
-  - server/src/handlers/status.rs
+  - server/src/rsm/timing.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/groups.rs
   - server/src/auth.rs
-  - server/src/syscollect.rs
-  - server/src/sweeper.rs
-  - server/sql/procedures/023_prometheus.sql
-# sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): auth.rs gained one read-only arm; the exposition, its families and its access rules are unchanged.
+  - server/src/proxy_embed.rs
+  - proxy/src/cp.rs
 ---
 
 `GET /metrics/prometheus` returns exposition text with content type
-`text/plain; version=0.0.4; charset=utf-8` and `Cache-Control: no-cache`. Every
-family carries `# HELP` and `# TYPE`.
+`text/plain; version=0.0.4`. Every family carries `# HELP` and `# TYPE`.
 
 `GET /metrics` is a different endpoint and is **not** Prometheus text: it returns
-a small JSON object with uptime, aggregate request and message counts, pool size
-and RSS. Scraping it will fail to parse.
+a small JSON object with uptime, aggregate request and message counts, resident
+memory, `"engine":"raft"` and a `raft` block (the node's role, whether a leader
+is known, term, applied and committed index, lag, `storageReady`). Scraping it
+will fail to parse.
 
 ## The endpoint cannot be protected by broker authentication
 
 `/health`, `/metrics` and `/metrics/prometheus` resolve to access level
-`public` in the route table, and the authentication middleware short-circuits on
-`public` before it ever looks for a token. They are also in the default
-`JWT_SKIP_PATHS`. Removing them from that list changes nothing, because the
-level check wins.
+`public` in the broker's route table, and the authentication middleware
+short-circuits on `public` before it ever looks for a token. They are also in
+the default `JWT_SKIP_PATHS`. Removing them from that list changes nothing,
+because the level check wins.
 
 <Aside type="danger">
 Turning on `JWT_ENABLED` does not close this endpoint. If the broker's port is
@@ -40,101 +41,84 @@ reverse proxy, a NetworkPolicy, or a listener that is not routable from tenant
 traffic.
 </Aside>
 
-## Process versus cluster
+The embedded proxy (`QUEEN_PROXY_EMBEDDED=true`) changes this on the port it
+serves. There, `/metrics` and `/metrics/prometheus` answer only a request that
+carries the control-plane token (`x-queen-cp-token`, or
+`Authorization: Bearer <token>`, set with `QUEEN_PROXY_CP_TOKEN`); every other
+request gets `404`, and so does every request when no token is configured.
+With `QUEEN_PROXY_PORT` set to a port other than `PORT`, `PORT` serves the
+broker router directly and the rule above applies there: keep that port
+internal and scrape it from inside the network.
 
-Two namespaces answer two different questions, and mixing them is the most
-common mistake in a Queen dashboard.
+## Every series is node-local
 
-`queen_process_*` counts what **this one broker instance** did since it started.
-The counters live in memory, so they reset to zero on every restart, and each
-instance behind a load balancer reports its own numbers. Use them for rate
-queries and for attributing load to an instance.
+Each node of a cluster reports what it measured itself. The counters live in
+memory and reset to zero when the process restarts; the raft index and storage
+gauges describe this node's own log and data directory. There is no cluster-wide
+lifetime total and no per-queue minute rate: scrape every node and aggregate in
+Prometheus.
 
-`queen_cluster_*` are **lifetime totals read back out of PostgreSQL**, from
-`queen.worker_metrics_summary`, which the metrics collector maintains. They
-survive restarts, and every instance in the cluster reports the *same* value
-because they all read the same row. Summing them across instances multiplies
-your traffic by the number of brokers. Aggregate them with `max`, never `sum`.
-
-The in-process families beyond `queen_process_*` (pool gauges, spool gauges,
-the maintenance flag, the admission families, the fusion batch families, parked
-long-polls) are also per-instance and also reset on restart.
+The raft indexes are the one place where comparing nodes is the point: a
+follower's applied index trailing the leader's committed index is replication
+lag.
 
 ## How a scrape is assembled
 
-The response is built in one pass and in a fixed order:
+The response is built in one pass from memory and the node's own store, in a
+fixed order, with no call to another node:
 
-1. In-process gauges and counters, always emitted.
-2. The admission families: `queen_admission_budget`,
-   `queen_admission_inflight{lane}`, `queen_admission_waiting{lane}`,
-   `queen_admission_trains_per_s`, `queen_admission_txn_per_train` and
-   `queen_admission_cycle_ms`. These replaced `queen_seg_push_vegas_limit` and
-   `queen_seg_pop_vegas_limit` in 1.0.0-beta.2, which no longer exist.
-3. Pool gauges (`queen_db_pool_size`, `_idle`, `_active`), the push
-   maintenance-mode flag, and the disk spool gauges.
-4. One call to the database aggregator, whose JSON becomes the `queen_cluster_*`
-   families, the per-queue minute rates, and the DLQ depths.
+1. The broker's in-process families: `queen_uptime_seconds`,
+   `queen_process_resident_memory_bytes`, the `queen_process_*` request and
+   message counters, `queen_parked_long_polls`, and the key/value and ephemeral
+   families.
+2. The pipeline timing families (`queen_raft_*_seconds` and friends), emitted
+   only while `QUEEN_RAFT_METRICS` is on, which is the default. With it off,
+   nothing is recorded and the whole block is skipped rather than rendered as
+   zeros.
+3. The state-machine families of this node: store operations and map use,
+   raft indexes, entries in flight, proposals, queue-log files and bytes, and
+   the disk gate.
 
-Step 4 is **best-effort**. If the pool has no connection or the read fails, the
-DB-backed families are silently absent from that scrape and the in-process block
-is still returned with HTTP 200. An alert on the absence of `queen_cluster_*`
-therefore detects a database problem; an alert on non-200 does not.
+## The state-machine families
 
-Because step 4 is a database round trip per scrape, the scrape interval is a
-load knob. Its per-queue and per-worker reads are bounded to buckets from the
-last five minutes; the lifetime totals are a single-row read and the dead-letter
-depths are counts.
+| Family | Type | Labels | What it says |
+| --- | --- | --- | --- |
+| `queen_raft_index` | gauge | `kind` = `log`, `committed`, `applied` or `durable` | The node's positions in the replicated log. |
+| `queen_raft_inflight` | gauge | none | Entries committed or proposed but not yet applied. |
+| `queen_raft_proposals_total` | counter | none | Proposals accepted since the node opened its store. |
+| `queen_raft_log_storage` | gauge | `kind` = `files` or `bytes` | The queue-log files on this node's data directory. |
+| `queen_raft_storage_full` | gauge | none | `1` while the disk gate refuses writes that grow storage, else `0`. |
+| `queen_raft_store_operations_total` | counter | `kind` | Operations on the embedded store, by kind. |
+| `queen_raft_store_map_bytes` | gauge | `kind` = `capacity` or `used` | The store's memory map: its size and how much of it is used. |
+| `queen_raft_store_ram_rows` | gauge | `ks`, `kind` = `live` or `dirty` | Rows per in-memory keyspace, and the keys changed since the last checkpoint. |
+| `queen_raft_store_readers` | gauge | `kind` = `used` or `limit` | Reader slots of the embedded store. |
 
-## Label sets
+`queen_raft_storage_full` turns to `1` when the data directory's filesystem
+reaches `QUEEN_RAFT_DISK_HIGH_PCT` percent used (default 85), or the store's map
+reaches 85 percent used, and back to `0` below `QUEEN_RAFT_DISK_LOW_PCT`
+(default 80) and 80 percent of the map. While it is `1`, pushes answer `507`. It
+is the first alert to write.
 
-| Family or group | Labels |
-| --- | --- |
-| `queen_cluster_*_total` | `scope="cluster"` |
-| `queen_cluster_ack_total` | `scope="cluster"`, `result` = `success` or `failed` |
-| `queen_batches_fired_total`, `queen_batch_items_fired_total`, `queen_fusion_items_per_batch` | `op` = `push`, `pop` or `ack` |
-| `queen_batch_rtt_milliseconds` | `op`, plus `quantile` = `0.5` or `0.99` |
-| `queen_queue_*_per_minute`, `queen_queue_parked_consumers`, `queen_queue_metrics_age_seconds` | `queue` |
-| `queen_queue_pop_lag_milliseconds` | `queue`, `stat` = `avg` or `max` |
-| `queen_queue_ack_per_minute` | `queue`, `result` = `success` or `failed` |
-| `queen_dlq_depth` | `scope="cluster"` |
-| `queen_dlq_depth_by_queue`, `queen_parked_long_polls` | `queue` |
-| everything else | none |
+With `QUEEN_RAFT_GROUPS` above 1 the node runs several raft groups, and every
+line of this block carries a `group` label naming the group it describes. With
+the default of one group there is no `group` label.
 
-`queen_batch_rtt_milliseconds` is a **gauge** that happens to carry a `quantile`
-label. It is not a Prometheus summary, and `quantile` here is a plain label
-computed from a bounded in-process ring of recent round trips. Queue names are
-escaped for backslash, double quote and newline.
+## The timing families
 
-## Freshness of the per-queue families
-
-Per-queue series do not come from live counters. Each instance flushes its
-per-queue deltas into minute buckets in PostgreSQL every `METRICS_FLUSH_MS`
-(60 s by default), and the aggregator reads the most recent bucket per queue
-within a five-minute window. Consequences:
-
-- a per-queue value can be up to one flush interval stale;
-- `queen_queue_metrics_age_seconds` is the age of the bucket the value came
-  from (use it to distinguish "zero traffic" from "stale bucket");
-- a queue that stops receiving traffic disappears from the exposition about five
-  minutes later, rather than reporting zero.
-
-`queen_parked_long_polls` is the exception: it is the live, instantaneous
-per-queue count of parked long-poll pops on this instance.
+The pipeline timing families are Prometheus summaries: each sample line carries
+`quantile` = `0.5`, `0.9`, `0.99`, `0.999` or `1` (the maximum), followed by
+`_count` and `_sum`. They are cumulative since the process started, and a
+quantile is the upper bound of the histogram bucket it falls in, so read it as
+"at most". The per-command planning family,
+`queen_raft_planner_plan_seconds`, carries `kind` next to `quantile`. These
+families are process-wide: with several raft groups they have no `group` label.
 
 ## Per-queue series are not tenant-scoped
 
-No **per-queue** series carries a tenant label, and exactly one series on the
-whole endpoint does: `queen_timers_fire_lag_seconds`, described under the
-cardinality rule below. When `QUEEN_TENANCY_HEADER` is on and two tenants hold
-the same queue name, their series collide:
-
-- `queen_dlq_depth_by_queue` groups dead-letter rows by queue **name**, so the
-  count is the sum across tenants;
-- `queen_parked_long_polls` explicitly sums the per-tenant gauges into one line
-  per queue name;
-- the per-queue minute rates are stored per tenant but the aggregator selects
-  one row per queue name, so one tenant's bucket is reported and the others are
-  hidden.
+No per-queue series carries a tenant label. When `QUEEN_TENANCY_HEADER` is on
+and two tenants hold the same queue name, their series collide:
+`queen_parked_long_polls` sums the per-tenant gauges into one line per queue
+name.
 
 <Aside type="danger">
 `/metrics/prometheus` is a cell-wide operator surface. Exposing it to a tenant
@@ -143,9 +127,6 @@ operator route for exactly this reason.
 </Aside>
 
 ## The rule about the `tenant` label
-
-Every label on this endpoint is a fixed enumeration in Rust, so no call site can
-mint a new label value. That is not an accident of style, it is the rule:
 
 > The `tenant` label is allowed **only** on occupancy gauges, where it is one
 > series per tenant written by a background job and bounded by the control
@@ -158,76 +139,20 @@ decided by somebody else's web traffic, so they are the first place that rule
 could really have been broken. The per-tenant view of a hot path lives in the
 broker's top-N log lines and in the JSON status endpoint, not here.
 
-There is one motivated exception. `queen_timers_fire_lag_seconds` carries
-`tenant` alongside `quantile`, because it is an occupancy gauge and because a
-timer backlog that does not name its culprit puts every tenant on the same
-alert. It is capped at 1024 distinct tenants, and past the cap it **denies the
-new tenant rather than evicting an old one**: the tenant id is opaque and
-validated against nothing, so an evicting map is an unbounded map with extra
-steps. `queen_timers_fire_lag_tenants_dropped_total` says when the cap is
-biting, and a non-zero value means the gauge is no longer complete.
+`queen_kv_read_rejected_total{reason="rate_limited"}` becoming non-zero is worth
+a panel even though it is not a fault. It is the earliest warning of a customer
+who has just put key/value reads on their own end users' request path. The
+`reason` label is read from the verdict rather than from the status code, so
+`disabled` means the operator's runtime kill switch and nothing else.
 
-## The two alarm gauges
+## No depth families
 
-Both are emitted only while the feature that owns them is on, and both report a
-condition that is invisible in every other series.
-
-**`queen_kv_expired_not_pruned`**, with `queen_kv_expiry_lag_seconds` beside it.
-An expired key is never returned and never counts as existing, whether or not the
-sweeper has deleted its row: expiry is a predicate, not the physical absence of a
-row. So a sweeper that falls behind produces a failure mode that **disguises
-itself as success**. Reads stay perfectly correct while the table grows, table
-bloat follows, and nothing else on this endpoint moves. Alert on 50 000 rows
-**or** an expiry lag above 600 seconds, whichever comes first.
-
-**`queen_timers_oldest_late_seconds`**, with `queen_timers_due` beside it. A
-timer backlog is promised work that has not been delivered, and a customer reads
-it as a lost message rather than as a late one. Warn on a minute of sustained
-lateness, page on five.
-
-Both `queen_kv_expired_not_pruned` and `queen_timers_due` are **capped at the SQL
-level**, and each has a `_capped` companion gauge that is `1` when the cap was
-hit. When the companion is `1`, the value is a **floor and not a count**: an
-exact count is proportional to the backlog precisely in the failure it exists to
-detect. Alert on the value, then read the companion before quoting the number.
-
-A third signal is worth a panel even though it is not a fault:
-`queen_kv_read_rejected_total{reason="rate_limited"}` becoming non-zero for a
-tenant that was at zero. It is the earliest warning of the one new failure mode
-these features introduce, a customer who has just put key/value reads on their
-own end users' request path. Panel it as a **list of tenants** rather than a
-total, because a total does not say who to call.
-
-The `reason` label on that counter is read from the verdict rather than from the
-status code, which matters for one value: `disabled` is the operator's runtime
-kill switch and nothing else. Classifying it from the status would file it under
-`pool`, and an operator who had just pulled the lever would be told the cell was
-out of database connections.
-
-## Two families that are gone
-
-`queen_queue_depth_total` and `queen_queue_depth_pending` were formatted from a
-`queue_depth` key in the aggregator's JSON that no stored procedure in this tree
-has ever produced. Neither family was ever present on a real scrape, only in
-this reference, because the generator reads help strings out of the exposition
-code and cannot tell live code from dead. The exposition code was removed in
-1.1.0. Nothing an operator could see changes: a family with no samples is not in
-the exposition either way.
-
-There is no per-queue depth family to replace them with, and that is on purpose:
-depth under a delivery policy is a per-**group** number, not a per-queue one, and
-a conflating group's remaining work is not the queue's message count. Ask
-[`GET /api/v1/resources/queues/:queue/depth`](/reference/http/queues#get-apiv1resourcesqueuesqueuedepth) for
-it, per group, and alert on `queen_queue_pop_lag_milliseconds` and the
-consumer-group lag endpoints for backlog.
-
-`queen_dlq_depth` and `queen_dlq_depth_by_queue` do work: they count
-`queen.log_dlq` rows, cluster total and per queue name, with an index-only scan
-per scrape. (Until 2026-07-31 they read the retired rows engine's dead-letter
-table and were pinned at 0; if a dashboard predates that, its DLQ panel was
-lying.) `queen_cluster_dlq_total{scope="cluster"}` remains the lifetime counter
-of dead-letter transitions; the depth gauges shrink when DLQ rows are deleted or
-replayed, the counter does not.
+There is no per-queue depth family and no dead-letter depth family. Depth under
+a delivery policy is a per-**group** number, not a per-queue one, and a
+conflating group's remaining work is not the queue's message count. Ask
+[`GET /api/v1/resources/queues/:queue/depth`](/reference/http/queues#get-apiv1resourcesqueuesqueuedepth)
+for it, per group, and use the consumer-group lag endpoints and
+`GET /api/v1/dlq` for backlog and dead letters.
 
 ## The families
 
@@ -239,7 +164,7 @@ replayed, the counter does not.
   <LinkCard
     href="/reference/config"
     title="Environment variables"
-    description="METRICS_FLUSH_MS, STATS_INTERVAL_MS and the rest of the collector cadence."
+    description="The disk gate, QUEEN_RAFT_METRICS and the rest of the node's configuration."
   />
   <LinkCard
     href="/reference/errors"

@@ -14,27 +14,24 @@ import (
 // QUEEN_RETENTION_INTERVAL_MS does NOT configure the broker; it only tells
 // these tests what the broker's cadence is so they can size their wait. Set it
 // to the same number the broker runs with, or the wait below is computed off a
-// cadence that is not the real one. Left unset the tests skip, which is how
-// they sat dead in CI: test/compose has never set it.
+// cadence that is not the real one. Left unset the tests skip; test/compose
+// sets it next to the broker's RETENTION_INTERVAL.
 
-// backoffCycles mirrors BACKOFF_BASE_CYCLES in server/src/retention.rs. Keep in
-// step with it -- see retentionSleep for why the number is load-bearing here.
+// backoffCycles is the slack, in sweep intervals, that retentionSleep waits
+// past a retention window. See retentionSleep for where the number comes from.
 const backoffCycles = 8
 
 // retentionSleep is how long to wait before a queue configured with a
 // `window`-second retention rule is guaranteed to have been swept.
 //
-// It is NOT "a few sweep intervals". retention.rs strikes any partition whose
-// visit deletes nothing and parks it for BACKOFF_BASE_CYCLES cycles; the sweep
-// that runs while the rows are still younger than `window` IS such a visit, so
-// the first real chance to delete is a whole backoff behind it:
-//
-//	bound = window + BACKOFF_BASE_CYCLES * RETENTION_INTERVAL
-//
-// The old helper returned 4 intervals capped at 30s, which is under that bound
-// at every cadence -- these tests would have failed the day they stopped
-// skipping. Measured on the JS twin (retention.js): rows still present at
-// 15s/25s/35s with window=10s, gone by 50s, exactly window + 8*5s.
+// The raft sweep (server/src/rsm/maintenance.rs) runs on the leader every
+// RETENTION_INTERVAL and judges every partition on every pass, with no
+// backoff, so data past its window is gone after the first pass that follows
+// the cutoff: window + 1 interval, plus the commit of that pass. The wait here
+// is longer, window + (backoffCycles+1) intervals: the bound the previous
+// engine's sweep needed (it parked a partition for 8 cycles after a visit that
+// deleted nothing), which the JS twin (retention.js) still waits. On raft it is
+// generous, never short.
 func retentionSleep(t *testing.T, window time.Duration) time.Duration {
 	t.Helper()
 	v := os.Getenv("QUEEN_RETENTION_INTERVAL_MS")
@@ -79,25 +76,19 @@ func TestRetention_PendingMessagesAreCleanedUp(t *testing.T) {
 }
 
 // TestRetention_CompletedMessagesAreCleanedUp pushes, drains, then waits for the
-// completed-retention sweep to delete the drained messages' DATA.
+// completed-retention sweep to delete the drained messages.
 //
-// It asserts on queen.log_segments, not on `messages list`, and the difference
-// is the whole point. `messages list` enumerates queen.log_txns -- the dedup
-// index -- whose purge cutoff is a different phase with its own floor:
-//
-//	txns_cutoff = now() - GREATEST(dedup_window_seconds, completed_retention_seconds, 900)
-//
-// so those rows outlive a 3s completed-retention by at least 900s, and by
-// default (dedup_window_seconds=3600) by an hour. This test used to count
-// `messages list` rows and expect 0, which no RETENTION_INTERVAL could ever
-// make true -- it was reading the dedup window and calling it retention. It
-// never failed only because it skipped. Measured: segments for this queue go
-// from 1 to 0 between t=5s and t=15s while the listing still reports 20 rows
-// (correctly flagged payloadAvailable:false) well past 75s.
+// The promise, stated at the API: once a consumed message is older than the
+// queue's completed retention, its data is gone. Nobody can read it back, not
+// even a consumer group that has never read the queue and starts from its
+// beginning. And the messages listing must not advertise that payload as
+// available. (--retention 60 keeps the pending sweep out of it at the
+// harness's 5s cadence: the checks run ~48s after the push, while the messages
+// are younger than 60s, so only the completed-retention sweep can have removed
+// them.)
 func TestRetention_CompletedMessagesAreCleanedUp(t *testing.T) {
 	// Must match --completed-retention below: the completed rows are what this
-	// one waits on, and they are swept by the same phase (and so the same
-	// backoff map) as the pending rows above.
+	// one waits on.
 	wait := retentionSleep(t, 3*time.Second)
 	q := uniqueQueue(t, "retention-completed")
 	runOK(t, "queue", "configure", q,
@@ -116,24 +107,20 @@ func TestRetention_CompletedMessagesAreCleanedUp(t *testing.T) {
 
 	time.Sleep(wait)
 
-	// The retention promise is that the DATA is gone. Segment rows are what
-	// hold it, and what `retention: swept segments_deleted=N` counts.
-	segs := pgRow(t, `SELECT count(*) FROM queen.log_segments s
-		JOIN queen.log_partitions p ON p.id = s.partition_id
-		JOIN queen.queues qq ON qq.id = p.queue_id
-		WHERE qq.name = $1`, q)
-	if len(segs) == 0 {
-		t.Fatalf("segment count query returned no row")
-	}
-	if n, ok := segs[0].(int64); !ok || n != 0 {
-		t.Errorf("expected 0 segments after completed-retention sweep, got %v", segs[0])
+	// The data is gone: a brand-new group reading from the beginning gets
+	// nothing back. --from-mode all for the same reason as the pending test
+	// above: under the default 'new' mode it would read 0 whether or not
+	// retention swept.
+	fresh := popN(t, q, 20, "--cg", "ct-ret-comp-fresh", "--from-mode", "all",
+		"--auto-ack", "--wait=false", "--timeout", "200ms")
+	if len(fresh) != 0 {
+		t.Errorf("expected completed-retention sweep to delete the drained msgs, a fresh group read %d back", len(fresh))
 	}
 
-	// And the listing, which outlives it by the dedup window, must at least
-	// stop claiming the payload is fetchable.
+	// And the listing must not advertise the payload as available.
 	for _, r := range listAllMessages(t, q) {
 		if avail, ok := r["payloadAvailable"].(bool); ok && avail {
-			t.Errorf("row still advertises payloadAvailable after its segment was deleted: %v", r["queuePath"])
+			t.Errorf("row still advertises payloadAvailable after the completed-retention sweep: %v", r["queuePath"])
 			break
 		}
 	}

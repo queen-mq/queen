@@ -27,11 +27,10 @@
 //                                                exists never to send
 //   404 {success:false, result:'gone', dlqId, error:'Message not found', message}
 //   500 {success:false, error, dlqRowRemoved:false|null, message}
-//                                                false = the database refused
-//                                                and rolled back; null = the
-//                                                broker never learned the
-//                                                outcome
-//   503 {success:false, result:'maintenance', error, dlqRowRemoved:false, message}
+//                                                false = the broker refused
+//                                                it and applied nothing;
+//                                                null = the broker never
+//                                                learned the outcome
 //
 // TWO OF THOSE ARE NOT FAILURES, and telling them apart is the whole reason
 // this module exists:
@@ -403,37 +402,14 @@ function failureVerdict(err) {
     }
   }
 
-  // ---- push maintenance is on ---------------------------------------------
-  // Not a failure and not a refusal of this caller: the cell is not writing to
-  // the log at all right now. A move cannot be spooled the way a push is (the
-  // spool carries frames, not the removal of a dead-letter record), so the
-  // broker refuses it and the row stays — which makes "try again later" an
-  // honest instruction rather than a hope.
-  if (err.status === 503 && body?.result === 'maintenance') {
-    return {
-      kind: 'warning',
-      title: 'Push maintenance is on',
-      detail:
-        'This cell is not writing to the log while push maintenance is on, and a replay is a write. ' +
-        'Nothing was replayed and the dead-letter record is untouched — replay it once the maintenance ' +
-        'switch is off.',
-      removeRow: false,
-      refresh: false,
-      field: null,
-      target: null,
-    }
-  }
-
   // ---- the move itself failed --------------------------------------------
   // Two different 500s, and the broker says which by what it can prove:
   //
-  //   dlqRowRemoved:false  the DATABASE refused the statement (it raised, and
-  //                        every guard raises before the delete), so one
-  //                        transaction rolled back whole and retrying
-  //                        duplicates nothing
-  //   dlqRowRemoved:null   the broker never learned the outcome — a connection
-  //                        lost after a single-statement transaction may have
-  //                        committed, and a committed move deleted the row
+  //   dlqRowRemoved:false  the broker refused the move before applying any of
+  //                        it, so retrying duplicates nothing
+  //   dlqRowRemoved:null   the broker never learned the outcome — a move whose
+  //                        commit it could not confirm may still have applied,
+  //                        and an applied move deleted the row
   //
   // Anything else on a 5xx (an older broker, a proxy's own error page) is read
   // as the second: an absent fact is not a fact.

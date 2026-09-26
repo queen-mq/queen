@@ -95,7 +95,7 @@ pub struct Api {
 ///     `require_stable` is answered honestly rather than ignored: it asks the
 ///     broker to withhold offsets belonging to an open transaction, and an
 ///     offset belonging to an open transaction is not in the store at all —
-///     since M9 the store write happens at COMMIT, inside the same Postgres
+///     since M9 the store write happens at COMMIT, inside the same broker
 ///     transaction as the records ([`crate::txn`]). So every offset this facade
 ///     returns is stable by construction, this row keeps its v7 ceiling, and
 ///     UNSTABLE_OFFSET_COMMIT (88) is a code it never needs. The sentence was
@@ -1145,11 +1145,11 @@ mod tests {
             (ApiKey::ElectLeaders, "one logical broker, nothing to elect"),
             (
                 ApiKey::AlterPartitionReassignments,
-                "no replicas to move; durability is Postgres's",
+                "no replicas to move; durability is the broker's",
             ),
             (
                 ApiKey::ListPartitionReassignments,
-                "no replicas to move; durability is Postgres's",
+                "no replicas to move; durability is the broker's",
             ),
             // The facade does have quotas — Queen's 429 with Retry-After — but
             // they are the Cloud proxy's, per TENANT, and not expressible in

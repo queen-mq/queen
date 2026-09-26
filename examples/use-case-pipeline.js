@@ -9,7 +9,7 @@
  *   - pops from its source queue
  *   - does work (here: a transformation, occasionally fails on purpose)
  *   - on success: queen.transaction().ack(input).queue(next).push(output).commit()
- *     — one PG transaction. Ack and next-stage push commit together.
+ *     — one transaction. Ack and next-stage push commit together.
  *   - on failure: ack with status='failed'. Per-queue retry_limit + DLQ kick in.
  *
  * The translate stage rejects every 7th message with a TerminalError-style

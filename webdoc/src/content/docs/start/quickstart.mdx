@@ -8,68 +8,45 @@ sidebar:
 sourceOfTruth:
   - server/src/config.rs
   - server/src/main.rs
-  - test/compose/docker-compose.single.yml
+  - server/src/handlers/raft.rs
 verifiedBy:
   - clients/client-js/test-v2/docs.js
 digest: >-
-  A broker from nothing in four commands, needing only Docker: `docker network create queen`; then
-  `docker run -d --name queen-pg --network queen -e POSTGRES_PASSWORD=postgres postgres:16`; then
-  `docker run -d --name queen --restart on-failure:10 --network queen -p 6632:6632 -e
-  PG_HOST=queen-pg -e PG_PORT=5432 -e PG_PASSWORD=postgres ghcr.io/queen-mq/queen:latest`; then
-  `curl -s http://localhost:6632/health`, which takes a pooled connection and does a real database
-  round-trip, so a healthy answer proves both processes. The restart policy matters on the first
-  run: the broker refuses to start against a database it cannot reach, and PostgreSQL is still
-  initialising for the first seconds after step 2. PG_USER and PG_DATABASE both default to
-  postgres and PG_PORT to 5432, so host and password are usually the whole configuration. Adding
-  `-v queen-spool:/var/lib/queen/buffers` persists the outage spool. Nothing is installed into
-  PostgreSQL and there is no migration to run. The same binary serves its dashboard on the same
-  port.
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): main.rs registers three new routes; the quickstart path is unchanged.
+  A broker from nothing in two commands, needing only Docker: `docker run -d --name queen -p
+  6632:6632 -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:latest`, then `curl -s
+  http://localhost:6632/health`, which answers 200 with `"engine":"raft"` once the node knows a
+  leader, at once on a single node. There is no database to start, no schema to apply and no
+  migration to run: the broker keeps its state in the data directory `QUEEN_RAFT_DIR`, default
+  `/var/lib/queen/raft`, and the volume is what keeps it across container restarts. The same
+  binary serves its dashboard on the same port.
 ---
 
-Docker and five minutes. At the end you have a PostgreSQL, a broker, and one message that went
-in and came out. There is no schema to migrate and no extension to install: the broker embeds its
-DDL and its stored procedures, and applies them at boot.
+Docker and five minutes. At the end you have a broker and one message that went in and came out.
+There is no database to run, no schema to migrate and no extension to install: the broker keeps
+its state in a directory on its own disk.
 
 ## Start a broker
 
 <Steps>
 
-1. **A network, so the broker can reach PostgreSQL by name.**
+1. **The broker.** It listens on `PORT`, default `6632`, and keeps everything in `QUEEN_RAFT_DIR`,
+   default `/var/lib/queen/raft`. The volume is what keeps your messages when the container is
+   replaced.
 
    ```bash
-   docker network create queen
+   docker run -d --name queen -p 6632:6632 -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:latest
    ```
 
-2. **PostgreSQL.** Any one the broker can reach works. The password has to match the next step.
-
-   ```bash
-   docker run -d --name queen-pg --network queen -e POSTGRES_PASSWORD=postgres postgres:16
-   ```
-
-3. **The broker.** `PG_USER` and `PG_DATABASE` both default to `postgres`, so host, port and
-   password are enough. It listens on `PORT`, default `6632`. `--restart on-failure:10` covers
-   the seconds PostgreSQL spends initialising on its first boot: the broker refuses to start
-   against a database it cannot reach, and Docker brings it back as soon as it can.
-
-   ```bash
-   docker run -d --name queen --restart on-failure:10 --network queen -p 6632:6632 -e PG_HOST=queen-pg -e PG_PORT=5432 -e PG_PASSWORD=postgres ghcr.io/queen-mq/queen:latest
-   ```
-
-4. **Check it.** `/health` takes a connection from the pool and does a real round-trip, so a
-   healthy answer means both processes work.
+2. **Check it.** `/health` answers `200` once the node knows a leader, which a single node does as
+   soon as it has opened its data directory.
 
    ```bash
    curl -s http://localhost:6632/health
    ```
 
-   ```json
-   {"status":"healthy","database":"connected","engine":"segments-rust","version":"1.2.1"}
-   ```
-
-   An empty answer on the first try means the broker is still waiting for PostgreSQL. Run it
-   again a second later. If it is still empty after a few tries, `docker logs queen` says why.
+   The answer carries `"status":"healthy"`, `"engine":"raft"`, the version, and a `raft` object
+   whose `role` is `leader`. An empty answer on the first try means the broker is still opening
+   its data directory: run it again a second later. If it stays empty, `docker logs queen` says why.
 
 </Steps>
 
@@ -120,6 +97,8 @@ curl -i -X POST http://localhost:6632/api/v1/push -H 'Content-Type: application/
 [{"index":0,"message_id":"019842f1-...","transaction_id":"019842f1-...","queueName":"orders","status":"queued"}]
 ```
 
+Each item also carries the message's `offset` in its partition.
+
 ```bash
 curl -i "http://localhost:6632/api/v1/pop/queue/orders?batch=1&wait=true&consumerGroup=demo&subscriptionMode=all"
 ```
@@ -148,7 +127,7 @@ The wire format is in [the HTTP reference](/reference/http).
 ## Clean up
 
 ```bash
-docker rm -f queen queen-pg && docker network rm queen
+docker rm -f queen && docker volume rm queen-data
 ```
 
 <CardGrid>
@@ -165,6 +144,6 @@ docker rm -f queen queen-pg && docker network rm queen
   <LinkCard
     href="/deploy"
     title="Deploy Queen"
-    description="What this skipped: TLS, authentication, PostgreSQL sizing, retention, high availability."
+    description="What this skipped: TLS, authentication, disk sizing, retention, high availability."
   />
 </CardGrid>

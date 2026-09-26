@@ -1,8 +1,9 @@
 name: Docker Images
 
-# Publishes both images to GHCR under the repo's own org:
-#   ghcr.io/queen-mq/queen         (broker + dashboard + queenctl)
-#   ghcr.io/queen-mq/queen-proxy   (gateway + operator console)
+# Publishes the image to GHCR under the repo's own org:
+#   ghcr.io/queen-mq/queen         (the single binary — broker, embedded proxy +
+#                                   operator console, Kafka facade, dashboard —
+#                                   plus queenctl)
 #
 # Auth is the workflow's own GITHUB_TOKEN — no registry secrets to rotate. The
 # `packages: write` permission below is what makes that token able to push.
@@ -48,14 +49,11 @@ jobs:
       packages: write
 
     strategy:
-      # One image failing should not cancel the other's build.
       fail-fast: false
       matrix:
         include:
           - image: queen
             dockerfile: ./Dockerfile
-          - image: queen-proxy
-            dockerfile: ./proxy/Dockerfile
 
     steps:
     - uses: actions/checkout@v4
@@ -66,9 +64,7 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    # The two images version independently: the broker from server.json (the
-    # same file build.rs reads), the proxy from its own crate manifest. Forcing
-    # a shared number would mean bumping one of them for no reason.
+    # The image is versioned from server.json (the same file build.rs reads).
     - name: Resolve version, commit and tags
       id: meta
       env:
@@ -80,15 +76,7 @@ jobs:
         HUB_USERNAME: ${{ secrets.DOCKER_USERNAME }}
         IS_PR: ${{ github.event_name == 'pull_request' }}
       run: |
-        case "${{ matrix.image }}" in
-          queen)
-            VERSION=$(jq -r '.version' server/server.json)
-            ;;
-          queen-proxy)
-            VERSION=$(awk -F'"' '/^\[package\]/{p=1} p && /^version[[:space:]]*=/{print $2; exit}' \
-              proxy/Cargo.toml)
-            ;;
-        esac
+        VERSION=$(jq -r '.version' server/server.json)
         test -n "$VERSION" || { echo "could not resolve version for ${{ matrix.image }}"; exit 1; }
         SHA=$(git rev-parse --short HEAD)
         echo "version=$VERSION" >> $GITHUB_OUTPUT
@@ -148,8 +136,8 @@ jobs:
     - name: Build and push
       uses: docker/build-push-action@v5
       with:
-        # Both Dockerfiles build from the repo root — the proxy crate embeds
-        # ../server/webapp/dist, which is outside proxy/.
+        # The repo root: the broker links the proxy, the Kafka facade and
+        # queen-protocol by relative path.
         context: .
         file: ${{ matrix.dockerfile }}
         platforms: linux/amd64,linux/arm64
@@ -162,14 +150,13 @@ jobs:
           org.opencontainers.image.revision=${{ github.sha }}
           org.opencontainers.image.version=${{ steps.meta.outputs.version }}
           org.opencontainers.image.licenses=Apache-2.0
-        # Ignored by the proxy Dockerfile, which declares no ARGs; only the
-        # broker stamps them into queenctl so that `queenctl version` inside the
-        # container matches the tag the image was published under.
+        # Stamped into queenctl so that `queenctl version` inside the container
+        # matches the tag the image was published under.
         build-args: |
           QUEENCTL_VERSION=${{ steps.meta.outputs.version }}
           QUEENCTL_COMMIT=${{ steps.meta.outputs.sha }}
-        # Scoped per image: a shared gha cache key would make the two matrix
-        # legs evict each other's layers and cold-build every run.
+        # Scoped per image, so a future second image cannot evict this one's
+        # layers.
         cache-from: type=gha,scope=${{ matrix.image }}
         cache-to: type=gha,scope=${{ matrix.image }},mode=max
 

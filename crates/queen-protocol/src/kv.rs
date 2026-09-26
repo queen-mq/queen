@@ -14,7 +14,7 @@
 //!   HTTP 200 for a lost `putIfAbsent`, a missing key and a delete that hit
 //!   nothing. It is the single most frequent outcome of this surface, and a
 //!   4xx would put it inside every retry policy and error dashboard.
-//! * **`found` is separate from `value`.** `'null'::jsonb` is a legal value, so
+//! * **`found` is separate from `value`.** `null` is a legal stored value, so
 //!   `{found: true, value: null}` and `{found: false}` are different things and
 //!   must not be collapsed.
 //!
@@ -45,8 +45,8 @@ where
 
 /// How long a written key lives. Exactly one of these reaches the wire, and
 /// there is no third option — an absent expiry is a `400 kv_expiry_not_specified`
-/// from the stored procedure, which is where the rule lives so that all seven
-/// clients inherit it.
+/// from the broker, which is where the rule lives so that all seven clients
+/// inherit it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expiry {
     /// `ttlSeconds`. **Zero is not valid** and neither is a negative: the
@@ -55,12 +55,12 @@ pub enum Expiry {
     Seconds(i64),
 
     /// A deadline, converted to a relative `ttlSeconds` at the moment of
-    /// sending. There is no `expiresAt` field on this wire — one clock,
-    /// Postgres's, and no client skew enters anywhere.
+    /// sending. There is no `expiresAt` field on this wire — one clock, the
+    /// broker's, and no client skew enters anywhere.
     Until(SystemTime),
 
     /// `forever: true`. Legal, and banned from the examples that run in CI: a
-    /// test that goes wrong leaves immortal state in a shared database.
+    /// test that goes wrong leaves immortal state in a shared broker.
     Forever,
 }
 
@@ -126,7 +126,7 @@ pub enum KvOpKind {
     GetPrefix,
     #[serde(rename = "put")]
     Put,
-    /// An alias: the stored procedure desugars it to `put` with `expect: 0` at
+    /// An alias: the broker desugars it to `put` with `expect: 0` at
     /// entry, so it is one code path. It exists under its own name because that
     /// is the name of the thing, and because "did I win?" is the question most
     /// often asked of this API.
@@ -166,8 +166,8 @@ impl KvOpKind {
 /// Every field is optional on the wire except `op` and `ns`, because the seven
 /// operations share one envelope. The constructors below are the supported way
 /// to build one: they set the fields that operation actually reads, and nothing
-/// else — an unknown or contradictory field is a `400` from the stored
-/// procedure, never a silent drop.
+/// else — an unknown operation or a contradictory field is a `400` from the
+/// broker, never a silent drop.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KvOperation {
     pub op: KvOpKind,
@@ -223,8 +223,8 @@ pub struct KvOperation {
     pub max: Option<i64>,
 
     /// The optimistic lock. `0` means "must not exist" and wins even against an
-    /// expired row the sweeper has not pruned yet; `N > 0` is a pure UPDATE and
-    /// creates nothing.
+    /// expired row the sweeper has not pruned yet; `N > 0` only updates an
+    /// existing key and creates nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect: Option<i64>,
 
@@ -522,16 +522,14 @@ pub struct KvResult {
 
     /// The current version.
     ///
-    /// **An opaque token, not an ordering.** It comes from one sequence shared
-    /// by every key, declared with a per-session cache, so consecutive writes to
-    /// the same key through a connection pool return values that do not
-    /// increase — 6, 3005, 1007, 2003 is a measured sequence. Compare versions
-    /// with `==`, never with `<`. The sequence is global rather than per-key on
+    /// **An opaque token, not an ordering.** Compare versions with `==`, never
+    /// with `<`. Versions are unique across every key and never re-issued, on
     /// purpose: a key that expired, was pruned and was recreated cannot reissue
     /// a version an old holder still carries.
     ///
-    /// On a lost race it is also **advisory**: it is read outside the row lock,
-    /// so it must not be reused blindly as a fencing token.
+    /// On a lost race it is also **advisory**: it is the version when the
+    /// precondition was checked and may have changed since, so it must not be
+    /// reused blindly as a fencing token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<i64>,
 

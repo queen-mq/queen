@@ -97,7 +97,7 @@ func TestTimerScheduleAcceptsBytesVerbatimAndPartition(t *testing.T) {
 
 func TestTimerDeliverAtIsConvertedToARelativeDelay(t *testing.T) {
 	// §4.2: only RELATIVE durations on the wire, never absolute instants — one
-	// clock, Postgres's, so no inter-broker skew can enter. `DeliverAt` is SDK
+	// clock, the broker's, so no inter-broker skew can enter. `DeliverAt` is SDK
 	// sugar converted at send time, exactly like the KV's `until`.
 	srv := newCaptureServer(t, okJSON(`{"results":[{"ok":true,"status":"scheduled","queue":"q","timerKey":"k","txn":"t","messageId":"m","deliverAt":"2026-08-17T10:00:00.000000Z"}]}`))
 	client := newWireClient(t, srv.URL)

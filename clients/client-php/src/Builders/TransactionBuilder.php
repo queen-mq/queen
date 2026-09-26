@@ -203,10 +203,8 @@ class TransactionBuilder
         ];
 
         // TOP-LEVEL arrays, never elements of `operations`, and OMITTED when
-        // empty. Omitted and not null: `"kv": null` is what a naive optional
-        // field produces, and the broker's jsonb_array_length would raise on a
-        // transaction that works today. A bundle with no riders is byte-for-byte
-        // the bundle this client has always sent.
+        // empty, never sent as null or []: a bundle with no riders is
+        // byte-for-byte the bundle this client has always sent.
         if ($this->kvOperations !== []) {
             $body['kv'] = array_values($this->kvOperations);
         }

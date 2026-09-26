@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The four outcomes the broker's segment-ack procedure branches on.
+/// The four outcomes the broker's ack path branches on.
 ///
 /// The wire accepts more spellings than this enum has variants:
 /// `completed`, `success`, `acked` and `ok` all normalize to

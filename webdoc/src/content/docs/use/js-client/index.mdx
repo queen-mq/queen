@@ -42,8 +42,8 @@ option table is in [Reference](/reference/sdk/javascript#constructor).
 <Render file="snippets/js-push" />
 
 The await returns the broker's array, one entry per item, each carrying a `status` of `queued`,
-`duplicate`, `buffered` or `failed`. Pass your own `transactionId` and the push becomes
-idempotent inside the dedup window.
+`duplicate` or `error`. Pass your own `transactionId` and the push becomes idempotent inside the
+dedup window.
 
 ## Consume
 
@@ -67,7 +67,7 @@ await client.ack(messages, true, { group: 'billing' })
 
 `ack()` takes one message or an array, and a status that is `true`/`false` or one of
 `completed`, `failed`, `retry`, `dlq`. A rejected ack still arrives as HTTP 200, so read
-`success` off each item. To ack the input and push the output in one PostgreSQL commit, use
+`success` off each item. To ack the input and push the output in one atomic commit, use
 [`client.transaction()`](/use/model#transactions).
 
 ## What differs here

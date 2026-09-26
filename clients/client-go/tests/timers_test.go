@@ -6,9 +6,9 @@
 // routes unregistered. The flag is gone (Alice, 2026-08-18): timers are part of
 // the engine, so these tests run against any broker.
 //
-// Queues and timer keys are all under the prefixes cleanupTestData purges: a
-// pending timer that outlived its test would fire into a queue that no longer
-// belongs to anybody.
+// Queue names and timer keys are unique per test, and a timer a test leaves
+// pending dies with the lane's broker (the harness destroys its raft volume
+// after the lane), so it can never fire into a later run's queues.
 
 package tests
 
@@ -44,7 +44,7 @@ func TestTimerSchedulePeekListCancel(t *testing.T) {
 		t.Fatalf("schedule: %v", err)
 	}
 	if !sched.OK || sched.Status != queen.TimerStatusScheduled {
-		t.Fatalf("schedule = %+v (is cleanupTestData purging queen.log_timers?)", sched)
+		t.Fatalf("schedule = %+v", sched)
 	}
 	// The message id is promised AT SCHEDULE: a client that knows it can
 	// correlate the delivered frame without a second API.

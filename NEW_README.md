@@ -31,7 +31,7 @@ It can manage 1M partitions easily, and those partitions are dynamic, created at
 
 Also, Queen is engineered in order to provide transactional features that allow you to offload to it a lot of complex application logic: with one unique Queen transaction is possible to: ACK (or NACK) a message, push to other queues, update counters in its own KV storage, set timers.
 
-Queen is multi tenant and uses a Raft group per tenant. It's architeture is engineered to be almost insensible to partition count and make transactions easy and fast.
+Queen is multi tenant, and can spread its tenants over several Raft groups, each with its own leader. It's architeture is engineered to be almost insensible to partition count and make transactions easy and fast.
 
 Queen is running in production at [Smartness](https://smartness.com), and it is tested with Jepsen.
 
@@ -68,14 +68,10 @@ fan-out and cache invalidation: the shapes that should not pay for replay and re
 - **Kafka clients connect directly.** Since 1.4.0 Queen speaks Kafka wire protocols, so an
 existing client moves over by changing its connection URL.
 
-- **The log lands in your data lake.** Since 1.5.0 a sink connector ships in the same image: it reads
-a queue through the broker's own API and writes JSONL or Parquet into any S3-compatible bucket,
-under a Hive layout DuckDB, Spark, Trino, ClickHouse and Snowflake read with nothing in front of
-them [reference/s3](https://queenmq.com/reference/s3).
-
-- **One binary, no sidecars.** Stateless, and curl is a first-class client · six SDKs (JavaScript,
+- **One binary, no sidecars, no database.** curl is a first-class client · six SDKs (JavaScript,
 Python, Go, Rust, C++, PHP/Laravel) plus `queenctl` · a dashboard served by the same binary on the
-same port · Prometheus metrics · JWT/JWKS auth · payload encryption · multi-tenant · HA replicas.
+same port · Prometheus metrics · JWT/JWKS auth · payload encryption · multi-tenant · Raft
+replication over three or five nodes.
 
 
 ## Published benchmarks
@@ -109,10 +105,10 @@ Full walkthrough in the [Quickstart](https://queenmq.com/start/quickstart).
 
 - **[The model](https://queenmq.com/use/model)**: queues, partitions, groups, offsets, leases, retention.
 - **[Transactions](https://queenmq.com/reference/http/transaction)**: bundle shape, rollback causes, the exactly-once boundary.
-- **[KV](https://queenmq.com/use/kv)** · **[Timers](https://queenmq.com/use/timers)** · **[Streams](https://queenmq.com/use/streams)** · **[Ephemeral](https://queenmq.com/use/ephemeral)** · **[S3 lake](https://queenmq.com/reference/s3)**: beyond push and pop.
-- **[Deploy](https://queenmq.com/deploy)** · [PostgreSQL](https://queenmq.com/deploy/postgres) · [HA](https://queenmq.com/deploy/ha) · [Kubernetes](https://queenmq.com/deploy/kubernetes) · [Kafka](https://queenmq.com/deploy/kafka) · [SQS](https://queenmq.com/deploy/sqs) · [S3 sink](https://queenmq.com/deploy/s3).
+- **[KV](https://queenmq.com/use/kv)** · **[Timers](https://queenmq.com/use/timers)** · **[Streams](https://queenmq.com/use/streams)** · **[Ephemeral](https://queenmq.com/use/ephemeral)**: beyond push and pop.
+- **[Deploy](https://queenmq.com/deploy)** · [HA](https://queenmq.com/deploy/ha) · [Kubernetes](https://queenmq.com/deploy/kubernetes) · [Operations](https://queenmq.com/deploy/operations) · [Kafka](https://queenmq.com/deploy/kafka).
 - **[Multi-tenant](https://queenmq.com/deploy/multi-tenant)** · [Proxy](https://queenmq.com/deploy/proxy) · [Isolation](https://queenmq.com/reference/multi-tenant/isolation).
-- **[Internals](https://queenmq.com/internals)**: storage model, life of a push and a pop, dedup, retention, mesh.
+- **[Internals](https://queenmq.com/internals)**: the replicated log, storage model, life of a push and a pop, dedup, retention.
 - **[Benchmarks](https://queenmq.com/benchmarks)** · [method and rig](https://queenmq.com/benchmarks/method) · [comparison](https://queenmq.com/start/compare).
 - **[HTTP reference](https://queenmq.com/reference/http)** · **[SDKs](https://queenmq.com/reference/sdk/javascript)**: routes and clients.
 

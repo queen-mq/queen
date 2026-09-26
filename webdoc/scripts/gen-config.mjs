@@ -1,37 +1,41 @@
 /**
- * Generate the broker's environment-variable reference from config.rs.
+ * Generate the broker's environment-variable reference.
  *
- * Every `env_bool/env_int/env_f64/env_str` call site becomes a row: name,
- * type, default. Nothing is transcribed by hand, so a new knob cannot ship
- * undocumented — an unclassified variable lands in the main table by default.
+ * Every `env_bool/env_int/env_f64/env_str/env_pct` call site in config.rs
+ * becomes a row: name, type, default. Nothing is transcribed by hand, so a new
+ * knob there cannot ship undocumented: an unclassified variable lands in the
+ * "Other" table by default.
  *
- * Four curated lists shape presentation only, never content:
- *   GROUPS       which section a variable belongs to
- *   EXPERIMENTAL variables the source itself marks as experiment-only
- *   INERT        variables still read (and logged) but no longer wired to
- *                anything
- *   INHERITS     nested `env_int("A", env_int("B", n))` sites where B is a
- *                different knob whose value A defaults to, not an older name
- *                for A. The parser cannot tell the two apart (both read as a
- *                nested call), and printing an inherited default under "Also
- *                read as" told operators to set a variable that does not
- *                configure the thing they were reading about. Every entry is
- *                checked against the parse below, so the list cannot drift
- *                away from config.rs without failing.
- * A variable in EXPERIMENTAL or INERT is still published — in its own table,
- * labelled — because silence is how the previous docs site went stale.
+ * The raft engine, the embedded proxy switch and a few request ceilings read
+ * their variables where they are used (`std::env::var` in the rsm modules and
+ * handlers) rather than through config.rs. Those are listed in EXTRA_VARS,
+ * each with the file that reads it and the default that file applies, and
+ * `verifyExtraSources` fails the generator when a listed file no longer names
+ * the variable, so the curated list cannot outlive the code.
+ *
+ * Two curated lists shape presentation only, never content:
+ *   GROUPS    which section a variable belongs to
+ *   INHERITS  nested `env_int("A", env_int("B", n))` sites where B is a
+ *             different knob whose value A defaults to, not an older name for
+ *             A. The parser cannot tell the two apart (both read as a nested
+ *             call), so every entry is checked against the parse below.
  */
 
 import { cell, emitPartial, isCheck, repoRead } from "./lib/source.mjs";
 
 const CONFIG = "server/src/config.rs";
-const EXTRA_SOURCES = ["server/src/fusion.rs (fusion-only overrides)"];
 
 // ---------------------------------------------------------------------------
 // Parse
 // ---------------------------------------------------------------------------
 
-const TYPE_OF = { env_bool: "boolean", env_int: "integer", env_f64: "number", env_str: "string" };
+const TYPE_OF = {
+  env_bool: "boolean",
+  env_int: "integer",
+  env_f64: "number",
+  env_str: "string",
+  env_pct: "number (percent)",
+};
 
 /** Read a balanced argument list starting at the char after `(`. */
 function readArgs(text, openParenIdx) {
@@ -82,7 +86,7 @@ function splitArgs(s) {
 
 function parseEnvVars(text) {
   const vars = new Map();
-  const re = /\b(env_bool|env_int|env_f64|env_str)\(/g;
+  const re = /\b(env_bool|env_int|env_f64|env_str|env_pct)\(/g;
   let m;
   while ((m = re.exec(text))) {
     const kind = m[1];
@@ -97,7 +101,7 @@ function parseEnvVars(text) {
     // consulted when A is unset, and the innermost literal is the real default.
     const aliases = [];
     let inner = def;
-    while (/^&?env_(bool|int|f64|str)\(/.test(inner)) {
+    while (/^&?env_(bool|int|f64|str|pct)\(/.test(inner)) {
       const innerArgs = splitArgs(readArgs(inner, inner.indexOf("(")));
       const innerName = innerArgs[0]?.match(/^"([^"]+)"$/);
       if (innerName) aliases.push(innerName[1]);
@@ -122,159 +126,380 @@ function parseEnvVars(text) {
   return vars;
 }
 
-/** `std::env::var("X")` sites outside the helpers — fusion's local overrides. */
-function parseRawEnvVars(text) {
-  const names = new Set();
-  const re = /std::env::var\(\s*"([A-Z][A-Z0-9_]*)"\s*\)/g;
-  let m;
-  while ((m = re.exec(text))) names.add(m[1]);
-  return names;
-}
-
 // ---------------------------------------------------------------------------
 // Curated presentation
 // ---------------------------------------------------------------------------
 
 const GROUPS = [
-  ["Server", (n) => ["PORT", "QUEEN_BIND_ADDR", "QUEEN_SERVER_ID", "HOSTNAME", "QUEEN_MAX_BODY_BYTES", "QUEEN_APPLY_SCHEMA"].includes(n)],
-  ["PostgreSQL", (n) => n.startsWith("PG_") || n.startsWith("DB_") || n === "QUEEN_STMT_TIMEOUT_MS"],
-  ["Authentication", (n) => n.startsWith("JWT_")],
-  ["Multi-broker mesh", (n) => n.startsWith("QUEEN_MESH_") || n.startsWith("QUEEN_SYNC_") || n.startsWith("QUEEN_UDP_") || n === "QUEEN_CACHE_REFRESH_INTERVAL_MS"],
-  ["Consume and long-poll", (n) => n.startsWith("POP_") || n === "DEFAULT_TIMEOUT" || n === "DEFAULT_SUBSCRIPTION_MODE" || n.startsWith("QUEEN_POP_")],
-  ["Storage engine", (n) => n.startsWith("QUEEN_V2_") || n.startsWith("QUEEN_DEDUP") || n.startsWith("QUEEN_ACK_") || n.startsWith("QUEEN_HOTLIST")],
-  // The `QUEEN_VEGAS_*` and `QUEEN_SEG_*` knobs this group used to name went
-  // out with the Vegas limiter; config.rs now only warns at boot when one is
-  // still set, so none of them is an `env_*` call site and this group matched
-  // nothing at all. Admission is what governs concurrency now, and its twelve
-  // knobs were landing in the unclassified "Other" bucket.
-  ["Admission and flow control", (n) => n.startsWith("QUEEN_ADMISSION")],
-  ["Background jobs", (n) => n.startsWith("RETENTION") || n.startsWith("STATS_") || n === "RETAINED_BYTES_INTERVAL_MS" || n.startsWith("PARTITION_CLEANUP") || n === "QUEEN_PARTITION_CLEANUP_ENABLED" || n.startsWith("METRICS_")],
-  ["Durability spool", (n) => n.startsWith("FILE_BUFFER")],
-  ["Security", (n) => n.startsWith("QUEEN_ENCRYPTION") || n === "QUEEN_TENANCY_HEADER"],
-  // Roughly forty knobs, and without this group every one of them lands under
-  // "Other" next to the pool gauges. `QUEEN_SWEEPER` has no underscore suffix
-  // and would fall out of a prefix-only test.
+  ["Server", (n) => ["PORT", "QUEEN_BIND_ADDR", "QUEEN_SERVER_ID", "HOSTNAME", "QUEEN_MAX_BODY_BYTES"].includes(n)],
+  // Before the raft group: the timer fire and the KV sweep are `QUEEN_RAFT_*`
+  // names, but an operator looks for them next to the rest of KV and timers.
   ["Key/value state, timers and the sweeper", (n) =>
-    n.startsWith("QUEEN_KV_") || n.startsWith("QUEEN_TIMERS_") || n === "QUEEN_SWEEPER" || n.startsWith("QUEEN_SWEEPER_")],
+    n.startsWith("QUEEN_KV_") || n.startsWith("QUEEN_TIMERS_") || n.startsWith("QUEEN_SWEEPER_") ||
+    n.startsWith("QUEEN_RAFT_TIMER_") || n.startsWith("QUEEN_RAFT_KV_SWEEP") || n === "QUEEN_STMT_TIMEOUT_MS"],
+  ["Retention and background jobs", (n) =>
+    n.startsWith("RETENTION") || n.startsWith("PARTITION_CLEANUP") || n === "QUEEN_PARTITION_CLEANUP_ENABLED" ||
+    n === "QUEEN_RAFT_RETENTION_VISIT" || n === "QUEEN_RAFT_TXN_WINDOW_MIN_S" || n === "QUEEN_RAFT_TRACE_RETENTION_S" ||
+    n.startsWith("METRICS_") || n.startsWith("QUEEN_DASH_")],
+  ["Storage and replication", (n) => n.startsWith("QUEEN_RAFT_") || n === "QUEEN_QLOG_SHARDS" || n === "QUEEN_TENANT_GROUPS"],
+  ["Authentication", (n) => n.startsWith("JWT_")],
+  ["Consume and long-poll", (n) => n.startsWith("POP_") || n === "DEFAULT_TIMEOUT" || n === "DEFAULT_SUBSCRIPTION_MODE"],
+  ["Security and tenancy", (n) => n.startsWith("QUEEN_ENCRYPTION") || n === "QUEEN_TENANCY_HEADER"],
+  ["Ephemeral queues", (n) => n.startsWith("QUEEN_EPHEMERAL_")],
+  ["Embedded proxy and Kafka facade", (n) => n === "QUEEN_PROXY_EMBEDDED" || n === "QUEEN_PROXY_PORT" || n.startsWith("QUEEN_KAFKA_")],
   ["Logging", (n) => n === "LOG_LEVEL" || n === "RUST_LOG" || n.startsWith("QUEEN_LOG")],
 ];
 
 /**
- * Nested defaults that are an inheritance, not an alias.
- *
- * `env_int("QUEEN_ACK_FUSION_SHARDS", env_int("QUEEN_V2_FUSION_SHARDS", 8))`
- * parses identically to `env_int("QUEEN_MESH_PORT", env_int("QUEEN_UDP_NOTIFY_PORT",
- * 6633))`, but the two mean opposite things. `QUEEN_UDP_NOTIFY_PORT` is the
- * older name for the same port and setting either one configures the mesh.
- * `QUEEN_V2_FUSION_SHARDS` is the push fusion shard count, a live knob of its
- * own: the ack fusion and hot-list shard counts merely start from whatever it
- * is set to. Setting it moves three things, and setting the outer name moves
- * only one. `verifyInherits` below asserts each entry against the parse, so
- * the list fails the build rather than outliving the code.
+ * Nested defaults that are an inheritance, not an alias. None today: the one
+ * nested site left in config.rs, `env_int("DEFAULT_TIMEOUT",
+ * env_int("POP_DEFAULT_TIMEOUT_MS", 30000))`, is a genuine alias (either name
+ * sets the pop wait). `verifyInherits` still checks every entry against the
+ * parse, so a future entry fails the build rather than outliving the code.
  */
-const INHERITS = new Map([
-  ["QUEEN_MESH_BIND_ADDR", "QUEEN_BIND_ADDR"],
-  ["QUEEN_ACK_FUSION_SHARDS", "QUEEN_V2_FUSION_SHARDS"],
-  ["QUEEN_HOTLIST_SHARDS", "QUEEN_V2_FUSION_SHARDS"],
-]);
-
-/** The source itself calls these experiment knobs, not product contracts. */
-const EXPERIMENTAL = new Map([
-  ["QUEEN_V2_FUSION_MIN_FRAMES", "fusion.rs: “a knob for experiments, not a product contract”"],
-  ["QUEEN_V2_FUSION_MIN_WAIT_MS", "fusion.rs: “a knob for experiments, not a product contract”"],
-  ["QUEEN_V2_BUNDLE_MAX", "fusion.rs: internal override only"],
-  ["QUEEN_V2_FUSION_MAX_INFLIGHT", "fusion.rs: internal override only"],
-]);
+const INHERITS = new Map();
 
 /**
- * Variables resolved outside the `env_*` helpers, so the parser cannot see
- * them, plus the one whose config.rs call site is a boot-log placeholder
- * rather than the real default.
+ * Variables resolved outside the `env_*` helpers of config.rs, so the parser
+ * cannot see them, plus the ones whose config.rs call site binds a derived
+ * value the parser would publish by name. `source` is the file that reads the
+ * variable; `verifyExtraSources` checks it still does.
  */
 const EXTRA_VARS = [
+  // --- Server
   {
-    name: "PG_DATABASE",
+    name: "QUEEN_SERVER_ID",
     type: "string",
-    def: "postgres",
-    aliases: ["PG_DB"],
-    // config.rs :: resolve_db_name — an explicitly empty value falls through.
+    def: "HOSTNAME, else a random queen-<hex> name",
+    aliases: [],
+    source: CONFIG, // resolve_server_id reads it with std::env::var
   },
   {
     name: "QUEEN_MAX_BODY_BYTES",
     type: "integer",
     def: "67108864 (64 MiB)",
     aliases: [],
-    // Applied in main.rs as a DefaultBodyLimit layer; config.rs only echoes it
-    // into the boot log.
+    source: "server/src/handlers/raft.rs", // the router's DefaultBodyLimit
+  },
+  // --- Storage and replication: server/src/rsm
+  {
+    name: "QUEEN_RAFT_REPLICATOR",
+    type: "string",
+    def: "local (openraft for a cluster)",
+    aliases: [],
+    source: "server/src/rsm/replicator/node.rs",
   },
   {
-    name: "QUEEN_ADMISSION_INIT",
-    type: "integer",
-    def: "96 (two thirds of DB_POOL_SIZE minus QUEEN_ADMISSION_POOL_RESERVE)",
+    name: "QUEEN_RAFT_NODE_ID",
+    type: "string",
+    def: "1 (a number from 1, or ordinal)",
     aliases: [],
-    // config.rs :: admission_floor — derived from the pool rather than a
-    // literal, so the parser reads back the binding name. Stated here as the
-    // value the defaults actually produce (160 - 16, two thirds).
+    source: "server/src/rsm/replicator/raft/cluster.rs",
   },
   {
-    name: "QUEEN_ADMISSION_MIN",
-    type: "integer",
-    def: "96 (two thirds of DB_POOL_SIZE minus QUEEN_ADMISSION_POOL_RESERVE)",
+    name: "QUEEN_RAFT_PEERS",
+    type: "string",
+    def: "(empty: a single voter)",
     aliases: [],
-    // Same derived floor as QUEEN_ADMISSION_INIT.
+    source: "server/src/rsm/replicator/raft/cluster.rs",
   },
   {
-    name: "QUEEN_KV_POOL_SIZE",
-    type: "integer",
-    def: "16 (DB_POOL_SIZE / 10, clamped to 4..32)",
+    name: "QUEEN_RAFT_LISTEN",
+    type: "string",
+    def: "0.0.0.0 at this node's raft port in QUEEN_RAFT_PEERS",
     aliases: [],
-    // config.rs :: kv_pool_default — the call site's second argument is a
-    // function call, so the parser read back `kv_pool_default(pool_size` (an
-    // unbalanced fragment, which is what a truncated expression looks like when
-    // it reaches a table cell). Derived on purpose, with the same precedent as
-    // admission_floor: this pool IS the bulkhead, and a bulkhead sized
-    // independently of the pool it protects stops protecting it the moment
-    // DB_POOL_SIZE moves.
+    source: "server/src/rsm/replicator/raft/cluster.rs",
   },
+  {
+    name: "QUEEN_RAFT_TOKEN",
+    type: "string",
+    def: "(empty)",
+    aliases: [],
+    source: "server/src/rsm/replicator/raft/cluster.rs",
+  },
+  {
+    name: "QUEEN_RAFT_JOIN",
+    type: "boolean",
+    def: "false",
+    aliases: [],
+    source: "server/src/rsm/replicator/raft/mod.rs",
+  },
+  {
+    name: "QUEEN_RAFT_FORCE_RECOVER",
+    type: "integer",
+    def: "(empty)",
+    aliases: [],
+    source: "server/src/rsm/replicator/raft/mod.rs",
+  },
+  {
+    name: "QUEEN_RAFT_ELECTION_MS",
+    type: "integer",
+    def: "1000 on a cluster, 150 on a single node",
+    aliases: [],
+    source: "server/src/rsm/replicator/raft/mod.rs",
+  },
+  {
+    name: "QUEEN_RAFT_HEARTBEAT_MS",
+    type: "integer",
+    def: "100 on a cluster, 50 on a single node",
+    aliases: [],
+    source: "server/src/rsm/replicator/raft/mod.rs",
+  },
+  {
+    name: "QUEEN_RAFT_PURGE_HOLD_S",
+    type: "integer",
+    def: "600",
+    aliases: [],
+    source: "server/src/rsm/replicator/raft/mod.rs",
+  },
+  {
+    name: "QUEEN_RAFT_GROUPS",
+    type: "integer",
+    def: "1 (at most 64)",
+    aliases: [],
+    source: "server/src/rsm/facade/groups.rs",
+  },
+  {
+    name: "QUEEN_TENANT_GROUPS",
+    type: "string",
+    def: "(empty: placement by hash)",
+    aliases: [],
+    source: "server/src/rsm/facade/groups.rs",
+  },
+  {
+    name: "QUEEN_QLOG_SHARDS",
+    type: "integer",
+    def: "0 (one log per queue; at most 4096)",
+    aliases: [],
+    source: "server/src/rsm/qlog/set.rs",
+  },
+  // --- Retention and background jobs: the leader's maintenance cadence
+  {
+    name: "RETENTION_INTERVAL",
+    type: "integer",
+    def: "5000",
+    aliases: [],
+    source: "server/src/rsm/batcher.rs",
+  },
+  {
+    name: "RETENTION_BATCH_SIZE",
+    type: "integer",
+    def: "1000",
+    aliases: [],
+    source: "server/src/rsm/batcher.rs",
+  },
+  {
+    name: "PARTITION_CLEANUP_DAYS",
+    type: "integer",
+    def: "30",
+    aliases: [],
+    source: "server/src/rsm/batcher.rs",
+  },
+  {
+    name: "QUEEN_PARTITION_CLEANUP_ENABLED",
+    type: "boolean",
+    def: "true",
+    aliases: [],
+    source: "server/src/rsm/batcher.rs",
+  },
+  {
+    name: "QUEEN_RAFT_RETENTION_VISIT",
+    type: "integer",
+    def: "8192",
+    aliases: [],
+    source: "server/src/rsm/batcher.rs",
+  },
+  {
+    name: "QUEEN_RAFT_TXN_WINDOW_MIN_S",
+    type: "integer",
+    def: "900",
+    aliases: [],
+    source: "server/src/rsm/batcher.rs",
+  },
+  {
+    name: "QUEEN_RAFT_TRACE_RETENTION_S",
+    type: "integer",
+    def: "604800 (7 days)",
+    aliases: [],
+    source: "server/src/rsm/batcher.rs",
+  },
+  {
+    name: "METRICS_FLUSH_MS",
+    type: "integer",
+    def: "60000 (at least 1000)",
+    aliases: [],
+    source: "server/src/rsm/dashboard/collector.rs",
+  },
+  {
+    name: "QUEEN_DASH_NODE_RETENTION_H",
+    type: "integer",
+    def: "168",
+    aliases: [],
+    source: "server/src/rsm/dashboard/store.rs",
+  },
+  {
+    name: "QUEEN_DASH_QUEUE_RETENTION_H",
+    type: "integer",
+    def: "24",
+    aliases: [],
+    source: "server/src/rsm/dashboard/store.rs",
+  },
+  {
+    name: "QUEEN_DASH_MAX_QUEUE_ROWS",
+    type: "integer",
+    def: "500000",
+    aliases: [],
+    source: "server/src/rsm/dashboard/store.rs",
+  },
+  // --- Key/value state, timers and the sweeper
   {
     name: "QUEEN_KV_REQUIRE_GRANT",
     type: "boolean",
     def: "the value of QUEEN_TENANCY_HEADER (so: false)",
     aliases: [],
+    source: CONFIG,
     // config.rs binds the default to the resolved `tenancy_header`, and the
-    // parser published the binding NAME as the default. Derived so that turning
-    // tenancy on makes a missing quota row a denial rather than a permission,
-    // while a self-hosted operator — who is their own customer — configures
-    // nothing.
+    // parser would publish the binding NAME as the default.
   },
   {
-    name: "QUEEN_TIMERS_MAX_PAYLOAD_BYTES",
+    name: "QUEEN_KV_MAX_VALUE_BYTES",
     type: "integer",
-    def: "1048576 (1 MiB), further narrowed to the plan's max_payload_bytes",
+    def: "65536",
     aliases: [],
-    // The literal in config.rs is only the absolute half of
-    // min(1 MiB, plan.max_payload_bytes); the plan half is applied in the proxy.
-    // Publishing the literal alone would read as a ceiling a tenant can rely on,
-    // and the whole reason the value is a minimum is that a timer becomes a
-    // message: an independent ceiling here would be a service entrance past the
-    // plan's own payload limit.
+    source: "server/src/handlers/kv.rs",
   },
   {
-    name: "QUEEN_HOTLIST_RESEED_WINDOW_MS",
+    name: "QUEEN_KV_MAX_OPS_PER_CALL",
     type: "integer",
-    def: "120000 (max of 4x QUEEN_HOTLIST_RESEED_MS and 120000)",
+    def: "256",
     aliases: [],
-    // config.rs parses a literal 0 and then REWRITES it before load() returns,
-    // so the scraped default would publish 0 — which reads as "no window" and
-    // is the opposite of what the broker applies. Stated here as the value the
-    // defaults actually produce.
+    source: "server/src/handlers/kv.rs",
+  },
+  {
+    name: "QUEEN_KV_MAX_KEYS_PER_CALL",
+    type: "integer",
+    def: "1024",
+    aliases: [],
+    source: "server/src/handlers/kv.rs",
+  },
+  {
+    name: "QUEEN_TIMERS_MAX_HORIZON_S",
+    type: "integer",
+    def: "7776000 (90 days)",
+    aliases: [],
+    source: "server/src/handlers/timers.rs",
+  },
+  {
+    name: "QUEEN_TIMERS_MAX_OPS_PER_CALL",
+    type: "integer",
+    def: "256",
+    aliases: [],
+    source: "server/src/handlers/timers.rs",
+  },
+  {
+    name: "QUEEN_RAFT_TIMER_TICK_MS",
+    type: "integer",
+    def: "50 (0: timers never fire)",
+    aliases: [],
+    source: "server/src/rsm/batcher.rs",
+  },
+  {
+    name: "QUEEN_RAFT_TIMER_FIRE_BATCH",
+    type: "integer",
+    def: "256",
+    aliases: [],
+    source: "server/src/rsm/planner/timers.rs",
+  },
+  {
+    name: "QUEEN_RAFT_TIMER_FIRE_MAX_BYTES",
+    type: "integer",
+    def: "4194304 (4 MiB)",
+    aliases: [],
+    source: "server/src/rsm/planner/timers.rs",
+  },
+  {
+    name: "QUEEN_SWEEPER_BACKOFF_MIN_MS",
+    type: "integer",
+    def: "1000",
+    aliases: [],
+    source: "server/src/rsm/planner/timers.rs",
+  },
+  {
+    name: "QUEEN_SWEEPER_BACKOFF_MAX_MS",
+    type: "integer",
+    def: "60000",
+    aliases: [],
+    source: "server/src/rsm/planner/timers.rs",
+  },
+  {
+    name: "QUEEN_SWEEPER_TRANSIENT_BACKOFF_MS",
+    type: "integer",
+    def: "1000",
+    aliases: [],
+    source: "server/src/rsm/planner/timers.rs",
+  },
+  {
+    name: "QUEEN_SWEEPER_MAX_ATTEMPTS",
+    type: "integer",
+    def: "5",
+    aliases: [],
+    source: "server/src/rsm/planner/timers.rs",
+  },
+  {
+    name: "QUEEN_RAFT_KV_SWEEP_MS",
+    type: "integer",
+    def: "1000",
+    aliases: [],
+    source: "server/src/rsm/batcher.rs",
+  },
+  {
+    name: "QUEEN_RAFT_KV_SWEEP_LIMIT",
+    type: "integer",
+    def: "512",
+    aliases: [],
+    source: "server/src/rsm/batcher.rs",
+  },
+  // --- Ephemeral queues
+  {
+    name: "QUEEN_EPHEMERAL_REQUIRE_GRANT",
+    type: "boolean",
+    def: "the value of QUEEN_TENANCY_HEADER (so: false)",
+    aliases: [],
+    source: CONFIG,
+  },
+  // --- Embedded proxy and Kafka facade
+  {
+    name: "QUEEN_PROXY_EMBEDDED",
+    type: "boolean",
+    def: "false",
+    aliases: [],
+    source: "server/src/proxy_embed.rs",
+  },
+  {
+    name: "QUEEN_PROXY_PORT",
+    type: "string",
+    def: "(empty: the proxy fronts PORT)",
+    aliases: [],
+    source: "server/src/proxy_embed.rs",
+  },
+  {
+    name: "QUEEN_KAFKA_THREADS",
+    type: "integer",
+    def: "min(4, cores / 2), at least 1",
+    aliases: [],
+    source: "server/src/kafka_inproc.rs",
+  },
+  {
+    name: "QUEEN_KAFKA_OFFSET_STORE",
+    type: "string",
+    def: "positions (or kv)",
+    aliases: [],
+    source: "server/src/kafka_inproc.rs",
   },
 ];
 
-/** Still parsed and logged at boot, but wired to nothing. */
-const INERT = new Map([
-  ["QUEEN_V2_FUSION_FRAMES", "kept for env compatibility; no longer a flush trigger (fusion.rs)"],
-]);
+/** Files EXTRA_VARS cites, for the partial's source header. */
+const EXTRA_SOURCES = [...new Set(EXTRA_VARS.map((v) => v.source).filter((s) => s !== CONFIG))].sort();
 
 function groupOf(name) {
   for (const [g, test] of GROUPS) if (test(name)) return g;
@@ -307,30 +532,37 @@ function verifyInherits(vars) {
   }
 }
 
+/**
+ * Every EXTRA_VARS row is a claim that a file reads a variable. Check it: a
+ * renamed or removed knob fails the generator instead of staying documented.
+ */
+function verifyExtraSources() {
+  const cache = new Map();
+  for (const v of EXTRA_VARS) {
+    if (!cache.has(v.source)) cache.set(v.source, repoRead(v.source));
+    if (!cache.get(v.source).includes(`"${v.name}"`)) {
+      throw new Error(`EXTRA_VARS says ${v.source} reads ${v.name}, and it no longer names it`);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 function main() {
   const check = isCheck();
   const configText = repoRead(CONFIG);
-  const fusionText = repoRead("server/src/fusion.rs");
 
   const vars = parseEnvVars(configText);
-  if (vars.size < 60) {
-    throw new Error(`only parsed ${vars.size} env vars out of ${CONFIG} — the parser is broken`);
+  if (vars.size < 40) {
+    throw new Error(`only parsed ${vars.size} env vars out of ${CONFIG}: the parser is broken`);
   }
 
-  // fusion.rs reads a few knobs directly rather than through Config.
-  for (const name of parseRawEnvVars(fusionText)) {
-    if (!vars.has(name)) vars.set(name, { name, type: "integer", def: "see notes", aliases: [] });
-  }
+  verifyExtraSources();
   for (const v of EXTRA_VARS) vars.set(v.name, v);
 
   verifyInherits(vars);
 
-  const all = [...vars.values()].sort((a, b) => a.name.localeCompare(b.name));
-  const main_ = all.filter((v) => !EXPERIMENTAL.has(v.name) && !INERT.has(v.name));
-  const experimental = all.filter((v) => EXPERIMENTAL.has(v.name));
-  const inert = all.filter((v) => INERT.has(v.name));
+  const main_ = [...vars.values()].sort((a, b) => a.name.localeCompare(b.name));
 
   const byGroup = new Map();
   for (const v of main_) {
@@ -340,17 +572,21 @@ function main() {
   }
 
   const lines = [];
+  const inheritColumn = INHERITS.size > 0;
   lines.push(
     `The broker is configured entirely through environment variables: ` +
       `${main_.length} of them, listed below with the defaults the code actually applies. ` +
       `Booleans go through one strict parser: an unparseable value is a fatal boot error, ` +
       `while unset and empty both fall back to the default.`,
     "",
-    `Two columns record what a variable falls back to. **Also read as** is an older name for ` +
-      `the same setting: either name configures the same thing, and the row's name wins when ` +
-      `both are set. **Default inherited from** is a different knob whose value this one starts ` +
-      `at when it is unset: setting that knob moves this variable and everything else that ` +
-      `inherits from it, while setting this variable moves only this one.`,
+    inheritColumn
+      ? `Two columns record what a variable falls back to. **Also read as** is an older name for ` +
+          `the same setting: either name configures the same thing, and the row's name wins when ` +
+          `both are set. **Default inherited from** is a different knob whose value this one starts ` +
+          `at when it is unset: setting that knob moves this variable and everything else that ` +
+          `inherits from it, while setting this variable moves only this one.`
+      : `**Also read as** is an older name for the same setting: either name configures the same ` +
+          `thing, and the row's name wins when both are set.`,
     "",
   );
 
@@ -358,42 +594,21 @@ function main() {
     const rows = byGroup.get(g);
     if (!rows?.length) continue;
     lines.push(`### ${g}`, "");
-    lines.push("| Variable | Type | Default | Default inherited from | Also read as |");
-    lines.push("| --- | --- | --- | --- | --- |");
+    if (inheritColumn) {
+      lines.push("| Variable | Type | Default | Default inherited from | Also read as |");
+      lines.push("| --- | --- | --- | --- | --- |");
+    } else {
+      lines.push("| Variable | Type | Default | Also read as |");
+      lines.push("| --- | --- | --- | --- |");
+    }
     for (const v of rows) {
       const inherited = INHERITS.has(v.name) ? `\`${INHERITS.get(v.name)}\`` : "";
       const aliases = inherited ? "" : v.aliases.map((a) => `\`${a}\``).join(", ");
-      lines.push(`| \`${v.name}\` | ${v.type} | \`${cell(v.def)}\` | ${inherited} | ${aliases} |`);
-    }
-    lines.push("");
-  }
-
-  if (experimental.length) {
-    lines.push(`### Experiment-only`, "");
-    lines.push(
-      `These exist to run experiments against the storage engine. The source marks them as ` +
-        `such, they are not part of any compatibility promise, and a deployment should not set them.`,
-      "",
-    );
-    lines.push("| Variable | Default | Why it is not a product knob |");
-    lines.push("| --- | --- | --- |");
-    for (const v of experimental) {
-      lines.push(`| \`${v.name}\` | \`${cell(v.def)}\` | ${cell(EXPERIMENTAL.get(v.name))} |`);
-    }
-    lines.push("");
-  }
-
-  if (inert.length) {
-    lines.push(`### Read but inert`, "");
-    lines.push(
-      `The broker still parses these and still prints them in its boot configuration block, ` +
-        `so they look live in a log. They change nothing.`,
-      "",
-    );
-    lines.push("| Variable | Default | Status |");
-    lines.push("| --- | --- | --- |");
-    for (const v of inert) {
-      lines.push(`| \`${v.name}\` | \`${cell(v.def)}\` | ${cell(INERT.get(v.name))} |`);
+      lines.push(
+        inheritColumn
+          ? `| \`${v.name}\` | ${v.type} | \`${cell(v.def)}\` | ${inherited} | ${aliases} |`
+          : `| \`${v.name}\` | ${v.type} | \`${cell(v.def)}\` | ${aliases} |`,
+      );
     }
     lines.push("");
   }

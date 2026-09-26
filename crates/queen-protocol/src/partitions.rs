@@ -1,4 +1,4 @@
-//! `POST /api/v1/partitions/changed` — partition discovery (PLAN_S3_SINK.md §5.1).
+//! `POST /api/v1/partitions/changed` — partition discovery.
 //!
 //! The only route that lists partition **names**. `GET /api/v1/resources/queues`
 //! answers a per-queue count, which is enough for a Kafka-shaped queue whose
@@ -22,10 +22,10 @@
 //!
 //! Both page through the opaque [`ChangedResult::next`] cursor.
 //!
-//! ## `lastWriteAt` is quantized, and what that costs
+//! ## `lastWriteAt` moves during a sweep, and what that costs
 //!
-//! The broker updates a partition's `lastWriteAt` at most once per second (it
-//! keeps the allocator's row update HOT), and it only ever moves **forward**.
+//! The broker updates a partition's `lastWriteAt` whenever a write to it
+//! applies, and it only ever moves **forward**.
 //! So a partition written to during a paged sweep can appear on a LATER page as
 //! well — seen twice, never missed. A caller must therefore be idempotent in
 //! what it does per partition, and may never treat "already seen this sweep" as
@@ -65,10 +65,10 @@ pub struct ChangedEntry {
     /// (`2026-09-04T10:00:00.000000Z`). Absent = enumerate every partition of
     /// the queue instead.
     ///
-    /// PostgreSQL parses it, so anything it accepts as a `timestamptz` is
-    /// accepted here; anything else is a `400` for the whole request naming the
-    /// offending literal. A value without a zone offset is read in the
-    /// database's session timezone — always send the `Z` form.
+    /// The broker reads `YYYY-MM-DDTHH:MM:SS`, an optional fraction, and `Z` or
+    /// a `±HH:MM` offset; a value with no designator reads as UTC. A value it
+    /// cannot parse is treated as absent, so that entry enumerates every
+    /// partition — always send the `Z` form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
 
@@ -167,8 +167,8 @@ pub struct ChangedPartition {
     /// When this partition was last written to, ISO-8601 at microsecond
     /// precision, always UTC (`2026-09-04T10:00:01.000000Z`).
     ///
-    /// **Quantized to one second** by the broker and monotonically
-    /// non-decreasing — see the module header for what a caller owes that.
+    /// Monotonically non-decreasing — see the module header for what a caller
+    /// owes that.
     #[serde(rename = "lastWriteAt")]
     pub last_write_at: String,
 }
@@ -224,29 +224,16 @@ impl ChangedResult {
 /// The answer, with the watermark that makes a time window a deterministic set.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChangedResponse {
-    /// **No record that will ever be committed to this cluster can carry a `ts`
-    /// at or below this instant.** ISO-8601, microseconds, UTC — the same
-    /// spelling and the same clock as [`crate::fetch::FetchRecord::ts`], which
-    /// is the whole point: the two are comparable, and a reader that closes a
-    /// window at or below `safeTime` can re-read that window after a crash and
-    /// get exactly the same records back.
-    ///
-    /// It is derived from the database's own clock and from the oldest
-    /// in-flight transaction, so it lags `now()` by at least a few seconds and
-    /// by as much as the longest open transaction. **Never compare it to a
-    /// local `SystemTime`** — a reader that does is wrong by construction.
+    /// ISO-8601, microseconds, UTC — the same spelling as
+    /// [`crate::fetch::FetchRecord::ts`]. On the 2.0 broker it is the wall
+    /// clock of the node that answered, read when it answered. **Never compare
+    /// it to a local `SystemTime`**.
     #[serde(rename = "safeTime")]
     pub safe_time: String,
 
-    /// `true` when the broker could not read `pg_stat_activity` across roles
-    /// and fell back to a fixed floor (`now() - QUEEN_FETCH_SAFE_FLOOR_MS`,
-    /// default 30 s) instead of the oldest open transaction.
-    ///
-    /// The value is still safe to use — the fallback is the conservative arm —
-    /// but it is not derived from the transactions actually running, so a write
-    /// statement that outlives the floor would not be covered by it. It is
-    /// normal and permanent on a cell whose broker connects as a role without
-    /// `pg_read_all_stats`; log it once and carry on, do not stall on it.
+    /// Always `false` from the 2.0 broker. A 1.x broker set it when it fell
+    /// back to a fixed floor instead of deriving `safeTime` from its open
+    /// transactions.
     #[serde(rename = "safeTimeDegraded")]
     pub safe_time_degraded: bool,
 
@@ -271,14 +258,12 @@ impl ChangedResponse {
 mod tests {
     use super::*;
 
-    /// A response byte for byte as the broker emits one.
+    /// A response byte for byte as a 1.x broker emitted one.
     ///
-    /// The body is composed by `033_log_partitions_changed.sql` as a `jsonb`
-    /// and returned by the handler verbatim, so the wire carries PostgreSQL's
-    /// own rendering: keys ordered by (length, then bytewise) rather than by
-    /// source order, and `", "` / `": "` separators. None of that is contract —
+    /// Its rendering orders keys by (length, then bytewise) rather than by
+    /// source order, with `", "` / `": "` separators. None of that is contract —
     /// no caller may depend on key order — but this literal is transcribed from
-    /// a real answer so the types are exercised against what actually arrives.
+    /// a real answer so the types are exercised against a real rendering.
     ///
     /// Three entries covering everything one response can hold: a queue with a
     /// filled page (`next` non-null), a queue whose sweep is finished
@@ -356,8 +341,8 @@ mod tests {
 
     #[test]
     fn the_degraded_watermark_is_a_flag_and_not_an_error() {
-        // The masked-`pg_stat_activity` arm: still a 200, still a usable
-        // watermark, with one boolean saying how it was derived.
+        // The degraded arm (a 1.x broker's fixed-floor fallback): still a 200,
+        // still a usable watermark, with one boolean saying how it was derived.
         let wire = r#"{"entries": [], "safeTime": "2026-09-04T10:04:27.000000Z", "safeTimeDegraded": true}"#;
         let got: ChangedResponse = serde_json::from_str(wire).unwrap();
         assert!(got.safe_time_degraded);

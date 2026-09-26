@@ -229,7 +229,7 @@ function decompressBounded(stored, budget) {
  *   'error'      the base64 or the zstd frame did not decode, `error` says so
  *
  * `bytes` is the size AFTER decompression (what the consumer will receive);
- * `storedBytes` is what the row occupies in Postgres. They differ exactly when
+ * `storedBytes` is the payload as the broker stores it. They differ exactly when
  * payloadZstd is true, and showing both is the only way the console can say
  * whether a client's compression is doing anything.
  */

@@ -1,4 +1,6 @@
-//! WP-2.10: the embedded facade on the single-node RSM, with no Postgres.
+//! The embedded facade on the single-node state machine, end to end. The three
+//! `docs:start` regions are the snippets the docs site publishes
+//! (webdoc/scripts/gen-snippets.mjs).
 
 use queen::protocol as qp;
 use queen::{Broker, BrokerConfig};
@@ -31,14 +33,96 @@ fn group_all_params(group: &str) -> qp::PopParams {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn embedded_raft_runs_admin_message_dlq_and_observability_without_postgres() {
+async fn embedded_broker_runs_the_message_path_admin_dlq_and_observability() {
     let dir = std::env::temp_dir().join(unique("queen-embedded-raft"));
     let queue = unique("queue");
     // The host's disk usage is not under test: the gate closes only on a full
     // disk (the default 85% refused the first push on a 91%-full dev machine).
-    let broker = Broker::start(BrokerConfig::new().raft(&dir).raft_disk_pct(100.0, 100.0))
+    std::env::set_var("QUEEN_RAFT_DISK_HIGH_PCT", "100");
+    std::env::set_var("QUEEN_RAFT_DISK_LOW_PCT", "100");
+    // docs:start(embedded-start)
+    let broker = Broker::start(BrokerConfig::new().raft(&dir))
         .await
-        .expect("embedded raft boot");
+        .expect("broker start");
+    // docs:end
+
+    // ------------------------------------ push, dedup, pop, transaction
+    let q = unique("emb-q");
+    let q2 = unique("emb-q2");
+    let group = "emb-workers";
+    broker
+        .configure(
+            &qp::ConfigureRequest::new(q.clone()).options(qp::QueueOptions {
+                dedup_window_seconds: Some(300),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("configure q");
+    let txn_id = unique("emb-txn");
+    // docs:start(embedded-push)
+    let first = broker
+        .push(vec![
+            qp::PushItem::new(q.clone(), serde_json::json!({"n": 1}))
+                .transaction_id(txn_id.clone()),
+            qp::PushItem::new(q.clone(), serde_json::json!({"n": 2})),
+            qp::PushItem::new(q.clone(), serde_json::json!({"n": 3})),
+        ])
+        .await
+        .expect("push");
+    // docs:end
+    assert_eq!(first.len(), 3);
+    assert!(
+        first.iter().all(|r| r.status == qp::PushStatus::Queued),
+        "all first pushes queued: {first:?}"
+    );
+    // Same explicit transactionId again -> dedup.
+    let dup = broker
+        .push(vec![qp::PushItem::new(
+            q.clone(),
+            serde_json::json!({"n": 1}),
+        )
+        .transaction_id(txn_id.clone())])
+        .await
+        .expect("dup push");
+    assert_eq!(dup[0].status, qp::PushStatus::Duplicate, "{dup:?}");
+
+    let popped = broker.pop(&q, &group_all_params(group)).await.expect("pop");
+    assert_eq!(popped.messages.len(), 3, "{popped:?}");
+    // Handoff: ack message[0] and push its successor to q2, guarded by the lease.
+    let m0 = &popped.messages[0];
+    // docs:start(embedded-transaction)
+    let txn = broker
+        .transaction(
+            &qp::TransactionRequest::new(vec![
+                qp::TxnOperation::Ack(qp::TxnAckOperation {
+                    transaction_id: m0.transaction_id.clone(),
+                    partition_id: m0.partition_id.clone(),
+                    status: qp::AckStatus::Completed,
+                    consumer_group: Some(group.to_string()),
+                    lease_id: Some(m0.lease_id.clone()),
+                    error: None,
+                }),
+                qp::TxnOperation::Push {
+                    items: vec![qp::TxnPushItem::new(
+                        q2.clone(),
+                        serde_json::json!({"stage": 2}),
+                    )],
+                },
+            ])
+            .with_required_leases([m0.lease_id.clone()]),
+        )
+        .await
+        .expect("transaction");
+    assert!(txn.success, "transaction must commit: {txn:?}");
+    // docs:end
+    assert_eq!(txn.results.len(), 2, "{txn:?}");
+    let handed = broker
+        .pop(&q2, &group_all_params(group))
+        .await
+        .expect("pop q2");
+    assert_eq!(handed.messages.len(), 1, "{handed:?}");
+    assert_eq!(handed.messages[0].data, serde_json::json!({"stage": 2}));
 
     let configured = broker
         .configure(&qp::ConfigureRequest::new(queue.clone()))
@@ -119,10 +203,7 @@ async fn embedded_raft_runs_admin_message_dlq_and_observability_without_postgres
 
     let metrics = broker.metrics().await.expect("metrics");
     assert_eq!(metrics["engine"], "raft", "{metrics}");
-    // The legacy pool block stays for dashboard compatibility, with no SQL
-    // connections behind it.
-    assert_eq!(metrics["database"]["poolSize"], 0, "{metrics}");
-    assert_eq!(metrics["database"]["idleConnections"], 0, "{metrics}");
+    assert!(metrics.get("database").is_none(), "{metrics}");
     let health = broker.health().await.expect("health");
     assert_eq!(health["status"], "healthy", "{health}");
     assert!(broker
@@ -141,7 +222,7 @@ async fn embedded_raft_runs_admin_message_dlq_and_observability_without_postgres
         .expect("delete grouped queue");
     assert!(grouped_deleted.deleted, "{grouped_deleted:?}");
 
-    assert_eq!(broker.shutdown().await, 0);
+    broker.shutdown().await;
     drop(broker);
     let _ = std::fs::remove_dir_all(dir);
 }

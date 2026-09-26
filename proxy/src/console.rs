@@ -17,10 +17,10 @@
 //! Host label, or the session's `x-queen-act-cluster` on a SHARED host, and a
 //! Host that names nothing is a 421 (withheld until the credential is valid on
 //! a listener that has shared hosts) — refuse a cluster that is suspended or
-//! being deleted, exactly as the data plane does, require a store — pxdb, or
-//! the broker's KV in the single binary; every read and write goes through
-//! `store::web` (503 `{"code":"not_configured"}` in dev-static mode — there
-//! is no user/key table to serve without one), then lift the session cookie into a synthetic
+//! being deleted, exactly as the data plane does, require a store — the
+//! broker's KV; every read and write goes through `store::web` (503
+//! `{"code":"not_configured"}` without one — there is no user/key table to
+//! serve), then lift the session cookie into a synthetic
 //! `Authorization: Bearer` header when the request has no Authorization
 //! header of its own, and hand off to `auth::authenticate` verbatim — so JWT
 //! verification, the revocation deny-list, and cluster-role resolution
@@ -56,22 +56,20 @@ use crate::limits::PushBlock;
 use crate::state::{ClusterCtx, ClusterStatus, EffectiveLimits, Features, Principal, Role, St};
 use crate::store::web;
 
-/// Scopes an api_keys row (and `queen_proxy.issue_api_key`) accepts — mirrors
-/// the CHECK constraint on `queen_proxy.api_keys.scopes` (001_init.sql).
+/// Scopes an api_keys row (and `issue_api_key`) accepts — mirrors the
+/// store's own check.
 const VALID_SCOPES: [&str; 4] = ["produce", "consume", "admin", "read"];
 
-/// Roles a cluster_roles row (and `queen_proxy.grant_cluster_role`) accepts —
-/// mirrors the CHECK constraint on `queen_proxy.cluster_roles.role`
-/// (001_init.sql) and the same list inside grant_cluster_role (004_lifecycle).
+/// Roles a cluster_roles row (and `grant_cluster_role`) accepts — mirrors the
+/// list inside grant_cluster_role.
 const VALID_ROLES: [&str; 4] = ["admin", "producer", "consumer", "viewer"];
 
 // ---------------------------------------------------------------------------
 // router
 // ---------------------------------------------------------------------------
 
-/// API routes, meant to be `.nest("/api/console", console::router())` — see
-/// the report for the exact main.rs diff. Paths below are relative to that
-/// mount point.
+/// API routes, mounted as `.nest("/api/console", console::router())` (app.rs).
+/// Paths below are relative to that mount point.
 pub fn router() -> Router<St> {
     Router::new()
         .route("/overview", get(overview))
@@ -80,7 +78,7 @@ pub fn router() -> Router<St> {
         .route("/keys/:id", delete(delete_key))
         // Members are addressed by email, not by id: an email is what an admin
         // types, and it is the only handle `grant_cluster_role` /
-        // `revoke_cluster_role` (004_lifecycle.sql) take. It is carried in the
+        // `revoke_cluster_role` take. It is carried in the
         // JSON body rather than the path on DELETE too, so the address never
         // has to survive percent-encoding — same-origin axum, no intermediary
         // that could strip a DELETE body.
@@ -125,11 +123,10 @@ async fn console_ctx(st: &St, headers: &HeaderMap) -> Result<(Arc<ClusterCtx>, U
     };
     // The SAME gate the data plane runs (gateway::status_gate), and it runs
     // here for the same reason: a wipe's first step is
-    // `set_tenant_status(deleting)`, which is documented — in
-    // proxy/migrations/007_tenant_delete.sql and in the broker's
-    // 031_tenant_purge.sql — as the step that stops the tenant's traffic. It
-    // did not stop the console: /api/console/* is nested separately in main.rs
-    // and never reaches gateway::handle, so an admin session on a tenant
+    // `set_tenant_status(deleting)`, which is documented as the step that
+    // stops the tenant's traffic. It did not stop the console:
+    // /api/console/* is nested separately in app.rs and never reaches
+    // gateway::handle, so an admin session on a tenant
     // mid-wipe could still read the console AND mint live API keys on it. A
     // suspended tenant is refused for the same reason: the console mutates
     // (keys, members, roles), and "suspended" that still issues credentials is
@@ -153,8 +150,7 @@ async fn console_ctx(st: &St, headers: &HeaderMap) -> Result<(Arc<ClusterCtx>, U
     }
 }
 
-/// A store behind the console: pxdb (standalone) or the broker's KV (single
-/// binary). Only dev-static has none.
+/// A store behind the console: the broker's KV.
 fn require_db(st: &St) -> Result<(), Response> {
     if st.store.is_some() {
         Ok(())
@@ -195,7 +191,7 @@ async fn overview(State(st): State<St>, headers: HeaderMap) -> Response {
         }
         Err(e) if e.is_unavailable() => {
             tracing::warn!(target: "console", err = %e, "overview: pool.get failed");
-            return errors::err_502("pxdb unavailable");
+            return errors::err_502("store unavailable");
         }
         Err(e) => {
             tracing::warn!(target: "console", err = %e, "overview: plan/usage query failed");
@@ -222,7 +218,7 @@ async fn overview(State(st): State<St>, headers: HeaderMap) -> Response {
         // these are the same ones gateway.rs turns into a 403 on Produce, so a
         // tenant reading this page can never be told they are fine while their
         // pushes are being rejected. `storage` comes from registry.rs summing
-        // the broker's per-queue retainedBytes (with hysteresis) via main.rs's
+        // the broker's per-queue retainedBytes (with hysteresis) via app.rs's
         // pump; `monthly_quota` from the rollup task.
         "push_block": push_block.map(push_block_str),
         "storage": {
@@ -316,7 +312,7 @@ async fn usage(State(st): State<St>, headers: HeaderMap, Query(q): Query<UsageQu
         Ok(r) => r,
         Err(e) if e.is_unavailable() => {
             tracing::warn!(target: "console", err = %e, "usage: pool.get failed");
-            return errors::err_502("pxdb unavailable");
+            return errors::err_502("store unavailable");
         }
         Err(e) => {
             tracing::warn!(target: "console", err = %e, "usage: query failed");
@@ -362,7 +358,7 @@ async fn list_keys(State(st): State<St>, headers: HeaderMap) -> Response {
         Ok(r) => r,
         Err(e) if e.is_unavailable() => {
             tracing::warn!(target: "console", err = %e, "list_keys: pool.get failed");
-            return errors::err_502("pxdb unavailable");
+            return errors::err_502("store unavailable");
         }
         Err(e) => {
             tracing::warn!(target: "console", err = %e, "list_keys: query failed");
@@ -416,7 +412,7 @@ async fn create_key(State(st): State<St>, headers: HeaderMap, Json(body): Json<C
         Ok(id) => id,
         Err(e) if e.is_unavailable() => {
             tracing::warn!(target: "console", err = %e, "create_key: pool.get failed");
-            return errors::err_502("pxdb unavailable");
+            return errors::err_502("store unavailable");
         }
         Err(e) => {
             tracing::warn!(target: "console", err = %e, "create_key: issue_api_key failed");
@@ -425,7 +421,7 @@ async fn create_key(State(st): State<St>, headers: HeaderMap, Json(body): Json<C
     };
 
     // issue_api_key() already appends its own operations row (actor =
-    // 'control_plane', 002_functions.sql) -- this is the SECOND, deliberately
+    // 'control_plane') -- this is the SECOND, deliberately
     // user-attributed row the task brief asks for ("scrivi operations via
     // record_operation (actor user)"). record_operation's own header comment
     // earmarks exactly this caller shape ("a future self-serve admin API
@@ -440,7 +436,7 @@ async fn create_key(State(st): State<St>, headers: HeaderMap, Json(body): Json<C
         json!({ "name": name, "scopes": body.scopes }),
     )
     .await;
-    // The NOTIFY issue_api_key sends on Postgres, for the single binary.
+    // This node's caches see the new key at once.
     web::invalidate_local(&st, &[ctx.cluster_id]);
 
     json_ok(json!({ "id": id, "key": plaintext }))
@@ -458,7 +454,7 @@ async fn delete_key(State(st): State<St>, headers: HeaderMap, Path(key_id): Path
         return err_400("invalid_request", "malformed key id");
     }
 
-    // `queen_proxy.revoke_api_key(uuid)` (002_functions.sql) looks the key up
+    // `revoke_api_key(uuid)` looks the key up
     // GLOBALLY by id -- it takes no cluster_id and never checks one. Enforce
     // cluster ownership HERE so a console admin on cluster A can never revoke
     // cluster B's key even by guessing/observing its uuid; see report.
@@ -466,7 +462,7 @@ async fn delete_key(State(st): State<St>, headers: HeaderMap, Path(key_id): Path
         Ok(owned) => owned,
         Err(e) if e.is_unavailable() => {
             tracing::warn!(target: "console", err = %e, "delete_key: pool.get failed");
-            return errors::err_502("pxdb unavailable");
+            return errors::err_502("store unavailable");
         }
         Err(e) => {
             tracing::warn!(target: "console", err = %e, "delete_key: ownership check failed");
@@ -506,15 +502,13 @@ fn validate_scopes(scopes: &[String]) -> Result<(), &'static str> {
 // ---------------------------------------------------------------------------
 // GET /members, POST /members, DELETE /members
 //
-// `queen_proxy.cluster_roles` is what every gate above reads, and until now
-// nothing wrote it at runtime: a second human on a cluster needed a
-// hand-written INSERT. Writes go through `queen_proxy.grant_cluster_role` /
-// `revoke_cluster_role` (004_lifecycle.sql), never through direct DML, so the
-// same-tenant check, the audit row and the invalidation notify all stay in the
-// one place that implements them.
+// `cluster_roles` is what every gate above reads. Writes go through
+// `grant_cluster_role` / `revoke_cluster_role` (store::web), never through
+// direct writes, so the same-tenant check, the audit row and the invalidation
+// all stay in the one place that implements them.
 // ---------------------------------------------------------------------------
 
-/// Password hashes are on `queen_proxy.users` — never read out here, never
+/// Password hashes are on `users` — never read out here, never
 /// returned. Same discipline as `key_hash`.
 async fn list_members(State(st): State<St>, headers: HeaderMap) -> Response {
     let (ctx, _user_id, role) = match console_ctx(&st, &headers).await {
@@ -528,7 +522,7 @@ async fn list_members(State(st): State<St>, headers: HeaderMap) -> Response {
         Ok(r) => r,
         Err(e) if e.is_unavailable() => {
             tracing::warn!(target: "console", err = %e, "list_members: pool.get failed");
-            return errors::err_502("pxdb unavailable");
+            return errors::err_502("store unavailable");
         }
         Err(e) => {
             tracing::warn!(target: "console", err = %e, "list_members: query failed");
@@ -589,7 +583,7 @@ async fn grant_member(State(st): State<St>, headers: HeaderMap, Json(body): Json
         Ok(None) => return errors::err_404("not_found", "no such user in this cluster's tenant"),
         Err(e) if e.is_unavailable() => {
             tracing::warn!(target: "console", err = %e, "grant_member: pool.get failed");
-            return errors::err_502("pxdb unavailable");
+            return errors::err_502("store unavailable");
         }
         Err(e) => {
             tracing::warn!(target: "console", err = %e, "grant_member: user lookup failed");
@@ -660,7 +654,7 @@ async fn revoke_member(State(st): State<St>, headers: HeaderMap, Json(body): Jso
             Ok(None) => return errors::err_404("not_found", "no such member on this cluster"),
             Err(e) if e.is_unavailable() => {
                 tracing::warn!(target: "console", err = %e, "revoke_member: pool.get failed");
-                return errors::err_502("pxdb unavailable");
+                return errors::err_502("store unavailable");
             }
             Err(e) => {
                 tracing::warn!(target: "console", err = %e, "revoke_member: member lookup failed");
@@ -715,7 +709,7 @@ fn validate_role(raw: &str) -> Result<String, &'static str> {
 /// Whether applying `new_role` (None = revoke) to a member currently holding
 /// `current_role` would leave the cluster with no admin at all. A cluster with
 /// no admin can never be administered again through the console — no endpoint
-/// here can create the first admin back, that takes control-plane SQL — so
+/// here can create the first admin back, that takes the control plane — so
 /// this is refused rather than merely warned about. It covers self-demotion
 /// and self-revocation too: the caller is an admin, so a sole admin removing
 /// themselves is exactly `admin_count == 1`.
@@ -729,7 +723,7 @@ fn would_orphan_admins(current_role: Option<&str>, admin_count: i64, new_role: O
     admin_count <= 1
 }
 
-/// Append a `queen_proxy.operations` row attributed to the console user (see
+/// Append a `operations` row attributed to the console user (see
 /// `create_key`'s call site for why this exists alongside issue_api_key's own
 /// internal audit row). Best-effort: never fails the request (no store, an
 /// unreachable one, or a refused row are skipped silently or warned).
@@ -832,9 +826,9 @@ fn spa_rel_path(path: &str) -> &str {
     }
 }
 
-/// SPA handler for `GET /console` and `GET /console/*` (mounted by main.rs —
-/// see report). Serves the embedded, Vite-built `console/dist`, falling back
-/// to `index.html` for any path with no matching built asset (client-side tab
+/// SPA handler for `GET /console` and `GET /console/*` (mounted by app.rs).
+/// Serves the embedded, Vite-built `console/dist`, falling back to
+/// `index.html` for any path with no matching built asset (client-side tab
 /// state on a hard refresh / deep link). 404 only when the SPA was never
 /// built at all (no `index.html` in the embed).
 pub async fn spa(uri: Uri) -> Response {

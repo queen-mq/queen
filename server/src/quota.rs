@@ -43,18 +43,18 @@
 //!     `proxy/src/registry.rs:441-449`: block above the cap, release only under
 //!     `release_percent` of it. Fast block, slow release. The other way round is
 //!     a tenant that oscillates in and out of the block on every refresh;
-//!   * the write path pays ONE HASHMAP LOOKUP AND NO SQL. That is the property
-//!     that makes this legal at all.
+//!   * the write path pays ONE HASHMAP LOOKUP. That is the property that makes
+//!     this legal at all.
 //!
 //! ---------------------------------------------------------------------------
 //! THE DELTA IS A MAJORANT, NEVER A RECONCILIATION
 //!
-//! The gate charges what a call COULD write, before the database says what it
-//! did: a `put` over an existing key adds no row, and the stored procedure does
-//! not report that per op. Overestimating blocks a little early; underestimating
+//! The gate charges what a call COULD write, before the call says what it did:
+//! a `put` over an existing key adds no row, and the answer does not report
+//! that per op. Overestimating blocks a little early; underestimating
 //! blocks late. Only the second is unsafe, so the delta is deliberately an upper
 //! bound and the next refresh — not an adjustment — is what corrects it. A call
-//! that was charged and then FAILED is refunded, because a database outage that
+//! that was charged and then FAILED is refunded, because an outage that
 //! inflated every delta would turn a cell fault (503, "not your fault") into a
 //! plan verdict (403, "yours"), and §12 says a stale or failed rollup must block
 //! nothing.
@@ -814,125 +814,6 @@ pub fn from_config(cfg: &crate::config::Config) -> Arc<Quotas> {
         write_rate: cfg.kv_write_rate,
         write_burst: cfg.kv_write_burst,
         hot_ratio: cfg.kv_quota_hot_percent as f64 / 100.0,
-    })
-}
-
-static REFRESH_ERR: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
-
-fn parse(txt: &str) -> Vec<TenantRow> {
-    let v: serde_json::Value = match serde_json::from_str(txt) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    let Some(arr) = v.as_array() else {
-        return Vec::new();
-    };
-    arr.iter()
-        .filter_map(|t| {
-            let tenant = t.get("tenant")?.as_str()?.to_string();
-            let granted = t.get("granted").and_then(|x| x.as_bool()).unwrap_or(false);
-            let num = |k: &str| t.get(k).and_then(|x| x.as_i64());
-            let small = |k: &str| num(k).map(|n| n.clamp(0, u32::MAX as i64) as u32);
-            Some(TenantRow {
-                tenant,
-                // A tenant with usage but NO quota row carries no limits at all,
-                // which the gate reads as "unlimited, unless a grant is
-                // required". The distinction is the whole of §9.4 point 1 and it
-                // must survive the JSON: `granted:false` is not the same as
-                // `enabled:false`, and collapsing them would either deny a
-                // tenant the operator never restricted or admit one they never
-                // authorised.
-                limits: granted.then(|| Limits {
-                    enabled: t.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true),
-                    max_rows: num("maxRows"),
-                    max_bytes: num("maxBytes"),
-                    max_timers: num("maxTimers"),
-                    max_timer_horizon_s: num("maxHorizonS"),
-                    max_reads_per_sec: small("maxReadsPerSec"),
-                    max_writes_per_sec: small("maxWritesPerSec"),
-                }),
-                measure: Measure {
-                    kv_rows: num("kvRows").unwrap_or(0),
-                    kv_bytes: num("kvBytes").unwrap_or(0),
-                    timer_rows: num("timerRows").unwrap_or(0),
-                    computed_at_ms: num("computedAtMs").unwrap_or(0),
-                },
-            })
-        })
-        .collect()
-}
-
-/// One refresh. Separated from the loop so the boot can await ONE before the
-/// listener opens: with `require_grant` on, an empty snapshot denies, and a cell
-/// that answered `feature_gated` to everybody for the first 30 seconds of every
-/// rollout would look exactly like an outage.
-pub async fn refresh_once(
-    q: &Quotas,
-    pool: &deadpool_postgres::Pool,
-    max_tenants: usize,
-) -> Result<usize, String> {
-    let client = pool.get().await.map_err(|e| e.to_string())?;
-    let txt = crate::db::kv_quota_refresh(&client, max_tenants.clamp(1, i32::MAX as usize) as i32)
-        .await
-        .map_err(|e| {
-            // Name the 42883 case, because it is the broker-new/database-old
-            // shape and its remedy is one environment variable away.
-            match e.as_db_error().map(|d| d.code().code().to_string()) {
-                Some(code) if code.starts_with("42") => format!(
-                    "{code}: queen.kv_quota_refresh_v1 is missing or does not match — apply the \
-                     schema (QUEEN_APPLY_SCHEMA=1) and restart"
-                ),
-                _ => e.to_string(),
-            }
-        })?;
-    let rows = parse(&txt);
-    let n = rows.len();
-    q.refresh(rows);
-    Ok(n)
-}
-
-/// The periodic refresh. EVERY broker runs it, including one with
-/// `QUEEN_SWEEPER=false`: that broker does not produce the measurement, but it
-/// still has to enforce against it.
-///
-/// Returns the handle so the embedded broker can abort it on `shutdown()`; the
-/// binary simply drops it, as it does for every other background loop.
-pub fn spawn_refresh(
-    q: Arc<Quotas>,
-    pool: deadpool_postgres::Pool,
-    interval_ms: u64,
-    max_tenants: usize,
-) -> tokio::task::JoinHandle<()> {
-    let interval = std::time::Duration::from_millis(interval_ms.max(1000));
-    tracing::info!(
-        target: "quota",
-        interval_ms = interval.as_millis() as u64,
-        max_tenants,
-        require_grant = q.k.require_grant,
-        "kv/timers quota refresh started"
-    );
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(interval).await;
-            match refresh_once(&q, &pool, max_tenants).await {
-                Ok(n) => {
-                    tracing::debug!(target: "quota", tenants = n, hot = q.hot(), "quota refreshed");
-                }
-                Err(e) => {
-                    // Logged and swallowed: the loop must survive a transient DB
-                    // outage, and a stale measurement blocks nothing by itself —
-                    // the local delta keeps accumulating against the last one it
-                    // adopted, which remains a correct lower bound (§12).
-                    if let Some(suppressed) = REFRESH_ERR.tick_now() {
-                        tracing::warn!(
-                            target: "quota", error = %e, suppressed,
-                            "quota refresh failed; the enforcer keeps using the last measurement \
-                             plus its local delta, so nothing is unblocked by this"
-                        );
-                    }
-                }
-            }
-        }
     })
 }
 

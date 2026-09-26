@@ -19,7 +19,7 @@ do and handed the batch to somebody else, and the somebody else found no flag.
 The flag was not written too slowly. It was in the wrong place. Living in a second data system, it
 could not commit with the acknowledgement, so there was always an interval in which one of the two
 existed and the other did not, and that interval is where the work happens twice. The correction is
-structural: put the marker in the database that already holds the queue, and write it in the same
+structural: put the marker in the broker that already holds the queue, and write it in the same
 transaction as the ack. A marker without its acknowledgement, and an acknowledgement without its
 marker, then stop being representable.
 
@@ -82,7 +82,7 @@ nothing will ever delete. Pick a TTL comfortably longer than the window in which
 still possible, which means longer than the lease times the retry budget, and long enough to answer
 a support question afterwards. The programs here use an hour. They never use `forever`: an example
 that runs in CI and writes an immortal row is one bad assertion away from leaving state in a shared
-database that nothing removes.
+broker that nothing removes.
 
 ## Where the guarantee stops
 
@@ -90,7 +90,7 @@ The atomic pair is the marker and the acknowledgement. It is not the marker and 
 
 If the process dies after the charge and before the commit, the money moved and no marker exists,
 so the redelivery charges again. Nothing in a broker can close that window, because the effect is
-outside the database that would have to roll it back. What the pattern does is make the window as
+outside the broker that would have to roll it back. What the pattern does is make the window as
 small as one commit, and make every failure on either side of it consistent: before the commit
 nothing happened, after the commit both things happened.
 
@@ -98,8 +98,8 @@ That leaves one job for you, and it is one line: give the payment provider the s
 you used for the marker. The order id is already the natural one. Then the residual window closes
 against the provider's own ledger rather than against a hope.
 
-The exception, and it is the only one, is the case where the effect is itself a row in this
-PostgreSQL: a push onto another queue, an acknowledgement, another KV write. Those go inside the
+The exception, and it is the only one, is the case where the effect is itself a write to this
+broker: a push onto another queue, an acknowledgement, another KV write. Those go inside the
 same bundle and inherit its atomicity exactly, and for them the phrase "exactly once" is literal
 rather than aspirational. The related caveat about a lost **response** rather than a lost commit,
 and the deterministic `transactionId` that answers it, is on
@@ -134,4 +134,5 @@ non-zero if it does not hold. The runner takes a language name to run one of the
 own, for example `examples/apps/run.sh js`. Each phase ends on a **count** with a deadline behind
 it rather than on a quiet interval, because a program that stops when nothing has arrived for a
 while passes on a broker that delivered nothing at all. And each run purges what it wrote, markers
-included: they are rows in their own table, so deleting the queue does not take them along.
+included: they live in the key/value store rather than in the queue, so deleting the queue does not
+take them along.

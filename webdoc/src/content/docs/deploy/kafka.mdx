@@ -1,13 +1,16 @@
 ---
 title: Kafka facade
-description: "Running queen-kafka beside a broker or a proxy, embedded in the broker, or as a cluster of two or three: every environment variable it reads, the advertised-address footgun, the TLS and SASL pair, and what a client has to change to reach it."
+description: "Running the Kafka facade inside the broker process, alone or on every node of a cluster: every environment variable it reads, the advertised-address footgun, the TLS and SASL pair, and what a client has to change to reach it."
 type: how-to
 tier: operate
 sidebar:
   order: 12
   label: Kafka facade
 sourceOfTruth:
-  - protocols/queen-kafka/src/main.rs
+  - server/src/kafka_inproc.rs
+  - server/src/main.rs
+  - server/src/config.rs
+  - protocols/queen-kafka/src/boot.rs
   - protocols/queen-kafka/src/lib.rs
   - protocols/queen-kafka/src/conn.rs
   - protocols/queen-kafka/src/tls.rs
@@ -17,45 +20,43 @@ sourceOfTruth:
   - protocols/queen-kafka/src/coordinator/mod.rs
   - protocols/queen-kafka/src/cluster/registry.rs
   - protocols/queen-kafka/src/txn.rs
-  - server/src/kafka_facade.rs
   - proxy/src/routes.rs
   - proxy/src/kafka_kv.rs
   - proxy/src/kafka_identity.rs
   - Dockerfile
-  - .github/workflows/docker-build.yml
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): classify gained the two DLQ replay arms and the messages family is now method-bounded; the facade's own route classes and the offset-commit note are unchanged.
 ---
 
-`queen-kafka` is a separate binary that speaks the Kafka wire protocol on one port and plain
-HTTP to Queen on another. It is a client of Queen like any SDK is: it holds no database
-connection, embeds no broker, and stores nothing durable of its own. What a Kafka client can do
-through it, and what it deliberately cannot, is [the protocol reference](/reference/kafka).
+The Kafka facade speaks the Kafka wire protocol on a port of its own and Queen's API on the inside.
+It is part of the broker binary and runs inside the broker process: there is no second binary to
+deploy and no child process. It stores nothing durable of its own: the records are Queen messages,
+committed offsets are Queen consumer-group positions (or key/value rows, see
+[where offsets live](#where-committed-offsets-live)), and topic records and the node registry are
+rows in Queen's key/value store.
+What a Kafka client can do through it, and what it deliberately cannot, is
+[the protocol reference](/reference/kafka).
 
 <Aside type="note">
-The facade ships **in the broker image**. `ghcr.io/queen-mq/queen` carries `bin/queen-kafka` beside
-the broker binary from 1.4.0 on, so pulling the broker pulls the facade and there is no second
-artifact to track. `QUEEN_KAFKA_EMBEDDED=true` is the only thing that starts it: left unset, nothing
-here is read and the image behaves exactly as it did before. What is narrower than the broker's own
-guarantees is the verification: the facade is checked by its own compatibility suite rather than by
-a released client matrix, and the deviations at the bottom of [the protocol
-reference](/reference/kafka) are the ones known today rather than a closed list.
+`QUEEN_KAFKA_EMBEDDED=true` is the only thing that starts it: left unset, nothing here is read and the
+broker behaves exactly as it does without it. What is narrower than the broker's own guarantees is the
+verification: the facade is checked by its own compatibility suite rather than by a released client
+matrix, and the deviations at the bottom of [the protocol reference](/reference/kafka) are the ones
+known today rather than a closed list.
 </Aside>
 
 ## The two shapes
 
-**Beside the broker (self-hosted).** The facade runs next to a broker, points `QUEEN_URL` at it,
-and carries one `QUEEN_TOKEN` for the whole listener. Every Kafka client on that port reaches
-Queen as that one identity, so the Kafka port inherits exactly the trust boundary the broker's
-own port has: keep it on the same private network, behind the same perimeter. This is the shape
-the compatibility rig runs and the one to start with.
+**In the broker (self-hosted).** The facade runs in the broker process and reaches the broker's
+router in-process, and carries one `QUEEN_TOKEN` for the whole listener when the broker has
+authentication on. Every Kafka client on that port reaches Queen as that one identity, so the Kafka
+port inherits exactly the trust boundary the broker's own port has: keep it on the same private
+network, behind the same perimeter. This is the shape the compatibility rig runs and the one to start
+with.
 
-**Beside the proxy (Cloud).** The facade points `QUEEN_URL` at a cell's proxy, turns on TLS and
-SASL/PLAIN, and each connection presents its own tenant token as the SASL password. That token
-is then the bearer on every call that connection makes, so tenancy, quota, metering and freeze
-are the proxy's, unchanged. `QUEEN_KAFKA_FORWARD_SNI_HOST` turns the TLS server name the client
-dialled into the `Host` header of those calls, which is how a proxy that routes by hostname
-finds the cluster.
+**Behind the proxy (Cloud).** The facade points `QUEEN_URL` at the proxy's port, turns on TLS and
+SASL/PLAIN, and each connection presents its own tenant token as the SASL password. That token is
+then the bearer on every call that connection makes, so tenancy, quota, metering and freeze are the
+proxy's, unchanged. `QUEEN_KAFKA_FORWARD_SNI_HOST` turns the TLS server name the client dialled into
+the `Host` header of those calls, which is how a proxy that routes by hostname finds the cluster.
 
 The Cloud shape produces **and consumes**. `POST /api/v1/fetch`, the route the facade's Fetch and
 ListOffsets both ride, is classified `Consume` by the proxy (`proxy/src/routes.rs`), which is
@@ -68,7 +69,7 @@ somebody: a fetch is metered as a request and not as a delivery, so Kafka consum
 the delivery bucket today, and the long poll is `maxWaitMs` in the body rather than `wait=true` in
 the query, so the proxy's parked-connection gauge does not see it.
 
-**Committed offsets no longer need the `kv` feature.** They ride `POST /api/v1/kv`, but a batch
+**Committed offsets do not need the `kv` feature.** They ride `POST /api/v1/kv`, but a batch
 that touches only the facade's reserved `qk:` key prefix is reclassified `Consume` at the gateway,
 so a consumer commits and reads its offsets on a plan that carries no `kv` feature at all, and a
 tenant over its storage quota can still move its cursor. Refusing that would strand a consumer at an
@@ -84,119 +85,85 @@ simply travel through different route classes, and which way that should be made
 decided. See [the proxy route classes](/reference/multi-tenant/endpoints).
 </Aside>
 
-## Build and run
-
-The crate is standalone, so it builds on its own manifest and produces one binary. Running it
-inside the broker's own process tree instead is [embedded mode](#embedded-in-the-broker).
+## Turning it on
 
 ```bash
-cargo build --release --manifest-path protocols/queen-kafka/Cargo.toml
-QUEEN_URL=http://localhost:6632 \
-QUEEN_KAFKA_ADVERTISED_ADDR=kafka.internal.example.com:9092 \
-  ./protocols/queen-kafka/target/release/queen-kafka
+QUEEN_KAFKA_EMBEDDED=true
+QUEEN_KAFKA_ADVERTISED_ADDR=kafka.internal.example.com:9092
 ```
 
-Every value is validated before the listener binds, and a bad one is a fatal boot with a message
-naming the variable. That is deliberate: a Kafka facade that starts on bad configuration does not
-fail, it lies. Clients bootstrap successfully and then fail on the connection they were told to
-make, one step away from the cause.
+The listener binds `QUEEN_KAFKA_ADDR`, `0.0.0.0:9092` by default. Every value is validated before the
+broker's listeners bind, and a bad one is a fatal boot with a message naming the variable. That is
+deliberate: a Kafka facade that starts on bad configuration does not fail, it lies. Clients bootstrap
+successfully and then fail on the connection they were told to make, one step away from the cause.
+`QUEEN_KAFKA_ADVERTISED_ADDR` is the one knob with no default, and boot refuses to continue without it.
 
 Two rules hold for every variable below. A value that does not parse is a boot failure and never
 a silent fall back to the default, because the default is not there to paper over a typo. And a
 variable that is present but empty or whitespace-only counts as unset, because an empty value in
 a Compose file or a Helm template is a variable somebody meant to set.
 
-## Embedded in the broker
+## Inside the broker process
 
-`QUEEN_KAFKA_EMBEDDED=true` makes the broker spawn and supervise the facade as a child process,
-wired to the broker's own listener over loopback and derived from the address that listener actually
-bound, so `PORT=0` and a wildcard bind both come out right. One deployment, two processes, one
-image.
+The facade's own work, accepting, decoding and encoding the Kafka wire, the record envelope and
+compression, runs on a runtime of its own whose threads are named `queen-kafka`
+(`QUEEN_KAFKA_THREADS`, default `min(4, cores / 2)`, at least 1). Every call into the broker is
+handed to the broker's own runtime, so a Kafka load spike cannot occupy the broker's workers with
+protocol work. What the two share is the state machine: a Kafka produce is a Queen push, and a Kafka
+fetch is Queen's `POST /api/v1/fetch`, through the same pipeline every Queen client uses.
 
-It is a child and not a library on purpose. The facade is a protocol server with its own accept
-loop, its own connection budget and its own decompression arena, and the broker is built with
-`panic = "abort"`, so a malformed Produce that walked the decompressor into an allocation failure
-would take the broker down rather than one task. A child keeps the blast radius at the facade: it
-dies, the broker keeps serving, and the supervisor brings it back on a backoff that doubles from one
-second to a thirty second ceiling and resets after an hour of healthy running.
+The facade still speaks Queen's API, routes, JSON and status codes, but its transport is the
+broker's router called as a service, with no socket in between. Routing, authentication, tenancy,
+push admission and follower forwarding are the ones every HTTP client meets: a full admission
+budget is a `429`, which the facade answers to its client as `throttle_time_ms`. The facade's own
+key/value calls, topic records, the node registry and offsets kept as key/value rows, go to the
+state machine directly, authorised like the KV route but without the tenant KV rate limit. With the
+proxy running in the same process, the facade still reaches the broker router itself, never the
+proxy's edge: it authenticates its own clients.
 
-These three are read by the **broker**, not by the facade:
+### Where committed offsets live
 
-| Variable | Default | What it is |
-| --- | --- | --- |
-| `QUEEN_KAFKA_EMBEDDED` | `false` | `true` spawns the facade. Off, nothing in the supervisor is read and the broker behaves exactly as it always did, which is why the binary can ship in the default image without changing what the default image does. |
-| `QUEEN_KAFKA_BIN` | the `queen-kafka` file beside the broker executable | Where the binary is. The default is resolved from the running executable's own directory at boot rather than written down as a path, and it is what makes the image work with no configuration at all. |
-| `QUEEN_KAFKA_SHUTDOWN_GRACE_MS` | `5000` | How long a stopping child has between SIGTERM and SIGKILL. Floored at 100 ms, because a grace of zero is a SIGKILL with extra steps. Five seconds covers a process mid-syscall: the facade's shutdown is closing sockets, not draining work, since every offset it holds is already in Queen. |
+`QUEEN_KAFKA_OFFSET_STORE` picks the store, and it is read once at boot.
 
-Every other `QUEEN_KAFKA_*` variable means exactly what it means when the facade runs alone. The
-environment forwards verbatim, `QUEEN_TOKEN` included, because that is the child's own credential.
-Four of the broker's secrets are stripped before exec and the facade reads none of them:
-`PG_PASSWORD`, `JWT_SECRET`, `QUEEN_ENCRYPTION_KEY` and `QUEEN_SYNC_SECRET`.
+- `positions`, the default: a commit moves the broker's own consumer-group position, one raft entry
+  per commit batch whatever its width. The Kafka group is a Queen consumer group, visible and shared
+  as one, in the dashboard and in the consumer-group routes.
+- `kv`: the offsets are key/value rows under `qk:group:*`, the layout every facade before 2.0 used.
+  This is also what the facade always does with an explicit `QUEEN_URL`, since it cannot know the
+  broker behind the URL. Groups kept this way do not appear in the consumer-group views.
 
-Two mistakes are refused at boot rather than discovered as a crash loop: a `QUEEN_KAFKA_BIN` that is
-not a file, and `QUEEN_KAFKA_EMBEDDED=true` without `QUEEN_KAFKA_ADVERTISED_ADDR`. A third is a
-warning and not a refusal. With `JWT_ENABLED=true` and neither `QUEEN_TOKEN` nor
-`QUEEN_KAFKA_SASL=plain`, every produce and fetch the child makes is answered `401`: the hop the
-child makes is authenticated like any other client's, whether it is the loopback the supervisor
-injects or a `QUEEN_URL` an operator set, because a private door into the broker is the kind of thing
-that is later found open from somewhere else.
+Offsets are not moved from one store to the other when the setting changes.
 
-The loopback is the **default**, not the only answer. An explicitly set, non-empty `QUEEN_URL` in the
-broker's own environment wins, and the child is given that instead. This is what makes embedded mode
-usable in Queen Cloud, where the facade has to reach the broker **through the cell proxy**; see
-[In Queen Cloud](#in-queen-cloud). An empty `QUEEN_URL=` is treated as unset, because that is a Helm
-template that resolved to nothing rather than an operator's decision. The boot line says which branch
-was taken:
+An explicitly set, non-empty `QUEEN_URL` changes the transport: the facade then calls that URL over
+HTTP instead. That is the Cloud hairpin through the proxy, where authentication, tenant scoping,
+quotas and metering apply to every Kafka request, and bypassing it in-process would bypass all four.
+An empty `QUEEN_URL=` is treated as unset, because that is a Helm template that resolved to nothing
+rather than an operator's decision. A `QUEEN_URL` that names the broker's own listener on loopback is
+logged as a warning: it trades the in-process transport for HTTP to itself.
 
-```text
-queen-kafka facade started (embedded) pid=18847 bin=/app/bin/queen-kafka
-  queen_url=http://queen-proxy:6711 queen_url_from="QUEEN_URL (explicit)"
-```
+With `JWT_ENABLED=true` on the broker, the facade's calls are authenticated like any other client's,
+so it needs `QUEEN_TOKEN` or `QUEEN_KAFKA_SASL=plain` (each connection's own token) to be let in.
 
-`queen_url_from` is either `QUEEN_URL (explicit)` or `loopback (bound listener)`. An operator
-debugging a hairpin should be able to read which one it is out of the boot log rather than inferring
-it from an address.
+A panic on a `queen-kafka` thread kills the task it happened in, one Kafka connection, and nothing
+else. A facade whose serve loop ends on its own, a listener error or a panic in the accept loop, is
+restarted on a backoff that doubles from one second to a thirty second ceiling and resets after an
+hour of healthy running. Clients reconnect and resume from offsets that live in Queen. On shutdown
+the broker stops the facade and waits for it, bounded by `QUEEN_KAFKA_SHUTDOWN_GRACE_MS` (5000), so a
+cluster-mode node hands its registry row back before the process exits.
 
-The child's stdout and stderr are forwarded into the broker's log, stripped of escape sequences and
-control bytes, truncated at 4 KiB a line, and budgeted at 200 lines per ten second window with a
-`suppressed` count when the budget is spent. `GET /status` grows a `kafka` block when embedded mode
-is on, and only then: `mode`, `phase`, `pid`, `restarts`, `lastExit`, `uptimeMs` and `backoffMs`.
-
-### What a stop guarantees, and what it does not
-
-The child is put in its own process group, so a stop signals the whole group and a grandchild dies
-with it rather than being re-parented.
-
-- **The broker gets SIGTERM or Ctrl-C**: guaranteed. The supervisor runs after the broker's serve
-  loop drains, sends SIGTERM to the group, and escalates to SIGKILL after the grace window.
-- **The broker panics or drops the handle**: the child is reaped with it.
-- **The broker is itself SIGKILLed**: this is where the platforms differ, and the honest answer is
-  two answers. On **Linux** the child carries `PR_SET_PDEATHSIG`, so the kernel kills it whatever
-  the parent died of. On **macOS and BSD** there is no equivalent: a SIGKILLed broker leaves the
-  facade running, re-parented to init and still holding its Kafka port. That is a development
-  machine caveat rather than a production one, and it is stated rather than papered over.
-
-### The image
-
-The repository's `Dockerfile` builds the facade in a stage of its own and copies it next to the
-broker binary in `/app/bin`. That adjacency is the contract: with `QUEEN_KAFKA_EMBEDDED=true` and no
-`QUEEN_KAFKA_BIN`, the supervisor resolves the child out of its own executable's directory, so
-embedded mode needs no extra configuration in that image. The same image runs the facade alone
-instead, with `docker run … queen-mq ./bin/queen-kafka`. `EXPOSE 9092` is documentation and
-publishes nothing on its own.
-
-That image is published: `ghcr.io/queen-mq/queen` has carried the facade since 1.4.0, on the same
-tags as the broker, because it is the same build. The repository ships no Helm chart, so a
-Kubernetes deployment is a manifest an operator writes, and [cluster mode](#cluster-mode) below has
-the shape that one has to have.
+The image exposes 9092 as documentation; `EXPOSE` publishes nothing on its own. The repository ships
+no Helm chart, so a Kubernetes deployment is a manifest an operator writes, and
+[cluster mode](#cluster-mode) below has the shape that one has to have.
 
 ## Every variable
 
 | Variable | Default | What it is |
 | --- | --- | --- |
-| `QUEEN_URL` | `http://localhost:6632` | The broker or proxy the facade calls. Must be an `http`/`https` URL; a trailing slash is normalised away. Checked at boot, not on the first metadata refresh. |
+| `QUEEN_URL` | unset: the broker's router, in-process | Set, the facade calls this broker or proxy over HTTP instead. Must be an `http`/`https` URL; a trailing slash is normalised away. Checked at boot, not on the first metadata refresh. |
 | `QUEEN_TOKEN` | none | Bearer token for that broker. Optional, and never logged: the boot line reports whether there is one, not what it is. With SASL on, a connection's own token replaces it. |
 | `QUEEN_KAFKA_ADDR` | `0.0.0.0:9092` | The address the Kafka listener binds. `host:port`, or `[v6]:port`. |
+| `QUEEN_KAFKA_THREADS` | `min(4, cores / 2)`, at least 1 | Threads of the facade's own runtime. Integer in 1 to 256. |
+| `QUEEN_KAFKA_OFFSET_STORE` | `positions` | `positions` or `kv`: where committed offsets live ([above](#where-committed-offsets-live)). Anything else is a fatal boot. An explicit `QUEEN_URL` always uses `kv`. |
 | `QUEEN_KAFKA_ADVERTISED_ADDR` | **required** | The `host:port` other machines use to reach this process. No default. See below. |
 | `QUEEN_KAFKA_DEFAULT_PARTITIONS` | `1024` | Partition count for a topic the facade auto-creates, and the floor for the width it advertises to topics that declared none of their own. A topic created through CreateTopics with a `numPartitions` carries that number as its own floor instead, so this knob stops applying to it. Integer in 1 to 100,000. |
 | `QUEEN_KAFKA_MAX_CONNECTIONS` | `4096` | How many connections the listener serves at once. Integer in 16 to 1,000,000. Past it a new connection is closed immediately, which is a client that reconnects rather than a facade accepting work it cannot do. |
@@ -216,9 +183,9 @@ the shape that one has to have.
 | `RUST_LOG` | none | Same, and it wins over `LOG_LEVEL`. |
 | `QUEEN_LOG_JSON` | `false` | `true` switches the log format to JSON. Any other value is read as false. |
 
-Four more variables belong to [cluster mode](#cluster-mode) and three to
-[embedded mode](#embedded-in-the-broker); each is in the table of its own section, because each is
-inert unless that mode is on.
+Four more variables belong to [cluster mode](#cluster-mode), in the table of its own section, because
+they are inert unless that mode is on. `QUEEN_KAFKA_EMBEDDED` and `QUEEN_KAFKA_SHUTDOWN_GRACE_MS` are
+read by the broker and described [above](#inside-the-broker-process).
 
 A consumer asking for a session timeout outside the min/max pair is refused
 `INVALID_SESSION_TIMEOUT`, which is the same contract Apache Kafka's two settings have. Past a
@@ -334,25 +301,29 @@ exactly-once source, or a two-phase commit finished by another process; the reas
 
 [Queen Cloud](https://queenmq.cloud/try) runs the broker as a managed cell, and has a free tier.
 
-In Cloud the facade does not talk to a broker. It talks to the **cell proxy**, and the proxy talks to
-the broker:
+In Cloud the facade does not talk to the broker's router directly. It talks to the **proxy**, over
+its port, and the proxy hands the request to the broker:
 
 ```text
-Kafka client --TCP--> queen-kafka --QUEEN_URL--> queen-proxy --> queen
-                       (facade)                  auth, tenant     (broker)
-                                                 scoping, quotas,
-                                                 metering
+Kafka client --TCP--> Kafka facade --QUEEN_URL--> proxy port --> broker router
+                                                  auth, tenant
+                                                  scoping, quotas,
+                                                  metering
 ```
 
-That is the whole of the difference, and it is one variable. Point `QUEEN_URL` at the proxy's Service
-rather than at the broker's. Every Kafka request then crosses the proxy's authentication, tenant
-scoping, quotas and metering, exactly as an SDK's request does. A facade wired straight to the broker
-serves Kafka clients that are not tenants of anything: no quota, no metering, no isolation.
+With both switched on in the same binary, the hop from the facade to the proxy's port is the only
+one that goes over HTTP.
 
-In embedded mode the supervisor injects a loopback address by default, which is right for a single
-deployment and wrong for a cell, so an explicit `QUEEN_URL` on the broker wins over it. That makes the
-broker pod call the proxy Service and the proxy call the broker back: a deliberate hairpin, and it
-needs a NetworkPolicy that permits it.
+That is the whole of the difference, and it is one variable. Point `QUEEN_URL` at the proxy's port
+rather than leaving the facade on the broker's router. Every Kafka request then crosses the proxy's
+authentication, tenant scoping, quotas and metering, exactly as an SDK's request does. A facade wired
+straight to the broker serves Kafka clients that are not tenants of anything: no quota, no metering,
+no isolation.
+
+Left unset, the facade calls the broker's router in-process, which is right for a single deployment
+and wrong for a cell, so an explicit `QUEEN_URL` wins over it. That makes the facade call the proxy's
+port and the proxy call the broker router: a deliberate hairpin, and if the proxy's port is reached
+through a Service, it needs a NetworkPolicy that permits it.
 
 This shape is **measured, not designed**. A real franz-go client produces, consumes, forms groups,
 commits offsets, runs admin and runs transactions through a whole cell, and two tenants on one shared
@@ -360,12 +331,10 @@ listener cannot see each other's topics, records, groups or committed offsets. T
 `protocols/queen-kafka/compat/cloud`, its rig stands the entire cell up from nothing, and it was 16 of 16 green
 on 2026-08-30.
 
-A Kafka consumer group is also no longer invisible to the people operating the cell. Its committed
-offsets live in KV rather than in `queen.log_consumers`, so the consumer-group views used to show
-native groups only; they now read both stores and every row carries a `kind` of `queen` or `kafka`,
-with the same lag arithmetic applied to each. The lag a Kafka group reports there matches what
-Kafka's own admin API reports for it. Nothing on that path writes an offset: KV stays the single
-source of truth for a Kafka group's position.
+In this shape the committed offsets are key/value rows (`qk:group:*`), because the facade behind an
+explicit `QUEEN_URL` cannot use the broker's own positions ([where offsets
+live](#where-committed-offsets-live)). The consumer-group views of the dashboard and of the HTTP API
+do not list groups kept that way; Kafka's own admin API reads them.
 
 ### Two things to set that nothing tells you about until every request fails
 
@@ -379,14 +348,15 @@ SNI lane (see [the advertised address](#the-advertised-address-is-the-footgun)).
 worth stating plainly: **the tenant of a Kafka connection is the tenant of the SASL password, and
 nothing else.**
 
-**The broker has a second, independent KV gate.** With `QUEEN_TENANCY_HEADER=true`, which every cell
-runs, the broker derives `kv_require_grant`, and the **absence** of a `queen.kv_quota` row is a
-denial rather than a permission. Without one row per broker tenant, every offset commit is refused
-`403` at the broker, past everything the proxy already allowed:
+**The broker has a second, independent KV gate.** With tenancy on, the broker derives
+`QUEEN_KV_REQUIRE_GRANT`, and the **absence** of a KV grant is a denial rather than a permission.
+Without a grant per broker tenant, every offset commit is refused `403` at the broker, past everything
+the proxy already allowed:
 
-```sql
-INSERT INTO queen.kv_quota (tenant_id, enabled) VALUES ('<broker tenant uuid>', TRUE)
-  ON CONFLICT (tenant_id) DO UPDATE SET enabled = TRUE;
+```bash
+curl -s -X POST http://localhost:6632/api/v1/system/quota \
+  -H 'Content-Type: application/json' \
+  -d '{"tenant":"<broker tenant uuid>","kind":"kv","enabled":true}'
 ```
 
 ### The `read` scope is not optional
@@ -457,10 +427,6 @@ they are listed here rather than left to be inferred from behaviour:
 | A Fetch is metered as a request rather than as a delivery. | The invoice, unless it is read here first. |
 | The parked-pop gauge is native-only. | An operator watching consumer pressure sees zero Kafka consumers, however many are long polling. |
 
-There is one documentation gap of the same vintage: the three consumer-group views now return an
-additive `kind` field of `queen` or `kafka` on every row, and
-[their reference page](/reference/http/consumer-groups) does not describe it yet.
-
 ## What the boot log says
 
 One line, and it is the one to compare against what the clients actually use:
@@ -501,15 +467,16 @@ have to guess at.
 
 ## Restarting it
 
-A facade restart is a broker restart and needs no ceremony. Group membership is in memory and
-dies with the process; committed offsets are in Queen and outlive it. A restarted facade knows
+A facade restart, with its broker or on its own after a failure, needs no ceremony. Group membership
+is in memory and dies with the facade; committed offsets are in Queen and outlive it. A restarted facade knows
 no members, answers `UNKNOWN_MEMBER_ID` to the first heartbeat of every survivor, and they
 rejoin and resume from where they had committed. That is the sequence a real broker failover
 produces, and every Kafka client already implements it.
 
 More than one facade in front of one Queen deployment needs one more decision, because two facades
-that each advertise themselves as the only broker will split a group between them. Either give each
-facade its own set of consumers, or turn on cluster mode.
+that each advertise themselves as the only broker will split a group between them. A Queen cluster
+with the facade on is exactly that: every node runs its own facade. Either give each facade its own
+set of consumers, or turn on cluster mode, which is what a multi-node deployment should do.
 
 ## Cluster mode
 
@@ -519,7 +486,7 @@ what they always were. That is asserted rather than assumed: the facade's own ac
 its whole body against a facade with the cluster configuration absent.
 
 Two facades in front of one Queen deployment already share everything durable, because the committed
-offsets are in Queen's key/value store and the log is in PostgreSQL. What they did not share was who
+offsets and the records are both in Queen. What they did not share was who
 arbitrates a group, and that produced two defects. Every facade answered `FindCoordinator` with
 itself, so one group formed twice and each generation assigned every partition; and an offset commit
 was an unconditional upsert, so the loser of a race silently overwrote the winner, leaving a commit
@@ -540,8 +507,8 @@ carrying that node's advertised host and port and an incarnation. Two requiremen
 boot check enforces both. `QUEEN_TOKEN` is **required** in cluster mode, because the registry is
 written with this process's own credential rather than a client's, and the broker list every client
 is handed has to be one list. And every facade of one cluster must present a credential of **one
-Queen tenant**, because `queen.kv` is keyed by tenant: two tenants are two registries, and each
-facade would see only itself.
+Queen tenant**, because Queen's key/value store is keyed by tenant: two tenants are two registries,
+and each facade would see only itself.
 
 ### Give every facade its own address
 
@@ -573,7 +540,7 @@ env:
   - name: QUEEN_KAFKA_ADVERTISED_ADDR
     value: "$(POD_NAME).queen-kafka.$(POD_NAMESPACE).svc.cluster.local:9092"
   # QUEEN_KAFKA_NODE_ID is the ordinal plus one, which a manifest cannot compute:
-  # derive it from $POD_NAME in the entrypoint before exec'ing the facade.
+  # derive it from $POD_NAME in the entrypoint before exec'ing the broker.
 ```
 
 A second, ordinary Service in front of the same pods is what goes in `bootstrap.servers`. A client
@@ -588,8 +555,8 @@ the manifest above is the whole of it.
 
 - **Leadership is an advertisement, not an access control.** Every node serves Produce, Fetch,
   ListOffsets and OffsetFetch for every partition, whatever `Metadata` said the leader was. A
-  non-leader has the data, since it is one shared PostgreSQL, so refusing would cost availability
-  for nothing. What is gated at a non-owner is JoinGroup, SyncGroup, Heartbeat, LeaveGroup,
+  non-leader has the data, since every facade reads the same Queen, so refusing would cost
+  availability for nothing. What is gated at a non-owner is JoinGroup, SyncGroup, Heartbeat, LeaveGroup,
   OffsetCommit, DescribeGroups and DeleteGroups. OffsetFetch is deliberately not gated: its answer
   is the same at every node, and an `assign()`-based consumer holding any connection would break if
   it were refused.
@@ -615,7 +582,7 @@ the manifest above is the whole of it.
   `COORDINATOR_NOT_AVAILABLE`, which is retriable, until a heartbeat succeeds.
 - **Two Queen tenants running a group of the same name are coordinated by the same node.** The
   ownership hash takes the group id and never the tenant, because a tenant-aware hash would never
-  converge across facades. It is harmless: they stay two coordinator entries over two `queen.kv`
+  converge across facades. It is harmless: they stay two coordinator entries over two tenants' key/value
   rows.
 - **Transactions are refused in cluster mode.** A transaction is a stage held in one process, and a
   node that does not hold it cannot honour the commit, so `initTransactions()` is answered a fatal

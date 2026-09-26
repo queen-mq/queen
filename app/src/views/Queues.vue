@@ -72,8 +72,8 @@
           </div>
 
           <!-- ALL is `null`, never '': '' is the DEFAULT namespace server-side
-               (012_configure.sql), so a '' sentinel makes the bucket most queues
-               land in the one bucket you cannot select. -->
+               (phase2.rs configured_defaults), so a '' sentinel makes the bucket
+               most queues land in the one bucket you cannot select. -->
           <div class="filter-field-col">
             <label class="label-xs">Namespace</label>
             <select v-model="filterNamespace" class="input">

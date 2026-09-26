@@ -49,8 +49,9 @@ several brokers, with failover and consistent-hash affinity already on.
 
 `push` takes anything `serde::Serialize`, `push_many` an iterator of them, and `push_items`
 fully-formed `PushItem` values for when the transaction id matters. Each entry of the result
-carries a `status`: `Queued`, `Duplicate`, `Error`, `Buffered` or `Failed`. A `transaction_id` you
-do not supply is minted client-side as a UUIDv7, unique per call and therefore not idempotent.
+carries a `status`: `Queued`, `Duplicate` or `Error`. The enum also has `Buffered` and `Failed`,
+which the 2.0 broker does not return. A `transaction_id` you do not supply is minted client-side
+as a UUIDv7, unique per call and therefore not idempotent.
 
 ## Consume
 

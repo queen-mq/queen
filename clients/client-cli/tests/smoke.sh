@@ -7,7 +7,7 @@
 #
 # For the full end-to-end test suite (parity with the JS test-v2 and Python
 # tests/ suites), run `make e2e` instead - it executes ~60 Go tests with
-# proper assertions, broker side-effect verification, and DB-side checks.
+# proper assertions and broker side-effect verification.
 #
 #   ./tests/smoke.sh                          # quick smoke
 #   QUEEN_SERVER=http://host:6632 ./tests/smoke.sh
@@ -101,15 +101,11 @@ run "status (cluster)"         status
 run "status (queue)"           status "$QUEUE"
 run "lag"                      lag
 
-# 10) Maintenance
-run "maintenance get"          maintenance get
-run "maintenance get pop"      maintenance get --pop
-
-# 11) Metrics
+# 10) Metrics
 run "metrics"                  metrics
 run "metrics --prometheus"     metrics --prometheus
 
-# 12) Analytics
+# 11) Analytics
 run "analytics overview"       analytics overview
 run "analytics queue-lag"      analytics queue-lag
 run "analytics queue-ops"      analytics queue-ops
@@ -117,15 +113,14 @@ run "analytics queue-parked"   analytics queue-parked
 run "analytics retention"      analytics retention
 run "analytics system"         analytics system
 run "analytics worker"         analytics worker
-run "analytics postgres"       analytics postgres
 
-# 13) Traces
+# 12) Traces
 run "traces names"             traces names
 
-# 14) Replay (alias for cg seek)
+# 13) Replay (alias for cg seek)
 run "replay --to beginning"    replay "$QUEUE" --cg "$CG" --to beginning
 
-# 15) Bench - tiny smoke that also verifies actual server-side consumption.
+# 14) Bench - tiny smoke that also verifies actual server-side consumption.
 BENCH_QUEUE="queenctl-smoke-bench-$$"
 "$BIN" --server "$SERVER" bench --queue "$BENCH_QUEUE" --total 50 --partitions 2 --producers 2 --consumers 2 --batch 25 >/dev/null 2>&1
 bench_rc=$?

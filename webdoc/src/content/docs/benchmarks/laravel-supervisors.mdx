@@ -1,6 +1,6 @@
 ---
 title: Laravel supervisor qualification
-description: "A diagnostic comparison of Laravel Horizon, Queen PHP and Queen Rust across throughput, latency, control-plane cost and worker recovery."
+description: "A diagnostic comparison of Laravel Horizon, Queen PHP and Queen Rust across throughput, latency, control-plane cost and worker recovery, run against the Queen 1.x broker on PostgreSQL."
 type: reference
 tier: operate
 status: preview
@@ -34,6 +34,11 @@ verifiedBy:
   - clients/client-php/tests/ProcessLeaseRenewerTest.php
   - clients/client-php/tests/SyncedFailedJobProviderLifecycleTest.php
 ---
+
+<Aside type="caution">
+This run measured **Queen 1.x**, whose storage was PostgreSQL. 2.0 replaced that storage with a
+replicated log, so these figures describe the 1.x engine and not 2.0.
+</Aside>
 
 This qualification asks whether Queen can replace the **process control plane** of Laravel
 Horizon for Queen-backed Laravel queues. Queen does not replace `queue:work`: both Queen engines

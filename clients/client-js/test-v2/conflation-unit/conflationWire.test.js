@@ -310,18 +310,6 @@ describe('conflation — declaration conflict', () => {
       assert.equal(warnings.filter(w => w.includes('Conflation.conflict')).length, 1)
     })
   })
-
-  it('pop maintenance is not a version skew', async () => {
-    // `{"messages":[],"paused":true}` means an operator turned pops off. The
-    // request never reached the claim path, so there is no echo to expect —
-    // raising here would stop every conflating consumer in the fleet on a
-    // routine operator action.
-    const paused = ok({ messages: [], paused: true })
-    await withQueen([paused], paused, async (queen) => {
-      const messages = await queen.queue(QUEUE).group(GROUP).conflation(true).pop()
-      assert.equal(messages.length, 0)
-    })
-  })
 })
 
 // ---------------------------------------------------------------------------

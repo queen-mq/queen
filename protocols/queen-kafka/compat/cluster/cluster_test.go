@@ -13,7 +13,7 @@ import (
 // SCENARIO 1 — THE ACCEPTANCE.
 //
 // Three facades in cluster mode, at least one pair in front of DIFFERENT Queen
-// brokers of one HA deployment sharing one Postgres. 200+ records over 8
+// brokers of one raft cluster. 200+ records over 8
 // partitions. ONE consumer group with three members, each bootstrapped against
 // a DIFFERENT facade. What must hold:
 //
@@ -186,8 +186,8 @@ func TestMetadataListsEveryLiveNode(t *testing.T) {
 				t.Errorf("%s says %s/%d is led by %d, %s says %d",
 					v.from, topic, p, leader, views[0].from, views[0].leaders[p])
 			}
-			// Replication is Postgres's business: claiming N replicas would be
-			// a lie a client could act on.
+			// Replication is the Queen broker's business, not these facades':
+			// claiming N replicas would be a lie a client could act on.
 			if got := v.replicas[p]; len(got) != 1 || got[0] != leader {
 				t.Errorf("%s says %s/%d has replicas %v, want [%d]", v.from, topic, p, got, leader)
 			}

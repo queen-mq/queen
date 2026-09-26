@@ -1,63 +1,62 @@
-//! KV — the port of `024_kv.sql` (`queen.kv_apply_v1`) and of the expiry step
-//! of `026_kv_sweeper.sql` onto the RSM (PLAN_RAFT.md WP-2.2).
+//! KV, implemented on the RSM (PLAN_RAFT.md WP-2.2), including the expiry
+//! sweep step.
 //!
 //! # The shape of a KV call in the RSM
 //!
-//! 024 is validate-then-apply inside ONE transaction. Here the two passes
-//! split along the line D3 draws:
+//! Validation and apply happen inside ONE transaction, in two passes split
+//! along the line D3 draws:
 //!
 //! 1. **Pass 1 — validation** is pure and runs at the RECEIVER ([`parse_ops`]):
 //!    the op taxonomy, the namespace charset, the key and value ceilings, the
 //!    mandatory expiry, one write per key per call, the op and key budgets. A
-//!    refused call never reaches the planner, exactly as a refused 024 call
-//!    never writes.
+//!    refused call never reaches the planner, so it never writes.
 //! 2. **Pass 2 — the writes** are planned here, serially, against committed
-//!    state plus the [`Overlay`], in 024's apply order (phase, namespace, key,
-//!    ordinal; byte order, `COLLATE "C"`). The planner is the one serial point
-//!    every write passes, so it is what 024's row lock was: exactly one of N
-//!    concurrent `putIfAbsent`s wins, an `expect` is judged against the version
-//!    the previous writer left, and an `incr` never loses an update. A verdict
-//!    carries what 024 returns WITH it (the loser's current value and version),
-//!    because the planner saw it; a lost `required` precondition aborts the
-//!    whole call with nothing logged, which is 024's RAISE 23514.
+//!    state plus the [`Overlay`], in a fixed apply order (phase, namespace,
+//!    key, ordinal; byte order, `COLLATE "C"`). The planner is the one serial
+//!    point every write passes, so it plays the role a row lock would:
+//!    exactly one of N concurrent `putIfAbsent`s wins, an `expect` is judged
+//!    against the version the previous writer left, and an `incr` never
+//!    loses an update. A verdict carries the loser's current value and
+//!    version WITH it, because the planner saw it; a lost `required`
+//!    precondition aborts the whole call with nothing logged.
 //! 3. **Reads are payload** and never ride in an outcome (D7): get, getMany and
 //!    getPrefix are evaluated by the RECEIVER against its own applied state
 //!    once the call's entry (if any) has applied ([`KvOpOutcome::Deferred`]),
-//!    which sees the call's own writes exactly as 024's phase ordering does.
+//!    which sees the call's own writes in the same apply order as pass 2.
 //!    The one read that must NOT see them — a `get` of a key the SAME call
 //!    writes later in apply order — is answered at plan time
 //!    ([`KvOpOutcome::Got`]). A call with no write never enters the planner.
 //!
 //! # Time (D5, I2) and versions (I18)
 //!
-//! One instant per call, as in 024 (`p_now`): the planner's stamp. Every
-//! expiry, `created_at` and `updated_at` an effect carries is computed from it,
-//! so apply has no clock. Liveness is 024's `kv_live_v1` —
-//! `expires IS NULL OR expires > now` — one boundary for readers and for the
-//! sweep ([`KvRow::live`]).
+//! One instant per call: the planner's stamp. Every expiry, `created_at` and
+//! `updated_at` an effect carries is computed from it, so apply has no clock.
+//! Liveness is one rule — `expires IS NULL OR expires > now` — the same
+//! boundary for readers and for the sweep ([`KvRow::live`]).
 //!
 //! Versions are `kv_version_base + ordinal` (I18): unique across the store and
-//! never re-issued, which is everything 024's sequence promised. They are also
-//! monotone, which 024 did not promise and nothing may rely on.
+//! never re-issued — that uniqueness is the only guarantee. They are also
+//! monotone as a side effect of how they are assigned, but nothing may rely
+//! on that.
 //!
 //! # The transaction reuse seam
 //!
 //! [`Planner::plan_kv_writes`] plans a list of ops into effects and per-op
 //! verdicts WITHOUT folding them into the overlay, so the transaction wire
-//! (WP-2.1) can plan its KV leg first — 024's lock order puts `queen.kv` first
-//! — and fold the whole command's effects once it has decided to log it.
+//! (WP-2.1) can plan its KV leg first, and fold the whole command's effects
+//! once it has decided to log it.
 //!
-//! # What differs from 024, and why
+//! # Design choices worth flagging
 //!
 //! - **The key ceiling is the store's, when it is tighter.** LMDB keys are at
 //!   most 511 bytes (R-108) and the store key is `(tenant, ns, key)`, so a key
 //!   is refused `kv_key_too_large` (413) once `tenant + ns + key` would not
-//!   fit — before 024's own 512-byte ceiling when the tenant and the namespace
-//!   are long. A key with a NUL, which Postgres cannot even represent, is a 400
-//!   `kv_bad_key` here rather than a protocol error.
-//! - **Bytes are measured on the compact JSON**, not on the jsonb text form
-//!   (which spaces its separators): the value ceiling and the 4 MiB read
-//!   budget admit a few more bytes than 024 does, never fewer.
+//!   fit — which can bind before the nominal 512-byte ceiling when the tenant
+//!   and the namespace are long. A key with a NUL byte is a 400 `kv_bad_key`
+//!   here rather than a protocol error.
+//! - **Bytes are measured on the compact JSON**, not on a padded text form
+//!   (one that spaces its separators): the value ceiling and the 4 MiB read
+//!   budget are only ever a little more generous that way, never tighter.
 //! - **incr arithmetic** is exact decimal while the numbers fit an `i128`
 //!   mantissa with at most 38 fractional digits ([`KvNum`]) — every counter
 //!   there is — and falls back to `f64` beyond, where NUMERIC would stay exact.
@@ -76,7 +75,7 @@ use crate::rsm::store::{keys, Reads, TypedReads};
 use super::{store_err, Overlay, Plan, Planned, Planner, Refusal};
 
 // ---------------------------------------------------------------------------
-// The ceilings of 024 (its DECLARE block), quoted so the receiver, the planner
+// The ceilings, defined once here so the receiver, the planner
 // and the read evaluation cannot drift from each other.
 // ---------------------------------------------------------------------------
 
@@ -93,21 +92,21 @@ pub const MAX_OPS_HTTP: usize = 256;
 /// `C_MAX_KEYS_WIRE` / `C_MAX_KEYS_HTTP`: the SUM of the keys every op names.
 pub const MAX_KEYS_WIRE: usize = 256;
 pub const MAX_KEYS_HTTP: usize = 4096;
-/// `kv_check_names_v1`'s key ceiling, in BYTES.
+/// The name check's key ceiling, in BYTES.
 pub const MAX_KEY_BYTES: usize = 512;
 /// `C_DETAIL_CAP`: a lost-precondition DETAIL is cut at this many characters.
 pub const DETAIL_CAP: usize = 4096;
-/// The most rows one leader sweep step deletes (026's `p_max_rows` role).
+/// The most rows one leader sweep step deletes.
 pub const SWEEP_LIMIT_DEFAULT: usize = 512;
 
 const SEC_US: i64 = 1_000_000;
 
 // ---------------------------------------------------------------------------
-// Numbers (024's NUMERIC, for incr)
+// Numbers (exact decimal, for incr)
 // ---------------------------------------------------------------------------
 
-/// A number `incr` computes with. 024 uses NUMERIC and `trim_scale`, i.e. exact
-/// decimal arithmetic and the shortest rendering; [`KvNum::Dec`] is exactly
+/// A number `incr` computes with: exact decimal arithmetic and the shortest
+/// rendering (no trailing fractional zero); [`KvNum::Dec`] is exactly
 /// that while the value fits an `i128` mantissa with at most 38 fractional
 /// digits. Beyond it the arithmetic falls back to `f64` ([`KvNum::Float`]).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -174,7 +173,7 @@ impl KvNum {
         Some(KvNum::Dec(if neg { -m } else { m }, scale as u32).normalized())
     }
 
-    /// Read a stored JSON value as 024's `kv_num_v1` does for a LIVE row: the
+    /// Read a stored JSON value as a number for a LIVE row: the
     /// number when it is a JSON number, `None` when it is not one.
     pub fn of_json(bytes: &[u8]) -> Option<KvNum> {
         match serde_json::from_slice::<Value>(bytes).ok()? {
@@ -256,7 +255,7 @@ impl KvNum {
 // Ops
 // ---------------------------------------------------------------------------
 
-/// The one expiry declaration every write carries (024 §5.1): EXACTLY ONE of
+/// The one expiry declaration every write carries (§5.1): EXACTLY ONE of
 /// `ttlSeconds` (an integer > 0) and `forever: true`.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KvExpiry {
@@ -274,7 +273,7 @@ impl KvExpiry {
     }
 }
 
-/// One validated op of a KV call (024's seven names, five code paths:
+/// One validated op of a KV call (seven wire names, five code paths:
 /// `putIfAbsent` is `Put` with `if_absent`, which desugars to `expect: 0`).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub enum KvOp {
@@ -289,7 +288,7 @@ pub enum KvOp {
     GetPrefix {
         ns: String,
         prefix: String,
-        /// The EXCLUSIVE keyset cursor; `None` for none (024 `NULLIF(…, '')`).
+        /// The EXCLUSIVE keyset cursor; `None` for none.
         after: Option<String>,
         /// Clamped to `1..=PREFIX_CAP`, defaulting to `PREFIX_DEFAULT`.
         limit: usize,
@@ -378,7 +377,7 @@ impl KvOp {
         }
     }
 
-    /// 024 pass 2's sort key before the ordinal: `(phase, ns, key | prefix)`,
+    /// The sort key before the ordinal: `(phase, ns, key | prefix)`,
     /// phase 1 being the multi-key reads, which therefore run LAST and see the
     /// call's own writes.
     fn sort_key(&self) -> (u8, &[u8], &[u8]) {
@@ -395,7 +394,7 @@ impl KvOp {
     }
 }
 
-/// The op indexes of a call in 024's pass-2 APPLY order: `(phase, ns, key |
+/// The op indexes of a call in pass-2 APPLY order: `(phase, ns, key |
 /// prefix)` in byte order, the input ordinal breaking ties. The planner decides
 /// writes in this order and the receiver spends the read budget in it.
 pub fn apply_order(ops: &[KvOp]) -> Vec<usize> {
@@ -415,12 +414,12 @@ pub struct KvCommand {
 }
 
 // ---------------------------------------------------------------------------
-// Pass 1: validation (024 `kv_apply_v1` pass 1 and `kv_check_names_v1`)
+// Pass 1: validation
 // ---------------------------------------------------------------------------
 
-/// A refused call, in 024's vocabulary: `status` is what the HTTP layer maps
-/// the SQLSTATE to (22023 → 400, 22001 → 413), `reason` is the SP's stable
-/// MESSAGE (`kv_bad_namespace`, `kv_expiry_not_specified`, …) — the only part a
+/// A refused call: `status` is the mapped HTTP code (400 or 413), `reason`
+/// is a stable MESSAGE (`kv_bad_namespace`, `kv_expiry_not_specified`, …) —
+/// the only part a
 /// client may branch on — and `detail` the human half, which names only what
 /// the caller itself sent.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -456,7 +455,7 @@ fn text_of(v: Option<&Value>) -> Option<String> {
     }
 }
 
-/// `format('%L', x)`.
+/// A single-quoted literal (quotes doubled), or `NULL` for `None`.
 fn lit(s: Option<&str>) -> String {
     match s {
         Some(s) => format!("'{}'", s.replace('\'', "''")),
@@ -466,7 +465,7 @@ fn lit(s: Option<&str>) -> String {
 
 /// `^[a-z0-9][a-z0-9._-]{0,63}$`: lowercase because case is the first of the
 /// typo classes, and a namespace is registered nowhere, so a typo would mint a
-/// phantom namespace that reads empty forever (024).
+/// phantom namespace that reads empty forever.
 pub fn namespace_ok(ns: &str) -> bool {
     let b = ns.as_bytes();
     !b.is_empty()
@@ -477,8 +476,8 @@ pub fn namespace_ok(ns: &str) -> bool {
         })
 }
 
-/// The namespace half of `kv_check_names_v1`, alone — what `kv_list_v1`
-/// checks its namespace with.
+/// The namespace check alone — what the list operation checks its
+/// namespace with.
 pub fn check_namespace(ns: Option<&str>) -> Result<(), KvInvalid> {
     match ns {
         Some(n) if namespace_ok(n) => Ok(()),
@@ -492,8 +491,8 @@ pub fn check_namespace(ns: Option<&str>) -> Result<(), KvInvalid> {
     }
 }
 
-/// `kv_check_names_v1(ns, key)`, plus the store's own key ceiling (see the
-/// module header).
+/// Validates the namespace and key together, plus the store's own key
+/// ceiling (see the module header).
 fn check_names(
     tenant: &str,
     ns: Option<&str>,
@@ -543,9 +542,9 @@ fn int_of(v: &Value) -> Option<i128> {
     (f.is_finite() && f.fract() == 0.0 && f.abs() < 1e38).then_some(f as i128)
 }
 
-/// Validate and type one call's ops: 024's pass 1, in its order (each op in
-/// input order, then one write per key, then the key budget). `in_wire` is
-/// 024's `p_in_wire`: the transaction wire forbids getPrefix and has the
+/// Validate and type one call's ops: pass 1, in its order (each op in
+/// input order, then one write per key, then the key budget). `in_wire`
+/// marks the transaction wire, which forbids getPrefix and has the
 /// smaller budgets. `max_store_key` is the store's key ceiling
 /// ([`Reads::max_key_len`]).
 pub fn parse_ops(
@@ -570,7 +569,7 @@ pub fn parse_ops(
         out.push(parse_one(i, op, tenant, in_wire, max_store_key)?);
     }
 
-    // §6.1 point 3, LOAD-BEARING in 024 (the lock order) and here (a key's
+    // §6.1 point 3, LOAD-BEARING here (a key's
     // verdict is decided once per call): at most one WRITE per key.
     let mut seen: HashSet<(&str, &str)> = HashSet::new();
     for op in &out {
@@ -902,7 +901,7 @@ fn parse_one(
 /// What [`Planner::plan_kv_writes`] decided for one KV call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KvPlan {
-    /// In 024's apply order. The n-th `KvPut` carries the overlay's next KV
+    /// In apply order. The n-th `KvPut` carries the overlay's next KV
     /// version plus n (I18). EMPTY when `failed` is set: the call aborted.
     pub effects: Vec<Effect>,
     /// Index-aligned with the ops; EMPTY when `failed` is set.
@@ -915,9 +914,9 @@ pub struct KvPlan {
 enum Verdict {
     /// Applied: the effect to log (if any) and the answer.
     Applied(Option<Effect>, KvWrite),
-    /// Not applied: the answer, and an effect that still has to happen (024
-    /// physically removes an EXPIRED row a plain delete names, and answers
-    /// `absent`).
+    /// Not applied: the answer, and an effect that still has to happen (a
+    /// plain delete naming an EXPIRED row still physically removes it, and
+    /// answers `absent`).
     Lost(Option<Effect>, KvWrite),
 }
 
@@ -970,7 +969,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// The versions it assigns start at the overlay's next KV version, so a
     /// caller that plans KV twice for one command must fold in between.
     ///
-    /// Reads are NOT evaluated here except the one case 024 orders before a
+    /// Reads are NOT evaluated here except the one case that is ordered before a
     /// write of the same key ([`KvOpOutcome::Got`]); every other read is
     /// [`KvOpOutcome::Deferred`] to the receiver. A `required` write that loses
     /// its precondition aborts the call: [`KvPlan::failed`], no effects.
@@ -1008,8 +1007,8 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             }
             let verdict = match op {
                 KvOp::Get { ns, key } => {
-                    // 024 reads it BEFORE the later write of the same key; a
-                    // read after apply could not, so fix the answer now.
+                    // This must be read BEFORE the later write of the same key; a
+                    // read after apply could not see it, so fix the answer now.
                     if writes
                         .get(&(ns.as_str(), key.as_str()))
                         .is_some_and(|&w| w > i)
@@ -1079,7 +1078,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 }
                 Verdict::Lost(eff, w) => {
                     // §6.1 point 5: escalation is opt-in PER ELEMENT, and it
-                    // aborts the whole call (024's RAISE rolls everything back).
+                    // aborts the whole call.
                     if op.required() {
                         return Ok(KvPlan {
                             effects: Vec::new(),
@@ -1299,8 +1298,8 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         Ok(Plan::logged(plan.effects, outcome))
     }
 
-    /// One bounded step of the leader's expiry sweep (026's
-    /// `kv_expire_step_v1`): at most `limit` `KvDelete`s for rows whose expiry
+    /// One bounded step of the leader's expiry sweep: at most `limit`
+    /// `KvDelete`s for rows whose expiry
     /// is at or before `now` (the reader's boundary, §5.7), oldest first, read
     /// off the expiry index — O(expired), never a scan of every key.
     ///
@@ -1345,7 +1344,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     }
 }
 
-/// The delete arm of 024 (it needs no planner state beyond the row).
+/// The delete verdict (it needs no planner state beyond the row).
 fn delete_verdict(
     tenant: &str,
     ns: &str,
@@ -1414,7 +1413,7 @@ fn delete_verdict(
 }
 
 // ---------------------------------------------------------------------------
-// The read side: 024's read arms and `kv_list_v1`, evaluated by the receiver
+// The read side: get / getMany / getPrefix / list, evaluated by the receiver
 // against its own applied state (a store read handle), and the answer shapes.
 // ---------------------------------------------------------------------------
 
@@ -1450,8 +1449,7 @@ fn split_us(us: i64) -> (i64, u32, u32, i64, i64, i64, i64) {
     )
 }
 
-/// A `timestamptz` the way 024's getPrefix / get / getMany answer it (jsonb's
-/// own rendering, UTC session): `2026-09-22T10:15:30.1234+00:00`, the
+/// A timestamp rendered `2026-09-22T10:15:30.1234+00:00`, UTC: the
 /// fractional seconds trimmed of trailing zeros and absent when zero.
 pub fn ts_jsonb(us: i64) -> String {
     let (y, mo, d, h, mi, s, frac) = split_us(us);
@@ -1501,8 +1499,8 @@ fn row_json(key: &str, row: &KvRow, with_value: bool) -> Value {
     obj(pairs)
 }
 
-/// The answer element of one write, from its planned verdict (024's uniform
-/// return, and incr's own).
+/// The answer element of one write, from its planned verdict (a uniform
+/// shape, and incr's own).
 pub fn write_json(index: usize, op: &KvOp, w: &KvWrite) -> Value {
     let value = match (&w.value, op) {
         (Some(v), _) => json_value(v),
@@ -1523,9 +1521,9 @@ pub fn write_json(index: usize, op: &KvOp, w: &KvWrite) -> Value {
     obj(pairs)
 }
 
-/// 024's DETAIL for a lost `required` precondition, cut at [`DETAIL_CAP`]
-/// characters exactly like the SP's `left(…, 4096)` — a pathological value
-/// then truncates it into invalid JSON, which the HTTP layer degrades to the
+/// DETAIL for a lost `required` precondition, cut at [`DETAIL_CAP`]
+/// characters: a pathological value then truncates it into invalid JSON,
+/// which the HTTP layer degrades to the
 /// bare verdict.
 pub fn precondition_detail(ops: &[KvOp], f: &KvPrecondition) -> String {
     let op = ops.get(f.index as usize);
@@ -1553,10 +1551,10 @@ pub fn precondition_detail(ops: &[KvOp], f: &KvPrecondition) -> String {
     v.to_string().chars().take(DETAIL_CAP).collect()
 }
 
-/// Render a whole call's answer, index-aligned (024 §6.4): the write verdicts
+/// Render a whole call's answer, index-aligned (§6.4): the write verdicts
 /// and plan-time gets from `pre`, every [`KvOpOutcome::Deferred`] read
 /// evaluated NOW against `r` at `now_us`, spending ONE read budget across the
-/// call in 024's apply order.
+/// call in apply order.
 pub fn render_call<R: Reads + ?Sized>(
     r: &R,
     tenant: &str,

@@ -1054,7 +1054,7 @@ fn map_usage_is_what_status_reports() {
 
 /// A key over LMDB's limit is a refusal the planner can turn into a 4xx, not a
 /// truncation and not a panic. A `(tenant, queue, group)` key of three long
-/// names reaches it, and the postgres schema does not bound `consumer_group`.
+/// names reaches it, and nothing bounds `consumer_group`'s length.
 #[test]
 fn an_over_long_key_is_refused_with_its_numbers() {
     let t = TempStore::new();
@@ -1291,9 +1291,8 @@ fn every_error_the_store_answers_is_classified_on_purpose() {
 // ---------------------------------------------------------------------------
 
 /// A `groups` key of EXACTLY the engine's limit. `(tenant, queue, group)` is
-/// three unbounded names in the postgres schema
-/// (`consumer_groups_metadata.consumer_group` is `TEXT`), so 511 B is reached
-/// by one long consumer group name.
+/// three unbounded names, so 511 B is reached by one long consumer group
+/// name.
 fn group_name_at_the_limit(max: usize, suffix: char) -> String {
     let mut g = "y".repeat(max - 9);
     g.push(suffix);

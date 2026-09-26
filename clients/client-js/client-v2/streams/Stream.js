@@ -176,7 +176,7 @@ export class Stream {
    *
    * The user fn receives `(value, ctx)` where:
    *   - value: the message payload (post any pre-stage map/filter)
-   *   - ctx.state: mutable per-key state (loaded from queen_streams.state,
+   *   - ctx.state: mutable per-key state (loaded from the broker,
    *                persisted only if you return ALLOW for this message)
    *   - ctx.streamTimeMs: system clock for the cycle (use for refill math)
    *   - ctx.partitionId: source partition_id (= state shard)

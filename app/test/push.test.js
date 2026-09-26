@@ -7,12 +7,11 @@
 // which filters the Messages list has to drop afterwards or it answers a good
 // push with an empty table. They live in @/composables/usePushVerdict as pure
 // functions precisely so they can be asserted here rather than by opening a
-// modal and squinting at it — the two that cannot (a blur, a transport) are
-// pinned through the source and through `createApiClient` at the end.
+// modal and squinting at it — the one that cannot (a blur) is pinned through
+// the source at the end.
 //
-// The wire this file pins comes from crates/queen-protocol/src/push.rs
-// (`PushStatus`, `PushResult`) and server/src/handlers/data.rs
-// (`render_push_results`): a top-level array, mixed snake/camel casing, and an
+// The wire this file pins comes from server/src/rsm/facade/real.rs
+// (`render_push`): a top-level array, mixed snake/camel casing, and an
 // `offset` key that is ABSENT rather than null when the broker allocated none.
 
 import { test } from 'node:test'
@@ -20,7 +19,6 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 import { ApiError } from '../src/api/errors.js'
-import { createApiClient } from '../src/api/httpClient.js'
 import {
   ACCEPTED_STATUSES,
   MAX_PAYLOAD_TEXT_BYTES,
@@ -32,11 +30,10 @@ import {
   payloadToText,
   pushVerdict,
   showsIds,
-  showsMessageId,
   worstResult,
 } from '../src/composables/usePushVerdict.js'
 
-/** One result in the shape `render_push_results` emits. */
+/** One result in the shape `render_push` emits. */
 const result = (status, extra = {}) => ({
   index: 0,
   message_id: '0198f2c1-4d3a-7c10-9f2b-6a1e5d0c7b83',
@@ -53,12 +50,10 @@ const result = (status, extra = {}) => ({
 test('verdict: only `queued` is a success', () => {
   assert.equal(pushVerdict([result('queued')]).kind, 'success')
 
-  // The three the old dashboard would have painted green on a 201, and the two
-  // reasons each one is not: nothing was written, and nothing is consumable.
+  // The two the old dashboard would have painted green on a 201, and why each
+  // one is not: nothing was written in either case.
   assert.equal(pushVerdict([result('duplicate')]).kind, 'warning')
-  assert.equal(pushVerdict([result('buffered')]).kind, 'warning')
   assert.equal(pushVerdict([result('error')]).kind, 'error')
-  assert.equal(pushVerdict([result('failed')]).kind, 'error')
 })
 
 test('verdict: each status says what happened to the message', () => {
@@ -69,32 +64,20 @@ test('verdict: each status says what happened to the message', () => {
   assert.match(duplicate.detail, /dedup window/)
   assert.match(duplicate.detail, /stored nothing/)
 
-  // Buffered is accepted but NOT in the queue — the distinction the spool
-  // exists to make.
-  const buffered = pushVerdict([result('buffered')])
-  assert.match(buffered.detail, /spool/)
-  assert.match(buffered.detail, /consume/)
-
-  // `failed` is the only status that means the message is gone.
-  assert.match(pushVerdict([result('failed')]).detail, /holding nothing/)
+  // An error is a refusal: nothing was written, so a resend is safe.
+  const error = pushVerdict([result('error')])
+  assert.match(error.detail, /refused/)
+  assert.match(error.detail, /Nothing was written/)
 })
 
-test('verdict: buffered and failed do not blame maintenance on their own', () => {
-  // `handle_push` spools the items whose DB transaction failed and re-labels
-  // them `buffered` / `failed` with a 201 (RUSTFIX item 1) while maintenance is
-  // OFF, so a verdict that states "push maintenance is on" as a fact sends the
-  // operator to a switch that is not the cause. Both details word the
-  // disjunction the broker actually produces.
-  const buffered = pushVerdict([result('buffered')]).detail
-  assert.match(buffered, /maintenance/)
-  assert.match(buffered, /database/)
-  // And a buffered message keeps only its transaction id through the spool.
-  assert.match(buffered, /transaction id/)
-
-  const failed = pushVerdict([result('failed')]).detail
-  assert.match(failed, /database/)
-  assert.match(failed, /spool/)
-  assert.doesNotMatch(failed, /maintenance is on/)
+test('verdict: the 1.x spool statuses are unknown here, never a success', () => {
+  // `buffered` and `failed` came from the 1.x disk spool. The 2.0 broker never
+  // answers them, so they get the unknown-status verdict like any other.
+  for (const status of ['buffered', 'failed']) {
+    const verdict = pushVerdict([result(status)])
+    assert.equal(verdict.kind, 'error', status)
+    assert.match(verdict.title, new RegExp(status))
+  }
 })
 
 test('verdict: an unknown status is never a success', () => {
@@ -119,7 +102,7 @@ test('verdict: a mixed array is judged by its WORST item', () => {
   // would let a queued first item hide an errored second one.
   assert.equal(pushVerdict([result('queued'), result('error', { index: 1 })]).kind, 'error')
   assert.equal(pushVerdict([result('queued'), result('duplicate', { index: 1 })]).kind, 'warning')
-  assert.equal(pushVerdict([result('duplicate'), result('failed', { index: 1 })]).kind, 'error')
+  assert.equal(pushVerdict([result('duplicate'), result('error', { index: 1 })]).kind, 'error')
   assert.equal(pushVerdict([result('queued'), result('queued', { index: 1 })]).kind, 'success')
 })
 
@@ -142,11 +125,11 @@ test('verdict: the item the ids come from is the one the verdict is about', () =
 })
 
 test('verdict: an absent offset is not offset 0', () => {
-  // `render_push_results` OMITS the key when the broker allocated none
-  // (buffered, failed, error), as does every broker older than the field.
-  // Rendering 0 there would claim the head of the partition, so the renderer
-  // asks `offsetLine`, which answers null for absent AND for an explicit null.
-  assert.equal(offsetLine(result('buffered')), null)
+  // `render_push` OMITS the key when the broker allocated none (an `error`
+  // item), as does every broker older than the field. Rendering 0 there would
+  // claim the head of the partition, so the renderer asks `offsetLine`, which
+  // answers null for absent AND for an explicit null.
+  assert.equal(offsetLine(result('error')), null)
   assert.equal(offsetLine(result('queued', { offset: null })), null)
   assert.equal(offsetLine(result('queued', { offset: 0 })), 0)
   assert.equal(offsetLine(result('queued', { offset: 41 })), 41)
@@ -155,25 +138,12 @@ test('verdict: an absent offset is not offset 0', () => {
 })
 
 test('verdict: ids are rendered only where the broker took the message', () => {
-  // PushStatus::accepted() (crates/queen-protocol/src/push.rs). A message id
-  // printed beside "the message is lost" names a message that does not exist.
-  assert.deepEqual(ACCEPTED_STATUSES, ['queued', 'duplicate', 'buffered'])
+  // A message id printed beside "the broker did not store the message" names a
+  // message that does not exist.
+  assert.deepEqual(ACCEPTED_STATUSES, ['queued', 'duplicate'])
   for (const status of ACCEPTED_STATUSES) assert.equal(showsIds(status), true, status)
-  for (const status of ['error', 'failed', 'deferred', undefined, null, '']) {
+  for (const status of ['error', 'buffered', 'failed', 'deferred', undefined, null, '']) {
     assert.equal(showsIds(status), false, `${status} must show no ids`)
-  }
-})
-
-test('verdict: a buffered result shows no message id', () => {
-  // The spool record carries no message id (`WriteEvent`, file_buffer.rs) and
-  // the drain mints a fresh one per replayed event (`build_segment`), so the id
-  // the broker returns beside `buffered` will never identify a row. The
-  // transaction id IS spooled, and is the handle the verdict points at.
-  assert.equal(showsMessageId('buffered'), false)
-  assert.equal(showsMessageId('queued'), true)
-  assert.equal(showsMessageId('duplicate'), true)
-  for (const status of ['error', 'failed', undefined]) {
-    assert.equal(showsMessageId(status), false, `${status} must show no message id`)
   }
 })
 
@@ -407,45 +377,6 @@ test('copy: an undecryptable envelope is recognised, and a plain payload is not'
   for (const value of [null, undefined, 'encrypted', 42, [1, 2, 3], []]) {
     assert.equal(isEncryptedEnvelope(value), false, `${JSON.stringify(value)} is not an envelope`)
   }
-})
-
-// ---------------------------------------------------------------------------
-// The 500 that carries results
-// ---------------------------------------------------------------------------
-
-test('transport: a 500 that carries the results array still reports the item status', () => {
-  // `buffer_all` answers 500 with the SAME per-item array when a spool write
-  // failed, and that is one of the two ways `failed` — "the message is lost" —
-  // ever reaches the screen. It survives three layers: ky pre-parsing
-  // `error.data`, httpClient passing a non-string through `errorData`, and
-  // ApiError keeping it as `body`. A change to any one of them would silently
-  // downgrade the sentence to the generic "Server error (HTTP 500)" toast.
-  const lost = [{
-    index: 0,
-    message_id: '0198f2c1-4d3a-7c10-9f2b-6a1e5d0c7b83',
-    transaction_id: 'order-8891',
-    queueName: 'orders.created',
-    status: 'failed',
-  }]
-  const client = createApiClient({
-    apiBaseUrl: 'https://queen.test',
-    fetch: async () => new Response(JSON.stringify(lost), {
-      status: 500, headers: { 'content-type': 'application/json' },
-    }),
-  })
-
-  return client.post('/api/v1/push', { items: [{ queue: 'orders.created', payload: { id: 1 } }] })
-    .then(
-      () => assert.fail('a 500 must reject'),
-      (err) => {
-        assert.ok(Array.isArray(err.body), 'the results array survives as ApiError.body')
-        const verdict = pushVerdict(err.body)
-        assert.equal(verdict.kind, 'error')
-        assert.match(verdict.title, /message is lost/)
-        // And the modal reads the array rather than describing the status code.
-        assert.notEqual(describePushRefusal(err), verdict.title)
-      },
-    )
 })
 
 // ---------------------------------------------------------------------------

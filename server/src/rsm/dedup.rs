@@ -27,7 +27,7 @@
 //! `txns_start ≤ log_start`, and the gap is the txns window,
 //! `max(dedup_window, completed_retention, 900 s)` (D10, retention.rs ≈16–17).
 //! Inside that gap a re-push is still a duplicate and an ack-by-hash below the
-//! cursor still resolves, exactly as postgres answers.
+//! cursor still resolves.
 //!
 //! # Where the probe runs, and where the record runs
 //!
@@ -798,9 +798,8 @@ pub fn delete_partition_chunk<W: Writes + ?Sized>(
 // message a NEW hash — every one of those random LMDB gets returns "absent",
 // pure waste (PERF-2 diagnosis (c): `store::keys::read_name` + `mdb_txn_begin`
 // dominate the C1000 fan-out; on the A shapes the probe is one random read per
-// arrival). The front removes it exactly the way `server/src/dedup.rs`'s bloom
-// front removes the postgres cache's exact scan: a per-partition ring of
-// generational register-blocked bloom filters that answers, for a hash,
+// arrival). The front removes that per-message scan with a per-partition ring
+// of generational register-blocked bloom filters that answers, for a hash,
 // EITHER "certainly not in the committed window — skip the probe" OR "maybe —
 // probe". It NEVER answers "duplicate": the LMDB index (and the overlay) stay
 // the sole authority for that. So a disabled front is exactly equivalent to
@@ -814,7 +813,7 @@ pub fn delete_partition_chunk<W: Writes + ?Sized>(
 //   partition), `front(pid)` ⊇ { h : (pid, h) has a committed occurrence in
 //   the dedup window the planner is asking about }.
 //
-// Two facts keep it, both mirrored from the postgres front:
+// Two facts keep it:
 //
 //   (1) COVERAGE ON ENTRY. A partition becomes SEEDED one of two ways.
 //       * BORN seeded: the planner minted the pid this front-lifetime
@@ -848,16 +847,16 @@ pub fn delete_partition_chunk<W: Writes + ?Sized>(
 // monotone per partition, so plan order == created order == generation order).
 // A front (oldest) generation is dropped once its `max_created_us` is entirely
 // below the window floor — every hash it holds is then out of window, so the
-// drop cannot lose an in-window hash (postgres invariant 4 at generation
-// grain). Per-partition memory therefore tracks the window, not all of history.
+// drop cannot lose an in-window hash. Per-partition memory therefore tracks
+// the window, not all of history.
 // A global byte cap ([`DedupFront::byte_cap`], `QUEEN_RAFT_DEDUP_FRONT_MB`)
 // bounds the total: a partition that would grow the front past the cap is
-// dropped to FALLBACK (always-probe) instead — the same always-sound resource
-// trade as the postgres cache's SUPPRESSED state. At 16 bits/hash the front
-// costs ~2 B per in-window message; the smoke reports the measured figure.
+// dropped to FALLBACK (always-probe) instead — an always-sound resource
+// trade. At 16 bits/hash the front costs ~2 B per in-window message; the
+// smoke reports the measured figure.
 
 /// Bits per expected hash a generation is sized for (its filter is
-/// `cap × 2` bytes). Matches the postgres front (16 bits, k=7).
+/// `cap × 2` bytes).
 const FRONT_BITS_PER_HASH: usize = 16;
 /// A generation's fixed overhead (boxed words + counters + deque slot).
 const FRONT_BYTES_PER_GEN: usize = 64;

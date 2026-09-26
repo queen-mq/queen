@@ -6,8 +6,8 @@
 // produce and the commit, and the loop restarts from its committed offsets.
 //
 // What this proves that no other scenario does: the records and the offsets
-// ride ONE POST /api/v1/transaction, which is ONE Postgres transaction
-// (DESIGN section 6). So a crash between them is not a window -- the output
+// ride ONE POST /api/v1/transaction, which is ONE broker transaction -- one
+// raft entry, applied all or nothing (DESIGN section 6). So a crash between them is not a window -- the output
 // count must equal the input count exactly, with no duplicate and no loss,
 // even though a whole iteration's work was thrown away mid-flight.
 //

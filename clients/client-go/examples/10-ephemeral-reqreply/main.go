@@ -3,7 +3,7 @@
 //
 // This example demonstrates:
 //   - implicit queues: an inbox created by the first message that names it and
-//     garbage-collected when it goes quiet — no Configure, no PG row, no cleanup
+//     garbage-collected when it goes quiet — no Configure, no stored row, no cleanup
 //   - a long-poll pop parked on a RAM gate as the reply leg
 //   - the correlation pattern: the requester names its own inbox, the responder
 //     pushes the answer straight into it
@@ -103,7 +103,7 @@ func main() {
 	fmt.Printf("Round trip: min %s, median %s, max %s\n",
 		latencies[0], latencies[len(latencies)/2], latencies[len(latencies)-1])
 	fmt.Printf("%d inboxes were created and abandoned; none of them was ever declared,\n", requestCount)
-	fmt.Println("and none of them left anything behind in PostgreSQL.")
+	fmt.Println("and none of them left anything behind in the broker's log.")
 
 	bufferedCoda(ctx, q, eph)
 

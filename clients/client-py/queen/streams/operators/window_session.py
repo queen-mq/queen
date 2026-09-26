@@ -75,7 +75,7 @@ class WindowSessionOperator:
     ) -> dict:
         sessions: dict = {}
 
-        # Seed from PG state.
+        # Seed from the loaded state.
         for state_key, value in loaded_state.items():
             parts = state_key.split(_OPEN_SEPARATOR)
             if len(parts) != 3 or parts[0] != self.operator_tag or parts[1] != "open":

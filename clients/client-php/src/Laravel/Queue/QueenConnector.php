@@ -8,7 +8,7 @@ use Queen\Queen;
 
 class QueenConnector implements ConnectorInterface
 {
-    /** PostgreSQL and the broker wire encode lease horizons as signed int32 seconds. */
+    /** The broker wire encodes lease horizons as signed int32 seconds. */
     private const MAX_RETRY_AFTER_SECONDS = 2_147_483_647;
 
     /** A stopping worker must never spend its whole shutdown grace on a tail release. */

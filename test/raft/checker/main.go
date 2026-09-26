@@ -147,7 +147,7 @@ func printCatalogue(w *os.File) {
 
 const usage = `checker — run-log invariants for the raft storage class (PLAN_RAFT.md §13.7)
 
-Reads ONE run log (JSONL, written by difffuzz / crash / kill / flatness — the
+Reads ONE run log (JSONL, written by crash / kill / flatness — the
 format is documented in log.go) and judges the invariants over it. Three states:
 PASS, FAIL and SKIP; a SKIP always says what the log did not contain.
 

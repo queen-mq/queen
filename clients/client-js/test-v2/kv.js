@@ -1,15 +1,16 @@
 /**
  * KV integration suite (PLAN_KV_TIMERS.md §5, §8.3).
  *
- * Every test here is repeatable ONLY because run.js purges `queen.kv` for the
- * `test-%` namespaces before the run (§10.4): without that purge a
+ * Every test here is repeatable ONLY because every run starts on a fresh broker
+ * (test/run.sh creates the lane's data volume empty and destroys it with
+ * `down -v`): against a broker that kept the previous run's keys, a
  * `putIfAbsent` test is green on its first execution and red forever after,
- * and an `incr` test accumulates between runs. If you add a test here, its
- * namespace must start with `test-` or it will be the one that rots.
+ * and an `incr` test accumulates between runs. Keep the namespaces under
+ * `test-`, like every other fixture of the suite.
  *
  * And `forever` is BANNED in this file. A test that goes wrong with a TTL
  * leaves state that expires by itself; a test that goes wrong with `forever`
- * leaves immortal state in a shared database.
+ * leaves immortal state in a shared broker.
  */
 
 import { KV_NS, sleep } from './_kvtimers.js'

@@ -446,7 +446,7 @@ async def test_auto_renew_lease(client):
 # ============================================================================
 #
 # Exercises the .partitions(N) builder method end-to-end:
-#   * Server SQL drains up to N partitions per call
+#   * The broker drains up to N partitions per call
 #   * Each message carries its own partitionId / leaseId / partition
 #   * batch(B) is a global cap on TOTAL messages across all partitions
 #   * Default (no .partitions() call) preserves single-partition behaviour

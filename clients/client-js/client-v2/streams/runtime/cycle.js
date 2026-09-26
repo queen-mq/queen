@@ -6,10 +6,10 @@
  *   - push_items: sink emissions (queue/partition/payload triples)
  *   - ack: source ack (transactionId, leaseId, status, optional error)
  *
- * The server runs streams_cycle_v1 in one transaction; on success the
- * SDK considers the source messages safely processed. On failure (including
- * EXCEPTION inside the SP), the entire cycle is rolled back and the source
- * messages remain visible for redelivery via Queen's existing lease/retry.
+ * The broker commits the cycle as one command, all or nothing; on success the
+ * SDK considers the source messages safely processed. On failure, nothing of
+ * the cycle is applied and the source messages remain visible for redelivery
+ * via Queen's existing lease/retry.
  */
 
 export async function commitCycle({ http, queryId, partitionId, consumerGroup, stateOps, pushItems, ack, releaseLease }) {

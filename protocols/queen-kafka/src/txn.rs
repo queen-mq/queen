@@ -2,9 +2,8 @@
 //!
 //! A transactional producer's records are held in this process until
 //! `EndTxn(commit)`, which writes the whole set through ONE call to
-//! `POST /api/v1/transaction` — a single Postgres transaction that already
-//! carries KV riders inside itself
-//! (server/sql/procedures/005_log_ack.sql, `log_transaction_wire_v1`). Abort
+//! `POST /api/v1/transaction` — a single broker transaction (one raft entry,
+//! applied all or nothing) that already carries KV riders inside itself. Abort
 //! discards the stage. **No uncommitted record ever enters the log.**
 //!
 //! That one sentence is the whole design, and everything Kafka builds to cope
@@ -55,8 +54,7 @@
 //! carries the version it holds, at **index 0 of the bundle with
 //! `required: true`** — so a fenced commit does not merely fail, it writes
 //! **zero records and zero offsets**, because a lost `required` precondition
-//! raises 23514 out of `kv_apply_v1` and rolls the whole Postgres transaction
-//! back.
+//! rolls the whole broker transaction back (`reason: "kv_precondition"`).
 //!
 //! ## What survives a crash, and the property that must not be got wrong
 //!
@@ -70,7 +68,7 @@
 //! held the stage and the bundle committed. A false positive — the application
 //! believes committed while nothing landed — is unreachable.** The reverse (a
 //! commit that landed and was answered an error, because the facade died
-//! between the Postgres COMMIT and the response) is reachable, is bounded to
+//! between the broker's commit and the response) is reachable, is bounded to
 //! one transaction, and is the safe direction: the application resumes from
 //! offsets that were committed atomically with the records and reprocesses
 //! nothing.
@@ -133,7 +131,7 @@ pub const DEFAULT_MAX_TXN_BYTES: usize = 8 * 1024 * 1024;
 pub const DEFAULT_MAX_TXN_RECORDS: usize = 50_000;
 
 /// Partitions one transaction may span. Each becomes a push group inside the
-/// bundle and one `queen.log_partitions` row lock in the pre-lock.
+/// bundle.
 pub const MAX_TXN_PARTITIONS: usize = 200;
 
 /// Offsets one transaction may commit.

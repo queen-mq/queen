@@ -7,12 +7,11 @@
 # replies with canned answers so the commit contract of §8.3 (200 + verdict,
 # versus every other failure) can be exercised without a broken database.
 #
-# No postgresql-client, deliberately and for the same reason the txnsemantics
-# runner has none: every assertion here is made at the HTTP wire, because the
-# wire IS the contract the seven clients depend on. An assertion that read the
-# row straight out of Postgres would pass on a broker that commits correctly and
-# reports the wrong thing, which is exactly the failure this suite exists to
-# catch.
+# Every assertion here is made at the HTTP wire, deliberately and for the same
+# reason as the txnsemantics runner: the wire IS the contract the seven clients
+# depend on. An assertion that read the row out of the broker's store would pass
+# on a broker that commits correctly and reports the wrong thing, which is
+# exactly the failure this suite exists to catch.
 FROM alpine:3.20
 
 RUN apk add --no-cache bash curl jq python3

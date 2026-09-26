@@ -1,7 +1,8 @@
 name: tests
 
-# Full client + broker test matrix (JS/Go/Py/CLI/C++ on single + HA stacks,
-# plus Rust broker unit tests). This is the CI counterpart of `test/run.sh`.
+# Full client + broker test matrix (the JS/Go/Py/CLI/C++/PHP/Rust client suites
+# on the single-node raft stacks, flag-off and default-tenant, plus Rust broker
+# unit tests). This is the CI counterpart of `test/run.sh`.
 on:
   push:
   pull_request:
@@ -13,20 +14,22 @@ concurrency:
 
 jobs:
   # Compile the broker once and share it as an artifact so the matrix cells load
-  # it instead of recompiling Rust six times.
+  # it instead of recompiling Rust for every cell. It is the product image (the
+  # single binary: broker + embedded proxy + Kafka facade + both frontends),
+  # the same Dockerfile docker-build.yml publishes.
   broker-image:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
       - name: Build queen:test
         uses: docker/build-push-action@v6
         with:
-          # Repo root, not ./server: the broker depends on the shared
-          # queen-protocol crate by relative path, so it has to be in context.
+          # Repo root: the broker links queen-protocol, the proxy and the Kafka
+          # facade by relative path, so they have to be in context.
           context: .
-          file: ./server/Dockerfile
+          file: ./Dockerfile
           tags: queen:test
           outputs: type=docker,dest=/tmp/queen-test.tar
           cache-from: type=gha
@@ -41,9 +44,9 @@ jobs:
   suites:
     needs: broker-image
     runs-on: ubuntu-latest
-    # JS and CLI each exercise three isolated topologies. Their per-topology
-    # safety deadline is about ten minutes, so a serialized lane needs more
-    # than thirty minutes including image setup and teardown.
+    # Every client suite exercises two isolated topologies (single, tenanted).
+    # The per-topology safety deadline is about ten minutes, so a serialized
+    # lane needs well over twenty minutes including image setup and teardown.
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -52,7 +55,7 @@ jobs:
         # §10.2). It is a cell of its own rather than a step of another because
         # it is the executable specification the six SDK cells are read against:
         # when it and an SDK cell disagree, the SDK is wrong.
-        suite: [js, go, py, cli, cpp, laravel, rust-client, mesh, http]
+        suite: [js, go, py, cli, cpp, laravel, rust-client, http]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -175,8 +178,8 @@ jobs:
       - name: PHP fixture syntax
         run: find app/app app/config app/tests -name '*.php' -print0 | xargs -0 -n1 php -l
 
-  # Broker tests that do not require the live PostgreSQL stack. Native for fast
-  # caching; live integration cases remain in the Docker-backed matrix above.
+  # Broker unit tests: in-process, no stack. Native for fast caching; live
+  # integration cases remain in the Docker-backed matrix above.
   rust-unit:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -282,39 +285,6 @@ jobs:
       - name: clippy
         run: |
           cargo clippy --manifest-path protocols/queen-kafka/Cargo.toml --locked \
-            --all-targets -- -D warnings
-
-  # The S3 / data-lake sink connector (PLAN_S3_SINK.md). Its own workspace root,
-  # excluded from every other manifest by construction — so, exactly like the
-  # Kafka facade above, named nowhere it would be tested nowhere.
-  #
-  # This job exists FROM DAY ONE, deliberately, and that is the whole point of
-  # the note: queen-sqs shipped in 1.4.0 with 715 tests and NO CI job, so for a
-  # release those tests only ever ran where somebody happened to run them.
-  # PLAN_S3_SINK.md F11 names that as the trap not to repeat. A suite CI never
-  # executes is a suite whose green is a memory.
-  #
-  # Unit tests only. The e2e scenarios (plan §9) need a live broker, a
-  # PostgreSQL and an S3-compatible endpoint; they join test/run.sh when they are
-  # boring, and stay OUT of this workflow until then — the proxyimpr lesson: a
-  # flaky new lane in the release-day matrix is discovered on release day.
-  s3-sink:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          components: clippy, rustfmt
-          # See rust-unit: name the manifest, or rust-cache probes the root.
-          cache-workspaces: connectors/queen-s3
-      - name: cargo test
-        run: cargo test --manifest-path connectors/queen-s3/Cargo.toml --locked
-      - name: rustfmt
-        run: cargo fmt --manifest-path connectors/queen-s3/Cargo.toml --check
-      - name: clippy
-        run: |
-          cargo clippy --manifest-path connectors/queen-s3/Cargo.toml --locked \
             --all-targets -- -D warnings
 
   # `rust-version` in the client's Cargo.toml is a promise to anyone on an older

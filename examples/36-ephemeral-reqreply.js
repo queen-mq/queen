@@ -3,7 +3,7 @@
  *
  * This example demonstrates:
  * - implicit queues: an inbox that is created by the first message that names it
- *   and garbage-collected when it goes quiet — no configure, no PG row, no cleanup
+ *   and garbage-collected when it goes quiet — no configure, nothing on disk, no cleanup
  * - a long-poll pop parked on a RAM gate as the reply leg
  * - the correlation pattern: the requester names its own inbox, the responder
  *   pushes the answer straight into it
@@ -118,7 +118,7 @@ const sorted = [...latencies].sort((a, b) => a - b)
 console.log(`\nServed ${served} request(s).`)
 console.log(`Round trip: min ${sorted[0]}ms, median ${sorted[Math.floor(sorted.length / 2)]}ms, max ${sorted[sorted.length - 1]}ms`)
 console.log(`${REQUEST_COUNT} inboxes were created and abandoned; none of them was ever declared,`)
-console.log('and none of them left anything behind in PostgreSQL.')
+console.log('and none of them left anything behind on disk.')
 
 // The request queue is implicit too — left empty, it is collected on its own.
 // Deleting it is a courtesy to whoever reads the dashboard next.

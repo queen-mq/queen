@@ -1,26 +1,33 @@
 ---
 title: Life of a pop
-description: "Candidate selection, the claim under FOR UPDATE SKIP LOCKED, the head probe and forward scan, and the choice between an auto-ack and a lease."
+description: "A pop is a command like a push: the empty fast path, candidates from the ready ring, the claim planned on the leader as a cursor write, the lease or the auto-ack, the payload read from the answering node's own queue log, and long-poll parking."
 type: concept
 tier: internals
 sidebar:
   order: 4
 sourceOfTruth:
-  - server/src/handlers/data.rs
-  - server/sql/procedures/004_log_pop.sql
-  - server/src/pop_fusion.rs
-  - server/src/pop_autopilot.rs
   - server/src/config.rs
-  - server/src/db.rs
+  - server/src/handlers/data.rs
+  - server/src/handlers/raft.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/autopilot.rs
+  - server/src/rsm/planner/pop.rs
+  - server/src/rsm/planner/mod.rs
+  - server/src/rsm/state/mod.rs
+  - server/src/rsm/effect.rs
+  - server/src/rsm/batcher.rs
+  - server/src/rsm/qlog/set.rs
 verifiedBy:
+  - server/src/rsm/tests/planner_pop.rs
   - clients/client-js/test-v2/pop.js
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): db.rs gained the DLQ move and KV console statements; the pop path is untouched, and a moved frame announces its landing exactly as a push does.
 ---
 
-A pop answers one question: *which offsets may this consumer group take from this partition
-right now*. It answers that under a row lock, in SQL. Everything around that decision is
-scheduling: choosing which partitions to ask about, and deciding whether to wait.
+A pop answers one question: *which offsets may this consumer group take from which partitions right
+now*. In 2.0 that answer is planned on the leader like any other command, and it takes effect as a
+cursor write (a `CursorSet` effect) in an entry of the replicated log. Only after that entry has
+applied on the node that took the request does the node read the payloads, from its own queue logs.
+Everything around the claim is scheduling: choosing which partitions to ask about, and deciding
+whether to wait.
 
 The client side looks like this:
 
@@ -28,485 +35,208 @@ The client side looks like this:
 
 ## The three shapes of a pop
 
-| Route | Scope | Stored procedure |
+| Route | Scope | Command |
 | --- | --- | --- |
-| `GET /api/v1/pop/queue/:queue` | across the queue's partitions | `log_pop_wildcard_bin_v1` or `log_pop_list_v1` |
-| `GET /api/v1/pop/queue/:queue/partition/:partition` | one named partition | `log_pop_specific_v1` |
-| `GET /api/v1/pop?namespace=&task=` | across every matching queue | `log_pop_discover_wire_v1` |
+| `GET /api/v1/pop/queue/:queue` | across the queue's partitions | `PopWildcard` |
+| `GET /api/v1/pop/queue/:queue/partition/:partition` | one named partition | `PopPinned` |
+| `GET /api/v1/pop?namespace=&task=` | across every queue whose namespace and task match | `PopDiscover` |
 
-The single-partition, wildcard and discovery procedures funnel into `queen.log_pop_v1`, once per
-partition. `log_pop_list_v1`, the hot-list serve path, runs the same claim algorithm in one batched
-pass over the whole candidate list, about six statements regardless of how many candidates it was
-given, and calls `queen.log_pop_v1` only for a candidate on first contact that has no cursor row
-yet. The claim algorithm below is therefore the same in all cases; only candidate selection and
-batching differ. A discovery pop requires at least one of `namespace` or `task`: a bare
-`GET /api/v1/pop` is a `400` rather than an unbounded scan of every queue.
-
-The single-partition route carries one wire subtlety worth recording. Its response assembly lives
-inside `queen.log_pop_specific_v1` (004_log_pop), a `VOLATILE` plpgsql function that calls
-`log_pop_v1` first and resolves the reported `partitionId` **afterwards**, in a later command of
-the same function, whose snapshot is therefore at least as new as anything the claim saw. The
-previous shape resolved the partitionId in the outer statement, under a snapshot taken *before*
-the claim ran; because the volatile claim sees fresh snapshots internally, a pop racing the
-partition-creating push's commit could deliver a genuinely **leased** batch whose every message
-carried `partitionId: ""`, and the client's mandatory-partitionId ack guard then threw. Moving the
-assembly inside the function makes the ordering airtight by snapshot monotonicity. The wire shape
-is unchanged.
+All three funnel into one claim function per partition (`claim_one` in
+`server/src/rsm/planner/pop.rs`); only candidate selection differs. A discovery pop needs at least one
+of `namespace` or `task`: a bare `GET /api/v1/pop` is a `400`, not a scan of every queue.
 
 <pre class="mermaid">{`
 sequenceDiagram
   participant C as consumer
-  participant H as pop handler
-  participant R as hot-list ring
-  participant PG as PostgreSQL
-  C->>H: GET pop with batch, partitions, wait
-  H->>R: ask for candidate partitions
-  R-->>H: k names, or nothing ready
-  H->>PG: log_pop_list_v1, one batched claim over all candidates
-  PG->>PG: claim log_consumers FOR UPDATE SKIP LOCKED
-  PG->>PG: head probe backwards, then forward scan to the budget
-  alt autoAck
-    PG->>PG: advance committed, no lease
-  else leased
-    PG->>PG: set worker_id, batch_end, lease_expires_at
-  end
-  PG-->>H: segment rows plus slicing bounds
-  H->>H: decompress each blob, slice the frames
-  H-->>C: 200 with messages, or 204 and park
+  participant R as receiver
+  participant B as batcher and planner (leader)
+  participant A as apply thread
+  participant Q as queue log (this node)
+  C->>R: GET pop with batch, partitions, wait
+  R->>R: empty fast path: any ready partition for this group?
+  R->>B: pop command
+  B->>B: candidates from the ready ring, claim, lease or auto-ack
+  B->>A: the entry, committed
+  A->>A: write the cursor rows, move pending rows
+  A-->>R: applied at this index
+  R->>Q: read the claimed records, decompress, decrypt
+  R-->>C: 200 with messages, or 204 and park
 `}</pre>
 
-Two placements carry most of the design. The ring is consulted before any permit or pooled
-connection is taken, and the frame walk happens after PostgreSQL has answered, never inside it.
+The request parameters and their defaults: `batch` 200; `partitions` 1, clamped to 1 to 64;
+`autoAck` false; `wait` false; `timeout` from `DEFAULT_TIMEOUT`, else `POP_DEFAULT_TIMEOUT_MS`, else
+30000 ms, and never more than 60000 ms; `consumerGroup` defaults to the queue-mode group
+`__QUEUE_MODE__`; `subscriptionMode` defaults to `DEFAULT_SUBSCRIPTION_MODE`. The lease length is
+`leaseSeconds` when the request sets it, otherwise the queue's `leaseTime` (60 seconds on a queue a
+push created); a discovery pop, which spans queues, uses 60 seconds unless the request sets it. The
+worker id is a UUIDv7 minted per request, and on a leased pop it is the `leaseId` the client gets
+back.
 
-The request parameters and their defaults: `batch` 200, `partitions` 1, `autoAck` false,
-`wait` false, `timeout` from `DEFAULT_TIMEOUT` (30000 ms), `consumerGroup` defaulting to the
-sentinel group `__QUEUE_MODE__`, `subscriptionMode` `all`, `subscriptionFrom` empty. The lease
-length is `COALESCE(leaseSeconds, the queue's lease_time, 60)`. The worker id is a freshly minted
-UUIDv7 per request, and on a leased pop it is what the client gets back as `leaseId`.
+When pop maintenance mode is on, every pop answers at once without claiming anything.
 
-When pop maintenance mode is on, every pop answers `204` immediately with no work done.
+## Step 1: the empty fast path
 
-## Where the width and the batch come from
+Most pops of an idle queue find nothing, and a plan costs a slot in the leader's serial pipeline. So
+a wildcard pop first checks committed state on its own node: if the queue exists, the group is
+registered, the group does not conflate, and no `pending` row of the group is ready, the pop is
+provably empty and never becomes a command (`QUEEN_RAFT_POP_FASTPATH_EMPTY`, on by default). A push
+that lands afterwards re-arms the partition and wakes the parked consumer, so nothing is stranded.
 
-Two numbers shape everything below. `partitions` is the sweep width, and it is
-what step 1 turns into `k` candidate names. `batch` is the message budget for the
-call, and it is both the stopping rule in step 1 and the cap the claim in step 4
-spends. Before 1.2 both were the client's, and a client that set neither got its
-own SDK's defaults.
+In a cluster that check reads the local node, which may not yet have applied an ack or a push another
+node already answered. A pop that waits is woken when that entry applies here. A pop that does not
+wait takes the read barrier first and looks again before it answers empty.
 
-Since 1.2 a pop may hand either of them, or both, to the broker by sending
-`autopilot=true` and simply omitting the ones it is delegating. The choice is per
-dimension: a value you send is yours and is never overridden, so
-`autopilot=true&partitions=1` is a manual width of one with an automatic batch.
-The reasoning, and the client side of it, are on
-[pop autopilot](/reference/http/pop#autopilot).
+## Step 2: the command and its candidates
 
-What is worth recording here is where the controller reads its inputs, because
-that is what bounds where it can run at all. It is an in-memory controller keyed
-by `(tenant, queue, group)` and it issues **no PostgreSQL query of its own**:
-before the claim it takes one pass over the ready set of the hot-list ring for
-both of its inputs, how many partitions are servable and how long the oldest of
-them has waited. The width loop steers that ready-age towards
-`QUEEN_POP_AUTOPILOT_TARGET_AGE_MS`, with a dwell in both directions so it cannot
-limit-cycle; the batch a delegated consumer receives is a constant rather than a
-loop, `QUEEN_POP_AUTOPILOT_BATCH`.
+The receiver builds a `PopCommand` with the budget (`batch`), the width (`partitions`), the lease
+length, the worker id and a planning deadline, and submits it. On the leader, the planner picks the
+partitions to try:
 
-Three consequences follow from reading the ring, and each of them is a place the
-parameter is accepted and quietly does nothing:
+- **A pinned pop** tries its one partition. An unknown partition answers empty and is never created:
+  only a push creates a partition.
+- **A wildcard pop** tries the group's **ready ring**, in FIFO order, then any partition of the queue
+  appended to earlier in the same cycle. The ring is derived from the `pending` keyspace, which apply
+  maintains: one row per `(tenant, queue, group, partition)` with work, carrying `ready_at`, never
+  later than the earliest time that partition could yield a claim. A partition is ready when
+  `ready_at` has passed, so a lease expiring or a `delayedProcessing` deadline passing re-arms a
+  partition with no extra write. The ring is coarse by contract: every candidate is re-checked
+  against its cursor row.
+- **A discovery pop** runs the wildcard walk over each matching queue, sharing one budget.
 
-- **The legacy SQL candidate scan has none of those facts.** With
-  `QUEEN_HOTLIST=0` the branch below runs and an opted-in request resolves to
-  today's defaults.
-- **A pinned-partition pop is one partition by definition**, and a discovery pop
-  spans queues rather than a ring, so neither route has a width to choose.
-- **Conflation owns that dimension already.** Under `conflation=true`,
-  `partitions` is not a sweep width but the message budget, because a conflating
-  pop yields at most one message per partition. A controller width there would
-  silently shrink what the consumer asked for, so the ticket is inert.
+The first wildcard or discovery pop of a group on a queue registers the group (a `GroupUpsert`
+effect carrying its subscription mode, instant and conflation policy). A wildcard pop on a queue that
+does not exist yet creates it with the implicit defaults, so a group can register before the first
+push. A group registered with backlog to find (`all`, or a timestamp) has no `pending` rows yet for
+the partitions that predate it, so that first wildcard pop tries every partition of the queue instead
+of the ring. A `new` group has no backlog and rides the ring from the start.
 
-The handler has exactly one place where the controller's answer becomes the
-claim's knobs, a `match` on the ticket's plan whose `None` arm is the
-pre-autopilot code path verbatim. That is what makes "a request without the
-parameter is byte-identical" structural rather than asserted: with no plan there
-is nothing at that site to get wrong.
+The walk stops once `partitions` partitions have been claimed or the `batch` budget is spent. The
+budget is shared: the first partition may take all of it.
 
-## Step 1: picking candidates
+## Step 3: visibility gates
 
-There are two candidate paths, and which one runs depends on `QUEEN_HOTLIST` (default **on**).
+Before it claims, `claim_one` reads two settings from the queue's configuration.
 
-### With the hot-list (default)
+**`windowBuffer` (seconds)** is a quiet-period debounce: if the partition's newest append is younger
+than `W` seconds, it delivers nothing, so a burst becomes one batch.
 
-The broker keeps, per `(tenant, queue, group)`, an in-memory ring of partitions it believes have
-pending data, and asks SQL only about those. The full mechanism is on
-[The hot-list](/internals/hotlist); what matters here is the ordering of the serve path, because
-it is deliberate:
+**`delayedProcessing` (seconds)** makes only appends at least `D` seconds old visible. Because append
+timestamps are monotone within a partition, the filter cuts a contiguous tail, and the scan stops at
+the first append that is too young.
 
-1. **A cheap in-memory check first.** If no reseed is due, the deferral config is fresh, and the
-   ring has nothing ready, the pop returns empty **without taking an admission slot or a pooled
-   connection**. This ordering exists because a quiet re-poll rate is proportional to the number
-   of parked consumers: acquiring the shared serving limiter on every empty re-poll let that storm
-   saturate the limiter, so a freshly woken real delivery queued behind thousands of empty polls.
-2. Only if there is real work does the pop take a permit and a connection.
-3. It takes up to `k = clamp(partitions × 2, 2, 64)` candidate names from the ring, stopping
-   earlier as soon as the marks on the entries it has already claimed cover the caller's `batch`,
-   and calls `queen.log_pop_list_v1(queue, group, names[], ...)`, which claims all of them in one
-   batched pass.
-4. It checks a per-candidate verdict back into the ring.
+## Step 4: seeding the cursor on first contact
 
-Checkout width is what bounds how many pops can serve one ring at once: every claimed entry is
-held `INFLIGHT` for the whole round trip, and that hold spans the client's work and its ack, not
-just the SQL. The fixed over-claim this replaced (`partitions × 8`, floor 16) held 16 to 80
-partitions per serve and capped a 100-partition ring at about six concurrent serves; raising the
-ceiling back to 512 after the claim went batched measured 4x to 13x worse on a sparse ring of 1000
-partitions taking about one message per second each on an 8-core cell, p50 21.8 s against about
-1.5 s at the default.
+The first time a `(partition, group)` pair is claimed, its cursor has to be seeded. An existing cursor
+is never re-seeded.
 
-A first-ever pop for a `(queue, group)` is routed through the SQL wildcard procedure instead,
-because that one carries the group-first-contact bulk seed. After the seed marker exists, every
-subsequent pop uses the ring.
+- A **registered group** seeds by its stored policy: `all` just below the oldest retained offset
+  (deliver everything retained); `new` just before the first append stamped at or after the group's
+  registration; a timestamp subscription just before the first append at or after that timestamp.
+  When nothing is that recent, the cursor lands on the tail. Because the comparison is by timestamp,
+  a partition created after the group registered still delivers its whole backlog.
+- A **pinned pop of an unregistered group** seeds from the intent it carries: `subscriptionFrom` as a
+  timestamp, `new` or `subscriptionFrom=now` at the tail, and otherwise everything retained. A plain
+  pinned pop does not register the group.
+- The queue-mode group always starts from everything retained.
 
-<Aside type="note">
-That first SQL pop is also a **provisioning** call: a wildcard pop, like a subscription
-registration, on a queue that does not exist creates its `queen.queues` config row. It has to.
-The durable subscription marker carries a foreign key to the queue row, and a group may
-legitimately subscribe before the first push creates the queue, so without the upsert the FK would
-reject exactly those early subscribers. The flip side of that widening: a consumer typo now
-creates a queue row, where it previously left only an orphan watermark.
-</Aside>
+Apart from two cases (the empty-partition seal below, and the first pinned pop of a conflating group,
+which registers the group and seeds every partition of the queue at once), a first contact that
+delivers nothing writes no cursor: the seed is stable, so the next poll computes the same value, and
+an idle poll costs no log entry.
 
-### Without the hot-list
+## Step 5: the claim
 
-`QUEEN_HOTLIST=0` reverts to the SQL candidate scan, which is worth understanding because it is
-what the hot-list replaces:
+With `wanted = committed + 1`, the claim works on the partition's append boundaries, which the
+planner rebuilds from the replicated `txns` rows (base offset, end offset, timestamp) plus the appends
+still in flight. It never reads a payload or a file position.
 
-```sql
-SELECT p.id, p.name
-FROM queen.log_partitions p
-LEFT JOIN queen.log_consumers c
-  ON c.partition_id = p.id AND c.consumer_group = p_group
-WHERE p.queue_id = v_qid
-  AND p.last_write_at >= v_watermark - interval '2 minutes'
-  AND (c.partition_id IS NULL OR p.last_offset > c.committed)
-  AND (c.worker_id IS NULL OR c.lease_expires_at IS NULL OR c.lease_expires_at < v_now)
-ORDER BY random()
-LIMIT v_cand_cap
-```
+- **A live lease skips the partition.** Another worker's live lease (or this worker's) means nothing
+  is claimed here this time; other partitions still serve. A lease granted under an earlier leader,
+  timed by another node's clock, is held `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (500 ms) past its expiry
+  before its batch goes to another worker. A lease that ran out with no ack is redelivered.
+- **The head probe** takes the append whose range covers `wanted` and serves from `wanted` to its end,
+  up to the budget.
+- **The forward scan** then takes later appends in order, each from its first frame, until the budget
+  is spent or an append is too young.
+- **A retention gap is not an error.** If `wanted` is below the oldest retained offset, the batch
+  starts at the first retained append.
+- **The empty-partition seal.** If the scan takes nothing and the partition holds no live append at
+  all while `last_offset > committed`, the cursor is sealed to `last_offset`. Without it, a partition
+  whose appends were all removed by retention would stay a candidate for ever. It never fires when an
+  append exists but is deferred by `delayedProcessing`.
+- **A conflating group** takes one backward step instead: it serves the newest visible frame and
+  leases the whole span up to it.
 
-Four things in that query carry their own reasoning:
-
-- **The write watermark** (`p.last_write_at >= watermark - 2 minutes`) keeps a caught-up consumer
-  from scanning the whole partition set on every long-poll. It is decisive at ten to twenty
-  thousand partitions per queue. The two minutes of slack absorb the one-second quantization of
-  `last_write_at` on the push side.
-- **The filter is coarse on purpose.** "No consumer row, or `last_offset > committed`" can be
-  stale; `log_pop_v1` re-verifies under the row lock, so a stale candidate simply yields zero
-  rows.
-- **`ORDER BY random()`** spreads two hundred consumers across partitions instead of convoying
-  them all onto the lowest-named one.
-- **The candidate cap** is 512 when `partitions >= 128`, otherwise `clamp(partitions × 4, 64, 512)`.
-  More candidates are fetched than requested, because some will be claimed by concurrent pops or
-  turn out empty.
-
-The legacy path also does the cheap `queen.log_has_pending_v1` probe before taking a permit, for
-the same starvation reason as above: `false` means definitively nothing to deliver, so skip the
-scan and park.
-
-Two pieces of per-`(queue, group)` bookkeeping live only on this path:
-
-**The group-first-contact bulk seed.** On the very first pop of a `(queue, group)`, one insert
-into `queen.consumer_groups_metadata` elects a single seeder (it is the first insertion that
-returns a row count), and that seeder seeds the cursor of *every* partition of the queue in one
-set-based statement. Without it, `log_pop_v1`'s per-partition lazy row creation convoys: many
-concurrent consumers of a fresh queue each block on another's transaction id, and because each
-holds several such pending inserts across randomly ordered partitions, the waits form chains.
-Chains, unlike cycles, are never broken by the deadlock detector.
-
-**The empty-scan watermark.** When a scan claims nothing, the watermark is not advanced blindly:
-a partition may have been skipped only because someone else held its lease. Throttled to once
-every 30 seconds, the procedure re-checks for pending data *ignoring* the lease filter, and
-advances the watermark only if the queue is genuinely empty. Otherwise it records the check time
-and keeps the floor, so a lease-held backlog is never stranded.
-
-## Step 2: visibility gates
-
-Before touching the consumer row, `log_pop_v1` reads `delayed_processing` and `window_buffer`
-from the `queen.queues` configuration row.
-
-**`windowBuffer` (seconds)** is a quiet-period debounce: if the partition received a segment
-within the last `W` seconds, deliver nothing at all. The check is one backward primary-key step
-to the newest segment, which works because `created_at` is monotone in `base_offset`. On the
-hot-list path this SQL debounce can be bypassed (`p_skip_window_debounce`) so that the broker's
-revisit wheel is the single authority on the hold; the SQL debounce remains the safe floor
-whenever the broker does not know the queue's config.
-
-**`delayedProcessing` (seconds)** makes only segments at least `D` seconds old visible. It is
-never bypassed: it stays SQL-enforced, and the wheel only schedules revisits for it. Because
-`created_at` is monotone, the filter cuts a contiguous suffix, so the scan hits the budget before
-ever reaching the filtered tail.
-
-## Step 3: subscription seeding, on first contact only
-
-If this is the first time a `(partition, group)` pair is seen, the cursor has to be seeded, and
-an existing cursor is *never* re-seeded. The order of preference is:
-
-1. **The durable subscription record.** `queen.consumer_groups_metadata.subscription_timestamp`
-   for this `(group, queue)`. The cursor lands just before the first segment at or after that
-   timestamp (a forward walk starting at the retention watermark, never at offset 0). If nothing
-   that recent exists, the cursor becomes `last_offset` (future-only). This is what makes a
-   partition created *after* a group subscribed deliver its whole backlog rather than skip it.
-2. **The pop-carried intent**, for a direct single-partition pop that never went through
-   registration: `subscriptionFrom` as a timestamp, or `subscriptionMode=new` /
-   `subscriptionFrom=now`, which seed `committed = last_offset` and skip the entire existing
-   backlog.
-3. Otherwise `committed = -1`: deliver everything retained.
-
-`__QUEUE_MODE__` is excluded from step 1 and 2 deliberately: a queue-mode pop carrying
-`subscriptionMode=new` must never skip backlog.
-
-## Step 4: the claim
-
-```sql
-SELECT c.committed INTO v_committed
-FROM queen.log_consumers c
-WHERE c.partition_id = v_pid AND c.consumer_group = p_group
-  AND (c.worker_id IS NULL OR c.lease_expires_at IS NULL OR c.lease_expires_at < v_now)
-FOR UPDATE SKIP LOCKED;
-```
-
-`SKIP LOCKED` keeps concurrent pops non-blocking: another worker's live lease, or another pop
-mid-flight on the same row, means this partition is simply skipped this cycle.
-
-What the procedure does **not** do is unconditionally `INSERT ... ON CONFLICT DO NOTHING` the
-consumer row on every pop. That single line is the difference between a working broker and a
-stalling one, and the history is recorded in the source: a per-pop insert makes concurrent pops
-serialize on the inserter's transaction id, and because a wildcard pop claims several partitions
-per transaction in random order, those waits form cycles: deadlock storms that grew *more*
-frequent as the broker got faster.
-
-So the claim is claim-first, and only a genuinely missing row takes the creation path:
-
-1. Re-probe without the lease filter, to distinguish "row missing" from "present but
-   leased or locked". Present means return, non-blocking.
-2. Missing means try a transaction-scoped advisory lock on
-   `hashtextextended(partition_id || '/' || group, 42)`. **Try**, not take: `ON CONFLICT DO NOTHING`
-   against a key another open transaction is inserting waits on that transaction until it commits,
-   and a wildcard pop's transaction lives for its whole candidate loop, so those waits chain into
-   a livelock with no cycle for the detector to break. The non-blocking try means exactly one pop
-   creates the row and every concurrent pop skips this partition for one cycle. A hash collision
-   false-skips an unrelated partition for one cycle, which is harmless.
-3. Insert the row seeded per step 3, then re-claim.
-
-<pre class="mermaid">{`
-flowchart TB
-  A["claim FOR UPDATE SKIP LOCKED"] -->|row returned| S["scan and deliver"]
-  A -->|nothing returned| B["re-probe without the lease filter"]
-  B -->|row present| K["skip this partition for one cycle"]
-  B -->|row missing| T["try the advisory xact lock"]
-  T -->|not acquired| K
-  T -->|acquired| I["insert the row, seeded per step 3"]
-  I --> RC["re-claim"]
-  RC -->|row returned| S
-  RC -->|nothing returned| K
-`}</pre>
-
-Every edge that is not the happy path leaves immediately. None of them waits on another
-transaction, which matters because a wildcard pop keeps its transaction open across the whole
-candidate loop.
-
-## Step 5: the head probe and the forward scan
-
-With `wanted = committed + 1`, the scan is two queries.
-
-**The head probe** is one backward primary-key step for the greatest `base_offset <= wanted`:
-
-```sql
-SELECT s.base_offset, s.end_offset, s.created_at, s.blob
-FROM queen.log_segments s
-WHERE s.partition_id = v_pid AND s.base_offset <= v_wanted
-ORDER BY s.base_offset DESC LIMIT 1
-```
-
-If that segment covers `wanted`, the scan starts mid-segment at `start_idx = wanted - base_offset`
-and takes `min(end_offset - wanted + 1, budget)` messages. If it does not cover `wanted` (a fully
-consumed head, or the cursor sitting in a retention gap), then no earlier segment can either,
-because ranges are disjoint. The probe is written as a bare `LIMIT 1` with the covering test
-applied afterwards, precisely so that a miss cannot walk the whole partition head.
-
-**The forward scan** then takes segments with `base_offset > wanted` in ascending order, each
-starting at frame 0, until the budget is spent. The `plpgsql` `FOR` loop is a cursor, so exiting
-at the budget stops the index walk: a deep backlog costs only the rows actually delivered.
-
-The procedure returns raw rows of `(base_offset, start_idx, take, msg_count, created_at, blob)`,
-and the broker decompresses each blob and slices frames `[start_idx, start_idx + take)`.
-PostgreSQL never looks inside a blob.
-
-### The empty-partition cursor seal
-
-If the scan takes nothing and the partition holds **no segments at all** while `last_offset >
-committed`, the procedure seals the cursor to the `last_offset` it snapshotted. Without this, a
-partition whose segments were all removed by retention stays "phantom pending" forever: a
-permanent wildcard candidate that also pins the empty-scan watermark at the epoch, forcing full
-partition-set scans on every long-poll.
-
-The guard conditions are narrow and worth stating. It fires only when the partition is *entirely*
-empty and unfiltered: `take = 0` also happens when segments exist but are deferred by
-`delayedProcessing`, and sealing past those would skip live messages. A race with a concurrent
-push is safe because offsets are monotone: anything pushed after the snapshot stays above the seal
-and remains pending. And it is a cursor seal, not a claim: no lease or attempt field is touched.
+The planner also refuses to claim for a request nobody can answer: when the request's deadline falls
+within `QUEEN_RAFT_POP_REPLY_MARGIN_MS` (50 ms) of the planner's clock, the pop answers empty rather
+than lease messages no one will receive.
 
 ## Step 6: auto-ack or lease
 
-This is the only branch that changes the delivery contract.
+This is the only branch that changes the delivery contract, and it is one `CursorSet` effect either
+way.
 
-**`autoAck=true`** commits inside the pop transaction:
+**`autoAck=true`** moves `committed` to the last delivered offset in the same entry, holds no lease,
+and returns an empty `leaseId`. If the consumer dies after the response is written but before the
+work is done, those messages are gone. This is at-most-once.
 
-```sql
-UPDATE queen.log_consumers SET
-    committed = v_last, worker_id = NULL, lease_expires_at = NULL,
-    lease_acquired_at = NULL, batch_end = NULL,
-    total_consumed = total_consumed + v_taken
-```
+**Otherwise the batch is leased.** The cursor row gets the worker, `batch_end` (the last delivered
+offset), `lease_expires_at = now + lease seconds`, and the **delivered set**: the distinct
+transaction-id hashes of the delivered messages, which the ack fast path later compares against. The
+cursor does not move; only an ack moves it. `attempt_count` increases when a batch starts at the same
+offset as the previous delivery (a nack or a lease expiry left the cursor there) and resets to 1
+otherwise. It is telemetry and never spends the retry budget, which only an explicit `failed` ack
+charges.
 
-No lease, and `leaseId` comes back as an empty string. If the consumer dies after the response is
-written but before the work is done, those messages are gone. This is at-most-once.
+One cursor row holds at most one lease, so exactly one leased batch is in flight per
+`(partition, group)`. A single-partition queue cannot be consumed in parallel by one group, however
+many consumers run. Parallelism comes from partitions.
 
-**Otherwise the batch is leased:**
+## Step 7: the answer, and waiting
 
-```sql
-UPDATE queen.log_consumers SET
-    worker_id = p_worker,
-    lease_expires_at = v_now + make_interval(secs => p_lease_seconds),
-    lease_acquired_at = v_now,
-    batch_end = v_last,
-    attempt_count = CASE WHEN attempt_offset IS NOT DISTINCT FROM v_start
-                         THEN attempt_count + 1 ELSE 1 END,
-    attempt_offset = v_start
-```
+When the entry applies on this node, the receiver reads each claimed range from its own queue log
+(the index lookup of `(pid, offset)`, the record decompressed, the payload decrypted when the queue is
+encrypted) and renders the messages. On a follower serving its own client, the leader plans the
+claim and the follower waits until it has applied that entry before it reads; the follower asks the
+leader to stop claiming 250 ms early (at most a quarter of the time left), because it still has to
+apply and render.
 
-The lease covers the span `(committed, batch_end]`. The cursor does not move. Only an ack moves
-it. Redelivery detection is the `attempt_offset` comparison: a batch starting at the same offset
-as the previous delivery means the cursor did not move in between (a nack, or a lease expiry), so
-`attempt_count` increments; a batch starting anywhere else is fresh work and resets it to 1.
-`attempt_count` is telemetry and never spends the retry budget, which is charged only by an
-explicit `failed` ack.
+A claim whose requester is gone is not left to expire. When the entry carrying a leased claim applies
+and the pop that asked for it is no longer waiting (its deadline passed or the request was dropped),
+the batcher releases the lease with a nack: the lease is dropped, the cursor stays, and no retry is
+charged. The partition is claimable again within a cycle. A follower does the same for a claim it
+could not deliver in time.
 
-Because one consumer row holds at most one lease, exactly one in-flight leased batch exists per
-`(partition, group)`. A single-partition queue cannot be consumed in parallel by one group, no
-matter how many consumers you start. Parallelism comes from partitions.
+An empty result answers **`204` with no body at all**, unless the answer has something to say about
+conflation.
 
-## Step 7: rendering, and waiting
+If the result is empty, `wait=true`, and the deadline has not passed, a pinned or wildcard pop parks
+on its own gate, one per `(tenant, queue, group)`. Apply wakes one parked pop of a group when a
+partition becomes claimable for that group (an append, a lease released); a pinned pop is woken by
+appends to its queue. A parked pop also re-checks on its own every `QUEEN_RAFT_POP_PARK_RECHECK_MS`
+(5000 ms), the safety net for work that becomes claimable by the clock alone (a lease expiring, a
+delayed message maturing). A re-poll that would start with less than `QUEEN_RAFT_POP_SUBMIT_MIN_MS`
+(100 ms) left answers empty instead. A discovery pop does not park: it answers at once.
 
-The broker renders the per-message JSON, records per-queue metrics and delivery lag, and, on a
-leased pop, registers the batch in the [ack registry](/internals/ack-internals) so the eventual
-full-batch ack becomes one positional cursor advance.
+## Pop autopilot
 
-`count == 0` answers **`204` with no body at all**. Not an empty JSON object: announcing a
-content length on a body that is then elided poisoned Node/undici connections badly enough to
-produce reset storms under empty-poll load, and clients read nothing from that body anyway.
-
-If the batch is empty, `wait=true`, and the deadline has not passed, the pop parks:
-
-- It releases the permit and the pooled connection first. A parked pop never pins a connection.
-- It waits on the queue's wake gate, which a local write that landed frames, a peer's mesh hint,
-  an ack-promote or the background wheel tick can open. The landing writes are the push, a fired
-  timer, a streams sink emit and the disk spool replaying after an outage: all four announce after
-  their commit through the same function, so a fired timer reaches a parked consumer in the cycle
-  it fires rather than at the next reseed.
-- The wait is bounded by a backoff: `POP_WAIT_INITIAL_INTERVAL_MS` (100 ms) for the first
-  `POP_WAIT_BACKOFF_THRESHOLD` (3) attempts, then `initial × attempt × POP_WAIT_BACKOFF_MULTIPLIER`
-  capped at `POP_WAIT_MAX_INTERVAL_MS` (1000 ms). A successful wake resets the count. The backoff
-  is the correctness floor: a lost wake costs at most one interval.
-- On the legacy path, a wake also drains the pushed-partition hints and tries a targeted
-  single-partition pop for each, which is cheaper than another candidate scan. If every hinted partition
-  comes back empty it falls through to the wildcard pop, which is the backstop for missed wakes and
-  pre-existing backlog.
-
-## The minimum pop wait, and where it lives
-
-`queen.queues.min_pop_wait_time` (milliseconds, 0 = off) lets an under-full claim be held back so
-one commit carries more messages. It is unrelated to long-poll waiting: long-poll waits on an
-*empty* queue, this waits only when the queue is *non-empty* and the batch is *under-full*, and it
-ends at the first of batch full, window elapsed, or the caller's deadline.
-
-The design decision worth recording is where the wait happens. It is in Rust, before the permit
-and the connection are taken, never inside the stored procedure. A `pg_sleep` inside
-`log_pop_list_v1` would hold, for the whole window, a pooled connection, a serving permit, a
-PostgreSQL backend, and (after the first partition claim) the claimed rows' locks. That trades
-one cheap commit for a scarce connection and a held lock. Waiting in the broker costs a timer.
-
-The feature is also gated by a relaxed atomic that is false on every broker where no queue has
-ever configured it, so the default path pays one atomic load rather than a per-queue map lookup.
-
-## Pop fusion
-
-`QUEEN_POP_FUSION` (default **off**) makes N pop claims share one PostgreSQL transaction, and
-therefore one commit. It is the third leg of the coalescing that the
-[push path](/internals/life-of-a-push) and the [ack path](/internals/ack-internals) already had;
-until it existed, one pop was one transaction.
-
-What it buys is the WAL flush. On the sparse shape (1000 partitions taking about one message per
-second each on an 8-core cell, admission window 64) the wait sampler showed `LWLock`/`WALWrite`
-dominating at 16.4k samples against 3.5k on CPU, and about 90% of the roughly 88 ms of wall per pop
-was time queued for the commit. Fusion shares that seat, it does not skip it: the commit stays
-synchronous, so a served pop's lease is durable exactly as it is on the direct path.
-
-It is only reachable because the claim went batched. `log_pop_list_v1` is about six statements
-regardless of candidate count and every row lock it takes is `FOR UPDATE ... SKIP LOCKED`, so jobs
-inside one fused transaction never wait on each other: candidate sets are disjoint by hot-list
-checkout, and `SKIP LOCKED` never blocks. Fusing the old per-partition body would have multiplied
-a long serial leg instead.
-
-| Setting | Default | What it does |
-| --- | --- | --- |
-| `QUEEN_POP_FUSION` | `false` | the kill switch. Unset or `0` and the serve path never enqueues, so the pop path is the direct one described above |
-| `QUEEN_POP_FUSION_SHARDS` | 4 | round-robin buffers. Pop jobs have no fold key, because hot-list checkout already made the candidate sets disjoint, so any placement is correct |
-| `QUEEN_POP_FUSION_MAX_JOBS` | 16 | the most claims one flush drains from a buffer |
-| `QUEEN_POP_FUSION_CONCURRENCY` | 1 | flushes in flight per shard. Pop claims have no cross-flush ordering, so overlap is allowed, unlike ack fusion |
-| `QUEEN_POP_FUSION_HOLD_MS` | 3 | the buffer's liveness tick |
-
-**Batch size is emergent, not configured.** A job arriving at a shard with a free in-flight slot
-fires immediately, so at low load a fused pop claims in about one database round trip and its
-latency matches the direct path. Under load, arrivals accumulate for the in-flight flush's round
-trip and the next flush carries all of them, up to `QUEEN_POP_FUSION_MAX_JOBS`, which makes the
-batch roughly `pop rate × RTT / shards`. `QUEEN_POP_FUSION_HOLD_MS` is a backstop tick that re-runs
-the dispatch, not a linger every claim waits on.
-
-Two placements carry the win. The admission slot is taken once per flush rather than once per pop,
-so the limiter's round-trip signal becomes the fused transaction, the thing that actually queues on
-PostgreSQL. And the fused route is taken before any permit or connection, because `take_batch` is
-pure memory: the flush task holds the one permit and the one connection for every claim in it.
-
-A pop that owes side work stays on the direct path. The branch requires both the deferral-config
-refresh and the reseed floor to be idle, since each of those needs a private connection.
-
-Checkout width differs by one factor on this path: it is the SQL's serve cap 1:1,
-`k = clamp(partitions, 2, 64)`, without the direct path's twofold over-fetch. On the default
-`partitions=1` both work out to 2. The over-fetch dates from the random-candidate-scan era, when
-half a claim's candidates were routinely stolen or already empty; against the hot-list ring the
-candidates measured 0.0% `leased` and 1.0% `empty` on 2026-08-03, so the surplus half of every
-claim came back with no verdict at all and went to the back of the ready ring for a full extra
-lap.
-
-Failure is the direct path's failure. A pool error, a statement error, a broker-side timeout or a
-failed commit resolves **every** participant of that flush to a flush error; each caller re-appends
-its candidates to the ring and returns empty, which is what it does on a direct-path database
-error too. A rolled-back transaction wrote nothing. On the
-timeout arm the statement is cancelled server-side and the connection is quarantined rather than
-recycled. A caller whose HTTP future dies mid-flush leaves the flush to commit leases nobody is
-waiting on: the ring entries are requeued by the drop guard, the next serve reads them as `leased`,
-and the leases expire into redelivery. That is the same at-least-once window the direct path has
-between the SQL completing and the response rendering, widened by at most one flush round trip.
-
-The `pop-fusion` log target emits a `coalesce summary` line at most once every 10 seconds with
-`commits`, `jobs`, `jobs_per_commit` (the fusion gain) and the commit wait at p50 and p95.
+A wildcard pop that sends `autopilot=true` and leaves `partitions` or `batch` unset hands those
+dimensions to the broker; a value the client sends is never overridden. The choice is node-local and
+made before planning, so the plan stays a pure function of the command. The width is the group's
+partitions ready now, divided among this node's pops of that group in flight, clamped to 1 to 64. The
+batch is drain-aware: the group's measured drain rate (messages acknowledged per second of lease)
+times `QUEEN_RAFT_AUTOPILOT_DRAIN_MS` (200 ms), clamped to `QUEEN_RAFT_AUTOPILOT_BATCH_MIN` (100) and
+`QUEEN_RAFT_AUTOPILOT_BATCH_MAX` (1000); a group with no measurement yet starts at the minimum. The
+choice is echoed in the body as `"autopilot":{"partitions":W,"batch":B}`. A conflating pop is exempt.
+The wire contract is on [pop autopilot](/reference/http/pop#autopilot).
 
 ## What to expect when things go wrong
 
 | Situation | Result |
 | --- | --- |
-| Another worker holds the lease | that partition is skipped this cycle; other partitions still serve |
-| Cursor sits in a retention gap | the forward scan takes the next existing segment; not an error |
+| Another worker holds the lease | that partition is skipped this time; other partitions still serve |
+| The consumer never acks | the lease expires and the batch is redelivered, `attempt_count` up, retry budget untouched |
+| The requester is gone when the claim applies | the lease is released at once with a nack |
+| Cursor below the oldest retained offset | the claim starts at the first retained append; not an error |
 | Partition emptied entirely by retention | the cursor is sealed to `last_offset`; it stops being a candidate |
-| Statement timeout | the statement is cancelled server-side, the connection quarantined, `500` returned |
-| Client disconnects mid-pop | checked-out ring candidates are re-appended by a drop guard; the SQL claim either committed (and the lease will expire) or rolled back |
-| Pool exhausted | `500` with `{"error":"pool"}` |
+| No leader, or leadership lost | `503` with `Retry-After: 1` |

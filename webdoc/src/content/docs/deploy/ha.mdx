@@ -1,214 +1,207 @@
 ---
 title: High availability
-description: "More than one broker against one PostgreSQL: what the mesh between them carries, what a push does while the database is unreachable, and why the disk spool is not replication."
+description: "Three or five voters on one replicated log: what a cluster survives, how a write becomes durable, and how a node is added, replaced or recovered."
 type: how-to
 tier: operate
 sidebar:
   order: 5
 sourceOfTruth:
-  - server/src/mesh.rs
+  - server/src/rsm/replicator/raft/mod.rs
+  - server/src/rsm/replicator/raft/cluster.rs
+  - server/src/rsm/replicator/raft/log_store.rs
+  - server/src/rsm/replicator/raft/repair.rs
+  - server/src/rsm/replicator/node.rs
+  - server/src/rsm/facade/groups.rs
+  - server/src/handlers/raft.rs
   - server/src/main.rs
-  - server/src/file_buffer.rs
-  - server/src/admission.rs
-  - server/src/retention.rs
-  - server/src/stats.rs
-  - server/src/config.rs
-  - test/compose/docker-compose.ha.yml
-verifiedBy:
-  - server/mesh-verify.sh
 digest: >-
-  Replicas are copies of one binary on one PostgreSQL, and messages, offsets, leases,
-  deduplication, queue configuration and the dead-letter queue are rows: nothing replicates
-  between brokers, no quorum, no serving leader, no split-brain. They cover a broker dying, a
-  rolling restart, one node's network, not PostgreSQL, the failure domain. Three brokers is the
-  designed ceiling: replicas × `DB_POOL_SIZE` must fit `max_connections`. Every replica serves
-  every route, so a pop from one broker is acked to another. Leader election is a lease claim:
-  retention sweep and statistics reconciler run on one replica per cycle. `QUEEN_MESH_PORT`
-  carries hints only. While PostgreSQL is unreachable a push spools to disk, answered `201` with
-  `status: "buffered"` per item; pops, acks and `POST /api/v1/transaction` fail. The spool is
-  node-local, drained only by its broker, uncapped in size and age: a long outage fills the disk
-  and pushes report `failed`.
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): main.rs registers three new routes (the two KV console reads and POST /api/v1/dlq/:id/replay) and no new environment variable; nothing this page describes moved.
+  A Queen 2.0 cluster is three or five voters running the same binary with the openraft
+  replicator (`QUEEN_RAFT_REPLICATOR=openraft`), each with its own data directory. One leader
+  orders every write into one replicated log; an entry is written to the queue logs and fsynced
+  once on each node before it counts, a write is answered after its entry is committed on a
+  majority, and every node applies the log to its own full copy of the state. Three voters
+  survive one failure, five survive two; a cluster without a majority refuses writes until one
+  returns. Heartbeat 100 ms and election timeout 1 to 2 s by default. Any node serves clients:
+  followers forward writes to the leader and reads wait until the node has applied what was
+  committed when they began. Each node sets `QUEEN_RAFT_NODE_ID`, the same `QUEEN_RAFT_PEERS`
+  (`id=raft_host:raft_port/http_host:http_port`, every voter) and the same `QUEEN_RAFT_TOKEN`.
+  After the first boot the membership lives in the log and changes only through
+  `/api/v1/system/raft/membership`. On SIGTERM a leader hands leadership to a caught-up voter
+  before it drains.
 ---
 
-Brokers hold no authoritative state, so a second broker is another copy of the same binary pointed
-at the same PostgreSQL. Messages, offsets, leases, deduplication, queue configuration and the
-dead-letter queue are all rows: nothing to replicate between brokers, no quorum, no serving leader,
-no split-brain. The one deliberate exception is the [ephemeral](/reference/http/ephemeral) queue
-family, whose contents live in a single broker's RAM and die with it, by contract.
+A cluster is three or five nodes running the same binary, each with a data directory of its own.
+One of them leads: it orders every write into a single replicated log, and every node applies that
+log, entry by entry and in the same order, to its own full copy of the state. There is no shared
+storage and no external coordinator. The consensus protocol is Raft, from the `openraft` crate,
+and its log is the broker's own queue logs rather than a second write-ahead log.
 
-That also says what replicas cover. A broker process dying, a rolling restart, one node's network:
-yes. Losing PostgreSQL: no. The database is the failure domain, and keeping it alive is
-PostgreSQL's own tooling.
+What that buys, precisely:
 
-Timers add one bounded cost to a rolling restart and no risk. A broker that is stopped while it holds
-claimed timer rows does not hand them back: in-flight HTTP requests drain, the sweeper task is aborted
-with the runtime, and those rows become claimable again only when their lease expires, up to
-`QUEEN_SWEEPER_LEASE_MS` (30 s) later. Nothing is lost and nothing is delivered twice, because the
-fire was never committed. A 30 second worst case on a deploy is cheaper than a second shutdown path to
-maintain.
+- **A node dying, a rolling restart, one node's network.** The remaining majority keeps serving.
+  Three voters tolerate one failure and five tolerate two. Voter counts are odd on purpose: four
+  voters need three for a majority and so tolerate one failure, the same as three.
+- **No acknowledged write lost to a single failure.** An entry is written to the queue logs and
+  fsynced once on each node before that node reports it; the leader counts it committed when a
+  majority has reported it; the client is answered only after that.
+- **Losing a majority stops writes.** Two of three voters gone means no leader can be elected,
+  and every node answers `503` until a majority is back. That is the price of never having two
+  leaders; the way out when the majority is gone for good is
+  [below](#when-a-majority-is-gone-for-good).
 
-Two brokers, condensed from `test/compose/docker-compose.ha.yml`:
+The one deliberate exception is the [ephemeral](/use/ephemeral) queue class, whose contents live in
+one node's memory and are not replicated, by contract.
 
-```yaml
-services:
-  queen-a:
-    image: ghcr.io/queen-mq/queen:latest
-    environment:
-      PG_HOST: pg                       # the same database for every broker
-      QUEEN_SERVER_ID: queen-a          # distinct per broker
-      QUEEN_MESH_PORT: "6633"
-      QUEEN_MESH_PEERS: "queen-b:6633"  # the other broker
-      QUEEN_SYNC_SECRET: "change-me"    # byte-identical on every broker
-      FILE_BUFFER_DIR: /var/lib/queen/buffers
-    volumes: ["spool-a:/var/lib/queen/buffers"]   # never shared
+## Three nodes
+
+Every node takes the environment of a single node plus four variables:
+
+```bash
+QUEEN_RAFT_DIR=/var/lib/queen/raft
+QUEEN_RAFT_REPLICATOR=openraft
+QUEEN_RAFT_NODE_ID=1          # 2 and 3 on the other two
+QUEEN_RAFT_PEERS=1=queen-1:7400/queen-1:6632,2=queen-2:7400/queen-2:6632,3=queen-3:7400/queen-3:6632
+QUEEN_RAFT_TOKEN=...          # openssl rand -hex 32, the same on every node
 ```
 
-`queen-b` is the mirror image: its own server id, its own volume, its peer list pointing back. The
-rest of the environment is what a single broker already takes
-([configuration](/reference/config)).
+- `QUEEN_RAFT_REPLICATOR=openraft` selects the replicator that talks to peers. A single node runs
+  the local replicator by default, and the broker refuses a peer list without this setting.
+- `QUEEN_RAFT_NODE_ID` is a number from 1, distinct per node. On Kubernetes it can be `ordinal`,
+  which reads the trailing number of `HOSTNAME` and adds one, so pod `queen-0` is node 1.
+- `QUEEN_RAFT_PEERS` lists every voter of the initial membership, this node included, as
+  `id=raft_address/http_address`. The raft address is where peers send votes and log entries; the
+  HTTP address is where a follower forwards a client's write. The node binds its raft listener on
+  `0.0.0.0` at the port of its own raft address, unless `QUEEN_RAFT_LISTEN` names another address.
+- `QUEEN_RAFT_TOKEN` is the shared secret every raft request carries, in the
+  `x-queen-raft-token` header. Leave it unset and anything that can reach the raft port can vote
+  and append. Set it, and keep the port on a private network anyway
+  ([Security](/deploy/security#the-raft-port)).
 
-Three brokers is the designed ceiling. Full-mesh connections grow quadratically,
-`replicas × DB_POOL_SIZE` has to fit PostgreSQL's `max_connections`, and past three the bottleneck
-is the database rather than the number of brokers.
+Start all three. They find each other, elect a leader and serve. A complete, runnable version is
+[Docker Compose](/deploy/compose); the StatefulSet version is [Kubernetes](/deploy/kubernetes).
 
-Put a load balancer in front and stop thinking about it. Every replica serves every route, with no
-session affinity and no partition ownership, so a pop taken from one broker is acked to another.
+One `/health` answers `"role":"leader"` and the others `"role":"follower"`. Point clients at all of
+them behind a load balancer or a Service, with no affinity: a write that reaches a follower is
+forwarded to the leader, and a read waits until the node that took it has applied everything the
+cluster had committed when the read began, so a client never reads behind a write it was already
+answered for.
 
-## The mesh
+## How long a failover takes
 
-Brokers talk to each other over framed TCP on `QUEEN_MESH_PORT`, and everything on that wire is a
-hint:
+The leader sends a heartbeat every 100 ms, and a follower that hears nothing for its election
+timeout, a random value between 1 and 2 s, stands for election. Both are settings,
+`QUEEN_RAFT_HEARTBEAT_MS` and `QUEEN_RAFT_ELECTION_MS` (the minimum; the maximum is twice it), and
+the defaults are deliberately not tighter: a leader whose disk stalls on one slow fsync should not
+be deposed for it.
 
-- pop wakes, so a push committed on A releases a long poll parked on B immediately
-- hot-list marks, telling a peer that a partition went from empty to pending
-- maintenance-mode flips
-- queue-config invalidations, the instruction to forget a cached value and never the value itself
-- ephemeral admin fan-out (a RAM-class queue's reset, delete or config change), healed by the
-  periodic re-read when a frame is dropped
+A write in flight when the leader dies is not answered by the dead leader. The client sees an error
+or a timeout and retries; a retry of a push with the same `transactionId`, inside the queue's
+deduplication window (3600 s unless configured otherwise), finds the original if it was committed
+and writes nothing twice.
 
-Messages, offsets, acks, leases and deduplication state never cross it. They belong to PostgreSQL,
-which is why deduplication stays exact across replicas with no coordination at all, and why leader
-election is a row rather than a protocol: the retention sweep and the statistics reconciler each
-claim a lease row per cycle, an advisory lock stays inside the cycle as a belt, and each runs on
-exactly one replica per cycle.
+A planned stop costs less than a crash. On SIGTERM a node that leads first hands leadership to a
+caught-up voter and only then drains its listener as a follower, so a rolling restart costs one
+leadership transfer rather than an election timeout. Restart one node at a time and wait for it to
+answer `/health` with `200` before the next.
 
-The [sweeper](/internals/sweeper) is the one background component that elects nothing. Every replica
-fires timers and prunes expired KV rows in parallel, sharing the work with `FOR UPDATE ... SKIP LOCKED`
-instead of a lock id, because any ownership scheme orphans the shards of a broker that dies and an
-orphaned timer never fires. Two brokers doing a little redundant scanning is a cost; a promised message
-that silently never arrives is a defect.
+## The membership is in the log
 
-There is deliberately no mesh frame for a due timer either. The wake that a schedule rings is
-in-process only, so a timer scheduled on broker A and fired by broker B waits out B's sleep ceiling,
-`QUEEN_SWEEPER_MAX_SLEEP_MS`, one second by default. That is correct rather than merely tolerable,
-because `deliverAt` is a floor and never an appointment, and it is the reason nobody may make the
-correctness of timers depend on the mesh being up.
+The peer list is read at the very first boot, to initialise the cluster. From then on the
+membership is an entry in the replicated log, and it wins over whatever `QUEEN_RAFT_PEERS` says: the
+variable only tells a node its own listen address. Changing a peer's address, or adding a fifth
+line to the variable, changes nothing on a running cluster.
 
-Frames are dropped, not queued, when a peer is slow or down, and a dropped frame costs latency and
-nothing else, because every accelerated path has a periodic floor that re-reads the database. A
-broker with no peers configured binds nothing and keeps its in-process waker. The frame set and the
-cadences are in [the mesh](/internals/mesh).
+Membership changes go through the operator routes. Every node answers them and a follower forwards
+the change to the leader, which refuses any change that would leave the cluster without a quorum.
+They are under `/api/v1/system/`, so with authentication on they need the admin level, and a
+request scoped to a tenant is refused.
 
-The mesh port is a control surface, not a data port, and it must be firewalled to the brokers
-themselves: [Security](/deploy/security).
+| Route | Body | Does |
+| --- | --- | --- |
+| `GET /api/v1/system/raft/membership` | none | The current voters and learners |
+| `POST /api/v1/system/raft/membership/learners` | `{"id", "raft", "http"}` | Adds a node as a learner: it receives the log and does not vote |
+| `POST /api/v1/system/raft/membership/promote` | `{"ids": [...]}` | Makes caught-up learners voters |
+| `PUT /api/v1/system/raft/membership/voters` | `{"voters": [...]}` | Sets the voter set |
+| `DELETE /api/v1/system/raft/membership/members/:id` | none | Removes a member |
 
-## While PostgreSQL is unreachable
+`?timeoutMs=` bounds a change, 30 s by default; past it the answer is `504` and the change may still
+complete. A refused change answers `409` with a stable `code`, for example `no_quorum`,
+`last_voter` or `learner_behind`. The read-only views `GET /api/v1/raft/status`,
+`GET /api/v1/raft/members` and `GET /api/v1/raft/liveness` say what each node sees.
 
-A push does not have to fail. An item whose transaction cannot commit is appended to an on-disk
-spool under `FILE_BUFFER_DIR`, and the answer is still `201` with `status: "buffered"` on that
-item, which is why the per-item status is the contract and the status line is not. When the
-database returns, a drain replays each event under its original `transactionId`, so anything that
-had already committed comes back `duplicate` and writes nothing.
+## Replacing a node
 
-Reads need the database. Pops and acks error, safely, since an unacked lease redelivers, and
-`POST /api/v1/transaction` is all-or-nothing so it fails with them. `GET /api/v1/status/buffers`
-and the `queen_file_buffer_pending` gauge watch the backlog, and maintenance mode is the same
-diversion on purpose, for a planned failover ([system routes](/reference/http/system)).
+A node that lost its disk comes back as a new, empty member, and a removed voter comes back under
+its old id only with its data directory wiped. The cycle, from any node that is still up:
 
-## How the drain behaves
+<Steps>
 
-The drain is not a loop that retries until something works. It classifies every failure and the
-classification decides whether the file is kept, retried or given up on.
+1. **Remove the lost member,** if the membership still lists it.
 
-One cycle runs every `FILE_BUFFER_FLUSH_MS` (100 ms by default). It first finalizes the file
-currently being written so its events become drainable, then replays finalized files oldest-first,
-which is FIFO.
+   ```bash
+   curl -s -X DELETE http://queen-1:6632/api/v1/system/raft/membership/members/3
+   ```
 
-**Transient against permanent is a SQLSTATE decision, not a heuristic.** A failure carrying no
-SQLSTATE at all is the connection itself, so it is transient. So are `40001` serialization failure,
-`40P01` deadlock detected, and the whole of classes `08`, `53`, `57` and `58`: connection exception,
-insufficient resources, operator intervention, system error. Any other server-side error, a
-constraint violation or a `RAISE` inside a procedure, is permanent, because the same bytes will fail
-every retry. A spool file the broker cannot read is permanent for the same reason.
+2. **Start the replacement empty, with `QUEEN_RAFT_JOIN=true`.** A fresh node with that setting
+   never initialises a cluster of its own and answers `503` until the leader adds it. Without the
+   setting, a fresh node still asks its peers first and joins when one of them already holds
+   cluster state. Its `QUEEN_RAFT_PEERS` must still list its own entry.
 
-| Classification | What the drain does with the file |
-| --- | --- |
-| Transient | Leaves it in place, marks the database unhealthy, stops the cycle and retries on the next one. A file is **never** quarantined for a transient error, which is the property that makes an outage safe: surviving one is the entire point of the spool. |
-| Permanent | Counts the failure against that head file alone and retries it next cycle. The database stays marked healthy and the transient breaker is untouched, so one bad file does not look like an outage. |
+3. **Add it as a learner.** It receives the log, or a snapshot, and does not vote.
 
-Two counters bound how long either failure can hold up everything behind it.
+   ```bash
+   curl -s -X POST http://queen-1:6632/api/v1/system/raft/membership/learners \
+     -H 'Content-Type: application/json' -d '{"id":3,"raft":"queen-3:7400","http":"queen-3:6632"}'
+   ```
 
-- **Five attempts, then quarantine.** A head file that fails permanently five consecutive times is
-  moved to `<FILE_BUFFER_DIR>/failed` and the cycle carries on with the files behind it, so one
-  poison file cannot block replay of every newer buffered message. If the move itself fails the file
-  is deleted, on the reasoning that its data is a permanent SQL failure that can never be stored.
-  The counter is per file: it resets when the head changes and on the first successful drain.
-- **Ten consecutive transient failures, then a 5 s cooldown.** The circuit breaker parks the whole
-  drain loop for five seconds and resets its counter, so a broker does not spin against a database
-  that is still down.
+4. **Promote it once it has caught up.** Before that the promotion is refused with `409
+   learner_behind`.
 
-Pacing is asymmetric on purpose. A cycle drains up to **ten** files while the database is marked
-healthy and exactly **one** while it is not, so a recovering broker refills PostgreSQL at ten files
-per cycle, while a broker that is still failing probes with a single file rather than a burst.
+   ```bash
+   curl -s -X POST http://queen-1:6632/api/v1/system/raft/membership/promote \
+     -H 'Content-Type: application/json' -d '{"ids":[3]}'
+   ```
 
-Replay is admitted, not privileged. Each file's replay takes a slot in the **Maint lane** of the
-same admission arbiter that governs live traffic, and Maint is last in the wake order with a
-guaranteed share of 0.05, so a recovering spool cannot outrank the pushes, pops and acks arriving
-right now ([flow control](/internals/flow-control/)). Within a file, events are replayed in batches
-of `FILE_BUFFER_MAX_BATCH` (100 by default) rather than as one large transaction, and a batch that
-already committed replays idempotently on the next attempt at the file because the original
-`transactionId` is preserved.
+</Steps>
 
-**The tenant is preserved on disk.** Each spooled event carries the tenant resolved at push time,
-and the drain groups events by `(tenant, queue, partition)` and re-applies it on replay. A buffered
-push therefore cannot come back as the default tenant, which would be a quota and scope evasion. A
-push made by the default tenant omits the field, so a spool file written by a single-tenant broker
-is byte-identical to what it was before tenancy existed, and an older file without the field replays
-as the default tenant.
+A follower that was away for longer than the leader keeps the log for it (`QUEEN_RAFT_PURGE_HOLD_S`,
+600 s by default) receives a snapshot instead of the missing entries. A node that has to load a
+snapshot exits with code 75 and loads it on the next start, so leave the restart to its supervisor
+and keep its volume.
 
-<Aside type="caution">
-A quarantined file is an accepted-then-lost push, and `queen_file_buffer_failed` does not count it:
-that gauge counts spool **write** failures only. `GET /api/v1/status/buffers` counts the `.buf`
-files still pending in the spool root, not the contents of `failed/`. Alert on the broker's `spool`
-error log (`drain failed (permanent)` and `quarantined poison spool file`) as well as on the gauge,
-and treat any file appearing under `<FILE_BUFFER_DIR>/failed` as data that needs recovering by hand.
-</Aside>
+## When a majority is gone for good
 
-## The spool is not replication
+If a majority of the voters lost their disks and will never come back, Raft cannot elect a leader
+on its own. `QUEEN_RAFT_FORCE_RECOVER=<this node's id>` on the one survivor makes it, at boot, the
+only voter of its cluster: it commits everything its own log holds and serves alone, and new nodes
+then join it as learners.
 
-It is node-local and unreplicated, and a broker drains only the files it wrote itself. Behind a
-load balancer, buffered messages scatter across whichever brokers accepted them, and losing a node
-loses its spool: give every broker storage that outlives its container, and never point two brokers
-at one directory.
+It is unsafe by design and should be the last resort. Whatever the lost members had committed and
+the survivor had not is gone, and those writes were acknowledged to clients. The lost members must
+never come back with their old data, because two of them could still form a majority of the old
+voter set and elect a second leader: wipe them, or give their replacements new data directories.
+The setting refuses to run unless it names the node it is set on.
 
-It has no size cap and no maximum age either, so a long outage grows it until the filesystem fills
-and pushes start reporting `failed`. Replay is idempotent exactly as far as the deduplication
-window reaches, and no further.
+## Several raft groups per process
 
-More brokers buy availability. Throughput comes from partitions, and durability comes from
-PostgreSQL.
+One leader orders every write of a cluster, so one cluster's write rate is what one leader can
+plan and one set of disks can sync. `QUEEN_RAFT_GROUPS`, default 1 and at most 64, runs several
+independent raft groups in each process instead, each a whole state machine with its own log,
+leader and data directory. A tenant lives in exactly one group, chosen by a stable hash of its name
+or pinned with `QUEEN_TENANT_GROUPS=tenant=group,...` before it first writes. Group `g` uses the
+raft port plus `g`, and prefers a different node as its leader, so with as many groups as nodes
+every node leads one group. Every node must use the same value, and a group scales and fails over
+on its own. It helps only when the load is spread over several tenants.
 
 <CardGrid>
   <LinkCard
-    href="/deploy/security"
-    title="Security"
-    description="The trust boundaries around the broker, and the mesh port that has to be closed."
+    href="/deploy/kubernetes"
+    title="Kubernetes"
+    description="The StatefulSet, the headless Service, and why readiness is /health and liveness never is."
   />
   <LinkCard
-    href="/internals/mesh"
-    title="The mesh"
-    description="The framing, the frame set, and what heals a hint that never arrived."
+    href="/deploy/security"
+    title="Security"
+    description="The trust boundaries around the broker, and the raft port that has to stay private."
   />
 </CardGrid>

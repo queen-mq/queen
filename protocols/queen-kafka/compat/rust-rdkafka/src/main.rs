@@ -47,8 +47,8 @@
 //!
 //! ## What it needs
 //!
-//! A stack that is ALREADY RUNNING. Nothing here starts or stops a broker, a
-//! facade or a Postgres; that is `rig.sh`'s job, or yours.
+//! A stack that is ALREADY RUNNING. Nothing here starts or stops a broker or a
+//! facade; that is `rig.sh`'s job, or yours.
 
 mod clients;
 mod harness;

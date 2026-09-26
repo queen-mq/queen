@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
-# The queen-kafka compatibility rig: a throwaway Postgres, a debug broker, a
-# debug facade, and the franz-go suite in compat/go run against them. Nothing it
-# starts outlives it — the container, the broker and the facade are torn down on
-# every exit path, including a failure or a Ctrl-C.
+# The queen-kafka compatibility rig: a debug broker (one raft node on a
+# throwaway data directory), a debug facade, and the franz-go suite in compat/go
+# run against them. Nothing it starts outlives it — the broker and the facade are
+# torn down and the data directory removed on every exit path, including a
+# failure or a Ctrl-C.
 #
 #   protocols/queen-kafka/compat/rig.sh                 # the whole suite
 #   protocols/queen-kafka/compat/rig.sh -run TestLongPoll -v
@@ -14,11 +15,15 @@
 # Every argument that is not --keep is passed through to `go test`, so the whole
 # of its flag surface (-run, -v, -count, -timeout) is available.
 #
-# Ports are deliberately not the defaults: 55432 for Postgres (never 5432 — that
-# is a live stack on a developer machine), 6699 for the broker, 19092 for the
-# Kafka listener, and under --m5 19093 for the TLS one and 6698 for the
-# credential gate in front of the broker. Override with PG_HOST_PORT /
-# BROKER_PORT / KAFKA_PORT / KAFKA_TLS_PORT / GATE_PORT.
+# Ports are deliberately not the defaults (6632 is a live stack on a developer
+# machine): 6699 for the broker, 19092 for the Kafka listener, and under --m5
+# 19093 for the TLS one and 6698 for the credential gate in front of the broker.
+# Override with BROKER_PORT / KAFKA_PORT / KAFKA_TLS_PORT / GATE_PORT.
+#
+# The broker's disk gate refuses writes (507) once the data directory's
+# filesystem is QUEEN_RAFT_DISK_HIGH_PCT used, 85 by default; a throwaway rig on
+# a developer disk is not what it protects, so the rig runs it at 99.5 unless
+# QUEEN_RAFT_DISK_HIGH_PCT says otherwise.
 #
 # The facade runs at QUEEN_KAFKA_DEFAULT_PARTITIONS=8: small enough that a
 # partition listing stays readable, wide enough that "keys across partitions"
@@ -28,7 +33,6 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
-PG_HOST_PORT="${PG_HOST_PORT:-55432}"
 BROKER_PORT="${BROKER_PORT:-6699}"
 KAFKA_PORT="${KAFKA_PORT:-19092}"
 # The M5 listener, off unless --m5: TLS + SASL/PLAIN + SNI forwarding, which is
@@ -39,10 +43,7 @@ KAFKA_TLS_PORT="${KAFKA_TLS_PORT:-19093}"
 # literal, so an address here would test TLS and nothing about routing.
 KAFKA_TLS_HOST="${KAFKA_TLS_HOST:-localhost}"
 PARTITIONS="${PARTITIONS:-8}"
-# Overridable so a stage of a campaign can run this rig inside its own assigned
-# container namespace while another one is up. PG_HOST_PORT / BROKER_PORT /
-# KAFKA_PORT / KAFKA_TLS_PORT / GATE_PORT already are.
-CONTAINER="${CONTAINER:-queen-kafka-compat-pg}"
+DISK_HIGH_PCT="${QUEEN_RAFT_DISK_HIGH_PCT:-99.5}"
 
 KEEP=0
 M5=0
@@ -51,12 +52,15 @@ for arg in "$@"; do
   case "$arg" in
     --keep) KEEP=1;;
     --m5) M5=1;;
-    -h|--help) sed -n '2,25p' "$0"; exit 0;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0;;
     *) GO_TEST_ARGS+=("$arg");;
   esac
 done
 
 LOGDIR="$(mktemp -d -t queen-kafka-compat.XXXXXX)"
+# The broker's whole state. Inside LOGDIR so --keep leaves it beside the logs;
+# removed at teardown, where the logs are kept.
+RAFT_DIR="$LOGDIR/raft"
 BROKER_LOG="$LOGDIR/broker.log"
 FACADE_LOG="$LOGDIR/facade.log"
 FACADE_TLS_LOG="$LOGDIR/facade-tls.log"
@@ -87,14 +91,13 @@ cleanup() {
   if [ "$KEEP" = 1 ]; then
     echo
     echo "--keep: the stack is still up."
-    echo "  postgres : container $CONTAINER on 127.0.0.1:$PG_HOST_PORT"
-    echo "  broker   : pid ${BROKER_PID:-none}, http://127.0.0.1:$BROKER_PORT, log $BROKER_LOG"
+    echo "  broker   : pid ${BROKER_PID:-none}, http://127.0.0.1:$BROKER_PORT, data $RAFT_DIR, log $BROKER_LOG"
     echo "  facade   : pid ${fpid:-none}, 127.0.0.1:$KAFKA_PORT, log $FACADE_LOG"
     [ -n "$GATE_PID" ] && \
       echo "  authgate : pid $GATE_PID, http://127.0.0.1:$GATE_PORT in front of the broker, log $GATE_LOG"
     [ -n "$FACADE_TLS_PID" ] && \
       echo "  facade/m5: pid $FACADE_TLS_PID, $KAFKA_TLS_HOST:$KAFKA_TLS_PORT (TLS+SASL), log $FACADE_TLS_LOG"
-    echo "  tear down: kill ${BROKER_PID:-} ${fpid:-} ${GATE_PID:-}; docker rm -f $CONTAINER"
+    echo "  tear down: kill ${BROKER_PID:-} ${fpid:-} ${GATE_PID:-}; rm -rf $RAFT_DIR"
     exit $code
   fi
   say "tearing down"
@@ -102,39 +105,21 @@ cleanup() {
   [ -n "$GATE_PID" ] && kill "$GATE_PID" 2>/dev/null
   [ -n "$fpid" ] && kill "$fpid" 2>/dev/null
   [ -n "$BROKER_PID" ] && kill "$BROKER_PID" 2>/dev/null
-  # A debug broker with a full pool can take a moment to unwind; give both a
+  # A debug broker can take a moment to unwind; give every process a
   # grace period before insisting.
   sleep 1
   [ -n "$FACADE_TLS_PID" ] && kill -9 "$FACADE_TLS_PID" 2>/dev/null
   [ -n "$GATE_PID" ] && kill -9 "$GATE_PID" 2>/dev/null
   [ -n "$fpid" ] && kill -9 "$fpid" 2>/dev/null
   [ -n "$BROKER_PID" ] && kill -9 "$BROKER_PID" 2>/dev/null
-  docker rm -f "$CONTAINER" >/dev/null 2>&1
+  rm -rf "$RAFT_DIR"
   echo "logs kept at $LOGDIR"
   exit $code
 }
 trap cleanup EXIT INT TERM
 
-command -v docker >/dev/null || { echo "docker not found" >&2; exit 2; }
 command -v go >/dev/null || { echo "go not found" >&2; exit 2; }
 command -v cargo >/dev/null || { echo "cargo not found" >&2; exit 2; }
-
-# --------------------------------------------------------------------- postgres
-say "postgres on 127.0.0.1:$PG_HOST_PORT (tmpfs, thrown away at exit)"
-docker rm -f "$CONTAINER" >/dev/null 2>&1
-docker run -d --name "$CONTAINER" \
-  -e POSTGRES_PASSWORD=postgres -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres \
-  -e PGDATA=/var/lib/postgresql/data/pgdata \
-  -p "$PG_HOST_PORT":5432 \
-  --tmpfs /var/lib/postgresql/data:rw,size=2g \
-  postgres:16 -c max_connections=400 >/dev/null || exit 1
-
-for _ in $(seq 1 60); do
-  docker exec "$CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break
-  sleep 1
-done
-docker exec "$CONTAINER" pg_isready -U postgres >/dev/null 2>&1 || {
-  echo "postgres never became ready" >&2; docker logs "$CONTAINER" | tail -20; exit 1; }
 
 # ----------------------------------------------------------------------- builds
 say "building the broker and the facade (debug)"
@@ -142,10 +127,10 @@ say "building the broker and the facade (debug)"
 ( cd "$REPO_ROOT/protocols/queen-kafka" && cargo build ) || exit 1
 
 # ----------------------------------------------------------------------- broker
-say "broker on 127.0.0.1:$BROKER_PORT"
-PG_HOST=127.0.0.1 PG_PORT="$PG_HOST_PORT" PG_USER=postgres PG_PASSWORD=postgres \
-PG_DATABASE=postgres PORT="$BROKER_PORT" QUEEN_BIND_ADDR=127.0.0.1 \
-QUEEN_APPLY_SCHEMA=true DB_POOL_SIZE=32 LOG_LEVEL=info \
+say "broker on 127.0.0.1:$BROKER_PORT (one raft node, data in $RAFT_DIR)"
+mkdir -p "$RAFT_DIR" || exit 1
+QUEEN_RAFT_DIR="$RAFT_DIR" QUEEN_RAFT_DISK_HIGH_PCT="$DISK_HIGH_PCT" \
+PORT="$BROKER_PORT" QUEEN_BIND_ADDR=127.0.0.1 LOG_LEVEL=info \
   "$REPO_ROOT/server/target/debug/queen" > "$BROKER_LOG" 2>&1 &
 BROKER_PID=$!
 

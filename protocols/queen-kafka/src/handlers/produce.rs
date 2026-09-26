@@ -18,10 +18,11 @@
 //! ## Any node serves any partition, whatever Metadata said the leader was
 //!
 //! In cluster mode ([`crate::cluster`]) this handler has NO leadership gate,
-//! and the absence is a decision: `003_log_push.sql:131-213` allocates a
-//! message's offset by locking the `queen.log_partitions` row INSIDE the
-//! database transaction, so two facades appending to one partition through two
-//! brokers cannot issue the same offset. Apache Kafka answers
+//! and the absence is a decision: a message's offset is allocated by the
+//! broker's replicated state machine — one ordered log for the whole Queen
+//! cluster, planned on the raft leader whichever broker the push arrived at —
+//! so two facades appending to one partition through two brokers cannot issue
+//! the same offset. Apache Kafka answers
 //! NOT_LEADER_OR_FOLLOWER at a non-leader because a non-leader does not have
 //! the data; here every node has all of it, and refusing would turn each
 //! membership change into a synchronised metadata storm for nothing.
@@ -60,14 +61,16 @@
 //! ## The one request field that is not acted on
 //!
 //! `timeout_ms` is how long a Kafka leader waits for its followers to
-//! acknowledge before answering REQUEST_TIMED_OUT. There are no followers here:
-//! the push is one synchronous write to Postgres, and what bounds the wait is
-//! this facade's own 10-second budget for a call to Queen (`queen.rs`), which is
-//! below every client default (`request.timeout.ms` is 30 s). Honouring the
-//! field would mean racing a timer against a write already in flight and
-//! answering "timed out" about a record that landed — strictly worse than
-//! answering late, which a client handles by ignoring the response it no longer
-//! has a correlation id for. Everything else in v3..=v9 is acted on.
+//! acknowledge before answering REQUEST_TIMED_OUT. There are no followers here
+//! to wait for: the push is one synchronous write to Queen, answered once the
+//! broker holds it durably (on a raft majority when it runs as a cluster), and
+//! what bounds the wait is this facade's own 10-second budget for a call to
+//! Queen (`queen.rs`), which is below every client default
+//! (`request.timeout.ms` is 30 s). Honouring the field would mean racing a timer
+//! against a write already in flight and answering "timed out" about a record
+//! that landed — strictly worse than answering late, which a client handles by
+//! ignoring the response it no longer has a correlation id for. Everything else
+//! in v3..=v9 is acted on.
 //!
 //! ## Errors are per partition
 //!

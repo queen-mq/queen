@@ -81,8 +81,8 @@ func TTL(d time.Duration) Expiry {
 
 // Until sets the lifetime from an absolute instant, converted to a relative
 // delta AT SEND TIME and rounded up. This is client-side sugar: there is no
-// expiresAt field on the wire, because a single clock (Postgres's) is what keeps
-// broker skew out of the expiry rule (§5.1).
+// expiresAt field on the wire, because a single clock (the broker's) is what
+// keeps client skew out of the expiry rule (§5.1).
 func Until(t time.Time) Expiry {
 	return TTL(time.Until(t))
 }
@@ -90,7 +90,7 @@ func Until(t time.Time) Expiry {
 // Forever stores the key with no expiry.
 //
 // Never use it in a test or in an example that runs in CI: a run that fails
-// leaves immortal state behind in a shared database (§10.4).
+// leaves immortal state behind in a shared broker (§10.4).
 func Forever() Expiry {
 	return Expiry{forever: true, set: true}
 }
@@ -581,8 +581,8 @@ func (e *SurfaceError) Unwrap() error { return e.HTTP }
 // THE REFUSAL THAT REMAINS
 //
 // Dropping the boot gate did not drop the operator's RUNTIME KILL SWITCH
-// (`kv_enabled`, `timers_schedule_enabled`, `timers_fire_enabled` in
-// queen.system_state: read on every call, flipped live during an incident,
+// (`kv_enabled`, `timers_schedule_enabled`, `timers_fire_enabled`, the broker's
+// runtime switches: read on every call, flipped live during an incident,
 // expected to be flipped back). A surface that exists on every cell can still be
 // paused on one of them, so this stays worth handling -- as a transient refusal
 // like any other, not as a configuration to check before use:
@@ -666,8 +666,8 @@ func kvPath(ns, key string) string {
 // verdict is RETURNED instead, on TransactionResponse: there the bundle's own
 // outcome is the answer (see TransactionBuilder.Commit).
 //
-// It arrives with HTTP 200 deliberately: the transaction really did abort in
-// SQL, but a lost race is the expected outcome of a legitimate redelivery and
+// It arrives with HTTP 200 deliberately: the transaction really did abort, but
+// a lost race is the expected outcome of a legitimate redelivery and
 // must pollute neither retry policies nor error metrics.
 type KVPreconditionError struct {
 	// FailedIndex is the position of the operation that lost, in the array that

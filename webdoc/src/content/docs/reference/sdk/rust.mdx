@@ -25,7 +25,6 @@ verifiedBy:
   - clients/client-rust/tests/admin.rs
   - clients/client-rust/tests/streams.rs
   - clients/client-rust/tests/coverage.rs
-  - clients/client-rust/tests/maintenance.rs
 # sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
@@ -173,8 +172,8 @@ retried push write nothing:
 | `pop_auto_ack()` | `Result<Vec<Message>>` |
 | `pop_result()` | `Result<PopOutcome>` |
 
-`pop` returns `Err` on failure rather than an empty vector. An empty claim and a claim refused
-because pop maintenance is on both return `Ok` with nothing in it.
+`pop` returns `Err` on failure rather than an empty vector. An empty claim returns `Ok` with
+nothing in it.
 
 `pop_result` is the same call, returning `PopOutcome { messages, autopilot }`: the broker's
 account of how it sized the claim, with `partitions`, `batch`, and an optional `wait_ms` pacing
@@ -232,7 +231,7 @@ The DLQ builder takes only `limit` and `offset` because those, plus `queue` and
 | Method | Notes |
 | --- | --- |
 | `ack(&Message)` | Completed. Collects the lease into `requiredLeases`. |
-| `ack_with(&Message, AckStatus)` | `Retry` and `Dlq` survive to SQL rather than collapsing to a boolean. |
+| `ack_with(&Message, AckStatus)` | `Retry` and `Dlq` reach the broker as their own statuses rather than collapsing to a boolean. |
 | `ack_all(impl IntoIterator<Item = &Message>)` | |
 | `push(queue, payload)` | Returns `Result<Self>`; the payload is serialized here. |
 | `push_to(queue, partition, payload)` | |
@@ -266,11 +265,12 @@ contract are typed.
 
 `dlq` returns `DlqResponse` and `record_trace` returns `TraceResponse`.
 
-`retry_message` is a dead-letter replay. Since broker 1.6.0 it MOVES the newest dead-letter row
-at the address: one transaction claims the row, pushes the snapshot back into the log and deletes
-it, and the replayed frame carries the derived transaction id `dlq:<row id>`, so a second call
-answers `404` rather than appending a second copy. Only the addressed consumer group's record is
-removed. It errors on a message that is not in the DLQ.
+`retry_message` is a dead-letter replay. Since broker 1.6.0 it MOVES a dead-letter row at the
+address: one transaction pushes the row's snapshot back into the log and deletes the row (on a
+2.0 broker, one entry in the replicated log), and the replayed frame carries the derived
+transaction id `dlq:<row id>`, so a second call answers `404` rather than appending a second
+copy. Only the addressed consumer group's record is removed. It errors on a message that is not
+in the DLQ.
 
 ### Consumer groups
 
@@ -280,6 +280,9 @@ removed. It errors on a message that is not in the DLQ.
 `seek_consumer_group(group, queue, &SeekRequest)`,
 `set_subscription_timestamp(group, timestamp)`, `refresh_consumer_stats()`.
 
+A 2.0 broker answers `refresh_consumer_stats()` with a 200 and `"refreshed": false`: its counters
+are updated as log entries apply, so there is nothing to refresh.
+
 Seeking is how a replay is done. `subscription_from` on a pop only seeds a cursor that does not
 exist yet; it never moves one that does.
 
@@ -287,17 +290,12 @@ exist yet; it never moves one that does.
 
 `renew_lease(lease_id, seconds)`, `status(params)`,
 `queue_stats(params)`, `queue_detail(name, params)`, `analytics(params)`,
-`system_metrics(params)`, `worker_metrics(params)`, `postgres_stats()`, `health()`,
-`metrics() -> String`, `maintenance()`, `set_maintenance(bool)`, `pop_maintenance()`,
-`set_pop_maintenance(bool)`.
+`system_metrics(params)`, `worker_metrics(params)`, `health()`,
+`metrics() -> String`.
 
 `RenewLeaseResponse::expires_at()` reads the expiry from whichever of `newExpiresAt`,
 `expiresAt` or `lease_expires_at` is present. The broker writes the same value under all three,
 one per SDK that looks for a different key.
-
-`MaintenanceResponse::push_paused()` and `pop_paused()` return `Option<bool>`, because which of
-the two keys a reply carries depends on the route: the `GET` on `/system/maintenance` reports
-both, and each `POST` reports only its own. An absent key is `None` rather than `false`.
 
 ### Not present
 

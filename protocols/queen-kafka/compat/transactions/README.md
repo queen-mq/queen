@@ -14,8 +14,8 @@ protocols/queen-kafka/compat/transactions/run.sh --keep     # leave the stack up
 ```
 
 It brings up its **own** stack and tears it down on every exit path, including a
-failure and a Ctrl-C: a throwaway Postgres on 32910, a debug broker on 32911 and
-three debug facades. Three, because three checks need a facade configured
+failure and a Ctrl-C: a debug broker on 32911 (one raft node on a throwaway data
+directory, removed at exit) and three debug facades. Three, because three checks need a facade configured
 differently from the others, and reconfiguring one mid-suite would make every
 earlier result unreproducible.
 
@@ -25,12 +25,13 @@ earlier result unreproducible.
 | 32913 | `QUEEN_KAFKA_NODE_ID=1` | the cluster gate is read from CONFIGURATION, so it cannot be turned on in place |
 | 32914 | caps at their floor, 70 partitions | `QUEEN_KAFKA_TXN_MAX_BYTES=65536` makes the byte cap reachable in a second instead of in eight megabytes |
 
-Ports 32910 to 32914 and the container name `qkt-acc-pg` are its own and are
-overridable (`PG_HOST_PORT`, `BROKER_PORT`, `KAFKA_PORT`, `KAFKA_CLUSTER_PORT`,
-`KAFKA_TIGHT_PORT`, `CONTAINER`), so it runs beside `compat/rig.sh` without
-touching it.
+Ports 32911 to 32914 are its own and are overridable (`BROKER_PORT`,
+`KAFKA_PORT`, `KAFKA_CLUSTER_PORT`, `KAFKA_TIGHT_PORT`), so it runs beside
+`compat/rig.sh` without touching it. The broker's disk gate runs at
+`QUEEN_RAFT_DISK_HIGH_PCT=99.5` unless that variable is set: a throwaway rig on
+a developer disk is not what the gate (85 by default) protects.
 
-Requires docker, cargo, go and a JDK 17 or newer. The `kafka-clients` jars are
+Requires cargo, go and a JDK 17 or newer. The `kafka-clients` jars are
 fetched from Maven Central on first use and cached outside the repository, the
 same way `compat/java-matrix` does it; point `JARS_CACHE` at a populated
 directory to run with no network at all.
@@ -75,14 +76,14 @@ compat directory and this suite has never needed to move it:
 # clustered), so it is invoked rather than wired into this one: nothing here is
 # reusable by it except the build.
 if [ "$TRANSACTIONS" = 1 ]; then
-  say "compat/transactions (its own stack on 32910-32914)"
+  say "compat/transactions (its own stack on 32911-32914)"
   "$SCRIPT_DIR/transactions/run.sh" || RESULT=1
 fi
 ```
 
 with `TRANSACTIONS=0` beside `M5=0` in the argument loop and `--transactions)
 TRANSACTIONS=1;;` in the `case`. Note that it must run **after** the franz-go
-suite and not beside it: both bind a Postgres container and a facade, and the
+suite and not beside it: both run a broker and a facade, and the
 machine that runs CI is not guaranteed to have the cores for two stacks at once.
 
 ## The one core change this suite caused

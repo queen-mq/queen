@@ -4,17 +4,22 @@
 // through the CLI.
 //
 // The suite is gated on the QUEEN_E2E env var so plain `go test ./...`
-// stays fast. To run the full suite:
+// stays fast. To run the full suite against a local broker:
 //
-//	docker run -d --name qpg -e POSTGRES_PASSWORD=postgres -p 5433:5432 postgres:16
-//	docker run -d --name queen --link qpg:qpg -p 6632:6632 \
-//	  -e PG_HOST=qpg -e PG_PORT=5432 -e PG_PASSWORD=postgres \
+//	docker run -d --name queen -p 6632:6632 \
+//	  -e QUEEN_RAFT_DIR=/var/lib/queen/raft \
+//	  -v queen-e2e:/var/lib/queen/raft \
 //	  ghcr.io/queen-mq/queen:latest
 //	cd clients/client-cli && make build
 //	QUEEN_E2E=1 \
 //	  QUEEN_SERVER=http://localhost:6632 \
-//	  PG_HOST=localhost PG_PORT=5433 PG_PASSWORD=postgres \
+//	  QUEEN_RETENTION_INTERVAL_MS=5000 \
 //	  go test -v ./tests/...
+//
+// Every assertion is made through queenctl, and so through the broker's public
+// HTTP API; nothing reads the broker's storage. QUEEN_RETENTION_INTERVAL_MS
+// tells the retention tests the broker's sweep cadence (its RETENTION_INTERVAL,
+// 5000 ms unless the broker sets another); left unset, those tests skip.
 //
 // Filter with -run as usual, e.g. `go test -v -run TestQueue ./tests/...`.
 package tests
@@ -34,8 +39,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ---------------------------------------------------------------------------
@@ -45,11 +48,6 @@ import (
 const (
 	envE2E      = "QUEEN_E2E"
 	envServer   = "QUEEN_SERVER"
-	envPGHost   = "PG_HOST"
-	envPGPort   = "PG_PORT"
-	envPGUser   = "PG_USER"
-	envPGPass   = "PG_PASSWORD"
-	envPGDB     = "PG_DB"
 	envQueuePfx = "QUEEN_TEST_QUEUE_PREFIX"
 )
 
@@ -57,7 +55,6 @@ var (
 	binPath   string
 	serverURL string
 	queuePfx  string
-	pg        *pgxpool.Pool
 	createdQs sync.Map // queueName -> struct{}{}
 )
 
@@ -92,23 +89,6 @@ func setup() error {
 	}
 
 	queuePfx = getenv(envQueuePfx, fmt.Sprintf("ct-e2e-%d", time.Now().Unix()%100000))
-
-	// Optional Postgres pool for DB-side assertions. The suite degrades
-	// gracefully if PG isn't reachable: tests that need it call
-	// requirePG(t).
-	dsn := pgDSN()
-	if dsn != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		p, err := pgxpool.New(ctx, dsn)
-		if err == nil {
-			if err := p.Ping(ctx); err == nil {
-				pg = p
-			} else {
-				p.Close()
-			}
-		}
-	}
 	return nil
 }
 
@@ -121,15 +101,6 @@ func teardown() error {
 		_, _, _ = run("queue", "delete", name, "--yes")
 		return true
 	})
-	if pg != nil {
-		if acquired := pg.Stat().AcquiredConns(); acquired != 0 {
-			// pgxpool.Close waits for acquired connections without a deadline.
-			// Fail immediately with a useful diagnostic instead of consuming the
-			// outer ten-minute `go test` timeout.
-			return fmt.Errorf("%d PostgreSQL connection(s) still acquired", acquired)
-		}
-		pg.Close()
-	}
 	return nil
 }
 
@@ -138,26 +109,6 @@ func getenv(k, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-func pgDSN() string {
-	host := os.Getenv(envPGHost)
-	if host == "" {
-		return ""
-	}
-	port := getenv(envPGPort, "5432")
-	user := getenv(envPGUser, "postgres")
-	pw := getenv(envPGPass, "postgres")
-	db := getenv(envPGDB, "postgres")
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pw, host, port, db)
-}
-
-// requirePG fails the test if no Postgres pool is configured.
-func requirePG(t *testing.T) {
-	t.Helper()
-	if pg == nil {
-		t.Skip("PG_HOST not set; this test needs database access for assertions")
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -381,7 +332,7 @@ func parseNDJSONMessages(t *testing.T, blob string) []cliMessage {
 }
 
 // ---------------------------------------------------------------------------
-// admin / db helpers
+// admin helpers
 // ---------------------------------------------------------------------------
 
 // listAllMessages returns every message currently visible for the queue via
@@ -404,36 +355,9 @@ func queueDetail(t *testing.T, queue string) map[string]any {
 	return m
 }
 
-// pgRow runs a single-row query against the broker's database and decodes
-// columns into dst (in order).
-func pgRow(t *testing.T, sql string, args ...any) []any {
-	t.Helper()
-	requirePG(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cols := []any{}
-	// Use Query rather than QueryRow because pgx Row does not expose Values().
-	// Every acquired connection is released when rows is closed; creating an
-	// unused QueryRow here would keep its connection checked out and make
-	// pgxpool.Close block at the end of the suite.
-	rows, err := pg.Query(ctx, sql, args...)
-	if err != nil {
-		t.Fatalf("pg query: %v", err)
-	}
-	defer rows.Close()
-	if !rows.Next() {
-		return nil
-	}
-	vals, err := rows.Values()
-	if err != nil {
-		t.Fatalf("pg values: %v", err)
-	}
-	cols = vals
-	return cols
-}
-
 // retry runs fn repeatedly until it returns nil or the timeout expires. Used
-// to wait out the broker's async stats-refresh / partition-lookup commits.
+// where the broker may make a change visible a moment after the call that
+// made it.
 func retry(t *testing.T, total time.Duration, fn func() error) {
 	t.Helper()
 	deadline := time.Now().Add(total)

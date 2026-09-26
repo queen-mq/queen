@@ -218,7 +218,7 @@
 
                   <!-- Expanded: one cursor per group over the ONE ring (§1.5).
                        lag is head − cursor, and it is the only lag this class
-                       has — nothing here is read from Postgres. -->
+                       has — nothing here is read from the durable store. -->
                   <tr v-if="isExpanded(row.name)">
                     <td :colspan="colCount" style="background:var(--recessed); padding:12px 16px;">
                       <div class="eph-detail-meta">
@@ -355,15 +355,16 @@
 // The columns are the class's own truth: depth is the ring length, bytes is
 // what the ring holds, a group's lag is head − cursor, and a drop is a message
 // that left without being consumed (bounds, ttl, or retry exhaustion). There is
-// deliberately NO pending, NO retained, NO dead-letter and NO PG-derived lag
-// here: those concepts have no referent when the contents survive nothing
-// (§1.2), and borrowing a durable column would be inventing a number.
+// deliberately NO pending, NO retained, NO dead-letter and NO lag derived from
+// the durable log here: those concepts have no referent when the contents
+// survive nothing (§1.2), and borrowing a durable column would be inventing a
+// number.
 //
-// POLLING. Both status routes read in-process gauges and touch no database
+// POLLING. Both status routes read in-process gauges and touch no storage
 // (§6), which is why this view carries its own 2s ticker instead of the shell's
 // 30s one — the house rule against private intervals exists because a poll
-// costs the tenant a metered, rate-limited, DB-touching request, and here it
-// costs none of the three. The ticker still pauses while the tab is hidden, is
+// costs the tenant a metered, rate-limited request that reads the store, and
+// here it costs none of the three. The ticker still pauses while the tab is hidden, is
 // cleared on unmount, and stops entirely once the family answers a stable
 // verdict (see stores/ephemeralStore.js).
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
@@ -389,7 +390,7 @@ const {
 
 const POLL_MS = 2000
 const POLL_NOTE =
-  'The status routes read in-process gauges — no database is touched, so this page polls every 2s'
+  'The status routes read in-process gauges and touch no storage, so this page polls every 2s'
 // A tenant can hold thousands of ephemeral inboxes (§1.1). Render a bounded
 // slice and say so, rather than paint 5 000 rows every two seconds.
 const MAX_ROWS = 200

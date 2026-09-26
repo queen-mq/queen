@@ -1,5 +1,5 @@
-//! Rust client for [Queen MQ](https://queenmq.com) — a message queue that
-//! keeps its data in PostgreSQL.
+//! Rust client for [Queen MQ](https://queenmq.com) — a message queue broker
+//! that keeps its data in its own replicated log.
 //!
 //! A queue is split into **partitions**, one per entity, created on first push.
 //! Each partition is a strictly ordered lane that a consumer group drains
@@ -165,7 +165,7 @@ impl Queen {
         Admin::new(Arc::clone(&self.inner))
     }
 
-    /// Key/value state, in the same database as the queue.
+    /// Key/value state, in the same broker as the queue.
     ///
     /// Standalone calls; to write state **atomically with an ack**, which is
     /// what this primitive is for, use the riders on

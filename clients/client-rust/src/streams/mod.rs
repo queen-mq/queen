@@ -2,7 +2,7 @@
 //!
 //! A stream is a chain of operators over a source queue. The engine pops a
 //! batch, folds it into per-key window state, and commits the state change, the
-//! output and the source ack **in one PostgreSQL transaction** — so a window
+//! output and the source ack **in one broker command** — so a window
 //! never advances without its output being written, and never emits twice for
 //! the same input.
 //!
@@ -29,13 +29,13 @@
 //! # }
 //! ```
 //!
-//! # State lives in Postgres, keyed by partition
+//! # State lives in the broker, keyed by partition
 //!
-//! Window accumulators are rows in `queen_streams.state`, scoped to
+//! Window accumulators are state cells in the broker, scoped to
 //! `(query_id, partition_id, key)`. The key defaults to the source
 //! `partition_id`, which is what makes the default configuration free of
 //! cross-worker contention: a partition is claimed by one worker at a time, so
-//! its state rows have one writer. [`Stream::key_by`] overrides that, and the
+//! its state cells have one writer. [`Stream::key_by`] overrides that, and the
 //! warning on it is not decorative.
 //!
 //! # Chain rules

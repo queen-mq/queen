@@ -39,11 +39,11 @@ func analyticsRange() (string, string, error) {
 	return from, to, nil
 }
 
-// systemAnalyticsAlternative is the hint for the three series the proxy keeps
-// closed: they aggregate host and Postgres internals shared by every tenant
+// systemAnalyticsAlternative is the hint for the two series the proxy keeps
+// closed: they aggregate host and broker internals shared by every tenant
 // on a cell, so there is nothing to scope. The queue-shaped series are
 // tenant-scoped broker-side and stay open.
-const systemAnalyticsAlternative = "host and Postgres internals are shared across tenants; " +
+const systemAnalyticsAlternative = "host and broker internals are shared across tenants; " +
 	"use 'queenctl analytics queue-ops' / 'queenctl analytics queue-lag' for per-queue series"
 
 // analyticsRunE builds the RunE for one analytics sub-command. `surface` is
@@ -122,17 +122,9 @@ var analyticsSystemCmd = &cobra.Command{
 
 var analyticsWorkerCmd = &cobra.Command{
 	Use:   "worker",
-	Short: "Per-worker event-loop and DB metrics (operator-only through a proxy)",
+	Short: "Per-worker event-loop, lag and request metrics (operator-only through a proxy)",
 	RunE: analyticsRunE("GET /api/v1/analytics/worker-metrics", systemAnalyticsAlternative, func(ctx context.Context, c clientHandle, from, to string) (map[string]any, error) {
 		return c.A.GetWorkerMetrics(ctx, from, to)
-	}),
-}
-
-var analyticsPostgresCmd = &cobra.Command{
-	Use:   "postgres",
-	Short: "Postgres connection / activity stats (operator-only through a proxy)",
-	RunE: analyticsRunE("GET /api/v1/analytics/postgres-stats", systemAnalyticsAlternative, func(ctx context.Context, c clientHandle, from, to string) (map[string]any, error) {
-		return c.A.GetPostgresStats(ctx)
 	}),
 }
 
@@ -148,13 +140,13 @@ func init() {
 	for _, cmd := range []*cobra.Command{
 		analyticsQueueLagCmd, analyticsQueueOpsCmd, analyticsParkedCmd,
 		analyticsRetentionCmd, analyticsSystemCmd, analyticsWorkerCmd,
-		analyticsPostgresCmd, analyticsOverviewCmd,
+		analyticsOverviewCmd,
 	} {
 		cmd.Flags().StringVar(&anFrom, "from", "", "start time")
 		cmd.Flags().StringVar(&anTo, "to", "", "end time")
 	}
 	analyticsCmd.AddCommand(analyticsOverviewCmd, analyticsQueueLagCmd, analyticsQueueOpsCmd,
 		analyticsParkedCmd, analyticsRetentionCmd, analyticsSystemCmd,
-		analyticsWorkerCmd, analyticsPostgresCmd)
+		analyticsWorkerCmd)
 	rootCmd.AddCommand(analyticsCmd)
 }

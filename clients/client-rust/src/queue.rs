@@ -509,13 +509,8 @@ impl QueueBuilder {
         }
         let applied = resp.is_some_and(|r| r.conflation_applied());
         let conflict = resp.is_some_and(|r| r.has_conflation_conflict());
-        // Pop maintenance is not version skew either: the broker refused the pop
-        // before it reached the claim path, so there is no echo to expect. The
-        // caller already returns early on it; the guard is repeated here so the
-        // verdict cannot depend on which call site reached it.
-        let paused = resp.is_some_and(|r| r.is_paused());
 
-        if !applied && !conflict && !paused {
+        if !applied && !conflict {
             return Err(Error::Invalid(CONFLATION_UNSUPPORTED.to_string()));
         }
         // §3.3: the stored policy wins and this consumer keeps working — a
@@ -542,9 +537,8 @@ impl QueueBuilder {
     ///
     /// Unlike the JS and Python clients, a failed pop returns `Err` rather than
     /// an empty vector: silently turning a 403 or an exhausted retry budget
-    /// into "no messages" hides an outage as an idle queue. An *empty* claim,
-    /// and a claim refused because pop maintenance is on, both return `Ok`
-    /// with no messages.
+    /// into "no messages" hides an outage as an idle queue. An *empty* claim
+    /// returns `Ok` with no messages.
     ///
     /// `auto_ack` here is the broker-side flag: the cursor commits at delivery
     /// and no lease is taken, so a crash mid-handler loses the batch. Defaults
@@ -613,13 +607,6 @@ impl QueueBuilder {
             self.check_conflation(None)?;
             return Ok(PopOutcome::empty());
         };
-        if resp.is_paused() {
-            // Pop maintenance is not a version skew: the request never reached
-            // the claim path, so there is no echo to expect and nothing to
-            // conclude from its absence.
-            tracing::debug!("broker is in pop maintenance; treating as an empty poll");
-            return Ok(PopOutcome::empty());
-        }
         if !resp.success {
             return Err(Error::Http {
                 status: 200,
@@ -655,7 +642,7 @@ impl QueueBuilder {
             .post_json("/api/v1/configure", &req, &Opts::default())
             .await?;
         let out = out.unwrap_or(serde_json::Value::Null);
-        // configure_queue_v1 reports failure inside a 200 body.
+        // A configure failure can come back inside a 200 body.
         if let Some(err) = out.get("error").and_then(|e| e.as_str()) {
             return Err(Error::Invalid(format!("configure failed: {err}")));
         }

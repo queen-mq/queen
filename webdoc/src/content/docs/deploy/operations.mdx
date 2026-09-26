@@ -1,81 +1,60 @@
 ---
 title: Operations
-description: "Running Queen day to day: the log blocks and metrics worth watching, turning retention on, dumping both schemas, and how a version change goes."
+description: "Running Queen day to day: the signals worth watching, the disk gate, turning retention on, what replication does not replace, and how a version change goes."
 type: how-to
 tier: operate
 sidebar:
   order: 6
 sourceOfTruth:
-  - server/src/obs.rs
-  - server/src/retention.rs
-  - server/src/sweeper.rs
-  - server/src/switches.rs
-  - server/src/schema.rs
-  - server/src/file_buffer.rs
-  - server/src/handlers/status.rs
-  - server/sql/schema.sql
-  - server/sql/procedures/006_log_maintenance.sql
-# sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the retention paragraph is rewritten for the /configure merge rule; switches.rs and schema.sql changed only comments.
+  - server/src/handlers/raft.rs
+  - server/src/handlers/data.rs
+  - server/src/rsm/maintenance.rs
+  - server/src/rsm/batcher.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/real/phase2/admin.rs
+  - server/src/rsm/replicator/raft/mod.rs
+  - server/src/config.rs
 ---
 
-The broker prints its rates and cache sizes on a timer, and exposes database-backed cluster totals
-to Prometheus. Retention is off until you turn it on. A backup is a `pg_dump` of two schemas. A
-version change is a cutover, not a migration.
+Every node keeps its whole state in its data directory, and the cluster keeps it in step. What an
+operator watches is whether a leader is known, how full the disk is, and whether the followers are
+keeping up. Retention is off until you turn it on. A version change within 2.0 is a rolling restart.
 
 ## What to watch
 
-Nothing is logged per message. One task emits two aggregate blocks every `QUEEN_LOG_RATES_MS`,
-default 10 seconds: `rates` carries `push_s`, `pop_s`, `ack_s`, latency percentiles, the number of
-parked long-polls and `pool_waiting`, and `sizes` carries cache occupancy, `spool_pending` and
-`rss_gb`. A handful of per-queue lines follow, ranked by traffic. `QUEEN_LOG_JSON=1` turns each
-line into one JSON object for a shipper.
+`/health` is the first signal. `200` with `"status":"healthy"` means the node knows a leader and
+can take writes; `503` with `"status":"settling"` means it does not, which is an election in
+progress or a cluster that has lost its majority. Alert on it staying there, not on one answer, and
+never restart a node for it ([the probes](/deploy/kubernetes#the-probes)).
 
-Two lines fire on transition rather than on the timer, and they are the ones to page on:
+The scrape target is `GET /metrics/prometheus`. The raft families are the ones specific to 2.0:
 
-```text
-WARN spool  entering buffered mode (degraded durability)
-INFO spool  DB recovered
-```
+| Family | What it tells you |
+| --- | --- |
+| `queen_raft_storage_full` | The disk and store-map admission gate: whether writes are being refused |
+| `queen_raft_index` | The node's raft and state-machine indexes |
+| `queen_raft_inflight` | Entries committed or proposed but not yet applied |
+| `queen_raft_log_storage` | Queue-log files and bytes on this node |
+| `queen_raft_admit_waiting` | Commands waiting for admission room right now |
 
-Buffered means pushes are landing on the broker's local disk instead of PostgreSQL. Alert on the
-same condition: `queen_file_buffer_db_healthy == 0`, `queen_file_buffer_pending` not returning to
-zero once the database recovers, and `queen_file_buffer_failed > 0`, which counts accepted-then-lost
-pushes and should be zero forever.
+The endpoint sits outside broker authentication, and its per-queue series sum across tenants, so it
+is an operator surface, never a tenant one. Behind the embedded proxy's port it answers only with
+the control-plane token. The full family list is in [Prometheus](/reference/prometheus).
 
-The scrape target is `GET /metrics/prometheus`. `GET /metrics` is a small JSON object with several
-fields wired to zero: read it by hand, do not build a dashboard on it. Per-queue series sum across
-tenants and the endpoint sits outside broker authentication, so it is an operator surface, never a
-tenant one. The full family list is in [Prometheus](/reference/prometheus).
+On a cluster, `GET /api/v1/system/raft/membership` answers, from any node, who leads, the term, and
+for each member whether the leader hears from it (`live`) and how many log entries it trails
+(`lag`). A member that stays behind is a disk or a network to look at before it is a second failure.
 
-Do not alert on `/health` answering 503 as "the broker is down": it is a database check, and
-[the probe wiring](/deploy/kubernetes#the-probes) is where that matters.
+## The disk gate
 
-## Maintenance mode does not hold the timer fire
-
-<Aside type="danger">
-While push maintenance mode is on, pushes are diverted to the broker's disk spool, and **the timer
-fire is not on that path**. The fire is a `DELETE` of the staging row and a push of the frame in the
-*same* transaction, and that shared commit is the whole of its exactly-once guarantee; putting the
-push half on the spool would break it. So the fire is not spooled, and it is not held back either:
-the sweeper reads only `timers_fire_enabled`, never the maintenance flag, and no stored procedure
-reads that flag on its behalf.
-
-A maintenance window therefore does not make the log static. Ordinary pushes wait on disk and land
-when the window closes, while every timer that comes due inside it commits into `queen.log_segments`
-throughout, which also reverses their order: a push accepted early in the window is appended after a
-timer that fired later in it. If the window is open because the database is going away, the fires
-fail transiently instead, spend no delivery attempt, and drain oldest first when it returns.
-
-To hold delivery for the length of a window, pause it deliberately with the `timersFire` kill switch
-and turn it back on when the window closes. Nothing is lost while it is off, but promised messages
-are not being delivered, so it is a lever to leave a clock on.
-</Aside>
-
-The sweeper is also the component an operator kill switch acts on, separately from maintenance mode
-and of exactly the same class: those switches pause something that is running, they do not turn a
-feature on. [KV and timers](/deploy/state) has the three rungs of refusal, what each one answers, and
-the order in which the broker sheds work before anybody has to pull a lever.
+Nothing is deleted until retention deletes it, so a node's disk fills at the rate the workload
+writes. Once the filesystem holding the data directory is `QUEEN_RAFT_DISK_HIGH_PCT` full, default
+85%, the node refuses every command that grows storage with `507` and a `storage_full` code, and
+accepts them again once usage is under `QUEEN_RAFT_DISK_LOW_PCT`, default 80%. The same gate closes
+at 85% of the embedded store's map and reopens under 80%. What grows storage is a push, a
+transaction that pushes, writes a KV value or schedules a timer, and a trace; pops and acks keep
+working, so consumers can drain while retention catches up. Size the volume for the retention you
+configure, with the headroom the gap between logical deletion and reclaimed space needs (below).
 
 ## Retention
 
@@ -88,89 +67,74 @@ curl -s -X POST http://localhost:6632/api/v1/configure \
 ```
 
 `retentionSeconds` deletes on age alone, read or not. `completedRetentionSeconds` never passes the
-slowest group's cursor, so one abandoned group pins the history for every other. Deletion is
-whole-segment, so a window is a floor on what is kept, not a ceiling. Since 1.6.0 `/configure`
-merges, so a later call that omits these keys leaves retention exactly as it is; the two ways to
-turn it back off are both explicit: send `retentionEnabled: false` (or `null`, which restores the
-default), or send the whole configuration with `"mode": "replace"`, which is what
-`queenctl apply -f` does. See
+slowest consumer group's cursor, so one abandoned group pins the history for every other.
+`/configure` merges, so a later call that omits these keys leaves retention exactly as it is; the
+two ways to turn it back off are both explicit: send `retentionEnabled: false`, or send the whole
+configuration with `"mode": "replace"`, which is what `queenctl apply -f` does. A `null` value is
+refused with `400` rather than read as "restore the default". See
 [queue options](/reference/queue-options).
 
-The sweep runs every `RETENTION_INTERVAL` ms, default 5000, on the one replica per cycle that wins
-the `queen.maintenance_leases` claim, and logs only when it actually deleted something:
+The leader plans retention every `RETENTION_INTERVAL` ms, default 5000, as ordinary entries of the
+replicated log, so every node deletes the same messages. One pass is bounded by
+`RETENTION_BATCH_SIZE` rows, default 1000, and visits a bounded window of each queue's partitions,
+resuming where the last pass stopped, so a queue with very many partitions is swept over several
+passes.
 
-```text
-INFO retention  swept queues=12 due=27 backed_off=15 segments_deleted=340 txns_purged=340 max_wait_evicted=0 partitions_deleted=0 metrics_purge=… elapsed_ms=47
-```
+Deleting a message and getting its disk space back are two steps. The space comes back when a whole
+queue-log file holds nothing live any more, and each node reclaims its own files. A message's
+record is also kept at least as long as the queue's deduplication window and completed retention,
+and never less than 900 s (`QUEEN_RAFT_TXN_WINDOW_MIN_S`), because the deduplication index needs
+it. So disk usage trails deletion, and the disk gate is where that difference shows.
 
-Silence on a growing deployment means nothing is being deleted. `due` and `backed_off` explain a
-delete rate that looks too slow: `due` pinned at its cap every cycle means the cycle is capped
-rather than idle, and a large `backed_off` means the due partitions are held back by a group's
-cursor rather than deletable. Two things the sweep never
-touches: dead letters, which leave one at a time through
-`DELETE /api/v1/messages/:partitionId/:transactionId`, and streaming state in
-`queen_streams.state`. The loop step by step is in [retention internals](/internals/retention).
+Two things retention never touches: dead letters, which leave one at a time through
+`DELETE /api/v1/messages/:partitionId/:transactionId` or in bulk through `DELETE /api/v1/dlq`, and
+streaming state. A partition with no messages left, no dead letters and no live lease, last written
+more than `PARTITION_CLEANUP_DAYS` ago (30 by default), is removed, unless
+`QUEEN_PARTITION_CLEANUP_ENABLED=false`. The loop step by step is in
+[retention internals](/internals/retention).
 
-## Backup and restore
+## Replication is not a backup
 
-Everything the broker persists lives in two schemas, plus the spool on local disk that no database
-backup captures. Dump both schemas: omitting `queen_streams` loses every registered streaming query
-and its per-key state, silently, because the broker boots and recreates an empty one.
-
-```bash
-pg_dump -Fc -n queen -n queen_streams -f queen-2026-08-15.dump "postgresql://user@host:5432/queen"
-```
-
-A dump can be taken against a running broker, since `pg_dump` reads one snapshot. Restore into an
-empty database with every instance stopped, including the ones behind the load balancer.
-
-```bash
-createdb -h host -U postgres queen_restored
-pg_restore --no-owner --no-privileges -d "postgresql://postgres@host:5432/queen_restored" queen-2026-08-15.dump
-```
-
-`--no-owner --no-privileges` because the broker re-issues its own grants at boot, which is also
-why a schema-only dump is redundant. Restore into the version that produced the dump.
-
-`queen.kv`, `queen.log_timers` and the two quota tables live in the `queen` schema, so the command
-above already carries them. One of them is not data but configuration: `queen.kv_quota` holds the
-per-tenant grants and limits an operator wrote by hand, and it is the one table in this feature that a
-rollback must never drop. A restore also brings back timers that were pending at the dump instant,
-which then fire again, so the same idempotency the rest of a restore demands applies to their
-consumers.
-
-A restore rolls consumption back to the dump instant, so every message acked since redelivers: an
-hour-old dump means an hour of reprocessing, and it is a recovery only if handlers are idempotent.
-Leases are columns on a row rather than sessions, so restored ones expire and re-lease on their
-own. One thing to check by hand: the maintenance flags live in `queen.system_state`, and a dump
-taken during a maintenance window restores with push maintenance on, sending every push straight
-to the spool. Read `GET /api/v1/system/maintenance` immediately after.
+Three voters hold three copies, and every one of them applies the same entries. That covers a lost
+disk or a lost node. It does not cover a mistake: a queue deleted, a retention window set too short
+or a bad replay is replicated to every voter like any other write. Queen 2.0 has no backup command.
+The data directory of a stopped node is the whole of what it restarts from; anything beyond that,
+such as snapshots of the volumes, is the storage layer's business, and the application-level
+defence is the one it always was: consumers that can reprocess, and producers that can replay with
+deterministic `transactionId`s.
 
 ## Upgrades
 
-Same-version restarts and replacements need no coordination. Start the replacement, wait for a 200
-from `/health`, take the old instance out of the load balancer, SIGTERM, repeat. Shutdown drains
-in-flight requests, and a leased batch nobody acked redelivers once its lease expires.
+Restarts and replacements of the same version need no coordination. Restart one node at a time and
+wait for it to answer `/health` with `200` before the next. On SIGTERM a leader first hands its
+leadership to a caught-up voter, then drains its in-flight requests; a leased batch nobody acked
+redelivers once its lease expires.
 
-A version change is different, because the boot-time apply is not a migration engine: every boot
-re-applies the same idempotent corpus a fresh database gets, and there is no upgrade path, so
-pointing a new build at an old database is unsupported.
+A version change within 2.0 is the same rolling restart, as long as the new build reads the data
+directory the old one wrote. When it cannot, because the on-disk format changed or because you want
+a different `QUEEN_QLOG_SHARDS` (fixed when a directory is created), the move is a fresh start:
+stop every node, point all of them at new, empty directories, and start them together. Never start
+one empty node into the running cluster for this: it would be sent the old data back. The old
+directory stays untouched, so rolling back is the old image with the old directory. Messages in the
+old directory do not carry over.
+
+From 1.x, which stored everything in PostgreSQL, there is no in-place upgrade either: 2.0 does not
+read a 1.x database.
 
 <Steps>
 
-1. **Stop producing** to the old deployment.
+1. **Start the 2.0 deployment** beside the old one.
 
-2. **Let consumers drain it** to empty.
+2. **Re-apply your `/configure` options** on it: they lived in the old database.
 
-3. **Start the new version against a fresh database.** It creates its own schema at first boot.
+3. **Move producers** to the new address.
 
-4. **Repoint the clients**, and re-apply your `/configure` options: they lived in the old database.
+4. **Let consumers drain the old deployment** to empty, then move them.
 
 </Steps>
 
-Rollback is the same move reversed, so keep the old database until you trust the new one. If you
-cannot drain, copy at the application level, reading the backlog through the old API and pushing
-it with a deterministic `transactionId` per message so a retried copy loop cannot duplicate.
+If you cannot drain, copy at the application level, reading the backlog through the old API and
+pushing it with a deterministic `transactionId` per message so a retried copy loop cannot duplicate.
 
-Watch the spool, turn retention on before the disk decides for you, dump both schemas, and cut
-over rather than migrate.
+Watch `/health` and the disk, turn retention on before the disk decides for you, keep three voters
+on three machines, and remember that three copies of a mistake are still a mistake.

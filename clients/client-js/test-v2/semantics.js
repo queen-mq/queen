@@ -16,9 +16,9 @@
  *     AFTER the group registered (durable subscription record).
  *  8. Queue-mode pops never skip backlog, even when carrying subscriptionMode.
  *  9. Empty polls while another worker holds the lease never strand backlog
- *     (wildcard watermark guard).
- * 10. Push-only (never-configured) queues get a queen.queues row: visible in
- *     resources, discoverable by namespace pop.
+ *     (an empty answer must not hide the partition once the lease lapses).
+ * 10. Push-only (never-configured) queues are registered by the push: visible
+ *     in resources, discoverable by namespace pop.
  * 11. GET /api/v1/messages/:pid/:txn keeps the full v0.16.0 shape (including
  *     consumerGroups[].name — not .group).
  * 12. Transactions honor `retry` and `dlq` ack statuses (not collapsed to a
@@ -39,7 +39,7 @@
  * Run: node run.js <testName>   e.g. node run.js implicitAckCompletesBatch
  */
 
-import { dbPool, TEST_CONFIG } from './run.js'
+import { TEST_CONFIG } from './run.js'
 
 // Lazy: run.js imports this module before TEST_CONFIG is initialized (TDZ),
 // so the base URL must be resolved at call time, not module-eval time.
@@ -369,7 +369,7 @@ export async function queueModePopNeverSkipsBacklog(client) {
 }
 
 // ============================================================================
-// 9. Watermark: empty polls during a held lease must not strand backlog
+// 9. Empty polls during a held lease must not strand backlog
 // ============================================================================
 export async function leasedBacklogNotStrandedByEmptyPolls(client) {
     const queue = uniq('watermark-lease')
@@ -385,34 +385,26 @@ export async function leasedBacklogNotStrandedByEmptyPolls(client) {
     if (a.length !== 1) return { success: false, message: 'Worker A did not get the message' }
 
     // Worker B (same group) polls empty repeatedly while A holds the lease.
-    // A buggy engine advances the empty-scan watermark here even though the
-    // backlog is only invisible because of A's lease.
+    // The backlog is invisible here ONLY because of A's lease: a broker that
+    // remembers these empty answers as "nothing to deliver" keeps hiding the
+    // partition after the lease lapses.
     for (let i = 0; i < 3; i++) {
         await client.queue(queue).group(group).batch(1).wait(false).pop()
         await sleep(100)
     }
 
-    // Defeat the 2-minute candidate-filter grace so a wrongly-advanced
-    // watermark actually hides the partition (same trick as watermark.js).
-    // Queue identity is now the queen.queues id (log_queues merged away).
-    await dbPool.query(`
-        UPDATE queen.log_partitions p
-        SET last_write_at = last_write_at - interval '10 minutes'
-        FROM queen.queues q
-        WHERE p.queue_id = q.id AND q.name = $1
-    `, [queue])
-
-    // Wait for A's lease to lapse. NO new push arrives.
+    // Wait for A's lease to lapse. NO new push arrives, so nothing but the
+    // lease expiry can make the message deliverable again.
     await sleep(3500)
 
     const b = await popRetry(client, queue, { group, tries: 10 })
     if (b.length !== 1) {
         return {
             success: false,
-            message: 'Backlog stranded: empty polls during a held lease advanced the watermark past unconsumed data'
+            message: 'Backlog stranded: after empty polls during a held lease, the message never came back once the lease lapsed'
         }
     }
-    return { success: true, message: 'Backlog survived lease churn + empty polls (watermark guard holds)' }
+    return { success: true, message: 'Backlog survived lease churn + empty polls' }
 }
 
 // ============================================================================
@@ -433,7 +425,7 @@ export async function pushOnlyQueueIsDiscoverable(client) {
     const list = Array.isArray(body) ? body : (body.queues || [])
     const entry = list.find(q => (q.name || q.queue) === queue)
     if (!entry) {
-        return { success: false, message: 'Push-only queue missing from /api/v1/resources/queues (no queen.queues row?)' }
+        return { success: false, message: 'Push-only queue missing from /api/v1/resources/queues (never registered by the push?)' }
     }
     const entryNs = entry.namespace ?? entry.ns
     if (entryNs !== ns) {
@@ -455,19 +447,13 @@ export async function pushOnlyQueueIsDiscoverable(client) {
         if (!found) await sleep(200)
     }
 
-    // Cleanup: queue identity is now the queen.queues id, and deleting the
-    // queues row cascades partitions/watermarks/metadata/lag-metrics. Only
-    // log_txns/log_dlq are FK-less by design → explicit purge via partitions.
-    await dbPool.query(`
-        WITH parts AS (
-          SELECT lp.id FROM queen.log_partitions lp
-          JOIN queen.queues q ON q.id = lp.queue_id
-          WHERE q.name = $1
-        ),
-        d1 AS (DELETE FROM queen.log_txns WHERE partition_id IN (SELECT id FROM parts)),
-        d2 AS (DELETE FROM queen.log_dlq  WHERE partition_id IN (SELECT id FROM parts))
-        SELECT 1`, [queue])
-    await dbPool.query(`DELETE FROM queen.queues WHERE name = $1`, [queue])
+    // Best-effort cleanup through the public API. The lane's broker is thrown
+    // away after the run anyway, so a failed delete is not this test's verdict.
+    try {
+        await client.queue(queue).delete()
+    } catch (e) {
+        // Ignore
+    }
 
     if (!found) {
         return { success: false, message: 'Namespace discovery pop never found the push-only queue' }

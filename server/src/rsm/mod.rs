@@ -1,5 +1,5 @@
-//! `rsm/` — the replicated state machine of PLAN_RAFT.md: Queen without
-//! Postgres, one replicated log.
+//! `rsm/` — the replicated state machine of PLAN_RAFT.md: Queen on one
+//! replicated log.
 //!
 //! One leader turns client commands into log entries of EFFECTS; every node
 //! applies committed entries, in order, to its own full copy of the state
@@ -59,9 +59,7 @@
 //!   must not truncate or discard them (I11). Both are
 //!   [`effect::CodecError::fatal`].
 //!
-//! Nothing here is wired into the HTTP handlers yet: the storage seam
-//! (`QUEEN_STORAGE=postgres|raft`) is WP-1.7's, and until then the postgres
-//! class is the only path a request can take.
+//! The HTTP handlers reach all of this through the storage seam, `facade`.
 
 pub mod effect;
 pub mod entry;

@@ -2,8 +2,8 @@
 # queen-kafka compat: CLUSTER MODE acceptance
 #
 # Runs the cluster suite against a stack that is ALREADY UP. Nothing here starts
-# or stops a Postgres, a broker or a facade -- that is rig-cluster.sh's job, or
-# yours. Every address comes from the environment so this can be wired into
+# or stops a broker or a facade -- that is rig-cluster.sh's job, or yours.
+# Every address comes from the environment so this can be wired into
 # compat/rig.sh without editing a line of Go.
 #
 # REQUIRED:

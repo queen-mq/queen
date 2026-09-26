@@ -360,44 +360,6 @@ export class Admin {
   }
 
   /**
-   * Get push maintenance mode status
-   * @returns {Promise<object>}
-   */
-  async getMaintenanceMode() {
-    logger.log('Admin.getMaintenanceMode', {})
-    return this.#httpClient.get('/api/v1/system/maintenance')
-  }
-
-  /**
-   * Set push maintenance mode
-   * @param {boolean} enabled - Enable or disable maintenance mode
-   * @returns {Promise<object>}
-   */
-  async setMaintenanceMode(enabled) {
-    logger.log('Admin.setMaintenanceMode', { enabled })
-    return this.#httpClient.post('/api/v1/system/maintenance', { enabled })
-  }
-
-  /**
-   * Get pop maintenance mode status
-   * @returns {Promise<object>}
-   */
-  async getPopMaintenanceMode() {
-    logger.log('Admin.getPopMaintenanceMode', {})
-    return this.#httpClient.get('/api/v1/system/maintenance/pop')
-  }
-
-  /**
-   * Set pop maintenance mode
-   * @param {boolean} enabled - Enable or disable pop maintenance mode
-   * @returns {Promise<object>}
-   */
-  async setPopMaintenanceMode(enabled) {
-    logger.log('Admin.setPopMaintenanceMode', { enabled })
-    return this.#httpClient.post('/api/v1/system/maintenance/pop', { enabled })
-  }
-
-  /**
    * Get system metrics (CPU, memory, connections, etc.)
    * @param {object} params - Query parameters (from, to, etc.)
    * @returns {Promise<object>}
@@ -417,15 +379,6 @@ export class Admin {
     logger.log('Admin.getWorkerMetrics', { params })
     const queryString = this.#buildQueryString(params)
     return this.#httpClient.get(`/api/v1/analytics/worker-metrics${queryString}`)
-  }
-
-  /**
-   * Get PostgreSQL statistics
-   * @returns {Promise<object>}
-   */
-  async getPostgresStats() {
-    logger.log('Admin.getPostgresStats', {})
-    return this.#httpClient.get('/api/v1/analytics/postgres-stats')
   }
 
   // ===========================

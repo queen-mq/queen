@@ -93,12 +93,6 @@ export function checkConflationResponse(result, ctx) {
 
   if (result && result.conflation === true) return
 
-  // Pop maintenance: the broker refused the pop before it reached the claim
-  // path, so there is no policy to echo and nothing to conclude from the
-  // absence of one. Reading it as "old broker" would stop every conflating
-  // consumer in the fleet the moment an operator pauses pops.
-  if (result && result.paused === true) return
-
   // The group is known to disagree with us; this response is that same
   // conflict, seen through a body that could not carry the flag.
   if (knownConflicts.has(key)) return

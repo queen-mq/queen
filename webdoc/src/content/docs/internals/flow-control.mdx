@@ -1,318 +1,125 @@
 ---
 title: Flow control
-description: "The single admission arbiter: how it senses PostgreSQL's flush pipeline from commit clustering, how the budget moves, the four lanes, and how it interacts with the connection pool."
+description: "How a 2.0 node pushes back: a byte budget taken at the HTTP edge before the body is read, a hold that turns into 429 with a jittered Retry-After, the disk gate that answers 507, and the bounded queues between the receiver, the planner and the log."
 type: concept
 tier: internals
 sidebar:
-  order: 8
+  order: 7
 sourceOfTruth:
-  - server/src/admission.rs
-  - server/src/db.rs
-  - server/src/handlers/data.rs
-  - server/src/fusion.rs
-  - server/src/pop_fusion.rs
-  - server/src/pop_autopilot.rs
-  - server/src/hotlist.rs
   - server/src/config.rs
+  - server/src/handlers/raft.rs
+  - server/src/rsm/admit.rs
+  - server/src/rsm/batcher.rs
+  - server/src/rsm/entry.rs
+  - server/src/rsm/planner/mod.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/remote.rs
+  - server/src/rsm/store/mod.rs
+  - server/src/rsm/timing.rs
+  - server/src/rsm/replicator/raft/mod.rs
 verifiedBy:
-  - server/src/admission.rs
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): db.rs gained the DLQ move and KV console statements; no admission, pacing or pool behaviour moved.
+  - server/src/rsm/admit.rs
 ---
 
-The broker does not let requests reach PostgreSQL as fast as they arrive. Every write transaction on
-the hot paths holds a slot from one process-wide admission arbiter, and the number of slots moves
-based on what the broker observes about PostgreSQL's commit pipeline.
+Every write on a 2.0 node goes through one serial pipeline: the leader's planner, then the log. When
+producers offer more than that pipeline can take, something has to make them slow down, and it has to
+happen before their request bodies pile up in memory. Before the budget below existed, an offered
+rate above the planner's ceiling queued bodies in RAM until the kernel killed the process.
 
-The reason to have it at all is that a connection pool is a poor admission controller. A pool of
-160 connections will happily put 160 statements into PostgreSQL, and if PostgreSQL can only usefully
-run twenty of them the other 140 are lock contention, `SKIP LOCKED` racing and fatter round trips:
-work that makes throughput worse while every gauge still looks unsaturated.
+A node pushes back in three places, from the outside in.
 
-## Why the previous design was replaced
-
-Until 1.0.0-beta.2 the broker used two Vegas-style limiters, one for push and one for pop, each
-inferring queueing from per-operation round-trip time. That design is sound on a network link and
-wrong on this path, for a reason worth stating plainly because it generalises.
-
-A delay-based controller estimates queueing as the ratio of current round-trip time to the smallest
-one it has seen. On a WAL-bound commit path most of the excess over that minimum is not queueing at
-all: it is the group-commit flush wait, an intrinsic cost that admission cannot remove. The estimator
-counted a fixed floor as congestion and backed off from it.
-
-Two consequences followed. The controller's dead band widened at low limits (the grow and shrink
-thresholds were absolute, so the band `alpha < queue < beta` covers a larger RTT range the smaller
-the limit is), which made low limits an attractor it could not climb out of. And because the limiter
-sat below what the workload needed, the broker left cores idle while the pool reported no waiters at
-all: the controller and the ground truth disagreed, and nothing exported the controller's inputs, so
-the disagreement was invisible.
-
-The replacement inverts the topology. One owner for admission instead of several self-balancing
-loops, and a sensor that measures the shared resource directly instead of inferring it from the
-latency of individual operations.
-
-## The sensor: commit trains
-
-Group commit makes write completions cluster in time. One flush acknowledgement releases every
-transaction that boarded it, so the broker's own commit completions arrive in bursts. Clustering
-them measures the flush pipeline with no PostgreSQL-side telemetry at all, which means it works on
-any managed PostgreSQL.
-
-Completions closer together than `QUEEN_ADMISSION_TRAIN_GAP_US` (300 by default) belong to the same
-train. From the train sequence the arbiter derives:
-
-| quantity | meaning |
-| --- | --- |
-| train size | transactions per flush, i.e. amortisation, measured rather than assumed |
-| train cadence | flush cycles per second |
-| cycle | gap between train starts, i.e. the flush interval |
-
-Queueing, the thing admission can actually remove, shows up as in-flight slots that have waited
-several cycles. That is the control error.
-
-## The control law
-
-One AIMD step per tick (`QUEEN_ADMISSION_TICK_MS`, 500 by default) over a total budget `B` of
-concurrently admitted write transactions:
-
-```text
-grow    when B was saturated during the tick
-shrink  when the oldest admitted live-lane slot has waited several flush cycles
-hold    otherwise
-```
-
-`B` is clamped to `[QUEEN_ADMISSION_MIN, QUEEN_ADMISSION_MAX]` and never rises above
-`DB_POOL_SIZE - QUEEN_ADMISSION_POOL_RESERVE`. Admitted work must never starve on the connection
-pool, and the reserve keeps rare unmetered writes (admin operations) from deadlocking behind metered
-ones.
-
-One thing the law deliberately does **not** do is shrink on a widening flush cycle. A bigger budget
-grows the trains, and every flush then carries more, so the cycle widens exactly when amortisation is
-working. An earlier build shrank on that signal and pinned the budget below the workload: the same
-category of mistake the Vegas estimator made with per-operation round-trip time.
-
-<Aside type="caution">
-The shrink signal is slot age, which conflates statement execution with commit wait: a transaction
-doing genuine heavy work looks the same as one waiting behind a queue. The floor is set high enough
-that ordinary work does not trip it, but on a workload whose write transactions routinely run long
-the budget will hunt rather than settle. This is a known weakness of the current signal and it is
-documented as such in `admission.rs`.
-</Aside>
-
-## Four lanes
-
-Push, Pop, Ack and Maint each have their own slot accounting inside the shared budget. A grant is
-work conserving: any lane may use any free slot below `B`.
-
-The guarantees act on the **wake order** when `B` is exhausted. Released slots go first to lanes
-sitting below their guaranteed share, in the order Ack, Pop, Push, Maint. Acks come first because
-they unblock lanes and shorten everyone's lap; maintenance can always wait.
-
-| lane | share | variable |
+| Where | What it bounds | What the client sees |
 | --- | --- | --- |
-| Push | 0.25 | `QUEEN_ADMISSION_SHARE_PUSH` |
-| Pop | 0.40 | `QUEEN_ADMISSION_SHARE_POP` |
-| Ack | 0.30 | `QUEEN_ADMISSION_SHARE_ACK` |
-| Maint | 0.05 | `QUEEN_ADMISSION_SHARE_MAINT` |
+| The admission budget, at the HTTP edge | bytes of writes in flight, from arrival to reply | a wait, then `429` with `Retry-After` |
+| The disk gate | writes while the data directory's disk or the store's map is nearly full | `507` |
+| The bounded queues inside | commands waiting for a planning cycle, entries in flight | a wait, bounded by the request's deadline, then `503` |
 
-The share is a wake ordering, not a slot reservation and not a floor on a lane's own concurrency cap.
-A lane's optimum can sit well below its share, and pinning its cap at the share would force exactly
-the contention the arbiter exists to avoid.
+## The admission budget
 
-Each lane also carries its own concurrency cap inside `B`, moved by a per-lane controller that probes
-one step up (10% of the cap, at least one slot) when the lane presses its cap. Some paths have
-negative returns to concurrency, and this is what finds each lane's operating point without
-hardcoding it. What the controller judges the probe on is not the same in every lane.
+`server/src/rsm/admit.rs` keeps one byte budget per process, shared by the HTTP edge and every caller
+inside the process.
 
-Push, Ack and Maint judge a probe on marginal throughput: the raise survives only if the lane's
-completion rate grew by at least 5%.
+**Where it is taken.** `POST /api/v1/push` and `POST /api/v1/transaction` carry an admission layer
+(`admit_edge` in `server/src/handlers/raft.rs`) that runs inside authentication and tenancy, so an
+unauthenticated request never takes budget, and **before the body is read**. It takes permits sized by
+the request's `Content-Length`, or 64 KiB when there is none (a chunked body). A push waiting for
+room holds only its connection: its bytes stay in the socket, and TCP slows the sender down. Callers
+that do not come through that edge (in-process callers, KV writes, timer schedules) are gated in the
+facade instead, sized by their raw body or by an estimate of the command; a request the edge already
+admitted is not charged twice. On a cluster, the leader gates the prepared commands its followers
+send it the same way.
 
-The Pop lane does not, because throughput is the wrong objective for a delivery path. Its objective
-is the measured age of the oldest servable but unvisited entry in the hot-list ready ring, sampled
-from each shard's FIFO head so a lane that is never visited still reports. Age-at-visit sampling has
-survivorship bias: the starved lane is the one that never samples.
+**What it covers.** At the edge, every request to the push and transaction routes. Inside, only
+commands that grow storage: pushes, transactions that push, put keys or schedule timers, KV puts and
+increments, timer schedules, trace appends. Pops, acks and lease renewals on their own routes never
+take permits, so consumption keeps running while producers are held.
 
-Because ready age is roughly ring depth divided by visit rate, judging it alone would blame the
-probe for an arrival surge, so the verdict reads all three terms.
+**Hold, then 429.** When the budget is spent, a new command **waits** for room, so a producer that
+waits for its answers simply slows down. Only if no room frees within the hold is it refused, with
+`429` and `Retry-After`. Both are jittered: the hold by plus or minus 25%, `Retry-After` uniformly over
+1 to 5 seconds, so requests that queued together are not refused together and do not come back
+together. Permits are returned when the reply is ready, not when the body has been read.
 
-| what the tick measured | verdict |
-| --- | --- |
-| age improved: at or below 90% of the pre-probe value, or under a 10 ms floor | keep the raise |
-| age worse, but depth grew at least 1.2× and the visit rate held at 95% or better | load, not the probe: hold the raise without blame |
-| anything else, including a fallen visit rate | revert |
-
-The last row is the one to read twice: inside a struggling system the default is to take capacity
-out, never to keep it. A reverted probe also holds the lane still for six ticks, 3 seconds on the
-default cadence, before it may probe again.
-
-The global budget deliberately watches a different variable, the oldest admitted slot's wait. Two
-controllers chasing the same number is how the coupled loops of the previous design were built.
-
-## Slots are RAII
-
-A slot releases when it drops. There is no code path that can leak in-flight accounting, which is a
-class of bug the previous limiter had at eight call sites: several paths took a permit and returned
-early without recording it, so its in-flight counter drifted upward until the controller's own
-anti-ramp guard was permanently disabled.
-
-Feeding the sensor is separate and explicit. `Slot::commit_done(rtt)` marks a real commit completion;
-a slot dropped without it (a pool failure, an empty take) releases cleanly and contributes no fake
-train sample.
-
-## How it interacts with the connection pool
-
-The slot and the pooled connection are two separate resources acquired in a fixed order: **slot
-first, then connection**. The reverse order deadlocks, with slot holders parked in `pool.get()` while
-connection holders park waiting for a slot.
-
-Three ordering rules exist because getting them wrong produced real regressions:
-
-**A parked pop holds neither.** A long poll releases the slot and returns the connection before it
-parks, and re-acquires both on wake. Otherwise every parked consumer would pin a connection, and the
-pool would be exhausted by consumers doing nothing.
-
-**A cheap in-memory check comes before the slot.** On the hot-list serve path, a pop whose ring has
-nothing ready returns empty without touching either resource. The reason is a starvation inversion:
-the rate of empty re-polls is proportional to the number of parked consumers, so taking the shared
-pop slot on every empty re-poll saturated admission, and a freshly woken real delivery then queued
-behind thousands of empty polls. The legacy path achieves the same thing with the cheap indexed
-`log_has_pending_v1` probe.
-
-**The minimum-pop-wait hold happens before the slot too.** Holding an under-full claim back is done
-in Rust, before either resource is taken. A `pg_sleep` inside the pop procedure would hold a
-connection, a slot, a PostgreSQL backend, and (after the first partition claim) row locks, for the
-whole window.
-
-One knob moves the slot boundary itself. With `QUEEN_POP_FUSION` set (off by default), N pop claim
-legs share one transaction, and the Pop lane takes **one slot per fused flush** rather than one per
-claim. What the sensor then measures is the fused transaction, which is the thing that actually
-queues on PostgreSQL, instead of N copies of the same WAL wait. The claim leg it fuses is described
-in [life of a pop](/internals/life-of-a-pop).
-
-Background jobs run in the Maint lane rather than bypassing admission, which is what lets the wake
-order keep them behind request traffic without starving them outright. The
-[sweeper](/internals/sweeper) is one of them: a timer fire is a writing transaction holding partition
-locks, and it takes a Maint slot **before** its connection like every other job here.
-
-## The one path that has no lane
-
-[KV state](/use/kv) is the exception, and it is deliberate on both halves. Neither KV reads nor KV
-writes take a lane. They have their own connection pool, `QUEEN_KV_POOL_SIZE`, derived as
-`clamp(DB_POOL_SIZE / 10, 4, 32)`, and that pool **is** the semaphore.
-
-Writes were the tempting half to put on the Push lane, and doing so would have been a defect. Thirty
-tenants each inside their own limit of a hundred writes a second are three thousand Push slots a
-second, on a small stack whose measured commit-bound ceiling is around 480 messages a second. No tenant
-would have violated anything, the message path would be starved, and the weigher could not tell the
-two kinds of work apart because they would be the same lane.
-
-What the dedicated pool gives that a lane would not is the shape of its failure. At roughly 1 ms a
-read it is worth about 16,000 reads a second, so it never binds in normal operation; when the database
-slows to 100 ms a read it is worth 160 a second, and the excess takes a `503` instead of taking
-connections away from the log. `queen_kv_pool` exports its size, availability and waiters.
-
-The exception to the exception: a KV write that rides **inside** a push or an ack inherits the slot the
-handler already took and does not take another. That is a bundle of messages, and it belongs in the
-message lane.
-
-## The second control loop, and why it is not a second arbiter
-
-This page opens by replacing several self-balancing loops with one owner, so a
-second feedback loop in the same broker needs accounting for. [Pop
-autopilot](/reference/http/pop#autopilot) is one, and it does not compete with
-the arbiter because the two act on different quantities.
-
-| | Admission arbiter | Pop autopilot |
+| Setting | Default | What it does |
 | --- | --- | --- |
-| Senses | commit clustering, the shared flush pipeline | ready partitions and the age of the oldest, from the hot-list ring |
-| Decides | how many transactions may be in flight | how much work one admitted pop does |
-| Scope | process-wide, four lanes | one `(tenant, queue, group)` lane, in memory |
-| Costs | a slot per write transaction | no PostgreSQL query at all |
-| Applies to | every hot-path write | only a pop that sent `autopilot=true`, only on the ring path |
+| `QUEEN_RAFT_ADMIT_MAX_MB` | 64 | the budget, in megabytes of raw request bytes. `0` turns admission off |
+| `QUEEN_RAFT_ADMIT_HOLD_MS` | 15000 | how long a command waits for room before `429`; below the SDKs' 30 s request timeout |
 
-A wider sweep is not more slots. It is more partitions inside the same claim,
-which is the same one slot for the Pop lane either way, so the controller cannot
-spend the arbiter's budget however it steers. What it can spend is the value of a
-slot, and that is what its two failure directions look like. Too wide and the
-claim holds its slot while it visits partitions that had nothing, which is the
-speculative scan the controller exists to prevent. Too narrow and ready
-partitions are left behind, their ready-age grows, and that growth is precisely
-the signal the width loop steers on.
+A command larger than the whole budget takes all of it and runs alone. The budget counts raw request
+bytes, and a parsed push costs several times its wire size in memory, which is why the budget is
+small.
 
-The message budget is a constant rather than a loop for a related reason, and it
-is the one worth knowing before raising it. A claimed entry is held `INFLIGHT`
-for the whole round trip, and that hold spans the consumer's own work and its ack,
-not just the SQL. So a deep claim on a backlogged partition stays inflight for as
-long as the client takes to drain it serially, and the tail a consumer sees grows
-with the depth it asked for. `QUEEN_POP_AUTOPILOT_BATCH` therefore ships at 100,
-below the 200 an absent `batch` resolves to in the handler, and a drain-aware
-successor that sizes it from the observed ack rate is the open item behind that
-constant.
+The state is on [`/metrics/prometheus`](/reference/prometheus/) while `QUEEN_RAFT_METRICS` is on (the
+default):
 
-## Degraded signal
+| Series | Meaning |
+| --- | --- |
+| `queen_raft_admit_bytes{kind="cap"}` | the budget |
+| `queen_raft_admit_bytes{kind="held"}` | bytes held by admitted commands now |
+| `queen_raft_admit_waiting` | commands waiting for room now |
+| `queen_raft_admit_total{outcome="waited"}` | commands that had to wait, then got in |
+| `queen_raft_admit_total{outcome="refused"}` | commands refused with `429` |
 
-With `synchronous_commit = off`, or on a device faster than the clustering gap, commit waits collapse
-and the trains carry no information. The arbiter detects this (the tenth-percentile commit round trip
-falls under an observability floor, held for three consecutive ticks) and pins the budget to
-`QUEEN_ADMISSION_NOSYNC_BUDGET` instead of chasing noise. The mode is visible in telemetry as
-`adm_mode`.
+The 1.x admission arbiter, its connection pool and its `QUEEN_ADMISSION_*` knobs do not exist in 2.0.
 
-## What is exported
+## The disk gate
 
-On `/metrics/prometheus`:
+A node refuses writes that grow storage once its data directory's filesystem is at least
+`QUEEN_RAFT_DISK_HIGH_PCT` used (default 85), and accepts them again only below
+`QUEEN_RAFT_DISK_LOW_PCT` (default 80). The same gate closes when the store's LMDB map is 85% full and
+reopens below 80%. The check is cached and refreshed at most every `QUEEN_RAFT_DISK_CHECK_MS` (100 ms),
+so a burst of writes does not become a burst of `statvfs` calls. A refused write answers `507` with
+code `storage_full`, and `queen_raft_storage_full` is `1` while the gate is closed. Pops, acks and
+deletes keep working, which is how the disk drains. Size the volume for retention.
 
-```text
-queen_admission_budget
-queen_admission_inflight{lane="push|pop|ack|maint"}
-queen_admission_waiting{lane="push|pop|ack|maint"}
-queen_admission_trains_per_s
-queen_admission_txn_per_train
-queen_admission_cycle_ms
-```
+## The queues inside
 
-<Aside type="caution">
-Note the path. These are on `/metrics/prometheus`, not `/metrics`.
-</Aside>
+Past admission, a command crosses bounded queues. None of them refuses on its own: a full one makes
+the command wait, and the request's deadline bounds the wait.
 
-The 10 second `broker rates` log line carries the same picture in one row: `adm_budget`, `adm_mode`,
-`adm_lanes` as `push:in/cap w<waiters>` per lane, `trains_s`, `cycle_ms`, `oldest_wait_ms` and
-`adm_last`.
+- **The command channel** between the receivers and the batcher holds
+  `QUEEN_RAFT_COMMAND_QUEUE_DEPTH` commands (default 1024). A full channel makes the sender wait.
+- **The cycle.** The batcher drains the channel into cycles of at most 4096 commands, an estimated
+  4 MiB, or 5 ms of planning, whichever comes first. Every command that is not a plain push (acks,
+  pops, renewals, transactions, KV, timers) waits in a priority lane that each cycle drains before any
+  push: the work that empties the system goes ahead of the work that fills it.
+- **The pipeline.** At most `QUEEN_RAFT_PIPELINE` entries (default 4) are proposed and not yet applied.
+  While the pipeline is full, the next cycle waits for the oldest entry to apply.
+- **Forwarding from a follower.** A follower keeps at most `QUEEN_RAFT_FWD_INFLIGHT` calls to the
+  leader in flight (default 4096), prepared commands and read barriers together; past that a call waits
+  for a free slot, up to its deadline.
 
-`adm_last` is why the budget last moved, and it is the field that turns a flat budget into a
-diagnosis. It reads `init` until the first change, then `saturated` (the budget grew because `B` was
-exhausted), `oldest-age` (it shrank on queueing), or `nosync-detected` and `signal-restored` for the
-two mode transitions. `saturated` and `oldest-age` are written only when the budget actually changes
-by at least one slot, so a steady budget leaves the previous reason standing rather than reporting
-the ticks that decided to hold.
+A command that runs out of deadline anywhere on that path answers `503` with `Retry-After: 1`, as does
+every write while no leader is known. Clients retry those; a retried push that reuses its
+`transactionId` is deduplicated against whatever did commit.
 
-`QUEEN_ADMISSION_TRACE=1`, off by default, adds a per-decision line on the `admission` target that
-none of the above carries: `budget adjusted` with the reason, the previous budget, the flush cycle,
-the oldest wait and transactions per train, plus `lane probe reverted` with the lane, its new cap and
-the verdict reason, and `lane probe kept` for the Pop lane. It logs on every tick that changes
-something, which on a busy broker is most of them, so it is a debugging knob rather than a setting to
-leave on.
+## Reading the signals
 
-<Aside type="caution">
-The metric names changed in 1.0.0-beta.2. `queen_seg_push_vegas_limit` and
-`queen_seg_pop_vegas_limit` no longer exist. Dashboards and alerts referencing them need updating to
-the `queen_admission_*` family above.
-</Aside>
+| What you see | What it means |
+| --- | --- |
+| `queen_raft_admit_waiting` above zero, `refused` flat | producers are being slowed, not refused: the budget is full, so new writes wait for room |
+| `queen_raft_admit_total{outcome="refused"}` rising | producers keep sending after the hold; they get `429` and come back after `Retry-After` |
+| `queen_raft_storage_full` at `1` | the disk or the store map is past its high mark; writes answer `507` until usage drops below the low mark |
+| `503` with `Retry-After: 1` | no leader, a leadership change, or a deadline spent inside the node |
 
-## Tuning it
-
-The short version: read the telemetry before changing anything, and prefer changing nothing.
-
-- **The floor and the initial budget derive from the pool.** Two thirds of
-  `DB_POOL_SIZE - QUEEN_ADMISSION_POOL_RESERVE`, which is 96 on the defaults. They are derived rather
-  than fixed so that a small deployment can never admit more concurrent transactions than it has
-  connections for.
-- **`waiting` is the signal that admission is binding.** If a lane shows waiters while the pool
-  reports idle connections, the arbiter is the constraint, not PostgreSQL.
-- **Raising `QUEEN_ADMISSION_MAX` cannot help unless the budget is sitting at it.** The maximum is a
-  safety ceiling, not an operating point.
-- **The Vegas-era variables are gone.** `QUEEN_SEG_{PUSH,POP}_{INIT,MIN,MAX}`, `QUEEN_VEGAS_ALPHA` and
-  `QUEEN_VEGAS_BETA` are no longer read. The broker logs a warning at boot if it finds any of them
-  set, rather than letting you tune a control loop that is not there.
-
-The generated [configuration reference](/reference) lists every one of these variables with the
-default the code applies.
+The client-facing contract of each status is on [Errors](/reference/errors/).

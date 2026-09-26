@@ -336,16 +336,7 @@ impl HttpClient {
         let status = resp.status();
 
         if status == reqwest::StatusCode::NO_CONTENT {
-            // 204 still carries a body on the pop-maintenance path
-            // ({"messages":[],"paused":true}), so read it rather than assuming
-            // empty — discarding it would turn "paused" into "no messages" and
-            // hide maintenance mode from the caller.
-            let bytes = resp.bytes().await.unwrap_or_default();
-            return Ok(if bytes.is_empty() {
-                None
-            } else {
-                Some(bytes.to_vec())
-            });
+            return Ok(None);
         }
 
         if !status.is_success() {

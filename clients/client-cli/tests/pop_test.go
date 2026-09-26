@@ -145,8 +145,7 @@ func TestPop_V4MultiPartitionBasic(t *testing.T) {
 			map[string]any{"p": p, "m": 1},
 		})
 	}
-	// Wait out the PUSHPOPLOOKUPSOL race - the partition_lookup commits
-	// asynchronously after the push.
+	// A short settle after the pushes, before the wildcard pop.
 	time.Sleep(500 * time.Millisecond)
 
 	got := popN(t, q, 100,

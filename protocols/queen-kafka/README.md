@@ -37,8 +37,9 @@ it is decoded; the code is in [`examples/cross-protocol`](../../examples/cross-p
 - **Cloud fit**: TLS with SNI, SASL/PLAIN (the password is your Queen token),
   429s mapped to `throttle_time_ms`. Point `QUEEN_URL` at a cell's proxy instead
   of at a broker and every Kafka request crosses authentication, tenant scoping,
-  quotas and metering; a real client proves it end to end in
-  [`compat/cloud/`](compat/cloud).
+  quotas and metering. A real client proved it end to end against the
+  standalone proxy on 2026-08-30; that rig (`compat/cloud/`) was removed with
+  Postgres on 2026-09-26 and the single binary has none yet.
 
 The advertised table is 33 API keys. The thirteen admin keys,
 `InitProducerId` and the four transaction keys landed on 2026-08-29 and
@@ -71,7 +72,7 @@ The advertised table is 33 API keys. The thirteen admin keys,
 Since M9 a transactional producer works. `initTransactions`,
 `beginTransaction`, `send`, `sendOffsetsToTransaction`, `commitTransaction` and
 `abortTransaction` all do what they say, the records and the consumer offsets
-commit atomically in one Postgres transaction, and a second producer taking the
+commit atomically in one broker transaction (one raft entry), and a second producer taking the
 same `transactional.id` fences the first with zero of its records in the log.
 Measured against real clients in [`compat/transactions`](compat/transactions):
 Java kafka-clients 4.3.1 and franz-go, including a SIGKILL between the last send
@@ -149,9 +150,9 @@ to connect back to, and getting it wrong is the classic Kafka footgun.
 
 ### In-process, inside a raft broker
 
-A broker in raft mode (`QUEEN_STORAGE=raft`) with `QUEEN_KAFKA_EMBEDDED=true`
-runs this library inside its own process (server/src/kafka_inproc.rs): no
-child, no second binary, no loopback socket. The configuration is the same
+A broker with `QUEEN_KAFKA_EMBEDDED=true` runs this library inside its own
+process (server/src/kafka_inproc.rs): no child, no second binary, no loopback
+socket. The configuration is the same
 environment, read by the same `queen_kafka::boot::Config`; the differences are
 three:
 
@@ -195,7 +196,7 @@ body against a facade with the cluster config absent.
 ### The problem it solves
 
 Two facades in front of one Queen deployment already share everything durable:
-offsets are in Queen's key/value store and the log is in Postgres. What they did
+offsets are in Queen's key/value store and the records in its queues. What they did
 not share was **who arbitrates a group**, and that produced two distinct
 defects. Both are fixed, and both are reproduced side by side in
 [`compat/cluster/`](compat/cluster):
@@ -226,7 +227,7 @@ Two requirements the boot check enforces and one it does not:
   this process's own credential, not a client's, because the broker list every
   client is handed has to be one list.
 - All facades of one cluster must present credentials of **one Queen tenant**.
-  `queen.kv` is keyed by tenant, so two tenants are two registries and each
+  Queen's KV is keyed by tenant, so two tenants are two registries and each
   facade would see only itself.
 - Not enforced: each node's `QUEEN_KAFKA_ADVERTISED_ADDR` must be **its own**,
   individually reachable by every client. See the anti-pattern below.
@@ -250,8 +251,8 @@ addresses is the Kubernetes shape that works.
 
 - **Leadership is an advertisement, not an access control.** Every node serves
   Produce, Fetch, ListOffsets and OffsetFetch for every partition, whatever
-  Metadata said the leader was. A non-leader has the data here (it is one shared
-  Postgres), so refusing would cost availability for nothing. What IS gated at a
+  Metadata said the leader was. A non-leader has the data here (every facade
+  reads the same Queen), so refusing would cost availability for nothing. What IS gated at a
   non-owner is JoinGroup, SyncGroup, Heartbeat, LeaveGroup, OffsetCommit,
   DescribeGroups and DeleteGroups. OffsetFetch is deliberately not: it reads
   shared state whose answer is the same at every node, and an `assign()`-based
@@ -284,7 +285,7 @@ addresses is the Kubernetes shape that works.
   same node.** The ownership hash takes the group id and never the tenant,
   because the tenant key is seeded per process and a tenant-aware hash would
   never converge across facades. It is harmless: they remain two coordinator
-  entries over two `queen.kv` rows.
+  entries over two KV rows.
 - **Ordering across a leadership move.** A producer with
   `max.in.flight.requests.per.connection > 1` and idempotence off can have two
   batches land out of order when its metadata moves. Apache Kafka has the
@@ -292,30 +293,34 @@ addresses is the Kubernetes shape that works.
 
 ### Proving it in your own deployment
 
-[`compat/cluster/rig-cluster.sh`](compat/cluster) stands up one Postgres, two
-mesh-wired Queen brokers on it, three clustered facades (two in front of one
-broker and one in front of the other, so a cross-broker read is on the critical
-path), one facade with the cluster config absent and two unclustered facades,
-then runs nine scenarios and tears it all down. `run.sh` in that directory
+[`compat/cluster/rig-cluster.sh`](compat/cluster) stands up a raft cluster of
+three Queen brokers, three clustered facades (one in front of each broker, so a
+cross-node round trip is on the critical path), one facade with the cluster
+config absent and two unclustered facades, then runs nine scenarios and tears it
+all down. `run.sh` in that directory
 points the same suite at a stack you already have.
 
 ## Tests
 
-`cargo test`. Live end-to-end (Docker + Go): `compat/rig.sh --m5`, passing
-`-count=1`. Cluster mode: `compat/cluster/rig-cluster.sh`. Queen Cloud, with a
-whole cell and the proxy on the path: `compat/cloud/rig-cloud.sh`. Behaviour
-against a real broker: `compat/differential/rig-diff.sh` diffs every answer
-against `apache/kafka:3.9.1`. Full support matrix and config reference: the
+`cargo test`. Live end-to-end (Go): `compat/rig.sh --m5`, passing
+`-count=1`. Cluster mode: `compat/cluster/rig-cluster.sh`. Embedded mode:
+`compat/embedded/rig-embedded.sh`. Behaviour against a real broker (Docker):
+`compat/differential/rig-diff.sh` diffs every answer against
+`apache/kafka:3.9.1`. Every rig runs its brokers as raft nodes on throwaway data
+directories. Full support matrix and config reference: the
 webdoc pages `/reference/kafka` and `/deploy/kafka`. Plan and status:
 [../PLAN_QUEEN_KAFKA.md](../PLAN_QUEEN_KAFKA.md).
 
-Measured on 2026-08-30, all from a clean machine: `rig.sh --m5` **91/91**,
-`cluster` **11/11**, `cloud` **16/16**, the differential **0 divergences left to
-classify** (100 found: 74 deliberate, 26 accepted).
+Measured on 2026-08-30, all from a clean machine and against the
+Postgres-backed broker the rigs ran then: `rig.sh --m5` **91/91**, `cluster`
+**11/11**, `cloud` **16/16** (a rig since removed), the differential **0
+divergences left to classify** (100 found: 74 deliberate, 26 accepted). Not yet
+re-measured on raft.
 
-Status: preview. Not in release CI, and no published image carries the facade
-yet, though the repository's `Dockerfile` builds it beside the broker binary for
-`QUEEN_KAFKA_EMBEDDED=true` (server/src/kafka_facade.rs). Queen Cloud is
+Status: preview. Not in release CI. Every broker links the facade in (the
+`kafka` feature, on by default) and runs it in-process with
+`QUEEN_KAFKA_EMBEDDED=true` (server/src/kafka_inproc.rs); the standalone
+`queen-kafka` binary talks HTTP to the broker `QUEEN_URL` names. Queen Cloud is
 **reachable**: produce, consume, groups, committed offsets, admin and
 transactions all cross the cell proxy, and two tenants on one shared listener are
 isolated from each other. What is still open there is a short list of

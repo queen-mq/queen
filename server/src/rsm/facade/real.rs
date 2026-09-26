@@ -15,8 +15,7 @@
 //!
 //! # What the facade does, and where the line to the planner is
 //!
-//! The facade is the RECEIVER of §9.1: it does the pool-free pre-work the
-//! Postgres handlers used to do against a connection — parse the wire body, mint
+//! The facade is the RECEIVER of §9.1: it does the pre-work — parse the wire body, mint
 //! message ids, hash transaction ids (`xxh3_128`), pack one frame per message
 //! (O20, the survivors' frames are concatenated by the planner, never
 //! repacked), build the typed [`Command`], submit it, and render the wire answer
@@ -1145,8 +1144,7 @@ impl RaftFacade {
 /// fails to apply in time is handed back (`release_unanswered`).
 const FOLLOWER_POP_MARGIN: Duration = Duration::from_millis(250);
 
-/// PLAN_CONFLATION §3.1/§3.3, the answer half, rendered as the Postgres engine
-/// renders it (`render_pop_parts` in data.rs): `"conflation":true` on every
+/// PLAN_CONFLATION §3.1/§3.3, the answer half: `"conflation":true` on every
 /// answer whose EFFECTIVE policy is conflating, empty ones included, and
 /// `"conflationConflict":true` when the request named another value and the
 /// stored one won. Both keys go after `partitionsClaimed` and only when true, so
@@ -1310,7 +1308,10 @@ impl RaftFacade {
     /// `results` array on commit; `success:false` + `reason` on a rollback.
     async fn txn_impl(&self, ctx: ReqCtx, req: super::TxnReq) -> Result<super::TxnOut, RsmError> {
         let txn_id = uuid_bytes_to_string(&uuidv7_bytes());
-        let fail = |reason: &str, err: &str| super::TxnOut {
+        // A rollback VERDICT answers 200 + `success:false`; a body the wire
+        // refuses (wrong shape, server-owned field) answers a named 4xx.
+        let answer = |status: u16, reason: &str, err: &str| super::TxnOut {
+            status,
             body: serde_json::json!({
                 "transactionId": txn_id,
                 "success": false,
@@ -1320,12 +1321,30 @@ impl RaftFacade {
             })
             .to_string(),
         };
+        let fail = |reason: &str, err: &str| answer(200, reason, err);
+        let refuse = |reason: &str, err: &str| answer(400, reason, err);
         let body: TxnBodyIn = match serde_json::from_slice(&req.raw) {
             Ok(b) => b,
-            Err(e) => return Ok(fail("bad_request", &format!("bad body: {e}"))),
+            Err(e) => {
+                // A rider that is not an array is the common wrong shape: name it.
+                let rider = serde_json::from_slice::<serde_json::Value>(&req.raw)
+                    .ok()
+                    .and_then(|v| {
+                        ["operations", "kv", "timers", "positions", "requiredLeases"]
+                            .into_iter()
+                            .find(|k| v.get(*k).is_some_and(|x| !x.is_array() && !x.is_null()))
+                    });
+                let msg = match rider {
+                    Some(k) => format!(
+                        "`{k}` must be an array at the TOP LEVEL of the transaction body"
+                    ),
+                    None => format!("bad body: {e}"),
+                };
+                return Ok(refuse("bad_request", &msg));
+            }
         };
         // The timers rider: schedules and cancels in one array, as on the
-        // POST /timers route (025), validated by the timers port.
+        // POST /timers route, validated by the timers port.
         let timer_values: Vec<serde_json::Value> = body
             .timers
             .as_deref()
@@ -1333,12 +1352,25 @@ impl RaftFacade {
             .iter()
             .map(|r| serde_json::from_str(r.get()).unwrap_or(serde_json::Value::Null))
             .collect();
+        // Provenance is the broker's: `producerSub` and every underscore field
+        // (`_messageId`, `_tenant`, ...) are set by the broker, never by a client.
+        for (i, v) in timer_values.iter().enumerate() {
+            if let Some(k) = v.as_object().and_then(|o| {
+                o.keys()
+                    .find(|k| k.starts_with('_') || k.as_str() == "producerSub")
+            }) {
+                return Ok(refuse(
+                    "timers_server_owned_field",
+                    &format!("timers[{i}]: `{k}` is set by the broker and cannot be supplied"),
+                ));
+            }
+        }
         let mut timer_ops = match crate::rsm::planner::timers::parse_timer_ops(
             &timer_values,
             ctx.producer_sub.as_deref(),
         ) {
             Ok(o) => o,
-            Err(e) => return Ok(fail("bad_request", &e.message)),
+            Err(e) => return Ok(refuse("bad_request", &e.message)),
         };
         // The KV rider, validated with the WIRE's limits (024: fewer ops, no
         // getPrefix inside a transaction).
@@ -1356,7 +1388,7 @@ impl RaftFacade {
             self.store.max_key_len(),
         ) {
             Ok(o) => o,
-            Err(e) => return Ok(fail(e.reason, &e.detail)),
+            Err(e) => return Ok(answer(e.status, e.reason, &e.detail)),
         };
         // The positions rider, validated here (names, offsets, metadata) and
         // planned inside the same command.
@@ -1545,23 +1577,24 @@ impl RaftFacade {
                     flat += 1;
                 }
                 "kv" | "timer" | "timers" => {
-                    return Ok(fail(
+                    return Ok(refuse(
                         "bad_request",
                         "kv and timer operations are TOP-LEVEL arrays of the request \
                          (\"kv\":[...], \"timers\":[...]), never elements of `operations`",
                     ))
                 }
                 "" => {
-                    return Ok(fail(
+                    return Ok(refuse(
                         "bad_request",
                         "every transaction operation needs a `type` of push or ack",
                     ))
                 }
                 other => {
-                    return Ok(fail(
+                    return Ok(refuse(
                         "bad_request",
                         &format!(
-                            "transaction supports only push and ack operations, got `{other}`"
+                            "transaction supports only push and ack operations, got `{other}`; \
+                             kv and timer operations go in the TOP LEVEL `kv` / `timers` arrays"
                         ),
                     ))
                 }
@@ -1673,6 +1706,7 @@ impl RaftFacade {
                 body["value"] = v.get("value").cloned().unwrap_or(serde_json::Value::Null);
             }
             return Ok(super::TxnOut {
+                status: 200,
                 body: body.to_string(),
             });
         }
@@ -1798,6 +1832,7 @@ impl RaftFacade {
             }
         }
         Ok(super::TxnOut {
+            status: 200,
             body: serde_json::json!({
                 "transactionId": txn_id,
                 "success": true,
@@ -1813,9 +1848,8 @@ impl RaftFacade {
 // ---------------------------------------------------------------------------
 
 /// The frame codec stores a transaction id behind a u16 length
-/// (`frames::pack_frames`). The Postgres push rejects longer ids at the HTTP
-/// boundary (`handlers::data::MAX_TXN_BYTES`), but a raft push is dispatched
-/// before that check, so the raft paths enforce it themselves: a longer id
+/// (`frames::pack_frames`, `handlers::data::MAX_TXN_BYTES`), so the push paths
+/// enforce the limit themselves: a longer id
 /// packs a frame whose declared txn length is truncated — a `debug_assert`
 /// panic in debug, a corrupt stored frame in release (found by W7 fuzzing).
 const MAX_TXN_BYTES: usize = u16::MAX as usize;
@@ -1854,7 +1888,7 @@ struct PushResolved {
     queue: String,
     partition: String,
     /// `None` for a survivor; `Some(leader index into the flat results)` for an
-    /// intra-request follower (postgres `resolve_push_followers`).
+    /// intra-request follower.
     follower_of: Option<usize>,
     hash: [u8; 16],
     frame: Vec<u8>,
@@ -1871,8 +1905,8 @@ struct PushItemOut {
 }
 
 impl RaftFacade {
-    /// Resolve the replicated queue encryption policy without touching the
-    /// legacy Postgres pool. The read is kept off the async runtime because an
+    /// Resolve the replicated queue encryption policy. The read is kept off the
+    /// async runtime because an
     /// LMDB page fault is blocking I/O (I15).
     async fn encrypted_queues(
         &self,
@@ -2325,8 +2359,8 @@ impl RaftFacade {
             }
         }
 
-        // Dashboard counters (Postgres counts in the handler, data.rs ≈440):
-        // one push request of N items; per queue one request and its items.
+        // Dashboard counters: one push request of N items; per queue one
+        // request and its items.
         if let Some(m) = crate::metrics::global() {
             m.push.record_request(resolved.len());
             let mut per_q: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
@@ -2417,11 +2451,11 @@ fn render_push(items: &[Option<PushItemOut>]) -> String {
         }
         out.push_str("\",\"transaction_id\":\"");
         if let Some(it) = it {
-            crate::fusion::json_escape_into(&mut out, &it.txn);
+            crate::util::json_escape_into(&mut out, &it.txn);
         }
         out.push_str("\",\"queueName\":\"");
         if let Some(it) = it {
-            crate::fusion::json_escape_into(&mut out, &it.queue);
+            crate::util::json_escape_into(&mut out, &it.queue);
         }
         out.push_str("\",\"status\":\"");
         out.push_str(it.map(|i| i.status).unwrap_or("error"));
@@ -2513,8 +2547,7 @@ impl RaftFacade {
         let lease_seconds = if options.lease_seconds > 0 {
             options.lease_seconds
         } else if queue.is_empty() {
-            // Discovery can span queues. Its Postgres implementation resolves
-            // each queue independently; the current command has one field, so
+            // Discovery can span queues and the command has one lease field, so
             // use the implicit-queue default unless the caller overrides it.
             60
         } else {
@@ -2798,8 +2831,7 @@ impl RaftFacade {
         autopilot_echo(Ok(out), plan)
     }
 
-    /// The group's EFFECTIVE conflation policy for this answer, resolved as
-    /// `resolve_conflation` resolves it on the Postgres engine (§3.3). With claims
+    /// The group's EFFECTIVE conflation policy for this answer (§3.3). With claims
     /// it is what they applied: the planner already let the stored policy win,
     /// or used the request's when this pop registered the group. Without, it is
     /// the stored policy, or the request's when the group is not registered.
@@ -3024,21 +3056,21 @@ fn render_pop_body(
 
     let mut out = String::with_capacity(256 + top_queue.len());
     out.push_str("{\"success\":true,\"queue\":\"");
-    crate::fusion::json_escape_into(&mut out, top_queue);
+    crate::util::json_escape_into(&mut out, top_queue);
     out.push_str("\",\"partition\":\"");
-    crate::fusion::json_escape_into(&mut out, first_name);
+    crate::util::json_escape_into(&mut out, first_name);
     out.push_str("\",\"partitionId\":\"");
-    crate::fusion::json_escape_into(&mut out, &first_pid);
+    crate::util::json_escape_into(&mut out, &first_pid);
     out.push_str("\",\"leaseId\":\"");
-    crate::fusion::json_escape_into(&mut out, lease_id);
+    crate::util::json_escape_into(&mut out, lease_id);
     out.push_str("\",\"consumerGroup\":\"");
-    crate::fusion::json_escape_into(&mut out, group);
+    crate::util::json_escape_into(&mut out, group);
     out.push_str("\",\"messages\":[");
 
     let dl = Some(deadline.instant());
     let mut count = 0usize;
     // Dashboard: per queue (messages, Σ lag ms, max lag ms), lag = delivery −
-    // creation, as the Postgres renderer measures it (data.rs ≈3457).
+    // creation.
     let now_ms = wall_micros() / 1000;
     let mut per_q: std::collections::HashMap<&str, (u64, u64, u64)> =
         std::collections::HashMap::new();
@@ -3141,7 +3173,7 @@ fn render_pop_body(
                     out.push_str("{\"id\":\"");
                     crate::frames::uuid_hex_into(&mut out, &fr.message_id);
                     out.push_str("\",\"transactionId\":\"");
-                    crate::fusion::json_escape_into(&mut out, fr.txn);
+                    crate::util::json_escape_into(&mut out, fr.txn);
                     out.push_str("\",\"traceId\":");
                     match &fr.trace_id {
                         Some(t) => {
@@ -3166,7 +3198,7 @@ fn render_pop_body(
                     match &fr.producer_sub {
                         Some(ps) => {
                             out.push('"');
-                            crate::fusion::json_escape_into(&mut out, ps);
+                            crate::util::json_escape_into(&mut out, ps);
                             out.push('"');
                         }
                         None => out.push_str("null"),
@@ -3174,13 +3206,13 @@ fn render_pop_body(
                     out.push_str(",\"createdAt\":\"");
                     out.push_str(&seg_created);
                     out.push_str("\",\"partitionId\":\"");
-                    crate::fusion::json_escape_into(&mut out, &partition_id);
+                    crate::util::json_escape_into(&mut out, &partition_id);
                     out.push_str("\",\"partition\":\"");
-                    crate::fusion::json_escape_into(&mut out, &info.name);
+                    crate::util::json_escape_into(&mut out, &info.name);
                     out.push_str("\",\"leaseId\":\"");
-                    crate::fusion::json_escape_into(&mut out, lease_id);
+                    crate::util::json_escape_into(&mut out, lease_id);
                     out.push_str("\",\"consumerGroup\":\"");
-                    crate::fusion::json_escape_into(&mut out, group);
+                    crate::util::json_escape_into(&mut out, group);
                     out.push_str("\",\"deliveryAttempt\":");
                     out.push_str(&attempt.to_string());
                     out.push_str(",\"offset\":");
@@ -3494,8 +3526,7 @@ fn resolve_ack_targets(
                     continue;
                 };
                 // A partitionId is a small dense integer: never trust it as an
-                // address without the owner (the PG engine's p_tenant check,
-                // 005_log_ack.sql). The txn path fails whole on this.
+                // address without the owner. The txn path fails whole on this.
                 if part.tenant != tenant {
                     bad.push((
                         f.index,
@@ -3697,11 +3728,11 @@ fn render_ack(
         let item = per_item.iter().find(|p| p.index == i);
         let bad_msg = bad.iter().find(|(bi, _)| *bi == i).map(|(_, m)| m.as_str());
         out.push_str(",\"transactionId\":\"");
-        crate::fusion::json_escape_into(&mut out, txn);
+        crate::util::json_escape_into(&mut out, txn);
         out.push('"');
         if let Some(msg) = bad_msg {
             out.push_str(",\"success\":false,\"error\":\"");
-            crate::fusion::json_escape_into(&mut out, msg);
+            crate::util::json_escape_into(&mut out, msg);
             out.push_str("\",\"leaseReleased\":false,\"dlq\":false,\"noop\":false}");
             continue;
         }
@@ -3748,7 +3779,7 @@ fn render_ack(
         out.push_str(",\"error\":");
         if let Some(error) = error {
             out.push('"');
-            crate::fusion::json_escape_into(&mut out, error);
+            crate::util::json_escape_into(&mut out, error);
             out.push('"');
         } else {
             out.push_str("null");
@@ -3792,7 +3823,7 @@ impl RaftFacade {
         };
         let expires_iso = expires.map(iso_from_us);
         let mut out = String::from("{\"leaseId\":\"");
-        crate::fusion::json_escape_into(&mut out, &req.lease_id);
+        crate::util::json_escape_into(&mut out, &req.lease_id);
         out.push_str("\",\"success\":");
         out.push_str(if renewed > 0 { "true" } else { "false" });
         out.push_str(",\"renewed\":");
@@ -4083,8 +4114,6 @@ impl Rsm for RaftFacade {
             }
             Ok(super::RsmBootstrap {
                 startup_error: None,
-                maintenance: flag("maintenance_mode", false)?,
-                pop_maintenance: flag("pop_maintenance_mode", false)?,
                 kv_enabled: flag(crate::switches::Switches::KEY_KV, true)?,
                 timers_schedule_enabled: flag(
                     crate::switches::Switches::KEY_TIMERS_SCHEDULE,

@@ -12,7 +12,7 @@
 #  wire it gets wrong and re-reads the same wrong way is green. Here the request
 #  is curl and the response is jq, so what is asserted is what a customer's
 #  `curl`, their nginx, their Postman collection and their sixth language will
-#  see. It is the executable half of the stored procedure's specification.
+#  see. It is the executable half of the surface's specification.
 #
 #  It is deliberately BROAD rather than deep: every route, every op, every
 #  envelope, every documented refusal. Depth lives elsewhere and is not
@@ -22,8 +22,7 @@
 #                                rolls back the push AND the timer, commit does
 #                                not raise, an expired lease annuls the KV write,
 #                                results are index-aligned).
-#    server/tests/timers_*       claim, fire, retry, DLQ, fault injection.
-#    server/tests/kv_*           the SQL helpers, boot idempotence, quota.
+#    the broker's own tests      claim, fire, retry, DLQ; kv semantics, quota.
 #
 #  What this file adds that none of them have: the SHAPE of every call, made the
 #  way an integrator makes it.

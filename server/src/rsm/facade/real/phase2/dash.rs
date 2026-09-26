@@ -1,6 +1,6 @@
 //! The dashboard's metric reads in raft mode (PLAN_RAFT.md D17, §14.6):
 //! gather every node's rows ([`crate::rsm::dashboard`]), then serve them
-//! through the ported stored-procedure views.
+//! through the ported dashboard views.
 
 use serde_json::Value;
 
@@ -8,8 +8,7 @@ use super::{ApiOut, RaftFacade, RsmError};
 use crate::rsm::dashboard::store::Rows;
 
 /// What a gather collected: the rows of every node that answered, and the
-/// nodes that did not (their rows are simply absent, as a replica that
-/// stopped reporting is absent from the Postgres tables).
+/// nodes that did not (their rows are simply absent).
 pub(super) struct Gathered {
     pub(super) rows: Rows,
     pub(super) missing: Vec<u64>,
@@ -67,8 +66,8 @@ pub(super) fn ok(v: Value) -> Result<ApiOut, RsmError> {
     Ok(ApiOut::json(200, v.to_string()))
 }
 
-/// The filter object a Postgres handler builds with `filters_from_query`
-/// (handlers/mod.rs ≈671): the listed keys with a non-empty value.
+/// The filter object built the way `filters_from_query`
+/// (handlers/mod.rs ≈671) does: the listed keys with a non-empty value.
 pub(super) fn filters(query: Option<&str>, keys: &[&str]) -> serde_json::Map<String, Value> {
     let q = super::query_map(query);
     keys.iter()
@@ -91,8 +90,8 @@ fn window(f: &serde_json::Map<String, Value>, now: i64, pad_us: i64) -> (i64, i6
     (from.min(to) - pad_us, to.max(from) + 1)
 }
 
-/// A view's answer: a top-level `error` is the stored procedure raising,
-/// which the Postgres handler serves as a 500 (`sp_result_to_response`).
+/// A view's answer: a top-level `error` means the input failed to parse,
+/// served as a 500.
 fn answer(v: Value) -> Result<ApiOut, RsmError> {
     if v.get("error").is_some() {
         return Ok(ApiOut::json(500, v.to_string()));
@@ -345,8 +344,9 @@ impl RaftFacade {
         Ok((metas, nows))
     }
 
-    /// Every node's queue rows of the tenant in the window, merged the way
-    /// the Postgres upsert merges replicas, plus this node's churn rows.
+    /// Every node's queue rows of the tenant in the window, merged (see
+    /// [`crate::rsm::dashboard::model::merge_queue_rows`]), plus this node's
+    /// churn rows.
     async fn tenant_queue_rows(
         &self,
         tenant: &str,
@@ -400,7 +400,7 @@ impl RaftFacade {
     }
 
     /// `GET /api/v1/analytics/workload` — `get_workload_v1` (400 on an
-    /// unknown `groupBy`, as the Postgres handler answers).
+    /// unknown `groupBy`).
     pub(super) async fn api_workload_v1(
         &self,
         ctx: super::ReqCtx,

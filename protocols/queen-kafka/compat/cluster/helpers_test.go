@@ -1,6 +1,6 @@
 // Package cluster is the live acceptance suite for queen-kafka CLUSTER MODE:
 // two or three facades that unmodified Kafka clients address as one cluster,
-// each optionally in front of its own Queen broker of the same HA deployment.
+// each optionally in front of its own Queen broker of the same raft cluster.
 //
 // It proves the two defects the design names, and it proves them the only way
 // they can be proved — with real clients against running processes:
@@ -14,8 +14,8 @@
 //	unconditional upsert, so the loser of a race silently overwrote the winner
 //	(50 became 16). Fixed by a compare-and-set fence on the commit path.
 //
-// Nothing here starts a stack. `rig-cluster.sh` does that — one Postgres, two
-// meshed Queen brokers, three clustered facades, one facade with the cluster
+// Nothing here starts a stack. `rig-cluster.sh` does that — a raft cluster of
+// three Queen brokers, three clustered facades, one facade with the cluster
 // config absent, and two independent single-node facades — and then runs
 // `run.sh` against it. Every address is an environment variable, so the suite
 // also runs against a stack that is already up:

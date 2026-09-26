@@ -296,7 +296,7 @@ async fn an_html_error_page_still_produces_a_usable_error() {
 
 #[tokio::test]
 async fn an_empty_body_on_a_no_content_reply_is_not_an_error() {
-    // The maintenance path answers 204 with no body at all.
+    // An empty pop answers 204 with no body at all.
     let broker = FakeBroker::start(vec![Reply::status(204)]).await;
 
     let msgs = client(&broker)

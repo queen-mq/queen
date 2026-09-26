@@ -4,7 +4,7 @@
     "title": "Queen MQ proxy API",
     "version": "1.0.0",
     "summary": "The proxy's own surface: service endpoints, login, and the cluster console.",
-    "description": "Generated from `proxy/`'s router at documentation build time.\n\nThis document covers only the endpoints the proxy *serves*. Every other path is\nforwarded to the broker of the cluster addressed by the request's first DNS label,\nafter classification, authentication, quota and rate-limit checks. For the broker's\nown surface use the broker document; for which of those routes a tenant credential\ncan reach, see the route-class table in the documentation.\n\nResponse shapes are not derivable here: console handlers build their JSON inline.\nOnly paths, methods, path parameters and the credential kind are asserted.",
+    "description": "Generated from `proxy/`'s router at documentation build time. The proxy runs inside\nthe broker process when QUEEN_PROXY_EMBEDDED is on.\n\nThis document covers only the endpoints the proxy *serves*. Every other path is\nhanded to the broker, in-process, for the cluster addressed by the request's first DNS\nlabel, after classification, authentication, quota and rate-limit checks. For the\nbroker's own surface use the broker document; for which of those routes a tenant\ncredential can reach, see the route-class table in the documentation.\n\nResponse shapes are not derivable here: console handlers build their JSON inline.\nOnly paths, methods, path parameters and the credential kind are asserted.",
     "license": {
       "name": "Apache-2.0",
       "identifier": "Apache-2.0"
@@ -29,6 +29,9 @@
     },
     {
       "name": "Console"
+    },
+    {
+      "name": "Control plane"
     }
   ],
   "components": {
@@ -43,6 +46,12 @@
         "in": "cookie",
         "name": "queen_session",
         "description": "The httpOnly session cookie the proxy sets at login."
+      },
+      "cpToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-queen-cp-token",
+        "description": "The control-plane token, the value of QUEEN_PROXY_CP_TOKEN."
       }
     },
     "schemas": {
@@ -186,6 +195,28 @@
         "x-queen-handler": "github_start"
       }
     },
+    "/api/cp/keys": {
+      "post": {
+        "operationId": "post_api_cp_keys",
+        "tags": [
+          "Control plane"
+        ],
+        "summary": "POST /api/cp/keys",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "issue_key",
+        "security": [
+          {
+            "cpToken": []
+          }
+        ],
+        "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
+      }
+    },
     "/console/{path}": {
       "get": {
         "operationId": "get_console_path",
@@ -210,6 +241,81 @@
         },
         "x-queen-handler": "spa",
         "x-queen-note": "Registered in axum as a catch-all segment: every path below this prefix resolves here."
+      }
+    },
+    "/api/cp/tenants": {
+      "post": {
+        "operationId": "post_api_cp_tenants",
+        "tags": [
+          "Control plane"
+        ],
+        "summary": "POST /api/cp/tenants",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "create_tenant",
+        "security": [
+          {
+            "cpToken": []
+          }
+        ],
+        "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
+      }
+    },
+    "/api/cp/clusters": {
+      "post": {
+        "operationId": "post_api_cp_clusters",
+        "tags": [
+          "Control plane"
+        ],
+        "summary": "POST /api/cp/clusters",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "ensure_cluster",
+        "security": [
+          {
+            "cpToken": []
+          }
+        ],
+        "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
+      }
+    },
+    "/api/cp/keys/{id}": {
+      "delete": {
+        "operationId": "delete_api_cp_keys_id",
+        "tags": [
+          "Control plane"
+        ],
+        "summary": "DELETE /api/cp/keys/:id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "revoke_key",
+        "security": [
+          {
+            "cpToken": []
+          }
+        ],
+        "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
       }
     },
     "/api/console/keys": {
@@ -260,6 +366,28 @@
         "description": "Console API. Requires a proxy-minted user session (cookie or bearer token); a cluster API key is not a console credential."
       }
     },
+    "/api/cp/bootstrap": {
+      "post": {
+        "operationId": "post_api_cp_bootstrap",
+        "tags": [
+          "Control plane"
+        ],
+        "summary": "POST /api/cp/bootstrap",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "bootstrap",
+        "security": [
+          {
+            "cpToken": []
+          }
+        ],
+        "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
+      }
+    },
     "/api/console/usage": {
       "get": {
         "operationId": "get_api_console_usage",
@@ -299,6 +427,36 @@
           }
         },
         "x-queen-handler": "session_token"
+      }
+    },
+    "/api/operator/users": {
+      "get": {
+        "operationId": "get_api_operator_users",
+        "tags": [
+          "Service"
+        ],
+        "summary": "GET /api/operator/users",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "list_users"
+      },
+      "post": {
+        "operationId": "post_api_operator_users",
+        "tags": [
+          "Service"
+        ],
+        "summary": "POST /api/operator/users",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "create_user"
       }
     },
     "/api/console/members": {
@@ -477,6 +635,219 @@
           }
         },
         "x-queen-handler": "jwks"
+      }
+    },
+    "/api/cp/clusters/{slug}": {
+      "get": {
+        "operationId": "get_api_cp_clusters_slug",
+        "tags": [
+          "Control plane"
+        ],
+        "summary": "GET /api/cp/clusters/:slug",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "get_cluster",
+        "security": [
+          {
+            "cpToken": []
+          }
+        ],
+        "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
+      }
+    },
+    "/api/cp/clusters/{id}/usage": {
+      "get": {
+        "operationId": "get_api_cp_clusters_id_usage",
+        "tags": [
+          "Control plane"
+        ],
+        "summary": "GET /api/cp/clusters/:id/usage",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "usage",
+        "security": [
+          {
+            "cpToken": []
+          }
+        ],
+        "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
+      }
+    },
+    "/api/cp/clusters/{id}/status": {
+      "put": {
+        "operationId": "put_api_cp_clusters_id_status",
+        "tags": [
+          "Control plane"
+        ],
+        "summary": "PUT /api/cp/clusters/:id/status",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "set_status",
+        "security": [
+          {
+            "cpToken": []
+          }
+        ],
+        "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
+      }
+    },
+    "/api/operator/users/{user_id}": {
+      "patch": {
+        "operationId": "patch_api_operator_users_user_id",
+        "tags": [
+          "Service"
+        ],
+        "summary": "PATCH /api/operator/users/:user_id",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "update_user"
+      }
+    },
+    "/api/cp/clusters/{id}/overrides": {
+      "put": {
+        "operationId": "put_api_cp_clusters_id_overrides",
+        "tags": [
+          "Control plane"
+        ],
+        "summary": "PUT /api/cp/clusters/:id/overrides",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "set_overrides",
+        "security": [
+          {
+            "cpToken": []
+          }
+        ],
+        "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
+      }
+    },
+    "/api/operator/users/{user_id}/roles/{cluster_id}": {
+      "put": {
+        "operationId": "put_api_operator_users_user_id_roles_cluster_id",
+        "tags": [
+          "Service"
+        ],
+        "summary": "PUT /api/operator/users/:user_id/roles/:cluster_id",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "set_role"
+      },
+      "delete": {
+        "operationId": "delete_api_operator_users_user_id_roles_cluster_id",
+        "tags": [
+          "Service"
+        ],
+        "summary": "DELETE /api/operator/users/:user_id/roles/:cluster_id",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "remove_role"
       }
     }
   }

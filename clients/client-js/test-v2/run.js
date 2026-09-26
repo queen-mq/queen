@@ -1,4 +1,3 @@
-import pg from 'pg';
 import { Queen } from '../client-v2/index.js'
 import * as queueTests from './queue.js'
 import * as pushTests from './push.js'
@@ -9,7 +8,6 @@ import * as dlqTests from './dlq.js'
 import * as completeTests from './complete.js'
 import * as transactionTests from './transaction.js'
 import * as subscriptionTests from './subscription.js'
-import * as maintenanceTests from './maintenance.js'
 import * as retentionTests from './retention.js'
 import * as bootstrapTests from './bootstrap.js'
 import * as loggerTests from './logger.js'
@@ -28,81 +26,43 @@ import { LoadBalancer } from '../client-v2/http/LoadBalancer.js';
 
 export const TEST_CONFIG_SINGLE = {
     baseUrls: [process.env.QUEEN_SERVER_URL || 'http://localhost:6632'],
-    loadBalancingStrategy: 'affinity',
-    dbConfig: {
-      host: process.env.PG_HOST || 'localhost',
-      port: process.env.PG_PORT || 5432,
-      database: process.env.PG_DB || 'postgres',
-      user: process.env.PG_USER || 'postgres',
-      password: process.env.PG_PASSWORD || 'postgres'
-    }
+    loadBalancingStrategy: 'affinity'
   };
 
 export const TEST_CONFIG_MULTIPLE = {
   baseUrls: ['http://localhost:6632','http://localhost:6633'],
-  loadBalancingStrategy: 'round-robin',
-  dbConfig: {
-    host: process.env.PG_HOST || 'localhost',
-    port: process.env.PG_PORT || 5432,
-    database: process.env.PG_DB || 'postgres',
-    user: process.env.PG_USER || 'postgres',
-    password: process.env.PG_PASSWORD || 'postgres'
-  }
+  loadBalancingStrategy: 'round-robin'
 };
 
 export const TEST_CONFIG = process.env.TEST_CONFIG === 'multiple' ? TEST_CONFIG_MULTIPLE : TEST_CONFIG_SINGLE;
 console.log('TEST_CONFIG:', TEST_CONFIG);
 
-// PLAN_RAFT.md §13.3 / WP-1.9 — the raft1 lane (QUEEN_TEST_STORAGE=raft).
-//
-// The phase-2 raft broker serves the public Queen API without Postgres. Run the
-// ordinary suite and skip only tests whose ASSERTION mechanism itself executes
-// SQL against Queen's private Postgres tables; those scenarios belong in the
-// backend-neutral conformance/crash lanes instead of pretending a DB exists.
-const RAFT_LANE = process.env.QUEEN_TEST_STORAGE === 'raft';
-
-// The name→module map, so a skipped test can be attributed to the route class it
-// needs. Order is cosmetic; keys are the reason-table keys below.
-const RAFT_MODULES = {
-  queue: queueTests, push: pushTests, pop: popTests, consume: consumerTests,
-  load: loadTests, dlq: dlqTests, complete: completeTests, transaction: transactionTests,
-  subscription: subscriptionTests, maintenance: maintenanceTests, retention: retentionTests,
-  bootstrap: bootstrapTests, logger: loggerTests, watermark: watermarkTests, auth: authTests,
-  semantics: semanticsTests, ackwindow: ackWindowTests, kv: kvTests, timers: timerTests,
-  docs: docsTests, stream: streamTests,
-};
-
-const RAFT_SKIP_MODULES = new Set(['watermark', 'ackwindow']);
-const RAFT_SKIP_TESTS = new Set([
-  'pushOnlyQueueIsDiscoverable',
-  'leasedBacklogNotStrandedByEmptyPolls',
-]);
-const RAFT_DIRECT_DB_REASON =
-  'test assertion mutates or reads Queen private Postgres tables; raft1 intentionally has no Postgres';
-
 // Global test state
-export let dbPool;  
 let activeClient;
 
-// Initialize database pool
-export async function initDb() {
-  if (RAFT_LANE) {
-    // No Postgres in raft mode (G-2). The suite's direct-DB assertions and the
-    // SQL cleanup do not apply; dbPool stays undefined and the raft lane runs
-    // only the tests that never touch it.
-    log(true, 'raft1 lane: QUEEN_TEST_STORAGE=raft — no Postgres, skipping the direct-DB setup');
-    return undefined;
-  }
-  dbPool = new pg.Pool(TEST_CONFIG.dbConfig);
-  await dbPool.query('SELECT 1');
-  return dbPool;
-}
-
-// Close database pool
-export async function closeDb() {
-  const pool = dbPool;
-  dbPool = undefined;
-  if (pool) await pool.end();
+// The suite talks to the broker through its public HTTP API only: there is no
+// database and no cleanup step. test/run.sh gives every lane a FRESH broker
+// (its data volume is created empty and destroyed with `down -v`), so the
+// suite starts on an empty store. A second run against the same broker is not
+// expected to be green: fixed-name fixtures (docs.js's fixed transactionId,
+// the kv and timer suites) would find the first run's state.
+//
+// The preflight makes a missing or unhealthy broker fail the run up front,
+// with the reason, instead of as a wall of per-test connection errors.
+async function preflightBroker(baseUrl) {
+    const url = `${baseUrl}/health`
+    let res
+    try {
+        res = await fetch(url, { signal: AbortSignal.timeout(5000) })
+    } catch (e) {
+        throw new Error(`broker preflight ${url}: ${e.cause?.message || e.message}`)
+    }
+    // Drain the body so the connection is released either way.
+    await res.arrayBuffer().catch(() => {})
+    if (!res.ok) {
+        throw new Error(`broker preflight ${url}: HTTP ${res.status}`)
+    }
+    log(true, `Broker preflight ${url}: HTTP ${res.status}`)
 }
 
 function log (success, ...args) {
@@ -127,86 +87,13 @@ function printResults() {
     console.log('='.repeat(80))
 }
 
-export const cleanupTestData = async () => {
-    if (RAFT_LANE) {
-      // A raft1 stack has no Postgres and boots on a fresh data volume every
-      // run (test/run.sh tears it down with `down -v`), so there is nothing to
-      // purge and no SQL to run it with — the store is already empty.
-      log(true, 'raft1 lane: fresh data volume, no Postgres — skipping SQL cleanup (store is empty at boot)');
-      return;
-    }
-    // All the LIKE patterns test queues use. The three exact names are the
-    // documentation queues (test-v2/docs.js): purging them here is what lets
-    // the published dedup snippet keep a fixed transactionId across runs.
-    const patterns = ['test-%', 'edge-%', 'pattern-%', 'workflow-%', 'orders', 'payments', 'invoices'];
-    try {
-      // Drop streaming queries first (CASCADE removes their state rows).
-      // Safe even when queen_streams isn't installed yet — we swallow the
-      // error if the schema doesn't exist.
-      try {
-        await dbPool.query(`DELETE FROM queen_streams.queries WHERE name LIKE 'test-%'`);
-      } catch (e) {
-        // queen_streams schema not installed — ignore.
-      }
-
-      // Queue identity is now the queen.queues id (log_queues was merged
-      // away): log_partitions, consumer_watermarks, consumer_groups_metadata
-      // and queue_lag_metrics all cascade from the queues row. Only log_txns
-      // and log_dlq have NO foreign key by design, so they get an explicit
-      // purge keyed via log_partitions first. Without it, every suite run
-      // inherits the previous run's messages and dedup window entries —
-      // fixed-transactionId tests report 'duplicate' on their FIRST push.
-      try {
-        await dbPool.query(`
-          WITH parts AS (
-            SELECT lp.id FROM queen.log_partitions lp
-            JOIN queen.queues q ON q.id = lp.queue_id
-            WHERE q.name LIKE ANY($1::text[])
-          ),
-          d1 AS (DELETE FROM queen.log_txns WHERE partition_id IN (SELECT id FROM parts)),
-          d2 AS (DELETE FROM queen.log_dlq  WHERE partition_id IN (SELECT id FROM parts))
-          SELECT 1`, [patterns]);
-      } catch (e) {
-        // Log-engine schema not installed (rows-only server) — ignore.
-      }
-
-      await dbPool.query(`DELETE FROM queen.queues WHERE name LIKE ANY($1::text[])`, [patterns]);
-
-      // KV keys and pending timers (PLAN_KV_TIMERS.md §10.4). NOT cosmetic:
-      // without this purge a putIfAbsent test is green on its first run and red
-      // forever after, an incr test accumulates between runs, and a timer left
-      // pending by an earlier run fires into a later one and shows up as a
-      // phantom message in an unrelated test. Neither table has a foreign key
-      // to queen.queues -- log_timers is keyed by NAMES on purpose -- so the
-      // queue delete above does not reach them.
-      //
-      // Both are deleted across every tenant: a test rig may run with
-      // QUEEN_TENANCY_HEADER on, and the rows to purge are identified by the
-      // test naming convention, never by tenant.
-      //
-      // These two used to be wrapped in a swallowing try/catch, on the grounds
-      // that a broker booted with the kv/timer flags off had never applied
-      // 024_kv.sql / 025_timers.sql. There are no such flags: schema.rs applies
-      // both on every boot, so a missing `queen.kv` or `queen.log_timers` is a
-      // broken rig and must be loud. Swallowing it would leave the purge silently
-      // undone, which is exactly the failure the purge exists to prevent -- a
-      // putIfAbsent test green on its first run and red forever after.
-      await dbPool.query(`DELETE FROM queen.kv WHERE namespace LIKE ANY($1::text[])`, [patterns]);
-      await dbPool.query(`DELETE FROM queen.log_timers WHERE queue LIKE ANY($1::text[])`, [patterns]);
-
-      log(true, 'Test data cleaned up (rows + segments + kv + timers)');
-    } catch (error) {
-      log(false, `Cleanup error: ${error.message}`);
-    }
-  };
-
 async function main() {
     const client = new Queen({
         urls: TEST_CONFIG.baseUrls,
         loadBalancingStrategy: TEST_CONFIG.loadBalancingStrategy
     })
     activeClient = client
-    await initDb()
+    await preflightBroker(TEST_CONFIG.baseUrls[0])
 
     // Separate human and AI tests
     const humanTests = [
@@ -220,7 +107,6 @@ async function main() {
         transactionTests,
         subscriptionTests,
         retentionTests,
-        maintenanceTests,
         bootstrapTests,
         loggerTests,
         watermarkTests,
@@ -237,7 +123,7 @@ async function main() {
     ]
 
     // Streaming tests (queen-streams). Run via `node run.js stream`.
-    // Require Queen v0.2+ with the queen_streams schema applied.
+    // Require a broker that serves the /streams/v1 routes.
     const streamGroupTests = [streamTests]
 
     const allTests = [...humanTests, ...aiTests, ...streamGroupTests]
@@ -292,32 +178,6 @@ async function main() {
         log(true, `Running all tests (${allTestFunctions.length} tests)...`)
     }
 
-    // PLAN_RAFT.md WP-2.11: exercise the complete public surface on raft1.
-    // Only direct-Postgres white-box tests remain excluded.
-    if (RAFT_LANE) {
-        const fnModule = new Map()
-        for (const [mn, mod] of Object.entries(RAFT_MODULES)) {
-            for (const f of Object.values(mod)) {
-                if (typeof f === 'function') fnModule.set(f.name, mn)
-            }
-        }
-        const kept = []
-        const skipped = []
-        for (const t of testsToRun) {
-            const mn = fnModule.get(t.name) || '?'
-            if (RAFT_SKIP_MODULES.has(mn) || RAFT_SKIP_TESTS.has(t.name)) skipped.push([mn, t.name])
-            else kept.push(t)
-        }
-        log(true, `raft1 lane: running ${kept.length} phase-2 test(s), skipping ${skipped.length} direct-Postgres white-box test(s)`)
-        for (const [mn, name] of skipped) {
-            console.log(`⏭️  SKIP (raft1) ${mn}.${name} — ${RAFT_DIRECT_DB_REASON}`)
-        }
-        testsToRun = kept
-    }
-
-    // Cleanup test data
-    await cleanupTestData()
-
     for (const test of testsToRun) {
         try {
             console.log('Running test:', test.name)
@@ -354,11 +214,10 @@ try {
 } catch (error) {
     log(false, 'Main error:', error.message)
 } finally {
-    // Always release both resource owners. Previously, an init/query failure
-    // skipped this teardown and the outer catch returned a successful process
-    // status, allowing a broken integration lane to appear green.
+    // Always release the client. Previously, an init failure skipped this
+    // teardown and the outer catch returned a successful process status,
+    // allowing a broken integration lane to appear green.
     const cleanupResults = await Promise.allSettled([
-        closeDb(),
         activeClient ? activeClient.close() : Promise.resolve()
     ])
     for (const result of cleanupResults) {

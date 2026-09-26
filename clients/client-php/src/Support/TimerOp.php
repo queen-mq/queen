@@ -10,8 +10,8 @@ namespace Queen\Support;
  * TWO RULES OF THE WIRE, both of which are cheap to break silently.
  *
  * ONLY RELATIVE DURATIONS, IN MILLISECONDS. The field is `delayMs`. An absolute
- * instant is not expressible: `deliverAt` is computed inside Postgres as
- * now() + the delay, so there is exactly one clock and no skew between brokers
+ * instant is not expressible: `deliverAt` is computed by the broker as now +
+ * the delay, so there is exactly one clock, the broker's, and no client's skew
  * can enter anywhere. The product's declared convention is "durations that can
  * be sub-second are in milliseconds, the ones that cannot are in seconds" — a
  * 250 ms retry backoff is a real and central use of a timer, a sub-second TTL

@@ -3,13 +3,12 @@
 # ships separately, and §7.2 owns the per-SDK halves). Build context = repo root.
 #   docker build -f test/runners/conflation/Dockerfile -t queen-test-runner-conflation .
 #
-# curl and jq are the client, exactly like test/runners/http. No
-# postgresql-client, and for the same reason as there: every §7.3 assertion is
-# observable at the wire (pop shape, response echoes, depth fields, the DLQ
-# surface, /metrics/prometheus), and an assertion that read the cursor straight
-# out of Postgres would pass on a broker that commits correctly and REPORTS the
-# wrong thing. The cursor-level pins (batch_end, lease_conflated,
-# attempt_offset) live in server/tests/conflation_semantics.rs (§7.1), not here.
+# curl and jq are the client, exactly like test/runners/http, and for the same
+# reason: every §7.3 assertion is observable at the wire (pop shape, response
+# echoes, depth fields, the DLQ surface, /metrics/prometheus). An assertion that
+# read the cursor out of the broker's store would pass on a broker that commits
+# correctly and REPORTS the wrong thing. The cursor-level pins live in the
+# broker's own tests (§7.1), not here.
 FROM alpine:3.20
 
 RUN apk add --no-cache bash curl jq

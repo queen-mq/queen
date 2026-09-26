@@ -161,8 +161,8 @@ export class ReduceOperator {
  *
  * The `operatorTag` (e.g. "tumb:60", "slide:60:10", "sess:30", "cron:minute")
  * lets multiple window operators within one query coexist in the same
- * `queen_streams.state` table without colliding, and lets the idle-flush
- * scan filter to a single operator's keys via prefix LIKE matching.
+ * state store without colliding, and lets the idle-flush scan filter to a
+ * single operator's keys by key prefix.
  *
  * Reserved key prefix: state keys starting with "__" are internal (e.g.
  * "__wm__" for per-partition watermarks). User code should never write

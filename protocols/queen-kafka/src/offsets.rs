@@ -28,7 +28,7 @@
 //! break without escaping. Ambiguity: group `a` with topic `b` and group `a:b`
 //! with topic `0` would compose the same key, and the prefix read that answers
 //! "all offsets for group `a`" would hand out group `a:b`'s. And storability:
-//! the key column is Postgres `TEXT`, which cannot hold a NUL byte at all. So
+//! the broker's KV refuses a key with a NUL byte in it (`kv_bad_key`). So
 //! everything outside `[A-Za-z0-9._-]` is percent-encoded ([`escape`]), which
 //! leaves every ordinary group and every legal topic name spelled exactly as it
 //! is, makes the separator unambiguous, and keeps the byte ordering the prefix
@@ -142,13 +142,14 @@ const FENCE_PREFIX: &str = "qk:fence:";
 /// [`KEY_PREFIX`] is not a prefix of it.
 const INDEX_PREFIX: &str = "qk:groups:";
 
-/// Ceiling on one key, in bytes — Postgres-side, `queen.kv_check_names_v1`.
-/// A group id and a topic name can each be long enough that the composed key
-/// passes it; see [`key`].
+/// Ceiling on one key, in bytes — the broker's KV key ceiling (`MAX_KEY_BYTES`
+/// in server/src/rsm/planner/kv.rs; its store can refuse a few bytes sooner
+/// when the tenant and the namespace are long). A group id and a topic name can
+/// each be long enough that the composed key passes it; see [`key`].
 ///
 /// Visible to [`crate::txn`], which composes a key of its own under the same
-/// namespace and is bounded by the same column. One constant, so a transaction
-/// key that would be refused by Postgres is refused here for the same reason
+/// namespace and is bounded by the same ceiling. One constant, so a transaction
+/// key that would be refused by the broker is refused here for the same reason
 /// and at the same number.
 pub(crate) const MAX_KEY_BYTES: usize = 512;
 
@@ -413,8 +414,8 @@ pub fn position_ops(pairs: &[(String, Committed)]) -> Vec<Option<PositionOp>> {
 /// The set is the one every legal Kafka topic name is already made of, so a
 /// topic is never rewritten and an ordinary group id (`orders-consumer`,
 /// `svc.billing`) is not either. What it does catch is the separator, the
-/// escape character itself, and the bytes Postgres `TEXT` cannot hold. See the
-/// module header for why both matter.
+/// escape character itself, and the NUL byte the broker's KV refuses in a key.
+/// See the module header for why both matter.
 ///
 /// Visible to [`crate::txn`] for the same reason [`MAX_KEY_BYTES`] is: a
 /// `transactional.id` is an arbitrary string and its key lives under the same
@@ -1299,7 +1300,7 @@ mod tests {
     }
 
     #[test]
-    fn keys_survive_group_ids_that_postgres_could_not_store_raw() {
+    fn keys_survive_group_ids_the_kv_could_not_store_raw() {
         for group in ["with space", "new\nline", "nul\0byte", "unicode-ø", "100%"] {
             let k = key(group, "orders", 3).unwrap();
             assert!(

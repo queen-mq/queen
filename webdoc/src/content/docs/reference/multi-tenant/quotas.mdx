@@ -11,26 +11,27 @@ sourceOfTruth:
   - proxy/src/gateway.rs
   - proxy/src/registry.rs
   - proxy/src/meter.rs
-  - proxy/migrations/001_init.sql
+  - proxy/src/app.rs
+  - proxy/src/store/data.rs
+  - proxy/src/store/usage.rs
+  - proxy/src/store/seed.rs
+  - server/src/rsm/facade/real/phase2.rs
 verifiedBy:
   - clients/client-js/test-v2/http-unit/retry429.test.js
   - clients/client-py/tests/http_unit/test_retry_429.py
   - clients/client-go/retry429_test.go
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree, PLAN_DASHBOARD_ACTIONS.md
-# §2.0): gateway.rs runs the two push blocks for a dead-letter replay and admits the row-id
-# route's destination as a whole pair, refusing a half-named one with 400 invalid_request. Both
-# are written down above; limits.rs, registry.rs and meter.rs changed nothing else this page
-# describes.
 ---
 
 A plan is eleven numbers and a feature flag. This page is what each one does at
 request time, in the order the gateway evaluates them, and which of them ignore the
 global enforcement switch.
 
-Every limit is per **cluster**. Because a cluster lives on exactly one cell and one
-proxy fronts that cell, the counters are process-local and exact: no shared store, no
-approximation. The trade is that they reset when the proxy restarts.
+Every limit is per **cluster**, and the counters are process-local: every node runs its
+own proxy, which keeps its own token buckets, parked-slot gauges and in-flight storage
+bytes, with no shared store. A cluster whose clients spread over several nodes is limited
+by each node on what that node sees: behind a load balancer over three nodes it can reach
+up to three times its plan's rate before every node refuses it. The counters reset when
+the node restarts.
 
 ## The enforcement switch
 
@@ -100,10 +101,10 @@ only observing.
 
 ## The request bucket
 
-| Plan column | Role |
+| Plan field | Role |
 | --- | --- |
-| `max_req_per_sec` | Refill rate. `NULL` means unlimited |
-| `req_burst` | Bucket capacity. `NULL` falls back to twice the rate |
+| `max_req_per_sec` | Refill rate. `null` means unlimited |
+| `req_burst` | Bucket capacity. `null` falls back to twice the rate |
 
 A classic token bucket: capacity is the burst, refill is the sustained rate, and a
 fresh bucket starts **full** so the first burst is immediately available. One token per
@@ -116,7 +117,7 @@ Details that change behaviour under load:
   shadow-mode denials do not skew later decisions.
 - **A plan upgrade does not hand out free tokens.** Raising capacity leaves the current
   token count alone; lowering it clamps the count down.
-- **`NULL` is free.** An unlimited limit returns `Allow` without touching the shard
+- **`null` is free.** An unlimited limit returns `Allow` without touching the shard
   map at all, so an unlimited cluster costs nothing.
 - `Retry-After` is `ceil(deficit / refill_rate)`, clamped to 1–60 seconds.
 
@@ -144,7 +145,7 @@ included counts.
 
 ## The message bucket
 
-| Plan column | Role |
+| Plan field | Role |
 | --- | --- |
 | `max_msgs_per_sec` | Refill rate |
 | `msgs_burst` | Capacity, defaulting to twice the rate |
@@ -171,31 +172,30 @@ Two behaviours worth knowing:
 
 ## Queue and partition caps
 
-| Plan column | Enforced on |
+| Plan field | Enforced on |
 | --- | --- |
 | `max_queues` | Each distinct queue named in a produce request or created by `/configure` |
 | `max_partitions_per_queue` | Each distinct `(queue, partition)` pair |
 
 Both matter because **a push creates queues and partitions implicitly**. And a push
-is not the only implicit creator: a streams cycle lazily provisions the queue and
-partition rows its sink emits name, so each distinct sink `(queue, partition)` pair is
+is not the only implicit creator: a streams cycle lazily provisions the queues and
+partitions its sink emits name, so each distinct sink `(queue, partition)` pair is
 admitted here exactly like a pushed one; and on the broker, a wildcard pop or a
-subscription registration against a queue that does not exist provisions its
-`queen.queues` config row too, because subscribing before the first push has to work,
-so a consumer typo creates a queue row where it previously left only an orphan cursor.
-Such a row carries no partitions until something is pushed to it. The proxy
-keeps the exact pairs it has admitted for the cluster in memory: a known pair is a set
-lookup with no database round trip, and a new one is evaluated under one lock and then
-recorded.
+subscription registration against a queue that does not exist provisions its queue
+configuration too, because subscribing before the first push has to work, so a consumer
+typo creates a queue where it would otherwise leave only an orphan cursor. Such a queue
+has no partitions until something is pushed to it. The proxy keeps the exact pairs it has
+admitted for the cluster in memory: a known pair is a set lookup with no store round trip,
+and a new one is evaluated under one lock and then recorded.
 
 Deleted queues stop consuming `max_queues` capacity without a proxy restart. The periodic
 inventory reconciliation prunes queue names and their partition sets, including when the broker
-confirms an empty inventory; a `queen_proxy_inval` notification clears the same cached registry
-after a delete performed elsewhere. An unreachable broker or an unreadable inventory never drives
-that pruning.
+confirms an empty inventory, and any invalidation of the cluster on the proxy's invalidation
+feed drops the same cached registry. An unreachable broker or an unreadable inventory never
+drives that pruning.
 
 The partition count used for the check is `max(pairs seen in this process, the last
-count read from the database) + 1`. The database side stores only a count, never
+count read from the store) + 1`. The stored queue row keeps only a count, never
 partition names, so after a restart the count is a **floor**, which is exactly what
 stops a restart being used to slip past `max_partitions_per_queue` before the reconciler
 catches up.
@@ -203,17 +203,18 @@ catches up.
 Over cap is `403 {"code":"quota_exceeded"}` when enforcing, a `would_block` log line
 when not.
 
-`/configure` is admitted too, because it is the *explicit* creation path: the
-underlying stored procedure creates the queue plus exactly one partition named
-`Default`, so one admission call covers what the request can create.
+`/configure` is admitted too, because it is the *explicit* creation path. The proxy admits
+it as the single pair `(queue, Default)`. The 2.0 broker's `/configure` writes the queue
+configuration and creates no partition, so that admission counts one partition the broker
+does not hold yet.
 
 ## The retention ceiling
 
 `max_retention_seconds` caps what a tenant may ask to keep. On `POST /api/v1/configure`
 the proxy reads `retentionSeconds` and `completedRetentionSeconds` (as a number or as
-a numeric string, because the stored procedure reads them as text and casts) and
-refuses the first one above the ceiling with `403 quota_exceeded`, naming the option and
-both values.
+a numeric string; the broker itself accepts only an integer and answers `400` to a string)
+and refuses the first one above the ceiling with `403 quota_exceeded`, naming the option
+and both values.
 
 It **refuses rather than clamps**. The proxy is parse-only and never rewrites a request
 body; silently shortening a customer's retention would make their data disappear later
@@ -230,8 +231,8 @@ A long-poll pop (`wait=true`) holds a slot for as long as it is parked. Two caps
 
 | Cap | Scope | Default |
 | --- | --- | --- |
-| `max_parked_pops` | One cluster | From the plan |
-| `QUEEN_PROXY_CELL_MAX_PARKED` | The whole cell, across every cluster | 5000 |
+| `max_parked_pops` | One cluster, on one node | From the plan |
+| `QUEEN_PROXY_CELL_MAX_PARKED` | One node's proxy, across every cluster | 5000 |
 
 The slot is an RAII guard held across the upstream await, so it is released when the
 broker answers, when the client disconnects, and when the request is cancelled. There
@@ -245,20 +246,19 @@ wrong.
 ## The storage quota
 
 `max_retained_bytes` starts from data the broker reports, then closes the measurement gap with the
-payload bytes the proxy has accepted since that report changed.
+payload bytes the proxy has accepted since that report changed. Every node runs its own
+reconciler and pump, so each node's proxy holds its own verdict.
 
 <Steps>
 
-1. Every `QUEEN_PROXY_RECONCILE_MS` (60 s), the reconciler asks each cell
-   `GET /api/v1/resources/queues` with that cluster's tenant header and sums the
-   `retainedBytes` field across its queues.
+1. Every `QUEEN_PROXY_RECONCILE_MS` (60 s), the reconciler asks the broker in its own
+   process, with no socket, for `GET /api/v1/resources/queues` with that cluster's tenant
+   header and sums the `retainedBytes` field across its queues.
 
 2. The proxy publishes that measured total to a per-cluster storage account. Every accepted push
    and every streaming sink emit immediately adds its raw JSON payload bytes to an in-flight
-   counter, so the admission estimate is `measured + in_flight` instead of a frozen ten-minute-old
-   number. The counter resets only when the broker's published total changes; repeating the same
-   value is not evidence that the broker's slow lane ran again. Raw bytes make this deliberately
-   conservative because the broker stores compressed payloads.
+   counter, so the admission estimate between two reconciler passes is
+   `measured + in_flight`. The counter resets only when the published total changes.
 
 3. A cluster whose measured total is over the cap enters the over-storage set. It leaves only once retained
    bytes fall back to **90% or less** of the cap. That band is hysteresis: without it a
@@ -289,9 +289,10 @@ the one batch that crosses it.
 
 ## The monthly message quota
 
-`plans.monthly_msgs_quota` is a calendar-month allowance, evaluated on the roll-up tick
-(`QUEEN_PROXY_ROLLUP_MS`, default hourly, with the first tick immediately at startup so
-a restart re-blocks anything that was blocked).
+`monthly_msgs_quota` (the plan's, or a cluster override's) is a calendar-month allowance,
+evaluated on the roll-up tick (`QUEEN_PROXY_ROLLUP_MS`, default hourly, with the first tick
+immediately at startup so a restart re-blocks anything that was blocked). Every node runs
+the tick and holds its own block.
 
 | Level | Condition | Action |
 | --- | --- | --- |
@@ -301,15 +302,16 @@ a restart re-blocks anything that was blocked).
 `Over` is `≥`, not `>`: an allowance is exhausted when it is fully consumed, unlike the
 storage cap which is a level and blocks strictly above. Each level is announced once per
 cluster per month, rising only. A repeat, or a wobble back down, announces nothing. The
-count comes from `usage_days` plus the not-yet-rolled `usage_minutes` remainder, so it
-includes traffic from the current hour.
+count is, for each UTC day, the larger of the rolled-up figure and the live minute rows,
+so it includes today's traffic up to each node's last flush
+([usage metering](/reference/multi-tenant/metering/)).
 
 Blocked pushes answer `403 {"code":"quota_exceeded"}` with a message naming
 `monthly_msgs_quota` and saying the block lifts at the next calendar month.
 
 <Aside type="note">
-**Every seeded plan leaves `monthly_msgs_quota` as `NULL`**, which means unlimited, and
-a cluster override can set it back to `NULL` explicitly. Until you set a number, this
+**Every seeded plan leaves `monthly_msgs_quota` as `null`**, which means unlimited, and
+a cluster override can set it back to `null` explicitly. Until you set a number, this
 entire chain is inert: the tick runs, finds no cluster with an allowance, and does
 nothing. Do not present the seeded plans as having a monthly cap.
 </Aside>
@@ -371,15 +373,16 @@ policy so the caller can pace its own loop. The synchronous API retries as above
    `would_block`. Those are exactly the requests that would have been refused.
 
 2. Fix the plans, not the traffic, where a real workload trips a cap you did not intend.
-   `set_limit_override` raises one limit for one cluster without forking a plan.
+   `PUT /api/cp/clusters/:id/overrides` raises one limit for one cluster without forking a
+   plan.
 
 3. Confirm clients handle `429`. If they are the shipped SDKs at a current version, they
    do; if they are hand-rolled HTTP, check for `Retry-After` handling before you switch
    on.
 
-4. Set `QUEEN_PROXY_ENFORCE=true` and verify with `GET /healthz`, which reports the live
-   value rather than the boot log, which survives a restart and can therefore describe a
-   process that no longer exists.
+4. Set `QUEEN_PROXY_ENFORCE=true` on every node and verify with `GET /healthz`, which
+   reports the live value rather than the boot log, which survives a restart and can
+   therefore describe a process that no longer exists.
 
 </Steps>
 
@@ -390,14 +393,16 @@ For completeness, so nothing here is mistaken for a guarantee:
 - No per-queue quota: the caps are per cluster.
 - No bandwidth or byte-rate limit. Bytes are metered, not capped.
 - No cap on consumer count or connection count, beyond parked long-poll slots.
-- Nothing limits how much *the proxy database* grows apart from
-  `QUEEN_PROXY_USAGE_KEEP_DAYS` on `usage_minutes`.
+- Nothing bounds how much of the proxy's own state accumulates in the replicated store:
+  the audit trail, the outbox and the daily usage rows are kept indefinitely. Only minute
+  rows (after `QUEEN_PROXY_USAGE_KEEP_DAYS`) and deny-list entries (with their token)
+  expire.
 
 ## Related
 
 - [Usage metering](/reference/multi-tenant/metering/): where the numbers the monthly
   quota compares against come from.
-- [Tenants, clusters and cells](/reference/multi-tenant/tenants/): the plan columns and
+- [Tenants, clusters and cells](/reference/multi-tenant/tenants/): the plan fields and
   the override merge.
 - [Endpoints a tenant can reach](/reference/multi-tenant/endpoints/): which route class
   each limit applies to.

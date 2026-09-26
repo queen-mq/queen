@@ -18,8 +18,8 @@ push that names them. That push carries the message under `payload`, and the pop
 under `data`.
 
 The mechanism to hold on to is that the status code is not the outcome. A push answers `201`
-whether the message reached PostgreSQL, the broker's disk spool or nowhere at all, and a refused
-acknowledgement arrives as `200` with `success: false` on its item. The per-item status is the
+whether each item was stored, found to be a duplicate or refused, and a refused acknowledgement
+arrives as `200` with `success: false` on its item. The per-item status is the
 answer; an empty pop is the one case with nothing to read, a `204` with no body.
 
 No consumer group is named here, so the read goes through the queue's own cursor, the reserved

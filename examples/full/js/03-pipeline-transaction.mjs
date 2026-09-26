@@ -98,9 +98,10 @@ try {
     const order = batch[0]
 
     // The transaction: the ack of the input and the push of the output land in
-    // the same PostgreSQL commit. The leaseId of the acked message travels with
-    // it as a required lease, so if the lease had expired (another consumer
-    // already took the order) the whole commit is refused, including the push.
+    // the same commit, one entry in the broker's replicated log. The leaseId of
+    // the acked message travels with it as a required lease, so if the lease
+    // had expired (another consumer already took the order) the whole commit is
+    // refused, including the push.
     const result = await queen.transaction()
       .ack(order, 'completed', { consumerGroup: G_INVOICER })
       .queue(Q_INVOICES)

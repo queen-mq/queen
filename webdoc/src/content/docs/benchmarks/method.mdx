@@ -1,6 +1,6 @@
 ---
 title: Method and archive
-description: "The loader that produced every figure in this section, the rig it runs on, and the pre-1.0 sessions that are traceable but not quotable."
+description: "The loader that produced every figure in this section, the Queen 1.x rig it ran on, and the pre-1.0 sessions that are traceable but not quotable."
 type: reference
 sidebar:
   order: 7
@@ -16,6 +16,12 @@ sourceOfTruth:
   - benchmark-queen/2026-07-17-storagev2-soak/README.md
   - benchmark-queen/2026-07-25-chaos-partial/NOTE.md
 ---
+
+<Aside type="caution">
+Every figure in this section measured **Queen 1.x**, whose storage was PostgreSQL. 2.0 replaced
+that storage with a replicated log. The loader below works against any Queen broker, but the rig,
+its PostgreSQL settings and its samplers describe the 1.x runs, not a 2.0 deployment.
+</Aside>
 
 One Go program and a handful of shell scripts produced every figure in this section, and all of
 them are in the repository.
@@ -64,10 +70,10 @@ scan was later measured at about 12 ms per pop at 1 000 partitions. Pass
 printed header rather than assuming today's defaults.
 </Aside>
 
-## The rig
+## The 1.x rig
 
-One machine for the broker and PostgreSQL, a separate machine for the loader. The separation is not
-optional: at 32 cores `goload` itself was once the ceiling, pinned at 93% CPU with 4% host idle, and
+One machine for the broker and PostgreSQL, a separate machine for the loader. The separation was
+not optional: at 32 cores `goload` itself was once the ceiling, pinned at 93% CPU with 4% host idle, and
 a 48-core loader is what turned a p99 of about 2 s into 358 ms.
 
 The soak's shape is explicit asynchronous acks, push batch 100, 200 partitions, 600 consumers, run
@@ -79,8 +85,9 @@ The soak's shape is explicit asynchronous acks, push batch 100, 200 partitions, 
 ```
 
 The cardinality shape is the same loader given a partition space far larger than its active set,
-which it creates as it goes. It needs `RETENTION_PARALLELISM` at 16 and a `QUEEN_DEDUP_CACHE_MB`
-sized to the host ([configuration](/reference/config)), and fails loudly without them.
+which it creates as it goes. On 1.x it needed `RETENTION_PARALLELISM` at 16 and a
+`QUEEN_DEDUP_CACHE_MB` sized to the host, and failed loudly without them; neither knob exists in
+2.0.
 
 ```bash
 ./goload -mode openloop -url http://BROKER:6632 -rate 200000 -push-batch 100 -partitions 1000000 -consumers 300 -manual-ack -ack-async -ack-inflight 256 -max-inflight 20000 -payload 256 -report 30
@@ -110,8 +117,7 @@ Four knobs move the result more than the rest.
   cache cap, because getting it wrong produced three out-of-memory failures at a million messages
   per second, all at about t=580 s and all invisible to 300-second runs.
 
-Autovacuum on the log engine's two fixed-population tables matters as much, and its settings are on
-[Storage model](/internals/storage-model).
+On 1.x, autovacuum on the log engine's two fixed-population tables mattered as much.
 
 ## The archive
 

@@ -1,6 +1,6 @@
 ---
 title: Transactional ack and push
-description: "The acknowledgement of one stage and the push of the next, in one PostgreSQL transaction."
+description: "The acknowledgement of one stage and the push of the next, in one transaction that commits atomically."
 type: tutorial
 tier: use
 sidebar:
@@ -12,8 +12,8 @@ verifiedBy:
 Ordering two calls does not make them safe. Push then ack duplicates the work when the process
 dies in between, ack then push loses it, and the previous tutorial left that window open.
 
-A transaction closes it: the ack of the input and the push of the output are one PostgreSQL
-commit, and both land or neither does. The commit also carries the lease of the message being
+A transaction closes it: the ack of the input and the push of the output are one entry in the
+broker's replicated log, and both land or neither does. The commit also carries the lease of the message being
 acknowledged, so it fails once that lease has expired, which is what stops a slow consumer from
 committing work the broker has already handed to somebody else.
 

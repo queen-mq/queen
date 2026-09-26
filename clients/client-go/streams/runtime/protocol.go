@@ -87,9 +87,8 @@ func CommitCycle(ctx context.Context, c *HTTPClient, queryID, partitionID, consu
 	stateOps []operators.StateOp, pushItems []operators.PushItem, ack map[string]interface{}, releaseLease bool) (map[string]interface{}, error) {
 
 	// Force empty slices instead of nil so JSON marshals to "[]" and not
-	// "null". The streams_cycle_v1 SP's COALESCE only fires for SQL NULL,
-	// not JSON null, so a "null" array makes jsonb_array_length() panic
-	// with "cannot get array length of a scalar".
+	// "null": the cycle's fields are arrays, and this client always sends
+	// arrays.
 	if stateOps == nil {
 		stateOps = []operators.StateOp{}
 	}

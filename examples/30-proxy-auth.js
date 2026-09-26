@@ -65,13 +65,8 @@ await test('refreshConsumerStats', () => queen.admin.refreshConsumerStats());
 console.log('\n=== SYSTEM API ===');
 await test('health', () => queen.admin.health());
 // await test('metrics', () => queen.admin.metrics()); // Returns raw text (verbose)
-await test('getMaintenanceMode', () => queen.admin.getMaintenanceMode());
-await test('getPopMaintenanceMode', () => queen.admin.getPopMaintenanceMode());
 await test('getSystemMetrics', () => queen.admin.getSystemMetrics());
 await test('getWorkerMetrics', () => queen.admin.getWorkerMetrics());
-await test('getPostgresStats', () => queen.admin.getPostgresStats());
-// await test('setMaintenanceMode', () => queen.admin.setMaintenanceMode(false)); // CAREFUL!
-// await test('setPopMaintenanceMode', () => queen.admin.setPopMaintenanceMode(false)); // CAREFUL!
 
 console.log('\n=== ALL TESTS COMPLETE ===');
 

@@ -142,7 +142,7 @@ Pass --dry-run to print the address without sending anything.`,
 			// The one 500 an operator must not answer by re-running blind: the
 			// broker did not learn whether the move committed, so the row may
 			// or may not be there. `dlqRowRemoved` is null in that body and
-			// false in the one that means "the database refused, nothing
+			// false in the one that means "the broker refused, nothing
 			// happened"; the raw body follows in the error itself.
 			var he *queen.HTTPError
 			if errors.As(err, &he) && strings.Contains(he.Body, `"dlqRowRemoved":null`) {

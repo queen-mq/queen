@@ -90,7 +90,8 @@ use crate::queen::{self, KvOp, QueenApi};
 /// which [`tests::the_key_space_cannot_see_the_others`] pins.
 const KEY_PREFIX: &str = "qk:topiccfg:";
 
-/// Ceiling on one key, in bytes — Postgres-side, `queen.kv_check_names_v1`.
+/// Ceiling on one key, in bytes — the broker's KV key ceiling (`MAX_KEY_BYTES`
+/// in server/src/rsm/planner/kv.rs).
 const MAX_KEY_BYTES: usize = 512;
 
 /// Records read in one call to Queen.
@@ -109,7 +110,7 @@ const KEYS_PER_CALL: usize = 128;
 /// **No escaping, and that is a precondition rather than a shortcut.** Every
 /// caller validates the name through [`crate::handlers::metadata::not_a_topic_here`]
 /// or `reserved_or_invalid` first, so `topic` is `[A-Za-z0-9._-]{1,249}` — a
-/// charset with no separator in it and no byte Postgres `TEXT` cannot hold — and
+/// charset with no separator in it and no NUL, which the broker's KV refuses — and
 /// the composed key is at most 261 bytes, inside [`MAX_KEY_BYTES`]. Composing a
 /// key from an unvalidated name is a bug in the caller, not an escaping problem
 /// here — which is why the precondition is asserted rather than commented: the

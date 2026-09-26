@@ -34,7 +34,7 @@ pub struct EffectiveLimits {
     pub max_retention_seconds: Option<i64>,
 }
 
-/// Plan feature flags, read out of `plans.features` (open JSONB). The rule is
+/// Plan feature flags, read out of a plan's `features` (open JSON). The rule is
 /// "missing key = false" for every one of them, which is what makes a cell that
 /// has never been told about a feature deny it (PLAN_KV_TIMERS.md §9.8 P1).
 #[derive(Clone, Copy, Debug, Default)]
@@ -122,14 +122,10 @@ impl OpClass {
 
 pub struct AppState {
     pub cfg: Config,
-    /// pxdb pool; None in dev-static mode (no persistence, no auth DB) AND in
-    /// the single binary, where `store` is the broker's KV. Being retired:
-    /// every read and write moves to `store` (PLAN_SINGLE_BINARY.md W3/W4).
-    pub db: Option<deadpool_postgres::Pool>,
-    /// Where the proxy's state lives: its Postgres, or the broker's KV.
+    /// Where the proxy's state lives: the broker's replicated KV.
     pub store: crate::store::Store,
-    /// Where the data plane sends a request: a cell broker over HTTP, or the
-    /// broker this proxy runs inside.
+    /// Where the data plane sends a request: the broker this proxy runs
+    /// inside (tests also relay to a stub broker over HTTP).
     pub upstream: crate::upstream::Upstream,
     pub cache: crate::cache::ClusterCache,
     pub limits: crate::limits::Limits,

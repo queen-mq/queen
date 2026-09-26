@@ -9,8 +9,8 @@
 # can never be one commit.
 #
 # POST /api/v1/transaction closes that window: the acknowledgement of the input
-# and the push of the output travel in one body and become one PostgreSQL
-# transaction. Both land or neither does.
+# and the push of the output travel in one body and become one entry in the
+# broker's replicated log. Both land or neither does.
 #
 # Run it:
 #   QUEEN_URL=http://localhost:6632 bash 03-transaction-ack-push.sh

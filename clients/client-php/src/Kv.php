@@ -41,8 +41,8 @@ use Queen\Support\KvOp;
  * succeeds even from a zombie. Use TransactionBuilder::kv() for that.
  *
  * ON NUMBERS. `version` is a 64-bit integer and survives PHP's json_decode
- * intact. `incr` runs on Postgres `numeric`, so a fractional delta comes back
- * as a PHP float; an integer counter comes back as an int. A counter driven
+ * intact. `incr` is exact decimal arithmetic in the broker, so a fractional
+ * delta comes back as a PHP float; an integer counter comes back as an int. A counter driven
  * past PHP_INT_MAX would decode as a float and lose precision silently, which
  * is a reason to bound counters with `max` rather than a reason to distrust
  * them.

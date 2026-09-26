@@ -27,10 +27,9 @@ description: "Verified snippet extracted from examples/cross-protocol/producer.m
 // the pair. Separately, each is its own measurement.
 
 // Setup the broker like:
-// docker run -d --name queen --network queen -e PG_HOST=queen-pg -e PG_PASSWORD=postgres 
-// -e QUEEN_SERVER=http://localhost:6632 -e QUEEN_KAFKA_EMBEDDED=true -e QUEEN_KAFKA_ADVERTISED_ADDR=localhost:9092 
-// -e QUEEN_KAFKA_DEFAULT_PARTITIONS=16 -e QUEEN_KV_WRITE_RATE=2000 -e QUEEN_KV_WRITE_BURST=4000 
-// -p 6632:6632 -p 9092:9092 ghcr.io/queen-mq/queen:1.4.1
+// docker run -d --name queen -e QUEEN_KAFKA_EMBEDDED=true -e QUEEN_KAFKA_ADVERTISED_ADDR=localhost:9092
+// -e QUEEN_KAFKA_DEFAULT_PARTITIONS=16 -e QUEEN_KV_WRITE_RATE=2000 -e QUEEN_KV_WRITE_BURST=4000
+// -p 6632:6632 -p 9092:9092 ghcr.io/queen-mq/queen:latest
 
 import Confluent from '@confluentinc/kafka-javascript'
 

@@ -8,8 +8,9 @@ RUN apt-get update \
 
 WORKDIR /src
 
-# The suite installs editable; asyncpg/httpx ship cp312 wheels, so no compiler
-# toolchain is needed. (.venv is excluded from the context by the sidecar ignore.)
+# The suite installs editable; its dependencies ship cp312 wheels, so no
+# compiler toolchain is needed. (.venv is excluded from the context by the
+# sidecar ignore.)
 COPY clients/client-py/ ./
 RUN pip install --no-cache-dir -e ".[dev]"
 

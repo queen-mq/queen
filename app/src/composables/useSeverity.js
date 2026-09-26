@@ -16,7 +16,7 @@
 //
 //   * a ratio against the work that was actually done in the window, or
 //   * a measure that is already proportional by construction (an age in
-//     seconds, an event-loop lag in ms, a pool's utilisation), or
+//     seconds, an event-loop lag in ms), or
 //   * a fallback used only when the denominator is missing, and marked as one.
 //
 // The thresholds are collected in THRESHOLDS so the test file can pin the
@@ -90,8 +90,6 @@ export const THRESHOLDS = Object.freeze({
   // --- Broker health (host measures, proportional by construction) --------
   eventLoopWarnMs: 50,
   eventLoopBadMs: 100,
-  poolWarnUtil: 0.8,
-  poolBadUtil: 1,
 
   // --- Is the queue keeping up? -------------------------------------------
   // pop ÷ push over the same window. The old rule called 0.84 "elevated",
@@ -263,17 +261,6 @@ export function eventLoopSeverity(ms) {
   if (v === null || v <= 0) return SEV_NONE
   if (v >= T.eventLoopBadMs) return SEV_BAD
   if (v >= T.eventLoopWarnMs) return SEV_WARN
-  return SEV_NONE
-}
-
-/** Postgres pool saturation: a full pool means requests are queueing. */
-export function poolSeverity({ active, size } = {}) {
-  const a = n(active)
-  const s = n(size)
-  if (a === null || s === null || s <= 0) return SEV_NONE
-  const util = a / s
-  if (util >= T.poolBadUtil) return SEV_BAD
-  if (util > T.poolWarnUtil) return SEV_WARN
   return SEV_NONE
 }
 

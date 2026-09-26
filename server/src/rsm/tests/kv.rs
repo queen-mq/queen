@@ -1,8 +1,7 @@
 //! WP-2.2 — KV on the RSM: the planner and apply against a real store (the
 //! [`Cell`] harness: plan a cycle, apply its entry, take a durable point), the
-//! semantic cases of `tests/kv_semantics.rs` (024 against Postgres) ported one
-//! by one, the receiver's pass 1, the expiry index and the leader sweep, the
-//! outcome codec, and I2's determinism.
+//! KV semantic cases ported one by one, the receiver's pass 1, the expiry
+//! index and the leader sweep, the outcome codec, and I2's determinism.
 //!
 //! A call goes through [`call`] exactly as the facade makes it: validated by
 //! `parse_ops`, planned + applied when it writes, then rendered off the store
@@ -203,8 +202,8 @@ fn a_put_is_read_back_and_a_second_put_keeps_the_lineage() {
 
 #[test]
 fn exactly_one_put_if_absent_wins_inside_one_cycle() {
-    // 024's row lock, here: the planner is the one serial point, and the
-    // overlay makes the second command of the SAME cycle see the first.
+    // The planner is the one serial point here, and the overlay makes the
+    // second command of the SAME cycle see the first.
     let mut c = Cell::new("kv-race");
     let cmds: Vec<Cmd> = (0..8u64)
         .map(|i| {
@@ -639,7 +638,7 @@ fn the_read_ceilings_clamp_and_tell_the_truth() {
         "at most one straddling row over"
     );
 
-    // ONE budget per call, spent in 024's apply order: the getMany sorts at
+    // ONE budget per call, spent in apply order: the getMany sorts at
     // (ns, '') — before the getPrefix at (ns, 'b') — so it is served whole
     // and the page gets only what it left.
     let many: Vec<String> = (0..40).map(|i| format!("b{i:03}")).collect();
@@ -792,7 +791,7 @@ fn a_lost_required_precondition_aborts_the_whole_call() {
 
 #[test]
 fn a_get_before_a_write_of_the_same_key_sees_the_old_value() {
-    // 024 applies in (ns, key, ordinal) order: a get sorted BEFORE the write
+    // Apply order is (ns, key, ordinal): a get sorted BEFORE the write
     // reads the old row, one sorted after reads the new.
     let mut c = Cell::new("kv-get-order");
     one(
@@ -1051,8 +1050,8 @@ fn pass_one_refuses_what_024_refuses() {
     assert_eq!(e.reason, "kv_get_prefix_not_allowed_in_transaction");
 
     // The store's own ceiling: a long tenant and namespace leave less room for
-    // the key than 024's 512 bytes — refused at the receiver (413), never a
-    // `KeyTooLong` inside apply.
+    // the key than the nominal 512 bytes — refused at the receiver (413),
+    // never a `KeyTooLong` inside apply.
     let tenant = "t".repeat(300);
     let e = parse_ops(
         json!([{"op":"get","ns":"n","key":"k".repeat(300)}])
@@ -1115,7 +1114,7 @@ fn a_key_at_the_store_ceiling_round_trips() {
 }
 
 // ---------------------------------------------------------------------------
-// The expiry index and the leader sweep (026)
+// The expiry index and the leader sweep
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1427,7 +1426,7 @@ fn the_kv_outcome_round_trips_alone_and_inside_an_entry() {
 }
 
 #[test]
-fn timestamps_render_like_postgres() {
+fn timestamps_keep_the_wire_format() {
     // 2026-09-22T10:15:30.123400 UTC.
     let us = 1_790_072_130_123_400i64;
     assert_eq!(ts_jsonb(us), "2026-09-22T10:15:30.1234+00:00");

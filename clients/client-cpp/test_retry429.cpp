@@ -13,7 +13,7 @@
  *                                                | "feature_gated" | "forbidden"}
  *
  * These run against an in-process httplib::Server on localhost -- no broker,
- * no Postgres, so the suite is self-contained:
+ * so the suite is self-contained:
  *
  *   make retry429 && ./bin/test_retry429
  */

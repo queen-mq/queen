@@ -1,37 +1,40 @@
 ---
 title: Comparison
-description: "How Kafka, RabbitMQ, SQS and pgmq get per-entity ordering, what that costs in structure, and what the four of them did on one machine with matched resources."
+description: "How Kafka, RabbitMQ, SQS and pgmq get per-entity ordering, what that costs in structure, and what they did on one machine against Queen 1.x with matched resources."
 type: concept
 tier: use
 sidebar:
   order: 4
 sourceOfTruth:
   - server/src/main.rs
-  - server/sql/procedures/003_log_push.sql
-  - server/sql/procedures/004_log_pop.sql
+  - server/src/rsm/mod.rs
+  - server/src/rsm/planner/push.rs
+  - server/src/rsm/replicator/mod.rs
+  - server/src/rsm/replicator/raft/mod.rs
 digest: >-
-  Per-entity ordering is the axis these systems differ on. Queen MQ makes a partition a row
-  created by the first push that names it, so lanes are unbounded, nothing is preallocated and
-  nothing rebalances. Kafka hash-mods a changing key set onto a partition count fixed in advance,
-  so entities that collide block each other. RabbitMQ and pgmq both need one live queue per
-  entity. Amazon SQS FIFO's message group id is structurally the same idea as a Queen MQ
-  partition. Where the other systems are better, stated plainly: Kafka replicates itself while
-  Queen MQ delegates durability and failover to one PostgreSQL, which is therefore one failure
-  domain; content-based routing is RabbitMQ's real strength and Queen MQ has no exchanges, no
-  bindings and no header matching; Amazon SQS has no server to operate at all; pgmq needs no
-  broker process and is insensitive to lane count. Kafka is also the cheapest of the four on CPU
-  in every measured shape.
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): main.rs registers three new routes; nothing this page compares moved.
+  Per-entity ordering is the axis these systems differ on. Queen MQ makes a partition a record in
+  its replicated state, created by the first push that names it, so lanes are unbounded, nothing
+  is preallocated and nothing rebalances. Kafka hash-mods a changing key set onto a partition
+  count fixed in advance, so entities that collide block each other. RabbitMQ and pgmq both need
+  one live queue per entity. Amazon SQS FIFO's message group id is structurally the same idea as a
+  Queen MQ partition. Queen MQ 2.0 is one binary that keeps its messages in its own replicated log
+  on local disk, with no external database: a single node, or a cluster of three or five nodes
+  replicated with Raft. Where the other systems are better, stated plainly: content-based routing
+  is RabbitMQ's real strength and Queen MQ has no exchanges, no bindings and no header matching;
+  Amazon SQS has no server to operate at all; pgmq needs no broker process and is insensitive to
+  lane count. The cross-broker measurements on this page were taken against Queen MQ 1.x, whose
+  storage was PostgreSQL, and describe that engine rather than 2.0; in them Kafka was the cheapest
+  of the four on CPU in every measured shape.
 ---
 
 One question separates these systems more sharply than any other: **how do you get strict
 ordering per entity, when there are many entities, the set keeps changing, and one slow entity
 must not delay the others?**
 
-Queen's answer: a partition is a row, created by the first push that names it, and ordering comes
-from taking that row's lock before allocating an offset. Consumption state is one cursor per
-partition and consumer group. Nothing is preallocated, nothing is assigned, nothing rebalances.
+Queen's answer: a partition is a record in the broker's replicated state, created by the first push
+that names it, and ordering comes from the leader allocating every offset of a partition in the
+order its entries enter the log. Consumption state is one cursor per partition and consumer group.
+Nothing is preallocated, nothing is assigned, nothing rebalances.
 
 <pre class="mermaid">{`
 flowchart LR
@@ -67,7 +70,9 @@ negotiates assignments through a coordinator.
   on one entity stalls every entity that collides with it.
 - **The partition count is a capacity decision made in advance**, and changing it changes the
   key-to-partition mapping for existing keys.
-- **Kafka replicates itself; Queen does not.** Queen's durability and failover are PostgreSQL's.
+- **Both replicate themselves, in different units.** Kafka replicates each partition across the
+  brokers that hold it; a Queen 2.0 cluster replicates one log with Raft across three or five
+  nodes, and a single Queen node has no replica.
 - **Ecosystem.** Kafka has connectors, stream processing and a large operational literature.
   Queen has six SDKs, a CLI and an HTTP API.
 
@@ -77,43 +82,35 @@ Producers publish to exchanges, bindings route into queues, consumers take messa
 per-message ack, nack and dead-letter exchanges. Queues are live server-side objects.
 
 - **Per-entity ordering means a queue per entity**, so broker-side objects scale with the entity
-  count. Queen's per-entity lane is a row.
+  count. Queen's per-entity lane is a record, not a live object.
 - **No replay.** An acknowledged message is gone. Queen's consumption state is a cursor, so a
   second group can read the same history from the start.
 - **Routing is RabbitMQ's real strength.** Queen has no exchanges, no bindings, no header
   matching: the producer names the queue and the partition.
-- **Leases, retry budgets and a dead-letter table came from this side of the family**, with one
+- **Leases, retry budgets and a dead-letter queue came from this side of the family**, with one
   difference: Queen's ack is an offset commit, so acking a message completes every earlier unacked
   message in that partition for that group.
 
 ## Amazon SQS
 
-SQS is two things at once here, and they are worth separating. It is a fully managed service you
-could choose instead, and it is **an interface Queen speaks**: `queen-sqs` is a facade that answers
-the SQS and SNS wire protocols, so an unmodified AWS SDK, and every driver built on one, reaches
-Queen by changing `endpoint_url`. The comparison below is about the service. The facade is
-[the protocol reference](/reference/sqs), it ships in the broker image, and it changes what the
-first bullet means: the choice stops being SQS or Queen and becomes which of them is behind the SDK
-your code already uses.
+A fully managed service you could choose instead. FIFO queues order messages within a message
+group id and consume a group serially, which is structurally the same idea as a Queen partition.
 
-As a service, then. FIFO queues order messages within a message group id and consume a group
-serially, which is structurally the same idea as a Queen partition.
-
-- **There is no server, and that is the whole point.** Queen is a binary plus a PostgreSQL you
-  operate.
+- **There is no server, and that is the whole point.** Queen is a binary you operate, with its data
+  directory on a persistent disk.
 - **No consumer groups and no replay.** Fan-out is a topology you assemble, each subscriber
   storing its own copy; a deleted message is gone.
 - **The deduplication window is the service's, not yours.** Queen's is a per-queue setting, keyed
-  on the `transactionId` you supply, and the facade exposes it as an attribute that widens AWS's
-  fixed five minutes to anything up to a year.
+  on the `transactionId` you supply.
 - **You cannot query the backlog.** Queen's queues, partitions, cursors, dead letters and lag are
-  tables.
+  readable over its HTTP API.
 
 ## pgmq
 
-The closest comparison, because it makes the same bet: PostgreSQL is the right place to keep
-messages. A queue is a table, sending inserts a row, reading updates it under a visibility
-timeout. There is no broker process.
+The closest comparison in the model's origins, because Queen 1.x made the same bet: PostgreSQL is
+the right place to keep messages. Queen 2.0 keeps them in its own replicated log instead. In pgmq a
+queue is a table, sending inserts a row, reading updates it under a visibility timeout. There is no
+broker process.
 
 - **No consumer groups**, so one stream to several consumers means a queue per consumer and one
   stored copy each.
@@ -121,24 +118,31 @@ timeout. There is no broker process.
   FIFO again means a queue per entity.
 - **Per-message row state versus a cursor.** pgmq updates and deletes per message; Queen advances
   one committed offset per partition and group.
-- **Extension versus schema.** pgmq installs as an extension, which some managed offerings
-  refuse. Queen needs `CREATE SCHEMA` and no extensions.
-- **A broker tier, for better and worse.** It buys HTTP clients in any language, long-polling and
-  shared commits; it is also one more process to run.
+- **Extension versus no database.** pgmq installs as a PostgreSQL extension, which some managed
+  offerings refuse. Queen 2.0 needs no database at all.
+- **A server of its own, for better and worse.** Queen is the process that keeps the messages, which
+  buys HTTP clients in any language, long-polling and shared commits; it is also one more thing to
+  run and to back with a persistent disk, where pgmq lives inside a database you may already
+  operate.
 
 ## What the measurements say
 
+<Aside type="caution">
+These runs measured **Queen 1.x**, whose storage was PostgreSQL. 2.0 replaced that storage with a
+replicated log, so the Queen rows below describe the 1.x engine and not 2.0.
+</Aside>
+
 All four on one machine, 32 vCPU and 62 GB, with the same resource limits, the same PostgreSQL
-durability tier for the two that use PostgreSQL, and the same twelve-stage ordered pipeline. Each
-of these systems would go faster run by someone who operates it daily, and for three of the four
-that is not us.
+durability tier for Queen 1.x and pgmq, which both used PostgreSQL, and the same twelve-stage
+ordered pipeline. Each of these systems would go faster run by someone who operates it daily, and
+for three of the four that is not us.
 
 **Sparse, 1 000 ordered lanes at 2 messages per lane per second.** Everyone served the full rate.
 
 | | p50 | cores | RAM | physical queues |
 | --- | ---: | ---: | ---: | ---: |
 | pgmq | **55 ms** | 6.5 | 2.2 GB | 12 |
-| Queen | 72 ms | 7.4 | **1.8 GB** | **4** |
+| Queen 1.x | 72 ms | 7.4 | **1.8 GB** | **4** |
 | RabbitMQ | 93 ms | 7.0 | 2.6 GB | **12 000** |
 | Kafka | 143 ms | **2.2** | 11.6 GB | 4 |
 
@@ -146,22 +150,22 @@ that is not us.
 
 | | p50 | % of rate served | shed |
 | --- | ---: | ---: | ---: |
-| Queen | **680 ms** (median of 8 runs) | **96%** | **0** |
+| Queen 1.x | **680 ms** (median of 8 runs) | **96%** | **0** |
 | Kafka | 2 287 ms | 89% | 0 |
 | pgmq | 11 863 ms | 63% | 104 780 |
 | RabbitMQ | 19 952 ms | 27% | 363 942 |
 
 The reversal between those two tables is the whole story. pgmq's grouped read scans the queue
-table on every call, so its cost tracks standing rows rather than lane count. Queen amortises over
-the partition visit, so more messages per lane make it cheaper per message. RabbitMQ needs a queue
+table on every call, so its cost tracks standing rows rather than lane count. Queen 1.x amortised
+over the partition visit, so more messages per lane made it cheaper per message. RabbitMQ needs a queue
 per key, and 12 000 live queues is where that stops working.
 
 **Cardinality.** pgmq is flat: 12 000 and 240 000 lanes give identical percentiles. Kafka refuses
 topic creation somewhere between 2 000 and 5 000 partitions per topic on default settings. Queen
-has held [1 000 000 ordered partitions](/benchmarks/cardinality-1m), created during the run at a
+1.x held [1 000 000 ordered partitions](/benchmarks/cardinality-1m), created during the run at a
 thousand a second.
 
-**Sustained throughput.** Queen holds
+**Sustained throughput.** Queen 1.x held
 [1 000 000 msg/s per side for 24 hours](/benchmarks/soak-24h) with leases, explicit acks,
 deduplication and retention all active. pgmq's ordered-consume path tops out between 20 000 and
 40 000 msg/s on the same machine. Full conditions and caveats are in
@@ -181,25 +185,23 @@ deduplication and retention all active. pgmq's ordered-consume path tops out bet
 | Per-tenant isolation, quotas and metering in the box | ✅ [proxy](/deploy/multi-tenant) | ⚠️ quotas, ACLs | ⚠️ vhosts | ⚠️ per AWS account | ❌ |
 | Ack and push in one transaction | ✅ | ❌ | ❌ | ❌ | ✅ same database |
 | Windowed aggregation with the state in the same commit | ✅ | ⚠️ separate runtime | ❌ | ❌ | ❌ |
-| Disk spool when the store is unreachable | ✅ | n/a | n/a | n/a | ❌ |
 | Content-based routing | ❌ | ❌ | ✅ | ❌ | ❌ |
-| Broker replicates itself | ❌ PostgreSQL's job | ✅ | ✅ | ✅ managed | ❌ |
+| Broker replicates itself | ✅ Raft, 3 or 5 nodes | ✅ | ✅ | ✅ managed | ❌ |
 | Runs in-process as a library | ✅ [Rust, beta](/use/embed/) | ❌ | ❌ | ❌ | ❌ |
 | No server to operate | ❌ | ❌ | ❌ | ✅ | ⚠️ no broker, still a database |
-| Runs without extensions on managed PostgreSQL | ✅ | n/a | n/a | n/a | ❌ needs the extension |
 
-Two rows settle the question on their own. **Replication is PostgreSQL's**, so one PostgreSQL is
-one failure domain. And **routing is out of scope**: no exchanges, no topic patterns, no header
-matching. If either is a requirement, it decides the choice regardless of any latency above.
+One row settles the question on its own: **routing is out of scope**. No exchanges, no topic
+patterns, no header matching. If routing is a requirement, it decides the choice regardless of
+anything else on this page.
 
 ## Choosing something else
 
 | Choose | When |
 | --- | --- |
-| **Kafka** | Your ordering domains are few and stable rather than one per entity; you want the broker to replicate itself independently of a database; you need the connector and stream-processing ecosystem |
+| **Kafka** | Your ordering domains are few and stable rather than one per entity; you need the connector and stream-processing ecosystem |
 | **RabbitMQ** | You need real routing or protocol breadth beyond HTTP; ordering per queue is enough and you do not need replay |
-| **Amazon SQS** | You want no server and no database to operate at all; your ordering domains fit FIFO's quotas; you never need to re-read history |
+| **Amazon SQS** | You want no server to operate at all; your ordering domains fit FIFO's quotas; you never need to re-read history |
 | **pgmq** | You want PostgreSQL-backed queuing with no broker process; your consumers all speak SQL; a work queue with visibility timeouts is enough; you can install extensions |
-| **Queen** | You need all three at once: strict FIFO per entity at cardinality you do not control, throughput that holds when the same lanes get busy, and consumer groups with replay, deduplication and dead-lettering over one stored copy |
+| **Queen** | You need strict FIFO per entity at cardinality you do not control, consumer groups with replay, deduplication and dead-lettering over one stored copy, and one binary that keeps and replicates its own log with no database to run |
 
 The boundaries of the model, stated directly, are in [Limits and non-goals](/reference/limits).

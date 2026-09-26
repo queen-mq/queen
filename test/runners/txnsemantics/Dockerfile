@@ -2,10 +2,10 @@
 # Build context = repo root.
 #   docker build -f test/runners/txnsemantics/Dockerfile -t queen-test-runner-txnsemantics .
 #
-# No postgresql-client on purpose: every assertion in this suite is made at the
-# HTTP wire, because the wire IS the contract the seven clients depend on. An
-# assertion that reads the row straight out of Postgres would pass on a broker
-# that commits correctly and reports the wrong thing.
+# Every assertion in this suite is made at the HTTP wire, on purpose: the wire
+# IS the contract the seven clients depend on. An assertion that read the row
+# out of the broker's store would pass on a broker that commits correctly and
+# reports the wrong thing.
 FROM alpine:3.20
 
 RUN apk add --no-cache bash curl jq

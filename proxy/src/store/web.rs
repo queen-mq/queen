@@ -1,28 +1,23 @@
 //! The web plane's state (PLAN_SINGLE_BINARY.md W4): users, identities,
 //! operations, outbox — plus every read or write the web-plane modules
-//! (console.rs, oauth.rs, operator.rs; acting.rs and webapp.rs have no SQL of
-//! their own) make on the data-plane tables, collected in the section marked
-//! "data-plane reads/writes used by the web plane" for the merge to dedupe
-//! against `data.rs`.
+//! (console.rs, oauth.rs, operator.rs; acting.rs and webapp.rs have no store
+//! access of their own) make on the data-plane tables, collected in the
+//! section marked "data-plane reads/writes used by the web plane" for the
+//! merge to dedupe against `data.rs`.
 //!
-//! Every function answers from either backend:
+//! Every function answers from [`Store`]:
 //!
-//! - `Store::Pg` — the SQL the handler ran before this seam, moved here
-//!   verbatim (same statements, same stored functions, same transactions and
-//!   the same error answers), so the standalone proxy behaves as it did.
-//! - `Store::Kv` — documents per [`super::schema`], and the stored functions of
-//!   migrations 002–011 reimplemented in Rust with the same validation, the
-//!   same messages and the same results. Each call commits its writes as ONE
-//!   atomic KV batch; the reads before it are covered by version
-//!   preconditions, and a lost race re-reads and retries ([`KV_RETRIES`]).
-//!   Unique indexes are `putIfAbsent` + `required` in the row's own batch.
-//! - `Store::None` (dev-static) — [`WebError::NotConfigured`]; the handlers
-//!   check `Store::is_some` first, exactly where they checked the pool.
+//! - `Store::Kv` — documents per [`super::schema`], every write validated
+//!   with the same rules and messages the handlers rely on. Each call commits
+//!   its writes as ONE atomic KV batch; the reads before it are covered by
+//!   version preconditions, and a lost race re-reads and retries
+//!   ([`KV_RETRIES`]). Unique indexes are `putIfAbsent` + `required` in the
+//!   row's own batch.
+//! - `Store::None` (no store, tests) — [`WebError::NotConfigured`]; the
+//!   handlers check `Store::is_some` first.
 //!
-//! Notification: on Postgres every mutation with a cluster emits
-//! `queen_proxy_inval` through `record_operation`. The KV has no channel, so a
-//! handler that wrote calls [`invalidate_local`] (this node's caches; the
-//! other nodes converge on their cache TTLs).
+//! Notification: a handler that wrote calls [`invalidate_local`] (this node's
+//! caches; the other nodes converge on their cache TTLs).
 //!
 //! Sessions: the deny-list is `px.revoked #<jti>` → [`RevokedDoc`], written by
 //! [`revoke_session`] with a TTL that ends at the token's own `exp` (so no
@@ -36,7 +31,6 @@ use axum::response::Response;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
-use tokio_postgres::error::SqlState;
 use uuid::Uuid;
 
 use super::kv::{self, Doc, Expect, KvBackend, KvError, Ttl};
@@ -47,15 +41,15 @@ use super::schema::{
 use super::Store;
 use crate::errors;
 
-/// `operations.actor` CHECK (001_init).
+/// The actors an operation row accepts.
 const ACTORS: [&str; 4] = ["user", "api_key", "control_plane", "system"];
-/// `cluster_roles.role` CHECK (001_init) and grant_cluster_role's list.
+/// The roles grant_cluster_role accepts.
 const ROLES: [&str; 4] = ["admin", "producer", "consumer", "viewer"];
-/// `api_keys.scopes` CHECK (001_init) and issue_api_key's list.
+/// The scopes issue_api_key accepts.
 const SCOPES: [&str; 4] = ["produce", "consume", "admin", "read"];
-/// `identities.provider` CHECK (001_init) and create_user's list.
+/// The identity providers create_user accepts.
 const PROVIDERS: [&str; 3] = ["local", "google", "github"];
-/// `tenants.status` CHECK (001_init) and set_tenant_status's list.
+/// The tenant statuses set_tenant_status accepts.
 const TENANT_STATUSES: [&str; 4] = ["active", "grace", "suspended", "deleting"];
 /// How many times a KV write that lost a version race is re-read and retried.
 pub const KV_RETRIES: usize = 5;
@@ -72,18 +66,17 @@ const ENTRY: &str = "";
 /// Why a repository call failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WebError {
-    /// No store behind this proxy (dev-static).
+    /// No store behind this proxy (tests).
     NotConfigured,
-    /// The store could not be reached: a pool checkout failed, or the broker's
-    /// KV had no answer (no leader, timeout). The handlers' "pxdb unavailable".
+    /// The store could not be reached: the broker's KV had no answer (no
+    /// leader, timeout). The handlers' "store unavailable".
     Unavailable(String),
-    /// A statement or KV call failed.
+    /// A KV call failed.
     Db(String),
-    /// A unique index already holds the value (Postgres 23505; a KV unique
-    /// index entry that already exists).
+    /// A unique index already holds the value (a KV unique index entry that
+    /// already exists).
     Conflict(String),
-    /// A stored function refused: its RAISE EXCEPTION message (Postgres
-    /// P0001), or the same message from the KV port.
+    /// A validation rule refused the call: its message.
     Raised(String),
     /// KV only, internal: a document changed between the read and the write.
     /// Retried; surfaces as `Db` once [`KV_RETRIES`] run out.
@@ -99,7 +92,7 @@ impl WebError {
 impl std::fmt::Display for WebError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WebError::NotConfigured => write!(f, "no store configured (dev-static)"),
+            WebError::NotConfigured => write!(f, "no store configured"),
             WebError::Unavailable(m) => write!(f, "store unavailable: {m}"),
             WebError::Db(m) | WebError::Raised(m) => write!(f, "{m}"),
             WebError::Conflict(m) => write!(f, "unique violation: {m}"),
@@ -134,27 +127,12 @@ impl From<KvError> for WebError {
     }
 }
 
-fn pg_err(e: tokio_postgres::Error) -> WebError {
-    match e.code() {
-        Some(c) if *c == SqlState::UNIQUE_VIOLATION => WebError::Conflict(e.to_string()),
-        Some(c) if *c == SqlState::RAISE_EXCEPTION => {
-            WebError::Raised(e.as_db_error().map(|d| d.message().to_string()).unwrap_or_else(|| e.to_string()))
-        }
-        _ => WebError::Db(e.to_string()),
-    }
-}
-
-async fn pg(pool: &deadpool_postgres::Pool) -> Result<deadpool_postgres::Object, WebError> {
-    pool.get().await.map_err(|e| WebError::Unavailable(e.to_string()))
-}
-
 fn raised(msg: impl Into<String>) -> WebError {
     WebError::Raised(msg.into())
 }
 
 /// A multi-step handler's refusal, carried as data: the status and message
-/// the handler answered before the SQL moved here, so moving it changed no
-/// byte of any answer.
+/// the handler answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
     /// 502 `bad_gateway`.
@@ -181,10 +159,8 @@ impl Refusal {
     }
 }
 
-/// What `pg_notify('queen_proxy_inval', cluster)` does for the standalone
-/// proxy, done for the single binary: drop THIS node's cached view of each
-/// cluster (host/key caches and every `on_invalidate` hook). A no-op on
-/// Postgres, where the NOTIFY already reached every proxy.
+/// Drop THIS node's cached view of each cluster (host/key caches and every
+/// `on_invalidate` hook) after a write.
 pub fn invalidate_local(st: &crate::state::AppState, clusters: &[Uuid]) {
     if matches!(st.store, Store::Kv(_)) {
         for c in clusters {
@@ -213,7 +189,7 @@ macro_rules! retrying {
 
 /// Inside a script attempt (`Result<Result<T, Refusal>, WebError>`): a store
 /// outage or a lost race propagates (answered / retried by the caller); any
-/// other failure is the named step's 502, as on Postgres.
+/// other failure is the named step's 502.
 macro_rules! step {
     ($res:expr, $step:expr) => {
         match $res {
@@ -227,7 +203,7 @@ macro_rules! step {
     };
 }
 
-/// A script's final mapping: its own refusal, "pxdb unavailable" for an
+/// A script's final mapping: its own refusal, "store unavailable" for an
 /// outage, `conflict` for a unique index when the script has a 409, and the
 /// failed step's 502 for anything else.
 fn script_answer<T>(
@@ -237,7 +213,7 @@ fn script_answer<T>(
 ) -> Result<T, Refusal> {
     match r {
         Ok(v) => v,
-        Err(e) if e.is_unavailable() => Err(Refusal::BadGateway("pxdb unavailable")),
+        Err(e) if e.is_unavailable() => Err(Refusal::BadGateway("store unavailable")),
         Err(WebError::Conflict(_)) if conflict.is_some() => Err(Refusal::Conflict(conflict.unwrap_or(failed))),
         Err(e) => {
             tracing::warn!(target: "operator", err = %e, "{failed}");
@@ -378,8 +354,8 @@ impl Tx {
         self.push(kv::delete_op(ns, &key, Expect::Version(version), true), Some(Guard::Fresh));
     }
 
-    /// `queen_proxy.record_operation` (002_functions): validate, then append
-    /// the `px.ops` row (+ its `px.ops.cluster` entry). Returns the row id.
+    /// `record_operation`: validate, then append the `px.ops` row (+ its
+    /// `px.ops.cluster` entry). Returns the row id.
     fn record(&mut self, a: &Audit<'_>) -> Result<Uuid, WebError> {
         check_audit(a)?;
         let at_us = now_us();
@@ -402,7 +378,7 @@ impl Tx {
         Ok(id)
     }
 
-    /// `queen_proxy.emit_outbox` (004_lifecycle).
+    /// `emit_outbox`: append a control-plane-bound event.
     fn outbox(&mut self, kind: &str, payload: Value) -> Result<Uuid, WebError> {
         let kind = kind.trim();
         if kind.is_empty() {
@@ -592,14 +568,8 @@ pub struct UserRef {
     pub tenant_id: Uuid,
 }
 
-fn row_to_userref(row: &tokio_postgres::Row) -> Option<UserRef> {
-    let user_id: Uuid = row.get::<_, String>(0).parse().ok()?;
-    let tenant_id: Uuid = row.get::<_, String>(1).parse().ok()?;
-    Some(UserRef { user_id, tenant_id })
-}
-
-/// One `queen_proxy.operations` row to append (`record_operation`'s
-/// arguments). `meta` Null is stored as `{}` (the function's COALESCE).
+/// One operations row to append (`record_operation`'s arguments). `meta`
+/// Null is stored as `{}`.
 #[derive(Clone, Debug)]
 pub struct Audit<'a> {
     pub tenant_id: Uuid,
@@ -616,34 +586,9 @@ pub struct Audit<'a> {
 // operations (audit)
 // ===========================================================================
 
-/// `queen_proxy.record_operation(...)`: append one audit row (and, on
-/// Postgres, the invalidation NOTIFY when it names a cluster).
+/// `record_operation(...)`: append one audit row.
 pub async fn record_operation(store: &Store, a: &Audit<'_>) -> Result<(), WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            let meta = a.meta.to_string();
-            // `::text::uuid` / `::text::jsonb`: the crate has no uuid/jsonb
-            // tokio-postgres feature, so the binds are text (oauth.rs'
-            // original pattern). A None cluster/actor binds SQL NULL, which
-            // is what the literal NULL in the old per-caller statements was.
-            client
-                .execute(
-                    "SELECT queen_proxy.record_operation($1::text::uuid, $2::text::uuid, $3, $4::text::uuid, $5, $6, $7::text::jsonb)",
-                    &[
-                        &a.tenant_id.to_string(),
-                        &a.cluster_id.map(|c| c.to_string()),
-                        &a.actor,
-                        &a.actor_id.map(|u| u.to_string()),
-                        &a.action,
-                        &a.target,
-                        &meta,
-                    ],
-                )
-                .await
-                .map_err(pg_err)?;
-            Ok(())
-        }
         Store::Kv(kv) => {
             let mut tx = Tx::default();
             tx.record(a)?;
@@ -666,15 +611,6 @@ pub struct OperationRow {
     pub at: String,
 }
 
-const LIST_OPERATIONS_SQL: &str = "
-    SELECT id::text, cluster_id::text, actor, actor_id::text, action, target, meta::text,
-           to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
-    FROM queen_proxy.operations
-    WHERE tenant_id = $1::text::uuid
-      AND ($2::text IS NULL OR cluster_id = $2::text::uuid)
-    ORDER BY at DESC
-    LIMIT $3";
-
 /// A tenant's audit trail, NEWEST FIRST, optionally one cluster's only.
 /// `limit` is clamped to 1..=1000.
 pub async fn list_operations(
@@ -685,29 +621,6 @@ pub async fn list_operations(
 ) -> Result<Vec<OperationRow>, WebError> {
     let limit = limit.clamp(1, 1000);
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            let rows = client
-                .query(
-                    LIST_OPERATIONS_SQL,
-                    &[&tenant_id.to_string(), &cluster_id.map(|c| c.to_string()), &(limit as i64)],
-                )
-                .await
-                .map_err(pg_err)?;
-            Ok(rows
-                .iter()
-                .map(|r| OperationRow {
-                    id: r.get(0),
-                    cluster_id: r.get(1),
-                    actor: r.get(2),
-                    actor_id: r.get(3),
-                    action: r.get(4),
-                    target: r.get(5),
-                    meta: serde_json::from_str(&r.get::<_, String>(6)).unwrap_or(Value::Null),
-                    at: r.get(7),
-                })
-                .collect())
-        }
         Store::Kv(kv) => {
             let kv = kv.as_ref();
             // The key IS the order: `#<owner>/<i64::MAX - at_us>/<id>`.
@@ -759,18 +672,6 @@ pub async fn list_operations(
 /// `WHERE email = lower($1)`.
 pub async fn user_login_by_email(store: &Store, email: &str) -> Result<Option<(UserRef, Option<String>)>, WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            let row = client
-                .query_opt(
-                    "SELECT id::text, tenant_id::text, password_hash \
-                     FROM queen_proxy.users WHERE email = lower($1)",
-                    &[&email],
-                )
-                .await
-                .map_err(pg_err)?;
-            Ok(row.and_then(|r| row_to_userref(&r).map(|u| (u, r.get::<_, Option<String>>(2)))))
-        }
         Store::Kv(kv) => Ok(user_by_email(kv.as_ref(), &email.to_lowercase())
             .await?
             .map(|u| (UserRef { user_id: u.value.id, tenant_id: u.value.tenant_id }, u.value.password_hash))),
@@ -778,18 +679,10 @@ pub async fn user_login_by_email(store: &Store, email: &str) -> Result<Option<(U
     }
 }
 
-/// `queen_proxy.record_user_login(user)` (011): stamp `last_login_at` and
+/// `record_user_login(user)`: stamp `last_login_at` and
 /// append the `login` audit row, atomically.
 pub async fn record_user_login(store: &Store, user_id: Uuid) -> Result<(), WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            client
-                .execute("SELECT queen_proxy.record_user_login($1::text::uuid)", &[&user_id.to_string()])
-                .await
-                .map_err(pg_err)?;
-            Ok(())
-        }
         Store::Kv(kv) => retrying!(kv_record_login_once(kv.as_ref(), user_id)),
         Store::None => Err(WebError::NotConfigured),
     }
@@ -815,7 +708,7 @@ async fn kv_record_login_once(kv: &dyn KvBackend, user_id: Uuid) -> Result<(), W
     commit(kv, tx).await
 }
 
-/// `queen_proxy.revoke_session(jti, exp, 'user', user)` (004): deny-list a
+/// `revoke_session(jti, exp, 'user', user)`: deny-list a
 /// session until its own expiry, and audit it. A second revocation of the
 /// same jti is a no-op (`ON CONFLICT DO NOTHING`), not an error.
 ///
@@ -823,20 +716,6 @@ async fn kv_record_login_once(kv: &dyn KvBackend, user_id: Uuid) -> Result<(), W
 /// (the row dies with the token; the data plane's `is_revoked` reads it).
 pub async fn revoke_session(store: &Store, jti: &str, exp_secs: i64, user_id: Uuid) -> Result<(), WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            // revoke_session(p_jti TEXT, p_expires_at TIMESTAMPTZ, p_actor TEXT,
-            // p_actor_id UUID) — exp is the token's own, so the sweep can drop
-            // the row once it expires.
-            client
-                .execute(
-                    "SELECT queen_proxy.revoke_session($1, to_timestamp($2), 'user', $3::text::uuid)",
-                    &[&jti, &(exp_secs as f64), &user_id.to_string()],
-                )
-                .await
-                .map_err(pg_err)?;
-            Ok(())
-        }
         // data.rs's write also moves the replicated revocation epoch, so the
         // logout holds on every node within a poll, not a cache TTL.
         Store::Kv(_) => crate::store::data::revoke_session(store, jti, exp_secs, "user", user_id)
@@ -854,45 +733,10 @@ pub struct MeUser {
     pub tenant_slug: String,
 }
 
-/// The user's own row. `is_operator` is the STORED bit; whether the capability
-/// is live also depends on this cell's `QUEEN_PROXY_OPERATOR_ENABLED`, and
-/// `/auth/me` reports both so the SPA can tell "you are not an operator" from
-/// "not on this cell" without guessing.
-const ME_USER_SQL: &str = "
-    SELECT u.email, u.is_operator, t.slug
-    FROM queen_proxy.users u
-    JOIN queen_proxy.tenants t ON t.id = u.tenant_id
-    WHERE u.id = $1::text::uuid";
-
-/// The clusters a NORMAL user may select, with the role on each.
-const ME_CLUSTERS_SQL: &str = "
-    SELECT c.id::text, c.slug, cr.role, t.slug, t.id::text, c.status, ce.slug
-    FROM queen_proxy.cluster_roles cr
-    JOIN queen_proxy.clusters c ON c.id = cr.cluster_id
-    JOIN queen_proxy.tenants  t ON t.id = c.tenant_id
-    JOIN queen_proxy.cells    ce ON ce.id = c.cell_id
-    WHERE cr.user_id = $1::text::uuid
-    ORDER BY t.slug, c.slug";
-
-/// The clusters an OPERATOR may select: all of them, as admin — the effective
-/// role acting.rs gives them, membership row or not, so the nav the SPA draws
-/// matches what the data plane will actually allow.
-const ME_CLUSTERS_OPERATOR_SQL: &str = "
-    SELECT c.id::text, c.slug, 'admin'::text, t.slug, t.id::text, c.status, ce.slug
-    FROM queen_proxy.clusters c
-    JOIN queen_proxy.tenants t ON t.id = c.tenant_id
-    JOIN queen_proxy.cells   ce ON ce.id = c.cell_id
-    ORDER BY t.slug, c.slug";
-
 /// The session's user row joined to its tenant; `None` when the user (or its
 /// tenant) is gone — the session outlived its owner.
 pub async fn me_user(store: &Store, user_id: Uuid) -> Result<Option<MeUser>, WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            let row = client.query_opt(ME_USER_SQL, &[&user_id.to_string()]).await.map_err(pg_err)?;
-            Ok(row.map(|r| MeUser { email: r.get(0), is_operator: r.get(1), tenant_slug: r.get(2) }))
-        }
         Store::Kv(kv) => {
             let kv = kv.as_ref();
             let Some(u) = by_id::<UserDoc>(kv, ns::USERS, user_id).await? else {
@@ -923,25 +767,6 @@ pub struct MeCluster {
 /// slug: its memberships, or — for a LIVE operator — every cluster, as admin.
 pub async fn me_clusters(store: &Store, user_id: Uuid, operator: bool) -> Result<Vec<MeCluster>, WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            let uid = user_id.to_string();
-            let (sql, params): (&str, Vec<&(dyn tokio_postgres::types::ToSql + Sync)>) =
-                if operator { (ME_CLUSTERS_OPERATOR_SQL, vec![]) } else { (ME_CLUSTERS_SQL, vec![&uid]) };
-            let rows = client.query(sql, &params).await.map_err(pg_err)?;
-            Ok(rows
-                .iter()
-                .map(|r| MeCluster {
-                    id: r.get(0),
-                    slug: r.get(1),
-                    role: r.get(2),
-                    tenant_slug: r.get(3),
-                    tenant_id: r.get(4),
-                    status: r.get(5),
-                    cell_slug: r.get(6),
-                })
-                .collect())
-        }
         Store::Kv(kv) => {
             let kv = kv.as_ref();
             let pairs: Vec<(ClusterDoc, String)> = if operator {
@@ -995,20 +820,6 @@ pub async fn find_user_by_identity(
     provider_id: &str,
 ) -> Result<Option<UserRef>, WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            let row = client
-                .query_opt(
-                    "SELECT u.id::text, u.tenant_id::text \
-                     FROM queen_proxy.identities i \
-                     JOIN queen_proxy.users u ON u.id = i.user_id \
-                     WHERE i.provider = $1 AND i.provider_id = $2",
-                    &[&provider, &provider_id],
-                )
-                .await
-                .map_err(pg_err)?;
-            Ok(row.as_ref().and_then(row_to_userref))
-        }
         Store::Kv(kv) => {
             let kv = kv.as_ref();
             let Some(iid) = index_target(kv, ns::IDENTITY_PROVIDER, &identity_key(provider, provider_id)).await? else {
@@ -1028,14 +839,6 @@ pub async fn find_user_by_identity(
 /// The user an email names (`WHERE email = lower($1)`).
 pub async fn find_user_by_email(store: &Store, email: &str) -> Result<Option<UserRef>, WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            let row = client
-                .query_opt("SELECT id::text, tenant_id::text FROM queen_proxy.users WHERE email = lower($1)", &[&email])
-                .await
-                .map_err(pg_err)?;
-            Ok(row.as_ref().and_then(row_to_userref))
-        }
         Store::Kv(kv) => Ok(user_by_email(kv.as_ref(), &email.to_lowercase())
             .await?
             .map(|u| UserRef { user_id: u.value.id, tenant_id: u.value.tenant_id })),
@@ -1054,19 +857,6 @@ pub async fn link_identity(
     email: &str,
 ) -> Result<(), WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            client
-                .execute(
-                    "INSERT INTO queen_proxy.identities(user_id, provider, provider_id, email, verified) \
-                     VALUES ($1::text::uuid, $2, $3, lower($4), true) \
-                     ON CONFLICT (provider, provider_id) DO NOTHING",
-                    &[&user.user_id.to_string(), &provider, &provider_id, &email],
-                )
-                .await
-                .map_err(pg_err)?;
-            Ok(())
-        }
         Store::Kv(kv) => {
             let kv = kv.as_ref();
             if !PROVIDERS.contains(&provider) {
@@ -1140,70 +930,9 @@ pub async fn provision_oauth_user(
     default_role: &str,
 ) -> Result<Provisioned, ProvisionError> {
     match store {
-        Store::Pg(pool) => pg_provision(pool, tenant_slug, email, provider, provider_id, default_role).await,
         Store::Kv(kv) => kv_provision(kv.as_ref(), tenant_slug, email, provider, provider_id, default_role).await,
         Store::None => Err(ProvisionError::Db(WebError::NotConfigured.to_string())),
     }
-}
-
-async fn pg_provision(
-    pool: &deadpool_postgres::Pool,
-    tenant_slug: &str,
-    email: &str,
-    provider: &str,
-    provider_id: &str,
-    default_role: &str,
-) -> Result<Provisioned, ProvisionError> {
-    let mut client = pool.get().await.map_err(|e| ProvisionError::Db(e.to_string()))?;
-    let tx = client.transaction().await.map_err(|e| ProvisionError::Db(e.to_string()))?;
-
-    let trow = tx
-        .query_opt("SELECT id::text FROM queen_proxy.tenants WHERE slug = $1", &[&tenant_slug])
-        .await
-        .map_err(|e| ProvisionError::Db(e.to_string()))?;
-    let Some(trow) = trow else {
-        return Err(ProvisionError::NoTenant);
-    };
-    let tenant_id: Uuid =
-        trow.get::<_, String>(0).parse().map_err(|_| ProvisionError::Db("tenant id parse".to_string()))?;
-
-    let urow = tx
-        .query_one(
-            "INSERT INTO queen_proxy.users(tenant_id, email) \
-             VALUES ($1::text::uuid, lower($2)) RETURNING id::text",
-            &[&tenant_id.to_string(), &email],
-        )
-        .await
-        .map_err(|e| ProvisionError::Db(e.to_string()))?;
-    let user_id: Uuid =
-        urow.get::<_, String>(0).parse().map_err(|_| ProvisionError::Db("user id parse".to_string()))?;
-
-    tx.execute(
-        "INSERT INTO queen_proxy.identities(user_id, provider, provider_id, email, verified) \
-         VALUES ($1::text::uuid, $2, $3, lower($4), true)",
-        &[&user_id.to_string(), &provider, &provider_id, &email],
-    )
-    .await
-    .map_err(|e| ProvisionError::Db(e.to_string()))?;
-
-    // Grant the default role on every cluster of the auto-provision tenant,
-    // in the same transaction as the user and identity rows (a
-    // half-provisioned human is exactly the state that is confusing to
-    // diagnose). `role` is validated at boot (config::CLUSTER_ROLES).
-    let granted = tx
-        .execute(
-            "INSERT INTO queen_proxy.cluster_roles(user_id, cluster_id, role) \
-             SELECT $1::text::uuid, c.id, $2 \
-               FROM queen_proxy.clusters c \
-              WHERE c.tenant_id = $3::text::uuid \
-             ON CONFLICT (user_id, cluster_id) DO NOTHING",
-            &[&user_id.to_string(), &default_role, &tenant_id.to_string()],
-        )
-        .await
-        .map_err(|e| ProvisionError::Db(e.to_string()))?;
-
-    tx.commit().await.map_err(|e| ProvisionError::Db(e.to_string()))?;
-    Ok(Provisioned { user: UserRef { user_id, tenant_id }, granted })
 }
 
 async fn kv_provision(
@@ -1266,26 +995,9 @@ pub struct PlanUsage {
     pub msgs: i64,
 }
 
-/// `cluster_month_msgs` (004_lifecycle.sql) reads usage_days plus the
-/// not-yet-rolled-up usage_minutes remainder, so month-to-date never
-/// under-counts today.
-const PLAN_USAGE_SQL: &str = "
-    SELECT p.code,
-           p.monthly_msgs_quota,
-           queen_proxy.cluster_month_msgs(c.id, (now() AT TIME ZONE 'UTC')::date),
-           to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM')
-    FROM queen_proxy.clusters c
-    JOIN queen_proxy.plans   p ON p.id = c.plan_id
-    WHERE c.id = $1::text::uuid";
-
 /// `None` when the cluster (or its plan) row is gone.
 pub async fn cluster_plan_usage(store: &Store, cluster_id: Uuid) -> Result<Option<PlanUsage>, WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            let row = client.query_opt(PLAN_USAGE_SQL, &[&cluster_id.to_string()]).await.map_err(pg_err)?;
-            Ok(row.map(|r| PlanUsage { code: r.get(0), monthly_msgs_quota: r.get(1), msgs: r.get(2), month: r.get(3) }))
-        }
         Store::Kv(kv) => {
             let kv = kv.as_ref();
             let Some(c) = by_id::<ClusterDoc>(kv, ns::CLUSTERS, cluster_id).await? else {
@@ -1319,33 +1031,10 @@ pub struct UsageMinute {
     pub bytes_out: i64,
 }
 
-const USAGE_SQL: &str = "
-    SELECT to_char(minute AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS minute,
-           op_class, reqs, msgs, bytes_in, bytes_out
-    FROM queen_proxy.usage_minutes
-    WHERE cluster_id = $1::text::uuid
-      AND minute >= now() - make_interval(hours => $2::int)
-    ORDER BY minute ASC, op_class ASC";
-
 /// The last `hours` of a cluster's minute usage, oldest first. KV: the
 /// metering writes one `px.usage.min` row per NODE; they are summed here.
 pub async fn usage_minutes(store: &Store, cluster_id: Uuid, hours: i32) -> Result<Vec<UsageMinute>, WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            let rows = client.query(USAGE_SQL, &[&cluster_id.to_string(), &hours]).await.map_err(pg_err)?;
-            Ok(rows
-                .iter()
-                .map(|r| UsageMinute {
-                    minute: r.get(0),
-                    op: r.get(1),
-                    reqs: r.get(2),
-                    msgs: r.get(3),
-                    bytes_in: r.get(4),
-                    bytes_out: r.get(5),
-                })
-                .collect())
-        }
         Store::Kv(kv) => {
             let since = wall_us() - i64::from(hours) * 3_600_000_000;
             let mut summed: BTreeMap<(i64, String), UsageDoc> = BTreeMap::new();
@@ -1383,34 +1072,9 @@ pub struct KeyRow {
     pub revoked_at: Option<String>,
 }
 
-const LIST_KEYS_SQL: &str = "
-    SELECT id::text, name, scopes,
-           to_char(created_at   AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
-           to_char(last_used_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
-           to_char(revoked_at   AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
-    FROM queen_proxy.api_keys
-    WHERE cluster_id = $1::text::uuid
-    ORDER BY created_at DESC";
-
 /// A cluster's API keys, newest first (revoked ones included).
 pub async fn list_cluster_keys(store: &Store, cluster_id: Uuid) -> Result<Vec<KeyRow>, WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            let rows = client.query(LIST_KEYS_SQL, &[&cluster_id.to_string()]).await.map_err(pg_err)?;
-            // MAI hash: key_hash is never selected above, let alone returned.
-            Ok(rows
-                .iter()
-                .map(|r| KeyRow {
-                    id: r.get(0),
-                    name: r.get(1),
-                    scopes: r.get(2),
-                    created_at: r.get(3),
-                    last_used_at: r.get(4),
-                    revoked_at: r.get(5),
-                })
-                .collect())
-        }
         Store::Kv(kv) => {
             let mut docs: Vec<ApiKeyDoc> =
                 cluster_key_docs(kv.as_ref(), cluster_id).await?.into_iter().map(|d| d.value).collect();
@@ -1440,27 +1104,9 @@ pub struct MemberRow {
     pub granted_at: String,
 }
 
-/// Password hashes are on `queen_proxy.users` — never selected here, never
-/// returned. Same discipline as `LIST_KEYS_SQL` and `key_hash`.
-const LIST_MEMBERS_SQL: &str = "
-    SELECT u.id::text, u.email, cr.role,
-           to_char(cr.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
-    FROM queen_proxy.cluster_roles cr
-    JOIN queen_proxy.users u ON u.id = cr.user_id
-    WHERE cr.cluster_id = $1::text::uuid
-    ORDER BY u.email ASC";
-
 /// A cluster's members, by email.
 pub async fn list_cluster_members(store: &Store, cluster_id: Uuid) -> Result<Vec<MemberRow>, WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            let rows = client.query(LIST_MEMBERS_SQL, &[&cluster_id.to_string()]).await.map_err(pg_err)?;
-            Ok(rows
-                .iter()
-                .map(|r| MemberRow { user_id: r.get(0), email: r.get(1), role: r.get(2), granted_at: r.get(3) })
-                .collect())
-        }
         Store::Kv(kv) => {
             let kv = kv.as_ref();
             let roles = cluster_member_roles(kv, cluster_id).await?;
@@ -1486,19 +1132,8 @@ pub async fn list_cluster_members(store: &Store, cluster_id: Uuid) -> Result<Vec
     }
 }
 
-/// Target user, resolved inside THIS cluster's tenant: `None` whether the
-/// address is unknown or another tenant's (the console must not be a probe).
-const MEMBER_CANDIDATE_SQL: &str = "
-    SELECT id::text FROM queen_proxy.users WHERE email = $1 AND tenant_id = $2::text::uuid";
-
 pub async fn user_id_in_tenant(store: &Store, email: &str, tenant_id: Uuid) -> Result<Option<String>, WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            let row =
-                client.query_opt(MEMBER_CANDIDATE_SQL, &[&email, &tenant_id.to_string()]).await.map_err(pg_err)?;
-            Ok(row.map(|r| r.get::<_, String>(0)))
-        }
         Store::Kv(kv) => Ok(user_by_email(kv.as_ref(), email)
             .await?
             .filter(|u| u.value.tenant_id == tenant_id)
@@ -1507,26 +1142,12 @@ pub async fn user_id_in_tenant(store: &Store, email: &str, tenant_id: Uuid) -> R
     }
 }
 
-/// Current role of one user on this cluster (NULL if none) + how many admins
-/// the cluster has, for the last-admin guard.
-const MEMBER_STANDING_SQL: &str = "
-    SELECT (SELECT role FROM queen_proxy.cluster_roles
-             WHERE cluster_id = $1::text::uuid AND user_id = $2::text::uuid),
-           (SELECT count(*) FROM queen_proxy.cluster_roles
-             WHERE cluster_id = $1::text::uuid AND role = 'admin')";
-
 pub async fn member_standing(
     store: &Store,
     cluster_id: Uuid,
     user_id: &str,
 ) -> Result<(Option<String>, i64), WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            let r =
-                client.query_one(MEMBER_STANDING_SQL, &[&cluster_id.to_string(), &user_id]).await.map_err(pg_err)?;
-            Ok((r.get::<_, Option<String>>(0), r.get::<_, i64>(1)))
-        }
         Store::Kv(kv) => {
             let kv = kv.as_ref();
             let user = Uuid::parse_str(user_id).map_err(|_| WebError::Db(format!("invalid uuid {user_id:?}")))?;
@@ -1537,16 +1158,6 @@ pub async fn member_standing(
     }
 }
 
-/// Member standing on THIS cluster, by email — the ownership check that keeps
-/// a revoke inside the caller's own cluster (`cluster_id` is bound, not sent).
-const MEMBER_ON_CLUSTER_SQL: &str = "
-    SELECT u.id::text, cr.role,
-           (SELECT count(*) FROM queen_proxy.cluster_roles
-             WHERE cluster_id = $1::text::uuid AND role = 'admin')
-    FROM queen_proxy.cluster_roles cr
-    JOIN queen_proxy.users u ON u.id = cr.user_id
-    WHERE cr.cluster_id = $1::text::uuid AND u.email = $2";
-
 /// `(user_id, role, admin_count)` of the member with this email, if any.
 pub async fn member_on_cluster(
     store: &Store,
@@ -1554,12 +1165,6 @@ pub async fn member_on_cluster(
     email: &str,
 ) -> Result<Option<(String, String, i64)>, WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            let row =
-                client.query_opt(MEMBER_ON_CLUSTER_SQL, &[&cluster_id.to_string(), &email]).await.map_err(pg_err)?;
-            Ok(row.map(|r| (r.get::<_, String>(0), r.get::<_, String>(1), r.get::<_, i64>(2))))
-        }
         Store::Kv(kv) => {
             let kv = kv.as_ref();
             let Some(u) = user_by_email(kv, email).await? else {
@@ -1626,24 +1231,6 @@ pub struct OperatorListing {
     pub roles: Vec<RoleRow>,
 }
 
-/// The cell of the acting cluster: `(cell id, cell slug)`.
-async fn pg_cell_for(client: &tokio_postgres::Client, cluster_id: Uuid) -> Result<(String, String), Refusal> {
-    let row = client
-        .query_opt(
-            "SELECT ce.id::text, ce.slug
-               FROM queen_proxy.clusters c
-               JOIN queen_proxy.cells ce ON ce.id = c.cell_id
-              WHERE c.id = $1::text::uuid",
-            &[&cluster_id.to_string()],
-        )
-        .await
-        .map_err(|e| {
-            tracing::warn!(target: "operator", err = %e, "cell lookup failed");
-            Refusal::BadGateway("cell lookup failed")
-        })?;
-    row.map(|r| (r.get(0), r.get(1))).ok_or(Refusal::Misdirected("acting cluster no longer exists"))
-}
-
 async fn kv_cell_for(kv: &dyn KvBackend, cluster_id: Uuid) -> Result<Result<(Uuid, String), Refusal>, WebError> {
     let gone = Refusal::Misdirected("acting cluster no longer exists");
     let Some(c) = step!(by_id::<ClusterDoc>(kv, ns::CLUSTERS, cluster_id).await, "cell lookup failed") else {
@@ -1658,125 +1245,11 @@ async fn kv_cell_for(kv: &dyn KvBackend, cluster_id: Uuid) -> Result<Result<(Uui
 /// The acting cluster's cell, and every tenant, cluster, user and role on it.
 pub async fn operator_listing(store: &Store, acting_cluster: Uuid) -> Result<OperatorListing, Refusal> {
     match store {
-        Store::Pg(pool) => pg_operator_listing(pool, acting_cluster).await,
         Store::Kv(kv) => {
             script_answer(kv_operator_listing(kv.as_ref(), acting_cluster).await, "user list failed", None)
         }
-        Store::None => Err(Refusal::BadGateway("pxdb unavailable")),
+        Store::None => Err(Refusal::BadGateway("store unavailable")),
     }
-}
-
-async fn pg_operator_listing(pool: &deadpool_postgres::Pool, acting_cluster: Uuid) -> Result<OperatorListing, Refusal> {
-    let client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "list_users: pool.get failed");
-            return Err(Refusal::BadGateway("pxdb unavailable"));
-        }
-    };
-    let (cell_id, cell_slug) = pg_cell_for(&client, acting_cluster).await?;
-
-    let tenant_rows = match client
-        .query(
-            "SELECT DISTINCT t.id::text, t.slug, t.name
-               FROM queen_proxy.tenants t
-               JOIN queen_proxy.clusters c ON c.tenant_id = t.id
-              WHERE c.cell_id = $1::text::uuid
-              ORDER BY t.slug",
-            &[&cell_id],
-        )
-        .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "tenant list failed");
-            return Err(Refusal::BadGateway("tenant list failed"));
-        }
-    };
-    let tenants = tenant_rows.iter().map(|r| TenantRow { id: r.get(0), slug: r.get(1), name: r.get(2) }).collect();
-
-    let cluster_rows = match client
-        .query(
-            "SELECT id::text, slug, tenant_id::text, status
-               FROM queen_proxy.clusters
-              WHERE cell_id = $1::text::uuid
-              ORDER BY slug",
-            &[&cell_id],
-        )
-        .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "cluster list failed");
-            return Err(Refusal::BadGateway("cluster list failed"));
-        }
-    };
-    let clusters = cluster_rows
-        .iter()
-        .map(|r| ClusterRow { id: r.get(0), slug: r.get(1), tenant_id: r.get(2), status: r.get(3) })
-        .collect();
-
-    let user_rows = match client
-        .query(
-            "SELECT u.id::text, u.email, u.name, u.tenant_id::text, t.slug,
-                    u.is_operator, (u.password_hash IS NOT NULL),
-                    to_char(u.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
-                    to_char(u.last_login_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
-               FROM queen_proxy.users u
-               JOIN queen_proxy.tenants t ON t.id = u.tenant_id
-              WHERE EXISTS (
-                    SELECT 1 FROM queen_proxy.clusters c
-                     WHERE c.tenant_id = u.tenant_id
-                       AND c.cell_id = $1::text::uuid)
-              ORDER BY t.slug, u.email",
-            &[&cell_id],
-        )
-        .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "user list failed");
-            return Err(Refusal::BadGateway("user list failed"));
-        }
-    };
-    let users = user_rows
-        .iter()
-        .map(|r| UserRow {
-            id: r.get(0),
-            email: r.get(1),
-            name: r.get(2),
-            tenant_id: r.get(3),
-            tenant_slug: r.get(4),
-            is_operator: r.get(5),
-            has_local_password: r.get(6),
-            created_at: r.get(7),
-            last_login_at: r.get(8),
-        })
-        .collect();
-
-    let role_rows = match client
-        .query(
-            "SELECT cr.user_id::text, c.id::text, c.slug, cr.role
-               FROM queen_proxy.cluster_roles cr
-               JOIN queen_proxy.clusters c ON c.id = cr.cluster_id
-              WHERE c.cell_id = $1::text::uuid
-              ORDER BY c.slug",
-            &[&cell_id],
-        )
-        .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "role list failed");
-            return Err(Refusal::BadGateway("role list failed"));
-        }
-    };
-    let roles = role_rows
-        .iter()
-        .map(|r| RoleRow { user_id: r.get(0), cluster_id: r.get(1), cluster_slug: r.get(2), role: r.get(3) })
-        .collect();
-
-    Ok(OperatorListing { cell_id, cell_slug, tenants, clusters, users, roles })
 }
 
 async fn kv_operator_listing(
@@ -1869,109 +1342,14 @@ pub async fn operator_create_user(
     actor_id: Uuid,
 ) -> Result<String, Refusal> {
     match store {
-        Store::Pg(pool) => pg_operator_create_user(pool, acting_cluster, u, actor_id).await,
         Store::Kv(kv) => script_answer(
             retrying!(kv_operator_create_user_once(kv.as_ref(), acting_cluster, u, actor_id)),
             "user creation failed",
             Some("a user with this email already exists"),
         )
         .map(|id| id.to_string()),
-        Store::None => Err(Refusal::BadGateway("pxdb unavailable")),
+        Store::None => Err(Refusal::BadGateway("store unavailable")),
     }
-}
-
-async fn pg_operator_create_user(
-    pool: &deadpool_postgres::Pool,
-    acting_cluster: Uuid,
-    u: &NewUser<'_>,
-    actor_id: Uuid,
-) -> Result<String, Refusal> {
-    let mut client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "create_user: pool.get failed");
-            return Err(Refusal::BadGateway("pxdb unavailable"));
-        }
-    };
-    let (cell_id, _) = pg_cell_for(&client, acting_cluster).await?;
-    let tx = match client.transaction().await {
-        Ok(tx) => tx,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "create_user: transaction failed");
-            return Err(Refusal::BadGateway("user creation failed"));
-        }
-    };
-
-    let scoped = match tx
-        .query_opt(
-            "SELECT 1
-               FROM queen_proxy.clusters
-              WHERE id = $1::text::uuid
-                AND tenant_id = $2::text::uuid
-                AND cell_id = $3::text::uuid",
-            &[&u.cluster_id.to_string(), &u.tenant_id.to_string(), &cell_id],
-        )
-        .await
-    {
-        Ok(row) => row.is_some(),
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "create_user: scope check failed");
-            return Err(Refusal::BadGateway("cluster lookup failed"));
-        }
-    };
-    if !scoped {
-        return Err(Refusal::NotFound("tenant and cluster are not on this cell"));
-    }
-
-    let user_row = match tx
-        .query_one(
-            "SELECT queen_proxy.create_user($1::text::uuid, $2, $3, $4)::text",
-            &[&u.tenant_id.to_string(), &u.email, &u.password_hash, &u.provider],
-        )
-        .await
-    {
-        Ok(row) => row,
-        Err(e) if e.code() == Some(&SqlState::UNIQUE_VIOLATION) => {
-            return Err(Refusal::Conflict("a user with this email already exists"))
-        }
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "create_user failed");
-            return Err(Refusal::BadGateway("user creation failed"));
-        }
-    };
-    let user_id = user_row.get::<_, String>(0);
-
-    if let Err(e) = tx.execute("SELECT queen_proxy.set_user_name($1::text::uuid, $2)", &[&user_id, &u.name]).await {
-        tracing::warn!(target: "operator", err = %e, "initial user name failed");
-        return Err(Refusal::BadGateway("user name could not be saved"));
-    }
-
-    if let Err(e) = tx
-        .execute(
-            "SELECT queen_proxy.grant_cluster_role($1::text::uuid, $2, $3)",
-            &[&u.cluster_id.to_string(), &u.email, &u.role],
-        )
-        .await
-    {
-        tracing::warn!(target: "operator", err = %e, "initial role grant failed");
-        return Err(Refusal::BadGateway("initial role grant failed"));
-    }
-    let meta = json!({ "email": u.email, "name": u.name, "provider": u.provider, "role": u.role }).to_string();
-    if let Err(e) = tx
-        .execute(
-            "SELECT queen_proxy.record_operation($1::text::uuid, $2::text::uuid, 'user', $3::text::uuid, 'operator_user_created', $4, $5::text::jsonb)",
-            &[&u.tenant_id.to_string(), &u.cluster_id.to_string(), &actor_id.to_string(), &user_id, &meta],
-        )
-        .await
-    {
-        tracing::warn!(target: "operator", err = %e, "operator user audit failed");
-        return Err(Refusal::BadGateway("user creation audit failed"));
-    }
-    if let Err(e) = tx.commit().await {
-        tracing::warn!(target: "operator", err = %e, "create_user commit failed");
-        return Err(Refusal::BadGateway("user creation failed"));
-    }
-    Ok(user_id)
 }
 
 async fn kv_operator_create_user_once(
@@ -2048,86 +1426,13 @@ pub async fn operator_rename_user(
     actor_id: Uuid,
 ) -> Result<Rename, Refusal> {
     match store {
-        Store::Pg(pool) => pg_operator_rename_user(pool, acting_cluster, user_id, name, actor_id).await,
         Store::Kv(kv) => script_answer(
             retrying!(kv_operator_rename_user_once(kv.as_ref(), acting_cluster, user_id, name, actor_id)),
             "user update failed",
             None,
         ),
-        Store::None => Err(Refusal::BadGateway("pxdb unavailable")),
+        Store::None => Err(Refusal::BadGateway("store unavailable")),
     }
-}
-
-async fn pg_operator_rename_user(
-    pool: &deadpool_postgres::Pool,
-    acting_cluster: Uuid,
-    user_id: Uuid,
-    name: &str,
-    actor_id: Uuid,
-) -> Result<Rename, Refusal> {
-    let mut client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "update_user: pool.get failed");
-            return Err(Refusal::BadGateway("pxdb unavailable"));
-        }
-    };
-    let (cell_id, _) = pg_cell_for(&client, acting_cluster).await?;
-    let tx = match client.transaction().await {
-        Ok(tx) => tx,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "update_user: transaction failed");
-            return Err(Refusal::BadGateway("user update failed"));
-        }
-    };
-    let target = match tx
-        .query_opt(
-            "SELECT u.tenant_id::text, u.name
-               FROM queen_proxy.users u
-              WHERE u.id = $1::text::uuid
-                AND EXISTS (
-                    SELECT 1 FROM queen_proxy.clusters c
-                     WHERE c.tenant_id = u.tenant_id
-                       AND c.cell_id = $2::text::uuid)",
-            &[&user_id.to_string(), &cell_id],
-        )
-        .await
-    {
-        Ok(Some(row)) => row,
-        Ok(None) => return Err(Refusal::NotFound("user is not on this cell")),
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "update_user: scope lookup failed");
-            return Err(Refusal::BadGateway("user lookup failed"));
-        }
-    };
-    let tenant_id = target.get::<_, String>(0);
-    let old_name = target.get::<_, Option<String>>(1);
-    if old_name.as_deref() == Some(name) {
-        return Ok(Rename::Unchanged);
-    }
-
-    if let Err(e) =
-        tx.execute("SELECT queen_proxy.set_user_name($1::text::uuid, $2)", &[&user_id.to_string(), &name]).await
-    {
-        tracing::warn!(target: "operator", err = %e, "set_user_name failed");
-        return Err(Refusal::BadGateway("user update failed"));
-    }
-    let meta = json!({ "old_name": old_name, "name": name }).to_string();
-    if let Err(e) = tx
-        .execute(
-            "SELECT queen_proxy.record_operation($1::text::uuid, NULL, 'user', $2::text::uuid, 'operator_user_updated', $3, $4::text::jsonb)",
-            &[&tenant_id, &actor_id.to_string(), &user_id.to_string(), &meta],
-        )
-        .await
-    {
-        tracing::warn!(target: "operator", err = %e, "operator user update audit failed");
-        return Err(Refusal::BadGateway("user update audit failed"));
-    }
-    if let Err(e) = tx.commit().await {
-        tracing::warn!(target: "operator", err = %e, "update_user commit failed");
-        return Err(Refusal::BadGateway("user update failed"));
-    }
-    Ok(Rename::Renamed)
 }
 
 async fn kv_operator_rename_user_once(
@@ -2173,8 +1478,8 @@ async fn kv_operator_rename_user_once(
 /// Grant (`Some(role)`) or remove (`None`) a user's role on a cluster of the
 /// acting cluster's cell. `would_orphan(current, admin_count, new)` is the
 /// caller's last-admin policy; it is decided against the SAME reads the
-/// write commits on (Postgres: `LOCK TABLE cluster_roles`; KV: every admin
-/// seat it counted is version-checked in the write's batch).
+/// write commits on (every admin seat it counted is version-checked in the
+/// write's batch).
 pub async fn operator_change_role(
     store: &Store,
     acting_cluster: Uuid,
@@ -2185,9 +1490,6 @@ pub async fn operator_change_role(
     actor_id: Uuid,
 ) -> Result<(), Refusal> {
     match store {
-        Store::Pg(pool) => {
-            pg_operator_change_role(pool, acting_cluster, user_id, cluster_id, new_role, would_orphan, actor_id).await
-        }
         Store::Kv(kv) => script_answer(
             retrying!(kv_operator_change_role_once(
                 kv.as_ref(),
@@ -2201,113 +1503,8 @@ pub async fn operator_change_role(
             "role change failed",
             None,
         ),
-        Store::None => Err(Refusal::BadGateway("pxdb unavailable")),
+        Store::None => Err(Refusal::BadGateway("store unavailable")),
     }
-}
-
-async fn pg_operator_change_role(
-    pool: &deadpool_postgres::Pool,
-    acting_cluster: Uuid,
-    user_id: Uuid,
-    cluster_id: Uuid,
-    new_role: Option<&str>,
-    would_orphan: fn(Option<&str>, i64, Option<&str>) -> bool,
-    actor_id: Uuid,
-) -> Result<(), Refusal> {
-    let mut client = match pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "change_role: pool.get failed");
-            return Err(Refusal::BadGateway("pxdb unavailable"));
-        }
-    };
-    let (cell_id, _) = pg_cell_for(&client, acting_cluster).await?;
-    let tx = match client.transaction().await {
-        Ok(tx) => tx,
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "change_role: transaction failed");
-            return Err(Refusal::BadGateway("role change failed"));
-        }
-    };
-    if let Err(e) = tx.batch_execute("LOCK TABLE queen_proxy.cluster_roles IN SHARE ROW EXCLUSIVE MODE").await {
-        tracing::warn!(target: "operator", err = %e, "role lock failed");
-        return Err(Refusal::BadGateway("role change failed"));
-    }
-
-    let standing = match tx
-        .query_opt(
-            "SELECT u.email, u.tenant_id::text, cr.role,
-                    (SELECT count(*) FROM queen_proxy.cluster_roles admins
-                      WHERE admins.cluster_id = c.id AND admins.role = 'admin')
-               FROM queen_proxy.users u
-               JOIN queen_proxy.clusters c
-                 ON c.id = $2::text::uuid AND c.tenant_id = u.tenant_id
-               LEFT JOIN queen_proxy.cluster_roles cr
-                 ON cr.user_id = u.id AND cr.cluster_id = c.id
-              WHERE u.id = $1::text::uuid
-                AND c.cell_id = $3::text::uuid",
-            &[&user_id.to_string(), &cluster_id.to_string(), &cell_id],
-        )
-        .await
-    {
-        Ok(Some(row)) => row,
-        Ok(None) => return Err(Refusal::NotFound("user and cluster are not on this cell or tenant")),
-        Err(e) => {
-            tracing::warn!(target: "operator", err = %e, "role standing lookup failed");
-            return Err(Refusal::BadGateway("role lookup failed"));
-        }
-    };
-    let email = standing.get::<_, String>(0);
-    let tenant_id = standing.get::<_, String>(1);
-    let current_role = standing.get::<_, Option<String>>(2);
-    let admin_count = standing.get::<_, i64>(3);
-
-    if new_role.is_none() && current_role.is_none() {
-        return Err(Refusal::NotFound("user has no access to this cluster"));
-    }
-    if would_orphan(current_role.as_deref(), admin_count, new_role) {
-        return Err(Refusal::BadRequest("cannot remove or demote the last admin of this cluster"));
-    }
-
-    let action = if let Some(role) = new_role {
-        if let Err(e) = tx
-            .execute(
-                "SELECT queen_proxy.grant_cluster_role($1::text::uuid, $2, $3)",
-                &[&cluster_id.to_string(), &email, &role],
-            )
-            .await
-        {
-            tracing::warn!(target: "operator", err = %e, "role grant failed");
-            return Err(Refusal::BadGateway("role grant failed"));
-        }
-        "operator_role_granted"
-    } else {
-        if let Err(e) = tx
-            .execute("SELECT queen_proxy.revoke_cluster_role($1::text::uuid, $2)", &[&cluster_id.to_string(), &email])
-            .await
-        {
-            tracing::warn!(target: "operator", err = %e, "role revocation failed");
-            return Err(Refusal::BadGateway("role revocation failed"));
-        }
-        "operator_role_revoked"
-    };
-
-    let meta = json!({ "email": email, "role": new_role, "previous_role": current_role }).to_string();
-    if let Err(e) = tx
-        .execute(
-            "SELECT queen_proxy.record_operation($1::text::uuid, $2::text::uuid, 'user', $3::text::uuid, $4, $5, $6::text::jsonb)",
-            &[&tenant_id, &cluster_id.to_string(), &actor_id.to_string(), &action, &user_id.to_string(), &meta],
-        )
-        .await
-    {
-        tracing::warn!(target: "operator", err = %e, "operator role audit failed");
-        return Err(Refusal::BadGateway("role change audit failed"));
-    }
-    if let Err(e) = tx.commit().await {
-        tracing::warn!(target: "operator", err = %e, "role change commit failed");
-        return Err(Refusal::BadGateway("role change failed"));
-    }
-    Ok(())
 }
 
 async fn kv_operator_change_role_once(
@@ -2382,21 +1579,15 @@ async fn kv_operator_change_role_once(
 }
 
 // ===========================================================================
-// control-plane functions with no HTTP route (in the standalone proxy they
-// are called over psql; in the single binary there is no psql, so these are
-// their only implementation): set_operator, bootstrap_tenant,
+// control-plane functions with no HTTP route of their own here (the control
+// plane and the operator call them): set_operator, bootstrap_tenant,
 // set_tenant_status, delete_tenant
 // ===========================================================================
 
-/// `queen_proxy.set_operator(email, enabled)` (006). Deliberately no HTTP
-/// route may call this (006's header): it is the fleet operator's lever.
+/// `set_operator(email, enabled)`. Deliberately no HTTP
+/// route may call this: it is the fleet operator's lever.
 pub async fn set_operator(store: &Store, email: &str, enabled: bool) -> Result<(), WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            client.execute("SELECT queen_proxy.set_operator($1, $2)", &[&email, &enabled]).await.map_err(pg_err)?;
-            Ok(())
-        }
         Store::Kv(kv) => retrying!(kv_set_operator_once(kv.as_ref(), email, enabled)),
         Store::None => Err(WebError::NotConfigured),
     }
@@ -2415,7 +1606,7 @@ async fn kv_set_operator_once(kv: &dyn KvBackend, email: &str, enabled: bool) ->
     doc.is_operator = enabled;
     let mut tx = Tx::default();
     tx.fresh(ns::USERS, schema::key(doc.id), &doc, Some(u.version));
-    // Audited even when the bit does not change (006).
+    // Audited even when the bit does not change.
     tx.record(&Audit {
         tenant_id: doc.tenant_id,
         cluster_id: None,
@@ -2428,19 +1619,10 @@ async fn kv_set_operator_once(kv: &dyn KvBackend, email: &str, enabled: bool) ->
     commit(kv, tx).await
 }
 
-/// `queen_proxy.set_tenant_status(tenant, status)` (002). Returns the
-/// tenant's clusters for [`invalidate_local`] (KV; on Postgres the function
-/// NOTIFYs each one itself and this is empty).
+/// `set_tenant_status(tenant, status)`. Returns the tenant's clusters for
+/// [`invalidate_local`].
 pub async fn set_tenant_status(store: &Store, tenant_id: Uuid, status: &str) -> Result<Vec<Uuid>, WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            client
-                .execute("SELECT queen_proxy.set_tenant_status($1::text::uuid, $2)", &[&tenant_id.to_string(), &status])
-                .await
-                .map_err(pg_err)?;
-            Ok(Vec::new())
-        }
         Store::Kv(kv) => retrying!(kv_set_tenant_status_once(kv.as_ref(), tenant_id, status)),
         Store::None => Err(WebError::NotConfigured),
     }
@@ -2470,7 +1652,7 @@ async fn kv_set_tenant_status_once(kv: &dyn KvBackend, tenant_id: Uuid, status: 
     children(kv, ns::CLUSTER_TENANT, tenant_id).await
 }
 
-/// `queen_proxy.bootstrap_tenant(...)`'s arguments (008's signature).
+/// `bootstrap_tenant(...)`'s arguments.
 #[derive(Clone, Debug)]
 pub struct Bootstrap<'a> {
     pub tenant_slug: &'a str,
@@ -2486,32 +1668,12 @@ pub struct Bootstrap<'a> {
     pub key_name: &'a str,
 }
 
-/// `queen_proxy.bootstrap_tenant(...)` (008): tenant + cluster + admin user +
+/// `bootstrap_tenant(...)`: tenant + cluster + admin user +
 /// admin role + a full-scope API key in one call, idempotent on the slugs.
 /// Returns `{tenant_id, cluster_id, user_id, api_key, password_set,
 /// can_login}`; `api_key` is the PLAINTEXT, shown once (null on a re-run).
 pub async fn bootstrap_tenant(store: &Store, b: &Bootstrap<'_>) -> Result<Value, WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            let row = client
-                .query_one(
-                    "SELECT (queen_proxy.bootstrap_tenant($1, $2, $3, $4, $5::text::uuid, $6, $7, $8))::text",
-                    &[
-                        &b.tenant_slug,
-                        &b.tenant_name,
-                        &b.cluster_slug,
-                        &b.plan_code,
-                        &b.cell.to_string(),
-                        &b.admin_email,
-                        &b.password,
-                        &b.key_name,
-                    ],
-                )
-                .await
-                .map_err(pg_err)?;
-            serde_json::from_str(&row.get::<_, String>(0)).map_err(|e| WebError::Db(e.to_string()))
-        }
         Store::Kv(kv) => {
             if b.tenant_slug.trim().is_empty() {
                 return Err(raised("bootstrap_tenant: tenant_slug must not be empty"));
@@ -2665,7 +1827,7 @@ async fn kv_bootstrap_once(
     }))
 }
 
-/// `queen_proxy.delete_tenant(tenant, force)` (007): hard-delete a tenant and
+/// `delete_tenant(tenant, force)`: hard-delete a tenant and
 /// everything under it. Refuses a tenant not in status `deleting` unless
 /// `force`; a second call answers `{"deleted": false, "existed": false}`.
 /// The result carries the clusters' `broker_tenant_uuid`s (they exist
@@ -2680,17 +1842,6 @@ async fn kv_bootstrap_once(
 /// what was left, and the event is emitted again: at-least-once).
 pub async fn delete_tenant(store: &Store, tenant_id: Uuid, force: bool) -> Result<Value, WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            let row = client
-                .query_one(
-                    "SELECT (queen_proxy.delete_tenant($1::text::uuid, $2))::text",
-                    &[&tenant_id.to_string(), &force],
-                )
-                .await
-                .map_err(pg_err)?;
-            serde_json::from_str(&row.get::<_, String>(0)).map_err(|e| WebError::Db(e.to_string()))
-        }
         Store::Kv(kv) => kv_delete_tenant(kv.as_ref(), tenant_id, force).await,
         Store::None => Err(WebError::NotConfigured),
     }
@@ -2703,8 +1854,8 @@ async fn kv_delete_tenant(kv: &dyn KvBackend, tenant_id: Uuid, force: bool) -> R
     let t = tenant.value;
     if t.status != "deleting" && !force {
         return Err(raised(format!(
-            "delete_tenant: tenant {} is {}, not deleting -- call queen_proxy.set_tenant_status({}, 'deleting') \
-             first (and purge the cell with queen.delete_tenant_data_v1), or pass p_force => true",
+            "delete_tenant: tenant {} is {}, not deleting -- set its status to 'deleting' first (tenant {}), \
+             or pass force",
             t.slug, t.status, tenant_id
         )));
     }
@@ -2855,8 +2006,8 @@ async fn kv_delete_tenant(kv: &dyn KvBackend, tenant_id: Uuid, force: bool) -> R
 }
 
 /// Strip `admin_email` from every outbox payload about this tenant or one of
-/// its clusters (007: the rows stay — the outbox is a queue — the address
-/// does not). Returns how many rows were redacted.
+/// its clusters (the rows stay — the outbox is a queue — the address does
+/// not). Returns how many rows were redacted.
 async fn redact_outbox(kv: &dyn KvBackend, tenant_id: Uuid, clusters: &HashSet<Uuid>) -> Result<usize, WebError> {
     let tenant = tenant_id.to_string();
     let clusters: HashSet<String> = clusters.iter().map(Uuid::to_string).collect();
@@ -2953,7 +2104,7 @@ fn usage_after(prefix: &str, sample: &str, from_us: i64) -> Option<String> {
     (formatted.len() == seg.len()).then(|| format!("{prefix}{formatted}"))
 }
 
-/// `cluster_month_msgs` (004), KV side: per UTC day of the month containing
+/// `cluster_month_msgs`, KV side: per UTC day of the month containing
 /// `now_us`, the larger of the rolled-up `px.usage.day` total and the live
 /// `px.usage.min` total (summed over op classes and nodes) — never
 /// double-counting a day, never under-counting today.
@@ -2988,49 +2139,25 @@ async fn cluster_month_msgs(kv: &dyn KvBackend, cluster: Uuid, now_us: i64) -> R
 // tenant_clusters, cell_clusters, tenant_on_cell, tenants_and_cells.
 // ===========================================================================
 
-/// `queen_proxy.grant_cluster_role(cluster, email, role)` (004): upsert the
+/// `grant_cluster_role(cluster, email, role)`: upsert the
 /// role, same-tenant rule enforced, audited as `cluster_role_granted`.
 pub async fn grant_cluster_role(store: &Store, cluster_id: Uuid, email: &str, role: &str) -> Result<(), WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            client
-                .execute(
-                    "SELECT queen_proxy.grant_cluster_role($1::text::uuid, $2, $3)",
-                    &[&cluster_id.to_string(), &email, &role],
-                )
-                .await
-                .map_err(pg_err)?;
-            Ok(())
-        }
         Store::Kv(_) => crate::store::data::grant_cluster_role(store, cluster_id, email, role).await.map_err(WebError::from),
         Store::None => Err(WebError::NotConfigured),
     }
 }
 
-/// `queen_proxy.revoke_cluster_role(cluster, email)` (004): raises when there
+/// `revoke_cluster_role(cluster, email)`: raises when there
 /// is no grant to remove; audited as `cluster_role_revoked`.
 pub async fn revoke_cluster_role(store: &Store, cluster_id: Uuid, email: &str) -> Result<(), WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            client
-                .execute(
-                    "SELECT queen_proxy.revoke_cluster_role($1::text::uuid, $2)",
-                    &[&cluster_id.to_string(), &email],
-                )
-                .await
-                .map_err(pg_err)?;
-            Ok(())
-        }
         Store::Kv(_) => crate::store::data::revoke_cluster_role(store, cluster_id, email).await.map_err(WebError::from),
         Store::None => Err(WebError::NotConfigured),
     }
 }
 
-const ISSUE_KEY_SQL: &str = "SELECT queen_proxy.issue_api_key($1::text::uuid, $2, $3, $4)::text AS id";
-
-/// `queen_proxy.issue_api_key(cluster, name, key_hash, scopes)` (002): the
+/// `issue_api_key(cluster, name, key_hash, scopes)`: the
 /// hash only, never the plaintext. Returns the key id.
 pub async fn issue_api_key(
     store: &Store,
@@ -3040,14 +2167,6 @@ pub async fn issue_api_key(
     scopes: &[String],
 ) -> Result<String, WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            let row = client
-                .query_one(ISSUE_KEY_SQL, &[&cluster_id.to_string(), &name, &key_hash, &scopes])
-                .await
-                .map_err(pg_err)?;
-            Ok(row.get::<_, String>(0))
-        }
         Store::Kv(kv) => {
             let kv = kv.as_ref();
             let Some(c) = by_id::<ClusterDoc>(kv, ns::CLUSTERS, cluster_id).await? else {
@@ -3066,18 +2185,6 @@ pub async fn issue_api_key(
 /// looks keys up GLOBALLY, so this is the console's ownership check.
 pub async fn api_key_active_on_cluster(store: &Store, key_id: &str, cluster_id: Uuid) -> Result<bool, WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            let row = client
-                .query_opt(
-                    "SELECT 1 FROM queen_proxy.api_keys \
-                     WHERE id = $1::text::uuid AND cluster_id = $2::text::uuid AND revoked_at IS NULL",
-                    &[&key_id, &cluster_id.to_string()],
-                )
-                .await
-                .map_err(pg_err)?;
-            Ok(row.is_some())
-        }
         Store::Kv(kv) => {
             let id = Uuid::parse_str(key_id).map_err(|_| WebError::Db(format!("invalid uuid {key_id:?}")))?;
             Ok(by_id::<ApiKeyDoc>(kv.as_ref(), ns::KEYS, id)
@@ -3088,16 +2195,11 @@ pub async fn api_key_active_on_cluster(store: &Store, key_id: &str, cluster_id: 
     }
 }
 
-/// `queen_proxy.revoke_api_key(key)` (002): stamps `revoked_at`; raises on an
-/// unknown or already-revoked key. The hash index entry stays (as the
-/// Postgres row does): `by_key_hash` reads `revoked_at` on the row.
+/// `revoke_api_key(key)`: stamps `revoked_at`; raises on an
+/// unknown or already-revoked key. The hash index entry stays (the key
+/// row stays, revoked): `by_key_hash` reads `revoked_at` on the row.
 pub async fn revoke_api_key(store: &Store, key_id: &str) -> Result<(), WebError> {
     match store {
-        Store::Pg(pool) => {
-            let client = pg(pool).await?;
-            client.execute("SELECT queen_proxy.revoke_api_key($1::text::uuid)", &[&key_id]).await.map_err(pg_err)?;
-            Ok(())
-        }
         // data.rs's write carries the cross-node cache invalidation in its
         // batch: a revoked key stops working on every node, not just this one.
         Store::Kv(_) => {
@@ -3110,7 +2212,7 @@ pub async fn revoke_api_key(store: &Store, key_id: &str) -> Result<(), WebError>
 
 // ---- KV planners: validate like the stored function, push its writes -------
 
-/// `create_tenant(slug, name)` (002).
+/// `create_tenant(slug, name)`.
 fn plan_create_tenant(tx: &mut Tx, slug: &str, name: &str) -> Result<TenantDoc, WebError> {
     if slug.trim().is_empty() {
         return Err(raised("create_tenant: slug must not be empty"));
@@ -3145,7 +2247,7 @@ fn plan_create_tenant(tx: &mut Tx, slug: &str, name: &str) -> Result<TenantDoc, 
     Ok(doc)
 }
 
-/// `create_cluster(tenant, slug, plan_code, cell)` (002), plan and cell
+/// `create_cluster(tenant, slug, plan_code, cell)`, plan and cell
 /// already resolved by the caller.
 fn plan_create_cluster(
     tx: &mut Tx,
@@ -3191,7 +2293,7 @@ fn plan_create_cluster(
     Ok(doc)
 }
 
-/// `create_user(tenant, email, password_hash, provider)` (002). `name` is
+/// `create_user(tenant, email, password_hash, provider)`. `name` is
 /// what an immediately following `set_user_name` would write (the operator
 /// path); create_user itself never sets one.
 fn plan_create_user(
@@ -3233,7 +2335,7 @@ fn plan_create_user(
     Ok(doc)
 }
 
-/// `set_user_name`'s rule (010): trimmed, 1 to 160 characters.
+/// `set_user_name`'s rule: trimmed, 1 to 160 characters.
 fn check_user_name(name: &str) -> Result<String, WebError> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 160 {
@@ -3242,7 +2344,7 @@ fn check_user_name(name: &str) -> Result<String, WebError> {
     Ok(name.to_string())
 }
 
-/// `set_user_name(user, name)` (010) on a user read at `user.version`.
+/// `set_user_name(user, name)` on a user read at `user.version`.
 /// Returns the stored (trimmed) name.
 fn plan_set_user_name(tx: &mut Tx, user: &Doc<UserDoc>, name: &str) -> Result<String, WebError> {
     let name = check_user_name(name)?;
@@ -3261,7 +2363,7 @@ fn plan_set_user_name(tx: &mut Tx, user: &Doc<UserDoc>, name: &str) -> Result<St
     Ok(name)
 }
 
-/// `grant_cluster_role` (004) once the cluster and user are resolved:
+/// `grant_cluster_role` once the cluster and user are resolved:
 /// same-tenant rule, upsert (the original `created_at` is kept), audit.
 fn plan_grant_role(
     tx: &mut Tx,
@@ -3298,7 +2400,7 @@ fn plan_grant_role(
     Ok(())
 }
 
-/// `revoke_cluster_role` (004) once the grant is resolved.
+/// `revoke_cluster_role` once the grant is resolved.
 fn plan_revoke_role(
     tx: &mut Tx,
     cluster: &ClusterDoc,
@@ -3319,7 +2421,7 @@ fn plan_revoke_role(
     Ok(())
 }
 
-/// `issue_api_key` (002) once the cluster is resolved. Returns the key id.
+/// `issue_api_key` once the cluster is resolved. Returns the key id.
 fn plan_issue_key(
     tx: &mut Tx,
     cluster: &ClusterDoc,
@@ -3505,7 +2607,7 @@ mod tests {
         (m.clone(), Store::Kv(m))
     }
 
-    /// A cell and the `free` plan, as the import (or an operator) seeds them.
+    /// A cell and the `free` plan, as the seed (or an operator) writes them.
     async fn seed(m: &MemKv, cell_slug: &str) -> Uuid {
         let cell = CellDoc {
             id: Uuid::new_v4(),
@@ -3905,7 +3007,7 @@ mod tests {
             revoke_api_key(&st, &id).await,
             Err(WebError::Raised(format!("revoke_api_key: unknown or already-revoked key {id}")))
         );
-        // The hash stays indexed (the row stays, revoked), as in Postgres.
+        // The hash stays indexed (the row stays, revoked).
         assert!(m.keys(ns::KEY_HASH).contains(&schema::key(&hash)));
         let ops = list_operations(&st, tenant, Some(cluster), 2).await.unwrap();
         assert_eq!((ops[0].action.as_str(), ops[1].action.as_str()), ("api_key_revoked", "api_key_issued"));
@@ -4373,7 +3475,7 @@ mod tests {
     // ---- plumbing ---------------------------------------------------------------------------
 
     #[test]
-    fn utc_formatting_matches_postgres_to_char() {
+    fn utc_formatting_is_rfc3339_zulu() {
         assert_eq!(utc_iso(0), "1970-01-01T00:00:00Z");
         assert_eq!(utc_iso(1_790_257_507_000_000), "2026-09-24T13:45:07Z");
         assert_eq!(utc_iso(1_709_251_199_999_999), "2024-02-29T23:59:59Z");
@@ -4420,8 +3522,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dev_static_has_no_store() {
+    async fn no_store_answers_not_configured() {
         assert_eq!(me_user(&Store::None, Uuid::new_v4()).await, Err(WebError::NotConfigured));
-        assert_eq!(operator_listing(&Store::None, Uuid::new_v4()).await, Err(Refusal::BadGateway("pxdb unavailable")));
+        assert_eq!(operator_listing(&Store::None, Uuid::new_v4()).await, Err(Refusal::BadGateway("store unavailable")));
     }
 }

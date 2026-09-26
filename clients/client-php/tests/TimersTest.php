@@ -17,8 +17,8 @@ use Queen\Timers;
  *
  *   * §4.2 — only RELATIVE durations travel, and the field is `delayMs`. An
  *     absolute instant is not expressible: `deliverAt`, `delaySeconds` and
- *     their snake_case spellings are all rejected by the stored procedure. One
- *     clock, Postgres's, so no inter-broker skew can enter anywhere. The
+ *     their snake_case spellings are all rejected by the broker. One clock,
+ *     the broker's, so no inter-broker skew can enter anywhere. The
  *     declared rule of the product is "durations that can be sub-second are in
  *     milliseconds, the ones that cannot are in seconds" — a 250 ms retry
  *     backoff is a real and central use of timers, a sub-second TTL is not.

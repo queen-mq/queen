@@ -1,6 +1,6 @@
 ---
 title: Kubernetes
-description: "A StatefulSet, two Services and the probe wiring, written against this broker: /health is the readiness question and never the liveness one."
+description: "A StatefulSet of three voters, a headless Service for raft, a client Service and a disruption budget: /health is the readiness question and never the liveness one."
 type: how-to
 tier: operate
 sidebar:
@@ -9,29 +9,22 @@ sourceOfTruth:
   - Dockerfile
   - server/src/main.rs
   - server/src/config.rs
-  - server/src/mesh.rs
-  - server/src/file_buffer.rs
-  - server/src/schema.rs
-  - server/src/handlers/status.rs
-  - server/src/admission.rs
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): main.rs registers three new routes and no new environment variable; nothing this page describes moved.
+  - server/src/handlers/raft.rs
+  - server/src/rsm/replicator/raft/cluster.rs
+  - server/src/rsm/replicator/raft/mod.rs
 ---
 
-Three replicas, a headless Service so they can find each other, and a client Service carrying only
-the HTTP port. The manifest below is the deployment in full: apply it with `-n queen`, against a
-PostgreSQL at `queen-pg`. Every value in it that is not obvious is explained underneath, including
-the three that decide whether the broker performs.
+Three voters, a headless Service so they can find each other by name, a client Service carrying
+the HTTP port, and a disruption budget. The manifest below is the deployment in full: apply it with
+`-n queen`. Every value in it that is not obvious is explained underneath.
 
 ```bash
-kubectl -n queen create secret generic queen-secrets \
-  --from-literal=pg-password=change-me \
-  --from-literal=sync-secret=change-me-too
+kubectl -n queen create secret generic queen-raft \
+  --from-literal=QUEEN_RAFT_TOKEN="$(openssl rand -hex 32)"
 ```
 
-`sync-secret` is the HMAC secret for the mesh handshake and must be byte-identical on every
-replica. Empty means open mode: any well-formed handshake from anyone reaching the port is
-accepted.
+`QUEEN_RAFT_TOKEN` is the secret every raft request between the pods carries, and it has to be the
+same on all three. Without it, anything in the cluster that can reach port 7400 can vote and append.
 
 ```yaml
 apiVersion: v1
@@ -50,26 +43,41 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: queen-mesh
+  name: queen-headless
 spec:
   clusterIP: None
   publishNotReadyAddresses: true
   selector:
     app.kubernetes.io/name: queen
   ports:
-    - name: mesh
-      port: 6633
-      targetPort: mesh
+    - name: http
+      port: 6632
+      targetPort: http
       protocol: TCP
+    - name: raft
+      port: 7400
+      targetPort: raft
+      protocol: TCP
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: queen
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: queen
 ---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: queen
 spec:
-  serviceName: queen-mesh
+  serviceName: queen-headless
   replicas: 3
   podManagementPolicy: Parallel
+  minReadySeconds: 30
   selector:
     matchLabels:
       app.kubernetes.io/name: queen
@@ -78,12 +86,19 @@ spec:
       labels:
         app.kubernetes.io/name: queen
     spec:
-      terminationGracePeriodSeconds: 60
+      terminationGracePeriodSeconds: 90
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
         fsGroup: 65532
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: queen
       containers:
         - name: queen
           image: ghcr.io/queen-mq/queen:latest
@@ -91,58 +106,48 @@ spec:
           ports:
             - name: http
               containerPort: 6632
-            - name: mesh
-              containerPort: 6633
+            - name: raft
+              containerPort: 7400
           env:
-            - name: PG_HOST
-              value: queen-pg
-            - name: PG_PORT
-              value: "5432"
-            - name: PG_USER
-              value: queen
-            - name: PG_DATABASE
-              value: queen
-            - name: PG_PASSWORD
+            - name: QUEEN_RAFT_DIR
+              value: /var/lib/queen/raft
+            - name: QUEEN_RAFT_REPLICATOR
+              value: openraft
+            - name: QUEEN_RAFT_NODE_ID
+              value: ordinal
+            - name: QUEEN_RAFT_PEERS
+              value: "1=queen-0.queen-headless:7400/queen-0.queen-headless:6632,2=queen-1.queen-headless:7400/queen-1.queen-headless:6632,3=queen-2.queen-headless:7400/queen-2.queen-headless:6632"
+            - name: QUEEN_RAFT_TOKEN
               valueFrom:
-                secretKeyRef: { name: queen-secrets, key: pg-password }
-            - name: DB_POOL_SIZE
-              value: "60"
-            - name: PORT
-              value: "6632"
-            - name: QUEEN_MESH_PORT
-              value: "6633"
-            - name: QUEEN_MESH_PEERS
-              value: "queen-0.queen-mesh:6633,queen-1.queen-mesh:6633,queen-2.queen-mesh:6633"
-            - name: QUEEN_SYNC_SECRET
-              valueFrom:
-                secretKeyRef: { name: queen-secrets, key: sync-secret }
+                secretKeyRef: { name: queen-raft, key: QUEEN_RAFT_TOKEN }
             - name: QUEEN_SERVER_ID
               valueFrom:
                 fieldRef: { fieldPath: metadata.name }
-            - name: FILE_BUFFER_DIR
-              value: /var/lib/queen/buffers
             - name: QUEEN_LOG_JSON
               value: "true"
           startupProbe:
-            httpGet: { path: /health, port: http }
-            periodSeconds: 10
-            failureThreshold: 30
+            tcpSocket: { port: http }
+            periodSeconds: 5
+            failureThreshold: 360
           readinessProbe:
             httpGet: { path: /health, port: http }
-            periodSeconds: 10
+            periodSeconds: 5
             failureThreshold: 3
           livenessProbe:
             tcpSocket: { port: http }
             periodSeconds: 20
             failureThreshold: 3
           resources:
-            requests: { cpu: "1", memory: 512Mi }
-            limits: { memory: 2Gi }
+            requests: { cpu: "1", memory: 4Gi }
+            limits: { memory: 4Gi }
           securityContext:
+            allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           volumeMounts:
-            - name: spool
-              mountPath: /var/lib/queen/buffers
+            - name: data
+              mountPath: /var/lib/queen/raft
             - name: tmp
               mountPath: /tmp
       volumes:
@@ -150,87 +155,78 @@ spec:
           emptyDir: {}
   volumeClaimTemplates:
     - metadata:
-        name: spool
+        name: data
       spec:
         accessModes: ["ReadWriteOnce"]
         resources:
-          requests: { storage: 5Gi }
+          requests: { storage: 50Gi }
 ```
+
+The peer names are short because the pods resolve them inside their own namespace. In another
+namespace, or with a different StatefulSet name, the list changes accordingly: it is
+`id=<pod>.<headless service>:<raft port>/<pod>.<headless service>:<http port>` for every pod, and
+the same string on all of them.
 
 ## The probes
 
-`/health` takes a pooled connection and runs a real query, which makes it the readiness answer: a
-broker that cannot reach PostgreSQL should leave the Service endpoints. Wire it to `livenessProbe`
-and a PostgreSQL outage becomes a kill loop on every replica: the pushes the disk spool exists to
-absorb are refused at the socket instead, and the spool goes with the container if it sits on the
-container filesystem. Liveness is a TCP connect on the HTTP port, or nothing: a panic aborts the
-process, so there is no half-alive state to detect.
+`/health` answers `503` with `"status":"settling"` while the node knows no leader, which is an
+election or a cluster that has lost its majority. That makes it the readiness answer: a node with
+no leader should leave the Service endpoints, since it cannot take a write. Wire it to the
+liveness probe and an election, or a network partition that costs the majority, becomes a restart
+loop on every pod at once, which is the one thing that cannot help.
 
-The startup probe gives the first boot five minutes: the broker applies its embedded schema
-before it serves.
+Liveness and startup are a TCP connect on the HTTP port. The broker binds its listeners only after
+the store and the replicator have opened, so an open port means the boot finished, and the startup
+probe above allows 30 minutes for it: a node that replays a long tail of its log after a crash is
+slow to open, not stuck.
+
+Readiness does not mean caught up. A follower answers `200` as soon as it knows a leader, even while
+it is still receiving the entries it missed. `minReadySeconds: 30` gives a rolling update some
+catch-up time before it moves to the next pod. The disruption budget does not wait for that, so a
+node drain can take a second voter while the first is still behind, and commits then stall until it
+catches up.
 
 ## Why a StatefulSet
 
-- `QUEEN_MESH_PEERS` is a list of hostnames parsed once at boot, and only a StatefulSet behind a
-  headless Service hands out stable names to put in it.
-- The spool is node-local and replayed only by a broker starting against the same
-  `FILE_BUFFER_DIR`, which is what one claim per ordinal buys.
-
-For one replica that accepts losing an unreplayed spool: drop the claim template, mount an
-`emptyDir` there, remove `QUEEN_MESH_PEERS`, and a Deployment is equivalent.
+- Every pod needs a stable name in `QUEEN_RAFT_PEERS` and a stable volume for its data directory,
+  and `QUEEN_RAFT_NODE_ID=ordinal` derives the node id from the pod name. That is what a
+  StatefulSet behind a headless Service hands out.
+- `podManagementPolicy: Parallel` and `publishNotReadyAddresses: true` go together. Without both,
+  a full restart deadlocks: no pod is ready without a leader, and no leader can be elected until
+  the peers' names resolve.
 
 ## The fields that are not obvious
 
-- `replicas` times `DB_POOL_SIZE` must fit PostgreSQL's `max_connections`: 180 here.
-- `terminationGracePeriodSeconds` must exceed your longest pop timeout, 30 seconds by default,
-  because a parked long-poll pop is an in-flight request that SIGTERM drains.
-- Port 6633 is TCP despite the legacy `QUEEN_UDP_*` alias names, and a Service or NetworkPolicy
-  declaring UDP blocks the mesh silently: brokers keep serving, with pop wakes arriving late.
-- The peer list is uniform and names the pod itself, which is safe because a frame is applied to
-  local state and never re-broadcast.
-- No CPU limit, but not for the reason usually given: tokio sizes its worker pool from
-  `available_parallelism()`, which honours the cgroup quota on the toolchain this builds with, so a
-  limit would size the pool correctly rather than oversubscribe it. The cost is CFS throttling. The
-  commit path is bursty, and a quota turns a burst into scheduler latency at exactly the percentile
-  you are watching. Memory has no such caveat and is set.
-- `podManagementPolicy: Parallel` is safe: the schema apply serialises cluster-wide on a
-  PostgreSQL advisory lock.
-- Nothing but the other brokers belongs on 6633: keep it off the client Service and close it with
-  a NetworkPolicy ([the mesh port](/deploy/security#the-mesh-port)).
-
-## The three sizing rules
-
-None of these shows up in a `kubectl get`, and each one is the difference between a broker that
-runs and a broker that performs.
-
-- **`PG_PORT` points at PostgreSQL directly, not at a pooler.** The broker holds a session-scoped
-  advisory lock across the boot schema apply and keeps a transaction open across every retention
-  cycle whose one job is holding that cycle's lock, plus the statements the hot paths prepare once
-  per connection, and all of that lives on one specific backend session.
-  PgBouncer in session mode is the supported way to pool, and it pins a server connection per
-  client, so it multiplexes nothing for a long-lived application pool anyway: 28 client connections
-  were measured against 28 backends. It can still recycle the server underneath and drop a held
-  lock, which is what `pg_advisory_unlock reported not-held` in the retention logs was. Full
-  reasoning in [PostgreSQL](/deploy/postgres#give-it-a-direct-connection).
-- **`DB_POOL_SIZE` has to comfortably exceed `QUEEN_ADMISSION_POOL_RESERVE`, default 16.** The
-  admission arbiter derives its band from `DB_POOL_SIZE` minus that reserve, so with the default
-  reserve a pool of 24 or less collapses the band to `[8,8]`: the broker then runs at a fixed eight
-  concurrent write transactions whatever the disk can take, and the AIMD adapter stops adapting.
-  The 60 in the manifest gives a band of `[29,44]`. If PostgreSQL cannot take
-  `replicas × DB_POOL_SIZE`, lower `QUEEN_ADMISSION_POOL_RESERVE` alongside rather than shrinking
-  the pool on its own ([flow control](/internals/flow-control)).
-- **Leave `QUEEN_STMT_TIMEOUT_MS` at its 30000 default unless you have measured a reason.** An
-  admission slot is held across the timed call, so a longer deadline means a wedged statement
-  occupies a write slot for that much longer, and the budget the arbiter is trying to hold shrinks
-  by one for the duration.
+- `replicas` is 3 or 5, and it is fixed at the first boot: the membership is stored in the log, so
+  scaling the StatefulSet does not add a voter. Adding and removing voters on a running cluster
+  goes through the membership API ([High availability](/deploy/ha#the-membership-is-in-the-log)).
+  So do the release name, the namespace and the two ports, because they are inside the peer
+  addresses the log recorded. Changing any of them on a live cluster means starting over with new
+  volumes.
+- `terminationGracePeriodSeconds` must exceed your longest long-poll pop, 30 seconds by default,
+  because a parked pop is an in-flight request that SIGTERM drains, and on top of that a leader
+  first hands its leadership to a caught-up voter.
+- No CPU limit. The raft heartbeat and the commit path are latency-sensitive, and CFS throttling
+  turns a burst into scheduler latency at exactly the moment a follower is waiting for a heartbeat.
+  Memory has no such caveat: request equals limit.
+- Hard anti-affinity puts each voter on its own node, because two voters on one machine turn one
+  machine's failure into the loss of a majority. Spread over zones where you have them.
+- The disk gate refuses writes with `507` once the volume is 85% full
+  (`QUEEN_RAFT_DISK_HIGH_PCT`) and resumes below 80% (`QUEEN_RAFT_DISK_LOW_PCT`). Size the claim for
+  retention, not for throughput.
+- Nothing but the other pods belongs on port 7400: keep it off the client Service and close it with
+  a NetworkPolicy ([the raft port](/deploy/security#the-raft-port)).
+- A pod that exits with code 75 is a follower that fell too far behind and will load a snapshot on
+  its next start. The kubelet restarts it in place, and the volume stays.
 
 ## Verify
 
 ```bash
 kubectl -n queen rollout status statefulset/queen
-kubectl -n queen logs queen-0 | grep -E 'schema|config:|listening|mesh'
+kubectl -n queen port-forward svc/queen 6632:6632 &
+curl -s http://localhost:6632/api/v1/system/raft/membership
 ```
 
-The `mesh` line reports `peers` and `auth`: `auth=hmac` means the secret arrived, `auth=off` is
-open mode. Every variable above, and the ones left at their defaults, is in
-[configuration](/reference/config).
+The answer names the `leader` and the `term`, and lists the three voters, each with whether the
+leader hears from it (`live`) and how many log entries it is behind (`lag`). Every variable above, and the ones
+left at their defaults, is in [configuration](/reference/config).

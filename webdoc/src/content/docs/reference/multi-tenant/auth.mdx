@@ -12,9 +12,12 @@ sourceOfTruth:
   - proxy/src/acting.rs
   - proxy/src/routes.rs
   - proxy/src/webapp.rs
-  - proxy/migrations/001_init.sql
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the sentence saying a viewer writes nothing is now true, and says so: classify's messages arm was DELETE-only, so the retry POST inherited read. Both replay routes are queue admin.
+  - proxy/src/cache.rs
+  - proxy/src/config.rs
+  - proxy/src/store/data.rs
+  - proxy/src/store/web.rs
+  - server/src/proxy_embed.rs
+  - server/src/main.rs
 ---
 
 The proxy accepts exactly two kinds of credential, and they are not interchangeable.
@@ -23,9 +26,10 @@ bound to one cluster, scoped by capability. A **user session** is what a human g
 from logging in: a proxy-minted JWT, not bound to any cluster, whose permissions are
 resolved per cluster at request time.
 
-The credential is spent at the proxy. It is stripped before the request is forwarded,
-and the broker sees only the cell secret. See
-[Deploying queen_proxy](/deploy/multi-tenant/).
+The credential is spent at the proxy. It is stripped before the request is handed to
+the broker in the same process, and the broker router behind the proxy runs with its
+own JWT off, so a tenant's credential never reaches it. See
+[Multi-tenant](/deploy/multi-tenant/).
 
 ## How a credential is read
 
@@ -53,10 +57,10 @@ cookie:
 | --- | --- |
 | Format | `qk_<env>_<43 base64url characters>` |
 | Entropy | 32 bytes from the OS CSPRNG |
-| Stored as | `sha256` hex in `api_keys.key_hash`; the plaintext is shown once |
+| Stored as | Its `sha256` in hex, in the key's document in the proxy's state; the plaintext is shown once |
 | Bound to | One cluster, permanently |
 | Scopes | Any non-empty subset of `produce`, `consume`, `admin`, `read` |
-| Revocation | `api_keys.revoked_at`; the lookup filters on `revoked_at IS NULL` |
+| Revocation | `revoked_at` set on the key's document; a lookup treats a revoked key as no key |
 
 Two checks run on every request. The hash must resolve to a live key, and that key's
 cluster must be the cluster the request resolved to:
@@ -66,11 +70,14 @@ cluster must be the cluster the request resolved to:
   [shared host](#shared-hosts) there is nothing to mismatch: the key itself names the
   cluster.
 
-Revocation propagates two ways: the mutating SQL function fires the invalidation
-notification, which drops the cached entry immediately, and the positive cache entry
-expires after 30 seconds anyway. A revoked key can never be resurrected by the
-pxdb-outage grace window, because a clean "no such row" writes a negative entry that
-replaces the expired positive one.
+Revocation propagates two ways. The revoke writes an invalidation mark for the key's
+cluster in the same atomic batch, and every node polls that feed
+(`QUEEN_PROXY_INVAL_POLL_MS`, default 1000 ms) and drops the cluster's cached keys at
+its next poll. The positive cache entry also expires after 30 seconds anyway. A revoked
+key can never be resurrected by the stale-serve grace window
+(`QUEEN_PROXY_STALE_GRACE_MS`, default 600000 ms, during which a last known-good entry is
+served while the store does not answer), because a clean "no such key" answer writes a
+negative entry that replaces the expired positive one.
 
 An API key can never be an operator, and it can never be retargeted:
 `x-queen-act-cluster` is refused for API keys with a `403` rather than being silently
@@ -90,7 +97,7 @@ A session is a JWT the proxy itself mints and verifies. Claims are
 | `cluster` claim | **Absent** on a session cookie |
 | `role` claim | A placeholder (`viewer`) on a session cookie |
 | `aud` claim | **Never minted here.** Verified when present, see [Audience](#audience) |
-| Revocation | The `jti` goes on the `revoked_tokens` deny-list at logout, checked on every verify |
+| Revocation | The `jti` goes on the deny-list at logout, an entry in the proxy's state that expires with the token, checked on every verify |
 
 Key material also decides what a host can do at all. `QUEEN_PROXY_JWT_ED25519_PUB_PEM` alone
 makes a verify-only host: it accepts sessions the auth host minted and mints none. No material
@@ -110,19 +117,22 @@ sessions, which keeps the form.
 
 The two blanks are the point. A session token grants nothing on its own: because it
 carries no `cluster` and its `role` is a placeholder, the effective role is looked up
-live in `cluster_roles` for the cluster the request resolved to. Deleting a membership
-row takes effect within the role cache's 30-second TTL, without touching the token.
+live among the roles of the cluster the request resolved to. Removing a membership takes
+effect within the role cache's 30-second TTL, without touching the token.
 
 A token that *does* carry a `cluster` claim is trusted for that cluster and rejected
 for any other (`403 token not valid for this cluster`). Nothing mints such a token
 today; the check exists so a future scoped token cannot be retargeted.
 
 Three caches bound how fast a revocation lands: the deny-list at 60 seconds, the
-per-cluster role at 30 seconds, and the operator bit at 30 seconds. When the deny-list
-lookup itself errors (a pool or query failure, not a clean miss), the default is to
-**fail open**: a transient pxdb blip must not `401` every session, and the token still
-passed signature and expiry. `QUEEN_PROXY_REVOCATION_STRICT=true` inverts that for
-deployments that would rather lose availability.
+per-cluster role at 30 seconds, and the operator bit at 30 seconds. A logout does not
+wait for the first: its write also bumps the invalidation feed, and every node empties
+its deny-list cache at its next poll (`QUEEN_PROXY_INVAL_POLL_MS`, default 1000 ms).
+When the deny-list lookup itself fails (the replicated store did not answer, not a
+clean miss), the default is to **fail open**: a moment without a leader must not `401`
+every session, and the token still passed signature and expiry.
+`QUEEN_PROXY_REVOCATION_STRICT=true` inverts that for deployments that would rather lose
+availability.
 
 ### Audience
 
@@ -194,7 +204,7 @@ checks the deny-list first, so a logged-out cookie cannot produce a new one.
 | Route | Purpose |
 | --- | --- |
 | `GET /auth/login` | The login page, carrying a validated `next` |
-| `POST /auth/login` | Email and password, verified against the bcrypt hash in `users.password_hash` |
+| `POST /auth/login` | Email and password, verified against the user's bcrypt password hash |
 | `POST /auth/logout` | Revoke and clear |
 | `GET /auth/me` | What the browser's session is: identity, tenant, clusters, operator bit, and `acting_cluster`, the cluster this very request would act on (`null` when none is named). Cookie only |
 | `GET /auth/session-token` | A 15-minute bearer for the SPA |
@@ -228,14 +238,15 @@ What the flow enforces:
 
 <Steps>
 
-1. A linked `identities` row for this `(provider, provider_id)` → log in as that user.
+1. A linked identity for this `(provider, provider_id)` → log in as that user.
 
-2. Otherwise, a verified email matching an existing `users` row → link the identity to
-   that user and log in.
+2. Otherwise, a verified email matching an existing user → link the identity to that
+   user and log in.
 
 3. Otherwise, auto-provision, but **only** when `QUEEN_PROXY_AUTOPROVISION=true`. The new
    user is created under the tenant named by `QUEEN_PROXY_AUTOPROVISION_TENANT` (a
-   slug), with the `users` and `identities` rows written in one transaction. With
+   slug), with the user, its identity and a `QUEEN_PROXY_DEFAULT_ROLE` role (default
+   `viewer`) on each of that tenant's clusters written in one atomic batch. With
    auto-provision on and no valid tenant slug, the callback answers `500`.
 
 4. Otherwise `403 {"code":"not_provisioned"}`.
@@ -292,22 +303,24 @@ Feature gating happens *before* authorization: a plan without `features.streams`
 
 ## The operator capability
 
-An operator is a `users.is_operator` row **and** `QUEEN_PROXY_OPERATOR_ENABLED=true`
-on the cell. Both, resolved per request. With the flag off, an operator-class route
-`404`s before authentication runs at all, the same answer a hard block gives, with no
-lookup and no way in.
+An operator is a user whose stored `is_operator` bit is set **and**
+`QUEEN_PROXY_OPERATOR_ENABLED=true` on the cell. Both, resolved per request. With the flag
+off, an operator-class route `404`s before authentication runs at all, the same answer a
+hard block gives, with no lookup and no way in.
 
-A live operator is `admin` on every cluster on that cell, membership row or not, and is
+A live operator is `admin` on every cluster on that cell, membership or not, and is
 the only principal that can open the cell-wide surfaces: broker status, buffer state,
-host and PostgreSQL metrics, maintenance mode, the Prometheus endpoint, and the proxy-backed
-Users page. That page can create and name local or OAuth-first accounts for tenants represented
-on the selected cell, edit their display names, show their latest successful login, and add, change, or remove their roles on clusters on that cell. It cannot set the
-operator bit. Operator
-access is logged, sampled to one line per minute with a suppressed count, because a
-dashboard polls those routes.
+host and worker metrics, maintenance mode, and the proxy-backed Users page. That page can
+create and name local or OAuth-first accounts for tenants represented on the selected cell,
+edit their display names, show their latest successful login, and add, change, or remove
+their roles on clusters on that cell. It cannot set the operator bit. Operator access is
+logged, sampled to one line per minute with a suppressed count, because a dashboard polls
+those routes. The Prometheus endpoint on the proxy's port is not among them: it answers to
+the control-plane token instead
+([isolation](/reference/multi-tenant/isolation/#prometheus-sums-across-tenants)).
 
-Granting it is a `psql` call to `queen_proxy.set_operator(email, true)`. There is
-deliberately no HTTP path. See
+No route sets the operator bit: not the console, not the Users page, not the control
+plane. That is deliberate. See
 [Tenants, clusters and cells](/reference/multi-tenant/tenants/).
 
 <Aside type="caution">
@@ -326,8 +339,8 @@ cluster UUID:
 | --- | --- |
 | API key | `403`. A key is bound to its own cluster |
 | No credential | `401` |
-| Session with a `cluster_roles` row on the target | Acts with that row's role |
-| Session without a row | `403 no such cluster, or no role on it` |
+| Session with a role on the target | Acts with that role |
+| Session without one | `403 no such cluster, or no role on it` |
 | Live operator session | Acts as `admin` on any cluster that exists |
 
 An unresolvable cluster reference and an unauthorized one return the **same** `403`
@@ -340,7 +353,7 @@ A host listed in `QUEEN_PROXY_SHARED_HOSTS` fronts many clusters, so the `Host` 
 names nothing and resolution inverts: the credential names the cluster. An API key acts
 on the one cluster it is bound to, with no header needed and the header still refused.
 A session must name one, through `x-queen-act-cluster` or a `cluster` claim, and is then
-checked against `cluster_roles` by exactly the matrix above; a session that names none
+checked against its role on that cluster by exactly the matrix above; a session that names none
 is `403` with `this host serves several clusters; name one with x-queen-act-cluster`,
 which is what the dashboard's cluster selector exists to answer. No credential is `401`,
 never `421`: there is no wrong host to report.

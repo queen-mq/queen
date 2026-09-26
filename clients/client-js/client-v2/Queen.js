@@ -28,9 +28,9 @@ const CLOSE_FLUSH_DEADLINE_MILLIS = 30000
 // Both /api/v1/ack and /api/v1/ack/batch respond with a top-level JSON array,
 // one item per acknowledgment in request order:
 //   [{index, transactionId, success, error, queueName, partitionName, leaseReleased, dlq}]
-// (see queen.ack_messages_v2 / routes/ack.cpp). A rejected ack/nack (e.g.
-// "Invalid or expired lease") still arrives as HTTP 200 with success=false on
-// the item, so the per-item flag is the only signal that the broker accepted it.
+// A rejected ack/nack (e.g. "Invalid or expired lease") still arrives as HTTP
+// 200 with success=false on the item, so the per-item flag is the only signal
+// that the broker accepted it.
 
 function normalizeAckItem(item, index) {
   if (item === null || typeof item !== 'object') {
@@ -529,8 +529,8 @@ export class Queen {
     }
 
     // Dedupe: with v4 multi-partition pop, all messages in one batch share
-    // the same leaseId (one renew_lease_v2 call extends every claimed
-    // partition_consumers row). Without this, callers passing the full
+    // the same leaseId (one renew call extends the lease of every claimed
+    // partition). Without this, callers passing the full
     // messages array would issue N redundant identical HTTP calls.
     leaseIds = [...new Set(leaseIds)]
 

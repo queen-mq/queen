@@ -2,7 +2,7 @@
  * Queen C++ Client - Comprehensive Test Suite
  * 
  * Ported from Node.js client test-v2/ directory
- * Covers all human-written tests (excluding ai_* and maintenance)
+ * Covers all human-written tests (excluding ai_*)
  * 
  * Test Categories:
  * - Push operations

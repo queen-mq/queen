@@ -9,7 +9,7 @@
 //! ## What was actually broken, and what fixes each half
 //!
 //! Two facades in front of one Queen deployment already share everything
-//! durable: offsets are in Queen's key/value store and the log is in Postgres.
+//! durable: offsets are in Queen's key/value store and the records in its queues.
 //! What they did NOT share was who arbitrates a group, and that produced two
 //! distinct defects that need two distinct fixes:
 //!
@@ -44,11 +44,10 @@
 //! is stated rather than hidden: two Queen tenants running a group of the same
 //! name are coordinated by the same facade. That is harmless — they stay two
 //! entries in the coordinator's registry (`coordinator/mod.rs`, `GroupKey`) and
-//! their offsets and fences are two different `queen.kv` rows, because the
-//! tenant is a COLUMN there and an argument to the stored procedure
-//! (024_kv.sql:111-114). Ownership simply does not spread by tenant; with two
-//! or three nodes and a hash over the group id it spreads by group, which is
-//! the thing that needed spreading.
+//! their offsets and fences are two different KV rows, because the tenant is
+//! part of every KV key the broker stores. Ownership simply does not spread by
+//! tenant; with two or three nodes and a hash over the group id it spreads by
+//! group, which is the thing that needed spreading.
 //!
 //! ## Leadership is an ADVERTISEMENT, not an access control
 //!
@@ -58,12 +57,12 @@
 //! THE DATA; that reason does not exist here, and copying the refusal without
 //! the reason would cost real availability for nothing:
 //!
-//!   * `server/sql/procedures/032_log_fetch.sql:11-19` — a fetch *"is not a
-//!     pop. No lease is taken, no `queen.log_consumers` row is read, created or
-//!     advanced, no watermark is written, nothing is claimed"*.
-//!   * `server/sql/procedures/003_log_push.sql:131-213` — the offset is
-//!     allocated by the DATABASE under a `queen.log_partitions` row lock, so
-//!     two brokers appending to one partition cannot issue the same offset.
+//!   * a fetch (`POST /api/v1/fetch`) is not a pop: no lease is taken, no
+//!     consumer cursor is read, created or advanced, nothing is claimed.
+//!   * the offset is allocated by the broker's replicated state machine — one
+//!     ordered log for the whole Queen cluster, planned on the raft leader
+//!     whichever broker a push arrived at — so two brokers appending to one
+//!     partition cannot issue the same offset.
 //!
 //! and refusing would make each membership change a synchronised metadata storm
 //! during the very window in which the nodes disagree about the live set.

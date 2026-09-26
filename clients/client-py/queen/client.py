@@ -577,8 +577,8 @@ class Queen:
                 lease_ids = [lease_id]
 
         # Dedupe: with v4 multi-partition pop, all messages in one batch share
-        # the same leaseId (one renew_lease_v2 call extends every claimed
-        # partition_consumers row). dict.fromkeys preserves insertion order.
+        # the same leaseId (one renew call extends the lease of every claimed
+        # partition). dict.fromkeys preserves insertion order.
         lease_ids = list(dict.fromkeys(lease_ids))
 
         if not lease_ids:

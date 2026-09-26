@@ -1,32 +1,36 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import net from 'node:net'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { describe, it } from 'node:test'
 
 const suiteRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 
-function runWithUnavailableDatabase() {
+// A loopback port with nothing listening on it: bind an ephemeral port, then
+// release it. Not port 1: fetch() rejects the Fetch-spec "bad ports" (1 is one
+// of them) before it ever connects, so the preflight would fail with "bad port"
+// and never exercise a refused connection.
+function closedLoopbackPort() {
   return new Promise((resolve, reject) => {
+    const server = net.createServer()
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address()
+      server.close(error => (error ? reject(error) : resolve(port)))
+    })
+  })
+}
+
+function runWithUnreachableBroker(brokerUrl) {
+  return new Promise((resolve, reject) => {
+    const env = { ...process.env, QUEEN_SERVER_URL: brokerUrl }
+    // TEST_CONFIG=multiple would point run.js at its fixed localhost URLs
+    // instead of QUEEN_SERVER_URL.
+    delete env.TEST_CONFIG
     const child = spawn(process.execPath, ['test-v2/run.js', 'human'], {
       cwd: suiteRoot,
-      env: {
-        ...process.env,
-        PG_HOST: '127.0.0.1',
-        PG_PORT: '1',
-        PG_DB: 'postgres',
-        PG_USER: 'postgres',
-        PG_PASSWORD: 'postgres',
-        QUEEN_SERVER_URL: 'http://127.0.0.1:1',
-        // This test exercises the POSTGRES database-init-failure fatal path, so
-        // pin the child to postgres regardless of the ambient lane. On the raft1
-        // lane the container env carries QUEEN_TEST_STORAGE=raft, which run.js
-        // reads to SKIP the direct-DB setup (PLAN_RAFT.md §13.3) — inherited
-        // through `...process.env`, it would make run.js never touch Postgres and
-        // never print the ECONNREFUSED this test asserts. Overriding it here keeps
-        // the unit test identical and green on both the single and raft1 lanes.
-        QUEEN_TEST_STORAGE: 'postgres'
-      },
+      env,
       stdio: ['ignore', 'pipe', 'pipe']
     })
 
@@ -49,11 +53,12 @@ function runWithUnavailableDatabase() {
 }
 
 describe('integration runner lifecycle', () => {
-  it('returns a failure status when database initialization fails', async () => {
-    const result = await runWithUnavailableDatabase()
+  it('returns a failure status when the broker preflight fails', async () => {
+    const port = await closedLoopbackPort()
+    const result = await runWithUnreachableBroker(`http://127.0.0.1:${port}`)
 
     assert.equal(result.signal, null)
     assert.equal(result.code, 1, result.output)
-    assert.match(result.output, /Main error: connect ECONNREFUSED/)
+    assert.match(result.output, /Main error: broker preflight .*ECONNREFUSED/)
   })
 })

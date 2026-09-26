@@ -10,20 +10,26 @@ sourceOfTruth:
   - server/src/main.rs
   - server/src/handlers/mod.rs
   - server/src/handlers/data.rs
-  - server/src/handlers/queues.rs
-  - server/sql/schema.sql
-  - server/sql/procedures/012_configure.sql
-  - server/sql/procedures/001_log_schema.sql
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the queue-option defaults paragraph is rewritten for the merge rule; every default value is unchanged.
+  - server/src/handlers/raft.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/real/phase2.rs
+  - server/src/rsm/facade/real/phase2/admin.rs
+  - server/src/rsm/facade/real/phase2/reads.rs
+  - server/src/rsm/planner/timers.rs
+  - server/src/rsm/planner/kv.rs
+  - server/src/rsm/batcher.rs
+  - server/src/rsm/maintenance.rs
+  - server/src/rsm/admit.rs
+  - server/src/rsm/qlog/set.rs
+  - server/src/rsm/dashboard/store.rs
 ---
 
 A default reaches a message through one of three layers, and the layers are
 resolved in a fixed order:
 
 1. **Request parameter**: a query parameter or body field on one call.
-2. **Queue configuration**: a column on the queue's `queen.queues` row, written
-   by `POST /api/v1/configure` or created implicitly by the first push.
+2. **Queue configuration**: the options stored with the queue, written by
+   `POST /api/v1/configure` or created implicitly by the first push.
 3. **Environment**: process-wide, read once at boot.
 
 Where the same setting exists at two layers, the more specific one wins, but only
@@ -38,19 +44,20 @@ number exists for each.
 
 | Setting | Effective default | The other number, and why |
 | --- | --- | --- |
-| Lease time | **60 s** on a queue created implicitly by a push; **300 s** after an explicit `/configure` | One column, two writers. `queen.queues.lease_time` has a column default of 60, which is what an implicitly created queue gets; `/configure` computes `leaseTime` with a default of 300 and writes it explicitly into that same column. So the value depends on how the queue came into existence, and what the config display shows is what the pop path leases with. |
-| Deduplication window | **3600 s, on** | Deduplication is not opt-in. `queen.queues.dedup_window_seconds` defaults to 3600 and `/configure` re-applies 3600 whenever `dedupWindowSeconds` is omitted. Only an explicit `0` disables it. |
-| `RETENTION_INTERVAL` | **5000 ms** | 300000 was the retired engine's monolithic five-minute sweep. The log engine runs bounded autocommitting steps, so the cadence is 5 s. |
+| Lease time | **60 s** on a queue created implicitly by a push; **300 s** after an explicit `/configure` | Two writers, one option. A queue created by its first push gets 60; `/configure` defaults `leaseTime` to 300 and stores it. So the value depends on how the queue came into existence, and what the config display shows is what the pop path leases with. |
+| Deduplication window | **3600 s, on** | Deduplication is not opt-in. Every new queue, pushed or configured, gets `dedupWindowSeconds` 3600. Only an explicit `0` disables it. |
+| `RETENTION_INTERVAL` | **5000 ms** | 300000 was a 1.x five-minute sweep. On a raft node the leader plans a bounded maintenance pass every 5 s, and each pass is an ordinary entry in the replicated log. |
 | Pop long-poll timeout | **30000 ms** | Read from `DEFAULT_TIMEOUT` first, then `POP_DEFAULT_TIMEOUT_MS`, then 30000. Both names exist; `DEFAULT_TIMEOUT` takes precedence, so setting only `POP_DEFAULT_TIMEOUT_MS` while `DEFAULT_TIMEOUT` is also set has no effect. |
 
-One more that is often assumed off: **`QUEEN_HOTLIST` defaults to on**. The
-broker selects wildcard-pop candidates in memory rather than by scanning
-PostgreSQL. `QUEEN_HOTLIST=0` reverts to the SQL candidate scan.
-
-And one that is often assumed to be a flag and is not: **the key/value and timer
+One that is often assumed to be a flag and is not: **the key/value and timer
 surfaces have no boot switch**. Every broker registers those routes and exposes
 their metrics, exactly as it does for push and pop. Pausing a live surface is a
-runtime call on `POST /api/v1/system/kv-timers`, which answers 503, never 404.
+runtime call on `POST /api/v1/system/kv-timers`, after which the paused routes
+answer 503, never 404. In a cluster the flip takes effect at once only on the node
+that served the call; the other nodes apply the stored value when they restart.
+The timer fire does not read the switch: it runs on the leader every
+`QUEEN_RAFT_TIMER_TICK_MS` (50 ms), and only `QUEEN_RAFT_TIMER_TICK_MS=0` on every
+node stops it.
 
 <Aside type="caution">
 `QUEEN_TENANCY_HEADER=1` **refuses to boot** unless `QUEEN_KV_TRUSTED_PROXY=1` is
@@ -60,77 +67,57 @@ write another tenant's state knowing only that name. Setting the second variable
 is the operator asserting that a proxy in front supplies the header and strips
 the client's. The requirement is unconditional: no flag can switch the KV off to
 make that header safe. A safety interlock has to fail closed, which is also why an
-unparseable boolean anywhere in the configuration is a fatal boot error rather
-than a fallback to the default.
+unparseable boolean in the configuration is a fatal boot error rather than a
+fallback to the default.
 </Aside>
 
-`QUEEN_KV_REQUIRE_GRANT` is derived from `QUEEN_TENANCY_HEADER` rather than
-defaulted independently. With tenancy on, a tenant with no quota row is a
-**denial**; with tenancy off, a self-hosted operator, who is their own customer,
-configures nothing.
+`QUEEN_KV_REQUIRE_GRANT` and `QUEEN_EPHEMERAL_REQUIRE_GRANT` are derived from
+`QUEEN_TENANCY_HEADER` rather than defaulted independently. With tenancy on, a
+tenant with no grant is **refused**; with tenancy off, a self-hosted operator,
+who is their own customer, configures nothing.
 
 ## Environment defaults that shape behaviour
 
-The full list, with every variable, is in
-[Environment variables](/reference/config). These are the ones whose default
-changes what a client observes. The `QUEEN_ADMISSION_*` defaults in particular
-are the settled output of a measured control loop rather than round numbers:
-[flow control](/internals/flow-control/) explains what the loop measures and why
-each of them sits where it does.
+The full list is in [Environment variables](/reference/config). These are the
+ones whose default changes what a client or an operator observes.
 
 | Variable | Default | Effect of the default |
 | --- | --- | --- |
-| `PORT` | `6632` | The one port the HTTP listener serves. |
-| `QUEEN_BIND_ADDR` | `0.0.0.0` | Every interface. A host or IP only: a value carrying its own port is a fatal boot error rather than a silent bind somewhere else. It also becomes the mesh listener's address unless `QUEEN_MESH_BIND_ADDR` overrides it. |
+| `PORT` | `6632` | The one port the HTTP listener serves: API, dashboard, `/health` and metrics. |
+| `QUEEN_BIND_ADDR` | `0.0.0.0` | Every interface. A host or IP only: a value carrying its own port is a fatal boot error rather than a silent bind somewhere else. |
 | `QUEEN_MAX_BODY_BYTES` | `67108864` (64 MiB) | Larger request bodies are rejected with 413 before any handler runs. |
-| `DB_POOL_SIZE` | `160` | Upper bound on concurrent PostgreSQL work. A request that cannot get a pooled connection at all answers 500 with `{"error":"pool"}`. |
-| `QUEEN_STMT_TIMEOUT_MS` | `30000` | A statement past this is abandoned, cancelled server-side, and its pooled connection is quarantined. |
-| `QUEEN_ADMISSION_MIN` | `96` on the default pool | Floor on the admitted-write-transaction budget. It is derived, not a constant: two thirds of (`DB_POOL_SIZE` minus `QUEEN_ADMISSION_POOL_RESERVE`), never below 8, which is 96 at `DB_POOL_SIZE=160` with reserve 16. Shrink the pool and the floor shrinks with it. A fixed floor larger than the pool would admit more concurrent transactions than there are connections. |
-| `QUEEN_ADMISSION_MAX` | `128` | Ceiling on the same budget, itself capped at `DB_POOL_SIZE - QUEEN_ADMISSION_POOL_RESERVE`, so a pool smaller than 144 lowers the effective ceiling without any change here. |
-| `QUEEN_ADMISSION_POOL_RESERVE` | `16` | Pooled connections held back from the admission budget so admitted work never queues on the pool and unmetered admin writes cannot deadlock behind metered ones. |
-| `QUEEN_ADMISSION_SHARE_PUSH` / `_POP` / `_ACK` / `_MAINT` | `0.25` / `0.40` / `0.30` / `0.05` | Guaranteed lane shares of the budget. They order the wake queue when the budget is exhausted (ack, then pop, then push, then maint); they are not slot reservations and not a floor on a lane's own concurrency cap. |
-| `QUEEN_POP_FUSION` | `false` | Off. Each pop claim commits on its own. Set it and N claim legs share one transaction and one commit, and the Pop lane takes one admission slot per fused flush instead of one per claim. |
+| `QUEEN_RAFT_DIR` | `/var/lib/queen/raft` | Where the node keeps all its state. Without a persistent volume there, the data dies with the container. |
+| `QUEEN_RAFT_REPLICATOR` | `local` | A single node with no network and no consensus. A cluster needs `openraft`. |
+| `QUEEN_RAFT_READY_LAG_MS` | `2000` | `/health` answers 200 only while a leader is known and the apply lag is under this. |
+| `QUEEN_RAFT_DISK_HIGH_PCT` / `QUEEN_RAFT_DISK_LOW_PCT` | `85` / `80` | Writes that grow storage answer 507 from the high mark until the data directory's filesystem is back under the low one. |
+| `QUEEN_QLOG_SHARDS` | `0` | One queue log per queue. Fixed when the data directory is created. |
+| `QUEEN_RAFT_ADMIT_MAX_MB` | `64` | The push admission budget, in request bytes. A push or transaction over it waits for room, and answers 429 only after the hold. `0` turns the gate off. |
+| `QUEEN_RAFT_ADMIT_HOLD_MS` | `15000` | How long a push or transaction waits for room before the 429, jittered by 25 percent either way. |
+| `QUEEN_STMT_TIMEOUT_MS` | `30000` | The deadline of an ack, a transaction and a lease extension, capped at 60 s. Past it the request answers 503 `timeout`. |
 | `DEFAULT_TIMEOUT` / `POP_DEFAULT_TIMEOUT_MS` | `30000` | How long a `wait=true` pop parks when the client sends no `timeout`. |
 | `DEFAULT_SUBSCRIPTION_MODE` | `new` | Where a consumer group starts when its first pop sends no `subscriptionMode`: `new` at the partition's tail, `all` at the oldest retained offset. Only consulted on a group's first contact, and ignored entirely by group-less pops, which are always `all`. |
-| `POP_WAIT_INITIAL_INTERVAL_MS` | `100` | First re-query interval of a parked pop; grows past `POP_WAIT_BACKOFF_THRESHOLD` (3) by `POP_WAIT_BACKOFF_MULTIPLIER` (2.0) up to `POP_WAIT_MAX_INTERVAL_MS` (1000). A push-wake resets it. |
-| `QUEEN_POP_PENDING_GATE` | on | Parked re-polls on the single-partition and discovery pop routes probe a cheap pending check and skip the full pop procedure when nothing is deliverable. Kill switch only; the wildcard route's gate is unconditional. |
-| `RETENTION_INTERVAL` | `5000` | Maintenance cycle cadence. Scheduled through the `queen.maintenance_leases` claim row, so the value is the true cluster cadence: exactly one instance sweeps per period, whatever the replica count. |
-| `RETENTION_BATCH_SIZE` | `1000` | Maximum segment rows deleted per bounded step, and partitions deleted per cleanup batch. |
-| `RETENTION_PARALLELISM` | `1` | Concurrent per-partition step workers in retention phases 1 to 3, clamped to 16. `1` is the historical serial cycle, so an upgrade changes nothing until you raise it. Each worker holds one maintenance-lane admission slot and one pooled connection while it runs, so raise `QUEEN_ADMISSION_SHARE_MAINT` with it. |
-| `PARTITION_CLEANUP_DAYS` | `30` | How long a partition must be empty *and* idle before the cleanup phase deletes the row. `QUEEN_PARTITION_CLEANUP_ENABLED=false` keeps every partition forever. |
-| `METRICS_FLUSH_MS` | `60000` | How often per-queue counters reach PostgreSQL, and therefore how stale a per-queue Prometheus series can be. |
-| `STATS_INTERVAL_MS` | `10000` | Cadence of the stats reconciler that feeds the dashboard's pending and total counts. A true cluster cadence: scheduled through the `queen.maintenance_leases` claim row, one refresh per period. |
-| `RETAINED_BYTES_INTERVAL_MS` | `600000` | Cadence of the retained-bytes lane, the one `log_segments` scan in the stats family; feeds the `retainedBytes` gauge the proxy storage quota reads. Scheduled through the claim row like the two above. |
-| `QUEEN_CACHE_REFRESH_INTERVAL_MS` | `60000` | How long a lost peer notification can leave a stale per-queue cache in place. |
-| `QUEEN_HOTLIST` | on | Broker-side candidate selection for wildcard pops. |
-| `QUEEN_HOTLIST_RESEED_FULL_MS` | `300000` | How often a ring is re-derived from *every* partition of its queue instead of only the recently written ones. It bounds how long a partition wrongly missing from a ring can stay missing. `0` is the kill switch: every reseed is a full walk again, and the repair paths that exist only because a windowed pass cannot see a cursor move are switched off with it. |
-| `QUEEN_ACK_FUSION` | on | Coalesces full-batch acks into one commit per flush. |
-| `QUEEN_DEDUP_CACHE` | on, `512` MB | Broker-side dedup cache. Correctness never depends on it; disabled, SQL probes the full window. |
+| `RETENTION_INTERVAL` | `5000` | How often the leader plans a maintenance pass. Only the leader plans, and every node applies the result, so the cadence is the cluster's whatever the node count. |
+| `RETENTION_BATCH_SIZE` | `1000` | The most rows one maintenance entry considers. |
+| `PARTITION_CLEANUP_DAYS` | `30` | How long a partition must be empty *and* idle (no write, lease or new consumer group, no dead letters) before maintenance deletes it. `QUEEN_PARTITION_CLEANUP_ENABLED=false` keeps every partition forever. |
+| `METRICS_FLUSH_MS` | `60000` | How often the node's counters reach its `dash.db`, and so how fresh the dashboard's per-minute history is. |
+| `QUEEN_DASH_NODE_RETENTION_H` / `QUEEN_DASH_QUEUE_RETENTION_H` | `168` / `24` | Hours of node rows and of queue rows each node's `dash.db` keeps. |
 | `JWT_ENABLED` | `false` | No authentication. Every route is open, including admin ones. |
 | `QUEEN_TENANCY_HEADER` | `false` | Every request resolves to the default tenant `00000000-0000-0000-0000-000000000001`. |
-| `QUEEN_SWEEPER` | `true` | Spawned on every broker, because the surfaces it serves are on every broker. Off, expired keys are never pruned and timers never fire: nothing is lost, it waits. This decides whether a background task exists, not whether a surface does. |
-| `QUEEN_KV_POOL_SIZE` | `16` on the default pool | The key/value routes take their connections from a pool of their own, `DB_POOL_SIZE / 10` clamped to 4..32, so a slow database costs them their throughput instead of costing the message path its connections. Derived, like the admission floor: shrink the pool and this shrinks with it. |
-| `QUEEN_TIMERS_MAX_HORIZON_S` | `7776000` (90 days) | Finite on purpose, and not "0 means unlimited". A finite horizon is what keeps the pending-timer quota cyclic: with an infinite one a tenant fills it once and never frees it. |
-| `QUEEN_SWEEPER_LEASE_MS` | `30000` | How long a broker holds a claimed timer, and therefore the longest a cancel can answer `too_late` after that broker dies. |
-| `QUEEN_APPLY_SCHEMA` | `true` | The broker applies the schema and all stored procedures on every boot. |
-| `QUEEN_SYNC_ENABLED` | `true` | Enabled, but inert with no `QUEEN_MESH_PEERS`: a single broker binds nothing. |
 | `QUEEN_ENCRYPTION_KEY` | unset | At-rest payload encryption is off, and a queue flagged `encryptionEnabled` stores plaintext. |
-| `FILE_BUFFER_DIR` | `/var/lib/queen/buffers` | Where pushes spool during a database outage. Must be writable and persistent, or the durability spool silently has nowhere to go. |
 | `LOG_LEVEL` | `info` | `RUST_LOG` overrides it; both accept full filter syntax. |
 
 ## Queue option defaults
 
-Applied by `POST /api/v1/configure`, and by the column defaults for a queue
-created implicitly by a push. Since 1.6.0 `/configure` **merges**: on an edit an
-omitted key keeps the value the queue already has, and the value in this table
-is what a create lands on, what an explicit `null` restores, and what
+Applied by `POST /api/v1/configure`, and to a queue created implicitly by a push.
+`/configure` **merges**: on an edit an omitted key keeps the value the queue
+already has, and the value in this table is what a create lands on and what
 `"mode": "replace"` puts back for every key the body omits. See
 [Queue options](/reference/queue-options) for what each one does.
 
 | Option | Default | Note |
 | --- | --- | --- |
-| `namespace` | `""` | For a push-created queue, derived from the queue name before the first `.`. |
-| `task` | `""` | For a push-created queue, derived from the name between the first and second `.`. |
+| `namespace` | `""` | For a push-created queue, the queue name before the first `.`. |
+| `task` | `""` | For a push-created queue, the name between the first and second `.`. |
 | `priority` | `0` | Stored and echoed; no pop, ack or maintenance path reads it. |
 | `leaseTime` | `300` (configure) / `60` (push-created) | Seconds. |
 | `retryLimit` | `3` | Explicit `failed` acks charged before dead-lettering. |
@@ -143,9 +130,9 @@ is what a create lands on, what an explicit `null` restores, and what
 | `retentionSeconds` | `0` | Needs `retentionEnabled` and a positive value to do anything. |
 | `completedRetentionSeconds` | `0` | Same gate. |
 | `maxWaitTimeSeconds` | `0` | Age eviction. Runs whether or not `retentionEnabled` is set. |
-| `minPopWaitTime` | `0` | Milliseconds a non-empty under-full pop may wait to fatten. Clamped to 0–60000. |
+| `minPopWaitTime` | `0` | Milliseconds, clamped to 0–60000 when stored. Stored and echoed; a 2.0 pop does not wait for it. |
 | `encryptionEnabled` | `false` | Requires a valid `QUEEN_ENCRYPTION_KEY` to have any effect. |
-| `dedupWindowSeconds` | `3600` | Stored on `queen.queues` like every other option, and echoed in the `/configure` response. |
+| `dedupWindowSeconds` | `3600` | Stored with the queue like every other option, and echoed in the `/configure` response. |
 
 ## Request parameter defaults
 
@@ -163,29 +150,22 @@ is what a create lands on, what an explicit `null` restores, and what
 | | `leaseSeconds` | queue `leaseTime`, else 60 |
 | `GET /api/v1/pop/queue/:queue/partition/:partition` | same, except `partitions` | ignored (a specific pop is one partition) |
 | `GET /api/v1/pop` (discovery) | `namespace` / `task` | none (a call with neither is a 400) |
+| | `leaseSeconds` | `60` |
 | `POST /api/v1/lease/:leaseId/extend` | `seconds` | `60`, also for an empty body |
 | `POST /api/v1/ack`, `/ack/batch` | `consumerGroup` | `__QUEUE_MODE__` |
-| | `status` | `completed` when absent; an unrecognised value is treated as `failed` |
-| `GET /api/v1/messages` | `limit` / `offset` | `200` / `0` |
-| `GET /api/v1/dlq` | `limit` / `offset` | `100` / `0` |
-| `GET /api/v1/status/queues` | `limit` / `offset` | `100` / `0` |
-| `GET /api/v1/traces/by-name/:traceName` | `limit` / `offset` | `100` / `0` |
-| `GET /api/v1/traces/names` | `limit` / `offset` | `50` / `0` |
+| | `status` | `completed` when absent. `failed`, `dlq` and `retry` are recognised in any case; any other value is treated as `completed` |
+| `GET /api/v1/messages` | `limit` / `offset` | `200` (clamped to 1–1000) / `0` |
+| `GET /api/v1/dlq` | `limit` / `offset` | `100` (clamped to 1–1000) / `0` |
+| `GET /api/v1/traces/by-name/:traceName` | `limit` / `offset` | `200` (clamped to 1–1000) / `0` |
+| `GET /api/v1/traces/names` | `limit` / `offset` | `100` (clamped to 1–1000) / `0` |
 | `GET /api/v1/consumer-groups/lagging` | `minLagSeconds` | `3600` |
 | `DELETE /api/v1/consumer-groups/:group` | `deleteMetadata` | `true` |
-| `POST …/queues/:queue/partitions/:partition/seek` | body | an empty body means `toEnd: true` |
-| `POST …/queues/:queue/seek` | body | required (`toEnd: true` or a `timestamp`), else 400 |
-| `POST /api/v1/kv`, a `getPrefix` op | `limit` | `100`, clamped to `QUEEN_KV_PREFIX_LIMIT` (1000) and never rejected |
+| `POST …/queues/:queue/seek` and `…/partitions/:partition/seek` | body | an empty body means `toEnd: true`; a body with neither `toEnd: true` nor a `timestamp` is a 400 |
+| `POST /api/v1/kv`, a `getPrefix` op | `limit` | `100`, clamped to 1000 and never rejected |
 | | `keysOnly` | `false` |
 | `PUT /api/v1/kv/:ns/*key` | `ttlSeconds` or `forever` | **no default**: exactly one of the two is mandatory, and a `put` never inherits the previous key's expiry |
 | `GET /api/v1/timers/:queue` | `limit` / `after` | `100` clamped to 1000 / none |
 | `POST /api/v1/timers` | `partition` | `Default` |
-
-<Aside type="note">
-The queue-level seek and the partition-level seek differ here on purpose: the
-dashboard's per-partition "skip to end" button sends no body, so an empty body is
-accepted there and rejected on the queue-wide form.
-</Aside>
 
 ## Fixed values that are not configurable
 
@@ -194,12 +174,9 @@ accepted there and rejected on the queue-wide form.
 | `Default` | The partition name used when a push names none. |
 | `__QUEUE_MODE__` | The consumer group used when a pop or ack names none. Its cursor is real state, like any other group's. |
 | `00000000-0000-0000-0000-000000000001` | The default tenant. Used for every request when `QUEEN_TENANCY_HEADER` is off, and when it is on but the header is absent or empty. |
-| `60` s | The lease floor used when the queue's configuration row cannot be read (the lookup could not reach the database, or the row is somehow absent). It equals the `queen.queues.lease_time` column default on purpose. |
-| `30` s | How long the broker caches a queue's `delayedProcessing`, `windowBuffer` and `minPopWaitTime` for its in-memory scheduler, so a `/configure` change to those three takes effect within that window rather than instantly. |
-| `737001` | The advisory lock inside the retention cycle. Belt, not scheduler: cadence comes from the `retention` row in `queen.maintenance_leases`, and the lock only excludes overlap against instances that predate the claim row. |
-| `737002` | Same role for the stats reconciler (`stats_refresh` row); also excludes the manual refresh route. |
-| `737003` | Same role for the retained-bytes lane (`retained_bytes` row). |
-| `778120010` | The advisory lock that serialises the boot-time schema apply across instances. |
+| `60` s | The lease used when a pop names no `leaseSeconds` and the queue has no configuration yet, and for a discovery pop that names none. It equals the lease of a push-created queue on purpose. |
+| `85` / `80` percent | The store's memory-map use at which the disk gate also closes and reopens. |
+| `4096` | The most shared queue logs `QUEEN_QLOG_SHARDS` can ask for. |
 
 ## Related pages
 

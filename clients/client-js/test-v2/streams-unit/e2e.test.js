@@ -1,5 +1,5 @@
 /**
- * End-to-end test for queen-streams against a live Queen server + PG.
+ * End-to-end test for queen-streams against a live Queen server.
  *
  * What it covers (per the plan's Definition of Done):
  *   1. 10,000 messages across 50 partitions
@@ -8,14 +8,10 @@
  *   4. Exactly-once on the sink queue
  *   5. Per-partition state isolation
  *   6. Downstream consumer of sink wakes up immediately
- *      (validates inline update_partition_lookup_v1 in streams_cycle_v1)
  *
  * Prerequisites:
  *   - Queen running on QUEEN_URL (default http://localhost:6632)
- *   - The streams procedures applied (auto-loaded on Queen boot):
- *     002_streams_schema, 007_log_streams, 008_streams_register_query_v1,
- *     009_streams_state_get_v1 (the retired rows-era streams cycle's role
- *     now lives in 007_log_streams' log_streams_cycle_v1)
+ *   - A broker serving the /streams/v1 routes (register, state/get, cycle)
  *
  * Run:
  *   QUEEN_URL=http://localhost:6632 node --test test/e2e.test.js
@@ -129,7 +125,7 @@ describe('queen-streams e2e (live Queen)', { skip: !SHOULD_RUN }, () => {
 
     // 3. Mid-stream kill: after 1.5s, stop the runner abruptly to simulate
     //    a worker crash, then restart it. Cursor + state should reconcile
-    //    via Queen's lease/retry + queen_streams.state PK.
+    //    via Queen's lease/retry + the per-partition streams state key.
     setTimeout(async () => {
       if (!stopped) {
         await handle.stop()
@@ -205,8 +201,8 @@ describe('queen-streams e2e (live Queen)', { skip: !SHOULD_RUN }, () => {
       const winKey = m.data && m.data.__winKey
       // The aggregate value doesn't carry windowKey by default; we check for
       // duplicates by (partition + transactionId) instead, which Queen
-      // guarantees unique across a partition. The streams_cycle_v1 SP
-      // dedupes via the SAME unique constraint that push_messages_v3 uses.
+      // guarantees unique across a partition. The streams cycle's sink
+      // pushes go through the SAME transactionId dedup as any push.
       const dedupKey = `${m.partition}|${m.transactionId}`
       assert.ok(!seen.has(dedupKey), 'duplicate sink message for ' + dedupKey)
       seen.add(dedupKey)
@@ -214,7 +210,7 @@ describe('queen-streams e2e (live Queen)', { skip: !SHOULD_RUN }, () => {
 
     // 6. Per-partition state isolation: every cycle the runner committed
     //    must touch state rows ONLY for its own partition. We can't easily
-    //    observe this from the client side (no DB access), but the
+    //    observe this from the client side (the stored state is private), but the
     //    aggregate-shape correctness in (5) above implies it (a leaked
     //    cross-partition write would produce wrong sums).
 

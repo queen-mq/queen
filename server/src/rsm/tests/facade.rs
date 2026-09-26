@@ -752,16 +752,6 @@ async fn phase_two_admin_detail_and_stream_state_accept_the_raft_partition_id() 
     assert_eq!(parse(&raft_status.body)["role"], "voter");
     assert_eq!(parse(&raft_status.body)["state"], "leader");
 
-    let postgres_stats = facade
-        .api(
-            ctx(),
-            call("GET", "/api/v1/analytics/postgres-stats", Value::Null),
-        )
-        .await
-        .expect("Postgres compatibility stats");
-    assert_eq!(postgres_stats.status, 200, "{}", postgres_stats.body);
-    assert_eq!(parse(&postgres_stats.body)["database"], "raft");
-
     facade.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }

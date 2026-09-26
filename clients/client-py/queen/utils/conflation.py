@@ -123,10 +123,6 @@ def check_pop_response(
     and §7.3 E2E-4 require to keep running -- and it would do it on that
     consumer's first poll of an idle queue.
 
-    ``paused`` is likewise not a verdict: the broker refuses pops during pop
-    maintenance before the request ever reaches the claim path, so there is no
-    policy to echo and nothing to conclude from the absence of one.
-
     A no-op when ``requested`` is falsy -- the check keys off what THIS consumer
     asked for, never off the response alone, so a consumer that never opted in
     is byte-for-byte unaffected.
@@ -141,9 +137,6 @@ def check_pop_response(
         return
 
     if body.get("conflation") is True:
-        return
-
-    if body.get("paused") is True:
         return
 
     raise ConflationUnsupportedError(UNSUPPORTED_MESSAGE)

@@ -3,9 +3,9 @@
 //! A per-queue storage class whose contents live in this process's heap and
 //! survive nothing: process exit (clean or crash), ownership movement, deploys.
 //! The durable engine is not edited to make this work — not its handlers, not
-//! its stored procedures, not its fusion — and that separation is enforced by
-//! construction: **nothing in this file constructs SQL, takes a pooled
-//! connection, or awaits anything at all.**
+//! its state machine, not its fusion — and that separation is enforced by
+//! construction: **nothing in this file touches the replicated store or awaits
+//! anything at all.**
 //!
 //! ---------------------------------------------------------------------------
 //! WHY EVERY METHOD HERE IS SYNCHRONOUS
@@ -73,8 +73,8 @@
 //! not sampled. So the per-tenant allowance lives on `TenantUsage`, next to the
 //! occupancy it bounds, and `switches::decide_ephemeral` reads it through
 //! `gate_grant` / `gate_push` — same three rungs, same `Answer`, different
-//! authority. What Postgres holds is only the GRANT ROW, refreshed on a slow
-//! cadence by `refresh_once` at the bottom of this file.
+//! authority. What the replicated store holds is only the GRANT ROW, adopted at
+//! boot (`apply_grants`) and on every grant write (`upsert_grant`).
 //!
 //! The `#[allow(dead_code)] // T1b` marks that used to sit on the `configure`
 //! seam and the status reads are gone: this phase gave every one of them a
@@ -261,11 +261,11 @@ pub struct QueueOptions {
 impl QueueOptions {
     /// Apply over a base, CLAMPING every value against the broker's own knobs.
     ///
-    /// The clamp is why 030_ephemeral.sql stores the options blob whole and
-    /// validates nothing: the engine has to clamp anyway (an operator may lower
+    /// The clamp is why the store keeps the options blob whole and validates
+    /// nothing: the engine has to clamp anyway (an operator may lower
     /// `QUEEN_EPHEMERAL_QUEUE_MAX_BYTES` under queues that were declared when it
-    /// was higher), so a CHECK constraint would be a second authority that
-    /// drifts the first time that happens.
+    /// was higher), so a stored check would be a second authority that drifts
+    /// the first time that happens.
     pub fn apply(&self, base: QueueConfig, k: &Knobs) -> QueueConfig {
         let mut c = base;
         if let Some(v) = self.max_bytes {
@@ -400,60 +400,6 @@ pub enum Route {
         /// The peer's advertised base URL, e.g. `http://queen-b:6632`.
         http_addr: String,
     },
-}
-
-/// One node's weight for one key (§3.7).
-///
-/// HRW ("rendezvous") and not a modulo or a consistent-hashing ring, for the
-/// property that matters here: adding or removing ONE node moves only the keys
-/// that node wins or loses — roughly `1/n` of them — and moves nothing else. On
-/// this class a moved key is an emptied ring (§1.2), so "how many keys move" is
-/// literally "how much data is dropped", and a modulo (which reshuffles almost
-/// everything) would turn one broker joining into a cell-wide wipe.
-///
-/// The score is `xxh3_64(key, seed = xxh3_64(node))`: hashing the NODE into the
-/// seed and the KEY into the body means the per-node seed can be computed once
-/// per node and the key is walked once per candidate, and — unlike
-/// `hash(node ++ key)` — no concatenation buffer is allocated per candidate.
-pub fn hrw_score(node: &str, key: &str) -> u64 {
-    xxhash_rust::xxh3::xxh3_64_with_seed(
-        key.as_bytes(),
-        xxhash_rust::xxh3::xxh3_64(node.as_bytes()),
-    )
-}
-
-/// The winner of `key` among `nodes`. `None` only on an empty candidate set,
-/// which no caller here can produce (self is always a candidate).
-///
-/// The tie-break is the node NAME and never the iteration order: two brokers
-/// hashing the same key must agree, and the order a `Vec` happens to be in is
-/// not a fact they share. A 64-bit collision between two live node ids is
-/// vanishingly unlikely and the tie-break costs one comparison — the point is
-/// that the answer is a FUNCTION of the membership set, with no hidden inputs.
-pub fn hrw_pick<'a>(key: &str, nodes: &'a [String]) -> Option<&'a str> {
-    let mut best: Option<(&'a str, u64)> = None;
-    for n in nodes {
-        let s = hrw_score(n, key);
-        let take = match best {
-            None => true,
-            Some((bn, bs)) => s > bs || (s == bs && n.as_str() > bn),
-        };
-        if take {
-            best = Some((n.as_str(), s));
-        }
-    }
-    best.map(|(n, _)| n)
-}
-
-/// The rendezvous key of one (queue, partition): the engine's own composite key
-/// plus the partition, joined with the same `\x1f` (§3.7).
-///
-/// Built from `qkey` and not from the three parts, so the tenant/queue half is
-/// spelled EXACTLY as the map key it names — including the `eph:` prefix. A key
-/// that differed from the map key by one byte would place a partition on a
-/// broker that then looked it up under a different name.
-pub fn rendezvous_key(tenant: &str, name: &str, partition: &str) -> String {
-    format!("{}\x1f{}", Ephemeral::qkey(tenant, name), partition)
 }
 
 /// `e:<epoch_hex>:<partition>:<seq>` — opaque to clients, self-describing to
@@ -803,8 +749,8 @@ impl Ring {
     /// The number a DEPTH READ should publish for this ring.
     ///
     /// With a named group, that group's own backlog. Without one, the WORST
-    /// cursor — the same precedence `log_queue_depth_v1` applies on the durable
-    /// side, named groups first and `__QUEUE_MODE__` speaking only when no named
+    /// cursor — the same precedence the durable side's depth read applies,
+    /// named groups first and `__QUEUE_MODE__` speaking only when no named
     /// group exists — so the two engines answer the same question the same way.
     /// With no cursor at all the answer is the ring's length: nobody has
     /// consumed anything, so everything is owed.
@@ -1132,7 +1078,7 @@ impl AckOutcome {
 ///
 /// The columns are this class's own truth and are deliberately NOT the durable
 /// listing's: there is no `pending` vs `retained` split (nothing is retained), no
-/// DLQ (§9) and no lag-from-Postgres. `declared` is the tier of §1.1, and it is
+/// DLQ (§9) and no lag. `declared` is the tier of §1.1, and it is
 /// the one column that tells an operator whether a queue survives a restart —
 /// as configuration, never as contents.
 #[derive(Clone, Debug)]
@@ -1218,15 +1164,6 @@ pub struct Ephemeral {
     /// optimization for a loop that may not exist, and the on-touch sweep is the
     /// correctness floor either way. Same shape as `Notifier::attach_transport`.
     wake_hint: OnceLock<fn(i64)>,
-    /// §3.5/§3.7 — the mesh, for membership and for the admin broadcast.
-    ///
-    /// A `OnceLock` and not a constructor argument for the same reason the
-    /// notifier's is: the transport is built AFTER the state its inbound
-    /// handlers capture, so taking it at construction would be a cycle. NEVER
-    /// SET ⇒ single broker ⇒ `route` short-circuits to `Local` before it hashes
-    /// anything and `broadcast_admin` is a no-op — the pre-mesh behaviour, which
-    /// is what every free-tier cell and the embedded `queen::Broker` run.
-    mesh: OnceLock<Arc<crate::mesh::MeshTransport>>,
 }
 
 impl Ephemeral {
@@ -1245,19 +1182,12 @@ impl Ephemeral {
             knobs,
             metrics,
             wake_hint: OnceLock::new(),
-            mesh: OnceLock::new(),
         })
     }
 
     /// Wire the sweeper's waker. Only the first call wins; safe to never call.
     pub fn attach_wake_hint(&self, f: fn(i64)) {
         let _ = self.wake_hint.set(f);
-    }
-
-    /// Wire the mesh (§3.5/§3.7). Only the first call wins; safe to never call —
-    /// never calling it IS the single-broker configuration.
-    pub fn attach_mesh(&self, t: Arc<crate::mesh::MeshTransport>) {
-        let _ = self.mesh.set(t);
     }
 
     #[inline]
@@ -1503,214 +1433,17 @@ impl Ephemeral {
         }
     }
 
-    // ------------------------------------------------- §3.7 rendezvous placement
+    // ------------------------------------------------------------ placement
 
-    /// The candidate set: every live, ephemeral-capable peer, plus self.
-    ///
-    /// `None` means THERE IS NO MESH — not "no members" — and is the
-    /// short-circuit of §3.7: with no transport attached, self owns everything
-    /// and no hash is computed at all.
-    /// ONE MEMBERSHIP SNAPSHOT PER DECISION. The members come back with their
-    /// addresses attached so the winner's `http_addr` is a lookup in a list
-    /// already in hand — asking the mesh twice would not only cost a second
-    /// clone of the list on every forwarded request, it would let the two reads
-    /// disagree and pick an address for a node the second read no longer has.
-    fn candidates(&self) -> Option<(String, Vec<String>, Vec<crate::mesh::EphMember>)> {
-        let mesh = self.mesh.get()?;
-        let members = mesh.eph_members();
-        if members.is_empty() {
-            // A mesh with no LIVE capable peer is a single broker for placement
-            // purposes, and taking the same early exit keeps the two cases one
-            // code path: a cell whose peer is down must behave exactly like a
-            // cell that never had one, or a rolling restart would answer
-            // differently from a fresh install.
-            return None;
-        }
-        let me = mesh.server_id().to_string();
-        let mut nodes: Vec<String> = Vec::with_capacity(members.len() + 1);
-        nodes.push(me.clone());
-        for m in &members {
-            // A peer announcing OUR server_id is a misconfiguration (two brokers
-            // sharing QUEEN_SERVER_ID); dedupe rather than let one key have two
-            // holders that each think they are it.
-            if m.server_id != me {
-                nodes.push(m.server_id.clone());
-            }
-        }
-        Some((me, nodes, members))
+    /// Where `(queue, partition)` lives: always this broker. The rings are
+    /// node-local RAM; there is no cross-broker placement.
+    pub fn route(&self, _tenant: &str, _name: &str, _partition: &str) -> Route {
+        Route::Local
     }
 
-    /// Who owns `(queue, partition)` — and, when that is not us, DROP whatever
-    /// this broker still holds for it (§3.7, the membership-change wipe).
-    ///
-    /// THE WIPE IS A SIDE EFFECT OF ASKING, and that is the design, not a
-    /// shortcut. Ownership moves when membership changes, and a ring left behind
-    /// on the old owner is memory nobody can reach: its messages are invisible to
-    /// every consumer (they all forward to the new owner) and its bytes still
-    /// count against three budgets. Doing it here means it happens on the next
-    /// TOUCH of that partition, with no watcher thread and no scan — and the
-    /// periodic `reap_foreign` below covers the partitions nobody touches again.
-    pub fn route(&self, tenant: &str, name: &str, partition: &str) -> Route {
-        match self.owner_of(tenant, name, partition) {
-            None => Route::Local,
-            Some((server_id, http_addr)) => {
-                self.wipe_ring(tenant, name, partition);
-                Route::Remote {
-                    server_id,
-                    http_addr,
-                }
-            }
-        }
-    }
-
-    /// The PURE half of `route`: who owns this partition, with no side effect.
-    /// `None` = this broker (including the no-mesh short-circuit).
-    ///
-    /// Split out so the periodic reap can ask about a partition and then decide
-    /// what to do, and so the decision itself is testable without a live ring.
-    fn owner_of(&self, tenant: &str, name: &str, partition: &str) -> Option<(String, String)> {
-        let c = self.candidates()?;
-        Self::owner_in(&c, tenant, name, partition)
-    }
-
-    /// `owner_of` against a candidate set the caller already holds.
-    ///
-    /// Split out for `reap_foreign`, which asks about EVERY partition on the
-    /// broker: a fresh membership snapshot per partition would make a cell with
-    /// ten thousand inboxes lock and clone the peer list ten thousand times per
-    /// refresh. Reusing one snapshot is also the more correct sweep — a pass that
-    /// re-read membership between partitions could act on two rings under two
-    /// different views of the cluster.
-    fn owner_in(
-        cands: &(String, Vec<String>, Vec<crate::mesh::EphMember>),
-        tenant: &str,
-        name: &str,
-        partition: &str,
-    ) -> Option<(String, String)> {
-        let (me, nodes, members) = cands;
-        let key = rendezvous_key(tenant, name, partition);
-        let owner = hrw_pick(&key, nodes)?;
-        if owner == me {
-            return None;
-        }
-        // The address is looked up on the WINNER rather than carried through the
-        // hash: the hash's input is the id set — the thing every broker agrees on
-        // — and an address is a local detail of how to reach it.
-        let addr = members
-            .iter()
-            .find(|x| x.server_id == owner)
-            .map(|x| x.http_addr.clone())
-            .filter(|a| !a.is_empty())?;
-        Some((owner.to_string(), addr))
-    }
-
-    /// The partition-less pop's placement rule (§3.7, v1).
-    ///
-    /// A pop that names no partition is asking about a QUEUE, and a queue's
-    /// partitions can hash to different owners — so there is no single right
-    /// answer and v1 picks the simple one:
-    ///
-    ///   * if ANY partition of this queue is owned here, serve LOCALLY and let
-    ///     the engine's existing partition-less pop visit the local rings. The
-    ///     pop sees this broker's share of the queue and nothing else.
-    ///   * otherwise route on the DEFAULT partition, which is the only partition
-    ///     a queue that has never been addressed by partition will ever have.
-    ///
-    /// The case this deliberately does not solve is a multi-partition queue
-    /// popped without a partition from a broker that owns some of it: the
-    /// consumer sees the local share only. Naming the partition is the complete
-    /// answer (it routes exactly), and fan-out over a multi-owner queue is what
-    /// §9's replicated local reads exist for. Scattering one pop across owners
-    /// would mean N forwarded long-polls per request, which is a distributed
-    /// query, not a queue read.
-    ///
-    /// The walk also WIPES: every partition it visits that no longer hashes here
-    /// is dropped by `route`, so a queue whose partitions all moved away cleans
-    /// itself up on the first pop rather than waiting for the periodic reap.
-    pub fn route_queue(&self, tenant: &str, name: &str) -> Route {
-        // Alone in the ring ⇒ everything is local and there is nothing to walk.
-        // The same early exit `route` takes, so the two cannot disagree.
-        if self.candidates().is_none() {
-            return Route::Local;
-        }
-        let mut any_local = false;
-        if let Some(q) = self.lookup(tenant, name, false) {
-            for p in q.partition_names() {
-                if self.route(tenant, name, &p) == Route::Local {
-                    any_local = true;
-                }
-            }
-        }
-        if any_local {
-            return Route::Local;
-        }
-        self.route(tenant, name, DEFAULT_PARTITION)
-    }
-
-    /// Drop one ring this broker no longer owns, refunding its budgets and
-    /// counting the move. `false` when there was nothing here.
-    ///
-    /// A push holding an `Arc` to this ring can still append to it after the
-    /// removal, and that message is lost — which is precisely the §1.2/§1.4
-    /// contract for an ownership move ("the few seconds of membership
-    /// disagreement may blur order and duplicate or lose messages"). Taking the
-    /// partitions lock for the whole of somebody else's append, on this class,
-    /// would be paying a convoy to protect data that is allowed to disappear.
-    fn wipe_ring(&self, tenant: &str, name: &str, partition: &str) -> bool {
-        let Some(q) = self.lookup(tenant, name, false) else {
-            return false;
-        };
-        let ring = q.partitions.lock().unwrap().remove(partition);
-        let Some(ring) = ring else { return false };
-        let freed = ring.lock().unwrap().wipe();
-        self.release(tenant, &q, &freed);
-        self.metrics.eph_wipes.fetch_add(1, Ordering::Relaxed);
-        true
-    }
-
-    /// The periodic half of the membership-change wipe (§3.7): drop every ring
-    /// whose partition no longer hashes here, whether or not anyone touches it.
-    ///
-    /// Needed because the lazy wipe in `route` only fires on a request FOR that
-    /// partition, and after an ownership move the requests go somewhere else by
-    /// definition — so without this pass the memory of a moved partition would be
-    /// freed by nothing until the queue itself was idle-collected (and never, for
-    /// a declared queue). Runs on the config refresh's cadence, so the bound on
-    /// stranded memory is one refresh interval, the same bound §10 Q4 accepts for
-    /// a lost broadcast.
-    pub fn reap_foreign(&self) -> u64 {
-        // ONE membership snapshot for the whole pass (see `owner_in`), and the
-        // no-mesh short-circuit in the same line.
-        let Some(cands) = self.candidates() else {
-            return 0;
-        };
-        let snapshot: Vec<(String, Arc<EqQueue>)> = self
-            .queues
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let mut n = 0u64;
-        for (key, q) in &snapshot {
-            let (tenant, _) = crate::handlers::split_tenant_queue(key);
-            for p in q.partition_names() {
-                if Self::owner_in(&cands, tenant, &q.name, &p).is_some()
-                    && self.wipe_ring(tenant, &q.name, &p)
-                {
-                    n += 1;
-                }
-            }
-        }
-        n
-    }
-
-    /// §3.5 — broadcast one admin op to every peer, fire and forget. No-op with
-    /// no mesh, which is why the three admin verbs can call it unconditionally.
-    pub fn broadcast_admin(&self, op: &str, tenant: &str, queue: &str) {
-        if let Some(m) = self.mesh.get() {
-            m.send_eph_admin(op, tenant, queue);
-        }
+    /// The partition-less pop's placement: this broker, like every partition.
+    pub fn route_queue(&self, _tenant: &str, _name: &str) -> Route {
+        Route::Local
     }
 
     // ---------------------------------------------------------------- push
@@ -2477,10 +2210,8 @@ impl Ephemeral {
         n
     }
 
-    /// The tenants a grant row exists for, plus whatever the caller adds. The
-    /// config refresh uses it to decide WHOSE declared configs to load: the
-    /// per-tenant list SP takes a tenant, and with `require_grant` on a tenant
-    /// without a row cannot declare anything anyway (§2).
+    /// The tenants a grant row exists for. With `require_grant` on, a tenant
+    /// without a row cannot declare anything (§2).
     pub fn granted_tenants(&self) -> Vec<String> {
         self.tenants
             .lock()
@@ -2491,8 +2222,7 @@ impl Ephemeral {
             .collect()
     }
 
-    /// Adopt the grant table (§1.6 rung 2). The ONLY writer of the allowance
-    /// fields, called by `refresh_once` below.
+    /// Adopt the whole grant table (§1.6 rung 2), at boot.
     ///
     /// A row that has DISAPPEARED must revoke, not linger: with `require_grant`
     /// on, deleting a row is how the control plane turns the feature off for a
@@ -2542,7 +2272,7 @@ impl Ephemeral {
     }
 
     /// Apply one RSM-backed grant after its `QuotaSet` commits, without
-    /// revoking unrelated tenants (the periodic SQL refresh is wholesale;
+    /// revoking unrelated tenants (the boot load, `apply_grants`, is wholesale;
     /// this control-plane path is deliberately incremental).
     pub fn upsert_grant(&self, row: Grant) {
         let mut m = self.tenants.lock().unwrap();
@@ -2683,42 +2413,17 @@ pub fn window_ready(have: usize, batch: usize, waited_ms: i64, w: Window) -> boo
 }
 
 // ===========================================================================
-// §2 — the cold path: grants and declared configs, read from Postgres
+// §2 — the cold path: declared configs and the backstop
 // ===========================================================================
 //
 // This is the ONLY code in the feature that awaits, and it runs at boot and then
 // on a slow cadence. Push, pop and ack never reach it.
 
-/// Parse `queen.eph_quota_list_v1`'s array.
-fn parse_grants(txt: &str) -> Vec<Grant> {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(txt) else {
-        return Vec::new();
-    };
-    let Some(arr) = v.as_array() else {
-        return Vec::new();
-    };
-    arr.iter()
-        .filter_map(|t| {
-            let num = |k: &str| t.get(k).and_then(|x| x.as_i64()).filter(|n| *n > 0);
-            Some(Grant {
-                tenant: t.get("tenant")?.as_str()?.to_string(),
-                // Absent `enabled` reads as TRUE: the column is NOT NULL DEFAULT
-                // TRUE, so its absence can only mean an older row shape, and a
-                // row that exists is a grant.
-                enabled: t.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true),
-                max_bytes: num("maxBytes"),
-                max_queues: num("maxQueues"),
-                max_msgs_per_sec: num("maxMsgsPerSec"),
-            })
-        })
-        .collect()
-}
-
-/// Parse `queen.eph_config_list_v1`'s array into (queue, options) pairs.
+/// Parse a declared queue's stored options object.
 ///
 /// UNKNOWN KEYS ARE IGNORED HERE, where the `configure` verb rejects them with a
 /// 400. That asymmetry is deliberate and one-directional: the verb is the gate
-/// (nothing reaches the table without passing it), and the boot load is reading
+/// (nothing reaches the store without passing it), and the boot load is reading
 /// back rows that a FUTURE broker version may have written with options this one
 /// does not know. Refusing them would make a rolling downgrade lose the whole
 /// queue's configuration instead of the one option it cannot honour.
@@ -2742,195 +2447,30 @@ pub(crate) fn parse_stored_options(v: &serde_json::Value) -> QueueOptions {
     o
 }
 
-/// One refresh of both cold-path reads.
-///
-/// SEPARATED FROM THE LOOP so the boot can await exactly one before the listener
-/// opens — the `quota::refresh_once` rule, and it matters more here: with
-/// `require_grant` on, an empty grant map DENIES, so a cell that started serving
-/// before its first read would answer `feature_gated` to every tenant for a
-/// refresh period on every single rollout.
-///
-/// WHOSE CONFIGS ARE LOADED, and why it is not "everyone's". The list SP is
-/// per-tenant (§2) and there is deliberately no cell-wide config scan: the set
-/// of tenants that can HAVE a declared queue is the set with a grant row, plus
-/// the default tenant (which is the only tenant at all when tenancy is off). A
-/// tenant with no grant row and tenancy on cannot reach `configure` — rung 2
-/// refuses it — so its declared configs cannot exist. When tenancy is off,
-/// `require_grant` is off too and the default tenant is everybody.
-pub async fn refresh_once(
-    eph: &Ephemeral,
-    pool: &deadpool_postgres::Pool,
-    max_tenants: usize,
-) -> Result<(usize, usize), String> {
-    let client = pool.get().await.map_err(|e| e.to_string())?;
-    let cap = max_tenants.clamp(1, i32::MAX as usize) as i32;
-    let txt = crate::db::eph_quota_list(&client, cap).await.map_err(|e| {
-        // Name the 42883 case: it is the broker-new/database-old shape and its
-        // remedy is one environment variable away.
-        match e.as_db_error().map(|d| d.code().code().to_string()) {
-            Some(code) if code.starts_with("42") => format!(
-                "{code}: queen.eph_quota_list_v1 is missing or does not match — apply the \
-                 schema (QUEEN_APPLY_SCHEMA=1) and restart"
-            ),
-            _ => e.to_string(),
-        }
-    })?;
-    let grants = parse_grants(&txt);
-    let n_grants = grants.len();
-    eph.apply_grants(grants);
-
-    let mut tenants = eph.granted_tenants();
-    if !tenants.iter().any(|t| t == crate::config::DEFAULT_TENANT) {
-        tenants.push(crate::config::DEFAULT_TENANT.to_string());
-    }
-    let mut n_configs = 0usize;
-    for t in tenants {
-        let txt = match crate::db::eph_config_list(&client, &t, cap).await {
-            Ok(v) => v,
-            // One tenant's read failing must not abort the others': a malformed
-            // tenant id in the grant table (the column is a uuid, but the SP
-            // casts) would otherwise cost every OTHER tenant its configuration.
-            Err(e) => return Err(e.to_string()),
-        };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else {
-            continue;
-        };
-        let Some(arr) = v.as_array() else { continue };
-        // §10 Q4 — the row set, for the ghost backstop below. Built from the
-        // SAME read that applies the configs, so the two can never disagree
-        // about what the table said.
-        let mut present: std::collections::HashSet<String> =
-            std::collections::HashSet::with_capacity(arr.len());
-        for row in arr {
-            let Some(queue) = row.get("queue").and_then(|x| x.as_str()) else {
-                continue;
-            };
-            let opts = row
-                .get("options")
-                .map(parse_stored_options)
-                .unwrap_or_default();
-            // `declared = true` vivifies the queue EMPTY (§1.2): the
-            // configuration is what survives a restart, never the contents.
-            eph.set_config(&t, queue, opts, true);
-            present.insert(queue.to_string());
-            n_configs += 1;
-        }
-        // The other direction, and the one the mesh phase needs: a `delete` whose
-        // broadcast this broker never received left a declared queue here whose
-        // row is gone. One refresh interval later it is gone here too (§10 Q4).
-        //
-        // BOUNDED READ CAVEAT: the list SP caps at `cap` rows. A tenant with more
-        // declared queues than that would see the overflow treated as deleted, so
-        // the cap is also the ceiling on declared queues per tenant — the same
-        // number `max_tenants` bounds the grant read by, and orders of magnitude
-        // above the tier this class is built for (implicit inboxes are the
-        // cardinality story, §1.1).
-        if arr.len() < cap as usize {
-            let dropped = eph.drop_undeclared(&t, &present);
-            if dropped > 0 {
-                tracing::info!(
-                    target: "ephemeral", tenant = %t, dropped,
-                    "dropped declared ephemeral queues whose row is gone (missed delete)"
-                );
-            }
-        }
-    }
-    Ok((n_grants, n_configs))
-}
-
-/// §3.5 — apply a peer's `config_set` broadcast: re-read THAT queue's declared
-/// row and hand it to the engine.
-///
-/// One row, not the whole tenant's list: the frame names the queue, and a full
-/// list read per admin verb would make a script that declares a thousand queues
-/// into a thousand full scans on every broker. It is also the first caller of
-/// `db::eph_config_get`, which existed for exactly this.
-///
-/// A MISSING ROW IS A NO-OP and not a delete. `configure` writes the row before
-/// it broadcasts, so `None` here can only mean the row was removed in between —
-/// and the `delete` that removed it broadcasts its own frame. Treating an absent
-/// row as an instruction to drop would make this function a second, weaker
-/// delete path racing the real one; the refresh above is the backstop that
-/// converges either way.
-pub async fn reload_config(
-    eph: &Ephemeral,
-    pool: &deadpool_postgres::Pool,
-    tenant: &str,
-    queue: &str,
-) -> Result<bool, String> {
-    let client = pool.get().await.map_err(|e| e.to_string())?;
-    let Some(txt) = crate::db::eph_config_get(&client, tenant, queue)
-        .await
-        .map_err(|e| e.to_string())?
-    else {
-        return Ok(false);
-    };
-    let v: serde_json::Value = serde_json::from_str(&txt).map_err(|e| e.to_string())?;
-    let opts = v
-        .get("options")
-        .map(parse_stored_options)
-        .unwrap_or_default();
-    eph.set_config(tenant, queue, opts, true);
-    Ok(true)
-}
-
-static EPH_REFRESH_ERR: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
-
-/// The periodic re-read, on the SAME cadence knob the kv/timers gate uses
-/// (`QUEEN_KV_QUOTA_REFRESH_MS`).
-///
-/// ONE KNOB AND NOT A SECOND ONE, deliberately. The knob's meaning is "how long a
-/// grant change takes to reach a broker", and that is one property of the cell,
-/// not one per feature: an operator who tuned the KV cadence and found the
-/// ephemeral grants still stale a minute later would be reading a knob that lied
-/// about its own scope. It is also the cadence that backstops a lost `reset` /
-/// `delete` broadcast when the mesh phase lands (§10 Q4).
-///
-/// Returns the handle so the embedded broker can abort it on `shutdown()`.
-pub fn spawn_refresh(
-    eph: Arc<Ephemeral>,
-    pool: deadpool_postgres::Pool,
-    interval_ms: u64,
-    max_tenants: usize,
-) -> tokio::task::JoinHandle<()> {
-    let interval = std::time::Duration::from_millis(interval_ms.max(1000));
-    tracing::info!(
-        target: "ephemeral",
-        interval_ms = interval.as_millis() as u64,
-        max_tenants,
-        require_grant = eph.knobs.require_grant,
-        "ephemeral grant/config refresh started"
-    );
+/// The RAM-class backstop: once a second, expire leases, head-drop ttl'd
+/// messages and collect idle implicit queues on the rings nobody touched.
+/// Leases and ttl are also enforced on every ring touch, so a busy queue needs
+/// nothing; an idle implicit queue has no touch at all, and without this loop
+/// the broker would hold one ring per short-lived inbox for the life of the
+/// process. No lock outside the engine's own maps.
+pub(crate) fn spawn_backstop(eph: Arc<Ephemeral>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let mut iv = tokio::time::interval(std::time::Duration::from_millis(1000));
+        iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            tokio::time::sleep(interval).await;
-            // §3.7 — the periodic half of the membership-change wipe, run BEFORE
-            // the database read and unconditionally: it needs no connection, and
-            // a cell whose pool is down must still stop holding rings it no
-            // longer owns. Zero work and zero allocation with no mesh.
-            let wiped = eph.reap_foreign();
-            if wiped > 0 {
+            iv.tick().await;
+            let s = eph.sweep(crate::util::now_epoch_ms());
+            if s.redelivered > 0 || s.exhausted > 0 || s.dropped_ttl > 0 || s.gc_queues > 0 {
                 tracing::info!(
-                    target: "ephemeral", rings = wiped,
-                    "dropped ephemeral rings whose partition moved to another broker"
+                    target: "ephemeral",
+                    redelivered = s.redelivered,
+                    exhausted = s.exhausted,
+                    dropped_ttl = s.dropped_ttl,
+                    gc_queues = s.gc_queues,
+                    queues = eph.queue_count(),
+                    bytes = eph.global_bytes(),
+                    "backstop"
                 );
-            }
-            match refresh_once(&eph, &pool, max_tenants).await {
-                Ok((g, c)) => tracing::debug!(
-                    target: "ephemeral", grants = g, configs = c, "ephemeral grants refreshed"
-                ),
-                Err(e) => {
-                    // Logged and swallowed. A stale grant map UNBLOCKS nothing:
-                    // the caps a broker already adopted stay in force, and a
-                    // tenant that was refused stays refused — which is the safe
-                    // direction for a budget paid in RAM.
-                    if let Some(suppressed) = EPH_REFRESH_ERR.tick_now() {
-                        tracing::warn!(
-                            target: "ephemeral", error = %e, suppressed,
-                            "ephemeral grant refresh failed; the last grants stay in force"
-                        );
-                    }
-                }
             }
         }
     })
@@ -2946,6 +2486,3 @@ mod ephemeral_engine_tests;
 
 // §3.7 — the placement half: the rendezvous hash, the single-broker
 // short-circuit, the ownership-move wipe and the ghost backstop.
-#[cfg(test)]
-#[path = "tests_unit/ephemeral_placement.rs"]
-mod ephemeral_placement_tests;

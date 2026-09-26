@@ -99,7 +99,7 @@ export class Runner {
     // two in-process paths removes the race at its source.
     this._partitionMutexes     = new Map()   // partitionId -> tail promise
     this._recentPartitions     = new Map()   // partitionId -> { partitionName, touchedAt }
-    this._partitionWatermarks  = new Map()   // partitionId -> wmMs (cache; PG is source of truth)
+    this._partitionWatermarks  = new Map()   // partitionId -> wmMs (cache; the broker is source of truth)
     this._stats = {
       cyclesTotal:      0,
       flushCyclesTotal: 0,
@@ -396,9 +396,9 @@ export class Runner {
     }
 
     // 6. Build the source ack — advance the cursor to the LAST message
-    //    and tell the SP how many messages were in this cycle's batch
-    //    so partition_consumers.acked_count / lease release logic uses
-    //    the correct count (the cycle is atomic across the full batch).
+    //    and tell the broker how many messages were in this cycle's batch
+    //    so its acked count / lease release logic uses the correct count
+    //    (the cycle is atomic across the full batch).
     const lastMsg = orderedMessages[orderedMessages.length - 1]
     const ack = lastMsg
       ? {
@@ -541,7 +541,7 @@ export class Runner {
     }
 
     // Ack the LAST allowed message (cursor advances to it). The count
-    // tells the SP how many messages this commit covers.
+    // tells the broker how many messages this commit covers.
     const lastAllowedSrc = allowedEnvelopes[allowedEnvelopes.length - 1].msg
     const ack = {
       transactionId: lastAllowedSrc.transactionId,
@@ -990,8 +990,8 @@ export class Runner {
   }
 
   /**
-   * Use the streams_state_get_v1 SP's key_prefix + ripe_at_or_before
-   * filters to scope the fetch.
+   * Use the state route's key_prefix + ripe_at_or_before filters to scope
+   * the fetch.
    */
   async _fetchRipeStateRows(partitionId, keyPrefix, ripeAtMs) {
     const body = {

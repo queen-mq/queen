@@ -245,7 +245,7 @@ pub fn group_decode(b: &[u8]) -> Result<GroupRow, CodecError> {
 // partitions
 // ---------------------------------------------------------------------------
 
-/// `queen.log_partitions` as the RSM holds it (§6.1).
+/// A partition as the RSM holds it (§6.1).
 ///
 /// There is no `hw` (the pgless "durable and visible tail"): in the RSM a
 /// segment exists only because apply executed a COMMITTED `Append`, so
@@ -253,7 +253,7 @@ pub fn group_decode(b: &[u8]) -> Result<GroupRow, CodecError> {
 /// live path allocated an offset before the write confirmed it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PartitionRow {
-    /// `log_partitions.id`, echoed by reads and traces.
+    /// The partition's id, echoed by reads and traces.
     pub uuid: [u8; 16],
     pub tenant: String,
     pub queue: String,
@@ -265,14 +265,14 @@ pub struct PartitionRow {
     /// Dedup watermark: hash lists below it have been pruned. It trails
     /// `log_start`, because the hash lists outlive the segments (D10, §11.7).
     pub txns_start: u64,
-    /// `log_partitions.last_write_at`.
+    /// The stamp of the last write.
     pub last_write_at_us: i64,
     /// The stamp of the oldest live segment: the retention work list's key.
     /// `None` when the partition holds nothing.
     pub oldest_live_at_us: Option<i64>,
     pub created_at_us: i64,
     /// The newest stamp written here, and the FLOOR for the next one:
-    /// `created_at = max(now, last_created_at + 1 µs)` (003, PUSHSER).
+    /// `created_at = max(now, last_created_at + 1 µs)` (PUSHSER).
     pub last_created_at_us: i64,
 }
 
@@ -309,9 +309,8 @@ impl PartitionRow {
         self.log_start as i64 - 1
     }
 
-    /// Pending frames for a cursor at `committed`: the lag arithmetic of
-    /// `get_consumer_groups_v4`,
-    /// `GREATEST(last_offset - GREATEST(committed, log_start - 1), 0)`.
+    /// Pending frames for a cursor at `committed`:
+    /// `max(last_offset - max(committed, log_start - 1), 0)`.
     pub fn pending_from(&self, committed: i64) -> u64 {
         (self.last_offset - committed.max(self.floor())).max(0) as u64
     }
@@ -416,9 +415,9 @@ pub fn cursor_decode(b: &[u8]) -> Result<CursorRow, CodecError> {
     })
 }
 
-/// The claim predicate of 004: `worker_id IS NULL OR lease_expires_at IS NULL
-/// OR lease_expires_at < now` is CLAIMABLE, so a live lease is a set worker
-/// AND a future expiry (ported from pgless `Cursor::lease_live`).
+/// The claim predicate: a cursor with no worker, no lease expiry, or an
+/// expiry at or before `now` is CLAIMABLE, so a live lease is a set worker AND
+/// a future expiry (ported from pgless `Cursor::lease_live`).
 pub fn lease_live(c: &CursorRow, now_us: i64) -> bool {
     c.worker.is_some() && c.lease_expires_at_us.is_some_and(|e| e > now_us)
 }
@@ -446,7 +445,7 @@ pub fn cursor_fresh(committed: i64, created_at_us: i64) -> CursorRow {
 // dead letters
 // ---------------------------------------------------------------------------
 
-/// `queen.log_dlq` minus the key columns (tenant, queue, dlq_id).
+/// A dead letter minus the key columns (tenant, queue, dlq_id).
 ///
 /// The payload is a SNAPSHOT, never a reference: a dead letter outlives the
 /// segment it came from, and retention may have unlinked those bytes.
@@ -454,7 +453,7 @@ pub fn cursor_fresh(committed: i64, created_at_us: i64) -> CursorRow {
 pub struct DlqRow {
     pub pid: Pid,
     pub group: String,
-    /// `-1` for a timer's dead letter (025), whose group is `__timer__`.
+    /// `-1` for a timer's dead letter, whose group is `__timer__`.
     pub offset: i64,
     pub message_id: Option<[u8; 16]>,
     pub txn: String,
@@ -581,13 +580,11 @@ pub fn request_id_decode(b: &[u8]) -> Result<RequestIdRow, CodecError> {
 }
 
 // ---------------------------------------------------------------------------
-// kv (024, WP-2.2)
+// kv (WP-2.2)
 // ---------------------------------------------------------------------------
 
-/// One `queen.kv` row as the RSM holds it. `(tenant, ns, key)` is the store key
-/// ([`super::keys::kv`]); the shard column of 024 has no counterpart (it is a
-/// Postgres contention spreader, and the expiry index replaces its one
-/// reader).
+/// One KV row as the RSM holds it. `(tenant, ns, key)` is the store key
+/// ([`super::keys::kv`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KvRow {
     /// The value JSON, raw (the compact text the receiver serialized). `null`
@@ -604,14 +601,14 @@ pub struct KvRow {
 }
 
 impl KvRow {
-    /// `queen.kv_live_v1`: `expires IS NULL OR expires > now`. A row exactly at
+    /// Live when it has no expiry or `expires > now`. A row exactly at
     /// `now` is dead for the reader AND for the sweep — one boundary for the
     /// whole feature (§5.7).
     pub fn live(&self, now_us: i64) -> bool {
         self.expires_at_us.is_none_or(|e| e > now_us)
     }
 
-    /// `queen.kv_ver_v1`: the version under the expiry rule, `0` when expired.
+    /// The version under the expiry rule, `0` when expired.
     pub fn effective_version(&self, now_us: i64) -> u64 {
         if self.live(now_us) {
             self.version
@@ -705,9 +702,8 @@ pub fn seg_loc_decode(b: &[u8]) -> Result<SegLocRow, CodecError> {
 /// The value of the `dlq_by_pos` index: the dead letters filed at one
 /// `(pid, group, offset)`, in the order they were filed.
 ///
-/// Plain 16-byte ids, no header: the length says how many. Postgres's index on
-/// `(partition_id, consumer_group, "offset")` is not unique (005), so this one
-/// cannot be either — a replayed dead letter that dies again is filed at the
+/// Plain 16-byte ids, no header: the length says how many. The index is not
+/// unique — a replayed dead letter that dies again is filed at the
 /// same position, and an index that held the newest made the older row
 /// unreachable by every delete path that walks it.
 pub fn dlq_ids_encode(ids: &[[u8; 16]]) -> Vec<u8> {
@@ -732,13 +728,12 @@ pub fn dlq_ids_decode(b: &[u8]) -> Result<Vec<[u8; 16]>, CodecError> {
 }
 
 // ---------------------------------------------------------------------------
-// timers (025, WP-2.3)
+// timers (WP-2.3)
 // ---------------------------------------------------------------------------
 
 /// The instant a timer becomes fireable: `deliver_at`, pushed out by a
-/// backoff's `visible_at` (025's generated `visible_at` column:
-/// `CASE WHEN claimed_until IS NULL OR claimed_until < deliver_at THEN
-/// deliver_at ELSE claimed_until END`). The `timers_due` index is keyed by it.
+/// backoff's `visible_at` (the later of the two). The `timers_due` index is
+/// keyed by it.
 pub fn timer_due_us(r: &TimerRow) -> i64 {
     match r.visible_at_us {
         Some(v) => v.max(r.deliver_at_us),
@@ -1172,8 +1167,8 @@ mod tests {
     /// The `dlq_by_pos` value did NOT need a version: it never had a header.
     ///
     /// WP-1.2 wrote the 16 raw bytes of one dlq id; WP-1.4 writes the list,
-    /// because the postgres index on `(partition_id, consumer_group, "offset")`
-    /// is not unique and a second dead letter at one position made the first
+    /// because the index on `(pid, group, offset)` is not unique and a second
+    /// dead letter at one position made the first
     /// unreachable. The widening is compatible by construction — a stored
     /// value of 16 bytes IS a one-element list — and this is the evidence.
     #[test]

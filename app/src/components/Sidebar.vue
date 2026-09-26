@@ -87,8 +87,8 @@ import { ref, computed, watch, h } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import ClusterSelector from '@/components/ClusterSelector.vue'
+import { system } from '@/api'
 import { useAutoRefresh } from '@/composables/useRefresh'
-import { loadHealth } from '@/stores/engine'
 import { useIdentity } from '@/stores/identity'
 
 const props = defineProps({ collapsed: Boolean })
@@ -105,8 +105,6 @@ watch(() => route.path, closeMobile)
 // ---------------------------------------------------------------------------
 // Cell health. Three states, never two: reachable, unreachable, and not yet
 // known — an unknown must not render as "offline" any more than as "healthy".
-// The same answer also decides the storage engine (stores/engine.js), so
-// raft mode costs no extra call.
 // ---------------------------------------------------------------------------
 const health = ref(null)
 const healthFailed = ref(false)
@@ -115,7 +113,7 @@ const loadingHealth = ref(false)
 const refreshHealth = async () => {
   loadingHealth.value = true
   try {
-    health.value = (await loadHealth()).data
+    health.value = (await system.getHealth()).data
     healthFailed.value = false
   } catch {
     // The failure is already on the global surface; here it only has to stop

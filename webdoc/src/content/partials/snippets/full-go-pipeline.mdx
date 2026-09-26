@@ -149,10 +149,10 @@ func stageOne(ctx context.Context, client *queen.Queen, count int) error {
 		}
 
 		// The handoff. The acknowledgement of the input and the push of the
-		// derived message run in one PostgreSQL transaction, so they either
-		// both happen or neither does. Ack first and crash, and the invoice is
-		// lost; push first and crash, and the order is invoiced twice on
-		// redelivery. This is the shape that has neither failure.
+		// derived message are one entry in the broker's replicated log, so
+		// they either both happen or neither does. Ack first and crash, and
+		// the invoice is lost; push first and crash, and the order is invoiced
+		// twice on redelivery. This is the shape that has neither failure.
 		//
 		// The message's leaseId travels with the ack as a required lease, so if
 		// the lease expired while this handler was working the commit fails

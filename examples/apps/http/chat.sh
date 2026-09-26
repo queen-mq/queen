@@ -207,8 +207,8 @@ while [ "$seq_no" -le "$MESSAGES_PER_CONVERSATION" ]; do
        }]}')"
     request POST /api/v1/push "$body"
     [ "$STATUS" = 201 ] || fail "push of $conversation/$seq_no returned HTTP $STATUS"
-    # HTTP 201 is not proof the message was stored: "buffered" and "failed" also
-    # come back 201. The per-item status is the only answer.
+    # HTTP 201 is not proof the message was stored: an item the broker refused
+    # comes back "error" inside a 201. The per-item status is the only answer.
     [ "$(jq -r '.[0].status' "$OUT")" = queued ] \
       || fail "push of $conversation/$seq_no came back $(jq -r '.[0].status' "$OUT")"
   done <<EOF

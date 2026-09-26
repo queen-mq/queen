@@ -36,10 +36,10 @@ version without contacting the server.`,
 		}
 		ver, _ := h["version"].(string)
 		status, _ := h["status"].(string)
-		db, _ := h["database"].(string)
+		engine, _ := h["engine"].(string)
 		fmt.Fprintf(stdout(), "server   %s\n", strOrDash(ver))
 		fmt.Fprintf(stdout(), "status   %s\n", strOrDash(status))
-		fmt.Fprintf(stdout(), "database %s\n", strOrDash(db))
+		fmt.Fprintf(stdout(), "engine   %s\n", strOrDash(engine))
 		fmt.Fprintf(stdout(), "context  %s (%s)\n", strOrDash(c.Context), c.Server)
 		return nil
 	},

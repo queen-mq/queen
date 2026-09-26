@@ -69,11 +69,11 @@
 //! | ack/nack, backlog left, lease released | `ready_at ← now` (overwrite) | ready now |
 //! | ack draining the partition | row deleted | leaves the ring |
 //! | nack with a retry backoff (future lease) | `ready_at ← lease_expiry` | deferred to the backoff |
-//! | seek backwards (010) | `ready_at ← now`, row (re)written | ready now |
+//! | seek backwards | `ready_at ← now`, row (re)written | ready now |
 //! | lease expiry, no ack | (unchanged: already `lease_expiry`) | promoted when `now ≥ lease_expiry` — by the next rebuild for the planner, by `promote_ring_deadlines` for the live ring |
 //! | `delayed_processing`/`window_buffer` deadline | (unchanged: already the visibility time) | promoted the same two ways |
 //! | group create | ring ensured (empty) | a place to seed candidates |
-//! | group delete (014) | rows swept | ring dropped, its global deadline with it |
+//! | group delete | rows swept | ring dropped, its global deadline with it |
 //! | partition delete / garbage (§5.2) | rows swept | `forget_partition` leaves every ring and drops its leases |
 //!
 //! The OFF path (`QUEEN_RAFT_PENDING_TRANSITIONS=0`, still the shipped default
@@ -88,7 +88,7 @@
 // I2, enforced rather than reviewed: `clippy.toml` lists the clock,
 // environment and randomness calls this side of the line may not make,
 // `[lints.clippy]` in Cargo.toml switches the lint off for the rest of the
-// package (the postgres class, and every integration test), and this is where
+// package (and every integration test), and this is where
 // it is switched back on — for this module and every module under it.
 #![deny(clippy::disallowed_methods)]
 
@@ -116,7 +116,7 @@ fn ring_key(tenant: &str, queue: &str, group: &str) -> RingKey {
 /// The per-(queue, group) candidate ring the wildcard pop walks, ported from
 /// pgless `native/state.rs`.
 ///
-/// COARSE BY CONTRACT, like the SQL candidate scan it replaces: an entry means
+/// COARSE BY CONTRACT: an entry means
 /// "this partition looked claimable when we last touched it", and the claim
 /// re-verifies against the cursor row. `deferred` holds revisit deadlines — a
 /// lease expiry, a `delayed_processing` or `window_buffer` visibility deadline
@@ -138,7 +138,7 @@ fn ring_key(tenant: &str, queue: &str, group: &str) -> RingKey {
 /// without `queued` the ordinary apply cycle (`Append` → `set_pending`, the
 /// group catches up → `clear_pending`, the next `Append` → `set_pending`) left
 /// one stale entry per turn that `walk` could NOT skip, because the pid was
-/// live again. The wildcard pop's budget walk (004) would then spend its
+/// live again. The wildcard pop's budget walk would then spend its
 /// budget offering one hot partition many times and never reach the others.
 ///
 /// So: liveness is `in_ready`, presence in the deque is `queued`, and
@@ -246,10 +246,10 @@ impl ReadyIndex {
     ///
     /// Each live partition is offered EXACTLY ONCE (the `queued` invariant
     /// above), so `limit` is a budget of distinct partitions — which is what
-    /// 004's budget walk spends — and one hot partition cannot starve the
-    /// rest. The walk costs O(deque), which [`ReadyIndex::compact`] keeps at
-    /// `max(16, 2 × live)` — compacting on removal as well as on push, since a
-    /// drained ring is all removals.
+    /// the wildcard pop's budget walk spends — and one hot partition cannot
+    /// starve the rest. The walk costs O(deque), which [`ReadyIndex::compact`]
+    /// keeps at `max(16, 2 × live)` — compacting on removal as well as on push,
+    /// since a drained ring is all removals.
     pub fn walk(&self, limit: usize, cb: &mut dyn FnMut(Pid) -> bool) -> usize {
         let mut n = 0;
         for pid in self.ready.iter() {
@@ -518,8 +518,7 @@ impl Derived {
 
     /// Make sure a ring exists, so a group that has registered but has no
     /// pending partition still has a place to be seeded into. Returns true
-    /// when this call created it (pgless's `ensure_group`, which 004's
-    /// `v_first_seen > 0` decides on).
+    /// when this call created it (pgless's `ensure_group`).
     pub fn ensure_ring(&mut self, tenant: &str, queue: &str, group: &str) -> bool {
         let k = ring_key(tenant, queue, group);
         if self.rings.contains_key(&k) {
@@ -529,7 +528,7 @@ impl Derived {
         true
     }
 
-    /// Forget a group's ring (a group delete, 014).
+    /// Forget a group's ring (a group delete).
     pub fn drop_ring(&mut self, tenant: &str, queue: &str, group: &str) {
         let key = ring_key(tenant, queue, group);
         self.rings.remove(&key);
@@ -1542,7 +1541,7 @@ mod tests {
 
     #[test]
     fn a_hot_partition_cannot_starve_the_others_in_the_budget() {
-        // The wildcard pop's budget walk (004) asks for `limit` DISTINCT
+        // The wildcard pop's budget walk asks for `limit` DISTINCT
         // candidates. A partition that cycles must not spend the budget.
         let mut r = ReadyIndex::default();
         for _ in 0..3 {

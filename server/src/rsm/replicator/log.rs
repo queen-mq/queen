@@ -325,8 +325,8 @@ impl LogStore {
 
     /// Append one group of entries and fsync ONCE. Returns the index the first
     /// entry was assigned; the rest follow contiguously. The whole group is
-    /// one `write_all` and one barrier, which is what amortizes the flush the
-    /// way a single WAL did for Postgres (pgless journal §10).
+    /// one `write_all` and one barrier, which is what amortizes the flush
+    /// (pgless journal §10).
     pub fn append_group(&mut self, entries: &[&[u8]]) -> io::Result<u64> {
         if entries.is_empty() {
             return Ok(self.next_index);

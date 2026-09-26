@@ -1,260 +1,138 @@
 ---
 title: Counters, rates and lag
-description: "How every number the dashboard and the status API show is derived and persisted, and why POST /api/v1/stats/refresh cannot produce log-engine numbers."
+description: "Where the numbers the dashboard and the status API show come from on 2.0: counters kept by apply, queue figures computed at read time from partition and cursor rows, lag from the oldest unconsumed record, and per-node history in dash.db gathered from every node."
 type: concept
 tier: internals
 sidebar:
   order: 10
 sourceOfTruth:
-  - server/src/stats.rs
-  - server/sql/procedures/011_log_stats.sql
-  - server/src/syscollect.rs
-  - server/src/db.rs
-  - server/src/handlers/status.rs
-  - server/sql/schema.sql
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): 011_log_stats changed only get_queue_v2, which this page does not describe; db.rs and schema.sql likewise. Nothing here moved.
+  - server/src/rsm/apply.rs
+  - server/src/rsm/store/keys.rs
+  - server/src/rsm/store/rows.rs
+  - server/src/rsm/facade/real/phase2.rs
+  - server/src/rsm/facade/real/phase2/reads.rs
+  - server/src/rsm/facade/real/phase2/dash.rs
+  - server/src/rsm/dashboard/mod.rs
+  - server/src/rsm/dashboard/model.rs
+  - server/src/rsm/dashboard/store.rs
+  - server/src/rsm/dashboard/collector.rs
+  - server/src/rsm/local_metrics.rs
+  - server/src/handlers/raft.rs
 ---
 
-Nothing in the log engine counts messages as they pass. There is no per-message row to count, and
-the counters you see are not sums: they are subtractions between watermarks, computed on a
-cadence and persisted into `queen.stats`. Understanding that is enough to predict every oddity on
-this page: why a number can be a few seconds stale, why it dips after a retention sweep, and why
-the manual refresh route does not help.
+No number on a 2.0 node comes from a refresh loop. There are three sources, and knowing which one
+a figure comes from predicts how it behaves.
 
-There are four independent sources of numbers, and they answer different questions.
-
-| Source | Cadence | Writes | Answers |
-| --- | --- | --- | --- |
-| Stats reconciler | `STATS_INTERVAL_MS`, 10000 ms | `queen.stats` | how much data exists and how far behind consumers are |
-| Retained-bytes lane | `RETAINED_BYTES_INTERVAL_MS`, 600000 ms | `queen.stats.retained_bytes` and `segment_count` | how many payload bytes each queue retains (for the storage quota) and how many live segment rows (for the queue list) |
-| Metrics collector | `METRICS_FLUSH_MS`, 60000 ms | `queen.worker_metrics`, `queen.system_metrics`, `queen.queue_lag_metrics` | what this replica did, per minute |
-| In-process counters | live | nothing | `/metrics/prometheus` gauges and `queen_process_*` totals |
-| KV and timer usage rollup | `QUEEN_KV_USAGE_EVERY_MS`, 300000 ms | `queen.kv_usage` | how much state each tenant holds |
-
-The last row is not this page's subject and is listed so nobody looks for it here. The KV and timer
-usage numbers are the [sweeper](/internals/sweeper)'s third and slowest clock, not the reconciler's
-work: they write `queen.kv_usage`, they are what the quota gauges and the `403` release decision read,
-and they are deliberately allowed to go stale under pressure, because they are precision rather than
-delivery. `GET /api/v1/system/kv-timers` reports their age as `quotaAgeMs`, and an age that keeps
-growing means the refresh is failing while the local write delta keeps enforcing.
-
-## The stats reconciler
-
-`stats.rs` runs one cycle every `STATS_INTERVAL_MS` on one pooled connection, inside a transaction.
-The schedule is a durable claim row (`queen.maintenance_leases`, task `stats_refresh`): each replica
-polls the row and runs only when it wins the claim, so the configured interval is the true cluster
-cadence whatever the replica count, `next_due_at` survives restarts, a dead holder stalls the task
-for at most its lease, and `enabled = false` on the row pauses the loop cluster-wide. Inside the
-cycle, `pg_try_advisory_xact_lock(737002)` is kept as belt against writers that do not know the
-row: an old-image pod during a rollout, and the unlocked manual refresh route below. The lock id is
-deliberately distinct from retention's `737001` so the two never serialize against each other. The
-transaction also sets `SET LOCAL statement_timeout` and `idle_in_transaction_session_timeout`, so an
-abandoned cycle can no longer pin the lock and an open snapshot until TCP keepalive gives up.
-
-The cycle is one call: `queen.log_refresh_all_stats_v1()`.
-
-### The arithmetic
-
-Per partition, with `worst = MIN(committed)` across that partition's consumer groups (no consumer
-rows means `-1`, so the whole retained range is pending):
-
-```text
-total      = last_offset - log_start + 1
-pending    = last_offset - GREATEST(worst, log_start - 1)
-processing = SUM over live leases of (batch_end - committed)
-completed  = total - pending - dlq          (floored at zero)
-```
-
-Every one of those is a subtraction between columns already on `log_partitions` and
-`log_consumers`. `total` is **exact**, not an estimate, because retention deletes only a contiguous
-prefix (there are never mid-log gaps), so `last_offset - log_start + 1` is precisely the retained
-frame count. The refresh is therefore `O(partitions)`, not `O(segments)`. The retired engine's
-refresher summed a message count over every live segment on every cycle.
-
-`processing` is the leased-but-unacked span, summed only over leases that are still live, and it is
-capped at `pending` when written.
-
-One timestamp cannot be derived from offsets, so it is the only `log_segments` touch the refresh
-makes, and it is a bounded primary-key probe rather than a scan:
-
-- **`oldest_pending_at`**: `queen.log_oldest_pending_at_v1(pid, wanted)`, which probes the segment
-  covering the oldest pending offset and, if the cursor sits in a retention gap, the first segment
-  past it. It runs only when something is actually pending. It is written as two probes rather than
-  one filtered `LIMIT 1` precisely so a miss cannot walk the partition's dead prefix.
-
-The stored `newest_message_at` column is dead: the refresh used to probe every partition's tail for
-it on every cycle, but nothing reads the stored value (the `newestMessage` the wire reports is
-computed live per request), so the refresh now writes `NULL` and the probe is gone.
-
-### The retained-bytes lane
-
-`retained_bytes` is `SUM(octet_length(blob))` over the queue's live segments. Because `blob` is
-`STORAGE EXTERNAL`, `octet_length` reads the length from the TOAST pointer without detoasting, but
-it is still a full heap scan of `log_segments`, and it feeds exactly one consequential reader: the
-proxy's storage quota, which is hysteretic by contract. So it does not run inside the reconciler
-cycle. A separate loop in `stats.rs` runs `queen.log_refresh_retained_bytes_v1()` every
-`RETAINED_BYTES_INTERVAL_MS` (default 600000 ms per replica), gated by its own advisory lock
-(`737003`), and writes only the two columns it owns: `retained_bytes` and, counted inside the same
-scan, `segment_count`, the live `log_segments` rows behind each queue. The reconciler self-assigns
-both and never computes them. `segment_count` exists so the queue list stops counting segments per
-call: that count grew with the tenant's segment population on every list request, while the queue
-detail keeps the exact live count per click.
-
-The value measures the **compressed bytes as stored** (TOAST bookkeeping, indexes, WAL and the
-`log_txns` hash sidecar are all excluded). Both columns lag up to one slow-lane period, and a newly
-created queue reads `0` until the lane's first pass over it.
-
-### Lag and rates
-
-Lag is derived from the one timestamp above:
-
-```text
-avg_lag_seconds = max_lag_seconds = EXTRACT(EPOCH FROM (now - oldest_pending_at))
-```
-
-At the queue level both come from the same value, so on this engine they agree.
-
-Rates are per-snapshot deltas. `queen.stats` carries `prev_total_messages`,
-`prev_completed_messages` and `prev_snapshot_at`, and the upsert computes:
-
-```text
-ingested_per_second  = (new total     - prev total)     / seconds since prev snapshot
-processed_per_second = (new completed - prev completed) / seconds since prev snapshot
-```
-
-Both are floored at zero, and both require the window to be at least 3 seconds wide: replica
-timers are staggered rather than phase-locked, and a near-zero denominator would turn a handful of
-frames into a spike. A narrower window writes `0`.
-
-<Aside type="caution">
-`total_messages` is the **retained** count, so `ingested_per_second` and `processed_per_second` dip
-transiently right after a retention sweep shrinks the retained window: the delta goes negative and
-is floored to zero. This is inherent to counting by watermark rather than by event, not a bug, and
-the retired engine's numbers had the same artifact for the same reason.
-</Aside>
-
-### Rollups
-
-The `namespace`, `task` and `system` rows are produced by the shared aggregators in 018_stats, which
-read the `queue` rows and never touch `partition_id`. The system aggregator counts
-`queen.log_partitions` for `child_count`, and the refresh then re-writes the same value from its own
-`COUNT(queen.log_partitions)`. That overwrite is belt and braces rather than a correction: it is
-cheap, authoritative, and pins the value at this cycle's snapshot.
-
-The summary the procedure returns keeps the labels `engine: "segments"` and `segPartitions`. Those
-are hard-coded literals, the same compatibility echo as the `storage: "segments"` the queue wire
-still reports: there is one engine and no engine-selector column, so the label selects nothing.
-
-The `stats` log target prints that summary verbatim with `elapsed_ms`. A cycle that updated no
-queues logs at `debug` so a quiet leader stops emitting `info` every ten seconds.
-
-### If the reconciler is not running
-
-Every stats-backed reader (the system overview, the status endpoints, the queue detail) reads
-`queen.stats`. Without this loop those rows stay stale or empty and each of those surfaces returns
-zeros. That is not a hypothetical: it was a real regression, and this loop is the fix.
+| Source | Kept by | Answers |
+| --- | --- | --- |
+| Counters | apply, on every node, in the replicated store | retained bytes and dead letters |
+| Read-time figures | the node answering, from its partition and cursor rows at the moment of the read | total, pending, processing, completed, lag |
+| Node rows | each node, in its own `dash.db` and `local.db` | throughput per minute, delivery lag, CPU and memory, retention history |
 
 ## POST /api/v1/stats/refresh
 
-The route forces the cycle above to run now instead of waiting out `STATS_INTERVAL_MS`. It calls the
-same `queen.log_refresh_all_stats_v1()` the loop calls, and returns its summary. It refreshes the
-counters only: `retained_bytes` belongs to the slow lane and keeps its last value here.
+The route answers `200` with `{"success":true,"refreshed":false,"engine":"raft"}` and changes
+nothing. Counters are updated when entries apply and everything else is computed when it is read,
+so there is nothing to refresh. The route stays because every SDK's admin API calls it.
 
-<Aside type="caution">
-Until 2026-07-30 it called `queen.refresh_all_stats_v1(true)` (the **rows-engine** reconciler), and
-the handler comment described that as a no-op wired for parity. It was not a no-op. That procedure
-computes partition statistics from `queen.messages`, `queen.partitions`, `queen.partition_consumers`
-and `queen.dead_letter_queue`, all empty under the log engine, and its second step
-(`aggregate_queue_stats_v2`) then rebuilt the `queue` rows from the missing `partition` rows with
-`COALESCE(..., 0)`. Both refreshers key those rows identically (`stat_type = 'queue'`,
-`stat_key = queues.id`), so hitting the route **blanked the live counters** until the next background
-cycle repaired them. Measured on a queue holding three pending messages: `child_count` 2 → 0,
-`total_messages` 3 → 0, `pending_messages` 3 → 0, with `/api/v1/status/queues` reporting an idle
-queue throughout that window.
+## Counters kept by apply
 
-If you are on an older build, do not wire that route into a refresh button, a health check or a cron
-job.
-</Aside>
+The `counters` keyspace holds one 64-bit integer per `(scope, id, counter)`. The scopes are
+partition, queue, tenant and (queue, consumer group); the counters are pushed, pending (per group),
+completed, failed, dead letters, retained bytes, consumed, and the instants of the last push and the
+last pop. Each effect updates the rows it concerns as it applies (an append also adds to `pending`
+once per subscribed group), and the updates of one store transaction are folded into one write per
+key at commit. They are replicated state: every node holds the same values after the same entry, and
+nothing recomputes them.
 
-## The metrics collector
+Two of them feed the API today. `retainedBytes` (the queue list, the queue detail and the sizes
+view) adds the frame length of every retained message and goes down when retention moves
+`log_start` past it; it is also the number a storage quota reads. `deadLetter` is the dead-letter
+count.
 
-`syscollect.rs` runs every `METRICS_FLUSH_MS` on one pooled connection and is deliberately **not**
-advisory-locked: every replica records its own rows, keyed by hostname, worker id and pid, and the
-readers aggregate across replicas.
+## Queue figures are computed when read
 
-Each cycle it:
+The queue list, the queue detail, the overview and the status views compute their message figures
+from the partition rows and the cursors, per request, on the node that answers:
 
-- diffs the in-process operation counters since the last flush and inserts one
-  `queen.worker_metrics` row of per-minute deltas (an `AFTER INSERT` trigger rolls it into
-  `queen.worker_metrics_summary`, which is where the dashboard's lifetime totals come from);
-- samples host and process gauges (CPU from `getrusage` as a delta over the interval, RSS,
-  deadpool's pool status) and inserts one `queen.system_metrics` row whose `metrics` JSONB matches
-  the shape the reader re-aggregates;
-- flushes per-queue counters into `queen.queue_lag_metrics`.
+```text
+per partition, then summed per queue:
+  total      = last_offset - log_start + 1
+  pending    = last_offset - max(committed, log_start - 1)     (floored at 0)
+  processing = sum over live leases of (batch_end - committed), capped at pending
+  completed  = total - pending - deadLetter                    (floored at 0)
+```
 
-### Per-queue rates
+`committed` is the lowest cursor among the queue's named consumer groups on that partition, else the
+queue-mode cursor, else -1 (nothing consumed). `deadLetter` and `retainedBytes` are the counters
+above. The queue detail reports `pending` with the leased span included, beside `processing`; the
+queue list and the overview report `pending` net of `processing`, the part nobody has leased.
 
-`queen.queue_lag_metrics` is keyed `(bucket_time, queue_id)` on one-minute buckets: queue identity
-is the `queen.queues` id, the row carries a cascading foreign key to it (a deleted queue's metric
-rows go with the queue), and readers join `queen.queues` when they need the name. The upsert
-**sums** on conflict, so several replicas writing the same minute aggregate into one cluster-wide
-row. Each bucket carries pop count, push request and message counts, empty-pop count,
-transaction count, ack request, success and failure counts, and a conflated count: log positions
-retired by conflation without a handler invocation, `0` on every queue whose groups do not conflate.
-The conflated count surfaces as `queen_queue_conflated_per_minute` beside the pop family, because
-the pair is the whole story of a conflating queue, what was handled and what was skipped.
+What follows from that:
 
-Two columns merge differently because summing them would be wrong. Lag merges as a weighted average
-(`SUM(avg × count) / SUM(count)`, the same identity the readers use across buckets) and the maximum
-merges with `GREATEST`. The parked-consumer count is a gauge and is summed across replicas.
+- **A figure is exact at the instant of the read.** It does not lag an interval; the overview's
+  `statsAge` is always 0.
+- **`total` counts retained messages.** It shrinks when retention moves `log_start`, and a message
+  retention removed is neither pending nor completed.
+- **`completed` is a residual**, not a count of acknowledgements.
+- **The list, the overview and the status views walk every partition of every queue of the
+  tenant.** Freshness is paid for per request, in proportion to the partitions.
+- **Some fields are constant.** The overview reports `failed` as 0, and the `median` and `min` of its
+  lag as 0. The queue detail reports `failed` as null and `cursor.batchesConsumed` as 0.
 
-Delivery lag itself is measured on the pop path: as each message is rendered the broker computes its
-age at delivery, which feeds both `queen_queue_pop_lag_milliseconds` and the lag columns here. So
-there are two different "lag" numbers in the system, and they are not the same measurement:
+## Lag
 
-| Number | Source | Means |
+Lag is computed per `(partition, consumer group)` cursor, at read time:
+
+- **offset lag** is that cursor's `pending`, as above;
+- **time lag** is the age of the oldest message the cursor has not consumed: now minus the creation
+  time of the record holding `committed + 1`, or of the first record after it when retention has
+  already removed that offset, rounded to the nearest second. It comes from the queue log's in-memory
+  index, without reading a payload, and is absent for a cursor that is caught up.
+
+The overview's `lag` block takes, per queue, the largest time lag and the largest offset lag over
+its cursors; `max` is the largest over the queues and `avg` the mean over the queues that lag.
+`GET /api/v1/consumer-groups/lagging` lists the cursors whose time lag exceeds `minLagSeconds`
+(default 3600), largest first.
+
+There is a second lag, measured differently. Delivery lag is the age of a message at the moment a
+pop hands it out; it is measured on the pop path and lands in the node rows below. Time lag is the
+age of a backlog and exists with no consumer running; delivery lag exists only while messages are
+being delivered.
+
+## Node rows in dash.db
+
+One collector thread per process wakes every `METRICS_FLUSH_MS` (default 60000; a value below 1000
+is ignored) and records what this node did since its previous flush:
+
+| Row | One per | Carries |
 | --- | --- | --- |
-| `queen.stats.avg_lag_seconds` | `now - oldest_pending_at` at refresh time | how old the oldest undelivered message is |
-| `queue_lag_metrics.avg_lag_ms` | per-message age at delivery | how old messages were when they were actually handed out |
+| worker | flush | push, pop and ack requests and messages, transactions, messages moved to the dead-letter queue, local store commit failures, event-loop lag, delivery lag |
+| system | flush | CPU, resident memory, and a raft family: entries in flight, apply lag in entries, log bytes and files, store map use |
+| queue | queue and minute with any activity | pops, empty pops, pushes, transactions, acks, delivery lag, the minute's average of parked long-polls, conflated positions |
+| parked | queue and minute with a parked long-poll | this node's parked long-polls |
 
-The first is a backlog age and exists even with no consumers running. The second only exists when
-messages are being delivered.
+The rows are journaled to `dash.db` in the data directory, one per process, shared by every raft
+group of the node. A torn tail is cut on reopen, and losing the unflushed tail loses a graph point,
+never queue state. Worker and system rows are kept `QUEEN_DASH_NODE_RETENTION_H` hours (default
+168), queue and parked rows `QUEEN_DASH_QUEUE_RETENTION_H` hours (default 24), and queue and parked
+rows are also capped at `QUEEN_DASH_MAX_QUEUE_ROWS` each (default 500000).
 
-## In-process counters and Prometheus
+A dashboard or analytics read gathers the rows of every node over the raft port and merges the
+queue rows of one minute: counters add, delivery lag is averaged weighted by its count, the maximum
+is the largest, parked long-polls add. A node that does not answer is missing from the result, and
+`GET /api/v1/status` names it in `nodesMissing`. A node is named by `QUEEN_SERVER_ID`, else
+`HOSTNAME`, else `node-` and its raft node id.
 
-`/metrics/prometheus` mixes three kinds of series, and the prefix tells you which:
+## Retention and partition churn in local.db
 
-- **`queen_process_*`**: what *this* broker instance did since it started. Reset on restart.
-- **`queen_cluster_*`**: lifetime totals read back out of PostgreSQL, so every instance reports the
-  same value.
-- **Gauges** are live in-process readings: the admission budget and per-lane inflight/waiting, pool
-  active/idle/size, spool pending and failed, fusion items per batch, the pop fill-wait counters.
+Apply records two more histories in the node's `local.db`: every watermark move (the last 4096 are
+kept) and the partitions created and deleted per queue and minute (kept 24 hours). Because apply
+records them, every node holds the same rows, and a read serves them from the answering node alone.
+A retention row records how far `log_start` and `txns_start` moved, not which rule moved them, so
+the Retention chart's completed-retention and eviction series stay at 0.
 
-The full list is generated from the source; see the [Prometheus reference](/reference).
+## Prometheus
 
-<Aside type="caution">
-Per-queue Prometheus series **sum across tenants**. `/metrics/prometheus` must never be exposed to a
-tenant on a shared cell.
-</Aside>
-
-Two collection details worth knowing because they affect what the numbers mean. `autoAck` deliveries
-are counted as acks: they *are* acknowledgements, so the ack throughput and completed totals reflect
-auto-acked consumption. And a push whose transaction failed is counted in the database-error series
-*before* the spool relabels those items `buffered`, so spooling never hides the failure.
-
-## Practical consequences
-
-- **Numbers are up to one interval stale.** Counters lag by up to `STATS_INTERVAL_MS`; per-queue
-  throughput lags by up to `METRICS_FLUSH_MS` and is bucketed by minute; `retained_bytes` lags by
-  up to `RETAINED_BYTES_INTERVAL_MS`, and a queue created between lane passes reads `0`.
-- **A rate dip right after a sweep is expected.** See the retained-count note above.
-- **Zeros everywhere mean the reconciler is not running** or, on an older build, something called
-  the retired rows-engine refresh route.
-- **`pending` counts retained data only.** Messages deleted by retention are not pending and not
-  completed; they are gone, and `total` shrinks with them.
-- **`completed` is a residual**, not an event count: `total - pending - dlq`, floored at zero. It is
-  not a tally of acks.
-- **One queue-detail field is honestly zero.** `cursor.batchesConsumed` reads 0 because
-  `queen.log_consumers` does not carry the retired per-batch counter, and `lastActivity` is
-  `MAX(lease_acquired_at)`, the closest activity signal the log schema keeps.
+`/metrics/prometheus` serves this process's own counters plus the state machine's families. The
+families are listed in the [Prometheus reference](/reference/prometheus/).

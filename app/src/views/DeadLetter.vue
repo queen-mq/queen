@@ -332,8 +332,7 @@
     <!-- Replay. A confirm rather than a one-click action because a replay is a
          WRITE: it appends a copy to a partition, it removes the dead-letter
          record, and both are irreversible. So the modal names the target AND
-         the irreversible part before the click, the way the maintenance toggle
-         taught this dashboard to. -->
+         the irreversible part before the click. -->
     <Teleport to="body">
       <div v-if="replayRow" class="modal-backdrop dlq-replay-over" @click.self="closeReplay">
         <form class="card modal-card dlq-replay-card" @submit.prevent="submitReplay">
@@ -524,9 +523,9 @@
           <DetailField label="Transaction ID" :value="selectedMsg.transactionId" mono copyable />
           <DetailField label="Consumer group" :value="selectedMsg.consumerGroup" mono tone="accent" />
 
-          <!-- The log engine cannot recover the enqueue time from an opaque
-               blob, so it echoes failed_at as createdAt. Showing the same
-               instant twice under two labels invents a fact. -->
+          <!-- The broker does not return a dead letter's enqueue time: it
+               echoes failed_at as createdAt. Showing the same instant twice
+               under two labels invents a fact. -->
           <DetailField
             v-if="hasDistinctCreatedAt(selectedMsg)"
             label="Created"

@@ -8,12 +8,12 @@ edition = "2021"
 # 1.86. CI verifies this number on every push; when a dependency raises it, that
 # job goes red instead of a user's build.
 rust-version = "1.86"
-description = "Rust client for Queen MQ — one ordered lane per entity, on the PostgreSQL you already run."
+description = "Rust client for Queen MQ — one ordered lane per entity, on one broker with its own replicated log."
 license = "Apache-2.0"
 homepage = "https://queenmq.com"
 repository = "https://github.com/queen-mq/queen"
 readme = "README.md"
-keywords = ["queue", "message-queue", "postgresql", "broker", "mq"]
+keywords = ["queue", "message-queue", "broker", "mq"]
 categories = ["asynchronous", "database", "api-bindings"]
 
 [dependencies]

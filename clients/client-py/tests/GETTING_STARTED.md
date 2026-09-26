@@ -7,20 +7,14 @@ Quick guide to running the Queen Python client test suite.
 ### 1. Start Queen Server
 
 ```bash
-# Start PostgreSQL
-docker run --name postgres \
-  -e POSTGRES_PASSWORD=postgres \
-  -p 5432:5432 \
-  -d postgres
-
-# Start Queen Server
-docker run -p 6632:6632 \
-  -e PG_HOST=host.docker.internal \
-  -e PG_PASSWORD=postgres \
+docker run -d --name queen -p 6632:6632 \
+  -e QUEEN_RAFT_DIR=/var/lib/queen/raft \
+  -v queen-data:/var/lib/queen/raft \
   ghcr.io/queen-mq/queen:latest
 ```
 
-Or use docker-compose (see main README).
+The tests expect an empty broker and nothing cleans up after them, so start a
+fresh one for every run (see [Starting Over](#starting-over)).
 
 ### 2. Install Dependencies
 
@@ -40,9 +34,6 @@ pip install -e ".[dev]"
 ```bash
 # Check Queen server
 curl http://localhost:6632/health
-
-# Check database connection
-python -c "import asyncpg, asyncio; asyncio.run(asyncpg.connect('postgresql://postgres:postgres@localhost/postgres'))"
 
 # Check Queen client
 python -c "from queen import Queen; print('✅ Ready!')"
@@ -145,19 +136,6 @@ docker logs <container-id>
 curl http://localhost:6632/health
 ```
 
-### Database Connection Errors
-
-```bash
-# Check PostgreSQL is running
-docker ps | grep postgres
-
-# Test connection
-psql -h localhost -U postgres -d postgres
-
-# Check from Docker network
-docker exec -it <queen-container> curl http://postgres:5432
-```
-
 ### Import Errors
 
 ```bash
@@ -199,29 +177,22 @@ QUEEN_CLIENT_LOG=true pytest tests/test_name.py::test_function -vvs
 
 ### Check Test Data
 
+There is no database to query: look at what a run left behind through the
+broker's HTTP API.
+
 ```bash
-# Connect to database
-psql -h localhost -U postgres -d postgres
-
-# Check queues
-SELECT name, namespace, task FROM queen.queues WHERE name LIKE 'test-%';
-
-# Check messages
-SELECT queue_name, partition_id, COUNT(*) 
-FROM queen.messages 
-WHERE queue_name LIKE 'test-%' 
-GROUP BY queue_name, partition_id;
-
-# Check consumer groups
-SELECT * FROM queen.consumer_groups WHERE consumer_group LIKE 'test-%';
+# List queues
+curl http://localhost:6632/api/v1/resources/queues
 ```
 
-### Manual Cleanup
+### Starting Over
+
+Most tests use fixed queue names and nothing cleans up after them, so a second
+run against the same broker sees the first run's data. Start a fresh broker:
 
 ```bash
-# If tests fail and leave data
-psql -h localhost -U postgres -d postgres
-> DELETE FROM queen.queues WHERE name LIKE 'test-%';
+docker rm -f queen && docker volume rm queen-data
+# then start it again (step 1 above)
 ```
 
 ## Next Steps

@@ -1,23 +1,21 @@
 package tests
 
 import (
-	"context"
 	"testing"
 	"time"
 )
 
-// TestWatermark_* mirror clients/client-js/test-v2/watermark.js. The
-// underlying machinery is the consumer_watermarks table that optimizes POP
-// by remembering when a CG last saw the queue empty. The fix being verified
-// here is: seek and CG delete must reset the watermark so a backward seek
-// or a fresh CG sees historical messages again.
+// TestWatermark_* mirror clients/client-js/test-v2/watermark.js (the names
+// follow the JS twin). They pin two behaviours at the CLI, once a consumer
+// group has drained a queue:
 //
-// The JS suite runs against a Pg-connected helper that artificially advances
-// the watermark 10 minutes into the future so the 2-minute lookback window
-// in the SP filter excludes the partition. We do the same here when a
-// PG_HOST is available; otherwise we exercise the fast path (no advanced
-// watermark) and only assert the simpler invariant that re-consume after
-// seek-to-beginning yields the same N messages.
+//   - seeking the group back to the beginning makes it consume every message
+//     again;
+//   - deleting the group, metadata included, and subscribing again under the
+//     same name also consumes every message again.
+//
+// Each message sits in its own partition, so every drain is a wildcard pop
+// across partitions and the re-consume has to reach all of them.
 
 const watermarkSeekQueue = "watermark-seek"
 const watermarkDeleteQueue = "watermark-delete"
@@ -29,8 +27,7 @@ func TestWatermark_SeekBackwardsAllowsReconsume(t *testing.T) {
 	createQueue(t, q)
 	cg := "ct-wm-seek"
 
-	// Push 10 messages each to its own partition so a wildcard pop has to
-	// walk the partition_lookup table (where the watermark filter applies).
+	// Push 10 messages, each to its own partition.
 	for i := 0; i < 10; i++ {
 		pushOne(t, q, "p-"+itoa(i), map[string]any{"i": i, "batch": "original"})
 	}
@@ -47,24 +44,6 @@ func TestWatermark_SeekBackwardsAllowsReconsume(t *testing.T) {
 		t.Fatalf("first drain: got %d, want 10", len(got))
 	}
 
-	// Optionally age the watermark via direct SQL to recreate the bug
-	// scenario from the JS test. Without PG access, we still cover the
-	// "seek-to-beginning resets the cursor" invariant - just not the
-	// 2-minute-lookback edge case.
-	if pg != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		// Watermarks are keyed by queue_id now (queue identity is the
-		// queen.queues id), so resolve the name through a join.
-		_, _ = pg.Exec(ctx, `
-			UPDATE queen.consumer_watermarks w
-			   SET last_empty_scan_at = NOW() + interval '10 minutes',
-			       updated_at         = NOW() + interval '10 minutes'
-			  FROM queen.queues q
-			 WHERE w.queue_id = q.id AND q.name = $1 AND w.consumer_group = $2
-		`, q, cg)
-	}
-
 	// Seek backwards.
 	runOK(t, "replay", q, "--cg", cg, "--to", "beginning")
 	time.Sleep(300 * time.Millisecond)
@@ -76,13 +55,13 @@ func TestWatermark_SeekBackwardsAllowsReconsume(t *testing.T) {
 		"--timeout", "5s",
 	)
 	if len(again) != 10 {
-		t.Errorf("after seek-backwards + watermark age: got %d, want 10", len(again))
+		t.Errorf("after seek to beginning: got %d, want 10", len(again))
 	}
 }
 
 // TestWatermark_DeleteCGAllowsReconsume mirrors
-// watermark.js#deleteConsumerGroupAllowsReconsume. Deleting a CG must clear
-// its watermark so a brand-new subscription sees historical data.
+// watermark.js#deleteConsumerGroupAllowsReconsume. After the group is deleted,
+// a new subscription under the same name must see the historical data again.
 func TestWatermark_DeleteCGAllowsReconsume(t *testing.T) {
 	q := uniqueQueue(t, watermarkDeleteQueue)
 	createQueue(t, q)
@@ -103,21 +82,8 @@ func TestWatermark_DeleteCGAllowsReconsume(t *testing.T) {
 		t.Fatalf("first drain: got %d, want 8", len(got))
 	}
 
-	if pg != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		// Watermarks are keyed by queue_id now (queue identity is the
-		// queen.queues id), so resolve the name through a join.
-		_, _ = pg.Exec(ctx, `
-			UPDATE queen.consumer_watermarks w
-			   SET last_empty_scan_at = NOW() + interval '10 minutes',
-			       updated_at         = NOW() + interval '10 minutes'
-			  FROM queen.queues q
-			 WHERE w.queue_id = q.id AND q.name = $1 AND w.consumer_group = $2
-		`, q, cg)
-	}
-
-	// Delete the CG (with --metadata so the SP also clears the watermark).
+	// Delete the CG, metadata included, so the next pop under the same name
+	// is a brand-new subscription.
 	runOK(t, "cg", "delete", cg, "--queue", q, "--metadata", "--yes")
 	time.Sleep(300 * time.Millisecond)
 

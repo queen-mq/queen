@@ -161,12 +161,11 @@ class TransactionBuilder:
         It is a ``putIfAbsent`` with ``required=True``, and ``required`` is the
         whole point -- without it the marker loses its race and the bundle
         commits anyway, i.e. the gate was decoration. With it the transaction
-        rolls back in SQL and ``commit()`` RETURNS
+        applies nothing and ``commit()`` RETURNS
         ``{success: False, reason: "kv_precondition", ...}``.
 
-        Put it FIRST in the bundle. It costs one row lock held for the length of
-        the transaction (accepted risk §18.2), so gate on a key derived from the
-        message, never on a shared one.
+        Put it FIRST in the bundle, and gate on a key derived from the message,
+        never on a shared one.
         """
         return _append_kv(
             self,
@@ -302,8 +301,8 @@ class TransactionKvBuilder:
         the transaction that holds the outermost lock space of the product and,
         downstream, the partition locks. ``get`` and ``getMany`` are allowed
         because the caller fixes their cost. The boundary is COST, not the kind
-        of operation. The broker raises 22023 on it; refusing here is the same
-        rule, one round trip earlier.
+        of operation. The broker refuses it; refusing here is the same rule, one
+        round trip earlier.
         """
         raise ValueError(
             "getPrefix is not allowed inside a transaction: its cost is not bounded by the "

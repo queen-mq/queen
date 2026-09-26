@@ -11,8 +11,8 @@ Public surface (mirrors @queenmq/streams in JS):
             .to(q.queue('approved')) \\
             .run(query_id='rate-limiter', url='http://localhost:6632')
 
-The streaming runtime commits state, sink emissions, and source acks in a
-single PostgreSQL transaction via /streams/v1/cycle, so end-to-end semantics
+The streaming runtime commits state, sink emissions, and source acks as one
+broker command via /streams/v1/cycle, all or nothing, so end-to-end semantics
 are exactly-once even across retries.
 """
 

@@ -64,8 +64,9 @@ export const IDENTITY_OPTIONS = [
 /**
  * The 19 options `/configure` echoes, with the default each one lands on when a
  * body carries it as `null` (or omits it on a create, or on `mode: "replace"`).
- * Every default here is the literal in 012_configure.sql's parse section — if
- * the two ever disagree, that file is right and this one is a bug.
+ * Every default here is the literal in the broker's `configured_defaults`
+ * (server/src/rsm/facade/real/phase2.rs) — if the two ever disagree, that file
+ * is right and this one is a bug.
  *
  * `group` decides where the field sits: `common` is open when the form opens,
  * `advanced` is behind a disclosure, because nine of these change how and when
@@ -73,9 +74,10 @@ export const IDENTITY_OPTIONS = [
  * time invites an operator to skim past one.
  *
  * `inert: true` marks an option the broker STORES, ECHOES and never READS
- * (decision D2, re-confirmed against the procedures on 2026-09-11: `ttl`,
- * `max_queue_size` and `retry_delay` appear in 011_log_stats and 012_configure
- * and in no push, pop, ack or maintenance path). The editor hides them rather
+ * (decision D2, re-confirmed against the raft code on 2026-09-26: `ttl`,
+ * `max_queue_size` and `retry_delay` are written to the queue row
+ * (rsm/store/rows.rs) and echoed (phase2.rs config_options), and read by no
+ * push, pop, ack or maintenance path). The editor hides them rather
  * than offering a back-pressure cap and a TTL that do nothing; Queue Detail
  * still shows the stored values, labelled as declared and not enforced, because
  * a value that IS on the row must not vanish from the page that documents it.
@@ -92,7 +94,7 @@ export const OPTIONS = [
     help:
       'How long a popped batch stays invisible to the rest of its consumer group. A pop that ' +
       'sends its own leaseSeconds overrides it, and leases already issued keep the expiry they ' +
-      'were given. Note a queue created by a push leases at the column default of 60 until a ' +
+      'were given. Note a queue created by a push leases at the implicit-queue default of 60 until a ' +
       'configure writes one.',
   },
   {
@@ -429,23 +431,25 @@ export function configDiff(current = {}, edited = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Validation — the SP's rules, before the round trip
+// Validation — the broker's rules, before the round trip
 // ---------------------------------------------------------------------------
 
-/** The charset 012_configure.sql enforces on the sink name, verbatim. */
+/** The charset the broker enforces on the sink name, verbatim
+ *  (server/src/rsm/facade/real/phase2.rs apply_config_options). */
 const SINK_HOLD_RE = /^[A-Za-z0-9._-]{0,64}$/
 const SINK_HOLD_MAX_MIN = 60
 const SINK_HOLD_MAX_MAX = 31536000
 
-/** Postgres `integer`, which is the column type behind every int option here. */
+/** i32::MAX: the broker parses every int option here as a 32-bit integer
+ *  (server/src/rsm/facade/real/phase2.rs apply_config_options). */
 const INT_MAX = 2147483647
 
 /**
  * `{key: message}` for everything the broker would refuse, checked here so the
  * operator is told which field is wrong while it is still on screen.
  *
- * This mirrors the SP; it does not invent rules of its own. The two options
- * 012_configure.sql REJECTS out of range (`retentionSinkHold`,
+ * This mirrors the broker; it does not invent rules of its own. The two
+ * options `apply_config_options` REJECTS out of range (`retentionSinkHold`,
  * `retentionSinkHoldMaxSeconds` — the two that govern deletion) are checked
  * exactly as it checks them, and the ones it CLAMPS (`minPopWaitTime`,
  * `dedupWindowSeconds`) are deliberately not: a clamp is not a refusal, and
@@ -469,15 +473,14 @@ export function validate(edited = {}) {
         errors[key] = `${meta.label} cannot be negative. 0 is the value that turns it off.`
         continue
       }
-      // Every one of these columns is a Postgres `integer`, and the SP does not
-      // bound them: a bigger number reaches the driver, which answers `value
-      // "99999999999" is out of range for type integer`. That string would then
-      // be rendered to the operator as if it were a verdict about the field, so
-      // the form states the limit in its own words first.
+      // The broker parses every one of these as a 32-bit integer and refuses
+      // the whole call above that with `<option> must be an integer`, which
+      // reads as a type error rather than a range. So the form states the
+      // limit in its own words first.
       if (value > INT_MAX) {
         errors[key] =
-          `${meta.label} cannot be larger than ${INT_MAX}: the broker stores it in a 32-bit ` +
-          'integer column and refuses the whole call above that.'
+          `${meta.label} cannot be larger than ${INT_MAX}: the broker reads it as a 32-bit ` +
+          'integer and refuses the whole call above that.'
         continue
       }
     }

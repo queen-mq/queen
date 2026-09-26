@@ -166,13 +166,13 @@ const routes = [
     }
   },
   {
-    // Cell-level: host resources and Postgres internals cover every tenant on
+    // Cell-level: host resources and the replicated log cover every tenant on
     // this cell, which is why the proxy answers it for live operators only.
     path: '/system',
     name: 'System',
     component: () => import('@/views/System.vue'),
     meta: {
-      title: 'System', subtitle: 'Cell-level: server resources and Postgres internals',
+      title: 'System', subtitle: 'Cell-level: server resources and the replicated log',
       requires: 'operator', scope: 'cell',
       nav: { group: 'Cell', icon: 'system', order: 1 },
     }

@@ -273,14 +273,14 @@ pub async fn verify_session(st: &St, token: &str) -> Result<Session, Response> {
     };
 
     // Deny-list check (revoked_tokens): 60s in-process cache; skipped when there
-    // is no pxdb (dev). Transient DB failure fails OPEN (see is_revoked).
+    // is no store. A transient store failure fails OPEN (see is_revoked).
     if st.keys.is_revoked(&st.store, &claims.jti).await {
         tracing::debug!(target: "auth", jti = %claims.jti, "jwt revoked");
         return Err(errors::err_401("invalid credential"));
     }
 
     // The per-cell gate is checked BEFORE the row lookup, not after: on a cell
-    // where the capability is off, no request ever asks pxdb about it.
+    // where the capability is off, no request ever asks the store about it.
     let operator = st.cfg.operator_enabled && st.keys.is_operator(&st.store, claims.user_id).await;
     Ok(Session { claims, operator })
 }
@@ -304,7 +304,7 @@ pub async fn role_on_cluster(
         None => {
             // Distinguish "user exists but has no role here" (a real 403)
             // from "the session's user no longer exists" — a stale JWT
-            // after user deletion (or a dev pxdb reset): that session is
+            // after user deletion (or a dev store reset): that session is
             // dead, and 401 lets the SPA bounce to login instead of
             // leaving a 403 dead-end.
             if !st.keys.user_exists(&st.store, session.claims.user_id).await {
@@ -536,7 +536,7 @@ pub struct VerifiedClaims {
     pub jti: String,
     pub cluster: Option<Uuid>,
     /// Unix seconds. Carried out of verification because revoking a session
-    /// needs the token's OWN expiry: `queen_proxy.revoke_session` stores it so
+    /// needs the token's OWN expiry: `revoke_session` stores it so
     /// the sweep can drop the deny-list row once the token is dead anyway.
     pub exp: i64,
 }
@@ -634,7 +634,7 @@ pub struct Keys {
     /// Deny-list policy when the lookup is UNAVAILABLE — see `is_revoked`.
     /// false (default) = fail open, true = fail closed.
     revocation_strict: bool,
-    /// Rate limiter for the "deny-list unavailable" line, so a pxdb outage
+    /// Rate limiter for the "deny-list unavailable" line, so a store outage
     /// costs one log line per window instead of one per request.
     revoked_warn: Mutex<WarnSampler>,
 }
@@ -680,9 +680,10 @@ impl Keys {
         // derivation is undesirable. When absent, the public key is derived from
         // the private PEM with ring.
         //
-        // Read through config.rs rather than off the environment here: main.rs's
-        // boot gate classifies the deployment from the same knob, and two readers
-        // with two "is it set?" rules would print one mode and run another.
+        // Read through config.rs rather than off the environment here: the boot
+        // gate (`config::jwt_boot`, app.rs) classifies the deployment from the
+        // same knob, and two readers with two "is it set?" rules would print
+        // one mode and run another.
         let pub_override = crate::config::jwt_ed25519_pub_pem();
         Keys::build(
             cfg.jwt_ed25519_pem.clone(),
@@ -859,12 +860,12 @@ impl Keys {
     /// Is this jti on the deny-list? Cached 60s. `db == None` (dev) => not
     /// revoked.
     ///
-    /// When the lookup is UNAVAILABLE (pool or query error — not a clean "no
-    /// such row") the answer is a deliberate policy, not an accident:
+    /// When the lookup is UNAVAILABLE (the store did not answer — not a clean
+    /// "no such row") the answer is a deliberate policy, not an accident:
     ///   * default (`QUEEN_PROXY_REVOCATION_STRICT` unset/false) — fail OPEN.
-    ///     A pxdb blip must not 401 every session; the token still had to pass
-    ///     signature + exp, and the data plane already degrades without pxdb.
-    ///     The cost is bounded and explicit: for as long as pxdb is unreachable
+    ///     A store blip must not 401 every session; the token still had to pass
+    ///     signature + exp, and the data plane already degrades without a store.
+    ///     The cost is bounded and explicit: for as long as the store is unreachable
     ///     the deny-list is not enforced on this proxy.
     ///   * strict (`QUEEN_PROXY_REVOCATION_STRICT=true`) — fail CLOSED, for
     ///     deployments that prefer rejecting sessions to honouring one that may
@@ -921,19 +922,19 @@ impl Keys {
             tracing::warn!(
                 target: "auth", err = %err, cause = what, suppressed,
                 "deny-list unavailable; failing CLOSED (QUEEN_PROXY_REVOCATION_STRICT=true): \
-                 user sessions rejected until pxdb recovers"
+                 user sessions rejected until the store recovers"
             );
         } else {
             tracing::warn!(
                 target: "auth", err = %err, cause = what, suppressed,
-                "deny-list unavailable; failing OPEN: revocations are NOT enforced until pxdb \
+                "deny-list unavailable; failing OPEN: revocations are NOT enforced until the store \
                  recovers (set QUEEN_PROXY_REVOCATION_STRICT=true to reject instead)"
             );
         }
     }
 
     /// Pin a jti as revoked in this process's deny-list cache. Called right
-    /// after a successful `queen_proxy.revoke_session` so the proxy that served
+    /// after a successful `revoke_session` so the proxy that served
     /// the logout stops honouring the token immediately, instead of waiting out
     /// a cached negative answer (other cells converge within their own
     /// `REVOKED_TTL`). Best-effort local shortcut — the DB row is the truth.
@@ -945,14 +946,10 @@ impl Keys {
         cache.insert(jti.to_string(), (true, Instant::now()));
     }
 
-    /// Resolve a user's role on a cluster from `cluster_roles`. Cached 30s
-    /// (positive memberships only). `db == None` or no row => None (fail-closed:
-    /// membership cannot be proven => caller returns 403). UUIDs are bound as
-    /// text and cast in SQL to avoid a tokio-postgres uuid feature dependency.
     /// Does the session's user still exist? Only consulted on the rare
     /// role-miss path, so deliberately uncached: a deleted user must lose
-    /// access immediately, and dev pxdb resets must not leave stale-but-
-    /// validly-signed sessions stuck on a 403 dead-end. On transient DB
+    /// access immediately, and dev store resets must not leave stale-but-
+    /// validly-signed sessions stuck on a 403 dead-end. On transient store
     /// errors we assume the user exists (prefer the softer 403 over killing
     /// a possibly-good session).
     pub async fn user_exists(&self, db: impl Into<Store>, user_id: Uuid) -> bool {
@@ -969,6 +966,9 @@ impl Keys {
         }
     }
 
+    /// Resolve a user's role on a cluster from `cluster_roles`. Cached 30s
+    /// (positive memberships only). No store or no row => None (fail-closed:
+    /// membership cannot be proven => caller returns 403).
     pub async fn cluster_role(&self, db: impl Into<Store>, user_id: Uuid, cluster_id: Uuid) -> Option<Role> {
         let key = (user_id, cluster_id);
         if let Some((r, at)) = self.role_cache.lock().unwrap().get(&key) {
@@ -1007,11 +1007,11 @@ impl Keys {
         self.role_cache.lock().unwrap().remove(&(user_id, cluster_id));
     }
 
-    /// Does this user hold the operator bit (`queen_proxy.users.is_operator`)?
+    /// Does this user hold the operator bit (the user's `is_operator`)?
     /// Cached `ROLE_TTL`, both answers.
     ///
-    /// Fail-CLOSED on every unknown: no pxdb, an unavailable pool, a query
-    /// error, or a column a pre-006 pxdb does not have yet all answer `false`.
+    /// Fail-CLOSED on every unknown: no store, an unavailable store, or a
+    /// document that does not decode all answer `false`.
     /// This is the opposite stance from `is_revoked`'s default fail-open, and
     /// deliberately so — a degraded control plane must never GRANT cell-wide
     /// access it cannot confirm, whereas failing open there only means a
@@ -1048,8 +1048,8 @@ impl Keys {
     /// one-key OKP/Ed25519 set; HS or unconfigured => `{"keys":[]}` (nothing
     /// public to publish).
     /// Can this proxy ISSUE a session token? False on a verify-only host and on
-    /// one with no material at all. Read once, at boot (main.rs), so a cell that
-    /// serves a login it cannot satisfy refuses to start instead of 500ing every
+    /// one with no material at all. Read once, at boot (app.rs), so a cell that
+    /// serves a login it cannot satisfy says so at boot instead of 500ing every
     /// login for as long as nobody tries one.
     pub fn can_mint(&self) -> bool {
         matches!(&self.signer, Signer::Ed { enc: Some(_), .. } | Signer::Hs { .. })
@@ -1084,16 +1084,16 @@ impl Keys {
 // ---------------------------------------------------------------------------
 
 /// Detached loop dropping `revoked_tokens` rows whose own `exp` has passed
-/// (`queen_proxy.sweep_revoked_tokens`, migration 004). Without it the
-/// deny-list only ever grows, since a logout inserts a row per session.
+/// (`store::data::sweep_revoked_tokens`; the KV rows also carry a TTL, so this
+/// only catches rows written without one). Without it the deny-list could only
+/// grow, since a logout inserts a row per session.
 ///
-/// Maintenance, so it is deliberately unexcited about failure: a pxdb outage
+/// Housekeeping, so it is deliberately unexcited about failure: a store outage
 /// warns and the next tick tries again — nothing here can affect a verify's
-/// outcome (an expired row is already inert). Skipped entirely without a pxdb
-/// (dev-static) and disabled by `QUEEN_PROXY_REVOCATION_SWEEP_MS=0`.
+/// outcome (an expired row is already inert). Skipped entirely without a store
+/// and disabled by `QUEEN_PROXY_REVOCATION_SWEEP_MS=0`.
 pub fn spawn_revocation_sweep(st: St) {
     if !st.store.is_some() {
-        tracing::info!(target: "auth", "revocation sweep: no pxdb configured, skipping (dev-static mode)");
         return;
     }
     let store = st.store.clone();
@@ -1135,7 +1135,7 @@ fn hs_or_none(hs_secret: Option<String>) -> Signer {
 /// Ed25519 signer built from a PUBLIC key alone: verifies, never mints.
 ///
 /// A PEM that will not parse yields `Signer::None` rather than a guess, and
-/// main.rs's boot gate turns that into a refusal — a verify-only host that
+/// the boot gate (`config::jwt_boot`) reports it as fatal — a verify-only host that
 /// cannot verify 401s every session while looking perfectly healthy, which is
 /// the same failure class as a mint host that cannot mint.
 fn verify_only_ed(pub_pem: Option<&str>) -> Signer {
@@ -1656,36 +1656,20 @@ mod tests {
         assert!(role_from_str("nope").is_none());
     }
 
-    /// A pool that can never connect: `pool.get()` fails on a refused TCP
-    /// connect, which is exactly the "deny-list lookup unavailable" branch of
-    /// `is_revoked` — no live Postgres needed to pin the policy.
-    fn unreachable_pool() -> deadpool_postgres::Pool {
-        let mut pg = tokio_postgres::Config::new();
-        // :1 is never listening; connect_timeout bounds the test if some
-        // environment blackholes it instead of refusing.
-        pg.host("127.0.0.1")
-            .port(1)
-            .user("nobody")
-            .dbname("nope")
-            .connect_timeout(Duration::from_secs(2));
-        let mgr = deadpool_postgres::Manager::from_config(
-            pg,
-            tokio_postgres::NoTls,
-            deadpool_postgres::ManagerConfig {
-                recycling_method: deadpool_postgres::RecyclingMethod::Fast,
-            },
-        );
-        deadpool_postgres::Pool::builder(mgr).max_size(1).build().unwrap()
+    /// A store that never answers, which is exactly the "deny-list lookup
+    /// unavailable" branch of `is_revoked`.
+    fn unreachable_store() -> Store {
+        Store::Kv(std::sync::Arc::new(crate::store::memkv::Down))
     }
 
     #[tokio::test]
     async fn revocation_fails_open_by_default() {
         let keys = hs_keys("queen-proxy");
         assert!(!keys.revocation_strict, "default policy is fail-open");
-        let db = Some(unreachable_pool());
+        let db = unreachable_store();
         assert!(
             !keys.is_revoked(&db, "some-jti").await,
-            "an unreachable pxdb must not revoke every session by default"
+            "an unreachable store must not revoke every session by default"
         );
         assert!(
             keys.revoked_cache.lock().unwrap().is_empty(),
@@ -1697,7 +1681,7 @@ mod tests {
     async fn revocation_fails_closed_when_strict() {
         let mut keys = hs_keys("queen-proxy");
         keys.revocation_strict = true;
-        let db = Some(unreachable_pool());
+        let db = unreachable_store();
         assert!(
             keys.is_revoked(&db, "some-jti").await,
             "strict mode must treat an unavailable deny-list as revoked"
@@ -1709,13 +1693,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_pxdb_means_not_revoked_in_either_policy() {
+    async fn no_store_means_not_revoked_in_either_policy() {
         for strict in [false, true] {
             let mut keys = hs_keys("queen-proxy");
             keys.revocation_strict = strict;
             assert!(
                 !keys.is_revoked(Store::None, "some-jti").await,
-                "dev-static mode has no deny-list at all (strict={strict})"
+                "no store means no deny-list at all (strict={strict})"
             );
         }
     }
@@ -1724,9 +1708,9 @@ mod tests {
     fn note_revoked_is_honoured_by_the_cache() {
         let keys = hs_keys("queen-proxy");
         keys.note_revoked("jti-1");
-        // Cached positive answers are returned without touching the pool, so an
-        // unreachable pxdb cannot resurrect a token this proxy just revoked.
-        let db = Some(unreachable_pool());
+        // Cached positive answers are returned without touching the store, so
+        // an unreachable store cannot resurrect a token this proxy just revoked.
+        let db = unreachable_store();
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         assert!(rt.block_on(keys.is_revoked(&db, "jti-1")));
         assert!(!rt.block_on(keys.is_revoked(&db, "jti-2")), "unrelated jti unaffected (fail-open)");
@@ -2112,9 +2096,9 @@ mod tests {
     async fn is_operator_fails_closed_without_a_control_plane() {
         let keys = hs_keys("queen-proxy");
         let uid = Uuid::new_v4();
-        // no pxdb at all (dev-static), and an unreachable one: both deny.
+        // no store at all, and an unreachable one: both deny.
         assert!(!keys.is_operator(Store::None, uid).await);
-        assert!(!keys.is_operator(&Some(unreachable_pool()), uid).await);
+        assert!(!keys.is_operator(&unreachable_store(), uid).await);
         assert!(
             keys.operator_cache.lock().unwrap().is_empty(),
             "a non-answer must not be cached as a grant or a denial"
@@ -2126,7 +2110,7 @@ mod tests {
         let keys = Keys::build(None, None, None, "queen-proxy".to_string(), None);
         assert!(keys.mint_user_jwt(Uuid::new_v4(), "admin", None, 60).is_err());
         assert!(matches!(keys.verify_jwt_claims("x.y.z"), Err(JwtReject::NotConfigured)));
-        // What main.rs's boot gate reads, and the shape it refuses in mint mode.
+        // What the boot gate reads, and the shape it refuses in mint mode.
         assert!(!keys.can_mint());
         assert!(!keys.can_verify());
     }

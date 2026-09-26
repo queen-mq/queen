@@ -182,7 +182,7 @@ class TimersIntegrationTest extends IntegrationTestCase
 
     /**
      * And the same for an absolute instant, which is not expressible on this
-     * wire at all: one clock, Postgres's, so no skew between brokers can enter.
+     * wire at all: one clock, the broker's, so no skew between brokers can enter.
      */
     public function testTheBrokerRefusesAnAbsoluteDeliverAt(): void
     {

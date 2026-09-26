@@ -1,286 +1,143 @@
 ---
 title: The storage model
-description: "Segments, offsets and the log: the log tables, the queue row they hang off, what each row holds, and the invariants that make offset arithmetic safe."
+description: "What a 2.0 node keeps in its data directory and why: queue logs for payloads, an ordered store for everything else, the raft state, how a message is found by offset, and the invariants offset arithmetic rests on."
 type: concept
 tier: internals
 sidebar:
   order: 2
 sourceOfTruth:
-  - server/sql/schema.sql
-  - server/sql/procedures/001_log_schema.sql
-  - server/sql/procedures/003_log_push.sql
-  - server/sql/procedures/005_log_ack.sql
-  - server/sql/procedures/006_log_maintenance.sql
+  - server/src/config.rs
   - server/src/frames.rs
-  - server/src/util.rs
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the dead-letter removal sentence is rewritten for the move primitive, which deletes the row in the same transaction as the push; schema.sql changed one comment.
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/effect.rs
+  - server/src/rsm/apply.rs
+  - server/src/rsm/qlog/mod.rs
+  - server/src/rsm/qlog/set.rs
+  - server/src/rsm/qlog/record.rs
+  - server/src/rsm/qlog/index.rs
+  - server/src/rsm/qlog/codec.rs
+  - server/src/rsm/store/mod.rs
+  - server/src/rsm/store/rows.rs
+  - server/src/rsm/dedup.rs
+  - server/src/rsm/maintenance.rs
+  - server/src/rsm/replicator/local.rs
+  - server/src/rsm/replicator/raft/log_store.rs
+  - server/src/rsm/replicator/raft/snapshot.rs
+  - server/src/rsm/dashboard/store.rs
+  - server/src/rsm/local_metrics.rs
+verifiedBy:
+  - server/src/rsm/tests/qlog_wal.rs
+  - server/src/rsm/tests/planner_push.rs
 ---
 
-A message's address in Queen is one number: a `BIGINT` offset, monotone within its partition.
-Everything in the storage layer follows from that choice. There is no per-message row, no
-per-message state, and no compound cursor. A consumer group's progress in a partition is one
-integer; the difference between two integers is a message count; whether one message precedes
-another is a comparison.
+A message's address in Queen is one number: an offset, gapless and monotone within its partition. A
+consumer group's progress in a partition is one integer, the difference between two offsets is a
+message count, and whether one message precedes another is a comparison. That did not change in
+2.0. What changed is where the bytes live: in the data directory of each node, split between two
+stores that apply keeps in step.
 
-The data itself is not stored per message either. Messages are packed into **segments**: one
-`queen.log_segments` row holds many messages as length-prefixed frames, compressed together
-with zstd, covering an inclusive offset range `[base_offset, end_offset]`. A partition's
-segments have disjoint ranges, allocated in ascending order.
+- **The queue logs** hold the message payloads, appended once, in the leader's order.
+- **The ordered store** holds everything whose shape is a key and a value: queues, groups,
+  partitions, cursors, leases, dead letters, the hash lists deduplication and acks resolve through,
+  KV, timers, counters, and the recorded outcome of every recent command.
+
+Each node holds a full copy of both, built by applying the same entries. Nothing is shared between
+nodes except the entries themselves.
+
+## The data directory
+
+`QUEEN_RAFT_DIR` names it (default `/var/lib/queen/raft`). Put it on a persistent volume: it is the
+only copy of this node's state.
+
+| Path | What it holds |
+| --- | --- |
+| `qlog/` | the queue logs: one directory per log (`q<id>/`) holding rolling files `rNNNNNNNN.qlog` and, beside each sealed file, its index `rNNNNNNNN.qidx`. `q0/` is the system log, for entries that touch no queue. `qlog/SHARDS` records the shared-log count when the directory uses one |
+| `store/` | the ordered store: one LMDB environment opened through the `heed` crate |
+| `raft/` | the openraft replicator only: `state.json` (the vote and the purge point, replaced atomically) and `committed.json` (the commit point, rewritten in place and never fsynced) |
+| `snapshots/`, `snapshot.pending` | a snapshot received from the leader, staged here and swapped in at the next boot |
+| `dash.db` | this node's dashboard rows, a checksum-framed journal |
+| `local.db` | node-local metrics and retention history, the same journal format |
+| `groups/g<N>/` | with `QUEEN_RAFT_GROUPS` above 1, group N's own queue logs, store and raft state (group 0 keeps the top level) |
+
+Two more directories, `log/` and `seg/`, belong to the layout used before the queue logs became the
+write-ahead log (`QUEEN_RAFT_QLOG=0`). With the default, apply files no payload into `seg/` and the
+writer appends nothing to `log/`; the local replicator still replays a `log/` tail left by an older
+build when it opens.
+
+There is no disk spool and no external database. Crash recovery needs nothing but this directory: the
+store reopens at its last durable point, and the entries above it replay from the queue logs.
+
+## The queue logs
+
+A queue's messages live once, in the leader's order, in that queue's log. The log **is** the
+write-ahead log: there is no second copy of a payload anywhere on the node.
 
 <pre class="mermaid">{`
-flowchart TB
-  P["log_partitions<br/>last_offset 11, log_start 4"]
-  S1["log_segments base 4, end 6<br/>blob: 3 frames, zstd"]
-  S2["log_segments base 7, end 11<br/>blob: 5 frames, zstd"]
-  T1["log_txns base 4, end 6<br/>hashes: 48 bytes"]
-  T2["log_txns base 7, end 11<br/>hashes: 80 bytes"]
-  C["log_consumers, group billing<br/>committed 6"]
-  P --> S1
-  P --> S2
-  P --> C
-  S1 -.-> T1
-  S2 -.-> T2
+flowchart LR
+  E["entry 812<br/>pushes to orders/p1 and orders/p2"] --> W["log writer"]
+  W --> Q7["q7/r00000003.qlog<br/>message record p1, base 120, 3 frames<br/>message record p2, base 44, 1 frame<br/>entry record 812"]
+  W -->|"one fsync per touched log"| D[("disk")]
+  D --> A["apply entry 812"]
 `}</pre>
 
-Offsets 0 to 3 are gone, deleted by retention, which is why `log_start` sits at 4 rather than 0.
-Segment lengths differ because nothing chose them, and each dashed sidecar row mirrors the
-range of the one segment it hangs off.
+**Which log.** A queue's log id is an `xxh3` of `(tenant, queue)`. With `QUEEN_QLOG_SHARDS` at its
+default of `0`, every queue has its own log. With `QUEEN_QLOG_SHARDS=K` (1 to 4096), every queue's
+records go to shared log `queue_id % K` instead, so one write group fsyncs at most `K` logs however
+many queues it touches. The count is fixed when a data directory is created and recorded in
+`qlog/SHARDS`; a directory keeps its layout, and a different value in the environment only logs a
+warning.
 
-## The tables
+**What a record is.** Every record is self-describing and checksummed:
 
-Four log tables are created by `001_log_schema.sql`, applied at every boot; `queen.log_dlq` is a
-fifth, created by the ack file (005_log_ack) and covered below; [Ack internals](/internals/ack-internals)
-has the path that writes it. All of them hang off `queen.queues` (created by `schema.sql`), which
-is both the queue's identity and its configuration.
-
-### queen.queues
-
-One row per queue, and queue identity **is** this row's `id`. On the wire a queue is named by
-`(tenant_id, name)`, established by the unique index `queues_tenant_name_uk`, so two tenants can
-hold the same queue name on one broker; internally, every partition-to-config join is by id, because
-`queen.log_partitions.queue_id` references `queen.queues(id)` with `ON DELETE CASCADE`. There is no
-separate engine-side queue table: the same row carries the full configuration (the retry limit, the
-DLQ flags, visibility delays, encryption, retention policy) plus the two engine-side options below.
-A queue that was never `/configure`d exists anyway: the first push, or an early subscription,
-provisions the row with its defaults.
-
-| Column | Meaning |
-| --- | --- |
-| `id` | primary key; `log_partitions.queue_id` references it with `ON DELETE CASCADE` |
-| `tenant_id` | opaque scoping key; defaults to the fixed default tenant |
-| `name` | the queue name as clients send it |
-| `lease_time` | default lease seconds for pops on this queue; **defaults to 60** |
-| `dedup_window_seconds` | deduplication window; `INT NOT NULL`, **defaults to 3600**, and `0` disables |
-
-`lease_time` needs care. It defaults to 60 on a row created implicitly by a push, but
-`POST /api/v1/configure` computes `leaseTime` with a default of 300 and writes it into the same
-column, so the effective default depends on how the queue came into existence. The 60 is a truth
-fix, not a behaviour change: implicitly created queues always leased at 60 (the pop path read that
-default), while the old config display showed a 300 the pop path never used. One column, one truth,
-and what the configuration shows is now the lease actually granted.
-
-There is no `storage` engine-selector column. One engine, nothing to select; the wire still echoes
-`storage: "segments"` as a hard-coded literal.
-
-### queen.log_partitions
-
-One row per partition. This row is the write serializer for the partition, and its columns are
-three offset watermarks, two retention timestamps derived from them, and bookkeeping.
-
-| Column | Type | Meaning |
-| --- | --- | --- |
-| `id` | `UUID` | primary key; every other log table keys on it |
-| `queue_id` | `UUID` | owning queue; references `queen.queues(id)` with `ON DELETE CASCADE` |
-| `name` | `TEXT` | partition name; defaults to `Default` |
-| `last_offset` | `BIGINT` | **the allocator.** Highest allocated offset; starts at `-1`, so the next base offset is `last_offset + 1` |
-| `log_start` | `BIGINT` | segment retention watermark, starts at 0: every offset below it has been deleted |
-| `txns_start` | `BIGINT` | hash-sidecar purge watermark, starts at 0: every `log_txns` row below it has been purged |
-| `oldest_live_at` | `TIMESTAMPTZ` | retention work-list fact: `created_at` of the segment sitting at `log_start`; `NULL` means no live segments, so retention can never have work here |
-| `oldest_txn_at` | `TIMESTAMPTZ` | the same for the sidecar: `created_at` of the `log_txns` row at `txns_start`; `NULL` means fully purged |
-| `last_write_at` | `TIMESTAMPTZ` | last write time, indexed, **quantized to at most one real change per second** |
-| `created_at` | `TIMESTAMPTZ` | creation time |
-
-`UNIQUE (queue_id, name)` makes partition names unique inside a queue. `last_write_at` is
-indexed by `idx_log_partitions_queue_write (queue_id, last_write_at)`, which is what lets a
-wildcard pop range-scan only recently written partitions instead of the whole set. The
-quantization exists precisely because that index is there: bumping an indexed column makes the
-allocator `UPDATE` non-HOT, so push only writes a new value when more than a second has
-elapsed. The candidate scan absorbs the staleness by allowing two minutes of slack.
-
-The two `oldest_*` columns are the retention work-list, and they exist so retention's cost scales
-with deletable work rather than with the partition count. `created_at` is monotone within a
-partition (invariant 2 below), so "this partition holds something deletable under cutoff `C`" is
-exactly "the row at its watermark is older than `C`": one range scan over a partial index,
-`(queue_id, oldest_live_at)` or `(queue_id, oldest_txn_at)` with a `NOT NULL` predicate, instead of
-one probe per partition. Each is a fact, never a policy (cutoffs stay computed from queue config at
-query time), and each is maintained in the same transaction, under the same row lock, as the
-watermark it mirrors: the retention step moves `oldest_live_at` with `log_start`, the sidecar purge
-moves `oldest_txn_at` with `txns_start`, and push only fills them on the empty-to-non-empty
-transition (`COALESCE`), so the allocator `UPDATE` stays HOT for a partition that already holds
-data. These two indexes are also the ones the schema apply builds `CONCURRENTLY`, because they
-arrive on an already-populated hot table.
-
-The table is also tuned against churn, and the reasoning is worth knowing because it explains a
-class of latency spike. Every push updates this row, so between autovacuum passes the dead
-tuple count dwarfs the live row count. The table therefore sets `fillfactor = 70`,
-`autovacuum_vacuum_scale_factor = 0` with `autovacuum_vacuum_threshold = 500` (threshold-based
-triggering, so vacuum re-fires under churn), and, the important one,
-`vacuum_truncate = off`. Heap truncation takes an `ACCESS EXCLUSIVE` lock, and on a table with
-a fixed row population it reclaims nothing while freezing every push and pop behind the lock
-for seconds. Turning it off removed the whole periodic-spike class.
-
-### queen.log_segments
-
-The messages.
-
-| Column | Type | Meaning |
-| --- | --- | --- |
-| `partition_id`, `base_offset` | `UUID`, `BIGINT` | composite primary key; `partition_id` references `log_partitions(id)`, cascading |
-| `end_offset` | `BIGINT` | inclusive; `msg_count = end_offset - base_offset + 1` |
-| `created_at` | `TIMESTAMPTZ` | commit-order timestamp, stamped under the partition row lock |
-| `blob` | `BYTEA` | the packed, zstd-compressed frames |
-
-`blob` is `SET STORAGE EXTERNAL`, so TOAST does not spend CPU trying to re-compress bytes the
-broker already compressed. **`log_segments` carries zero secondary indexes**, and that is a
-property of this one table rather than of the model: its primary key is also the pop path, so
-every read is a range scan or a backward step on it. The other tables here do carry an index
-where a scan needs one: `log_partitions` on `(queue_id, last_write_at)` plus the two partial
-retention-work-list indexes on `(queue_id, oldest_live_at)` and `(queue_id, oldest_txn_at)`, and
-`log_dlq` on `(partition_id, failed_at DESC)`.
-
-Autovacuum on this table is set by measurement, and the numbers are recorded with their dates in
-`001_log_schema.sql`. The earlier factors, 0.02 for vacuum and 0.05 for insert, re-fired vacuum
-roughly every 13 seconds at 1M msg/s, and each pass over the growing heap and its TOAST table
-competed for I/O exactly when the system had no headroom left: an absorbed hiccup at 800k msg/s,
-a stall at 900k, and a contributor to collapse at 1M. The table now sets
-`autovacuum_vacuum_scale_factor = 0.1` and `autovacuum_vacuum_insert_scale_factor = 0.3`, with
-`autovacuum_vacuum_cost_limit = 4000` and `autovacuum_vacuum_cost_delay = 0` so each pass finishes
-fast. **The same four values are set again with the `toast.` prefix.** The blob bytes live in the
-TOAST table, so tuning only the heap would leave the larger half of the write volume on the stock
-cadence. At 0.1 and 0.3 vacuum still keeps pace with retention churn: the heap plateaus through
-slot reuse, verified over 300 seconds at 1M msg/s with retention sweeping every 5 seconds. These
-are storage parameters only, so applying them at every boot is idempotent and rewrites nothing.
-
-Operators meet the same reasoning from the other side, next to the server settings that matter
-alongside it, in [PostgreSQL](/deploy/postgres). Do not strip these parameters in a tuning pass.
-
-### queen.log_txns
-
-The hash sidecar. One row per segment, mirroring its offset range, holding 16 bytes per frame.
-
-| Column | Type | Meaning |
-| --- | --- | --- |
-| `partition_id`, `base_offset` | `UUID`, `BIGINT` | composite primary key; `partition_id` carries **no foreign key**, deliberately |
-| `end_offset` | `BIGINT` | inclusive, same range as the segment |
-| `created_at` | `TIMESTAMPTZ` | same timestamp as the segment |
-| `hashes` | `BYTEA` | `16 × msg_count` bytes: `xxh3_128` of each frame's `transactionId`, big-endian, in frame order |
-
-<Aside type="caution">
-This table is written on **every** push, whether deduplication is on or off. It is not a
-deduplication optimisation you can turn off. Acks arrive on the wire addressed by
-`transactionId`, and the only way to turn a `transactionId` into an offset is to find its hash
-in this table. Disabling deduplication (`dedupWindowSeconds: 0`) skips the *probe*, not the
-*write*.
-</Aside>
-
-The broker computes the hashes; SQL never hashes anything, it only stores and compares `bytea`.
-The 128-bit width is what makes collisions a non-issue. There is deliberately **no foreign key**
-on `partition_id`: the purge path must never pay foreign-key trigger cost, and the rows are only
-ever reached through a live `log_partitions` row. The missing key leaves one obligation: whatever
-deletes a partition must delete these rows itself, because the purge phase walks live partitions,
-so a row orphaned by a partition delete would be unreachable forever. Exactly two things delete
-partitions, `log_partition_cleanup_step_v1` and `delete_queue_v1`, and both delete the sidecar
-explicitly first.
-
-The sidecar's size is `O(rate × window)`, independent of retention or backlog, because it is
-purged on its own clock. The retention loop purges rows older than
-`GREATEST(dedup_window_seconds, completed_retention_seconds, 900)` seconds and advances
-`txns_start`. A hash that outlives even that window resolves as unknown on ack, which the ack
-path treats as *not acked*: redelivery rather than loss.
-
-### queen.log_consumers
-
-Coordination state, one row per `(partition, consumer_group)`. This is the entire consumption
-model.
-
-| Column | Type | Meaning |
-| --- | --- | --- |
-| `partition_id`, `consumer_group` | `UUID`, `TEXT` | composite primary key; `partition_id` references `log_partitions(id)`, cascading. Queue-mode consumers use the group name `__QUEUE_MODE__` |
-| `committed` | `BIGINT` | **the cursor.** Last acked offset; everything at or below it is done. Starts at `-1`, so the next wanted offset is `committed + 1` |
-| `batch_end` | `BIGINT` | inclusive end of the currently leased batch; `NULL` means no lease |
-| `worker_id` | `TEXT` | the lease holder, the same value the client receives as `leaseId` |
-| `lease_expires_at`, `lease_acquired_at` | `TIMESTAMPTZ` | lease window; `lease_acquired_at` is also the queue detail's `lastActivity` source |
-| `batch_retry_count` | `INTEGER` | the retry budget, charged only by an explicit `failed` ack |
-| `lease_conflated` | `BOOLEAN` | whether the lease this row holds was a conflating one; written by the pop that took the lease, read by the ack that closes it, non-indexed so the lease `UPDATE` stays HOT |
-| `attempt_offset`, `attempt_count` | `BIGINT`, `INTEGER` | redelivery telemetry: the batch's first delivered offset and how many times that same start has been delivered |
-| `total_consumed` | `BIGINT` | lifetime counter |
-| `created_at` | `TIMESTAMPTZ` | first contact |
-
-A leased batch is the span `(committed, batch_end]`. One row can hold at most one lease, which
-is why exactly one in-flight leased batch exists per `(partition, group)` and a single-partition
-queue cannot be consumed in parallel by one group.
-
-`attempt_count` is telemetry and never consumes budget: lease expiry increments it but does not
-spend a retry. The two counters are separate on purpose: a consumer crash must not eat the
-retry budget an explicit failure is entitled to.
-
-Like `log_partitions`, this table sets `fillfactor = 50`, threshold-based autovacuum and
-`vacuum_truncate = off`, for the same churn and exclusive-lock reasons.
-
-### queen.log_dlq
-
-The per-message escape hatch. Everything else in this model is a cursor; this is the one table
-with a row per message. The payload is a snapshot, not a pointer, and the table carries no foreign
-key on purpose: a dead letter survives the retention that deletes its source segment, and the
-cleanup phase refuses to reclaim a partition that still holds one.
-
-| Column | Type | Meaning |
-| --- | --- | --- |
-| `id` | `UUID` | primary key, defaulted from `gen_random_uuid()`; the DLQ row's own identity, not the message's |
-| `partition_id` | `UUID` | where the poison frame lived; carries **no foreign key**, deliberately |
-| `consumer_group` | `TEXT` | the group whose retries ran out. One frame poisonous to two groups produces two rows |
-| `"offset"` | `BIGINT` | the frame's offset, recorded for tracing. Quoted in DDL and column lists because `offset` is a reserved word |
-| `message_id` | `UUID` | the frame's message id |
-| `transaction_id` | `TEXT` | the frame's `transactionId`, and the address the delete and retry routes take |
-| `payload` | `JSONB` | the snapshot the broker extracted from the segment blob before disposing of the frame |
-| `error` | `TEXT` | the error text carried by the ack that exhausted the budget |
-| `retry_count` | `INTEGER` | the `(partition, group)` `batch_retry_count` as it stood when the frame was dead-lettered |
-| `failed_at` | `TIMESTAMPTZ` | defaults to `now()` |
-
-One secondary index, `idx_log_dlq_partition_failed_at` on `(partition_id, failed_at DESC)`, which
-is what the DLQ browse and depth queries scan.
-
-`queen.log_dlq_head_v1` files the row and moves the cursor in one transaction: it sets
-`committed = GREATEST(committed, p_off)`, releases the lease, and resets `batch_retry_count` and
-the attempt counters. The `GREATEST` is a guard rather than arithmetic. The cursor already sits at
-the completed prefix, so the normal move is exactly the one disposed frame, and a stale caller can
-never walk it backward.
-
-The missing foreign key leaves the same obligation `log_txns` carries: whatever deletes a partition
-must delete these rows itself, and `delete_queue_v1` does exactly that before dropping the queue
-row. Partition cleanup takes the opposite route and declines to delete at all. The eligibility
-predicate `log_partition_dead_v1` vetoes on `EXISTS (SELECT 1 FROM queen.log_dlq ...)`, so an empty,
-long-inactive partition that still holds a dead letter is not empty and stays. Nothing removes a row
-on a timer: retention never touches this table, and the only removals are
-`DELETE /api/v1/messages/:partitionId/:transactionId`, which removes every consumer group's row
-for that address, and the two replay routes, which move exactly one row back into the log and
-delete it in the same transaction as the push.
-
-### The helper
-
-```sql
-queen.log_unnest_hashes(p BYTEA) RETURNS TABLE (idx INT, h BYTEA)
+```text
+len:u32 | xxh3:u64 | seq:u64 | pid:u64 | base_offset:u64 | count:u32 | created_at:i64 | txn_kind:u8 |
+  hashes[16 * count] | payload
 ```
 
-Explodes a 16-byte-stride blob into `(idx, hash)` rows with `idx` zero-based. It is `IMMUTABLE`
-pure byte slicing, so PostgreSQL can inline it into the calling query. Both the push
-deduplication probe and ack-by-hash resolution go through it.
+(A `txn_kind` of 1 adds a transaction envelope before the hashes; the high bit of `txn_kind` marks a
+compressed payload.) `len` counts every byte after itself, so a scanner knows where the next record
+starts, and the checksum covers every byte after itself, so a torn tail fails it. `seq` is the index
+of the entry that wrote the record. A **message record** carries one `Append` effect: `count`
+messages of one partition starting at `base_offset`, their 16-byte `transactionId` hashes in frame
+order, and the packed frames as the payload. An **entry record** carries the entry itself in its payload-free form.
+For each entry the writer puts the whole entry record into the lowest-numbered log the entry touches
+and a 61-byte stub into every other touched log (`QUEEN_QLOG_ENTRY_LAYOUT=copies` writes the whole
+record into each instead). Entry records are never indexed, so no read path can see them.
 
-## What a segment looks like inside
+**Durability.** The log writer takes a group of pending entries (on the local replicator at most
+4096 entries or 4 MiB), writes their records, fsyncs every log the group touched once, and only then
+hands the group to apply. The openraft replicator stores its log through the same group write. A
+message is durable when its record is fsynced, untorn, in its log. At open, recovery merges the entry
+records of every log by `seq` and replays the gapless prefix of complete entries above the store's
+durable index; an entry missing a part is the unacknowledged tail of a group whose fsyncs did not all
+land, and it is cut from every log. Only the active file can have a torn tail. A damaged record in a
+sealed file is corruption and is reported, never truncated.
 
-The broker packs frames, then compresses the whole buffer with zstd at `QUEEN_V2_ZSTD_LEVEL`
-(default 3). Each frame is little-endian:
+**Files and the index.** Files roll at `QUEEN_RAFT_SEGMENT_BYTES` (default 64 MiB) and a sealed file
+never changes again. The index maps `(pid, base_offset)` to the record's byte offset, length, end
+offset, timestamp and count: the active file's index is in RAM, a sealed file's is the `.qidx` beside
+it, and either can be rebuilt by scanning the `.qlog`. Byte offsets are node-local: they never appear
+in an entry, so two nodes may lay out the same records in different files.
+
+**Compression.** The log writer compresses each message record's payload with zstd at
+`QUEEN_RAFT_QLOG_ZSTD_LEVEL` (default 1; `0` turns it off). A payload under 512 bytes, or one that
+compresses by less than a tenth, is stored raw. The codec is node-local: the entry in the replicated
+log carries the raw frames, and every read decompresses at one decode point.
+
+**Reclaim.** A queue log shrinks only by dropping whole sealed files. On each maintenance tick every
+node runs one bounded pass over its own logs: it unlinks sealed files whose message records all sit
+below their partition's `txns_start`, and rewrites at most one partly dead file per pass, copying
+only its live records forward. A file is never dropped while it holds a record above the store's
+durable index (recovery replays from there) or, on openraft, above the purge point (a follower may
+still need the entry).
+`txns_start` trails the payload retention watermark (see below), so a record outlives its payload
+retention by the hash-list window. [Retention internals](/internals/retention) covers the watermarks.
+
+## The frames inside a payload
+
+A message record's payload is the packed frames of the messages that survived deduplication, in
+offset order, one frame per message. The frame codec is the one 1.x used (`server/src/frames.rs`),
+little-endian:
 
 ```text
 u32 body_len
@@ -291,71 +148,133 @@ body:
   u16  txn_len
   u8[txn_len] transaction_id
   [u16 psub_len | u8[psub_len] producer_sub]   present only when flag 2 is set
-  u8[...] payload             the JSON bytes as the client sent them
+  u8[...] payload             the JSON bytes as the client sent them, or their ciphertext
 ```
+
+The receiver packs one frame per message before it submits the command; the planner concatenates
+the survivors' frames into the `Append` blob and never repacks or decompresses them. Reading offset
+`O` from a record based at `B` means decoding the payload and taking frame `O - B`.
+
+## The ordered store
+
+The store is one LMDB environment, opened through `heed`. Every keyspace is held in RAM, loaded in
+full at open, and LMDB holds its checkpoint, written durably at each **durable point**: every
+`QUEEN_RAFT_DURABLE_EVERY_MS` (1000 ms) or `QUEEN_RAFT_DURABLE_EVERY_BYTES` (256 MiB), whichever comes
+first. In between, the queue logs are the write-ahead log. After a crash the store reopens exactly at
+its last durable point (its `applied_index` included) and the entries above it replay from the queue
+logs; apply skips an entry at or below the applied index, which is what makes that replay safe.
+
+LMDB keeps no checksums, so every value carries one (`xxh3` over the keyspace, the key and the value),
+verified on every read. A corrupt value stops the node rather than being served.
+
+Keys are byte strings compared with `memcmp`, integers big-endian, names escaped so that a composite
+key of two names cannot be confused with another pair. Every scan is therefore a scan in key order.
+The message-path keyspaces:
+
+| Keyspace | Key | Value |
+| --- | --- | --- |
+| `queues` | `(tenant, queue)` | the queue's configuration: lease time, retry limit, DLQ flags, delays, retention, encryption, dedup window |
+| `groups` | `(tenant, queue, group)` | the group's registration: subscription mode and instant, conflation policy |
+| `partitions` | `pid` | the partition row (below) |
+| `partitions_by_key` | `(tenant, queue, partition)` | `pid`: the unique name index |
+| `queue_partitions` | `(tenant, queue, pid)` | nothing: the scan index for wildcard pops and administration |
+| `cursors` | `(pid, group)` | the cursor row (below) |
+| `leases_by_worker` | `(worker, pid, group)` | the lease expiry, walked by lease renewal |
+| `pending` | `(tenant, queue, group, pid)` | `ready_at`: partitions with work for a group, the source of the ready rings |
+| `txns` | `(pid, base_offset)` | one row per `Append`: end offset, timestamp and the 16-byte hash of every message |
+| `dlq`, `dlq_by_pos` | `(tenant, queue, dlq_id)`, `(pid, group, offset)` | dead letters with their payload snapshot, and the index by position |
+| `request_ids`, `request_expiry` | `request_id`, `(time, request_id)` | the outcome recorded for each recent command |
+| `counters` | `(scope, id, counter)` | counters maintained at apply |
+| `meta` | fixed names | the applied index and term, the durable index, the next partition id, the clock floor |
+
+The rest cover the other surfaces: `kv` and `kv_expiry`, `timers` and `timers_due`, `streams_queries`
+and `streams_state`, `traces`, `trace_names` and `trace_expiry`, `flags`, `quotas`, `eph_config`,
+`garbage` (partitions whose data is still being deleted in chunks), and `dedup` (a per-hash index
+written only with `QUEEN_RAFT_DEDUP_INDEX=rows`). Three keyspaces are node-local because they name
+this node's files: `seg_loc`, `files` and `partition_files`. Every other keyspace is replicated.
+
+### The partition row
+
+| Field | Meaning |
+| --- | --- |
+| `uuid` | the partition's UUID, echoed by reads and traces |
+| `tenant`, `queue`, `partition` | the names |
+| `last_offset` | the highest offset appended, `-1` when empty. The next base offset is `last_offset + 1` |
+| `log_start` | the retention watermark: no offset below it is served any more |
+| `txns_start` | the hash-list watermark: every `txns` row below it is gone. It trails `log_start` |
+| `oldest_live_at` | the timestamp of the oldest live append, unset when the partition holds nothing |
+| `last_write_at`, `last_created_at` | the last write, and the floor for the next append's timestamp |
+| `created_at` | creation time |
+
+A partition's id (`pid`) is a small integer from one counter in `meta`, assigned by the planner and
+never reused. On the wire, `partitionId` in pop responses and acks is this number in decimal; read
+and admin routes accept it or the partition's UUID.
+
+### The cursor row
+
+One row per `(pid, group)`. Queue-mode consumers use the group name `__QUEUE_MODE__`.
+
+| Field | Meaning |
+| --- | --- |
+| `committed` | the cursor: the last acked offset, `-1` when nothing is acked. The next wanted offset is `committed + 1` |
+| `batch_end` | the inclusive end of the leased batch; unset when there is no lease |
+| `worker` | the lease holder, returned to the client as `leaseId` |
+| `lease_expires_at`, `lease_acquired_at` | the lease window |
+| `batch_retry_count` | the retry budget spent, charged only by an explicit `failed` ack |
+| `attempt_offset`, `attempt_count` | redelivery telemetry: the first offset of the delivered batch and how many times that same start was delivered |
+| `delivered` | the distinct hashes the leased batch delivered, which the ack fast path compares against ([Ack internals](/internals/ack-internals)) |
+| `lease_conflated` | whether the lease was a conflating one |
+| `total_consumed` | a lifetime counter |
+| `metadata` | the opaque string recorded with a position set through a transaction's `positions` rider; empty otherwise |
+| `created_at` | when the row was first written |
+
+A leased batch is the span `(committed, batch_end]`. One row holds at most one lease, so exactly one
+leased batch is in flight per `(partition, group)`, and one group cannot consume a single partition in
+parallel. Parallelism comes from partitions.
+
+## How a message is found
 
 <pre class="mermaid">{`
 flowchart LR
-  S["log_segments row<br/>base_offset 7"] --> F0["frame 0<br/>offset 7"]
-  S --> F1["frame 1<br/>offset 8"]
-  S --> F2["frame 2<br/>offset 9"]
-  H["log_txns.hashes"] --> H0["bytes 0 to 15"]
-  H --> H1["bytes 16 to 31"]
-  H --> H2["bytes 32 to 47"]
-  H0 -.-> F0
-  H1 -.-> F1
-  H2 -.-> F2
+  N["tenant, queue, partition"] -->|"partitions_by_key"| P["pid"]
+  P -->|"cursors"| C["wanted = committed + 1"]
+  P -->|"txns rows"| S["the append covering wanted"]
+  S -->|"queue id, log id"| L["qlog index: pid, base_offset"]
+  L --> R["record, decompressed"]
+  R --> F["frame wanted - base_offset"]
 `}</pre>
 
-Position is the entire addressing scheme, and it is why an ack that arrives carrying only a
-`transactionId` can be turned into a number: find the matching 16-byte slot, and its index is
-the message.
+The planner decides *which* offsets a pop takes without touching a payload: it rebuilds a partition's
+append boundaries (base, end, timestamp) from the replicated `txns` rows plus the appends still in
+flight, and never reads a byte position. The claim travels in the outcome as `(pid, start, end)`. The
+node that answers then reads the payloads from its own queue log: the log id from the queue's id and
+the shard count, the record from the index lookup of `(pid, offset)`, the frames from the decompressed
+payload. [Life of a pop](/internals/life-of-a-pop) has the whole path.
 
-Reading offset `O` from a segment based at `B` means decompressing the blob and skipping to
-frame `O - B`. That is why a pop returns whole segment rows plus slicing bounds and does the
-frame walk in Rust: PostgreSQL never looks inside a blob.
+## The invariants
 
-## Segment size is emergent, not configured
-
-There is no "segment size" setting, and this is a design decision rather than a missing knob.
-The push fusion layer dispatches a partition's accumulating segment the moment that partition
-has no flush in flight, so a segment contains exactly whatever arrived during the previous
-flush's round trip. At low load that is one message; under load it grows with offered load on
-its own. [Life of a push](/internals/life-of-a-push) explains the mechanism.
-
-The practical consequence: you cannot tune throughput by setting a batch size on the server. A
-larger client-side push batch does produce larger segments, and that does reduce commits per
-message.
-
-## The invariants everything else depends on
-
-Four properties hold, and every other page in this section leans on at least one of them.
-
-1. **Ranges are disjoint and allocated monotonically.** The allocator `UPDATE` on
-   `log_partitions.last_offset` happens under that row's lock, so two concurrent pushers to one
-   partition cannot interleave ranges. A rolled-back push rolls back the allocator bump, so
-   steady state has no holes.
-2. **`created_at` is monotone per partition, in commit order.** The timestamp is stamped
-   *after* the row lock is held, so a later pusher can only stamp after this transaction commits
-   and releases. Time-based retention and timestamp subscriptions are both a single forward walk
-   on the primary key because of this; without it they would need a sort.
-3. **`log_start` is the first live segment's `base_offset`**, or `last_offset + 1` when the
-   partition is empty. Retention only ever deletes a contiguous prefix of whole segments, and
-   advances the watermark to the last deleted `end_offset + 1`.
-4. **Offsets are not dense.** Retention leaves gaps, and the pop scan tolerates them: if the
-   segment covering the wanted offset is gone, the scan takes the next segment whose
-   `base_offset` is greater. A gap is not an error and not a stall.
+1. **Offsets are gapless and allocated in plan order.** The planner allocates a push's offsets from
+   `last_offset + 1`, and apply refuses an `Append` whose `base_offset` is not the partition's next
+   offset: such an entry means the planner planned against different state, and the node stops
+   rather than paper over it.
+2. **Timestamps are strictly monotone per partition.** An append is stamped
+   `max(now, last_created_at + 1 µs)` by the planner. Time-based retention, subscription seeding and
+   the `delayedProcessing` filter are all forward walks because of this.
+3. **Two watermarks, one order.** `txns_start <= log_start <= last_offset + 1`. Payloads below
+   `log_start` are no longer served; hash lists survive down to `txns_start`, so a duplicate check or
+   an ack by `transactionId` still resolves in the gap between them.
+4. **Retention removes a prefix.** A cursor can sit below `log_start` after retention; the next claim
+   then starts at the first retained offset. A gap is not an error and not a stall.
+5. **Positions never replicate.** Which file and which byte offset a record landed at is this node's
+   business. Entries carry effects, never positions, which is what lets a snapshot install onto a node
+   whose files are laid out differently.
 
 ## What this model does not have
 
-- **No global order.** Order is per partition. Two messages in different partitions of the same
-  queue have no defined relative order, and nothing in the storage layer could give them one.
-- **No per-message *pending* state.** Progress is a cursor: acking offset `N` implicitly completes
-  every earlier unacked offset in that partition for that group, and there is nowhere to record
-  "message 5 still pending while message 7 is done". Terminal failure is different. A message that
-  exhausts its retries is disposed of individually into `queen.log_dlq`, and the cursor moves past
-  exactly that offset, which is what keeps one poison message from pinning an ordered lane. Dead
-  lettering is on by default; with it disabled the poison frame is dropped instead of filed, and
-  the cursor still moves past it.
-- **No reordering mechanism of any kind.** A partition is strictly first-in, first-out in commit
-  order. Nothing can jump the queue.
+- **No global order.** Order is per partition. Two messages in different partitions of one queue
+  have no defined relative order.
+- **No per-message pending state.** Progress is a cursor: acking offset `N` completes every earlier
+  unacked offset of that partition for that group. The one per-message record is the dead letter: a
+  message that exhausts its retries is filed individually and the cursor moves past exactly that
+  offset, so one poison message cannot pin an ordered lane.
+- **No reordering.** A partition is first in, first out in log order. Nothing can jump the queue.

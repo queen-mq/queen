@@ -5,7 +5,7 @@ Python, on purpose: this harness is process supervision (start, arm a fault,
 wait for a death, restart, read stderr) plus a call to the Go checker. Python's
 subprocess and signal handling make that readable, and the harness never touches
 the data path, so its speed does not matter. The two tools that DO touch the
-data path — difffuzz and the flatness preloader — are Go.
+data path — the flatness preloader — is Go.
 
     crashdrv.py --list-points                    # the fault catalogue (§13.5)
     crashdrv.py --list-scenarios

@@ -43,7 +43,7 @@ async def register_query(
             )
             hint = (
                 "\n\nHint: pass reset=True to Stream.run(...) to wipe the existing "
-                "queen_streams.state for this query_id, or pick a new query_id."
+                "stream state for this query_id, or pick a new query_id."
             )
             raise StreamsConfigHashMismatch(inner + hint) from ex
         raise

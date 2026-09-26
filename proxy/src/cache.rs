@@ -1,15 +1,13 @@
 //! ClusterCache: host -> ClusterCtx and api-key-hash -> (ClusterCtx, scopes),
 //! store-backed with TTL + invalidation. OWNER: Agent B.
 //!
-//! dev-static (QUEEN_PROXY_DEV_CELL_URL) always wins when configured -- the
-//! store-backed path below is only ever consulted when it isn't. The lookups
-//! themselves (Postgres SQL or KV documents) live in `store::data`; see
-//! migrations/001_init.sql for the table shapes and the limit_overrides
-//! merge convention (mirrored exactly by `merge_limits` below).
+//! The lookups themselves (KV documents) live in `store::data`; see
+//! `store::schema` for the document shapes and `merge_limits` below for the
+//! limit_overrides merge convention.
 //!
-//! Invalidation: the standalone proxy LISTENs on `queen_proxy_inval`; inside
-//! the broker the store is the replicated KV and the same signal is its
-//! invalidation feed (`store::data::InvalFeed`), polled once a second.
+//! Invalidation: the store is the broker's replicated KV and the "this
+//! cluster changed" signal is its invalidation feed
+//! (`store::data::InvalFeed`), polled once a second.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -20,7 +18,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-use crate::config::{Config, PxdbConfig};
+use crate::config::Config;
 use crate::state::{ClusterCtx, ClusterStatus, EffectiveLimits, Features, Scopes};
 use crate::store::data::{self, ClusterKey, InvalPoll, Lookup};
 use crate::store::{KvBackend, Store};
@@ -28,9 +26,9 @@ use crate::store::{KvBackend, Store};
 const HOST_TTL: Duration = Duration::from_secs(30);
 const KEY_POSITIVE_TTL: Duration = Duration::from_secs(30);
 /// Short negative TTL so a brute-forced/garbage key hash still forces a
-/// re-check every 5s (anti-brute-force: the DB, not memory, is the source of
-/// truth for "does this hash exist"), while capping how hard a hot loop of
-/// bad keys can hit pxdb.
+/// re-check every 5s (anti-brute-force: the store, not memory, is the source
+/// of truth for "does this hash exist"), while capping how hard a hot loop of
+/// bad keys can hit the store.
 const KEY_NEGATIVE_TTL: Duration = Duration::from_secs(5);
 /// Ceiling on NEGATIVE api-key entries (unknown/revoked hashes). Their cache
 /// key is attacker-chosen, so this is the difference between a memo and an
@@ -45,7 +43,7 @@ const KEY_NEGATIVE_TTL: Duration = Duration::from_secs(5);
 /// would prune on every unknown key instead of every TTL, which costs a walk
 /// and never costs correctness. Positive entries are never dropped by it.
 const KEY_NEGATIVE_MAX: usize = 10_000;
-/// After a refresh pxdb failed to answer, how long an expired entry keeps
+/// After a refresh the store failed to answer, how long an expired entry keeps
 /// being served before another refresh is attempted for it. Bounds the cost
 /// of an outage to one (failing) lookup per entry per second, not per request.
 const REFRESH_BACKOFF: Duration = Duration::from_secs(1);
@@ -53,17 +51,8 @@ const REFRESH_BACKOFF: Duration = Duration::from_secs(1);
 /// (QUEEN_PROXY_KEY_TOUCH_MS).
 const KEY_TOUCH_FLUSH_MS: u64 = 10_000;
 
-/// The pg_notify channel every queen_proxy.* mutating SQL function targets
-/// (migrations/002_functions.sql via record_operation()).
-pub const INVAL_CHANNEL: &str = "queen_proxy_inval";
-
-const LISTENER_MAX_BACKOFF: Duration = Duration::from_secs(30);
-/// A session that stayed up at least this long counts as "was healthy" for
-/// backoff-reset purposes -- see `listen_forever`.
-const LISTENER_HEALTHY_SESSION_MIN: Duration = Duration::from_secs(10);
-
 /// Sampling interval for the stale-serve warning -- one line per window while
-/// pxdb is down, not one per request (every request takes that path during an
+/// the store is down, not one per request (every request takes that path during an
 /// outage). Same shape as gateway.rs::maint_log_due.
 const STALE_LOG_INTERVAL: Duration = Duration::from_secs(10);
 static STALE_LOG: LogGate = LogGate::new();
@@ -100,18 +89,19 @@ fn stale_log_due(now: Instant) -> bool {
 /// cares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Miss {
-    /// pxdb ran the query and matched nothing: the row genuinely isn't there.
+    /// The store answered and matched nothing: the row genuinely isn't there.
     NoSuchRow,
-    /// pxdb never answered -- pool checkout, query, or row decode failed.
+    /// The store never answered -- no leader, a timeout, or a document that
+    /// does not decode.
     NoAnswer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fallback {
     /// Serve the expired entry: last known-good, still inside the grace
-    /// window, and pxdb couldn't contradict it.
+    /// window, and the store couldn't contradict it.
     ServeStale,
-    /// pxdb answered "no such row" -- deny, and forget any expired entry so a
+    /// The store answered "no such row" -- deny, and forget any expired entry so a
     /// later outage can't resurrect a deleted cluster/revoked key through the
     /// grace window.
     FailClosed,
@@ -120,8 +110,8 @@ enum Fallback {
 }
 
 /// The PLAN §2 degradation rule, kept free of I/O so it can be tested:
-/// fail-open for known good, fail-closed for unknowns and for anything pxdb
-/// positively denied.
+/// fail-open for known good, fail-closed for unknowns and for anything the
+/// store positively denied.
 fn fallback(miss: Miss, stale_expires_at: Option<Instant>, now: Instant, grace: Duration) -> Fallback {
     if miss == Miss::NoSuchRow {
         return Fallback::FailClosed;
@@ -140,7 +130,7 @@ struct HostEntry {
     expires_at: Instant,
     /// Earliest instant a background refresh may be started for this entry
     /// once it has expired. `expires_at` on insert; pushed out by
-    /// REFRESH_BACKOFF each time pxdb fails to answer.
+    /// REFRESH_BACKOFF each time the store fails to answer.
     refresh_after: Instant,
 }
 
@@ -161,10 +151,10 @@ type Touched = Mutex<HashSet<Uuid>>;
 
 // ------------------------------------------------------------ single-flight
 
-/// One in-flight pxdb lookup per cache key, shared by every request that
+/// One in-flight store lookup per cache key, shared by every request that
 /// needs it. Before this, every request that arrived while an entry was
 /// expired ran its own lookup: at a 30s TTL under load that was a herd of
-/// dozens of identical SELECTs per expiry -- and for keys dozens of
+/// dozens of identical reads per expiry -- and for keys dozens of
 /// `last_used_at` UPDATEs serialised on one row, each waiting for the
 /// previous one's fsync, which is how the 2026-08-22 soak wrote
 /// `last_used_at` 103 726 times for 35 keys.
@@ -236,7 +226,7 @@ impl<T: Clone + Send + 'static> Flights<T> {
 
     /// Join the lookup in flight for `key`, starting `work` if there is none.
     /// Resolves to `None` only if the task died without a result (a panic),
-    /// which callers treat as "pxdb did not answer".
+    /// which callers treat as "the store did not answer".
     fn join<F>(self: &Arc<Self>, key: &str, work: F) -> impl Future<Output = Option<T>>
     where
         F: Future<Output = T> + Send + 'static,
@@ -260,22 +250,14 @@ impl<T: Clone + Send + 'static> Flights<T> {
 // ----------------------------------------------------------------- the cache
 
 pub struct ClusterCache {
-    dev_static: Option<ClusterCtx>,
     /// Dev/demo fallback (QUEEN_PROXY_DEFAULT_CLUSTER): slug tried when the
     /// Host header resolves to no cluster — browsers on localhost send
     /// `Host: localhost:6711`, which is no cluster's slug. Never set in cloud.
     default_cluster: Option<String>,
-    /// Where lookups go: pxdb, the broker's KV, or nowhere (dev-static).
+    /// Where lookups go: the broker's KV (or nowhere, in tests).
     store: Store,
-    /// Cloned at construction so `spawn_listener` can open its own dedicated
-    /// LISTEN connection later. The pool can't be reused for this: deadpool
-    /// drives each pooled connection on its own background task and
-    /// discards `AsyncMessage::Notification` (see tokio-postgres's
-    /// LISTEN/NOTIFY docs -- a dedicated `Connection` object, polled by
-    /// hand, is the documented pattern).
-    pxdb_cfg: Option<PxdbConfig>,
-    /// How far past its TTL an entry may still be served when pxdb fails to
-    /// answer (config::stale_grace).
+    /// How far past its TTL an entry may still be served when the store fails
+    /// to answer (config::stale_grace).
     stale_grace: Duration,
     host_cache: Arc<HostMap>,
     key_cache: Arc<KeyMap>,
@@ -283,8 +265,8 @@ pub struct ClusterCache {
     key_flights: Arc<Flights<Lookup<KeyResult>>>,
     touched: Arc<Touched>,
     /// Extra per-cluster state to drop alongside this cache's own entries when
-    /// pxdb says a cluster changed. `queen_proxy_inval` is the cell's ONE
-    /// "this cluster is not what you think it is" signal, and the host/key
+    /// the store says a cluster changed. The invalidation feed is the cell's
+    /// ONE "this cluster is not what you think it is" signal, and the host/key
     /// caches were not the only thing keyed on a cluster: the queue registry
     /// (registry.rs) holds the live queue-name set that `max_queues` counts,
     /// and until 2026-09-04 nothing invalidated it, so a soft-deleted queue
@@ -292,44 +274,16 @@ pub struct ClusterCache {
     inval_subscribers: Arc<RwLock<Vec<InvalHook>>>,
 }
 
-/// A subscriber to `queen_proxy_inval`. Boxed rather than a concrete type so
+/// A subscriber to the invalidation feed. Boxed rather than a concrete type so
 /// cache.rs keeps no dependency on whatever holds the state being dropped.
 type InvalHook = Arc<dyn Fn(Uuid) + Send + Sync>;
 
 impl ClusterCache {
-    /// The standalone proxy's constructor: pxdb, or none (dev-static).
-    pub fn new(cfg: &Config, db: Option<deadpool_postgres::Pool>) -> ClusterCache {
-        ClusterCache::with_store(cfg, db.map(Store::Pg).unwrap_or(Store::None))
-    }
-
-    /// Any store: the single binary hands the broker's KV here.
-    pub fn with_store(cfg: &Config, store: Store) -> ClusterCache {
-        let dev_static = cfg.dev_static.as_ref().map(|d| ClusterCtx {
-            cluster_id: Uuid::nil(),
-            tenant_id: Uuid::nil(),
-            broker_tenant: Uuid::parse_str(&d.broker_tenant)
-                .unwrap_or_else(|_| Uuid::parse_str(crate::config::DEFAULT_TENANT_UUID).unwrap()),
-            slug: "dev".to_string(),
-            cell_base_url: d.cell_url.clone(),
-            cell_token: d.cell_token.clone(),
-            status: ClusterStatus::Active,
-            limits: EffectiveLimits::default(),
-            // dev-static has no plans table to read, so every feature is on —
-            // it is a single-developer loopback mode, and the cloud path never
-            // reaches this branch.
-            features: Features {
-                streams: true,
-                traces: true,
-                kv: true,
-                timers: true,
-                ephemeral: true,
-            },
-        });
+    /// A cache over `store` (the broker's KV).
+    pub fn new(cfg: &Config, store: Store) -> ClusterCache {
         ClusterCache {
-            dev_static,
             default_cluster: cfg.default_cluster.clone(),
             store,
-            pxdb_cfg: cfg.pxdb.clone(),
             stale_grace: crate::config::stale_grace(),
             host_cache: Arc::new(RwLock::new(HashMap::new())),
             key_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -341,7 +295,7 @@ impl ClusterCache {
     }
 
     /// Register a callback to run on every cluster invalidation, from the
-    /// NOTIFY listener and from `invalidate`. Call it BEFORE `spawn_listener`:
+    /// invalidation feed and from `invalidate`. Call it BEFORE `spawn_listener`:
     /// the listener task takes its own handle on the subscriber list, so a hook
     /// added afterwards still fires, but registering first means no
     /// notification can land in the gap.
@@ -354,11 +308,6 @@ impl ClusterCache {
 
     /// Resolve the cluster for an inbound Host header (host[:port]).
     pub async fn resolve_host(&self, host: &str) -> Option<Arc<ClusterCtx>> {
-        // dev-static always wins when configured -- behavior unchanged from
-        // the skeleton.
-        if let Some(ctx) = &self.dev_static {
-            return Some(Arc::new(ctx.clone()));
-        }
         if let Some(slug) = slug_from_host(host) {
             if let Some(ctx) = self.resolve_slug(slug).await {
                 return Some(ctx);
@@ -370,9 +319,9 @@ impl ClusterCache {
     }
 
     /// Resolve a cluster named EXPLICITLY (act-as-cluster, acting.rs): a slug
-    /// or a cluster uuid. Deliberately does NOT honour dev-static or
-    /// `default_cluster` — those exist to guess a cluster when Host cannot
-    /// name one, and a caller that named one must get that one or nothing.
+    /// or a cluster uuid. Deliberately does NOT honour `default_cluster` —
+    /// it exists to guess a cluster when Host cannot name one, and a caller
+    /// that named one must get that one or nothing.
     pub async fn resolve_ref(&self, reference: &str) -> Option<Arc<ClusterCtx>> {
         let reference = reference.trim();
         if reference.is_empty() {
@@ -381,7 +330,7 @@ impl ClusterCache {
         match Uuid::parse_str(reference) {
             // Cache key is namespaced so `id:<uuid>` can never collide with a
             // slug entry; invalidation retains by cluster_id, so both shapes
-            // are dropped together on NOTIFY.
+            // are dropped together on invalidation.
             Ok(id) => {
                 let key = format!("id:{id}");
                 self.resolve_keyed(key, ClusterKey::Id(id)).await
@@ -400,10 +349,10 @@ impl ClusterCache {
     ///   * an expired entry inside the grace window is served AS IS, and one
     ///     background refresh is started for it (stale-while-revalidate). Its
     ///     answer lands in the cache for the next request, so the TTL costs no
-    ///     request its latency and no request a herd. A cluster pxdb has since
-    ///     deleted is answered 421 one request later than before -- still
+    ///     request its latency and no request a herd. A cluster the store has
+    ///     since deleted is answered 421 one request later than before -- still
     ///     within the TTL, and the control-plane actions that must not wait
-    ///     even that long arrive through NOTIFY invalidation;
+    ///     even that long arrive through the invalidation feed;
     ///   * nothing servable: one lookup, shared by every request that needs
     ///     it, then the PLAN §2 rule (`fallback`) on its outcome.
     async fn resolve_keyed(&self, cache_key: String, key: ClusterKey) -> Option<Arc<ClusterCtx>> {
@@ -493,49 +442,34 @@ impl ClusterCache {
         }
     }
 
-    /// Invalidate a cluster (NOTIFY payload or admin action).
+    /// Invalidate a cluster (invalidation feed or admin action).
     pub fn invalidate(&self, cluster_id: Uuid) {
         fan_out_invalidation(&self.host_cache, &self.key_cache, &self.inval_subscribers, cluster_id);
     }
 
-    /// Spawn the LISTEN task. Called from main.rs at startup, next to
-    /// `registry.spawn_reconciler()`. No-op in dev-static mode (matches the
-    /// doc comment on the skeleton) and also when there's simply no pxdb
-    /// configured. Note this takes `&self`, not `self: &Arc<Self>` -- the
-    /// skeleton declared the latter, but `AppState` stores `cache` as a
-    /// plain field (not `Arc<ClusterCache>`), so nothing could ever have
-    /// called it that way.
-    ///
-    /// Inside the broker (a KV store) the same invalidations arrive through
-    /// the KV invalidation feed instead, polled every QUEEN_PROXY_INVAL_POLL_MS
-    /// (default 1 s): every node runs its own proxy, and each drops its own
-    /// caches.
+    /// Spawn the invalidation task: poll the KV invalidation feed every
+    /// QUEEN_PROXY_INVAL_POLL_MS (default 1 s). Every node runs its own
+    /// proxy, and each drops its own caches. No-op without a store. Note this
+    /// takes `&self`, not `self: &Arc<Self>` -- `AppState` stores `cache` as a
+    /// plain field (not `Arc<ClusterCache>`).
     pub fn spawn_listener(&self) {
+        let Store::Kv(kv) = &self.store else {
+            return;
+        };
+        let kv = kv.clone();
         let host_cache = self.host_cache.clone();
         let key_cache = self.key_cache.clone();
         let subscribers = self.inval_subscribers.clone();
-        if let Store::Kv(kv) = &self.store {
-            let kv = kv.clone();
-            tokio::spawn(async move {
-                poll_forever(kv, host_cache, key_cache, subscribers).await;
-            });
-            return;
-        }
-        let (Store::Pg(_), Some(pxcfg)) = (&self.store, self.pxdb_cfg.clone()) else {
-            tracing::info!("queen_proxy_inval listener: no pxdb configured, skipping (dev-static mode)");
-            return;
-        };
         tokio::spawn(async move {
-            listen_forever(pxcfg, host_cache, key_cache, subscribers).await;
+            poll_forever(kv, host_cache, key_cache, subscribers).await;
         });
     }
 
     /// Batched `api_keys.last_used_at` writer: a key is "touched" when a
     /// lookup finds it (once per TTL per key, thanks to single-flight), and
     /// the set is written as ONE statement every QUEEN_PROXY_KEY_TOUCH_MS,
-    /// off every request path. Best-effort like the inline UPDATE it
-    /// replaces: a failed flush is dropped and the next refresh re-touches.
-    /// No-op without a pxdb (dev-static).
+    /// off every request path. Best-effort: a failed flush is dropped and the
+    /// next refresh re-touches. No-op without a store.
     pub fn spawn_touch_flush(&self) {
         if !self.store.is_some() {
             return;
@@ -559,10 +493,10 @@ impl ClusterCache {
 // ------------------------------------------------------ lookup tasks
 //
 // The lookups themselves are `store::data::lookup_cluster` / `lookup_api_key`
-// (the SQL moved there verbatim; the KV arm reads the same rows as
-// documents). Both answer `Unavailable` for a malformed row on purpose: the
-// row EXISTS, so the store has not said "no such cluster/key" -- we merely
-// failed to decode its answer (schema drift, a column that went NULL).
+// (KV documents). Both answer `Unavailable` for a malformed document on
+// purpose: the row EXISTS, so the store has not said "no such cluster/key" --
+// we merely failed to decode its answer (schema drift, a field that went
+// missing).
 // Classifying that as `Absent` would let one bad row deny a live cluster.
 //
 // `last_used_at` is NOT bumped by a key lookup: `apply_key_lookup` records
@@ -624,7 +558,7 @@ fn apply_host_lookup(cache: &HostMap, key: &str, looked: &Lookup<Arc<ClusterCtx>
                 HostEntry { ctx: ctx.clone(), expires_at: now + HOST_TTL, refresh_after: now + HOST_TTL },
             );
         }
-        // pxdb answered "no such row": forget any expired entry so a later
+        // The store answered "no such row": forget any expired entry so a later
         // outage can't resurrect a deleted cluster through the grace window.
         // Only when there is something to forget -- a flood of garbage Host
         // headers (the common 421 case) must not take the write lock.
@@ -647,7 +581,7 @@ fn apply_host_lookup(cache: &HostMap, key: &str, looked: &Lookup<Arc<ClusterCtx>
             if stale_log_due(now) {
                 tracing::warn!(
                     slug = %key,
-                    "pxdb unreachable: serving cluster from expired cache (fail-open, PLAN §2)"
+                    "store unreachable: serving cluster from expired cache (fail-open, PLAN §2)"
                 );
             }
         }
@@ -669,7 +603,7 @@ fn apply_key_lookup(cache: &KeyMap, touched: &Touched, hash_hex: &str, looked: &
             );
             touched.lock().unwrap().insert(result.1);
         }
-        // pxdb answered: this hash is unknown or revoked. The negative entry
+        // The store answered: this hash is unknown or revoked. The negative entry
         // both denies and replaces any expired positive, so the grace window
         // can never resurrect a revoked key.
         //
@@ -687,7 +621,7 @@ fn apply_key_lookup(cache: &KeyMap, touched: &Touched, hash_hex: &str, looked: &
         //
         // `apply_host_lookup` answers the same problem by not caching a miss at
         // all. Here the miss is worth caching — without it every request
-        // carrying a garbage key is a pxdb round trip — so it is capped
+        // carrying a garbage key is a store round trip — so it is capped
         // instead: expired negatives are dropped first (they are only worth one
         // avoided lookup each), and if the cap still holds, this one is simply
         // not cached. The request is denied either way; only the memo is lost.
@@ -710,7 +644,7 @@ fn apply_key_lookup(cache: &KeyMap, touched: &Touched, hash_hex: &str, looked: &
             if w.len() >= KEY_NEGATIVE_MAX {
                 let mut negatives = 0usize;
                 // Positives past their TTL are KEPT: the stale-while-revalidate
-                // grace window (`fallback`) is what serves them through a pxdb
+                // grace window (`fallback`) is what serves them through a store
                 // outage, and dropping them here would turn a flood into a
                 // fail-CLOSED for live keys. Only expired negatives go, and
                 // only they are counted against the cap.
@@ -747,7 +681,7 @@ fn apply_key_lookup(cache: &KeyMap, touched: &Touched, hash_hex: &str, looked: &
             // Only a positive entry is a fail-open worth reporting; a stale
             // negative just keeps denying.
             if positive && stale_log_due(now) {
-                tracing::warn!("pxdb unreachable: serving api key from expired cache (fail-open, PLAN §2)");
+                tracing::warn!("store unreachable: serving api key from expired cache (fail-open, PLAN §2)");
             }
         }
     }
@@ -782,7 +716,7 @@ fn invalidate_caches(host_cache: &HostMap, key_cache: &KeyMap, cluster_id: Uuid)
 /// The hooks are CLONED OUT before any of them runs, so no subscriber executes
 /// while the list's read lock is held: a hook that registered another one (or
 /// that took a lock some other thread holds while waiting on this list) would
-/// otherwise deadlock the LISTEN task, and the LISTEN task is the only thing
+/// otherwise deadlock the feed task, and the feed task is the only thing
 /// delivering invalidations.
 fn fan_out_invalidation(
     host_cache: &HostMap,
@@ -797,143 +731,6 @@ fn fan_out_invalidation(
     }
 }
 
-// ---------------------------------------------------------------- listener
-
-/// Drives the dedicated LISTEN connection forever, reconnecting with
-/// exponential backoff (capped) on any error or graceful close. Backoff
-/// resets to its floor once a session has stayed up "long enough" to count
-/// as healthy, so a blip doesn't leave the listener limping at the max
-/// backoff long after pxdb recovers.
-async fn listen_forever(
-    pxcfg: PxdbConfig,
-    host_cache: Arc<HostMap>,
-    key_cache: Arc<KeyMap>,
-    subscribers: Arc<RwLock<Vec<InvalHook>>>,
-) {
-    let mut backoff = Duration::from_secs(1);
-    loop {
-        let started = Instant::now();
-        if let Err(e) = listen_once(&pxcfg, &host_cache, &key_cache, &subscribers).await {
-            tracing::warn!(error = %e, backoff_s = backoff.as_secs(), "queen_proxy_inval listener: connection lost, retrying");
-        }
-        backoff = if started.elapsed() >= LISTENER_HEALTHY_SESSION_MIN {
-            Duration::from_secs(1)
-        } else {
-            (backoff * 2).min(LISTENER_MAX_BACKOFF)
-        };
-        tokio::time::sleep(backoff).await;
-    }
-}
-
-/// One connect-LISTEN-poll session. Returns (with an error) when the
-/// connection drops; the caller reconnects. Deliberately NOT built on the
-/// deadpool pool (see the field comment on `pxdb_cfg`): this opens its own
-/// tokio_postgres connection and polls the `Connection` object directly
-/// (`std::future::poll_fn` bridging `Connection::poll_message`, the
-/// documented tokio-postgres LISTEN/NOTIFY pattern) rather than spawning it
-/// as a bare driver task, which is what would discard notifications.
-async fn listen_once(
-    pxcfg: &PxdbConfig,
-    host_cache: &Arc<HostMap>,
-    key_cache: &Arc<KeyMap>,
-    subscribers: &Arc<RwLock<Vec<InvalHook>>>,
-) -> Result<(), String> {
-    let mut pg = tokio_postgres::Config::new();
-    pg.host(&pxcfg.host)
-        .port(pxcfg.port)
-        .user(&pxcfg.user)
-        .password(&pxcfg.password)
-        .dbname(&pxcfg.dbname)
-        .application_name("queen-proxy-listen")
-        .connect_timeout(pxcfg.timeout());
-    let listen_stmt = format!("LISTEN {INVAL_CHANNEL}");
-
-    if pxcfg.use_ssl {
-        // Same trust as the pool, from the same validated material — a LISTEN
-        // connection that trusted a different root set than the pool would be
-        // the worst kind of divergence: invalidations arriving over a link
-        // nobody audited.
-        let connector = crate::pgtls::make_connector(
-            pxcfg.ssl_reject_unauthorized,
-            pxcfg.ssl_root_cert.as_deref(),
-        )
-        .map_err(|e| format!("PXDB_SSL_ROOT_CERT: {e}"))?;
-        let (client, connection) = pg.connect(connector).await.map_err(|e| format!("connect: {e}"))?;
-        run_listen_session(client, connection, &listen_stmt, host_cache, key_cache, subscribers, true).await
-    } else {
-        let (client, connection) =
-            pg.connect(tokio_postgres::NoTls).await.map_err(|e| format!("connect: {e}"))?;
-        run_listen_session(client, connection, &listen_stmt, host_cache, key_cache, subscribers, false).await
-    }
-}
-
-/// Drive the LISTEN statement and the notification stream from ONE loop.
-///
-/// This ordering is load-bearing. `Client` only queues a request; the
-/// `Connection` is what drives the socket, so awaiting `batch_execute` BEFORE
-/// entering the poll loop parks forever — the LISTEN never reaches the server,
-/// no notification ever arrives, and the failure is silent because the
-/// "connected" log line sits on the far side of that await. Every cache
-/// invalidation then silently degrades to TTL expiry (30s), which is how a
-/// revoked API key kept working. Poll both, or neither works.
-async fn run_listen_session<S, T>(
-    client: tokio_postgres::Client,
-    mut connection: tokio_postgres::Connection<S, T>,
-    listen_stmt: &str,
-    host_cache: &Arc<HostMap>,
-    key_cache: &Arc<KeyMap>,
-    subscribers: &Arc<RwLock<Vec<InvalHook>>>,
-    tls: bool,
-) -> Result<(), String>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-    T: tokio_postgres::tls::TlsStream + Unpin,
-{
-    let listen = client.batch_execute(listen_stmt);
-    tokio::pin!(listen);
-    let mut listening = false;
-
-    loop {
-        tokio::select! {
-            res = &mut listen, if !listening => {
-                res.map_err(|e| format!("LISTEN: {e}"))?;
-                listening = true;
-                tracing::info!(channel = INVAL_CHANNEL, tls, "queen_proxy_inval listener connected");
-            }
-            msg = std::future::poll_fn(|cx| connection.poll_message(cx)) => {
-                match msg {
-                    Some(Ok(tokio_postgres::AsyncMessage::Notification(n))) => {
-                        handle_notification(&n, host_cache, key_cache, subscribers);
-                    }
-                    Some(Ok(_)) => {} // notices etc., nothing to do
-                    Some(Err(e)) => return Err(format!("connection error: {e}")),
-                    None => return Err("connection closed".to_string()),
-                }
-            }
-        }
-    }
-}
-
-fn handle_notification(
-    n: &tokio_postgres::Notification,
-    host_cache: &Arc<HostMap>,
-    key_cache: &Arc<KeyMap>,
-    subscribers: &Arc<RwLock<Vec<InvalHook>>>,
-) {
-    if n.channel() != INVAL_CHANNEL {
-        return;
-    }
-    match Uuid::parse_str(n.payload()) {
-        Ok(cluster_id) => {
-            tracing::debug!(cluster = %cluster_id, "cache invalidated via NOTIFY");
-            fan_out_invalidation(host_cache, key_cache, subscribers, cluster_id);
-        }
-        Err(e) => {
-            tracing::warn!(payload = n.payload(), error = %e, "queen_proxy_inval: unparseable NOTIFY payload");
-        }
-    }
-}
-
 // ------------------------------------------------------- kv invalidation feed
 
 /// Cluster ids this process currently holds anything for.
@@ -943,9 +740,8 @@ fn cached_clusters(host_cache: &HostMap, key_cache: &KeyMap) -> HashSet<Uuid> {
     ids
 }
 
-/// The KV arm of `listen_forever`: poll the invalidation feed
-/// (`store::data::InvalFeed`) and fan out every cluster it names, exactly as a
-/// NOTIFY would. One local read per tick while nothing changes.
+/// Poll the invalidation feed (`store::data::InvalFeed`) and fan out every
+/// cluster it names. One local read per tick while nothing changes.
 async fn poll_forever(
     kv: Arc<dyn KvBackend>,
     host_cache: Arc<HostMap>,
@@ -992,8 +788,7 @@ async fn poll_forever(
 
 // -------------------------------------------------------- row/doc -> ctx
 //
-// The pure halves of building a ClusterCtx, shared by both store arms
-// (`store::data::ctx_from_row` / `ctx_from_docs`).
+// The pure halves of building a ClusterCtx (`store::data::ctx_from_docs`).
 
 /// tenant.status + cluster.status -> effective ClusterStatus, worst wins
 /// (PLAN §6.2 / open decision §13.b: tenant `grace` == "payment-failed" maps
@@ -1029,9 +824,8 @@ pub(crate) fn merge_status(tenant_status: &str, cluster_status: &str) -> Cluster
     }
 }
 
-/// Merge a cluster's `limit_overrides` JSONB onto its plan's base limits.
-/// Convention (also documented on clusters.limit_overrides in
-/// 001_init.sql): key absent -> inherit the plan value; key present as JSON
+/// Merge a cluster's `limit_overrides` JSON onto its plan's base limits.
+/// Convention: key absent -> inherit the plan value; key present as JSON
 /// null -> force unlimited; key present as a number -> that value wins.
 pub(crate) fn merge_limits(base: EffectiveLimits, overrides: &serde_json::Value) -> EffectiveLimits {
     EffectiveLimits {
@@ -1063,6 +857,8 @@ pub(crate) fn override_or(overrides: &serde_json::Value, key: &str, base: Option
     }
 }
 
+/// [`parse_features_value`] from JSON text; unparseable text is no feature.
+#[cfg(test)]
 pub(crate) fn parse_features(json: &str) -> Features {
     match serde_json::from_str::<serde_json::Value>(json) {
         Ok(v) => parse_features_value(&v),
@@ -1070,8 +866,7 @@ pub(crate) fn parse_features(json: &str) -> Features {
     }
 }
 
-/// `parse_features` on an already-parsed `plans.features` (the KV document
-/// carries it as JSON, not text).
+/// A plan's `features` document -> [`Features`] (missing = false).
 pub(crate) fn parse_features_value(v: &serde_json::Value) -> Features {
     Features {
         streams: v.get("streams").and_then(|b| b.as_bool()).unwrap_or(false),
@@ -1191,14 +986,14 @@ mod tests {
         assert_eq!(merge_status("something_new", "active"), ClusterStatus::Suspended);
     }
 
-    // ---- fail-open on pxdb outage (PLAN §2) ----
+    // ---- fail-open on a store outage (PLAN §2) ----
 
     const GRACE: Duration = Duration::from_secs(600);
 
     #[test]
     fn fallback_serves_stale_only_while_inside_the_grace_window() {
         let now = Instant::now();
-        // TTL blew 1s ago: pxdb didn't answer, entry is last known-good.
+        // TTL blew 1s ago: the store didn't answer, entry is last known-good.
         let expired = now - Duration::from_secs(1);
         assert_eq!(fallback(Miss::NoAnswer, Some(expired), now, GRACE), Fallback::ServeStale);
         // Exactly at the edge of the window still counts as good.
@@ -1211,7 +1006,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_never_serves_stale_when_pxdb_answered_no() {
+    fn fallback_never_serves_stale_when_the_store_answered_no() {
         let now = Instant::now();
         // The whole correctness of the change: a clean "no such row" fails
         // closed even with a perfectly fresh-looking cached entry behind it.
@@ -1224,7 +1019,7 @@ mod tests {
 
     #[test]
     fn fallback_denies_unknown_with_nothing_cached() {
-        // pxdb down + never seen this slug/key -> still a 421/401, never a
+        // store down + never seen this slug/key -> still a 421/401, never a
         // guess (PLAN §2: "deny unknowns").
         let now = Instant::now();
         assert_eq!(fallback(Miss::NoAnswer, None, now, GRACE), Fallback::Deny);
@@ -1378,7 +1173,7 @@ mod tests {
         assert!(cache.read().unwrap()["acme"].refresh_after > Instant::now(), "no second refresh inside the backoff");
 
         apply_host_lookup(&cache, "acme", &Lookup::Absent);
-        assert!(!cache.read().unwrap().contains_key("acme"), "pxdb said no: nothing left to resurrect");
+        assert!(!cache.read().unwrap().contains_key("acme"), "the store said no: nothing left to resurrect");
         apply_host_lookup(&cache, "garbage", &Lookup::Absent);
         assert!(!cache.read().unwrap().contains_key("garbage"), "unknown hosts are never cached");
     }
@@ -1438,7 +1233,7 @@ mod tests {
     fn re_denying_a_hash_already_cached_is_never_capped() {
         // One broken client retrying the same wrong key forever occupies one
         // entry, so it must keep being memoised however full the map is —
-        // otherwise the cap turns exactly that case into a pxdb round trip per
+        // otherwise the cap turns exactly that case into a store round trip per
         // request.
         let cache: Arc<KeyMap> = Arc::new(RwLock::new(HashMap::new()));
         let touched: Arc<Touched> = Arc::new(Mutex::new(HashSet::new()));
@@ -1495,7 +1290,7 @@ mod tests {
     #[tokio::test]
     async fn a_kv_store_resolves_hosts_refs_and_keys() {
         let (store, cluster, key) = kv_world().await;
-        let cache = ClusterCache::with_store(&crate::config::test_config(&[]), store);
+        let cache = ClusterCache::new(&crate::config::test_config(&[]), store);
         let ctx = cache.resolve_host("acme.eu1.queenmq.cloud:6711").await.expect("resolved");
         assert_eq!(ctx.cluster_id, cluster);
         assert_eq!(ctx.limits.max_queues, Some(20), "the plan came along");
@@ -1506,13 +1301,13 @@ mod tests {
         assert!(cache.by_key_hash(&"0".repeat(64)).await.is_none());
     }
 
-    /// The Kv arm of `queen_proxy_inval`: a revoke written anywhere (here: the
+    /// The invalidation feed: a revoke written anywhere (here: the
     /// store directly, as another node would) reaches this cache through the
     /// feed well inside the 30 s TTL, and the registry hook hears it too.
     #[tokio::test]
     async fn a_kv_write_reaches_the_cache_through_the_feed() {
         let (store, cluster, key) = kv_world().await;
-        let cache = ClusterCache::with_store(&crate::config::test_config(&[]), store.clone());
+        let cache = ClusterCache::new(&crate::config::test_config(&[]), store.clone());
         let heard = Arc::new(Mutex::new(Vec::new()));
         let h = heard.clone();
         cache.on_invalidate(move |id| h.lock().unwrap().push(id));

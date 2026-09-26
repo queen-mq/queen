@@ -2,18 +2,19 @@
 //
 // The rules worth a test here are all about not resetting a queue the operator
 // only meant to nudge: `configDiff`, which decides what is allowed on the wire
-// at all; `validate`, which mirrors the two refusals 012_configure.sql makes so
+// at all; `validate`, which mirrors the two refusals the broker makes so
 // a bad sink name is caught before the round trip; `buildBody`, which decides
 // where namespace and task go and what `mode` says; and the option catalogue
-// itself, whose defaults have to be the SP's defaults or every "restore the
-// default" in the editor is a guess.
+// itself, whose defaults have to be the broker's defaults or every "restore
+// the default" in the editor is a guess.
 //
 // The wire this file pins:
-//   server/sql/procedures/012_configure.sql  parse section, echo, the two rejects
-//   server/src/handlers/queues.rs            handle_configure: the options bag,
-//                                            the non-empty fold of namespace/task,
-//                                            `mode` -> 400
-//   server/sql/procedures/011_log_stats.sql  get_queue_v2's 21-key `options`
+//   server/src/rsm/facade/real/phase2.rs  api_configure: the options bag, the
+//                                         non-empty fold of namespace/task,
+//                                         `mode` -> 400; apply_config_options:
+//                                         the parse and the two rejects;
+//                                         configured_defaults; config_options:
+//                                         the echoed `options`
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -79,7 +80,7 @@ test('the catalogue carries every option /configure accepts, and its default', (
   ]
   assert.deepEqual(ALL_OPTIONS.map(o => o.key).sort(), [...expected].sort())
 
-  // The defaults, verbatim from the parse section of 012_configure.sql. A drift
+  // The defaults, verbatim from the broker's configured_defaults. A drift
   // here makes every cleared field in the editor promise the wrong value.
   assert.deepEqual({ ...OPTION_DEFAULTS }, {
     namespace: '', task: '', priority: 0, leaseTime: 300, retryLimit: 3, retryDelay: 1000,
@@ -106,22 +107,30 @@ test('every editable option sits in exactly one rendered group', () => {
   assert.deepEqual(grouped.map(o => o.key).sort(), EDITABLE_OPTIONS.map(o => o.key).sort())
 })
 
-test('the option list matches the keys 012_configure.sql parses', (t) => {
-  // Held against the SQL itself: an option added to the SP that nobody adds
-  // here is an option the editor silently cannot set. Skipped rather than
-  // failed when the file is not reachable (app/ built outside the monorepo),
-  // because this assertion is about the pair, not about this package.
-  let sql
+test('the option list matches the keys the broker\'s configure path parses', (t) => {
+  // Held against the broker source itself: an option added to
+  // `apply_config_options` that nobody adds here is an option the editor
+  // silently cannot set. Skipped rather than failed when the file is not
+  // reachable (app/ built outside the monorepo), because this assertion is
+  // about the pair, not about this package.
+  const file = '../../server/src/rsm/facade/real/phase2.rs'
+  let src
   try {
-    sql = readFileSync(new URL('../../server/sql/procedures/012_configure.sql', import.meta.url), 'utf8')
+    src = readFileSync(new URL(file, import.meta.url), 'utf8')
   } catch {
-    t.skip('server/sql/procedures/012_configure.sql not reachable from here')
+    t.skip('server/src/rsm/facade/real/phase2.rs not reachable from here')
     return
   }
-  const parsed = new Set([...sql.matchAll(/p_options \? '([A-Za-z]+)'/g)].map(m => m[1]))
-  // `replace` is a directive, not an option: the handler inserts it and the SP
-  // reads it with `->>`, never with `?`, so it never shows up in this set.
-  assert.equal(parsed.has('replace'), false)
+  const start = src.indexOf('fn apply_config_options')
+  assert.notEqual(start, -1, 'apply_config_options is where the broker parses queue options')
+  const body = src.slice(start, src.indexOf('\n}\n', start))
+  const parsed = new Set([
+    ...body.matchAll(/set_[ib]!\(\s*"([A-Za-z]+)"/g),
+    ...body.matchAll(/\bs\("([A-Za-z]+)"\)/g),
+  ].map(m => m[1]))
+  // `mode` is a directive, not an option: `api_configure` reads it off the
+  // body root and never hands it to `apply_config_options`.
+  assert.equal(parsed.has('mode'), false)
   assert.deepEqual([...parsed].sort(), ALL_OPTIONS.map(o => o.key).sort())
 })
 
@@ -424,11 +433,10 @@ test('a role refusal, a rate limit and an unreachable proxy keep the shared word
 // The two rules the modal composes out of these functions
 // ---------------------------------------------------------------------------
 
-test('an int larger than a Postgres integer is refused here, not by the driver', () => {
-  // Every one of these columns is `integer` and the SP bounds none of them, so
-  // 99999999999 reaches the driver and comes back as `value "99999999999" is
-  // out of range for type integer` — which the modal would then render to the
-  // operator as if it were a verdict about the field.
+test('an int larger than a 32-bit integer is refused here, not by the broker', () => {
+  // The broker parses every int option as a 32-bit integer and refuses
+  // 99999999999 with `<option> must be an integer` — which the modal would
+  // then render to the operator as if it were a type error about the field.
   assert.deepEqual(validate({ leaseTime: 2147483647 }), {})
   assert.match(validate({ leaseTime: 2147483648 }).leaseTime, /2147483647/)
   assert.match(validate({ dedupWindowSeconds: 99999999999 }).dedupWindowSeconds, /32-bit/)

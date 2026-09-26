@@ -366,24 +366,3 @@ async def test_consume_loop_survives_a_conflict_without_the_echo(capsys):
 
     assert len(seen) == 1
     assert capsys.readouterr().err.count("conflation conflict") == 1
-
-
-# ---------------------------------------------------------------------------
-# 3c. Pop maintenance is not a version skew.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_paused_response_is_not_an_unsupported_broker():
-    """`{"messages":[],"paused":true}` means the operator turned pops off. The
-    request never reached the claim path, so there is no echo to expect: reading
-    its absence as "old broker" would have every conflating consumer in the
-    fleet exit the moment pop maintenance is switched on."""
-    paused = {"success": True, "messages": [], "paused": True}
-    client, _ = make(default_pop=paused)
-    try:
-        msgs = await client.queue("orders").group("workers").conflation().pop()
-    finally:
-        await client.close()
-
-    assert msgs == []

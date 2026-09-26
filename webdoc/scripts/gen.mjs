@@ -18,7 +18,6 @@ const GENERATORS = [
   "gen-proxy-routes.mjs",
   "gen-openapi.mjs",
   "gen-kafka-apis.mjs",
-  "gen-sqs-actions.mjs",
   "gen-charts.mjs",
   "gen-snippets.mjs",
 ];

@@ -11,8 +11,7 @@ sourceOfTruth:
   - server/src/config.rs
   - server/src/httpget.rs
   - server/src/main.rs
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): auth.rs gained one read-only arm and main.rs three routes; the claims, the role mapping and the token handling are unchanged.
+  - server/src/proxy_embed.rs
 ---
 
 `JWT_ENABLED` defaults to `false`: off, the middleware stamps an empty identity
@@ -148,7 +147,7 @@ The route classification is prefix-based:
 | Level | Routes |
 | --- | --- |
 | `public` | `/health`, `/metrics`, `/metrics/prometheus`, `/`, `/assets/*`, `/favicon*`, plus `/auth/me`, `/auth/login`, `/auth/logout`, public so they can answer the auth question rather than be blocked by it (with JWT on, `/auth/me` returns `401` from its own handler) |
-| `admin` | Everything under `/api/v1/system/` and `/internal/`, every `DELETE /api/v1/consumer-groups/*`, every `DELETE /api/v1/resources/queues/*`, and `/api/v1/stats/refresh` |
+| `admin` | Everything under `/api/v1/system/` (the raft membership routes included), every `DELETE /api/v1/consumer-groups/*`, every `DELETE /api/v1/resources/queues/*`, `DELETE /api/v1/dlq`, and `/api/v1/stats/refresh` |
 | `read-only` | `GET` on `/status`, `/api/v1/status*`, `/api/v1/analytics*`, `/api/v1/resources/*`, `/api/v1/messages*`, `/api/v1/consumer-groups*`, `/api/v1/dlq*`, `/api/v1/traces*`, `/api/v1/kv*`, `/api/v1/timers*` and `/api/v1/ephemeral/queues*` (the two ephemeral status reads), plus `/streams/v1/state/get` |
 | `write-only` | `POST /api/v1/push`, `POST /api/v1/timers` (scheduling a timer is a produce operation), and `POST /api/v1/ephemeral/push` |
 | `read-write` | Everything else: pop, ack, transaction, lease extension, `/configure`, seeks, subscription changes, `POST /api/v1/traces`, message deletes, KV and timer writes (the timer cancel included), the remaining ephemeral verbs, and any route not listed above |
@@ -161,9 +160,16 @@ Turning JWT on turns the broker-served dashboard off, deliberately: the app send
 no bearer token and the broker holds no accounts, so `/auth/me` answers `401` and
 `/auth/login` serves a static page pointing at the proxy. `JWT_SKIP_PATHS` cannot
 rescue it (the shell would load, then every `/api/v1/*` call behind it answers
-`401`). A dashboard with sessions belongs behind `queen_proxy`; with auth off, the
-broker serves the open [standalone dashboard](/deploy/dashboard/).
+`401`). A dashboard with sessions belongs to the proxy, which runs in the broker
+process with `QUEEN_PROXY_EMBEDDED=true`; with auth off, the broker serves the open
+[standalone dashboard](/deploy/dashboard/).
 </Aside>
+
+With the proxy embedded on the public port (`QUEEN_PROXY_EMBEDDED=true` and no
+`QUEEN_PROXY_PORT`), the broker's own JWT check is off behind it: the proxy
+authenticates every request before it reaches the broker router. With
+`QUEEN_PROXY_PORT` set to another port, `PORT` serves the broker router directly,
+with the JWT settings on this page.
 
 ## Remapping claims for an external identity provider
 

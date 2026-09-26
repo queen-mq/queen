@@ -40,9 +40,8 @@
 //!   `created_at`. D5's clock (`now = max(wall, last_now+1, max_created_at+1)`)
 //!   makes `created_at < registered_at` hold for exactly the appends committed
 //!   BEFORE the registration entry, so the comparison is the position
-//!   comparison — and it is what the SQL spec itself does (004 ≈305–316,
-//!   `s.created_at >= v_from_ts`). The `(reg_index, reg_effect)` positions apply
-//!   records on the group row are not needed under this formulation.
+//!   comparison. The `(reg_index, reg_effect)` positions apply records on the
+//!   group row are not needed under this formulation.
 //! * **The delivered set is in the cursor (O16).** A claim records the distinct
 //!   transaction hashes it delivered on the cursor row, bounded by the batch
 //!   size, so the ack fast path is deterministic instead of resting on a RAM map
@@ -97,12 +96,12 @@ pub mod ack;
 /// KEEP_OVERLAY: the overlay kept between cycles on the planner thread.
 pub(crate) mod kept;
 /// KV: versions from `kv_version_base + ordinal`, TTL, prefix lists,
-/// `required` (024), and the leader's expiry sweep (026). WP-2.2.
+/// `required`, and the leader's expiry sweep. WP-2.2.
 pub mod kv;
 pub mod pop;
 pub mod push;
-/// Timers: schedule/cancel, the fire step, backoff and the `__timer__` DLQ
-/// (025). WP-2.3.
+/// Timers: schedule/cancel, the fire step, backoff and the `__timer__` DLQ.
+/// WP-2.3.
 pub mod timers;
 
 pub use kv::{KvCommand, KvOp};
@@ -118,13 +117,13 @@ pub mod positions;
 /// is [`Planner::plan_kv_writes`]; a timers leg would be
 /// [`Planner::plan_timer_ops`].
 pub mod txn;
-/// Streams: cycle, register, state (007, 008). WP-2.4.
+/// Streams: cycle, register, state. WP-2.4.
 pub mod streams {}
-/// Admin: configure, deletes, consumer groups, messages, flags, quotas
-/// (010, 012, 013, 014, 016, 030, 031). WP-2.5.
+/// Admin: configure, deletes, consumer groups, messages, flags, quotas.
+/// WP-2.5.
 pub mod admin {}
-/// Retention as a leader loop: rules 1–3, max-wait eviction, txns purge
-/// (006). WP-2.7.
+/// Retention as a leader loop: rules 1–3, max-wait eviction, txns purge.
+/// WP-2.7.
 pub mod retention {}
 
 const SEC_US: i64 = 1_000_000;
@@ -150,8 +149,8 @@ pub struct PlanConfig {
     pub plan_budget_ms: u64,
     /// O18.
     pub slow_command_ms: u64,
-    /// `QUEEN_RAFT_DEDUP_INDEX` (PERF-E): which keyspace the dedup probe / 005
-    /// resolve read as the authority. Default [`IndexMode::Rows`] so the
+    /// `QUEEN_RAFT_DEDUP_INDEX` (PERF-E): which keyspace the dedup probe /
+    /// hash-ack resolve read as the authority. Default [`IndexMode::Rows`] so the
     /// unit-test harness keeps today's behaviour; `BatcherConfig::from_env`
     /// sets the product default (`txns`) and keeps `record` (apply side) in
     /// step via [`dedup::set_record_index_mode`].
@@ -218,7 +217,7 @@ impl Refusal {
 
     /// The store could not answer a read the planner needs. I14: refuse with a
     /// retryable error, never guess. A `KeyTooLong` is the one 4xx here (a name
-    /// the postgres schema accepts and LMDB does not, R-108).
+    /// LMDB does not accept, R-108).
     pub fn from_store(e: StoreError) -> Refusal {
         match e {
             StoreError::KeyTooLong { .. } => Refusal::client("name_too_long", e.to_string()),
@@ -277,7 +276,7 @@ pub enum CommandKind {
     Transaction,
     /// A KV call with at least one write (WP-2.2).
     Kv,
-    /// `POST /api/v1/timers` and the cancel route (025 `log_timers_apply_v1`).
+    /// `POST /api/v1/timers` and the cancel route.
     Timers,
     /// Phase-2 commands whose receiver has already produced deterministic,
     /// self-contained effects (flags, traces, grants and control metadata).
@@ -337,7 +336,7 @@ pub struct PushItem {
     pub frame: Vec<u8>,
 }
 
-/// `POST /api/v1/push` for one partition (003). The receiver has already
+/// `POST /api/v1/push` for one partition. The receiver has already
 /// resolved the queue's config (for the implicit-creation case) and packed each
 /// message.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -347,13 +346,13 @@ pub struct PushCommand {
     pub queue: String,
     pub partition: String,
     pub items: Vec<PushItem>,
-    /// The config an implicit queue creation uses (003 first contact). Ignored
+    /// The config an implicit queue creation uses (first contact). Ignored
     /// when the queue already exists. `id` is the receiver-minted queue uuid.
     pub create_cfg: QueueConfig,
 }
 
-/// The subscription intent a pop carries for a group with no stored policy
-/// (004 ≈320): the pop-carried `sub_mode`/`sub_from` fall-back.
+/// The subscription intent a pop carries for a group with no stored policy:
+/// the pop-carried `sub_mode`/`sub_from` fall-back.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct SubIntent {
     /// `""`, `"new"`, `"all"`, or `"timestamp"`.
@@ -365,9 +364,8 @@ pub struct SubIntent {
     pub now: bool,
 }
 
-/// A pop of one named partition (`log_pop_specific_v1`), the whole queue by
-/// wildcard (`log_pop_wildcard_*_v1`), or a discovery group across a namespace
-/// or task (`log_pop_discover_*_v1`). One struct, three entry points.
+/// A pop of one named partition, the whole queue by wildcard, or a discovery
+/// group across a namespace or task. One struct, three entry points.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PopCommand {
     pub request_id: RequestId,
@@ -387,14 +385,14 @@ pub struct PopCommand {
     pub auto_ack: bool,
     pub conflate: bool,
     pub sub: SubIntent,
-    /// The hot-list wheel owns the window-buffer hold on the pinned path
-    /// (004): skip the debounce here when it says so.
+    /// The hot-list wheel owns the window-buffer hold on the pinned path:
+    /// skip the debounce here when it says so.
     pub skip_window_debounce: bool,
     /// Discovery: the namespace and task that pick the queues.
     pub namespace: String,
     pub task: String,
-    /// The config a wildcard pop uses if it must create the queue (004 ≈1046);
-    /// `None` disables implicit creation (pinned never creates).
+    /// The config a wildcard pop uses if it must create the queue; `None`
+    /// disables implicit creation (pinned never creates).
     pub create_cfg: Option<QueueConfig>,
     /// Wall-clock µs after which nobody is waiting for this pop's answer
     /// (`0` = no deadline). The planner refuses to CLAIM for a pop that cannot
@@ -408,7 +406,7 @@ pub struct PopCommand {
     pub wait: bool,
 }
 
-/// The status an ack item carries (005). `Ok` covers the SQL's
+/// The status an ack item carries. `Ok` covers
 /// completed/success/acked/ok/"".
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AckStatus {
@@ -430,7 +428,7 @@ pub struct DlqSnapshot {
     pub payload: Vec<u8>,
 }
 
-/// One item of a hash-resolved ack (005).
+/// One item of a hash-resolved ack.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct AckItem {
     pub hash: [u8; 16],
@@ -441,29 +439,28 @@ pub struct AckItem {
     pub snapshot: Option<DlqSnapshot>,
 }
 
-/// One `(pid, group)` target of an ack (005). A batch acks several.
+/// One `(pid, group)` target of an ack. A batch acks several.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct AckTarget {
     pub pid: Pid,
     pub tenant: String,
     pub queue: String,
     pub group: String,
-    /// The lease id; `""` for a lease-less ack, which still advances (005
-    /// RUSTFIX item 11).
+    /// The lease id; `""` for a lease-less ack, which still advances
+    /// (RUSTFIX item 11).
     pub worker: String,
     pub items: Vec<AckItem>,
 }
 
-/// `POST /api/v1/ack`, `/ack/batch` (005 `log_ack_by_hash_v1` / `log_ack_multi_v1`).
+/// `POST /api/v1/ack`, `/ack/batch`.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct AckCommand {
     pub request_id: RequestId,
     pub targets: Vec<AckTarget>,
 }
 
-/// A positional ack of ONE leased batch (`log_ack_v1` / `log_ack_at_v1`): the
-/// receiver advances the cursor to an absolute offset it computed from the
-/// delivered batch.
+/// A positional ack of ONE leased batch: the receiver advances the cursor to
+/// an absolute offset it computed from the delivered batch.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct AckPositionalCommand {
     pub request_id: RequestId,
@@ -497,23 +494,23 @@ pub struct NackCommand {
     pub worker: String,
 }
 
-/// `POST /api/v1/lease/:leaseId/extend` (`log_renew_lease_v1`). Renews EVERY
+/// `POST /api/v1/lease/:leaseId/extend`. Renews EVERY
 /// live lease of the worker: the planner walks `leases_by_worker` in key order
 /// (never a hash map, §8), so the effect list is deterministic.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RenewCommand {
     pub request_id: RequestId,
     /// Only this tenant's leases renew (a lease id is a bearer value that can
-    /// leak; the PG engine scopes `log_renew_lease_v1` by `p_tenant`). `None`
-    /// from a node that predates the field: every lease of the worker.
+    /// leak). `None` from a node that predates the field: every lease of the
+    /// worker.
     #[serde(default)]
     pub tenant: Option<String>,
     pub worker: String,
     pub seconds: i32,
 }
 
-/// `log_dlq_head_v1` as a standalone command: file the poison HEAD frame the
-/// receiver snapshotted, advance past it, release the lease. Used when the DLQ
+/// A standalone DLQ-head command: file the poison HEAD frame the receiver
+/// snapshotted, advance past it, release the lease. Used when the DLQ
 /// handoff was not folded into the ack (the `/dlq` replay-then-die path).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct DlqHeadCommand {
@@ -634,7 +631,7 @@ pub struct Overlay {
     /// `(tenant, ns, key) → row` for every KV row an entry in flight (or an
     /// earlier command of this cycle) wrote — `None` for a delete — so the
     /// next KV write is judged against the version it left, not against the
-    /// committed one (WP-2.2; the serial point 024's row lock was).
+    /// committed one (WP-2.2).
     kv: HashMap<(String, String, String), Tagged<Option<crate::rsm::store::rows::KvRow>>, FxBuild>,
     /// `(tenant, queue, timer_key) → what the in-flight entries did to it`
     /// (WP-2.3). The overlay's view wins over committed state per key, which
@@ -838,8 +835,8 @@ impl Overlay {
                 self.purged_tenants
                     .insert(tenant.clone(), Tagged { v: (), tag });
             }
-            // A group delete (014) keeps the partition: only its `(pid, group)`
-            // rows go.
+            // A group delete keeps the partition: only its `(pid, group)` rows
+            // go.
             Effect::GarbageAdd { pids, scope, .. }
                 if !matches!(scope, crate::rsm::effect::GarbageScope::Group { .. }) =>
             {
@@ -2332,12 +2329,12 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         Ok(Seed::Complete(buf))
     }
 
-    /// Resolve one hash for a hash ack (005): `eff` = MIN over `[lo, hi]`,
+    /// Resolve one hash for a hash ack: `eff` = MIN over `[lo, hi]`,
     /// `below` = any occurrence at or below `committed`. Merges committed and
     /// overlay occurrences. Under `txns` the committed legs come from an ordered
     /// range scan of the txns rows over `[txns_start, …]` (PERF-E); under `rows`
     /// from the `(pid, hash)` occurrence list.
-    // The 005 span is four scalars (lo/hi/committed/txns_start) the caller has
+    // The span is four scalars (lo/hi/committed/txns_start) the caller has
     // already computed; bundling them buys nothing but a struct at one call site.
     #[allow(clippy::too_many_arguments)]
     fn dedup_resolve(
@@ -2379,7 +2376,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     // ---- seeding ----------------------------------------------------------
 
     /// The cursor `committed` a first-contact (partition, group) seeds to, from
-    /// the group's stored subscription (§8, 004 ≈305–316). `all` = before
+    /// the group's stored subscription (§8). `all` = before
     /// `log_start`; `new` = before the first append at/after the group's
     /// registration instant; `timestamp` = before the first append at/after the
     /// subscription timestamp. All three are one `seed_from_ts` over the
@@ -2416,9 +2413,9 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         Ok(seed.max(floor).max(-1))
     }
 
-    /// Seed from a pop-carried intent when the group has no stored policy
-    /// (004 ≈320): `now`/`new` → the tail, an explicit instant → `seed_from_ts`,
-    /// anything unparsable → ignore (the SQL's EXCEPTION handler).
+    /// Seed from a pop-carried intent when the group has no stored policy:
+    /// `now`/`new` → the tail, an explicit instant → `seed_from_ts`, anything
+    /// unparsable → ignore.
     fn seed_from_intent(
         &self,
         ov: &Overlay,
@@ -2443,7 +2440,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
 
 /// The cursor a subscription seeds: just before the first retained segment
 /// stamped at or after `ts_us`; the allocated tail when nothing is that recent.
-/// Inclusive (`created_at >= ts`), matching the SQL spec (004 ≈314).
+/// Inclusive (`created_at >= ts`).
 fn seed_from_ts(segs: &[Seg], log_start: u64, last_offset: i64, ts_us: i64) -> i64 {
     for s in segs {
         if s.base >= log_start && s.created_at_us >= ts_us {
@@ -2478,7 +2475,7 @@ pub fn bucket_of(tenant: &str, queue: &str, partition: &str) -> u16 {
 }
 
 /// A group's stored policy built for a first-contact registration from a
-/// pop-carried intent (004 ≈226–246). `now`/`new`/unparsable → `new` at the
+/// pop-carried intent. `now`/`new`/unparsable → `new` at the
 /// registration instant; an explicit instant → `timestamp`; otherwise `all`.
 pub(crate) fn group_meta_for_registration(
     id: [u8; 16],

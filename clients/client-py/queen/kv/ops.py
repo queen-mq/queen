@@ -8,8 +8,8 @@ it is the only way the two wires cannot drift, and it is what makes
 
 WHAT THIS MODULE VALIDATES, AND WHAT IT DELIBERATELY DOES NOT.
 
-The semantic rules live in ``queen.kv_apply_v1`` so that all seven clients and
-the embedded broker inherit them without a line of their own
+The semantic rules live in the broker so that all seven clients inherit them
+without a line of their own
 (PLAN_KV_TIMERS.md §5.1). What is checked here is only what the SDK has to
 decide anyway in order to build the body at all, plus the two cases §5.3 calls
 client-side bugs:
@@ -22,7 +22,7 @@ client-side bugs:
     written, an intention to fence was declared.
 
 Everything else -- the charset of a namespace, the key ceiling, the taxonomy of
-`reason` -- is the procedure's, and duplicating it here would give the product
+`reason` -- is the broker's, and duplicating it here would give the product
 two places to disagree about what a KV operation is.
 """
 
@@ -262,8 +262,8 @@ def put_if_absent(
     name of the thing and because `applied`, answering "did I win?", is the most
     frequent question asked of this API.
 
-    It takes NO `expect`: it desugars to put+expect:0 inside the procedure, and
-    a different expect alongside it is a 22023. Not offering the parameter is
+    It takes NO `expect`: it desugars to put+expect:0 inside the broker, and
+    a different expect alongside it is refused. Not offering the parameter is
     cheaper than explaining it.
     """
     op: Dict[str, Any] = {"op": "putIfAbsent", "ns": _name("ns", ns), "key": _name("key", key), "value": value}

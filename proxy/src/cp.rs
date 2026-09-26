@@ -1,7 +1,6 @@
-//! A small control-plane API for deployments without a SQL console — above
-//! all the single binary, whose state is the broker's replicated KV
-//! (PLAN_SINGLE_BINARY.md W3/W4). What an operator or a provisioning script
-//! did with `psql` against the proxy's Postgres, over HTTP:
+//! A small control-plane API over HTTP: how an operator or a provisioning
+//! script manages the proxy's state, which is the broker's replicated KV
+//! (PLAN_SINGLE_BINARY.md W3/W4):
 //!
 //! | route | does |
 //! |---|---|

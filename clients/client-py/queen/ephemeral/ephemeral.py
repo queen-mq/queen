@@ -13,8 +13,8 @@ chain would only hide how few moving parts there are.
 WHAT THIS CLASS IS ABOUT, BEFORE ANY SIGNATURE: contents survive NOTHING
 (§1.2). Not a restart, not a crash, not a deploy, not the ownership move a
 membership change causes. Treat a failover like a Redis restart. Declared
-CONFIGURATION is durable -- it lives in PG and comes back after a restart, as
-configured and EMPTY. There is no replay, no history, no subscription mode and
+CONFIGURATION is durable -- it lives in the broker's replicated log and comes
+back after a restart, as configured and EMPTY. There is no replay, no history, no subscription mode and
 no DLQ, because none of those concepts has a referent when there is no history
 to have.
 
@@ -416,9 +416,9 @@ class Ephemeral:
         options: Optional[Mapping[str, Any]] = None,
         **overrides: Any,
     ) -> Any:
-        """Declare a queue and its bounds. Persists the OPTIONS in PG (§1.1):
-        the configuration survives a restart, the contents never do, and the
-        queue comes back declared and empty.
+        """Declare a queue and its bounds. Persists the OPTIONS in the broker's
+        replicated log (§1.1): the configuration survives a restart, the
+        contents never do, and the queue comes back declared and empty.
 
         Optional in every sense -- a push or a pop that names an unknown queue
         creates it implicitly with the tenant defaults (§1.1). Declare when you
@@ -454,8 +454,7 @@ class Ephemeral:
         return await self._call("POST", _RESET_ROUTE, {"queue": queue}, queue=queue)
 
     async def delete(self, queue: str) -> Any:
-        """Delete the queue: contents, cursors, and the declared configuration
-        in PG."""
+        """Delete the queue: contents, cursors, and the declared configuration."""
         _require_queue(queue)
         logger.log("Ephemeral.delete", {"queue": queue})
         return await self._call(
@@ -730,9 +729,7 @@ class Ephemeral:
         """Every ephemeral queue this tenant currently has, declared and
         implicit.
 
-        Free to poll: the gauges are read out of the broker's own memory, with
-        no database behind them -- unlike the durable meter, whose 1s poll is
-        load-bearing on PG.
+        Free to poll: the gauges are read out of the broker's own memory.
         """
         logger.log("Ephemeral.queues", {})
         return await self._call("GET", _QUEUES_ROUTE)

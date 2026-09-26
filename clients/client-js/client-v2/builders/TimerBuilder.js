@@ -24,8 +24,8 @@
  *    bundle's fate; see TransactionBuilder, which says so where it happens.)
  *
  * 2. ONLY RELATIVE DURATIONS, IN MILLISECONDS (§4.2, §20.6). `delayMs`, never
- *    `delaySeconds` and never an absolute instant: `deliver_at` is computed in
- *    Postgres, so there is ONE clock and no broker's skew can enter. The rule
+ *    `delaySeconds` and never an absolute instant: `deliver_at` is computed on
+ *    the broker's clock, so there is ONE clock and no client's skew can enter. The rule
  *    of the product is "durations that can be sub-second are in milliseconds,
  *    the ones that cannot are in seconds" -- a 250 ms retry backoff is a real
  *    and central use of timers, which is why this wire is the millisecond one.

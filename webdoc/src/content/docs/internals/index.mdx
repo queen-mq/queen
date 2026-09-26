@@ -1,159 +1,161 @@
 ---
 title: Internals
-description: "The shape of the system in one page: an axum router, a connection pool, the fusion layer, the log engine in PostgreSQL, the background jobs, and the mesh."
+description: "The shape of a Queen 2.0 node in one page: one process, one leader that plans client commands into a replicated log of effect entries, and every node applying those entries to its own queue logs and ordered store."
 type: overview
 tier: internals
 sidebar:
   order: 1
 sourceOfTruth:
   - server/src/main.rs
-  - server/src/schema.rs
-  - server/src/db.rs
-  - server/src/fusion.rs
-  - server/src/handlers/data.rs
-  - server/sql/procedures/001_log_schema.sql
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): main.rs registers three new routes and db.rs the statements behind them; nothing this page describes moved.
+  - server/src/config.rs
+  - server/src/handlers/raft.rs
+  - server/src/rsm/mod.rs
+  - server/src/rsm/batcher.rs
+  - server/src/rsm/apply.rs
+  - server/src/rsm/state/mod.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/remote.rs
+  - server/src/rsm/facade/real/phase2.rs
+  - server/src/rsm/replicator/node.rs
+  - server/src/rsm/replicator/raft/mod.rs
+  - server/src/rsm/maintenance.rs
 ---
 
-Queen is one stateless Rust binary (crate `queen`, binary `queen`) and one
-PostgreSQL database. The binary holds no durable state. Every offset, cursor, lease and
-segment lives in PostgreSQL, and every in-memory structure in the broker is a cache or a
-scheduler over it. That single fact is the key to reading this section: when an in-memory
-structure is stale, wrong, or lost to a restart, the outcome is extra work, not lost or
-misdelivered messages. Each page below states its own version of that argument, because each
-structure earns its place only by having one. The one deliberate exception is the
-[ephemeral queue class](/use/ephemeral/), whose contents live in broker memory by contract: only
-the declared configuration is a PostgreSQL row, its hot verbs take neither an admission slot nor a
-pooled connection, and losing its contents on a restart is that class's documented trade, not a
-defect. Everything else in this section is state PostgreSQL owns.
+Queen 2.0 is one Rust binary (crate `queen`, binary `queen`) and one data directory. There is no
+external database. Every message, offset, cursor, lease and queue configuration a node knows is in
+the directory named by `QUEEN_RAFT_DIR` (default `/var/lib/queen/raft`), and the code that owns it
+is the replicated state machine in `server/src/rsm/`.
 
-Read the [concept pages](/use) first if you want to know what Queen promises. This section
-explains how it keeps those promises, and where it pays for them.
+That state machine has one rule, and every page in this section leans on it. One leader turns
+client commands into log entries of **effects**: deterministic state changes such as "append these
+frames to partition 7 at offset 120" or "write this cursor row". Every node applies the committed
+entries, in index order, to its own full copy of the state. Committed state is changed only by
+apply, and apply reads no clock, no environment and no randomness: every time and every id it needs
+was stamped by the planner and travels inside the effect. Two nodes that apply the same entries
+therefore hold the same replicated state.
 
-## The request path
+The one deliberate exception is the [ephemeral queue class](/use/ephemeral/): its messages live in
+process memory by contract and never enter the log. Only its configuration is replicated state.
 
-An HTTP request crosses the same five layers regardless of what it does.
+Read the [concept pages](/use) first if you want to know what Queen promises. This section explains
+how a node keeps those promises.
 
-1. **The axum router** in `server/src/main.rs`. Eighty-four method-and-path pairs on one flat `Router`,
-   plus a fallback that serves the dashboard SPA compiled into the binary with `rust_embed` from
-   `server/webapp/dist`. There is no runtime static-directory override. There is no TLS listener
-   and no CORS layer: the broker speaks plaintext HTTP on `PORT` (6632) and expects a proxy in
-   front of it.
-2. **Middleware.** JWT validation (off by default) resolves an access level and an
-   authenticated `sub`; tenant resolution reads `x-queen-tenant` when
-   `QUEEN_TENANCY_HEADER=1`, otherwise stamps the fixed default tenant. Both run before any
-   handler and both are transparent when disabled.
-3. **An admission slot.** Every write transaction passes through one process-wide arbiter that
-   sizes itself from PostgreSQL's commit-flush pipeline, with four lanes (push, pop, ack, maint)
-   sharing the budget. See [Flow control](/internals/flow-control).
-4. **A pooled connection.** One `deadpool-postgres` pool, `DB_POOL_SIZE` connections
-   (default 160), shared by handlers and background jobs. Hot statements go through
-   `prepare_cached`, so a steady-state call re-uses a prepared statement on that connection.
-5. **One stored-procedure call.** Almost every route is a single `SELECT queen.<sp>(...)`
-   whose JSON result the handler forwards, sometimes verbatim. The decision procedures
-   (who gets which message, whether a push is a duplicate, what an ack commits) live in SQL,
-   under row locks, not in Rust.
+## One request, top to bottom
 
-A pop that has to wait is the one exception worth knowing: it releases both the permit and
-the connection *before* it parks, and re-acquires them on wake. A parked long-poll costs the
-broker a timer and nothing else.
+<pre class="mermaid">{`
+flowchart TB
+  H["HTTP router<br/>PORT, default 6632"] --> R["receiver<br/>parse, validate, pack frames"]
+  R -->|"typed command"| B["batcher and planner, on the leader<br/>one entry per cycle"]
+  B -->|"propose"| L["replicator<br/>local or openraft"]
+  L -->|"write, one fsync per touched log"| Q[("queue logs")]
+  L -->|"committed entries, in order"| A["apply thread<br/>the only writer of committed state"]
+  A --> S[("ordered store, LMDB")]
+  A -->|"applied at index"| B
+  B -->|"outcome"| R
+  R --> H
+`}</pre>
 
-## What lives in memory
+1. **The router** (`build_raft_router` in `server/src/handlers/raft.rs`). The message path (push,
+   the three pops, ack, transaction, lease renewal), KV, timers, the ephemeral verbs and the raft
+   membership routes have typed handlers. The other `/api/` and `/streams/` routes go through one
+   generic adapter over the same state machine (`server/src/rsm/facade/real/phase2.rs`), and
+   anything else is the dashboard SPA compiled into the binary. The router serves `PORT`, unless the embedded [proxy](/deploy/proxy) takes that port
+   (`QUEEN_PROXY_EMBEDDED=true` without `QUEEN_PROXY_PORT`). JWT validation (`JWT_ENABLED`, off by
+   default) and tenant resolution (`QUEEN_TENANCY_HEADER`, off by default) run as middleware before
+   any handler.
+2. **The receiver** (`server/src/rsm/facade/real.rs`). It does the work that needs no shared state:
+   parse the body, bound the name lengths, mint message ids (UUIDv7), hash every `transactionId`
+   with `xxh3_128`, encrypt payloads for queues configured for it, pack one frame per message, and
+   build a typed command. It never plans and never writes committed state.
+3. **Admission.** A push or a transaction takes a byte budget sized by its `Content-Length` before
+   its body is read, and a node whose disk is full refuses writes that grow storage. See
+   [Flow control](/internals/flow-control).
+4. **The batcher and the planner** (`server/src/rsm/batcher.rs`, `server/src/rsm/planner/`), on the
+   leader only. Each cycle drains the command channel, plans every command against committed state
+   plus an overlay of the entries still in flight, and builds one entry out of all of them. Planning
+   runs on one dedicated thread, `queen-planner`. Up to 4 entries are in flight at once
+   (`QUEEN_RAFT_PIPELINE`).
+5. **The replicator** (`server/src/rsm/replicator/`). `local`, the default, is a single node with no
+   consensus protocol. `openraft` runs the Raft protocol and is required for a cluster. Both write
+   an entry into the queue logs, with one fsync per log it touches, before anything applies it;
+   openraft also needs a majority of voters to hold it before it counts as committed. A data
+   directory belongs to the replicator that created it: each one refuses a directory the other
+   wrote.
+6. **Apply** (`server/src/rsm/apply.rs`). One thread per node executes committed entries in index
+   order against the ordered store. When the entry that carries a command has applied on this node,
+   the batcher answers the receiver, which renders the HTTP response from the recorded outcome. A
+   pop reads its payload bytes from this node's own queue logs at that point.
 
-Nothing in this table is durable. Every entry is followed by what its being wrong costs.
+An answered write is therefore fsynced in the queue logs and applied on the node that answered, and
+in a cluster it is also on a majority of voters. [Life of a push](/internals/life-of-a-push) and
+[Life of a pop](/internals/life-of-a-pop) walk the two main paths step by step.
 
-| Structure | Module | Replaces | Cost of being wrong |
+## Any node serves clients
+
+In a cluster (`QUEEN_RAFT_REPLICATOR=openraft` with `QUEEN_RAFT_PEERS`; see
+[High availability](/deploy/ha/)) only the leader plans. A follower still serves its own clients
+(`QUEEN_RAFT_CLIENT_OFFLOAD`, on by default). It parses and prepares the command exactly as the
+leader would, and sends only the prepared command to the leader over the Raft RPC listener, carrying
+the cluster token. The leader plans it with everything else and answers with the log index its entry
+landed at. The follower waits until it has applied that index itself, then renders the answer from
+its own state. A pop therefore reads its payloads from the follower's own queue logs, and a client
+reads its own writes on whichever node it talks to. A prepared command keeps its request id across
+retries, so a lost answer followed by a retry never plans the command twice.
+
+Reads that must observe every acknowledged write (a KV read, a queue's depth or configuration, the
+empty answer of a pop that does not wait) take a **read barrier** first: the node obtains the
+leader's read index (the leader confirms it still leads) and waits until it has applied that far.
+On a single node the barrier costs nothing.
+
+With `QUEEN_RAFT_CLIENT_OFFLOAD` off, a follower instead relays every `/api/` and `/streams/`
+request to the leader over HTTP, except the `/api/v1/raft/` routes, which describe the node that
+was asked. With no leader known the answer is `503` with `Retry-After: 1`, and the client retries.
+
+## What lives where
+
+| What | Where | Replicated | How it survives a restart |
 | --- | --- | --- | --- |
-| Push fusion shards | `fusion.rs` | one transaction per push request | the bundle fails; participants are told `error` and spooled to disk |
-| Hot-list rings | `hotlist.rs` | the SQL wildcard candidate scan | one empty `SKIP LOCKED` claim that returns no rows |
-| Dedup cache | `dedup.rs` | nothing: it only narrows the SQL probe | the probe widens to the full window |
-| Ack registry | `ack_registry.rs` | per-ack hash resolution | the ack falls through to the SQL path |
-| Ack fusion buffers | `ack_fusion.rs` | one transaction per ack | the whole flush errors; leases expire and redeliver |
-| Long-poll gates and hints | `notify.rs` | polling | the parked pop waits out its own backoff |
-| Disk spool | `file_buffer.rs` | losing pushes during a database outage | pushes fail outright |
+| Message payloads (packed frames) | queue logs, `qlog/` | yes, as entries; file boundaries and byte positions are node-local | fsynced before apply; recovery replays the entries above the store's last durable point |
+| Queues, groups, partitions, cursors, leases, dead letters, dedup hash lists, KV, timers, counters, recorded outcomes | ordered store, `store/` (LMDB through the `heed` crate) | yes | every keyspace is held in RAM and LMDB holds its checkpoint, written at each durable point |
+| Ready rings, visibility and lease deadlines | RAM | derived | rebuilt from the `pending` and `leases_by_worker` keyspaces at open and when a node becomes leader |
+| The dedup front (bloom filters) | planner RAM | no | rebuilt on first touch; it can skip a read, never change a verdict |
+| Parked long-polls | RAM, one gate per (tenant, queue, group) | no | a parked request ends with the process |
+| Vote, purge point, commit point | `raft/` (openraft only) | no | written by the replicator |
+| Dashboard rows and node-local metrics | `dash.db`, `local.db` | no | losing the unflushed tail loses a graph point, never queue state |
 
-The two things that decide *what data exists* (the deduplication verdict and the consumer
-cursor) are not in this table. They are in PostgreSQL, computed under a row lock, on every
-call.
+[The storage model](/internals/storage-model) has the files, the keyspaces and the invariants.
 
-## The storage side
+## Background work
 
-Storage is the "log engine": four tables created by `001_log_schema.sql` (`log_partitions`,
-`log_segments`, `log_txns`, `log_consumers`) plus `queen.log_dlq` from the ack file, all hanging
-off `queen.queues`, which is both a queue's identity and its configuration
-(`log_partitions.queue_id` references it directly, `ON DELETE CASCADE`). A partition is an ordered
-lane; a message's position is a single monotone `BIGINT` offset; a segment is one row holding many
-messages packed together and zstd-compressed. [The storage model](/internals/storage-model) has the
-row-by-row detail.
+Periodic work is planned the way client commands are: on its tick, the leader's batcher plans a
+step and proposes the result as an ordinary entry, and every node applies it. Only work on a node's
+own files runs locally.
 
-Two further tables hang off nothing at all. `queen.kv` and `queen.log_timers` are created at every
-boot like the rest, and stay empty unless an operator switches their surfaces on. Neither names a
-partition, deliberately, which is what keeps them out of the per-partition maintenance scan; see
-[KV internals](/internals/kv) and [timer internals](/internals/timers). The ephemeral class keeps
-two more (`queen.ephemeral_queues`, `queen.ephemeral_quota`): declared configuration and quota
-rows only, never message contents.
-
-All of that DDL is `include_str!`-embedded in the binary and re-applied idempotently at every
-boot, under an advisory lock and with no migrations, because the deployment model is
-always-virgin; the [schema catalogue](/internals/schema) has the apply order and its rules.
-
-## Background jobs
-
-Several loops run alongside the HTTP server. Each is spawned before `axum::serve`, each
-swallows its own errors so a transient database failure cannot kill it. The cluster-singleton loops
-schedule through one durable claim row each in `queen.maintenance_leases`, so their cadence is the
-configured value whatever the replica count; the advisory locks stay inside those cycles as belt
-against old-image pods.
-
-| Loop | Cadence | Leader gate | What it does |
+| Step | Cadence | Runs on | What it does |
 | --- | --- | --- | --- |
-| Retention | `RETENTION_INTERVAL`, 5000 ms | claim row `retention` + transaction lock `737001` as belt | bounded autocommitting delete steps ([Retention](/internals/retention)) |
-| Stats reconciler | `STATS_INTERVAL_MS`, 10000 ms | claim row `stats_refresh` + transaction lock `737002` as belt | recomputes `queen.stats` from the log tables ([Stats](/internals/stats)) |
-| Retained-bytes lane | `RETAINED_BYTES_INTERVAL_MS`, 600000 ms | claim row `retained_bytes` + transaction lock `737003` as belt | recomputes `queen.stats.retained_bytes` from live segments ([Stats](/internals/stats)) |
-| Metrics collector | `METRICS_FLUSH_MS`, 60000 ms | none, by design | per-replica rows in `worker_metrics` and `system_metrics` |
-| Hot-list wheel tick | 50 ms | none | promotes due deferred and lease-parked ring entries |
-| Hot-list wake tick | 5 ms | none | one coalesced wake per queue where a write landed frames |
-| Hot-list reseed floor | 2 s tick, per ring `QUEEN_HOTLIST_RESEED_MS` | none | re-derives ring contents from PostgreSQL, bounded to recently written partitions |
-| Hot-list full reseed | per ring, `QUEEN_HOTLIST_RESEED_FULL_MS`, 300000 ms | none | the same over every partition of the queue, the floor for pendingness no write explains |
-| Reconcile | `QUEEN_CACHE_REFRESH_INTERVAL_MS`, 60000 ms | none | re-reads maintenance flags, drops per-queue caches, applies the hot-list repair markers a seek or a group delete published |
-| Idle sweep | `QUEEN_HOTLIST_IDLE_SWEEP_MS`, 300000 ms | none | drops rings and wake gates for queues nobody touched |
-| Unserved-ring trim | `QUEEN_HOTLIST_UNSERVED_TRIM_MS`, 30000 ms | none | drops rings this broker serves no pops for, the standby-broker bound on ring memory |
-| Spool drain | `FILE_BUFFER_FLUSH_MS`, 100 ms | none | replays disk-spooled pushes once the database is reachable |
-| Sweeper | due-driven, 5 ms to 1000 ms | none, by design | fires due timers into the log and prunes expired KV rows ([the sweeper](/internals/sweeper)) |
+| Timer fire | `QUEEN_RAFT_TIMER_TICK_MS`, 50 ms | the leader, as entries | fires due timers through the push planner ([Timer internals](/internals/timers)) |
+| KV expiry | `QUEEN_RAFT_KV_SWEEP_MS`, 1000 ms | the leader, as entries | deletes expired keys; a read already treats an expired key as absent ([KV internals](/internals/kv)) |
+| Maintenance | `RETENTION_INTERVAL`, 5000 ms | the leader, as entries | moves retention watermarks, deletes empty partitions idle past `PARTITION_CLEANUP_DAYS`, expires traces, resumes interrupted deletes ([Retention internals](/internals/retention)) |
+| Request-id expiry | 10 s | the leader, as entries | retires recorded outcomes older than `QUEEN_RAFT_REQUEST_ID_WINDOW_S` (60 s) |
+| Queue-log reclaim | on the maintenance tick | every node, locally | unlinks sealed queue-log files that hold only dead records, and rewrites partly dead ones |
+| Durable point | `QUEEN_RAFT_DURABLE_EVERY_MS` (1000 ms) or `QUEEN_RAFT_DURABLE_EVERY_BYTES` (256 MiB) | every node, locally | checkpoints the store; crash recovery replays from here |
 
-The metrics collector is deliberately un-gated: every replica records its own rows, keyed by
-hostname and worker id, and the dashboard aggregates across them.
-
-The sweeper is un-gated for a stronger reason, and it is the opposite of retention's. Any ownership
-scheme orphans the work of a broker that dies, and an orphaned timer never fires, which is the worst
-failure this component can have. So every replica drains in parallel and the sharing mechanism is
-`FOR UPDATE ... SKIP LOCKED` rather than an election. It is spawned on every replica, because the two
-surfaces it serves are on every replica; `QUEEN_SWEEPER=false` is the only thing that stops it.
-
-## The mesh
-
-With `QUEEN_MESH_PEERS` set, replicas form a full mesh over framed TCP. It carries wakes for
-parked pops when a write lands frames on another replica, hot-list pending marks, maintenance-mode
-flips, queue-config cache invalidation, and the admin fan-out for ephemeral queues (whose data
-verbs travel broker-to-broker over plain HTTP instead, to the owner the HELLO handshake
-advertised). Nothing it carries is authoritative: PostgreSQL
-is re-read every `QUEEN_CACHE_REFRESH_INTERVAL_MS` and a parked pop re-polls on its own
-backoff, so a dropped frame costs latency only. It also has a security boundary you must
-enforce yourself: see [The mesh](/internals/mesh).
+Counters (messages pushed, bytes retained, and the rest the dashboard reads) are updated by apply as
+each entry applies, so `POST /api/v1/stats/refresh` has nothing to recompute and answers
+`{"success":true,"refreshed":false,"engine":"raft"}`. See [Counters, rates and lag](/internals/stats).
 
 ## Working on Queen
 
-The four pages under **Contributing** are the same tier pointed at the repository rather than
-at the running system. They are the answer to "where does this claim come from": the workspace
-and the build order, the suites each page names in its `verifiedBy` frontmatter, the generators
-that derive this site's fact tables from `server/`, and what a release actually publishes.
+The pages under **Contributing** are the same tier pointed at the repository rather than at the
+running system. They answer "where does this claim come from": the workspace, the suites each page
+names in its `verifiedBy` frontmatter, the generators that derive this site's fact tables from
+`server/`, and what a release publishes.
 
 <CardGrid>
   <LinkCard
     href="/internals/contributing"
     title="Building and developing"
-    description="The workspace, the build order that matters, and the compile-time embedding that makes a SQL edit invisible until you rebuild."
+    description="The workspace and how to build and run a node from source."
   />
   <LinkCard
     href="/internals/contributing/testing"
@@ -168,7 +170,7 @@ that derive this site's fact tables from `server/`, and what a release actually 
   <LinkCard
     href="/internals/contributing/release"
     title="How Queen ships"
-    description="The registries a release touches, where the version number lives, and the one boundary a rollback cannot cross."
+    description="The registries a release touches and where the version number lives."
   />
 </CardGrid>
 
@@ -178,76 +180,56 @@ that derive this site's fact tables from `server/`, and what a release actually 
   <LinkCard
     href="/internals/storage-model"
     title="The storage model"
-    description="Segments, offsets, the log tables and the queue row they hang off: what each row is, and the invariants that make offset arithmetic safe."
+    description="The data directory file by file: queue logs, the ordered store and its keyspaces, how a message is found, and the invariants offsets rest on."
   />
   <LinkCard
     href="/internals/life-of-a-push"
     title="Life of a push"
-    description="From HTTP body to committed rows: grouping, intra-request dedup, and how N partitions cost one commit."
+    description="From an HTTP body to an applied entry: one command per partition, the dedup probe, gapless offsets, and one fsync per touched queue log."
   />
   <LinkCard
     href="/internals/life-of-a-pop"
     title="Life of a pop"
-    description="Candidate selection, the claim under FOR UPDATE SKIP LOCKED, the head probe, and lease versus auto-ack."
-  />
-  <LinkCard
-    href="/internals/hotlist"
-    title="The hot-list"
-    description="The in-memory ring that replaced the SQL candidate scan: tri-state verdicts, epoch-CAS clears, and the revisit wheel."
+    description="The ready ring, the claim planned on the leader, the lease or the auto-ack, and the payload read from the answering node's own queue log."
   />
   <LinkCard
     href="/internals/dedup"
     title="Deduplication"
-    description="How exactness is achieved in SQL, and why the broker-side cache can never change a verdict."
+    description="How the planner reaches an exact verdict from committed hash lists plus the entries in flight, and why the bloom front cannot change it."
   />
   <LinkCard
     href="/internals/ack-internals"
     title="Ack internals"
-    description="The ack registry, ack fusion, and how a transactionId resolves to an offset through the hash sidecar."
+    description="The delivered set on the cursor row, hash resolution through the txns rows, the retry budget, and a dead letter filed in the same entry."
   />
   <LinkCard
     href="/internals/flow-control"
     title="Flow control"
-    description="The adaptive concurrency limiter: what it measures, how the limit moves, and why raising the maximum does nothing."
+    description="The byte budget at the HTTP edge, the 429 after the hold, the disk gate, and the bounded queues between receiver, planner and log."
   />
   <LinkCard
     href="/internals/retention"
     title="Retention internals"
-    description="Bounded autocommitting steps, one partition lock at a time, and the three eviction watermarks."
+    description="How the leader's maintenance step moves retention watermarks and how each node reclaims its queue-log files."
   />
   <LinkCard
     href="/internals/stats"
     title="Counters, rates and lag"
-    description="Where every number on the dashboard comes from, and why the manual refresh route does nothing useful."
-  />
-  <LinkCard
-    href="/internals/mesh"
-    title="The mesh"
-    description="Framed TCP, the HMAC HELLO handshake, the frame set, and the security reality."
+    description="Where the numbers on the dashboard and the status API come from."
   />
   <LinkCard
     href="/internals/timers"
     title="Timer internals"
-    description="Why a scheduled message cannot live in the log, the staging table keyed by names, and the two lease columns."
+    description="How a scheduled message waits and how it fires."
   />
   <LinkCard
     href="/internals/kv"
     title="KV internals"
-    description="The identity with no partition id, a version that is not monotonic, and one predicate as the only definition of existence."
+    description="How keys, versions and expiry are stored and changed."
   />
   <LinkCard
     href="/internals/sweeper"
-    title="The sweeper"
-    description="One component with two clocks, leaderless, and the livelock a claim-then-fire loop walks into."
-  />
-  <LinkCard
-    href="/internals/schema"
-    title="Schema and procedure catalogue"
-    description="Every log table with its columns, and every log-engine stored procedure with its signature and role."
-  />
-  <LinkCard
-    href="/internals/legacy"
-    title="Retired objects"
-    description="The engines that came before, and why nothing of them survives: deployments start from an empty database."
+    title="Sweeper internals"
+    description="How due timers fire and expired keys are removed."
   />
 </CardGrid>

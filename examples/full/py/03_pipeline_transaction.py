@@ -79,8 +79,8 @@ async def main():
         # ------------------------------------------------------------------
         # pop() claims messages without committing anything. Nothing is settled
         # until the ack, which is why the ack can travel with the push in one
-        # transaction: the broker applies both inside one PostgreSQL transaction
-        # or neither of them.
+        # transaction: the broker applies both as one entry of its replicated
+        # log, or neither of them.
         handled = 0
         while handled < len(ORDER_BATCH):
             batch = await (

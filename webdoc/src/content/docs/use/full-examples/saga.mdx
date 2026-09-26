@@ -20,7 +20,7 @@ released looks exactly like a room that was sold.
 
 The release was not slow. It was in the wrong place. A compensation is not a timeout, it is an
 obligation, and an obligation has to outlive the process that took it on. The correction is to make
-it a row in the same database as the queue, written in the same transaction as the work it
+it a record in the same broker as the queue, written in the same transaction as the work it
 compensates for. Then the deploy is irrelevant: if the room is held, the compensation exists, and if
 the room is not held, nothing else happened either.
 
@@ -81,7 +81,7 @@ a message that has nothing to do still has to leave the cursor.
 
 Every KV write in the program carries `ttlSeconds`, spelled as an hour in each client's own idiom.
 The expiry is mandatory: exactly one of `ttlSeconds` and `forever`, with zero being the same error as
-two. None of these programs uses `forever`, which would leave rows in a shared database that nothing
+two. None of these programs uses `forever`, which would leave rows in a shared broker that nothing
 removes if a run failed.
 
 ## The cancel is not the guarantee
@@ -131,7 +131,7 @@ down with it, which a compare-and-swap cannot do. `expect` is the secondary one.
 | the payment settles and the cancel arrives in time | the timer's row is gone before it fires, and the compensation is never delivered. The program asserts this with a `peek` and with a second delivery pass that finds nothing |
 | the payment settles and the cancel arrives too late | the compensation is delivered anyway, reads the state, finds `confirmed` and refuses. This is the case the program scripts on purpose |
 | the payment is declined | the state stays `held`, nobody is awake to release the room, and the timer does it at the hold's expiry |
-| a broker dies holding the timer's claim | the lease expires and another broker fires it. Worst case, delivery is late by `QUEEN_SWEEPER_LEASE_MS`. A cancel in that window answers `too_late`, which is a verdict and not a failure |
+| the leader dies before a due timer fires | the timer is a record in the replicated state, so the next leader, or the same node once restarted, fires it. The fire is one entry of the log, so the compensation goes out once, and a cancel never answers `too_late` |
 
 ## Run it
 
@@ -151,6 +151,6 @@ does not hold. The runner takes a language name to run one of them on its own, f
 `examples/apps/run.sh go`. Each phase ends on a **count** with a deadline behind it rather than on a
 quiet interval, because a program that stops when nothing has arrived for a while passes on a broker
 that delivered nothing at all. The compensation phase gets the longest deadline of the three, since a
-timer is delivered no earlier than its delay plus one sweep. And each run purges what it wrote:
-the queues, the saga rows, and any timer still armed, because a pending timer is keyed by name in a
-table of its own and deleting the queue does not reach it.
+timer is delivered no earlier than its delay plus one fire step of the leader. And each run purges
+what it wrote: the queues, the saga rows, and any timer still armed, because a pending timer is keyed
+by name in a store of its own and deleting the queue does not reach it.

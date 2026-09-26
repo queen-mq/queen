@@ -34,4 +34,4 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: OS/arch, how Queen runs (Docker, Kubernetes/Helm, bare binary), PostgreSQL version, relevant non-default env vars.
+      description: OS/arch, how Queen runs (Docker, Kubernetes/Helm, bare binary), single node or cluster (how many nodes), relevant non-default env vars.

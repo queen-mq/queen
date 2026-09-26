@@ -10,7 +10,7 @@ import (
 var metricsPrometheus bool
 
 // The broker's metrics endpoints are process-wide (host CPU, worker
-// lifetimes, PG internals) and cannot be scoped to one tenant, so a proxied
+// lifetimes, broker internals) and cannot be scoped to one tenant, so a proxied
 // cluster has no equivalent - only the per-queue series.
 const metricsAlternative = "the broker's metrics endpoints are not tenant-scopable; " +
 	"use 'queenctl analytics queue-ops' / 'queenctl analytics queue-lag' instead"

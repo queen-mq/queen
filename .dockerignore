@@ -1,8 +1,7 @@
 # Build context exclusions.
 #
-# Both images (Dockerfile = broker, proxy/Dockerfile = proxy) build from
-# the REPO ROOT, so everything not excluded here is uploaded to the daemon on
-# every build. Patterns without `**/` match only at the context root — that is
+# The image (Dockerfile) builds from the REPO ROOT, so everything not excluded
+# here is uploaded to the daemon on every build. Patterns without `**/` match only at the context root — that is
 # why the nested target/ and node_modules/ dirs need the recursive form.
 
 # Dependencies — reinstalled inside the image with `npm ci`
@@ -15,8 +14,8 @@
 app/dist
 server/webapp/dist
 proxy/console/dist
-# ...except the committed one, which server/Dockerfile copies verbatim: the
-# slim test image has no frontend stage to regenerate it from.
+# ...except the committed one, which the test runner images copy verbatim:
+# they have no frontend stage to regenerate it from.
 !server/webapp/dist
 
 # Python virtualenvs — 280 MB of client-py/.venv would otherwise be uploaded to

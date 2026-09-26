@@ -1,7 +1,7 @@
 //! Key encodings for the keyspaces of §6.1 and §6.2.
 //!
 //! LMDB orders keys by `memcmp`, so the encoding IS the index order: every
-//! "in key order" the plan asks for — the retention walk, `log_renew_lease_v1`
+//! "in key order" the plan asks for — the retention walk, a lease renew
 //! iterating a worker's leases, the wildcard candidate scan, a `DeleteChunk`
 //! resuming where the last one stopped — is a range scan over one of the
 //! functions below, and nothing sorts in RAM.
@@ -12,8 +12,8 @@
 //!   numeric order.
 //! - **Signed integers are big-endian with the sign bit flipped**
 //!   ([`push_i64`]), so −1 sorts below 0. Offsets are `u64` in the keyspaces
-//!   that hold them, but `log_consumers.committed` and a timer's DLQ offset
-//!   are −1 in the SQL, and a key that carries one must still order.
+//!   that hold them, but a cursor's `committed` and a timer's DLQ offset can
+//!   be −1, and a key that carries one must still order.
 //! - **Names are escaped and terminated** ([`push_name`]): `0x00` becomes
 //!   `0x00 0xFF` and the name ends with `0x00 0x00`. Without the escape,
 //!   `("ab", "c")` and `("a", "bc")` would encode to the same bytes; with it,
@@ -22,8 +22,7 @@
 //!   longer name, which is plain string order).
 //!
 //! A composite key of names can therefore exceed LMDB's 511-byte limit —
-//! `(tenant, queue, group)` is three unbounded names in the postgres schema
-//! (`consumer_groups_metadata.consumer_group` is `TEXT`). The adapter refuses
+//! `(tenant, queue, group)` is three unbounded names. The adapter refuses
 //! such a key with [`super::StoreError::KeyTooLong`] rather than truncating
 //! it; see the note in `super`'s header.
 
@@ -230,8 +229,8 @@ pub fn cursors_group_of(k: &[u8]) -> Option<String> {
     Some(read_name(k, 8)?.0)
 }
 
-/// `(worker, pid, group)` → `lease_expires_at_us`. `log_renew_lease_v1` walks
-/// one worker's leases in this order (§8).
+/// `(worker, pid, group)` → `lease_expires_at_us`. A lease renew walks one
+/// worker's leases in this order (§8).
 pub fn leases_by_worker(worker: &str, p: Pid, group: &str) -> Vec<u8> {
     let mut k = with(worker.len() + group.len() + 12);
     push_name(&mut k, worker);
@@ -288,7 +287,7 @@ pub fn pending_parts(k: &[u8]) -> Option<(String, String, String, Pid)> {
 // dead letters
 // ---------------------------------------------------------------------------
 
-/// `(tenant, queue, dlq_id)`: the primary key of `log_dlq`.
+/// `(tenant, queue, dlq_id)`: the primary key of a dead letter.
 pub fn dlq(tenant: &str, queue: &str, dlq_id: &[u8; 16]) -> Vec<u8> {
     let mut k = with(tenant.len() + queue.len() + 20);
     push_name(&mut k, tenant);
@@ -310,7 +309,7 @@ pub fn dlq_parts(k: &[u8]) -> Option<(String, String, [u8; 16])> {
 }
 
 /// `(pid, group, offset)` → dlq_id: the second index of §6.1's `dlq`. The
-/// offset is signed because a timer's dead letter files at −1 (025).
+/// offset is signed because a timer's dead letter files at −1.
 pub fn dlq_by_pos(p: Pid, group: &str, offset: i64) -> Vec<u8> {
     let mut k = with(group.len() + 18);
     push_u64(&mut k, p);
@@ -501,7 +500,7 @@ pub fn counter_group_tenant_prefix(tenant: &str) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// kv (024, WP-2.2)
+// kv (WP-2.2)
 // ---------------------------------------------------------------------------
 
 /// `(tenant, ns)`: every key of one namespace, in key byte order.
@@ -522,14 +521,13 @@ pub fn kv_tenant_prefix(tenant: &str) -> Vec<u8> {
 
 /// `(tenant, ns, key)`. The tenant and the namespace are escaped and
 /// terminated like every other name; the KEY is the raw, UNTERMINATED tail.
-/// That is what makes the SQL's two ordering promises structural here:
+/// That is what makes the two ordering promises structural here:
 ///
 /// - inside one namespace the store order IS the byte order of the key
-///   strings — `COLLATE "C"`, the order getPrefix pages in and the order its
+///   strings — the order getPrefix pages in and the order its
 ///   `after` cursor is exclusive in;
 /// - a key PREFIX is a store-key prefix (`kv_ns_prefix ‖ prefix`), so a prefix
-///   read is one range scan, with no escaping in the way and no metacharacter
-///   (024's `starts_with`, never a LIKE).
+///   read is one range scan, with no escaping in the way and no metacharacter.
 ///
 /// The tail needs no terminator because nothing follows it, and no escape
 /// because the prefix before it is self-delimiting.
@@ -575,12 +573,12 @@ pub fn kv_expiry_parts(k: &[u8]) -> Option<(i64, u64)> {
 }
 
 // ---------------------------------------------------------------------------
-// timers (025, WP-2.3)
+// timers (WP-2.3)
 // ---------------------------------------------------------------------------
 
-/// `(tenant, queue, timer_key)`: the primary key of `queen.log_timers`. The
-/// escaped names keep BYTE order, so a keyset walk over one queue's timers is
-/// 025's `ORDER BY timer_key COLLATE "C"`.
+/// `(tenant, queue, timer_key)`: the primary key of a timer. The escaped names
+/// keep BYTE order, so a keyset walk over one queue's timers is in timer-key
+/// byte order.
 pub fn timers(tenant: &str, queue: &str, key: &str) -> Vec<u8> {
     let mut k = with(tenant.len() + queue.len() + key.len() + 6);
     push_name(&mut k, tenant);
@@ -594,8 +592,8 @@ pub fn timers_prefix(tenant: &str, queue: &str) -> Vec<u8> {
     queues(tenant, queue)
 }
 
-/// The scan prefix of every timer of one queue whose key STARTS WITH `prefix`
-/// (025 `log_timers_count_v1`): the queue prefix plus the escaped prefix bytes
+/// The scan prefix of every timer of one queue whose key STARTS WITH `prefix`:
+/// the queue prefix plus the escaped prefix bytes
 /// WITHOUT a terminator, so `starts_with` on the encoded key is `starts_with`
 /// on the name (a NUL is escaped the same way inside and outside the prefix).
 pub fn timers_key_prefix(tenant: &str, queue: &str, prefix: &str) -> Vec<u8> {
@@ -940,7 +938,7 @@ mod tests {
 
     #[test]
     fn kv_keys_order_by_key_bytes_inside_a_namespace() {
-        // COLLATE "C": byte order, and a namespace never bleeds into its
+        // Byte order, and a namespace never bleeds into its
         // neighbour ("a" vs "ab") nor a tenant into another.
         let mut keys = vec!["b", "a", "a%b", "a%bc", "ab", "a_b", "\u{e9}", "Z"];
         let mut enc: Vec<(Vec<u8>, &str)> = keys.iter().map(|k| (kv("t", "ns", k), *k)).collect();

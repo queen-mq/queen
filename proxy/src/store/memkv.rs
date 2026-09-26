@@ -1,6 +1,7 @@
 //! An in-memory [`KvBackend`] with the broker's KV semantics (atomic batch,
 //! `expect` versions, `required`, TTL, `getPrefix` paging, `incr`), for
-//! tests of the KV side of every repository. Not a production backend.
+//! tests of every repository, and [`Down`], a backend that never answers.
+//! Not production backends.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -38,6 +39,16 @@ impl MemKv {
             .filter(|((n, _), r)| n == ns && r.expires_at_ms.is_none_or(|e| e > now))
             .map(|((_, k), _)| k.clone())
             .collect()
+    }
+}
+
+/// A backend that never answers: every batch fails [`KvError::Unavailable`],
+/// like a KV with no leader. For the fail-open / fail-closed tests.
+pub struct Down;
+
+impl KvBackend for Down {
+    fn kv(&self, _ops: Vec<Value>) -> BoxFut<'_, Result<Vec<Value>, KvError>> {
+        Box::pin(async { Err(KvError::Unavailable("no leader".into())) })
     }
 }
 

@@ -19,7 +19,7 @@ use crate::uuid;
 /// Builds one transaction.
 ///
 /// The point of this endpoint is the handoff: ack the message you just
-/// processed and push the next stage's in a single PostgreSQL transaction, so
+/// processed and push the next stage's in a single broker command, so
 /// there is no window where one happened and the other did not.
 ///
 /// Acking through here also collects the messages' lease ids into
@@ -30,7 +30,7 @@ use crate::uuid;
 /// # KV and timers ride along
 ///
 /// [`TransactionBuilder::kv`] and [`TransactionBuilder::timer`] put state
-/// writes and scheduled deliveries **in the same PostgreSQL transaction** as
+/// writes and scheduled deliveries **in the same transaction** as
 /// the ack and the push. That is what the KV surface is for: an idempotency
 /// marker written outside the transaction that acks the message it guards
 /// protects nothing, because the two can come apart.

@@ -49,9 +49,9 @@ var rootCmd = &cobra.Command{
 (https://queenmq.com).
 
 It exposes the broker's data plane (push, pop, ack, transaction, lease) and
-admin plane (queues, partitions, consumer groups, DLQ, traces, maintenance,
-metrics, analytics) through a single static binary built on top of the
-official Go SDK.`,
+admin plane (queues, partitions, consumer groups, DLQ, traces, metrics,
+analytics) through a single static binary built on top of the official Go
+SDK.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Version:       BuildVersion,

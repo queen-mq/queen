@@ -53,7 +53,6 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use super::{json, AppState};
-use crate::db;
 use crate::switches::{decide, Origin, Surface};
 use crate::tenant::Tenant;
 
@@ -150,10 +149,10 @@ pub(super) fn write_footprint(ops: &[Value]) -> (i64, i64) {
 }
 
 /// Read a positive integer env knob once. These four ceilings are the HTTP-edge
-/// half of §9.2: the SP carries the same numbers as constants and is the floor
+/// half of §9.2: the planner carries the same numbers as constants and is the floor
 /// nothing can get under, while these guard the body BEFORE a connection is
 /// taken. The value ceiling is the documented case where the two halves measure
-/// different things — raw body bytes here, canonical JSONB text in the SP,
+/// different things — raw body bytes here, compact JSON in the planner,
 /// normally shorter — and that surprise belongs in the documentation, not in a
 /// bug report from the first user with a value near the ceiling.
 ///
@@ -184,7 +183,7 @@ fn max_ops_per_call() -> usize {
     *V.get_or_init(|| env_usize("QUEEN_KV_MAX_OPS_PER_CALL", 256))
 }
 
-/// 1024 and not the stored procedure's 4096: the edge is allowed to be STRICTER
+/// 1024 and not the planner's 4096: the edge is allowed to be STRICTER
 /// than the floor, and this default is `config.rs`'s, which is the number an
 /// operator sees documented. Every default in this block is kept identical to
 /// `Config`'s on purpose — the two read the same environment variables, so for
@@ -206,7 +205,7 @@ fn max_keys_per_call() -> usize {
 //    collapses to 160/s and the rest gets 503 instead of stealing connections
 //    from the message path.
 // 2. NO lane (see the module header).
-// 3. PER-TENANT TOKEN BUCKET evaluated BEFORE pool.get(), 429 + Retry-After.
+// 3. PER-TENANT TOKEN BUCKET evaluated BEFORE the pool acquire, 429 + Retry-After.
 // 4. `resolve_query_timeout` mandatory: a slow getPrefix with no server-side
 //    cancel leaves the backend spinning and quarantines the connection, and on a
 //    pool of 16 three quarantines are 19% of capacity.
@@ -216,55 +215,6 @@ fn max_keys_per_call() -> usize {
 // `rate_check` is the ONE call site for the bucket. Point (4) is implemented
 // here, in full, on every call.
 // ---------------------------------------------------------------------------
-
-#[inline]
-fn kv_pool(st: &AppState) -> &deadpool_postgres::Pool {
-    // SEAM (§8.4 point 1): return `&st.kv_pool` once AppState carries it. Until
-    // then the shared pool is used, which is correct but NOT yet a bulkhead —
-    // that is the difference between "the KV endpoint is slow" and "the KV
-    // endpoint made the message path slow".
-    &st.pool
-}
-
-/// RUNG 5 of the degradation ladder (§12.1): "scritture KV standalone rifiutate
-/// … le scritture KV DENTRO il wire continuano: la transazione e' il valore del
-/// prodotto, la POST e' la comodita'."
-///
-/// The trigger is sustained refusal by the pool, which is the cell telling us the
-/// database is slow — not the tenant telling us anything, which is why the answer
-/// is 503 and not 429 or 403. It is a streak and not a single miss: one refusal
-/// under a burst is normal, `kv_standalone_shed_after` in a row is a condition.
-///
-/// This rung exists ONLY on this file's surface. The in-wire KV path in
-/// `data.rs` never consults it, and that asymmetry is the whole content of the
-/// rung: shedding the convenience keeps the transaction working.
-fn standalone_shed(st: &AppState) -> bool {
-    use std::sync::atomic::Ordering;
-    let shed = st.kv_pressure.load(Ordering::Relaxed) >= st.kv_standalone_shed_after;
-    static SHED: crate::obs::OnChange<bool> = crate::obs::OnChange::new();
-    crate::obs::sweeper_stage(
-        &SHED,
-        "kv_standalone_writes",
-        shed,
-        "the KV pool refused consecutive standalone writes",
-    );
-    shed
-}
-
-fn note_pool(st: &AppState, ok: bool) {
-    use std::sync::atomic::Ordering;
-    if ok {
-        st.kv_pressure.store(0, Ordering::Relaxed);
-    } else {
-        // Saturating, so a long outage cannot wrap the counter back under the
-        // threshold and silently un-shed the rung.
-        let _ = st
-            .kv_pressure
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                Some(n.saturating_add(1))
-            });
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Response shapes.
@@ -280,7 +230,7 @@ fn body_obj(pairs: Vec<(&str, Value)>) -> String {
 
 /// Error envelope. `error` is a CODE from the closed §9.5 taxonomy and is the
 /// only field a client may branch on: string matching on a message is forbidden
-/// everywhere in this codebase. `reason` carries the SP's opaque MESSAGE (also a
+/// everywhere in this codebase. `reason` carries the planner's opaque MESSAGE (also a
 /// stable identifier, e.g. `kv_bad_ttl`), `detail` the human half.
 fn err(code: &str, reason: Option<&str>, detail: Option<&str>) -> String {
     let mut pairs = vec![("error", Value::String(code.to_string()))];
@@ -321,29 +271,19 @@ fn unavailable(reason: &str) -> Response {
 }
 
 // ---------------------------------------------------------------------------
-// DB error → HTTP, per §9.5 and §7.6's SQLSTATE taxonomy.
+// Facade failure → HTTP, per §9.5.
 //
-// The three interesting rows:
-//
-//   23514 check_violation — `required:true` lost its precondition. §8.3: this is
-//   the EXPECTED outcome of every legitimate redelivery, so it is HTTP 200 with
-//   an explicit body, never a 4xx/5xx. The transaction really did abort in SQL
-//   and the RAISE really was necessary, but it must pollute neither the error
-//   metrics nor the retry policies. Everything the client needs is read from
-//   `detail()`, which is JSON, and NEVER from the message: the message is
-//   deliberately opaque because handlers echo DB text and namespace/key names
-//   would land in shared logs and error aggregators (§13.5).
-//
-//   42xxx — configuration, not data: a new broker against an old database
-//   (`QUEEN_APPLY_SCHEMA=0`) resolves the SP at runtime and fails with 42883.
-//   Permanent, so a retry is pointless and the status must not invite one: 500.
-//
-//   40001 / 40P01 / classes 08, 53, 57, 58, and NO SQLSTATE at all — transient.
-//   503 + Retry-After, which §9.5 defines as "not your fault, it is the cell".
+// The interesting case: a lost `required:true` precondition. §8.3: this is
+// the EXPECTED outcome of every legitimate redelivery, so it is HTTP 200 with
+// an explicit body, never a 4xx/5xx. It must pollute neither the error
+// metrics nor the retry policies. Everything the client needs is read from
+// `detail()`, which is JSON, and NEVER from the message: the message is
+// deliberately opaque because handlers echo backend text and namespace/key
+// names would land in shared logs and error aggregators (§13.5).
 // ---------------------------------------------------------------------------
 
 fn precondition_200(detail: Option<&str>) -> Response {
-    // The DETAIL is capped at 4 KiB in the SP, so a pathological value can
+    // The DETAIL is capped at 4 KiB in the planner, so a pathological value can
     // truncate it into invalid JSON. Degrade to the bare verdict rather than
     // turning a legitimate lost race into a 500.
     let parsed: Option<Value> = detail.and_then(|d| serde_json::from_str(d).ok());
@@ -363,121 +303,6 @@ fn precondition_200(detail: Option<&str>) -> Response {
     json(StatusCode::OK, body_obj(pairs))
 }
 
-/// Resolve a timed DB call while PRESERVING the SQLSTATE-bearing error.
-///
-/// `db::resolve_query_timeout` collapses "the statement failed" into `None`,
-/// which is right for the pop paths (an empty result is a legal answer there)
-/// and wrong here: this surface's whole error taxonomy — 400 on shape, 413 on
-/// size, 200 on a lost precondition, 503 on transient — is a function of the
-/// SQLSTATE, and a lost SQLSTATE would turn every one of them into a 500.
-///
-/// The TIMEOUT arm is delegated to `db::resolve_query_timeout` unchanged rather
-/// than reimplemented: it owns the server-side cancel (which needs the TLS
-/// connector matching how the pool was built) and the deadpool quarantine, and a
-/// second copy of that logic in a handler is precisely how the two drift. §8.4
-/// point 4 makes this mandatory on these routes: a slow read whose backend keeps
-/// running holds its locks, and on a pool of 16 three quarantined connections
-/// are 19% of capacity.
-///
-/// `Err(None)` is the timeout, `Err(Some(e))` the database's own verdict.
-pub(super) fn resolve_db<T>(
-    res: Result<Result<T, tokio_postgres::Error>, tokio::time::error::Elapsed>,
-    client: deadpool_postgres::Client,
-    cancel: tokio_postgres::CancelToken,
-    what: &'static str,
-    metrics: &crate::metrics::Metrics,
-) -> Result<T, Option<tokio_postgres::Error>> {
-    match res {
-        Ok(Ok(v)) => {
-            drop(client);
-            Ok(v)
-        }
-        // NOT counted as a db error here: most of these are verdicts (a lost
-        // race, a malformed op) and counting them would inflate "DB errors" on
-        // the single most frequent outcome of the product. The arms in
-        // `db_error_response` that ARE failures record it themselves — the same
-        // discrimination the transaction path makes for QDUP/QTXN.
-        Ok(Err(e)) => {
-            drop(client);
-            Err(Some(e))
-        }
-        Err(elapsed) => {
-            let _: Option<T> =
-                db::resolve_query_timeout(Err(elapsed), client, cancel, what, metrics);
-            Err(None)
-        }
-    }
-}
-
-fn db_error_response(st: &AppState, e: &tokio_postgres::Error) -> Response {
-    let dbe = match e.as_db_error() {
-        // No SQLSTATE means the connection itself failed: transient by the
-        // house classifier, and the tenant did nothing wrong.
-        None => {
-            st.metrics.record_db_error();
-            return unavailable("connection");
-        }
-        Some(d) => d,
-    };
-    let code = dbe.code().code().to_string();
-    let msg = dbe.message().to_string();
-    let detail = dbe.detail().map(str::to_string);
-    let class = &code[..2.min(code.len())];
-
-    match code.as_str() {
-        // A lost precondition is a verdict, not a failure: no db-error metric.
-        "23514" => precondition_200(detail.as_deref()),
-        // Shape: charset, missing TTL, unknown op, empty prefix, a tenant field
-        // inside an op, getPrefix in the wire, one key named twice.
-        //
-        // The DETAIL is returned TO THE CALLER but never written to a broker log
-        // (§13.5): it describes what the caller itself just sent, so handing it
-        // back is not disclosure, while logging it would put namespaces into
-        // shared logs and error aggregators. Verified in 024: no DETAIL on this
-        // path interpolates a KEY — the worst case is a malformed namespace,
-        // echoed only to whoever wrote it.
-        "22023" => json(
-            StatusCode::BAD_REQUEST,
-            err("kv_bad_request", Some(&msg), detail.as_deref()),
-        ),
-        // Value or key over the ceiling. 413 is the §9.5 row; the SP's own
-        // measurement is the canonical JSONB text, not the raw body.
-        "22001" => json(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            err("payload_too_large", Some(&msg), detail.as_deref()),
-        ),
-        _ if code == "40001" || code == "40P01" || matches!(class, "08" | "53" | "57" | "58") => {
-            st.metrics.record_db_error();
-            unavailable(&msg)
-        }
-        // Class 42 is configuration (§7.6): an operator can repair it, and it is
-        // the shape of "new broker, old schema". Loud, not retryable.
-        _ if class == "42" => {
-            st.metrics.record_db_error();
-            static MISCONF: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
-            if let Some(suppressed) = MISCONF.tick_now() {
-                tracing::error!(
-                    target: "kv",
-                    sqlstate = %code,
-                    suppressed,
-                    "kv stored procedure missing or malformed; is the schema applied?"
-                );
-            }
-            json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                err("kv_misconfigured", Some(&msg), None),
-            )
-        }
-        _ => {
-            st.metrics.record_db_error();
-            json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                err("kv_error", Some(&msg), None),
-            )
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // The one path to the database.
 // ---------------------------------------------------------------------------
@@ -485,7 +310,7 @@ fn db_error_response(st: &AppState, e: &tokio_postgres::Error) -> Response {
 /// Apply a validated op array. `p_in_wire` is FALSE here by construction: this
 /// is the HTTP surface, the one place `getPrefix` and `incr` are allowed. The
 /// transaction wire passes TRUE from its own call site (§5.5, §6.3) — that flag
-/// is a parameter of the SP and not a second procedure, so the two surfaces can
+/// is a parameter of the planner and not a second procedure, so the two surfaces can
 /// never drift apart.
 async fn apply_ops(
     st: &Arc<AppState>,
@@ -508,10 +333,10 @@ async fn apply_ops(
     }
     // §6.1 point 4: an op count alone bounds nothing — 63 getMany of 256 keys
     // read 16 128 rows. The key sum is a budget of its own, at the edge as well
-    // as in the SP, and it is counted the SAME way in both: a getPrefix counts
+    // as in the planner, and it is counted the SAME way in both: a getPrefix counts
     // as its CLAMPED limit, which is the most it can return. Counting it as one
     // would let a batch of prefix reads through the edge only to be refused by
-    // the SP — after spending the connection this guard exists to protect.
+    // the planner — after spending the connection this guard exists to protect.
     const PREFIX_DEFAULT: usize = 100;
     const PREFIX_CAP: usize = 1000;
     let keys: usize = ops
@@ -561,30 +386,7 @@ async fn apply_ops(
         }
     }
 
-    // Rung 5 (§12.1), before everything else this function does with a
-    // connection: a cell whose pool is refusing sheds the CONVENIENCE surface and
-    // keeps the transaction working. Reads are not shed — they are the cheap half
-    // and the one an idempotency marker cannot do without. The rung is a
-    // POOL signal, so it does not exist in raft mode (no pool is ever dialled).
-    if write && !st.storage.is_raft() && standalone_shed(st) {
-        st.metrics
-            .kvt
-            .kv_read_rejected(crate::metrics::KvReject::Pool);
-        return Err(json_retry(
-            StatusCode::SERVICE_UNAVAILABLE,
-            err(
-                "kv_unavailable",
-                Some("kv_standalone_paused"),
-                Some(
-                    "standalone KV writes are shed while the cell is under pressure; KV \
-                     operations inside POST /api/v1/transaction continue",
-                ),
-            ),
-            1,
-        ));
-    }
-
-    // THE LADDER (§9.5, §12.1), in one call, and evaluated BEFORE `pool.get()`
+    // THE LADDER (§9.5, §12.1), in one call, and evaluated BEFORE the pool acquire
     // because the entire point of a rate limit is not to spend a connection on a
     // request that is over it (§8.4 point 3).
     //
@@ -602,7 +404,7 @@ async fn apply_ops(
         return Err(resp);
     }
 
-    // The op kinds are kept for the metrics: on failure the SP tells us nothing
+    // The op kinds are kept for the metrics: on failure the planner tells us nothing
     // per-op, and a batch whose ops all read as `get` would misattribute the
     // whole error series.
     let kinds: Vec<crate::metrics::KvOp> = ops
@@ -615,99 +417,7 @@ async fn apply_ops(
         .map(|v| v.to_string().len() as u64)
         .sum();
 
-    // PLAN_RAFT.md WP-2.2 — raft mode routes the call to the state machine
-    // facade instead of a pooled connection. Everything above this line — the
-    // edge ceilings, the ladder, the metric labels — is shared, so the two
-    // storage classes cannot disagree on who gets through; below it the answer
-    // is the stored procedure's, element for element.
-    if st.storage.is_raft() {
-        return raft_apply(st, tenant, ops, add_rows, add_bytes, &kinds, bytes_in).await;
-    }
-
-    let ops_json = Value::Array(ops).to_string();
-
-    let client = match kv_pool(st).get().await {
-        Ok(c) => c,
-        // The pool IS the bulkhead (§8.4 point 1): exhausted means the DB is
-        // slow, which is the cell's problem and not the tenant's. 503, not 500,
-        // and with Retry-After — §12.1 degradation stage 2.
-        Err(_) => {
-            st.metrics.record_db_error();
-            st.metrics
-                .kvt
-                .kv_read_rejected(crate::metrics::KvReject::Pool);
-            note_pool(st, false);
-            // The call never reached the database, so the charge it took must go
-            // back. Without this, a slow database inflates every delta until the
-            // tenant answers 403 — turning a cell fault ("not your fault", 503)
-            // into a plan verdict ("yours", 403), which §12 forbids.
-            st.quota.refund(tenant, add_rows, add_bytes, 0);
-            return Err(unavailable("kv_pool_exhausted"));
-        }
-    };
-    note_pool(st, true);
-    // Captured BEFORE the query: on a broker-side timeout the still-running
-    // statement is cancelled server-side and this connection is quarantined
-    // rather than abandoned (§8.4 point 4).
-    let cancel = client.cancel_token();
-    let t0 = std::time::Instant::now();
-    let res = tokio::time::timeout(
-        st.stmt_timeout,
-        db::kv_apply(&client, &ops_json, tenant, false),
-    )
-    .await;
-    // One duration per CALL, shared out over the ops of the batch: a batch is one
-    // round trip and one commit, so charging every op the whole latency would
-    // make the p99 a function of batch size rather than of the database.
-    let ms = t0.elapsed().as_secs_f64() * 1000.0 / (kinds.len().max(1) as f64);
-
-    match resolve_db(res, client, cancel, "kv_apply", &st.metrics) {
-        Ok(txt) => match serde_json::from_str::<Value>(&txt) {
-            // §6.4: the results are index-aligned to the input array, and the SP
-            // raises rather than returning a short one — so a shape other than an
-            // array is a broken contract, never a user error.
-            Ok(Value::Array(a)) => {
-                record_results(st, &a, ms, bytes_in);
-                Ok(a)
-            }
-            _ => {
-                st.metrics.record_db_error();
-                record_all(st, &kinds, crate::metrics::KvResult::Error, ms);
-                Err(json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    err("kv_error", Some("kv_result_unreadable"), None),
-                ))
-            }
-        },
-        Err(Some(e)) => {
-            // A lost precondition is a VERDICT, not a fault (§8.3): counting it
-            // as an error would make the most frequent outcome of the product's
-            // number-one use case read as a failure on every dashboard.
-            let verdict = e
-                .as_db_error()
-                .map(|d| d.code().code() == "23514")
-                .unwrap_or(false);
-            let outcome = if verdict {
-                crate::metrics::KvResult::Rejected
-            } else {
-                crate::metrics::KvResult::Error
-            };
-            record_all(st, &kinds, outcome, ms);
-            // The transaction aborted, so nothing was written — including on the
-            // 23514 verdict path, where the RAISE is what rolled it back.
-            st.quota.refund(tenant, add_rows, add_bytes, 0);
-            Err(db_error_response(st, &e))
-        }
-        Err(None) => {
-            record_all(st, &kinds, crate::metrics::KvResult::Error, ms);
-            // NOT refunded, deliberately. A broker-side timeout does not say
-            // whether the statement committed; the cancel is best-effort. Keeping
-            // the charge over-counts for at most one refresh period, and
-            // over-counting blocks early while under-counting blocks late — only
-            // the second is unsafe (§9.3).
-            Err(unavailable("kv_timeout"))
-        }
-    }
+    raft_apply(st, tenant, ops, add_rows, add_bytes, &kinds, bytes_in).await
 }
 
 // ---------------------------------------------------------------------------
@@ -716,10 +426,9 @@ async fn apply_ops(
 // The same wire contract, answered by the state machine: 024's pass 1 runs at
 // the facade's receiver, the writes are planned serially and answered once
 // their entry is committed and applied here, the reads come off this node's
-// applied state. The error taxonomy maps one to one onto the SQLSTATE rows
-// above — 400 on shape, 413 on size, 200 on a lost `required` precondition,
-// 503 + Retry-After on a cell condition — so no client can tell which storage
-// class answered.
+// applied state. The error taxonomy maps consistently onto the cases above —
+// 400 on shape, 413 on size, 200 on a lost `required` precondition, 503 +
+// Retry-After on a cell condition.
 // ---------------------------------------------------------------------------
 
 /// A refusal that never reached a verdict, rendered in this file's envelope.
@@ -762,8 +471,8 @@ fn raft_failure(f: crate::rsm::facade::KvFailure) -> Response {
     }
 }
 
-/// [`apply_ops`]'s raft leg: the call through the facade, with the metrics and
-/// the quota bookkeeping the Postgres leg keeps.
+/// [`apply_ops`]'s raft leg: the call through the facade, with its own metrics
+/// and quota bookkeeping.
 async fn raft_apply(
     st: &Arc<AppState>,
     tenant: &str,
@@ -795,7 +504,7 @@ async fn raft_apply(
             // Nothing was written — refund the charge — EXCEPT when the
             // outcome is unknown: a timeout or a retry may have committed, and
             // over-counting blocks early where under-counting blocks late
-            // (§9.3), the same rule as the Postgres leg's timeout.
+            // (§9.3).
             let unknown = matches!(
                 f,
                 KvFailure::Rsm(RsmError::Timeout) | KvFailure::Rsm(RsmError::Retry { .. })
@@ -809,7 +518,7 @@ async fn raft_apply(
 }
 
 /// `putIfAbsent` is NOT a label of its own: it desugars to `put` with `expect:0`
-/// at the entry of the SP, so it is one code path and therefore one series.
+/// at the entry of the planner, so it is one code path and therefore one series.
 fn kv_op_label(op: Option<&str>) -> Option<crate::metrics::KvOp> {
     use crate::metrics::KvOp;
     match op? {
@@ -830,7 +539,7 @@ fn record_all(st: &AppState, kinds: &[crate::metrics::KvOp], r: crate::metrics::
 }
 
 /// Attribute each returned element to its own op and outcome. The element's own
-/// `op` field is authoritative rather than the input's: the SP is where
+/// `op` field is authoritative rather than the input's: the planner is where
 /// `putIfAbsent` becomes `put`, and reading the answer instead of the question
 /// keeps the two from drifting.
 fn record_results(st: &AppState, results: &[Value], ms: f64, bytes_in: u64) {
@@ -1059,10 +768,10 @@ pub async fn handle_kv_put(
     op.insert("key".to_string(), Value::String(key));
     // Only the fields §8.1 names for this route are forwarded. Expiry is NOT
     // defaulted here: exactly one of ttlSeconds and forever is mandatory and the
-    // SP is the single place that says so, so all seven clients and the embedded
+    // planner is the single place that says so, so all seven clients and the embedded
     // broker inherit the rule without a line of their own (§5.1). A `put` that
     // silently inherited the previous TTL is the fastest way to make a marker
-    // immortal, so an absent expiry must reach the SP as absent.
+    // immortal, so an absent expiry must reach the planner as absent.
     for f in ["value", "ttlSeconds", "forever", "expect", "required"] {
         if let Some(v) = obj.get(f) {
             op.insert(f.to_string(), v.clone());
@@ -1188,7 +897,7 @@ fn get_response(results: Vec<Value>) -> Response {
 // ---------------------------------------------------------------------------
 
 /// The list body. Every field but `namespace` is optional, and every default is
-/// the STORED PROCEDURE's: this struct resolves nothing the SQL already decides,
+/// the planner's: this struct resolves nothing the planner already decides,
 /// so the console's own choices (`includeExpired`, the page size) travel on the
 /// wire where they can be read in a request log, rather than being implied by a
 /// default that a second caller would inherit without asking.
@@ -1199,14 +908,14 @@ fn get_response(results: Vec<Value>) -> Response {
 /// publishes an open object and the field names reach the site only as prose.
 #[derive(Deserialize)]
 struct KvListBody {
-    /// Validated in SQL (charset, ≤ 64 bytes) and nowhere else, so the rule has
+    /// Validated in the planner (charset, ≤ 64 bytes) and nowhere else, so the rule has
     /// one home: an unknown namespace is an empty page, a MALFORMED one is a
     /// 400 — without that, a typo mints a phantom namespace that reads empty
     /// forever and the operator concludes their data is gone.
     namespace: String,
     /// FREE TEXT, not a key: absent or empty lists the whole namespace, which is
     /// what an operator who has just opened a namespace needs. `%` and `_` are
-    /// ordinary bytes — the SQL predicate is `starts_with`, never a LIKE.
+    /// ordinary bytes — matching is a plain `starts_with`, never a wildcard pattern.
     #[serde(default)]
     prefix: Option<String>,
     /// The EXCLUSIVE keyset cursor: the last key of the previous page. Absent
@@ -1214,7 +923,7 @@ struct KvListBody {
     /// what page 1 costs.
     #[serde(default)]
     after: Option<String>,
-    /// Clamped to 1..=1000 by the stored procedure, defaulting to 100 there and
+    /// Clamped to 1..=1000 by the planner, defaulting to 100 there and
     /// not here, so the number has one home. Never rejected: a 400 on a
     /// too-high limit is an error the caller cannot fix without reading the
     /// server's configuration.
@@ -1224,7 +933,7 @@ struct KvListBody {
     /// `{"limit":5000000000}` a 400 `kv_bad_body` from serde, before the
     /// sentence above ever runs — handing the one caller who most obviously
     /// asked for too much exactly the error this field promises never to give.
-    /// It is saturated into i32 range in `limit()` and clamped in SQL.
+    /// It is saturated into i32 range in `limit()` and clamped in the planner.
     #[serde(default)]
     limit: Option<i64>,
     /// Omit the values. The key/version/expiry columns alone are what a browser
@@ -1232,7 +941,7 @@ struct KvListBody {
     /// difference between one row and a thousand fitting under the byte budget.
     #[serde(rename = "keysOnly", default)]
     keys_only: Option<bool>,
-    /// Absent means FALSE, the same default the stored procedure applies and the
+    /// Absent means FALSE, the same default the planner applies and the
     /// same answer every other read on this surface gives: §5.7 says an expired
     /// row is gone, and a caller who did not ask for the exception must not be
     /// handed markers that every `get` on the same cell treats as absent.
@@ -1258,12 +967,12 @@ impl KvListBody {
     fn after(&self) -> Option<&str> {
         self.after.as_deref().filter(|s| !s.is_empty())
     }
-    /// `None` reaches SQL as NULL and the stored procedure applies its own
+    /// `None` reaches the planner as absent, which applies its own
     /// default. Resolving it here would be a second place for the number to live.
     ///
     /// SATURATED, not clamped: the only number this function knows is the width
     /// of the column it binds into, and anything that survives the saturation is
-    /// still clamped to 1..=1000 by the stored procedure. So `5_000_000_000`
+    /// still clamped to 1..=1000 by the planner. So `5_000_000_000`
     /// behaves like `5000` — a limit that is too high, answered with the maximum
     /// page — instead of like a malformed body.
     fn limit(&self) -> Option<i32> {
@@ -1275,31 +984,6 @@ impl KvListBody {
     }
     fn include_expired(&self) -> bool {
         self.include_expired.unwrap_or(false)
-    }
-}
-
-/// Take a connection from the KV pool, or render the cell's own refusal.
-///
-/// Shared by the two console reads because the bookkeeping is three lines that
-/// are all easy to forget one of: the db-error metric, the `pool` reject reason
-/// (a cell condition, not the tenant's doing) and `note_pool`, which is what
-/// feeds rung 5 — the streak that sheds standalone writes while keeping the
-/// transaction wire working. A read that quietly skipped `note_pool` would make
-/// that streak undercount exactly when the database is slow.
-async fn console_client(st: &AppState) -> Result<deadpool_postgres::Client, Response> {
-    match kv_pool(st).get().await {
-        Ok(c) => {
-            note_pool(st, true);
-            Ok(c)
-        }
-        Err(_) => {
-            st.metrics.record_db_error();
-            st.metrics
-                .kvt
-                .kv_read_rejected(crate::metrics::KvReject::Pool);
-            note_pool(st, false);
-            Err(unavailable("kv_pool_exhausted"))
-        }
     }
 }
 
@@ -1331,33 +1015,11 @@ pub async fn handle_kv_namespaces(
         return resp;
     }
 
-    // PLAN_RAFT.md WP-2.2 — raft mode reads this node's applied state.
-    if st.storage.is_raft() {
-        use crate::rsm::facade::{Deadline, ReqCtx};
-        let ctx = ReqCtx::new(tenant.as_str(), Deadline::after(st.stmt_timeout));
-        return match st.rsm.kv_namespaces(ctx).await {
-            Ok(txt) => json(StatusCode::OK, format!("{{\"namespaces\":{txt}}}")),
-            Err(f) => raft_failure(f),
-        };
-    }
-
-    let client = match console_client(&st).await {
-        Ok(c) => c,
-        Err(resp) => return resp,
-    };
-    let cancel = client.cancel_token();
-    let res =
-        tokio::time::timeout(st.stmt_timeout, db::kv_namespaces(&client, tenant.as_str())).await;
-    match resolve_db(res, client, cancel, "kv_namespaces", &st.metrics) {
-        // The stored procedure returns the bare array; the route wraps it, the
-        // same way `batch_response` wraps the batch's. An object leaves room for
-        // the call-level fields a console will want (a truncation flag the day a
-        // tenant's namespace count needs one, the snapshot's age when this moves
-        // onto the sweeper's figures) without a second shape change on a page
-        // that is already shipped.
+    use crate::rsm::facade::{Deadline, ReqCtx};
+    let ctx = ReqCtx::new(tenant.as_str(), Deadline::after(st.stmt_timeout));
+    match st.rsm.kv_namespaces(ctx).await {
         Ok(txt) => json(StatusCode::OK, format!("{{\"namespaces\":{txt}}}")),
-        Err(Some(e)) => db_error_response(&st, &e),
-        Err(None) => unavailable("kv_timeout"),
+        Err(f) => raft_failure(f),
     }
 }
 
@@ -1375,7 +1037,7 @@ pub async fn handle_kv_list(
     // said nothing. Nothing in the product appends a query string to this POST,
     // so the guard costs a caller nothing and makes the rule structural instead
     // of documentary. First, like its siblings: it reads no state and spends no
-    // connection, and everything that touches Postgres is still behind the
+    // connection, and everything that touches the backend is still behind the
     // ladder below.
     if let Some(r) = reject_query(&q) {
         return r;
@@ -1388,56 +1050,19 @@ pub async fn handle_kv_list(
         Err(e) => return bad_request("kv_bad_body", &e.to_string()),
     };
 
-    // PLAN_RAFT.md WP-2.2 — raft mode pages this node's applied state; the
-    // body resolves exactly as it does for the Postgres leg.
-    if st.storage.is_raft() {
-        use crate::rsm::facade::{Deadline, KvListReq, ReqCtx};
-        let ctx = ReqCtx::new(tenant.as_str(), Deadline::after(st.stmt_timeout));
-        let list = KvListReq {
-            namespace: req.namespace.clone(),
-            prefix: req.prefix().to_string(),
-            after: req.after().map(str::to_string),
-            limit: req.limit().map(i64::from),
-            keys_only: req.keys_only(),
-            include_expired: req.include_expired(),
-        };
-        return match st.rsm.kv_list(ctx, list).await {
-            Ok(txt) => json(StatusCode::OK, txt),
-            Err(f) => raft_failure(f),
-        };
-    }
-
-    let client = match console_client(&st).await {
-        Ok(c) => c,
-        Err(resp) => return resp,
+    use crate::rsm::facade::{Deadline, KvListReq, ReqCtx};
+    let ctx = ReqCtx::new(tenant.as_str(), Deadline::after(st.stmt_timeout));
+    let list = KvListReq {
+        namespace: req.namespace.clone(),
+        prefix: req.prefix().to_string(),
+        after: req.after().map(str::to_string),
+        limit: req.limit().map(i64::from),
+        keys_only: req.keys_only(),
+        include_expired: req.include_expired(),
     };
-    // Captured BEFORE the query: on a broker-side timeout the still-running
-    // statement is cancelled server-side and the connection is quarantined
-    // rather than abandoned (§8.4 point 4). A namespace listing is the one read
-    // here whose cost the caller does not bound a priori, so this is not
-    // ceremony.
-    let cancel = client.cancel_token();
-    let res = tokio::time::timeout(
-        st.stmt_timeout,
-        db::kv_list(
-            &client,
-            tenant.as_str(),
-            &req.namespace,
-            req.prefix(),
-            req.after(),
-            req.limit(),
-            req.keys_only(),
-            req.include_expired(),
-        ),
-    )
-    .await;
-    match resolve_db(res, client, cancel, "kv_list", &st.metrics) {
-        // Passed through verbatim: `{rows, truncated, nextAfter, bytes}` is
-        // built in SQL, in one place, for the same reason every other shape on
-        // this surface is (§9.2).
+    match st.rsm.kv_list(ctx, list).await {
         Ok(txt) => json(StatusCode::OK, txt),
-        Err(Some(e)) => db_error_response(&st, &e),
-        Err(None) => unavailable("kv_timeout"),
+        Err(f) => raft_failure(f),
     }
 }
 
@@ -1476,7 +1101,7 @@ mod tests {
         assert_eq!(
             b.limit(),
             None,
-            "the limit's one home is the stored procedure"
+            "the limit's one home is the planner"
         );
         assert!(
             !b.keys_only(),

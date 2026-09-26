@@ -8,9 +8,8 @@
  * operate, an eviction story, and an outage when Redis fills up.
  *
  * With Queen: a stream with a tumbling window per provider, holding the
- * set of seen eventIds inside the window. State lives in
- * queen_streams.state — durable, replicated by your PG backup, query-able
- * with plain SQL. No Redis.
+ * set of seen eventIds inside the window. The window state lives in the
+ * broker and commits in the same log entry as the stream's acks. No Redis.
  *
  * Demo flow:
  *   1. Push 1000 webhook events across 5 providers. Inject 300 duplicates
@@ -210,7 +209,7 @@ console.log(`  stream metrics:               cycles=${stream.metrics().cyclesTot
 console.log(`  status: ${pass ? 'PASS' : 'FAIL'}`)
 console.log('==============================================')
 console.log('')
-console.log('  Dedup state is just a row in queen_streams.state per (provider, window).')
+console.log('  Dedup state is stream state held by the broker, per (provider, window).')
 console.log('  No Redis, no separate dedup service, no eviction policy to babysit —')
 console.log("  the window closes and the state is GC'd automatically.")
 

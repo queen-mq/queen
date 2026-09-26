@@ -7,8 +7,8 @@
  * Semantics
  * ---------
  * The runtime processes a popped batch sequentially in source order. For each
- * message, it builds a `ctx` object with mutable `state` (loaded from
- * `queen_streams.state` for the message's key) and invokes the user fn.
+ * message, it builds a `ctx` object with mutable `state` (loaded from the
+ * broker for the message's key) and invokes the user fn.
  *
  *   .gate((msg, ctx) => boolean)
  *

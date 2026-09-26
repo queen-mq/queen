@@ -145,33 +145,6 @@ struct FetchEntry {
 }
 
 impl RaftFacade {
-    /// Keep the legacy diagnostics route wire-compatible in a Postgres-free
-    /// deployment. Its categories are inherently PostgreSQL-specific, so Raft
-    /// reports an explicit engine marker and empty category collections rather
-    /// than dialing the lazy pool or returning a misleading 404.
-    pub(super) async fn api_postgres_stats(&self, ctx: ReqCtx) -> Result<ApiOut, RsmError> {
-        self.linearizable(&ctx).await?;
-        Ok(ApiOut::json(
-            200,
-            json!({
-                "timestamp": crate::rsm::planner::timers::iso_us(super::super::wall_micros()),
-                "database": "raft",
-                "databaseCache": {},
-                "tableCache": [],
-                "indexCache": [],
-                "cacheSummary": {},
-                "deadTuples": [],
-                "hotUpdates": [],
-                "activeQueries": [],
-                "autovacuumStatus": [],
-                "bufferConfig": {},
-                "bufferUsage": [],
-                "tableSizes": []
-            })
-            .to_string(),
-        ))
-    }
-
     pub(super) async fn api_dynamic(
         &self,
         ctx: &ReqCtx,
@@ -489,8 +462,8 @@ impl RaftFacade {
         Ok(ApiOut::json(200, json!({"safeTime":crate::rsm::planner::timers::iso_us(super::super::wall_micros()),"safeTimeDegraded":false,"entries":out}).to_string()))
     }
 
-    /// `GET /api/v1/messages` — `queen.list_messages_v1` (010 ≈771): the
-    /// messages created in `[from, to)` (default the last hour; `to` rounds up
+    /// `GET /api/v1/messages`: the messages created in `[from, to)` (default
+    /// the last hour; `to` rounds up
     /// to the next minute), newest first, each with its status against the
     /// partition's cursors ([`message_status`]), filtered by queue, partition,
     /// namespace, task and status, then paged by `limit`/`offset`.
@@ -549,8 +522,8 @@ impl RaftFacade {
                     let cfg = r.queue(&tenant, &qn)?;
                     let ns = cfg.as_ref().and_then(|c| c.namespace.clone());
                     let tk = cfg.as_ref().and_then(|c| c.task.clone());
-                    // namespace/task narrow the listing only: Postgres computes
-                    // `mode` over the queue/partition filter alone.
+                    // namespace/task narrow the listing only: `mode` is
+                    // computed over the queue/partition filter alone.
                     let listed = namespace.as_ref().is_none_or(|n| ns.as_ref() == Some(n))
                         && task.as_ref().is_none_or(|t| tk.as_ref() == Some(t));
                     let mut pids = Vec::new();
@@ -866,8 +839,8 @@ impl RaftFacade {
         .await
         .map_err(|e| RsmError::Internal(format!("groups read: {e}")))?
         .map_err(read_error)?;
-        // The list is a bare array (Postgres serves the procedure's JSONB
-        // verbatim); one group is `{queue: {...}}`, 404 when it has no cursor.
+        // The list is a bare array; one group is `{queue: {...}}`, 404 when
+        // it has no cursor.
         if answer.as_object().is_some_and(|o| o.is_empty()) {
             return Ok(ApiOut::json(
                 404,
@@ -969,7 +942,7 @@ impl RaftFacade {
             .and_then(Value::as_str);
         let pid = self.resolve_pid(&ctx.tenant, pid_s).await?;
         if pid_s.is_some() && pid.is_none() {
-            // PG answers a pid outside the tenant with 404 (011_traces.sql).
+            // A pid outside the tenant answers with 404.
             return Ok(ApiOut::json(
                 404,
                 json!({"success":false,"error":"Partition not found"}).to_string(),
@@ -1458,13 +1431,11 @@ fn dlq_json(
     (_t, q, id, r): (String, String, [u8; 16], DlqRow),
     partition: Option<&(String, [u8; 16])>,
 ) -> Value {
-    json!({"id":uuid_bytes_to_string(&id),"queue":q,"partition":partition.map(|p|p.0.clone()),"partitionId":partition.map(|p|uuid_bytes_to_string(&p.1)).unwrap_or_else(|| r.pid.to_string()),"createdAt":crate::rsm::planner::timers::iso_us(r.failed_at_us),"consumerGroup":r.group,"offset":r.offset,"messageId":r.message_id.map(|x|uuid_bytes_to_string(&x)),"transactionId":r.txn,"data":payload_json(&r.payload),"payload":payload_json(&r.payload),"errorMessage":r.error,"retryCount":r.retry_count,"failedAt":crate::rsm::planner::timers::iso_us(r.failed_at_us)})
+    json!({"id":uuid_bytes_to_string(&id),"queue":q,"partition":partition.map(|p|p.0.clone()),"partitionId":r.pid.to_string(),"createdAt":crate::rsm::planner::timers::iso_us(r.failed_at_us),"consumerGroup":r.group,"offset":r.offset,"messageId":r.message_id.map(|x|uuid_bytes_to_string(&x)),"transactionId":r.txn,"data":payload_json(&r.payload),"payload":payload_json(&r.payload),"errorMessage":r.error,"retryCount":r.retry_count,"failedAt":crate::rsm::planner::timers::iso_us(r.failed_at_us)})
 }
 
-/// One `(partition, group)` cursor with its lag inputs: the row the Postgres
-/// consumer-group procedures aggregate (010 `v2_base`, `lag_base`,
-/// `detail_base`). `pending` is the §9 arithmetic
-/// `GREATEST(last_offset - GREATEST(committed, log_start - 1), 0)`.
+/// One `(partition, group)` cursor with its lag inputs. `pending` is the §9
+/// arithmetic `GREATEST(last_offset - GREATEST(committed, log_start - 1), 0)`.
 struct CursorLag {
     queue: String,
     partition: String,
@@ -1476,7 +1447,7 @@ struct CursorLag {
     pending: u64,
     lease_live: bool,
     /// The stamp of the oldest message this cursor has not consumed; `None`
-    /// when it is caught up (Postgres: the covering-segment probe).
+    /// when it is caught up.
     oldest_unconsumed_us: Option<i64>,
 }
 
@@ -1491,8 +1462,7 @@ impl CursorLag {
 
 /// The stamp of the oldest message a cursor at `committed` has not consumed:
 /// the record covering `committed + 1`, or the first one after it once
-/// retention has deleted past the cursor. Postgres reads the covering
-/// segment's `created_at` (010 `v2_data`); the queue log answers the same from
+/// retention has deleted past the cursor. The queue log answers this from
 /// its in-memory index, without reading a payload.
 pub(super) fn oldest_unconsumed_us(
     qlog: Option<&QLogReader>,
@@ -1547,7 +1517,7 @@ pub(super) fn oldest_unconsumed_us(
 }
 
 /// Every cursor of the tenant (of one group when `only` is set), with its lag
-/// inputs. Queue-mode cursors (`__QUEUE_MODE__`) are included, as in Postgres.
+/// inputs. Queue-mode cursors (`__QUEUE_MODE__`) are included.
 fn cursor_lags<R: Reads + ?Sized>(
     r: &R,
     qlog: Option<&QLogReader>,
@@ -1617,14 +1587,14 @@ fn cursor_lags<R: Reads + ?Sized>(
     Ok(out)
 }
 
-/// `subscriptionTimestamp` as Postgres stores it: mode `all` registers at the
-/// epoch (004 ≈239), which the planner encodes as `i64::MIN`.
+/// `subscriptionTimestamp`: mode `all` registers at the epoch, which the
+/// planner encodes as `i64::MIN`.
 fn subscription_ts_json(us: i64) -> Value {
     Value::String(crate::rsm::planner::timers::iso_us(us.max(0)))
 }
 
-/// `GET /api/v1/consumer-groups/:group` — `queen.get_consumer_group_details_v1`
-/// (010 ≈1397): `{ queue: { conflation, kind, partitions: [...] } }`.
+/// `GET /api/v1/consumer-groups/:group`:
+/// `{ queue: { conflation, kind, partitions: [...] } }`.
 fn group_detail<R: Reads + ?Sized>(
     r: &R,
     qlog: Option<&QLogReader>,
@@ -1667,9 +1637,9 @@ fn group_detail<R: Reads + ?Sized>(
     Ok(Value::Object(answer))
 }
 
-/// `GET /api/v1/consumer-groups/lagging` — `queen.get_lagging_partitions_v1`
-/// (010 ≈1264): every cursor, queue mode included, whose oldest unconsumed
-/// message is older than `min_lag_seconds`, oldest first.
+/// `GET /api/v1/consumer-groups/lagging`: every cursor, queue mode included,
+/// whose oldest unconsumed message is older than `min_lag_seconds`, oldest
+/// first.
 fn lagging_partitions<R: Reads + ?Sized>(
     r: &R,
     qlog: Option<&QLogReader>,
@@ -1715,8 +1685,8 @@ pub(super) fn iso_ms(us: i64) -> String {
     format!("{}Z", &s[..s.len() - 4])
 }
 
-/// `GET /api/v1/consumer-groups` — `queen.get_consumer_groups_v4` (010 ≈482):
-/// one row per `(group, queue)` with at least one cursor, ordered by group
+/// `GET /api/v1/consumer-groups`: one row per `(group, queue)` with at least
+/// one cursor, ordered by group
 /// then queue. `members` counts partition cursors, `state` is `Lagging` past
 /// 300 s of time lag, else `Stable` once anything was consumed, else `Dead`.
 fn group_view<R: Reads + ?Sized>(

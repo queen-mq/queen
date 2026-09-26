@@ -722,7 +722,7 @@ auto out = client.timers().schedule(timer);  // status: scheduled | rescheduled 
 client.timers().cancel("compensation", "saga-1", out["txn"]);
 ```
 
-- `delayMs`, never an absolute instant: one clock, and it is the database's.
+- `delayMs`, never an absolute instant: one clock, and it is the broker's.
   Durations that can be sub-second are in milliseconds; the ones that cannot
   (a TTL) are in seconds. A delay in the past is legal and fires immediately.
 - `deliverAt` is **not before**, never **exactly at**.

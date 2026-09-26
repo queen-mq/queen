@@ -1,23 +1,21 @@
 #!/usr/bin/env bash
-# Two-tenant isolation over the HA pair, driven DIRECTLY at the brokers with the
-# trusted `x-queen-tenant` header (no proxy in the picture — the proxy's own
-# end-to-end check is proxy/scripts/isolation-smoke.sh).
+# Two-tenant isolation, driven DIRECTLY at the brokers with the trusted
+# `x-queen-tenant` header and QUEEN_TENANCY_HEADER=true on every node. No proxy
+# in the picture: with the embedded proxy in front, it is the proxy that sets
+# this header from the caller's credential.
 #
-# Why this exists: every cloud cell runs the broker with QUEEN_TENANCY_HEADER=true
-# behind a mesh pair, so the in-memory discovery layer — the hot-list ring
-# (server/src/hotlist.rs), the parked-pop wake gates (server/src/notify.rs) and the
-# mesh frames that feed them (server/src/mesh.rs) — must be keyed by (tenant, queue),
-# not by queue name. It is: the ring/gate key is `tenant_queue_key(tenant, queue)` and
-# every queue-carrying frame carries a `tenant` field (a frame WITHOUT one, i.e. a
-# pre-Track-B peer mid rolling upgrade, fans out to every tenant holding that name —
-# a safe over-wake). Those structures are still only *hints*: Postgres is the sole
-# authority and every SP call carries the tenant, so a leak was never possible. What
-# this runner pins down is that one tenant's ring traffic cannot HIDE or DELAY
-# another tenant's pending message on a shared cell.
+# Why this exists: a shared cell runs the broker with the tenant header on, so
+# every piece of per-queue state — queue identity and config, partitions,
+# consumer-group cursors, the dedup window, the parked-pop wake gates — must be
+# keyed by (tenant, queue), never by the queue name alone. What this runner pins
+# down is that one tenant can neither SEE, nor advance, nor HIDE or DELAY another
+# tenant's data on a shared cell.
 #
 # Shape of every scenario: the SAME queue name, the SAME partition name and the
-# SAME consumer-group name owned by two different tenants, with traffic driven on
-# BOTH brokers so the mesh and both brokers' caches are in play.
+# SAME consumer-group name owned by two different tenants, with traffic driven
+# through BOTH URLs. On the `ha-tenanted` topology QUEEN_A_URL and QUEEN_B_URL
+# are two nodes of the raft cluster (a follower forwards to the leader, so the
+# traffic crosses nodes); on `tenanted` both are the single node.
 set -uo pipefail
 
 A="${QUEEN_A_URL:?QUEEN_A_URL not set}"
@@ -75,8 +73,6 @@ if [ "$PROBE" != "123" ]; then
   exit 1
 fi
 say "tenancy probe: header honoured (A=123 while B=456)"
-say "allowing time for the mesh dial + HELLO handshake"
-sleep 3
 
 Q=tenancy-iso
 P=shared-part
@@ -115,12 +111,6 @@ if [ -n "$QID_A" ] && [ "$QID_A" != "$QID_B" ]; then
 else
   bad "queue ids collide across tenants (A='$QID_A' B='$QID_B')"
 fi
-# Crosstalk, by design: the mesh QUEUE_CONFIG_SET frame carries only the queue
-# NAME, so the peer drops the lease/encryption cache entry of EVERY tenant that
-# holds that name (server/src/main.rs on_queue_config_set). Over-invalidation ⇒
-# one extra lazy re-fetch; the assertions above are what proves it is harmless.
-note "mesh QUEUE_CONFIG_SET is tenant-inert: B's configure invalidates A's cached"
-note "     entry for the same queue name on the peer (over-invalidation, lazy refetch)"
 
 say ""
 say "== 2. no message crosses tenants (push on one broker, pop on the other) =="
@@ -217,33 +207,27 @@ call GET "$B" "$TB" "/api/v1/pop/queue/$Q?consumerGroup=$G&batch=50&partitions=8
 eq "B's '$G' cursor is now drained too" "0" "$(nmsgs)"
 
 say ""
-say "== 7. hot-list ring isolation: same (queue, group, partition) names, two tenants =="
-# server/src/hotlist.rs: the ready ring is keyed by (tenant, queue) + group and the
-# partition-name interning is nested inside that per-(tenant, queue) state, so the
-# two tenants own DISJOINT entries for ($Q, $G2, $P) even though every name
-# collides. Keyed by queue name alone they would share one entry (and one interned
-# index, so note_id would map BOTH partition uuids onto it): A's claim / ack /
-# empty-CAS would then clear or wheel B's still-pending message, hiding it until the
-# QUEEN_HOTLIST_RESEED_MS floor. PG was always the authority (log_pop_list_v1 carries
-# the tenant) so a *leak* was never possible; what this proves is the absence of that
-# hide-and-delay.
+say "== 7. same (queue, group, partition) names: A's claim+ack cannot hide or delay B =="
+# Every name collides, so the two tenants' pending messages sit in state that is
+# told apart ONLY by the tenant. If any piece of the pop path (the ready set of a
+# wildcard pop, the partition lookup, the cursor, a wake) were keyed by the names
+# alone, A's claim / ack / empty poll would clear or skip B's still-pending
+# message and B would get it late or never. What this proves is the absence of
+# that hide-and-delay.
 #
-# The hot-list lives in each broker's process memory, so both tenants must pop
-# from the SAME broker for the entry to actually be shared — hence every pop in
-# this section goes to queen-a. The pushes go to queen-b so the ring is fed the
-# way it is in production: by a name-only HOTLIST_DIRTY / MESSAGE_AVAILABLE mesh
-# frame from the peer.
+# Both tenants pop through A and push through B, so on the cluster the writes and
+# the reads enter on different nodes.
 G2=ring-cg
-# Seed both cursors so the first-contact wildcard bootstrap is out of the way and
-# subsequent pops genuinely take the ring path.
+# Seed both cursors so the first-contact bootstrap is out of the way and the
+# pops below take the steady-state path.
 call GET "$A" "$TA" "/api/v1/pop/queue/$Q?consumerGroup=$G2&batch=50&partitions=8&autoAck=true&wait=true&timeout=6000"
 call GET "$A" "$TB" "/api/v1/pop/queue/$Q?consumerGroup=$G2&batch=50&partitions=8&autoAck=true&wait=true&timeout=6000"
 call GET "$A" "$TA" "/api/v1/pop/queue/$Q?consumerGroup=$G2&batch=50&partitions=8&autoAck=true"
 call GET "$A" "$TB" "/api/v1/pop/queue/$Q?consumerGroup=$G2&batch=50&partitions=8&autoAck=true"
 
-# Both tenants push one message to the identically-named partition on the PEER,
-# then A consumes first on queen-a. A's take_batch/checkin/promote all act on the
-# ring entry B's message is also riding.
+# Both tenants push one message to the identically-named partition through B,
+# then A consumes first through A: its claim and ack act on the same names B's
+# pending message carries.
 call POST "$B" "$TA" /api/v1/push \
   "{\"items\":[{\"queue\":\"$Q\",\"partition\":\"$P\",\"payload\":{\"t\":\"A\",\"n\":77}}]}"
 eq "ring: tenant A pushes 1 to queen-b" 201 "$RC"
@@ -257,9 +241,9 @@ eq "ring: A gets its message back from queen-a" "1" "$RA"
 eq "ring: and only its own" "A" "$RTAG"
 
 # The assertion that matters: A's consumption must not have hidden or DELAYED B's
-# still-pending message on the same broker. The latency budget is the real
-# discriminator — a shared ring still delivers B eventually (the reseed floor), just
-# tens of seconds late, so asserting delivery alone would pass on the broken shape.
+# still-pending message. The latency budget is the real discriminator — shared
+# state could still deliver B eventually (a periodic rescan), just tens of seconds
+# late, so asserting delivery alone would pass on the broken shape.
 T0=$(date +%s)
 call GET "$A" "$TB" "/api/v1/pop/queue/$Q?consumerGroup=$G2&batch=50&partitions=8&autoAck=true&wait=true&timeout=8000"
 RB=$(nmsgs); RTAG=$(tags); T1=$(date +%s)
@@ -267,19 +251,19 @@ if [ "$RB" = "1" ]; then
   ok "ring: B's message survived A's claim+ack ($((T1-T0))s)"
   eq "ring: and B sees only its own" "B" "$RTAG"
   if [ $((T1-T0)) -le 3 ]; then
-    ok "ring: B was served from its OWN ring, not the reseed floor ($((T1-T0))s <= 3s)"
+    ok "ring: B was served promptly, not by a periodic rescan ($((T1-T0))s <= 3s)"
   else
-    bad "ring: B waited $((T1-T0))s — served by the reseed floor, so the ring is shared"
+    bad "ring: B waited $((T1-T0))s — delivered late, so the two tenants share pop state"
   fi
 else
   bad "ring: B's pending message was NOT delivered within 8s after A consumed (got $RB)"
   # Diagnose: hidden-until-reseed (recoverable, a latency bug) vs actually lost.
-  say "       diagnosing: is it hidden until the hot-list reseed floor, or lost?"
+  say "       diagnosing: is it hidden until some periodic rescan, or lost?"
   call GET "$A" "$TB" "/api/v1/pop/queue/$Q?consumerGroup=$G2&batch=50&partitions=8&autoAck=true&wait=true&timeout=45000"
   T2=$(date +%s)
   if [ "$(nmsgs)" -ge 1 ]; then
-    say "       -> delivered after $((T2-T0))s: HIDDEN by shared-ring crosstalk until the"
-    say "          QUEEN_HOTLIST_RESEED_MS floor, not lost. Visibility-latency defect."
+    say "       -> delivered after $((T2-T0))s: HIDDEN by cross-tenant crosstalk, not lost."
+    say "          Visibility-latency defect."
   else
     say "       -> still nothing after $((T2-T0))s: the message is not being delivered at all."
   fi
@@ -287,9 +271,9 @@ fi
 
 say ""
 say "== 8. parked long-poll: a foreign tenant's push delivers nothing =="
-# The parked-pop wake gate (notifier.wait_queue) is keyed by (tenant, queue), so a
-# push by tenant B no longer wakes tenant A's parked long-poll on the same queue
-# name. NB the wake is not observable from HTTP either way: a woken pop that finds
+# The parked-pop wake gate is keyed by (tenant, queue), so a push by tenant B does
+# not wake tenant A's parked long-poll on the same queue name. NB the wake is not
+# observable from HTTP either way: a woken pop that finds
 # nothing keeps looping to its deadline, so the elapsed time is ~timeout in BOTH
 # shapes. The delivery assertion below is the honest one; the elapsed time is
 # reported, not asserted (see the design's §6g — do not write a test that claims to
@@ -307,8 +291,8 @@ S1=$(date +%s)
 wait "$WAKER" 2>/dev/null
 eq "a tenant-B push delivers NOTHING to tenant A's parked long-poll" "0" "$(nmsgs)"
 note "A's 6s long-poll returned after $((S1-S0))s while tenant B pushed to the same"
-note "     queue name on the peer. The mesh frame now carries B's tenant, so only B's"
-note "     gate is woken — A neither receives data nor burns a re-query on B's push."
+note "     queue name through B. The wake gate is keyed by (tenant, queue), so only"
+note "     B's parked pops are woken — A neither receives data nor re-queries on it."
 # Drain what B pushed so the stack is left tidy.
 call GET "$B" "$TB" "/api/v1/pop/queue/$Q?batch=50&partitions=8&autoAck=true&wait=true&timeout=5000" >/dev/null
 

@@ -23,7 +23,6 @@ verifiedBy:
   - clients/client-php/tests/LaravelSupervisorTest.php
   - clients/client-php/tests/LaravelSupervisorProductionTest.php
   - clients/client-php/tests/LaravelDashboardTest.php
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 Queen is not a drop-in reimplementation of Horizon. Both can supervise Laravel workers, but they
@@ -32,12 +31,12 @@ sit on different queue backends and make different operational trade-offs.
 | Stack | Queue backend | Control plane | Worker process |
 | --- | --- | --- | --- |
 | Horizon | Redis | Horizon PHP master and supervisors | `artisan horizon:work` |
-| Queen PHP | Queen broker plus PostgreSQL | Laravel/PHP master | `artisan queue:work queen` |
-| Queen Rust | Queen broker plus PostgreSQL | Rust master after one temporary Artisan config load | `artisan queue:work queen` |
+| Queen PHP | Queen broker | Laravel/PHP master | `artisan queue:work queen` |
+| Queen Rust | Queen broker | Rust master after one temporary Artisan config load | `artisan queue:work queen` |
 
 The fair comparison is therefore **Horizon plus Redis** against **Queen's Laravel driver,
-supervisor, broker and PostgreSQL**. Comparing Horizon with the Queen broker alone would compare a
-worker control plane with a message store.
+supervisor and broker**. Comparing Horizon with the Queen broker alone would compare a worker
+control plane with a message store.
 
 <Aside type="note">
 Choose Horizon when its established Redis workflow, multi-master visibility, job tags, retained
@@ -55,7 +54,7 @@ implementation and tests named in this page's frontmatter.
 | Area | Horizon | Queen Laravel |
 | --- | --- | --- |
 | Laravel jobs | Standard dispatch, middleware, retry, backoff and failures | Same Laravel application surface |
-| Queue backend | Redis only; the official docs state Redis Cluster is not supported | Queen broker with PostgreSQL as durable source of truth |
+| Queue backend | Redis only; the official docs state Redis Cluster is not supported | Queen broker, which keeps messages in its own replicated log on disk |
 | Dynamic balancing | `auto`, with `size` or `time` strategy | `auto`, with independent `size` or `time` implementation |
 | Fixed allocation | `simple` | `simple` |
 | Ordered queue priority | `balance=false` | `balance=off` |
@@ -83,8 +82,7 @@ The Rust master does not keep a Laravel application resident after configuration
 diagnostic campaign its median proportional set size was **2.9 MiB**, against **65.0 MiB** for the
 Horizon orchestrator. The Queen PHP reference master measured 35.1 MiB.
 
-That is a control-plane result, not a whole-stack memory claim. Queen still needs its broker and
-PostgreSQL.
+That is a control-plane result, not a whole-stack memory claim. Queen still needs its broker.
 
 ### One contract, two engines
 
@@ -117,8 +115,8 @@ path fails closed instead of silently creating a second control namespace.
 ### Product maturity and familiarity
 
 Horizon has an established Laravel installation path, a large operating history and one familiar
-Redis-backed surface. Queen's Laravel supervisor is still a preview with additional broker,
-PostgreSQL and state-directory decisions.
+Redis-backed surface. Queen's Laravel supervisor is still a preview with additional broker and
+state-directory decisions.
 
 ### A richer Laravel-specific dashboard
 
@@ -144,9 +142,11 @@ deployment step.
 
 ## What the diagnostic benchmark found
 
-The final matched campaign used Docker Desktop on an arm64 Mac, four fixed workers, 2,000 jobs per
-lane with 10 ms of simulated work, prefetch 4, ACK batch 1 and three runs per engine. All nine runs
-were correct, quiescent and isolated.
+The final matched campaign ran against Queen 1.x, whose broker stored messages in PostgreSQL; 2.0
+replaced that storage with a replicated log, so the Queen stack figures below describe 1.x. It used
+Docker Desktop on an arm64 Mac, four fixed workers, 2,000 jobs per lane with 10 ms of simulated
+work, prefetch 4, ACK batch 1 and three runs per engine. All nine runs were correct, quiescent and
+isolated.
 
 | Median | Horizon | Queen PHP | Queen Rust |
 | --- | ---: | ---: | ---: |
@@ -158,8 +158,8 @@ were correct, quiescent and isolated.
 
 Paired against Horizon, Queen Rust measured **1.046x completion throughput**, **0.888x p95** and
 **0.044x orchestrator PSS**. Its stack CPU result was inconclusive with only three pairs. The
-complete Queen Rust topology used **1.341x stack memory** because it included the Queen broker and
-PostgreSQL while the Horizon fixture used Redis.
+complete Queen Rust topology used **1.341x stack memory** because it included the Queen 1.x broker
+and its PostgreSQL while the Horizon fixture used Redis.
 
 <Aside type="caution">
 These figures are diagnostic, not a universal performance claim. The fast profile was measured
@@ -169,23 +169,23 @@ The full method, paired intervals and gates are in
 [Laravel supervisor benchmark](/benchmarks/laravel-supervisors).
 </Aside>
 
-The separate historical result near one million messages per second is a broker-native push test
-with Go loaders, 200 partitions and 600 consumers. It is not a Laravel job-throughput result and
-does not belong in this comparison.
+The separate historical result near one million messages per second is a Queen 1.x broker-native
+push test with Go loaders, 200 partitions and 600 consumers. It is not a Laravel job-throughput
+result and does not belong in this comparison.
 
 ## Reliability boundary
 
-The qualification exercised two queues, synchronized failed jobs and a worker killed during user
-code. Horizon, Queen PHP and Queen Rust all preserved the 24 expected idempotent effects and drained
+The qualification, also run against Queen 1.x, exercised two queues, synchronized failed jobs and a
+worker killed during user code. Horizon, Queen PHP and Queen Rust all preserved the 24 expected idempotent effects and drained
 their queue after redelivery. That verifies the tested at-least-once path.
 
 It does not verify exactly-once external effects. A process can perform an external side effect and
 die before its acknowledgement becomes durable in any of the three systems. Jobs still need an
 idempotency strategy.
 
-Queen's remaining pre-GA gates include a 24-hour Laravel soak, persistent broker/network/PostgreSQL
-and storage faults, broader scaling and partition matrices, native release verification and the
-same fast profile with renewal enabled.
+Queen's remaining pre-GA gates include a 24-hour Laravel soak, persistent broker, network and
+storage faults, broader scaling and partition matrices, native release verification and the same
+fast profile with renewal enabled.
 
 ## Choose Horizon when
 

@@ -70,7 +70,7 @@ class Timers:
     async def batch(self, operations: Iterable[Dict[str, Any]]) -> List[TimerResult]:
         """Apply timer ops in one transaction. Results are INDEX-ALIGNED (§6.4).
 
-        A cancel IS accepted in this array -- it is the same stored procedure --
+        A cancel IS accepted in this array -- it is the same broker operation --
         but a cancel sent here inherits this ROUTE's authorization class, so on
         a cluster that is over quota a mixed batch is refused whole (§9.6). Use
         :meth:`cancel`, which takes the route that is never blocked.

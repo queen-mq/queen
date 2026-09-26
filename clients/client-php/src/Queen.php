@@ -268,8 +268,8 @@ class Queen
         }
 
         // Dedupe: with v4 multi-partition pop, all messages in one batch share
-        // the same leaseId (one renew_lease_v2 call extends every claimed
-        // partition_consumers row).
+        // the same leaseId (one renew call extends the lease of every claimed
+        // partition).
         $leaseIds = array_values(array_unique($leaseIds));
 
         if (empty($leaseIds)) {

@@ -7,8 +7,8 @@
 // steps a crash duplicates work, and in the other order it loses work.
 //
 // A Queen transaction closes that window: the acknowledgement of the input and
-// the push of the output are one PostgreSQL transaction. Both land or neither
-// does.
+// the push of the output are one entry in the broker's replicated log. Both
+// land or neither does.
 //
 // Build it (see 01-hello-world.cpp for the two headers queen_client.hpp
 // expects but this repository does not vendor):

@@ -24,7 +24,6 @@ export QUEEN_TEST_STRICT=1
 cd /suite/clients/client-rust
 
 # One `cargo test` covers the lot: cargo runs the lib unit tests and each
-# integration binary in turn, never two at once, which is what keeps the
-# broker-global maintenance suite away from the others. New test files are
-# picked up by being in tests/ — there is nothing else to register.
+# integration binary in turn, never two at once. New test files are picked up
+# by being in tests/ — there is nothing else to register.
 exec cargo test --locked

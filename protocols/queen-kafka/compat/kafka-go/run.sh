@@ -2,9 +2,9 @@
 # queen-kafka compat: segmentio/kafka-go
 #
 # Runs the kafka-go suite against a stack that is ALREADY UP. Nothing here
-# starts or stops a broker, a facade or a Postgres — that is rig.sh's job, or
-# yours. Every address comes from the environment so this can be wired into
-# rig.sh without editing a line of Go.
+# starts or stops a broker or a facade — that is rig.sh's job, or yours. Every
+# address comes from the environment so this can be wired into rig.sh without
+# editing a line of Go.
 #
 #   QUEEN_KAFKA_BOOTSTRAP     plaintext facade      (default 127.0.0.1:19092)
 #   QUEEN_KAFKA_PARTITIONS    the facade's QUEEN_KAFKA_DEFAULT_PARTITIONS (default 8)

@@ -15,8 +15,6 @@
 //!   a failure is a torn tail or a committed entry this node cannot apply
 //!   (I11), the counters of I18, the distinct request ids of §5.4, and the
 //!   values the encoder refuses to write.
-//! - [`columns`] the catalogue against the SQL that specifies it: every column
-//!   of the one table an effect carries whole has a slot (§8, G-1).
 //! - [`store`] the store against a real LMDB environment (WP-1.2): CRUD and
 //!   range scans per keyspace, read isolation, the four pins of D9, the dedup
 //!   index of D10 and the derived indexes of §6.3.
@@ -36,7 +34,6 @@
 mod apply;
 mod apply_crash;
 mod batcher;
-mod columns;
 mod dedup_txns;
 mod delete_race;
 mod facade;

@@ -1,7 +1,7 @@
 //! W7 hardening (PLAN_SINGLE_BINARY.md): once the proxy router runs inside the
 //! broker, the broker's public listener is internet-facing. The edge controls
-//! live here as reusable axum layers and helpers, so the standalone proxy and
-//! the single binary wire the same code.
+//! live here as reusable axum layers and helpers, so every listener of the
+//! single binary wires the same code.
 //!
 //! * **Client IP + per-IP rate limit** — [`ClientIpResolver`] keys on the real
 //!   socket peer (`ConnectInfo`). `X-Forwarded-For` is honoured ONLY when the
@@ -1470,8 +1470,8 @@ fn strike<K: std::hash::Hash + Eq + Clone>(
 
 /// `{prefix}_TLS_CERT` / `{prefix}_TLS_KEY` (PEM paths). Both or neither:
 /// half a configuration is an error, not a silent plaintext listener.
-/// Prefixes in use: `QUEEN_PROXY` (standalone proxy), `QUEEN` (the broker's
-/// public listener), `QUEEN_RAFT` (the raft RPC listener).
+/// Prefixes in use: `QUEEN` (the broker's public listener), `QUEEN_RAFT` (the
+/// raft RPC listener).
 pub fn tls_paths_from_env(prefix: &str) -> Result<Option<(String, String)>, String> {
     let (ck, kk) = (format!("{prefix}_TLS_CERT"), format!("{prefix}_TLS_KEY"));
     match (env_opt(&ck), env_opt(&kk)) {
@@ -2756,7 +2756,7 @@ mod tests {
             "POST\n/api/v1/messages/p1/tx1/retry\n",
             "POST\n/streams/v1/cycle\n",
             "DELETE\n/api/v1/resources/queues/%2e%2e\n",
-            "GET\n/internal/../api/v1/system/maintenance\n",
+            "GET\n/internal/../api/v1/system/shared-state\n",
             "\n\n\n",
             "G\u{0}T\n\u{7f}\n&&==&",
         ] {

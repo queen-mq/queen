@@ -46,8 +46,8 @@ option table is in [Reference](/reference/sdk/python#constructor).
 <Render file="snippets/py-push" />
 
 The await returns the broker's list, one entry per item, each carrying a `status` of `queued`,
-`duplicate`, `buffered` or `failed`. Pass your own `transactionId` and the push becomes
-idempotent inside the dedup window.
+`duplicate` or `error`. Pass your own `transactionId` and the push becomes idempotent inside the
+dedup window.
 
 ## Consume
 
@@ -73,7 +73,7 @@ await client.ack(messages, True, {"group": "billing"})
 
 `ack()` takes one message or a list, and a status that is `True`/`False` or one of `completed`,
 `failed`, `retry`, `dlq`. `partitionId` is mandatory and every popped message carries it. To ack
-the input and push the output in one PostgreSQL commit, use
+the input and push the output in one atomic commit, use
 [`client.transaction()`](/use/model#transactions).
 
 ## What differs here

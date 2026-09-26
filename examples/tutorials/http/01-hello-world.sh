@@ -104,9 +104,9 @@ jq . "$TMP/body"
 # There is no envelope object around it. The mixed casing is the wire contract:
 # message_id and transaction_id are snake_case, queueName is camelCase.
 #
-# HTTP 201 is not proof the message was stored: "buffered" (the broker spooled
-# it to disk) and "failed" (it exists nowhere) also come back 201. The per-item
-# status is the only answer.
+# HTTP 201 is not proof the message was stored: "error" (the broker refused the
+# item and it exists nowhere) also comes back 201. The per-item status is the
+# only answer.
 push_status="$(jq -r '.[0].status' "$TMP/body")"
 echo "pushed $(jq -r '.[0].transaction_id' "$TMP/body") -> $push_status"
 check "$push_status" queued 'the broker stored the message'

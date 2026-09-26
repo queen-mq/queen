@@ -1,7 +1,7 @@
 # Queen MQ Rust Client
 
-Rust client for [Queen MQ](https://github.com/queen-mq/queen) — a message queue that keeps its
-data in PostgreSQL.
+Rust client for [Queen MQ](https://github.com/queen-mq/queen) — a message queue broker that keeps
+its data in its own replicated log.
 
 ```toml
 [dependencies]
@@ -53,12 +53,12 @@ types. A field that drifts on either side fails a test rather than reaching a cl
 ## What is here
 
 Core protocol: push (with client-side batching), pop, consume, ack, transactions, DLQ,
-consumer groups, leases, traces, maintenance, and the observability endpoints — plus the
-full streams DSL.
+consumer groups, leases, traces, and the observability endpoints — plus the full streams
+DSL.
 
 Key/value state (`queen.kv()`) and scheduled deliveries (`queen.timers()`), including their
 riders on `queen.transaction()`, which is the reason they exist: a marker written in the same
-PostgreSQL transaction as the ack it guards. There is nothing to turn on: both surfaces ship
+transaction as the ack it guards, one broker command, all or nothing. There is nothing to turn on: both surfaces ship
 with the broker, on every cell, like push and pop. An operator can still *pause* one during an
 incident through the runtime kill switch, and that is a 503 with `Retry-After` on the routes
 (403, terminal, on a transaction rider) — a live surface stopped on purpose, never a broker
@@ -218,7 +218,7 @@ let handle = Stream::from(queen.queue("clicks"))
 Tumbling, sliding, session and wall-clock (`cron`) windows; event time with watermarks and a
 late-event policy; `reduce` and the named aggregates; `key_by`; `gate` for rate limiting; and
 `to` / `foreach` terminals. Each cycle commits its state change, its output and its source ack
-in **one PostgreSQL transaction**, so a window cannot advance without its output being written.
+in **one broker command**, so a window cannot advance without its output being written.
 
 The chain's `config_hash` is computed byte-identically to the JS, Go and Python SDKs — the test
 suite pins it against vectors captured from the JS implementation — so the same query can be
@@ -239,8 +239,7 @@ worse:
 | `clearQueue`, `moveMessageToDLQ` | not offered | call routes that 404 |
 
 The `pop` one matters most: turning a 403 or an exhausted retry budget into "no messages" makes
-an outage look like an idle queue. An *empty* claim, and a claim refused because pop maintenance
-is on, both still return `Ok` with nothing in it.
+an outage look like an idle queue. An *empty* claim still returns `Ok` with nothing in it.
 
 The `traceId` one is not a choice so much as a fact. The broker's push path has nowhere to store
 a trace id — neither its request struct nor the frame it builds carries one — so a trace id sent
@@ -303,7 +302,6 @@ tested — plus a breadth pass of their own:
 | `tests/admin.rs` | transactions, DLQ, consumer groups, traces, failover |
 | `tests/streams.rs` | every window kind, event time, gates, sinks, restart recovery |
 | `tests/coverage.rs` | queue options, payload shapes, naming, ordering under concurrency |
-| `tests/maintenance.rs` | push and pop maintenance (broker-global, so its own binary) |
 | `tests/kv_timers_wire.rs` | the exact JSON body of every kv and timer operation, against a scripted server, no broker needed |
 | `tests/kv_timers.rs` | kv and timers live: the transaction gate, the fence, the counter ceiling, a timer becoming a message |
 

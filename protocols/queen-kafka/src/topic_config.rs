@@ -180,7 +180,7 @@ pub fn topic_configs_with(isr: u32) -> Vec<Reported> {
             Source::Default,
             Kind::Int,
             "Always 1. The facade advertises one logical broker and Metadata reports \
-             replicas=[0], isr=[0]; durability is Postgres's, not a replica count's.",
+             replicas=[0], isr=[0]; durability is the Queen broker's, not a replica count's.",
         )
     };
     vec![
@@ -335,8 +335,8 @@ pub fn alter_with(name: &str, value: Option<&str>, isr: u32) -> Result<Delta, St
             Some(v) => Err(format!(
                 "{MIN_INSYNC_REPLICAS}={v} cannot be honoured: this facade advertises ONE \
                  logical broker and every Metadata answer says replicas=[0], isr=[0], so the \
-                 only in-sync replica count there is is 1. Durability here is Postgres's, not \
-                 a replica count's. Accepting a higher number would report a durability \
+                 only in-sync replica count there is is 1. Durability here is the Queen \
+                 broker's, not a replica count's. Accepting a higher number would report a durability \
                  setting that is not in force"
             )),
         },

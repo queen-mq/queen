@@ -944,8 +944,8 @@ fn pending_transitions_rebuild_from_pending_equals_the_live_rings() {
 // Every one of these drives real entries through `apply` (which now promotes
 // the live rings to each entry's stamp) with `pending_transitions` on — the
 // default — and checks the one law: a partition is in its group's ring exactly
-// when the SQL would consider it claimable, and re-enters it on every event
-// that makes it claimable again.
+// when it is claimable, and re-enters it on every event that makes it
+// claimable again.
 // ---------------------------------------------------------------------------
 
 /// Per-group `(ready sorted, parked count, next deadline)` — the shape the
@@ -3804,7 +3804,7 @@ fn the_gauges_settle_when_groups_partitions_and_queues_are_deleted() {
     };
     assert_settled(&node, "before any delete");
 
-    // -- a consumer group (014) ------------------------------------------
+    // -- a consumer group ------------------------------------------
     at(
         &mut a,
         vec![
@@ -3840,7 +3840,7 @@ fn the_gauges_settle_when_groups_partitions_and_queues_are_deleted() {
     );
     assert_settled(&node, "after the group delete");
 
-    // -- a partition, while the queue lives (006 cleanup) -----------------
+    // -- a partition, while the queue lives -----------------
     at(&mut a, vec![Effect::PartitionDelete { pid: 2 }]);
     a.commit().expect("commit");
     assert_settled(&node, "after the partition delete");
@@ -5265,8 +5265,8 @@ fn a_delete_releases_each_frame_claim_exactly_once() {
 #[test]
 fn two_dead_letters_at_one_position_both_go_with_their_partition() {
     // `log_dlq`'s index on `(partition_id, consumer_group, "offset")` is NOT
-    // unique in postgres (005): a message replayed out of the DLQ that dies
-    // again is filed at the same position twice, and both rows exist. The
+    // unique: a message replayed out of the DLQ that dies again is filed at
+    // the same position twice, and both rows exist. The
     // `dlq_by_pos` index held ONE id per position, so the older row became
     // reachable by nothing — every delete path walks that index — and it
     // outlived its partition, its queue and its tenant, with `dlq_count`

@@ -1,6 +1,6 @@
 ---
 title: Ordered pipeline
-description: "88,503,408 messages through four stages with 0 duplicates, 0 gaps and 0 order violations."
+description: "Queen 1.x on PostgreSQL: 88,503,408 messages through four stages with 0 duplicates, 0 gaps and 0 order violations."
 type: reference
 sidebar:
   order: 5
@@ -8,6 +8,11 @@ sourceOfTruth:
   - benchmark-queen/2026-07-23-3test-report/raw/t3.out
   - benchmark-queen/2026-07-29-vm-campaign/goload/cm.go
 ---
+
+<Aside type="caution">
+This run measured **Queen 1.x**, whose storage was PostgreSQL. 2.0 replaced that storage with a
+replicated log, so these figures describe the 1.x engine and not 2.0.
+</Aside>
 
 **A four-stage pipeline over 1000 partitions, running 25,000 events per second for 600 seconds,
 delivered 88,503,408 messages that a per-stage verifier confirmed as 0 duplicates, 0 gaps and 0
@@ -109,10 +114,9 @@ The run sustains roughly 350,000 message-operations per second: about 50,000 pus
 and 150,000 acks. PostgreSQL used about 19 cores and the broker about 7, at about 14,000 commits
 per second, with the database near 8 GB.
 
-The result took two broker fixes that ship today: the mass-creation livelock, broken by ordered
-provisioning inserts and a non-blocking advisory lock
-([life of a pop](/internals/life-of-a-pop)), and index churn under heavy updates, bounded by
-threshold-based autovacuum ([storage model](/internals/storage-model)).
+The result took two 1.x broker fixes: the mass-creation livelock, broken by ordered provisioning
+inserts and a non-blocking advisory lock, and index churn under heavy updates, bounded by
+threshold-based autovacuum.
 
 ## What it does not establish
 

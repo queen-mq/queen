@@ -7,9 +7,8 @@
 #   - `clippy::disallowed_methods` is warn-by-default but inert until a method
 #     is listed here, so this file is what turns it on;
 #   - `[lints.clippy]` in Cargo.toml then allows it for every target of the
-#     package, so the 196 legitimate clock and environment reads of the
-#     postgres class — and every integration test under tests/ — stay exactly
-#     as they are;
+#     package, so the legitimate clock and environment reads of the HTTP edge
+#     — and every integration test under tests/ — stay exactly as they are;
 #   - `rsm/apply.rs`, `rsm/state/` and `rsm/store/` re-`deny` it at the top of
 #     the file, which is the scope I2 names. Nothing else in the crate changes
 #     behaviour because of this file.

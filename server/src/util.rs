@@ -1,36 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-// FNV-1a hasher for the hot-path HashMaps/HashSets keyed by short strings
-// (queue/partition/txn). std's default SipHash showed up at ~3% of broker CPU
-// under load; these maps hold request-scoped, non-adversarial keys, so a fast
-// non-DoS-resistant hash is appropriate.
-pub struct FnvHasher(u64);
-
-impl Default for FnvHasher {
-    fn default() -> Self {
-        FnvHasher(0xcbf29ce484222325)
-    }
-}
-
-impl std::hash::Hasher for FnvHasher {
-    fn write(&mut self, bytes: &[u8]) {
-        let mut h = self.0;
-        for b in bytes {
-            h ^= *b as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-        self.0 = h;
-    }
-    fn finish(&self) -> u64 {
-        self.0
-    }
-}
-
-pub type FnvBuild = std::hash::BuildHasherDefault<FnvHasher>;
-pub type FnvHashMap<K, V> = std::collections::HashMap<K, V, FnvBuild>;
-pub type FnvHashSet<K> = std::collections::HashSet<K, FnvBuild>;
-
 pub fn now_epoch_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -111,11 +81,9 @@ pub fn parse_iso_ms(s: &str) -> Option<i64> {
     Some(local_ms - offset_min * 60_000)
 }
 
-// Log-engine txn fingerprint (doc 18 §3): xxh3_128 of the txn id's utf8 bytes,
-// serialized big-endian. The broker is the ONLY place hashing happens — SQL
-// stores and compares the 16-byte bytea verbatim (queen.log_txns.hashes,
-// 16*msg_count frame-order stride). 128 bits retires the 64-bit collision
-// concern for ack-by-txn resolution and dedup probes.
+// Transaction-id fingerprint (doc 18 §3): xxh3_128 of the txn id's utf8 bytes,
+// serialized big-endian, stored and compared as 16 bytes. 128 bits retires the
+// 64-bit collision concern for ack-by-txn resolution and dedup probes.
 // Wired by fusion/ack in the log-engine slice; tests exercise it meanwhile.
 #[allow(dead_code)]
 pub fn txn_hash128(txn: &str) -> [u8; 16] {
@@ -125,6 +93,42 @@ pub fn txn_hash128(txn: &str) -> [u8; 16] {
 // UUIDv7 (time-ordered) as raw bytes — mirrors the C++/Go generators.
 static LAST_MS: AtomicU64 = AtomicU64::new(0);
 static SEQ: AtomicU64 = AtomicU64::new(0);
+
+pub fn json_escape_into(out: &mut String, s: &str) {
+    // Byte-scan fast path: every byte needing an escape ('"', '\\', <0x20) is
+    // ASCII, and multi-byte UTF-8 units are all >= 0x80, so splitting the string
+    // only at escape bytes always lands on char boundaries. Clean runs (the
+    // overwhelmingly common case — UUIDs, txn ids, ISO timestamps) are appended
+    // wholesale instead of char-by-char.
+    let b = s.as_bytes();
+    let mut start = 0;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'"' || c == b'\\' || c < 0x20 {
+            if start < i {
+                out.push_str(&s[start..i]);
+            }
+            match c {
+                b'"' => out.push_str("\\\""),
+                b'\\' => out.push_str("\\\\"),
+                b'\n' => out.push_str("\\n"),
+                b'\r' => out.push_str("\\r"),
+                b'\t' => out.push_str("\\t"),
+                _ => {
+                    out.push_str("\\u00");
+                    out.push(char::from(b"0123456789abcdef"[(c >> 4) as usize]));
+                    out.push(char::from(b"0123456789abcdef"[(c & 0x0f) as usize]));
+                }
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    if start < b.len() {
+        out.push_str(&s[start..]);
+    }
+}
 
 #[cfg(test)]
 thread_local! {
@@ -210,7 +214,7 @@ mod tests {
     use super::*;
 
     // Pinned vectors: these assert OUR serialization (xxh3_128, big-endian) never
-    // drifts across refactors/crate bumps — hashes are persisted in log_txns, so
+    // drifts across refactors/crate bumps — hashes are persisted, so
     // a silent change would orphan every stored fingerprint. Values are snapshots
     // of this implementation's output, not external reference vectors.
     #[test]

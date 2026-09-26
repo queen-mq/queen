@@ -194,10 +194,9 @@ func (a *Admin) DeleteMessage(ctx context.Context, partitionID, transactionID st
 }
 
 // RetryMessage replays a DEAD-LETTERED message: the broker MOVES the newest
-// queen.log_dlq snapshot at this address back into the log -- claim the row
-// under a lock, push the frame, delete the row, one transaction
-// (queen.log_dlq_move_v1). Only dead-lettered addresses can be replayed; a live
-// message 404s.
+// dead-letter record at this address back into the log -- push the frame and
+// delete the record in one broker command. Only dead-lettered addresses can be
+// replayed; a live message 404s.
 //
 // IDEMPOTENT BY ROW, which is what changed with the move primitive (broker
 // 1.6.0; the four defects this used to warn about were all in the two-statement
@@ -207,12 +206,12 @@ func (a *Admin) DeleteMessage(ctx context.Context, partitionID, transactionID st
 //     id>`, so a second call cannot mint a second copy. In practice it does not
 //     get that far: the row was deleted in the same transaction as the push, so
 //     the second call answers 404.
-//  2. The row is claimed with FOR UPDATE, so two concurrent callers serialise
-//     and the loser is told the row is gone -- never a second push.
+//  2. Two concurrent callers are serialised by the broker's log, and the
+//     loser's push carries the same transaction id -- never a second copy.
 //  3. There is no "replayed but still dead-lettered" state to report: the push
-//     and the delete commit together or not at all. A 500 carrying
-//     "dlqRowRemoved":false means the database refused and nothing happened; a
-//     500 whose "dlqRowRemoved" is null means the broker never learned the
+//     and the delete commit together or not at all. An error carrying
+//     "dlqRowRemoved":false means the broker refused and nothing happened; one
+//     whose "dlqRowRemoved" is null means the broker never learned the
 //     outcome, and the answer is to re-read the DLQ, not to resend blindly.
 //  4. Only the addressed consumer group's record is removed. An address can
 //     carry one row per group; this replays the most recent one and leaves the
@@ -222,9 +221,7 @@ func (a *Admin) DeleteMessage(ctx context.Context, partitionID, transactionID st
 // consumerGroup, dlqId, originalTransactionId, replayedAs{...}, dlqRowRemoved}.
 // "duplicate" means nothing was written AND nothing was removed: something in
 // the destination's dedup window already carries that transaction id, and the
-// broker will not destroy a record it did not replay. 503 means push
-// maintenance is on -- a move cannot be spooled, so it is refused and the row
-// stays.
+// broker will not destroy a record it did not replay.
 //
 // Still sent with WithoutFailoverRetry: it is a write, and a blind resend by
 // the transport would hide a verdict the caller has to read. The replayed copy
@@ -457,28 +454,6 @@ func (a *Admin) Metrics(ctx context.Context) (string, error) {
 	return "", nil
 }
 
-// GetMaintenanceMode returns the maintenance mode status.
-func (a *Admin) GetMaintenanceMode(ctx context.Context) (map[string]interface{}, error) {
-	return a.httpClient.Get(ctx, "/api/v1/system/maintenance", 0, "")
-}
-
-// SetMaintenanceMode sets the maintenance mode.
-func (a *Admin) SetMaintenanceMode(ctx context.Context, enabled bool) (map[string]interface{}, error) {
-	body := map[string]interface{}{"enabled": enabled}
-	return a.httpClient.Post(ctx, "/api/v1/system/maintenance", body)
-}
-
-// GetPopMaintenanceMode returns the pop maintenance mode status.
-func (a *Admin) GetPopMaintenanceMode(ctx context.Context) (map[string]interface{}, error) {
-	return a.httpClient.Get(ctx, "/api/v1/system/maintenance/pop", 0, "")
-}
-
-// SetPopMaintenanceMode sets the pop maintenance mode.
-func (a *Admin) SetPopMaintenanceMode(ctx context.Context, enabled bool) (map[string]interface{}, error) {
-	body := map[string]interface{}{"enabled": enabled}
-	return a.httpClient.Post(ctx, "/api/v1/system/maintenance/pop", body)
-}
-
 // GetSystemMetrics returns system metrics.
 func (a *Admin) GetSystemMetrics(ctx context.Context, from, to string) (map[string]interface{}, error) {
 	query := url.Values{}
@@ -515,19 +490,12 @@ func (a *Admin) GetWorkerMetrics(ctx context.Context, from, to string) (map[stri
 	return a.httpClient.Get(ctx, path, 0, "")
 }
 
-// GetPostgresStats returns PostgreSQL statistics.
-func (a *Admin) GetPostgresStats(ctx context.Context) (map[string]interface{}, error) {
-	return a.httpClient.Get(ctx, "/api/v1/analytics/postgres-stats", 0, "")
-}
-
 // SeekConsumerGroupPartition seeks a single partition of a consumer group
-// to its end. The server-side implementation is fixed: there is no
-// timestamp variant for partition-scoped seek - the SP signature is
-// queen.seek_partition_v1($cg, $queue, $partition). The server route is
+// to its end. The server route is
 // POST /api/v1/consumer-groups/:group/queues/:queue/partitions/:partition/seek.
 //
 // The opts argument is accepted for API symmetry with SeekConsumerGroup
-// but its fields are ignored by the server.
+// but is not sent.
 func (a *Admin) SeekConsumerGroupPartition(ctx context.Context, consumerGroup, queueName, partition string, opts SeekConsumerGroupOptions) (map[string]interface{}, error) {
 	_ = opts
 	path := fmt.Sprintf("/api/v1/consumer-groups/%s/queues/%s/partitions/%s/seek",

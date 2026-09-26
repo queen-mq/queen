@@ -11,7 +11,7 @@ index-aligned element, and the only one on which a DELETE can carry an
 ``expect`` at all. The three path routes are sugar for what people write by
 hand with curl. An SDK that used them would have two body shapes, two error
 shapes and two places to drift, in exchange for an ETag it cannot use -- the
-ETag saves bandwidth, never the round trip to the database (§8.5: nothing in
+ETag saves bandwidth, never the round trip to the broker (§8.5: nothing in
 front of this is cached, and nothing will be).
 
 THE RULE THAT DECIDES HOW TO USE THIS, WORTH READING ONCE (§5.2):
@@ -233,9 +233,9 @@ class KV:
     ) -> KvResult:
         """"Must not exist", with ``applied`` answering "did I win?".
 
-        Exactly one of N concurrent callers applies: Postgres takes the row
-        lock BEFORE evaluating the condition, so the second re-evaluates
-        against the new row.
+        Exactly one of N concurrent callers applies: the broker orders every
+        write in its log and evaluates the condition in that order, so the
+        second sees the row the first wrote.
 
         And the sentence that has to travel with this method: **putIfAbsent
         plus a TTL is not a distributed lock.** A lock that expires is not

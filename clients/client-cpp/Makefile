@@ -65,7 +65,7 @@ bin/test_client: test_client.cpp queen_client.hpp ../server/vendor/json.hpp ../s
 
 # Build proxy contract test suite (bearer auth, 429 backoff, terminal 403).
 # Self-contained: serves its own responses from an in-process httplib::Server,
-# so it needs neither a broker nor Postgres.
+# so it needs no broker.
 retry429: bin/test_retry429
 	@echo "Proxy contract test suite built successfully!"
 	@echo "Run with: ./bin/test_retry429"
@@ -80,9 +80,9 @@ run-retry429: bin/test_retry429
 
 # Build the KV / timers wire-contract suite (PLAN_KV_TIMERS.md §5, §4, §6.3,
 # §8.1/§8.3, §9.6). Like retry429 it serves its own responses in-process, so it
-# needs neither a broker nor Postgres -- it asserts the exact JSON body, method
-# and path the client puts on the wire, which is the only thing that catches a
-# wrong wire shape before production.
+# needs no broker -- it asserts the exact JSON body, method and path the client
+# puts on the wire, which is the only thing that catches a wrong wire shape
+# before production.
 kvtimers: bin/test_kv_timers
 	@echo "KV/timers wire test suite built successfully!"
 	@echo "Run with: ./bin/test_kv_timers"

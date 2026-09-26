@@ -12,8 +12,10 @@
 //! for every partition, with `[0]` as both replicas and ISR. That is
 //! PLAN_QUEEN_KAFKA.md's "one logical Kafka broker": the facade is the only
 //! address a client ever needs, whatever the Queen cluster behind it looks like.
-//! Replication is Postgres's business and is not modelled here — claiming
-//! replicas the facade does not arbitrate would be a lie a client could act on.
+//! Replication is the Queen broker's business and is not modelled here —
+//! claiming replicas the facade does not arbitrate would be a lie a client
+//! could act on. (A clustered facade INSIDE a raft broker of several voters is
+//! the exception: see [`crate::cluster::Placement::replicated`].)
 //!
 //! ...unless `QUEEN_KAFKA_NODE_ID` is set, in which case the answer is the
 //! whole live set from the node registry, the controller is the lowest live id,
@@ -1805,7 +1807,8 @@ mod clustered {
     }
 
     /// What does NOT change with a cluster: the replica list is the leader
-    /// alone (replication is Postgres's business) and the epoch is still -1.
+    /// alone (replication is the Queen broker's business) and the epoch is
+    /// still -1.
     #[tokio::test]
     async fn replicas_isr_and_epoch_are_unchanged() {
         let (f, _) = clustered(&[("orders", 2)], &THREE, 2);

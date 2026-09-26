@@ -10,8 +10,11 @@ pip install -e ".[dev]"
 
 ## Requirements
 
-- ✅ Queen server running on `http://localhost:6632`
-- ✅ PostgreSQL accessible
+- ✅ A fresh Queen server running on `http://localhost:6632` (the tests expect an empty broker):
+  ```bash
+  docker run -d --name queen -p 6632:6632 -e QUEEN_RAFT_DIR=/var/lib/queen/raft \
+    -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:latest
+  ```
 - ✅ Python 3.8+
 - ✅ Dependencies installed
 
@@ -54,6 +57,7 @@ pytest tests/test_push.py::test_push_message
 1. **Check server:** `curl http://localhost:6632/health`
 2. **Check logs:** `QUEEN_CLIENT_LOG=true pytest tests/ -vs`
 3. **Run one test:** `pytest tests/test_push.py::test_push_message -vvs`
+4. **Rerunning?** Most tests use fixed queue names and nothing cleans up after them, so start from a fresh broker: `docker rm -f queen && docker volume rm queen-data`, then start it again.
 
 ## Test Categories
 

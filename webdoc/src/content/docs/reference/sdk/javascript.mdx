@@ -99,7 +99,7 @@ separate from `retryAttempts`; the defaults, the `Retry-After` contract and the 
 
 ### `hostHeader`
 
-A `queen_proxy` deployment picks the tenant cluster from the first DNS label of the `Host`
+The proxy picks the tenant cluster from the first DNS label of the `Host`
 header. When the base URL points at a shared address (an IP, a cell endpoint, a local rig),
 `hostHeader` rewrites the request authority (and TLS SNI) while the socket still dials the
 configured address, the same contract as `curl --resolve`. Accepts a bare authority only
@@ -218,8 +218,8 @@ with `traceId: null`. Push inside a transaction when a trace id has to survive. 
 
 <Render file="snippets/js-push" />
 
-Deduplication is keyed on `transactionId` and enforced in SQL before an offset is allocated, so
-a duplicate writes nothing:
+Deduplication is keyed on `transactionId` and checked before an offset is allocated, so a
+duplicate writes nothing:
 
 <Render file="snippets/js-push-dedup" />
 
@@ -234,11 +234,15 @@ builder resolves without re-sending.
 | `onError(cb)` | `cb(failedItems, error)` |
 | `onDuplicate(cb)` | `cb(duplicateItems, error)` |
 
-Awaiting a non-buffered push resolves to the broker's per-item array. The four possible item
-statuses are described on the [push route page](/reference/http/push/). With no `onError` callback
-registered, at
-least one `failed` item makes the await throw; with one registered, it does not throw. Awaiting a
-buffered push resolves to `{ buffered: true, count }` once the buffer has accepted every item.
+Awaiting a non-buffered push resolves to the broker's per-item array. A 2.0 broker answers each
+item `queued`, `duplicate` or `error`; the statuses are described on the
+[push route page](/reference/http/push/). The client passes `queued` items to `onSuccess`,
+`duplicate` items to `onDuplicate` and `failed` items to `onError`. With no `onError` callback
+registered, at least one `failed` item makes the await throw; with one registered, it does not
+throw. The 2.0 broker never answers `failed`, and the client does not match `error`: an `error`
+item reaches no callback and does not make the await throw, so check each item's `status` in the
+resolved array. Awaiting a buffered push resolves to `{ buffered: true, count }` once the buffer
+has accepted every item.
 While the buffer sits at `maxSize` the await parks until the flusher drains below the bound, so
 under overload a buffered push is no longer instantaneous: the producer degrades to the flush
 rate instead of growing the heap. Accepted is not sent; the messages still leave with the flush.
@@ -382,11 +386,11 @@ disabling `handleSignals` without calling `close()` loses buffered messages on `
 The DLQ is read-only through this builder. Replay lives on the admin façade:
 `admin.retryMessage(partitionId, transactionId)`.
 
-Since 1.6.0 that route runs on a **move**: one transaction claims the newest
-dead-letter row at the address, pushes it back into the log and deletes the row,
-and the replayed message carries the deterministic transaction id
-`dlq:<dead-letter row id>`. Two consequences for a caller. A second call for the
-same address answers `404`, because the row is gone, so a retry after a lost
+Since 1.6.0 that route runs on a **move**: one transaction pushes a dead-letter
+row at the address back into the log and deletes the row (on a 2.0 broker, one
+entry in the replicated log), and the replayed message carries the deterministic
+transaction id `dlq:<dead-letter row id>`. Two consequences for a caller. A
+second call for the same address answers `404`, because the row is gone, so a retry after a lost
 response is safe rather than a second copy. And when the destination's dedup
 window already holds that transaction id the verdict is `result: "duplicate"`,
 which means nothing was written **and the dead-letter row was kept**
@@ -396,7 +400,8 @@ See [Messages and dead letters](/reference/http/messages-dlq).
 
 ## `TransactionBuilder`
 
-`queen.transaction()`. Pushes and acks bundled into one PostgreSQL transaction, all-or-nothing.
+`queen.transaction()`. Pushes and acks in one transaction: one entry in the replicated log,
+all-or-nothing.
 
 | Method | Notes |
 | --- | --- |
@@ -452,7 +457,6 @@ dropping `null` and `undefined`.
 | `getAnalytics(params = {})` | `GET /api/v1/status/analytics` |
 | `getSystemMetrics(params = {})` | `GET /api/v1/analytics/system-metrics` |
 | `getWorkerMetrics(params = {})` | `GET /api/v1/analytics/worker-metrics` |
-| `getPostgresStats()` | `GET /api/v1/analytics/postgres-stats` |
 
 ### Consumer groups
 
@@ -466,7 +470,9 @@ dropping `null` and `undefined`.
 | `refreshConsumerStats()` | `POST /api/v1/stats/refresh` |
 
 `seekConsumerGroup` posts `options` as the body verbatim: `{ toEnd: true }` or
-`{ timestamp: '<RFC3339>' }`.
+`{ timestamp: '<RFC3339>' }`. A 2.0 broker answers `refreshConsumerStats()` with a 200 and
+`"refreshed": false`: its counters are updated as log entries apply, so there is nothing to
+refresh.
 
 ### System
 
@@ -474,10 +480,6 @@ dropping `null` and `undefined`.
 | --- | --- |
 | `health()` | `GET /health` |
 | `metrics()` | `GET /metrics` |
-| `getMaintenanceMode()` | `GET /api/v1/system/maintenance` |
-| `setMaintenanceMode(enabled)` | `POST /api/v1/system/maintenance` |
-| `getPopMaintenanceMode()` | `GET /api/v1/system/maintenance/pop` |
-| `setPopMaintenanceMode(enabled)` | `POST /api/v1/system/maintenance/pop` |
 
 ## Streaming SDK
 

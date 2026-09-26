@@ -2,7 +2,7 @@
 
 The live acceptance suite for two or three `queen-kafka` facades that unmodified
 Kafka clients address as **one cluster**, each facade optionally in front of its
-own Queen broker of the same HA deployment.
+own Queen broker of the same raft cluster.
 
 Cluster mode is opt-in: `QUEEN_KAFKA_NODE_ID` in `1..=64` is the one and only
 switch, and with it unset the facade behaves exactly as it always has. This
@@ -28,18 +28,23 @@ protocols/queen-kafka/compat/cluster/rig-cluster.sh -run TestAcceptance -v
 protocols/queen-kafka/compat/cluster/rig-cluster.sh --keep      # leave the stack up
 ```
 
-It starts **one throwaway Postgres**, **two mesh-wired Queen brokers on that one
-Postgres** (the recipe in `test/compose/docker-compose.ha.yml`: distinct
-`QUEEN_SERVER_ID`, byte-identical `QUEEN_SYNC_SECRET`, each other as
-`QUEEN_MESH_PEERS`), **three clustered facades**, **one facade with the cluster
+It starts **one Queen cluster of three raft brokers** (the shape of
+`helm_v2/broker`: the same `QUEEN_RAFT_PEERS` on every node, a distinct
+`QUEEN_RAFT_NODE_ID`, a shared `QUEEN_RAFT_TOKEN`, each on its own throwaway
+data directory), **three clustered facades**, **one facade with the cluster
 config absent**, and **two independent single-node facades**.
 
-Facade 1 and 3 point at broker A, facade 2 at broker B. That is not decoration:
-it puts a cross-broker read on the critical path of every group assertion, which
-is what proves the design's premise that the data path is stateless over the
-shared Postgres — a fetch takes no lease and writes nothing
-(`032_log_fetch.sql:11-19`) and produce's offsets are allocated by the database
-under a row lock (`003_log_push.sql:131-213`).
+Facade 1 points at broker A, facade 2 at broker B and facade 3 at broker C.
+That is not decoration: whichever broker leads, two of the three facades reach
+it through a follower, which puts a cross-node round trip on the critical path
+of every group assertion. That is what proves the design's premise that the
+facades' data path is stateless over one Queen deployment: every broker answers
+for every partition, and a write is ordered by the raft leader, not by the
+facade or the broker it arrived at.
+
+The brokers' disk gate runs at `QUEEN_RAFT_DISK_HIGH_PCT=99.5` unless that
+variable is set: a throwaway rig on a developer disk is not what the gate (85 by
+default) protects.
 
 To run the suite against a stack that is **already up**, use `run.sh` and give it
 addresses:
@@ -69,24 +74,23 @@ PASS that proves nothing about the stack now running.
 An unset optional variable **skips** rather than silently passing, so a partial
 wiring can never be mistaken for a green run.
 
-## Ports and containers
+## Ports
 
 The rig owns **32400–32419** and binds nothing else. Every port is an
 environment variable; move them as a block.
 
 | | |
 | --- | --- |
-| 32400 | Postgres, container **`qkx-c2-pg`** (the only container this rig creates) |
-| 32401 / 32402 | Queen broker A / B (HTTP) |
-| 32403 / 32404 | broker A / B mesh |
+| 32401 / 32402 / 32403 | Queen broker A / B / C (HTTP) |
+| 32404 / 32405 / 32406 | broker A / B / C raft RPC, bound to 127.0.0.1 |
 | 32410 / 32411 / 32412 | clustered facades, node ids 1 / 2 / 3 |
 | 32413 | the facade with the cluster config **absent** |
 | 32414 / 32415 | the two **independent** single-node facades |
 
 **Teardown discipline.** Every host process's pid is written to
 `$LOGDIR/pids/<name>.pid` at spawn, and teardown kills only those pids. Nothing
-is ever resolved from a port. The container is removed by its own name and no
-other. The kill/stop/start scripts the node-death and rolling-restart scenarios
+is ever resolved from a port. The brokers' data directories are removed and
+the logs kept. The kill/stop/start scripts the node-death and rolling-restart scenarios
 drive obey the same rule: they resolve a **node id** to the pid recorded when
 that facade was spawned, and fail loudly if the pidfile is missing rather than
 guessing.
@@ -161,7 +165,7 @@ but nothing here has run four.
 
 ## Wiring it into `compat/rig.sh` — proposed, NOT applied
 
-`rig.sh` stands up **one** broker and **one** facade, and this suite needs two
+`rig.sh` stands up **one** broker and **one** facade, and this suite needs three
 brokers and six facades. Wiring it in therefore means calling this rig, not
 extending that one. The block below is what would go at the end of `rig.sh`,
 just before the panic scan; it is written down here rather than applied because
@@ -170,14 +174,13 @@ whoever owns that gate, not a side effect of this suite landing.
 
 ```sh
 # ------------------------------------------------------------------ cluster
-# The cluster-mode acceptance runs its own stack: two meshed brokers on one
-# Postgres and six facades, none of which this rig's single broker and single
-# facade can stand in for. It owns ports 32400-32419 and the container
-# qkx-c2-pg, disjoint from this rig's 55432/6699/19092 and
-# queen-kafka-compat-pg, so the two can run side by side.
+# The cluster-mode acceptance runs its own stack: a raft cluster of three
+# brokers and six facades, none of which this rig's single broker and single
+# facade can stand in for. It owns ports 32400-32419, disjoint from this rig's
+# 6699/19092, so the two can run side by side.
 #
-# Off by default: it costs about five minutes and needs Docker for a SECOND
-# Postgres. Turn it on with --cluster.
+# Off by default: it costs about five minutes and three more brokers. Turn it
+# on with --cluster.
 if [ "$CLUSTER" = 1 ]; then
   say "cluster-mode acceptance (its own stack, ports 32400-32419)"
   if ! "$SCRIPT_DIR/cluster/rig-cluster.sh"; then
@@ -203,8 +206,10 @@ the same shape the M5 SNI check already uses.
 
 ## A measured run
 
-Against the branch as this was written — three facades, two brokers, one
-Postgres, `TTL=3000`, `HEARTBEAT=1000`:
+Against the branch as this was written, on the rig as it was then — three
+facades, two brokers on one shared Postgres (the storage Queen had before raft),
+`TTL=3000`, `HEARTBEAT=1000`. The rig now runs a three-node raft cluster and has
+not been re-measured on it:
 
 ```
 --- PASS: TestAcceptanceOneGroupAcrossThreeFacades (3.07s)

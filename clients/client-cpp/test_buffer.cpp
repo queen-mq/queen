@@ -15,7 +15,7 @@
  *      dropped.
  *
  * Everything here runs against an in-process httplib::Server on localhost --
- * no broker, no Postgres:
+ * no broker:
  *
  *   make buffer && ./bin/test_buffer
  *

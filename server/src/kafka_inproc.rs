@@ -2,8 +2,7 @@
 //!
 //! In raft mode, `QUEEN_KAFKA_EMBEDDED=true` runs the `queen-kafka` library
 //! INSIDE this broker process — one binary, one process, no child to spawn or
-//! supervise (the Postgres boot keeps the child of `kafka_facade.rs`). The
-//! facade reads exactly the environment the child read (`QUEEN_KAFKA_*`,
+//! supervise. The facade reads exactly the environment the child read (`QUEEN_KAFKA_*`,
 //! `QUEEN_TOKEN`), through the same [`queen_kafka::boot::Config`], so every
 //! knob keeps its documented meaning.
 //!
@@ -830,7 +829,6 @@ mod tests {
             crate::util::uuidv7_bytes()[15]
         ));
         let _ = std::fs::remove_dir_all(&dir);
-        std::env::set_var("QUEEN_STORAGE", "raft");
         std::env::set_var("QUEEN_RAFT_DIR", dir.join("cfg").display().to_string());
         let cfg = crate::config::load();
         let facade = crate::rsm::facade::real::RaftFacade::open(&crate::rsm::facade::RsmBuildCtx {

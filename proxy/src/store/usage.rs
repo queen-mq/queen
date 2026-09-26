@@ -1,16 +1,6 @@
-//! usage_minutes / usage_days — the metering tables — on either backend
-//! (PLAN_SINGLE_BINARY.md W3, metering). Every statement `meter.rs` and the
-//! console's usage pages issue lives here.
-//!
-//! # Postgres (the standalone proxy)
-//!
-//! The SQL `meter.rs` carried, VERBATIM: the additive per-minute UPSERT, the
-//! stored functions `rollup_usage_days()` (004) and `prune_usage_minutes()`
-//! (005), the monthly-quota read over `cluster_month_msgs()` (004) and the
-//! outbox dedupe + `emit_outbox()` of the quota events. Nothing about the
-//! standalone proxy's behaviour changes.
-//!
-//! # The broker's KV (the single binary)
+//! usage_minutes / usage_days — the metering tables — in the broker's KV
+//! (PLAN_SINGLE_BINARY.md W3, metering). Every read and write `meter.rs` and
+//! the console's usage pages issue lives here.
 //!
 //! [`ns::USAGE_MIN`] `#<cluster>/<minute_us, 20 digits>/<op_class>/<node>` →
 //! [`UsageDoc`]:
@@ -24,18 +14,17 @@
 //! - **TTL instead of a prune.** A minute of UTC day `D` expires at the start
 //!   of day `D + keep_days + 2` ([`minute_ttl_secs`]): every minute of a day
 //!   expires at the same instant, so a day is never half gone, and the rollup
-//!   only (re)computes days at least a full day away from that instant. That
-//!   keeps minutes at least as long as `prune_usage_minutes(keep_days)` does.
+//!   only (re)computes days at least a full day away from that instant: a
+//!   minute lives at least `keep_days` days.
 //!
 //! [`ns::USAGE_DAY`] `#<cluster>/<YYYY-MM-DD>/<op_class>` → [`UsageDoc`],
 //! forever: RECOMPUTED from the minute rows (sum over nodes), never added to —
 //! so whichever node runs the rollup writes the same value, and a re-run writes
-//! nothing (unchanged rows are skipped). Like 004 it only writes days that
-//! HAVE minutes, so an imported day whose minutes Postgres pruned keeps its
-//! figure.
+//! nothing (unchanged rows are skipped). It only writes days that HAVE
+//! minutes, so a day whose minutes expired keeps its figure.
 //!
-//! The monthly count is 004's `cluster_month_msgs`: per day
-//! `GREATEST(rolled, live minutes)`. Live minutes are read from the day before
+//! The monthly count (`cluster_month_msgs`) is, per day, the larger of the
+//! rolled figure and the live minutes. Live minutes are read from the day before
 //! the last rolled day onward (the rollup re-rolls that window every pass);
 //! earlier days are final, and late spool replays for them trigger a targeted
 //! re-roll ([`kv_add_minutes`] reports the days it touched).
@@ -43,7 +32,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use deadpool_postgres::Pool;
 use serde::Serialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -53,8 +41,7 @@ use super::schema::{self, ns, ClusterDoc, OutboxDoc, PlanDoc, UsageDoc};
 use super::Store;
 use crate::meter::UsageRow;
 
-/// Default minute retention (`QUEEN_PROXY_USAGE_KEEP_DAYS`), the same 90 days
-/// `prune_usage_minutes` defaults to.
+/// Default minute retention (`QUEEN_PROXY_USAGE_KEEP_DAYS`): 90 days.
 pub const USAGE_KEEP_DAYS: u64 = 90;
 
 /// Ops per KV write batch: the broker's transaction-wire ceiling (64), well
@@ -317,143 +304,6 @@ fn minute_out(minute_us: i64, op: String, d: &UsageDoc) -> UsageMinute {
 }
 
 // ---------------------------------------------------------------------------
-// Postgres: the SQL meter.rs and console.rs issued, verbatim
-// ---------------------------------------------------------------------------
-
-const PG_UPSERT_SQL: &str = "
-    INSERT INTO queen_proxy.usage_minutes (cluster_id, minute, op_class, reqs, msgs, bytes_in, bytes_out)
-    VALUES ($1::text::uuid, to_timestamp($2::bigint), $3, $4, $5, $6, $7)
-    ON CONFLICT (cluster_id, minute, op_class) DO UPDATE SET
-        reqs = queen_proxy.usage_minutes.reqs + EXCLUDED.reqs,
-        msgs = queen_proxy.usage_minutes.msgs + EXCLUDED.msgs,
-        bytes_in = queen_proxy.usage_minutes.bytes_in + EXCLUDED.bytes_in,
-        bytes_out = queen_proxy.usage_minutes.bytes_out + EXCLUDED.bytes_out";
-
-/// Clusters with a monthly allowance, their calendar-month message count, and
-/// the month itself — one round trip. `cluster_month_msgs` is STABLE and reads
-/// usage_days plus the not-yet-rolled usage_minutes remainder (004_lifecycle),
-/// so the count includes traffic from the current minute-ish, not just what
-/// the rollup has folded in. `jsonb_exists` rather than the `?` operator so
-/// the statement carries no character that a future parameter binder might
-/// claim. Every value comes from one `now()`, so month and count cannot
-/// disagree across a boundary.
-const PG_QUOTA_SQL: &str = "
-    SELECT c.id::text, c.tenant_id::text, c.slug,
-           p.monthly_msgs_quota, (c.limit_overrides)::text,
-           queen_proxy.cluster_month_msgs(c.id, date_trunc('month', (now() AT TIME ZONE 'UTC'))::date),
-           to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM')
-      FROM queen_proxy.clusters c
-      JOIN queen_proxy.plans p ON p.id = c.plan_id
-     WHERE c.status <> 'deleting'
-       AND (p.monthly_msgs_quota IS NOT NULL OR jsonb_exists(c.limit_overrides, 'monthly_msgs_quota'))";
-
-/// Has this exact (kind, cluster, month) event already been written?
-const PG_OUTBOX_SEEN_SQL: &str = "
-    SELECT 1 FROM queen_proxy.outbox
-     WHERE kind = $1 AND payload->>'cluster_id' = $2 AND payload->>'month' = $3
-     LIMIT 1";
-
-/// jsonb as text + cast, the same binding workaround this crate uses for uuid
-/// (`$1::text::uuid`) — tokio-postgres carries neither the uuid nor the
-/// serde_json type feature here.
-const PG_EMIT_OUTBOX_SQL: &str = "SELECT queen_proxy.emit_outbox($1, $2::text::jsonb)";
-
-/// No argument: rollup_usage_days' own default (NULL) means "every closed day
-/// still in usage_minutes", which is what a periodic driver wants — late spool
-/// drains for older days get corrected on the next pass.
-const PG_ROLLUP_SQL: &str = "SELECT queen_proxy.rollup_usage_days()";
-
-const PG_PRUNE_SQL: &str = "SELECT queen_proxy.prune_usage_minutes($1)";
-
-/// The console's `/usage` window (console.rs USAGE_SQL's filter and order),
-/// with the minute as epoch microseconds; `minute` is whole seconds, so the
-/// epoch is exact on every Postgres version.
-const PG_RECENT_SQL: &str = "
-    SELECT extract(epoch from minute)::bigint * 1000000, op_class, reqs, msgs, bytes_in, bytes_out
-    FROM queen_proxy.usage_minutes
-    WHERE cluster_id = $1::text::uuid
-      AND minute >= now() - make_interval(hours => $2::int)
-    ORDER BY minute ASC, op_class ASC";
-
-const PG_MINUTES_SQL: &str = "
-    SELECT extract(epoch from minute)::bigint * 1000000, op_class, reqs, msgs, bytes_in, bytes_out
-    FROM queen_proxy.usage_minutes
-    WHERE cluster_id = $1::text::uuid
-      AND minute >= 'epoch'::timestamptz + $2::bigint * interval '1 microsecond'
-      AND ($3::bigint IS NULL OR minute < 'epoch'::timestamptz + $3::bigint * interval '1 microsecond')
-    ORDER BY minute ASC, op_class ASC";
-
-/// Per (day, op_class): the rolled row and the live minutes, the larger of the
-/// two per field — 004's `cluster_month_msgs` rule, for every figure.
-const PG_DAYS_SQL: &str = "
-    SELECT to_char(day, 'YYYY-MM-DD'), op_class,
-           GREATEST(COALESCE(d.reqs, 0), COALESCE(m.reqs, 0)),
-           GREATEST(COALESCE(d.msgs, 0), COALESCE(m.msgs, 0)),
-           GREATEST(COALESCE(d.bytes_in, 0), COALESCE(m.bytes_in, 0)),
-           GREATEST(COALESCE(d.bytes_out, 0), COALESCE(m.bytes_out, 0))
-      FROM (
-            SELECT ud.day, ud.op_class, ud.reqs, ud.msgs, ud.bytes_in, ud.bytes_out
-              FROM queen_proxy.usage_days ud
-             WHERE ud.cluster_id = $1::text::uuid
-               AND ud.day >= $2::text::date AND ud.day <= $3::text::date
-           ) d
-      FULL JOIN (
-            SELECT (um.minute AT TIME ZONE 'UTC')::date AS day, um.op_class,
-                   SUM(um.reqs)::bigint AS reqs, SUM(um.msgs)::bigint AS msgs,
-                   SUM(um.bytes_in)::bigint AS bytes_in, SUM(um.bytes_out)::bigint AS bytes_out
-              FROM queen_proxy.usage_minutes um
-             WHERE um.cluster_id = $1::text::uuid
-               AND um.minute >= ($2::text::date::timestamp AT TIME ZONE 'UTC')
-               AND um.minute <  (($3::text::date + 1)::timestamp AT TIME ZONE 'UTC')
-             GROUP BY 1, 2
-           ) m USING (day, op_class)
-     ORDER BY day ASC, op_class ASC";
-
-/// console.rs PLAN_USAGE_SQL's usage half.
-const PG_MONTH_MSGS_SQL: &str = "
-    SELECT queen_proxy.cluster_month_msgs($1::text::uuid, (now() AT TIME ZONE 'UTC')::date),
-           to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM')";
-
-/// UPSERT one flush batch inside a single transaction (prepared statement
-/// reused per row — simple and correct for v1 cardinality: distinct
-/// (cluster, op_class) pairs closed per flush interval, not per-message).
-/// cluster_id binds as text and casts in SQL (`$1::text::uuid`) — tokio-postgres
-/// isn't built with the `with-uuid-1` feature in this crate, and this repo's
-/// established workaround (see server/ Track B notes) is the text-cast, not a
-/// new Cargo feature. ADDITIVE: a row is usage to add, which is also what a
-/// spooled row is.
-pub async fn pg_add_minutes(pool: &Pool, rows: &[UsageRow]) -> Result<(), String> {
-    if rows.is_empty() {
-        return Ok(());
-    }
-    let mut client = pool.get().await.map_err(|e| format!("pool: {e}"))?;
-    let txn = client.transaction().await.map_err(|e| format!("begin: {e}"))?;
-    {
-        let stmt = txn.prepare(PG_UPSERT_SQL).await.map_err(|e| format!("prepare: {e}"))?;
-        for r in rows {
-            let cid = r.cluster_id.to_string();
-            let minute_secs = (r.minute as i64) * 60;
-            txn.execute(
-                &stmt,
-                &[
-                    &cid,
-                    &minute_secs,
-                    &r.op,
-                    &(r.reqs as i64),
-                    &(r.msgs as i64),
-                    &(r.bytes_in as i64),
-                    &(r.bytes_out as i64),
-                ],
-            )
-            .await
-            .map_err(|e| format!("upsert: {e}"))?;
-        }
-    }
-    txn.commit().await.map_err(|e| format!("commit: {e}"))?;
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // KV: this node's minute rows (the meter's flush and spool replay)
 // ---------------------------------------------------------------------------
 
@@ -512,8 +362,8 @@ pub async fn kv_write_totals(
 /// retention are dropped. Returns the (cluster, UTC day) pairs it wrote to, so
 /// the rollup can re-roll a day that is already behind its window.
 ///
-/// At-least-once, like the Postgres UPSERT it stands in for: a write whose ack
-/// is lost is added again when the spool is replayed again.
+/// At-least-once: a write whose ack is lost is added again when the spool is
+/// replayed again.
 pub async fn kv_add_minutes(
     kv: &dyn KvBackend,
     node: &str,
@@ -710,7 +560,8 @@ pub async fn kv_usage_by_day(kv: &dyn KvBackend, cluster: Uuid, from: i64, to: i
         .collect())
 }
 
-/// 004's `cluster_month_msgs` over the KV, for the month containing `now_us`.
+/// `cluster_month_msgs` over the KV, for the month containing `now_us`: per
+/// day, the larger of the rolled figure and the live minutes.
 pub async fn kv_month_msgs(kv: &dyn KvBackend, cluster: Uuid, now_us: i64) -> Result<MonthMsgs, String> {
     let (start, next, month) = month_of(day_of(now_us));
     let mut per_day: BTreeMap<i64, (i64, i64)> = BTreeMap::new();
@@ -798,7 +649,8 @@ async fn kv_rollup_cluster(
 // KV: the monthly-quota read and the outbox
 // ---------------------------------------------------------------------------
 
-/// The quota pass's rows over the KV (what [`PG_QUOTA_SQL`] selects).
+/// The quota pass's rows over the KV: clusters with a monthly allowance (plan
+/// or override), not being deleted, with their month-to-date messages.
 pub async fn kv_quota_rows(kv: &dyn KvBackend, now_us: i64) -> Result<Vec<QuotaRow>, String> {
     let plans: HashMap<Uuid, PlanDoc> = kv::scan::<PlanDoc>(kv, ns::PLANS, schema::K)
         .await
@@ -873,7 +725,7 @@ pub async fn kv_emit_outbox(kv: &dyn KvBackend, kind: &str, payload: &Value, now
 }
 
 // ---------------------------------------------------------------------------
-// The repository: one function per question, either backend
+// The repository: one function per question
 // ---------------------------------------------------------------------------
 
 /// A cluster with a monthly allowance, as the quota pass sees it.
@@ -891,34 +743,12 @@ pub struct QuotaRow {
     pub month: String,
 }
 
-/// Fold every closed day into usage_days. Returns the rows written. Postgres:
-/// `rollup_usage_days()` (every closed day still in usage_minutes). KV:
-/// [`kv_rollup`] with `extra` days to recompute.
+/// Fold every closed day into usage_days ([`kv_rollup`], with `extra` days
+/// to recompute). Returns the rows written.
 pub async fn rollup_days(store: &Store, keep_days: u64, extra: &[(Uuid, i64)]) -> Result<u64, String> {
     match store {
-        Store::Pg(pool) => {
-            let client = pool.get().await.map_err(|e| format!("pool: {e}"))?;
-            let row = client.query_one(PG_ROLLUP_SQL, &[]).await.map_err(|e| e.to_string())?;
-            let rows: i32 = row.get(0);
-            Ok(rows.max(0) as u64)
-        }
         Store::Kv(kv) => kv_rollup(kv.as_ref(), keep_days, extra, now_us()).await,
         Store::None => Ok(0),
-    }
-}
-
-/// Drop minute rows past retention whose day is rolled up. Postgres:
-/// `prune_usage_minutes(keep_days)` (which raises below 1). KV: nothing to do —
-/// the rows carry their TTL ([`minute_ttl_secs`]).
-pub async fn prune_minutes(store: &Store, keep_days: i32) -> Result<u64, String> {
-    match store {
-        Store::Pg(pool) => {
-            let client = pool.get().await.map_err(|e| format!("pool: {e}"))?;
-            let row = client.query_one(PG_PRUNE_SQL, &[&keep_days]).await.map_err(|e| e.to_string())?;
-            let pruned: i32 = row.get(0);
-            Ok(pruned.max(0) as u64)
-        }
-        Store::Kv(_) | Store::None => Ok(0),
     }
 }
 
@@ -926,29 +756,6 @@ pub async fn prune_minutes(store: &Store, keep_days: i32) -> Result<u64, String>
 /// with their month-to-date messages.
 pub async fn quota_rows(store: &Store) -> Result<Vec<QuotaRow>, String> {
     match store {
-        Store::Pg(pool) => {
-            let client = pool.get().await.map_err(|e| format!("pool: {e}"))?;
-            let rows = client.query(PG_QUOTA_SQL, &[]).await.map_err(|e| e.to_string())?;
-            let mut out = Vec::with_capacity(rows.len());
-            for row in &rows {
-                let id_str: String = row.get(0);
-                let Ok(cluster_id) = Uuid::parse_str(&id_str) else {
-                    tracing::warn!(target: "meter", id = %id_str, "monthly quota: unparseable cluster id, skipping");
-                    continue;
-                };
-                let overrides_json: String = row.get(4);
-                out.push(QuotaRow {
-                    cluster_id,
-                    tenant_id: row.get(1),
-                    slug: row.get(2),
-                    plan_quota: row.get(3),
-                    overrides: serde_json::from_str(&overrides_json).unwrap_or(Value::Null),
-                    msgs: row.get(5),
-                    month: row.get(6),
-                });
-            }
-            Ok(out)
-        }
         Store::Kv(kv) => kv_quota_rows(kv.as_ref(), now_us()).await,
         Store::None => Ok(Vec::new()),
     }
@@ -958,12 +765,6 @@ pub async fn quota_rows(store: &Store) -> Result<Vec<QuotaRow>, String> {
 /// restart mid-month (and, in the single binary, a second node).
 pub async fn quota_event_seen(store: &Store, kind: &str, cluster_id: &str, month: &str) -> Result<bool, String> {
     match store {
-        Store::Pg(pool) => {
-            let client = pool.get().await.map_err(|e| format!("pool: {e}"))?;
-            let seen =
-                client.query_opt(PG_OUTBOX_SEEN_SQL, &[&kind, &cluster_id, &month]).await.map_err(|e| e.to_string())?;
-            Ok(seen.is_some())
-        }
         Store::Kv(kv) => kv_outbox_seen(kv.as_ref(), kind, cluster_id, month).await,
         Store::None => Ok(false),
     }
@@ -972,44 +773,15 @@ pub async fn quota_event_seen(store: &Store, kind: &str, cluster_id: &str, month
 /// `emit_outbox(kind, payload)`: a control-plane-bound event.
 pub async fn emit_outbox(store: &Store, kind: &str, payload: &Value) -> Result<(), String> {
     match store {
-        Store::Pg(pool) => {
-            let client = pool.get().await.map_err(|e| format!("pool: {e}"))?;
-            let payload_text = payload.to_string();
-            client.execute(PG_EMIT_OUTBOX_SQL, &[&kind, &payload_text]).await.map_err(|e| e.to_string())?;
-            Ok(())
-        }
         Store::Kv(kv) => kv_emit_outbox(kv.as_ref(), kind, payload, now_us()).await.map(|_| ()),
         Store::None => Ok(()),
     }
-}
-
-fn pg_minute_rows(rows: &[tokio_postgres::Row]) -> Vec<UsageMinute> {
-    rows.iter()
-        .map(|r| {
-            let minute_us: i64 = r.get(0);
-            UsageMinute {
-                minute_us,
-                minute: iso_minute(minute_us),
-                op_class: r.get(1),
-                reqs: r.get(2),
-                msgs: r.get(3),
-                bytes_in: r.get(4),
-                bytes_out: r.get(5),
-            }
-        })
-        .collect()
 }
 
 /// The console's `/usage?hours=N`: a cluster's minutes from `now - hours`
 /// onward, per (minute, op_class) ascending, summed over nodes.
 pub async fn cluster_usage_recent(store: &Store, cluster: Uuid, hours: i64) -> Result<Vec<UsageMinute>, String> {
     match store {
-        Store::Pg(pool) => {
-            let client = pool.get().await.map_err(|e| format!("pool: {e}"))?;
-            let hours = hours.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-            let rows = client.query(PG_RECENT_SQL, &[&cluster.to_string(), &hours]).await.map_err(|e| e.to_string())?;
-            Ok(pg_minute_rows(&rows))
-        }
         Store::Kv(kv) => {
             let from = now_us().saturating_sub(hours.saturating_mul(3_600_000_000));
             kv_usage_by_minute(kv.as_ref(), cluster, from, None).await
@@ -1027,14 +799,6 @@ pub async fn cluster_usage_by_minute(
     to_us: Option<i64>,
 ) -> Result<Vec<UsageMinute>, String> {
     match store {
-        Store::Pg(pool) => {
-            let client = pool.get().await.map_err(|e| format!("pool: {e}"))?;
-            let rows = client
-                .query(PG_MINUTES_SQL, &[&cluster.to_string(), &from_us, &to_us])
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(pg_minute_rows(&rows))
-        }
         Store::Kv(kv) => kv_usage_by_minute(kv.as_ref(), cluster, from_us, to_us).await,
         Store::None => Ok(Vec::new()),
     }
@@ -1052,24 +816,6 @@ pub async fn cluster_usage_by_day(
     let from = parse_day(from_day).ok_or_else(|| format!("bad day {from_day:?} (YYYY-MM-DD)"))?;
     let to = parse_day(to_day).ok_or_else(|| format!("bad day {to_day:?} (YYYY-MM-DD)"))?;
     match store {
-        Store::Pg(pool) => {
-            let client = pool.get().await.map_err(|e| format!("pool: {e}"))?;
-            let rows = client
-                .query(PG_DAYS_SQL, &[&cluster.to_string(), &day_str(from), &day_str(to)])
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(rows
-                .iter()
-                .map(|r| UsageDay {
-                    day: r.get(0),
-                    op_class: r.get(1),
-                    reqs: r.get(2),
-                    msgs: r.get(3),
-                    bytes_in: r.get(4),
-                    bytes_out: r.get(5),
-                })
-                .collect())
-        }
         Store::Kv(kv) => kv_usage_by_day(kv.as_ref(), cluster, from, to).await,
         Store::None => Ok(Vec::new()),
     }
@@ -1079,19 +825,13 @@ pub async fn cluster_usage_by_day(
 /// UTC month (`cluster_month_msgs`), with the month.
 pub async fn cluster_month_msgs(store: &Store, cluster: Uuid) -> Result<MonthMsgs, String> {
     match store {
-        Store::Pg(pool) => {
-            let client = pool.get().await.map_err(|e| format!("pool: {e}"))?;
-            let row = client.query_one(PG_MONTH_MSGS_SQL, &[&cluster.to_string()]).await.map_err(|e| e.to_string())?;
-            Ok(MonthMsgs { msgs: row.get(0), month: row.get(1) })
-        }
         Store::Kv(kv) => kv_month_msgs(kv.as_ref(), cluster, now_us()).await,
         Store::None => Ok(MonthMsgs { month: month_of(day_of(now_us())).2, msgs: 0 }),
     }
 }
 
 /// Every usage row of a cluster (minutes and days), for the cascade of a
-/// cluster delete. Postgres cascades the foreign key itself (0). Returns the
-/// rows deleted.
+/// cluster delete. Returns the rows deleted (0 without a store).
 pub async fn delete_cluster_usage(store: &Store, cluster: Uuid) -> Result<u64, String> {
     let Some(kv) = store.kv() else { return Ok(0) };
     let mut n = 0u64;
@@ -1322,8 +1062,8 @@ mod tests {
         assert_eq!(kv_rollup(&kv, 90, &[(c1(), today - 30)], now).await.unwrap(), 1);
         assert_eq!(day_doc(&kv, c1(), today - 30, "push").await.unwrap().msgs, 7);
 
-        // A rolled day whose minutes are gone (pruned in Postgres before an
-        // import) keeps its figure: only days WITH minutes are written.
+        // A rolled day whose minutes are gone (expired) keeps its figure:
+        // only days WITH minutes are written.
         put_day(&kv, c1(), today - 2, "txn", 42).await;
         kv_rollup(&kv, 90, &[(c1(), today - 2)], now).await.unwrap();
         assert_eq!(day_doc(&kv, c1(), today - 2, "txn").await.unwrap().msgs, 42);
@@ -1445,7 +1185,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prune_is_the_ttl_and_delete_cascades() {
+    async fn delete_cascades_to_one_clusters_usage() {
         let kv = std::sync::Arc::new(MemKv::new());
         let now = noon_0924();
         put_min(&kv, c1(), now, "push", "n1", 1).await;
@@ -1453,7 +1193,6 @@ mod tests {
         let other = Uuid::new_v4();
         put_min(&kv, other, now, "push", "n1", 1).await;
         let store = Store::Kv(kv.clone());
-        assert_eq!(prune_minutes(&store, 90).await.unwrap(), 0);
         assert_eq!(delete_cluster_usage(&store, c1()).await.unwrap(), 2);
         assert_eq!(kv.keys(ns::USAGE_MIN).len(), 1, "the other cluster keeps its row");
         assert!(kv.keys(ns::USAGE_DAY).is_empty());

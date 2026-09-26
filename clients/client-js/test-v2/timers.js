@@ -1,8 +1,9 @@
 /**
  * Timer integration suite (PLAN_KV_TIMERS.md §4, §9.6, §20.2).
  *
- * Repeatable only because run.js purges `queen.log_timers` for the `test-%`
- * queues before the run: a pending timer left behind by a previous run fires
+ * Repeatable only because every run starts on a fresh broker (test/run.sh
+ * creates the lane's data volume empty and destroys it with `down -v`): on a
+ * broker that kept it, a pending timer left behind by a previous run fires
  * into the queue of the next one and shows up as a phantom message in an
  * unrelated test.
  *
@@ -21,7 +22,7 @@ export async function timerSchedulesAndFires(client) {
   // A per-run marker, so a message left in this queue by an earlier run can
   // never be mistaken for this run's delivery. It is the one place in these
   // suites where per-run uniqueness is right: the assertion is about THIS
-  // timer's identity, and the purge cannot be relied on to prove identity.
+  // timer's identity, and a clean start cannot be relied on to prove identity.
   const run = `fire-${Date.now()}`
   const res = await client.timer(queueName)
     .key('fire-1')
@@ -34,8 +35,8 @@ export async function timerSchedulesAndFires(client) {
   }
 
   // deliverAt is "not before", never "exactly at", and the visibility of a
-  // fired timer to a consumer is bounded by the hot-list reseed, not by the
-  // delay -- see popUntil, which measured it. The assertion is arrival.
+  // fired timer to a consumer is bounded by the broker's fire step, not by the
+  // delay -- see popUntil. The assertion is arrival.
   const mine = await popUntil(client, queueName, m => m.data && m.data.run === run)
 
   if (mine.length !== 1) {

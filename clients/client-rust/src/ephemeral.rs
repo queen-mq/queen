@@ -10,9 +10,10 @@
 //! Contents survive **nothing** (§1.2). Not a restart, not a crash, not a
 //! deploy, not the ownership move that a membership change causes. Treat a
 //! failover like a Redis restart. Declared *configuration* is durable — it lives
-//! in PostgreSQL and comes back after a restart, as configured and EMPTY. There
-//! is no replay, no history, no subscription mode and no DLQ, because none of
-//! those concepts has a referent when there is no history to have.
+//! in the broker's replicated log and comes back after a restart, as configured
+//! and EMPTY. There is no replay, no history, no subscription mode and no DLQ,
+//! because none of those concepts has a referent when there is no history to
+//! have.
 //!
 //! # Delivery is not "at most once"
 //!
@@ -195,9 +196,9 @@ impl Ephemeral {
 
     // ------------------------------------------------------------ declaration
 
-    /// Declare a queue and its bounds, persisting the OPTIONS in PostgreSQL
-    /// (§1.1): the configuration survives a restart, the contents never do, and
-    /// the queue comes back declared and empty.
+    /// Declare a queue and its bounds, persisting the OPTIONS in the broker's
+    /// replicated log (§1.1): the configuration survives a restart, the
+    /// contents never do, and the queue comes back declared and empty.
     ///
     /// Optional in every sense — a push or a pop that names an unknown queue
     /// creates it implicitly with the tenant defaults. Declare when you want
@@ -238,8 +239,7 @@ impl Ephemeral {
         Ok(out.map(|r| r.dropped).unwrap_or(0))
     }
 
-    /// Delete the queue: contents, cursors, and the declared configuration in
-    /// PostgreSQL.
+    /// Delete the queue: contents, cursors, and the declared configuration.
     ///
     /// READ `deleted`, NOT the `Ok`. A queue that was not there is a 200 with
     /// `deleted: false`, and the scar behind that is the durable queue delete:
@@ -399,9 +399,7 @@ impl Ephemeral {
 
     /// Every ephemeral queue this tenant currently has, declared and implicit.
     ///
-    /// Free to poll: the gauges are read out of the broker's own memory, with no
-    /// database behind them — unlike the durable meter, whose 1s poll is
-    /// load-bearing on PostgreSQL.
+    /// Free to poll: the gauges are read out of the broker's own memory.
     ///
     /// Untyped on purpose. The renderer for this route does not exist in the
     /// broker yet, so its key names are not decided, and putting a guess in

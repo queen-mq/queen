@@ -16,7 +16,7 @@
 
 ## What is Queen MQ?
 
-Queen MQ is a PostgreSQL-backed message queue system with a powerful feature set:
+Queen MQ is a partitioned message queue broker that keeps its state in its own replicated log, with a powerful feature set:
 
 - **FIFO Partitions** - Unlimited ordered partitions within queues
 - **Consumer Groups** - Kafka-style consumer groups for scalability
@@ -494,9 +494,9 @@ Both surfaces are **always there**. There is nothing to enable: kv and timers ar
 broker the way push and pop are, on every cell that runs it. There is no capability to probe and
 no 404 that means "this cell does not have the feature" — a 404 from these routes is a bug.
 
-What an operator can still do is **pause** them, with the runtime kill switch in
-`queen.system_state` (`kv_enabled`, `timers_schedule_enabled`, `timers_fire_enabled`) — the same
-class of lever as maintenance mode, pulled live during an incident and expected to be pulled back.
+What an operator can still do is **pause** them, with the broker's runtime kill switches
+(`kv_enabled`, `timers_schedule_enabled`, `timers_fire_enabled`) — a lever pulled live during an
+incident and expected to be pulled back.
 A paused surface answers `503` with `Retry-After` and `error: 'kv_disabled'` / `'timers_disabled'`,
 which this client retries like any other 5xx. Inside a transaction it is a `403` on the `kv` or
 `timers` rider instead, so a bundle holding messages does not spin forever on a paused cell.
@@ -581,7 +581,7 @@ the retry budget.
 
 Durations that can be sub-second are in **milliseconds** (`delayMs`), the ones that cannot are in
 **seconds** (`ttlSeconds`). Only relative delays exist, because there is one clock and it is the
-database's. A delay in the past is legal and fires on the first cycle.
+broker's. A delay in the past is legal and fires on the first cycle.
 
 `deliverAt` is **"not before"**, never "exactly at".
 

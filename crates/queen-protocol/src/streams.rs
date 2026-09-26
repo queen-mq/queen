@@ -9,7 +9,8 @@
 //! * `POST /streams/v1/state/get` — read the operator state rows for one
 //!   `(query_id, partition_id)`.
 //! * `POST /streams/v1/cycle` — commit state mutations, sink pushes and the
-//!   source ack **in one PostgreSQL transaction**. This is what makes the
+//!   source ack **in one transaction** (one entry in the broker's replicated
+//!   log: all of it applies or none). This is what makes the
 //!   engine exactly-once against its own state: either the window advanced,
 //!   the output was written and the input was acked, or none of it happened.
 
@@ -221,9 +222,9 @@ pub struct CycleAckResult {
     pub dlq: bool,
 }
 
-/// Response of a cycle. **Always HTTP 200** on a completed procedure call, so
-/// `success` is the only signal — a rolled-back cycle looks like a successful
-/// request.
+/// Response of a cycle. **HTTP 200** whether the cycle committed or rolled
+/// back, so `success` is the only signal — a rolled-back cycle looks like a
+/// successful request.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CycleResponse {
     #[serde(default = "default_true")]
@@ -238,17 +239,12 @@ pub struct CycleResponse {
     /// The *source* queue's name, resolved broker-side. Empty when the broker
     /// could not resolve it.
     ///
-    /// The SP emits this key as SQL NULL whenever the partition lookup found
-    /// nothing (`server/sql/procedures/007_log_streams.sql:171` initializes
-    /// `v_source_queue_name` to NULL and only :193 ever sets it), and
-    /// `jsonb_build_object` keeps nulls — so both the success shape at :447-455
-    /// and, far more often, the EXCEPTION shape at :457-467 can carry
-    /// `"queueName": null`. `#[serde(default)]` alone does not cover that: it
-    /// fills an *absent* key, not a present null, so a rolled-back cycle failed
-    /// to deserialize at all and the runner reported a decode error instead of
-    /// the `error` string sitting right next to it. The broker itself expects
-    /// the null (`server/src/handlers/streams.rs:446`, "bumped even if
-    /// queueName came back NULL").
+    /// A 1.x broker could send `"queueName": null`, most often on a rolled-back
+    /// cycle. `#[serde(default)]` alone does not cover that: it fills an
+    /// *absent* key, not a present null, so such a response failed to
+    /// deserialize at all and the runner reported a decode error instead of
+    /// the `error` string sitting right next to it. `null_as_empty` reads the
+    /// null as empty.
     #[serde(rename = "queueName", default, deserialize_with = "null_as_empty")]
     pub queue_name: String,
 

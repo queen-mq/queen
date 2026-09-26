@@ -1,5 +1,5 @@
-// Package queen is the Go client for Queen MQ, a partitioned message queue that
-// runs on the PostgreSQL you already operate. It covers the whole HTTP API:
+// Package queen is the Go client for Queen MQ, a partitioned message queue
+// broker that keeps its state in its own replicated log. It covers the whole HTTP API:
 // pushing messages, consuming them one ordered lane at a time with consumer
 // groups, acknowledgements and lease renewal, multi-queue transactions, the
 // dead letter queue, and the administrative endpoints.
@@ -278,8 +278,8 @@ func (q *Queen) Renew(ctx context.Context, messages interface{}) ([]RenewRespons
 	}
 
 	// Dedupe: with v4 multi-partition pop, all messages in one batch share
-	// the same leaseId (one renew_lease_v2 call extends every claimed
-	// partition_consumers row). Without this dedupe, callers passing the
+	// the same leaseId (one renew call extends the lease of every claimed
+	// partition). Without this dedupe, callers passing the
 	// full message slice would issue N redundant identical HTTP calls.
 	{
 		seen := make(map[string]struct{}, len(leaseIDs))

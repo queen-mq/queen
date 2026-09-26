@@ -7,10 +7,11 @@ sidebar:
   label: lease extend
 sourceOfTruth:
   - server/src/handlers/data.rs
-  - server/sql/procedures/005_log_ack.sql
+  - server/src/handlers/raft.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/planner/ack.rs
 verifiedBy:
   - clients/client-js/test-v2/consume.js
-# sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
 ---
 
 A pop hands out a lease with a fixed lifetime. When the lease expires without an ack, the batch
@@ -53,9 +54,9 @@ curl -sS -X POST http://localhost:6632/api/v1/lease/0198f2c1-9a7b-7d20-8e31-4c5d
   "leaseId": "0198f2c1-9a7b-7d20-8e31-4c5d6e7f8a90",
   "success": true,
   "renewed": 1,
-  "newExpiresAt": "2026-07-30T11:06:44.512873Z",
-  "expiresAt": "2026-07-30T11:06:44.512873Z",
-  "lease_expires_at": "2026-07-30T11:06:44.512873Z"
+  "newExpiresAt": "2026-07-30T11:06:44.512Z",
+  "expiresAt": "2026-07-30T11:06:44.512Z",
+  "lease_expires_at": "2026-07-30T11:06:44.512Z"
 }
 ```
 
@@ -68,12 +69,12 @@ curl -sS -X POST http://localhost:6632/api/v1/lease/0198f2c1-9a7b-7d20-8e31-4c5d
 | `expiresAt` | string or `null` | the same value |
 | `lease_expires_at` | string or `null` | the same value again |
 
-The three expiry keys carry one identical value. They exist because different clients read
-different key names; use whichever you like, and do not read a difference into them. The
-timestamp reports the earliest deadline across the renewed leases, which is exactly what you need
-to schedule the next renewal.
+The three expiry keys carry one identical value, in UTC at millisecond precision. They exist
+because different clients read different key names; use whichever you like, and do not read a
+difference into them. The timestamp reports the earliest deadline across the renewed leases,
+which is exactly what you need to schedule the next renewal.
 
-Only **live** leases are renewed: rows whose expiry is in the future and whose holder is this
+Only **live** leases are renewed: leases whose expiry is in the future and whose holder is this
 lease id. An expired lease is not resurrected.
 
 ### Status codes
@@ -82,7 +83,8 @@ lease id. An expired lease is not resurrected.
 | --- | --- |
 | `200` | the renewal ran, whether or not it renewed anything |
 | `403` | authentication is on and the token has no `read-write` role |
-| `500` | no database connection was available (`{"error":"pool"}`), or the renewal query failed (`{"error":"renew failed: …"}`) |
+| `503` | code `no_leader`, `retry` or `timeout`, with `Retry-After: 1`: the renewal did not reach the leader, or its answer did not come back in time |
+| `500` | code `internal`: a broker fault |
 
 <Aside type="caution">
 HTTP 200 does **not** mean the lease was extended. An unknown, expired or foreign lease id

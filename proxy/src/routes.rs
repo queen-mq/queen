@@ -94,25 +94,8 @@ fn is_operator_route(p: &str) -> bool {
     matches!(
         p,
         "/api/v1/status"
-            | "/api/v1/status/buffers"
             | "/api/v1/analytics/system-metrics"
             | "/api/v1/analytics/worker-metrics"
-            | "/api/v1/analytics/postgres-stats"
-            // The two maintenance kill switches. GET reads the flag, POST flips
-            // it; both halves of both switches are the same operator page.
-            //
-            // `/maintenance/pop` was blocked here while `/maintenance` was not,
-            // which left the console able to SEE pop maintenance — the push
-            // endpoint reports `popMaintenanceMode` too, so the banner lit —
-            // and unable to turn it off. Same blast radius as the push switch
-            // (cell-wide, every tenant), same gate in front of it: a live
-            // operator principal AND `QUEEN_PROXY_OPERATOR_ENABLED` on the cell.
-            // Splitting them protected nothing and stranded an operator inside
-            // a state they could watch but not leave.
-            //
-            // `/system/shared-state` is still NOT here and stays blocked.
-            | "/api/v1/system/maintenance"
-            | "/api/v1/system/maintenance/pop"
             | "/metrics/prometheus"
     )
 }
@@ -123,8 +106,8 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
     let m = method;
     let p = path;
 
-    // --- operator-eligible, checked FIRST: the prefix blocks below would
-    //     otherwise swallow /api/v1/system/maintenance and /metrics/prometheus.
+    // --- operator-eligible, checked FIRST: the Read prefixes below would
+    //     otherwise hand /api/v1/status and the host analytics to every tenant.
     //     Reaching one of these still requires a live operator principal (see
     //     RouteClass::Operator); classification alone opens nothing.
     if is_operator_route(p) {
@@ -147,8 +130,8 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
     if p == "/api/v1/pop" || p == "/api/v1/pop/" {
         return RouteClass::Blocked;
     }
-    // System aggregates are not tenant-scopable by nature (host CPU, PG
-    // internals, worker lifetime counters, cell maintenance) — they are the
+    // System aggregates are not tenant-scopable by nature (host CPU, worker
+    // lifetime counters) — they are the
     // `Operator` set above, reachable by nobody else. Everything queue-shaped
     // (namespaces/tasks/overview, queue-lag/ops/parked, retention,
     // status/analytics) IS tenant-scoped broker-side since Track B2 and falls
@@ -453,8 +436,8 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
     // kv/timers blocks above state.
     //
     // `push` is the ONLY `Grow` half, and it is deliberate over-blocking:
-    // `Grow` also inherits the retained-storage push block, which bounds PG
-    // storage rather than the broker RAM this family spends (§5.1). Safe
+    // `Grow` also inherits the retained-storage push block, which bounds
+    // retained storage rather than the broker RAM this family spends (§5.1). Safe
     // direction, and the refinement (a `GrowVolatile` that sees the message
     // quota but not the storage one) is a later call, not a silent default.
     // Everything else is `Open`: `reset`/`delete` are how a tenant at its cap
@@ -1058,47 +1041,21 @@ mod tests {
 
     /// The operator subset is a CLOSED list. Anything not on it that used to
     /// be blocked must still be blocked — the whole point of the per-cell flag
-    /// is that turning it on widens the surface by exactly these eight paths.
+    /// is that turning it on widens the surface by exactly these four paths.
     #[test]
-    fn operator_subset_is_exactly_the_agreed_eight() {
+    fn operator_subset_is_exactly_the_agreed_four() {
         for p in [
             "/api/v1/status",
-            "/api/v1/status/buffers",
             "/api/v1/analytics/system-metrics",
             "/api/v1/analytics/worker-metrics",
-            "/api/v1/analytics/postgres-stats",
-            "/api/v1/system/maintenance",
-            "/api/v1/system/maintenance/pop",
             "/metrics/prometheus",
         ] {
             assert_eq!(classify(&Method::GET, p), RouteClass::Operator, "{p}");
         }
-        // Both switches' write halves belong to the same operator page.
-        for p in ["/api/v1/system/maintenance", "/api/v1/system/maintenance/pop"] {
-            assert_eq!(classify(&Method::POST, p), RouteClass::Operator, "POST {p}");
-        }
-    }
-
-    /// The pop switch is reachable, but only on the same terms as the push one:
-    /// an operator on a cell with the flag on. Nothing here says a TENANT may
-    /// touch it — that is `auth::authorize`'s job, and `RouteClass::Operator`
-    /// is what makes it ask.
-    #[test]
-    fn pop_maintenance_is_operator_not_open() {
+        // The rest of `/api/v1/system/*` stays blocked, for every method.
         for m in [Method::GET, Method::POST] {
-            assert_eq!(
-                classify(&m, "/api/v1/system/maintenance/pop"),
-                RouteClass::Operator,
-                "{m} pop maintenance"
-            );
-            assert_ne!(classify(&m, "/api/v1/system/maintenance/pop"), RouteClass::Read);
-            assert_ne!(classify(&m, "/api/v1/system/maintenance/pop"), RouteClass::QueueAdmin);
+            assert_eq!(classify(&m, "/api/v1/system/shared-state"), RouteClass::Blocked, "{m}");
         }
-        // Its neighbour did not come along for the ride.
-        assert_eq!(
-            classify(&Method::GET, "/api/v1/system/shared-state"),
-            RouteClass::Blocked
-        );
     }
 
     #[test]

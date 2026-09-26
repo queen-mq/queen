@@ -1,6 +1,6 @@
 # Queen MQ Go Client
 
-A high-performance Go client for [Queen MQ](https://github.com/queen-mq/queen) - a message queue backed by PostgreSQL.
+A high-performance Go client for [Queen MQ](https://github.com/queen-mq/queen) - a partitioned message queue broker that keeps its state in its own replicated log.
 
 ## Installation
 
@@ -448,7 +448,7 @@ if result.Success {
 
 ## Key/Value
 
-Transactional state on the same Postgres, and on the same commit as your
+Transactional state in the same broker, and on the same commit as your
 messages. Every write states its lifetime: exactly one of a TTL and `Forever`,
 never neither.
 
@@ -538,8 +538,8 @@ timers are part of the engine, the way push and pop are, and every broker that
 answers has them.
 
 What an operator can still do, live and during an incident, is **pause** one of
-them (`kv_enabled`, `timers_schedule_enabled`, `timers_fire_enabled` in
-`queen.system_state`). That is a **503** with `Retry-After` and the code
+them (`kv_enabled`, `timers_schedule_enabled`, `timers_fire_enabled`, the
+broker's runtime switches). That is a **503** with `Retry-After` and the code
 `kv_disabled` / `timers_disabled` on `/api/v1/kv` and `/api/v1/timers` — back off
 and come back — and a **403** on a `kv`/`timers` rider inside
 `POST /api/v1/transaction`, permanent on purpose, because a bundle carries
@@ -649,13 +649,6 @@ Run the test suite (requires a running Queen server):
 ```bash
 # Set server URL
 export QUEEN_SERVER_URL=http://localhost:6632
-
-# Set database connection for cleanup
-export PG_HOST=localhost
-export PG_PORT=5432
-export PG_DB=queen
-export PG_USER=postgres
-export PG_PASSWORD=postgres
 
 # Run tests
 cd clients/client-go

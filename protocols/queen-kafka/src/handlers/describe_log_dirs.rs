@@ -11,9 +11,9 @@
 //! for it (`retainedBytes` of `GET /api/v1/resources/queues/{queue}`). A
 //! partition nothing has been written to yet holds 0 bytes, which is true.
 //!
-//! Over HTTP the facade knows nothing of the broker's storage — a Postgres
-//! broker has segments, not log directories — and answers with no directory
-//! at all: a broker with no log dirs, rather than an invented path.
+//! Over HTTP the facade knows nothing of the broker's storage — not even which
+//! node's disk holds what — and answers with no directory at all: a broker
+//! with no log dirs, rather than an invented path.
 //!
 //! `offset_lag` is 0 and `is_future_key` false: there is no replica movement
 //! between directories to report.

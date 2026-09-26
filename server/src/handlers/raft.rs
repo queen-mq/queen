@@ -12,16 +12,14 @@
 //!    threads validated producer identity into the facade; the facade owns
 //!    frame packing, encryption, dedup repacking, and long-poll parking.
 //!
-//! 2. **Raft-mode `/health`, `/metrics/prometheus`, `/stats/refresh`**: the
-//!    Postgres variants of these touch `pool.get()`, which must never happen in
-//!    raft mode (there is no reachable database). The raft variants read
+//! 2. **`/health`, `/metrics/prometheus`, `/stats/refresh`**: they read
 //!    node-local state only. `/health` keeps `status`/`version`/`engine` and
 //!    adds the `raft` block (§14.1); `/stats/refresh` is the no-op 200 §9.6
 //!    requires (every SDK's Admin API calls it); `/metrics/prometheus` drops the
 //!    DB-backed blob and keeps the in-process families.
 //!
-//! 3. **The composition roots** `build_raft_state` (the raft `AppState`, no
-//!    Postgres connect and no schema apply) and `build_raft_router` (the router:
+//! 3. **The composition roots** `build_raft_state` (the `AppState`) and
+//!    `build_raft_router` (the router:
 //!    hot routes to the typed handlers and the rest of `/api` and `/streams` to
 //!    the generic Phase-2 facade adapter). `build_raft_state` is shared
 //!    by `main.rs` (the binary), `embedded/boot.rs` and the seam test, so the
@@ -33,7 +31,7 @@ use axum::http::{header, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 
 use super::{json, AppState};
-use crate::config::{Config, StorageMode};
+use crate::config::Config;
 use crate::rsm::facade::{
     self, AckReq, Deadline, DepthReq, DlqHeadReq, PopDiscoverReq, PopOptions, PopPinnedReq, PopReq,
     PushReq, RenewReq, ReqCtx, RsmError,
@@ -65,10 +63,10 @@ pub(crate) fn err_response(e: RsmError) -> Response {
     // A `Rejected` carries the planner's own `code`; every other variant uses
     // its stable static one.
     let mut body = String::from("{\"error\":\"");
-    crate::fusion::json_escape_into(&mut body, &e.to_string());
+    crate::util::json_escape_into(&mut body, &e.to_string());
     body.push_str("\",\"code\":\"");
     match &e {
-        RsmError::Rejected { code, .. } => crate::fusion::json_escape_into(&mut body, code),
+        RsmError::Rejected { code, .. } => crate::util::json_escape_into(&mut body, code),
         _ => body.push_str(e.code()),
     }
     body.push('"');
@@ -77,7 +75,7 @@ pub(crate) fn err_response(e: RsmError) -> Response {
     } = &e
     {
         body.push_str(",\"leader\":\"");
-        crate::fusion::json_escape_into(&mut body, h);
+        crate::util::json_escape_into(&mut body, h);
         body.push('"');
     }
     body.push('}');
@@ -146,11 +144,11 @@ pub(crate) async fn dispatch_push(
     resp
 }
 
-/// A pop's answer: an empty one is a bodiless 204, exactly as on the Postgres
-/// engine (`pop_status` in data.rs), unless it has something to say about
+/// A pop's answer: an empty one is a bodiless 204, unless it has something to
+/// say about
 /// conflation (the group's effective policy conflates, or the request conflicted
 /// with it) — an SDK that asked for conflation reads a 204 as a broker that
-/// cannot conflate. A conflict is counted and logged as on the Postgres engine.
+/// cannot conflate. A conflict is counted and logged.
 fn pop_answer(
     st: &AppState,
     tenant: &str,
@@ -299,10 +297,16 @@ pub(crate) async fn dispatch_pop_discover(
     }
     let ctx = ReqCtx::new(tenant, deadline_for(timeout_ms));
     // Discovery spans queues: the conflict is attributed to the namespace/task
-    // pair, with no per-queue counter (as on the Postgres engine).
+    // pair, with no per-queue counter.
     let requested = options.conflate_requested;
     let scope = requested.map(|_| {
-        let star = |s: &str| if s.is_empty() { "*".to_string() } else { s.to_string() };
+        let star = |s: &str| {
+            if s.is_empty() {
+                "*".to_string()
+            } else {
+                s.to_string()
+            }
+        };
         (
             format!("{}/{}", star(&namespace), star(&task)),
             group.clone().unwrap_or_default(),
@@ -363,7 +367,10 @@ pub(crate) async fn dispatch_transaction(
         .with_producer_sub(producer_sub);
     let req = crate::rsm::facade::TxnReq { raw: body.to_vec() };
     match st.rsm.transaction(ctx, req).await {
-        Ok(out) => json(StatusCode::OK, out.body),
+        Ok(out) => json(
+            StatusCode::from_u16(out.status).unwrap_or(StatusCode::OK),
+            out.body,
+        ),
         Err(e) => err_response(e),
     }
 }
@@ -441,7 +448,7 @@ pub(crate) async fn dispatch_depth(
 /// `GET /health` in raft mode (§14.1): keeps `status`/`version`/`engine`, adds
 /// the `raft` block, and answers `200 healthy` while a leader is known and the
 /// apply lag is under the ready threshold, else `503 settling`. Reads
-/// node-local state only — never `pool.get()`.
+/// node-local state only.
 pub(crate) async fn handle_health(
     axum::extract::State(st): axum::extract::State<Arc<AppState>>,
 ) -> Response {
@@ -472,21 +479,35 @@ pub(crate) async fn handle_stats_refresh(
     )
 }
 
-/// `GET /metrics/prometheus` in raft mode: the in-process families plus the
-/// admission gauges, without the DB-backed cluster blob the Postgres handler
-/// fetches with `pool.get()`.
+/// `GET /metrics/prometheus`: the in-process families plus the state machine's.
 pub(crate) async fn handle_prometheus(
     axum::extract::State(st): axum::extract::State<Arc<AppState>>,
 ) -> Response {
     let mut body = st.metrics.prometheus();
-    let adm = st.admission.snapshot();
-    body.push_str("# HELP queen_admission_budget Write-transaction admission budget\n# TYPE queen_admission_budget gauge\n");
-    body.push_str(&format!("queen_admission_budget {}\n", adm.budget));
     // PERF-1 (O18): the node-local rsm timing histograms and counters. Empty
     // (all-zero) until the pipeline has done work, and skipped entirely when
     // QUEEN_RAFT_METRICS is off.
     crate::rsm::timing::render_prometheus(&mut body);
     body.push_str(&st.rsm.prometheus());
+    let conflated = crate::rsm::dashboard::collector::last_conflated();
+    if !conflated.is_empty() {
+        body.push_str(
+            "# HELP queen_queue_conflated_per_minute Messages conflated away per queue in the last metrics bucket (METRICS_FLUSH_MS)\n# TYPE queen_queue_conflated_per_minute gauge\n",
+        );
+        for (tenant, queue, n) in conflated {
+            let queue = crate::metrics::escape_label(&queue);
+            if tenant == crate::config::DEFAULT_TENANT {
+                body.push_str(&format!(
+                    "queen_queue_conflated_per_minute{{queue=\"{queue}\"}} {n}\n"
+                ));
+            } else {
+                let tenant = crate::metrics::escape_label(&tenant);
+                body.push_str(&format!(
+                    "queen_queue_conflated_per_minute{{tenant=\"{tenant}\",queue=\"{queue}\"}} {n}\n"
+                ));
+            }
+        }
+    }
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
@@ -495,9 +516,8 @@ pub(crate) async fn handle_prometheus(
         .into_response()
 }
 
-/// `GET /metrics` in raft mode. Process metrics remain local. The legacy
-/// database pool block stays present (with zero SQL connections) for dashboard
-/// compatibility, while state-machine role/readiness lives in `raft` (§14.6).
+/// `GET /metrics`. Process metrics are local; state-machine role/readiness
+/// lives in `raft` (§14.6).
 pub(crate) async fn handle_metrics(
     axum::extract::State(st): axum::extract::State<Arc<AppState>>,
 ) -> Response {
@@ -512,11 +532,6 @@ pub(crate) async fn handle_metrics(
         "messages": {
             "total": snap.push_messages + snap.pop_messages + snap.ack_messages,
             "rate": 0,
-        },
-        "database": {
-            "poolSize": 0,
-            "idleConnections": 0,
-            "waitingRequests": 0,
         },
         "memory": {
             "rss": st.metrics.resident_bytes(),
@@ -760,19 +775,9 @@ pub(crate) async fn handle_membership_remove(
 // Composition roots.
 // ---------------------------------------------------------------------------
 
-/// Build the raft-mode [`AppState`]: the same subsystems the Postgres boot
-/// constructs, but with NO Postgres connect, NO schema apply and NONE of the
-/// §10.3 loops — the handlers branch to `rsm` before any of them would run.
+/// Build the broker's [`AppState`] around the state machine facade.
 ///
-/// The deadpool `Pool` is still built (deadpool is lazy — it opens no
-/// connection here), because `AppState.pool` is typed `Pool` and the subsystems
-/// take a handle; in raft mode nothing ever calls `pool.get()` (the raft router
-/// serves only the routes that do not, and the message-path handlers dispatch to
-/// the facade first). This is the one literal concession in WP-1.7a to
-/// `AppState`'s Postgres-era shape; making `pool` optional is a mechanical
-/// follow-up once the handlers are fully ported (WP-2.x).
-///
-/// Shared by `main.rs`, `embedded/boot.rs` and the seam test so the raft state
+/// Shared by `main.rs`, `embedded/boot.rs` and the seam test so the state
 /// cannot drift between them.
 pub(crate) fn build_raft_state(cfg: &Config) -> Result<Arc<AppState>, String> {
     build_raft_state_with(cfg, None)
@@ -786,26 +791,11 @@ pub(crate) fn build_raft_state_with(
     cfg: &Config,
     rsm_override: Option<Arc<dyn facade::Rsm>>,
 ) -> Result<Arc<AppState>, String> {
-    // Lazy pool handle (no connection; see the doc above).
-    let pool = crate::db::create_pool(cfg);
-
-    // Admission sized by the planner queue depth, not the DB pool (§WP-1.7).
-    let admission =
-        crate::admission::Admission::new(crate::admission::AdmissionCfg::for_raft_planner(
-            cfg.raft_planner_queue_depth as u64,
-            std::time::Duration::from_millis(cfg.admission_tick_ms),
-            std::time::Duration::from_micros(cfg.admission_train_gap_us),
-            cfg.admission_trace,
-        ));
-    crate::admission::set_global(admission.clone());
-
     let metrics = Arc::new(crate::metrics::Metrics::new());
-    // The raft handlers hand requests to the facade before the Postgres
-    // path's counters; the facade counts through the global handle, and the
-    // dashboard collector (rsm/dashboard/collector.rs) flushes it.
+    // The facade counts through the global handle, and the dashboard
+    // collector (rsm/dashboard/collector.rs) flushes it.
     crate::metrics::install_global(metrics.clone());
     let notifier = crate::notify::Notifier::new(cfg.tenancy_header);
-    let encryption = crate::encryption::Encryption::from_env();
 
     // The facade: the real state machine when WP-1.7c has registered its
     // builder, the NotReady stub otherwise — or the caller's own.
@@ -823,55 +813,6 @@ pub(crate) fn build_raft_state_with(
         return Err(format!("raft bootstrap state: {error}"));
     }
 
-    let fusion = crate::fusion::Fusion::new(
-        cfg.fusion_shards,
-        pool.clone(),
-        admission.clone(),
-        metrics.clone(),
-        cfg.zstd_level,
-        cfg.fusion_frames,
-        cfg.fusion_hold_ms,
-        cfg.stmt_timeout,
-        cfg.dedup_cache_mb,
-        cfg.dedup_cache_enabled,
-        crate::db::cancel_connector(cfg)?,
-    );
-    let ack_registry = Arc::new(crate::ack_registry::AckRegistry::new(
-        cfg.ack_registry_mb,
-        cfg.ack_registry_enabled,
-    ));
-    let ack_fusion = crate::ack_fusion::AckFusion::new(
-        cfg.ack_fusion_shards,
-        pool.clone(),
-        cfg.stmt_timeout,
-        cfg.ack_fusion_hold_ms,
-        cfg.ack_fusion_enabled,
-    );
-    let pop_fusion = crate::pop_fusion::PopFusion::new(
-        cfg.pop_fusion_shards,
-        pool.clone(),
-        cfg.stmt_timeout,
-        admission.clone(),
-        metrics.clone(),
-        cfg.pop_fusion_hold_ms,
-        cfg.pop_fusion_max_jobs,
-        cfg.pop_fusion_max_inflight,
-        cfg.pop_fusion_enabled,
-    );
-    let file_buffer = Arc::new(crate::file_buffer::FileBufferManager::new(
-        cfg.file_buffer.clone(),
-        cfg.zstd_level,
-    ));
-    // NOTE: no `startup_recovery`, no `spawn_drain` — the push spool is not used
-    // in raft mode (D19: after the hold, 503; the SDK buffers retry).
-    let hotlist = crate::hotlist::HotList::new(
-        cfg.hotlist_enabled,
-        cfg.hotlist_shards,
-        cfg.hotlist_window_batch,
-        false,
-        cfg.tenancy_header,
-    );
-    hotlist.attach_notifier(notifier.clone());
     let ephemeral = crate::ephemeral::Ephemeral::new(
         crate::ephemeral::Knobs {
             global_max_bytes: cfg.ephemeral_max_bytes,
@@ -935,47 +876,18 @@ pub(crate) fn build_raft_state_with(
     );
 
     Ok(Arc::new(AppState {
-        pool,
-        fusion,
-        ack_registry,
-        ack_fusion,
-        pop_fusion,
-        admission,
         metrics,
         stmt_timeout: cfg.stmt_timeout,
         pop_default_timeout_ms: cfg.pop_default_timeout_ms,
         default_subscription_mode: cfg.default_subscription_mode.clone(),
-        pop_pending_gate: cfg.pop_pending_gate,
-        pop_wait_initial_interval_ms: cfg.pop_wait_initial_interval_ms,
-        pop_wait_backoff_threshold: cfg.pop_wait_backoff_threshold,
-        pop_wait_backoff_multiplier: cfg.pop_wait_backoff_multiplier,
-        pop_wait_max_interval_ms: cfg.pop_wait_max_interval_ms,
-        zstd_level: cfg.zstd_level,
-        lease_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-        encryption,
-        enc_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-        maintenance: std::sync::atomic::AtomicBool::new(bootstrap.maintenance),
-        pop_maintenance: std::sync::atomic::AtomicBool::new(bootstrap.pop_maintenance),
-        quota,
-        switches,
-        kv_pressure: std::sync::atomic::AtomicU32::new(0),
-        kv_standalone_shed_after: cfg.kv_standalone_shed_after,
         notifier,
-        file_buffer,
-        partition_queue: std::sync::Mutex::new(std::collections::HashMap::new()),
-        seeded_groups: std::sync::Mutex::new(std::collections::HashMap::new()),
         ephemeral,
         peers: Arc::new(crate::peerclient::PeerClient::new()),
-        hotlist,
-        autopilot: crate::pop_autopilot::PopAutopilot::new(cfg.pop_autopilot_knobs()),
-        hotlist_reseed_ms: cfg.hotlist_reseed_ms,
-        hotlist_reseed_full_ms: cfg.hotlist_reseed_full_ms,
-        hotlist_reseed_window_ms: cfg.hotlist_reseed_window_ms,
         tenancy_enabled: cfg.tenancy_header,
-        ownership_ok: std::sync::Mutex::new(std::collections::HashSet::new()),
+        quota,
+        switches,
         auth_enabled: cfg.auth.enabled,
-        server_id: cfg.sync.server_id.clone(),
-        storage: StorageMode::Raft,
+        server_id: cfg.server_id.clone(),
         rsm,
         raft_ready_lag_ms: cfg.raft_ready_lag_ms,
     }))
@@ -984,8 +896,7 @@ pub(crate) fn build_raft_state_with(
 /// The raft-mode router (server target only). Ported routes go to the real
 /// handlers — the message-path ones branch to the facade via their
 /// storage-aware guard — and the remaining `/api` or `/streams` routes go
-/// through the generic Phase-2 adapter. Auth and tenancy layers are applied
-/// exactly as the Postgres router does.
+/// through the generic Phase-2 adapter. Auth and tenancy layers wrap them all.
 #[cfg(feature = "server")]
 pub(crate) fn build_raft_router(
     state: Arc<AppState>,
@@ -1018,9 +929,8 @@ pub(crate) fn build_raft_router(
             post(super::handle_lease_extend),
         )
         // --------------------------------------------- kv → facade (WP-2.2)
-        // The handlers are the Postgres ones: each branches to the facade after
-        // the shared edge ceilings and ladder. Registered exactly as main.rs
-        // does — the static console paths are under `/api/v1/resources`, and
+        // Each handler dispatches to the facade after the shared edge ceilings
+        // and ladder. The static console paths are under `/api/v1/resources`, and
         // no literal segment may ever sit under `/api/v1/kv/:ns/`.
         .route("/api/v1/kv", post(super::handle_kv_batch))
         .route(
@@ -1035,8 +945,7 @@ pub(crate) fn build_raft_router(
         )
         .route("/api/v1/resources/kv/list", post(super::handle_kv_list))
         // ------------------------------------ timers (WP-2.3) → facade, 025's wire
-        // The same four routes main.rs registers for the postgres class; the
-        // handlers branch to the state machine on `st.storage.is_raft()`.
+        // The four timer routes; the handlers dispatch to the state machine.
         .route("/api/v1/timers", post(super::handle_timers_batch))
         .route("/api/v1/timers/:queue", get(super::handle_timers_list))
         .route(
@@ -1086,16 +995,6 @@ pub(crate) fn build_raft_router(
         .route(
             "/api/v1/ephemeral/queues/:queue/depth",
             get(super::handle_ephemeral_depth),
-        )
-        // The internal mesh fallback and its local stats never touch Postgres.
-        .route("/internal/api/notify", post(crate::internal::handle_notify))
-        .route(
-            "/internal/api/shared-state/stats",
-            get(crate::internal::handle_shared_state_stats),
-        )
-        .route(
-            "/internal/api/inter-instance/stats",
-            get(crate::internal::handle_inter_instance_stats),
         )
         // Phase-2 /api and /streams are served by the generic RSM facade;
         // everything else falls through to the SPA/static handler.
@@ -1307,9 +1206,8 @@ async fn raft_fallback(
     super::handle_static(method, uri).await
 }
 
-/// Shared Phase-2 HTTP/embedded adapter. The regular raft fallback and the
-/// storage-aware legacy handlers both use this path, so embedded mode cannot
-/// accidentally reach a Postgres pool for a ported operation.
+/// Shared Phase-2 HTTP/embedded adapter. The raft fallback and the handlers the
+/// embedded API calls both use this path.
 pub(crate) async fn dispatch_api(
     st: &Arc<AppState>,
     tenant: &str,
@@ -1358,19 +1256,8 @@ fn apply_local_control(
     tenant: &str,
     body: &[u8],
 ) {
-    use std::sync::atomic::Ordering;
     let parsed = || serde_json::from_slice::<serde_json::Value>(body).ok();
     match (method, path) {
-        ("POST", "/api/v1/system/maintenance") => {
-            if let Some(v) = parsed().and_then(|v| v.get("enabled").and_then(|x| x.as_bool())) {
-                st.maintenance.store(v, Ordering::Relaxed);
-            }
-        }
-        ("POST", "/api/v1/system/maintenance/pop") => {
-            if let Some(v) = parsed().and_then(|v| v.get("enabled").and_then(|x| x.as_bool())) {
-                st.pop_maintenance.store(v, Ordering::Relaxed);
-            }
-        }
         ("POST", "/api/v1/system/kv-timers") => {
             if let Some(v) = parsed() {
                 if let Some(x) = v.get("kv").and_then(|x| x.as_bool()) {
@@ -1540,7 +1427,7 @@ fn quota_grant_from_json(v: &serde_json::Value) -> crate::rsm::effect::QuotaGran
 }
 
 // ---------------------------------------------------------------------------
-// WP-1.7a seam test: boot the broker in raft mode with no Postgres reachable,
+// WP-1.7a seam test: boot the broker,
 // and confirm the message path routes to the (NotReady) facade — 503
 // raft_phase1_unsupported from push and pop, 413 for an over-long name — while
 // /health answers 200 with the raft block. Exercises the same handler functions
@@ -1581,17 +1468,13 @@ mod tests {
     use crate::auth::AuthedSub;
     use crate::tenant::Tenant;
 
-    /// A raft-mode config with a throwaway data dir, and NO Postgres env — so
-    /// nothing this test touches can reach a database. `config::load` is the only
+    /// A config with a throwaway data dir. `config::load` is the only
     /// caller of itself in the lib unit-test binary, so setting the env here is
     /// race-free.
     fn raft_config() -> crate::config::Config {
         let dir = std::env::temp_dir().join(format!("queen-raft-seam-{}", std::process::id()));
-        std::env::set_var("QUEEN_STORAGE", "raft");
         std::env::set_var("QUEEN_RAFT_DIR", dir.display().to_string());
-        let cfg = crate::config::load();
-        assert_eq!(cfg.storage, crate::config::StorageMode::Raft);
-        cfg
+        crate::config::load()
     }
 
     async fn body_of(resp: axum::response::Response) -> (StatusCode, String) {
@@ -1701,7 +1584,7 @@ mod tests {
     }
 
     /// WP-2.3: the four timer routes, through the REAL handlers, over a REAL
-    /// `RaftFacade` — the same funnel the postgres class uses above it (body
+    /// `RaftFacade` — the same funnel a client goes through (body
     /// shape, server-owned fields, horizon, the ladder), the state machine
     /// below it. Schedule → peek → list/count → it fires → the pop sees the
     /// message; cancel → `absent` with the caller's txn echoed; a bad call is
@@ -1875,7 +1758,7 @@ mod tests {
     /// by the REAL state machine. The builder hook is not registered in the
     /// unit-test binary (the seam tests above keep the stub), so the facade is
     /// swapped into a raft `AppState` by hand. Every answer here is the wire
-    /// answer the Postgres class gives for the same call.
+    /// answer a client gets for the same call.
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn kv_routes_are_served_by_the_state_machine_in_raft_mode() {
         use std::collections::HashMap;

@@ -1,12 +1,10 @@
 """
 Tests for server-stamped producer identity (issue #23, feature A).
 
-Same semantics as client-js/test-v2/auth.js:
-
-  - SP-level tests (always run, talk to Postgres directly) verify the schema +
-    stored-procedure contract independently of the HTTP layer.
-  - HTTP-level tests exercise the anti-impersonation invariant when JWT auth
-    is enabled on the server.
+Same semantics as client-js/test-v2/auth.js: HTTP-level tests exercise the
+anti-impersonation invariant, observing producer_sub black-box by popping each
+push back. There are no SP-level tests any more (they drove the storage
+procedures directly); nothing here reaches past the HTTP API.
 
 Tests gate themselves on the ``JWT_SECRET`` env var so this suite can run
 against a server in either configuration. Run with a JWT-enabled server as:
@@ -60,10 +58,8 @@ def _make_token(sub: str, role: str = "read-write") -> str:
 
 # ---------------------------------------------------------------------------
 # Black-box observation helper: pop the message back over HTTP and read its
-# producerSub. The segments engine stores payloads in queen.seg_segments (never
-# queen.messages) and stamps producer_sub in the broker, so a push is only
-# observable via pop — the seg-native ground truth. Optional bearer authorizes
-# the pop when JWT is enabled.
+# producerSub. The broker stamps producer_sub itself and the pop is the only
+# place to read it back. Optional bearer authorizes the pop when JWT is enabled.
 # ---------------------------------------------------------------------------
 async def _popped_producer_sub(
     queue: str, transaction_id: str, bearer_token: Optional[str] = None
@@ -121,18 +117,7 @@ async def _http_push(
 
 
 # ===========================================================================
-# (Retired) SP-level producer_sub tests — they drove the ROWS engine directly
-# (queen.push_messages_v2 + queen.pop_specific_batch + a queen.messages read) to
-# verify the SP's producer_sub NULLIF handling. The rows engine is retired
-# (segments-only): payloads live in queen.seg_segments and producer_sub is
-# stamped in the broker, never in queen.messages. The shipping producer_sub
-# behavior is covered black-box (HTTP push -> pop) by the tests below.
-# ===========================================================================
-
-
-# ===========================================================================
-# HTTP-LEVEL TESTS — observe producer_sub black-box via the HTTP pop path
-# (queen.seg_segments is the seg-native ground truth; queen.messages is gone).
+# HTTP-LEVEL TESTS — observe producer_sub black-box via the HTTP pop path.
 # ===========================================================================
 @pytest.mark.asyncio
 @pytest.mark.skipif(JWT_ENABLED, reason="JWT_SECRET set - see HTTP-JWT test")

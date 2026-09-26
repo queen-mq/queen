@@ -85,7 +85,7 @@ pub struct Metrics {
     /// DLQ transitions observed on the ack path (worker_metrics parity).
     pub dlq_moved: AtomicU64,
     /// PLAN_CONFLATION §6.2 — log positions a conflating delivery SKIPPED
-    /// (reported by the ack SPs as `conflated`), and declaration conflicts (a pop
+    /// (the ack's `conflated`), and declaration conflicts (a pop
     /// asking for a policy the group does not have, §3.3). Both ride the existing
     /// `rates` line as windowed deltas (§6.1); neither is per-message-logged.
     pub conflated: AtomicU64,
@@ -131,8 +131,7 @@ pub struct Metrics {
     /// because a gauge goes down.
     pub eph_bytes: AtomicI64,
     pub eph_queues: AtomicI64,
-    /// Database failures observed on the DATA paths (push/pop/ack/transaction):
-    /// a statement error, a statement timeout, or a pool acquisition failure.
+    /// Failures observed on the DATA paths (push/pop/ack/transaction).
     /// Bump it ONLY through `record_db_error(s)` — the gauge is charted as
     /// "DB errors", so a path that fails without counting reads as healthy.
     pub db_errors: AtomicU64,
@@ -149,7 +148,7 @@ pub struct Metrics {
     /// `minPopWaitTime = 0`, which is the default.
     pub pop_fill_wait: AtomicU64,
     pub pop_fill_wait_us: AtomicU64,
-    /// RUSTFIX item 24: per-queue throughput, flushed into queen.queue_lag_metrics.
+    /// RUSTFIX item 24: per-queue throughput, flushed into the dashboard's queue rows.
     pub per_queue: PerQueue,
     /// Parked long-poll gauge (dashboard Parked row / queue_parked_replica).
     pub parked: Parked,
@@ -189,8 +188,8 @@ pub struct Counters {
     pub conflation_conflicts: u64,
 }
 
-/// RUSTFIX item 24: per-queue throughput counters, flushed each minute into
-/// queen.queue_lag_metrics so the per-queue Prometheus families
+/// RUSTFIX item 24: per-queue throughput counters, flushed by the dashboard
+/// collector into its queue rows so the per-queue Prometheus families
 /// (queen_queue_*_per_minute) and the /analytics/queue-lag|queue-ops views show
 /// real data instead of zeros.
 ///
@@ -292,7 +291,7 @@ impl PerQueue {
         c.ack_failed.fetch_add(failed, Ordering::Relaxed);
     }
     /// PLAN_CONFLATION §6.2: log positions a conflating ack retired WITHOUT a
-    /// handler invocation (the ack SPs' `conflated`). Fed from the ack handler.
+    /// handler invocation (the ack's `conflated`). Fed from the ack handler.
     pub fn add_conflated(&self, tenant: &str, queue: &str, n: u64) {
         if n == 0 {
             return;
@@ -368,10 +367,8 @@ impl PerQueue {
 // Parked long-poll gauge (dashboard "Parked" row + queen_queue_parked_consumers)
 // ---------------------------------------------------------------------------
 //
-// C++ sampled the currently-parked long-poll POPs per queue at ~1Hz and flushed
-// the minute-average into queue_lag_metrics.parked_count (a gauge: SUM across
-// workers, AVG across buckets — see the parked_count gauge notes in
-// 019_worker_metrics.sql). Here:
+// The currently-parked long-poll POPs per queue, sampled at ~1Hz and flushed as
+// an average (a gauge: SUM across workers, AVG across buckets). Here:
 // each parked pop holds a ParkedGuard for the duration of its wait; a 1 Hz
 // sampler (spawn_samplers) accumulates the instantaneous per-queue gauge, and
 // syscollect drains sum/samples once per flush to compute the same average.
@@ -486,10 +483,8 @@ impl Parked {
 //
 // NOT here, on purpose: `queen_kv_rows{tenant}`, `queen_kv_bytes{tenant}`,
 // `queen_kv_quota_ratio{tenant,kind}` and `queen_timers_pending{tenant}`. Those
-// come from the SLOW rollup in `queen.kv_usage` and are emitted by the cluster-plan
-// block in `queen.get_prometheus_metrics_v1` (§14.5), which READS the rollup table
-// and never counts the tables — a `count(*)` inside the Prometheus endpoint would
-// run the rollup on every scrape.
+// are occupancy from the SLOW rollup (§14.5), never a count of the rows — a count
+// inside the Prometheus endpoint would run the rollup on every scrape.
 
 /// A bounded ring of recent samples giving p50/p99 for free — the accumulation
 /// pattern already in the house (`OpMetrics::rtt`), lifted out because §14 needs it
@@ -531,7 +526,7 @@ impl Ring {
 }
 
 /// The five KV code paths (§5: seven names, five code paths — `putIfAbsent` is an
-/// alias that desugars to `put` with `expect:0` at the entry of `kv_apply_v1`, so it
+/// alias that desugars to `put` with `expect:0` when the call is parsed, so it
 /// is NOT a label of its own; one code path, one series).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum KvOp {
@@ -638,7 +633,7 @@ impl FireResult {
         [FireResult::Fired, FireResult::Duplicate, FireResult::Stale];
 }
 
-/// The three SQLSTATE classes of the single broker-wide classifier (§7.6). `config`
+/// The three failure classes of the single broker-wide classifier (§7.6). `config`
 /// is split out of `permanent` because "the destination queue name is malformed" is
 /// not the same operational event as "this payload violates a constraint": an
 /// operator can repair a `config`, nobody can repair a `permanent`, and only
@@ -750,7 +745,7 @@ pub struct KvTimers {
     kv_bytes_out: AtomicU64,
     kv_read_rejected: [AtomicU64; KV_REJECTS],
     kv_singleflight_coalesced: AtomicU64,
-    /// Expired-but-not-yet-pruned rows, CAPPED at the SQL level: the reported value
+    /// Expired-but-not-yet-pruned rows, CAPPED where counted: the reported value
     /// saturates and `kv_expired_not_pruned_capped` says so, because an exact count
     /// is O(backlog) precisely in the failure it exists to detect. This is the one
     /// signal that separates "sweeper behind" from "all well" in a failure mode that
@@ -790,9 +785,9 @@ pub struct KvTimers {
     /// and it is legitimate for the same reason: one row per tenant, written by the
     /// sweeper, bounded by the control plane rather than by callers. `queen_kv_rows`,
     /// `queen_kv_bytes`, `queen_kv_quota_ratio` and `queen_timers_pending` are
-    /// EXPOSED from the cluster-plan block that reads `queen.kv_usage` directly
-    /// (§14.5) — this copy exists for the `sizes` block and the top-N log lines, so
-    /// that an incident has the numbers in the log next to everything else.
+    /// not exported from here (§14.5) — this copy exists for the `sizes` block and
+    /// the top-N log lines, so that an incident has the numbers in the log next to
+    /// everything else.
     usage: RwLock<Vec<TenantUsage>>,
 }
 
@@ -900,8 +895,6 @@ impl KvTimers {
         self.timers_schedule_rejected[why as usize].fetch_add(1, Ordering::Relaxed);
     }
     /// One delivery's lateness (ms between due and fire), attributed to its tenant.
-    /// The value comes from the SERVER (`r_late_ms`): the broker never does timestamp
-    /// arithmetic, there is one clock and it is Postgres's (§4.2).
     pub fn fire_lag(&self, tenant: &str, late_ms: f64) {
         if let Some(r) = self.fire_lag.read().unwrap().get(tenant) {
             r.record(late_ms);
@@ -979,8 +972,7 @@ impl KvTimers {
             self.kv_pool_size.load(Ordering::Relaxed),
         )
     }
-    /// Publish a rollup pass. Last-writer-wins, exactly like the `computed_at`
-    /// discipline of the `queen.kv_usage` row it mirrors.
+    /// Publish a rollup pass. Last-writer-wins.
     pub fn set_usage(&self, rows: Vec<TenantUsage>) {
         *self.usage.write().unwrap() = rows;
     }
@@ -1402,7 +1394,7 @@ impl KvTimers {
 /// Prometheus label-value escaping. The tenant id is caller-supplied and opaque, so
 /// it is escaped rather than trusted — an unescaped quote does not corrupt one line,
 /// it corrupts the whole exposition from that point on.
-fn escape_label(v: &str) -> String {
+pub(crate) fn escape_label(v: &str) -> String {
     let mut out = String::with_capacity(v.len());
     for c in v.chars() {
         match c {
@@ -1416,15 +1408,14 @@ fn escape_label(v: &str) -> String {
 }
 
 impl Metrics {
-    /// One database failure on a data path (statement error, statement timeout,
-    /// or pool acquisition failure). Feeds worker_metrics.db_error_count and the
+    /// One failure on a data path. Feeds worker_metrics.db_error_count and the
     /// dashboard "DB errors" series.
     #[inline]
     pub fn record_db_error(&self) {
         self.db_errors.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// `n` database failures at once (e.g. every item of a push whose commit
+    /// `n` failures at once (e.g. every item of a push whose commit
     /// failed). A no-op for n == 0.
     #[inline]
     pub fn record_db_errors(&self, n: u64) {
@@ -1860,14 +1851,14 @@ impl Metrics {
 
 /// Spawn the background samplers feeding the dashboard-facing gauges:
 ///  * a 100 ms scheduler-lag probe (sleep-overshoot => "event loop" lag), and
-///  * a 1 Hz parked-long-poll sampler (minute-averaged into queue_lag_metrics
+///  * a 1 Hz parked-long-poll sampler (averaged into the dashboard's queue rows
 ///    by syscollect).
 /// Both are tiny (two atomic ops / a map scan per tick).
 static GLOBAL: std::sync::OnceLock<Arc<Metrics>> = std::sync::OnceLock::new();
 
-/// Install the process's metrics for code that holds no `AppState`: in raft
-/// mode the handlers hand a request to the facade before the Postgres path's
-/// counters, so the facade counts its own traffic through this. First wins.
+/// Install the process's metrics for code that holds no `AppState`: the
+/// handlers hand a request to the facade before any handler counter, so the
+/// facade counts its own traffic through this. First wins.
 pub fn install_global(m: Arc<Metrics>) {
     let _ = GLOBAL.set(m);
 }

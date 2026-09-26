@@ -4,39 +4,6 @@
 
 use std::env;
 
-/// Join a bind host and a port into an authority, bracketing an IPv6 literal.
-/// Unbracketed, `::1` + `6711` is `::1:6711`, which is NOT a `SocketAddr` —
-/// that grammar requires the brackets — so it falls through to the name
-/// resolver instead of the parse path. A hostname passes through untouched and
-/// is resolved at bind time.
-pub fn host_port(host: &str, port: u16) -> String {
-    if host.contains(':') && !host.starts_with('[') {
-        format!("[{host}]:{port}")
-    } else {
-        format!("{host}:{port}")
-    }
-}
-
-/// Exit on a bind host that carries a port, or that is explicitly empty —
-/// both would be joined with the port into an address nothing listens on, and
-/// the failure would quote a string no operator ever wrote. Checked here, in
-/// `load`, so it lands with the rest of the boot validation and before any
-/// TLS material is read. An IP literal (v4 or v6) or a hostname is accepted;
-/// whether a hostname resolves is still the bind's problem.
-fn checked_bind_addr(key: &str, v: String) -> String {
-    if v.is_empty() {
-        tracing::error!("{key} is set to the empty string — give it a host or IP, or unset it for 0.0.0.0");
-        std::process::exit(1);
-    }
-    if v.parse::<std::net::IpAddr>().is_err() && v.contains(':') {
-        tracing::error!(
-            "{key}={v} carries a port — set the host or IP only, the port comes from QUEEN_PROXY_PORT"
-        );
-        std::process::exit(1);
-    }
-    v
-}
-
 pub fn env_str(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -56,9 +23,9 @@ pub fn env_u64(key: &str, default: u64) -> u64 {
     env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-/// The roles `queen_proxy.cluster_roles.role` accepts (001_init.sql CHECK).
+/// The roles a cluster role document accepts (`store::data`'s check).
 /// Kept here so a bad `QUEEN_PROXY_DEFAULT_ROLE` is caught at boot rather than
-/// as a constraint violation on somebody's first login.
+/// as a refused write on somebody's first login.
 pub const CLUSTER_ROLES: [&str; 4] = ["admin", "producer", "consumer", "viewer"];
 
 /// Validate `QUEEN_PROXY_DEFAULT_ROLE`, falling back to the least-privileged
@@ -142,11 +109,11 @@ fn normalize_shared_hosts(raw: Vec<String>) -> Vec<String> {
 }
 
 /// Grace window past a cache entry's TTL during which the last known-good
-/// value may still be served, but only when pxdb failed to *answer* (PLAN §2:
-/// "keep serving cached clusters (fail-open for known good) ... pxdb down ≠
-/// data plane down"). Ten minutes covers the outages this exists to survive —
-/// a managed-PG failover, a restart, a migration — while bounding the damage:
-/// nothing is refreshed while pxdb is down, so this window is also the
+/// value may still be served, but only when the store failed to *answer*
+/// (PLAN §2: "keep serving cached clusters (fail-open for known good) ...
+/// store down ≠ data plane down"). Ten minutes covers the outages this exists
+/// to survive — a leader election, a restart — while bounding the damage:
+/// nothing is refreshed while the store is down, so this window is also the
 /// worst-case delay before a control-plane decision taken during the outage
 /// (suspend, delete, key revocation) takes effect. A clean "no such row"
 /// never uses it — see cache.rs::fallback. Read here rather than off `Config`
@@ -156,9 +123,9 @@ pub fn stale_grace() -> std::time::Duration {
     std::time::Duration::from_millis(env_u64("QUEEN_PROXY_STALE_GRACE_MS", 600_000))
 }
 
-/// Deny-list policy when the pxdb revocation lookup itself fails (pool or
-/// query error, not a clean "no such row"). Default false = fail OPEN: a
-/// transient pxdb blip must not 401 every session, and the token still had to
+/// Deny-list policy when the revocation lookup itself fails (the store did
+/// not answer, not a clean "no such row"). Default false = fail OPEN: a
+/// transient store blip must not 401 every session, and the token still had to
 /// pass signature + exp. true = fail CLOSED for deployments that would rather
 /// lose availability than honour a token that may have been revoked. Read here
 /// rather than off `Config` (like `stale_grace` above) because one module
@@ -167,7 +134,7 @@ pub fn revocation_strict() -> bool {
     env_bool("QUEEN_PROXY_REVOCATION_STRICT", false)
 }
 
-/// How often `queen_proxy.sweep_revoked_tokens()` drops deny-list rows whose
+/// How often `store::data::sweep_revoked_tokens` drops deny-list rows whose
 /// own `exp` has passed. Pure GC — an expired row can no longer change a
 /// verify's outcome — so hourly is ample; 0 disables the sweep.
 pub fn revocation_sweep_interval() -> std::time::Duration {
@@ -175,29 +142,10 @@ pub fn revocation_sweep_interval() -> std::time::Duration {
 }
 
 /// Bound on the metering drain that runs after the listener stops accepting.
-/// The drain spools to disk when pxdb is unreachable, so this only exists so a
-/// dead pxdb cannot hold the process open indefinitely.
+/// The drain spools to disk when the KV is unreachable, so this only exists so
+/// a KV without a leader cannot hold the process open indefinitely.
 pub fn shutdown_drain_budget() -> std::time::Duration {
     std::time::Duration::from_millis(env_u64("QUEEN_PROXY_SHUTDOWN_DRAIN_MS", 5_000))
-}
-
-/// Paths to the OPTIONAL TLS listener material — the Cloudflare-origin leg
-/// (PLAN §9: "origin cert between CF and the cell proxy"). Both must be set:
-/// TLS is opt-in, and a half-configured listener is a misconfiguration worth
-/// failing on rather than silently serving the plaintext port.
-#[derive(Clone, Debug)]
-pub struct TlsMaterial {
-    pub cert_path: String,
-    pub key_path: String,
-}
-
-pub fn tls_material() -> Result<Option<TlsMaterial>, String> {
-    match (env_opt("QUEEN_PROXY_TLS_CERT"), env_opt("QUEEN_PROXY_TLS_KEY")) {
-        (Some(cert_path), Some(key_path)) => Ok(Some(TlsMaterial { cert_path, key_path })),
-        (None, None) => Ok(None),
-        (Some(_), None) => Err("QUEEN_PROXY_TLS_CERT set without QUEEN_PROXY_TLS_KEY".to_string()),
-        (None, Some(_)) => Err("QUEEN_PROXY_TLS_KEY set without QUEEN_PROXY_TLS_CERT".to_string()),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -297,9 +245,9 @@ pub fn resolve_auth_portal_url(raw: Option<String>) -> Option<String> {
 ///
 /// The distinction that matters is whether a human can log in HERE. The console
 /// (`/auth/login`, the SPA gate in webapp.rs, `/api/console/*`) is mounted
-/// unconditionally, but a login can only ever succeed against a real
-/// `queen_proxy.users` row — so a pxdb is what turns the console from decoration
-/// into a surface that must be able to mint.
+/// unconditionally, but a login can only ever succeed against a real user
+/// document — so a user store is what turns the console from decoration into
+/// a surface that must be able to mint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JwtMode {
     /// Issues session tokens itself. Needs a signer that can mint AND verify.
@@ -307,8 +255,8 @@ pub enum JwtMode {
     /// Accepts session tokens minted elsewhere (the auth host) and issues none.
     /// Needs a verification key, and nothing else.
     VerifyOnly,
-    /// No user table at all — dev-static / pure data plane. Nothing can log in,
-    /// so no JWT material is required and none is missed.
+    /// No user store at all — a pure data plane. Nothing can log in, so no JWT
+    /// material is required and none is missed.
     NoIdentity,
 }
 
@@ -327,7 +275,9 @@ impl JwtMode {
 /// only: nothing here can carry key material into a log line.
 #[derive(Clone, Copy, Debug)]
 pub struct JwtMaterial {
-    pub has_pxdb: bool,
+    /// A user store exists (the broker's KV), so the console can log someone
+    /// in.
+    pub has_users: bool,
     pub ed_private: bool,
     pub ed_public: bool,
     pub hs_secret: bool,
@@ -348,7 +298,7 @@ pub struct JwtBoot {
 /// than discovered on a cell.
 ///
 /// The failure this exists to stop was measured on the first cloud cell: a proxy
-/// with a pxdb and no JWT secret boots, passes every health check, serves the
+/// with a user store and no JWT secret boots, passes every health check, serves the
 /// API-key data plane perfectly — and answers 500 to every single console login,
 /// because `oauth::establish_session` cannot mint. Nothing in the process says
 /// so until a human tries to log in.
@@ -360,19 +310,18 @@ pub struct JwtBoot {
 ///   * verify-only mode must be able to verify (or every session 401s);
 ///   * no-identity mode requires nothing.
 ///
-/// SUPPLIED-BUT-BROKEN IS FATAL; ABSENT IS NOT. A proxy with a pxdb and NO JWT
-/// material at all is a legal, documented shape — the API-key-only self-hosted
-/// proxy that never serves a console login (webdoc `deploy/proxy.mdx`:
-/// "`PXDB_HOST` is the only variable it refuses to start without"). Refusing to
-/// boot it would break that contract on upgrade for every external self-hoster,
-/// for a console they do not use. So that one case is the loud warning spec §9b
+/// SUPPLIED-BUT-BROKEN IS FATAL; ABSENT IS NOT. A proxy with a user store and
+/// NO JWT material at all is a legal, documented shape — the API-key-only
+/// self-hosted proxy that never serves a console login. Refusing to boot it
+/// would break that contract on upgrade for every external self-hoster, for a
+/// console they do not use. So that one case is the loud warning spec §9b
 /// allows ("fail fast at boot, or warn loudly"), and `oauth::establish_session`
 /// names the same two variables if anyone ever does try to log in. Every case
 /// where material WAS supplied and cannot serve its mode stays fatal: an
 /// operator who set a key meant to use it, and a signer that silently does
 /// nothing is the failure this gate exists for.
 pub fn jwt_boot(m: JwtMaterial) -> JwtBoot {
-    let mode = if !m.has_pxdb {
+    let mode = if !m.has_users {
         JwtMode::NoIdentity
     } else if m.ed_public && !m.ed_private && !m.hs_secret {
         // The operator supplied a public key and nothing else: an explicit
@@ -393,14 +342,14 @@ pub fn jwt_boot(m: JwtMaterial) -> JwtBoot {
     });
 
     // Nothing was supplied at all. Mint mode by classification (there is a
-    // pxdb, so there is a user table and a console), but this is also exactly
+    // user store, so there is a console), but this is also exactly
     // the shape of an API-key-only proxy, so it is reported rather than
     // refused. The wording is the fatal one's, in the imperative rather than
     // the past tense, and it must keep naming the way out.
     let nothing_supplied = !m.ed_private && !m.ed_public && !m.hs_secret;
     if mode == JwtMode::Mint && nothing_supplied && !m.can_mint {
         warn = Some(
-            "NO JWT SIGNER is configured and PXDB_HOST is set: the console login at /auth/login \
+            "NO JWT SIGNER is configured: the console login at /auth/login \
              will answer 503 \"no JWT signer\" while /healthz and the whole API-key data plane stay \
              green. This is fine for an API-KEY-ONLY proxy and is why it is not a boot refusal. To \
              serve the console, set QUEEN_PROXY_JWT_ED25519_PEM (Ed25519 private key PEM — \
@@ -430,8 +379,8 @@ pub fn jwt_boot(m: JwtMaterial) -> JwtBoot {
         // is never refused for material it was not given.)
         JwtMode::Mint if nothing_supplied => None,
         JwtMode::Mint if !m.can_mint => Some(format!(
-            "JWT mode MINT detected (PXDB_HOST is set, so this proxy serves the console login at \
-             /auth/login against a real user table and must issue session tokens) but NO USABLE JWT \
+            "JWT mode MINT detected (this proxy serves the console login at /auth/login against \
+             its user store and must issue session tokens) but NO USABLE JWT \
              SIGNER is configured{}. Every login would answer 503 \"no JWT signer\" while \
              /healthz and the whole API-key data plane stayed green. Set QUEEN_PROXY_JWT_ED25519_PEM \
              (Ed25519 private key PEM — production) or QUEEN_PROXY_JWT_SECRET (HS256 — dev). To run \
@@ -470,141 +419,17 @@ pub const ACT_CLUSTER_HEADER: &str = "x-queen-act-cluster";
 pub const DEFAULT_TENANT_UUID: &str = "00000000-0000-0000-0000-000000000001";
 
 #[derive(Clone, Debug)]
-pub struct PxdbConfig {
-    pub host: String,
-    pub port: u16,
-    pub user: String,
-    pub password: String,
-    pub dbname: String,
-    pub use_ssl: bool,
-    pub ssl_reject_unauthorized: bool,
-    /// `PXDB_SSL_ROOT_CERT` — the PEM **CONTENT** of the CA that signed the
-    /// pxdb's certificate, not a path to it (same family shape as
-    /// `PXDB_PASSWORD` and `QUEEN_PROXY_JWT_ED25519_PEM`: the value IS the
-    /// material). Set it and the chain is verified against exactly that CA
-    /// instead of the compiled-in Mozilla set, which is what a managed
-    /// PostgreSQL on a private CA needs — before this knob existed the only way
-    /// to connect at all was `PXDB_SSL_REJECT_UNAUTHORIZED=false`, i.e.
-    /// encryption with no authentication.
-    ///
-    /// A supplied CA REPLACES the Mozilla set and outranks
-    /// `PXDB_SSL_REJECT_UNAUTHORIZED=false`; both rules, and why, are in
-    /// `pgtls.rs`'s header — the same file, byte for byte, that the broker
-    /// uses for `PG_SSL_ROOT_CERT`. Malformed PEM is fatal at boot, never a
-    /// silent fall-back.
-    ///
-    /// **Trap:** a multi-line value does not survive `docker --env-file` or
-    /// systemd's `EnvironmentFile` — they stop at the first newline. Use
-    /// `-e PXDB_SSL_ROOT_CERT="$(cat ca.pem)"`, a compose block scalar, or a
-    /// Kubernetes secret; or put the PEM on one line with `\n` for the
-    /// newlines, which the parser un-escapes.
-    pub ssl_root_cert: Option<String>,
-    pub pool_size: usize,
-    /// Bound on every pxdb I/O the proxy does outside a query: TCP connect,
-    /// pool checkout wait, connection create/recycle (db.rs, and the LISTEN
-    /// connection in cache.rs). The caches only fall back to a stale entry
-    /// once a lookup has FAILED, so without this a black-holed pxdb turned
-    /// every cache miss into a request parked for the OS TCP timeout, and a
-    /// saturated pool into an unbounded queue of requests behind it.
-    pub timeout_ms: u64,
-}
-
-impl PxdbConfig {
-    pub fn timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(self.timeout_ms.max(100))
-    }
-
-    /// What this pool ACTUALLY trusts, as one word for the boot log, from the
-    /// same pure functions `db.rs` and `cache.rs` feed the connector — so the
-    /// line cannot describe a policy other than the one installed. The broker
-    /// prints the identical pair for its own PostgreSQL link.
-    pub fn trust_label(&self) -> &'static str {
-        crate::pgtls::trust_label(
-            self.use_ssl,
-            self.ssl_root_cert.is_some(),
-            self.ssl_reject_unauthorized,
-        )
-    }
-
-    /// Is the pxdb link AUTHENTICATED, not merely encrypted?
-    pub fn link_authenticated(&self) -> bool {
-        crate::pgtls::link_authenticated(
-            self.use_ssl,
-            self.ssl_root_cert.is_some(),
-            self.ssl_reject_unauthorized,
-        )
-    }
-}
-
-/// `PXDB_SSL_ROOT_CERT` as raw PEM, or `None`. Whitespace-only counts as unset —
-/// an env file that leaves the variable blank must mean "not configured", not
-/// "configured with nothing", which would otherwise boot-fail every deployment
-/// that templates the variable in unconditionally.
-///
-/// Read through this ONE function so `Config::load`'s boot gate and the two
-/// connector sites (`db::create_pool`, `cache.rs`'s LISTEN connection) cannot
-/// disagree about whether a CA is configured.
-pub fn pxdb_ssl_root_cert() -> Option<String> {
-    // Same shape as `jwt_ed25519_pub_pem` above. (The broker's twin reads its
-    // own variable through `env_str` instead, because ITS reference page is
-    // scraped from the env_* call sites; the proxy's is hand-written, in
-    // webdoc/src/content/docs/deploy/proxy.mdx.)
-    env::var("PXDB_SSL_ROOT_CERT").ok().filter(|v| !v.trim().is_empty())
-}
-
-/// Validate the CA material and report the anchor count, WITHOUT exiting, so it
-/// is unit-testable and so `load` keeps every `exit(1)` in one place.
-///
-/// Validated whenever the variable is SET, even with `PXDB_USE_SSL=false` or no
-/// `PXDB_HOST` at all: a variable that is set is a statement of intent, and
-/// finding out at boot that the PEM was truncated by an env file beats finding
-/// out at the next TLS handshake.
-pub fn check_pxdb_ssl_root_cert() -> Result<Option<usize>, String> {
-    match pxdb_ssl_root_cert() {
-        None => Ok(None),
-        Some(pem) => match crate::pgtls::root_store_from_pem(&pem) {
-            Ok(roots) => Ok(Some(roots.len())),
-            Err(e) => Err(format!(
-                "PXDB_SSL_ROOT_CERT is set but unusable: {e}. It takes the PEM CONTENT of the CA \
-                 certificate that signed the pxdb's certificate — not a path, and not a \
-                 fingerprint. Fix it or unset it; it is not ignored, because a database link \
-                 believed to be verified and silently is not is the failure this variable exists \
-                 to remove."
-            )),
-        },
-    }
-}
-
-/// Static single-cluster fallback for local dev without a pxdb (smoke tests).
-#[derive(Clone, Debug)]
-pub struct DevStaticCluster {
-    pub cell_url: String,
-    pub cell_token: Option<String>,
-    pub broker_tenant: String,
-}
-
-#[derive(Clone, Debug)]
 pub struct Config {
-    pub port: u16,
-    /// Host the listener binds — `QUEEN_PROXY_BIND_ADDR`, default `0.0.0.0`:
-    /// every interface, which is what the address was hardcoded to before the
-    /// knob existed, so an upgrade changes nothing until someone sets it.
-    /// HOST only — the port stays `QUEEN_PROXY_PORT`, and `load` refuses a
-    /// value carrying one rather than joining it into an address nothing
-    /// listens on. Applies to the TLS listener too: there is one socket here.
-    pub bind_addr: String,
-    pub pxdb: Option<PxdbConfig>,
     /// false = shadow mode: limit decisions are computed+logged+metered but not enforced.
     pub enforce: bool,
     /// Dev only: skip authentication entirely (never set in cloud).
     pub dev_insecure: bool,
-    pub dev_static: Option<DevStaticCluster>,
     /// Dev/demo only: slug to fall back to when Host resolves to no cluster
     /// (browsers on localhost). Never set in cloud.
     pub default_cluster: Option<String>,
     /// `QUEEN_PROXY_SHARED_HOSTS` — hostnames that front MANY clusters, where
     /// the cluster is resolved from the CREDENTIAL instead of from the Host
-    /// label: an API key names its own cluster (`queen_proxy.api_keys`), a
+    /// label: an API key names its own cluster (`api_keys`), a
     /// human session names one with `x-queen-act-cluster` and is checked
     /// against `cluster_roles`. On such a host a missing or invalid key is a
     /// 401, never a 421 — there is no host label left to be misdirected.
@@ -655,12 +480,12 @@ pub struct Config {
     /// and meant to stay false forever on customer/shared cells.
     ///
     /// The routes an operator may open are blocked at the proxy because they
-    /// are not tenant-scopable (cell-wide status, PG internals, host metrics,
-    /// maintenance). Today no role can reach them at all, which is a
-    /// STRUCTURAL guarantee — there is no code path, so there is no bug that
-    /// can open one. `queen_proxy.users.is_operator` converts that into a
-    /// runtime check, and this flag is what keeps the structural version on
-    /// every cell that has no business serving an internal dashboard: with it
+    /// are not tenant-scopable (cell-wide status, host metrics).
+    /// Today no role can reach them at all, which is a STRUCTURAL guarantee —
+    /// there is no code path, so there is no bug that can open one.
+    /// `users.is_operator` converts that into a runtime check, and this flag
+    /// is what keeps the structural version on every cell that has no
+    /// business serving an internal dashboard: with it
     /// off, `classify`'s operator class 404s before authentication even runs,
     /// exactly as a hard block does.
     pub operator_enabled: bool,
@@ -669,7 +494,7 @@ pub struct Config {
     /// Google Workspace domains allowed to sign in, lowercased. EMPTY MEANS ANY
     /// verified Google account, which is only a closed door because
     /// auto-provision is off by default — an unknown identity still has to
-    /// match an existing `queen_proxy.users` row. Turn auto-provision on
+    /// match an existing `users` row. Turn auto-provision on
     /// without setting this and any verified Google account on earth can create
     /// itself an account.
     ///
@@ -725,95 +550,16 @@ impl Config {
     }
 
     pub fn load() -> Config {
-        let pxdb = env_opt("PXDB_HOST").map(|host| PxdbConfig {
-            host,
-            port: env_u64("PXDB_PORT", 5432) as u16,
-            user: env_str("PXDB_USER", "postgres"),
-            password: env_str("PXDB_PASSWORD", ""),
-            dbname: env_str("PXDB_DB", "queen_proxy"),
-            use_ssl: env_bool("PXDB_USE_SSL", false),
-            ssl_reject_unauthorized: env_bool("PXDB_SSL_REJECT_UNAUTHORIZED", true),
-            ssl_root_cert: pxdb_ssl_root_cert(),
-            pool_size: env_u64("PXDB_POOL_SIZE", 16) as usize,
-            timeout_ms: env_u64("PXDB_TIMEOUT_MS", 5_000),
-        });
-
-        // --- pxdb TLS trust (spec §0: PXDB_SSL_ROOT_CERT) ------------------
-        // Malformed CA material is FATAL here, beside the bind-address and
-        // shared-hosts gates. It is never a fall-back to the compiled-in
-        // Mozilla set: falling back would be a downgrade with no signal, which
-        // is exactly what the default of PXDB_SSL_REJECT_UNAUTHORIZED=true
-        // exists to prevent. The advisory below covers the combinations that
-        // are legal but almost certainly not what was meant; its wording lives
-        // in pgtls.rs and the broker prints the identical sentence for PG_*.
-        let ca_anchors = match check_pxdb_ssl_root_cert() {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::error!(target: "config", "{e}");
-                std::process::exit(1);
-            }
-        };
-        match &pxdb {
-            Some(px) => {
-                if let Some(msg) = crate::pgtls::boot_advisory(
-                    px.use_ssl,
-                    px.ssl_root_cert.is_some(),
-                    px.ssl_reject_unauthorized,
-                    crate::pgtls::PROXY_VARS,
-                ) {
-                    tracing::warn!(target: "config", anchors = ca_anchors, "{msg}");
-                }
-            }
-            // No pxdb at all: the CA describes a connection this process will
-            // never open. Its own sentence, because "the connection is
-            // plaintext" would be a lie about a connection that does not exist.
-            None if ca_anchors.is_some() => tracing::warn!(
-                target: "config",
-                "PXDB_SSL_ROOT_CERT is set but PXDB_HOST is not — this proxy opens no pxdb \
-                 connection, so the CA is not used by anything."
-            ),
-            None => {}
-        }
-        let dev_static = env_opt("QUEEN_PROXY_DEV_CELL_URL").map(|cell_url| DevStaticCluster {
-            cell_url,
-            cell_token: env_opt("QUEEN_PROXY_DEV_CELL_TOKEN"),
-            broker_tenant: env_str("QUEEN_PROXY_DEV_TENANT", DEFAULT_TENANT_UUID),
-        });
-        // A shared host resolves its cluster out of `queen_proxy.api_keys` and
-        // `queen_proxy.cluster_roles`. Without a pxdb neither table exists, so
-        // every request to a listed host would answer 401 forever — a silent,
-        // unexplainable failure. Boot-fatal instead, like the bind address: a
-        // half-configured feature is a misconfiguration, not a degraded mode.
+        // A shared host resolves its cluster from the credential: the API key
+        // documents and cluster roles in the broker's KV.
         let shared_hosts = normalize_shared_hosts(csv_lower("QUEEN_PROXY_SHARED_HOSTS"));
-        // The single binary keeps api_keys/cluster_roles in the broker's KV
-        // (PLAN_SINGLE_BINARY.md W3): no pxdb, and nothing missing.
-        let embedded = matches!(
-            env_str("QUEEN_PROXY_EMBEDDED", "").trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        );
-        if !shared_hosts.is_empty() && pxdb.is_none() && !embedded {
-            tracing::error!(
-                hosts = ?shared_hosts,
-                "QUEEN_PROXY_SHARED_HOSTS is set but PXDB_HOST is not — a shared host resolves its \
-                 cluster from queen_proxy.api_keys/cluster_roles, and there is no such table \
-                 without a pxdb. Every request to these hosts would answer 401."
-            );
-            std::process::exit(1);
-        }
         // Read before the literal because the JWT audience defaults to this
         // URL's host: one read, so the value the verifier enforces cannot drift
         // from the one the OAuth callbacks are built on.
         let public_base_url = env_opt("QUEEN_PROXY_PUBLIC_URL");
         Config {
-            port: env_u64("QUEEN_PROXY_PORT", 6711) as u16,
-            bind_addr: checked_bind_addr(
-                "QUEEN_PROXY_BIND_ADDR",
-                env_str("QUEEN_PROXY_BIND_ADDR", "0.0.0.0"),
-            ),
-            pxdb,
             enforce: env_bool("QUEEN_PROXY_ENFORCE", false),
             dev_insecure: env_bool("QUEEN_PROXY_DEV_INSECURE", false),
-            dev_static,
             default_cluster: env_opt("QUEEN_PROXY_DEFAULT_CLUSTER"),
             shared_hosts,
             send_tenant_header: env_bool("QUEEN_PROXY_TENANT_HEADER", true),
@@ -862,12 +608,8 @@ impl Config {
 #[cfg(test)]
 pub(crate) fn test_config(hosts: &[&str]) -> Config {
     Config {
-        port: 0,
-        bind_addr: "0.0.0.0".to_string(),
-        pxdb: None,
         enforce: false,
         dev_insecure: false,
-        dev_static: None,
         default_cluster: None,
         shared_hosts: normalize_shared_hosts(hosts.iter().map(|h| h.to_string()).collect()),
         send_tenant_header: true,
@@ -1156,11 +898,11 @@ mod tests {
 
     // ---- jwt boot gate (spec §9b) ------------------------------------------
 
-    /// The material a working cell carries: a pxdb and an HS secret, signer
-    /// fully capable. Tests below vary one axis at a time from here.
+    /// The material a working cell carries: a user store and an HS secret,
+    /// signer fully capable. Tests below vary one axis at a time from here.
     fn mat() -> JwtMaterial {
         JwtMaterial {
-            has_pxdb: true,
+            has_users: true,
             ed_private: false,
             ed_public: false,
             hs_secret: true,
@@ -1170,7 +912,7 @@ mod tests {
     }
 
     #[test]
-    fn hs_secret_with_a_pxdb_is_mint_mode_and_boots() {
+    fn hs_secret_with_a_user_store_is_mint_mode_and_boots() {
         let b = jwt_boot(mat());
         assert_eq!(b.mode, JwtMode::Mint);
         assert!(b.fatal.is_none(), "{:?}", b.fatal);
@@ -1191,11 +933,11 @@ mod tests {
         assert!(b.warn.is_none());
     }
 
-    /// THE MEASURED INCIDENT: a pxdb, a console, and nothing to sign with.
+    /// THE MEASURED INCIDENT: a user store, a console, and nothing to sign
+    /// with.
     ///
     /// Reported LOUDLY, not refused (spec §9b allows either): this is also the
-    /// shape of the API-key-only self-hosted proxy, and `deploy/proxy.mdx`
-    /// promises `PXDB_HOST` is the only variable it refuses to start without.
+    /// shape of the API-key-only self-hosted proxy.
     #[test]
     fn mint_mode_without_a_signer_warns_loudly_and_still_boots() {
         let b = jwt_boot(JwtMaterial {
@@ -1213,7 +955,6 @@ mod tests {
             "QUEEN_PROXY_JWT_ED25519_PEM",
             "QUEEN_PROXY_JWT_SECRET",
             "QUEEN_PROXY_JWT_ED25519_PUB_PEM",
-            "PXDB_HOST",
         ] {
             assert!(msg.contains(needle), "boot warning must name {needle}: {msg}");
         }
@@ -1296,13 +1037,12 @@ mod tests {
     }
 
     #[test]
-    fn no_pxdb_is_no_identity_and_never_fatal() {
-        // dev-static / pure data plane: `/auth/login` cannot resolve a user
-        // without a users table, so nothing here can ever ask for a mint. This
-        // is the shape the smoke scripts run, and it must keep booting with no
-        // JWT material at all.
+    fn no_user_store_is_no_identity_and_never_fatal() {
+        // A pure data plane: `/auth/login` cannot resolve a user without a
+        // user store, so nothing here can ever ask for a mint, and it must
+        // keep booting with no JWT material at all.
         let b = jwt_boot(JwtMaterial {
-            has_pxdb: false,
+            has_users: false,
             hs_secret: false,
             can_mint: false,
             can_verify: false,
@@ -1319,7 +1059,7 @@ mod tests {
         // quietly start rejecting a shape that works.
         for bits in 0u8..64 {
             let m = JwtMaterial {
-                has_pxdb: bits & 1 != 0,
+                has_users: bits & 1 != 0,
                 ed_private: bits & 2 != 0,
                 ed_public: bits & 4 != 0,
                 hs_secret: bits & 8 != 0,
@@ -1342,13 +1082,11 @@ mod tests {
 
     #[test]
     fn every_refusal_names_material_the_operator_actually_set() {
-        // The contract that keeps `deploy/proxy.mdx` true: a proxy is only ever
-        // refused for material it WAS given. Absent material is a shape, and
-        // the only variable this process refuses to start without stays
-        // PXDB_HOST.
+        // A proxy is only ever refused for material it WAS given. Absent
+        // material is a shape, not a mistake.
         for bits in 0u8..64 {
             let m = JwtMaterial {
-                has_pxdb: bits & 1 != 0,
+                has_users: bits & 1 != 0,
                 ed_private: bits & 2 != 0,
                 ed_public: bits & 4 != 0,
                 hs_secret: bits & 8 != 0,

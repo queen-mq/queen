@@ -225,26 +225,6 @@ class Admin
         return $this->httpClient->get('/metrics');
     }
 
-    public function getMaintenanceMode(): mixed
-    {
-        return $this->httpClient->get('/api/v1/system/maintenance');
-    }
-
-    public function setMaintenanceMode(bool $enabled): mixed
-    {
-        return $this->httpClient->post('/api/v1/system/maintenance', ['enabled' => $enabled]);
-    }
-
-    public function getPopMaintenanceMode(): mixed
-    {
-        return $this->httpClient->get('/api/v1/system/maintenance/pop');
-    }
-
-    public function setPopMaintenanceMode(bool $enabled): mixed
-    {
-        return $this->httpClient->post('/api/v1/system/maintenance/pop', ['enabled' => $enabled]);
-    }
-
     public function getSystemMetrics(array $params = []): mixed
     {
         return $this->httpClient->get('/api/v1/analytics/system-metrics' . $this->buildQueryString($params));
@@ -253,11 +233,6 @@ class Admin
     public function getWorkerMetrics(array $params = []): mixed
     {
         return $this->httpClient->get('/api/v1/analytics/worker-metrics' . $this->buildQueryString($params));
-    }
-
-    public function getPostgresStats(): mixed
-    {
-        return $this->httpClient->get('/api/v1/analytics/postgres-stats');
     }
 
     // ===========================

@@ -1623,7 +1623,6 @@ async fn the_membership_endpoints_answer_through_the_router() {
     let (lid, fid, did) = (l as u64 + 1, f as u64 + 1, dead as u64 + 1);
 
     let cfg_dir = scratch("endpoints-cfg");
-    std::env::set_var("QUEEN_STORAGE", "raft");
     std::env::set_var("QUEEN_RAFT_DIR", cfg_dir.display().to_string());
     let cfg = crate::config::load();
     let rsm: Arc<dyn Rsm> = nodes[f].clone().unwrap();

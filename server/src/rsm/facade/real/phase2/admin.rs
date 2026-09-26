@@ -12,7 +12,6 @@ use crate::rsm::effect::{CursorRow, SubscriptionMode};
 use crate::rsm::entry::PushVerdict;
 use crate::rsm::planner::txn::TxnCommand;
 use crate::rsm::planner::{PushCommand, PushItem};
-use crate::rsm::replicator::Replicator;
 use crate::rsm::store::rows::cursor_fresh;
 use crate::rsm::store::{Store, TypedReads};
 use crate::util::{txn_hash128, uuidv7_bytes};
@@ -315,25 +314,6 @@ impl RaftFacade {
         address: Option<(&str, &str)>,
         body: &[u8],
     ) -> Result<ApiOut, RsmError> {
-        let store = self.store.clone();
-        let maintenance = tokio::task::spawn_blocking(move || {
-            store.read(|r| {
-                Ok(r.flag("maintenance_mode")?
-                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                    .and_then(|value| value.get("enabled").and_then(Value::as_bool))
-                    .unwrap_or(false))
-            })
-        })
-        .await
-        .map_err(|e| RsmError::Internal(format!("maintenance read: {e}")))?
-        .map_err(read_error)?;
-        if maintenance {
-            return Ok(ApiOut::json(
-                503,
-                json!({"success":false,"error":"Maintenance mode is enabled; replay is paused"})
-                    .to_string(),
-            ));
-        }
         let target: Value = if body.iter().all(u8::is_ascii_whitespace) {
             json!({})
         } else {
@@ -500,8 +480,6 @@ impl RaftFacade {
                         .unwrap_or(default))
                 };
                 Ok((
-                    get("maintenance_mode", false)?,
-                    get("pop_maintenance_mode", false)?,
                     get(crate::switches::Switches::KEY_KV, true)?,
                     get(crate::switches::Switches::KEY_TIMERS_SCHEDULE, true)?,
                     get(crate::switches::Switches::KEY_TIMERS_FIRE, true)?,
@@ -513,14 +491,10 @@ impl RaftFacade {
         .map_err(|e| RsmError::Internal(format!("flag read: {e}")))?
         .map_err(read_error)?;
         let out = match key.as_str() {
-            "maintenance_mode" => {
-                json!({"maintenanceMode":values.0,"popMaintenanceMode":values.1,"bufferedMessages":0,"bufferHealthy":true})
-            }
-            "pop_maintenance_mode" => json!({"popMaintenanceMode":values.1}),
             "kv_timers_enabled" => {
-                json!({"kvEnabled":values.2,"timersScheduleEnabled":values.3,"timersFireEnabled":values.4,"quotaTenants":0,"quotaAgeMs":Value::Null,"quotaHot":0})
+                json!({"kvEnabled":values.0,"timersScheduleEnabled":values.1,"timersFireEnabled":values.2,"quotaTenants":0,"quotaAgeMs":Value::Null,"quotaHot":0})
             }
-            "ephemeral_enabled" => json!({"ephemeralEnabled":values.5}),
+            "ephemeral_enabled" => json!({"ephemeralEnabled":values.3}),
             _ => json!({"enabled":true}),
         };
         Ok(ApiOut::json(200, out.to_string()))
@@ -579,11 +553,7 @@ impl RaftFacade {
             });
         }
         self.submit_effects(&ctx, effects).await?;
-        if key == "maintenance_mode" {
-            v = json!({"maintenanceMode":v["enabled"],"bufferedMessages":0,"bufferHealthy":true,"mirrored":true})
-        } else if key == "pop_maintenance_mode" {
-            v = json!({"popMaintenanceMode":v["enabled"],"mirrored":true})
-        } else if key == "kv_timers_enabled" {
+        if key == "kv_timers_enabled" {
             return self.api_flag_get(key).await;
         } else if key == "ephemeral_enabled" {
             v = json!({"ephemeralEnabled":v["enabled"],"mirrored":true})
@@ -867,26 +837,9 @@ impl RaftFacade {
                 .to_string(),
         ))
     }
-    pub(super) async fn api_local_snapshot(
-        &self,
-        _ctx: &ReqCtx,
-        key: &str,
-    ) -> Result<ApiOut, RsmError> {
-        let value = match key {
-            // §14.6: no database, no spool (D19 refuses a push instead of
-            // buffering it). `pending` is the log's appended-not-applied tail.
-            "buffers" => {
-                let m = self.repl.metrics();
-                json!({"pending":m.inflight,"failed":0,"worker":0,"engine":"raft","spool":false})
-            }
-            _ => json!({key:[]}),
-        };
-        Ok(ApiOut::json(200, value.to_string()))
-    }
-    /// `GET /api/v1/analytics/dlq-signatures?queue=` — `get_dlq_signatures_v1`
-    /// (010): why rows sit in one queue's DLQ, folded into error signatures
-    /// over the newest `limit` rows (default 200, 1..=1000). 400 without a
-    /// queue, as the Postgres handler answers.
+    /// `GET /api/v1/analytics/dlq-signatures?queue=`: why rows sit in one
+    /// queue's DLQ, folded into error signatures over the newest `limit` rows
+    /// (default 200, 1..=1000). 400 without a queue.
     pub(super) async fn api_dlq_signatures(
         &self,
         ctx: ReqCtx,
@@ -952,11 +905,11 @@ impl RaftFacade {
         ))
     }
 
-    /// `GET /api/v1/analytics/partition-liveness` — `get_partition_liveness_v1`
-    /// (011): per queue, how many partitions were written in the last hour,
+    /// `GET /api/v1/analytics/partition-liveness`: per queue, how many
+    /// partitions were written in the last hour,
     /// day and week, created in the last day, and the write-time span; the
     /// `limit` (default 20, 1..=200) queues with the most partitions. An empty
-    /// `namespace=` / `task=` filters on the empty label, as in Postgres.
+    /// `namespace=` / `task=` filters on the empty label.
     pub(super) async fn api_partition_liveness(
         &self,
         ctx: ReqCtx,
@@ -1050,7 +1003,7 @@ impl RaftFacade {
     }
 }
 
-/// `get_dlq_signatures_v1`'s fold of an error text (010): empty → `(no
+/// The DLQ signature fold of an error text: empty → `(no
 /// message)`; then, in order, UUIDs and whole words of 20+ hex digits →
 /// `<id>`, `YYYY-MM-DD[T…[Z]]` → `<date>`, whole words of digits → `<n>`,
 /// whitespace runs → one space; trimmed, first 120 characters.

@@ -206,7 +206,7 @@ async fn the_token_travels_as_a_bearer_header_on_each_call() {
 }
 
 /// The lean list is asked for by name, and a broker that does not know the
-/// value — a Postgres broker — answers the enriched list, which reads the same.
+/// value — an older one — answers the enriched list, which reads the same.
 #[tokio::test]
 async fn the_queue_list_asks_for_lanes_only_and_reads_an_enriched_answer_the_same() {
     const ENRICHED: &str = r#"{"queues":[{"id":"q-1","name":"orders","partitions":12,

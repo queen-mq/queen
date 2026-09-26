@@ -1,27 +1,27 @@
 //! Queue-scoped dashboard views of raft mode (PLAN_RAFT.md D17, §14.6).
 //!
-//! Pure ports of the analytics stored procedures that read the per-queue
-//! metric tables, computed over the node-local rows of [`super::model`]:
+//! Pure views over the per-queue metrics, computed over the node-local rows
+//! of [`super::model`]:
 //!
-//! | function | stored procedure (server/sql/procedures/) | route |
-//! |---|---|---|
-//! | [`queue_ops_json`] | `queen.get_queue_ops_v1` (019_worker_metrics.sql:1398) | `GET /api/v1/analytics/queue-ops` |
-//! | [`parked_replicas_json`] | `queen.get_queue_parked_per_replica_v1` (019:1534) | `GET /api/v1/analytics/queue-parked-replicas` |
-//! | [`workload_json`] | `queen.get_workload_v1` (019:1642) + `handle_workload` | `GET /api/v1/analytics/workload` |
-//! | [`retention_json`] | `queen.get_retention_timeseries_v1` (022_retention_analytics.sql:20) + `handle_retention` | `GET /api/v1/analytics/retention` |
-//! | [`queue_lag_json`] | `queen.get_queue_lag_v1` (019:259) | `GET /api/v1/analytics/queue-lag` |
+//! | function | route |
+//! |---|---|
+//! | [`queue_ops_json`] | `GET /api/v1/analytics/queue-ops` |
+//! | [`parked_replicas_json`] | `GET /api/v1/analytics/queue-parked-replicas` |
+//! | [`workload_json`] | `GET /api/v1/analytics/workload` (`handle_workload`) |
+//! | [`retention_json`] | `GET /api/v1/analytics/retention` (`handle_retention`) |
+//! | [`queue_lag_json`] | `GET /api/v1/analytics/queue-lag` |
 //!
 //! # Inputs
 //!
 //! `filters` is the request's query string as a JSON object of strings (the
-//! `Query<HashMap<String, String>>` the Postgres handler receives, empty values
-//! included); the filters JSON the Postgres handler builds from it
-//! (`filters_from_query`, handlers/mod.rs:671) works as well. Each function
-//! applies the handler's rules itself: an empty value is an absent filter,
-//! except `namespace=` / `task=` on the workload route; keys a handler does not
-//! forward are ignored; `_tenant` is ignored because every row slice arrives
-//! already filtered to the request tenant. `now_us` plays the procedures'
-//! `NOW()` (the default window is `[now - 1 h, now]`).
+//! `Query<HashMap<String, String>>` a handler receives, empty values
+//! included); the filters JSON built from it (`filters_from_query`,
+//! handlers/mod.rs:671) works as well. Each function applies the handler's
+//! rules itself: an empty value is an absent filter, except `namespace=` /
+//! `task=` on the workload route; keys a handler does not forward are
+//! ignored; `_tenant` is ignored because every row slice arrives already
+//! filtered to the request tenant. `now_us` plays `NOW()` (the default window
+//! is `[now - 1 h, now]`).
 //!
 //! The [`QueueRow`] slice must hold one row per `(bucket_us, queue)` (the
 //! output of [`merge_queue_rows`]), like the table's unique key
@@ -30,24 +30,23 @@
 //!
 //! # Fidelity
 //!
-//! The answer carries the Postgres payload's keys, nesting, `null` / `0` /
+//! The answer carries the same keys, nesting, `null` / `0` /
 //! `[]` choices, array order, bucket widths, bucket alignment and timestamp
-//! texts. Deliberately not byte-identical:
+//! texts the dashboard expects. Deliberately not byte-identical:
 //!
 //! * object key order (`jsonb` sorts keys by length; no reader depends on it);
-//! * the text of a fractional `numeric`: Postgres prints `4.00` or
-//!   `85.7142857142857143`, these views print the `f64` a JSON parser reads
-//!   from that text (`4.0`, `85.71428571428571`). The private `Num` replays
+//! * the text of a fractional value: these views print the `f64` a JSON
+//!   parser reads from the canonical decimal text (`4.0`, `85.71428571428571`,
+//!   not `4.00` or `85.7142857142857143`). The private `Num` replays
 //!   numeric.c's arithmetic (division scale, half-away-from-zero rounding) so
 //!   the parsed values are equal, not merely close;
-//! * text `ORDER BY` is bytewise (collation "C"); Postgres sorts names by the
-//!   database collation (en_US.utf8 on the postgres:16 image), which differs
-//!   only between names that mix case or punctuation differently.
+//! * text ordering is bytewise (as under collation "C"), which differs from a
+//!   locale-aware sort only between names that mix case or punctuation
+//!   differently.
 //!
-//! An unparsable `from` / `to` makes the procedure raise; the Postgres handler
-//! then answers 500 with `{"error": ...}`. The views return that object
-//! (`{"error": "invalid input syntax for type timestamp with time zone: ..."}`),
-//! which `sp_result_to_response` maps to the same 500.
+//! An unparsable `from` / `to` makes these views return
+//! `{"error": "invalid input syntax for type timestamp with time zone: ..."}`,
+//! which a caller maps to the same 500.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -57,9 +56,8 @@ use super::model::*;
 
 const US_PER_HOUR: i64 = 60 * US_PER_MIN;
 
-/// Longest bucket axis [`workload_json`] builds. Postgres has no such guard;
-/// it fails on the `jsonb` size limit instead. 200 000 buckets is 137 years of
-/// six-hour steps, so only a nonsense range (`from=0001-01-01`) reaches it.
+/// Longest bucket axis [`workload_json`] builds. 200 000 buckets is 137 years
+/// of six-hour steps, so only a nonsense range (`from=0001-01-01`) reaches it.
 const MAX_AXIS_BUCKETS: i128 = 200_000;
 
 /// The 400 message of `handle_workload` / `handle_retention`
@@ -74,24 +72,23 @@ const BAD_GROUP_BY: &str = "bad groupBy";
 /// One queue of the request tenant: the `queen.queues` columns the procedures
 /// join (`q.name`, `q.namespace`, `q.task`).
 ///
-/// Postgres keys the metric rows by queue id, so a metric row survives only
-/// while its queue does (`queue_lag_metrics` cascades on delete, a retention
-/// row's partition goes with its queue). The raft rows carry the queue NAME,
-/// so the views join on the name and use `created_us` to drop what an earlier
-/// queue of the same name left behind. Pass every queue of the tenant: a row
-/// whose queue is not in the list is dropped like a deleted queue's.
+/// A metric row survives only while its queue does. The raft rows carry the
+/// queue NAME, so the views join on the name and use `created_us` to drop
+/// what an earlier queue of the same name left behind. Pass every queue of
+/// the tenant: a row whose queue is not in the list is dropped like a
+/// deleted queue's.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct QueueMeta {
     /// `queen.queues.name`, the key the metric rows carry.
     pub name: String,
-    /// `queen.queues.namespace`; `None` is SQL NULL, read as `''`.
+    /// `queen.queues.namespace`; `None` reads as `''`.
     pub namespace: Option<String>,
-    /// `queen.queues.task`; `None` is SQL NULL, read as `''`.
+    /// `queen.queues.task`; `None` reads as `''`.
     pub task: Option<String>,
     /// `queen.queues.created_at`, epoch µs (raft: `QueueConfig::created_at_us`).
     /// A metric row whose minute precedes the creation minute, or a retention
     /// step before this instant, belongs to an earlier incarnation and is
-    /// treated as Postgres treats a deleted queue's rows. 0 keeps every row.
+    /// dropped, the same as a deleted queue's rows. 0 keeps every row.
     pub created_us: i64,
 }
 
@@ -103,8 +100,8 @@ pub struct QueueMeta {
 pub struct QueueNow {
     /// The queue's `queen.queues` columns (name, namespace, task, creation).
     pub meta: QueueMeta,
-    /// `queen.stats.pending_messages` of the queue's `'queue'` row
-    /// (011_log_stats.sql:145-212): the sum over the queue's partitions of
+    /// `queen.stats.pending_messages` of the queue's `'queue'` row: the sum
+    /// over the queue's partitions of
     /// `GREATEST(last_offset - GREATEST(committed, log_start - 1), 0)`, where
     /// `committed` is the partition's MIN cursor over the named groups, else its
     /// MIN `__QUEUE_MODE__` cursor, else -1.
@@ -118,8 +115,7 @@ pub struct QueueNow {
     /// `queen.log_dlq` rows.
     pub dead_letter: i64,
     /// `queen.stats.retained_bytes`: the stored (compressed) payload bytes of
-    /// the queue's live segments, `SUM(octet_length(log_segments.blob))`
-    /// (028_retained_bytes, refreshed on a slow ~10 min lane).
+    /// the queue's live segments, refreshed on a slow ~10 min lane.
     pub retained_bytes: i64,
     /// `queen.stats.child_count`: the number of the queue's partitions.
     pub partitions: i64,
@@ -134,18 +130,16 @@ pub struct QueueNow {
 // get_queue_ops_v1
 // ---------------------------------------------------------------------------
 
-/// `GET /api/v1/analytics/queue-ops`: port of `queen.get_queue_ops_v1`
-/// (019_worker_metrics.sql:1398-1521) behind `handle_queue_ops`
+/// `GET /api/v1/analytics/queue-ops`, behind `handle_queue_ops`
 /// (handlers/analytics.rs:138), which forwards `from`, `to`, `queue`.
 ///
 /// `{timeRange, bucketMinutes, series, queues}`: one `series` element per
 /// (bucket, queue) that has rows, ordered by bucket then queue, no gap
 /// filling. `avgLagMs` is the pop-weighted mean of the rows' `avg_lag_ms` and,
 /// with `maxLagMs`, is `null` for a bucket without pops. `partitionCount` is
-/// always `null`: its column (`MAX(partition_count)`) has no writer in the
-/// Postgres broker either. Rates divide by the NOMINAL bucket width, and the
-/// six-hour width (ranges over 7 days) floors to the hour, exactly as the
-/// procedure does (`EXTRACT(minute FROM t) % 360` is the minute itself).
+/// always `null`: nothing has ever written that column. Rates divide by the
+/// NOMINAL bucket width, and the six-hour width (ranges over 7 days) floors
+/// to the hour (`EXTRACT(minute FROM t) % 360` is the minute itself).
 pub fn queue_ops_json(
     filters: &Map<String, Value>,
     now_us: i64,
@@ -213,16 +207,15 @@ pub fn queue_ops_json(
 // get_queue_parked_per_replica_v1
 // ---------------------------------------------------------------------------
 
-/// `GET /api/v1/analytics/queue-parked-replicas`: port of
-/// `queen.get_queue_parked_per_replica_v1` (019_worker_metrics.sql:1534-1618)
-/// behind `handle_queue_parked_replicas` (handlers/analytics.rs:191), which
-/// forwards `from`, `to`, `queue`.
+/// `GET /api/v1/analytics/queue-parked-replicas`, behind
+/// `handle_queue_parked_replicas` (handlers/analytics.rs:191), which forwards
+/// `from`, `to`, `queue`.
 ///
 /// `{timeRange, bucketMinutes, series, replicas}`: `series` is the bucket
 /// average of each (queue, node) minute gauge, ordered by bucket, queue,
 /// hostname, worker id; `replicas` the distinct (hostname, workerId) pairs of
 /// the window. The table is keyed by queue NAME, so rows of a deleted queue
-/// still show, as in Postgres; no queue list is needed.
+/// still show; no queue list is needed.
 pub fn parked_replicas_json(
     filters: &Map<String, Value>,
     now_us: i64,
@@ -278,8 +271,7 @@ pub fn parked_replicas_json(
 // get_workload_v1
 // ---------------------------------------------------------------------------
 
-/// `GET /api/v1/analytics/workload`: port of `queen.get_workload_v1`
-/// (019_worker_metrics.sql:1642-1949) and of `handle_workload`
+/// `GET /api/v1/analytics/workload`, the body of `handle_workload`
 /// (handlers/analytics.rs:153-187).
 ///
 /// `Err(msg)` is the handler's 400: `msg` is `"bad groupBy"`, sent as
@@ -556,10 +548,9 @@ fn group_base(
 // get_retention_timeseries_v1
 // ---------------------------------------------------------------------------
 
-/// `GET /api/v1/analytics/retention`: port of
-/// `queen.get_retention_timeseries_v1` (022_retention_analytics.sql:20-203)
-/// and of `handle_retention` (handlers/analytics.rs:212-235), which forwards
-/// `from`, `to`, `queue`, `groupBy`.
+/// `GET /api/v1/analytics/retention`, the body of `handle_retention`
+/// (handlers/analytics.rs:212-235), which forwards `from`, `to`, `queue`,
+/// `groupBy`.
 ///
 /// `Err(msg)` is the handler's 400 for a non-empty `groupBy` outside
 /// `namespace` / `task` / `queue` (`msg` = `"bad groupBy"`). Otherwise
@@ -568,9 +559,9 @@ fn group_base(
 ///
 /// Each [`RetentionRow`] is one `queen.retention_history` event: its three
 /// counters feed `retentionMsgs` / `completedRetentionMsgs` / `evictionMsgs`,
-/// their sum `totalMsgs`, and it counts once in `eventCount`. A row whose queue
-/// no longer exists is Postgres's "unresolvable partition" row: it stays in
-/// `series` / `totals` without a `queue` filter and is left out of `rows`.
+/// their sum `totalMsgs`, and it counts once in `eventCount`. A row whose
+/// queue no longer exists stays in `series` / `totals` without a `queue`
+/// filter and is left out of `rows`.
 pub fn retention_json(
     filters: &Map<String, Value>,
     now_us: i64,
@@ -692,8 +683,7 @@ impl Retained {
 // get_queue_lag_v1
 // ---------------------------------------------------------------------------
 
-/// `GET /api/v1/analytics/queue-lag`: port of `queen.get_queue_lag_v1`
-/// (019_worker_metrics.sql:259-324) behind `handle_queue_lag`
+/// `GET /api/v1/analytics/queue-lag`, behind `handle_queue_lag`
 /// (handlers/analytics.rs:112), which passes `from`, `to`, `queue`
 /// positionally, an empty value as absent.
 ///
@@ -1215,9 +1205,9 @@ fn avg_2dp(sum: i128, n: i128) -> Value {
         .map_or(Value::Null, |v| v.round(2).to_json())
 }
 
-/// A PostgreSQL `numeric`: the value `m / 10^s`, `s` being its display scale.
+/// A fixed-point decimal: the value `m / 10^s`, `s` being its display scale.
 ///
-/// Only what the ported procedures do to their integer sums is modelled, each
+/// Only what these views do to their integer sums is modelled, each
 /// with numeric.c's rule: [`Num::div`] (`numeric_div`: the scale
 /// `select_div_scale` picks, rounded half away from zero), [`Num::add`] (exact,
 /// the larger scale) and [`Num::round`] (`round(numeric, int)`, half away from
@@ -1236,8 +1226,8 @@ impl Num {
         Num { m: v, s: 0 }
     }
 
-    /// `numeric_div`; `None` for a zero divisor (Postgres raises; the
-    /// procedures guard every division with `CASE` or `NULLIF`).
+    /// `numeric_div`; `None` for a zero divisor (undefined; every call site
+    /// guards its division first).
     fn div(self, d: Num) -> Option<Num> {
         if d.m == 0 {
             return None;
@@ -1451,7 +1441,7 @@ mod tests {
         f
     }
 
-    /// The number a JSON parser reads from Postgres' `numeric` text.
+    /// The number a JSON parser reads from a decimal `numeric` text.
     fn pg(text: &str) -> Value {
         Value::from(text.parse::<f64>().expect("numeric text"))
     }
@@ -1500,7 +1490,7 @@ mod tests {
     }
 
     #[test]
-    fn numeric_division_matches_postgres_text() {
+    fn numeric_division_keeps_the_wire_text() {
         // select_div_scale: at least 16 significant digits, half away from zero.
         assert_eq!(div_text(10, 3), "3.3333333333333333");
         assert_eq!(div_text(1, 3), "0.33333333333333333333");
@@ -1712,7 +1702,7 @@ mod tests {
                 ..qrow("2026-09-24T09:07:00Z", "a")
             },
             // b before its creation minute (an earlier incarnation) and a
-            // deleted queue: Postgres cascaded both away.
+            // deleted queue: both are excluded here.
             QueueRow {
                 push_messages: 99,
                 ..qrow("2026-09-24T09:01:00Z", "b")
@@ -2159,7 +2149,7 @@ mod tests {
             r("2026-09-24T09:01:10Z", "a", 100, 0, 0),
             r("2026-09-24T09:01:50.5Z", "a", 0, 0, 5),
             // A deleted queue, and c before its current incarnation: rows
-            // Postgres can no longer resolve to a queue.
+            // that no longer resolve to a queue.
             r("2026-09-24T09:02:00Z", "zombie", 50, 0, 0),
             r("2026-09-24T09:03:00Z", "c", 0, 0, 1),
             r("2026-09-24T09:03:59Z", "b", 0, 7, 0),

@@ -1,6 +1,6 @@
 ---
 title: Conformance
-description: "The other half of the evidence: every client suite run against every applicable topology in its own throwaway stack, the tenancy parity gate, and the two-tenant isolation run."
+description: "The Queen 1.x conformance record: every client suite run against every applicable PostgreSQL topology in its own throwaway stack, the tenancy parity gate, and the two-tenant isolation run."
 type: reference
 sidebar:
   order: 8
@@ -9,21 +9,18 @@ sourceOfTruth:
   - test/compose/docker-compose.single.yml
   - test/compose/docker-compose.ha.yml
   - test/runners/tenancy/tenancy-check.sh
-  - test/runners/mesh/mesh-check.sh
   - test/runners/rust-client/entrypoint.sh
   - test/runners/cli/entrypoint.sh
   - test/runners/cpp/entrypoint.sh
 verifiedBy:
   - test/run.sh
-digest: >-
-  Queen MQ's conformance evidence is `test/run.sh`: seven client suites (JavaScript, Python, Go,
-  Rust, C++, PHP and the queenctl CLI) on three topologies each, plus the broker's unit tests,
-  an HA mesh assertion, a two-tenant isolation suite and raw-HTTP kv/timer and conflation
-  suites, every cell its own throwaway Docker stack. The `tenanted` lane reruns each client
-  suite with tenant scoping on and no tenant header, and any divergence from the flag-off lane
-  fails the run either way. The recorded isolation run is 45 assertions, 0 failures.
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
+
+<Aside type="caution">
+This is the conformance record of **Queen 1.x**, whose storage was PostgreSQL: every topology
+below is a PostgreSQL stack. 2.0 replaced that storage with a replicated log, so this matrix
+describes the 1.x broker and not 2.0.
+</Aside>
 
 The throughput pages measure how fast one shape goes. This page is the other half of the
 evidence: whether the clients and the broker agree about what the API means, on more than one
@@ -79,9 +76,9 @@ without which `TestMain` exits 0 having run nothing.
 | `tenanted` | the `single` stack, with the broker started with native tenant scoping on while the suite sends **no** tenant header | on |
 | `ha-tenanted` | the `ha` pair with the flag on, the substrate for the `tenancy` suite | on |
 
-Running the client suites on `ha` is what makes [high availability](/deploy/ha) a tested claim
-rather than a topology diagram: the same unmodified suite, pointed at one broker of a mesh pair
-sharing one PostgreSQL, has to produce the same result it produces against a single broker.
+Running the client suites on `ha` is what made 1.x high availability a tested claim rather than
+a topology diagram: the same unmodified suite, pointed at one broker of a mesh pair sharing one
+PostgreSQL, had to produce the same result it produced against a single broker.
 
 ## The tenancy parity gate
 
@@ -122,8 +119,8 @@ The run recorded on 2026-07-29 against a freshly built image is **45 assertions,
 **It refuses to pass vacuously.** A probe up front configures one queue name for two tenants with
 different lease times and aborts if the broker does not keep them apart, so the lane can never
 pass by comparing the default tenant with itself. Expected and harmless crosstalk is printed as
-`note` lines rather than asserted: PostgreSQL is the authority on those paths and every
-stored-procedure call carries the tenant, so the cost is a re-query, not a leak.
+`note` lines rather than asserted: in 1.x PostgreSQL was the authority on those paths and every
+stored-procedure call carried the tenant, so the cost was a re-query, not a leak.
 
 ## What this evidence does not cover
 
@@ -136,8 +133,9 @@ stored-procedure call carries the tenant, so the cost is a re-query, not a leak.
   arithmetic.
 - **Two failures are known and deterministic**: `TestGateTokenBucketBasic` in the Go client, and
   `TestLoad_BenchSmoke` in the CLI, which is a benchmark deadline rather than a semantic check.
-- **The `mesh` suite asserts connection, not behaviour.** Cross-replica wake latency, dead-peer
-  detection and reconnection are `server/mesh-verify.sh`, run by hand.
+- **The `mesh` suite asserted connection, not behaviour.** In 1.x, cross-replica wake latency,
+  dead-peer detection and reconnection were checked by hand with a separate script. 2.0 has no
+  mesh.
 - **The proxy is not in this matrix.** `queen_proxy`'s own unit tests run with `cargo test`
   inside `proxy/`, and its two-tenant end-to-end check is `proxy/scripts/isolation-smoke.sh`.
 

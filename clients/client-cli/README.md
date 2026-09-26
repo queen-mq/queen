@@ -1,8 +1,7 @@
 # queenctl
 
 Operator CLI for [Queen MQ](https://queenmq.com), the partitioned message
-queue backed by PostgreSQL. Single static binary built on top of
-[`client-go`](../client-go).
+queue. Single static binary built on top of [`client-go`](../client-go).
 
 ```text
 queenctl tail orders --cg debug --follow | jq '.data'
@@ -121,8 +120,7 @@ explicitly and name what to run instead:
 |---|---|---|
 | `status` (no queue) | `/api/v1/status` | `queue list`, or `status <queue>` |
 | `metrics [--prometheus]` | `/metrics`, `/metrics/prometheus` | `analytics queue-ops` / `queue-lag` |
-| `analytics system\|worker\|postgres` | `/api/v1/analytics/*-metrics`, `/postgres-stats` | `analytics queue-ops` / `queue-lag` |
-| `maintenance [get\|on\|off]` | `/api/v1/system/maintenance` | operator credentials against the broker |
+| `analytics system\|worker` | `/api/v1/analytics/*-metrics` | `analytics queue-ops` / `queue-lag` |
 | `cg refresh-stats` | `/api/v1/stats/refresh` | nothing - the broker refreshes on its own interval |
 | `pop --namespace/--task` (no queue) | `/api/v1/pop` | name a queue |
 
@@ -134,7 +132,7 @@ All of them work normally when the context points straight at a broker.
 |---|---|
 | Top-level | `ping` `version` `status` `lag` `tail` `push` `pop` `ack` `apply` `replay` |
 | Resources | `queue [list\|describe\|configure\|delete\|clear\|stats]` `partition [list\|describe\|seek\|clear]` `messages [list\|get\|delete\|traces]` `cg [list\|describe\|lag\|seek\|delete\|refresh-stats]` `dlq [list\|describe\|retry\|drain]` `namespace list` `task list` |
-| Ops | `tx -f` `lease extend` `maintenance [get\|on\|off]` `metrics [--prometheus]` `analytics [overview\|queue-lag\|queue-ops\|queue-parked\|retention\|system\|worker\|postgres]` `traces [names\|by-name\|by-message]` `bench` |
+| Ops | `tx -f` `lease extend` `metrics [--prometheus]` `analytics [overview\|queue-lag\|queue-ops\|queue-parked\|retention\|system\|worker]` `traces [names\|by-name\|by-message]` `bench` |
 | Plumbing | `config [view\|get-contexts\|use-context\|set-context\|delete-context]` `login` `logout` `completion` `docs` |
 
 Run `queenctl <command> --help` for full flag descriptions.
@@ -218,28 +216,26 @@ The CLI ships with three layers of testing:
    [`clients/client-js/test-v2/*`](../../clients/client-js/test-v2/) and
    [`clients/client-py/tests/*`](../../clients/client-py/tests/) covering
    queue, push, pop, tail/consume, DLQ, transaction, subscription,
-   maintenance, retention, watermark, auth, and load. ~70 Go tests with
+   retention, watermark, auth, and load. ~70 Go tests with
    broker side-effect verification (e.g. `consumedBy` invariants for
-   `bench`) and DB-side assertions where configured.
+   `bench`), all made through the broker's HTTP API.
 
 Running the full suite locally:
 
 ```bash
-docker run -d --name qpg -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16
-docker run -d --name queen --network host \
-  -e PG_HOST=localhost -e PG_USER=postgres -e PG_PASSWORD=postgres \
+docker run -d --name queen -p 6632:6632 \
   -e RETENTION_INTERVAL=2000 \
+  -v queen-e2e:/var/lib/queen/raft \
   ghcr.io/queen-mq/queen:latest
 
 cd clients/client-cli
 QUEEN_E2E=1 QUEEN_SERVER=http://localhost:6632 \
-  PG_HOST=localhost PG_USER=postgres PG_PASSWORD=postgres \
   QUEEN_RETENTION_INTERVAL_MS=2000 \
   make e2e
 ```
 
 > `RETENTION_INTERVAL=2000` (2s) is a **test-only** override so retention tests
-> finish in real time; production uses the default `300000` (5 min).
+> finish sooner; the broker's default is `5000` (5s).
 
 The same suite runs in CI on push to `master`/`cli` and on `workflow_dispatch`
 via [`.github/workflows/cli.yml`](../../.github/workflows/cli.yml). Each
@@ -259,7 +255,6 @@ Override defaults via env:
 | Variable | Default | Purpose |
 |---|---|---|
 | `QUEEN_SERVER` | `http://localhost:6632` | Broker URL |
-| `PG_HOST/PORT/USER/PASSWORD/DB` | (unset → DB-side asserts skipped) | Postgres for direct `consumer_watermarks` / `messages` queries |
 | `QUEEN_RETENTION_INTERVAL_MS` | (unset → retention tests skip) | Match the broker's `RETENTION_INTERVAL` env so cleanup tests run in real time |
 | `QUEEN_LOAD_TOTAL` | `2000` | Bump to `100000` for parity with the JS load test |
 | `QUEEN_TEST_QUEUE_PREFIX` | `ct-e2e-<unix-ts>` | Override per-test queue prefix when sharing one broker |

@@ -3,7 +3,7 @@ Rate-limiter helpers — composable token-bucket / sliding-window gate
 factories that return a callable suitable for ``Stream.gate(fn)``.
 
 Mirror of the JS rateLimiter.js helpers. The semantics (per-key state in
-``queen_streams.state``, partial-ack on deny, FIFO order on lease expiry)
+the broker, partial-ack on deny, FIFO order on lease expiry)
 all come from the underlying Stream gate runtime — these factories only
 decide HOW each request consumes from the bucket.
 
@@ -46,7 +46,7 @@ def token_bucket_gate(
 
     Returns a ``(msg, ctx) -> bool`` callable suitable for ``Stream.gate(fn)``.
     The bucket state lives in ``ctx.state`` (which the runtime persists per-key
-    in ``queen_streams.state`` on every ALLOWED message).
+    in the broker on every ALLOWED message).
     """
     if not _is_finite_positive(capacity):
         raise ValueError("token_bucket_gate: capacity must be a positive number")

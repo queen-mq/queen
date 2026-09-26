@@ -71,7 +71,7 @@ func (ob *OperationBuilder) Replace(enabled bool) *OperationBuilder {
 // `nil` sends JSON null, which is the broker's own "restore this option's
 // default" and is otherwise unreachable from here. Keys set with Option are
 // applied AFTER the QueueConfig bag, so they win over it; the spelling is the
-// wire's (camelCase, as configure_queue_v1 parses it) and is not validated here.
+// wire's (camelCase, as the broker parses it) and is not validated here.
 func (ob *OperationBuilder) Option(key string, value interface{}) *OperationBuilder {
 	if ob.rawOptions == nil {
 		ob.rawOptions = make(map[string]interface{})

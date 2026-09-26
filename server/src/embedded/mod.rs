@@ -6,7 +6,7 @@
 //!
 //! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
 //! let broker = Broker::start(
-//!     BrokerConfig::new().pg("localhost", 5432, "postgres", "postgres", "postgres"),
+//!     BrokerConfig::new().raft("/var/lib/myapp/queen"),
 //! )
 //! .await?;
 //!
@@ -41,78 +41,30 @@
 //! therefore the HTTP broker's, by construction. The push/ack render paths are
 //! pinned to the protocol types by the `protocol_conformance` tests; the
 //! remaining response bodies are covered by the embedded end-to-end test
-//! (`tests/embedded_smoke.rs`). The serde round-trip this costs is noise next
-//! to the Postgres work behind each call.
+//! (`tests/embedded_raft_smoke.rs`). The serde round-trip this costs is noise
+//! next to the state machine work behind each call.
 //!
 //! # Scope and caveats (v1)
 //!
-//! * **One `Broker` per process LIFETIME is the supported shape.** The
-//!   admission arbiter is a first-set-wins process global: a second concurrent
-//!   instance — or a new instance after a `start → shutdown → start` cycle —
-//!   still routes its maintenance writers through the FIRST broker's arbiter,
-//!   whose budget was sized for the first configuration. Everything stays
-//!   correct, but maintenance metering degrades. For a full teardown, restart
-//!   the process.
-//! * **`shutdown` is best-effort.** It aborts the loops this module spawned
-//!   and closes the connection pool (idle Postgres connections drop at once).
-//!   The loops spawned inside the engine — fusion shards, the admission
-//!   adapter, retention, stats, syscollect, the spool drain, the metrics
-//!   samplers and the log reporter — expose no handles today and keep running
-//!   until process exit; with the pool closed they fail their next
-//!   `pool.get()` and idle harmlessly.
+//! * **Storage** is the broker's own: the replicated state machine on a
+//!   single node, durable in the data directory given to
+//!   [`BrokerConfig::raft`] (or `QUEEN_RAFT_DIR`). Never open one data
+//!   directory from two brokers at once.
+//! * **`shutdown`** hands leadership off (a no-op off a cluster) and stops the
+//!   loops this module spawned.
 //! * **Panics.** The broker's own doctrine (PLAN_SINGLE_BINARY.md W1) is
-//!   unwind everywhere except the core: in raft mode, `start` installs a panic
-//!   hook (`obs::panic_policy::install_embedded`, chained to the host's) that
-//!   ABORTS the process when a raft core thread panics (planner, log writer,
-//!   apply, checkpoint, openraft) — crash, then replay from the data dir —
-//!   and leaves every other panic, including the host's own, to unwind. In
-//!   Postgres mode no hook is installed: a panicking background loop dies
-//!   silently and its subsystem stops; the request paths themselves are
-//!   panic-free under normal operation.
-//! * **The on-disk push spool** (DB-outage / maintenance durability) defaults
-//!   to a per-instance temp dir, removed on a clean empty shutdown:
-//!   `status: "buffered"` pushes survive a broker restart only if you
-//!   configure a stable [`BrokerConfig::spool_dir`]. Never share a spool dir
-//!   between two instances — with `FILE_BUFFER_DIR` set, a second in-process
-//!   Broker gets a private subdir of it for the same reason.
-//! * **No mesh.** N embedded instances over one Postgres stay correct (leases,
-//!   acks, dedup and maintenance coordinate through the database), but every
-//!   cross-instance notice a broker fleet sends as a peer frame is a periodic
-//!   READ of the database here, so it costs its floor rather than the ~20ms a
-//!   frame takes: a parked pop re-polls on its own backoff (≤ 1s), a config
-//!   invalidation rides the reconcile loop (`QUEEN_CACHE_REFRESH_INTERVAL_MS`,
-//!   60s), and another instance's PUSH enters this instance's wildcard
-//!   candidate ring on the WINDOWED reseed — one `QUEEN_HOTLIST_RESEED_MS`
-//!   (30s) plus that ring's de-phasing offset — because a push is a recent
-//!   write by definition.
-//!
-//!   Since 1.0.1 that last floor is two numbers rather than one, and the
-//!   second is where an embedded fleet is genuinely worse off than a broker
-//!   fleet. Anything that makes OLD partitions pending with NO write — a
-//!   backward seek, a consumer-group delete — is invisible to the windowed
-//!   pass by construction. A broker peer is told over the mesh; embedded has
-//!   no frame to receive, so it waits for the durable repair marker
-//!   (`queen.hotlist_repairs`) that the operation writes in its own
-//!   transaction and this instance's reconcile loop polls: one interval (60s),
-//!   after a 5s settle at start. Which side of that this surface sits on
-//!   matters: seek and consumer-group delete are NOT exposed here (see below),
-//!   so an embedded instance only ever READS those markers — the publisher is
-//!   an HTTP broker sharing this database, whether driven by its API or by
-//!   `queenctl`. Everything else a
-//!   windowed pass cannot see (a ring entry cleared in error, a claim stranded
-//!   by a dropped pop, a stale lease park) waits for the FULL walk,
-//!   `QUEEN_HOTLIST_RESEED_FULL_MS` (300s) plus its offset, exactly as in the
-//!   broker. Lower `QUEEN_CACHE_REFRESH_INTERVAL_MS` to buy the marker latency
-//!   back; `QUEEN_HOTLIST_RESEED_FULL_MS=0` makes every pass a full walk at
-//!   the 30s cadence instead (and stops the marker poll, which then has
-//!   nothing to add), at the database cost the windowing exists to avoid.
+//!   unwind everywhere except the core: `start` installs a panic hook
+//!   (`obs::panic_policy::install_embedded`, chained to the host's) that
+//!   ABORTS the process when a core thread panics (planner, log writer, apply,
+//!   checkpoint, openraft) — crash, then replay from the data dir — and leaves
+//!   every other panic, including the host's own, to unwind.
 //! * **Not exposed in v1**: consumer-group administration (list/seek/delete),
 //!   queue listings, traces and the streams surface — the DLQ is covered
 //!   ([`Broker::dlq`], [`Broker::retry_message`], [`Broker::dlq_replay`],
 //!   [`Broker::delete_message`]). Prefer [`Broker::dlq_replay`]: it addresses
 //!   the dead-letter ROW, which names exactly one consumer group's record.
-//! * Env tuning knobs (`QUEEN_*`, `PG_*`, `LOG_*`) are honoured exactly like
-//!   the binary; [`BrokerConfig`] fields win where both are set. Exceptions:
+//! * Env tuning knobs (`QUEEN_*`, `LOG_*`) are honoured exactly like the
+//!   binary; [`BrokerConfig`] fields win where both are set. Exceptions:
 //!   `QUEEN_TENANCY_HEADER` and `JWT_ENABLED` are ignored embedded (a warning
 //!   is logged) — see [`BrokerConfig`]. A malformed boolean env var makes the
 //!   binary exit; [`Broker::start`] returns [`StartError::Config`] instead.
@@ -139,25 +91,16 @@ use crate::handlers::AppState;
 /// the library reports them.
 #[derive(Debug)]
 pub enum StartError {
-    /// A boolean env knob has an unparseable value (e.g. `QUEEN_HOTLIST=si`).
-    /// The binary exits on these; the library refuses to start instead —
-    /// see the boolean pre-validation in `embedded/boot.rs`.
+    /// A knob has an unusable value (e.g. an unparseable boolean env var, or no
+    /// data directory). The binary exits on these; the library refuses to start
+    /// instead — see the pre-validation in `embedded/boot.rs`.
     Config(String),
-    /// The connection pool could not be built (bad TLS/pool configuration).
-    Pool(String),
-    /// Postgres is unreachable or refused the credentials.
-    Connect(String),
-    /// Applying schema.sql + procedures failed.
-    Schema(String),
 }
 
 impl std::fmt::Display for StartError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Config(e) => write!(f, "configuration: {e}"),
-            Self::Pool(e) => write!(f, "pool configuration: {e}"),
-            Self::Connect(e) => write!(f, "postgres connect: {e}"),
-            Self::Schema(e) => write!(f, "schema apply: {e}"),
         }
     }
 }
@@ -176,8 +119,8 @@ pub enum Error {
     NotFound(String),
     /// The broker refused or failed the operation. `status` is the HTTP code
     /// the handler chose (`None` when the failure was reported inside a 200
-    /// body, as pop and configure do). A 5xx here is usually transient (pool
-    /// exhaustion, a DB hiccup) and worth a retry with backoff; an in-body
+    /// body, as pop and configure do). A 5xx here is usually transient
+    /// (overload, no leader yet) and worth a retry with backoff; an in-body
     /// failure is usually semantic and terminal.
     Broker {
         status: Option<u16>,
@@ -234,105 +177,33 @@ impl std::error::Error for Error {}
 /// Configuration for [`Broker::start`].
 ///
 /// Every field is optional: unset fields fall back to the same environment
-/// variables and defaults the broker binary reads (`PG_HOST`, `DB_POOL_SIZE`,
+/// variables and defaults the broker binary reads (`QUEEN_RAFT_DIR`,
 /// `QUEEN_*` tuning knobs, …), so an embedded broker in a container behaves
 /// like the image. Two env knobs are deliberately NOT honoured embedded (a
 /// warning is logged if set): `QUEEN_TENANCY_HEADER` (embedded is single-tenant
 /// by construction) and `JWT_ENABLED` (there is no HTTP surface to
 /// authenticate; the in-process caller is trusted). `QUEEN_MAX_BODY_BYTES` has
 /// no embedded equivalent either — there is no request body to cap.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BrokerConfig {
-    pub pg_host: Option<String>,
-    pub pg_port: Option<u16>,
-    pub pg_user: Option<String>,
-    pub pg_password: Option<String>,
-    pub pg_database: Option<String>,
-    /// Connect to Postgres over TLS (env `PG_USE_SSL`, default false).
-    pub pg_use_ssl: Option<bool>,
-    /// Verify the server certificate chain when TLS is on
-    /// (env `PG_SSL_REJECT_UNAUTHORIZED`, default true).
-    pub pg_ssl_reject_unauthorized: Option<bool>,
-    /// Per-statement timeout in milliseconds (env `QUEEN_STMT_TIMEOUT_MS`,
+    /// Per-request deadline in milliseconds (env `QUEEN_STMT_TIMEOUT_MS`,
     /// default 30000).
     pub stmt_timeout_ms: Option<u64>,
-    /// Connection pool size (env `DB_POOL_SIZE`, default 160 — size this DOWN
-    /// for an application fleet: every instance owns its own pool).
-    pub pool_size: Option<usize>,
-    /// Apply schema.sql + procedures at start (advisory-locked, idempotent).
-    /// Disable when the schema is managed externally; the connecting role then
-    /// needs no DDL rights. Default true.
-    pub apply_schema: bool,
-    /// Stable directory for the on-disk push spool (DB-outage / maintenance
-    /// durability). `None` (default) uses a per-instance temp dir: spooled
-    /// pushes then do NOT survive a restart. Never share this dir between
-    /// instances.
-    pub spool_dir: Option<PathBuf>,
-    /// Run the background retention/eviction sweep (advisory-locked, one
-    /// sweeper per cycle across all instances sharing the DB). Disable only if
-    /// an external broker on the same database already runs it. Default true.
-    pub retention: bool,
-    /// Run the background stats reconciler feeding `queen.stats` (status and
-    /// analytics reads). Same advisory-lock coordination. Default true.
-    pub stats_refresh: bool,
-    /// Write per-instance worker/system metrics rows (dashboard). Default true.
-    pub system_metrics: bool,
-    /// Emit the periodic `rates`/`sizes` aggregate log blocks via `tracing`.
-    /// Default true (inert without a subscriber).
-    pub log_reports: bool,
-    /// Run on the single-node RSM at this durable data directory, without
-    /// connecting to Postgres. `None` keeps the normal Postgres backend (unless
-    /// `QUEEN_STORAGE=raft` is selected in the environment).
+    /// The durable data directory (env `QUEEN_RAFT_DIR`). Required: one of the
+    /// two must be set.
     pub raft_dir: Option<PathBuf>,
-    /// Raft mode: refuse writes (`507`) once the data directory's filesystem
-    /// is at least this percent used (env `QUEEN_RAFT_DISK_HIGH_PCT`, default
-    /// 85). 100 leaves only a full disk to the gate.
+    /// Refuse writes (`507`) once the data directory's filesystem is at least
+    /// this percent used (env `QUEEN_RAFT_DISK_HIGH_PCT`, default 85). 100
+    /// leaves only a full disk to the gate.
     pub raft_disk_high_pct: Option<f64>,
-    /// Raft mode: accept writes again below this percent once the disk gate
-    /// has closed (env `QUEEN_RAFT_DISK_LOW_PCT`, default 80).
+    /// Accept writes again below this percent once the disk gate has closed
+    /// (env `QUEEN_RAFT_DISK_LOW_PCT`, default 80).
     pub raft_disk_low_pct: Option<f64>,
-}
-
-/// Same defaults as [`BrokerConfig::new`] — the derive would silently flip
-/// every documented `Default true` flag to false, so it is written out.
-impl Default for BrokerConfig {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl BrokerConfig {
     pub fn new() -> Self {
-        Self {
-            pg_host: None,
-            pg_port: None,
-            pg_user: None,
-            pg_password: None,
-            pg_database: None,
-            pg_use_ssl: None,
-            pg_ssl_reject_unauthorized: None,
-            stmt_timeout_ms: None,
-            pool_size: None,
-            apply_schema: true,
-            spool_dir: None,
-            retention: true,
-            stats_refresh: true,
-            system_metrics: true,
-            log_reports: true,
-            raft_dir: None,
-            raft_disk_high_pct: None,
-            raft_disk_low_pct: None,
-        }
-    }
-
-    pub fn pg_use_ssl(mut self, on: bool) -> Self {
-        self.pg_use_ssl = Some(on);
-        self
-    }
-
-    pub fn pg_ssl_reject_unauthorized(mut self, on: bool) -> Self {
-        self.pg_ssl_reject_unauthorized = Some(on);
-        self
+        Self::default()
     }
 
     pub fn stmt_timeout_ms(mut self, ms: u64) -> Self {
@@ -340,67 +211,14 @@ impl BrokerConfig {
         self
     }
 
-    /// Set the whole Postgres connection in one call.
-    pub fn pg(
-        mut self,
-        host: impl Into<String>,
-        port: u16,
-        user: impl Into<String>,
-        password: impl Into<String>,
-        database: impl Into<String>,
-    ) -> Self {
-        self.pg_host = Some(host.into());
-        self.pg_port = Some(port);
-        self.pg_user = Some(user.into());
-        self.pg_password = Some(password.into());
-        self.pg_database = Some(database.into());
-        self
-    }
-
-    pub fn pool_size(mut self, n: usize) -> Self {
-        self.pool_size = Some(n);
-        self
-    }
-
-    pub fn apply_schema(mut self, apply: bool) -> Self {
-        self.apply_schema = apply;
-        self
-    }
-
-    pub fn spool_dir(mut self, dir: impl Into<PathBuf>) -> Self {
-        self.spool_dir = Some(dir.into());
-        self
-    }
-
-    pub fn retention(mut self, on: bool) -> Self {
-        self.retention = on;
-        self
-    }
-
-    pub fn stats_refresh(mut self, on: bool) -> Self {
-        self.stats_refresh = on;
-        self
-    }
-
-    pub fn system_metrics(mut self, on: bool) -> Self {
-        self.system_metrics = on;
-        self
-    }
-
-    pub fn log_reports(mut self, on: bool) -> Self {
-        self.log_reports = on;
-        self
-    }
-
-    /// Select the single-node Raft/RSM backend and its required durable data
-    /// directory (PLAN_RAFT WP-2.10).
+    /// The broker's durable data directory (PLAN_RAFT WP-2.10).
     pub fn raft(mut self, data_dir: impl Into<PathBuf>) -> Self {
         self.raft_dir = Some(data_dir.into());
         self
     }
 
-    /// Set the raft disk gate in one call: refuse writes at `high` percent of
-    /// the data directory's filesystem used, accept them again below `low`.
+    /// Set the disk gate in one call: refuse writes at `high` percent of the
+    /// data directory's filesystem used, accept them again below `low`.
     pub fn raft_disk_pct(mut self, high: f64, low: f64) -> Self {
         self.raft_disk_high_pct = Some(high);
         self.raft_disk_low_pct = Some(low);
@@ -440,33 +258,25 @@ pub struct Broker {
 struct Inner {
     st: Arc<AppState>,
     tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
-    /// Set when the spool dir was auto-generated (no explicit `spool_dir`, no
-    /// FILE_BUFFER_DIR): shutdown removes it when it holds no pending events.
-    auto_spool_dir: Option<PathBuf>,
 }
 
 impl Broker {
-    /// Boot the broker engine: connect to Postgres, apply the schema (unless
-    /// disabled), start the background machinery. Returns once the broker is
-    /// ready to serve operations.
+    /// Boot the broker engine: open the data directory, start the state
+    /// machine and the background machinery. Returns once the broker is ready
+    /// to serve operations.
     pub async fn start(cfg: BrokerConfig) -> Result<Self, StartError> {
         let booted = boot::boot(&cfg).await?;
         Ok(Self {
             inner: Arc::new(Inner {
                 st: booted.st,
                 tasks: std::sync::Mutex::new(booted.tasks),
-                auto_spool_dir: booted.auto_spool_dir,
             }),
         })
     }
 
     /// Push one or more messages. Per-item outcomes (queued / duplicate /
-    /// buffered / error / failed) are in the returned vector, in request
-    /// order — a partial failure is not an `Err`. This includes the
-    /// maintenance-mode spool path, which the HTTP layer reports as a 500 when
-    /// any item's spool write failed but whose body is still the per-item
-    /// array; the array wins here so the caller can see which items were
-    /// accepted.
+    /// error / failed) are in the returned vector, in request order — a
+    /// partial failure is not an `Err`.
     pub async fn push(&self, items: Vec<qp::PushItem>) -> Result<Vec<qp::PushResult>, Error> {
         let body = serde_json::to_vec(&qp::PushRequest::new(items))
             .map_err(|e| Error::InvalidRequest(e.to_string()))?;
@@ -479,11 +289,6 @@ impl Broker {
         .await;
         let (status, bytes) = read_response(resp).await;
         if !status.is_success() {
-            // buffer_all renders the normal per-item array under a 500 when
-            // some spool writes failed — surface the outcomes, not an Err.
-            if let Ok(results) = serde_json::from_slice::<Vec<qp::PushResult>>(&bytes) {
-                return Ok(results);
-            }
             return Err(error_from(status, &bytes));
         }
         parse(&bytes)
@@ -538,7 +343,7 @@ impl Broker {
     }
 
     /// Ack (or nack) one message. Like the HTTP API, a REJECTED ack (expired
-    /// or foreign lease, unknown message, pool exhaustion on the ack path) is
+    /// or foreign lease, unknown message) is
     /// `Ok` with `success: false` and the reason in `error` — inspect the
     /// [`qp::AckResult`]; `Err` here means the request itself was malformed.
     pub async fn ack(&self, req: &qp::AckRequest) -> Result<qp::AckResult, Error> {
@@ -663,7 +468,7 @@ impl Broker {
     }
 
     /// The broker's main metrics snapshot (the `/metrics` document): counters,
-    /// latencies, cache and pool gauges, per-queue rates.
+    /// latencies, per-queue rates.
     pub async fn metrics(&self) -> Result<serde_json::Value, Error> {
         let resp = crate::handlers::handle_metrics(State(self.inner.st.clone())).await;
         let (status, bytes) = read_response(resp).await;
@@ -720,9 +525,8 @@ impl Broker {
     }
 
     /// Replay a dead-lettered message addressed by (partition, transaction id):
-    /// the newest dead-letter row at that address is MOVED back into the log —
-    /// claim under the row lock, push, delete, ONE transaction
-    /// (`queen.log_dlq_move_v1`).
+    /// a dead-letter row at that address is MOVED back into the log — push and
+    /// delete in one log entry.
     ///
     /// Returns the handler's document: `{success, result: "moved"|"duplicate",
     /// queue, partition, consumerGroup, dlqId, originalTransactionId,
@@ -782,25 +586,6 @@ impl Broker {
             Extension(crate::tenant::Tenant::default_tenant()),
             Path(dlq_id.to_string()),
             Bytes::from(serde_json::Value::Object(body).to_string()),
-        )
-        .await;
-        let (status, bytes) = read_response(resp).await;
-        if !status.is_success() {
-            return Err(error_from(status, &bytes));
-        }
-        parse(&bytes)
-    }
-
-    /// `POST /api/v1/system/maintenance` — the PUSH maintenance switch.
-    ///
-    /// While it is on every push is diverted to the on-disk spool and nothing
-    /// reaches `queen.log_segments`; the replay routes, which cannot be
-    /// spooled, are refused with 503 instead. Returns the handler's document
-    /// (`maintenanceMode`, `bufferedMessages`, `bufferHealthy`, `message`).
-    pub async fn set_push_maintenance(&self, enabled: bool) -> Result<serde_json::Value, Error> {
-        let resp = crate::handlers::handle_set_maintenance(
-            State(self.inner.st.clone()),
-            Bytes::from(serde_json::json!({ "enabled": enabled }).to_string()),
         )
         .await;
         let (status, bytes) = read_response(resp).await;
@@ -1008,14 +793,9 @@ impl Broker {
         parse(&bytes)
     }
 
-    /// Stop the loops this handle owns, close the connection pool (idle
-    /// Postgres connections drop immediately; any engine loop that survives —
-    /// see the module docs — fails its next `pool.get()` and idles harmlessly),
-    /// remove an auto-generated spool dir when it holds nothing, and report how
-    /// many spooled push events are still on disk (0 in the common case). Safe
-    /// to call once from any clone; later calls are no-ops. After shutdown,
-    /// every operation on any clone fails with a pool error.
-    pub async fn shutdown(&self) -> usize {
+    /// Hand leadership off (a no-op off a cluster) and stop the loops this
+    /// handle owns. Safe to call once from any clone; later calls are no-ops.
+    pub async fn shutdown(&self) {
         // A raft cluster node that leads hands its leadership to a caught-up
         // peer first, as the binary does on SIGTERM (a no-op off a cluster).
         self.inner
@@ -1026,21 +806,7 @@ impl Broker {
         for t in self.inner.tasks.lock().unwrap().drain(..) {
             t.abort();
         }
-        self.inner.st.pool.close();
-        let pending = self.inner.st.file_buffer.pending_count();
-        if pending > 0 {
-            tracing::warn!(
-                target: "shutdown",
-                pending,
-                "embedded broker: spool has undrained events at shutdown"
-            );
-        } else if let Some(dir) = &self.inner.auto_spool_dir {
-            // Best-effort: the auto dir is documented non-durable, and leaving
-            // empties behind would accumulate one dir per Broker lifetime.
-            let _ = std::fs::remove_dir_all(dir);
-        }
         tracing::info!(target: "shutdown", "embedded broker shut down");
-        pending
     }
 }
 
@@ -1220,15 +986,5 @@ mod tests {
         off.consumer_group = Some("workers".into());
         let plain: serde_json::Value = pop_params(&off, None, None).unwrap();
         assert!(plain.get("conflation").is_none(), "{plain}");
-    }
-
-    /// Default::default() and new() must configure the same broker — the
-    /// derive would silently flip every documented-true flag to false.
-    #[test]
-    fn default_matches_new() {
-        let d = BrokerConfig::default();
-        assert!(
-            d.apply_schema && d.retention && d.stats_refresh && d.system_metrics && d.log_reports
-        );
     }
 }

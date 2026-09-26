@@ -1,46 +1,53 @@
 ---
 title: Consumer groups
-description: "Listing groups and their lag, changing a subscription, seeking a cursor per queue or per partition, and the admin DELETE routes."
+description: "Listing groups and their lag, reading a group's positions, changing a subscription, seeking a cursor per queue or per partition, and the admin DELETE routes."
 type: reference
 tier: use
 sidebar:
   order: 10
   label: Consumer groups
 sourceOfTruth:
-  - server/src/handlers/consumer_groups.rs
-  - server/src/main.rs
+  - server/src/rsm/facade/real/phase2.rs
+  - server/src/rsm/facade/real/phase2/reads.rs
+  - server/src/rsm/facade/real/phase2/admin.rs
+  - server/src/rsm/facade/real/phase2/positions.rs
+  - server/src/handlers/raft.rs
+  - server/src/handlers/data.rs
   - server/src/auth.rs
-  - server/src/db.rs
-  - server/sql/procedures/014_consumer_groups.sql
-  - server/sql/procedures/004_log_pop.sql
-  - server/sql/procedures/010_log_admin.sql
+  - server/src/config.rs
+  - server/src/rsm/apply.rs
+  - server/src/rsm/planner/mod.rs
+  - server/src/rsm/planner/pop.rs
+  - server/src/rsm/planner/ack.rs
 verifiedBy:
   - clients/client-js/test-v2/watermark.js
   - test/runners/tenancy/tenancy-check.sh
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): main.rs, auth.rs and db.rs gained the replay and KV console routes; nothing this page describes moved.
+  - server/src/rsm/tests/positions.rs
 ---
 
-Consumption state on this engine is one cursor per (partition, consumer group):
-`queen.log_consumers.committed`, the highest offset that group has completed in
-that partition. There is no per-message state, so every number on these routes is
-arithmetic over cursors and partition watermarks rather than a scan.
+Consumption state is one cursor per (partition, consumer group) in the replicated
+state: `committed`, the highest offset that group has completed in that partition.
+There is no per-message state, so every number on these routes is arithmetic over
+cursors and partition offsets rather than a scan of messages.
 
 A pop that carries no `consumerGroup` uses the reserved group name
 `__QUEUE_MODE__`, which is why that name shows up in listings on queues where
-nobody set a group explicitly. Groups are created implicitly on first contact:
-the first pop for a (queue, group) writes a marker row in
-`queen.consumer_groups_metadata` and seeds a cursor for every existing partition
-in one statement.
+nobody set a group explicitly. Groups are created implicitly: the first pop of a group
+on a queue registers it there, with its subscription (where a partition it has not
+touched yet starts) and its delivery policy. Each partition's cursor is created on the
+group's first contact with that partition, seeded from the registration.
 
-Reads are `read-only`. `subscription` and both `seek` routes are `read-write`.
-Both `DELETE` routes are **admin**: `route_access_level` maps every `DELETE`
-under `/api/v1/consumer-groups/` to admin regardless of what follows.
+Reads are `read-only`, except `POST /api/v1/consumer-groups/positions`, which is a
+POST and therefore `read-write`. `subscription` and both `seek` routes are
+`read-write`. Both `DELETE` routes are **admin**: `route_access_level` maps every
+`DELETE` under `/api/v1/consumer-groups/` to admin regardless of what follows. Every
+write on this page is one entry in the replicated log. Group, queue and partition names
+in these paths are percent-decoded, so encode them as you would any path segment.
 
 ## GET /api/v1/consumer-groups
 
-Every group the tenant has, one entry per (group, queue) pair. The body is a bare
-JSON array.
+Every group the tenant has, one entry per (group, queue) pair with at least one cursor,
+ordered by group, then queue. The body is a bare JSON array.
 
 ```json
 [
@@ -55,9 +62,10 @@ JSON array.
     "maxTimeLag": 42,
     "state": "Stable",
     "storage": "segments",
+    "kind": "queen",
     "subscriptionMode": "new",
-    "subscriptionTimestamp": "2026-07-30T08:00:00Z",
-    "subscriptionCreatedAt": "2026-07-30T08:00:00Z",
+    "subscriptionTimestamp": "2026-07-30T08:00:00.000000Z",
+    "subscriptionCreatedAt": "2026-07-30T08:00:00.000000Z",
     "conflation": false
   }
 ]
@@ -69,21 +77,20 @@ Read these fields carefully:
   32-partition queue reports `members: 32`. `partitionCursors` carries the same
   number under its true name; `members` is kept only for wire compatibility.
 - `totalLag` is the sum over partitions of
-  `GREATEST(last_offset - GREATEST(committed, log_start - 1), 0)`: pure
-  arithmetic, exact, and no segment scan. Frames already evicted by retention are
-  not counted as lag.
-- `maxTimeLag` is the age in seconds of the oldest unconsumed segment. This is the
-  one value that touches `queen.log_segments`.
+  `max(lastOffset - max(committed, logStart - 1), 0)`: pure arithmetic, exact, and no
+  scan. Messages already removed by retention are not counted as lag.
+- `maxTimeLag` is the age in seconds of the oldest message any of the group's cursors
+  on that queue has not consumed.
 - `state` is derived, not stored: `Lagging` when `maxTimeLag > 300`, otherwise
-  `Stable` when the group has ever consumed anything, otherwise `Dead`.
-- `subscriptionMode`, `subscriptionTimestamp` and `subscriptionCreatedAt` are the
-  group's durable registration on this queue, read from
-  `queen.consumer_groups_metadata`. Before 1.1.0 all three were hard-coded `null`,
-  which is why a group's start position had no console surface at all. They are
-  still `null` for a group that has cursors but no registration row, i.e. a group
-  that only ever used the pinned single-partition route without declaring a
-  delivery policy, which is the one path that does not register.
-- `conflation` (1.1.0) is the group's stored delivery policy on this queue: `true`
+  `Stable` when the group has ever consumed anything there, otherwise `Dead`.
+- `storage` is always `"segments"` and `kind` always `"queen"`.
+- `subscriptionMode` (`all`, `new` or `timestamp`), `subscriptionTimestamp` and
+  `subscriptionCreatedAt` are the group's registration on this queue. For `all` the
+  timestamp is the epoch (`1970-01-01T00:00:00.000000Z`); for `new` it is the
+  registration instant. All three are `null` for `__QUEUE_MODE__`, and for a group that
+  has cursors but no registration on the queue: one that only used the partition-pinned
+  pop without conflation, or whose cursors a seek created.
+- `conflation` is the group's stored delivery policy on this queue: `true`
   means [last-value delivery](/reference/http/pop#conflation), where `totalLag`
   and `partitionsWithLag` mean different things. For a conflating group `totalLag`
   is **log lag**, the positions still to retire, most of which will be skipped;
@@ -93,9 +100,9 @@ Read these fields carefully:
 ## GET /api/v1/consumer-groups/lagging
 
 Query: `minLagSeconds` (default **3600**). Returns a bare array of
-(group, partition) pairs whose time lag exceeds the threshold. The static
-`lagging` path is registered before the `:group` parameter route, so it cannot be
-shadowed by a group actually named `lagging`.
+(group, partition) cursors, queue mode included, whose time lag is greater than the
+threshold, largest lag first. The static `lagging` path is matched before the group
+route, so a group actually named `lagging` does not shadow it.
 
 ```json
 [
@@ -105,6 +112,7 @@ shadowed by a group actually named `lagging`.
     "partition_name": "eu-3",
     "partition_id": "0198...",
     "worker_id": "0198...",
+    "kind": "queen",
     "offset_lag": 512,
     "time_lag_seconds": 7421,
     "lag_hours": 2.06,
@@ -114,11 +122,11 @@ shadowed by a group actually named `lagging`.
 ]
 ```
 
-Keys are snake_case here: this route predates the camelCase listings and its
-shape is unchanged. `time_lag_seconds` is derived from the oldest unconsumed
-segment's `created_at`, so a partition whose entire backlog was evicted drops out
-of the result rather than reporting a huge lag. `last_consumed_at` is always
-`null`: `queen.log_consumers` does not carry that column.
+Keys are snake_case here, unlike the other listings. `time_lag_seconds` is the age of
+the oldest message the cursor has not consumed, so a partition whose entire backlog was
+removed by retention drops out of the result rather than reporting a huge lag.
+`lag_hours` is the same value in hours, rounded to two decimals. `partition_id` is the
+partition UUID. `last_consumed_at` is always `null`: the cursor does not record it.
 
 ## GET /api/v1/consumer-groups/:group
 
@@ -129,6 +137,7 @@ queue name.
 {
   "orders": {
     "conflation": false,
+    "kind": "queen",
     "partitions": [
       {
         "partition": "eu-1",
@@ -144,19 +153,54 @@ queue name.
 }
 ```
 
-`leaseActive` is true only while `lease_expires_at` is in the future. That is the
-one in-flight leased batch this group holds on the partition. `totalConsumed` is
-the group's lifetime counter from `queen.log_consumers.total_consumed`, and it
+`leaseActive` is true only while the group holds a live lease on the partition, the
+one in-flight leased batch. `totalConsumed` is the cursor's lifetime counter, and it
 counts **log positions retired**, not handler runs: under
 [conflation](/reference/http/pop#conflation) it keeps counting the skipped
 positions too, which is what the lag and state derivations want. `conflation`
-(1.1.0) is the group's stored delivery policy on that queue. A group with no
-cursors returns `{}`.
+is the group's stored delivery policy on that queue. `lastConsumedAt` is always `null`.
+Partitions are sorted by name.
+
+A group with no cursor anywhere answers `404` with
+`{"error":"Consumer group not found"}`.
+
+## POST /api/v1/consumer-groups/positions
+
+Where a group reads, partition by partition. The group travels in the body, not in the
+path, because a group name can be any string. Access level `read-write`: the route is a
+POST, although it writes nothing.
+
+```json
+{ "consumerGroup": "invoicer", "entries": [ { "queue": "orders", "partition": "eu-1" } ] }
+```
+
+```json
+{
+  "consumerGroup": "invoicer",
+  "entries": [ { "queue": "orders", "partition": "eu-1", "offset": 91205, "metadata": "" } ]
+}
+```
+
+- `offset` is the next offset the group reads: the cursor's `committed + 1`. Where the
+  group has no position (no cursor, no such partition, no such queue) the entry answers
+  `"offset": null` and carries no `metadata`.
+- `partition` defaults to `Default`. There is one answer per asked entry, in order, and
+  at most 65,536 entries per call.
+- Without `entries`, the answer is every position the group holds, on every queue it is
+  registered on.
+- `metadata` is the string stored with the position. It is empty unless a caller set
+  one through the `positions` field of `POST /api/v1/transaction`.
+- The read waits until this node has applied everything the cluster had committed when
+  it began, so a position acknowledged anywhere in the cluster is what it answers.
+
+A missing or empty `consumerGroup`, an entry without a `queue`, `entries` that is not
+an array, or more than 65,536 entries is a `400`.
 
 ## POST /api/v1/consumer-groups/:group/subscription
 
-Body: `subscriptionTimestamp` (required, non-empty). A missing or empty value is a
-`400`.
+Body: `subscriptionTimestamp` (required, an ISO 8601 instant). A missing value is a
+`400` (`subscriptionTimestamp is required`); one that does not parse, the empty string
+included, is a `400` (`subscriptionTimestamp is invalid`).
 
 ```json
 { "subscriptionTimestamp": "2026-07-30T08:00:00Z" }
@@ -173,18 +217,16 @@ Response:
 }
 ```
 
-What this actually changes: the stored subscription timestamp on the group's
-`queen.consumer_groups_metadata` rows (for **every queue** the group has touched,
-because the update carries no queue predicate), and it deletes the group's
-empty-scan watermarks so a backward move re-exposes cold partitions to the next
-pop's candidate scan.
+What this actually changes: the group's registration on **every queue** of the tenant
+where it is registered, because the route takes no queue. Each registration becomes
+subscription mode `timestamp` at the given instant, all in one log entry. `rowsUpdated`
+is the number of queues changed, and `newTimestamp` echoes the value as sent.
 
 <Aside type="caution">
 This route does **not** move any existing cursor. It changes where a partition the
-group has *not yet* touched gets seeded on first contact (the durable
-subscription record the pop path consults). `rowsUpdated: 0` with
-`success: true` means the group has no metadata row yet (it has never popped), so
-nothing was changed at all. To reposition a group that is already consuming, use
+group has *not yet* touched gets seeded on first contact. `rowsUpdated: 0` with
+`success: true` means the group is registered nowhere (it has never popped), so
+nothing was written at all. To reposition a group that is already consuming, use
 `seek`.
 </Aside>
 
@@ -200,24 +242,25 @@ Two routes, one body shape. Send either `toEnd` or `timestamp`:
 { "timestamp": "2026-07-30T08:00:00Z" }
 ```
 
-A body with neither is a `400` (`Must specify toEnd=true or a timestamp`). The
-per-partition route additionally accepts an **empty body**, which it treats as
-`toEnd: true`. That is what the dashboard's per-partition "skip to end" button
-sends.
+A body with neither, or with a `timestamp` that does not parse, is a `400`
+`{"success":false,"error":"Must specify toEnd=true or a timestamp"}`. Both routes treat
+an **empty body** as `toEnd: true`, and `toEnd: true` wins when a body sends both.
 
 Cursor placement:
 
-- `toEnd` sets `committed = last_offset`, so the next wanted offset is
-  `last_offset + 1` and the whole existing backlog is skipped.
-- `timestamp` sets `committed` to the base offset of the first segment with
-  `created_at >= timestamp`, minus one. Resolution is therefore
-  **segment-granular**, not per-message. If no segment is that recent, the cursor
-  lands on `last_offset` (a future-only cursor).
+- `toEnd` sets `committed` to the partition's last offset, so the next wanted offset is
+  the one after it and the whole existing backlog is skipped.
+- `timestamp` sets `committed` to one below the first retained message stamped at or
+  after `timestamp` (read to millisecond precision). Messages pushed together in one
+  request share one stamp, so the resolution is a push, not a message. If no message is
+  that recent, the cursor lands on the last offset (a future-only cursor). A timestamp
+  older than what is retained lands on the oldest retained message.
 
 Either way the seek releases any live lease on the partition and resets the
-retry/redelivery state for that (partition, group). Because the timestamp walk
-starts at the retention watermark, seeking to a timestamp older than what is
-retained lands on the oldest retained segment.
+retry and redelivery state for that (partition, group). A partition where the group has
+no cursor gets one. Every partition a seek moves is moved in one log entry. When it
+applies, each partition the seek left behind its last offset becomes claimable for the
+group again, so the group's next pop delivers from the new position.
 
 ### POST /api/v1/consumer-groups/:group/queues/:queue/seek
 
@@ -228,15 +271,16 @@ Seeks every partition of the queue.
   "success": true,
   "consumerGroup": "invoicer",
   "queueName": "orders",
+  "partitionName": null,
   "seekToEnd": true,
   "targetTimestamp": null,
-  "partitionsUpdated": 8
+  "partitionsUpdated": 8,
+  "updated": true
 }
 ```
 
-If no partition matched (the queue does not exist for this tenant, or has no
-partitions yet), the stored procedure fails loudly rather than reporting a
-successful no-op:
+A queue that does not exist for this tenant, or has no partitions yet, answers `404`
+rather than a successful no-op:
 
 ```json
 {
@@ -248,12 +292,9 @@ successful no-op:
 }
 ```
 
-That body is served with HTTP `404`: the broker maps a stored-procedure `error`
-containing "not found" to `404` and anything else to `500`.
-
 ### POST /api/v1/consumer-groups/:group/queues/:queue/partitions/:partition/seek
 
-Seeks one named partition.
+Seeks one named partition. The response has the same keys as the queue-wide route:
 
 ```json
 {
@@ -262,63 +303,46 @@ Seeks one named partition.
   "queueName": "orders",
   "partitionName": "eu-1",
   "seekToEnd": false,
-  "targetTimestamp": "2026-07-30T08:00:00.000Z",
+  "targetTimestamp": "2026-07-30T08:00:00.000000Z",
+  "partitionsUpdated": 1,
   "updated": true
 }
 ```
 
-An unknown partition returns `{"success": false, "error": "Partition not found"}`
-at `404`.
-
-After a successful seek the broker repairs its in-memory discovery ring for
-(queue, group) and wakes parked pops, so a backward seek starts redelivering
-immediately instead of waiting for the periodic reseed. A queue-wide seek
-re-derives the ring from committed database state, which only re-adds partitions
-whose `last_offset` is genuinely ahead of `committed`, so a seek to end adds
-nothing; a single-partition seek marks that one partition. The other brokers are
-told over the mesh, and the seek also writes a durable repair marker they read on
-their reconcile pass, so a peer that missed the frame repairs within one interval
-rather than at its next full reseed. See [the hot-list](/internals/hotlist).
-
-If that repair fails on this broker, the cursor still moved, so the response is
-still `200` and still `"success": true`, with two extra keys:
-
-```json
-{
-  "hotlistRepaired": false,
-  "warning": "the cursor moved, but re-discovering the partitions it made pending failed on this broker; delivery of the replayed messages resumes at the next full reseed"
-}
-```
-
-A seek whose repair worked is byte-identical to what it has always been: neither
-key appears.
+An unknown partition answers `404` with the same keys as the queue-wide `404` and
+`"error": "Partition not found"`.
 
 ## DELETE routes
 
-Both are **admin**. Both accept `deleteMetadata` (default `true`) and both answer
-`200` with a JSON body, not `204`, because the SDKs read fields off the response.
+Both are **admin**. Both accept `deleteMetadata` (default `true`; only the value
+`false` turns it off), and both answer `200` with a JSON body, not `204`, because the
+SDKs read fields off the response. Each is one log entry.
 
 ### DELETE /api/v1/consumer-groups/:group
 
-Removes the group's cursors across **every queue** of the tenant, plus its
-empty-scan watermarks, plus (when `deleteMetadata`) its
-`queen.consumer_groups_metadata` rows.
+Removes the group's cursors on **every queue** of the tenant and, when
+`deleteMetadata` is on, its registration on each queue together with the group's
+counters and pending-work index there.
 
 ```json
 {
   "success": true,
   "consumerGroup": "invoicer",
+  "queueName": null,
   "deletedPartitions": 24,
-  "metadataDeleted": true
+  "metadataDeleted": true,
+  "queues": ["orders", "refunds"]
 }
 ```
 
-`deletedPartitions` is the number of `queen.log_consumers` cursor rows removed.
+`deletedPartitions` is the number of cursors removed. `metadataDeleted` echoes the
+flag: it is `true` even on a queue where there was no registration to remove. `queues`
+lists the queues the call looked at, every queue of the tenant here. A group with
+nothing to remove still answers `success: true` with `deletedPartitions: 0`.
 
 ### DELETE /api/v1/consumer-groups/:group/queues/:queue
 
-The same operation scoped to one queue: cursors for that queue's partitions and
-the `(queue, group)` watermark row.
+The same operation scoped to one queue.
 
 ```json
 {
@@ -326,29 +350,24 @@ the `(queue, group)` watermark row.
   "consumerGroup": "invoicer",
   "queueName": "orders",
   "deletedPartitions": 8,
-  "metadataDeleted": true
+  "metadataDeleted": true,
+  "queues": ["orders"]
 }
 ```
 
-Clearing the watermark is the part that matters: an advanced empty-scan watermark
-would otherwise fence off every partition and the recreated group would appear to
-consume nothing.
-
 <Aside type="note">
-Deleting a group is how you make it re-consume from the beginning: with no cursor
-row, the next pop seeds from the retention watermark. The broker also drops the
-group from its in-memory ring on every queue and from the "already seeded" cache,
-so first contact re-seeds cold instead of trusting stale state. There is no
-separate reset-offsets route: `seek` and `DELETE` are the two mechanisms.
-</Aside>
+With no cursor on a partition, the group's next pop seeds a new one from its
+registration: from the oldest retained message for `all`, from the first message
+written at or after the registration instant for `new`, and from the first at or after
+the subscription timestamp for `timestamp`. With `deleteMetadata` on, the registration
+goes too, and the next pop registers the group again from what that pop asks for, or
+from `DEFAULT_SUBSCRIPTION_MODE` (default `new`) when it asks for nothing. So a delete
+makes a group re-consume from the oldest retained message only when its registration,
+kept or new, is `all`; to restart from a point in time, `seek` with a `timestamp`.
+There is no separate reset-offsets route: `seek` and `DELETE` are the two mechanisms.
 
-Like a seek, a delete is a cursor move that writes nothing, so the other brokers
-cannot discover it on their own: they still hold a ring for the group name and
-would keep serving from it. The broker that runs the delete therefore repairs the
-queues it holds a ring for and hands the result to its peers, and the delete also
-publishes a durable repair marker for the peers whose queues this broker does not
-poll. Before the reseed was windowed this healed within one 30-second floor
-because every broker walked every partition that often.
+Neither route removes the group's dead letters. Purge them with `DELETE /api/v1/dlq`.
+</Aside>
 
 ## Access levels
 
@@ -357,14 +376,15 @@ because every broker walked every partition that often.
 | `GET /api/v1/consumer-groups` | read-only |
 | `GET /api/v1/consumer-groups/lagging` | read-only |
 | `GET /api/v1/consumer-groups/:group` | read-only |
+| `POST /api/v1/consumer-groups/positions` | read-write |
 | `POST /api/v1/consumer-groups/:group/subscription` | read-write |
 | `POST /api/v1/consumer-groups/:group/queues/:queue/seek` | read-write |
 | `POST /api/v1/consumer-groups/:group/queues/:queue/partitions/:partition/seek` | read-write |
 | `DELETE /api/v1/consumer-groups/:group` | admin |
 | `DELETE /api/v1/consumer-groups/:group/queues/:queue` | admin |
 
-Every route here is tenant-scoped: the group name travels into the stored
-procedure together with the tenant, so two tenants can run a group called
-`workers` on their own queues without seeing each other's cursors. Related pages:
+Every route here is tenant-scoped: a group's cursors and registrations hang off the
+tenant's own queues and partitions, so two tenants can run a group called `workers` on
+their own queues without seeing each other's cursors. Related pages:
 [queues and resources](/reference/http/queues),
 [messages and DLQ](/reference/http/messages-dlq).

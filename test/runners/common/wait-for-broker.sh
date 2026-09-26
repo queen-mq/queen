@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Block until every URL in $QUEEN_WAIT_URLS answers a healthy /health.
 #
-# The broker's /health returns HTTP 200 only after it has connected to Postgres
-# AND applied its schema (it binds the HTTP listener after schema apply), and
-# 503 until then — so `curl -f` (fail on >=400) is a combined broker+PG+schema
-# readiness gate. The runtime broker image has no shell tools, which is why the
-# wait lives here in the runner (which has curl) rather than as a compose
-# healthcheck on the broker.
+# A raft broker's /health answers 503 ("settling") until its state machine is
+# open and ready — on a cluster node that also means a leader is known and its
+# apply has caught up — and 200 ("healthy") from then on. So `curl -f` (fail on
+# >=400) is the whole readiness gate, per node. The runtime broker image carries
+# no probe tooling of its own, which is why the wait lives here in the runner
+# (which has curl) rather than as a compose healthcheck on the broker.
 set -u
 
 : "${QUEEN_WAIT_URLS:?QUEEN_WAIT_URLS must be set (space-separated health URLs)}"

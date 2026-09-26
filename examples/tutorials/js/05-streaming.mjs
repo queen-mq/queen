@@ -4,9 +4,9 @@
 //
 // The four tutorials before this one move messages. This one aggregates them:
 // a tumbling window per entity, whose state, output and acknowledgements commit
-// in the same PostgreSQL transaction. That is exactly-once aggregation with no
-// changelog topic and no state store to operate, because the state and the
-// queue are already in the same database.
+// together, as one entry of the broker's replicated log. That is exactly-once
+// aggregation with no changelog topic and no state store to operate, because
+// the state and the queue are already in the same broker.
 //
 // A stream is a running process, so the order here is the order you would use
 // in production: start it, then let events arrive.
@@ -21,7 +21,7 @@ const RUN = Date.now().toString(36)
 const EVENTS = `tut-js-stream-events-${RUN}`
 const TOTALS = `tut-js-stream-totals-${RUN}`
 
-// The query id is this streaming query's identity in the database. Its window
+// The query id is this streaming query's identity in the broker. Its window
 // state is keyed by it, so restarting the program with the same id resumes the
 // same windows instead of starting new ones.
 const QUERY_ID = `tut-js-totals-${RUN}`

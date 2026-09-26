@@ -20,8 +20,8 @@ export QUEEN_URL="${QUEEN_URL:-http://localhost:6632}"
 echo "broker: $QUEEN_URL"
 if ! curl -fsS "$QUEEN_URL/health" >/dev/null 2>&1; then
   echo "no broker answering at $QUEEN_URL/health" >&2
-  echo "start one with:  docker run --name queen-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 -d postgres:16" >&2
-  echo "                 cd $ROOT/server && cargo run" >&2
+  echo "start one with:  docker run -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:latest" >&2
+  echo "or from source:  cd $ROOT/server && QUEEN_RAFT_DIR=./queen-data cargo run --release" >&2
   exit 1
 fi
 

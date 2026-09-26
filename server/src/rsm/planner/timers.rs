@@ -1,42 +1,39 @@
-//! Timers — the port of `025_log_timers.sql` onto the RSM (PLAN_RAFT.md WP-2.3).
+//! Timers on the RSM (PLAN_RAFT.md WP-2.3).
 //!
-//! # What maps to what
+//! # Where things live
 //!
-//! | 025 | here |
-//! |---|---|
-//! | `queen.log_timers` | [`Keyspace::Timers`](crate::rsm::store::Keyspace::Timers), one [`TimerRow`] per `(tenant, queue, timer_key)` |
-//! | `idx_log_timers_visible (shard, visible_at)` | [`Keyspace::TimersDue`](crate::rsm::store::Keyspace::TimersDue), `(due_us, tenant, queue, key)` |
-//! | `log_timers_apply_v1` | [`Planner::plan_timer_ops`] (the reusable helper) behind [`Planner::plan_timers`] |
-//! | `log_timers_due_v1` + `claim_v1` + `fire_v1` | [`Planner::plan_timer_fire`], one leader-loop step per tick |
-//! | `log_timers_fail_v1` | a `TimerBackoff` effect in the SAME fire entry |
-//! | `log_timers_dlq_v1` | `DlqInsert` (group `__timer__`, offset −1) + `TimerDelete`, same entry |
-//! | `peek_v1` / `list_v1` / `count_v1` | local reads in the facade, rendered by [`peek_json`] / [`list_row_json`] |
+//! - State: [`Keyspace::Timers`](crate::rsm::store::Keyspace::Timers), one
+//!   [`TimerRow`] per `(tenant, queue, timer_key)`; the fire order is
+//!   [`Keyspace::TimersDue`](crate::rsm::store::Keyspace::TimersDue),
+//!   `(due_us, tenant, queue, key)`.
+//! - Schedule / reschedule / cancel: [`Planner::plan_timer_ops`] (the reusable
+//!   helper) behind [`Planner::plan_timers`].
+//! - Fire: [`Planner::plan_timer_fire`], one leader-loop step per tick. A failed
+//!   fire is a `TimerBackoff` effect in the SAME fire entry; a dead letter is
+//!   `DlqInsert` (group `__timer__`, offset −1) + `TimerDelete`, same entry.
+//! - Peek / list / count: local reads in the facade, rendered by [`peek_json`] /
+//!   [`list_row_json`].
 //!
 //! # Why there is no claim, no lease and no `too_late`
 //!
-//! 025 needs `claim_token`/`claimed_until` because its fire spans a broker round
-//! trip: rows are claimed in one transaction, packed outside it, and pushed in
-//! another. Here the fire is ONE ENTRY planned by the single serial planner: the
+//! The fire is ONE ENTRY planned by the single serial planner: the
 //! message's `Append` (plus the implicit queue/partition creation of the push
 //! path) and the timer's `TimerDelete` are applied together or not at all, and
 //! the overlay makes a timer whose fire entry is still in flight invisible to
 //! the next cycle. There is therefore no window in which a timer is "in
 //! somebody's hands", and a cancel or a reschedule is never `too_late`: it either
 //! lands before the fire (the timer is gone / replaced) or after it (`absent`, or
-//! a new timer under the old name — exactly 025's answer once its fire commits).
+//! a new timer under the old name).
 //!
 //! # The fire reuses the push planner
 //!
 //! A fire plans a [`PushCommand`] through [`Planner::plan_push`], so the fired
 //! message gets gapless offsets, the monotone `created_at`, the implicit queue
-//! and partition creation and the dedup probe EXACTLY like a push. One deliberate
-//! difference from 025, stated rather than discovered: 025's fire passes
-//! `p_verified = last_offset`, which skips the dedup window probe for cost
-//! reasons (its §6.2 note), so it never answers `duplicate`. The RSM probe is an
-//! in-memory, bloom-fronted index lookup, so the fixed `txn` IS the secondary net
-//! it was designed to be: a fired message whose `txn` is already in the
-//! destination partition's dedup window is a `duplicate` — 025's own duplicate
-//! arm: the timer is DONE, deleted, and nothing is appended.
+//! and partition creation and the dedup probe EXACTLY like a push. The probe is
+//! an in-memory, bloom-fronted index lookup, so the fixed `txn` IS the secondary
+//! net it was designed to be: a fired message whose `txn` is already in the
+//! destination partition's dedup window is a `duplicate`: the timer is DONE,
+//! deleted, and nothing is appended.
 //!
 //! # Determinism
 //!
@@ -63,18 +60,18 @@ use super::{
 /// planner owns the encoding, and a typed outcome can replace it later).
 pub const TIMERS_OUTCOME_TAG: u16 = 0xF003;
 
-/// 025 §4.5: a timer never had a consumer group; its dead letter files under
-/// this one, at offset −1.
+/// A timer never had a consumer group; its dead letter files under this one,
+/// at offset −1.
 pub const TIMER_DLQ_GROUP: &str = "__timer__";
 
-/// 025's column default for `partition`.
+/// The default `partition`.
 pub const DEFAULT_PARTITION: &str = "Default";
 
 // ---------------------------------------------------------------------------
 // Command inputs and results
 // ---------------------------------------------------------------------------
 
-/// One validated schedule/reschedule. The receiver has done the pool-free
+/// One validated schedule/reschedule. The receiver has done the
 /// pre-work (O20: the planner never packs or decompresses): the payload is
 /// decoded, decompressed when the client flagged `payloadZstd`, and packed into
 /// the ONE frame the fire will append; the message id is minted.
@@ -84,7 +81,7 @@ pub struct TimerSchedule {
     pub key: String,
     pub partition: String,
     /// Relative, in µs. May be negative: a delay in the past is LEGAL and
-    /// fires on the first cycle (025 §4.2).
+    /// fires on the first cycle.
     pub delay_us: i64,
     pub txn: String,
     pub message_id: [u8; 16],
@@ -94,20 +91,20 @@ pub struct TimerSchedule {
     pub frame: Vec<u8>,
     /// Whether the STORED payload is zstd-compressed. The receiver
     /// decompresses before packing, so this is `false` for every frame it
-    /// builds; kept because it is 025's column and the peek reports it.
+    /// builds; kept because the peek reports it.
     pub payload_zstd: bool,
     pub encrypted: bool,
-    /// The AUTHENTICATED sub of the caller, never a client field (025 §4.2).
+    /// The AUTHENTICATED sub of the caller, never a client field.
     pub producer_sub: Option<String>,
 }
 
-/// One op of a timers call (025 `p_ops[i]`).
+/// One op of a timers call.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum TimerOp {
-    /// `schedule` and `reschedule` are the same upsert (025).
+    /// `schedule` and `reschedule` are the same upsert.
     Schedule(TimerSchedule),
     /// `txn` is the caller's expected txn, echoed back on `absent` so the
-    /// "was it already delivered?" check needs no second call (025 §4.4).
+    /// "was it already delivered?" check needs no second call.
     Cancel {
         queue: String,
         key: String,
@@ -141,8 +138,8 @@ impl TimerOp {
     }
 }
 
-/// `POST /api/v1/timers` and `DELETE /api/v1/timers/:queue/*key` (025
-/// `log_timers_apply_v1`): one command, one atomic unit.
+/// `POST /api/v1/timers` and `DELETE /api/v1/timers/:queue/*key`: one
+/// command, one atomic unit.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct TimersCommand {
     pub request_id: RequestId,
@@ -150,9 +147,8 @@ pub struct TimersCommand {
     pub ops: Vec<TimerOp>,
 }
 
-/// The verdict of one op, index-aligned with the ops (025 §4.1's closed
-/// taxonomy minus `too_late`, which cannot happen here — see the module
-/// header).
+/// The verdict of one op, index-aligned with the ops. There is no `too_late`:
+/// it cannot happen here (see the module header).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TimerOpResult {
     Scheduled {
@@ -161,7 +157,7 @@ pub enum TimerOpResult {
         txn: String,
         message_id: [u8; 16],
         deliver_at_us: i64,
-        /// The key already held a pending timer (025's `xmax <> 0` arm).
+        /// The key already held a pending timer.
         rescheduled: bool,
     },
     Cancelled {
@@ -171,7 +167,7 @@ pub enum TimerOpResult {
         txn: String,
     },
     /// No pending timer under that key. It MAY have been delivered already
-    /// (025 §4.4: there is no tombstone), hence `ok:false`.
+    /// (there is no tombstone), hence `ok:false`.
     Absent {
         queue: String,
         key: String,
@@ -180,7 +176,7 @@ pub enum TimerOpResult {
 }
 
 impl TimerOpResult {
-    /// The wire object 025 builds with `jsonb_build_object` for this verdict.
+    /// The wire object of this verdict.
     pub fn to_json(&self) -> Value {
         let mut m = Map::new();
         match self {
@@ -264,9 +260,9 @@ pub fn timers_results(o: &Outcome) -> Option<Vec<Value>> {
 // Receiver pre-work: validate and build the ops (pure, no state)
 // ---------------------------------------------------------------------------
 
-/// A refusal of the WHOLE call that 025 raises with SQLSTATE 22023
-/// (`timers_bad_request`, HTTP 400): the message and, where 025 has one, its
-/// HINT. Validate-then-apply: nothing is scheduled when one op is bad.
+/// A refusal of the WHOLE call (`timers_bad_request`, HTTP 400): the message
+/// and, where there is one, its hint. Validate-then-apply: nothing is
+/// scheduled when one op is bad.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpError {
     pub message: String,
@@ -282,8 +278,8 @@ impl OpError {
     }
 }
 
-/// 025's server-owned field list: present in an op, a refusal, never a field
-/// quietly ignored (§4.2).
+/// The server-owned fields: present in an op, a refusal, never a field
+/// quietly ignored.
 const SERVER_OWNED: [&str; 16] = [
     "producerSub",
     "producer_sub",
@@ -313,8 +309,8 @@ const DELAY_HINT: &str = "a delayMs in the past is LEGAL and fires on the first 
 const DUP_HINT: &str = "one key at most once per call is what makes the intra-space lock order \
      total (PLAN_KV_TIMERS §2.2)";
 
-/// `op->>'field'`: the text of a JSON scalar (a string as itself, a number or
-/// a boolean as its literal), `None` for an absent key or a JSON null.
+/// The text of a JSON scalar (a string as itself, a number or a boolean as
+/// its literal), `None` for an absent key or a JSON null.
 fn jtext(o: &Map<String, Value>, k: &str) -> Option<String> {
     match o.get(k)? {
         Value::Null => None,
@@ -323,7 +319,7 @@ fn jtext(o: &Map<String, Value>, k: &str) -> Option<String> {
     }
 }
 
-/// `(op->>'field')::boolean`, defaulting to false (025's COALESCE).
+/// A field read as a boolean, defaulting to false when absent or null.
 fn jbool(o: &Map<String, Value>, k: &str, i: usize) -> Result<bool, OpError> {
     match o.get(k) {
         None | Some(Value::Null) => Ok(false),
@@ -339,16 +335,15 @@ fn jbool(o: &Map<String, Value>, k: &str, i: usize) -> Result<bool, OpError> {
     }
 }
 
-/// Validate and build the ops of one call, in 025's order: every per-op check
+/// Validate and build the ops of one call, in this order: every per-op check
 /// first (object, known op, server-owned fields, queue, timerKey, partition,
 /// then delayMs/txn/payload for a schedule), then the one-key-per-call rule,
 /// then the build. `producer_sub` is the AUTHENTICATED sub, stamped on every
 /// schedule's frame.
 ///
 /// The build is the receiver's pre-work (O20): base64 decode, zstd
-/// decompression when `payloadZstd` (025's fire decompresses before packing;
-/// doing it here keeps the serial planner free of it and the delivered frame
-/// byte-identical), the message id (`_messageId` when the HTTP edge minted one,
+/// decompression when `payloadZstd` (doing it here keeps the serial planner
+/// free of it), the message id (`_messageId` when the HTTP edge minted one,
 /// else minted here), and the ONE frame the fire will append.
 pub fn parse_timer_ops(ops: &[Value], producer_sub: Option<&str>) -> Result<Vec<TimerOp>, OpError> {
     // ------------------------------------------------------------- VALIDATE
@@ -401,9 +396,9 @@ pub fn parse_timer_ops(ops: &[Value], producer_sub: Option<&str>) -> Result<Vec<
         }
     }
 
-    // One (queue, timerKey) at most once per call (025: load-bearing there
-    // for the lock order; here it keeps each op's verdict independent of the
-    // others, which is what lets the verdicts be decided before any is folded).
+    // One (queue, timerKey) at most once per call: it keeps each op's verdict
+    // independent of the others, which is what lets the verdicts be decided
+    // before any is folded.
     let mut seen: HashSet<(String, String)> = HashSet::with_capacity(ops.len());
     for v in ops {
         let o = v.as_object().expect("validated above");
@@ -435,9 +430,8 @@ pub fn parse_timer_ops(ops: &[Value], producer_sub: Option<&str>) -> Result<Vec<
         }
         let partition = jtext(o, "partition").unwrap_or_else(|| DEFAULT_PARTITION.to_string());
         let delay_ms = o.get("delayMs").and_then(Value::as_f64).unwrap_or(0.0);
-        // `make_interval(secs => delayMs / 1000.0)`: µs resolution. `as`
-        // saturates, so an absurd delay cannot wrap (the edge bounds it by the
-        // horizon anyway).
+        // µs resolution. `as` saturates, so an absurd delay cannot wrap (the
+        // edge bounds it by the horizon anyway).
         let delay_us = (delay_ms * 1000.0).round() as i64;
         let txn = jtext(o, "txn").unwrap_or_default();
         // The frame codec stores the txn behind a u16 (frames.rs).
@@ -459,8 +453,8 @@ pub fn parse_timer_ops(ops: &[Value], producer_sub: Option<&str>) -> Result<Vec<
         };
         let zstd = jbool(o, "payloadZstd", i)?;
         let encrypted = jbool(o, "encrypted", i)?;
-        // 025's fire decompresses a flagged payload before packing
-        // (`sweeper.rs` `group_and_pack`), a malformed one to nothing.
+        // A flagged payload is decompressed before packing, a malformed one
+        // to nothing.
         let payload = if zstd {
             crate::frames::zstd_decompress(&raw)
         } else {
@@ -481,7 +475,7 @@ pub fn parse_timer_ops(ops: &[Value], producer_sub: Option<&str>) -> Result<Vec<
             message_id,
             txn: &txn,
             // No trace on a fired timer: the schedule's trace context is not
-            // the delivery's (sweeper.rs `pack_one`).
+            // the delivery's.
             trace_id: None,
             producer_sub: psub,
             payload: &payload,
@@ -516,17 +510,17 @@ pub struct TimerFireConfig {
     pub batch: usize,
     /// `QUEEN_RAFT_TIMER_FIRE_MAX_BYTES`: at most this many frame bytes per
     /// step (at least one timer always goes, so an oversized one still makes
-    /// progress — 025's `QUEEN_SWEEPER_MAX_FIRE_BYTES` rule).
+    /// progress).
     pub max_bytes: usize,
     /// How many committed due-index entries one step may walk.
     pub scan_limit: usize,
     /// `QUEEN_SWEEPER_BACKOFF_MIN_MS` / `_MAX_MS`: a PERMANENT failure backs
-    /// off `min(min * 2^attempts, max)` (025 `fail_v1`, sweeper.rs).
+    /// off `min(min * 2^attempts, max)`.
     pub backoff_min_ms: i64,
     pub backoff_max_ms: i64,
     /// `QUEEN_SWEEPER_TRANSIENT_BACKOFF_MS`: a TRANSIENT failure backs off
     /// this long and spends no attempt (infrastructure never consumes the DLQ
-    /// budget, 025 §4.5).
+    /// budget).
     pub transient_backoff_ms: i64,
     /// `QUEEN_SWEEPER_MAX_ATTEMPTS`: past it the timer is dead-lettered into
     /// its destination queue's DLQ (`__timer__`, offset −1).
@@ -560,9 +554,7 @@ impl Default for TimerFireConfig {
 }
 
 impl TimerFireConfig {
-    /// Resolve from the environment, ONCE at boot. The backoff knobs keep the
-    /// postgres sweeper's names so one configuration means the same thing on
-    /// both storage classes.
+    /// Resolve from the environment, ONCE at boot.
     pub fn from_env() -> TimerFireConfig {
         fn num(name: &str, cur: i64) -> i64 {
             std::env::var(name)
@@ -594,7 +586,7 @@ pub struct FireReport {
     /// Timers whose message was appended.
     pub fired: usize,
     /// Timers whose `txn` was already in the destination's dedup window: done,
-    /// deleted, nothing appended (025's duplicate arm).
+    /// deleted, nothing appended.
     pub duplicates: usize,
     /// Timers that failed and were pushed out by a backoff.
     pub backed_off: usize,
@@ -647,11 +639,10 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         }
     }
 
-    /// Plan a list of timer schedules/cancels (025 `log_timers_apply_v1`)
-    /// against `ov` — THE REUSABLE HELPER: `plan_timers` is one caller, and a
-    /// TRANSACTION command that carries a `timers` array (005's wire calls the
-    /// same SP) is meant to be another, planning its timer ops into the same
-    /// entry as its pushes and acks.
+    /// Plan a list of timer schedules/cancels against `ov` — THE REUSABLE
+    /// HELPER: `plan_timers` is one caller, and a TRANSACTION command that
+    /// carries a `timers` array is meant to be another, planning its timer ops
+    /// into the same entry as its pushes and acks.
     ///
     /// Returns the effects, in op order, and the verdicts, index-aligned with
     /// `ops`. On `Ok` the effects are ALREADY FOLDED into `ov` (a later command
@@ -711,8 +702,8 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                     let deliver_at_us = now.saturating_add(s.delay_us);
                     // A reschedule is a NEW timer under an OLD name: attempts
                     // back to 0, last_error cleared, txn and message id
-                    // overwritten (025 §20.2). `created_at` is the one column
-                    // the upsert keeps.
+                    // overwritten. `created_at` is the one field the upsert
+                    // keeps.
                     let row = TimerRow {
                         partition: s.partition.clone(),
                         deliver_at_us,
@@ -772,9 +763,8 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         }
     }
 
-    /// The leader's fire step (025 due + claim + fire + fail + dlq, as ONE
-    /// planning step): every timer due at `now_us` — committed state merged
-    /// with the overlay, earliest first, bounded by `cfg` — becomes its
+    /// The leader's fire step: every timer due at `now_us` — committed state
+    /// merged with the overlay, earliest first, bounded by `cfg` — becomes its
     /// destination push (through [`Planner::plan_push`]) plus its
     /// `TimerDelete`, or its `TimerBackoff` / dead letter when the push is
     /// refused. The caller adds the returned effects to the entry as ONE
@@ -871,10 +861,10 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             return Ok((Vec::new(), report));
         }
 
-        // (3) GROUP BY (tenant, queue, partition) — never by (queue,
+        // (3) Group by (tenant, queue, partition) — never by (queue,
         // partition): a tenant-blind grouping would fuse two tenants' timers
-        // into one push (025 §6.2 point 8). Due order inside a group, groups
-        // in the order their first timer came due.
+        // into one push. Due order inside a group, groups in the order their
+        // first timer came due.
         let mut order: Vec<TimerKey> = Vec::new();
         let mut groups: HashMap<TimerKey, Vec<(String, TimerRow)>> = HashMap::new();
         for ((t, q, k), row) in chosen {
@@ -1021,9 +1011,9 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         }
     }
 
-    /// A timer's fire failed (025 `log_timers_fail_v1` + `log_timers_dlq_v1`):
-    /// back it off — the row stays pending and CANCELLABLE — or, once a
-    /// permanent failure exhausts its attempts, dead-letter it.
+    /// A timer's fire failed: back it off — the row stays pending and
+    /// CANCELLABLE — or, once a permanent failure exhausts its attempts,
+    /// dead-letter it.
     #[allow(clippy::too_many_arguments)]
     fn fire_failed(
         &self,
@@ -1039,7 +1029,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     ) {
         let now = self.now_us;
         let transient = r.retryable;
-        // PERMANENT failures only spend budget (025 §4.5).
+        // PERMANENT failures only spend budget.
         let attempts = if transient {
             row.attempts
         } else {
@@ -1058,7 +1048,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             // the archive again — nothing is lost.
         }
         // `min(min_ms * 2^attempts, max_ms)` on the attempts BEFORE this
-        // failure, exactly sweeper.rs's `fail_batch`.
+        // failure.
         let backoff_ms = if transient {
             cfg.transient_backoff_ms
         } else {
@@ -1081,10 +1071,10 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         report.backed_off += 1;
     }
 
-    /// 025 `log_timers_dlq_v1`: provision the destination queue and partition
-    /// when missing (a dead letter on a missing partition is unfindable), file
-    /// the dead letter under `__timer__` at offset −1 with a JSON snapshot of
-    /// the payload, and delete the timer — all in the fire's entry.
+    /// Provision the destination queue and partition when missing (a dead
+    /// letter on a missing partition is unfindable), file the dead letter
+    /// under `__timer__` at offset −1 with a JSON snapshot of the payload, and
+    /// delete the timer — all in the fire's entry.
     #[allow(clippy::too_many_arguments)]
     fn timer_dead_letter(
         &self,
@@ -1163,7 +1153,7 @@ pub fn frame_payload(frame: &[u8]) -> Vec<u8> {
         .unwrap_or_default()
 }
 
-/// The DLQ snapshot (sweeper.rs `dlq`): the payload as JSON when it is JSON,
+/// The DLQ snapshot: the payload as JSON when it is JSON,
 /// else `{"_raw_b64": …}` — the DLQ is the last resort and must not have a
 /// branch that loses the message.
 fn dlq_snapshot(frame: &[u8]) -> Vec<u8> {
@@ -1179,9 +1169,9 @@ fn dlq_snapshot(frame: &[u8]) -> Vec<u8> {
     }
 }
 
-/// The configuration an implicitly created queue gets (003 first contact and
-/// 025's fire provisioning): the `queen.queues` DDL defaults. The planner
-/// stamps `created_at_us`; the id is minted here, fresh per creation.
+/// The configuration an implicitly created queue gets (a push's first contact
+/// and the timer fire's provisioning). The planner stamps `created_at_us`; the
+/// id is minted here, fresh per creation.
 pub fn implicit_queue_config() -> QueueConfig {
     QueueConfig {
         id: crate::util::uuidv7_bytes(),
@@ -1210,10 +1200,9 @@ pub fn implicit_queue_config() -> QueueConfig {
     }
 }
 
-/// The implicit defaults plus the namespace/task labels derived by every SQL
-/// provisioning path (`003_log_push` and `025_log_timers`).  PostgreSQL's
-/// `split_part` keeps only the first two dotted components: an undotted queue
-/// has its full name as the namespace and an empty task.
+/// The implicit defaults plus the namespace/task labels: only the first two
+/// dotted components count, and an undotted queue has its full name as the
+/// namespace and an empty task.
 pub fn implicit_queue_config_for(queue: &str) -> QueueConfig {
     let mut cfg = implicit_queue_config();
     let mut parts = queue.split('.');
@@ -1226,8 +1215,7 @@ pub fn implicit_queue_config_for(queue: &str) -> QueueConfig {
 // Read rendering (peek / list / count), shared by the facade
 // ---------------------------------------------------------------------------
 
-/// 025's `to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`:
-/// microsecond precision, UTC.
+/// `YYYY-MM-DDTHH:MM:SS.ffffffZ`: microsecond precision, UTC.
 pub fn iso_us(us: i64) -> String {
     const US_PER_DAY: i64 = 86_400_000_000;
     let days = us.div_euclid(US_PER_DAY);
@@ -1257,8 +1245,8 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m as u32, d)
 }
 
-/// The columns peek and list share (025 `peek_v1` / `list_v1`). `claimed` is
-/// always false: nothing here ever holds a timer (see the module header).
+/// The fields peek and list share. `claimed` is always false: nothing here
+/// ever holds a timer (see the module header).
 fn row_fields(m: &mut Map<String, Value>, queue: &str, key: &str, row: &TimerRow) {
     m.insert("queue".into(), Value::String(queue.to_string()));
     m.insert("timerKey".into(), Value::String(key.to_string()));
@@ -1291,9 +1279,9 @@ fn row_fields(m: &mut Map<String, Value>, queue: &str, key: &str, row: &TimerRow
     m.insert("updatedAt".into(), Value::String(iso_us(row.updated_at_us)));
 }
 
-/// 025 `log_timers_peek_v1`: one key WITH the payload (base64, exactly as
-/// stored), or `{"found":false,…}` — a key of another tenant reads exactly like
-/// a key that does not exist.
+/// Peek: one key WITH the payload (base64, exactly as stored), or
+/// `{"found":false,…}` — a key of another tenant reads exactly like a key
+/// that does not exist.
 pub fn peek_json(queue: &str, key: &str, row: Option<&TimerRow>) -> Value {
     let mut m = Map::new();
     match row {
@@ -1316,15 +1304,15 @@ pub fn peek_json(queue: &str, key: &str, row: Option<&TimerRow>) -> Value {
     Value::Object(m)
 }
 
-/// One row of 025 `log_timers_list_v1` (no payload: a list is never an
-/// unbounded read whose cost the caller does not fix).
+/// One row of a timer list (no payload: a list is never an unbounded read
+/// whose cost the caller does not fix).
 pub fn list_row_json(queue: &str, key: &str, row: &TimerRow) -> Value {
     let mut m = Map::new();
     row_fields(&mut m, queue, key, row);
     Value::Object(m)
 }
 
-/// 025's list clamp: default 100, `[1, 1000]`, never an error.
+/// The list clamp: default 100, `[1, 1000]`, never an error.
 pub fn list_limit(limit: i32) -> usize {
     limit.clamp(1, 1000) as usize
 }

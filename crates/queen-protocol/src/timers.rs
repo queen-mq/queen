@@ -9,7 +9,7 @@
 //! quietly:
 //!
 //! * **Only relative durations, in milliseconds** (`delayMs`). An absolute
-//!   instant is not expressible: one clock, Postgres's, so no skew between
+//!   instant is not expressible: one clock, the broker's, so no skew between
 //!   brokers or clients can enter. A `delayMs` in the past is **legal** and
 //!   fires on the first cycle.
 //! * **`deliverAt` is "no earlier than", never "exactly at".**
@@ -327,8 +327,8 @@ pub struct TimerPeek {
     )]
     pub producer_sub: Option<String>,
 
-    /// Failed fire attempts that consumed budget. Transient database faults do
-    /// not count here — only permanent and configuration failures do.
+    /// Failed fire attempts that consumed budget. Transient failures do not
+    /// count here — only permanent and configuration failures do.
     #[serde(default)]
     pub attempts: i64,
 
@@ -508,7 +508,7 @@ mod tests {
         Raise(&'static str),
     }
 
-    /// KEEP IN SYNC with the FOREACH list in 025_log_timers.sql.
+    /// KEEP IN SYNC with `SERVER_OWNED` in server/src/rsm/planner/timers.rs.
     const SERVER_OWNED: [&str; 15] = [
         "producerSub",
         "producer_sub",
@@ -799,7 +799,8 @@ mod tests {
             assert_eq!(encoded.len() % 4, 0, "base64 is padded to a multiple of 4");
             assert_eq!(base64_decode(&encoded).unwrap(), slice, "len {len}");
         }
-        // Known vectors, against the encoder Postgres uses on the other side.
+        // Known vectors, in the padded standard alphabet the broker decodes on
+        // the other side.
         assert_eq!(base64_encode(b""), "");
         assert_eq!(base64_encode(b"f"), "Zg==");
         assert_eq!(base64_encode(b"fo"), "Zm8=");
@@ -812,7 +813,7 @@ mod tests {
     #[test]
     fn base64_refuses_what_it_cannot_decode() {
         assert!(base64_decode("not base64!").is_err());
-        // Postgres wraps long base64 in newlines; those are not corruption.
+        // A 1.x broker wrapped long base64 in newlines; those are not corruption.
         assert_eq!(base64_decode("Zm9v\nYg==").unwrap(), b"foob");
     }
 }

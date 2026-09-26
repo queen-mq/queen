@@ -10,7 +10,7 @@
  *      a tenant that is over quota -- while the fire never stops by itself, so
  *      that tenant keeps producing messages it cannot stop.
  *   2. delayMs, never delaySeconds and never an absolute instant (§4.2,
- *      §20.6). One clock, Postgres's. `deliverAt` in an op is a 22023.
+ *      §20.6). One clock, the broker's. `deliverAt` in an op is a 22023.
  *   3. The payload is base64 (§6.2), and the SDK encodes it, so a caller never
  *      has to know.
  *   4. `txn` is mandatory on a schedule and is echoed on `absent`, which is

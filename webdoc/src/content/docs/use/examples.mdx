@@ -7,27 +7,26 @@ sidebar:
   order: 11
 sourceOfTruth:
   - server/src/handlers/data.rs
-  - server/sql/procedures/003_log_push.sql
-  - server/sql/procedures/004_log_pop.sql
-  - server/sql/procedures/005_log_ack.sql
-  - server/sql/procedures/010_log_admin.sql
-  - server/sql/procedures/012_configure.sql
+  - server/src/rsm/planner/push.rs
+  - server/src/rsm/planner/pop.rs
+  - server/src/rsm/planner/ack.rs
+  - server/src/rsm/planner/txn.rs
+  - server/src/rsm/facade/real/phase2/admin.rs
 verifiedBy:
   - clients/client-js/test-v2/docs.js
 digest: >-
-  A first push provisions the queue, its partition and its configuration in the transaction that
+  A first push provisions the queue, its partition and its configuration in the log entry that
   writes it. Fan-out is one group name per consumer: no exchange, binding or create-group call,
-  bytes written once, one cursor row per partition per group, free on the write side; reads scale
+  bytes written once, one cursor per partition per group, free on the write side; reads scale
   with groups. In a transaction a duplicate push or rejected ack rolls back the batch, not per
   item. Dedup is exact, scoped to one partition, writes nothing on a duplicate; the window is
   `dedupWindowSeconds`, 3600 by default, and outside it the same id is new. A seek releases the
-  live lease, resets retry counters and lands on a segment, not a message. A new group seeds at
+  live lease, resets retry counters and lands on the first message stored at or after the
+  instant, never inside the messages one push wrote together. A new group seeds at
   each partition's end unless `subscriptionMode('all')` seeds it just below the oldest retained
   offset. A nack charges one retry; at `retryLimit`, 3 by default, the message is snapshotted to
   the DLQ. An expired lease charges nothing, so a hung handler redelivers forever, never reaching
   it.
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
-# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the queue-options card description is corrected for the merge rule; the examples send complete option sets, so what they configure is unchanged.
 ---
 
 Six shapes, in the order they are worth reading, each one the smallest code that makes it work.
@@ -41,7 +40,7 @@ other recipe here is built out of.
 
 The handler returning acks the message, the handler throwing nacks it, and the group is a cursor
 that survives restarts. A push to a queue nobody created provisions the queue, its partition and
-its configuration inside the same transaction that writes the message.
+its configuration inside the same log entry that writes the message.
 
 The same loop as a tutorial, in seven languages: [Hello world](/use/js-client/hello-world).
 
@@ -63,7 +62,7 @@ await client.queue('orders').group('analytics').batch(500)
 
 <Partition
   alt="One partition holding offsets 4 to 9, drawn once. Two cursors sit under it at different positions: billing at 8 and analytics at 5."
-  caption="One copy of the data, two cursors. A group is a position, not a queue, so the second reader costs a row per partition rather than a second copy of the messages."
+  caption="One copy of the data, two cursors. A group is a position, not a queue, so the second reader costs a cursor per partition rather than a second copy of the messages."
   cells={[
     { offset: 4 },
     { offset: 5 },
@@ -78,8 +77,8 @@ await client.queue('orders').group('analytics').batch(500)
   ]}
 />
 
-The message bytes are written once. A second group costs one cursor row per partition it reads
-and one in-place update per ack, so fan-out is free on the write side. Reads do scale with
+The message bytes are written once. A second group costs one cursor per partition it reads and
+one cursor write per ack, so fan-out is free on the write side. Reads do scale with
 groups: each one fetches and decompresses the segments it needs.
 
 ## Transactional pipeline
@@ -117,9 +116,9 @@ the replay must not disturb the one that is running.
 
 <Render file="snippets/js-seek" />
 
-A seek releases the live lease, resets the retry counters and re-seeds the group's discovery
-state, and it lands on a segment rather than on a message, because a segment is one commit of
-several fused pushes. A new group seeds at each partition's current end unless you ask for
+A seek releases the live lease and resets the retry counters, and it lands on the first message
+the broker stored at or after the instant. The messages one push wrote to a partition share one
+timestamp, so a seek never lands inside them. A new group seeds at each partition's current end unless you ask for
 `subscriptionMode('all')`, which seeds it just below the oldest retained offset.
 
 ## Failures and the dead-letter queue
@@ -135,7 +134,7 @@ await client.ack(msg, 'dlq', { error: 'unknown payload version' })
 
 One behaviour to design around: a lease that expires charges nothing, so a handler that hangs
 rather than fails redelivers forever and never reaches the dead-letter queue. Decide it has
-failed and say so. Reading the table, replaying a row and deleting one are in
+failed and say so. Reading the dead-letter queue, replaying a dead letter and deleting one are in
 [messages and DLQ](/reference/http/messages-dlq), and [errors](/reference/errors/) has what each
 failure returns.
 

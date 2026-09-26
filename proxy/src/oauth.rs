@@ -132,9 +132,10 @@ async fn login_post(
     Form(form): Form<LoginForm>,
 ) -> Response {
     let next = safe_next(form.next.as_deref());
-    // Behind the W7 edge (the single binary) the client IP is the resolved
-    // peer (XFF only from trusted proxies) and the guard backs off per IP AND
-    // per account; the standalone keeps its per-IP throttle.
+    // Behind the W7 edge the client IP is the resolved peer (XFF only from
+    // trusted proxies) and the guard backs off per IP AND per account; without
+    // the edge (a router built without it, as in tests) the per-IP throttle
+    // on the headers applies.
     let Some(axum::Extension(crate::harden::ClientIp(ip))) = peer else {
         let ip = client_ip(&headers);
         if let Err(retry) = throttle(&ip) {
@@ -210,8 +211,8 @@ async fn establish_session(st: &St, headers: &HeaderMap, user: UserRef, next: &s
 }
 
 /// Persist the account's latest successful authentication and its audit event
-/// in one database function call. This is best-effort for the same reason the
-/// previous login audit was: a temporary pxdb failure must not discard a valid
+/// in one store write. This is best-effort for the same reason the previous
+/// login audit was: a temporary store failure must not discard a valid
 /// session after password/OAuth verification and token minting succeeded.
 async fn record_login(st: &St, user_id: Uuid) {
     if !st.store.is_some() {
@@ -245,7 +246,7 @@ async fn logout(State(st): State<St>, headers: HeaderMap) -> Response {
     resp
 }
 
-/// Best-effort `queen_proxy.revoke_session(jti, exp, 'user', sub)` for whatever
+/// Best-effort `revoke_session(jti, exp, 'user', sub)` for whatever
 /// session the request presents. Every miss is silent by design — no cookie, a
 /// malformed or already-expired one, no store: there is nothing left to revoke
 /// and the logout still has to succeed (a logout that 500s leaves the user
@@ -265,7 +266,7 @@ async fn revoke_presented_session(st: &St, headers: &HeaderMap) {
             tracing::info!(target: "oauth", user_id = %claims.user_id, "session revoked on logout");
         }
         Err(e) if e.is_unavailable() => {
-            tracing::warn!(target: "oauth", "pxdb unavailable; session cookie cleared but token stays valid until exp");
+            tracing::warn!(target: "oauth", "store unavailable; session cookie cleared but token stays valid until exp");
         }
         Err(e) => {
             tracing::warn!(target: "oauth", err = %e, "revoke_session failed; cookie cleared but token stays valid until exp");
@@ -324,11 +325,11 @@ async fn me(State(st): State<St>, headers: HeaderMap) -> Response {
             }
             Ok(None) => {
                 // The session outlived its user row (deleted, or a dev
-                // pxdb reset). Nothing to render — send the SPA to
+                // store reset). Nothing to render — send the SPA to
                 // login rather than an identity with no owner.
                 return errors::err_401("session no longer valid");
             }
-            Err(e) if e.is_unavailable() => tracing::warn!(target: "oauth", err = %e, "me: pool.get failed"),
+            Err(e) if e.is_unavailable() => tracing::warn!(target: "oauth", err = %e, "me: store unavailable"),
             Err(e) => tracing::warn!(target: "oauth", err = %e, "me: user lookup failed"),
         }
         // A live operator selects among ALL clusters, as admin — the
@@ -1155,7 +1156,7 @@ async fn resolve_oauth(
 /// identity and the default role on every cluster of that tenant, all or
 /// nothing (`store::web::provision_oauth_user`). The auth host is the
 /// sanctioned direct writer of users/identities (PLAN §2), so this bypasses
-/// the control-plane create_user SQL function to keep the identity row atomic
+/// the control-plane create_user writer to keep the identity row atomic
 /// and record a single `signup` op.
 ///
 /// Why every cluster: without the grant the account exists, the login
@@ -1206,7 +1207,7 @@ async fn provision_user(
     Ok(user)
 }
 
-/// Append a `queen_proxy.operations` audit row (actor = user, no cluster).
+/// Append a `operations` audit row (actor = user, no cluster).
 /// Best-effort: no store, an unreachable one, or a refused row is skipped,
 /// never fatal to the login it records.
 async fn record_op(
@@ -1441,8 +1442,8 @@ fn presented_session(st: &St, headers: &HeaderMap) -> Option<String> {
 }
 
 /// Client IP for the login throttle: leftmost X-Forwarded-For, else X-Real-IP,
-/// else a shared "unknown" bucket (no ConnectInfo is wired in main.rs; the proxy
-/// sits behind Cloudflare so XFF is authoritative there).
+/// else a shared "unknown" bucket. Only reached without the W7 edge, which
+/// resolves the peer itself.
 fn client_ip(headers: &HeaderMap) -> String {
     if let Some(xff) = header_str(headers, "x-forwarded-for") {
         if let Some(first) = xff.split(',').next() {
@@ -1538,7 +1539,7 @@ fn err_500(msg: &str) -> Response {
 /// A login that cannot be served because this proxy holds no signer.
 ///
 /// 503 + a message that names the variables, not a bare 500 "internal": a
-/// proxy with a pxdb and no JWT material boots on purpose (config::jwt_boot —
+/// proxy with a user store and no JWT material boots on purpose (config::jwt_boot —
 /// it is the API-key-only shape), so this is a CONFIGURATION answer, not a
 /// crash, and the operator reading it is the one who can fix it. The boot
 /// warning says the same thing; this is what anyone who never reads the boot
@@ -1674,7 +1675,7 @@ enum SignIn {
 /// plane to send anyone to, and the 503 its form produces names the two
 /// variables to set (`err_no_signer`), which is the answer its operator needs.
 ///
-/// A data-plane proxy holding the same public key with NO pxdb behind it
+/// A data-plane proxy holding the same public key with NO user store behind it
 /// (`JwtMode::NoIdentity`, which is a classification of the user table rather
 /// than of the key material) lands on the notice too, and that is right: it
 /// verifies the auth host's sessions exactly like a cell does, and a form there

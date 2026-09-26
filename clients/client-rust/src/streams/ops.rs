@@ -656,7 +656,7 @@ mod tests {
             parse_iso_ms("2026-08-04T10:00:00.000Z"),
             Some(1_785_837_600_000)
         );
-        // Postgres renders microseconds; only the first three digits matter.
+        // The broker renders microseconds; only the first three digits matter.
         assert_eq!(
             parse_iso_ms("2026-08-04T10:00:00.123456Z"),
             Some(1_785_837_600_123)

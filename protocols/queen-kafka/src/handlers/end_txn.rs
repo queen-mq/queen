@@ -1,8 +1,8 @@
 //! EndTxn (26) — the one request that writes a transaction.
 //!
 //! Everything before this staged; this is where the whole set becomes durable,
-//! in **one** call to `POST /api/v1/transaction`, which is one Postgres
-//! transaction. The bundle is:
+//! in **one** call to `POST /api/v1/transaction`, which is one broker
+//! transaction: one raft entry, applied all or nothing. The bundle is:
 //!
 //! ```text
 //!   operations: [ { type: "push", items: [ every staged record ] } ]
@@ -14,11 +14,11 @@
 //! **`required: true` at index 0 is the whole mechanism.** Without it a lost
 //! precondition is a verdict that rolls nothing back and the records would land
 //! anyway; with it, a fenced producer writes exactly zero records and zero
-//! offsets, because `kv_apply_v1` raises 23514 and the bundle rolls back
-//! (005_log_ack.sql). It is the cluster fence's mechanism verbatim
+//! offsets, because the broker refuses the whole bundle
+//! (`reason: "kv_precondition"`). It is the cluster fence's mechanism verbatim
 //! ([`crate::cluster::fence`]), pointed at a transaction instead of at a group.
 //!
-//! The records and the offsets are in ONE Postgres transaction, and that
+//! The records and the offsets are in ONE broker transaction, and that
 //! sentence is the whole of atomic consume-transform-produce. No server change
 //! was needed for it: `kv` has been a top-level rider of this route since
 //! `PLAN_KV_TIMERS`.

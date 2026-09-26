@@ -38,8 +38,8 @@ test: ## Run unit tests (skips end-to-end).
 
 .PHONY: e2e
 e2e: build ## Run the full end-to-end suite. Requires a running broker. \
-            ## Honored env vars: QUEEN_SERVER, PG_HOST/PORT/USER/PASSWORD/DB, \
-            ## QUEEN_RETENTION_INTERVAL_MS, QUEEN_LOAD_TOTAL.
+            ## Honored env vars: QUEEN_SERVER, QUEEN_RETENTION_INTERVAL_MS, \
+            ## QUEEN_LOAD_TOTAL.
 	QUEEN_E2E=1 \
 	  QUEEN_SERVER=$${QUEEN_SERVER:-http://localhost:6632} \
 	  $(GO) test -v ./tests/... -timeout 10m
