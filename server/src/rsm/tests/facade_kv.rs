@@ -371,3 +371,48 @@ async fn a_restart_recovers_the_kv_state() {
     f.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Jepsen W4 leader-deaf (G1c-realtime): a call that writes and reads was
+/// answered after a request-id hit (`at: None` — a forwarding retry of an
+/// entry an earlier attempt committed) from the state as it was LATER, and
+/// read a write that began after its own had applied. Its reads come from its
+/// own position or not at all: a hit whose rendering is gone is an unknown
+/// outcome (a timeout), never later state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_request_id_hit_never_reads_later_state() {
+    let dir = scratch("rid-hit");
+    let f = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    let mixed = || KvReq {
+        ops: json!([
+            {"op":"getMany","ns":"w4","keys":["y"]},
+            {"op":"put","ns":"w4","key":"x","value":1,"forever":true},
+        ])
+        .as_array()
+        .expect("ops")
+        .clone(),
+    };
+    let first = ctx();
+    let id = first.request_id;
+    let got = f.kv(first, mixed()).await.expect("the first call").results;
+    assert_eq!(got[0]["rows"], json!([]), "{got:?}");
+    let later = one(
+        &f,
+        json!({"op":"put","ns":"w4","key":"y","value":2,"forever":true}),
+    )
+    .await;
+    assert!(applied(&later), "{later}");
+
+    // The same command again, as a forwarding retry sends it: a request-id hit.
+    let mut again = ReqCtx::new("default", Deadline::after(Duration::from_millis(300)));
+    again.request_id = id;
+    match f.kv(again, mixed()).await {
+        Ok(o) => assert_eq!(
+            o.results[0]["rows"],
+            json!([]),
+            "a hit read later state: {:?}",
+            o.results
+        ),
+        Err(KvFailure::Rsm(crate::rsm::facade::RsmError::Timeout)) => {}
+        Err(e) => panic!("unexpected failure: {e:?}"),
+    }
+}

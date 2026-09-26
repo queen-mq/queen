@@ -14,10 +14,14 @@
 //!    ([`crate::rsm::kv_reads`]), so they see the call's own writes, as 024's
 //!    phase ordering does, and nothing planned after it (reading the applied
 //!    state once the entry had applied let two calls each read the other's
-//!    write: Jepsen W4, G1c). Of a read-only call, or of a call answered from
-//!    committed state (a request-id hit): evaluated here, off this node's
-//!    applied state. Their bytes never enter the log (D7). One read budget
-//!    per call, spent in 024's apply order.
+//!    write: Jepsen W4, G1c) — a request-id hit too (a forwarding retry of an
+//!    entry an earlier attempt committed): it waits for this node's apply to
+//!    render it, and is never read off the state as it is later. Of a
+//!    read-only call: evaluated here, off this node's applied state, at an
+//!    entry boundary ([`crate::rsm::store::EntryGate`]: the RAM keyspaces are
+//!    read live, and a read in the middle of an entry saw half of a batch —
+//!    Jepsen W4, G-single). Their bytes never enter the log (D7). One read
+//!    budget per call, spent in 024's apply order.
 //!
 //! The store reads run on the blocking pool inside one read transaction (pin
 //! 2, I15), under the request's deadline.
@@ -29,6 +33,28 @@ use crate::rsm::store::{Reads, Store, TypedReads};
 
 use super::super::{KvFailure, KvListReq, KvOut, KvReq, ReqCtx, RsmError};
 use super::{reply_error, wall_micros, RaftFacade};
+
+/// The answer apply rendered for a registered call, waiting for this node's
+/// apply to pass the call's entry: at once when the reply came from that apply
+/// (`at: Some`), a little later after a request-id hit. `None` when the
+/// deadline passes first.
+async fn rendered(
+    reg: &crate::rsm::kv_reads::Registration,
+    ctx: &ReqCtx,
+) -> Option<Result<Vec<serde_json::Value>, String>> {
+    let mut pause = std::time::Duration::from_millis(1);
+    loop {
+        if let Some(answer) = reg.take() {
+            return Some(answer);
+        }
+        let left = ctx.deadline.remaining();
+        if left.is_zero() {
+            return None;
+        }
+        tokio::time::sleep(pause.min(left)).await;
+        pause = (pause * 2).min(std::time::Duration::from_millis(20));
+    }
+}
 
 fn invalid(e: KvInvalid) -> KvFailure {
     KvFailure::Invalid {
@@ -98,14 +124,29 @@ impl RaftFacade {
                     "kv_result_misaligned".into(),
                 )));
             }
-            // The entry applied on this node before the reply: its answer was
-            // rendered at the call's position.
-            if let (Some(reg), Some(_)) = (&registered, at) {
-                if let Some(answer) = reg.take() {
-                    return answer.map(|results| KvOut { results }).map_err(|e| {
-                        KvFailure::Rsm(RsmError::Internal(format!("kv read: {e}")))
-                    });
-                }
+            // A call that reads is answered at its own position only, never
+            // from the state now: that can hold a later command's write (Jepsen
+            // W4 leader-deaf, G1c). The entry applies on this node with the
+            // call registered whatever the reply says; `at: None` is a
+            // request-id hit — a forwarding retry of an entry an earlier
+            // attempt committed — and this node's apply may not have passed it
+            // yet, so wait for the rendering, up to the deadline.
+            if let Some(reg) = &registered {
+                let _ = at;
+                return match rendered(reg, &ctx).await {
+                    Some(answer) => answer
+                        .map(|results| KvOut { results })
+                        .map_err(|e| KvFailure::Rsm(RsmError::Internal(format!("kv read: {e}")))),
+                    // Applied, but its reads are gone: the outcome is unknown
+                    // to the client, never answered from later state.
+                    None => Err(KvFailure::Rsm(RsmError::Timeout)),
+                };
+            }
+            if ops.iter().any(|op| !op.is_write()) {
+                // Registered ids are unique (minted here per call, D6).
+                return Err(KvFailure::Rsm(RsmError::Internal(
+                    "kv read: the call's id was already registered".into(),
+                )));
             }
             o.results
         } else {
