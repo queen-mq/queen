@@ -718,6 +718,11 @@ struct InFlightEntry {
     /// and confirmed by `AppliedAt` on `Ok`; the drop gate compares it against
     /// the committed `applied_index`.
     index: u64,
+    /// The term this driver planned the entry in. The applied index passing
+    /// `index` proves the entry applied only when the entry applied there is
+    /// of this term ([`Replicator::applied_term_at`]): once this node has lost
+    /// the term, the new leader's entry sits at that index.
+    term: u64,
     entry: Arc<Entry>,
     waiters: Vec<Waiter>,
     /// `Some` once `propose` resolved `Ok` (applied locally) or the hold was
@@ -2693,9 +2698,11 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         bytes: Bytes,
     ) {
         let planned = entry.clone();
+        let term = self.planning_term.unwrap_or(0);
         self.inflight.push_back(InFlightEntry {
             seq,
             index,
+            term,
             entry,
             waiters,
             resolved: None,
@@ -3009,20 +3016,28 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             // every timed-out entry at or below the applied index resolved so
             // it no longer counts, and resume planning.
             let applied = self.repl.applied_index();
-            let term = match *self.role_rx.borrow() {
-                Role::Leader { term } => term,
-                _ => 0,
-            };
             let mut orphans: Vec<(Pid, String, String)> = Vec::new();
+            let mut superseded = false;
             for e in self.inflight.iter_mut() {
                 if e.timed_out && e.resolved.is_none() && e.index <= applied {
+                    if self.repl.applied_term_at(e.index) != Some(e.term) {
+                        // Another term's entry applied at its index: it never
+                        // committed, and neither did anything planned after it.
+                        superseded = true;
+                        break;
+                    }
                     e.resolved = Some(AppliedAt {
                         index: e.index,
-                        term,
+                        term: e.term,
                     });
                     // P1.3: answered `Retry`, yet applied — its leases are orphans.
                     orphans.extend(e.leased_claims());
                 }
+            }
+            if superseded {
+                let hint = self.role_rx.borrow().leader_hint();
+                self.lose_leadership(hint);
+                return;
             }
             self.release_orphans(orphans);
             self.holding_until = None;
@@ -3051,11 +3066,8 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     /// path (both guard on `resolved`): whichever reaches an entry first
     /// resolves it, the other is a no-op.
     fn resolve_applied(&mut self, applied: u64) {
-        let term = match *self.role_rx.borrow() {
-            Role::Leader { term } => term,
-            _ => 0,
-        };
         let mut orphans: Vec<(Pid, String, String)> = Vec::new();
+        let mut superseded = false;
         for e in self.inflight.iter_mut() {
             // In-flight entries are pushed in index order and never reordered,
             // so the first one above the applied index bounds the rest.
@@ -3064,6 +3076,19 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             }
             if e.resolved.is_some() {
                 continue;
+            }
+            // The index passing proves nothing by itself: after a term change
+            // it holds the new leader's entry, and this one never committed
+            // (Jepsen W3c pause: a stale leader answered its claims `Done`
+            // off the new leader's noop). Unknown: the propose result decides.
+            let term = e.term;
+            match self.repl.applied_term_at(e.index) {
+                Some(t) if t == term => {}
+                Some(_) => {
+                    superseded = true;
+                    break;
+                }
+                None => break,
             }
             if e.timed_out {
                 // Its waiters were already answered `Retry` (I3); mark it
@@ -3088,6 +3113,13 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             }
         }
         self.release_orphans(orphans);
+        if superseded {
+            // Every waiter `Retry`: the facade takes each command, under its
+            // request id, to the node that leads now.
+            let hint = self.role_rx.borrow().leader_hint();
+            self.lose_leadership(hint);
+            return;
+        }
         // Release a pipeline hold whose held entries have now applied (mirrors
         // `check_hold`, so a timeout followed by an applied-index wake still
         // resumes planning).

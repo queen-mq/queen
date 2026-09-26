@@ -899,7 +899,19 @@ impl RaftFacade {
                                 self.release_unanswered(&command, &reply);
                                 return Err(RsmError::Timeout);
                             }
-                            return Ok(reply);
+                            // The answer is for the leader's entry at `at`. A
+                            // leader that had lost its term answers for an index
+                            // the new leader's entry holds here (Jepsen W3c,
+                            // pause): its outcome never committed. Unknown, then:
+                            // ask whoever leads now, under the same request id.
+                            let superseded = matches!(
+                                &reply,
+                                Reply::Done { at: Some(at), .. }
+                                    if self.repl.applied_term_at(at.index).is_some_and(|t| t != at.term)
+                            );
+                            if !superseded {
+                                return Ok(reply);
+                            }
                         }
                         (reply, _) => return Ok(reply),
                     },

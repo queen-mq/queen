@@ -397,8 +397,12 @@ pub trait Replicator: Send + Sync + 'static {
     /// the propose future: that future still runs (it drives commit on a
     /// backend that resolves it, and it still delivers `Timeout`/`Fatal`),
     /// so a resolution the notify reaches first only answers the entry's
-    /// waiters sooner — commit + local apply (D7, I4) still gate it, because
-    /// the notify fires only AFTER `applied_index` advanced past the entry.
+    /// waiters sooner. The applied index passing an entry's index proves the
+    /// entry applied ONLY while the entry at that index is the one proposed:
+    /// after a leadership change the new leader's entries sit at the indexes
+    /// the old leader's in-flight entries were predicted at (Jepsen W3c,
+    /// pause). The driver resolves an entry off this wake only when
+    /// [`Replicator::applied_term_at`] names the term it proposed it in.
     ///
     /// The default is `None`: a backend that does not expose the signal makes
     /// the driver keep its per-propose await path, so this is never a
@@ -413,6 +417,15 @@ pub trait Replicator: Send + Sync + 'static {
     async fn read_barrier(&self, deadline: Instant) -> Result<u64, ProposeError>;
 
     fn applied_index(&self) -> u64;
+
+    /// The term of the entry this node applied at `index` (`None`: not applied
+    /// yet, or not known). The default knows nothing: the driver then resolves
+    /// an entry only from its propose result, which the backend matches to the
+    /// entry's own log id.
+    fn applied_term_at(&self, index: u64) -> Option<u64> {
+        let _ = index;
+        None
+    }
 
     async fn transfer_leadership(
         &self,

@@ -2119,6 +2119,11 @@ impl<S: Store + 'static> Replicator for LocalReplicator<S> {
         self.shared.applied_index.load(Ordering::Acquire)
     }
 
+    /// One leader, one term, a log nobody truncates.
+    fn applied_term_at(&self, index: u64) -> Option<u64> {
+        (index <= self.shared.applied_index.load(Ordering::Acquire)).then_some(LOG_TERM)
+    }
+
     async fn transfer_leadership(
         &self,
         to: Option<NodeId>,

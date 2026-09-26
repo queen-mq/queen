@@ -251,6 +251,11 @@ impl Replicator for FakeReplicator {
         self.shared.applied.load(Ordering::Acquire)
     }
 
+    /// The fake never truncates: what applied is of the current term.
+    fn applied_term_at(&self, index: u64) -> Option<u64> {
+        (index <= self.shared.applied.load(Ordering::Acquire)).then(|| self.term())
+    }
+
     async fn transfer_leadership(
         &self,
         to: Option<NodeId>,

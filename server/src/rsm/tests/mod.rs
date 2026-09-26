@@ -63,6 +63,7 @@ mod replicator;
 mod replicator_crash;
 mod roundtrip;
 pub(super) mod samples;
+mod stale_leader;
 mod store;
 mod store_crash;
 mod store_integrity;

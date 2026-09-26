@@ -368,6 +368,13 @@ impl<S: Store + 'static> Replicator for NodeReplicator<S> {
         }
     }
 
+    fn applied_term_at(&self, index: u64) -> Option<u64> {
+        match self {
+            NodeReplicator::Local(r) => r.applied_term_at(index),
+            NodeReplicator::Raft(r) => r.applied_term_at(index),
+        }
+    }
+
     async fn transfer_leadership(
         &self,
         to: Option<NodeId>,

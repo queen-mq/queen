@@ -2258,6 +2258,15 @@ impl<S: Store + 'static> Replicator for RaftReplicator<S> {
         self.shared.applied_index.load(Ordering::Acquire)
     }
 
+    /// `RaftNotify::applied` records the term (`note_term`) before it pulses
+    /// `applied_notify`, so the term of every index a wake reports is known.
+    fn applied_term_at(&self, index: u64) -> Option<u64> {
+        if index > self.shared.applied_index.load(Ordering::Acquire) {
+            return None;
+        }
+        self.shared.term_at(index)
+    }
+
     async fn transfer_leadership(
         &self,
         to: Option<NodeId>,
