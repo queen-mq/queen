@@ -341,7 +341,9 @@ pub struct RaftFacade {
 /// Wall micros for the PERF-J fastpath's `ready_at` comparison. A coarse hint —
 /// the pending ring's `ready_at` is in the RSM clock base (monotone wall micros),
 /// so a few microseconds of skew only ever makes a borderline deferred partition
-/// look not-yet-ready, which self-heals on the next re-poll (§9.5). The
+/// look not-yet-ready, which self-heals on the next re-poll (§9.5). A wall
+/// clock BEHIND the RSM clock by more (after a leader's clock excursion) makes
+/// the fastpath step aside ([`RaftFacade::wildcard_would_be_empty`]). The
 /// drained-partition case this optimises has no pending row at all, so it does
 /// not depend on this clock.
 fn wall_micros() -> i64 {
@@ -980,9 +982,12 @@ impl RaftFacade {
         let tenant = tenant.to_string();
         let queue = queue.to_string();
         let group = group.to_string();
-        let now_us = wall_micros();
+        let wall = wall_micros();
         let res = tokio::task::spawn_blocking(move || {
             store.read(|r| {
+                // On the RSM clock, never behind it (D5; see
+                // `wildcard_would_be_empty`).
+                let now_us = wall.max(r.last_now_us()?);
                 crate::rsm::planner::pop::wildcard_ready_count(
                     r, &tenant, &queue, &group, now_us, cap,
                 )
@@ -995,6 +1000,22 @@ impl RaftFacade {
         }
     }
 
+    /// How far the RSM clock (the last applied entry's `now`) runs ahead of
+    /// this node's wall clock; 0 when it does not, or on any error. A deadline
+    /// the planner compares with the RSM clock is set on that clock: from a
+    /// wall clock behind it (this node's stepped back, or the leader's ran
+    /// ahead) every pop's `wall + timeout` had passed before it was planned,
+    /// and each was answered empty (P9 W2: 150 s ahead, every pop of every
+    /// node empty until the drain gave up).
+    async fn rsm_ahead_us(&self) -> i64 {
+        let store = self.store.clone();
+        let wall = wall_micros();
+        match tokio::task::spawn_blocking(move || store.read(|r| r.last_now_us())).await {
+            Ok(Ok(last)) => last.saturating_sub(wall).max(0),
+            _ => 0,
+        }
+    }
+
     async fn wildcard_would_be_empty(&self, tenant: &str, queue: &str, group: &str) -> bool {
         let store = self.store.clone();
         let tenant = tenant.to_string();
@@ -1003,6 +1024,15 @@ impl RaftFacade {
         let now_us = wall_micros();
         let res = tokio::task::spawn_blocking(move || {
             store.read(|r| {
+                // `ready_at` is on the RSM clock. A wall clock BEHIND it (a
+                // leader's clock jumped forward and came back: the RSM clock
+                // keeps its high-water mark, D5) calls ready work "not yet"
+                // until it catches up — P9 W5: every pop answered empty for
+                // minutes after a +170 s excursion of the leader's clock. From
+                // behind, this node proves nothing: the planner decides.
+                if r.last_now_us()? > now_us {
+                    return Ok(false);
+                }
                 crate::rsm::planner::pop::wildcard_pop_provably_empty(
                     r,
                     &tenant,
@@ -2506,6 +2536,9 @@ impl RaftFacade {
         // for it; a woken pop therefore goes straight to the planner, whose
         // overlay folds every applied-but-uncommitted entry.
         let mut woke = false;
+        // The planner judges the deadline below on the RSM clock: how far that
+        // runs ahead of this node's wall clock (0 when it does not).
+        let rsm_ahead_us = self.rsm_ahead_us().await;
 
         loop {
             // PLAN_RAFT_DRAIN_FIX P1.1: a re-poll that cannot come back before the
@@ -2531,8 +2564,9 @@ impl RaftFacade {
             // claiming a little earlier (`FOLLOWER_POP_MARGIN`, at most a quarter
             // of what is left).
             let remaining = ctx.deadline.remaining();
-            let mut deadline_us =
-                wall_micros().saturating_add(remaining.as_micros().min(i64::MAX as u128) as i64);
+            let mut deadline_us = wall_micros()
+                .saturating_add(rsm_ahead_us)
+                .saturating_add(remaining.as_micros().min(i64::MAX as u128) as i64);
             if self.offload
                 && !matches!(
                     self.repl.role(),
