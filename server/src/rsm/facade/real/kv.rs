@@ -118,7 +118,7 @@ impl RaftFacade {
         };
 
         let results = self
-            .kv_read(&ctx, move |r, tenant, now| {
+            .kv_read(&ctx, true, move |r, tenant, now| {
                 kvp::render_call(r, tenant, &ops, &pre, now)
             })
             .await?;
@@ -141,7 +141,7 @@ impl RaftFacade {
             .unwrap_or(kvp::PREFIX_DEFAULT);
         let after = req.after.filter(|a| !a.is_empty());
         self.linearizable(&ctx).await.map_err(KvFailure::Rsm)?;
-        self.kv_read(&ctx, move |r, tenant, now| {
+        self.kv_read(&ctx, false, move |r, tenant, now| {
             let page = kvp::page_of(
                 r,
                 tenant,
@@ -169,7 +169,7 @@ impl RaftFacade {
     /// `GET /api/v1/resources/kv/namespaces` (`kv_namespaces_v1`).
     pub(super) async fn kv_namespaces_impl(&self, ctx: ReqCtx) -> Result<String, KvFailure> {
         self.linearizable(&ctx).await.map_err(KvFailure::Rsm)?;
-        self.kv_read(&ctx, |r, tenant, _now| {
+        self.kv_read(&ctx, false, |r, tenant, _now| {
             Ok(kvp::namespaces_of(r, tenant)?.to_string())
         })
         .await
@@ -178,16 +178,21 @@ impl RaftFacade {
     /// Run `f` over ONE read transaction on the blocking pool (pin 2, I15),
     /// under the request's deadline, at one instant for the whole call (§5.7):
     /// the wall clock, never behind the RSM's own clock (D5), so a row the
-    /// planner already judged expired is never read back alive.
+    /// planner already judged expired is never read back alive. `whole`: at an
+    /// entry boundary ([`crate::rsm::store::EntryGate`]) — a call's rows, which
+    /// must not show half of a batch; not the pages of a list, a scan that
+    /// would hold apply for its whole length.
     async fn kv_read<T: Send + 'static>(
         &self,
         ctx: &ReqCtx,
+        whole: bool,
         f: impl FnOnce(&dyn Reads, &str, i64) -> crate::rsm::store::Result<T> + Send + 'static,
     ) -> Result<T, KvFailure> {
         let store = self.store.clone();
         let tenant = ctx.tenant.clone();
         let wall = wall_micros();
         let task = tokio::task::spawn_blocking(move || {
+            let _whole = whole.then(|| store.entry_gate().whole());
             store.read(|r| {
                 let now = wall.max(r.last_now_us()?);
                 f(r, &tenant, now)

@@ -1137,6 +1137,44 @@ pub trait Writes: Reads {
     }
 }
 
+/// Entry boundaries for the readers of RAM keyspaces.
+///
+/// RAM keyspaces are read LIVE: a reader can observe an entry half-applied
+/// ([`heed_store`]'s module header, "Isolation"). A reader that answers a
+/// client from several rows must not: Jepsen W4 caught a read-only KV call
+/// returning one key of a two-key batch before its other key had applied (a
+/// fractured read, G-single). Apply holds the exclusive side while it executes
+/// ONE entry ([`EntryGate::entry`]); such a reader holds the shared side for
+/// its read ([`EntryGate::whole`]) and sees whole entries only. Never taken by
+/// the apply thread for a read (the lock is not reentrant).
+pub struct EntryGate(std::sync::RwLock<()>);
+
+impl EntryGate {
+    pub const fn new() -> EntryGate {
+        EntryGate(std::sync::RwLock::new(()))
+    }
+
+    /// Apply: held while one entry executes.
+    pub fn entry(&self) -> std::sync::RwLockWriteGuard<'_, ()> {
+        self.0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A reader that must see whole entries: held for the read.
+    pub fn whole(&self) -> std::sync::RwLockReadGuard<'_, ()> {
+        self.0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl Default for EntryGate {
+    fn default() -> EntryGate {
+        EntryGate::new()
+    }
+}
+
 /// The store itself.
 ///
 /// Not object-safe on purpose: [`Store::read`] is generic in what the closure
@@ -1167,6 +1205,13 @@ pub trait Store: Send + Sync {
     /// [`Writes::durable_commit`] keep it, because they open the next
     /// transaction on the same handle.
     fn write(&self) -> Result<Self::Write<'_>>;
+
+    /// The entry boundaries of the RAM keyspaces ([`EntryGate`]). The default
+    /// is one gate for the process: correct, only coarser.
+    fn entry_gate(&self) -> &EntryGate {
+        static GATE: EntryGate = EntryGate::new();
+        &GATE
+    }
 
     fn metrics(&self) -> &StoreMetrics;
 

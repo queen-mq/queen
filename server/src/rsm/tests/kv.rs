@@ -1471,3 +1471,76 @@ fn a_writing_calls_reads_see_nothing_planned_after_it() {
     drop((ra, rb));
     assert!(reads.call(&rid(ida)).is_none() && reads.call(&rid(idb)).is_none());
 }
+
+/// Jepsen W4 pause (G-single): a read-only call returned one key of a two-key
+/// batch before the other had applied — the RAM keyspaces are read live, and
+/// the read landed between the batch's two effects. A reader at the entry gate
+/// (`EntryGate::whole`, what `kv_read` holds) that starts in the middle of the
+/// entry waits for apply to finish it, and sees the batch whole.
+#[test]
+fn a_read_at_the_entry_gate_never_sees_half_a_batch() {
+    use std::time::Duration;
+
+    use crate::rsm::apply::{Applier, Committed as ApplyCommitted, NoNotify};
+
+    use super::apply::{cfg, seg_opts};
+
+    let batch = |v: &str| {
+        json!([
+            {"op":"put","ns":"w4","key":"a","value":v,"forever":true},
+            {"op":"put","ns":"w4","key":"b","value":v,"forever":true},
+        ])
+    };
+    let mut c = Cell::new("kv-entry-gate");
+    assert!(c.run(&[kv_cmd(0x6a7e_0001, batch("old"))]).logged);
+    let entry = c
+        .plan_entry(&[kv_cmd(0x6a7e_0002, batch("new"))], None)
+        .expect("the second batch writes");
+    assert!(entry.effects.len() >= 2, "two puts: {:?}", entry.effects);
+    let store = c.node.store();
+    let (mut a, _) = Applier::open(
+        store,
+        &c.node.seg_dir(),
+        seg_opts(),
+        cfg(),
+        std::sync::Arc::new(NoNotify),
+    )
+    .expect("open applier");
+
+    let (go, started) = std::sync::mpsc::channel::<()>();
+    let (seen_tx, seen) = std::sync::mpsc::channel();
+    std::thread::scope(|s| {
+        s.spawn(move || {
+            started.recv().expect("mid-entry");
+            let _whole = store.entry_gate().whole();
+            let rows = store
+                .read(|r| Ok((r.kv(TENANT, "w4", "a")?, r.kv(TENANT, "w4", "b")?)))
+                .expect("read");
+            seen_tx.send(rows).expect("seen");
+        });
+        crate::rsm::faults::set_mid_entry_hook(Some(Box::new(move || {
+            let _ = go.send(());
+            // Ample for a reader that does not wait to read right here.
+            std::thread::sleep(Duration::from_millis(200));
+        })));
+        let done = a.apply(&ApplyCommitted {
+            index: 2,
+            term: 1,
+            entry,
+        });
+        crate::rsm::faults::set_mid_entry_hook(None);
+        done.expect("apply");
+    });
+    let (ra, rb) = seen.recv().expect("the reader read");
+    let (ra, rb) = (ra.expect("a"), rb.expect("b"));
+    assert_eq!(
+        ra.value, rb.value,
+        "half a batch: a={:?} b={:?}",
+        ra.value, rb.value
+    );
+    assert_eq!(
+        ra.value,
+        b"\"new\"".to_vec(),
+        "the whole entry, after it applied"
+    );
+}

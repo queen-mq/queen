@@ -109,8 +109,8 @@ use super::integrity::{
     self, CorruptHook, ScrubCursor, ScrubPhase, ScrubReport, StoreFormat, CHECKSUM_LEN, FORMAT_KEY,
 };
 use super::{
-    CheckpointCut, Keyspace, MapUsage, Result, Scope, Store, StoreError, StoreMetrics, StoreOpts,
-    MAX_DBS,
+    CheckpointCut, EntryGate, Keyspace, MapUsage, Result, Scope, Store, StoreError, StoreMetrics,
+    StoreOpts, MAX_DBS,
 };
 
 /// Every keyspace's checksum seed, by slot ([`integrity::seeds`]).
@@ -398,6 +398,8 @@ pub struct HeedStore {
     /// caller must never reach it: [`HeedStore::write`] refuses first, and the
     /// handle clears the flag when it drops.
     writer_out: AtomicBool,
+    /// The entry boundaries of the RAM keyspaces ([`EntryGate`]).
+    gate: EntryGate,
     /// The store format ([`integrity`]): format 1 carries a checksum in every
     /// value; a legacy (format 0) store runs unverified.
     format: StoreFormat,
@@ -613,6 +615,7 @@ impl HeedStore {
             sync_every_commit: opts.sync_every_commit,
             all_ram: Keyspace::ALL.iter().all(|k| k.is_ram()),
             writer_out: AtomicBool::new(false),
+            gate: EntryGate::new(),
             format,
             checksummed: format.checksummed(),
             seeds,
@@ -1193,6 +1196,10 @@ impl Store for HeedStore {
             poison: None,
             arena: RefCell::new(Vec::new()),
         })
+    }
+
+    fn entry_gate(&self) -> &EntryGate {
+        &self.gate
     }
 
     fn metrics(&self) -> &StoreMetrics {

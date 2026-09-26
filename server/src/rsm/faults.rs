@@ -203,6 +203,33 @@ pub fn armed() -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// A pause in the middle of an entry (unit tests): what a reader sees there
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+thread_local! {
+    static MID_ENTRY: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` on THIS thread's apply between an entry's effects (where
+/// `apply.mid_entry` would fire), or stop with `None`. Thread-local, so the
+/// tests beside it never see it.
+#[cfg(test)]
+pub fn set_mid_entry_hook(f: Option<Box<dyn FnMut()>>) {
+    MID_ENTRY.with(|h| *h.borrow_mut() = f);
+}
+
+#[cfg(test)]
+pub(crate) fn mid_entry_hook() {
+    MID_ENTRY.with(|h| {
+        if let Some(f) = h.borrow_mut().as_mut() {
+            f();
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Apply refusals: a deterministic apply failure, on every node, for the tests
 // of the operator's skip (`QUEEN_RAFT_APPLY_SKIP`)
 // ---------------------------------------------------------------------------

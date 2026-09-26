@@ -1442,6 +1442,10 @@ impl<'s, S: Store> Applier<'s, S> {
             }
         }
         self.failed_effect = None;
+        // A reader answering from several rows sees this entry whole or not at
+        // all ([`crate::rsm::store::EntryGate`]).
+        let store: &'s S = self.store;
+        let _whole = store.entry_gate().entry();
         match self.execute(c) {
             Ok(a) => Ok(a),
             Err(e) => {
@@ -1715,6 +1719,8 @@ impl<'s, S: Store> Applier<'s, S> {
             // Only when at least one effect remains, so it means "mid".
             if ord + 1 < c.entry.effects.len() {
                 crate::rsm::faults::hit("apply.mid_entry");
+                #[cfg(test)]
+                crate::rsm::faults::mid_entry_hook();
             }
         }
         self.failed_effect = None;
