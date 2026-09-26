@@ -104,9 +104,17 @@
   (let [[k _] (:value op)
         key   (key-of "c" k)]
     (case (:f op)
-      :claim (let [id  (str "p" (:process op) "-" (System/nanoTime))
-                   op' (write-result op (kv/put! test client key id 0) id)]
-               (assoc op' :value (independent/tuple k id)))
+      :claim (let [id (str "p" (:process op) "-" (System/nanoTime))
+                   ; The id is in the op BEFORE the call: a claim that throws
+                   ; (a timeout, a dropped connection: :info) may have won, and
+                   ; the checker must know the value it would have written (P8:
+                   ; value-from-nowhere when an :info claim kept [k nil]).
+                   op (assoc op :value (independent/tuple k id))]
+               (try
+                 (-> (write-result op (kv/put! test client key id 0) id)
+                     (assoc :value (independent/tuple k id)))
+                 (catch clojure.lang.ExceptionInfo e
+                   (throw (ex-info (.getMessage e) (assoc (ex-data e) ::op op) e)))))
       :read  (let [op' (read-op test client op key)]
                (assoc op' :value (independent/tuple k (when (= :ok (:type op'))
                                                          (:value op'))))))))
@@ -128,7 +136,7 @@
         (let [{:keys [type msg]} (ex-data e)]
           (if (#{::qh/refused ::qh/timeout ::qh/io} type)
             (do (kv/forget-leader!)
-                (assoc op
+                (assoc (or (::op (ex-data e)) op)
                        :type  (if (#{:read} (:f op)) :fail (kv/exception-type type))
                        :error [(keyword (name type)) msg]))
             (throw e))))))
