@@ -1491,6 +1491,11 @@ impl<S: Store + 'static> LocalReplicator<S> {
                     .map_err(|e| io::Error::other(format!("read qlog tail of q{log}: {e}")))
             })?;
             qlog_tails = Some(set.track_tails());
+            // Every reopened record is fsync'd now, so the durable point may
+            // count it (`QlogTails::wait_synced`) — before the replay below
+            // feeds apply, whose durable points wait on it; the recovery cut
+            // lowers it again if it drops a tail.
+            set.sync_all_open(qlog_tail.max(store_applied))?;
             // NA-QLOG-I1 reconciliation, moved here from `Applier::open` now that
             // the qlog is boot/writer-owned: the reopened durable tail must be
             // AHEAD of or EQUAL to what the store recorded as qlog-durable, never

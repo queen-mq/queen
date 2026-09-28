@@ -339,17 +339,66 @@ pub struct QLogSet {
 #[derive(Debug, Default)]
 pub struct QlogTails {
     synced: std::sync::Mutex<BTreeMap<u64, std::collections::VecDeque<u64>>>,
+    /// Every record at or below this `seq`, in every log, is fsync'd: the
+    /// writer hands its groups to one syncer in order, and each sync covers
+    /// every log the groups since the last one wrote. The durable point waits
+    /// on it ([`QlogTails::wait_synced`]).
+    through: std::sync::Mutex<Through>,
+    moved: std::sync::Condvar,
+}
+
+#[derive(Debug, Default)]
+struct Through {
+    seq: u64,
+    /// A sync failed: what was written after the last good one is not
+    /// durable, and no later sync will say otherwise (the writer stops).
+    failed: Option<String>,
 }
 
 impl QlogTails {
-    /// A sync made `(log, seq)` durable: the log held records up to `seq`.
-    fn note_synced(&self, pairs: &[(u64, u64)]) {
+    /// A sync made `(log, seq)` durable for each pair, and every record
+    /// through `through` in every log.
+    fn note_synced(&self, pairs: &[(u64, u64)], through: u64) {
         let mut g = self.synced.lock().expect("qlog tails");
         for (log, seq) in pairs {
             let q = g.entry(*log).or_default();
             if q.back().is_none_or(|b| b < seq) {
                 q.push_back(*seq);
             }
+        }
+        drop(g);
+        let mut t = self.through.lock().expect("qlog tails");
+        if through > t.seq {
+            t.seq = through;
+            self.moved.notify_all();
+        }
+    }
+
+    fn note_failed(&self, why: String) {
+        let mut t = self.through.lock().expect("qlog tails");
+        t.failed.get_or_insert(why);
+        self.moved.notify_all();
+    }
+
+    /// Block until every record through `seq` is fsync'd; a failed sync short
+    /// of it is the error. Apply runs an entry once it is WRITTEN, before its
+    /// fsync (`log_store::Written`), so a durable point that recorded the
+    /// store's image of the entries through `seq` without this could land
+    /// ahead of the log on the platter: after a power loss the node would
+    /// refuse to boot (the log behind `meta::QLOG_DURABLE_INDEX`).
+    pub fn wait_synced(&self, seq: u64) -> io::Result<()> {
+        let mut t = self.through.lock().expect("qlog tails");
+        loop {
+            if t.seq >= seq {
+                return Ok(());
+            }
+            if let Some(why) = &t.failed {
+                return Err(io::Error::other(format!(
+                    "the queue logs are fsync'd through {} of {seq}: a sync failed: {why}",
+                    t.seq
+                )));
+            }
+            t = self.moved.wait(t).expect("qlog tails");
         }
     }
 
@@ -371,7 +420,8 @@ impl QlogTails {
         out
     }
 
-    /// Raft cut every log at `cut`: synced `seq`s at or above it are gone.
+    /// Raft cut every log at `cut`: synced `seq`s at or above it are gone, and
+    /// the entries written there next are not fsync'd yet.
     fn truncate_from(&self, cut: u64) {
         let mut g = self.synced.lock().expect("qlog tails");
         g.retain(|_, q| {
@@ -380,6 +430,11 @@ impl QlogTails {
             }
             !q.is_empty()
         });
+        drop(g);
+        let mut t = self.through.lock().expect("qlog tails");
+        if t.seq >= cut {
+            t.seq = cut.saturating_sub(1);
+        }
     }
 }
 
@@ -548,31 +603,50 @@ impl QLogSyncer {
     /// file it seals before it switches, so whichever file was cloned, every
     /// byte written before this call is durable when it returns.
     pub fn sync(&self, t: &SyncTicket) -> io::Result<()> {
-        let mut handles: Vec<std::fs::File> = Vec::with_capacity(t.qids.len());
-        let mut tails: Vec<(u64, u64)> = Vec::new();
-        for qid in &t.qids {
-            let arc = self
-                .logs
-                .read()
-                .expect("qlog set poisoned")
-                .get(qid)
-                .cloned();
-            if let Some(log) = arc {
-                let g = log.read().expect("qlog poisoned");
-                // Under the same lock as the clone: every record up to this
-                // tail is in the cloned file or in a file its roll fsync'd.
-                let tail = g.durable_tail();
-                if let Some(f) = g.active_clone()? {
-                    handles.push(f);
-                    tails.push((*qid, tail));
+        let synced = (|| -> io::Result<Vec<(u64, u64)>> {
+            let mut handles: Vec<std::fs::File> = Vec::with_capacity(t.qids.len());
+            let mut pairs: Vec<(u64, u64)> = Vec::new();
+            for qid in &t.qids {
+                let arc = self
+                    .logs
+                    .read()
+                    .expect("qlog set poisoned")
+                    .get(qid)
+                    .cloned();
+                if let Some(log) = arc {
+                    let g = log.read().expect("qlog poisoned");
+                    // Under the same lock as the clone: every record up to this
+                    // tail is in the cloned file or in a file its roll fsync'd.
+                    let tail = g.durable_tail();
+                    if let Some(f) = g.active_clone()? {
+                        handles.push(f);
+                        pairs.push((*qid, tail));
+                    }
                 }
             }
+            self.fsync_all(handles)?;
+            Ok(pairs)
+        })();
+        if let Some(tails) = &self.tails {
+            match &synced {
+                Ok(pairs) => tails.note_synced(pairs, t.seq),
+                Err(e) => tails.note_failed(e.to_string()),
+            }
         }
-        self.fsync_all(handles)?;
-        if let Some(t) = &self.tails {
-            t.note_synced(&tails);
-        }
-        Ok(())
+        synced.map(|_| ())
+    }
+
+    /// Fsync every open log, and count every record they hold as fsync'd
+    /// through `seq` ([`QlogTails::wait_synced`]).
+    fn sync_every_log(&self, seq: u64) -> io::Result<()> {
+        let qids: Vec<u64> = self
+            .logs
+            .read()
+            .expect("qlog set poisoned")
+            .keys()
+            .copied()
+            .collect();
+        self.sync(&SyncTicket { qids, seq })
     }
 
     fn fsync_all(&self, mut handles: Vec<std::fs::File>) -> io::Result<()> {
@@ -695,6 +769,14 @@ impl QLogSet {
     /// persist ([`QlogTails`]). Call before taking any [`QLogSet::syncer`].
     pub fn track_tails(&mut self) -> Arc<QlogTails> {
         self.tails.get_or_insert_with(Default::default).clone()
+    }
+
+    /// Boot, after recovery: fsync every open log and count every record as
+    /// fsync'd through `seq`, the recovered tip. A `kill -9` leaves records
+    /// written but not fsync'd in the page cache: readable, not yet durable,
+    /// and the durable point may count only durable ones.
+    pub fn sync_all_open(&self, seq: u64) -> io::Result<()> {
+        self.syncer().sync_every_log(seq)
     }
 
     /// Every open log against the tail the store recorded for it at a durable
@@ -2264,5 +2346,55 @@ impl QLogReader {
             .read()
             .expect("qlog set poisoned")
             .contains_key(&queue_id)
+    }
+}
+
+#[cfg(test)]
+mod through_tests {
+    use std::sync::mpsc::{channel, Receiver};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::QlogTails;
+
+    fn wait_in_thread(t: &Arc<QlogTails>, seq: u64) -> Receiver<std::io::Result<()>> {
+        let (tx, rx) = channel();
+        let t = t.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(t.wait_synced(seq));
+        });
+        rx
+    }
+
+    #[test]
+    fn a_durable_point_waits_for_the_fsync_of_the_entries_it_records() {
+        let t = Arc::new(QlogTails::default());
+        t.note_synced(&[(1, 5)], 5);
+        assert!(t.wait_synced(5).is_ok(), "fsync'd already");
+
+        let rx = wait_in_thread(&t, 8);
+        assert!(
+            rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "6..8 are written, not fsync'd"
+        );
+        t.note_synced(&[(1, 8)], 8);
+        assert!(rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("woken")
+            .is_ok());
+
+        // A Raft cut at 7: what is written there next is not fsync'd yet.
+        t.truncate_from(7);
+        let rx = wait_in_thread(&t, 7);
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        // A failed sync ends the wait with the error; what was fsync'd before
+        // it stays so.
+        t.note_failed("EIO".into());
+        let e = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("woken")
+            .unwrap_err();
+        assert!(e.to_string().contains("EIO"), "{e}");
+        assert!(t.wait_synced(6).is_ok());
     }
 }

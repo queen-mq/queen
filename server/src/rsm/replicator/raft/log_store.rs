@@ -340,6 +340,10 @@ impl LogStore {
         }
 
         let last_log_id = max_log_id(max_log_id(last, cfg.applied), purged);
+        // Every recovered record is fsync'd now, so the durable point may count
+        // it (`QlogTails::wait_synced`); the store's own checkpoint is at or
+        // below this tip too.
+        set.sync_all_open(last_log_id.map_or(0, |l| rsm_index(l.index)))?;
         let fresh = persisted.vote.is_none() && last_log_id.is_none();
         let reader = set.reader();
         let start = purged.map_or(0, |p| p.index + 1);

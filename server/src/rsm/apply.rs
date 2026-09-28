@@ -4206,11 +4206,20 @@ impl<'s, S: Store> Applier<'s, S> {
     fn prepare_point(&mut self) -> Result<Vec<(u16, u32)>> {
         let point = self.segments.durable_point()?;
         // Fsync the qlog alongside the segment files ONLY on the unit-test /
-        // A1-A2-A3a path (`Some`). On the LIVE A3b path the external writer fsync'd
-        // every record on the write path (before its entry), so there is nothing
-        // to sync here.
+        // A1-A2-A3a path (`Some`). On the LIVE path the external writer owns the
+        // queue logs and fsyncs them — but on a cluster an entry applies once it
+        // is WRITTEN (`log_store::Written`: a quorum of other nodes may commit it
+        // first), possibly before this node's fsync. The point below records the
+        // image of every entry through `applied_index`, so it waits for the
+        // writer's fsync to pass them: an image ahead of the log on the platter
+        // is a node that a power loss leaves unable to boot.
         if let Some(qlog) = self.qlog.as_mut() {
             qlog.sync().map_err(ApplyError::Qlog)?;
+        }
+        if let Some(tails) = &self.qlog_tails {
+            tails
+                .wait_synced(self.applied_index)
+                .map_err(ApplyError::Qlog)?;
         }
         // §13.5 `durable.files_synced`: every segment file written since the
         // last point is fsynced (step 1, §11.4), the durable store commit that
