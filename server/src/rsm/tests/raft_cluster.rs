@@ -1864,3 +1864,61 @@ async fn writes_go_on_across_membership_changes() {
         let _ = std::fs::remove_dir_all(d);
     }
 }
+
+/// Fresh nodes without `QUEEN_RAFT_JOIN` do not found a cluster while the node
+/// that holds the data is silent (review 2026-09-28). Nodes 2 and 3 lose their
+/// disks and start while node 1 is down: their open waits, where the old 1.5 s
+/// probe let them elect a leader over an empty log. Node 1 comes back: both
+/// find its state and join, and the cluster's state is node 1's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fresh_nodes_wait_while_the_node_with_the_data_is_silent() {
+    let _one = serial();
+    log_init();
+    const N: u64 = 60;
+    let entries = workload(SEED, 2 * N);
+    let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("found")).collect();
+    let ports = free_ports(3);
+    let opts = vec![test_opts(); 3];
+    let mut nodes = tokio::task::block_in_place(|| open_all(&dirs, &ports, &opts));
+    let l = tokio::task::block_in_place(|| leader_of(&nodes));
+    let first = propose_all(nodes[l].as_ref().unwrap(), &entries[..N as usize]).await;
+    tokio::task::block_in_place(|| wait_applied(&nodes, first));
+    for n in nodes.iter_mut() {
+        let _ = close(n.take().unwrap());
+    }
+    for d in &dirs[1..] {
+        std::fs::remove_dir_all(d).expect("remove");
+        std::fs::create_dir_all(d).expect("recreate");
+    }
+
+    // Nodes 2 and 3 start empty, without QUEEN_RAFT_JOIN, while node 1 is down.
+    let (tx, rx) = std::sync::mpsc::channel();
+    for id in [2u64, 3] {
+        let (d, c, tx) = (
+            dirs[id as usize - 1].clone(),
+            cluster_config(&ports, id),
+            tx.clone(),
+        );
+        std::thread::spawn(move || {
+            let _ = tx.send((id, open_node_in(&d, id, c, test_opts())));
+        });
+    }
+    assert!(
+        tokio::task::block_in_place(|| rx.recv_timeout(Duration::from_secs(5))).is_err(),
+        "an empty node founded a cluster while the node with the data was silent"
+    );
+
+    // Node 1 comes back: both find its state and join it.
+    let (d1, p1) = (dirs[0].clone(), ports.clone());
+    let one = tokio::task::block_in_place(move || open_node(&d1, 1, &p1, test_opts()));
+    let mut nodes = vec![Some(one), None, None];
+    for _ in 0..2 {
+        let (id, r) = tokio::task::block_in_place(|| rx.recv_timeout(Duration::from_secs(60)))
+            .expect("the fresh nodes join once node 1 answers");
+        nodes[id as usize - 1] = Some(r);
+    }
+    let l = tokio::task::block_in_place(|| leader_of(&nodes));
+    let last = propose_all(nodes[l].as_ref().unwrap(), &entries[N as usize..]).await;
+    tokio::task::block_in_place(|| wait_applied(&nodes, last));
+    converge(nodes, 2 * N, "found");
+}

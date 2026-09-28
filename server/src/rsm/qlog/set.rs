@@ -595,6 +595,22 @@ pub struct QLogSyncer {
     tails: Option<Arc<QlogTails>>,
 }
 
+/// TEST ONLY: `QUEEN_TEST_FSYNC_DELAY_MS`, a slow disk: every queue-log sync
+/// waits this long before its fsync, so what apply runs on a follower is
+/// written well before it is durable (the window the durable point's barrier
+/// closes, [`QlogTails::wait_synced`]; Jepsen's slow-disk power loss). Read
+/// once; unset or 0 is off.
+fn test_fsync_delay() -> Option<std::time::Duration> {
+    static DELAY: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    *DELAY.get_or_init(|| {
+        std::env::var("QUEEN_TEST_FSYNC_DELAY_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .map(std::time::Duration::from_millis)
+    })
+}
+
 impl QLogSyncer {
     /// Fsync every log in `t`, concurrently: the slowest fsync, not the sum.
     /// Each log's active file is cloned under a brief READ lock and fsynced
@@ -623,6 +639,9 @@ impl QLogSyncer {
                         pairs.push((*qid, tail));
                     }
                 }
+            }
+            if let Some(d) = test_fsync_delay() {
+                std::thread::sleep(d);
             }
             self.fsync_all(handles)?;
             Ok(pairs)
