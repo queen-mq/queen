@@ -2273,6 +2273,160 @@ fn a_watermark_releases_the_payload_before_the_hash_lists() {
 }
 
 #[test]
+fn retention_takes_the_dead_letters_it_passes_and_moves_the_oldest_stamp() {
+    // Dead letters follow the queue's retention: one goes when `log_start`
+    // passes its message; a timer's (offset −1) holds no message and stays.
+    // The partition's oldest stamp (`oldestMessage`) follows `log_start`. And
+    // the qlog path's `seg_loc` rows (file 0, offset 0) hold no segment claim:
+    // retention must not release them against bucket 1's REAL file 0, which a
+    // frame filed before the switch to the qlog created ("a segment claim was
+    // released twice", seen on stage).
+    let node = Node::new("dlq-retention");
+    let create = |pid: u64| Effect::PartitionCreate {
+        pid,
+        uuid: uuid(pid),
+        tenant: TENANT.into(),
+        queue: QUEUE.into(),
+        partition: "p0".into(),
+        created_at_us: BASE_US,
+    };
+    let append = |n: u64, blob: Vec<u8>| Effect::Append {
+        pid: 1,
+        bucket: 1,
+        base_offset: n,
+        count: 1,
+        created_at_us: BASE_US + 10 + n as i64,
+        hashes: hashes(200 + n, 1),
+        blob,
+    };
+    {
+        let (mut a, _) = open_at(&node);
+        a.apply(
+            &Build::new(BASE_US, 1, 0)
+                .cmd(vec![
+                    Effect::QueueUpsert {
+                        tenant: TENANT.into(),
+                        queue: QUEUE.into(),
+                        cfg: queue_config(BASE_US),
+                    },
+                    create(1),
+                ])
+                .at(1, 1),
+        )
+        .expect("apply");
+        a.apply(
+            &Build::new(BASE_US + 10, 2, 10)
+                .cmd(vec![append(0, vec![7; 16])])
+                .at(2, 1),
+        )
+        .expect("apply");
+        a.commit().expect("commit");
+    }
+    let qlog_cfg = ApplyConfig {
+        qlog: true,
+        qlog_writer_external: true,
+        ..cfg()
+    };
+    let (mut a, _) = Applier::open(
+        node.store(),
+        &node.seg_dir(),
+        seg_opts(),
+        qlog_cfg,
+        Arc::new(crate::rsm::apply::NoNotify),
+    )
+    .expect("reopen on the qlog path");
+    for n in 1..6u64 {
+        a.apply(
+            &Build::new(BASE_US + 10 + n as i64, 2, 10 + n * 10)
+                .cmd(vec![append(n, 64u32.to_le_bytes().to_vec())])
+                .at(2 + n, 1),
+        )
+        .expect("apply");
+    }
+    let dead = [
+        (1u64, "g", 0i64),
+        (2, "g", 1),
+        (3, "g", 4),
+        (4, "h", 1),
+        (5, "g", -1),
+    ];
+    let inserts = dead
+        .iter()
+        .map(|(id, group, offset)| Effect::DlqInsert {
+            dlq_id: uuid(100 + id),
+            tenant: TENANT.into(),
+            queue: QUEUE.into(),
+            pid: 1,
+            group: (*group).into(),
+            offset: *offset,
+            message_id: None,
+            txn: format!("t{id}"),
+            payload: b"{}".to_vec(),
+            error: "boom".into(),
+            retry_count: 3,
+            failed_at_us: BASE_US + 50,
+        })
+        .collect();
+    a.apply(&Build::new(BASE_US + 60, 2, 100).cmd(inserts).at(8, 1))
+        .expect("apply");
+    a.commit().expect("commit");
+
+    // Retention passes offsets 0..=2.
+    a.apply(
+        &Build::new(BASE_US + 100, 2, 200)
+            .cmd(vec![Effect::Watermark {
+                pid: 1,
+                log_start: 3,
+                txns_start: 0,
+            }])
+            .at(9, 1),
+    )
+    .expect("apply");
+    a.commit().expect("commit");
+    node.store()
+        .read(|r| {
+            for (id, _, offset) in dead {
+                let kept = r.dlq(TENANT, QUEUE, &uuid(100 + id)).unwrap().is_some();
+                assert_eq!(kept, offset < 0 || offset >= 3, "dead letter {id} at {offset}");
+            }
+            assert_eq!(r.partition_counter(1, Counter::DlqCount).unwrap(), 2);
+            assert_eq!(r.queue_counter(TENANT, QUEUE, Counter::DlqCount).unwrap(), 2);
+            let p = r.partition(1).unwrap().unwrap();
+            assert_eq!(p.oldest_live_at_us, Some(BASE_US + 13), "offset 3's stamp");
+            Ok(())
+        })
+        .expect("read");
+
+    // Everything, hash lists included: nothing is held, so there is no stamp;
+    // the timer's dead letter is still there.
+    a.apply(
+        &Build::new(BASE_US + 200, 2, 300)
+            .cmd(vec![Effect::Watermark {
+                pid: 1,
+                log_start: 6,
+                txns_start: 6,
+            }])
+            .at(10, 1),
+    )
+    .expect("apply");
+    a.commit().expect("commit");
+    node.store()
+        .read(|r| {
+            assert!(r.dlq(TENANT, QUEUE, &uuid(103)).unwrap().is_none());
+            assert!(r.dlq(TENANT, QUEUE, &uuid(105)).unwrap().is_some());
+            assert_eq!(r.partition_counter(1, Counter::DlqCount).unwrap(), 1);
+            assert_eq!(r.partition(1).unwrap().unwrap().oldest_live_at_us, None);
+            Ok(())
+        })
+        .expect("read");
+    assert_eq!(
+        a.segments_mut().saturated_releases(),
+        0,
+        "a segment claim was released twice"
+    );
+}
+
+#[test]
 fn a_queue_delete_frees_the_names_and_the_chunks_take_the_rest() {
     // §5.2's rules: the name-keyed rows go at once (the name is reusable
     // immediately), the pid-keyed data goes in bounded chunks behind a

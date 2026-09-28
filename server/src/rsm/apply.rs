@@ -2504,9 +2504,9 @@ impl<'s, S: Store> Applier<'s, S> {
             // of the payload-free log. That is what makes `RetainedBytes` — a
             // REPLICATED counter — REPLAY-STABLE (I2): the crash-recovered digest
             // equals the live digest, and no path computes it off an empty blob.
-            // Record it into a `seg_loc` with a sentinel `file_id = 0` (never a
-            // real segment file, so retention's `segments.release` is a no-op for
-            // it) so the watermark handler still decrements `RetainedBytes` THROUGH
+            // Record it into a `seg_loc` with a sentinel `file_id = 0`, offset 0
+            // (it holds no segment claim, so `release_seg_loc` skips it) so the
+            // watermark handler still decrements `RetainedBytes` THROUGH
             // RETENTION exactly as knob-off. `seg_loc` is NODE-LOCAL, so this row
             // is invisible to the replicated digest.
             let len: u64 = if blob.len() == 4 {
@@ -2994,15 +2994,7 @@ impl<'s, S: Store> Applier<'s, S> {
             })?;
         let mut bytes_freed: i64 = 0;
         for (_, row) in &released {
-            self.segments.release(
-                Position {
-                    bucket: row.bucket,
-                    file_id: row.file_id,
-                    offset: row.offset,
-                    len: row.len,
-                },
-                Release::Retained,
-            );
+            self.release_seg_loc(row, Release::Retained);
             bytes_freed += row.len as i64;
         }
         if bytes_freed != 0 {
@@ -3028,21 +3020,26 @@ impl<'s, S: Store> Applier<'s, S> {
                 true
             })?;
         for (base, row) in &expired {
-            self.segments.release(
-                Position {
-                    bucket: row.bucket,
-                    file_id: row.file_id,
-                    offset: row.offset,
-                    len: row.len,
-                },
-                Release::Window,
-            );
+            self.release_seg_loc(row, Release::Window);
             self.writes.del_seg_loc(pid, *base)?;
         }
         self.expire_hashes(pid, p.txns_start, txns_start)?;
 
+        // 3. The dead letters follow the queue's retention: the ones whose
+        //    message just left the log go with it.
+        self.trim_dlq(pid, &tenant, &queue, log_start)?;
+
         p.log_start = log_start;
         p.txns_start = txns_start;
+        // `oldestMessage`: the stamp of the oldest message still held, the
+        // frame at the new `log_start`. A partition without txns rows keeps
+        // what it had; an emptied one holds nothing.
+        p.oldest_live_at_us = if log_start as i64 > p.last_offset {
+            None
+        } else {
+            self.frame_stamp_from(pid, log_start)?
+                .or(p.oldest_live_at_us)
+        };
         self.writes.put_partition(pid, &p)?;
         self.local_metrics.record_retention(
             now_us,
@@ -3055,6 +3052,124 @@ impl<'s, S: Store> Applier<'s, S> {
             txns_start,
         );
         Ok(())
+    }
+
+    /// Retire one `seg_loc` row's claim on its segment file (§11.7).
+    ///
+    /// A row the qlog path filed (`file_id` 0, offset 0: the payload lives
+    /// once, in the qlog) holds no claim. File 0 is nonetheless a real file of
+    /// its bucket, so releasing against it would drive that file's counters
+    /// below the truth ("a segment claim was released twice").
+    fn release_seg_loc(&mut self, row: &SegLocRow, what: Release) {
+        if self.cfg.qlog && self.cfg.qlog_writer_external && row.file_id == 0 && row.offset == 0 {
+            return;
+        }
+        self.segments.release(
+            Position {
+                bucket: row.bucket,
+                file_id: row.file_id,
+                offset: row.offset,
+                len: row.len,
+            },
+            what,
+        );
+    }
+
+    /// The stamp of the first frame at or above `from`: its txns row's
+    /// `created_at`. `None` when no row is there.
+    fn frame_stamp_from(&self, pid: Pid, from: u64) -> Result<Option<i64>> {
+        let prefix = keys::txns_prefix(pid);
+        let start = keys::txns(pid, from);
+        let mut stamp = None;
+        let mut bad = false;
+        self.writes
+            .scan_raw(Keyspace::Txns, &start, &prefix, 1, &mut |_k, v| {
+                match dedup::TxnsRow::decode(v) {
+                    Ok(row) => stamp = Some(row.created_at_us),
+                    Err(_) => bad = true,
+                }
+                false
+            })?;
+        if bad {
+            return Err(StoreError::corrupt(Keyspace::Txns, "txns row").into());
+        }
+        Ok(stamp)
+    }
+
+    /// Dead letters follow the queue's retention: one goes when `log_start`
+    /// passes the offset of the message it holds. A timer's dead letter files
+    /// at −1, holds no message of the log, and stays.
+    ///
+    /// At most [`DLQ_TRIM_PER_WATERMARK`] ids per call, so one entry's apply
+    /// stays short; the rest go with the next watermarks. Every call starts
+    /// again from each group's lowest offset, so a replica that applied
+    /// earlier watermarks without this rule catches up at its first one.
+    fn trim_dlq(&mut self, pid: Pid, tenant: &str, queue: &str, log_start: u64) -> Result<()> {
+        let pid_prefix = keys::dlq_by_pos_pid_prefix(pid);
+        let mut from = pid_prefix.clone();
+        let mut found: Vec<(Vec<u8>, Vec<[u8; 16]>)> = Vec::new();
+        let mut ids = 0usize;
+        let mut bad = false;
+        while ids < DLQ_TRIM_PER_WATERMARK && !bad {
+            // The next group with dead letters in this partition.
+            let mut first: Option<Vec<u8>> = None;
+            self.writes
+                .scan_raw(Keyspace::DlqByPos, &from, &pid_prefix, 1, &mut |k, _v| {
+                    first = Some(k.to_vec());
+                    false
+                })?;
+            let Some(first) = first else { break };
+            let Some(group_len) = first.len().checked_sub(8) else {
+                bad = true;
+                break;
+            };
+            let group_prefix = first[..group_len].to_vec();
+            self.writes.scan_raw(
+                Keyspace::DlqByPos,
+                &first,
+                &group_prefix,
+                usize::MAX,
+                &mut |k, v| match keys::dlq_by_pos_offset_of(k) {
+                    Some(offset) if offset < 0 => true,
+                    Some(offset) if (offset as u64) < log_start => match rows::dlq_ids_decode(v) {
+                        Ok(list) => {
+                            ids += list.len();
+                            found.push((k.to_vec(), list));
+                            ids < DLQ_TRIM_PER_WATERMARK
+                        }
+                        Err(_) => {
+                            bad = true;
+                            false
+                        }
+                    },
+                    Some(_) => false,
+                    None => {
+                        bad = true;
+                        false
+                    }
+                },
+            )?;
+            // Past every key of this group: its prefix, then more than eight
+            // bytes of 0xFF.
+            from = group_prefix;
+            from.extend_from_slice(&[0xFF; 9]);
+        }
+        if bad {
+            return Err(StoreError::corrupt(Keyspace::DlqByPos, "dlq position key").into());
+        }
+        let mut gone = 0i64;
+        for (key, list) in &found {
+            for id in list {
+                if let Some(row) = self.writes.dlq(tenant, queue, id)? {
+                    self.writes.del_dlq(tenant, queue, id, &row)?;
+                    gone += 1;
+                }
+            }
+            // Whatever the list still names (a row that was never there) is
+            // below `log_start` too.
+            self.writes.del_raw(Keyspace::DlqByPos, key)?;
+        }
+        self.settle_dlq_count(pid, tenant, queue, gone)
     }
 
     /// Drop the dedup occurrences and the `txns` rows below `to`.
@@ -3425,15 +3540,7 @@ impl<'s, S: Store> Applier<'s, S> {
                 true
             })?;
         for (base, row) in &rows {
-            self.segments.release(
-                Position {
-                    bucket: row.bucket,
-                    file_id: row.file_id,
-                    offset: row.offset,
-                    len: row.len,
-                },
-                release_for(*base, log_start),
-            );
+            self.release_seg_loc(row, release_for(*base, log_start));
             self.writes.del_seg_loc(pid, *base)?;
         }
         Ok(())
@@ -3769,15 +3876,7 @@ impl<'s, S: Store> Applier<'s, S> {
             return Err(StoreError::corrupt(Keyspace::SegLoc, "seg_loc row").into());
         }
         for (base, row) in &rows {
-            self.segments.release(
-                Position {
-                    bucket: row.bucket,
-                    file_id: row.file_id,
-                    offset: row.offset,
-                    len: row.len,
-                },
-                release_for(*base, log_start),
-            );
+            self.release_seg_loc(row, release_for(*base, log_start));
             self.writes.del_seg_loc(pid, *base)?;
         }
         let next = if rows.len() == limit {
@@ -4931,6 +5030,9 @@ fn outcome_name(o: &crate::rsm::entry::Outcome) -> &'static str {
         Outcome::Placeholder(_) => "admin",
     }
 }
+
+/// The most dead letters one watermark retires ([`Applier::trim_dlq`]).
+const DLQ_TRIM_PER_WATERMARK: usize = 2048;
 
 /// What a frame at `base` still holds when its partition is deleted.
 ///
