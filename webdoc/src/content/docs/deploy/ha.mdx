@@ -144,8 +144,9 @@ its old id only with its data directory wiped. The cycle, from any node that is 
 
 2. **Start the replacement empty, with `QUEEN_RAFT_JOIN=true`.** A fresh node with that setting
    never initialises a cluster of its own and answers `503` until the leader adds it. Without the
-   setting, a fresh node still asks its peers first and joins when one of them already holds
-   cluster state. Its `QUEEN_RAFT_PEERS` must still list its own entry.
+   setting, a fresh node still asks its peers first: it joins when one of them already holds
+   cluster state, founds a new cluster only once every peer has answered that it holds none, and
+   waits while any peer does not answer. Its `QUEEN_RAFT_PEERS` must still list its own entry.
 
 3. **Add it as a learner.** It receives the log, or a snapshot, and does not vote.
 

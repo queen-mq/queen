@@ -2072,22 +2072,67 @@ impl NodeState {
     }
 }
 
+/// One peer's answer to [`peer_with_state`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PeerAnswer {
+    /// It holds cluster state: a log, a term or a membership.
+    HoldsState,
+    /// It answered, and holds none.
+    Empty,
+    /// No answer: still starting, unreachable, a refused token, a bad reply.
+    Silent,
+}
+
+/// What a fresh node does with its peers' answers.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Bootstrap {
+    /// A peer holds cluster state: this node joins that cluster.
+    Join(NodeId),
+    /// Every peer answered that it holds none: a new cluster, which every
+    /// founder initializes with the same members.
+    Initialize,
+    /// These peers did not answer: ask again. A silent peer is never taken
+    /// for an empty one, since it may be the one holding the data (starting,
+    /// or cut off): founding without it would let the empty nodes elect a
+    /// leader of an empty log over it.
+    Wait(Vec<NodeId>),
+}
+
+pub(crate) fn bootstrap_verdict(answers: &[(NodeId, PeerAnswer)]) -> Bootstrap {
+    if let Some((id, _)) = answers.iter().find(|(_, a)| *a == PeerAnswer::HoldsState) {
+        return Bootstrap::Join(*id);
+    }
+    let silent: Vec<NodeId> = answers
+        .iter()
+        .filter(|(_, a)| *a == PeerAnswer::Silent)
+        .map(|(id, _)| *id)
+        .collect();
+    if silent.is_empty() {
+        Bootstrap::Initialize
+    } else {
+        Bootstrap::Wait(silent)
+    }
+}
+
 /// A fresh node's question to its peers before it initializes a cluster from
 /// `QUEEN_RAFT_PEERS`: does one of them hold cluster state already? Then this
-/// node is a replacement joining that cluster, not a founder. Asked for up to
-/// 1.5 s while some peer does not answer (at a new cluster's first start the
-/// peers are starting too); the first peer that holds state answers it.
+/// node is a replacement joining that cluster, not a founder. `None` only once
+/// EVERY peer has answered that it holds none ([`bootstrap_verdict`]): at a
+/// new cluster's first start the peers are starting too and answer within
+/// seconds, while a peer that stays silent keeps this node waiting (said every
+/// 10 s) instead of letting it found a cluster without that peer.
 async fn peer_with_state(c: &ClusterConfig) -> Option<NodeId> {
     let client = network::http_client();
-    let end = Instant::now() + Duration::from_millis(1500);
+    let started = Instant::now();
+    let mut said = started;
     loop {
-        let mut silent = false;
+        let mut answers = Vec::new();
         for (id, node) in &c.members {
             if *id == c.node_id || node.raft.is_empty() {
                 continue;
             }
             let url = format!("http://{}/raft/v1/state", node.raft);
-            match network::post(
+            let answer = match network::post(
                 &client,
                 &url,
                 c.token.as_deref(),
@@ -2099,14 +2144,30 @@ async fn peer_with_state(c: &ClusterConfig) -> Option<NodeId> {
             {
                 Ok(b) => match serde_json::from_slice::<NodeState>(&b) {
                     Ok(st) if st.initialized => return Some(*id),
-                    Ok(_) => {}
-                    Err(_) => silent = true,
+                    Ok(_) => PeerAnswer::Empty,
+                    Err(_) => PeerAnswer::Silent,
                 },
-                Err(_) => silent = true,
-            }
+                Err(_) => PeerAnswer::Silent,
+            };
+            answers.push((*id, answer));
         }
-        if !silent || Instant::now() >= end {
-            return None;
+        match bootstrap_verdict(&answers) {
+            Bootstrap::Join(id) => return Some(id),
+            Bootstrap::Initialize => return None,
+            Bootstrap::Wait(silent) => {
+                if said.elapsed() >= Duration::from_secs(10) {
+                    said = Instant::now();
+                    tracing::warn!(
+                        target: "rsm",
+                        node = c.node_id,
+                        silent = ?silent,
+                        waited_s = started.elapsed().as_secs(),
+                        "raft: this fresh node founds a cluster only once every peer has \
+                         answered that it holds none, and these have not answered; a node \
+                         that replaces a member sets QUEEN_RAFT_JOIN=1",
+                    );
+                }
+            }
         }
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
@@ -2334,5 +2395,32 @@ impl<S: Store + 'static> Replicator for RaftReplicator<S> {
             log_files: files,
             log_bytes: bytes,
         }
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_tests {
+    use super::{bootstrap_verdict, Bootstrap, PeerAnswer::*};
+
+    #[test]
+    fn a_fresh_node_founds_a_cluster_only_once_every_peer_answered_empty() {
+        assert_eq!(
+            bootstrap_verdict(&[(2, Empty), (3, Empty)]),
+            Bootstrap::Initialize
+        );
+        // A silent peer may be the one holding the data: starting, cut off, or
+        // refusing a wrong token. Two empty nodes must not found without it.
+        assert_eq!(
+            bootstrap_verdict(&[(2, Empty), (3, Silent)]),
+            Bootstrap::Wait(vec![3])
+        );
+        assert_eq!(
+            bootstrap_verdict(&[(2, Silent), (3, Silent)]),
+            Bootstrap::Wait(vec![2, 3])
+        );
+        assert_eq!(
+            bootstrap_verdict(&[(2, Silent), (3, HoldsState)]),
+            Bootstrap::Join(3)
+        );
     }
 }
