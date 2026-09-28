@@ -166,6 +166,7 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
         let mut parked = crate::syscollect::drain_parked_avg(&metrics, interval);
         let mut queue_rows = Vec::new();
         let mut conflated_now: Vec<(String, String, i64)> = Vec::new();
+        let mut lag_now: Vec<(String, String, i64, i64)> = Vec::new();
         let mut parked_rows = Vec::new();
         for (key, cur) in &now_pq {
             let prev = last_pq.get(key).copied().unwrap_or_default();
@@ -196,6 +197,14 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
                 parked_count: parked_avg,
                 conflated: cur.conflated.saturating_sub(prev.conflated) as i64,
             };
+            // Every queue this process has served, idle ones at 0: a series
+            // that disappears when a queue goes quiet cannot resolve an alert.
+            lag_now.push((
+                row.tenant.clone(),
+                row.queue.clone(),
+                row.avg_lag_ms,
+                row.max_lag_ms,
+            ));
             let active = row.push_requests != 0
                 || row.push_messages != 0
                 || row.pop_messages != 0
@@ -223,6 +232,7 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
             queue_rows.push(row);
         }
         *LAST_CONFLATED.lock().unwrap_or_else(|p| p.into_inner()) = conflated_now;
+        *LAST_QUEUE_LAG.lock().unwrap_or_else(|p| p.into_inner()) = lag_now;
         // Queues that only had parked long-polls this interval.
         for (key, parked_avg) in parked {
             if parked_avg == 0 {
@@ -295,6 +305,18 @@ static LAST_CONFLATED: std::sync::Mutex<Vec<(String, String, i64)>> =
 
 pub(crate) fn last_conflated() -> Vec<(String, String, i64)> {
     LAST_CONFLATED
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+}
+
+/// The last bucket's pop lag per (tenant, queue) on THIS process, as
+/// (avg ms, max ms): what `queen_queue_pop_lag_milliseconds` exports.
+static LAST_QUEUE_LAG: std::sync::Mutex<Vec<(String, String, i64, i64)>> =
+    std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn last_queue_lag() -> Vec<(String, String, i64, i64)> {
+    LAST_QUEUE_LAG
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .clone()

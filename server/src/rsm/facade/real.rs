@@ -4134,6 +4134,41 @@ impl Rsm for RaftFacade {
         }
     }
 
+    fn dlq_depth_by_queue(&self) -> Vec<(String, String, i64)> {
+        if self.health().role != "leader" {
+            return Vec::new();
+        }
+        use crate::rsm::store::keys::{self, Counter, CounterScope};
+        let scope = [CounterScope::Queue as u8];
+        let read = self.store.read(|r| {
+            let mut out = Vec::new();
+            r.scan_raw(
+                crate::rsm::store::Keyspace::Counters,
+                &scope,
+                &scope,
+                usize::MAX,
+                &mut |k, v| {
+                    if let Some((tenant, queue, id)) = keys::counter_queue_parts(k) {
+                        if id == Counter::DlqCount as u16 {
+                            if let Ok(n) = rows::i64_decode(v) {
+                                out.push((tenant, queue, n));
+                            }
+                        }
+                    }
+                    true
+                },
+            )?;
+            Ok(out)
+        });
+        match read {
+            Ok(out) => out,
+            Err(e) => {
+                tracing::warn!(target: "metrics", error = %e, "dead-letter depths unreadable");
+                Vec::new()
+            }
+        }
+    }
+
     fn prometheus(&self) -> String {
         let mut out = String::new();
         out.push_str("# HELP queen_raft_store_operations_total Embedded-store operations by kind\n# TYPE queen_raft_store_operations_total counter\n");

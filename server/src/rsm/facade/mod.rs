@@ -791,6 +791,13 @@ pub trait Rsm: Send + Sync {
         String::new()
     }
 
+    /// Dead letters per `(tenant, queue)`, exported by the LEADER only: the
+    /// figure is replicated state, and one series per queue keeps the alert
+    /// rules' `sum by (queue)` exact. Empty elsewhere.
+    fn dlq_depth_by_queue(&self) -> Vec<(String, String, i64)> {
+        Vec::new()
+    }
+
     /// The notifier long-poll pops park on (§9.5). The apply thread wakes it
     /// after applying `Append`s and cursor releases; the receiver parks a
     /// waiting pop on it. `None` when the facade has no notifier yet (the stub

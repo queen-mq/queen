@@ -449,6 +449,17 @@ pub fn counter_queue(tenant: &str, queue: &str, c: Counter) -> Vec<u8> {
     k
 }
 
+/// `(tenant, queue, counter id)` of a [`counter_queue`] key.
+pub fn counter_queue_parts(k: &[u8]) -> Option<(String, String, u16)> {
+    if k.first() != Some(&(CounterScope::Queue as u8)) {
+        return None;
+    }
+    let (tenant, at) = read_name(k, 1)?;
+    let (queue, at) = read_name(k, at)?;
+    let id: [u8; 2] = k.get(at..at + 2)?.try_into().ok()?;
+    (at + 2 == k.len()).then_some((tenant, queue, u16::from_be_bytes(id)))
+}
+
 pub fn counter_tenant(tenant: &str, c: Counter) -> Vec<u8> {
     let mut k = with(tenant.len() + 5);
     counter_head(&mut k, CounterScope::Tenant);

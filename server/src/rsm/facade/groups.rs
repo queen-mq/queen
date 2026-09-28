@@ -301,6 +301,15 @@ impl Rsm for GroupRouter {
         h
     }
 
+    fn dlq_depth_by_queue(&self) -> Vec<(String, String, i64)> {
+        // A tenant lives in exactly one group, so the groups' lists never
+        // name the same queue twice.
+        self.groups
+            .iter()
+            .flat_map(|g| g.dlq_depth_by_queue())
+            .collect()
+    }
+
     fn prometheus(&self) -> String {
         let mut out = String::new();
         for (g, r) in self.groups.iter().enumerate() {

@@ -508,12 +508,52 @@ pub(crate) async fn handle_prometheus(
             }
         }
     }
+    // The two families channel-go's queue alerts read, under the names and
+    // labels the Postgres engine exported: pop lag per queue as this process
+    // measured it at delivery over the last metrics bucket, and the dead-letter
+    // depth per queue from the leader.
+    let lag = crate::rsm::dashboard::collector::last_queue_lag();
+    if !lag.is_empty() {
+        body.push_str(
+            "# HELP queen_queue_pop_lag_milliseconds Per-queue pop lag (delivery time minus creation time) over the last metrics bucket (METRICS_FLUSH_MS), on this process\n# TYPE queen_queue_pop_lag_milliseconds gauge\n",
+        );
+        for (tenant, queue, avg, max) in lag {
+            let labels = queue_labels(&tenant, &queue);
+            body.push_str(&format!(
+                "queen_queue_pop_lag_milliseconds{{{labels},stat=\"avg\"}} {avg}\nqueen_queue_pop_lag_milliseconds{{{labels},stat=\"max\"}} {max}\n"
+            ));
+        }
+    }
+    let dlq = st.rsm.dlq_depth_by_queue();
+    if !dlq.is_empty() {
+        body.push_str(
+            "# HELP queen_dlq_depth_by_queue Dead letters per queue (exported by the raft leader only)\n# TYPE queen_dlq_depth_by_queue gauge\n",
+        );
+        for (tenant, queue, n) in dlq {
+            let labels = queue_labels(&tenant, &queue);
+            body.push_str(&format!("queen_dlq_depth_by_queue{{{labels}}} {n}\n"));
+        }
+    }
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
         body,
     )
         .into_response()
+}
+
+/// `queue="…"`, with `tenant="…"` in front for any tenant but the default one
+/// (the shape `queen_queue_conflated_per_minute` has).
+fn queue_labels(tenant: &str, queue: &str) -> String {
+    let queue = crate::metrics::escape_label(queue);
+    if tenant == crate::config::DEFAULT_TENANT {
+        format!("queue=\"{queue}\"")
+    } else {
+        format!(
+            "tenant=\"{}\",queue=\"{queue}\"",
+            crate::metrics::escape_label(tenant)
+        )
+    }
 }
 
 /// `GET /metrics`. Process metrics are local; state-machine role/readiness
