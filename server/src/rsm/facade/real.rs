@@ -3454,20 +3454,25 @@ impl RaftFacade {
 
 /// The per-input-item resolution result: which target it went to (by index into
 /// the returned targets), so the render can attribute the target's lease/dlq.
-/// The item's own `status` is kept because the target's `AckResult` reports the
-/// DLQ as a COUNT, not a per-item set (WP-1.1's shape, R-101): the render needs
-/// this item's status to tell a filed dead letter from a sibling ack on the same
-/// target (see [`render_ack`]).
+/// The target's `AckResult` reports the DLQ as a COUNT, not a per-item set
+/// (WP-1.1's shape, R-101), so the render tells a filed dead letter from a
+/// sibling on the same target by the item's own `status` and `offset` (see
+/// [`render_ack`]).
 struct AckPerItem {
     index: usize,
     target: usize,
     hash: [u8; 16],
     status: AckStatus,
     lease_invalid: bool,
+    /// Where a `failed`/`dlq` item's message sits, found while snapshotting
+    /// its frame; `None` for everything else.
+    offset: Option<i64>,
 }
 
 struct AckSnapshotWork {
     input: usize,
+    /// This item's slot in the per-item list, for its `offset`.
+    per_item: usize,
     target: usize,
     item: usize,
     pid: Pid,
@@ -3604,6 +3609,7 @@ fn resolve_ack_targets(
                             })?;
                             snapshot_work.push(AckSnapshotWork {
                                 input: f.index,
+                                per_item: per_item.len(),
                                 target: ti,
                                 item,
                                 pid: f.pid,
@@ -3624,6 +3630,7 @@ fn resolve_ack_targets(
                     hash,
                     status: f.status,
                     lease_invalid,
+                    offset: None,
                 });
             }
             Ok(())
@@ -3632,7 +3639,10 @@ fn resolve_ack_targets(
 
     for work in snapshot_work {
         match read_dlq_snapshot(reader, qlog_reader, encryption, tenant, &work) {
-            Ok(Some(snapshot)) => targets[work.target].items[work.item].snapshot = Some(snapshot),
+            Ok(Some((snapshot, offset))) => {
+                targets[work.target].items[work.item].snapshot = Some(snapshot);
+                per_item[work.per_item].offset = Some(offset as i64);
+            }
             Ok(None) => {
                 // The planner will classify an unknown/stale hash without ever
                 // consuming the placeholder. A live signal whose frame really
@@ -3652,7 +3662,7 @@ fn read_dlq_snapshot(
     encryption: &crate::encryption::Encryption,
     tenant: &str,
     work: &AckSnapshotWork,
-) -> Result<Option<DlqSnapshot>, String> {
+) -> Result<Option<(DlqSnapshot, u64)>, String> {
     let mut off = work.from;
     while off <= work.to {
         let record = match qlog_reader {
@@ -3690,11 +3700,14 @@ fn read_dlq_snapshot(
                 } else {
                     frame.payload.to_vec()
                 };
-                return Ok(Some(DlqSnapshot {
-                    message_id: Some(frame.message_id),
-                    txn: frame.txn.to_string(),
-                    payload,
-                }));
+                return Ok(Some((
+                    DlqSnapshot {
+                        message_id: Some(frame.message_id),
+                        txn: frame.txn.to_string(),
+                        payload,
+                    },
+                    message_offset,
+                )));
             }
         }
         off = base.saturating_add(count as u64);
@@ -3716,6 +3729,20 @@ fn render_ack(
     per_item: &[AckPerItem],
     bad: &[(usize, String)],
 ) -> String {
+    // A `failed`/`dlq` item at or below its target's new cursor was settled by
+    // this ack. Per target: how many such items.
+    let settled = |p: &AckPerItem| {
+        matches!(p.status, AckStatus::Dlq | AckStatus::Failed)
+            && results
+                .get(p.target)
+                .zip(p.offset)
+                .is_some_and(|(res, off)| off <= res.committed)
+    };
+    let mut settled_per_target: std::collections::HashMap<usize, u32> =
+        std::collections::HashMap::new();
+    for p in per_item.iter().filter(|p| settled(p)) {
+        *settled_per_target.entry(p.target).or_default() += 1;
+    }
     let mut out = String::with_capacity(txns.len() * 96 + 2);
     out.push('[');
     for (i, txn) in txns.iter().enumerate() {
@@ -3742,21 +3769,23 @@ fn render_ack(
             Some((p, res)) => {
                 let stale = res.stale_hashes.contains(&p.hash);
                 let noop = res.noop_hashes.contains(&p.hash);
-                // Per-item DLQ, NOT `res.dlq > 0` broadcast to the whole target
-                // (the batch-ack mis-attribution R-101 leaves us to guard here).
-                // `res.dlq` is a COUNT — the outcome shape carries no per-item
-                // DLQ set — so a completed ack that shares a (partition, lease)
-                // target with a sibling that DID dead-letter must not inherit
-                // its flag. An item reads `dlq:true` only when its target filed
-                // a dead letter AND this item itself carried a DLQ-eligible
-                // signal; `res.dlq == 0` (e.g. a `failed` whose retry budget
-                // remained, so it was released to redeliver) reads false for
-                // every item. RESIDUAL, owed to R-101's shape refinement: two+
-                // signal items on ONE target with `res.dlq == 1` see the head
-                // (lowest-offset) one filed, but the receiver holds no offsets
-                // in this AckResult shape and marks each signal item — the
-                // per-item DLQ set the outcome must carry to disambiguate.
-                let dlq = res.dlq > 0 && matches!(p.status, AckStatus::Dlq | AckStatus::Failed);
+                // Per-item DLQ, NOT `res.dlq > 0` broadcast to the whole target.
+                // `res.dlq` is a COUNT (the outcome carries no per-item set), so
+                // an item reads `dlq:true` only when it is a `failed`/`dlq` item
+                // the ack settled — its message sits at or below the target's
+                // new cursor — and the count says it was filed: the planner
+                // files every settled `dlq` item and every settled `failed` one
+                // unless the queue keeps no dead letters (then those are
+                // dropped, and only the `dlq` items count). A `failed` whose
+                // budget remained was released, not settled: false. The rule
+                // holds for a leader that files only the head too (only the
+                // head sits at or below its cursor), so a mixed-version
+                // cluster answers right during a rolling upgrade.
+                let dlq = settled(p)
+                    && res.dlq > 0
+                    && settled_per_target
+                        .get(&p.target)
+                        .is_some_and(|all| res.dlq >= *all || p.status == AckStatus::Dlq);
                 let error = if stale && p.lease_invalid {
                     Some("invalid or expired lease")
                 } else if stale && !matches!(p.status, AckStatus::Ok) {

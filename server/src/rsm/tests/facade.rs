@@ -575,6 +575,152 @@ async fn a_forced_dlq_ack_files_the_transaction_id() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A batch nacked as a whole on a spent budget (`retryLimit` 0) goes to the
+/// DLQ as a batch, and every item's `dlq` flag says what happened to it; a
+/// `retry` above the head stops the settling and its message redelivers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_nacked_batch_goes_to_the_dlq_as_a_batch_and_each_flag_is_true() {
+    let dir = scratch("ack-nack-batch");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    let configured = facade
+        .api(
+            ctx(),
+            ApiReq {
+                method: "POST".into(),
+                path: "/api/v1/configure".into(),
+                query: None,
+                body: serde_json::to_vec(&serde_json::json!({
+                    "queue":"nack","options":{"retryLimit":0,"deadLetterQueue":true}
+                }))
+                .unwrap(),
+            },
+        )
+        .await
+        .expect("configure");
+    assert_eq!(configured.status, 200, "{}", configured.body);
+
+    // Round 1: a, b, c all nacked -> all three dead letters.
+    // Round 2: d failed, e retry, f failed -> d filed; e and f come back.
+    let mut filed = 0;
+    for (round, (txns, statuses, want)) in [
+        (
+            ["a", "b", "c"],
+            ["failed", "failed", "failed"],
+            [true, true, true],
+        ),
+        (
+            ["d", "e", "f"],
+            ["failed", "retry", "failed"],
+            [true, false, false],
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let items: Vec<String> = txns
+            .iter()
+            .map(|t| format!(r#"{{"queue":"nack","payload":{{"t":"{t}"}},"transactionId":"{t}"}}"#))
+            .collect();
+        facade
+            .push(
+                ctx(),
+                PushReq {
+                    raw: format!(r#"{{"items":[{}]}}"#, items.join(",")).into_bytes(),
+                },
+            )
+            .await
+            .expect("push");
+        let popped = facade
+            .pop_wildcard(
+                ctx(),
+                PopReq {
+                    queue: "nack".into(),
+                    group: None,
+                    batch: 10,
+                    auto_ack: false,
+                    wait: false,
+                    timeout_ms: 1000,
+                    options: Default::default(),
+                },
+            )
+            .await
+            .expect("pop");
+        let pop = parse(&popped.body);
+        assert_eq!(pop["messages"].as_array().map(|m| m.len()), Some(3), "round {round}");
+        let pid = pop["partitionId"].as_str().expect("partitionId").to_string();
+        let lease = pop["leaseId"].as_str().expect("leaseId").to_string();
+        let acks: Vec<String> = txns
+            .iter()
+            .zip(statuses)
+            .map(|(t, s)| {
+                format!(
+                    r#"{{"transactionId":"{t}","partitionId":"{pid}","status":"{s}","leaseId":"{lease}"}}"#
+                )
+            })
+            .collect();
+        let acked = facade
+            .ack(
+                ctx(),
+                AckReq {
+                    queue: Some("nack".into()),
+                    group: "__QUEUE_MODE__".into(),
+                    raw: format!(
+                        r#"{{"consumerGroup":"__QUEUE_MODE__","acknowledgments":[{}]}}"#,
+                        acks.join(",")
+                    )
+                    .into_bytes(),
+                },
+            )
+            .await
+            .expect("ack");
+        let results = parse(&acked.body);
+        let flags: Vec<bool> = results
+            .as_array()
+            .expect("ack array")
+            .iter()
+            .map(|r| r["dlq"].as_bool().expect("dlq flag"))
+            .collect();
+        assert_eq!(flags, want, "round {round}: {}", acked.body);
+        filed += want.iter().filter(|w| **w).count();
+        let rows = dlq_rows_settled(&facade, filed).await;
+        assert_eq!(rows.len(), filed, "round {round}");
+    }
+    let mut txns: Vec<String> = dlq_rows_settled(&facade, 4)
+        .await
+        .into_iter()
+        .map(|r| r.txn)
+        .collect();
+    txns.sort();
+    assert_eq!(txns, ["a", "b", "c", "d"]);
+
+    // e and f come back.
+    let popped = facade
+        .pop_wildcard(
+            ctx(),
+            PopReq {
+                queue: "nack".into(),
+                group: None,
+                batch: 10,
+                auto_ack: false,
+                wait: false,
+                timeout_ms: 1000,
+                options: Default::default(),
+            },
+        )
+        .await
+        .expect("pop");
+    let back: Vec<String> = parse(&popped.body)["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .map(|m| m["transactionId"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(back, ["e", "f"]);
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn phase_two_admin_detail_and_stream_state_accept_the_raft_partition_id() {
     let dir = scratch("phase2-api");

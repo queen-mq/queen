@@ -5,6 +5,9 @@
 //!   explicit signal that is never skipped, below-cursor honesty, the single
 //!   retry budget charged only by an explicit `failed`, the forced-DLQ handoff
 //!   (filed IN THE SAME entry per O7, from the receiver's snapshot per O20).
+//!   Once the head is dead-lettered (or dropped) the same call settles the
+//!   rest of what it names, in order, so a batch nacked on a spent budget goes
+//!   to the DLQ as a batch (`settle_above`).
 //! * [`Planner::plan_ack_positional`] — `log_ack_v1` / `log_ack_at_v1`: advance
 //!   the cursor to an absolute offset, validated against the lease.
 //! * [`Planner::plan_nack`] — release a lease, cursor untouched.
@@ -245,6 +248,100 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 .unwrap_or_default()
         };
 
+        // Above the head: the strongest item this call names at each position
+        // (dlq > failed > retry > ok). Once the head is settled — dead-lettered,
+        // or dropped by a queue without dead letters — the call settles these
+        // too, in order: a nacked batch goes to the DLQ as a batch, not one
+        // message per call with a fresh budget for the rest (which redelivered
+        // the k-th message k × (retryLimit + 1) times).
+        let mut above: std::collections::BTreeMap<i64, (AckStatus, usize)> =
+            std::collections::BTreeMap::new();
+        if let Some(head) = sig_off {
+            for (i, r) in resolved.iter().enumerate() {
+                let Some(off) = r.eff.filter(|o| *o > head) else {
+                    continue;
+                };
+                let status = match r.signal {
+                    Some(s) => s,
+                    None if r.ok => AckStatus::Ok,
+                    None => continue,
+                };
+                let rank = |s: AckStatus| if s == AckStatus::Ok { 3 } else { signal_rank(s) };
+                let slot = above.entry(off).or_insert((status, i));
+                if rank(status) < rank(slot.0) {
+                    *slot = (status, i);
+                }
+            }
+        }
+        let max_ok_all = resolved.iter().filter(|r| r.ok).filter_map(|r| r.eff).max();
+        // The positions settled above the head, contiguous from head + 1: a
+        // `dlq` is filed; a `failed` is filed (or dropped) when the budget is
+        // used up; an `ok`, or a silent position some `ok` above completes,
+        // completes. It stops at the first position that has to come back —
+        // a `retry`, a `failed` with budget left, a silent one — because the
+        // cursor only moves over a contiguous prefix. The flag says whether it
+        // stopped at a `failed`.
+        enum Step {
+            File(usize),
+            Drop,
+            Complete,
+        }
+        let settle_above = |exhausted: bool, dlq_enabled: bool| -> (Vec<(i64, Step)>, bool) {
+            let mut steps = Vec::new();
+            let Some(head) = sig_off else {
+                return (steps, false);
+            };
+            let mut p = head + 1;
+            while has_lease && (p as u64) <= batch_end {
+                match above.get(&p) {
+                    Some((AckStatus::Dlq, i)) => steps.push((p, Step::File(*i))),
+                    Some((AckStatus::Failed, i)) if exhausted => {
+                        steps.push((p, if dlq_enabled { Step::File(*i) } else { Step::Drop }))
+                    }
+                    Some((AckStatus::Failed, _)) => return (steps, true),
+                    Some((AckStatus::Ok, _)) => steps.push((p, Step::Complete)),
+                    Some(_) => break,
+                    None if max_ok_all.is_some_and(|m| m > p) => steps.push((p, Step::Complete)),
+                    None => break,
+                }
+                p += 1;
+            }
+            (steps, false)
+        };
+        // Apply `settle_above` once the head is settled: file what it files and
+        // move the cursor to the last settled position. Answers whether the
+        // walk stopped at a `failed` whose budget remains.
+        let settle = |effects: &mut Vec<Effect>,
+                      cur: &mut CursorRow,
+                      filed: &mut u32,
+                      exhausted: bool,
+                      retry_ct: u32|
+         -> bool {
+            let (steps, stopped_at_failed) = settle_above(exhausted, dlq_enabled);
+            for (off, step) in &steps {
+                if let Step::File(i) = step {
+                    let item = &target.items[*i];
+                    let error = item.error.clone().unwrap_or_else(|| dlq_error());
+                    self.file_dlq(
+                        effects,
+                        target,
+                        cur.committed,
+                        retry_ct,
+                        *off,
+                        &error,
+                        item.snapshot.clone().unwrap_or_default(),
+                        now,
+                    );
+                    *filed += 1;
+                }
+            }
+            if let Some((last, _)) = steps.last() {
+                cur.total_consumed += (*last - cur.committed).max(0) as u64;
+                cur.committed = *last;
+            }
+            stopped_at_failed
+        };
+
         if sig_kind == Some(AckStatus::Dlq) && has_lease {
             // Forced DLQ: advance the completed prefix and file the poison in
             // this entry (O7); the lease is released here (the RSM does not need
@@ -270,6 +367,18 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             cur.attempt_count = 0;
             cur.batch_retry_count = 0;
             cur.total_consumed += 1;
+            let exhausted = cur0.batch_retry_count >= retry_limit;
+            if settle(
+                &mut effects,
+                &mut cur,
+                &mut dlq_filed,
+                exhausted,
+                cur0.batch_retry_count,
+            ) {
+                // Stopped at a `failed` whose budget remains: the rest of the
+                // batch keeps the budget it has used.
+                cur.batch_retry_count = cur0.batch_retry_count;
+            }
             new = cur.committed;
             delta = (new - committed).max(0);
         } else if sig_kind == Some(AckStatus::Failed) && has_lease {
@@ -301,6 +410,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 cur.attempt_count = 0;
                 cur.batch_retry_count = 0;
                 cur.total_consumed += 1;
+                settle(&mut effects, &mut cur, &mut dlq_filed, true, retry_ct);
                 new = cur.committed;
                 delta = (new - committed).max(0);
             } else {
@@ -310,6 +420,8 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 release_lease(&mut cur);
                 cur.batch_retry_count = 0;
                 cur.total_consumed += delta as u64 + 1;
+                settle(&mut effects, &mut cur, &mut dlq_filed, true, retry_ct);
+                new = cur.committed;
                 delta = (new - committed).max(0);
             }
         } else if sig_kind == Some(AckStatus::Retry) && has_lease {
