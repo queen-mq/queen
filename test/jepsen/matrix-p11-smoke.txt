@@ -1,0 +1,20 @@
+# P11 smoke: the new workloads (W7 dlq, W8 retention, W9 streams, W10 timers)
+# and the new checks (leftovers and membership agreement on every test; the
+# slow-disk power loss), short, on 2.0.0-alpha.6 (queen-a6).
+#
+#   cd /root/jepsen-p11 && RUNS=/root/runs-p11s BIN=/root/bin/queen-a6 ./run-campaign.sh matrix-p11-smoke.txt
+#
+# s-slow-nobar runs the SAME build without the durable-point fsync barrier
+# (queen-a6-nobarrier): it is expected INVALID (a node refuses to boot,
+# NA-QLOG-I1), which shows the test can see the bug s-slow-a6 must not have.
+s-w7-none     --workload dlq --nemesis none --time-limit 60
+s-w8-none     --workload retention --nemesis none --time-limit 60
+s-w9-none     --workload streams --nemesis none --time-limit 60
+s-w10-none    --workload timers --nemesis none --time-limit 60
+s-w7-kill     --workload dlq --nemesis kill --time-limit 120
+s-w8-part     --workload retention --nemesis partition --time-limit 120
+s-w9-kill     --workload streams --nemesis kill --time-limit 120
+s-w10-part    --workload timers --nemesis partition --time-limit 120
+s-member-snap --workload queue --nemesis membership --nemesis-interval 20 --time-limit 180 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5
+s-slow-nobar  --workload log --lazyfs --nemesis kill --db-targets one --slow-fsync-nodes n4,n5 --slow-fsync-ms 300 --env QUEEN_RAFT_DURABLE_EVERY_MS=20 --time-limit 180 --bin /root/bin/queen-a6-nobarrier
+s-slow-a6     --workload log --lazyfs --nemesis kill --db-targets one --slow-fsync-nodes n4,n5 --slow-fsync-ms 300 --env QUEEN_RAFT_DURABLE_EVERY_MS=20 --time-limit 180

@@ -1,6 +1,7 @@
 (ns jepsen.queen.core
   "Entry point: lein run test --bin /path/to/queen --workload log --nemesis ..."
-  (:require [clojure.string :as str]
+  (:require [clojure.data.json :as json]
+            [clojure.string :as str]
             [clojure.tools.logging :refer [info warn]]
             [jepsen [checker :as checker]
                     [cli :as cli]
@@ -14,11 +15,15 @@
             [jepsen.queen [db :as db]
                           [nemesis :as qn]]
             [jepsen.queen.workload [dedup :as dedup]
+                                   [dlq :as dlq]
                                    [elle :as elle]
                                    [log :as log]
                                    [pipeline :as pipeline]
                                    [queue :as queue]
-                                   [register :as register]]))
+                                   [register :as register]
+                                   [retention :as retention]
+                                   [streams :as streams]
+                                   [timers :as timers]]))
 
 (def workloads
   {:log      log/workload         ; W1
@@ -28,7 +33,11 @@
    :claim    register/claim-workload     ; W3c
    :elle     elle/workload        ; W4
    :pipeline pipeline/workload    ; W5
-   :dedup    dedup/workload})     ; W6
+   :dedup    dedup/workload       ; W6
+   :dlq      dlq/workload         ; W7
+   :retention retention/workload  ; W8
+   :streams  streams/workload     ; W9
+   :timers   timers/workload})    ; W10
 
 (def all-faults
   #{:pause :kill :partition :clock :pause-kill :part-kill :bridge :leader-deaf
@@ -109,6 +118,53 @@
            :max-usage-pct worst
            :nodes         per-node})))))
 
+(defn leftovers-checker
+  "No snapshot directory left on a node after the test (db/log-files waits up
+  to 30 s for transfers to finish before it lists the data directory): a
+  `snapshots/send-*` left by a send openraft cancelled pins an LMDB copy and
+  hard links to the queue logs until a restart; a `recv-*` is a received
+  snapshot that was neither installed nor dropped."
+  []
+  (reify checker/Checker
+    (check [this test history opts]
+      (let [left (into (sorted-map)
+                       (for [node (:nodes test)
+                             :let [f (store/path test node "data-ls.txt")]
+                             :when (.exists f)
+                             :let [dirs (->> (str/split-lines (slurp f))
+                                             (keep #(second (re-find #"^(\S*/snapshots/(?:send|recv)-[^/\s]+):$" %)))
+                                             distinct
+                                             vec)]
+                             :when (seq dirs)]
+                         [node dirs]))]
+        {:valid?    (empty? left)
+         :leftovers left}))))
+
+(defn membership-agreement-checker
+  "Every node's OWN voter set, read from it after the test (raft-state.json),
+  is the same. A node that installed a snapshot naming an older membership
+  kept that voter set until the next membership change, and votes by it
+  (review 2026-09-28). Nodes that did not answer, or hold no cluster state,
+  are listed, not judged."
+  []
+  (reify checker/Checker
+    (check [this test history opts]
+      (let [views  (into (sorted-map)
+                         (for [node (:nodes test)
+                               :let [f  (store/path test node "raft-state.json")
+                                     st (when (.exists f)
+                                          (try (json/read-str (slurp f) :key-fn keyword)
+                                               (catch Exception _ nil)))]
+                               :when (map? st)]
+                           [node st]))
+            judged (filter (comp :initialized val) views)
+            sets   (distinct (map (comp set :voters val) judged))]
+        {:valid?          (<= (count sets) 1)
+         :voters          (into (sorted-map)
+                                (map (fn [[n st]] [n (vec (sort (:voters st)))]) views))
+         :not-initialized (vec (keep (fn [[n st]] (when-not (:initialized st) n)) views))
+         :no-answer       (vec (remove (set (keys views)) (:nodes test)))}))))
+
 (defn test-name
   "A name without spaces (it is the store directory)."
   [opts]
@@ -128,6 +184,9 @@
               "_" (name (:corrupt-remedy opts))))
        (when (:lazyfs opts) "_lazyfs")
        (when (:disk-hog opts) "_hog")
+       (when (seq (:slow-fsync-nodes opts))
+         (str "_slowfsync=" (str/join "," (:slow-fsync-nodes opts))
+              ":" (:slow-fsync-ms opts)))
        "_offload=" (if (:offload opts) "on" "off")
        "_lanes=" (:lanes opts)
        (when (seq (:env opts))
@@ -223,6 +282,8 @@
                                         #"panicked at|NA-QLOG-I1|poison"
                                         "queen.log")
                             :lazyfs   (lazyfs-checker)
+                            :leftovers (leftovers-checker)
+                            :members  (membership-agreement-checker)
                             :faults   (qn/fault-summary-checker)
                             :workload (:checker workload)})
             :perf-opts   {:nemeses (:perf nemesis)}})))
@@ -325,6 +386,14 @@
     :default 10
     :parse-fn read-string]
 
+   [nil "--slow-fsync-nodes NODES" "A slow disk on these nodes only (QUEEN_TEST_FSYNC_DELAY_MS: the queue-log syncer waits before every fsync), so they apply entries well before their fsync. With --lazyfs and kills: the slow-disk power loss."
+    :default []
+    :parse-fn #(vec (remove str/blank? (str/split % #",")))]
+
+   [nil "--slow-fsync-ms MS" "--slow-fsync-nodes: the wait before each fsync."
+    :default 300
+    :parse-fn parse-long]
+
    [nil "--server-timeout-ms MS" "POP_DEFAULT_TIMEOUT_MS on the nodes (the push deadline); the client waits 5 s more."
     :default 5000
     :parse-fn parse-long]
@@ -373,7 +442,7 @@
     :default 8
     :parse-fn parse-long]
 
-   ["-w" "--workload NAME" "Workload: log (W1), queue (W2), register (W3), counter (W3b), claim (W3c), elle (W4), pipeline (W5), dedup (W6)."
+   ["-w" "--workload NAME" "Workload: log (W1), queue (W2), register (W3), counter (W3b), claim (W3c), elle (W4), pipeline (W5), dedup (W6), dlq (W7), retention (W8), streams (W9), timers (W10)."
     :default :log
     :parse-fn keyword
     :validate [workloads (cli/one-of workloads)]]])

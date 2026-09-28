@@ -1,0 +1,5 @@
+# P11 smoke, again: the three runs the first smoke judged with checker bugs
+# since fixed (W7's flaky fate and settled-completion rule, W8's watermark read).
+s2-w7-none    --workload dlq --nemesis none --time-limit 60
+s2-w8-none    --workload retention --nemesis none --time-limit 60
+s2-w7-kill    --workload dlq --nemesis kill --time-limit 120

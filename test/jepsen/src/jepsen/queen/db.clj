@@ -26,6 +26,9 @@
 (def buf-dir          (str dir "/buf"))
 (def log-file         (str dir "/queen.log"))
 (def ls-file          (str dir "/data-ls.txt"))
+(def state-file       (str dir "/raft-state.json"))
+(def state-loop-sh    (str dir "/state-loop.sh"))
+(def state-loop-pid   (str dir "/state-loop.pid"))
 (def pid-file         (str dir "/queen.pid"))
 (def wrapper-pid-file (str dir "/wrapper.pid"))
 (def raft-port        7400)
@@ -71,7 +74,11 @@
         ; The push deadline (handlers/raft.rs deadline_for); the client's
         ; socket timeout is longer, so most outcomes are known.
         "POP_DEFAULT_TIMEOUT_MS"        (:server-timeout-ms test))
-      (:extra-env test))))
+      (:extra-env test)
+      ; --slow-fsync-nodes: a slow disk on these nodes only (a test knob of
+      ; the queue-log syncer), so they apply entries well before their fsync.
+      (when (some #{node} (:slow-fsync-nodes test))
+        {"QUEEN_TEST_FSYNC_DELAY_MS" (:slow-fsync-ms test)}))))
 
 (defn- sh-quote
   [x]
@@ -210,6 +217,35 @@
                                 hog-pid-file ") 2>/dev/null; pkill -9 -x dd; true")))
     (c/exec :rm :-f hog-file hog-pid-file)))
 
+(defn start-state-loop!
+  "Every 2 s, this node's own raft view (POST /raft/v1/state: its voters) into
+  raft-state.json, kept only when the node answered. Jepsen kills the nodes
+  BEFORE it collects their logs, so the view has to be taken while they run:
+  the file then holds the last one, for the membership agreement checker."
+  [test node]
+  (c/su
+    (cu/write-file!
+      (str "#!/usr/bin/env bash\n"
+           "# Written by jepsen.queen.db: this node's raft view, while it answers.\n"
+           "while true; do\n"
+           "  if curl -s -m 2 -X POST -H 'x-queen-raft-token: " (:raft-token test) "'"
+           " -o " state-file ".tmp -w '%{http_code}'"
+           " http://" (cn/ip node) ":" raft-port "/raft/v1/state | grep -q '^200$'; then\n"
+           "    mv -f " state-file ".tmp " state-file "\n"
+           "  fi\n"
+           "  sleep 2\n"
+           "done\n")
+      state-loop-sh)
+    (c/exec :bash :-c (str "setsid nohup bash " state-loop-sh
+                           " > /dev/null 2>&1 < /dev/null & echo $! > " state-loop-pid))))
+
+(defn stop-state-loop!
+  []
+  (c/su
+    (meh (c/exec :bash :-c (str "test -f " state-loop-pid " && kill -9 $(cat "
+                                state-loop-pid ") 2>/dev/null; true")))
+    (c/exec :rm :-f state-loop-pid state-loop-sh (str state-file ".tmp"))))
+
 (declare await-healthy!)
 
 (defn graceful-restart!
@@ -322,6 +358,7 @@
     (jepsen/synchronize test)
     (start-node! test node)
     (await-healthy! node 120000)
+    (start-state-loop! test node)
     (jepsen/synchronize test)
     (when (= node (jepsen/primary test))
       (configure-queues! test node))
@@ -331,24 +368,33 @@
 
   (teardown! [this test node]
     (stop-disk-hog!)
+    (stop-state-loop!)
     ; Always unmount a lazyfs left over from an earlier test, whatever this
     ; test's options: the data directory may be its mount point.
     (kill-node! (dissoc test :lazyfs) node)
     (qlazyfs/umount! (qlazyfs/lazyfs-map test data-dir))
-    (c/su (c/exec :rm :-rf data-dir buf-dir log-file ls-file pid-file
-                  wrapper-pid-file)))
+    (c/su (c/exec :rm :-rf data-dir buf-dir log-file ls-file state-file
+                  pid-file wrapper-pid-file)))
 
   db/LogFiles
   (log-files [this test node]
-    (meh (c/su (c/exec :bash :-c (str "ls -laR " data-dir " > " ls-file
-                                      " 2>&1; true"))))
+    ; The listing waits up to 30 s for snapshot transfers to finish: a
+    ; `snapshots/send-*` or `recv-*` directory still there after that is left
+    ; over (the leftovers checker reads the listing).
+    (meh (c/su (c/exec :bash :-c
+                       (str "for i in 1 2 3 4 5 6; do "
+                            "find " data-dir " -maxdepth 4 -path '*/snapshots/*' -type d "
+                            "\\( -name 'send-*' -o -name 'recv-*' \\) | grep -q . || break; "
+                            "sleep 5; done; "
+                            "ls -laR " data-dir " > " ls-file " 2>&1; true"))))
     ; The final cache usage goes into lazyfs.log, for the lazyfs checker.
     (when-let [lfs (lazyfs test)]
       (when (qlazyfs/mounted? lfs)
         (meh (qlazyfs/usage! lfs))))
-    (cond-> {log-file "queen.log"
-             ls-file  "data-ls.txt"
-             run-sh   "run.sh"}
+    (cond-> {log-file   "queen.log"
+             ls-file    "data-ls.txt"
+             state-file "raft-state.json"
+             run-sh     "run.sh"}
       (lazyfs test) (assoc (:log-file (lazyfs test)) "lazyfs.log")))
 
   db/Process
