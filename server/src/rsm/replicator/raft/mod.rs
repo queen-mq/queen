@@ -1240,6 +1240,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
                     data_dir.clone(),
                     store.clone(),
                     opened.reader.clone(),
+                    sm.membership_at(),
                 )),
                 shared.members.clone(),
             )),
@@ -1278,6 +1279,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
                     Arc::new(RecvCtx {
                         data_dir: data_dir.clone(),
                         restart: restart.clone(),
+                        receiving: tokio::sync::Mutex::new(()),
                     }),
                     shared.remote.clone(),
                     shared.local.clone(),

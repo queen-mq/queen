@@ -51,6 +51,16 @@ pub struct Checkpoint {
 
 const MEMBERSHIP_FILE: &str = "membership.json";
 
+/// Applied memberships kept (newest last), each change being two entries
+/// (joint, then uniform): a snapshot names the membership of its OWN
+/// checkpoint, which can trail the latest by a few changes.
+const MEMBERSHIP_HISTORY: usize = 64;
+
+/// The membership in force at a log id: the newest applied one at or below
+/// it, `None` when the history no longer reaches back that far.
+pub(crate) type MembershipAt =
+    Box<dyn Fn(&Option<LogId>) -> Option<StoredMembership> + Send + Sync>;
+
 /// The pieces of the state machine that outlive one openraft call.
 struct Parts<S: Store> {
     store: Arc<S>,
@@ -78,6 +88,11 @@ impl<S: Store> Parts<S> {
             .last()
             .cloned()
             .unwrap_or_default()
+    }
+
+    fn membership_at(&self, at: &Option<LogId>) -> Option<StoredMembership> {
+        let hist = self.membership.lock().expect("membership");
+        hist.iter().rev().find(|m| m.log_id() <= at).cloned()
     }
 
     /// A checkpoint at the store's durable index: everything at or below it is
@@ -173,10 +188,18 @@ impl<S: Store + 'static> QueenSm<S> {
         std::fs::File::open(&dir)?.sync_all()?;
         let mut hist = self.parts.membership.lock().expect("membership");
         hist.push(m);
-        if hist.len() > 4 {
+        if hist.len() > MEMBERSHIP_HISTORY {
             hist.remove(0);
         }
         Ok(())
+    }
+
+    /// For the snapshot sender ([`super::snapshot::SendCtx`]): it ships the
+    /// store's checkpoint as of the SEND, and names that checkpoint's
+    /// membership, not the one of the snapshot openraft built earlier.
+    pub(crate) fn membership_at(&self) -> MembershipAt {
+        let parts = self.parts.clone();
+        Box::new(move |at| parts.membership_at(at))
     }
 
     /// Hand one committed entry to the apply thread, waiting (without blocking

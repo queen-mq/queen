@@ -53,8 +53,10 @@ use serde::{Deserialize, Serialize};
 
 use super::log_store::{state_after_snapshot, write_atomic};
 use super::network::{post, Fail, HttpClient};
-use super::state_machine::{Checkpoint, Snapshot};
-use super::types::{LogId, NodeId, SnapshotMeta, StoredMembership, TypeConfig, Vote};
+use super::state_machine::{Checkpoint, MembershipAt, Snapshot};
+use super::types::{
+    applied_log_id, LogId, NodeId, SnapshotMeta, StoredMembership, TypeConfig, Vote,
+};
 use super::RaftHandle;
 use crate::rsm::qlog::set::{QLogReader, QLogSet};
 use crate::rsm::qlog::QLogOptions;
@@ -97,6 +99,8 @@ pub(crate) struct SendCtx {
     pub(crate) data_dir: PathBuf,
     pub(crate) copy_store: Box<dyn Fn(&Path) -> io::Result<(u64, u64)> + Send + Sync>,
     pub(crate) qlog: QLogReader,
+    /// The membership in force at the copied checkpoint.
+    pub(crate) membership_at: MembershipAt,
 }
 
 impl SendCtx {
@@ -104,6 +108,7 @@ impl SendCtx {
         data_dir: PathBuf,
         store: Arc<S>,
         qlog: QLogReader,
+        membership_at: MembershipAt,
     ) -> SendCtx {
         SendCtx {
             data_dir,
@@ -113,6 +118,7 @@ impl SendCtx {
                     .map_err(|e| io::Error::other(format!("copy the store: {e}")))
             }),
             qlog,
+            membership_at,
         }
     }
 }
@@ -121,6 +127,10 @@ impl SendCtx {
 pub(crate) struct RecvCtx {
     pub(crate) data_dir: PathBuf,
     pub(crate) restart: Arc<Restart>,
+    /// One transfer at a time: every transfer writes the same
+    /// `snapshot.pending` (through the same `.tmp`), so a second is refused
+    /// while one runs, and the leader sends again.
+    pub(crate) receiving: tokio::sync::Mutex<()>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -277,23 +287,33 @@ pub(crate) async fn send(
         .data_dir
         .join(SNAP_DIR)
         .join(format!("send-{target}-{}", stamp()));
+    // Removed when the last of its owners lets go: this future, or the copy
+    // below, which runs on after openraft cancels the send (a leader change).
+    let staging = Arc::new(Staging(dir.clone()));
     let c = ctx.clone();
-    let d = dir.clone();
-    let made = tokio::task::spawn_blocking(move || materialize(&c, &d))
+    let s = staging.clone();
+    let made = tokio::task::spawn_blocking(move || materialize(&c, &s.0))
         .await
         .map_err(|e| Fail::Network(format!("snapshot build: {e}")))?;
-    let (applied, applied_term, files) = match made {
-        Ok(m) => m,
-        Err(e) => {
-            let _ = fs::remove_dir_all(&dir);
-            return Err(Fail::Network(format!("snapshot build: {e}")));
-        }
+    let (applied, applied_term, files) =
+        made.map_err(|e| Fail::Network(format!("snapshot build: {e}")))?;
+    // The copy is the store's checkpoint NOW, which can be past the one openraft
+    // built this snapshot at: name the copy's own checkpoint and the membership
+    // in force there, so the follower installs one checkpoint, not two (an older
+    // membership beside a newer image is a node on a stale voter set).
+    let last_log_id = applied_log_id(applied, applied_term);
+    let Some(last_membership) = (ctx.membership_at)(&last_log_id) else {
+        return Err(Fail::Network(format!(
+            "snapshot at {last_log_id:?}: the membership in force there is no longer \
+             known; the next attempt copies a later checkpoint"
+        )));
     };
     let total: u64 = files.iter().map(|f| f.len).sum();
     tracing::info!(
         target: "rsm",
         target_node = target,
-        last_log_id = ?snapshot.meta.last_log_id,
+        built = ?snapshot.meta.last_log_id,
+        last_log_id = ?last_log_id,
         applied,
         files = files.len(),
         bytes = total,
@@ -301,7 +321,10 @@ pub(crate) async fn send(
     );
     let header = Header {
         vote,
-        meta: snapshot.meta.clone(),
+        meta: SnapshotMeta {
+            last_log_id,
+            last_membership,
+        },
         applied,
         applied_term,
         files: files.clone(),
@@ -323,10 +346,32 @@ pub(crate) async fn send(
         ttl,
     )
     .await;
-    let d = dir.clone();
-    let _ = tokio::task::spawn_blocking(move || fs::remove_dir_all(d)).await;
+    drop(staging);
     let bytes = res?;
     serde_json::from_slice(&bytes).map_err(|e| Fail::Network(format!("snapshot answer: {e}")))
+}
+
+/// A sender's staging directory (an LMDB copy, hard links to every queue-log
+/// and segment file), removed when dropped: on success, on error, and when
+/// openraft cancels the send, which drops the future wherever it stands. The
+/// links pin the linked files' blocks after retention unlinks them, so a left
+/// directory is disk that nothing frees until a restart.
+struct Staging(PathBuf);
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        let dir = std::mem::take(&mut self.0);
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => {
+                rt.spawn_blocking(move || {
+                    let _ = fs::remove_dir_all(dir);
+                });
+            }
+            Err(_) => {
+                let _ = fs::remove_dir_all(dir);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -398,6 +443,24 @@ fn safe_rel(p: &str) -> io::Result<PathBuf> {
     }
 }
 
+/// One checkpoint: the meta names the copied store's own, with the membership
+/// in force there. A sender that named an older one would leave this node on
+/// that older voter set, since openraft re-reads membership only from the log
+/// above the store's checkpoint.
+fn one_checkpoint(meta: &SnapshotMeta, applied: u64, applied_term: u64) -> io::Result<()> {
+    if meta.last_log_id != applied_log_id(applied, applied_term)
+        || meta.last_membership.log_id() > &meta.last_log_id
+    {
+        return Err(bad(format!(
+            "snapshot header names {:?} (membership at {:?}) for a store copied at {applied}: \
+             two checkpoints",
+            meta.last_log_id,
+            meta.last_membership.log_id(),
+        )));
+    }
+    Ok(())
+}
+
 /// Receive a snapshot, stage it, write the marker, and hand it to openraft.
 pub(crate) async fn receive<S: Store + 'static>(
     ctx: &RecvCtx,
@@ -408,6 +471,9 @@ pub(crate) async fn receive<S: Store + 'static>(
         // Already stopped on a snapshot: it loads at the restart.
         return Err(io::Error::other(format!("this node is restarting: {why}")));
     }
+    let Ok(_one) = ctx.receiving.try_lock() else {
+        return Err(io::Error::other("another snapshot is being received here"));
+    };
     let mut stream = body.into_data_stream();
     let mut buf: Vec<u8> = Vec::new();
     // The prefix and header.
@@ -430,6 +496,7 @@ pub(crate) async fn receive<S: Store + 'static>(
             None => return Err(bad("snapshot stream ended in its header")),
         }
     };
+    one_checkpoint(&header.meta, header.applied, header.applied_term)?;
     let rels: Vec<PathBuf> = header
         .files
         .iter()
@@ -657,4 +724,54 @@ pub fn apply_pending(data_dir: &Path, qopts: QLogOptions) -> io::Result<bool> {
     let _ = fs::remove_dir_all(&replaced);
     let _ = fs::remove_dir_all(&staged);
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use super::{applied_log_id, one_checkpoint, Staging};
+    use crate::rsm::replicator::raft::types::{SnapshotMeta, StoredMembership};
+
+    fn meta_at(index: u64, term: u64) -> SnapshotMeta {
+        SnapshotMeta {
+            last_log_id: applied_log_id(index, term),
+            last_membership: StoredMembership::default(),
+        }
+    }
+
+    #[test]
+    fn a_snapshot_names_the_checkpoint_of_the_store_it_carries() {
+        assert!(one_checkpoint(&meta_at(200, 3), 200, 3).is_ok());
+        // Built at 100, the store copied at send time at 200: two checkpoints.
+        let e = one_checkpoint(&meta_at(100, 3), 200, 3).unwrap_err();
+        assert!(e.to_string().contains("two checkpoints"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_send_leaves_no_staging_behind() {
+        let dir = std::env::temp_dir().join(format!(
+            "queen-snap-staging-{}-{}",
+            std::process::id(),
+            super::stamp()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("data.mdb"), b"copy").unwrap();
+        let staging = Arc::new(Staging(dir.clone()));
+        // The copy, still running when openraft drops the send.
+        let held = staging.clone();
+        let copy = tokio::task::spawn_blocking(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(held);
+        });
+        drop(staging);
+        assert!(dir.exists(), "the copy still uses it");
+        copy.await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while dir.exists() {
+            assert!(Instant::now() < deadline, "the staging directory was left");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 }
