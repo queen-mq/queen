@@ -543,6 +543,8 @@ impl RaftFacade {
             HeedStore::open(&dir.join("store"), &store_opts_from_env())
                 .map_err(|e| format!("open store at {}/store: {e}", dir.display()))?,
         );
+        // On every node: the damage it looks for is this node's own.
+        crate::rsm::scrub::spawn(&store, crate::rsm::scrub::Config::from_env());
 
         let gates = Arc::new(WaitGates::default());
         let waker: Arc<dyn Waker> = Arc::new(NotifierWaker {

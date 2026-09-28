@@ -108,6 +108,7 @@ use heed::{Database, Env, EnvFlags, EnvOpenOptions, RwTxn, WithTls};
 use super::integrity::{
     self, CorruptHook, ScrubCursor, ScrubPhase, ScrubReport, StoreFormat, CHECKSUM_LEN, FORMAT_KEY,
 };
+use super::sigbus::{self, MapWatch};
 use super::{
     CheckpointCut, EntryGate, Keyspace, MapUsage, Result, Scope, Store, StoreError, StoreMetrics,
     StoreOpts, MAX_DBS,
@@ -414,6 +415,8 @@ pub struct HeedStore {
     poison: OnceLock<StoreError>,
     /// Called once, with that first corruption ([`StoreOpts::on_corrupt`]).
     on_corrupt: Option<CorruptHook>,
+    /// What a bus error inside a walk of `data.mdb` prints ([`sigbus`]).
+    sigbus: sigbus::Notice,
     /// TEST ONLY. Set by [`HeedStore::fail_next_sync`]: the next environment
     /// sync answers as a failing `fsync` does. A durable point whose sync
     /// fails is the one condition §11.4 cannot be checked against on real
@@ -445,6 +448,10 @@ impl HeedStore {
     pub fn open(dir: &Path, opts: &StoreOpts) -> Result<HeedStore> {
         std::fs::create_dir_all(dir)
             .map_err(|e| StoreError::Io(format!("{}: {e}", dir.display())))?;
+        // A file shorter than its B-tree faults wherever LMDB first touches a
+        // missing page, most often right here: the open or the load.
+        let notice = sigbus::Notice::for_dir(dir);
+        let _watch = MapWatch::new(&notice);
 
         // LMDB does not pre-allocate the map: with no `MDB_WRITEMAP` the data
         // file is exactly the pages in use, so its length is what the rule
@@ -483,7 +490,7 @@ impl HeedStore {
         // Everything below can refuse (a damaged store refuses to open), and
         // an environment that is merely dropped is not guaranteed to have let
         // go of the path before the caller retries: close it and wait.
-        match Self::open_env(env.clone(), dir, opts) {
+        match Self::open_env(env.clone(), dir, opts, notice) {
             Ok(store) => Ok(store),
             Err(e) => {
                 env.prepare_for_closing().wait();
@@ -494,7 +501,12 @@ impl HeedStore {
 
     /// [`HeedStore::open`] from the open environment on: the keyspaces, the
     /// format, the migration, the scrub and the verified load.
-    fn open_env(env: Env<WithTls>, dir: &Path, opts: &StoreOpts) -> Result<HeedStore> {
+    fn open_env(
+        env: Env<WithTls>,
+        dir: &Path,
+        opts: &StoreOpts,
+        sigbus: sigbus::Notice,
+    ) -> Result<HeedStore> {
         let seeds = integrity::seeds();
         #[cfg(test)]
         let (create_legacy, fail_migration) = (opts.create_legacy, opts.fail_migration);
@@ -622,6 +634,7 @@ impl HeedStore {
             poisoned: AtomicBool::new(false),
             poison: OnceLock::new(),
             on_corrupt: opts.on_corrupt.clone(),
+            sigbus,
             #[cfg(test)]
             fail_sync: AtomicBool::new(false),
         })
@@ -728,9 +741,12 @@ impl HeedStore {
         // COMPACTING: LMDB's plain copy takes the writer mutex to read the meta
         // pages, and the apply thread holds a write transaction almost always,
         // so it would starve. The compacting copy walks one read transaction.
-        let file = self
-            .env
-            .copy_to_path(&path, heed::CompactionOption::Enabled)
+        let copied = {
+            let _watch = MapWatch::new(&self.sigbus);
+            self.env
+                .copy_to_path(&path, heed::CompactionOption::Enabled)
+        };
+        let file = copied
             .map_err(|e| StoreError::Mdb(format!("copy the store to {}: {e}", path.display())))?;
         file.sync_all()
             .map_err(|e| StoreError::Io(format!("sync {}: {e}", path.display())))?;
@@ -885,6 +901,7 @@ impl HeedStore {
         self.check_poison()?;
         let mut report = {
             let _guard = ReadGuard::acquire(&self.metrics)?;
+            let _watch = MapWatch::new(&self.sigbus);
             let txn = self.env.read_txn().map_err(|e| err(self, e))?;
             scrub_image(&txn, &self.dbs, self.format, &self.seeds, "by the scrub")
         };
@@ -929,6 +946,7 @@ impl HeedStore {
         let n = Keyspace::ALL.len();
         if cur.phase == ScrubPhase::Image {
             let _guard = ReadGuard::acquire(&self.metrics)?;
+            let _watch = MapWatch::new(&self.sigbus);
             let txn = self.env.read_txn().map_err(|e| err(self, e))?;
             while left > 0 && cur.slot < n {
                 let ks = Keyspace::ALL[cur.slot];
@@ -1101,6 +1119,8 @@ impl HeedStore {
     /// the previous checkpoint (the transaction aborts on drop, or the commit
     /// is not synced and is superseded by the next one).
     fn write_cut_inner(&self, cut: &mut CheckpointCut) -> Result<()> {
+        // The transaction walks the B-tree through the map to find each leaf.
+        let _watch = MapWatch::new(&self.sigbus);
         // Key order: LMDB's B-tree is written leaf after leaf, not at random.
         for (_, pairs) in cut.rows.iter_mut() {
             pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
@@ -2444,6 +2464,9 @@ fn inspect_image(dir: &Path, scrub: bool) -> Result<(u64, u64, Option<ScrubRepor
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0, None)),
         Err(e) => return Err(StoreError::Io(format!("{}: {e}", data.display()))),
     };
+    // A received snapshot or a copy can be short too.
+    let notice = sigbus::Notice::for_dir(dir);
+    let _watch = MapWatch::new(&notice);
     let map = (used + 2 * MAP_ROUND).div_ceil(MAP_ROUND) * MAP_ROUND;
     let mut o = EnvOpenOptions::new();
     o.map_size(map);

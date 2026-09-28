@@ -105,6 +105,9 @@ pub mod state;
 /// map-size rule of §11.8. Owner: WP-1.2.
 pub mod store;
 
+/// The store's node-local background scrub, paced by `QUEEN_STORE_SCRUB_*`.
+pub mod scrub;
+
 /// Payload segment files (§11.2): per-bucket, append-only, rolling at
 /// `QUEEN_RAFT_SEGMENT_BYTES`, sealed files immutable, the index of a sealed
 /// file in its own `.qidx` beside it (§6.1 amendment). Owner: WP-1.3.

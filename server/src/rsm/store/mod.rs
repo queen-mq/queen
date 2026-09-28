@@ -169,6 +169,7 @@ pub mod keys;
 #[cfg(test)]
 mod ram_tests;
 pub mod rows;
+pub(crate) mod sigbus;
 pub mod typed;
 
 pub use heed_store::HeedStore;

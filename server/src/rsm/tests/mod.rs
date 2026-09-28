@@ -30,6 +30,10 @@
 //!   an uncommitted transaction, then a reopen: the check G0 made WP-1.2 owe
 //!   for D9 — minus its durability leg, which only dropped unflushed writes on
 //!   the VM can decide (the file says so at its head).
+//! - [`store_sigbus`] a store file cut short, opened in a child process: one
+//!   FATAL line naming the file and exit 1, not a bare bus error.
+//! - [`store_scrub`] the scheduled scrub: it finds a damaged row under a
+//!   running store, completes passes over a healthy one, and ends with it.
 
 mod apply;
 mod apply_crash;
@@ -66,5 +70,7 @@ mod stale_leader;
 mod store;
 mod store_crash;
 mod store_integrity;
+mod store_scrub;
+mod store_sigbus;
 mod timers;
 mod timers_crash;
