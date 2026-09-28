@@ -1,186 +1,149 @@
 <template>
-  <div class="view-container">
+  <div class="view-container dash">
 
     <!--
       ========================================================================
-      Scope strip — whose numbers these are. Built from identity, never from a
-      fetch, so it renders during loading, during a failure and on an empty
-      page. `.scope-meta` carries the resolved range (precedence rule 2: this
-      view owns a range picker and hides no controls by role).
+      Head — the page's name, the live tick and the range, on one line. Whose
+      numbers these are is stated once, in the sidebar's tenant row.
       ========================================================================
     -->
-    <div class="scope-strip">
-      <span class="chip chip-mute">tenant scope</span>
-      <span class="scope-text">
-        <strong>{{ actingTenantSlug || 'no tenant' }}</strong>
-        <span class="scope-sep">/</span>{{ actingClusterSlug || 'no cluster' }}
-        <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
-      </span>
-      <span class="scope-fill"></span>
-      <span class="scope-meta">{{ rangeLabel }}</span>
-    </div>
-
-    <!--
-      ========================================================================
-      Filter card — row 1 is the range picker, the expand-all view switch, and
-      the live tick on the right. This view polls (useAutoRefresh), so the tick
-      is telling the truth; per-card `stamp()` carries panel-level freshness.
-      ========================================================================
-    -->
-    <div class="card filters">
-      <div class="card-body filter-rows">
-        <div class="filter-row">
-          <div class="filter-field">
-            <span class="label-xs">Range</span>
-            <div class="seg">
-              <button
-                v-for="r in timeRanges"
-                :key="r.value"
-                :class="{ on: selectedRange === r.value }"
-                @click="selectQuickRange(r.value)"
-              >{{ r.label }}</button>
-            </div>
-          </div>
-
+    <PageHead title="Overview" :live="refreshAgo">
+      <template #range>
+        <div class="seg" role="group" aria-label="Time range">
           <button
-            class="dash-master-toggle"
-            @click="toggleAllRows"
-            :title="anyExpanded ? 'Collapse every metric chart' : 'Expand every metric into a full chart'"
-          >
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <!-- Two stacked rows + chevrons. Up-pointing chevrons when
-                   anything is expanded (so click "lifts up" / collapses);
-                   down-pointing when collapsed (click "drops down" / expands). -->
-              <path :d="anyExpanded ? 'M3 7l5-3 5 3M3 11l5-3 5 3' : 'M3 5l5 3 5-3M3 9l5 3 5-3'" />
-            </svg>
-            <span>{{ anyExpanded ? 'Collapse all' : 'Expand all' }}</span>
-          </button>
+            v-for="r in timeRanges"
+            :key="r.value"
+            :class="{ on: selectedRange === r.value }"
+            :aria-pressed="selectedRange === r.value ? 'true' : 'false'"
+            @click="selectQuickRange(r.value)"
+          >{{ r.label }}</button>
+        </div>
+      </template>
+    </PageHead>
 
-          <span class="live-tick filter-field-right">
-            <span class="pulse" />
-            <span>live · {{ refreshAgo }}</span>
+    <!--
+      ========================================================================
+      The answer first: a verdict, the sentence behind it, what needs you,
+      and the partitions drawn as a sunflower. Every rule the verdict uses is
+      printed under the list — nothing here is decided out of sight.
+      ========================================================================
+    -->
+    <section class="hero" aria-labelledby="dash-headline">
+      <div class="hero-left">
+        <div>
+          <span class="hero-status">
+            <span class="g" :class="statusGlyph" aria-hidden="true" />{{ statusWord }}
           </span>
+          <h2 id="dash-headline" class="hero-title">{{ headline }}</h2>
+          <p class="hero-sum">
+            <template v-if="pushNow !== null">{{ formatNumber(queues.length) }} {{ queues.length === 1 ? 'queue takes' : 'queues take' }} in <b>{{ fmtMsgRate(pushNow) }}</b> and deliver <b>{{ fmtMsgRate(popNow) }}</b> to {{ formatNumber(consumers.length) }} consumer {{ consumers.length === 1 ? 'group' : 'groups' }}.</template>
+            <template v-else>No traffic samples in the last {{ selectedRange }}.</template>
+            <template v-if="pendingNow !== null"> The backlog is <b>{{ formatNumber(pendingNow) }}</b><template v-if="pendingDeltaLatest !== null"> ({{ pendingDeltaDisplay }} over {{ selectedRange }})</template>.</template>
+            <template v-if="lagMaxSeconds !== null"> The oldest message has waited <b>{{ fmtLagSeconds(lagMaxSeconds) }}</b>.</template>
+            <template v-if="ackAttempts > 0">{{ ' ' }}<b>{{ ackFailPct }}</b> of acks failed in this window.</template>
+          </p>
+        </div>
+
+        <div class="card issues">
+          <div class="issues-head">
+            <b>Open issues</b>
+            <span class="issues-count">{{ issuesCountText }}</span>
+          </div>
+          <ul v-if="issues.length" class="issues-list">
+            <li v-for="i in issues" :key="i.key">
+              <button class="issue" @click="$router.push(i.to)">
+                <span class="g" :class="i.sev" aria-hidden="true" />
+                <span class="issue-what">{{ i.name }}</span>
+                <span class="issue-why">{{ i.why }}</span>
+                <span class="issue-go">Open ›</span>
+              </button>
+            </li>
+          </ul>
+          <div v-else class="issues-empty">
+            <template v-if="statusKnown">Nothing needs you. Every queue holding messages has a consumer, no group is a minute behind, and ack failures are within limits.</template>
+            <template v-else-if="loadingQueues || loadingConsumers">Reading queues and consumer groups…</template>
+            <template v-else>Cannot judge: {{ queuesFailed ? queuesErrorText : consumersErrorText }}</template>
+          </div>
+          <details class="issues-rules">
+            <summary>How this is decided</summary>
+            <p>
+              Worked out in the browser from <code>GET /api/v1/resources/queues</code>,
+              <code>GET /api/v1/consumer-groups</code> and this window's
+              <code>queue-ops</code>. A queue needs you when a consumer group on it is
+              more than 1 minute behind (5 minutes: failing), or when it holds
+              messages and no consumer group reads it — a group that has never
+              consumed does not count as a reader. Ack failures count when their
+              share of the window's acks crosses the product's threshold. The
+              sidebar, Queues and Consumer groups use the same rule.
+            </p>
+          </details>
         </div>
       </div>
-    </div>
+
+      <div class="card flower-card">
+        <div class="card-header">
+          <h3>Partitions</h3>
+          <span class="muted">{{ queuesFailed ? '—' : `${formatNumber(totalPartitions)} across ${formatNumber(queues.length)} queues` }}</span>
+        </div>
+        <PartitionSunflower :queues="sunflowerQueues" :loading="loadingQueues" :error="queuesQ.error.value" />
+      </div>
+    </section>
 
     <!--
       ========================================================================
-      Counts strip — cluster scope counts on the left, point-in-time perf
-      stats on the right. Both are snapshot values (not time series), so
-      they don't belong in the metric table below; this strip is the
-      designated home for "what's happening right now, no chart needed".
-      The pending count is the only number with a threshold tone.
+      Right now — point-in-time counts, as of the last good fetch. The range
+      above does not bound these.
       ========================================================================
     -->
-    <div class="counts-strip">
-      <div class="counts-group">
-        <!-- Point-in-time totals as of the last good fetch — the same label
-             QueueDetail's strip carries for the same kind of number. The
-             range picker above does not bound these. -->
-        <span class="count-item-label">now</span>
-        <span class="count-item count-static" title="Messages currently stored for this tenant (retention has already swept the rest)">
-          <strong>{{ overviewFailed ? '—' : formatNumber(overview?.messages?.total ?? 0) }}</strong>
-          <span>stored</span>
-        </span>
-        <span class="count-sep">·</span>
-        <button class="count-item" @click="$router.push('/queues')" :disabled="loadingQueues">
-          <strong>{{ overviewFailed ? '—' : formatNumber(overview?.queues ?? 0) }}</strong>
-          <span>queues</span>
-        </button>
-        <span class="count-sep">·</span>
-        <span class="count-item count-static">
-          <strong>{{ queuesFailed ? '—' : formatNumber(totalPartitions) }}</strong>
-          <span>partitions</span>
-        </span>
-        <span class="count-sep">·</span>
-        <button class="count-item" @click="$router.push('/consumers')" :disabled="loadingConsumers">
-          <strong>{{ consumersFailed ? '—' : formatNumber(consumers?.length || 0) }}</strong>
-          <span>consumer groups</span>
-        </button>
-        <span class="count-sep">·</span>
-        <span class="count-item count-static">
-          <strong class="num" :class="pendingNumClass(overview?.messages?.pending)">
-            {{ overviewFailed ? '—' : formatNumber(overview?.messages?.pending ?? 0) }}
-          </strong>
-          <span>pending</span>
-        </span>
-        <span class="count-sep">·</span>
-        <span class="count-item count-static count-muted">
-          <strong>{{ overviewFailed ? '—' : formatNumber(overview?.messages?.completed ?? 0) }}</strong>
-          <span>completed</span>
-        </span>
+    <div class="counts-tiles" role="group" aria-label="Right now">
+      <div class="count-tile" title="Messages currently stored for this tenant (retention has already swept the rest)">
+        <span class="k">Stored</span>
+        <span class="v">{{ overviewFailed ? '—' : formatNumber(overview?.messages?.total ?? 0) }}</span>
       </div>
-
-      <!-- Right group — engine efficiency for the whole CELL, not this tenant:
-           it comes from the operator-only /api/v1/status, so it is hidden
-           entirely for anyone the proxy would answer 404. -->
-      <div
-        v-if="can('operator')"
-        class="counts-group counts-group-right"
-        :title="'Average rows per batch — push / pop / ack, across every tenant on this cell. Higher = healthier engine, less per-commit overhead.'"
-      >
-        <span class="count-item-label">batch eff <i class="cell-chip">cell</i></span>
-        <template v-if="statusFailed">
-          <span class="count-item count-static count-tight count-muted">
-            <strong>—</strong><span class="count-suffix">unavailable</span>
-          </span>
-        </template>
-        <template v-else>
-          <span class="count-item count-static count-tight">
-            <strong>{{ batchEfficiency.push }}</strong>
-            <span class="count-suffix">push</span>
-          </span>
-          <span class="count-sep">·</span>
-          <span class="count-item count-static count-tight">
-            <strong>{{ batchEfficiency.pop }}</strong>
-            <span class="count-suffix">pop</span>
-          </span>
-          <span class="count-sep">·</span>
-          <span class="count-item count-static count-tight">
-            <strong>{{ batchEfficiency.ack }}</strong>
-            <span class="count-suffix">ack</span>
-          </span>
-        </template>
+      <button class="count-tile" @click="$router.push('/queues')">
+        <span class="k">Queues</span>
+        <span class="v">{{ overviewFailed ? '—' : formatNumber(overview?.queues ?? 0) }}</span>
+      </button>
+      <div class="count-tile">
+        <span class="k">Partitions</span>
+        <span class="v">{{ queuesFailed ? '—' : formatNumber(totalPartitions) }}</span>
+      </div>
+      <button class="count-tile" @click="$router.push('/consumers')">
+        <span class="k">Consumer groups</span>
+        <span class="v">{{ consumersFailed ? '—' : formatNumber(consumers?.length || 0) }}</span>
+      </button>
+      <div class="count-tile">
+        <span class="k">Pending</span>
+        <span class="v num" :class="pendingNumClass(overview?.messages?.pending)">{{ overviewFailed ? '—' : formatNumber(overview?.messages?.pending ?? 0) }}</span>
+      </div>
+      <div class="count-tile">
+        <span class="k">Completed</span>
+        <span class="v">{{ overviewFailed ? '—' : formatNumber(overview?.messages?.completed ?? 0) }}</span>
       </div>
     </div>
 
     <!--
       ========================================================================
-      Metric table — the heart of the redesign. Nine rows, each carries:
-        dot · label · value+unit · context · sparkline.
-      Color only fires when a row crosses its threshold; the eye scans the
-      dot column and stops on the first non-grey one. Order is by operator
-      priority (flow → health → admin), not by code structure.
+      Headline metrics. A tile hands its series to the chart below; it does
+      not grow. Same sources, same verdicts as the old metric table.
       ========================================================================
     -->
-    <div class="metric-table">
-      <div class="metric-head">
-        <span></span>
-        <span>Metric</span>
-        <span class="h-value">Now</span>
-        <span>Context</span>
-        <span class="h-spark">{{ selectedRange }}</span>
-        <span></span>
-      </div>
-
-      <!-- Flow -->
-      <MetricRow
+    <div class="tile-grid tile-grid-4">
+      <MetricTile
         label="Throughput"
         :value="throughput.current"
-        :unit="throughput.current === '—' ? '' : '/s'"
+        :unit="throughput.current === '—' ? '' : '/s push'"
         :context="throughputContext"
         :series="throughputSeries"
         :labels="chartLabels"
         :value-format="fmtRate"
-        expand-unit="msgs / sec"
         :loading="loadingOps"
         :error="opsError"
         tooltip="Push / pop / ack rates for this tenant, summed across its queues (from queue-ops)."
-        :expanded="isExpanded('throughput')"
-        @toggle-expand="toggleRow('throughput')"
+        :selected="selectedMetric === 'throughput'"
+        @select="selectMetric('throughput')"
       />
-      <MetricRow
+      <MetricTile
         label="Pending Δ"
         :value="pendingDeltaDisplay"
         :unit="pendingDeltaDisplay === '—' ? '' : 'msgs'"
@@ -188,74 +151,28 @@
         :sparkline="pendingDeltaSeries"
         :labels="chartLabels"
         :value-format="fmtCount"
-        expand-unit="msgs (cumulative)"
         :severity="pendingDeltaSeverity"
         :loading="loadingOps"
         :error="opsError"
         tooltip="Cumulative (push − ack) over the selected window. Positive = falling behind, negative = catching up."
-        :expanded="isExpanded('pendingDelta')"
-        @toggle-expand="toggleRow('pendingDelta')"
+        :selected="selectedMetric === 'pendingDelta'"
+        @select="selectMetric('pendingDelta')"
       />
-      <!-- Parked + Fill ratio sit between Pending Δ and Time lag because
-           together they answer the consumer-side of the flow story:
-           who's waiting (Parked) and how often they're actually fed
-           (Fill). Time lag below tells you how *late* messages are
-           when they finally do get delivered. -->
-      <MetricRow
-        label="Parked"
-        :value="parkedLatest === null ? '—' : formatNumber(Math.round(parkedLatest))"
-        :unit="parkedLatest === null ? '' : 'consumers'"
-        :context="parkedContext"
-        :series="parkedSeriesData"
-        :labels="chartLabels"
-        :value-format="fmtCount"
-        expand-unit="long-polls"
-        :loading="loadingOps"
-        :error="opsError"
-        tooltip="Long-poll consumer connections currently waiting for work, summed across all queues. Approximates idle connected consumers (busy consumers, mid-job, not counted)."
-        :expanded="isExpanded('parked')"
-        @toggle-expand="toggleRow('parked')"
-      />
-      <MetricRow
-        label="Fill ratio"
-        :context="fillContext"
-        :series="fillSeriesData"
-        :labels="chartLabels"
-        :value-format="fmtFillPct"
-        expand-unit="%"
-        :severity="fillSeverity"
-        :loading="loadingOps"
-        :error="opsError"
-        tooltip="Long-polls returning a message ÷ all long-poll completions, across all queues. Below 30% with traffic = consumers mostly waiting (over-provisioned); near 100% sustained = consumers fully utilized — watch the Time lag row for under-provisioning."
-        :expanded="isExpanded('fillRatio')"
-        @toggle-expand="toggleRow('fillRatio')"
-      >
-        <template #value>
-          <template v-if="fillLatest === null">
-            <span class="num">—</span>
-          </template>
-          <template v-else>
-            <span class="num" :class="fillSeverity">{{ fillLatest.toFixed(1) }}</span><i class="mr-unit">%</i>
-          </template>
-        </template>
-      </MetricRow>
-      <MetricRow
+      <MetricTile
         label="Time lag"
         :context="lagContext"
         :series="lagSeriesData"
         :labels="chartLabels"
         :value-format="fmtLagMs"
-        expand-unit="ms"
         :severity="lagSeverity"
         :loading="loadingOverview"
         :error="overviewError"
         tooltip="Headline is the tenant's current oldest-message age (avg / max). The chart is pop-sampled per bucket, so it has gaps whenever nothing was consumed — it cannot report the lag of a stalled queue."
-        :expanded="isExpanded('timeLag')"
-        @toggle-expand="toggleRow('timeLag')"
+        :selected="selectedMetric === 'timeLag'"
+        @select="selectMetric('timeLag')"
       >
         <template #value>
-          <!-- `0` and "no sample" are different answers. The SP emits NULL when
-               it never measured, and that must not read as a healthy zero. -->
+          <!-- `0` and "no sample" are different answers. -->
           <template v-if="lagAvgSeconds === null && lagMaxSeconds === null">
             <span class="num">—</span>
           </template>
@@ -265,122 +182,180 @@
             <span class="num" :class="lagNumClass(lagMaxSeconds)">{{ fmtLagSeconds(lagMaxSeconds) }}</span>
           </template>
         </template>
-      </MetricRow>
-
-      <!-- Health -->
-      <MetricRow
+      </MetricTile>
+      <MetricTile
         label="Errors"
         :value="formatNumber(errorTotal)"
+        :unit="'ack failures'"
         :context="errorContext"
         :sparkline="errorSeriesData"
         :labels="chartLabels"
         :value-format="fmtCount"
-        expand-unit="ack failures"
         :severity="errorSeverity"
-        :clickable="errorTotal > 0"
-        @click="$router.push('/dlq')"
         :loading="loadingOps"
         :error="opsError"
-        tooltip="Ack failures for this tenant across the window. DLQ depth is a current snapshot, not a per-window count, so it is shown separately in the context line."
-        :expanded="isExpanded('errors')"
-        @toggle-expand="toggleRow('errors')"
+        tooltip="Ack failures for this tenant across the window. DLQ depth is a current snapshot, not a per-window count, so it is shown in the context line."
+        :selected="selectedMetric === 'errors'"
+        @select="selectMetric('errors')"
       />
+    </div>
 
-      <!-- Admin -->
-      <MetricRow
-        label="Partitions"
-        :context="'created / deleted in window'"
-        :series="partitionSeriesData"
-        :labels="chartLabels"
-        :value-format="fmtCount"
-        expand-unit="count"
-        :loading="loadingOps"
-        :error="opsError"
-        :expanded="isExpanded('partitions')"
-        @toggle-expand="toggleRow('partitions')"
-      >
-        <template #value>
-          <span class="num" style="color:var(--text-hi);">+{{ formatNumber(partitionCreatedTotal) }}</span>
-          <span class="mr-sep">/</span>
-          <span class="num mute">−{{ formatNumber(partitionDeletedTotal) }}</span>
-        </template>
-      </MetricRow>
-      <MetricRow
-        label="Retention"
-        :context="retentionContext"
-        :series="retentionSeriesData"
-        :labels="retentionLabels"
-        :value-format="fmtCount"
-        expand-unit="msgs"
-        :error="retentionError"
-        tooltip="Messages deleted by the retention / eviction workers. Every retention step is recorded when it applies, so an empty series means nothing was deleted in the window."
-        :expanded="isExpanded('retention')"
-        @toggle-expand="toggleRow('retention')"
-      >
-        <template #value>
-          <span v-if="retentionTotal === null" class="num">—</span>
-          <template v-else>
-            <span class="num">{{ formatNumber(retentionTotal) }}</span><i class="mr-unit">msgs</i>
+    <!-- The chart the tiles hand their series to. -->
+    <section class="card focus" aria-labelledby="focus-title">
+      <div class="card-header">
+        <h3 id="focus-title">{{ focus.title }}</h3>
+        <span class="card-sub">{{ focus.sub }}</span>
+        <span class="muted">last {{ selectedRange }}</span>
+      </div>
+      <div class="card-body">
+        <div v-if="focus.error" class="panel-err">{{ describeApiError(focus.error) }}</div>
+        <RowChart
+          v-else
+          :data="focus.sparkline || []"
+          :series="focus.series || null"
+          :labels="focus.labels || []"
+          :tone="focus.tone || 'mute'"
+          :value-format="focus.valueFormat || null"
+          :unit="focus.unit"
+          variant="full"
+        />
+      </div>
+    </section>
+
+    <!-- Delivery and housekeeping — this tenant, every queue. -->
+    <section class="dash-sect" aria-labelledby="sect-tenant">
+      <div class="sect-head">
+        <h3 id="sect-tenant">Delivery and housekeeping</h3>
+        <span>{{ actingTenantSlug || 'this tenant' }} · every queue</span>
+      </div>
+      <div class="tile-grid tile-grid-4">
+        <MetricTile
+          label="Parked"
+          :value="parkedLatest === null ? '—' : formatNumber(Math.round(parkedLatest))"
+          :unit="parkedLatest === null ? '' : 'long-polls'"
+          :context="parkedContext"
+          :series="parkedSeriesData"
+          :labels="chartLabels"
+          :value-format="fmtCount"
+          :loading="loadingOps"
+          :error="opsError"
+          tooltip="Long-poll consumer connections currently waiting for work, summed across all queues."
+          :selected="selectedMetric === 'parked'"
+          @select="selectMetric('parked')"
+        />
+        <MetricTile
+          label="Fill ratio"
+          :context="fillContext"
+          :series="fillSeriesData"
+          :labels="chartLabels"
+          :value-format="fmtFillPct"
+          :severity="fillSeverity"
+          :loading="loadingOps"
+          :error="opsError"
+          tooltip="Long-polls returning a message ÷ all long-poll completions, across all queues."
+          :selected="selectedMetric === 'fillRatio'"
+          @select="selectMetric('fillRatio')"
+        >
+          <template #value>
+            <span v-if="fillLatest === null" class="num">—</span>
+            <template v-else><span class="num" :class="fillSeverity">{{ fillLatest.toFixed(1) }}</span><i class="mr-unit">%</i></template>
           </template>
-        </template>
-      </MetricRow>
+        </MetricTile>
+        <MetricTile
+          label="Partitions"
+          context="created / deleted in window"
+          :series="partitionSeriesData"
+          :labels="chartLabels"
+          :value-format="fmtCount"
+          :loading="loadingOps"
+          :error="opsError"
+          :selected="selectedMetric === 'partitions'"
+          @select="selectMetric('partitions')"
+        >
+          <template #value>
+            <span class="num">+{{ formatNumber(partitionCreatedTotal) }}</span>
+            <span class="mr-sep">/</span>
+            <span class="num mute">−{{ formatNumber(partitionDeletedTotal) }}</span>
+          </template>
+        </MetricTile>
+        <MetricTile
+          label="Retention"
+          :context="retentionContext"
+          :series="retentionSeriesData"
+          :labels="retentionLabels"
+          :value-format="fmtCount"
+          :error="retentionError"
+          tooltip="Messages deleted by the retention / eviction workers."
+          :selected="selectedMetric === 'retention'"
+          @select="selectMetric('retention')"
+        >
+          <template #value>
+            <span v-if="retentionTotal === null" class="num">—</span>
+            <template v-else><span class="num">{{ formatNumber(retentionTotal) }}</span><i class="mr-unit">msgs</i></template>
+          </template>
+        </MetricTile>
+      </div>
+    </section>
 
-      <!-- =====================================================================
-           CELL · OPERATOR. Everything below covers every tenant on this cell,
-           and each source is a route the proxy answers 404 for anyone else.
-           ===================================================================== -->
-      <template v-if="can('operator')">
-        <div class="cell-section cell-section-inline">
-          <span class="cell-tag">CELL · OPERATOR</span>
-          <span>host and engine figures for the whole cell — every tenant on it, not just {{ actingTenantSlug || 'this tenant' }}</span>
-        </div>
-        <MetricRow
+    <!-- The cell — every tenant on it. Operator routes only. -->
+    <section v-if="can('operator')" class="dash-sect" aria-labelledby="sect-cell">
+      <div class="sect-head">
+        <h3 id="sect-cell">Cell</h3>
+        <span class="mono">{{ actingCellSlug || 'unknown cell' }}</span>
+        <span class="sect-scope">Shared by every tenant on this cell, not just {{ actingTenantSlug || 'this tenant' }}</span>
+      </div>
+      <div class="tile-grid tile-grid-3">
+        <MetricTile
+          label="Batch efficiency"
+          context="rows per batch: push · pop · ack"
+          :error="statusError"
+          :loading="loadingStatus"
+          :spark="false"
+          tooltip="Average rows per batch across every tenant on this cell. Higher = less per-commit overhead."
+        >
+          <template #value>
+            <span class="num">{{ batchEfficiency.push }}</span><span class="mr-sep">·</span><span class="num">{{ batchEfficiency.pop }}</span><span class="mr-sep">·</span><span class="num">{{ batchEfficiency.ack }}</span>
+          </template>
+        </MetricTile>
+        <MetricTile
           label="Event loop"
-          scope="cell"
           :context="eventLoopContext"
           :series="elSeriesData"
           :labels="statusChartLabels"
           :value-format="(v) => v + ' ms'"
-          expand-unit="ms"
           :severity="elNumClass(maxEventLoopLag)"
           :loading="loadingStatus"
           :error="statusError"
-          :expanded="isExpanded('eventLoop')"
-          @toggle-expand="toggleRow('eventLoop')"
+          :selected="selectedMetric === 'eventLoop'"
+          @select="selectMetric('eventLoop')"
         >
           <template #value>
-            <template v-if="avgEventLoopLag === null && maxEventLoopLag === null">
-              <span class="num">—</span>
-            </template>
+            <template v-if="avgEventLoopLag === null && maxEventLoopLag === null"><span class="num">—</span></template>
             <template v-else>
-              <span class="num" :class="elNumClass(avgEventLoopLag)">{{ avgEventLoopLag ?? '—' }}<i class="mr-unit">ms</i></span>
+              <span class="num" :class="elNumClass(avgEventLoopLag)">{{ avgEventLoopLag ?? '—' }}</span><i class="mr-unit">ms</i>
               <span class="mr-sep">/</span>
-              <span class="num" :class="elNumClass(maxEventLoopLag)">{{ maxEventLoopLag ?? '—' }}<i class="mr-unit">ms</i></span>
+              <span class="num" :class="elNumClass(maxEventLoopLag)">{{ maxEventLoopLag ?? '—' }}</span><i class="mr-unit">ms</i>
             </template>
           </template>
-        </MetricRow>
-        <MetricRow
+        </MetricTile>
+        <MetricTile
           label="Queen CPU"
-          scope="cell"
           :context="cpuContext"
           :series="cpuSeriesData"
           :labels="cpuLabels"
           :value-format="(v) => v.toFixed(1) + '%'"
-          expand-unit="%"
           :loading="loadingStatus"
           :error="cpuError"
-          :expanded="isExpanded('cpu')"
-          @toggle-expand="toggleRow('cpu')"
+          :selected="selectedMetric === 'cpu'"
+          @select="selectMetric('cpu')"
         >
           <template #value>
             <span v-if="cpuLatest === null" class="num">—</span>
-            <template v-else>
-              <span class="num">{{ cpuLatest.toFixed(1) }}</span><i class="mr-unit">%</i>
-            </template>
+            <template v-else><span class="num">{{ cpuLatest.toFixed(1) }}</span><i class="mr-unit">%</i></template>
           </template>
-        </MetricRow>
-      </template>
-    </div>
+        </MetricTile>
+      </div>
+    </section>
 
     <!--
       ========================================================================
@@ -396,7 +371,7 @@
       <div class="card">
         <div class="card-header">
           <h3>Top queues by pending</h3>
-          <span class="chip chip-mute">{{ queuesFailed ? '—' : `${enrichedQueues.length} queues` }}</span>
+          <span class="card-sub">{{ queuesFailed ? '—' : `${enrichedQueues.length} queues` }}</span>
           <span class="muted">{{ stamp(queuesQ) }}</span>
         </div>
 
@@ -416,7 +391,7 @@
             @click="$router.push(`/queues/${encodeURIComponent(q.name)}`)"
           >
             <div class="entity-head">
-              <span class="status-dot" :class="statusDotClass(q._status)" />
+              <span class="g" :class="queueGlyph(q)" aria-hidden="true" />
               <span class="entity-name">{{ q.name }}</span>
               <span class="entity-right num" :class="lagNumClass(q._lag)">
                 {{ q._lag > 0 ? fmtLagSeconds(q._lag) : '—' }}
@@ -424,12 +399,12 @@
             </div>
             <div class="entity-meta">
               <span class="bar bar-meta">
-                <i :class="depthBarClass(q._status)" :style="{ width: q._depthPct + '%' }" />
+                <i :class="queueGlyph(q) === 'ok' ? '' : queueGlyph(q)" :style="{ width: q._depthPct + '%' }" />
               </span>
               <span class="meta-text">
                 <strong>{{ q._pending === null ? '—' : formatNumber(q._pending) }}</strong> pending
                 <span class="meta-sep">·</span>
-                {{ q.partitions || 1 }} {{ (q.partitions || 1) === 1 ? 'part' : 'parts' }}
+                {{ formatNumber(q.partitions || 1) }} {{ (q.partitions || 1) === 1 ? 'partition' : 'partitions' }}
               </span>
             </div>
           </button>
@@ -438,14 +413,14 @@
         <div v-else class="card-body"><div class="panel-msg">No queues</div></div>
 
         <div class="card-foot">
-          <a class="card-foot-link" @click="$router.push('/queues')">See all queues →</a>
+          <a class="card-foot-link" @click="$router.push('/queues')">All queues ›</a>
         </div>
       </div>
 
       <div class="card">
         <div class="card-header">
           <h3>Consumer groups by lag</h3>
-          <span class="chip chip-mute">{{ consumersFailed ? '—' : `${consumers.length} total · ${laggingCount} lagging` }}</span>
+          <span class="card-sub">{{ consumersFailed ? '—' : `${consumers.length} total · ${laggingCount} lagging` }}</span>
           <span class="muted">{{ stamp(consumersQ) }}</span>
         </div>
 
@@ -465,13 +440,11 @@
             @click="$router.push('/consumers')"
           >
             <div class="entity-head">
-              <span class="status-dot" :class="cgDotClass(g)" />
+              <span class="g" :class="groupGlyph(g)" aria-hidden="true" />
               <span class="entity-name">{{ g.queueName || '?' }}</span>
               <!-- A conflating group is delivered ONE message per partition —
                    the newest — so the partitions still to visit are the whole
-                   of the work left, and they take the lead figure. Its message
-                   backlog is log depth and is named as such on the meta line
-                   below, next to the time lag this slot normally carries. -->
+                   of the work left, and they take the lead figure. -->
               <span
                 v-if="isConflating(g)"
                 class="entity-right num"
@@ -488,9 +461,6 @@
                 <span v-if="g.name === '__QUEUE_MODE__'" class="meta-tag">queue mode</span>
                 <span v-if="isConflating(g)" class="meta-tag meta-tag-cfl">conflation</span>
                 <span v-if="g.name !== '__QUEUE_MODE__'"><strong>{{ g.name }}</strong></span>
-                <!-- Conflating: the two numbers that reframe the row lead the
-                     line. It is one ellipsised row, and what a narrow window
-                     eats is the tail — which must not be the word "log". -->
                 <template v-if="isConflating(g)">
                   <span class="meta-sep">·</span>
                   <span class="num">{{ formatNumber(g.totalLag || 0) }} log lag</span>
@@ -500,10 +470,10 @@
                 <span class="meta-sep">·</span>
                 <!-- One row per (partition, group) cursor — NOT a consumer
                      count: one process on a 32-partition queue is 32 rows. -->
-                {{ g.members || 0 }} {{ (g.members || 0) === 1 ? 'partition' : 'partitions' }} assigned
+                {{ formatNumber(g.members || 0) }} {{ (g.members || 0) === 1 ? 'partition' : 'partitions' }} assigned
                 <template v-if="!isConflating(g) && (g.partitionsWithLag || 0) > 0">
                   <span class="meta-sep">·</span>
-                  <span class="num warn">{{ g.partitionsWithLag }} lagging</span>
+                  <span class="num warn">{{ formatNumber(g.partitionsWithLag) }} lagging</span>
                 </template>
               </span>
             </div>
@@ -513,7 +483,7 @@
         <div v-else class="card-body"><div class="panel-msg">No consumer groups</div></div>
 
         <div class="card-foot">
-          <a class="card-foot-link" @click="$router.push('/consumers')">See all consumer groups →</a>
+          <a class="card-foot-link" @click="$router.push('/consumers')">All consumer groups ›</a>
         </div>
       </div>
     </div>
@@ -540,11 +510,16 @@ import {
   ackFailureSeverity, backlogSeverity, eventLoopSeverity, numTone,
   pendingDriftSeverity, timeLagSeverity,
 } from '@/composables/useSeverity'
+import { groupAttention, queueAttention } from '@/composables/useAttention'
+import { useGroupsStore } from '@/stores/groupsStore'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { stamp } from '@/composables/useStamp'
 import { useIdentity } from '@/stores/identity'
-import MetricRow from '@/components/MetricRow.vue'
+import MetricTile from '@/components/MetricTile.vue'
+import PartitionSunflower from '@/components/PartitionSunflower.vue'
+import PageHead from '@/components/PageHead.vue'
+import RowChart from '@/components/RowChart.vue'
 
 // The scope strip states all three slugs, so it is built from identity and
 // never from a fetch — it must survive a failed load and an empty tenant.
@@ -587,9 +562,11 @@ const getTimeRangeParams = () => {
 // Nothing here swallows a failure: `error` drives an inline "unavailable"
 // state, so an endpoint we cannot reach never renders as an idle cluster.
 // ---------------------------------------------------------------------------
+const groupsStore = useGroupsStore()
 const overviewQ  = useApi((config) => resources.getOverview(config), { immediate: false })
 const queuesQ    = useApi((config) => queuesApi.list(undefined, config), { immediate: false })
-const consumersQ = useApi((config) => consumersApi.list(config), { immediate: false })
+// Handed to the shared store, so the sidebar and Queues reuse this read.
+const consumersQ = useApi((config) => consumersApi.list(config), { immediate: false, onSuccess: (d) => groupsStore.publish(d) })
 const opsQ       = useApi((config) => systemApi.getQueueOps(getTimeRangeParams(), config), { immediate: false })
 const retentionQ = useApi((config) => systemApi.getRetention(getTimeRangeParams(), config), { immediate: false })
 const statusQ    = useApi((config) => operatorApi.getStatus(getTimeRangeParams(), config), { immediate: false })
@@ -626,28 +603,6 @@ const statusFailed    = computed(() => statusQ.error.value !== null)
 
 const queuesErrorText    = computed(() => describeApiError(queuesQ.error.value))
 const consumersErrorText = computed(() => describeApiError(consumersQ.error.value))
-
-// ---------------------------------------------------------------------------
-// Expand state — per-row + master toggle.
-// We use a Set keyed by stable row ids (not the human-readable label)
-// so future label tweaks don't blow away the user's expanded selection.
-// ---------------------------------------------------------------------------
-const ALL_ROW_KEYS = [
-  'throughput', 'pendingDelta', 'parked', 'fillRatio', 'timeLag',
-  'errors', 'partitions', 'retention',
-  'eventLoop', 'cpu',
-]
-const expandedRows = ref(new Set())
-const isExpanded = (key) => expandedRows.value.has(key)
-const toggleRow = (key) => {
-  const next = new Set(expandedRows.value)
-  if (next.has(key)) next.delete(key); else next.add(key)
-  expandedRows.value = next
-}
-const anyExpanded = computed(() => expandedRows.value.size > 0)
-const toggleAllRows = () => {
-  expandedRows.value = anyExpanded.value ? new Set() : new Set(ALL_ROW_KEYS)
-}
 
 // ---------------------------------------------------------------------------
 // TENANT history — queue-ops rolled up from one row per (queue, bucket) to one
@@ -1178,20 +1133,12 @@ const enrichedQueues = computed(() => {
     .map(q => {
       const lag = queueLagMap.value[q.name] || 0
       const depth = q._pending ?? 0
-      // Depth RANK used to drive this: `depth / maxPending > 0.8` is true of
-      // the biggest queue in the tenant by definition, so the top row of the
-      // panel was painted red on every cell, including one holding three
-      // messages. The bar below still shows the rank — that is what a bar is
-      // for — but the verdict comes from the lag, which is a measurement and
-      // not an ordering.
-      const status =
-        lag >= 300 ? 'degraded'
-      : lag >= 60  ? 'watch'
-      : 'healthy'
+      // The bar shows the depth RANK — that is what a bar is for. The verdict
+      // is never the rank (the biggest queue would always be red); it comes
+      // from useAttention, by lag and by whether anyone reads the queue.
       return {
         ...q,
         _lag: lag,
-        _status: status,
         _depthPct: Math.min(100, (depth / maxPending) * 100),
       }
     })
@@ -1208,31 +1155,6 @@ const laggingCount = computed(() =>
   consumers.value.filter(c => (c.maxTimeLag || 0) >= 60 || (c.partitionsWithLag || 0) > 0).length
 )
 
-// Severity → status-dot class mapping. Reused for both panels.
-const statusDotClass = (s) =>
-  s === 'degraded' ? 'status-dot-danger'
-: s === 'watch'    ? 'status-dot-warning'
-                   : 'status-dot-success'
-
-// A consumer group that is behind is a real state, so this keeps its colour —
-// but `partitionsWithLag > 0` no longer qualifies on its own: on a busy queue
-// some partition is momentarily behind at every sample, which is what working
-// looks like. The escalation is the AGE, as everywhere else.
-const cgStatus = (g) => {
-  const lag = g.maxTimeLag || 0
-  if (lag >= 300) return 'stuck'
-  if (lag >= 60) return 'lag'
-  return 'healthy'
-}
-const cgDotClass = (g) => {
-  const s = cgStatus(g)
-  return s === 'stuck' ? 'status-dot-danger'
-       : s === 'lag'   ? 'status-dot-warning'
-                       : 'status-dot-success'
-}
-
-// Bar fill color follows queue status (same severity vocabulary).
-const depthBarClass = (s) => s === 'degraded' ? 'bad' : s === 'watch' ? 'warn' : ''
 
 // ---------------------------------------------------------------------------
 // Formatters. The unit is in the name: `fmtLagMs` takes milliseconds,
@@ -1288,6 +1210,116 @@ const fmtFillPct = (n) => {
 const lastRefreshAt = ref(null)
 const refreshAgo = useRefreshAgo(lastRefreshAt)
 
+
+// ---------------------------------------------------------------------------
+// Focus chart — the tiles hand it their series; it replaces the old per-row
+// expansion. Same data, same formatters, same tones as the tiles.
+// ---------------------------------------------------------------------------
+const selectedMetric = ref('throughput')
+const selectMetric = (key) => { selectedMetric.value = key }
+const focus = computed(() => {
+  switch (selectedMetric.value) {
+    case 'pendingDelta': return { title: 'Pending Δ', sub: 'cumulative push − ack across the window', sparkline: pendingDeltaSeries.value, labels: chartLabels.value, valueFormat: fmtCount, unit: 'msgs (cumulative)', tone: pendingDeltaSeverity.value || 'mute', error: opsError.value }
+    case 'timeLag': return { title: 'Time lag', sub: 'pop-sampled per bucket, with gaps where nothing was consumed', series: lagSeriesData.value, labels: chartLabels.value, valueFormat: fmtLagMs, unit: 'ms', error: opsError.value }
+    case 'errors': return { title: 'Ack failures', sub: 'failed acks per bucket', sparkline: errorSeriesData.value, labels: chartLabels.value, valueFormat: fmtCount, unit: 'ack failures', tone: errorSeverity.value || 'mute', error: opsError.value }
+    case 'parked': return { title: 'Parked', sub: 'long-polls waiting for work, summed across queues', series: parkedSeriesData.value, labels: chartLabels.value, valueFormat: fmtCount, unit: 'long-polls', error: opsError.value }
+    case 'fillRatio': return { title: 'Fill ratio', sub: 'long-polls that came back with a message', series: fillSeriesData.value, labels: chartLabels.value, valueFormat: fmtFillPct, unit: '%', error: opsError.value }
+    case 'partitions': return { title: 'Partitions', sub: 'created and deleted per bucket', series: partitionSeriesData.value, labels: chartLabels.value, valueFormat: fmtCount, unit: 'count', error: opsError.value }
+    case 'retention': return { title: 'Retention', sub: 'messages removed by retention and eviction', series: retentionSeriesData.value, labels: retentionLabels.value, valueFormat: fmtCount, unit: 'msgs', error: retentionError.value }
+    case 'eventLoop': return { title: 'Event loop', sub: 'scheduling delay, every tenant on this cell', series: elSeriesData.value, labels: statusChartLabels.value, valueFormat: (v) => v + ' ms', unit: 'ms', error: statusError.value }
+    case 'cpu': return { title: 'Queen CPU', sub: 'the whole cell', series: cpuSeriesData.value, labels: cpuLabels.value, valueFormat: (v) => v.toFixed(1) + '%', unit: '%', error: cpuError.value }
+    default: return { title: 'Throughput', sub: 'push, pop and ack per second, summed across queues', series: throughputSeries.value, labels: chartLabels.value, valueFormat: fmtRate, unit: 'msgs / sec', error: opsError.value }
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Status — what needs you, worked out from data already on this page and
+// printed with its rules under the list. It never claims "healthy" when it
+// could not read the queues or the groups: that is "status unknown".
+//
+//   bad   a consumer group on the queue is ≥ 5 min behind
+//   warn  a consumer group on the queue is ≥ 1 min behind
+//   warn  the queue holds messages and no live consumer group reads it
+//   warn/bad  the tenant's ack failures, by ackFailureSeverity (useSeverity)
+//
+// The first three are composables/useAttention — the sidebar, Queues and
+// Consumer groups read the same function, so none of them can disagree.
+// ---------------------------------------------------------------------------
+const queuePath = (name) => `/queues/${encodeURIComponent(name)}`
+const issues = computed(() => {
+  if (queuesFailed.value || consumersFailed.value) return []
+  const out = []
+  // enrichedQueues is sorted by depth; the rule keeps that order.
+  for (const a of queueAttention(enrichedQueues.value, consumers.value)) {
+    const why = a.reason === 'lag'
+      ? `A consumer group is ${fmtLagSeconds(a.lag)} behind · ${formatNumber(a.pending)} pending`
+      : `${a.deadOnly ? 'Its consumer group has never read' : 'No consumer group reads it'} · ${formatNumber(a.pending)} waiting`
+    out.push({ key: `q:${a.name}`, sev: a.sev, name: a.name, why, to: queuePath(a.name) })
+  }
+  const es = errorSeverity.value
+  if (es === 'warn' || es === 'bad') out.push({ key: 'acks', sev: es, name: 'Ack failures', why: errorContext.value, to: '/dlq', tenant: true })
+  const rank = { bad: 2, warn: 1 }
+  return out.sort((a, b) => rank[b.sev] - rank[a.sev])
+})
+const issueSevByQueue = computed(() => new Map(issues.value.filter(i => !i.tenant).map(i => [i.name, i.sev])))
+const queueGlyph = (q) => issueSevByQueue.value.get(q.name) || 'ok'
+const groupGlyph = (g) => {
+  const s = groupAttention(g)
+  return s === 'bad' || s === 'warn' ? s : s === 'mute' ? 'idle' : 'ok'
+}
+
+const statusKnown = computed(() =>
+  !loadingQueues.value && !loadingConsumers.value && !queuesFailed.value && !consumersFailed.value
+)
+const statusSev = computed(() => {
+  if (!statusKnown.value) return 'unknown'
+  if (issues.value.some(i => i.sev === 'bad')) return 'bad'
+  return issues.value.length ? 'warn' : 'ok'
+})
+const statusGlyph = computed(() => statusSev.value === 'unknown' ? 'idle' : statusSev.value)
+const statusWord = computed(() => {
+  const w = { ok: 'Healthy', warn: 'Degraded', bad: 'Failing' }[statusSev.value]
+  if (w) return w
+  return loadingQueues.value || loadingConsumers.value ? 'Checking' : 'Unknown'
+})
+const headline = computed(() => {
+  if (loadingQueues.value || loadingConsumers.value) return 'Checking your queues…'
+  if (!statusKnown.value) return 'Status unknown'
+  const qIssues = issues.value.filter(i => !i.tenant)
+  const bad = qIssues.filter(i => i.sev === 'bad')
+  if (bad.length === 1) return `${bad[0].name} is falling behind`
+  if (bad.length > 1) return `${bad.length} queues are falling behind`
+  if (qIssues.length) return `${qIssues.length} ${qIssues.length === 1 ? 'queue needs' : 'queues need'} attention`
+  if (issues.value.length) return 'Ack failures need attention'
+  return 'All queues are healthy'
+})
+const issuesCountText = computed(() => {
+  if (!statusKnown.value) return '—'
+  if (!issues.value.length) return 'none'
+  const q = issues.value.filter(i => !i.tenant).length
+  return `${q} of ${formatNumber(queues.value.length)} queues${issues.value.length > q ? ' · acks' : ''}`
+})
+
+// The sentence under the headline: only numbers the page already has.
+const pushNow = computed(() => latestFinite(history.value.map(x => x.pushPerSecond)))
+const popNow = computed(() => latestFinite(history.value.map(x => x.popPerSecond)))
+const pendingNow = computed(() => (overviewFailed.value ? null : toNum(overview.value?.messages?.pending)))
+const ackAttempts = computed(() => ackSuccessTotal.value + ackFailedTotal.value)
+const ackFailPct = computed(() =>
+  ackAttempts.value > 0 ? `${((ackFailedTotal.value / ackAttempts.value) * 100).toFixed(2)}%` : '—'
+)
+const fmtMsgRate = (n) => fmtRate(n).replace(' /s', ' msg/s')
+
+// The sunflower: one entry per queue; the component decides how many seeds.
+const sunflowerQueues = computed(() =>
+  enrichedQueues.value.map(q => ({
+    name: q.name,
+    partitions: q.partitions || 1,
+    pending: q._pending ?? 0,
+    sev: queueGlyph(q),
+  }))
+)
+
 // ---------------------------------------------------------------------------
 // Loading
 // ---------------------------------------------------------------------------
@@ -1318,122 +1350,59 @@ onMounted(fetchAll)
 
 <style scoped>
 /* ---------------------------------------------------------------------------
-   Filter card contents.
-
-   The card itself, its rows, its fields and the live tick are shared chrome
-   (.filters / .filter-rows / .filter-row / .filter-field / .filter-field-right
-   / .live-tick in style.css) — the old .dash-bar, .dash-live, .dash-bar-right
-   and .dash-refresh-tick rules were deleted with them.
-
-   The expand-all switch stays a local control: it is this view's only view
-   switch and the canon does not name it, so re-chroming it would be a
-   redesign rather than a de-duplication.
-   --------------------------------------------------------------------------- */
-.dash-master-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px 4px 8px;
-  border-radius: var(--r-control);
-  border: 1px solid var(--bd);
-  background: var(--ink-2);
-  color: var(--text-mid);
-  font-size: 11px;
-  font-family: 'JetBrains Mono', monospace;
-  cursor: pointer;
-  transition: color .12s var(--ease), border-color .12s var(--ease), background .12s var(--ease);
-}
-.dash-master-toggle:hover {
-  color: var(--text-hi);
-  border-color: var(--bd-hi);
-  background: var(--ink-3);
-}
-
-/* ---------------------------------------------------------------------------
-   Hoisted out of this file by the uniform pass — see style.css:
-
-     .counts-strip / .counts-group / .counts-group-right / .count-item-label /
-     .count-item / .count-static / .count-tight / .count-muted / .count-sep /
-     .count-suffix   — verbatim duplicate of QueueDetail's copy;
-     .metric-table / .metric-head / .h-spark (+ its two media queries)
-                     — verbatim duplicate of QueueDetail's copy;
-     .cell-section-inline / .cell-tag / .cell-chip
-                     — replace the local .metric-cell-head / .metric-cell-tag /
-                       .count-scope, which were a third spelling of the amber
-                       cell vocabulary QueueOperations and MetricRow also carry;
-     .panel-err / .panel-msg
-                     — replace .entity-failed / .entity-empty, which used to
-                       mean BOTH "we could not ask" and "we asked and it is
-                       nothing", separated only by italics.
-
-   The cell band keeps its in-table geometry (rules, not a rounded panel) via
-   .cell-section-inline: a card inside a table body reads as a nested card.
+   Page layout lives in style.css (OVERVIEW); what is here is the two ranked
+   lists at the bottom and the value fragments the tiles' slots render.
    --------------------------------------------------------------------------- */
 
-/* The slot-defined value separators — used by compound rows like "avg / max" */
 :deep(.mr-sep) {
-  color: var(--text-low);
+  color: var(--text-faint);
   margin: 0 4px;
   font-weight: 400;
 }
 :deep(.mr-unit) {
   font-style: normal;
   color: var(--text-low);
-  margin-left: 3px;
-  font-size: 11px;
+  margin-left: 4px;
+  font-size: 12px;
   font-weight: 400;
 }
 
-/* ---------------------------------------------------------------------------
-   Bottom panels — symmetric entity rows.
-
-   One idiom, two panels. Each row is a 2-line card: the head carries
-   the leading severity dot, the entity name (left), and the right-side
-   numeric metric; the meta line below carries either a depth bar with
-   counts (queues) or a tag + counts (consumer groups). The two panels
-   render the same .entity-row class so they read as a single visual
-   system on the dashboard.
-   --------------------------------------------------------------------------- */
+/* Ranked lists: rows on hairlines inside one card — no box per row. */
 .entity-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 10px 10px 6px;
+  padding: 4px 0;
 }
-
 .entity-row {
   display: block;
   width: 100%;
   text-align: left;
-  border: 1px solid var(--bd);
-  border-radius: var(--r-card);
-  background: color-mix(in srgb, var(--text-hi) 1.2%, transparent);
-  padding: 9px 12px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--bd-soft);
+  background: transparent;
+  padding: 10px 16px;
   cursor: pointer;
-  transition: border-color .12s var(--ease), background .12s var(--ease);
+  color: inherit;
+  transition: background .12s var(--ease);
 }
-.entity-row:hover {
-  border-color: var(--bd-hi);
-  background: color-mix(in srgb, var(--text-hi) 3%, transparent);
-}
+.entity-row:last-child { border-bottom: 0; }
+.entity-row:hover { background: var(--ink-3); }
 
 .entity-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
 }
 .entity-name {
   flex: 1;
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--text-hi);
-  letter-spacing: -.005em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .entity-right {
-  font-family: 'JetBrains Mono', monospace;
   font-variant-numeric: tabular-nums;
   font-size: 12px;
   color: var(--text-mid);
@@ -1445,59 +1414,53 @@ onMounted(fetchAll)
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-top: 6px;
-  padding-left: 14px;  /* indent under the dot so the meta line aligns with name */
+  margin-top: 5px;
+  padding-left: 18px;  /* under the name, past the glyph */
 }
 .entity-meta .bar-meta {
-  flex: 0 1 160px;
-  width: 160px;
+  flex: 0 1 140px;
+  width: 140px;
   height: 4px;
+  background: var(--ink-4);
 }
+.entity-meta .bar-meta i { background: var(--text-faint); }
+.entity-meta .bar-meta i.warn { background: var(--warn-400); }
+.entity-meta .bar-meta i.bad { background: var(--ember-400); }
 .meta-text {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-low);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
 }
 .meta-text strong {
   color: var(--text-mid);
   font-weight: 600;
 }
-.meta-sep { color: var(--bd-hi); margin: 0 4px; }
+.meta-sep { color: var(--text-faint); margin: 0 4px; }
 .meta-tag {
   display: inline-block;
-  padding: 1px 6px;
-  border-radius: var(--r-pill);
+  padding: 0 6px;
+  border-radius: var(--r-chip);
   border: 1px solid var(--bd);
-  background: var(--ink-3);
   color: var(--text-mid);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 500;
-  letter-spacing: .02em;
-  margin-right: 2px;
+  margin-right: 4px;
 }
-/* Conflation is a declared delivery policy, not a severity: the app's "idle,
-   proven" ice tone (the token .chip-ice uses), same tag on every surface that
-   names a consumer group. */
-.meta-tag-cfl {
-  border-color: var(--ice-bd);
-  background: var(--ice-glow);
-  color: var(--ice-400);
-}
+.meta-tag-cfl { color: var(--text-hi); }
 
 .card-foot {
   border-top: 1px solid var(--bd);
-  padding: 8px 14px;
+  padding: 8px 16px;
   display: flex;
   justify-content: flex-end;
 }
 .card-foot-link {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--text-mid);
   cursor: pointer;
-  letter-spacing: -.005em;
   transition: color .12s var(--ease);
 }
 .card-foot-link:hover { color: var(--text-hi); }

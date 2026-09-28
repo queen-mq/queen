@@ -1,36 +1,11 @@
 <template>
   <div class="view-container">
 
-    <!-- Tenant scope. Every queue below belongs to the acting tenant on this
-         cluster; the cell it runs on is named too, so a tenant figure is never
-         read as a cell figure. Built from identity, not from the fetch, so it
-         still states the scope while loading, on a failed list and on an empty
-         one. No `.scope-meta`: this page owns no range picker and hides no
-         control by role. -->
-    <div class="scope-strip">
-      <span class="chip chip-mute">tenant scope</span>
-      <span class="scope-text">
-        <strong>{{ actingTenantSlug || 'no tenant' }}</strong>
-        <span class="scope-sep">/</span>{{ actingClusterSlug || 'no cluster' }}
-        <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
-      </span>
-      <span class="scope-fill"></span>
-
-      <!-- Cross-link, not a merged row. Ephemeral queues are a different
-           storage class: no pending, no retained bytes, no DLQ, contents that
-           survive nothing — they cannot share this table's columns without one
-           of them lying. The chip appears only once the family has actually
-           answered on this cell, so on an older broker there is no dead link
-           and no failing probe behind it. -->
-      <router-link
-        v-if="ephemeralAvailable"
-        to="/ephemeral"
-        class="chip chip-ice eph-link"
-        title="RAM-class queues — depth is a ring in broker memory, and it survives nothing"
-      >
-        {{ formatNumber(ephemeralCount) }} ephemeral queue{{ ephemeralCount === 1 ? '' : 's' }} →
-      </router-link>
-    </div>
+    <PageHead title="Queues" :sub="lastFetched ? formatNumber(queues.length) : ''" :live="refreshAgo">
+      <template #actions>
+        <button v-if="can('queueAdmin')" class="btn btn-primary" @click="showCreate = true">Create queue</button>
+      </template>
+    </PageHead>
 
     <!-- Stale data presented as live is the failure mode: the store keeps the
          last-good rows on a failed refresh, so say how old they are. -->
@@ -52,91 +27,47 @@
       </span>
     </div>
 
-    <!-- Filters: search · namespace · task · sort · legend, then the live tick
-         on the right edge. No range picker here on purpose — the Throughput and
-         Lag p99 columns average over a 15-minute window hard-coded in
-         `fetchQueueOps`, so a picker would not drive the fetch. -->
-    <div class="card filters">
-      <div class="card-body filter-rows">
-        <div class="filter-row">
-          <div class="filter-search">
-            <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-            </svg>
-            <input
-              v-model="searchQuery"
-              type="text"
-              placeholder="Search queues..."
-              class="input"
-            />
-          </div>
-
-          <!-- ALL is `null`, never '': '' is the DEFAULT namespace server-side
-               (phase2.rs configured_defaults), so a '' sentinel makes the bucket
-               most queues land in the one bucket you cannot select. -->
-          <div class="filter-field-col">
-            <label class="label-xs">Namespace</label>
-            <select v-model="filterNamespace" class="input">
-              <option :value="ALL">All namespaces</option>
-              <option v-for="ns in namespaces" :key="ns" :value="ns">
-                {{ ns || '(default)' }}
-              </option>
-            </select>
-          </div>
-
-          <div class="filter-field-col">
-            <label class="label-xs">Task</label>
-            <select v-model="filterTask" class="input">
-              <option :value="ALL">All tasks</option>
-              <option v-for="task in tasks" :key="task" :value="task">
-                {{ task || '(default)' }}
-              </option>
-            </select>
-          </div>
-
-          <!-- Single-select, so `.seg` and not `.pill-row`: this is a mode
-               switch on the list order, not a multi-select filter. -->
-          <div class="filter-field">
-            <span class="label-xs">Sort</span>
-            <div class="seg">
-              <button
-                v-for="opt in sortOptions"
-                :key="opt.value"
-                :class="{ on: sortBy === opt.value }"
-                @click="sortBy = opt.value"
-              >
-                {{ opt.label }}
-              </button>
-            </div>
-          </div>
-
-          <span class="qhg-legend">
-            <span class="ld" style="background:var(--ok-500);"></span> healthy
-            <span class="ld" style="background:var(--ice-400);"></span> idle
-            <span class="ld" style="background:var(--warn-400);"></span> elevated
-            <span class="ld" style="background:var(--ember-400);"></span> falling behind
-          </span>
-
-          <div class="filter-field-right q-row-right">
-            <!-- This page really does poll (`useAutoRefresh` below), so the tick
-                 is a fact, not a label. -->
-            <span class="live-tick">
-              <span class="pulse" />
-              <span>live · {{ refreshAgo }}</span>
-            </span>
-
-            <!-- The page's one CREATE, behind a rule so it does not read as a
-                 third filter. `can('queueAdmin')` mirrors the proxy's
-                 RouteClass::QueueAdmin for /api/v1/configure, so the button is
-                 absent for a producer rather than enabled-and-403. -->
-            <template v-if="can('queueAdmin')">
-              <span class="q-action-rule" aria-hidden="true"></span>
-              <button class="btn" @click="showCreate = true">Create queue</button>
-            </template>
+    <!-- No range picker here on purpose: the Throughput and Lag p99 columns
+         average over a 15-minute window hard-coded in `fetchQueueOps`, so a
+         picker would not drive the fetch. -->
+    <PageTools>
+      <div class="filter-search">
+        <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+        </svg>
+        <input v-model="searchQuery" type="text" placeholder="Search queues…" class="input" />
+      </div>
+      <!-- ALL is `null`, never '': '' is the DEFAULT namespace server-side
+           (phase2.rs configured_defaults), so a '' sentinel makes the bucket
+           most queues land in the one bucket you cannot select. -->
+      <label class="tool-field">
+        <span class="tool-label">Namespace</span>
+        <select v-model="filterNamespace" class="input">
+          <option :value="ALL">All</option>
+          <option v-for="ns in namespaces" :key="ns" :value="ns">{{ ns || '(default)' }}</option>
+        </select>
+      </label>
+      <label class="tool-field">
+        <span class="tool-label">Task</span>
+        <select v-model="filterTask" class="input">
+          <option :value="ALL">All</option>
+          <option v-for="task in tasks" :key="task" :value="task">{{ task || '(default)' }}</option>
+        </select>
+      </label>
+      <template #view>
+        <div class="tool-seg">
+          <span class="tool-label">Sort</span>
+          <div class="seg">
+            <button
+              v-for="opt in sortOptions"
+              :key="opt.value"
+              :class="{ on: sortBy === opt.value }"
+              @click="sortBy = opt.value"
+            >{{ opt.label }}</button>
           </div>
         </div>
-      </div>
-    </div>
+      </template>
+    </PageTools>
 
     <!-- Health grid -->
     <QueueHealthGrid
@@ -145,6 +76,8 @@
       :sort-by="sortBy"
       :show-hot="false"
       :can-delete="can('queueAdmin')"
+      :attention="attention"
+      :attention-unknown="groupsFailed"
       @select="viewQueue"
       @delete="confirmDelete"
     >
@@ -177,6 +110,15 @@
       </template>
     </QueueHealthGrid>
 
+    <!-- The glyphs the rows use: shape first, colour only for the two states
+         that need you. -->
+    <div v-if="filteredQueues.length" class="list-legend">
+      <span><i class="g ok" aria-hidden="true" />healthy</span>
+      <span><i class="g idle" aria-hidden="true" />idle</span>
+      <span><i class="g warn" aria-hidden="true" />behind or no reader</span>
+      <span><i class="g bad" aria-hidden="true" />falling behind</span>
+    </div>
+
     <!-- Delete confirmation modal -->
     <Teleport to="body">
       <div v-if="showDeleteModal" class="modal-backdrop" @click.self="closeDeleteModal">
@@ -193,7 +135,7 @@
           <div class="modal-foot">
             <button class="btn btn-ghost" @click="closeDeleteModal">Cancel</button>
             <button class="btn btn-danger" :disabled="deleting" @click="deleteQueue">
-              {{ deleting ? 'Deleting…' : 'Delete Queue' }}
+              {{ deleting ? 'Deleting…' : 'Delete queue' }}
             </button>
           </div>
         </div>
@@ -217,18 +159,21 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { queues as queuesApi, system as systemApi, describeApiError } from '@/api'
 import { formatNumber, toNum } from '@/composables/useApi'
+import { queueAttention } from '@/composables/useAttention'
 import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { useToast } from '@/composables/useToast'
-import { useEphemeralStore } from '@/stores/ephemeralStore'
+import { useGroupsStore } from '@/stores/groupsStore'
 import { useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
 import QueueConfigModal from '@/components/QueueConfigModal.vue'
 import QueueHealthGrid from '@/components/QueueHealthGrid.vue'
+import PageHead from '@/components/PageHead.vue'
+import PageTools from '@/components/PageTools.vue'
 
 const router = useRouter()
-const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
+const { can } = useIdentity()
 const { notifySuccess } = useToast()
 
 // "All" sentinel. It must not be '' — '' is a real, selectable namespace/task
@@ -248,14 +193,6 @@ const {
 const lastFetchedText = computed(() =>
   lastFetched.value ? formatTimestamp(lastFetched.value) : 'an earlier load'
 )
-
-// Ephemeral cross-link. The same store the /ephemeral view uses, so the family
-// is probed ONCE per cluster: on a broker that does not serve it the store
-// records the verdict and stops asking, which is what keeps a 30s page refresh
-// from turning an old broker's 404 into a recurring toast.
-const ephemeralStore = useEphemeralStore()
-const ephemeralAvailable = ephemeralStore.available
-const ephemeralCount = ephemeralStore.count
 
 // Live tick, off the shared ticker. `lastFetched` only advances on a
 // SUCCESSFUL load, so on a failed refresh this keeps counting up while the
@@ -410,14 +347,25 @@ const fetchQueueOps = async () => {
   }
 }
 
-// Auto-refresh forces fresh queues; mount-time call reuses cache. The
-// ephemeral probe is TTL-cached and never forced — the chip is a signpost, and
-// its own page is where the live figures are.
+// The consumer groups, for the row verdicts: whether anyone reads a queue and
+// how far behind, by the rule the Overview and the sidebar use. The shared
+// listing (a full scan on the broker — stores/groupsStore), kept fresher here
+// because this is the page that shows the verdicts.
+const groupsStore = useGroupsStore()
+const groupsFailed = computed(() => groupsStore.error.value !== null)
+const fetchGroups = () => groupsStore.fetchGroups({ ttlMs: 25_000 })
+const attention = computed(() => {
+  const groups = groupsStore.groups.value
+  if (groups === null) return null
+  return new Map(queueAttention(queuesStore.queues.value, groups).map((a) => [a.name, a]))
+})
+
+// Auto-refresh forces fresh queues; mount-time call reuses cache.
 const refreshAll = async () => {
   await Promise.all([
     fetchQueues(true),
     fetchQueueOps(),
-    ephemeralStore.fetchQueues(),
+    fetchGroups(),
   ])
 }
 
@@ -469,43 +417,12 @@ useAutoRefresh(refreshAll)
 onMounted(() => {
   fetchQueues()       // cache-respecting
   fetchQueueOps()
-  ephemeralStore.fetchQueues()
+  fetchGroups()
 })
 </script>
 
 <style scoped>
-/* The toolbar is now the shared `.card.filters` shell; `.qtoolbar`,
-   `.qtoolbar-search` and `.qtoolbar-search-icon` moved to style.css as
-   `.filters` / `.filter-row` / `.filter-search` / `.filter-search-icon`.
-   `.view-banner` and `.qdel-error` are gone too — the first is hoisted
-   verbatim, the second is the shared `.panel-err`. */
-
-/* The right edge of the filter row: the live tick, then the one control that
-   CHANGES something. The hairline is the same two pixels Messages puts between
-   its filter actions and "Push message" — it is what keeps "Create queue" from
-   being read as another way of narrowing the list. */
-.q-row-right { display: flex; align-items: center; gap: 8px; }
-.q-action-rule { width: 1px; align-self: stretch; margin: 0 2px; background: var(--bd); }
-
-.qhg-legend {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: var(--text-mid);
-  margin-left: 4px;
-}
-.qhg-legend .ld {
-  width: 7px;
-  height: 7px;
-  border-radius: var(--r-pill);
-}
-
-/* The chip is a link: it must not carry a link's underline into a chip row. */
-.eph-link { text-decoration: none; white-space: nowrap; }
-.eph-link:hover { border-color: color-mix(in srgb, var(--ice-400) 45%, transparent); }
-
-@media (max-width: 880px) {
-  .qhg-legend { display: none; }
-}
+/* The head and the tools row are components/PageHead and PageTools, the same
+   on every page; the list is QueueHealthGrid. Nothing page-specific is left
+   to lay out here. */
 </style>

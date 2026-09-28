@@ -1,22 +1,5 @@
 <template>
-  <div class="view-container">
-
-    <!-- ======================================================================
-         Scope strip — always first, always rendered. It is built from
-         useIdentity(), not from anything we fetched, so it still states which
-         tenant / cluster / cell these numbers belong to while the page is
-         loading and when the fetch failed.
-         ====================================================================== -->
-    <div class="scope-strip">
-      <span class="chip chip-mute">tenant scope</span>
-      <span class="scope-text">
-        <strong>{{ actingTenantSlug || 'no tenant' }}</strong>
-        <span class="scope-sep">/</span>{{ actingClusterSlug || 'no cluster' }}
-        <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
-      </span>
-      <span class="scope-fill"></span>
-      <span class="scope-meta">{{ rangeLabel }}</span>
-    </div>
+  <div class="view-container qd">
 
     <!-- ======================================================================
          Loading skeleton — first paint only; subsequent refreshes leave the
@@ -57,96 +40,57 @@
     </div>
 
     <template v-else-if="statusData">
-      <!-- ====================================================================
-           Detail bar — back · queue · meta. This is page IDENTITY, not a
-           control: the breadcrumb cannot carry a queue's namespace, task and
-           partition count. The range picker and the live tick that used to
-           ride along on the right have moved into the filter card below,
-           where every other view keeps them.
-           ==================================================================== -->
-      <div class="qd-bar">
-        <button @click="$router.push('/queues')" class="detail-back" title="Back to queues">
-          <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-          </svg>
-        </button>
+      <PageHead :title="queueName" :live="refreshAgo">
+        <template #lead>
+          <button @click="$router.push('/queues')" class="detail-back" title="Back to queues" aria-label="Back to queues">
+            <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+            </svg>
+          </button>
+        </template>
+        <template #title><span class="qd-ns">{{ nameParts.ns }}</span>{{ nameParts.rest }}</template>
+        <template #sub>
+          <span v-if="queueData?.namespace">Namespace <b>{{ queueData.namespace }}</b> · </span>
+          <span v-if="queueData?.task">Task <b>{{ queueData.task }}</b> · </span>
+          <span><b>{{ formatNumber(partitions.length) }}</b> {{ partitions.length === 1 ? 'partition' : 'partitions' }}</span>
+          <span v-if="queueData?.createdAt" :title="formatTimestampUtc(queueData.createdAt)"> · created {{ formatRelative(queueData.createdAt) }}</span>
+        </template>
+        <template #range>
+          <div class="seg" role="group" aria-label="Time range">
+            <button
+              v-for="r in timeRanges"
+              :key="r.value"
+              :class="{ on: selectedRange === r.value }"
+              :aria-pressed="selectedRange === r.value ? 'true' : 'false'"
+              @click="selectedRange = r.value"
+            >{{ r.label }}</button>
+          </div>
+        </template>
+        <!-- PUSH is RouteClass::Produce; EDIT and DELETE are QueueAdmin: the
+             buttons mirror the proxy's classes so none is enabled into a 403. -->
+        <template #actions>
+          <button v-if="can('queueAdmin')" @click="openDeleteModal" class="btn btn-ghost qd-delete">Delete</button>
+          <button v-if="can('queueAdmin')" @click="configOpen = true" class="btn">Configure</button>
+          <button v-if="can('produce')" @click="pushOpen = true" class="btn btn-primary">Push message</button>
+        </template>
+      </PageHead>
 
-        <span class="detail-name font-mono">{{ queueData?.name || queueName }}</span>
-
-        <span class="detail-meta font-mono">
-          <span v-if="queueData?.namespace">{{ queueData.namespace }}</span>
-          <span v-if="queueData?.task">· {{ queueData.task }}</span>
-          <span>· {{ partitions.length }} partition{{ partitions.length === 1 ? '' : 's' }}</span>
-          <span v-if="queueData?.priority != null">· p{{ queueData.priority }}</span>
-          <span v-if="queueData?.createdAt">· created {{ formatRelative(queueData.createdAt) }}</span>
-        </span>
-      </div>
-
-      <!-- Quick actions — second row, separated so the bar above stays
-           uncluttered on narrow viewports. -->
-      <div class="qd-actions">
-        <button class="btn btn-ghost" @click="goMessages">
-          <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.86 9.86 0 01-4-.8L3 21l1.4-4.2A8.96 8.96 0 013 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-          </svg>
-          Browse messages
-        </button>
-        <!-- Not red on a non-zero count: a dead-letter depth is a standing
-             to-do list, not something failing now (the colour policy); the
-             count beside the label is the signal. Purge and Delete keep red
-             because they destroy. -->
+      <!-- The queue's other views, one click away. A dead-letter depth is a
+           standing to-do list, not something failing now: the count beside
+           the label is the signal. -->
+      <PageTools>
+        <button class="btn btn-ghost" @click="goMessages">Messages</button>
         <button class="btn btn-ghost" @click="goDLQ">
-          <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-          </svg>
-          DLQ
+          Dead letter
           <span v-if="totalMessages.deadLetter > 0" class="qd-badge">{{ formatNumber(totalMessages.deadLetter) }}</span>
         </button>
-        <button class="btn btn-ghost" @click="goTraces">
-          <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
-          </svg>
-          Traces
-        </button>
-
-        <span class="qd-actions-spacer" />
-
-        <!-- The writes, all of them to the right of the spacer. PUSH is
-             RouteClass::Produce (admin or producer); EDIT and DELETE are
-             RouteClass::QueueAdmin (admin only): mirroring the proxy's classes
-             here is what keeps a button from being enabled into a 403. -->
-        <button v-if="can('produce')" @click="pushOpen = true" class="btn">
-          <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M12 19V5m0 0l-6 6m6-6l6 6" />
-          </svg>
-          Push message
-        </button>
-
-        <!-- /api/v1/configure is RouteClass::QueueAdmin, the same class as the
-             delete beside it: admin only, and absent rather than 403 for
-             anyone else. -->
-        <button v-if="can('queueAdmin')" @click="configOpen = true" class="btn">
-          <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-            <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-          </svg>
-          Edit configuration
-        </button>
-
-        <button v-if="can('queueAdmin')" @click="openDeleteModal" class="btn btn-danger">
-          <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-          </svg>
-          Delete queue
-        </button>
-      </div>
+        <button class="btn btn-ghost" @click="goTraces">Traces</button>
+      </PageTools>
 
       <!-- ====================================================================
-           Page banners — facts about the whole page. Worst first: the failed
-           refresh, then the derived advisories in their own severity order.
+           What needs you on this queue — a failed refresh first, then the
+           derived advisories, worst first. Quiet when there is nothing.
            ==================================================================== -->
-      <!-- A refresh that failed while data is on screen: the counts and config
-           below are the last good ones, not the current ones. -->
       <div v-if="detailStale" class="status-banner banner-bad view-banner">
         <span :title="formatTimestampUtc(lastRefreshAt)">
           <strong>Could not load live status</strong> ·
@@ -154,10 +98,6 @@
           configuration that were on screen at {{ lastRefreshText }}.
         </span>
       </div>
-
-      <!-- Derived advisories — only when there's something to flag, so the
-           page is quiet on healthy queues. The tone is the severity and is
-           carried by the shared banner classes. -->
       <div
         v-for="(b, i) in banners"
         :key="i"
@@ -169,130 +109,53 @@
         <span class="qd-banner-cta" v-if="b.cta">{{ b.cta }} →</span>
       </div>
 
-      <!-- ====================================================================
-           Filter card — the page's only control is the range picker, so it is
-           row 1's first field; the live tick closes the row on the right.
-           ==================================================================== -->
-      <div class="card filters">
-        <div class="card-body filter-rows">
-          <div class="filter-row">
-            <div class="filter-field">
-              <span class="label-xs">Range</span>
-              <div class="seg">
-                <button
-                  v-for="r in timeRanges"
-                  :key="r.value"
-                  :class="{ on: selectedRange === r.value }"
-                  @click="selectedRange = r.value"
-                >{{ r.label }}</button>
-              </div>
-            </div>
-
-            <span class="live-tick filter-field-right">
-              <span class="pulse" />
-              <span>live · {{ refreshAgo }}</span>
-            </span>
-          </div>
+      <!-- Right now: totals as of the last good status fetch. -->
+      <div class="counts-tiles" role="group" aria-label="Right now">
+        <div class="count-tile">
+          <span class="k">Pending</span>
+          <span class="v num" :class="pendingNumClass(totalMessages.pending)">{{ formatNumber(totalMessages.pending) }}</span>
+        </div>
+        <div class="count-tile">
+          <span class="k">Processing</span>
+          <span class="v">{{ formatNumber(totalMessages.processing) }}</span>
+        </div>
+        <div class="count-tile">
+          <span class="k">Completed</span>
+          <span class="v">{{ formatNumber(totalMessages.completed) }}</span>
+        </div>
+        <button class="count-tile" @click="goDLQ">
+          <span class="k">Dead letter</span>
+          <span class="v">{{ formatNumber(totalMessages.deadLetter) }}</span>
+        </button>
+        <div class="count-tile">
+          <span class="k">Total</span>
+          <span class="v">{{ formatNumber(totalMessages.total) }}</span>
+        </div>
+        <div class="count-tile">
+          <span class="k">Partitions</span>
+          <span class="v">{{ formatNumber(partitions.length) }}</span>
         </div>
       </div>
 
       <!-- ====================================================================
-           Counts strip — point-in-time scope (left) + now-snapshots (right).
-           Mirrors Dashboard's counts-strip but scoped to this queue.
+           Metrics — the eight rows of the old table as tiles. A tile hands its
+           series to the chart below; same sources and verdicts as before.
            ==================================================================== -->
-      <div class="counts-strip">
-        <div class="counts-group">
-          <!-- These are the totals as of the last good status fetch, exactly
-               like the rates on the right — the label was missing, not the
-               fact. -->
-          <span class="count-item-label">now</span>
-          <span class="count-item count-static">
-            <strong class="num" :class="pendingNumClass(totalMessages.pending)">{{ formatNumber(totalMessages.pending) }}</strong>
-            <span>pending</span>
-          </span>
-          <span class="count-sep">·</span>
-          <span class="count-item count-static">
-            <strong>{{ formatNumber(totalMessages.processing) }}</strong>
-            <span>processing</span>
-          </span>
-          <span class="count-sep">·</span>
-          <span class="count-item count-static count-muted">
-            <strong>{{ formatNumber(totalMessages.completed) }}</strong>
-            <span>completed</span>
-          </span>
-          <!-- No "failed" tile: get_queue_detail_v2's log branch hardcodes
-               `failed` to 0, so the tile could only ever assert zero while the
-               Errors row two blocks down charts the queue's real ack failures. -->
-          <span class="count-sep">·</span>
-          <button class="count-item" @click="goDLQ">
-            <strong class="num">{{ formatNumber(totalMessages.deadLetter) }}</strong>
-            <span>dlq</span>
-          </button>
-          <span class="count-sep">·</span>
-          <span class="count-item count-static count-muted">
-            <strong>{{ formatNumber(totalMessages.total) }}</strong>
-            <span>total</span>
-          </span>
-          <span class="count-sep">·</span>
-          <span class="count-item count-static">
-            <strong>{{ formatNumber(partitions.length) }}</strong>
-            <span>{{ partitions.length === 1 ? 'partition' : 'partitions' }}</span>
-          </span>
-        </div>
-
-        <div class="counts-group counts-group-right" :title="'Now-rates from queue-ops time series; parked = currently waiting long-poll consumers.'">
-          <span class="count-item-label">now</span>
-          <span class="count-item count-static count-tight">
-            <strong>{{ nowSnapshot.push }}</strong><span class="count-suffix">push/s</span>
-          </span>
-          <span class="count-sep">·</span>
-          <span class="count-item count-static count-tight">
-            <strong>{{ nowSnapshot.pop }}</strong><span class="count-suffix">pop/s</span>
-          </span>
-          <span class="count-sep">·</span>
-          <span class="count-item count-static count-tight">
-            <strong>{{ nowSnapshot.ack }}</strong><span class="count-suffix">ack/s</span>
-          </span>
-          <span class="count-sep">·</span>
-          <span class="count-item count-static count-tight">
-            <strong>{{ nowSnapshot.parked }}</strong><span class="count-suffix">parked</span>
-          </span>
-        </div>
-      </div>
-
-      <!-- ====================================================================
-           Metric table — Dashboard idiom, queue-scoped.
-           Eight rows tell the story of this queue end-to-end:
-             flow (Throughput, Pending Δ, Time lag, Fill ratio)
-             health (Errors, Parked)
-             admin (Partitions activity, Consumed)
-           Each row reuses MetricRow for consistent typography + interactions.
-           ==================================================================== -->
-      <div class="metric-table">
-        <div class="metric-head">
-          <span></span>
-          <span>Metric</span>
-          <span class="h-value">Now</span>
-          <span>Context</span>
-          <span class="h-spark">{{ selectedRange }}</span>
-          <span></span>
-        </div>
-
-        <MetricRow
+      <div class="tile-grid tile-grid-4">
+        <MetricTile
           label="Throughput"
           :value="throughput.current"
-          unit="/s"
+          unit="/s push"
           :context="throughputContext"
           :series="throughputSeries"
           :labels="chartLabels"
           :value-format="fmtRate"
-          expand-unit="msgs / sec"
           :loading="loadingOps"
           :error="opsError"
-          :expanded="isExpanded('throughput')"
-          @toggle-expand="toggleRow('throughput')"
+          :selected="selectedMetric === 'throughput'"
+          @select="selectedMetric = 'throughput'"
         />
-        <MetricRow
+        <MetricTile
           label="Pending Δ"
           :value="pendingDeltaDisplay"
           unit="msgs"
@@ -300,27 +163,25 @@
           :sparkline="pendingDeltaSeries"
           :labels="chartLabels"
           :value-format="fmtCount"
-          expand-unit="msgs (cumulative)"
           :severity="pendingDeltaSeverity"
           :loading="loadingOps"
           :error="opsError"
           tooltip="Cumulative (push − ack) across the selected window. Positive = queue filling, negative = draining."
-          :expanded="isExpanded('pendingDelta')"
-          @toggle-expand="toggleRow('pendingDelta')"
+          :selected="selectedMetric === 'pendingDelta'"
+          @select="selectedMetric = 'pendingDelta'"
         />
-        <MetricRow
+        <MetricTile
           label="Time lag"
           :context="lagContext"
           :series="lagSeriesData"
           :labels="chartLabels"
           :value-format="fmtLagMs"
-          expand-unit="ms"
           :severity="lagSeverityKey"
           :loading="loadingOps"
           :error="opsError"
           tooltip="Per-bucket avg / max delivery delay, derived from queue lag metrics."
-          :expanded="isExpanded('timeLag')"
-          @toggle-expand="toggleRow('timeLag')"
+          :selected="selectedMetric === 'timeLag'"
+          @select="selectedMetric = 'timeLag'"
         >
           <template #value>
             <template v-if="lagLatest.avg === null && lagLatest.max === null">
@@ -332,79 +193,72 @@
               <span class="num" :class="lagNumClass(lagLatest.max)">{{ fmtLagShort(lagLatest.max) }}</span>
             </template>
           </template>
-        </MetricRow>
-        <MetricRow
+        </MetricTile>
+        <MetricTile
           label="Fill ratio"
           :context="fillContext"
           :series="fillSeriesData"
           :labels="chartLabels"
           :value-format="fmtFillPct"
-          expand-unit="%"
           :severity="fillSeverityKey"
           :loading="loadingOps"
           :error="opsError"
-          tooltip="Long-polls returning a message ÷ all long-poll completions on this queue. <30% with traffic = consumers mostly empty; ~100% sustained = fully utilized — watch Time lag."
-          :expanded="isExpanded('fillRatio')"
-          @toggle-expand="toggleRow('fillRatio')"
+          tooltip="Long-polls returning a message ÷ all long-poll completions on this queue."
+          :selected="selectedMetric === 'fillRatio'"
+          @select="selectedMetric = 'fillRatio'"
         >
           <template #value>
-            <template v-if="fillLatest === null">
-              <span class="num">—</span>
-            </template>
-            <template v-else>
-              <span class="num" :class="fillSeverityKey">{{ fillLatest.toFixed(1) }}</span><i class="mr-unit">%</i>
-            </template>
+            <span v-if="fillLatest === null" class="num">—</span>
+            <template v-else><span class="num" :class="fillSeverityKey">{{ fillLatest.toFixed(1) }}</span><i class="mr-unit">%</i></template>
           </template>
-        </MetricRow>
-        <MetricRow
+        </MetricTile>
+        <MetricTile
           label="Errors"
           :value="formatNumber(errorsTotal)"
+          unit="ack failures"
           :context="errorsContext"
           :sparkline="errorsSeries"
           :labels="chartLabels"
           :value-format="fmtCount"
-          expand-unit="count"
           :severity="errorsSeverity"
           :loading="loadingOps"
           :error="opsError"
-          tooltip="ack failures over the selected window for this queue."
-          :expanded="isExpanded('errors')"
-          @toggle-expand="toggleRow('errors')"
+          tooltip="Ack failures over the selected window for this queue."
+          :selected="selectedMetric === 'errors'"
+          @select="selectedMetric = 'errors'"
         />
-        <MetricRow
+        <MetricTile
           label="Parked"
           :value="formatNumber(Math.round(parkedLatest))"
-          unit="consumers"
+          unit="long-polls"
           :context="parkedContext"
           :sparkline="parkedSeries"
           :labels="chartLabels"
           :value-format="fmtCount"
-          expand-unit="long-polls"
           :loading="loadingOps"
           :error="opsError"
-          tooltip="Long-poll consumer connections currently waiting on this queue, averaged each minute."
-          :expanded="isExpanded('parked')"
-          @toggle-expand="toggleRow('parked')"
+          tooltip="Long-poll consumer connections currently waiting on this queue."
+          :selected="selectedMetric === 'parked'"
+          @select="selectedMetric = 'parked'"
         />
-        <MetricRow
+        <MetricTile
           label="Partitions Δ"
-          :context="'created / deleted in window · current ' + partitions.length"
+          :context="'created / deleted in window'"
           :series="partitionOpsSeries"
           :labels="chartLabels"
           :value-format="fmtCount"
-          expand-unit="count"
           :loading="loadingOps"
           :error="opsError"
-          :expanded="isExpanded('partitionsOps')"
-          @toggle-expand="toggleRow('partitionsOps')"
+          :selected="selectedMetric === 'partitionsOps'"
+          @select="selectedMetric = 'partitionsOps'"
         >
           <template #value>
-            <span class="num" style="color:var(--text-hi);">+{{ formatNumber(partitionCreatedTotal) }}</span>
+            <span class="num">+{{ formatNumber(partitionCreatedTotal) }}</span>
             <span class="mr-sep">/</span>
             <span class="num mute">−{{ formatNumber(partitionDeletedTotal) }}</span>
           </template>
-        </MetricRow>
-        <MetricRow
+        </MetricTile>
+        <MetricTile
           label="Consumed"
           :value="formatNumber(consumedTotal)"
           unit="msgs"
@@ -412,14 +266,50 @@
           :sparkline="popSeries"
           :labels="chartLabels"
           :value-format="fmtCount"
-          expand-unit="msgs (per bucket)"
           :loading="loadingOps"
           :error="opsError"
-          tooltip="Lifetime messages consumed across all consumer groups on this queue (from partition cursors); sparkline shows pop rate per bucket."
-          :expanded="isExpanded('consumed')"
-          @toggle-expand="toggleRow('consumed')"
+          tooltip="Lifetime messages consumed across all consumer groups on this queue; the trend is pops per bucket."
+          :selected="selectedMetric === 'consumed'"
+          @select="selectedMetric = 'consumed'"
         />
       </div>
+
+      <section class="card focus" aria-labelledby="qd-focus-title">
+        <div class="card-header">
+          <h3 id="qd-focus-title">{{ focus.title }}</h3>
+          <span class="card-sub">{{ focus.sub }}</span>
+          <span class="muted">last {{ selectedRange }}</span>
+        </div>
+        <div class="card-body">
+          <div v-if="opsError" class="panel-err">{{ describeApiError(opsError) }}</div>
+          <RowChart
+            v-else
+            :data="focus.sparkline || []"
+            :series="focus.series || null"
+            :labels="chartLabels"
+            :tone="focus.tone || 'mute'"
+            :value-format="focus.valueFormat || null"
+            :unit="focus.unit"
+            variant="full"
+          />
+        </div>
+      </section>
+
+      <!-- ====================================================================
+           The queue's partitions as seeds, beside its configuration.
+           ==================================================================== -->
+      <div class="qd-bottom">
+        <div class="card flower-card">
+          <div class="card-header">
+            <h3>Partitions</h3>
+            <span class="muted">{{ formatNumber(partitions.length) }}</span>
+          </div>
+          <PartitionSunflower
+            mode="partitions"
+            :queue-name="queueName"
+            :queues="partitionSeeds"
+          />
+        </div>
 
       <!-- ====================================================================
            Configuration card — full queue config + identity chips.
@@ -438,69 +328,54 @@
                page's freshness is stated by the live tick instead. -->
           <span class="card-sub">{{ queueData.namespace || '—' }} · {{ queueData.task || '—' }}</span>
         </div>
-        <div class="card-body">
-          <div class="qd-config-grid">
-            <!-- formatDuration(0) is the string '0ms', which is truthy — the
-                 old `|| '—'` guard could never fire, so "no TTL" rendered as
-                 "0ms" (instant expiry). Test the raw value instead. -->
-            <div class="qd-config">
-              <span class="label-xs">Lease time</span>
-              <span class="qd-config-val font-mono">
-                {{ queueData.config.leaseTime ? formatDuration(queueData.config.leaseTime * 1000) : '—' }}
-              </span>
-              <span class="qd-config-hint">how long a lease is held</span>
-            </div>
-            <!-- The three the broker STORES and never READS (D2, re-confirmed
-                 against the raft code 2026-09-26: `ttl`, `max_queue_size` and
-                 `retry_delay` are written to the queue row and echoed, and read
-                 by no push, pop, ack or maintenance path). They stay on this card
-                 because the values are really on the row — a queue configured
-                 with `maxSize: 1000` has that number, and hiding it would make
-                 the page disagree with the API — but they are dimmed and say so
-                 rather than describing an enforcement that does not happen. The
-                 editor omits them entirely. -->
-            <div class="qd-config qd-config-inert">
-              <span class="label-xs">TTL</span>
-              <span class="qd-config-val font-mono">
-                {{ queueData.config.ttl ? formatDuration(queueData.config.ttl * 1000) : '∞' }}
-              </span>
-              <span class="qd-config-hint">declared, not enforced by this broker</span>
-            </div>
-            <div class="qd-config qd-config-inert">
-              <span class="label-xs">Max queue size</span>
-              <span class="qd-config-val font-mono">{{ queueData.config.maxQueueSize ? formatNumber(queueData.config.maxQueueSize) : '∞' }}</span>
-              <span class="qd-config-hint">declared, not enforced by this broker</span>
-            </div>
-            <div class="qd-config">
-              <span class="label-xs">Retry limit</span>
-              <span class="qd-config-val font-mono">{{ queueData.config.retryLimit || 0 }}</span>
-              <span class="qd-config-hint">attempts before DLQ / drop</span>
-            </div>
-            <div class="qd-config qd-config-inert">
-              <span class="label-xs">Retry delay</span>
-              <span class="qd-config-val font-mono">{{ queueData.config.retryDelay || 0 }} ms</span>
-              <span class="qd-config-hint">declared, not enforced by this broker</span>
-            </div>
-            <div class="qd-config">
-              <span class="label-xs">Dead-letter queue</span>
-              <span class="qd-config-val">
-                <span class="chip" :class="queueData.config.deadLetterQueue ? 'chip-ice' : 'chip-mute'">
-                  {{ queueData.config.deadLetterQueue ? 'enabled' : 'disabled' }}
-                </span>
-              </span>
-              <span class="qd-config-hint">where exhausted retries land</span>
-            </div>
-            <div class="qd-config">
-              <span class="label-xs">Priority</span>
-              <span class="qd-config-val font-mono">{{ queueData.priority ?? 0 }}</span>
-              <span class="qd-config-hint">scheduler priority</span>
-            </div>
-            <div class="qd-config">
-              <span class="label-xs">Created</span>
-              <span :title="formatTimestampUtc(queueData.createdAt)" class="qd-config-val font-mono">{{ formatTimestamp(queueData.createdAt) }}</span>
-              <span class="qd-config-hint">{{ formatRelative(queueData.createdAt) }}</span>
-            </div>
-          </div>
+        <!-- The same list the editor draws: what the option is on the left, what
+             it holds on the right. The line under each old tile moved into the
+             label's tooltip. -->
+        <ul class="qd-settings">
+          <!-- formatDuration(0) is the string '0ms', which is truthy — the old
+               `|| '—'` guard could never fire, so "no TTL" rendered as "0ms"
+               (instant expiry). Test the raw value instead. -->
+          <li>
+            <span title="How long a lease is held">Lease time</span>
+            <b>{{ queueData.config.leaseTime ? formatDuration(queueData.config.leaseTime * 1000) : '—' }}</b>
+          </li>
+          <li>
+            <span title="Failed acks before the message is dead-lettered or dropped">Retry limit</span>
+            <b>{{ queueData.config.retryLimit || 0 }}</b>
+          </li>
+          <li>
+            <span title="Where a message that exhausts its retries lands">Dead-letter queue</span>
+            <b>{{ queueData.config.deadLetterQueue ? 'On' : 'Off' }}</b>
+          </li>
+          <li>
+            <span title="Scheduler priority">Priority</span>
+            <b>{{ queueData.priority ?? 0 }}</b>
+          </li>
+          <!-- The three the broker STORES and never READS (D2, re-confirmed
+               against the raft code 2026-09-26: `ttl`, `max_queue_size` and
+               `retry_delay` are written to the queue row and echoed, and read by
+               no push, pop, ack or maintenance path). They stay because the
+               values are really on the row — hiding them would make the page
+               disagree with the API — but dimmed, and saying so, rather than
+               describing an enforcement that does not happen. The editor omits
+               them entirely. -->
+          <li class="is-inert">
+            <span>TTL</span>
+            <b>{{ queueData.config.ttl ? formatDuration(queueData.config.ttl * 1000) : '∞' }}<i>not enforced</i></b>
+          </li>
+          <li class="is-inert">
+            <span>Max queue size</span>
+            <b>{{ queueData.config.maxQueueSize ? formatNumber(queueData.config.maxQueueSize) : '∞' }}<i>not enforced</i></b>
+          </li>
+          <li class="is-inert">
+            <span>Retry delay</span>
+            <b>{{ queueData.config.retryDelay || 0 }} ms<i>not enforced</i></b>
+          </li>
+          <li>
+            <span>Created</span>
+            <b :title="formatTimestampUtc(queueData.createdAt)">{{ formatTimestamp(queueData.createdAt) }}<i>{{ formatRelative(queueData.createdAt) }}</i></b>
+          </li>
+        </ul>
 
           <!-- This card shows what the STATUS route reports, which is six of
                the twenty-one options a queue carries. The rest — retention,
@@ -516,7 +391,7 @@
               options, the namespace and the task. The dimmed three are not among them.
             </template>
           </p>
-        </div>
+      </div>
       </div>
     </template>
 
@@ -587,11 +462,17 @@ import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
+import { useGroupsStore } from '@/stores/groupsStore'
+import { queueAttention } from '@/composables/useAttention'
 import { semanticColors } from '@/composables/useChartTheme'
 import {
   ackFailureSeverity, backlogSeverity, numTone, pendingDriftSeverity, timeLagSeverity,
 } from '@/composables/useSeverity'
-import MetricRow from '@/components/MetricRow.vue'
+import MetricTile from '@/components/MetricTile.vue'
+import PartitionSunflower from '@/components/PartitionSunflower.vue'
+import PageHead from '@/components/PageHead.vue'
+import PageTools from '@/components/PageTools.vue'
+import RowChart from '@/components/RowChart.vue'
 import PushMessageModal from '@/components/PushMessageModal.vue'
 import QueueConfigModal from '@/components/QueueConfigModal.vue'
 
@@ -659,15 +540,8 @@ const lastRefreshText = computed(() =>
 // Live tick, off the app's one shared ticker.
 const refreshAgo = useRefreshAgo(lastRefreshAt)
 
-// Per-row expand state — same Set-based pattern as Dashboard so the
-// metric table feels familiar from page to page.
-const expandedRows = ref(new Set())
-const isExpanded = (key) => expandedRows.value.has(key)
-const toggleRow = (key) => {
-  const next = new Set(expandedRows.value)
-  if (next.has(key)) next.delete(key); else next.add(key)
-  expandedRows.value = next
-}
+// The tile whose series the focus chart draws — same pattern as the Overview.
+const selectedMetric = ref('throughput')
 
 // ---------------------------------------------------------------------------
 // Time range helpers
@@ -1155,6 +1029,47 @@ const formatRelative = (ts) => {
 // ---------------------------------------------------------------------------
 // Navigation helpers
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Focus chart — the tiles hand it their series.
+// ---------------------------------------------------------------------------
+const focus = computed(() => {
+  switch (selectedMetric.value) {
+    case 'pendingDelta': return { title: 'Pending Δ', sub: 'cumulative push − ack across the window', sparkline: pendingDeltaSeries.value, valueFormat: fmtCount, unit: 'msgs (cumulative)', tone: pendingDeltaSeverity.value || 'mute' }
+    case 'timeLag': return { title: 'Time lag', sub: 'average and maximum delivery delay per bucket', series: lagSeriesData.value, valueFormat: fmtLagMs, unit: 'ms' }
+    case 'fillRatio': return { title: 'Fill ratio', sub: 'long-polls that came back with a message', series: fillSeriesData.value, valueFormat: fmtFillPct, unit: '%' }
+    case 'errors': return { title: 'Ack failures', sub: 'failed acks per bucket', sparkline: errorsSeries.value, valueFormat: fmtCount, unit: 'ack failures', tone: errorsSeverity.value || 'mute' }
+    case 'parked': return { title: 'Parked', sub: 'long-polls waiting on this queue', sparkline: parkedSeries.value, valueFormat: fmtCount, unit: 'long-polls' }
+    case 'partitionsOps': return { title: 'Partitions', sub: 'created and deleted per bucket', series: partitionOpsSeries.value, valueFormat: fmtCount, unit: 'count' }
+    case 'consumed': return { title: 'Pops', sub: 'messages popped per bucket, every consumer group', sparkline: popSeries.value, valueFormat: fmtCount, unit: 'msgs per bucket' }
+    default: return { title: 'Throughput', sub: 'push, pop and ack per second', series: throughputSeries.value, valueFormat: fmtRate, unit: 'msgs / sec' }
+  }
+})
+
+// "pricing.recompute" -> dimmed "pricing." + "recompute", as in every list.
+const nameParts = computed(() => {
+  const n = queueData.value?.name || queueName.value || ''
+  const i = n.indexOf('.')
+  return i < 0 ? { ns: '', rest: n } : { ns: n.slice(0, i + 1), rest: n.slice(i + 1) }
+})
+
+// One seed per partition (the component caps and says so). The queue's
+// verdict — useAttention, the rule the Overview, Queues and the sidebar use —
+// colours only the partitions that hold work. It reads the shared listing the
+// sidebar keeps; this page never pays for a consumer-group scan of its own.
+const groupsStore = useGroupsStore()
+const queueSev = computed(() => {
+  const groups = groupsStore.groups.value
+  if (groups === null || groupsStore.error.value !== null) return 'ok'
+  const here = { name: queueName.value, messages: { pending: totalMessages.value.pending } }
+  return queueAttention([here], groups)[0]?.sev || 'ok'
+})
+const partitionSeeds = computed(() => partitions.value.map(p => {
+  const m = p.messages || p.stats || {}
+  const pending = Math.max(0, toNum(m.pending) || 0)
+  return { name: String(p.name ?? p.partition ?? p.id ?? '?'), partitions: 1, pending, sev: pending > 0 ? queueSev.value : 'ok' }
+}))
+
 function goMessages() {
   router.push({ path: '/messages', query: { queue: queueName.value } })
 }
@@ -1292,18 +1207,11 @@ onMounted(fetchAll)
   flex-wrap: wrap;
 }
 
-/* Quick-action row */
-.qd-actions {
-  display: flex; align-items: center; gap: 8px;
-  margin-bottom: 14px;
-  flex-wrap: wrap;
-}
-.qd-actions-spacer { flex: 1 1 auto; }
 .qd-badge {
   display: inline-flex; align-items: center;
   padding: 0 5px; border-radius: var(--r-pill);
-  font-size: 10px; font-family: 'JetBrains Mono', monospace;
-  margin-left: 4px;
+  font-size: 11px; font-variant-numeric: tabular-nums; color: var(--text-low);
+  margin-left: 2px;
 }
 
 /* ---------------------------------------------------------------------------
@@ -1333,43 +1241,25 @@ onMounted(fetchAll)
 }
 
 /* ---------------------------------------------------------------------------
-   Configuration grid
+   Configuration — a read-only settings list, the editor's rows without the
+   controls.
    --------------------------------------------------------------------------- */
-.qd-config-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 14px 24px;
+.qd-settings { list-style: none; margin: 0; padding: 0 16px; }
+.qd-settings li {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 16px;
+  min-height: 38px; padding: 9px 0; border-top: 1px solid var(--bd-soft); font-size: 13px;
 }
-@media (max-width: 1100px) {
-  .qd-config-grid { grid-template-columns: repeat(3, 1fr); }
-}
-@media (max-width: 900px) {
-  .qd-config-grid { grid-template-columns: repeat(2, 1fr); }
-}
-@media (max-width: 500px) {
-  .qd-config-grid { grid-template-columns: 1fr; }
-}
-.qd-config {
-  display: flex; flex-direction: column; gap: 4px;
-  padding: 10px 0;
-}
-.qd-config-val {
-  font-size: 14px; font-weight: 600;
-  color: var(--text-hi); letter-spacing: -.005em;
-}
-.qd-config-hint {
-  font-size: 10.5px; color: var(--text-low);
-  letter-spacing: .04em;
-}
-/* An option the broker stores and never reads. Dimmed to the hint's own
-   colour, so the figure still reads at a glance as a fact about the row while
-   it stops competing with the five values that actually govern behaviour. */
-.qd-config-inert .qd-config-val { color: var(--text-mid); font-weight: 500; }
+.qd-settings li:first-child { border-top: 0; }
+.qd-settings li > span { color: var(--text-mid); }
+.qd-settings li > b { font-weight: 500; color: var(--text-hi); font-variant-numeric: tabular-nums; text-align: right; }
+/* Stored and never read: the figure stays, a step quieter, and says so. */
+.qd-settings li.is-inert > b { font-weight: 400; color: var(--text-low); }
+.qd-settings i { margin-left: 8px; font-style: normal; font-size: 11px; font-weight: 400; color: var(--text-low); }
 
 .qd-config-note {
-  margin: 12px 0 0; padding-top: 12px;
+  margin: 0; padding: 12px 16px 14px;
   border-top: 1px solid var(--bd);
-  font-size: 11.5px; line-height: 1.5; color: var(--text-low);
+  font-size: 12px; line-height: 1.5; color: var(--text-low);
 }
 /* A sentence with one control in it: the button has to sit on the baseline of
    the prose, not on a button's own box. */
@@ -1383,4 +1273,13 @@ onMounted(fetchAll)
 /* The delete modal uses the shared shell — .modal-backdrop / .modal-card /
    .modal-foot — and the shared .panel-err for its form error, so it is not a
    fourth private ember box. Nothing modal-shaped is declared here any more. */
+
+/* ---- v3: head, actions, the bottom row ------------------------------------ */
+.view-container { display: flex; flex-direction: column; gap: 16px; }
+.qd-ns { color: var(--text-low); font-weight: 500; }
+.qd-delete { color: var(--text-mid); }
+.qd-delete:hover { color: var(--ember-400) !important; }
+.qd-bottom { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr); gap: 16px; align-items: start; }
+.qd-bottom > .card { margin: 0; }
+@media (max-width: 1100px) { .qd-bottom { grid-template-columns: minmax(0, 1fr); } }
 </style>

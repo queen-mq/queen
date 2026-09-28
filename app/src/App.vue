@@ -2,12 +2,12 @@
   <!-- Boot gate: nothing renders until /auth/me says who this is. A shell
        drawn before identity is a shell that has to guess a permission. -->
   <div v-if="status === 'loading' || status === 'idle'" class="boot-screen">
-    <img src="/queen-mark.svg" alt="" class="boot-mark" />
+    <img src="/queen-sunflower-badge.webp" alt="" class="boot-mark" />
     <p>Starting session…</p>
   </div>
 
   <div v-else-if="status === 'error'" class="boot-screen boot-error">
-    <img src="/queen-mark.svg" alt="" class="boot-mark" />
+    <img src="/queen-sunflower-badge.webp" alt="" class="boot-mark" />
     <h2>Cannot start the dashboard</h2>
     <p>
       <code>/auth/me</code> did not answer ({{ loadError }}). The server may be
@@ -19,10 +19,10 @@
     </div>
   </div>
 
-  <div v-else class="app-shell" :class="{ collapsed }">
+  <div v-else class="app-shell">
     <!-- Sidebar wrapper - hidden from grid flow on mobile -->
     <div class="sidebar-slot">
-      <Sidebar :collapsed="collapsed" @toggle-collapse="collapsed = !collapsed" />
+      <Sidebar />
     </div>
 
     <section class="app-main">
@@ -59,7 +59,7 @@
 </template>
 
 <script setup>
-import { computed, onUnmounted, provide, ref, watch } from 'vue'
+import { computed, onUnmounted, provide, watch } from 'vue'
 
 import Sidebar from '@/components/Sidebar.vue'
 import Header from '@/components/Header.vue'
@@ -70,8 +70,6 @@ import { useUiStore } from '@/stores/ui'
 
 const { status, loadError, actingCluster, epoch, ensureIdentity } = useIdentity()
 const { offline, offlineSince } = useUiStore()
-
-const collapsed = ref(false)
 
 const offlineSinceText = computed(() =>
   offlineSince.value ? formatTimestamp(offlineSince.value) : 'the last successful load'

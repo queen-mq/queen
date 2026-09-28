@@ -1,13 +1,14 @@
 <template>
   <div class="view-container">
-    <div class="scope-strip scope-strip-cell">
-      <span class="chip chip-scope"><span class="dot"></span>cell · operator</span>
-      <span class="scope-text">
-        user accounts and cluster access for <strong>cell {{ cellSlug }}</strong>
-        <span class="scope-sep">·</span>
-        every tenant represented on this cell
-      </span>
-    </div>
+
+    <PageHead title="Users">
+      <template #sub>
+        <span>cell <b>{{ cellSlug }}</b> · every tenant represented on it</span>
+      </template>
+      <template #actions>
+        <button class="btn btn-primary" :disabled="!tenants.length" @click="openCreate">Add user</button>
+      </template>
+    </PageHead>
 
     <div v-if="error" class="status-banner banner-bad view-banner">
       <span>
@@ -19,42 +20,36 @@
     <div class="users-summary">
       <div class="stat">
         <div class="stat-label">Users</div>
-        <div class="stat-value font-mono">{{ users.length }}</div>
+        <div class="stat-value">{{ users.length }}</div>
         <div class="stat-foot">accounts in cell tenants</div>
       </div>
       <div class="stat">
         <div class="stat-label">Tenants</div>
-        <div class="stat-value font-mono">{{ tenants.length }}</div>
+        <div class="stat-value">{{ tenants.length }}</div>
         <div class="stat-foot">represented on this cell</div>
       </div>
       <div class="stat">
         <div class="stat-label">Access grants</div>
-        <div class="stat-value font-mono">{{ grantCount }}</div>
+        <div class="stat-value">{{ grantCount }}</div>
         <div class="stat-foot">roles on cell clusters</div>
       </div>
     </div>
 
-    <div class="card users-filters">
-      <div class="card-body users-toolbar">
-        <div class="filter-field-col users-search">
-          <label class="label-xs" for="users-search">Search</label>
-          <input id="users-search" v-model="search" class="input" placeholder="Name, email or tenant" />
-        </div>
-        <div class="filter-field-col users-tenant-filter">
-          <label class="label-xs" for="users-tenant">Tenant</label>
-          <select id="users-tenant" v-model="tenantFilter" class="input">
-            <option value="">All tenants</option>
-            <option v-for="tenant in tenants" :key="tenant.id" :value="tenant.id">
-              {{ tenant.slug }}
-            </option>
-          </select>
-        </div>
-        <span class="scope-fill"></span>
-        <button class="btn btn-primary" :disabled="!tenants.length" @click="openCreate">
-          Add user
-        </button>
+    <PageTools>
+      <div class="filter-search">
+        <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+        </svg>
+        <input id="users-search" v-model="search" class="input" placeholder="Name, email or tenant" />
       </div>
-    </div>
+      <label class="tool-field" for="users-tenant">
+        <span class="tool-label">Tenant</span>
+        <select id="users-tenant" v-model="tenantFilter" class="input">
+          <option value="">All</option>
+          <option v-for="tenant in tenants" :key="tenant.id" :value="tenant.id">{{ tenant.slug }}</option>
+        </select>
+      </label>
+    </PageTools>
 
     <div class="card">
       <div class="card-header">
@@ -259,6 +254,8 @@ import { operator, describeApiError } from '@/api'
 import { useRefresh } from '@/composables/useRefresh'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
+import PageHead from '@/components/PageHead.vue'
+import PageTools from '@/components/PageTools.vue'
 
 const roles = ['admin', 'producer', 'consumer', 'viewer']
 const { actingCellSlug } = useIdentity()

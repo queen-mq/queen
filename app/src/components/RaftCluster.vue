@@ -99,7 +99,6 @@
         <span class="card-sub">
           {{ view.rows.length }} member{{ view.rows.length === 1 ? '' : 's' }}<template v-if="view.self !== null"> · as seen by node {{ view.self }}</template>
         </span>
-        <span class="chip chip-mute">cell-level</span>
         <span class="muted">{{ stamp }}</span>
       </div>
       <div class="card-body">
@@ -131,7 +130,7 @@
                   <div v-if="row.error && !row.unreachable" class="rc-err">{{ row.error }}</div>
                 </td>
                 <td>
-                  <span class="chip" :class="row.chip.cls"><span class="dot"></span>{{ row.chip.label }}</span>
+                  <span class="rc-state"><span class="g" :class="chipGlyph(row.chip.cls)" aria-hidden="true" />{{ capital(row.chip.label) }}</span>
                   <span v-if="row.role === 'learner' && row.state !== 'learner'" class="rc-role">learner</span>
                 </td>
 
@@ -141,16 +140,16 @@
                   {{ row.error || 'No answer from this member' }}<span v-if="row.raftAddr" class="rc-sub font-mono"> · raft {{ row.raftAddr }}</span>
                 </td>
                 <template v-else>
-                  <td class="right font-mono tabular-nums">{{ count(row.term) }}</td>
-                  <td class="right font-mono tabular-nums">{{ formatIndex(row.applied) }}</td>
-                  <td class="right font-mono tabular-nums">{{ formatIndex(row.committed) }}</td>
-                  <td class="right font-mono tabular-nums">{{ formatIndex(row.durable) }}</td>
-                  <td class="right font-mono num" :class="numTone(row.lagSeverity)">{{ count(row.lag) }}</td>
-                  <td class="right font-mono num" :class="numTone(row.heartbeatSeverity)">{{ ms(row.heartbeatMs) }}</td>
-                  <td class="right font-mono tabular-nums">
+                  <td class="right tabular-nums">{{ count(row.term) }}</td>
+                  <td class="right tabular-nums">{{ formatIndex(row.applied) }}</td>
+                  <td class="right tabular-nums">{{ formatIndex(row.committed) }}</td>
+                  <td class="right tabular-nums">{{ formatIndex(row.durable) }}</td>
+                  <td class="right num" :class="numTone(row.lagSeverity)">{{ count(row.lag) }}</td>
+                  <td class="right num" :class="numTone(row.heartbeatSeverity)">{{ ms(row.heartbeatMs) }}</td>
+                  <td class="right tabular-nums">
                     {{ bytes(row.logBytes) }}<span v-if="row.logFiles !== null" class="rc-sub"> · {{ count(row.logFiles) }} files</span>
                   </td>
-                  <td class="right font-mono num" :class="numTone(row.mapSeverity)" :title="mapTitle(row)">
+                  <td class="right num" :class="numTone(row.mapSeverity)" :title="mapTitle(row)">
                     {{ formatMapPct(row.mapPct) }}
                   </td>
                 </template>
@@ -235,6 +234,10 @@ const mapTitle = (row) => {
   if (row.readers !== null && row.maxReaders !== null) parts.push(`${count(row.readers)} of ${count(row.maxReaders)} readers`)
   return parts.join(' · ')
 }
+
+// The state marks of the rest of the app: dot, ring, triangle, diamond.
+const chipGlyph = (cls) => ({ 'chip-ok': 'ok', 'chip-warn': 'warn', 'chip-bad': 'bad' }[cls] || 'idle')
+const capital = (label) => (label ? label.charAt(0).toUpperCase() + label.slice(1) : label)
 </script>
 
 <style scoped>
@@ -249,6 +252,7 @@ const mapTitle = (row) => {
 
 .rc-node { display: flex; align-items: center; gap: 6px; }
 .rc-node-name { font-weight: 500; color: var(--text-hi); }
+.rc-state { display: inline-flex; align-items: center; gap: 8px; color: var(--text-hi); }
 .rc-sub { font-size: 11px; color: var(--text-low); }
 .rc-role { margin-left: 6px; font-size: 11px; color: var(--text-low); }
 .rc-err { margin-top: 2px; font-size: 11px; color: var(--ember-400); white-space: normal; }

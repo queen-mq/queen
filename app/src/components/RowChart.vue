@@ -189,7 +189,7 @@ function buildChartData() {
         pointHoverBackgroundColor: c.line,
         pointHoverBorderColor: chartTheme.tooltipBg,
         pointHoverBorderWidth: 1,
-        tension: 0.4,
+        tension: 0,
         fill: true,
         // Don't bridge null buckets — render them as actual gaps so the
         // operator can tell "no sample yet" from "real zero".
@@ -221,7 +221,7 @@ function buildChartData() {
         pointHoverBackgroundColor: line,
         pointHoverBorderColor: chartTheme.tooltipBg,
         pointHoverBorderWidth: 1,
-        tension: 0.4,
+        tension: 0,
         fill: i === 0 || s.fill === true,
         spanGaps: false,
       }
@@ -419,10 +419,8 @@ onUnmounted(() => { if (chart) { chart.destroy(); chart = null } })
   justify-content: center;
   width: 100%;
   height: 100%;
-  font-family: 'JetBrains Mono', monospace;
   font-size: 12px;
   color: var(--text-low);
-  letter-spacing: -.005em;
 }
 
 /* HTML legend — sits above the canvas in full variant. Right-aligned
@@ -445,10 +443,11 @@ onUnmounted(() => { if (chart) { chart.destroy(); chart = null } })
   font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
   letter-spacing: -.005em;
 }
+/* The key is the stroke the series draws, as on every other chart. */
 .rcl-swatch {
-  width: 10px;
-  height: 10px;
-  border-radius: var(--r-chip);
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
   display: inline-block;
 }
 .rcl-label {

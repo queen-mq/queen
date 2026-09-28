@@ -2,12 +2,14 @@
   <div class="topbar-wrap">
   <header class="topbar">
     <div class="crumbs">
-      <span>Queen</span>
-      <span class="sep">/</span>
+      <template v-if="parentCrumb">
+        <router-link class="crumb-link" :to="parentCrumb.to">{{ parentCrumb.label }}</router-link>
+        <span class="sep">/</span>
+      </template>
       <span class="here">{{ pageTitle }}</span>
     </div>
 
-    <div class="cmd-search" ref="searchContainer" @click="focusSearch">
+    <div class="cmd-search" :class="{ open: searchOpen }" ref="searchContainer" @click="focusSearch">
       <svg style="width:14px; height:14px; flex-shrink:0;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
       <input
         ref="searchInput" v-model="searchQuery" type="text"
@@ -73,7 +75,14 @@ const route = useRoute()
 const router = useRouter()
 const emit = defineEmits(['refresh'])
 
-const pageTitle = computed(() => route.meta.title || 'Dashboard')
+// A detail page names its entity; its parent list is one click back.
+const pageTitle = computed(() => {
+  if (route.name === 'QueueDetail' && route.params.queueName) return String(route.params.queueName)
+  return route.meta.title || 'Overview'
+})
+const parentCrumb = computed(() =>
+  route.name === 'QueueDetail' ? { label: 'Queues', to: '/queues' } : null
+)
 
 const searchQuery = ref('')
 const showResults = ref(false)
@@ -85,7 +94,13 @@ const searchDataLoaded = ref(false)
 const queues = ref([])
 const consumers = ref([])
 
-const focusSearch = () => { searchInput.value?.focus() }
+// The one search box. On a phone it is a magnifier until it is used, so
+// opening it has to show the field before it can take the focus.
+const searchOpen = ref(false)
+const focusSearch = () => {
+  searchOpen.value = true
+  nextTick(() => searchInput.value?.focus())
+}
 
 const searchResults = computed(() => {
   if (!searchQuery.value) return []
@@ -105,11 +120,11 @@ const navigateResults = (dir) => {
   selectedIndex.value = Math.max(0, Math.min(searchResults.value.length - 1, selectedIndex.value + dir))
 }
 const handleSearchEnter = () => { if (searchResults.value[selectedIndex.value]) selectResult(searchResults.value[selectedIndex.value]) }
-const selectResult = (r) => { router.push(r.route); searchQuery.value = ''; showResults.value = false; selectedIndex.value = 0 }
-const closeSearch = () => { showResults.value = false; searchQuery.value = '' }
+const selectResult = (r) => { router.push(r.route); searchQuery.value = ''; showResults.value = false; selectedIndex.value = 0; searchOpen.value = false; searchInput.value?.blur() }
+const closeSearch = () => { showResults.value = false; searchQuery.value = ''; searchOpen.value = false; searchInput.value?.blur() }
 const onSearchFocus = async () => { if (searchQuery.value) showResults.value = true; if (!searchDataLoaded.value) await loadSearchData() }
 const onSearchInput = () => { showResults.value = true; if (!searchDataLoaded.value) loadSearchData() }
-const onSearchBlur = () => { setTimeout(() => { if (!searchQuery.value) showResults.value = false }, 150) }
+const onSearchBlur = () => { setTimeout(() => { if (!searchQuery.value) { showResults.value = false; searchOpen.value = false } }, 150) }
 watch(searchQuery, () => { selectedIndex.value = 0; if (searchQuery.value) showResults.value = true })
 
 const loadSearchData = async () => {

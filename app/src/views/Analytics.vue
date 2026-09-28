@@ -1,153 +1,100 @@
 <template>
   <div class="view-container">
 
-    <!-- Scope strip. Every number below is this tenant's; the cell it runs on
-         is named too, so a tenant figure is never read as a cell figure. -->
-    <div class="scope-strip">
-      <span class="chip chip-mute">tenant scope</span>
-      <span class="scope-text">
-        <strong>{{ actingTenantSlug || 'no tenant' }}</strong>
-        <span class="scope-sep">/</span>{{ actingClusterSlug || 'no cluster' }}
-        <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
-      </span>
-      <span class="scope-fill"></span>
-      <span class="scope-meta" :title="rangeUtcTitle">{{ rangeLabel }}</span>
+    <PageHead title="Analytics">
+      <template #sub><span :title="rangeUtcTitle">{{ rangeLabel }}</span></template>
+      <template #range>
+        <div class="seg" role="group" aria-label="Time range">
+          <button
+            v-for="r in timeRanges"
+            :key="r.value"
+            :class="{ on: selectedRange === r.value && !customMode }"
+            :aria-pressed="selectedRange === r.value && !customMode ? 'true' : 'false'"
+            @click="selectQuickRange(r.value)"
+          >{{ r.label }}</button>
+          <button :class="{ on: customMode }" :aria-pressed="customMode ? 'true' : 'false'" @click="toggleCustomMode">Custom</button>
+        </div>
+      </template>
+    </PageHead>
+
+    <PageTools>
+      <!-- No free entry: the watcher below drops a queue this cluster does not
+           list, so accepting a typed name would only make it vanish. -->
+      <label class="tool-field" for="an-queue-filter">
+        <span class="tool-label">Queue</span>
+        <Autocomplete
+          id="an-queue-filter"
+          v-model="queueFilter"
+          :options="queueNames"
+          :loading="queuesFirstLoad"
+          label="Queue"
+          placeholder="All"
+        />
+      </label>
+      <label class="tool-field">
+        <span class="tool-label">Namespace</span>
+        <select v-model="namespaceFilter" class="input">
+          <option value="">All</option>
+          <option v-for="ns in namespaceOptions" :key="ns.namespace" :value="ns.namespace">{{ ns.namespace || 'Default' }}</option>
+        </select>
+      </label>
+      <label class="tool-field">
+        <span class="tool-label">Task</span>
+        <select v-model="taskFilter" class="input">
+          <option value="">All</option>
+          <option v-for="t in taskOptions" :key="t.task" :value="t.task">{{ t.task || 'Default' }}</option>
+        </select>
+      </label>
+      <template v-if="hasActiveFilter">
+        <span v-if="!scopeUnavailable" class="tool-note">{{ scopedQueues.length }} queue{{ scopedQueues.length === 1 ? '' : 's' }} match</span>
+        <button class="btn btn-ghost" @click="clearFilters">Clear</button>
+      </template>
+    </PageTools>
+
+    <!-- A window of your own: the only range that waits for Apply, because a
+         half-typed date must not re-scope the page. -->
+    <div v-if="customMode" class="page-tools">
+      <label class="tool-field">
+        <span class="tool-label">From</span>
+        <input v-model="customFrom" type="datetime-local" class="input" :title="formatTimestampUtc(customFrom)" />
+      </label>
+      <label class="tool-field">
+        <span class="tool-label">To</span>
+        <input v-model="customTo" type="datetime-local" class="input" :title="formatTimestampUtc(customTo)" />
+      </label>
+      <button class="btn btn-primary" :disabled="!customRangeValid" @click="applyCustomRange">Apply</button>
+      <span v-if="customError" class="tool-note is-bad">{{ customError }}</span>
     </div>
 
-    <!-- Filters -->
-    <div class="card filters">
-      <div class="card-body filter-rows">
-
-        <div class="filter-row">
-          <div class="filter-field">
-            <span class="label-xs">Range</span>
-            <div class="seg">
-              <button
-                v-for="r in timeRanges"
-                :key="r.value"
-                :class="{ on: selectedRange === r.value && !customMode }"
-                @click="selectQuickRange(r.value)"
-              >{{ r.label }}</button>
-              <button :class="{ on: customMode }" @click="toggleCustomMode">Custom</button>
-            </div>
-          </div>
-          <span class="filter-hint">applies to the flow chart, the range totals and the leaderboard</span>
-        </div>
-
-        <div class="filter-row">
-          <!-- No free entry: the watcher below drops a queue this cluster does
-               not list, so accepting a typed name would only make it vanish. -->
-          <div class="filter-field-col">
-            <label class="label-xs" for="an-queue-filter">Queue</label>
-            <Autocomplete
-              id="an-queue-filter"
-              v-model="queueFilter"
-              :options="queueNames"
-              :loading="queuesFirstLoad"
-              label="Queue"
-              placeholder="All queues"
-            />
-          </div>
-
-          <div class="filter-field-col">
-            <label class="label-xs">Namespace</label>
-            <select v-model="namespaceFilter" class="input">
-              <option value="">All namespaces</option>
-              <option v-for="ns in namespaceOptions" :key="ns.namespace" :value="ns.namespace">
-                {{ ns.namespace || 'Default' }}
-              </option>
-            </select>
-          </div>
-
-          <div class="filter-field-col">
-            <label class="label-xs">Task</label>
-            <select v-model="taskFilter" class="input">
-              <option value="">All tasks</option>
-              <option v-for="t in taskOptions" :key="t.task" :value="t.task">
-                {{ t.task || 'Default' }}
-              </option>
-            </select>
-          </div>
-
-          <button v-if="hasActiveFilter" class="btn btn-ghost" @click="clearFilters">Clear filters</button>
-        </div>
-
-        <div v-if="customMode" class="filter-row filter-row-sep">
-          <div class="filter-field">
-            <span class="label-xs">From</span>
-            <input v-model="customFrom" type="datetime-local" class="input" :title="formatTimestampUtc(customFrom)" />
-          </div>
-          <div class="filter-field">
-            <span class="label-xs">To</span>
-            <input v-model="customTo" type="datetime-local" class="input" :title="formatTimestampUtc(customTo)" />
-          </div>
-          <button class="btn btn-primary" :disabled="!customRangeValid" @click="applyCustomRange">Apply</button>
-          <span v-if="customError" class="filter-invalid">{{ customError }}</span>
-        </div>
-
-        <!-- A filter the queue list could not be fetched for cannot be applied.
-             Say so instead of showing tenant-wide numbers under a filter chip. -->
-        <div v-if="scopeUnavailable" class="panel-err filter-row-sep">
-          Namespace / task filtering needs the queue list, which failed to load
-          ({{ queuesErrorText }}). The panels below are not narrowed to that filter.
-        </div>
-        <div v-else-if="hasActiveFilter" class="filter-row an-chips">
-          <span v-if="queueFilter" class="chip chip-ice">queue: {{ queueFilter }}</span>
-          <span v-if="namespaceFilter" class="chip chip-ice">namespace: {{ namespaceFilter }}</span>
-          <span v-if="taskFilter" class="chip chip-ice">task: {{ taskFilter }}</span>
-          <span class="filter-hint">{{ scopedQueues.length }} queue{{ scopedQueues.length === 1 ? '' : 's' }} match</span>
-        </div>
-      </div>
+    <!-- A filter the queue list could not be fetched for cannot be applied.
+         Say so instead of showing tenant-wide numbers under a filter. -->
+    <div v-if="scopeUnavailable" class="panel-err an-block">
+      Namespace / task filtering needs the queue list, which failed to load
+      ({{ queuesErrorText }}). The panels below are not narrowed to that filter.
     </div>
 
     <!-- ===================== RANGE-BOUNDED PANELS ===================== -->
 
-    <div class="card" style="margin-bottom:16px;">
-      <div class="card-header">
-        <h3>Totals for the selected range</h3>
-        <span class="chip chip-mute">selected range</span>
-        <span class="muted">{{ stamp(ops) }}</span>
+    <!-- The range's totals. Everything on this strip follows the range. -->
+    <div v-if="opsUnavailable" class="panel-err an-block">{{ opsErrorText }}</div>
+    <div v-else class="counts-tiles an-block" aria-label="Totals for the selected range">
+      <div class="count-tile"><span class="k">Ingested</span><span class="v">{{ metric(rangeTotals.ingested) }}</span></div>
+      <div class="count-tile"><span class="k">Delivered</span><span class="v">{{ metric(rangeTotals.delivered) }}</span></div>
+      <div class="count-tile"><span class="k">Acked</span><span class="v">{{ metric(rangeTotals.acked) }}</span></div>
+      <div class="count-tile" :title="ackFailTitle">
+        <span class="k">Ack failures</span><span class="v" :class="ackFailTone">{{ metric(rangeTotals.ackFailed) }}</span>
       </div>
-      <div class="card-body">
-        <div v-if="opsUnavailable" class="panel-err">{{ opsErrorText }}</div>
-        <div v-else class="stat-grid stat-grid-6">
-          <div class="stat">
-            <div class="stat-label">Ingested</div>
-            <div class="stat-value font-mono">{{ metric(rangeTotals.ingested) }}</div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">Delivered</div>
-            <div class="stat-value font-mono">{{ metric(rangeTotals.delivered) }}</div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">Acked</div>
-            <div class="stat-value font-mono">{{ metric(rangeTotals.acked) }}</div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">Ack failures</div>
-            <div class="stat-value font-mono num" :class="{ bad: rangeTotals.ackFailed > 0 }">
-              {{ metric(rangeTotals.ackFailed) }}
-            </div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">Empty polls</div>
-            <div class="stat-value font-mono">{{ metric(rangeTotals.emptyPolls) }}</div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">Peak lag</div>
-            <div class="stat-value font-mono">
-              {{ rangeTotals.maxLagMs === null ? '—' : formatDuration(rangeTotals.maxLagMs) }}
-            </div>
-            <div class="stat-foot">worst pop-to-publish delay in the range</div>
-          </div>
-        </div>
+      <div class="count-tile"><span class="k">Empty polls</span><span class="v">{{ metric(rangeTotals.emptyPolls) }}</span></div>
+      <div class="count-tile" title="The worst pop-to-publish delay in the range">
+        <span class="k">Peak lag</span>
+        <span class="v">{{ rangeTotals.maxLagMs === null ? '—' : formatDuration(rangeTotals.maxLagMs) }}</span>
       </div>
     </div>
 
     <div class="card" style="margin-bottom:16px;">
       <div class="card-header">
-        <h3>Message flow over time</h3>
-        <span class="chip chip-mute">selected range</span>
+        <h3>Message flow</h3>
+        <span class="card-sub">messages per bucket</span>
         <span class="muted">{{ stamp(ops) }}</span>
       </div>
       <div class="card-body">
@@ -168,7 +115,7 @@
       <div class="card">
         <div class="card-header">
           <h3>Top queues by volume</h3>
-          <span class="chip chip-mute">selected range</span>
+          <span class="card-sub">ingested and acked</span>
           <span class="muted">{{ stamp(ops) }}</span>
         </div>
         <div class="card-body">
@@ -187,63 +134,52 @@
 
       <div class="card">
         <div class="card-header">
-          <h3>Backlog split</h3>
-          <span class="card-sub">the time range does not apply to these</span>
-          <span class="chip chip-mute">now</span>
+          <h3>Backlog right now</h3>
+          <span class="card-sub">the range does not apply</span>
           <span class="muted">{{ stamp(queueList) }}</span>
         </div>
-        <div class="card-body an-center">
-          <div v-if="queuesFirstLoad" class="skeleton" style="height:240px; width:100%;" />
-          <div v-else-if="queuesFailed" class="panel-err">{{ queuesErrorText }}</div>
-          <BaseChart
-            v-else-if="backlogChart.labels.length"
-            type="doughnut"
-            :data="backlogChart"
-            :options="doughnutOptions"
-            height="240px"
-          />
-          <div v-else class="panel-msg">Nothing pending or in flight right now.</div>
+        <div class="card-body">
+          <div v-if="queuesFailed" class="panel-err">{{ queuesErrorText }}</div>
+          <template v-else>
+            <div class="stat-grid stat-grid-2">
+              <div class="stat">
+                <div class="stat-label">Queues</div>
+                <div class="stat-value">{{ queuesFirstLoad ? '—' : formatNumber(scopedQueues.length) }}</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Messages stored</div>
+                <div class="stat-value">{{ metric(backlog.total) }}</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Pending</div>
+                <div class="stat-value">{{ metric(backlog.pending) }}</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Processing</div>
+                <div class="stat-value">{{ metric(backlog.processing) }}</div>
+              </div>
+            </div>
+            <!-- Waiting against leased, to scale. Absent when both are zero:
+                 an empty bar would be a shape standing for nothing. -->
+            <div v-if="backlogSplit" class="an-split">
+              <div class="an-split-bar" role="img" :aria-label="backlogSplit.label">
+                <span v-if="backlogSplit.pending" class="an-split-p" :style="{ flexGrow: backlogSplit.pending }" />
+                <span v-if="backlogSplit.processing" class="an-split-q" :style="{ flexGrow: backlogSplit.processing }" />
+              </div>
+              <div class="an-split-key">
+                <span><i class="an-key-p" />Pending {{ backlogSplit.pendingPct }}</span>
+                <span><i class="an-key-q" />Processing {{ backlogSplit.processingPct }}</span>
+              </div>
+            </div>
+            <p v-else-if="!queuesFirstLoad" class="an-note">Nothing pending or in flight right now.</p>
+            <!-- The queue reader pages; the totals above cover the page we hold,
+                 so say it rather than understate a large tenant silently. -->
+            <p v-if="queuePageFull" class="an-note">
+              Showing the first {{ QUEUE_PAGE_LIMIT }} queues — this tenant has more, and the
+              figures above cover only those {{ QUEUE_PAGE_LIMIT }}.
+            </p>
+          </template>
         </div>
-      </div>
-    </div>
-
-    <!-- ===================== SNAPSHOT PANEL ===================== -->
-
-    <div class="card">
-      <div class="card-header">
-        <h3>Backlog right now</h3>
-        <span class="card-sub">the time range does not apply to these</span>
-        <span class="chip chip-mute">now</span>
-        <span class="muted">{{ stamp(queueList) }}</span>
-      </div>
-      <div class="card-body">
-        <div v-if="queuesFailed" class="panel-err">{{ queuesErrorText }}</div>
-        <template v-else>
-          <div class="stat-grid stat-grid-4">
-            <div class="stat">
-              <div class="stat-label">Queues</div>
-              <div class="stat-value font-mono">{{ queuesFirstLoad ? '—' : scopedQueues.length }}</div>
-            </div>
-            <div class="stat">
-              <div class="stat-label">Total messages</div>
-              <div class="stat-value font-mono">{{ metric(backlog.total) }}</div>
-            </div>
-            <div class="stat">
-              <div class="stat-label">Pending</div>
-              <div class="stat-value font-mono">{{ metric(backlog.pending) }}</div>
-            </div>
-            <div class="stat">
-              <div class="stat-label">Processing</div>
-              <div class="stat-value font-mono">{{ metric(backlog.processing) }}</div>
-            </div>
-          </div>
-          <!-- The queue reader pages; the totals above cover the page we hold,
-               so say it rather than understate a large tenant silently. -->
-          <p v-if="queuePageFull" class="an-note">
-            Showing the first {{ QUEUE_PAGE_LIMIT }} queues — this tenant has more, and the
-            four figures above cover only those {{ QUEUE_PAGE_LIMIT }}.
-          </p>
-        </template>
       </div>
     </div>
   </div>
@@ -258,14 +194,16 @@ import {
   formatDuration, formatNumber, toNum, trimIncompleteBuckets, useApi,
 } from '@/composables/useApi'
 import { stateColor } from '@/composables/useChartTheme'
+import { ackFailureSeverity, numTone } from '@/composables/useSeverity'
 import {
   formatChartLabel, formatDateTimeLocal, formatTimestampRange, formatTimestampRangeUtc,
   formatTimestampUtc, isMultiDay, validateRange,
 } from '@/composables/useFormat'
 import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
-import { useIdentity } from '@/stores/identity'
 import Autocomplete from '@/components/Autocomplete.vue'
+import PageHead from '@/components/PageHead.vue'
+import PageTools from '@/components/PageTools.vue'
 
 // TENANT PAGE. Every source here is tenant-scoped broker-side:
 //   /api/v1/analytics/queue-ops  — per (bucket, queue) push/pop/ack in a range
@@ -275,7 +213,6 @@ import Autocomplete from '@/components/Autocomplete.vue'
 // proxy blocks and the broker never scopes; nothing on this page may come from
 // it, so its lifetime "messages/leases/DLQ/workers" panels are gone rather
 // than shown as this tenant's.
-const { actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
 
 const QUEUE_PAGE_LIMIT = 500
 
@@ -561,42 +498,58 @@ const backlog = computed(() => {
   )
 })
 
-const backlogChart = computed(() => {
-  const b = backlog.value
-  const entries = [
-    { label: 'Pending', value: b.pending },
-    { label: 'Processing', value: b.processing },
-  ].filter(e => (e.value || 0) > 0)
-  if (!entries.length) return { labels: [], datasets: [] }
+// Rounding never claims all or nothing when it is not: 99.9% is ">99%".
+const pct = (part, whole) => {
+  const v = (part / whole) * 100
+  if (v > 0 && v < 1) return '<1%'
+  if (v > 99 && v < 100) return '>99%'
+  return `${Math.round(v)}%`
+}
+
+const backlogSplit = computed(() => {
+  const pending = backlog.value.pending || 0
+  const processing = backlog.value.processing || 0
+  const whole = pending + processing
+  if (!whole) return null
+  const pendingPct = pct(pending, whole)
+  const processingPct = pct(processing, whole)
   return {
-    labels: entries.map(e => e.label),
-    datasets: [{
-      data: entries.map(e => e.value),
-      backgroundColor: entries.map(e => stateColor(e.label).fill),
-      borderWidth: 0,
-    }],
+    pending,
+    processing,
+    pendingPct,
+    processingPct,
+    label: `Pending ${pendingPct}, processing ${processingPct}`,
   }
+})
+
+// Amber and coral mean what they mean on the Overview: a share of the window's
+// ack attempts, judged by useSeverity, never "more than zero".
+const ackFailSev = computed(() => ackFailureSeverity({
+  failed: rangeTotals.value.ackFailed,
+  succeeded: rangeTotals.value.acked,
+}))
+const ackFailTone = computed(() => numTone(ackFailSev.value))
+const ackFailTitle = computed(() => {
+  const f = rangeTotals.value.ackFailed
+  const ok = rangeTotals.value.acked
+  if (!f || ok === null) return ''
+  return `${pct(f, f + ok)} of ack attempts failed in the range`
 })
 
 // ---------------------------------------------------------------------------
 // Chart options
 // ---------------------------------------------------------------------------
 const flowOptions = {
-  plugins: { legend: { display: true, position: 'top', labels: { usePointStyle: true, padding: 20 } } },
+  plugins: { legend: { display: true, position: 'top' } },
   scales: { y: { title: { display: true, text: 'Messages per bucket', font: { size: 11 } } } },
 }
 
 const barOptions = {
-  plugins: { legend: { display: true, position: 'top', labels: { usePointStyle: true, padding: 16 } } },
+  plugins: { legend: { display: true, position: 'top' } },
   scales: {
     x: { stacked: true },
     y: { stacked: true, beginAtZero: true, title: { display: true, text: 'Messages', font: { size: 11 } } },
   },
-}
-
-const doughnutOptions = {
-  plugins: { legend: { display: true, position: 'bottom', labels: { usePointStyle: true, padding: 16 } } },
-  cutout: '60%',
 }
 </script>
 
@@ -609,9 +562,17 @@ const doughnutOptions = {
    below it — separation is always a margin-bottom on the preceding block. */
 .an-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
 
-.an-chips { gap: 8px; }
-.an-note { margin-top: 10px; font-size: 11.5px; color: var(--text-low); }
-.an-center { display: flex; align-items: center; justify-content: center; }
+.an-note { margin: 14px 0 0; font-size: 12px; line-height: 1.5; color: var(--text-low); }
+.an-block { margin-bottom: 16px; }
+
+.an-split { margin-top: 18px; display: flex; flex-direction: column; gap: 8px; }
+.an-split-bar { display: flex; gap: 2px; height: 6px; }
+.an-split-bar span { flex-basis: 0; min-width: 2px; border-radius: 1px; }
+.an-split-p, .an-key-p { background: var(--series-1); }
+.an-split-q, .an-key-q { background: var(--series-3); }
+.an-split-key { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--text-mid); font-variant-numeric: tabular-nums; }
+.an-split-key span { display: inline-flex; align-items: center; gap: 6px; }
+.an-split-key i { width: 8px; height: 8px; border-radius: 1px; }
 
 @media (max-width: 1100px) {
   .an-grid-2 { grid-template-columns: 1fr; }

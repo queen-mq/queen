@@ -1,19 +1,7 @@
 <template>
   <div class="view-container">
 
-    <!-- Tenant scope. Consumer groups, lag and cursors below belong to the
-         acting tenant on this cluster; the cell is named so neither is read
-         as the other. -->
-    <div class="scope-strip">
-      <span class="chip chip-mute">tenant scope</span>
-      <span class="scope-text">
-        <strong>{{ actingTenantSlug || 'no tenant' }}</strong>
-        <span class="scope-sep">/</span>{{ actingClusterSlug || 'no cluster' }}
-        <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
-      </span>
-      <span class="scope-fill"></span>
-      <span v-if="!canAdmin" class="scope-meta">read-only role — cursor and delete actions hidden</span>
-    </div>
+    <PageHead title="Consumer groups" :sub="headSub" />
 
     <!-- A failed list must not look like an empty one: say the grid below is
          stale (or absent), and how stale. Page-level fact, so it is a page
@@ -25,84 +13,58 @@
       </span>
     </div>
 
-    <!--
-      ========================================================================
-      Filter card — the app-wide control container: a card with no header,
-      one row of fields, sort last and right-aligned. This page owns no time
-      window, so the row's first field is the search box, not a range picker.
-      ========================================================================
-    -->
-    <div class="card filters">
-      <div class="card-body filter-rows">
-        <div class="filter-row">
-          <div class="filter-search">
-            <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-            </svg>
-            <input
-              v-model="searchQuery"
-              type="text"
-              placeholder="Search consumer groups..."
-              class="input"
-            />
-          </div>
-
-          <div class="filter-field-col">
-            <label class="label-xs">Namespace</label>
-            <select v-model="filterNamespace" class="input">
-              <option value="">All namespaces</option>
-              <option v-for="ns in namespaces" :key="ns" :value="ns">{{ ns || '(empty)' }}</option>
-            </select>
-          </div>
-
-          <div class="filter-field-col">
-            <label class="label-xs">Task</label>
-            <select v-model="filterTask" class="input">
-              <option value="">All tasks</option>
-              <option v-for="t in tasks" :key="t" :value="t">{{ t || '(empty)' }}</option>
-            </select>
-          </div>
-
-          <!-- No free entry: this filter is applied to the loaded rows, so a
-               name outside the list can only produce an empty table. -->
-          <div class="filter-field-col">
-            <label class="label-xs" for="cg-queue-filter">Queue</label>
-            <Autocomplete
-              id="cg-queue-filter"
-              v-model="filterQueue"
-              :options="scopedQueueNames"
-              :loading="groupsFirstLoad"
-              label="Queue"
-              placeholder="All queues"
-            />
-          </div>
-
-          <label class="filter-check">
-            <input v-model="showLaggingOnly" type="checkbox" />
-            <span>Lagging only</span>
-          </label>
-
-          <div class="filter-field">
-            <span class="label-xs">Sort</span>
-            <div class="seg">
-              <button
-                v-for="opt in sortOptions"
-                :key="opt.value"
-                :class="{ on: sortBy === opt.value }"
-                @click="sortBy = opt.value"
-              >{{ opt.label }}</button>
-            </div>
-          </div>
-
-          <span class="qhg-legend">
-            <span class="ld" style="background:var(--ok-500);"></span> stable
-            <span class="ld" style="background:var(--warn-400);"></span> lagging
-            <span class="ld" style="background:var(--ember-400);"></span> stuck
-            <span class="ld" style="background:var(--bd-hi);"></span> dead
-          </span>
-        </div>
+    <PageTools>
+      <div class="filter-search">
+        <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+        </svg>
+        <input v-model="searchQuery" type="text" placeholder="Search consumer groups…" class="input" />
       </div>
-    </div>
+      <label class="tool-field">
+        <span class="tool-label">Namespace</span>
+        <select v-model="filterNamespace" class="input">
+          <option value="">All</option>
+          <option v-for="ns in namespaces" :key="ns" :value="ns">{{ ns || '(empty)' }}</option>
+        </select>
+      </label>
+      <label class="tool-field">
+        <span class="tool-label">Task</span>
+        <select v-model="filterTask" class="input">
+          <option value="">All</option>
+          <option v-for="t in tasks" :key="t" :value="t">{{ t || '(empty)' }}</option>
+        </select>
+      </label>
+      <!-- No free entry: this filter is applied to the loaded rows, so a name
+           outside the list can only produce an empty table. -->
+      <label class="tool-field" for="cg-queue-filter">
+        <span class="tool-label">Queue</span>
+        <Autocomplete
+          id="cg-queue-filter"
+          v-model="filterQueue"
+          :options="scopedQueueNames"
+          :loading="groupsFirstLoad"
+          label="Queue"
+          placeholder="All"
+        />
+      </label>
+      <label class="tool-check">
+        <input v-model="showLaggingOnly" type="checkbox" />
+        <span>Lagging only</span>
+      </label>
+      <template #view>
+        <div class="tool-seg">
+          <span class="tool-label">Sort</span>
+          <div class="seg">
+            <button
+              v-for="opt in sortOptions"
+              :key="opt.value"
+              :class="{ on: sortBy === opt.value }"
+              @click="sortBy = opt.value"
+            >{{ opt.label }}</button>
+          </div>
+        </div>
+      </template>
+    </PageTools>
 
     <!--
       ========================================================================
@@ -218,19 +180,19 @@
                      that policy a large one is the design working. -->
                 <td style="text-align:right;">
                   <template v-if="rowConflates(p)">
-                    <span class="font-mono tabular-nums num">{{ formatNumber(p.offset_lag) }}</span>
+                    <span class="tabular-nums num">{{ formatNumber(p.offset_lag) }}</span>
                     <span class="lp-lag-note">log lag</span>
                   </template>
-                  <span v-else class="font-mono tabular-nums num warn">{{ formatNumber(p.offset_lag) }}</span>
+                  <span v-else class="tabular-nums num warn">{{ formatNumber(p.offset_lag) }}</span>
                 </td>
                 <td style="text-align:right;">
                   <span
-                    class="font-mono tabular-nums"
+                    class="tabular-nums"
                     :class="{ 'num': true, 'warn': (p.time_lag_seconds || 0) > 60, 'bad': (p.time_lag_seconds || 0) > 600 }"
                   >{{ formatDuration((p.time_lag_seconds || 0) * 1000) }}</span>
                 </td>
                 <td>
-                  <span :title="formatTimestampUtc(p.oldest_unconsumed_at)" class="font-mono" style="font-size:11.5px; color:var(--text-mid);">{{ formatTimestamp(p.oldest_unconsumed_at) }}</span>
+                  <span :title="formatTimestampUtc(p.oldest_unconsumed_at)" class="tabular-nums" style="font-size:12px; color:var(--text-mid);">{{ formatTimestamp(p.oldest_unconsumed_at) }}</span>
                 </td>
                 <td v-if="canAdmin" style="text-align:right;">
                   <button
@@ -298,6 +260,14 @@
       </template>
     </ConsumerHealthGrid>
 
+    <!-- The glyphs the rows use. -->
+    <div v-if="consumers.length" class="list-legend">
+      <span><i class="g ok" aria-hidden="true" />stable</span>
+      <span><i class="g warn" aria-hidden="true" />lagging</span>
+      <span><i class="g bad" aria-hidden="true" />stuck</span>
+      <span><i class="g idle" aria-hidden="true" />never consumed</span>
+    </div>
+
     <!-- ===================== Detail modal ===================== -->
     <Teleport to="body">
       <div
@@ -322,14 +292,17 @@
             </button>
           </div>
           <div class="card-body">
-            <div class="stat-grid stat-grid-5 stat-grid-center" style="margin-bottom:24px;">
+            <div class="stat-grid stat-grid-5" style="margin-bottom:20px;">
               <div class="stat">
                 <div class="stat-label">Partitions</div>
-                <div class="stat-value font-mono">{{ dash(selectedConsumer.members) }}</div>
+                <div class="stat-value">{{ dash(selectedConsumer.members) }}</div>
               </div>
               <div class="stat">
                 <div class="stat-label">State</div>
-                <div class="cg-state" :class="stateClass(selectedConsumer)">{{ getStatusText(selectedConsumer) }}</div>
+                <!-- The same verdict as the row it was opened from. -->
+                <div class="stat-value cg-verdict" :class="verdictTone(selectedConsumer)">
+                  <span class="g" :class="verdictGlyph(selectedConsumer)" aria-hidden="true" />{{ verdictWord(selectedConsumer) }}
+                </div>
               </div>
               <div class="stat">
                 <!-- Partitions behind. On a conflating group this is the WHOLE
@@ -337,11 +310,8 @@
                      so it is the figure to size consumers against, and it says
                      so. -->
                 <div class="stat-label">Lag parts</div>
-                <div
-                  class="stat-value font-mono num"
-                  :class="{ warn: (selectedConsumer.partitionsWithLag || 0) > 0 }"
-                >{{ dash(selectedConsumer.partitionsWithLag) }}</div>
-                <div v-if="isConflating(selectedConsumer)" class="stat-foot" style="justify-content:center;">
+                <div class="stat-value">{{ dash(selectedConsumer.partitionsWithLag) }}</div>
+                <div v-if="isConflating(selectedConsumer)" class="stat-foot">
                   handler runs left
                 </div>
               </div>
@@ -352,44 +322,36 @@
                      the label says log lag so the tile beside it is read as the
                      work. -->
                 <div class="stat-label">{{ isConflating(selectedConsumer) ? 'Log lag' : 'Backlog' }}</div>
-                <div class="stat-value font-mono">{{ dash(selectedConsumer.totalLag) }}</div>
-                <div class="stat-foot" style="justify-content:center;">
+                <div class="stat-value">{{ dash(selectedConsumer.totalLag) }}</div>
+                <div class="stat-foot">
                   {{ isConflating(selectedConsumer) ? 'positions to retire' : 'messages behind' }}
                 </div>
               </div>
               <div class="stat">
                 <div class="stat-label">Time lag</div>
-                <div class="stat-value font-mono">
+                <div class="stat-value">
                   {{ (selectedConsumer.maxTimeLag || 0) > 0 ? formatDuration(selectedConsumer.maxTimeLag * 1000) : '—' }}
                 </div>
               </div>
             </div>
 
-            <div style="margin-bottom:16px;">
-              <span class="label-xs" style="display:block; margin-bottom:8px;">Queue</span>
-              <div class="modal-queue-pill">
-                <span style="font-weight:500; color:var(--text-hi);">{{ selectedConsumer.queueName || '—' }}</span>
-              </div>
-            </div>
-
-            <div v-if="selectedConsumer.topics?.length > 0">
-              <span class="label-xs" style="display:block; margin-bottom:12px;">Topics</span>
-              <div style="display:flex; flex-direction:column; gap:8px;">
-                <div
-                  v-for="topic in selectedConsumer.topics"
-                  :key="topic"
-                  class="modal-queue-pill"
-                  style="display:flex; align-items:center; justify-content:space-between;"
-                >
-                  <span style="font-weight:500; color:var(--text-hi);">{{ topic }}</span>
+            <ul class="detail-list">
+              <li>
+                <span class="detail-note">Queue</span>
+                <span>{{ selectedConsumer.queueName || '—' }}</span>
+              </li>
+              <li v-for="topic in selectedConsumer.topics || []" :key="topic">
+                <span class="detail-note">Topic</span>
+                <span class="cg-topic">
+                  {{ topic }}
                   <button
                     v-if="canAdmin"
                     class="btn btn-ghost"
                     @click="openSeekModal({ ...selectedConsumer, queueName: topic })"
                   >Seek</button>
-                </div>
-              </div>
-            </div>
+                </span>
+              </li>
+            </ul>
           </div>
         </div>
       </div>
@@ -497,6 +459,7 @@ import { useRoute } from 'vue-router'
 
 import ConsumerHealthGrid from '@/components/ConsumerHealthGrid.vue'
 import { consumers as consumersApi, describeApiError } from '@/api'
+import { useGroupsStore } from '@/stores/groupsStore'
 import {
   formatDuration, formatNumber, toNum, useApi,
 } from '@/composables/useApi'
@@ -506,16 +469,25 @@ import { useRefresh } from '@/composables/useRefresh'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
 import Autocomplete from '@/components/Autocomplete.vue'
+import { groupAttention } from '@/composables/useAttention'
+import PageHead from '@/components/PageHead.vue'
+import PageTools from '@/components/PageTools.vue'
 import { useQueuesStore } from '@/stores/queuesStore'
 
 // TENANT PAGE. /api/v1/consumer-groups* is tenant-scoped broker-side; the
 // mutating routes (delete / seek) are RouteClass::QueueAdmin at the proxy, so
 // their controls are shown only to a role that may actually use them.
-const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
+const { can } = useIdentity()
 // notifyWarn carries an outcome the shared HTTP client cannot see: a 2xx that did
 // nothing (no partition matched, nothing deleted) is a failure to the user.
 const { notifySuccess, notifyWarn } = useToast()
 const canAdmin = computed(() => can('queueAdmin'))
+// The count, and what this role may do here: a Viewer sees no cursor or
+// delete actions, and should be told why rather than wonder.
+const headSub = computed(() => [
+  consumers.value.length ? String(consumers.value.length) : '',
+  canAdmin.value ? '' : 'read-only role, cursor and delete actions hidden',
+].filter(Boolean).join(' · '))
 
 // Shared queues store. The Queues page populates it; we just consume here.
 // queueMeta gives us the queue → { namespace, task } join we need to scope
@@ -574,7 +546,9 @@ const lagPresets = [
 // Fetchers. Both keep their own error so a failed refresh can never be shown
 // as an empty list or as a clean bill of health.
 // ---------------------------------------------------------------------------
-const groups = useApi((config) => consumersApi.list(config))
+// Handed to the shared store, so the sidebar and Queues reuse this read.
+const groupsStore = useGroupsStore()
+const groups = useApi((config) => consumersApi.list(config), { onSuccess: (d) => groupsStore.publish(d) })
 const lagging = useApi((config) => consumersApi.getLagging(lagThreshold.value, config))
 
 const consumers = computed(() => {
@@ -680,6 +654,18 @@ watch([filterNamespace, filterTask], () => {
 // Presentation helpers
 // ---------------------------------------------------------------------------
 const getStatusText = (g) => g.state || 'Unknown'
+// The panel's verdict is the grid's (useAttention), not the broker's raw
+// state word: a group 1d behind is "Stuck" in both places.
+const VERDICT = {
+  bad: { glyph: 'bad', word: 'Stuck', tone: 'bad' },
+  warn: { glyph: 'warn', word: 'Lagging', tone: 'warn' },
+  mute: { glyph: 'idle', word: 'Never consumed', tone: '' },
+  ok: { glyph: 'ok', word: 'Stable', tone: '' },
+}
+const verdictOf = (g) => VERDICT[groupAttention(g)] || VERDICT.ok
+const verdictGlyph = (g) => verdictOf(g).glyph
+const verdictWord = (g) => verdictOf(g).word
+const verdictTone = (g) => verdictOf(g).tone
 const stateClass = (g) => {
   const s = getStatusText(g)
   if (s === 'Stable') return 'cg-state-ok'
@@ -1061,6 +1047,10 @@ onMounted(() => {
 /* The State tile shows a word, not a figure — its own scale and its own
    three colours, which is a meaning, not a chrome variant. */
 .cg-state { font-size: 16px; font-weight: 600; margin-top: 8px; }
+.cg-verdict { display: inline-flex; align-items: center; gap: 8px; font-size: 16px !important; }
+.cg-verdict.warn { color: var(--warn-400); }
+.cg-verdict.bad { color: var(--ember-400); }
+.cg-topic { display: inline-flex; align-items: center; gap: 12px; }
 .cg-state-ok { color: var(--ok-500); }
 .cg-state-warn { color: var(--warn-400); }
 .cg-state-mute { color: var(--text-mid); }
@@ -1071,4 +1061,6 @@ onMounted(() => {
   border: 1px solid var(--bd);
   background: var(--ink-3);
 }
+
+.qhg-legend .g:not(:first-child) { margin-left: 8px; }
 </style>
