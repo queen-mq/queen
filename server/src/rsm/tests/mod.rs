@@ -58,6 +58,8 @@ mod raft;
 mod raft_cluster;
 mod replicator;
 mod replicator_crash;
+mod retention_per_file;
+mod retention_scan;
 mod roundtrip;
 pub(super) mod samples;
 mod stale_leader;

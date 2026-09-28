@@ -1473,3 +1473,209 @@ fn reclaim_step_unlinks_every_dead_file_and_caps_rewrites() {
         assert!(q.read_payload(11, offset).unwrap().is_some(), "live pid 11 survives");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Per-file retention (2026-09-28): a file is judged by the partitions in it
+// ---------------------------------------------------------------------------
+
+/// A per-queue set of small files: `n` one-message records into one log, the
+/// pids cycling through `pids`, each pid's offsets counting up from 0.
+fn per_file_set(
+    tag: &str,
+    file_bytes: u64,
+    pids: &[u64],
+    n: u64,
+) -> (TmpDir, super::set::QLogSet, u64) {
+    use super::set::QLogSet;
+    let td = TmpDir::new(tag);
+    let mut set = QLogSet::new(td.path().join("qlog"), QLogOptions::testing(file_bytes));
+    set.reopen_all().unwrap();
+    set.set_recovery_floor(u64::MAX);
+    let log = set.log_id_for(QLogSet::queue_id_of("t", "per-file"), pids[0]);
+    let mut next = std::collections::HashMap::new();
+    for i in 0..n {
+        let pid = pids[i as usize % pids.len()];
+        let base = next.entry(pid).or_insert(0u64);
+        write_one(&mut set, log, i + 1, pid, *base, 1_000 + i as i64);
+        *base += 1;
+    }
+    set.sync().unwrap();
+    (td, set, log)
+}
+
+fn unlimited_budget() -> super::set::ReclaimBudget {
+    super::set::ReclaimBudget {
+        files: usize::MAX,
+        lookups: usize::MAX,
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+        rewrite: true,
+    }
+}
+
+/// One pass over `log`, the watermarks from `starts` (a pid absent is gone);
+/// every pid the pass asks about is appended to `asked`. `rewrite`: whether the
+/// pass may rewrite a mixed file (and so sample live files to find one).
+fn per_file_pass(
+    reader: &super::set::QLogReader,
+    log: u64,
+    starts: &std::collections::HashMap<u64, u64>,
+    asked: &mut Vec<u64>,
+    rewrite: bool,
+) -> super::ReclaimProgress {
+    let mut live_start = |pid: u64| -> std::io::Result<Option<u64>> {
+        asked.push(pid);
+        Ok(starts.get(&pid).copied())
+    };
+    let mut budget = super::set::ReclaimBudget {
+        rewrite,
+        ..unlimited_budget()
+    };
+    reader
+        .reclaim_log(log, &mut live_start, &mut budget)
+        .unwrap()
+}
+
+fn sealed_files(set: &super::set::QLogSet, log: u64) -> usize {
+    set.log(log).unwrap().read().unwrap().file_count() - 1
+}
+
+#[test]
+fn per_file_retention_asks_only_for_the_partitions_in_its_files() {
+    use std::collections::HashMap;
+    let (_td, set, log) = per_file_set("per-file-ask", 300, &[1, 2, 3], 24);
+    let reader = set.reader();
+    let before = sealed_files(&set, log);
+    assert!(before >= 4, "several sealed files, got {before}");
+
+    // All live: each file stops at its first partition run, one lookup each.
+    let live: HashMap<u64, u64> = [(1, 0), (2, 0), (3, 0)].into();
+    let mut asked = Vec::new();
+    let p = per_file_pass(&reader, log, &live, &mut asked, false);
+    assert_eq!((p.changed, p.examined), (0, before));
+    assert_eq!(asked.len(), before, "one lookup per live file");
+    assert!(
+        asked.iter().all(|pid| [1, 2, 3].contains(pid)),
+        "only partitions with records in the files are looked up: {asked:?}"
+    );
+    // A pass that may rewrite also samples each live file for dead bytes: a
+    // few more lookups per file (at most its distinct partitions here), still
+    // only partitions that are in the files.
+    let mut asked = Vec::new();
+    let p = per_file_pass(&reader, log, &live, &mut asked, true);
+    assert_eq!(p.changed, 0);
+    assert!(
+        asked.len() <= before * 4,
+        "{} lookups for {before} files",
+        asked.len()
+    );
+    assert!(asked.iter().all(|pid| [1, 2, 3].contains(pid)));
+
+    // pid 1 expired: files holding only pid 1 go, the others move past it.
+    let mut one_gone = live.clone();
+    one_gone.insert(1, u64::MAX);
+    let mut asked = Vec::new();
+    let p = per_file_pass(&reader, log, &one_gone, &mut asked, false);
+    assert!(asked.iter().filter(|pid| **pid == 1).count() <= before);
+    let left = sealed_files(&set, log);
+    assert_eq!(left, before - p.changed);
+
+    // Nothing changed since: every file resumes at its first live record, so
+    // the pass asks one partition per file and never pid 1 again.
+    let mut asked = Vec::new();
+    let p = per_file_pass(&reader, log, &one_gone, &mut asked, false);
+    assert_eq!((p.changed, p.examined), (0, left));
+    assert_eq!(asked.len(), left, "one lookup per file: {asked:?}");
+    assert!(!asked.contains(&1), "a dead run is never looked up again");
+
+    // Every partition gone: every sealed file goes, the active file stays.
+    let mut asked = Vec::new();
+    let mut changed = 0;
+    loop {
+        let p = per_file_pass(&reader, log, &HashMap::new(), &mut asked, true);
+        changed += p.changed;
+        if !p.more {
+            break;
+        }
+    }
+    assert_eq!(changed, left);
+    assert_eq!(sealed_files(&set, log), 0);
+}
+
+#[test]
+fn per_file_retention_rewrites_mixed_files_and_keeps_their_live_records() {
+    use std::collections::HashMap;
+    // Bigger files, so every sealed file mixes pid 10 and pid 11.
+    let (_td, set, log) = per_file_set("per-file-rewrite", 1200, &[10, 11], 40);
+    let reader = set.reader();
+    assert!(sealed_files(&set, log) >= 2);
+    let bytes_before = set.log(log).unwrap().read().unwrap().bytes();
+    let starts: HashMap<u64, u64> = [(10, u64::MAX), (11, 0)].into();
+    let mut rewrites = 0;
+    let mut passes = 0;
+    loop {
+        let p = per_file_pass(&reader, log, &starts, &mut Vec::new(), true);
+        assert!(p.compacted <= 1, "one rewrite per pass");
+        rewrites += p.compacted;
+        passes += 1;
+        if p.changed == 0 && !p.more {
+            break;
+        }
+        assert!(passes < 64, "retention never settled");
+    }
+    assert!(
+        rewrites >= 2,
+        "the mixed files were rewritten, got {rewrites}"
+    );
+    let q = set.log(log).unwrap();
+    let q = q.read().unwrap();
+    assert!(
+        q.bytes() < bytes_before,
+        "the expired records released bytes"
+    );
+    for offset in 0..20 {
+        assert!(
+            q.read_payload(11, offset).unwrap().is_some(),
+            "live pid 11 offset {offset} survives"
+        );
+    }
+    let active = q.files().last().unwrap().id;
+    let sealed_pid10 = (0..20)
+        .filter_map(|offset| q.locate(10, offset))
+        .filter(|loc| loc.file_id != active)
+        .count();
+    assert_eq!(
+        sealed_pid10, 0,
+        "no expired pid 10 record is left in a sealed file"
+    );
+}
+
+#[test]
+fn per_file_retention_stops_at_its_lookup_budget_and_resumes() {
+    let (_td, set, log) = per_file_set("per-file-budget", 300, &[1, 2, 3], 24);
+    let reader = set.reader();
+    let before = sealed_files(&set, log);
+    let mut passes = 0;
+    let mut changed = 0;
+    loop {
+        let mut budget = super::set::ReclaimBudget {
+            lookups: 2,
+            ..unlimited_budget()
+        };
+        let mut asked = 0;
+        let mut gone = |_pid: u64| -> std::io::Result<Option<u64>> {
+            asked += 1;
+            Ok(None)
+        };
+        let p = reader.reclaim_log(log, &mut gone, &mut budget).unwrap();
+        assert!(asked <= 2, "the lookup budget was exceeded: {asked}");
+        changed += p.changed;
+        passes += 1;
+        if !p.more {
+            break;
+        }
+        assert!(passes < 200, "retention never finished");
+    }
+    assert!(passes > 1, "the budget split the work over passes");
+    assert_eq!(changed, before);
+    assert_eq!(sealed_files(&set, log), 0);
+}

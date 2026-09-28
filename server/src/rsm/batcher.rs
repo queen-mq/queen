@@ -211,6 +211,11 @@ pub struct BatcherConfig {
     /// ([`RunState::plan_wall`]); `wall` stamps the wall clock every cycle, as
     /// before.
     pub monotonic_clock: bool,
+    /// `QUEEN_RAFT_RETENTION_SCAN` (default on in production): the retention
+    /// walk runs on a background thread ([`crate::rsm::retention_scan`]) and
+    /// the planner only judges what it proposes. `None` keeps the walk on the
+    /// planning thread, as do lanes (`QUEEN_LANES` > 1).
+    pub retention_scan: Option<crate::rsm::retention_scan::ScanConfig>,
 }
 
 impl Default for BatcherConfig {
@@ -238,6 +243,7 @@ impl Default for BatcherConfig {
             keep_overlay_verify: false,
             lanes: 1,
             monotonic_clock: true,
+            retention_scan: None,
         }
     }
 }
@@ -360,6 +366,7 @@ impl BatcherConfig {
                     "QUEEN_RAFT_TXN_WINDOW_MIN_S",
                     d.maintenance.txn_window_min_s as u64,
                 ) as i64,
+                partition_walk: true,
             },
             keep_overlay: flag("QUEEN_RAFT_KEEP_OVERLAY", d.keep_overlay),
             lanes: std::env::var("QUEEN_LANES")
@@ -370,6 +377,7 @@ impl BatcherConfig {
             monotonic_clock: std::env::var("QUEEN_RAFT_CLOCK")
                 .map(|v| !v.trim().eq_ignore_ascii_case("wall"))
                 .unwrap_or(d.monotonic_clock),
+            retention_scan: crate::rsm::retention_scan::ScanConfig::from_env(),
             // Off unless explicitly turned on: only "1"/"true"/"on"/"yes".
             keep_overlay_verify: std::env::var("QUEEN_RAFT_KEEP_OVERLAY_VERIFY")
                 .map(|v| {
@@ -1127,6 +1135,7 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
     kv_sweep_limit: Option<usize>,
     fire: Option<TimerFireConfig>,
     maintenance: Option<crate::rsm::maintenance::Config>,
+    scan: Option<Arc<crate::rsm::retention_scan::ScanShared>>,
 ) -> crate::rsm::store::Result<PlanOutput> {
     // P4: the rings this batch's wildcard pops walk — the only part of
     // `Derived` the planner reads. A discovery pop spans queues: every ring.
@@ -1426,6 +1435,26 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
             }
         }
 
+        // Background retention (`QUEEN_RAFT_RETENTION_SCAN`): what the scanner
+        // proposed, judged again against committed state and everything in
+        // flight — its snapshot may be old — and logged like the walk's own.
+        if let Some(scan) = scan.as_ref() {
+            let proposals = scan.take(crate::rsm::retention_scan::TAKE_PER_CYCLE);
+            if !proposals.is_empty() {
+                let (effects, _dropped) =
+                    crate::rsm::retention_scan::judge(r, ov, now_us, scan, &proposals)?;
+                if !effects.is_empty() {
+                    let id = crate::util::uuidv7_bytes();
+                    if entry
+                        .add_command(id, Outcome::Empty, effects.clone())
+                        .is_ok()
+                    {
+                        ov.apply_effects(&effects);
+                    }
+                }
+            }
+        }
+
         // WP-2.2 KV expiry sweep (026's `kv_expire_step_v1` as a leader loop):
         // one bounded step, planned AFTER this cycle's commands so it sees
         // their writes in the overlay (a key a command just rewrote is not
@@ -1682,11 +1711,44 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
         } else {
             None
         };
+        // Background retention: the partition walk leaves the planning thread
+        // (single planner only; lanes keep the walk in the cycle).
+        let mut cfg = self.cfg;
+        let scan = match cfg.retention_scan {
+            Some(scan_cfg) if maintenance_on && cfg.lanes <= 1 => {
+                let shared = crate::rsm::retention_scan::ScanShared::new(&cfg.maintenance);
+                match crate::rsm::retention_scan::spawn(
+                    self.store.clone(),
+                    cfg.maintenance.clone(),
+                    scan_cfg,
+                    shared.clone(),
+                ) {
+                    Ok(()) => {
+                        cfg.maintenance.partition_walk = false;
+                        Some(shared)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "rsm",
+                            error = %e,
+                            "rsm retention scanner did not start; the walk stays on the planner",
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        let scan_on = scan.is_some();
+        let mut scan_tick = tokio::time::interval(Duration::from_millis(200));
+        scan_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut st = RunState {
             planner_thread: PlannerThread::spawn(),
+            scan,
+            scan_due: false,
             store: self.store,
             repl: self.repl,
-            cfg: self.cfg,
+            cfg,
             front: self.front,
             reader: self.reader,
             qlog_reader: self.qlog_reader,
@@ -1736,6 +1798,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             while let Ok(more) = st.cmd_rx.try_recv() {
                 st.enqueue(more);
             }
+            st.sync_scan();
             while st.can_plan() {
                 st.plan_cycle().await;
             }
@@ -1787,6 +1850,12 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                     st.maintenance_due = true;
                     st.start_qlog_gc();
                 }
+                _ = scan_tick.tick(), if scan_on => {
+                    if st.scan.as_ref().is_some_and(|s| s.queued() > 0) {
+                        st.note_wake("retention_scan");
+                        st.scan_due = true;
+                    }
+                }
                 _ = tokio::time::sleep(Duration::from_millis(HOLD_POLL_MS)),
                     if st.holding_until.is_some() || st.realign_at.is_some() || st.quiescing.is_some() =>
                 {
@@ -1820,6 +1889,9 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             }
         }
 
+        if let Some(scan) = &st.scan {
+            scan.stop();
+        }
         // On a Fatal exit, nothing else will answer the stragglers.
         st.fail_all(None);
     }
@@ -1873,6 +1945,10 @@ impl PlannerThread {
 
 struct RunState<S: Store, R: Replicator> {
     planner_thread: PlannerThread,
+    /// The background retention scanner's handle ([`crate::rsm::retention_scan`]),
+    /// when it runs; `scan_due` asks a cycle to plan what it queued.
+    scan: Option<Arc<crate::rsm::retention_scan::ScanShared>>,
+    scan_due: bool,
     store: Arc<S>,
     repl: Arc<R>,
     cfg: BatcherConfig,
@@ -2121,7 +2197,8 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 || ((self.expire_due
                     || self.kv_sweep_due
                     || self.timers_due
-                    || self.maintenance_due)
+                    || self.maintenance_due
+                    || self.scan_due)
                     && !self.closing))
     }
 
@@ -2175,7 +2252,8 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     .iter()
                     .any(|s| matches!(s.command, Command::Timers(_))));
         let maintenance = self.maintenance_due && !self.closing;
-        if batch.is_empty() && !expire && !kv_sweep && !fire && !maintenance {
+        let scanned = self.scan_due && !self.closing;
+        if batch.is_empty() && !expire && !kv_sweep && !fire && !maintenance && !scanned {
             return;
         }
         // PERF-K trace: capture the before-state and the inter-cycle gap now
@@ -2276,6 +2354,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         let qlog_reader = self.qlog_reader.clone();
         let fire_cfg = fire.then(|| self.cfg.timer_fire.clone());
         let maintenance_cfg = maintenance.then(|| self.cfg.maintenance.clone());
+        let scan = self.scan.clone();
         let keep = KeepCfg {
             enabled: self.cfg.keep_overlay,
             epoch: self.plan_epoch,
@@ -2328,6 +2407,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                         kv_sweep_limit,
                         fire_cfg,
                         maintenance_cfg,
+                        scan,
                     )
                 };
                 if crate::rsm::timing::enabled() {
@@ -2374,6 +2454,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             if maintenance {
                 self.maintenance_due = false;
             }
+            self.scan_due = false;
         }
         // A result handled during planning dropped the pipeline (a lost
         // leadership moves the epoch) or started a hold (a timed-out propose):
@@ -2441,6 +2522,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         if out.maintained {
             self.maintenance_due = out.maintenance_more;
         }
+        // Proposals still queued keep the cycles coming (the pipeline bound
+        // still paces them); the scan tick re-arms this otherwise.
+        self.scan_due = self.scan.as_ref().is_some_and(|s| s.queued() > 0);
 
         // §13.5 `planner.planned`: effects and outcomes exist in the overlay;
         // nothing is proposed. A crash here has committed nothing (I1): the
@@ -3046,6 +3130,13 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
 
     /// PERF-K trace: record which `select!` arm woke the driver, and bump the
     /// per-wake sequence so the analysis can group the cycles that ran after it.
+    /// Background retention walks only while this node plans as leader.
+    fn sync_scan(&self) {
+        if let Some(scan) = &self.scan {
+            scan.set_leading(!self.paused && !self.stopped && !self.closing);
+        }
+    }
+
     fn note_wake(&mut self, reason: &'static str) {
         self.wake_reason = reason;
         self.wake_seq = self.wake_seq.wrapping_add(1);

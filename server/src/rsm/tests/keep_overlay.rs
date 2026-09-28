@@ -903,6 +903,7 @@ impl Rig {
             steps.kv_sweep,
             steps.fire.clone(),
             None,
+            None,
         )
         .expect("plan cycle");
         assert!(

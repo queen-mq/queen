@@ -694,6 +694,19 @@ pub(crate) struct ReclaimProgress {
     pub compacted: usize,
 }
 
+/// What per-file retention may look at in one log
+/// ([`QLog::reclaim_candidates`]), copied out under a short read lock.
+pub(crate) struct ReclaimCandidates {
+    pub dir: PathBuf,
+    /// Sealed, not active, at or below the recovery floor: `(id, bytes)`,
+    /// ascending by id.
+    pub eligible: Vec<(u64, u64)>,
+    /// Every file id the log still has.
+    pub all_ids: std::collections::BTreeSet<u64>,
+    /// [`QLog::set_compact_min_dead_pct`].
+    pub compact_pct: u8,
+}
+
 impl QLog {
     /// Open (creating the directory if needed) queue `queue_id`'s logs under
     /// `root`, validate and truncate the torn tail of the active file, rebuild
@@ -2347,6 +2360,61 @@ impl QLog {
                 self.reclaim_checked.insert(id, generation);
             } else {
                 self.reclaim_checked.remove(&id);
+            }
+        }
+        let live_ids: std::collections::BTreeSet<u64> =
+            self.files.iter().map(|meta| meta.id).collect();
+        self.reclaim_checked.retain(|id, _| live_ids.contains(id));
+        Ok(out)
+    }
+
+    /// The files per-file retention may judge ([`ReclaimCandidates`]): a copy
+    /// of the metadata, so the judging runs with no lock on this log.
+    pub(crate) fn reclaim_candidates(&self) -> ReclaimCandidates {
+        let floor = self.floor.load(Ordering::Acquire);
+        let active = self.active_index.file_id();
+        ReclaimCandidates {
+            dir: self.dir.clone(),
+            eligible: self
+                .files
+                .iter()
+                .filter(|m| m.sealed && Some(m.id) != active && m.max_seq <= floor)
+                .map(|m| (m.id, m.bytes))
+                .collect(),
+            all_ids: self.files.iter().map(|m| m.id).collect(),
+            compact_pct: self.compact_min_dead_pct,
+        }
+    }
+
+    /// Carry out what per-file retention decided off the lock: unlink the
+    /// wholly dead files in `dead`, and rewrite `rewrite = (id, bytes,
+    /// txns_starts)` keeping only its live messages. Each file is checked again
+    /// here (sealed, not active, at or below the recovery floor, and the rewrite
+    /// still the length it was judged at), so a stale decision changes nothing.
+    pub(crate) fn reclaim_apply(
+        &mut self,
+        dead: &[u64],
+        rewrite: Option<(u64, u64, &std::collections::HashMap<u64, u64>)>,
+    ) -> io::Result<ReclaimProgress> {
+        let mut out = ReclaimProgress::default();
+        if !dead.is_empty() {
+            out.changed += self.unlink_dead_files(|meta| dead.contains(&meta.id))?;
+        }
+        if let Some((id, bytes, starts)) = rewrite {
+            let active = self.active_index.file_id();
+            let floor = self.floor.load(Ordering::Acquire);
+            let unchanged = self.files.iter().any(|m| {
+                m.id == id
+                    && m.sealed
+                    && Some(m.id) != active
+                    && m.max_seq <= floor
+                    && m.bytes == bytes
+            });
+            if unchanged {
+                self.compact_file_below_txns(id, starts)?;
+                self.reclaim_checked.remove(&id);
+                out.changed += 1;
+                out.compacted += 1;
             }
         }
         let live_ids: std::collections::BTreeSet<u64> =

@@ -1039,6 +1039,26 @@ impl Overlay {
         self.parts.contains_key(&pid)
     }
 
+    /// For background retention ([`crate::rsm::retention_scan::judge`]):
+    /// `None` when an entry in flight takes the partition away (its delete, or
+    /// its queue's or tenant's), else the watermarks an entry in flight moves it
+    /// to, if one does.
+    pub(crate) fn retention_view(
+        &self,
+        pid: Pid,
+        tenant: &str,
+        queue: &str,
+    ) -> Option<Option<(u64, u64)>> {
+        if self.is_gone(pid) || self.queue_dropped(tenant, queue) {
+            return None;
+        }
+        Some(
+            self.parts
+                .get(&pid)
+                .and_then(|o| o.watermark.as_ref().map(|t| t.v)),
+        )
+    }
+
     /// Fold one timer effect under `tag` (see [`TimerSlot`] for what `base` and
     /// `last` record). Shared with the KEEP_OVERLAY re-fold of a key whose
     /// value was derived through an entry that landed.

@@ -35,6 +35,10 @@ pub struct Config {
     /// dedup window and completed retention. The physical reclaim of a queue
     /// log follows this watermark, so nothing is freed before it.
     pub txn_window_min_s: i64,
+    /// Walk the partitions here, on the planning thread (the old way). Off
+    /// when the background scanner ([`crate::rsm::retention_scan`]) walks them:
+    /// then [`plan`] keeps only the garbage and trace steps.
+    pub partition_walk: bool,
 }
 
 impl Default for Config {
@@ -47,6 +51,7 @@ impl Default for Config {
             visit_cap: 8_192,
             walk: Default::default(),
             txn_window_min_s: 900,
+            partition_walk: true,
         }
     }
 }
@@ -59,77 +64,86 @@ pub struct Planned {
     pub more: bool,
 }
 
-/// Reclaim whole sealed queue-log files made dead by already-committed txns
-/// watermarks.  This is intentionally node-local: the positions and file
-/// boundaries differ per replica.  It runs from the blocking maintenance
+/// Reclaim sealed queue-log files made dead by already-committed txns
+/// watermarks. This is intentionally node-local: the positions and file
+/// boundaries differ per replica. It runs from the blocking maintenance
 /// cycle, never on a Tokio worker, and is safe to repeat after a crash.
+///
+/// Per file: a pass judges sealed files one at a time and looks up only the
+/// partitions that have records in them ([`QLogReader::reclaim_log`]). It used
+/// to read EVERY partition row on every pass to build each log's watermark
+/// map: about 0.5 µs a partition, so ~0.5 s a pass at 1M partitions and 4-5 s
+/// at 10M, repeated every 5 s on every node whatever the files held.
 pub fn reclaim_qlogs<R: Reads + ?Sized>(r: &R, qlogs: &QLogReader) -> Result<usize> {
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::HashMap;
 
-    let mut queues: BTreeMap<u64, HashMap<Pid, u64>> = BTreeMap::new();
-    let mut corrupt = false;
-    r.scan_raw(
-        Keyspace::Partitions,
-        &[],
-        &[],
-        usize::MAX,
-        &mut |key, value| match (keys::pid_of(key), rows::partition_decode(value)) {
-            (Some(pid), Ok(row)) => {
-                // The log that holds this partition's records: its lane's log of
-                // its queue. Every log absent from this map counts all its
-                // message records as dead, so the key must be exactly the log
-                // the writer routed the partition to.
-                let qid = qlogs.log_id_for(QLogReader::queue_id_of(&row.tenant, &row.queue), pid);
-                queues.entry(qid).or_default().insert(pid, row.txns_start);
-                true
-            }
-            _ => {
-                corrupt = true;
-                false
-            }
-        },
-    )?;
-    if corrupt {
-        return Err(StoreError::corrupt(Keyspace::Partitions, "partition row"));
-    }
+    // pid -> (the log its records go to, its txns_start); None: the partition
+    // is gone. One store read per pid per pass, shared by every file and log.
+    let mut known: HashMap<Pid, Option<(u64, u64)>> = HashMap::new();
+    let mut failed: Option<StoreError> = None;
 
-    // Queue logs can outlive queue/partition metadata, and q0 is the system
-    // entry log. Empty watermarks correctly make their durable sealed message
-    // records dead and their entry-only files reclaimable.
-    for qid in qlogs.log_ids() {
-        queues.entry(qid).or_default();
-    }
-
-    let mut removed = 0usize;
-    let mut ordered: Vec<_> = queues.into_iter().collect();
+    let mut logs = qlogs.log_ids();
+    logs.sort_unstable();
     let cursor = qlogs.reclaim_queue_cursor();
-    let split = ordered.partition_point(|(qid, _)| *qid < cursor);
-    ordered.rotate_left(split);
-    // A bounded pass: up to `RECLAIM_EXAMINE_PER_PASS` sealed files looked at
-    // and every dead one unlinked (cheap), but at most ONE copy-forward rewrite
-    // (it can touch tens of MiB), all within `RECLAIM_PASS_BUDGET`. It used to
-    // examine one file per pass for the whole broker — one every 5 s — so
-    // hundreds of sealed queue files took hours to go.
-    let deadline = std::time::Instant::now() + RECLAIM_PASS_BUDGET;
-    let mut examined = 0usize;
-    let mut compacted = false;
-    for (qid, starts) in ordered {
-        if examined >= RECLAIM_EXAMINE_PER_PASS || std::time::Instant::now() >= deadline {
+    let split = logs.partition_point(|id| *id < cursor);
+    logs.rotate_left(split);
+
+    // A bounded pass: up to `RECLAIM_EXAMINE_PER_PASS` sealed files judged and
+    // `RECLAIM_LOOKUPS_PER_PASS` partitions looked up, every dead file
+    // unlinked (cheap), but at most ONE copy-forward rewrite (it can touch tens
+    // of MiB), all within `RECLAIM_PASS_BUDGET`. A file's judging resumes where
+    // the last pass stopped, so a big file is judged over several passes.
+    let mut budget = crate::rsm::qlog::set::ReclaimBudget {
+        files: RECLAIM_EXAMINE_PER_PASS,
+        lookups: RECLAIM_LOOKUPS_PER_PASS,
+        deadline: std::time::Instant::now() + RECLAIM_PASS_BUDGET,
+        rewrite: true,
+    };
+    let mut removed = 0usize;
+    for log_id in logs {
+        if budget.spent() {
             break;
         }
-        let progress = qlogs
-            .reclaim_step(qid, &starts, RECLAIM_EXAMINE_PER_PASS - examined, !compacted)
-            .map_err(|e| StoreError::Io(format!("qlog retention: {e}")))?;
-        qlogs.advance_reclaim_queue_cursor(qid);
+        // The log that holds a partition's records is its lane's log of its
+        // queue. A record in any other log is dead: the key must be exactly
+        // the log the writer routed the partition to.
+        let mut live_start = |pid: u64| -> std::io::Result<Option<u64>> {
+            let at = match known.get(&pid) {
+                Some(at) => *at,
+                None => {
+                    let at = match r.partition(pid) {
+                        Ok(row) => row.map(|row| {
+                            let queue_id = QLogReader::queue_id_of(&row.tenant, &row.queue);
+                            (qlogs.log_id_for(queue_id, pid), row.txns_start)
+                        }),
+                        Err(e) => {
+                            failed = Some(e);
+                            return Err(std::io::Error::other("partition read failed"));
+                        }
+                    };
+                    known.insert(pid, at);
+                    at
+                }
+            };
+            Ok(at.and_then(|(log, start)| (log == log_id).then_some(start)))
+        };
+        let progress = qlogs.reclaim_log(log_id, &mut live_start, &mut budget);
+        if let Some(e) = failed.take() {
+            return Err(e);
+        }
+        let progress = progress.map_err(|e| StoreError::Io(format!("qlog retention: {e}")))?;
+        qlogs.advance_reclaim_queue_cursor(log_id);
         removed += progress.changed;
-        examined += progress.examined;
-        compacted |= progress.compacted > 0;
     }
     Ok(removed)
 }
 
-/// The most sealed queue-log files one retention pass looks at.
+/// The most sealed queue-log files one retention pass judges.
 const RECLAIM_EXAMINE_PER_PASS: usize = 256;
+
+/// The most partitions one retention pass looks up (one per partition run in a
+/// judged file; a file bigger than this is judged over several passes).
+const RECLAIM_LOOKUPS_PER_PASS: usize = 262_144;
 
 /// The wall time one retention pass may take before it stops looking.
 const RECLAIM_PASS_BUDGET: std::time::Duration = std::time::Duration::from_millis(200);
@@ -194,24 +208,17 @@ pub fn plan<R: Reads + ?Sized>(r: &R, now_us: i64, cfg: &Config) -> Result<Plann
         ));
     }
 
+    let queues = if cfg.partition_walk {
+        queues
+    } else {
+        Vec::new()
+    };
     for (tenant, queue, qcfg) in queues {
         if budget == 0 {
             out.more = true;
             break;
         }
-        let sink_floor = sink_floor(r, now_us, &tenant, &queue, &qcfg);
-        let all_cutoff = (qcfg.retention_enabled && qcfg.retention_seconds > 0)
-            .then(|| now_us.saturating_sub(qcfg.retention_seconds as i64 * 1_000_000))
-            .map(|v| v.min(sink_floor));
-        let completed_cutoff = (qcfg.retention_enabled && qcfg.completed_retention_seconds > 0)
-            .then(|| now_us.saturating_sub(qcfg.completed_retention_seconds as i64 * 1_000_000))
-            .map(|v| v.min(sink_floor));
-        let max_wait_cutoff = (qcfg.max_wait_time_seconds > 0)
-            .then(|| now_us.saturating_sub(qcfg.max_wait_time_seconds as i64 * 1_000_000));
-        let txn_window_s = i64::from(qcfg.dedup_window_seconds)
-            .max(i64::from(qcfg.completed_retention_seconds))
-            .max(cfg.txn_window_min_s.max(0));
-        let txns_cutoff = now_us.saturating_sub(txn_window_s * 1_000_000);
+        let cut = queue_cutoffs(r, now_us, cfg, &tenant, &queue, &qcfg);
 
         // A bounded window of the queue's partitions, resuming where the last
         // pass stopped and wrapping to the first ones (see `visit_cap`).
@@ -261,97 +268,23 @@ pub fn plan<R: Reads + ?Sized>(r: &R, now_us: i64, cfg: &Config) -> Result<Plann
             let Some(part) = r.partition(pid)? else {
                 continue;
             };
-            let mut segments = Vec::new();
-            let prefix = keys::txns_prefix(pid);
-            let from = keys::txns(pid, part.txns_start);
-            let mut corrupt = false;
-            r.scan_raw(
-                Keyspace::Txns,
-                &from,
-                &prefix,
-                cfg.row_limit + 1,
-                &mut |key, value| match (keys::txns_base_of(key), TxnsRow::decode(value)) {
-                    (Some(base), Ok(row)) => {
-                        segments.push((base, row));
-                        true
-                    }
-                    _ => {
-                        corrupt = true;
-                        false
-                    }
-                },
-            )?;
-            if corrupt {
-                return Err(crate::rsm::store::StoreError::corrupt(
-                    Keyspace::Txns,
-                    "txns row",
-                ));
-            }
-
-            let mut log_target = part.log_start;
-            if let Some(cutoff) = all_cutoff {
-                log_target = log_target.max(stale_boundary(
-                    &segments,
-                    part.log_start,
-                    cutoff,
-                    None,
-                    cfg.row_limit,
-                ));
-            }
-            if let Some(cutoff) = max_wait_cutoff {
-                log_target = log_target.max(stale_boundary(
-                    &segments,
-                    part.log_start,
-                    cutoff,
-                    None,
-                    cfg.row_limit,
-                ));
-            }
-            if let Some(cutoff) = completed_cutoff {
-                let mut min_committed: Option<i64> = None;
-                r.scan_cursors(pid, usize::MAX, &mut |_group, cursor| {
-                    min_committed = Some(
-                        min_committed.map_or(cursor.committed, |old| old.min(cursor.committed)),
-                    );
-                    true
-                })?;
-                if let Some(cap) = min_committed.map(|v| v.saturating_add(1).max(0) as u64) {
-                    log_target = log_target.max(stale_boundary(
-                        &segments,
-                        part.log_start,
-                        cutoff,
-                        Some(cap),
-                        cfg.row_limit,
-                    ));
+            match judge_partition(r, now_us, cfg, pid, &part, &cut)? {
+                Some(Verdict::Watermark {
+                    log_start,
+                    txns_start,
+                }) => {
+                    out.effects.push(Effect::Watermark {
+                        pid,
+                        log_start,
+                        txns_start,
+                    });
+                    budget = budget.saturating_sub(1);
                 }
-            }
-
-            let txn_target = stale_boundary(
-                &segments,
-                part.txns_start,
-                txns_cutoff,
-                Some(log_target),
-                cfg.row_limit,
-            )
-            .min(log_target);
-            if log_target > part.log_start || txn_target > part.txns_start {
-                out.effects.push(Effect::Watermark {
-                    pid,
-                    log_start: log_target,
-                    txns_start: txn_target,
-                });
-                budget = budget.saturating_sub(1);
-            } else if cfg.partition_cleanup_enabled
-                && partition_dead(
-                    r,
-                    pid,
-                    &part,
-                    now_us.saturating_sub(cfg.partition_cleanup_days.max(1) * 86_400 * 1_000_000),
-                    now_us,
-                )?
-            {
-                out.effects.push(Effect::PartitionDelete { pid });
-                budget = budget.saturating_sub(1);
+                Some(Verdict::Delete) => {
+                    out.effects.push(Effect::PartitionDelete { pid });
+                    budget = budget.saturating_sub(1);
+                }
+                None => {}
             }
         }
         {
@@ -378,6 +311,244 @@ pub fn plan<R: Reads + ?Sized>(r: &R, now_us: i64, cfg: &Config) -> Result<Plann
         out.effects.push(Effect::TraceExpire {
             cutoff_us: trace_cutoff,
         });
+    }
+    Ok(out)
+}
+
+/// A queue's retention cutoffs at `now_us` ([`judge_partition`]).
+pub(crate) struct Cutoffs {
+    all: Option<i64>,
+    completed: Option<i64>,
+    max_wait: Option<i64>,
+    txns: i64,
+}
+
+/// The cutoffs `qcfg` sets for queue `(tenant, queue)` at `now_us`.
+pub(crate) fn queue_cutoffs<R: Reads + ?Sized>(
+    r: &R,
+    now_us: i64,
+    cfg: &Config,
+    tenant: &str,
+    queue: &str,
+    qcfg: &crate::rsm::effect::QueueConfig,
+) -> Cutoffs {
+    let sink_floor = sink_floor(r, now_us, tenant, queue, qcfg);
+    let all = (qcfg.retention_enabled && qcfg.retention_seconds > 0)
+        .then(|| now_us.saturating_sub(qcfg.retention_seconds as i64 * 1_000_000))
+        .map(|v| v.min(sink_floor));
+    let completed = (qcfg.retention_enabled && qcfg.completed_retention_seconds > 0)
+        .then(|| now_us.saturating_sub(qcfg.completed_retention_seconds as i64 * 1_000_000))
+        .map(|v| v.min(sink_floor));
+    let max_wait = (qcfg.max_wait_time_seconds > 0)
+        .then(|| now_us.saturating_sub(qcfg.max_wait_time_seconds as i64 * 1_000_000));
+    let txn_window_s = i64::from(qcfg.dedup_window_seconds)
+        .max(i64::from(qcfg.completed_retention_seconds))
+        .max(cfg.txn_window_min_s.max(0));
+    Cutoffs {
+        all,
+        completed,
+        max_wait,
+        txns: now_us.saturating_sub(txn_window_s * 1_000_000),
+    }
+}
+
+/// What retention does to one partition now ([`judge_partition`]).
+pub(crate) enum Verdict {
+    Watermark { log_start: u64, txns_start: u64 },
+    Delete,
+}
+
+/// Retention's judgment of partition `pid` (row `part`) under its queue's
+/// cutoffs: move its watermarks, delete it (idle past the cleanup age), or
+/// nothing. Shared by the walk on the planning thread ([`plan`]) and the
+/// background scanner ([`scan_slice`]).
+pub(crate) fn judge_partition<R: Reads + ?Sized>(
+    r: &R,
+    now_us: i64,
+    cfg: &Config,
+    pid: Pid,
+    part: &rows::PartitionRow,
+    cut: &Cutoffs,
+) -> Result<Option<Verdict>> {
+    let mut segments = Vec::new();
+    let prefix = keys::txns_prefix(pid);
+    let from = keys::txns(pid, part.txns_start);
+    let mut corrupt = false;
+    r.scan_raw(
+        Keyspace::Txns,
+        &from,
+        &prefix,
+        cfg.row_limit + 1,
+        &mut |key, value| match (keys::txns_base_of(key), TxnsRow::decode(value)) {
+            (Some(base), Ok(row)) => {
+                segments.push((base, row));
+                true
+            }
+            _ => {
+                corrupt = true;
+                false
+            }
+        },
+    )?;
+    if corrupt {
+        return Err(crate::rsm::store::StoreError::corrupt(
+            Keyspace::Txns,
+            "txns row",
+        ));
+    }
+
+    let mut log_target = part.log_start;
+    if let Some(cutoff) = cut.all {
+        log_target = log_target.max(stale_boundary(
+            &segments,
+            part.log_start,
+            cutoff,
+            None,
+            cfg.row_limit,
+        ));
+    }
+    if let Some(cutoff) = cut.max_wait {
+        log_target = log_target.max(stale_boundary(
+            &segments,
+            part.log_start,
+            cutoff,
+            None,
+            cfg.row_limit,
+        ));
+    }
+    if let Some(cutoff) = cut.completed {
+        let mut min_committed: Option<i64> = None;
+        r.scan_cursors(pid, usize::MAX, &mut |_group, cursor| {
+            min_committed =
+                Some(min_committed.map_or(cursor.committed, |old| old.min(cursor.committed)));
+            true
+        })?;
+        if let Some(cap) = min_committed.map(|v| v.saturating_add(1).max(0) as u64) {
+            log_target = log_target.max(stale_boundary(
+                &segments,
+                part.log_start,
+                cutoff,
+                Some(cap),
+                cfg.row_limit,
+            ));
+        }
+    }
+
+    let txn_target = stale_boundary(
+        &segments,
+        part.txns_start,
+        cut.txns,
+        Some(log_target),
+        cfg.row_limit,
+    )
+    .min(log_target);
+    if log_target > part.log_start || txn_target > part.txns_start {
+        return Ok(Some(Verdict::Watermark {
+            log_start: log_target,
+            txns_start: txn_target,
+        }));
+    }
+    if cfg.partition_cleanup_enabled
+        && partition_dead(
+            r,
+            pid,
+            part,
+            now_us.saturating_sub(cfg.partition_cleanup_days.max(1) * 86_400 * 1_000_000),
+            now_us,
+        )?
+    {
+        return Ok(Some(Verdict::Delete));
+    }
+    Ok(None)
+}
+
+/// One slice of the background retention walk
+/// ([`crate::rsm::retention_scan`]).
+pub(crate) struct Slice {
+    pub proposals: Vec<crate::rsm::retention_scan::Proposal>,
+    /// Partitions looked at.
+    pub visited: usize,
+    /// The slice reached the last partition: the cursor is back at the first.
+    pub wrapped: bool,
+}
+
+/// Up to `limit` partitions in pid order from `*cursor` — every partition of
+/// the node in turn, whatever queue it is in — judged as [`plan`]'s walk judges
+/// them. Advances `*cursor`, wrapping to the first partition after the last.
+pub(crate) fn scan_slice<R: Reads + ?Sized>(
+    r: &R,
+    now_us: i64,
+    cfg: &Config,
+    cursor: &mut Pid,
+    limit: usize,
+) -> Result<Slice> {
+    use crate::rsm::retention_scan::Proposal;
+    use std::collections::hash_map::Entry;
+    use std::collections::HashMap;
+
+    let limit = limit.max(1);
+    let mut parts = Vec::with_capacity(limit);
+    let mut corrupt = false;
+    r.scan_raw(
+        Keyspace::Partitions,
+        &keys::pid(*cursor),
+        &[],
+        limit,
+        &mut |key, value| match (keys::pid_of(key), rows::partition_decode(value)) {
+            (Some(pid), Ok(row)) => {
+                parts.push((pid, row));
+                true
+            }
+            _ => {
+                corrupt = true;
+                false
+            }
+        },
+    )?;
+    if corrupt {
+        return Err(StoreError::corrupt(Keyspace::Partitions, "partition row"));
+    }
+    let wrapped = parts.len() < limit;
+    *cursor = match parts.last() {
+        Some((pid, _)) if !wrapped => pid.saturating_add(1),
+        _ => 0,
+    };
+    let mut out = Slice {
+        proposals: Vec::new(),
+        visited: parts.len(),
+        wrapped,
+    };
+    let mut queues: HashMap<(String, String), Option<Cutoffs>> = HashMap::new();
+    for (pid, part) in parts {
+        if r.garbage(pid)?.is_some() {
+            continue;
+        }
+        let cut = match queues.entry((part.tenant.clone(), part.queue.clone())) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(v) => {
+                let cut = r
+                    .queue(&part.tenant, &part.queue)?
+                    .map(|qcfg| queue_cutoffs(r, now_us, cfg, &part.tenant, &part.queue, &qcfg));
+                v.insert(cut)
+            }
+        };
+        // A partition whose queue row is gone is the garbage path's, as in
+        // the walk over queue rows.
+        let Some(cut) = cut.as_ref() else {
+            continue;
+        };
+        match judge_partition(r, now_us, cfg, pid, &part, cut)? {
+            Some(Verdict::Watermark {
+                log_start,
+                txns_start,
+            }) => out.proposals.push(Proposal::Watermark {
+                pid,
+                log_start,
+                txns_start,
+            }),
+            Some(Verdict::Delete) => out.proposals.push(Proposal::Delete { pid }),
+            None => {}
+        }
     }
     Ok(out)
 }
@@ -446,7 +617,7 @@ fn percent_escape(value: &str) -> String {
     out
 }
 
-fn partition_dead<R: Reads + ?Sized>(
+pub(crate) fn partition_dead<R: Reads + ?Sized>(
     r: &R,
     pid: Pid,
     part: &rows::PartitionRow,

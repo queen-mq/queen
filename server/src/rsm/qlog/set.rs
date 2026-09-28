@@ -307,6 +307,9 @@ pub struct QLogSet {
     /// While non-zero, retention unlinks and rewrites nothing
     /// ([`QLogReader::pause_reclaim`]): a snapshot is linking the files.
     reclaim_paused: Arc<AtomicU64>,
+    /// Per-file retention progress, kept by the readers the retention pass
+    /// uses ([`QLogReader::reclaim_log`]).
+    reclaim_state: Arc<std::sync::Mutex<ReclaimState>>,
     /// How many LANES each queue's records are split into: a partition's
     /// records live in its lane's log ([`QLogSet::log_id_for`]), and the lanes
     /// of one group are written in parallel. Fixed when the directory is
@@ -679,6 +682,7 @@ impl QLogSet {
             totals: Arc::new(SharedTotals::default()),
             reclaim_queue_cursor: Arc::new(AtomicU64::new(0)),
             reclaim_paused: Arc::new(AtomicU64::new(0)),
+            reclaim_state: Arc::default(),
             lanes: Arc::new(AtomicU64::new(1)),
             shards: Arc::new(AtomicU64::new(0)),
             idle_at: None,
@@ -964,6 +968,7 @@ impl QLogSet {
             totals: self.totals.clone(),
             reclaim_queue_cursor: self.reclaim_queue_cursor.clone(),
             reclaim_paused: self.reclaim_paused.clone(),
+            reclaim_state: self.reclaim_state.clone(),
             root: self.root.clone(),
             lanes: self.lanes.clone(),
             shards: self.shards.clone(),
@@ -1577,12 +1582,213 @@ pub struct QLogReader {
     reclaim_queue_cursor: Arc<AtomicU64>,
     /// Shared with the set: see [`QLogReader::pause_reclaim`].
     reclaim_paused: Arc<AtomicU64>,
+    /// Shared with the set: per-file retention progress
+    /// ([`QLogReader::reclaim_log`]).
+    reclaim_state: Arc<std::sync::Mutex<ReclaimState>>,
     /// `<data_dir>/qlog`, for a snapshot that links the files.
     root: PathBuf,
     /// Shared with the set: see [`QLogSet::lanes`].
     lanes: Arc<AtomicU64>,
     /// Shared with the set: see [`QLogSet::shards`].
     shards: Arc<AtomicU64>,
+}
+
+/// What per-file retention remembers between passes
+/// ([`QLogReader::reclaim_log`]). Only the retention thread touches it.
+#[derive(Default)]
+pub(crate) struct ReclaimState {
+    /// Per log: the next file id to judge. The files rotate, so one that stays
+    /// live cannot starve the ones behind it.
+    cursors: std::collections::HashMap<u64, u64>,
+    /// Per `(log, file)`: how far the file is known dead.
+    files: std::collections::HashMap<(u64, u64), FileProgress>,
+}
+
+/// One sealed file's retention progress. A sealed `.qidx` lists its records
+/// sorted by `(pid, base_offset)`, so each pid is one contiguous run and costs
+/// one watermark lookup.
+struct FileProgress {
+    /// The file's index, mapped on its own so the judging holds no queue lock.
+    /// A sealed index never changes; a rewrite of the file drops this entry.
+    view: super::index::View,
+    /// Index records `[0, pos)` are known dead. Deadness never reverses while
+    /// the process runs: a `txns_start` never moves back (the apply refuses
+    /// it), a pid is never handed out twice, and a partition's log does not
+    /// change. So the next pass resumes here instead of starting over.
+    pos: usize,
+    /// Message bytes in `[0, pos)`.
+    dead_bytes: u64,
+    /// Message bytes in the whole file (entry records carry none).
+    msg_bytes: u64,
+}
+
+/// What one retention pass may still spend, across every log it visits.
+pub(crate) struct ReclaimBudget {
+    /// Files still to judge.
+    pub files: usize,
+    /// Watermark lookups still allowed (one per partition run in a file).
+    pub lookups: usize,
+    pub deadline: std::time::Instant,
+    /// A copy-forward rewrite is still allowed (at most one per pass).
+    pub rewrite: bool,
+}
+
+impl ReclaimBudget {
+    pub(crate) fn spent(&self) -> bool {
+        self.files == 0 || self.lookups == 0 || std::time::Instant::now() >= self.deadline
+    }
+}
+
+/// [`judge_file`]'s verdict.
+enum Judged {
+    /// Every message record is dead: the file can go.
+    Dead,
+    /// The record at this index is live, so the file stays.
+    Live(usize),
+    /// The pass ran out of budget inside the file.
+    Unfinished,
+}
+
+/// Resume `p` after its known-dead prefix: one lookup per partition run, until
+/// a live record (the file stays), the end (it is dead), or the budget. Entry
+/// records (`count == 0`) never keep a file.
+fn judge_file(
+    p: &mut FileProgress,
+    live_start: &mut dyn FnMut(u64) -> io::Result<Option<u64>>,
+    budget: &mut ReclaimBudget,
+) -> io::Result<Judged> {
+    let n = p.view.len();
+    let mut i = p.pos;
+    let mut runs = 0usize;
+    let verdict = loop {
+        while i < n && p.view.record(i).count == 0 {
+            i += 1;
+        }
+        if i >= n {
+            break Judged::Dead;
+        }
+        if budget.lookups == 0
+            || (runs % 1024 == 1023 && std::time::Instant::now() >= budget.deadline)
+        {
+            break Judged::Unfinished;
+        }
+        runs += 1;
+        budget.lookups -= 1;
+        let pid = p.view.record(i).pid;
+        let start = live_start(pid)?;
+        let mut live_at = None;
+        while i < n {
+            let r = p.view.record(i);
+            if r.pid != pid {
+                break;
+            }
+            if r.count > 0 {
+                if start.is_some_and(|s| r.end > s) {
+                    live_at = Some(i);
+                    break;
+                }
+                p.dead_bytes += u64::from(r.len);
+            }
+            i += 1;
+        }
+        if let Some(at) = live_at {
+            break Judged::Live(at);
+        }
+    };
+    p.pos = i;
+    Ok(verdict)
+}
+
+/// Is live file `p` worth a rewrite: at least `pct`% of its message bytes dead
+/// ([`QLog::set_compact_min_dead_pct`])? A sample of the records from `from`
+/// (the live one) on estimates it; only then is every remaining partition
+/// looked up, for the exact figure and the watermarks the rewrite keeps records
+/// by. `None`: not worth it, or not affordable in this pass.
+fn rewrite_starts(
+    p: &FileProgress,
+    from: usize,
+    pct: u8,
+    live_start: &mut dyn FnMut(u64) -> io::Result<Option<u64>>,
+    budget: &mut ReclaimBudget,
+) -> io::Result<Option<std::collections::HashMap<u64, u64>>> {
+    const SAMPLE: usize = 32;
+    let n = p.view.len();
+    if p.msg_bytes == 0 || from >= n {
+        return Ok(None);
+    }
+    let is_dead = |start: Option<u64>, end: u64| start.is_none_or(|s| end <= s);
+    let worth =
+        |dead: u64| dead > 0 && u128::from(dead) * 100 >= u128::from(pct) * u128::from(p.msg_bytes);
+    let mut seen: std::collections::HashMap<u64, Option<u64>> = std::collections::HashMap::new();
+    let mut lookup = |pid: u64, budget: &mut ReclaimBudget| -> io::Result<Option<Option<u64>>> {
+        if let Some(start) = seen.get(&pid) {
+            return Ok(Some(*start));
+        }
+        if budget.lookups == 0 {
+            return Ok(None);
+        }
+        budget.lookups -= 1;
+        let start = live_start(pid)?;
+        seen.insert(pid, start);
+        Ok(Some(start))
+    };
+
+    // The estimate.
+    let stride = ((n - from) / SAMPLE).max(1);
+    let (mut sample_dead, mut sample_all) = (0u64, 0u64);
+    let mut k = from;
+    while k < n {
+        let r = p.view.record(k);
+        if r.count > 0 {
+            let Some(start) = lookup(r.pid, budget)? else {
+                return Ok(None);
+            };
+            sample_all += u64::from(r.len);
+            if is_dead(start, r.end) {
+                sample_dead += u64::from(r.len);
+            }
+        }
+        k += stride;
+    }
+    if sample_all == 0 {
+        return Ok(None);
+    }
+    let rest = p.msg_bytes.saturating_sub(p.dead_bytes);
+    let estimate =
+        p.dead_bytes + (u128::from(rest) * u128::from(sample_dead) / u128::from(sample_all)) as u64;
+    if !worth(estimate) {
+        return Ok(None);
+    }
+
+    // The exact figure, and the watermarks of the partitions that stay.
+    let mut starts = std::collections::HashMap::new();
+    let mut dead = p.dead_bytes;
+    let mut i = from;
+    while i < n {
+        let r = p.view.record(i);
+        if r.count == 0 {
+            i += 1;
+            continue;
+        }
+        let pid = r.pid;
+        let Some(start) = lookup(pid, budget)? else {
+            return Ok(None);
+        };
+        while i < n {
+            let r = p.view.record(i);
+            if r.pid != pid {
+                break;
+            }
+            if r.count > 0 && is_dead(start, r.end) {
+                dead += u64::from(r.len);
+            }
+            i += 1;
+        }
+        if let Some(s) = start {
+            starts.insert(pid, s);
+        }
+    }
+    Ok(worth(dead).then_some(starts))
 }
 
 /// Retention stays paused while one of these is alive.
@@ -1685,6 +1891,144 @@ impl QLogReader {
             }
             None => Ok(ReclaimProgress::default()),
         }
+    }
+
+    /// Per-file retention for log `log_id`: judge its sealed files one at a
+    /// time from their own `.qidx`, looking up only the partitions that have
+    /// records in them, and remember how far each file is known dead.
+    ///
+    /// `live_start(pid)` answers `Some(txns_start)` when the partition still
+    /// exists AND its records go to this log, `None` otherwise (its records here
+    /// are dead): the rule the whole-map walk applied, at the cost of the files
+    /// judged instead of every partition on the node.
+    ///
+    /// The judging holds no lock on the log. Only the unlink, and the one
+    /// rewrite a pass allows, take its write lock, and only when it is free
+    /// (`try_write`): an append never queues behind retention.
+    pub(crate) fn reclaim_log(
+        &self,
+        log_id: u64,
+        live_start: &mut dyn FnMut(u64) -> io::Result<Option<u64>>,
+        budget: &mut ReclaimBudget,
+    ) -> io::Result<ReclaimProgress> {
+        let mut out = ReclaimProgress::default();
+        if self.reclaim_paused.load(Ordering::Acquire) > 0 {
+            out.more = true;
+            return Ok(out);
+        }
+        let mut state = self
+            .reclaim_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = &mut *state;
+        let Some(log) = self.log(log_id) else {
+            state.files.retain(|(l, _), _| *l != log_id);
+            state.cursors.remove(&log_id);
+            return Ok(out);
+        };
+        let cand = log.read().expect("qlog poisoned").reclaim_candidates();
+        state
+            .files
+            .retain(|(l, id), _| *l != log_id || cand.all_ids.contains(id));
+
+        let cursor = state.cursors.get(&log_id).copied().unwrap_or(0);
+        let mut order = cand.eligible;
+        let split = order.partition_point(|(id, _)| *id < cursor);
+        order.rotate_left(split);
+
+        let mut dead: Vec<u64> = Vec::new();
+        let mut rewrite: Option<(u64, u64, std::collections::HashMap<u64, u64>)> = None;
+        for (id, bytes) in order {
+            if budget.spent() {
+                out.more = true;
+                break;
+            }
+            budget.files -= 1;
+            out.examined += 1;
+            state.cursors.insert(log_id, id.wrapping_add(1));
+            let progress = match state.files.entry((log_id, id)) {
+                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    let path = super::qidx_path(&cand.dir, id);
+                    let view = match super::index::View::open(&path, Some(bytes)) {
+                        Ok(view) => view,
+                        Err(e) => {
+                            // Gone since the listing, or an index the log
+                            // rebuilds at its next open: judge it later.
+                            tracing::debug!(
+                                target: "rsm",
+                                log = log_id,
+                                file = id,
+                                error = %e,
+                                "rsm qlog retention skips a file it cannot map",
+                            );
+                            continue;
+                        }
+                    };
+                    let msg_bytes = view
+                        .records()
+                        .filter(|r| r.count > 0)
+                        .map(|r| u64::from(r.len))
+                        .sum();
+                    v.insert(FileProgress {
+                        view,
+                        pos: 0,
+                        dead_bytes: 0,
+                        msg_bytes,
+                    })
+                }
+            };
+            match judge_file(progress, live_start, budget)? {
+                Judged::Dead => dead.push(id),
+                Judged::Unfinished => out.more = true,
+                Judged::Live(at) => {
+                    if budget.rewrite && rewrite.is_none() {
+                        if let Some(starts) =
+                            rewrite_starts(progress, at, cand.compact_pct, live_start, budget)?
+                        {
+                            rewrite = Some((id, bytes, starts));
+                        }
+                    }
+                }
+            }
+        }
+        if dead.is_empty() && rewrite.is_none() {
+            return Ok(out);
+        }
+        let Ok(mut guard) = log.try_write() else {
+            // An append holds the log: the verdicts stand until the next pass.
+            out.more = true;
+            return Ok(out);
+        };
+        if self.reclaim_paused.load(Ordering::Acquire) > 0 {
+            // A snapshot began linking the files while this pass judged them.
+            out.more = true;
+            return Ok(out);
+        }
+        let (files_before, bytes_before) = (guard.file_count() as u64, guard.bytes());
+        let applied = guard.reclaim_apply(
+            &dead,
+            rewrite
+                .as_ref()
+                .map(|(id, bytes, starts)| (*id, *bytes, starts)),
+        );
+        let (files_after, bytes_after) = (guard.file_count() as u64, guard.bytes());
+        drop(guard);
+        replace_total(&self.totals.files, files_before, files_after);
+        replace_total(&self.totals.bytes, bytes_before, bytes_after);
+        let applied = applied?;
+        out.changed += applied.changed;
+        out.compacted += applied.compacted;
+        if applied.compacted > 0 {
+            budget.rewrite = false;
+        }
+        for id in &dead {
+            state.files.remove(&(log_id, *id));
+        }
+        if let Some((id, _, _)) = rewrite {
+            state.files.remove(&(log_id, id));
+        }
+        Ok(out)
     }
 
     pub(crate) fn log_ids(&self) -> Vec<u64> {

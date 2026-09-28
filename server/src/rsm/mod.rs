@@ -69,6 +69,7 @@ pub mod local_metrics;
 /// cross-node gather and the views that re-aggregate them (D17, §14.6).
 pub mod dashboard;
 pub mod maintenance;
+pub mod retention_scan;
 
 // ---------------------------------------------------------------------------
 // The map as stubs. One line each, replaced by the owning WP (see the header).

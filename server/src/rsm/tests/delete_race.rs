@@ -948,6 +948,7 @@ impl Cycles {
             None,
             fire,
             maintenance,
+            None,
         )
         .expect("plan cycle");
         assert!(
