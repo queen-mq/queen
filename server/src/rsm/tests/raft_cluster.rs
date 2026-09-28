@@ -1476,7 +1476,16 @@ async fn an_entry_every_node_refuses_is_skipped_and_leaves_nothing_behind() {
             f.command.as_deref().is_some_and(|c| c.contains(&id)),
             "{f:?}"
         );
-        assert!(nodes[*i].as_ref().unwrap().role() == Role::Stopped);
+        // The stop follows the recorded failure: the apply thread unwinds (its
+        // checkpoint thread first), its notify releases the waiters, and
+        // openraft stops on the error — a moment later under load.
+        tokio::task::block_in_place(|| {
+            let end = Instant::now() + Duration::from_secs(10);
+            while nodes[*i].as_ref().unwrap().role() != Role::Stopped {
+                assert!(Instant::now() < end, "node {} did not stop", i + 1);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
     }
     for n in nodes.iter_mut() {
         close_stopped(n.take().unwrap());
