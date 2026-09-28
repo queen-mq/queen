@@ -4,12 +4,13 @@
     <div class="qhead">
       <div></div>
       <div class="h-name">Queue</div>
-      <div class="h-c">Density</div>
+      <div class="h-status">Status</div>
+      <div class="h-c h-density">Density</div>
       <div v-if="showHot" class="h-c h-hot">Hot</div>
-      <div class="h-c">Throughput</div>
+      <div class="h-c">Pop rate</div>
       <div class="h-c">Lag p99</div>
       <div class="h-c h-parts">Partitions</div>
-      <div class="h-c h-store">Storage</div>
+      <div class="h-c h-store">Stored</div>
       <div></div>
     </div>
 
@@ -18,21 +19,20 @@
       <div v-for="i in 8" :key="`s-${i}`" class="qrow qrow-skeleton">
         <span></span>
         <span class="skeleton" style="height: 12px; width: 60%;"></span>
-        <span class="skeleton" style="height: 18px; width: 60px; margin: 0 auto;"></span>
-        <span v-if="showHot" class="skeleton" style="height: 18px; width: 60px; margin: 0 auto;"></span>
-        <span class="skeleton" style="height: 18px; width: 70px; margin: 0 auto;"></span>
-        <span class="skeleton" style="height: 18px; width: 60px; margin: 0 auto;"></span>
-        <span class="skeleton" style="height: 18px; width: 60px; margin: 0 auto;"></span>
-        <span class="skeleton" style="height: 18px; width: 60px; margin: 0 auto;"></span>
+        <span class="skeleton" style="height: 12px; width: 70px;"></span>
+        <span class="skeleton h-density" style="height: 12px; width: 50px; margin-left: auto;"></span>
+        <span v-if="showHot" class="skeleton" style="height: 12px; width: 50px; margin-left: auto;"></span>
+        <span class="skeleton" style="height: 12px; width: 60px; margin-left: auto;"></span>
+        <span class="skeleton" style="height: 12px; width: 50px; margin-left: auto;"></span>
+        <span class="skeleton h-parts" style="height: 12px; width: 40px; margin-left: auto;"></span>
+        <span class="skeleton h-store" style="height: 12px; width: 50px; margin-left: auto;"></span>
         <span></span>
       </div>
     </template>
 
     <!-- empty state -->
     <div v-else-if="!queues.length">
-      <!-- The slot owns the whole block, `.empty-state` padding included: a
-           wrapper that padded too meant the host view's empty state sat in
-           96px of air while every other empty state in the app sat in 48. -->
+      <!-- The slot owns the whole block, `.empty-state` padding included. -->
       <slot name="empty">
         <div class="empty-state">
           <h3>No queues match your filters</h3>
@@ -40,7 +40,7 @@
       </slot>
     </div>
 
-    <!-- rows -->
+    <!-- rows: plain numbers; colour only where a verdict says so -->
     <template v-else>
       <div
         v-for="q in displayed"
@@ -49,14 +49,13 @@
         :class="`sev-${cardSev(q)}`"
         @click="$emit('select', q)"
       >
-        <span class="qdot"></span>
+        <span class="g" :class="glyph(cardSev(q))" aria-hidden="true"></span>
         <span class="qname">
           <span class="ns">{{ q._nsPrefix }}</span><span class="nm">{{ q._namePart }}</span>
         </span>
-        <span class="cell-c">
-          <span class="cc" :class="`sev-${densitySev(q.density)}`">
-            {{ densityVal(q.density) }}<i>msg/p</i>
-          </span>
+        <span class="qstatus" :class="`sev-${cardSev(q)}`">{{ verdict(q).word }}</span>
+        <span class="cell-c h-density">
+          <span class="cc">{{ densityVal(q.density) }}<i>msg/p</i></span>
         </span>
         <span v-if="showHot" class="cell-c cc-hot">
           <span class="cc" :class="`sev-${hotSev(q.hotCount, q.partitions)}`">
@@ -64,20 +63,18 @@
           </span>
         </span>
         <span class="cell-c">
-          <span class="cc" :class="`sev-${throughputSev(q.popPerSec, q.pushPerSec)}`">
-            <span :class="arrowClass(q)" style="margin-right:2px;">{{ arrow(q) }}</span>{{ fmtRate(q.popPerSec) }}<i>/s</i>
+          <span class="cc" :title="`push ${fmtRate(q.pushPerSec)}/s · pop ${fmtRate(q.popPerSec)}/s`">
+            <span class="arrow" :class="arrowClass(q)">{{ arrow(q) }}</span>{{ fmtRate(q.popPerSec) }}<i>/s</i>
           </span>
         </span>
         <span class="cell-c">
-          <span class="cc" :class="`sev-${lagSev(q.avgLagMs)}`">
-            {{ fmtLag(q.avgLagMs) }}
-          </span>
+          <span class="cc">{{ fmtLag(q.avgLagMs) }}</span>
         </span>
         <span class="cell-c cc-parts">
-          <span class="cc sev-mute">{{ fmt(q.partitions) }}<i>parts</i></span>
+          <span class="cc">{{ fmt(q.partitions) }}</span>
         </span>
         <span class="cell-c cc-store">
-          <span class="cc sev-mute" :title="q.retainedBytes == null ? 'Storage not reported for this queue' : undefined">
+          <span class="cc" :title="q.retainedBytes == null ? 'Storage not reported for this queue' : undefined">
             {{ fmtBytes(q.retainedBytes) }}
           </span>
         </span>
@@ -86,6 +83,7 @@
             v-if="canDelete"
             class="qaction"
             title="Delete queue"
+            :aria-label="`Delete ${q.name}`"
             @click.stop="$emit('delete', q)"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -102,7 +100,7 @@
 import { computed } from 'vue'
 
 import { formatBytes } from '@/composables/useApi'
-import { keepUpSeverity, lagMsSeverity, laggingPartitionsSeverity } from '@/composables/useSeverity'
+import { laggingPartitionsSeverity } from '@/composables/useSeverity'
 
 const props = defineProps({
   /**
@@ -129,6 +127,13 @@ const props = defineProps({
    * dead button.
    */
   canDelete: { type: Boolean, default: false },
+  /**
+   * What needs you, by queue name — composables/useAttention's verdicts, the
+   * rule the Overview and the sidebar use. null while it is being read.
+   */
+  attention: { type: Object, default: null },
+  /** The consumer groups could not be read, so no row can be judged. */
+  attentionUnknown: { type: Boolean, default: false },
 })
 
 defineEmits(['select', 'delete'])
@@ -137,17 +142,7 @@ defineEmits(['select', 'delete'])
  * The thresholds themselves live in @/composables/useSeverity, with the rest
  * of the app's colour policy and a test file that pins them. What stays here
  * is only the mapping from this grid's columns onto those rules. */
-const SEV_RANK = { ok: 0, ice: 0, mute: 1, warn: 2, bad: 3 }
-
-/* Density now means TOTAL messages per partition — a queue's lifetime
- * weight, not its backlog. So colors scale with magnitude (cold → cool)
- * but never go warn/bad: a heavy queue isn't "at risk" just because
- * it's processed a lot of data over time. */
-function densitySev(d) {
-  if (!d) return 'mute'
-  if (d < 10) return 'mute'
-  return 'ice'
-}
+const SEV_RANK = { ok: 0, ice: 0, mute: 1, unknown: 1, warn: 2, bad: 3 }
 
 /* Hot partitions, as a SHARE of the queue's partitions. A count could not be
  * a verdict on its own: 20 hot partitions is most of a 24-partition queue and
@@ -158,27 +153,31 @@ function hotSev(h, partitions) {
   return laggingPartitionsSeverity({ behind: h, total: partitions })
 }
 
-/* Throughput is colored by pop/push ratio — i.e. is the queue keeping up? */
-function throughputSev(pop, push) {
-  return keepUpSeverity({ pop, push })
-}
 
-function lagSev(ms) {
-  return lagMsSeverity(ms)
-}
-
-/* Row-level severity describes whether the queue IS KEEPING UP — not just
- * whether any metric is high. Density and hot count never drive the stripe. */
-function cardSev(q) {
-  const t = throughputSev(q.popPerSec, q.pushPerSec)
-  const l = lagSev(q.avgLagMs)
-  if (t === 'bad' || l === 'bad') return 'bad'
-  if (t === 'warn' || l === 'warn') return 'warn'
+/* The row's verdict is the app's one rule for "needs you" (useAttention):
+ * a consumer group behind, or messages nobody reads — the same verdict the
+ * Overview and the sidebar give this queue. The pop-rate and lag cells keep
+ * their own tones; they describe a column, not the queue. */
+function verdict(q) {
+  if (props.attentionUnknown) return { sev: 'unknown', word: 'Unknown' }
+  const a = props.attention?.get(q.name)
+  if (a?.sev === 'bad') return { sev: 'bad', word: 'Falling behind' }
+  if (a?.reason === 'noReader') return { sev: 'warn', word: a.deadOnly ? 'Never read' : 'No reader' }
+  if (a?.sev === 'warn') return { sev: 'warn', word: 'Behind' }
   // Only an explicit 0 proves the queue is drained. `pending == null` means
   // the backend did not report it, and claiming "idle" from an unknown is how
   // a backed-up queue ends up painted the same colour as an empty one.
-  if ((q.popPerSec || 0) < 5 && (q.pushPerSec || 0) < 5 && q.pending === 0) return 'ice'
-  return 'ok'
+  if ((q.popPerSec || 0) < 5 && (q.pushPerSec || 0) < 5 && q.pending === 0) return { sev: 'ice', word: 'Idle' }
+  return { sev: 'ok', word: 'Healthy' }
+}
+function cardSev(q) {
+  return verdict(q).sev
+}
+
+/* The row verdict as a shape and a word — the same vocabulary as the page
+ * legend and the Overview. Only warn and bad carry a colour. */
+function glyph(sev) {
+  return sev === 'bad' ? 'bad' : sev === 'warn' ? 'warn' : sev === 'ice' || sev === 'unknown' ? 'idle' : 'ok'
 }
 
 /* ---------------- formatters ---------------- */
@@ -260,6 +259,9 @@ const displayed = computed(() => {
 </script>
 
 <style scoped>
+/* One card, rows on hairlines, plain right-aligned numbers. The verdict is a
+   glyph and a word per row; a number is coloured only when its own rule
+   says warn or bad. No stripes, no tinted rows, no pills. */
 .qhg {
   background: var(--ink-2);
   border: 1px solid var(--bd);
@@ -267,104 +269,46 @@ const displayed = computed(() => {
   overflow: hidden;
 }
 
-/* column header */
-.qhead {
+.qhead, .qrow {
   display: grid;
-  grid-template-columns: 14px minmax(200px, 1fr) 76px 86px 78px 92px 82px 84px 32px;
-  gap: 10px;
+  grid-template-columns: 14px minmax(200px, 1fr) 118px 92px 82px 104px 84px 86px 88px 32px;
+  gap: 12px;
   align-items: center;
-  padding: 0 12px 0 0;
-  height: 28px;
-  background: color-mix(in srgb, var(--text-hi) 1.2%, transparent);
-  border-bottom: 1px solid var(--bd);
-  font-size: 9.5px;
-  letter-spacing: .12em;
-  text-transform: uppercase;
-  color: var(--text-low);
-  font-weight: 500;
+  padding: 0 12px 0 16px;
 }
-.qhead .h-name { padding-left: 28px; }
-.qhead .h-c { text-align: center; }
-
-/* row */
-.qrow {
-  position: relative;
-  display: grid;
-  grid-template-columns: 14px minmax(200px, 1fr) 76px 86px 78px 92px 82px 84px 32px;
-  gap: 10px;
-  align-items: center;
-  padding: 0 12px 0 0;
-  height: 26px;
-  border-bottom: 1px solid var(--bd);
-  cursor: pointer;
-  transition: background .12s ease;
-  font-size: 11.5px;
-}
-
-/* without the Hot column */
 .qhg-no-hot .qhead,
 .qhg-no-hot .qrow {
-  grid-template-columns: 14px minmax(200px, 1fr) 76px 78px 92px 82px 84px 32px;
-}
-.qrow:last-child { border-bottom: none; }
-.qrow:hover { background: color-mix(in srgb, var(--text-hi) 2.5%, transparent); }
-
-/* left status stripe */
-.qrow::before {
-  content: '';
-  position: absolute;
-  left: 0; top: 0; bottom: 0;
-  width: 3px;
-  background: var(--bd-hi);
-}
-.qrow.sev-ok::before { background: var(--ok-500); }
-.qrow.sev-mute::before { background: var(--bd-hi); }
-.qrow.sev-ice::before { background: var(--ice-400); }
-.qrow.sev-warn::before { background: var(--warn-400); }
-.qrow.sev-bad::before {
-  background: var(--ember-400);
-  box-shadow: 1px 0 12px color-mix(in srgb, var(--ember-500) 55%, transparent);
-}
-.qrow.sev-bad { background: color-mix(in srgb, var(--ember-500) 3%, transparent); }
-.qrow.sev-warn { background: color-mix(in srgb, var(--warn-400) 2%, transparent); }
-
-.qrow-skeleton { cursor: default; }
-.qrow-skeleton::before { background: var(--bd-hi) !important; box-shadow: none !important; }
-.qrow-skeleton:hover { background: transparent; }
-
-/* status dot */
-.qdot {
-  width: 6px; height: 6px;
-  border-radius: var(--r-pill);
-  background: var(--bd-hi);
-  margin-left: 10px;
-  position: relative;
-  flex-shrink: 0;
-}
-.qrow.sev-ok .qdot { background: var(--ok-500); }
-.qrow.sev-ice .qdot { background: var(--ice-400); }
-.qrow.sev-warn .qdot { background: var(--warn-400); }
-.qrow.sev-bad .qdot { background: var(--ember-400); }
-.qrow.sev-bad .qdot::after {
-  content: '';
-  position: absolute; inset: -2px;
-  border-radius: var(--r-pill);
-  background: var(--ember-400);
-  opacity: .25;
-  animation: qhg-pulse 2.4s ease-out infinite;
-}
-@keyframes qhg-pulse {
-  0% { transform: scale(.6); opacity: .35; }
-  100% { transform: scale(2.0); opacity: 0; }
+  grid-template-columns: 14px minmax(200px, 1fr) 118px 92px 104px 84px 86px 88px 32px;
 }
 
-/* queue name */
-.qname {
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
+.qhead {
+  height: 36px;
+  border-bottom: 1px solid var(--bd);
   font-size: 12px;
   font-weight: 500;
+  color: var(--text-low);
+}
+.qhead .h-c { text-align: right; }
+
+.qrow {
+  position: relative;
+  height: var(--row-h, 40px);
+  border-bottom: 1px solid var(--bd-soft);
+  cursor: pointer;
+  transition: background .12s ease;
+  font-size: 13px;
+}
+.qrow:last-child { border-bottom: none; }
+.qrow:hover { background: var(--ink-3); }
+.qrow .g { justify-self: center; }
+
+.qrow-skeleton { cursor: default; }
+.qrow-skeleton:hover { background: transparent; }
+
+/* Queue names are names, not code: sans, with the namespace prefix dimmed. */
+.qname {
+  font-weight: 500;
   color: var(--text-hi);
-  letter-spacing: -0.005em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -372,86 +316,57 @@ const displayed = computed(() => {
 .qname .ns { color: var(--text-low); font-weight: 400; }
 .qname .nm { color: var(--text-hi); }
 
-/* cell wrapper to align chip in column center */
-.cell-c { text-align: center; }
+.qstatus { font-size: 12px; color: var(--text-low); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.qstatus.sev-warn { color: var(--warn-400); }
+.qstatus.sev-bad { color: var(--ember-400); }
 
-/* compact chip */
+.cell-c { text-align: right; }
 .cc {
-  display: inline-flex;
-  align-items: baseline;
-  justify-content: center;
-  padding: 2px 7px;
-  border-radius: var(--r-control);
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
   font-variant-numeric: tabular-nums;
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.4;
-  border: 1px solid transparent;
+  font-size: 13px;
+  color: var(--text-hi);
   white-space: nowrap;
-  min-width: 52px;
-  letter-spacing: 0;
 }
 .cc i {
   font-style: normal;
-  opacity: .55;
-  font-weight: 500;
-  margin-left: 4px;
-  font-size: 9.5px;
+  font-size: 11px;
+  color: var(--text-low);
+  margin-left: 3px;
 }
-/* Fill + border are the status tokens, never hand-typed rgba: a chip that
-   half-follows the palette is how a hue change ends up half-applied. */
-.cc.sev-ice { background: var(--ice-glow); color: var(--ice-400); border-color: var(--ice-bd); }
-.cc.sev-mute { background: var(--ink-3); color: var(--text-mid); border-color: var(--bd); }
-.cc.sev-ok { background: var(--ok-glow); color: var(--ok-500); border-color: var(--ok-bd); }
-.cc.sev-warn { background: var(--warn-glow); color: var(--warn-400); border-color: var(--warn-bd); }
-.cc.sev-bad { background: var(--ember-glow); color: var(--ember-400); border-color: var(--ember-bd); }
-
-.arrow-ok { color: var(--ok-500); }
-.arrow-mid { color: var(--text-mid); }
-.arrow-bad { color: var(--ember-400); }
+.cc.sev-warn { color: var(--warn-400); }
+.cc.sev-bad { color: var(--ember-400); }
+.arrow { margin-right: 3px; color: var(--text-low); }
+.arrow.arrow-bad { color: var(--text-mid); }
 
 /* row action button (hover-only) */
 .qactions { opacity: 0; transition: opacity .12s ease; }
-.qrow:hover .qactions { opacity: 1; }
+.qrow:hover .qactions, .qaction:focus-visible { opacity: 1; }
 .qaction {
-  width: 22px; height: 22px;
+  width: 24px; height: 24px;
   display: grid;
   place-items: center;
   background: transparent;
-  border: 1px solid transparent;
+  border: 0;
   border-radius: var(--r-control);
   color: var(--text-low);
   cursor: pointer;
-  margin: 0 auto;
+  margin-left: auto;
 }
-.qaction:hover {
-  color: var(--ember-400);
-  border-color: var(--ember-bd);
-  background: color-mix(in srgb, var(--ember-500) 6%, transparent);
-}
-.qaction svg { width: 12px; height: 12px; }
+.qaction:hover { color: var(--ember-400); background: var(--ink-4); }
+.qaction svg { width: 13px; height: 13px; }
 
-/* Empty state: shared `.empty-state` block from style.css, supplied by the
-   host view through the #empty slot. Nothing local — the wrapper must not
-   pad, or the block pads twice. */
-
-/* responsive: hide hot/parts at narrow widths */
-@media (max-width: 1000px) {
-  .qhead, .qrow,
-  .qhg-no-hot .qhead, .qhg-no-hot .qrow {
-    grid-template-columns: 14px minmax(180px, 1fr) 76px 78px 92px 82px 32px;
+/* narrower: drop the columns a triage does not need first */
+@media (max-width: 1180px) {
+  .qhead, .qrow, .qhg-no-hot .qhead, .qhg-no-hot .qrow {
+    grid-template-columns: 14px minmax(180px, 1fr) 110px 104px 84px 86px 32px;
   }
-  .qrow .cc-hot, .qrow .cc-store,
-  .qhead .h-hot, .qhead .h-store { display: none; }
+  .h-density, .qrow .h-density, .qrow .cc-hot, .qhead .h-hot, .qrow .cc-store, .qhead .h-store { display: none; }
 }
-
-@media (max-width: 880px) {
-  .qhead, .qrow,
-  .qhg-no-hot .qhead, .qhg-no-hot .qrow {
-    grid-template-columns: 14px minmax(140px, 1fr) 76px 78px 82px 32px;
+@media (max-width: 760px) {
+  .qhead, .qrow, .qhg-no-hot .qhead, .qhg-no-hot .qrow {
+    grid-template-columns: 14px minmax(120px, 1fr) 90px 72px 28px;
+    gap: 10px;
   }
-  .qrow .cc-hot, .qrow .cc-parts, .qrow .cc-store,
-  .qhead .h-hot, .qhead .h-parts, .qhead .h-store { display: none; }
+  .qstatus, .qhead .h-status, .qrow .cc-parts, .qhead .h-parts { display: none; }
 }
 </style>

@@ -1,69 +1,38 @@
 <template>
   <div class="view-container">
 
-    <!-- Scope strip. Built from identity, never from fetched data, so it states
-         whose numbers these are while loading, while failing and when empty. -->
-    <div class="scope-strip">
-      <span class="chip chip-mute">tenant scope</span>
-      <span class="scope-text">
-        <strong>{{ actingTenantSlug || 'no tenant' }}</strong>
-        <span class="scope-sep">/</span>{{ actingClusterSlug || 'no cluster' }}
-        <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
-      </span>
-      <span class="scope-fill"></span>
-      <span class="scope-meta" :title="rangeUtcTitle">{{ rangeLabel }}</span>
-    </div>
-
-    <!-- Controls: time range picker. The "Source" toggle that used to live
-         here disappeared when this view became its own page — the only
-         data source is queue-operations, so the toggle had no second
-         option to offer. It left the picker floated right against two-thirds
-         of empty card; the picker is now the row's first field, as everywhere
-         else. -->
-    <div class="card filters">
-      <div class="card-body filter-rows">
-        <div class="filter-row">
-          <div class="filter-field">
-            <span class="label-xs">Range</span>
-            <div class="seg">
-              <button
-                v-for="range in timeRanges"
-                :key="range.value"
-                :class="{ on: timeRange === range.value && !customMode }"
-                @click="selectQuickRange(range.value)"
-              >{{ range.label }}</button>
-              <button
-                :class="{ on: customMode }"
-                @click="toggleCustomMode"
-              >Custom</button>
-            </div>
-          </div>
-
-          <!-- This page really does poll (`useAutoRefresh` below), so the tick
-               is a fact and not a label. It counts from the last SUCCESSFUL
-               queue-ops load, so a failing refresh makes it climb instead of
-               resetting into a freshness we do not have. -->
-          <span class="live-tick filter-field-right">
-            <span class="pulse" />
-            <span>live · {{ refreshAgo }}</span>
-          </span>
+    <!-- This page really does poll (`useAutoRefresh` below), so the tick is a
+         fact and not a label. It counts from the last SUCCESSFUL queue-ops
+         load, so a failing refresh makes it climb instead of resetting into a
+         freshness we do not have. -->
+    <PageHead title="Queue operations" :live="refreshAgo">
+      <template #sub><span :title="rangeUtcTitle">{{ rangeLabel }}</span></template>
+      <template #range>
+        <div class="seg" role="group" aria-label="Time range">
+          <button
+            v-for="range in timeRanges"
+            :key="range.value"
+            :class="{ on: timeRange === range.value && !customMode }"
+            @click="selectQuickRange(range.value)"
+          >{{ range.label }}</button>
+          <button :class="{ on: customMode }" @click="toggleCustomMode">Custom</button>
         </div>
+      </template>
+    </PageHead>
 
-        <!-- Custom Date/Time Range. Validation is live and Apply is the only
-             thing that re-scopes the panels — a half-typed range never does. -->
-        <div v-if="customMode" class="filter-row filter-row-sep">
-          <div class="filter-field">
-            <span class="label-xs">From</span>
-            <input v-model="customFrom" type="datetime-local" class="input" :title="formatTimestampUtc(customFrom)" />
-          </div>
-          <div class="filter-field">
-            <span class="label-xs">To</span>
-            <input v-model="customTo" type="datetime-local" class="input" :title="formatTimestampUtc(customTo)" />
-          </div>
-          <button class="btn btn-primary" :disabled="!customRangeValid" @click="applyCustomRange">Apply</button>
-          <span v-if="customError" class="filter-invalid">{{ customError }}</span>
-        </div>
-      </div>
+    <!-- A window of your own: the only range that waits for Apply, because a
+         half-typed date must not re-scope the page. -->
+    <div v-if="customMode" class="page-tools">
+      <label class="tool-field">
+        <span class="tool-label">From</span>
+        <input v-model="customFrom" type="datetime-local" class="input" :title="formatTimestampUtc(customFrom)" />
+      </label>
+      <label class="tool-field">
+        <span class="tool-label">To</span>
+        <input v-model="customTo" type="datetime-local" class="input" :title="formatTimestampUtc(customTo)" />
+      </label>
+      <button class="btn btn-primary" :disabled="!customRangeValid" @click="applyCustomRange">Apply</button>
+      <span v-if="customError" class="tool-note is-bad">{{ customError }}</span>
     </div>
 
     <!-- Loading skeleton — shown only on first fetch; subsequent refreshes
@@ -99,7 +68,7 @@
         <!-- Retention & Eviction Jobs -->
         <div class="card" style="margin-bottom:16px;">
           <div class="card-header">
-            <h3>Retention &amp; Eviction Jobs</h3>
+            <h3>Retention and eviction</h3>
             <span class="card-sub">messages deleted by retention / eviction workers</span>
             <span class="muted">{{ stamp(retentionPanel) }}</span>
           </div>
@@ -113,19 +82,19 @@
               <div class="stat-grid stat-grid-4" style="margin-bottom:14px;">
                 <div class="stat">
                   <div class="stat-label">Retention</div>
-                  <div class="stat-value font-mono">{{ formatNumber(retentionTotals?.retentionMsgs || 0) }}</div>
+                  <div class="stat-value">{{ formatNumber(retentionTotals?.retentionMsgs || 0) }}</div>
                 </div>
                 <div class="stat">
                   <div class="stat-label">Completed retention</div>
-                  <div class="stat-value font-mono">{{ formatNumber(retentionTotals?.completedRetentionMsgs || 0) }}</div>
+                  <div class="stat-value">{{ formatNumber(retentionTotals?.completedRetentionMsgs || 0) }}</div>
                 </div>
                 <div class="stat">
                   <div class="stat-label">Eviction</div>
-                  <div class="stat-value font-mono">{{ formatNumber(retentionTotals?.evictionMsgs || 0) }}</div>
+                  <div class="stat-value">{{ formatNumber(retentionTotals?.evictionMsgs || 0) }}</div>
                 </div>
                 <div class="stat">
                   <div class="stat-label">Events</div>
-                  <div class="stat-value font-mono">{{ formatNumber(retentionTotals?.eventCount || 0) }}</div>
+                  <div class="stat-value">{{ formatNumber(retentionTotals?.eventCount || 0) }}</div>
                 </div>
               </div>
               <BaseChart
@@ -147,9 +116,8 @@
         <!-- Top Queues leaderboard (window snapshot) -->
         <div class="card" style="margin-bottom:16px;">
           <div class="card-header">
-            <h3>Top Queues</h3>
+            <h3>Top queues</h3>
             <span class="card-sub">averaged across the window — what to look at first</span>
-            <span class="chip chip-mute">selected range</span>
             <span class="muted">{{ stamp(opsPanel) }}</span>
           </div>
           <div class="card-body">
@@ -157,13 +125,13 @@
             <div v-else-if="hasTopQueueData" class="top-queues-grid">
               <!-- Push rate -->
               <div>
-                <h4 class="label-xs" style="margin-bottom:8px;">By Push/s</h4>
+                <h4 class="qo-rank-head">Push per second</h4>
                 <table v-if="topQueues.push.length" class="t top-queues">
                   <tbody>
                     <tr v-for="(row, i) in topQueues.push" :key="`push-${row.queue}`">
                       <td class="rank">{{ i + 1 }}</td>
                       <td class="qname" :title="row.queue">{{ row.queue }}</td>
-                      <td class="font-mono tabular-nums val">{{ formatRate(row.push) }}</td>
+                      <td class="tabular-nums val">{{ formatRate(row.push) }}</td>
                     </tr>
                   </tbody>
                 </table>
@@ -171,13 +139,13 @@
               </div>
               <!-- Pop rate -->
               <div>
-                <h4 class="label-xs" style="margin-bottom:8px;">By Pop/s</h4>
+                <h4 class="qo-rank-head">Pop per second</h4>
                 <table v-if="topQueues.pop.length" class="t top-queues">
                   <tbody>
                     <tr v-for="(row, i) in topQueues.pop" :key="`pop-${row.queue}`">
                       <td class="rank">{{ i + 1 }}</td>
                       <td class="qname" :title="row.queue">{{ row.queue }}</td>
-                      <td class="font-mono tabular-nums val">{{ formatRate(row.pop) }}</td>
+                      <td class="tabular-nums val">{{ formatRate(row.pop) }}</td>
                     </tr>
                   </tbody>
                 </table>
@@ -185,13 +153,13 @@
               </div>
               <!-- Parked (waiting consumers) -->
               <div>
-                <h4 class="label-xs" style="margin-bottom:8px;">By Parked (waiting consumers)</h4>
+                <h4 class="qo-rank-head">Parked consumers</h4>
                 <table v-if="topQueues.parked.length" class="t top-queues">
                   <tbody>
                     <tr v-for="(row, i) in topQueues.parked" :key="`parked-${row.queue}`">
                       <td class="rank">{{ i + 1 }}</td>
                       <td class="qname" :title="row.queue">{{ row.queue }}</td>
-                      <td class="font-mono tabular-nums val">{{ formatParked(row.parked) }}</td>
+                      <td class="tabular-nums val">{{ formatParked(row.parked) }}</td>
                     </tr>
                   </tbody>
                 </table>
@@ -199,13 +167,13 @@
               </div>
               <!-- Lag -->
               <div>
-                <h4 class="label-xs" style="margin-bottom:8px;">By Avg Lag</h4>
+                <h4 class="qo-rank-head">Average lag</h4>
                 <table v-if="topQueues.lag.length" class="t top-queues">
                   <tbody>
                     <tr v-for="(row, i) in topQueues.lag" :key="`lag-${row.queue}`">
                       <td class="rank">{{ i + 1 }}</td>
                       <td class="qname" :title="row.queue">{{ row.queue }}</td>
-                      <td class="font-mono tabular-nums val">{{ formatDurationMs(row.lag) }}</td>
+                      <td class="tabular-nums val">{{ formatDurationMs(row.lag) }}</td>
                     </tr>
                   </tbody>
                 </table>
@@ -219,7 +187,7 @@
         <!-- Per-Queue Metrics -->
         <div class="card" style="margin-bottom:16px;">
           <div class="card-header">
-            <h3>Per-Queue Metrics</h3>
+            <h3>Per-queue metrics</h3>
             <span class="card-sub">rates and latency, one line per queue</span>
             <span class="muted">{{ stamp(opsPanel) }}</span>
           </div>
@@ -258,7 +226,7 @@
                       <button
                         :class="{ on: viewMode === 'individual' }"
                         @click="viewMode = 'individual'"
-                      >Per Replica</button>
+                      >Per replica</button>
                     </div>
                   </div>
                 </div>
@@ -285,8 +253,8 @@
                 </div>
               </div>
               <div>
-                <h4 class="label-xs" style="margin-bottom:10px;">
-                  {{ queueOpActive.label }} by Queue<span v-if="isParkedIndividual"> &amp; Replica</span>
+                <h4 class="qo-chart-head">
+                  {{ queueOpActive.label }} by queue<span v-if="isParkedIndividual">&amp; replica</span>
                   <span v-if="queueOpActive.kind === 'rate'" style="color:var(--text-low); font-weight:normal;">(per second)</span>
                   <span v-else-if="queueOpActive.kind === 'rate-signed'" style="color:var(--text-low); font-weight:normal;">(push − pop messages/s; positive = backlog filling, negative = draining)</span>
                   <span v-else-if="queueOpActive.kind === 'percent'" style="color:var(--text-low); font-weight:normal;">(long-polls returning a message ÷ all long-poll completions; gaps = quiet bucket)</span>
@@ -304,8 +272,8 @@
                 <div v-else class="empty-tile">No per-queue data for this op yet</div>
               </div>
               <div style="margin-top:20px;">
-                <h4 class="label-xs" style="margin-bottom:10px;">
-                  Avg Latency by Queue
+                <h4 class="qo-chart-head">
+                  Average latency by queue
                   <span style="color:var(--text-low); font-weight:normal;">(measured at pop; gaps = buckets with no pops)</span>
                 </h4>
                 <BaseChart
@@ -337,7 +305,7 @@
             <div v-if="opsError" class="panel-err">{{ describeApiError(opsError) }}</div>
             <template v-else-if="partitionCountChartData.labels.length > 0 || partitionRateChartData.labels.length > 0">
               <div>
-                <h4 class="label-xs" style="margin-bottom:10px;">Partition count by Queue</h4>
+                <h4 class="qo-chart-head">Partition count by queue</h4>
                 <BaseChart
                   v-if="partitionCountChartData.labels.length > 0"
                   :key="`per-queue-partitions-${hasExplicitQueueSelection ? 'legend' : 'nolegend'}`"
@@ -349,7 +317,7 @@
                 <div v-else class="empty-tile">No partition-count snapshots yet</div>
               </div>
               <div style="margin-top:20px;">
-                <h4 class="label-xs" style="margin-bottom:10px;">Partition creation / deletion rate (events per bucket, across all queues)</h4>
+                <h4 class="qo-chart-head">Partition creation / deletion rate (events per bucket, across all queues)</h4>
                 <BaseChart
                   v-if="partitionRateChartData.labels.length > 0"
                   type="bar"
@@ -372,12 +340,10 @@
              the header says so.
              ================================================================== -->
         <template v-if="can('operator')">
-          <div class="cell-section">
-            <span class="cell-tag">CELL · OPERATOR</span>
-            <span>
-              broker-wide worker figures — every tenant on this cell, not just
-              {{ actingTenantSlug || 'this tenant' }}
-            </span>
+          <div class="sect-head qo-cell-head">
+            <h3>Cell</h3>
+            <span class="mono">{{ actingCellSlug || 'unknown cell' }}</span>
+            <span class="sect-scope">Broker-wide worker figures, shared by every tenant on this cell, not just {{ actingTenantSlug || 'this tenant' }}</span>
           </div>
 
           <div v-if="workerError" class="card" style="margin-bottom:16px;">
@@ -390,8 +356,8 @@
             <!-- Throughput Chart -->
             <div class="card" style="margin-bottom:16px;">
               <div class="card-header">
-                <h3>Message Throughput <span class="cell-chip">cell</span></h3>
-                <span class="chip chip-mute">{{ workerData?.pointCount || 0 }} data points</span>
+                <h3>Message throughput</h3>
+                <span class="card-sub">{{ workerData?.pointCount || 0 }} data points</span>
                 <span class="muted">{{ stamp(workerPanel) }}</span>
               </div>
               <div class="card-body">
@@ -421,7 +387,7 @@
             <!-- Message Latency -->
             <div class="card" style="margin-bottom:16px;">
               <div class="card-header">
-                <h3>Message Latency <span class="cell-chip">cell</span></h3>
+                <h3>Message latency</h3>
                 <span class="card-sub">time from push to pop</span>
                 <span class="muted">{{ stamp(workerPanel) }}</span>
               </div>
@@ -445,7 +411,7 @@
                  measurements. -->
             <div class="card" style="margin-bottom:16px;">
               <div class="card-header">
-                <h3>Event Loop Latency <span class="cell-chip">cell</span></h3>
+                <h3>Event loop latency</h3>
                 <span class="card-sub">avg and max delay reported by the broker workers</span>
                 <span class="muted">{{ stamp(workerPanel) }}</span>
               </div>
@@ -479,8 +445,8 @@
                  constant zero wearing the name of a real failure mode. -->
             <div class="card" style="margin-bottom:16px;">
               <div class="card-header">
-                <h3>Errors <span class="cell-chip">cell</span></h3>
-                <span v-if="totalErrors > 0" class="chip" :class="errorChipClass">{{ totalErrors }} in period</span>
+                <h3>Errors</h3>
+                <span v-if="totalErrors > 0" class="card-sub num" :class="chipTone(errorChipClass)">{{ formatNumber(totalErrors) }} in period</span>
                 <span class="muted">{{ stamp(workerPanel) }}</span>
               </div>
               <div class="card-body">
@@ -515,9 +481,9 @@
                  Errors panel above, which is why this chart is separate. -->
             <div class="card" style="margin-bottom:16px;">
               <div class="card-header">
-                <h3>Dead Letter Queue <span class="cell-chip">cell</span></h3>
-                <span class="card-sub">messages moved to DLQ</span>
-                <span v-if="dlqTotal > 0" class="chip" :class="dlqChipClass">{{ formatNumber(dlqTotal) }} in period</span>
+                <h3>Dead letter</h3>
+                <span class="card-sub">messages moved aside</span>
+                <span v-if="dlqTotal > 0" class="card-sub num" :class="chipTone(dlqChipClass)">{{ formatNumber(dlqTotal) }} in period</span>
                 <span class="muted">{{ stamp(workerPanel) }}</span>
               </div>
               <div class="card-body">
@@ -539,8 +505,8 @@
                  above: same never-written worker_metrics columns. -->
             <div v-if="workerData?.workers?.length" class="card">
               <div class="card-header">
-                <h3>Workers Status <span class="cell-chip">cell</span></h3>
-                <span class="chip chip-mute">{{ workerData.workers.length }} workers</span>
+                <h3>Workers</h3>
+                <span class="card-sub">{{ workerData.workers.length }}</span>
                 <span class="muted">{{ stamp(workerPanel) }}</span>
               </div>
               <div class="card-body">
@@ -548,11 +514,11 @@
                   <table class="t">
                     <thead>
                       <tr>
-                        <th>Worker ID</th>
-                        <th>Hostname</th>
-                        <th style="text-align:right;">Avg EL</th>
-                        <th style="text-align:right;">Max EL</th>
-                        <th>Last Seen</th>
+                        <th>Worker</th>
+                        <th>Host</th>
+                        <th style="text-align:right;">Event loop, average</th>
+                        <th style="text-align:right;">Event loop, peak</th>
+                        <th>Last seen</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -563,12 +529,12 @@
                         <td style="font-weight:500;">{{ worker.workerId }}</td>
                         <td style="color:var(--text-mid);">{{ worker.hostname }}</td>
                         <td style="text-align:right;">
-                          <span class="font-mono tabular-nums" :class="{ 'val-warn': worker.avgEventLoopLagMs > 100 }">
+                          <span class="tabular-nums" :class="{ 'val-warn': worker.avgEventLoopLagMs > 100 }">
                             {{ worker.avgEventLoopLagMs }}ms
                           </span>
                         </td>
                         <td style="text-align:right;">
-                          <span class="font-mono tabular-nums" :class="{ 'val-bad': worker.maxEventLoopLagMs > 500 }">
+                          <span class="tabular-nums" :class="{ 'val-bad': worker.maxEventLoopLagMs > 500 }">
                             {{ worker.maxEventLoopLagMs }}ms
                           </span>
                         </td>
@@ -599,12 +565,14 @@ import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { stamp } from '@/composables/useStamp'
 import { useIdentity } from '@/stores/identity'
+import PageHead from '@/components/PageHead.vue'
+import PageTools from '@/components/PageTools.vue'
 import { chartColor, chartTheme, alpha } from '@/composables/useChartTheme'
 import { ackFailureSeverity, dlqGrowthSeverity } from '@/composables/useSeverity'
 import BaseChart from '@/components/BaseChart.vue'
 import MultiSelect from '@/components/MultiSelect.vue'
 
-const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
+const { can, actingTenantSlug, actingCellSlug } = useIdentity()
 
 // ---------------------------------------------------------------------------
 // State
@@ -778,8 +746,8 @@ const toggleThroughputMetric = (key) => { selectedThroughputMetrics[key] = !sele
 // to be red here while the chart drew it in the grey ramp, so the legend was
 // both alarming and wrong about its own chart.
 const eventLoopMetrics = [
-  { key: 'avg', label: 'Avg Event Loop', activeDot: 'var(--series-1)' },
-  { key: 'max', label: 'Max Event Loop', activeDot: 'var(--series-2)' },
+  { key: 'avg', label: 'Average', activeDot: 'var(--series-1)' },
+  { key: 'max', label: 'Peak', activeDot: 'var(--series-2)' },
 ]
 const selectedEventLoopMetrics = reactive({ avg: true, max: true })
 const toggleEventLoopMetric = (key) => { selectedEventLoopMetrics[key] = !selectedEventLoopMetrics[key] }
@@ -792,8 +760,8 @@ const toggleEventLoopMetric = (key) => { selectedEventLoopMetrics[key] = !select
 // ramp; whether the numbers are BAD is the chip in the header, which now
 // computes a rate instead of testing a count against zero.
 const errorMetrics = [
-  { key: 'ackFailed', label: 'Ack Failed', activeDot: 'var(--series-2)' },
-  { key: 'dlq',       label: 'DLQ',        activeDot: 'var(--series-1)' },
+  { key: 'ackFailed', label: 'Ack failures', activeDot: 'var(--series-2)' },
+  { key: 'dlq',       label: 'Dead letters', activeDot: 'var(--series-1)' },
 ]
 const selectedErrorMetrics = reactive({ ackFailed: true, dlq: true })
 const toggleErrorMetric = (key) => { selectedErrorMetrics[key] = !selectedErrorMetrics[key] }
@@ -1165,13 +1133,13 @@ const errorsChartData = computed(() => {
   const datasets = []
   if (selectedErrorMetrics.ackFailed) {
     datasets.push({
-      label: 'Ack Failed', data: ts.map(t => toNum(t.ackFailed)),
+      label: 'Ack failures', data: ts.map(t => toNum(t.ackFailed)),
       backgroundColor: alpha(chartColor(1).line, 0.6), borderColor: chartColor(1).line, borderWidth: 1
     })
   }
   if (selectedErrorMetrics.dlq) {
     datasets.push({
-      label: 'DLQ', data: ts.map(t => toNum(t.dlqCount)),
+      label: 'Dead letters', data: ts.map(t => toNum(t.dlqCount)),
       backgroundColor: alpha(chartColor(0).line, 0.6), borderColor: chartColor(0).line, borderWidth: 1
     })
   }
@@ -1197,7 +1165,7 @@ const dlqChartData = computed(() => {
     // is supposed to mean "this is failing right now". The header chip carries
     // the verdict; the bars carry the shape.
     datasets: [{
-      label: 'DLQ', data,
+      label: 'Dead letters', data,
       backgroundColor: alpha(chartColor(0).line, 0.6),
       borderColor: chartColor(0).line, borderWidth: 1
     }]
@@ -1601,6 +1569,9 @@ watch([selectedQueueOp, viewMode], ([op, mode], [prevOp, prevMode]) => {
   const isIndividualParked  = op === 'parked' && mode === 'individual'
   if (wasIndividualParked !== isIndividualParked) fetchData()
 })
+
+// The header counts are words with a tone, not chips.
+const chipTone = (cls) => (cls === 'chip-bad' ? 'bad' : cls === 'chip-warn' ? 'warn' : '')
 </script>
 
 <style scoped>
@@ -1634,16 +1605,19 @@ watch([selectedQueueOp, viewMode], ([op, mode], [prevOp, prevMode]) => {
    widths on the rank and value columns lets qname reliably absorb
    everything that's left. */
 .top-queues { table-layout: fixed; width: 100%; }
-.top-queues td { padding: 4px 8px; font-size: 12px; }
+.top-queues td { padding: 7px 8px; font-size: 13px; }
 .top-queues td.rank {
   width: 28px; color: var(--text-low); text-align: right;
   font-variant-numeric: tabular-nums; font-size: 11px;
 }
 .top-queues td.qname {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
-  color: var(--text-mid);
+  color: var(--text-hi);
 }
+.qo-rank-head { margin: 0 0 6px; font-size: 12px; font-weight: 500; color: var(--text-low); }
+.qo-chart-head { margin: 0 0 10px; font-size: 12px; font-weight: 500; color: var(--text-mid); }
+.qo-chart-head span { margin-left: 6px; }
+.qo-cell-head { margin: 28px 0 12px; }
 .top-queues td.val {
   width: 80px;
   text-align: right; white-space: nowrap; color: var(--text-hi);

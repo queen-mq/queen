@@ -6,7 +6,7 @@
 
 <script setup>
 import { ref, watch, onMounted, onUnmounted, nextTick } from 'vue'
-import { chartPalette, chartTheme, themeVersion } from '@/composables/useChartTheme'
+import { chartPalette, chartTheme, legendLabels, themeVersion } from '@/composables/useChartTheme'
 import {
   Chart, LineController, BarController, DoughnutController,
   CategoryScale, LinearScale, PointElement, LineElement,
@@ -44,7 +44,7 @@ function buildChartData(data) {
       pointRadius: 0,
       pointHoverRadius: 3,
       pointHoverBackgroundColor: ds.borderColor || c.line,
-      tension: 0.4,
+      tension: 0,
       fill: ds.fill !== false,
       // Don't bridge null buckets — render them as honest gaps so a
       // still-aggregating tail bucket doesn't draw a phantom drop to 0.
@@ -61,7 +61,7 @@ function getThemeOptions() {
     maintainAspectRatio: false,
     interaction: { mode: 'index', intersect: false },
     plugins: {
-      legend: { display: false },
+      legend: { display: false, align: 'end', labels: legendLabels() },
       tooltip: {
         backgroundColor: chartTheme.tooltipBg,
         titleColor: chartTheme.tooltipText,
@@ -108,7 +108,19 @@ function createChart() {
 
   const ctx = canvas.value.getContext('2d')
   const mergedOpts = { ...getThemeOptions() }
-  if (props.options?.plugins) mergedOpts.plugins = { ...mergedOpts.plugins, ...props.options.plugins }
+  if (props.options?.plugins) {
+    const theme = mergedOpts.plugins
+    const own = props.options.plugins
+    mergedOpts.plugins = { ...theme, ...own }
+    // A caller that only switches the legend on keeps the house key style.
+    if (own.legend) {
+      mergedOpts.plugins.legend = {
+        ...theme.legend,
+        ...own.legend,
+        labels: { ...theme.legend.labels, ...(own.legend.labels || {}) },
+      }
+    }
+  }
   if (props.options?.scales?.y?.title) {
     mergedOpts.scales.y.title = { ...props.options.scales.y.title, color: chartTheme.axisTitle }
   }

@@ -1,18 +1,8 @@
 <template>
   <div class="view-container">
 
-    <!-- Scope strip. Built from identity, not from a fetch, so it states the
-         scope while loading, on a failure and on an empty page. Traces owns no
-         range picker, so it carries no .scope-meta. -->
-    <div class="scope-strip">
-      <span class="chip chip-mute">tenant scope</span>
-      <span class="scope-text">
-        <strong>{{ actingTenantSlug || 'no tenant' }}</strong>
-        <span class="scope-sep">/</span>{{ actingClusterSlug || 'no cluster' }}
-        <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
-      </span>
-      <span class="scope-fill"></span>
-    </div>
+    <!-- This page does not poll, so it carries no live tick. -->
+    <PageHead title="Traces" :sub="currentTraceName ? `events named ${currentTraceName}` : ''" />
 
     <!-- Page banners: the failure first, then the broker-capability caveat. -->
     <div v-if="error" class="status-banner banner-bad view-banner">
@@ -29,56 +19,28 @@
       <span>This broker returned every trace in one response — the page controls would page nothing, so they are hidden.</span>
     </div>
 
-    <!-- Search -->
-    <div class="card filters">
-      <div class="card-body filter-rows">
-        <div class="filter-row">
-          <div class="filter-search">
-            <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-            </svg>
-            <input
-              v-model="searchTraceName"
-              type="text"
-              placeholder="Enter a trace name"
-              class="input"
-              @keyup.enter="searchTraces"
-            />
-          </div>
-          <button
-            class="btn btn-primary"
-            :disabled="!searchTraceName || loading"
-            @click="searchTraces"
-          >
-            Search
-          </button>
-          <button
-            v-if="currentTraceName"
-            class="btn btn-ghost"
-            @click="clearSearch"
-          >
-            Clear
-          </button>
-        </div>
-
-        <!-- Quick examples: real trace names for this tenant, or nothing. -->
-        <div v-if="!currentTraceName && exampleTraceNames.length > 0" class="filter-row">
-          <div class="filter-field">
-            <span class="label-xs">Recent trace names</span>
-            <div class="pill-row">
-              <button
-                v-for="example in exampleTraceNames"
-                :key="example"
-                class="pill"
-                @click="searchTraceName = example; searchTraces()"
-              >
-                {{ example }}
-              </button>
-            </div>
-          </div>
-        </div>
+    <PageTools>
+      <div class="filter-search">
+        <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+        </svg>
+        <input v-model="searchTraceName" type="text" placeholder="A trace name" class="input" @keyup.enter="searchTraces" />
       </div>
-    </div>
+      <button class="btn btn-primary" :disabled="!searchTraceName || loading" @click="searchTraces">Search</button>
+      <button v-if="currentTraceName" class="btn btn-ghost" @click="clearSearch">Clear</button>
+      <!-- Quick examples: real trace names for this tenant, or nothing. -->
+      <template v-if="!currentTraceName && exampleTraceNames.length > 0">
+        <span class="tool-label">Recent</span>
+        <div class="pill-row">
+          <button
+            v-for="example in exampleTraceNames"
+            :key="example"
+            class="pill"
+            @click="searchTraceName = example; searchTraces()"
+          >{{ example }}</button>
+        </div>
+      </template>
+    </PageTools>
 
     <!-- Summary -->
     <div v-if="currentTraceName && traces.length > 0" class="card" style="margin-bottom:16px;">
@@ -91,18 +53,18 @@
         <div class="stat-grid stat-grid-3">
           <div class="stat">
             <div class="stat-label">Traces found</div>
-            <div class="stat-value font-mono">{{ totalTraces }}</div>
+            <div class="stat-value">{{ totalTraces }}</div>
           </div>
           <div class="stat">
             <div class="stat-label">Unique messages</div>
-            <div class="stat-value font-mono">{{ uniqueMessages }}</div>
+            <div class="stat-value">{{ uniqueMessages }}</div>
             <div class="stat-foot">on this page</div>
           </div>
           <div class="stat">
             <div class="stat-label">Queues</div>
             <!-- 0 queues would read as "these traces touched no queue". They
                  touched queues the broker could not name for these rows. -->
-            <div class="stat-value font-mono">{{ queueAttributionAvailable ? uniqueQueues : '—' }}</div>
+            <div class="stat-value">{{ queueAttributionAvailable ? uniqueQueues : '—' }}</div>
             <div class="stat-foot">
               {{ queueAttributionAvailable ? 'on this page' : 'queue not recorded for these traces' }}
             </div>
@@ -193,7 +155,7 @@
 
                 <!-- Time -->
                 <td>
-                  <span :title="formatTimestampUtc(trace.created_at)" class="font-mono" style="font-size:12px; color:var(--text-mid); white-space:nowrap;">
+                  <span :title="formatTimestampUtc(trace.created_at)" class="tabular-nums" style="font-size:12px; color:var(--text-mid); white-space:nowrap;">
                     {{ formatTimestamp(trace.created_at) }}
                   </span>
                 </td>
@@ -272,7 +234,7 @@
            from `limit` claimed a page size the response never had. -->
       <div v-if="showPager && (traces.length > 0 || offset > 0)" class="pager">
         <span class="pager-count">
-          Showing <span class="font-mono tabular-nums">{{ shownFrom }}</span>–<span class="font-mono tabular-nums">{{ shownTo }}</span> of <span class="font-mono tabular-nums">{{ totalTraces }}</span>
+          Showing <span class="tabular-nums">{{ shownFrom }}</span>–<span class="tabular-nums">{{ shownTo }}</span> of <span class="tabular-nums">{{ totalTraces }}</span>
         </span>
         <div class="pager-nav">
           <button class="btn btn-ghost" :disabled="offset === 0" @click="previousPage">Previous</button>
@@ -317,7 +279,7 @@
               </div>
 
               <div>
-                <label class="label-xs" style="display:block; margin-bottom:6px;">Queue / Partition</label>
+                <label class="label-xs" style="display:block; margin-bottom:6px;">Queue / partition</label>
                 <p style="font-size:13px; font-weight:500; color:var(--text-hi);">
                   {{ selectedTrace.queue_name || '-' }} / {{ selectedTrace.partition_name || '-' }}
                 </p>
@@ -334,14 +296,14 @@
               </div>
 
               <div v-if="selectedTrace.consumer_group && selectedTrace.consumer_group !== '__QUEUE_MODE__'">
-                <label class="label-xs" style="display:block; margin-bottom:6px;">Consumer Group</label>
+                <label class="label-xs" style="display:block; margin-bottom:6px;">Consumer group</label>
                 <p style="font-size:13px; color:var(--text-mid);">{{ selectedTrace.consumer_group }}</p>
               </div>
             </div>
 
             <!-- Trace Names -->
             <div v-if="selectedTrace.trace_names?.length > 0">
-              <label class="label-xs" style="display:block; margin-bottom:8px;">Trace Names</label>
+              <label class="label-xs" style="display:block; margin-bottom:8px;">Trace names</label>
               <div style="display:flex; flex-wrap:wrap; gap:6px;">
                 <span
                   v-for="name in selectedTrace.trace_names"
@@ -356,7 +318,7 @@
 
             <!-- Trace Data -->
             <div v-if="selectedTrace.data">
-              <label class="label-xs" style="display:block; margin-bottom:8px;">Trace Data</label>
+              <label class="label-xs" style="display:block; margin-bottom:8px;">Trace data</label>
 
               <!-- Text content -->
               <div v-if="selectedTrace.data.text" style="margin-bottom:12px;">
@@ -394,10 +356,10 @@ import { useApi } from '@/composables/useApi'
 import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
 import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
-import { useIdentity } from '@/stores/identity'
 import DetailDrawer from '@/components/DetailDrawer.vue'
+import PageHead from '@/components/PageHead.vue'
+import PageTools from '@/components/PageTools.vue'
 
-const { actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
 
 // Search state
 const searchTraceName = ref('')

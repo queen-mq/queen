@@ -24,7 +24,7 @@ const routes = [
     name: 'Dashboard',
     component: () => import('@/views/Dashboard.vue'),
     meta: {
-      title: 'Dashboard', subtitle: 'System overview and key metrics',
+      title: 'Overview', subtitle: 'System overview and key metrics',
       requires: 'read', scope: 'tenant',
       nav: { group: 'Overview', icon: 'dashboard', order: 1 },
     }
@@ -34,9 +34,9 @@ const routes = [
     name: 'QueueOperations',
     component: () => import('@/views/QueueOperations.vue'),
     meta: {
-      title: 'Queue Operations', subtitle: 'Per-queue throughput, lag, and consumer health',
+      title: 'Queue operations', subtitle: 'Per-queue throughput, lag, and consumer health',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Overview', icon: 'operations', order: 2 },
+      nav: { group: 'Observability', icon: 'operations', order: 1 },
     }
   },
   {
@@ -54,7 +54,7 @@ const routes = [
     name: 'QueueDetail',
     component: () => import('@/views/QueueDetail.vue'),
     meta: {
-      title: 'Queue Detail', subtitle: 'Queue configuration and status',
+      title: 'Queue', subtitle: 'Queue configuration and status',
       requires: 'read', scope: 'tenant',
     }
   },
@@ -69,7 +69,7 @@ const routes = [
     name: 'Ephemeral',
     component: () => import('@/views/Ephemeral.vue'),
     meta: {
-      title: 'Ephemeral Queues', subtitle: 'RAM-class queues — contents survive nothing',
+      title: 'Ephemeral queues', subtitle: 'RAM-class queues — contents survive nothing',
       requires: 'read', scope: 'tenant',
       nav: { group: 'Routing', icon: 'ephemeral', order: 2 },
     }
@@ -79,7 +79,7 @@ const routes = [
     name: 'Consumers',
     component: () => import('@/views/Consumers.vue'),
     meta: {
-      title: 'Consumer Groups', subtitle: 'Monitor consumer lag and status',
+      title: 'Consumer groups', subtitle: 'Monitor consumer lag and status',
       requires: 'read', scope: 'tenant',
       nav: { group: 'Routing', icon: 'consumers', order: 3 },
     }
@@ -95,8 +95,8 @@ const routes = [
     }
   },
   {
-    // State, not Routing: the KV store holds what a tenant has PUT somewhere,
-    // not what is travelling. Read-class and tenant-scoped — the console list
+    // Routing, beside the queues it is used with (Alice, 2026-09-28; it had
+    // its own "State" group). Read-class and tenant-scoped — the console list
     // is `Read` at the proxy by prefix (/api/v1/resources), so a Viewer may
     // browse it, which the batch route /api/v1/kv would never allow.
     path: '/kv',
@@ -105,7 +105,7 @@ const routes = [
     meta: {
       title: 'KV', subtitle: 'Browse the key-value store, namespace by namespace',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'State', icon: 'kv', order: 1 },
+      nav: { group: 'Routing', icon: 'kv', order: 5 },
     }
   },
   {
@@ -119,7 +119,7 @@ const routes = [
     meta: {
       title: 'Timers', subtitle: 'Scheduled messages waiting to fire, per queue',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'State', icon: 'timers', order: 2 },
+      nav: { group: 'Routing', icon: 'timers', order: 6 },
     }
   },
   {
@@ -129,7 +129,7 @@ const routes = [
     meta: {
       title: 'Traces', subtitle: 'Track message flows across queues',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Observability', icon: 'traces', order: 1 },
+      nav: { group: 'Observability', icon: 'traces', order: 2 },
     }
   },
   {
@@ -139,7 +139,7 @@ const routes = [
     meta: {
       title: 'Analytics', subtitle: 'Throughput and performance trends',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Observability', icon: 'analytics', order: 2 },
+      nav: { group: 'Observability', icon: 'analytics', order: 3 },
     }
   },
   {
@@ -152,7 +152,7 @@ const routes = [
     meta: {
       title: 'Workload', subtitle: 'Who is doing the work, how much, and what is stuck',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Observability', icon: 'workload', order: 3 },
+      nav: { group: 'Observability', icon: 'workload', order: 4 },
     }
   },
   {
@@ -160,9 +160,9 @@ const routes = [
     name: 'DeadLetter',
     component: () => import('@/views/DeadLetter.vue'),
     meta: {
-      title: 'Dead Letter', subtitle: 'Inspect, replay and purge failed messages',
+      title: 'Dead letter', subtitle: 'Inspect, replay and purge failed messages',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Observability', icon: 'dlq', order: 4 },
+      nav: { group: 'Observability', icon: 'dlq', order: 5 },
     }
   },
   {

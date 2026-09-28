@@ -1,18 +1,25 @@
 <template>
   <div class="view-container">
 
-    <!-- Scope. These rows are the acting tenant's, on the acting cluster's cell;
-         saying so is what keeps a tenant number from being read as a cell number.
-         Built from identity, not from the fetch, so it survives a failed load. -->
-    <div class="scope-strip">
-      <span class="chip chip-mute">tenant scope</span>
-      <span class="scope-text">
-        <strong>{{ actingTenantSlug || 'no tenant' }}</strong>
-        <span class="scope-sep">/</span>{{ actingClusterSlug || 'no cluster' }}
-        <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
-      </span>
-      <span class="scope-fill"></span>
-    </div>
+    <PageHead title="Messages">
+      <template #range>
+        <div class="seg" role="group" aria-label="Created in">
+          <button
+            v-for="r in RANGE_PRESETS"
+            :key="r.value"
+            :class="{ on: rangePreset === r.value }"
+            :aria-pressed="rangePreset === r.value ? 'true' : 'false'"
+            @click="pickRange(r)"
+          >{{ r.value }}</button>
+          <button :class="{ on: rangePreset === 'custom' }" @click="rangePreset = 'custom'">Custom</button>
+        </div>
+      </template>
+      <!-- `can('produce')` mirrors the proxy's RouteClass::Produce for
+           /api/v1/push, so the button is absent rather than enabled-and-403. -->
+      <template v-if="canProduce" #actions>
+        <button class="btn" @click="openPush">Push message</button>
+      </template>
+    </PageHead>
 
     <!-- The list failed. Whatever is in the table below is stale, and saying so
          is the whole point — an empty table would read as "no messages". -->
@@ -32,149 +39,79 @@
       </span>
     </div>
 
-    <!-- Filters. Two groups in one card, separated by a rule: WHAT to look
-         for on top, then the WINDOW to look in, with the actions on that
-         window's right edge. Every one of the nine controls wears its label
-         above it — four control shapes in a wrapping row only read as a grid
-         when their labels line up. -->
-    <div class="card filters msg-filters">
-      <div class="card-body filter-rows">
-
-        <!-- Entity filters -->
-        <div class="filter-row">
-          <!-- Client-side only: this narrows the rows already on the page, it
-               is not a server-side transaction lookup. The label says so, so
-               the box beside four server-side fields cannot be read as one. -->
-          <div class="filter-field-col msg-field-search">
-            <label class="label-xs" for="msg-search-filter">Search loaded rows</label>
-            <div class="filter-search">
-              <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-              </svg>
-              <input
-                id="msg-search-filter"
-                v-model="searchQuery"
-                type="text"
-                placeholder="Transaction or partition ID"
-                class="input"
-                title="Filters the rows already on this page. It is not a server-side transaction lookup."
-              />
-            </div>
-          </div>
-
-          <!-- Free entry allowed: `queue` is a server-side parameter here, and a
-               deep link can arrive with a queue this cluster's list does not
-               carry. -->
-          <div class="filter-field-col">
-            <label class="label-xs" for="msg-queue-filter">Queue</label>
-            <Autocomplete
-              id="msg-queue-filter"
-              v-model="filterQueue"
-              :options="queueNames"
-              :loading="queuesLoading"
-              label="Queue"
-              placeholder="All queues"
-              allow-custom
-            />
-          </div>
-
-          <div class="filter-field-col">
-            <label class="label-xs" for="msg-partition-filter">Partition name</label>
-            <input
-              id="msg-partition-filter"
-              v-model="filterPartition"
-              type="text"
-              placeholder="Filter by name..."
-              class="input"
-            />
-          </div>
-
-          <div class="filter-field-col">
-            <label class="label-xs" for="msg-status-filter">Status</label>
-            <select id="msg-status-filter" v-model="filterStatus" class="input">
-              <option value="">All Status</option>
-              <option value="pending">Pending</option>
-              <option value="processing">Processing</option>
-              <option value="completed">Completed</option>
-              <option value="dead_letter">Dead Letter</option>
-            </select>
-          </div>
-
-          <div class="filter-field-col">
-            <label class="label-xs" for="msg-limit-filter">Limit</label>
-            <select id="msg-limit-filter" v-model="limit" class="input">
-              <option :value="50">50 messages</option>
-              <option :value="100">100 messages</option>
-              <option :value="200">200 messages</option>
-              <option :value="500">500 messages</option>
-            </select>
-          </div>
-        </div>
-
-        <!-- Time window and actions, under the rule: everything here is the
-             server-side window, and Apply is what sends it. The 1h / 24h / 7d
-             buttons only PREFILL the two inputs — nothing is selected until
-             Apply runs — so they stay loose buttons under a "quick fill"
-             label instead of becoming a range picker with an active state the
-             page has not chosen. -->
-        <div class="filter-row filter-row-sep">
-          <div class="filter-field-col msg-field-time">
-            <label class="label-xs" for="msg-from-filter">From</label>
-            <input id="msg-from-filter" v-model="filterFrom" type="datetime-local" class="input" :title="formatTimestampUtc(filterFrom)" />
-          </div>
-
-          <div class="filter-field-col msg-field-time">
-            <label class="label-xs" for="msg-to-filter">To</label>
-            <input id="msg-to-filter" v-model="filterTo" type="datetime-local" class="input" :title="formatTimestampUtc(filterTo)" />
-          </div>
-
-          <div class="filter-field-col msg-field-quick">
-            <span class="label-xs">Quick fill</span>
-            <div class="msg-quick-row">
-              <button class="btn btn-ghost" @click="setTimeRange(1)">1h</button>
-              <button class="btn btn-ghost" @click="setTimeRange(24)">24h</button>
-              <button class="btn btn-ghost" @click="setTimeRange(168)">7d</button>
-            </div>
-          </div>
-
-          <div class="filter-field-right msg-filter-actions">
-            <button class="btn btn-primary" @click="applyFilters">Apply</button>
-            <button v-if="hasActiveFilters" class="btn btn-ghost" @click="clearFilters">Clear</button>
-
-            <!-- The page's one WRITE, on the same right edge as the filter
-                 actions but behind a rule: "Apply" and "Push message" must not
-                 read as two halves of one group. `can('produce')` mirrors the
-                 proxy's RouteClass::Produce for /api/v1/push, so the button is
-                 absent rather than enabled-and-403. -->
-            <template v-if="canProduce">
-              <span class="msg-action-rule" aria-hidden="true"></span>
-              <button class="btn" @click="openPush">Push message</button>
-            </template>
-          </div>
-        </div>
+    <PageTools>
+      <!-- Client-side only: this narrows the rows already on the page, it is
+           not a server-side transaction lookup, and the placeholder says so. -->
+      <div class="filter-search" title="Filters the rows already on this page. It is not a server-side transaction lookup.">
+        <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+        </svg>
+        <input v-model="searchQuery" type="text" placeholder="Search loaded rows" class="input" />
       </div>
+      <!-- Free entry allowed: `queue` is a server-side parameter here, and a
+           deep link can arrive with a queue this cluster's list does not
+           carry. -->
+      <label class="tool-field" for="msg-queue-filter">
+        <span class="tool-label">Queue</span>
+        <Autocomplete
+          id="msg-queue-filter"
+          v-model="filterQueue"
+          :options="queueNames"
+          :loading="queuesLoading"
+          label="Queue"
+          placeholder="All"
+          allow-custom
+        />
+      </label>
+      <label class="tool-field">
+        <span class="tool-label">Partition</span>
+        <input v-model="filterPartition" type="text" placeholder="All" class="input" />
+      </label>
+      <label class="tool-field">
+        <span class="tool-label">Status</span>
+        <select v-model="filterStatus" class="input">
+          <option value="">All</option>
+          <option value="pending">Pending</option>
+          <option value="processing">Processing</option>
+          <option value="completed">Completed</option>
+          <option value="dead_letter">Dead letter</option>
+        </select>
+      </label>
+      <button v-if="hasActiveFilters" class="btn btn-ghost" @click="clearFilters">Clear</button>
+      <template #view>
+        <label class="tool-field">
+          <span class="tool-label">Show</span>
+          <select v-model="limit" class="input" @change="applyFilters">
+            <option :value="50">50</option>
+            <option :value="100">100</option>
+            <option :value="200">200</option>
+            <option :value="500">500</option>
+          </select>
+        </label>
+      </template>
+    </PageTools>
+
+    <!-- A window of your own: the one filter that waits for Apply, because
+         a half-typed date must not re-scope the list. -->
+    <div v-if="rangePreset === 'custom'" class="page-tools">
+      <label class="tool-field">
+        <span class="tool-label">From</span>
+        <input v-model="filterFrom" type="datetime-local" class="input" :title="formatTimestampUtc(filterFrom)" />
+      </label>
+      <label class="tool-field">
+        <span class="tool-label">To</span>
+        <input v-model="filterTo" type="datetime-local" class="input" :title="formatTimestampUtc(filterTo)" />
+      </label>
+      <button class="btn btn-primary" @click="applyFilters">Apply</button>
     </div>
 
     <!-- Bus mode. Driven by what the rows actually report as well as by the
          top-level mode: a log-engine queue reports its groups per message. -->
-    <div v-if="busGroups > 0" class="card" style="margin-bottom:16px;">
-      <div class="card-body">
-        <div style="display:flex; align-items:center; gap:8px; font-size:13px;">
-          <svg style="width:16px; height:16px; color:var(--text-mid);" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-          </svg>
-          <span style="font-weight:600; color:var(--text-hi);">Bus Mode Active</span>
-          <span class="chip chip-ice">{{ busGroups }} consumer group(s)</span>
-        </div>
-      </div>
-    </div>
-
     <!-- Messages list -->
     <div class="card">
       <div class="card-header">
         <h3>Messages</h3>
-        <span class="chip chip-mute">{{ formatNumber(messages.length) }} loaded</span>
-        <span class="chip chip-mute">page <span class="font-mono tabular-nums">{{ currentPage }}</span></span>
+        <span class="card-sub">{{ formatNumber(messages.length) }} loaded · page {{ currentPage }}<template v-if="busGroups > 0"> · bus mode, {{ busGroups }} consumer {{ busGroups === 1 ? 'group' : 'groups' }}</template></span>
         <span class="muted">{{ stamp(listPanel) }}</span>
       </div>
 
@@ -241,26 +178,19 @@
                     payload expired
                   </span>
                 </td>
-                <td :title="formatTimestampUtc(message.createdAt)" class="font-mono tabular-nums" style="text-align:right; font-size:12px; color:var(--text-mid); white-space:nowrap;">
+                <td :title="formatTimestampUtc(message.createdAt)" class="tabular-nums" style="text-align:right; font-size:12px; color:var(--text-mid); white-space:nowrap;">
                   {{ formatTimestamp(message.createdAt) }}
                 </td>
-                <td style="text-align:right;">
-                  <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">
-                    <span
-                      class="chip"
-                      :class="{
-                        'chip-ice': message.status === 'pending',
-                        'chip-mute': message.status === 'processing',
-                        'chip-ok': message.status === 'completed',
-                        'chip-bad': message.status === 'dead_letter' || message.status === 'failed'
-                      }"
-                    >
-                      {{ message.status }}
-                    </span>
-                    <div v-if="message.busStatus && message.busStatus.totalGroups > 0" style="font-size:11px; color:var(--text-low);">
-                      {{ message.busStatus.consumedBy }}/{{ message.busStatus.totalGroups }} groups
-                    </div>
-                  </div>
+                <td style="text-align:right; white-space:nowrap;">
+                  <!-- One line: the status as a word (coloured only when it is a
+                       failure), and how many groups have it, beside it. -->
+                  <span
+                    class="msg-status"
+                    :class="{ 'is-bad': message.status === 'dead_letter' || message.status === 'failed', 'is-live': message.status === 'pending' || message.status === 'processing' }"
+                  >{{ statusLabel(message.status) }}</span>
+                  <span v-if="message.busStatus && message.busStatus.totalGroups > 0" class="msg-groups">
+                    · {{ message.busStatus.consumedBy }}/{{ message.busStatus.totalGroups }} groups
+                  </span>
                 </td>
               </tr>
             </template>
@@ -298,7 +228,7 @@
       <!-- Pagination. Not drawn under an empty first page or under a failure:
            Previous/Next below "no messages" offer travel that goes nowhere. -->
       <div v-if="messages.length || currentPage > 1" class="pager">
-        <span class="pager-count">Page <span class="font-mono tabular-nums">{{ currentPage }}</span></span>
+        <span class="pager-count">Page <span class="tabular-nums">{{ currentPage }}</span></span>
         <div class="pager-nav">
           <button class="btn btn-ghost" :disabled="currentPage === 1" @click="prevPage">Previous</button>
           <button class="btn btn-ghost" :disabled="!canPageForward" @click="nextPage">Next</button>
@@ -308,7 +238,7 @@
 
     <DetailDrawer
       :open="Boolean(selectedMessage)"
-      title="Message Detail"
+      title="Message"
       :subtitle="messageDetail?.transactionId || selectedMessage?.transactionId || ''"
       wide
       :split="Boolean(messageDetail)"
@@ -326,24 +256,14 @@
       <template v-else-if="messageDetail">
           <!-- Status and routing match the DLQ drawer: the same facts occupy
                the same positions and identifiers are directly copyable. -->
+          <!-- The status as a word, coloured only when it is a failure; the
+               retry count is a count beside it. -->
           <div class="detail-status-row">
             <span
-              class="chip"
-              :class="{
-                'chip-ice': messageDetail.status === 'pending',
-                'chip-mute': messageDetail.status === 'processing',
-                'chip-ok': messageDetail.status === 'completed',
-                'chip-bad': messageDetail.status === 'dead_letter' || messageDetail.status === 'failed'
-              }"
-            >
-              {{ messageDetail.status }}
-            </span>
-            <!-- A retry count is a count. The status chip beside it is where
-                 the verdict lives — a message that ran out of retries reads
-                 `dead_letter` there and is red on that word alone. -->
-            <span v-if="messageDetail.retryCount" class="chip chip-mute">
-              {{ messageDetail.retryCount }} retries
-            </span>
+              class="msg-status detail-status"
+              :class="{ 'is-bad': messageDetail.status === 'dead_letter' || messageDetail.status === 'failed', 'is-live': messageDetail.status === 'pending' || messageDetail.status === 'processing' }"
+            >{{ statusLabel(messageDetail.status) }}</span>
+            <span v-if="messageDetail.retryCount" class="detail-note">· {{ messageDetail.retryCount }} {{ messageDetail.retryCount === 1 ? 'retry' : 'retries' }}</span>
           </div>
 
           <div class="detail-fields">
@@ -367,12 +287,11 @@
             mono
             copyable
             boxed
-            tone="danger"
+            tone="high"
           />
 
-          <!-- Queue Config -->
           <div v-if="messageDetail.queueConfig" class="detail-section">
-            <h4 class="detail-section-title">Queue Config</h4>
+            <h4 class="detail-section-title">Queue configuration</h4>
             <div class="card detail-config-grid">
               <div><span>Lease time</span><strong>{{ messageDetail.queueConfig.leaseTime }}s</strong></div>
               <div><span>TTL</span><strong>{{ messageDetail.queueConfig.ttl }}s</strong></div>
@@ -383,23 +302,13 @@
 
           <!-- Consumer Groups -->
           <div v-if="messageDetail.consumerGroups && messageDetail.consumerGroups.length > 0" class="detail-section">
-            <h4 class="detail-section-title">Consumer Groups</h4>
-            <div style="display:flex; flex-direction:column; gap:8px;">
-              <div
-                v-for="group in messageDetail.consumerGroups"
-                :key="group.name"
-                class="card"
-                style="display:flex; align-items:center; justify-content:space-between; padding:10px 14px;"
-              >
-                <span style="font-size:13px; font-weight:500; color:var(--text-hi);">{{ group.name === '__QUEUE_MODE__' ? 'Queue Mode' : group.name }}</span>
-                <span
-                  class="chip"
-                  :class="group.consumed ? 'chip-ok' : 'chip-ice'"
-                >
-                  {{ group.consumed ? 'Consumed' : 'Pending' }}
-                </span>
-              </div>
-            </div>
+            <h4 class="detail-section-title">Consumer groups</h4>
+            <ul class="detail-list">
+              <li v-for="group in messageDetail.consumerGroups" :key="group.name">
+                <span>{{ group.name === '__QUEUE_MODE__' ? 'Queue mode' : group.name }}</span>
+                <span :class="group.consumed ? 'detail-note' : 'msg-status is-live'">{{ group.consumed ? 'Consumed' : 'Pending' }}</span>
+              </li>
+            </ul>
           </div>
 
           <!-- Actions -->
@@ -408,14 +317,9 @@
                  a delete failure hoisted to the top would land off screen. -->
             <div v-if="actionError" class="panel-err">{{ actionError }}</div>
 
-            <div v-if="messageDetail.status === 'completed'" class="card" style="padding:12px 14px; border-color:var(--ok-bd);">
-              <div style="display:flex; gap:8px; align-items:center; font-size:13px; color:var(--ok-500);">
-                <svg style="width:18px; height:18px; flex-shrink:0;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <p>This message has been successfully consumed and acknowledged.</p>
-              </div>
-            </div>
+            <p v-if="messageDetail.status === 'completed'" class="detail-note">
+              Consumed and acknowledged.
+            </p>
 
             <!-- Only dead-lettered messages are deletable: a live payload lives
                  in an immutable log segment, and the broker answers a delete on
@@ -425,11 +329,8 @@
               v-if="isDeletable && canAdmin"
               @click="deleteMessage"
               :disabled="actionLoading"
-              class="btn btn-danger" style="width:100%; justify-content:center;"
+              class="btn btn-danger"
             >
-              <svg style="width:16px; height:16px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-              </svg>
               {{ actionLoading ? 'Purging…' : 'Purge dead-letter entry' }}
             </button>
 
@@ -466,7 +367,7 @@
                 broker that carries the encryption key.
               </p>
               <template v-else>
-                <button class="btn" style="width:100%; justify-content:center;" @click="openPushCopy">
+                <button class="btn" @click="openPushCopy">
                   Push a copy
                 </button>
                 <p style="font-size:12px; color:var(--text-low);">
@@ -545,9 +446,11 @@ import DetailDrawer from '@/components/DetailDrawer.vue'
 import DetailField from '@/components/DetailField.vue'
 import JsonViewer from '@/components/JsonViewer.vue'
 import PushMessageModal from '@/components/PushMessageModal.vue'
+import PageHead from '@/components/PageHead.vue'
+import PageTools from '@/components/PageTools.vue'
 
 const route = useRoute()
-const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
+const { can } = useIdentity()
 const { notifySuccess, notifyError } = useToast()
 
 // State
@@ -683,6 +586,20 @@ const toISOString = (dateTimeLocal) => {
   return new Date(dateTimeLocal).toISOString()
 }
 
+// The window, as a range like every other page's: a preset applies at once;
+// Custom opens the two dates and waits for Apply.
+const RANGE_PRESETS = [
+  { value: '1h', hours: 1 },
+  { value: '24h', hours: 24 },
+  { value: '7d', hours: 168 },
+]
+const rangePreset = ref(route.query.from || route.query.to ? 'custom' : '1h')
+const pickRange = (preset) => {
+  rangePreset.value = preset.value
+  setTimeRange(preset.hours)
+  applyFilters()
+}
+
 // Set time range preset
 const setTimeRange = (hours) => {
   const now = new Date()
@@ -700,6 +617,7 @@ const clearFilters = () => {
   filterStatus.value = ''
 
   // Reset to default last 1 hour
+  rangePreset.value = '1h'
   setTimeRange(1)
 
   applyFilters()
@@ -927,49 +845,14 @@ watch([filterQueue, filterPartition, filterStatus], () => {
   currentPage.value = 1
   fetchMessages()
 })
+
+// Status words as a person reads them; the wire value stays in the drawer.
+const statusLabel = (st) => ({ pending: 'Pending', processing: 'Processing', completed: 'Completed', dead_letter: 'Dead letter', failed: 'Failed' }[st] || st)
 </script>
 
 <style scoped>
-/* --- Filter card ----------------------------------------------------------
-   Nine controls, more than any other filter card in the app carries, so the
-   per-field sizing is tuned HERE rather than by widening the shared
-   `.filter-field-col` that eleven other views also stand on. Only the widths
-   are local; the column, the rule and the right-edge slot are the shared
-   ones. Colours come from the tokens, so both schemes follow. */
-
-/* The search box is the row's subject and the widest thing in it, so it gets
-   first call on the slack. `.filter-search` is written for a flex ROW: inside
-   the column that now carries its label, its `flex: 1 1 220px` would become a
-   220px HEIGHT. */
-.msg-field-search { flex: 2 1 240px; max-width: 320px; }
-.msg-field-search > .filter-search {
-  flex: 0 0 auto; width: 100%; min-width: 0; max-width: none;
-}
-
-/* A datetime-local draws its own `YYYY-MM-DD, --:--` and is unreadable at the
-   shared 150px floor — it clips the time off the end. */
-.msg-field-time { flex: 0 1 200px; min-width: 196px; max-width: 210px; }
-
-/* Three loose buttons sized by their own content, wearing the same label
-   treatment as the fields beside them. */
-.msg-field-quick { flex: 0 0 auto; min-width: 0; max-width: none; }
-.msg-quick-row { display: flex; align-items: center; gap: 6px; }
-
-/* Apply/Clear ride the right edge of the time row (`.filter-field-right`) and
-   simply trail the quick-fill buttons once the row wraps. */
-.msg-filter-actions { display: flex; align-items: center; gap: 8px; }
-
-/* The hairline between the filter actions and the one action that CHANGES
-   something. Two pixels of rule are what keep "Push message" from being read
-   as a third way of applying a filter. */
-.msg-action-rule { width: 1px; align-self: stretch; margin: 0 2px; background: var(--bd); }
-
-/* One control height across the card. Without it the row's `align-items:
-   flex-end` bottom-aligns controls of three different natural heights and the
-   labels above them come out ragged — which is most of what read as mess.
-   `:deep` is needed for the one control that lives in a child component
-   (Autocomplete's input). */
-.msg-filters :deep(.input),
-.msg-filters .btn { height: 28px; box-sizing: border-box; }
-.msg-filters :deep(select.input) { line-height: 1; }
+.msg-status { font-size: 12px; color: var(--text-low); }
+.msg-status.is-live { color: var(--text-hi); }
+.msg-status.is-bad { color: var(--ember-400); }
+.msg-groups { font-size: 12px; color: var(--text-low); }
 </style>

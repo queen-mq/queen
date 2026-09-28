@@ -111,98 +111,108 @@
             </p>
 
             <!-- ----------------------------------------------- common options -->
-            <div class="qc-group">
-              <span class="label-xs qc-group-title">Options</span>
-              <!-- A text row is a <label> wrapping its input, the way every
-                   form in this app writes one; a boolean row cannot be, because
-                   its own <label> wraps the checkbox and a label inside a label
-                   is invalid markup that toggles the box from the wrong click. -->
+            <div class="qc-section">
+              <h4 class="qc-section-title">Options</h4>
+              <!-- A text row is a <label> wrapping its input; a boolean row
+                   cannot be, because its switch is two buttons and a label
+                   around them would forward every click to the first. -->
               <component
                 :is="meta.type === 'bool' ? 'div' : 'label'"
                 v-for="meta in commonOptions"
                 :key="meta.key"
-                class="qc-field"
+                class="qc-row"
               >
-                <span class="qc-option-head">
-                  <span class="label-xs">{{ meta.label }}</span>
+                <span class="qc-row-label">{{ meta.label }}</span>
+                <span class="qc-row-help">
+                  <span v-if="errors[meta.key]" class="qc-invalid">{{ errors[meta.key] }}</span>
+                  <template v-else>{{ meta.help }}</template>
+                </span>
+                <span class="qc-row-control">
+                  <span v-if="meta.type === 'bool'" class="seg" role="group" :aria-label="meta.label">
+                    <button type="button" :class="{ on: form[meta.key] === true }" :aria-pressed="form[meta.key] === true ? 'true' : 'false'" @click="form[meta.key] = true">On</button>
+                    <button type="button" :class="{ on: form[meta.key] === false }" :aria-pressed="form[meta.key] === false ? 'true' : 'false'" @click="form[meta.key] = false">Off</button>
+                  </span>
+                  <span v-else class="qc-input" :class="{ 'qc-input-text': meta.type !== 'int' }">
+                    <input
+                      v-model="form[meta.key]"
+                      class="input"
+                      :class="meta.type === 'int' ? 'tabular-nums' : 'font-mono'"
+                      autocomplete="off"
+                      spellcheck="false"
+                      :inputmode="meta.type === 'int' ? 'numeric' : 'text'"
+                      :placeholder="blankPlaceholder(meta)"
+                    />
+                    <span v-if="meta.unit" class="qc-unit">{{ meta.unit }}</span>
+                  </span>
+                  <!-- The default, stated on every row: it is what a blank field
+                       means, and the number an operator is moving away from. -->
                   <span class="qc-default">default {{ formatOptionValue(meta, meta.default) }}</span>
                 </span>
-
-                <label v-if="meta.type === 'bool'" class="qc-check">
-                  <input v-model="form[meta.key]" type="checkbox" />
-                  <span>{{ form[meta.key] ? 'on' : 'off' }}</span>
-                </label>
-                <input
-                  v-else
-                  v-model="form[meta.key]"
-                  class="input font-mono"
-                  autocomplete="off"
-                  spellcheck="false"
-                  :inputmode="meta.type === 'int' ? 'numeric' : 'text'"
-                  :placeholder="blankPlaceholder(meta)"
-                />
-
-                <span v-if="errors[meta.key]" class="qc-invalid">{{ errors[meta.key] }}</span>
-                <span v-else class="qc-help">{{ meta.help }}</span>
               </component>
             </div>
 
             <!-- --------------------------------------------- advanced options -->
-            <button type="button" class="qc-toggle" @click="showAdvanced = !showAdvanced">
-              <span class="qc-toggle-chev" :class="{ 'qc-toggle-open': showAdvanced }" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
-                </svg>
-              </span>
-              Advanced options
-              <!-- Retention and encryption live under this fold. If any of them
-                   is already off its default, the fold says so rather than
-                   hiding the fact that this queue deletes data on a timer. -->
-              <span v-if="advancedOffDefault" class="chip chip-mute qc-toggle-badge">
-                {{ advancedOffDefault }} not at the default
-              </span>
-            </button>
-
-            <div v-if="showAdvanced" class="qc-group">
+            <div class="qc-section">
+              <button type="button" class="qc-toggle" :aria-expanded="showAdvanced ? 'true' : 'false'" @click="showAdvanced = !showAdvanced">
+                <span class="qc-toggle-chev" :class="{ 'qc-toggle-open': showAdvanced }" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+                  </svg>
+                </span>
+                Advanced options
+                <!-- Retention and encryption live under this fold. If any of
+                     them is already off its default, the fold says so rather
+                     than hiding that this queue deletes data on a timer. -->
+                <span v-if="advancedOffDefault" class="qc-toggle-note">· {{ advancedOffDefault }} not at the default</span>
+              </button>
+              <template v-if="showAdvanced">
+              <!-- A text row is a <label> wrapping its input; a boolean row
+                   cannot be, because its switch is two buttons and a label
+                   around them would forward every click to the first. -->
               <component
                 :is="meta.type === 'bool' ? 'div' : 'label'"
                 v-for="meta in advancedOptions"
                 :key="meta.key"
-                class="qc-field"
+                class="qc-row"
               >
-                <span class="qc-option-head">
-                  <span class="label-xs">{{ meta.label }}</span>
+                <span class="qc-row-label">{{ meta.label }}</span>
+                <span class="qc-row-help">
+                  <span v-if="errors[meta.key]" class="qc-invalid">{{ errors[meta.key] }}</span>
+                  <template v-else>{{ meta.help }}</template>
+                  <!-- Turning encryption on is not retroactive in either
+                       direction, and an operator who reads this switch as "make
+                       this queue's data encrypted" would be wrong about
+                       everything already stored. -->
+                  <span v-if="meta.key === 'encryptionEnabled' && isEditing" class="qc-caution">
+                    Not retroactive: frames already in the queue stay exactly as they are, and only
+                    pushes after this save are encrypted. The broker that serves this call drops its
+                    cached flag at once and tells its peers to do the same; a peer that misses that
+                    frame picks it up on the next cache refresh (60 s by default).
+                  </span>
+                </span>
+                <span class="qc-row-control">
+                  <span v-if="meta.type === 'bool'" class="seg" role="group" :aria-label="meta.label">
+                    <button type="button" :class="{ on: form[meta.key] === true }" :aria-pressed="form[meta.key] === true ? 'true' : 'false'" @click="form[meta.key] = true">On</button>
+                    <button type="button" :class="{ on: form[meta.key] === false }" :aria-pressed="form[meta.key] === false ? 'true' : 'false'" @click="form[meta.key] = false">Off</button>
+                  </span>
+                  <span v-else class="qc-input" :class="{ 'qc-input-text': meta.type !== 'int' }">
+                    <input
+                      v-model="form[meta.key]"
+                      class="input"
+                      :class="meta.type === 'int' ? 'tabular-nums' : 'font-mono'"
+                      autocomplete="off"
+                      spellcheck="false"
+                      :inputmode="meta.type === 'int' ? 'numeric' : 'text'"
+                      :placeholder="blankPlaceholder(meta)"
+                    />
+                    <span v-if="meta.unit" class="qc-unit">{{ meta.unit }}</span>
+                  </span>
+                  <!-- The default, stated on every row: it is what a blank field
+                       means, and the number an operator is moving away from. -->
                   <span class="qc-default">default {{ formatOptionValue(meta, meta.default) }}</span>
                 </span>
-
-                <label v-if="meta.type === 'bool'" class="qc-check">
-                  <input v-model="form[meta.key]" type="checkbox" />
-                  <span>{{ form[meta.key] ? 'on' : 'off' }}</span>
-                </label>
-                <input
-                  v-else
-                  v-model="form[meta.key]"
-                  class="input font-mono"
-                  autocomplete="off"
-                  spellcheck="false"
-                  :inputmode="meta.type === 'int' ? 'numeric' : 'text'"
-                  :placeholder="blankPlaceholder(meta)"
-                />
-
-                <span v-if="errors[meta.key]" class="qc-invalid">{{ errors[meta.key] }}</span>
-                <span v-else class="qc-help">{{ meta.help }}</span>
-
-                <!-- Turning encryption on is not retroactive in either
-                     direction, and an operator who reads this switch as "make
-                     this queue's data encrypted" would be wrong about
-                     everything already stored. -->
-                <span v-if="meta.key === 'encryptionEnabled' && isEditing" class="qc-caution">
-                  Not retroactive: frames already in the queue stay exactly as they are, and only
-                  pushes after this save are encrypted. The broker that serves this call drops its
-                  cached flag at once and tells its peers to do the same; a peer that misses that
-                  frame picks it up on the next cache refresh (60 s by default).
-                </span>
               </component>
+              </template>
             </div>
 
             <!-- --------------------------------------------------- the rule -->
@@ -589,63 +599,74 @@ const submit = async () => {
    from and still under its own pickers. */
 .qc-over { z-index: 55; }
 
-/* Wider than the 480px shell: this form is two columns of labels plus a helper
-   sentence per option, and at 480px every sentence wraps to four lines. */
-.qc-card { max-width: 560px; }
+/* A settings sheet: what each option is on the left, its control on the
+   right. Wide enough that a help sentence runs two lines, not four. */
+.qc-card { max-width: 680px; }
 
-.qc-form { display: grid; gap: 14px; }
+.qc-form { display: grid; gap: 18px; }
 .qc-form .panel-err { margin-bottom: 0; }
-.qc-field { display: grid; gap: 6px; }
-.qc-help { color: var(--text-low); font-size: 11.5px; line-height: 1.45; }
-.qc-invalid { color: var(--ember-400); font-size: 11.5px; line-height: 1.45; }
-.qc-warn { color: var(--warn-400); font-size: 11.5px; line-height: 1.45; }
-.qc-caution {
-  padding: 7px 9px; font-size: 11.5px; line-height: 1.45; color: var(--warn-400);
-  border: 1px solid var(--warn-bd); border-radius: var(--r-control);
-  background: var(--warn-glow);
-}
 
+/* Identity: the name and the two discovery labels, stacked. */
+.qc-field { display: grid; gap: 6px; }
+.qc-field > .label-xs { font-size: 13px; font-weight: 500; color: var(--text-hi); }
+.qc-help { color: var(--text-low); font-size: 12px; line-height: 1.5; }
+.qc-invalid { color: var(--ember-400); font-size: 12px; line-height: 1.5; }
+.qc-warn { color: var(--warn-400); font-size: 12px; line-height: 1.5; }
 /* Namespace and task are one decision in two fields, so they share a row and
    one helper sentence below them. */
 .qc-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.qc-pair-help { margin: -6px 0 0; }
+.qc-pair-help { margin: -8px 0 0; }
 
-.qc-group { display: grid; gap: 12px; }
-.qc-group-title { color: var(--text-low); }
-
-.qc-option-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-/* The default, stated on every row: it is what a blank field means, and the
-   number an operator is deciding to move away from. */
-.qc-default { color: var(--text-low); font-size: 11px; white-space: nowrap; }
-
-.qc-check {
-  display: flex; align-items: center; gap: 8px;
-  font-size: 12.5px; color: var(--text-mid); cursor: pointer;
+/* Option rows. */
+.qc-section { display: grid; }
+.qc-section-title { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--text-hi); }
+.qc-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 28px; row-gap: 4px; align-items: start;
+  padding: 14px 0; border-top: 1px solid var(--bd-soft);
 }
-.qc-check input { width: 16px; height: 16px; accent-color: var(--accent); }
+.qc-row-label { grid-column: 1; font-size: 13px; font-weight: 500; color: var(--text-hi); }
+.qc-row-help { grid-column: 1; display: grid; gap: 6px; font-size: 12px; line-height: 1.5; color: var(--text-low); }
+.qc-row-control {
+  grid-column: 2; grid-row: 1 / span 2;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+}
+.qc-input {
+  display: inline-flex; align-items: center; width: 148px; height: 32px; padding-right: 10px;
+  border: 1px solid var(--bd-hi); border-radius: var(--r-control); background: var(--ink-3);
+}
+.qc-input:focus-within { box-shadow: 0 0 0 1px var(--ring); }
+.qc-input .input {
+  width: 100%; min-width: 0; height: 30px; padding: 0 0 0 10px; text-align: right;
+  border: 0; background: transparent; box-shadow: none;
+}
+.qc-input-text { width: 200px; }
+.qc-input-text .input { text-align: left; }
+.qc-unit { margin-left: 6px; font-size: 12px; color: var(--text-low); }
+.qc-default { font-size: 11px; color: var(--text-low); white-space: nowrap; }
+/* Not retroactive, and said where the switch is. */
+.qc-caution { color: var(--warn-400); }
 
 .qc-toggle {
-  display: flex; align-items: center; gap: 8px;
-  padding: 0; border: none; background: none; cursor: pointer;
-  font-size: 12px; font-weight: 600; color: var(--text-mid);
+  display: flex; align-items: center; gap: 8px; padding: 10px 0;
+  border: none; border-top: 1px solid var(--bd-soft); background: none; cursor: pointer;
+  font-size: 13px; font-weight: 600; color: var(--text-hi); text-align: left;
 }
 .qc-toggle:hover { color: var(--text-hi); }
-.qc-toggle-chev { display: inline-flex; width: 12px; height: 12px; transition: transform 0.15s ease; }
+.qc-toggle-chev { display: inline-flex; width: 12px; height: 12px; color: var(--text-low); transition: transform 0.15s ease; }
 .qc-toggle-chev svg { width: 12px; height: 12px; }
 .qc-toggle-open { transform: rotate(90deg); }
-.qc-toggle-badge { font-weight: 500; }
+.qc-toggle-note { font-weight: 400; font-size: 12px; color: var(--text-low); }
 
-.qc-note {
-  margin: 0; padding: 9px 10px;
-  font-size: 11.5px; line-height: 1.45; color: var(--text-mid);
-  border: 1px solid var(--bd); border-radius: var(--r-control);
-  background: var(--ink-3);
-}
+/* The rule the save follows, said once, plainly, above the buttons. */
+.qc-note { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-low); }
 
 /* The footer's left-hand statement; the buttons stay right-aligned. */
-.qc-foot-note { margin-right: auto; font-size: 11.5px; color: var(--text-low); }
+.qc-foot-note { margin-right: auto; font-size: 12px; color: var(--text-low); }
 
 @media (max-width: 560px) {
   .qc-pair { grid-template-columns: 1fr; }
+  .qc-row { grid-template-columns: minmax(0, 1fr); }
+  .qc-row-control { grid-column: 1; grid-row: auto; align-items: flex-start; }
 }
 </style>

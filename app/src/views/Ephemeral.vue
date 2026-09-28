@@ -1,24 +1,17 @@
 <template>
   <div class="view-container">
 
-    <!-- Tenant scope, built from identity and never from the fetch — same
-         strip as Queues, because these queues belong to the acting tenant on
-         this cell too. The class chip is not decoration: everything below is
-         RAM, and the page has to say so before it says anything else. -->
-    <div class="scope-strip">
-      <span class="chip chip-mute">tenant scope</span>
-      <span class="scope-text">
-        <strong>{{ actingTenantSlug || 'no tenant' }}</strong>
-        <span class="scope-sep">/</span>{{ actingClusterSlug || 'no cluster' }}
-        <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
-      </span>
-      <span class="scope-fill"></span>
-      <router-link to="/queues" class="chip chip-mute" style="text-decoration:none;">durable queues →</router-link>
-      <span
-        class="chip chip-ice"
-        title="Contents live in broker RAM and survive nothing — not a restart, not a crash, not a deploy, not an ownership move"
-      >RAM class</span>
-    </div>
+    <!-- The class is not decoration: everything below is RAM, and the page has
+         to say so before it says anything else — so it is the head's fact. -->
+    <PageHead
+      title="Ephemeral queues"
+      :live="support === 'live' ? refreshAgo : ''"
+      :live-title="POLL_NOTE"
+    >
+      <template #sub>
+        <span title="Contents live in broker RAM and survive nothing — not a restart, not a crash, not a deploy, not an ownership move">in broker RAM — contents survive nothing</span>
+      </template>
+    </PageHead>
 
     <!-- ===================== Not exposed here =====================
          404 (broker older than 1.1), 404 route_blocked (proxy does not
@@ -102,48 +95,36 @@
             <strong>{{ num(totals.drops) }}</strong>
           </span>
         </div>
-        <div class="counts-group counts-group-right">
-          <span class="live-tick" :title="POLL_NOTE">
-            <span class="pulse" />
-            <span>live · {{ refreshAgo }}</span>
-          </span>
-        </div>
       </div>
 
-      <!-- Filters. High queue cardinality is the point of this class (thousands
-           of req/reply inboxes), so search and an explicit order are not a
+      <!-- High queue cardinality is the point of this class (thousands of
+           req/reply inboxes), so search and an explicit order are not a
            convenience here — they are how the page stays readable. -->
-      <div class="card filters">
-        <div class="card-body filter-rows">
-          <div class="filter-row">
-            <div class="filter-search">
-              <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-              </svg>
-              <input v-model="searchQuery" type="text" placeholder="Search ephemeral queues..." class="input" />
-            </div>
-
-            <div class="filter-field">
-              <span class="label-xs">Sort</span>
-              <div class="seg">
-                <button
-                  v-for="opt in sortOptions"
-                  :key="opt.value"
-                  :class="{ on: sortBy === opt.value }"
-                  @click="sortBy = opt.value"
-                >{{ opt.label }}</button>
-              </div>
-            </div>
-
-            <div class="filter-field">
-              <label class="filter-check">
-                <input v-model="declaredOnly" type="checkbox" />
-                Declared only
-              </label>
+      <PageTools>
+        <div class="filter-search">
+          <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+          </svg>
+          <input v-model="searchQuery" type="text" placeholder="Search ephemeral queues…" class="input" />
+        </div>
+        <label class="tool-check">
+          <input v-model="declaredOnly" type="checkbox" />
+          <span>Declared only</span>
+        </label>
+        <template #view>
+          <div class="tool-seg">
+            <span class="tool-label">Sort</span>
+            <div class="seg">
+              <button
+                v-for="opt in sortOptions"
+                :key="opt.value"
+                :class="{ on: sortBy === opt.value }"
+                @click="sortBy = opt.value"
+              >{{ opt.label }}</button>
             </div>
           </div>
-        </div>
-      </div>
+        </template>
+      </PageTools>
 
       <!-- ===================== The table ===================== -->
       <div class="card">
@@ -223,7 +204,7 @@
                     <td :colspan="colCount" style="background:var(--recessed); padding:12px 16px;">
                       <div class="eph-detail-meta">
                         <span v-if="row.partitions !== null"><b>{{ num(row.partitions) }}</b> partition{{ row.partitions === 1 ? '' : 's' }}</span>
-                        <span v-if="row.head !== null">ring head <b class="font-mono">{{ num(row.head) }}</b></span>
+                        <span v-if="row.head !== null">ring head <b class="tabular-nums">{{ num(row.head) }}</b></span>
                         <span v-if="row.owner">owner <b class="font-mono">{{ row.owner }}</b></span>
                         <span class="eph-detail-note">contents survive nothing — this is a snapshot of RAM</span>
                       </div>
@@ -377,9 +358,11 @@ import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { useToast } from '@/composables/useToast'
 import { useEphemeralStore } from '@/stores/ephemeralStore'
 import { useIdentity } from '@/stores/identity'
+import PageHead from '@/components/PageHead.vue'
+import PageTools from '@/components/PageTools.vue'
 import { lossSeverity } from '@/composables/useSeverity'
 
-const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
+const { can } = useIdentity()
 const { notifySuccess } = useToast()
 
 const store = useEphemeralStore()

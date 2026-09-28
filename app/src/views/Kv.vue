@@ -1,31 +1,25 @@
 <template>
   <div class="view-container">
 
-    <!-- Tenant scope, from identity and never from the fetch. Two key counts
-         sit beside it and they COUNT DIFFERENT SCOPES: `N keys` is every row
-         of every namespace, counted when the queue listing was read, `N in
-         <ns>` every row of one namespace, counted when the picker was filled.
-         Both include expired rows awaiting sweep. Both titles say so; the
-         script header has the why. -->
-    <div class="scope-strip">
-      <span class="chip chip-mute">tenant scope</span>
-      <span class="scope-text">
-        <strong>{{ actingTenantSlug || 'no tenant' }}</strong>
-        <span class="scope-sep">/</span>{{ actingClusterSlug || 'no cluster' }}
-        <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
-      </span>
-      <span class="scope-fill"></span>
-      <span v-if="usageMeasured" class="chip chip-mute" :title="TENANT_TOTAL_TITLE">
-        {{ formatNumber(kvRows) }} keys
-      </span>
-      <span v-if="usageMeasured && kvBytes !== null" class="scope-meta" :title="TENANT_BYTES_TITLE">
-        {{ formatBytes(kvBytes) }}
-      </span>
-      <span v-if="exactCount !== null" class="scope-meta" :title="EXACT_COUNT_TITLE">
-        {{ formatNumber(exactCount) }} in {{ namespace }}
-      </span>
-      <span class="scope-meta">{{ stamp(listPanel) }}</span>
-    </div>
+    <!-- Two key counts sit beside the title and they COUNT DIFFERENT SCOPES:
+         `N keys` is every row of every namespace, counted when the queue
+         listing was read, `N in <ns>` every row of one namespace, counted when
+         the picker was filled. Both include expired rows awaiting sweep. Both
+         titles say so; the script header has the why. -->
+    <PageHead title="KV">
+      <template #sub>
+        <span v-if="usageMeasured" :title="TENANT_TOTAL_TITLE">{{ formatNumber(kvRows) }} keys</span>
+        <template v-if="usageMeasured && kvBytes !== null"> · <span :title="TENANT_BYTES_TITLE">{{ formatBytes(kvBytes) }}</span></template>
+        <template v-if="exactCount !== null"> · <span :title="EXACT_COUNT_TITLE">{{ formatNumber(exactCount) }} in {{ namespace }}</span></template>
+        <template v-if="stamp(listPanel)"> · {{ stamp(listPanel) }}</template>
+      </template>
+      <!-- §2.5 D6. Said on the page and not only in the plan: a console that
+           can read application state is expected to be able to edit it, and
+           the absence of an Edit button is not an answer. -->
+      <template #actions>
+        <span class="tool-note" :title="READ_ONLY_TITLE">Read-only — this page never writes to the store</span>
+      </template>
+    </PageHead>
 
     <!-- ===================== The three quiet states =====================
          Not here / not in the plan / not being served right now. One card, no
@@ -68,90 +62,62 @@
         </span>
       </div>
 
-      <!-- Filters. The namespace is not a filter, it is the ADDRESS: KV keys
-           are unique inside one namespace and the stored procedure takes it as
-           a required argument, so nothing is listable without one. -->
-      <div class="card filters">
-        <div class="card-body filter-rows">
-          <div class="filter-row">
-            <div class="filter-field-col filter-field-wide">
-              <label class="label-xs" for="kv-namespace">Namespace</label>
-              <!-- A select rather than the Autocomplete the timers page uses:
-                   the exact key count belongs IN the option, and Autocomplete
-                   renders plain strings. A tenant has a handful of namespaces
-                   (they are declared, not derived from traffic), so the list
-                   stays short by construction. -->
-              <select
-                v-if="!namespacesUnavailable"
-                id="kv-namespace"
-                v-model="namespace"
-                class="input"
-                :disabled="nsLoading && !options.length"
-              >
-                <option value="">{{ namespacePlaceholder }}</option>
-                <option v-for="o in options" :key="o.namespace" :value="o.namespace">{{ o.label }}</option>
-              </select>
-              <input
-                v-else
-                id="kv-namespace"
-                v-model="namespaceDraft"
-                class="input"
-                placeholder="namespace"
-                spellcheck="false"
-                @change="applyNamespaceDraft"
-              />
-            </div>
-
-            <!-- The prefix replaces "jump to page 47". Keys in this store are
-                 structured (`wh.deliver:<tenant>:<id>`), so a prefix is a tight
-                 index range — one seek, the same cost as the first page — which
-                 is the only navigation a keyset walk can offer. -->
-            <div class="filter-field-col filter-field-wide">
-              <label class="label-xs" for="kv-prefix">Key prefix</label>
-              <input
-                id="kv-prefix"
-                v-model="prefixDraft"
-                class="input"
-                placeholder="prefix — e.g. wh.deliver:"
-                spellcheck="false"
-                :title="prefixHint"
-                @keyup.enter="applyPrefixNow"
-              />
-            </div>
-
-            <div class="filter-field-col">
-              <label class="label-xs" for="kv-limit">Page size</label>
-              <select id="kv-limit" v-model.number="limit" class="input">
-                <option :value="50">50</option>
-                <option :value="100">100</option>
-                <option :value="250">250</option>
-              </select>
-            </div>
-
-            <!-- §2.5 D6. Said on the page and not only in the plan: a console
-                 that can read application state is expected to be able to edit
-                 it, and the absence of an Edit button is not an answer. -->
-            <span class="filter-hint filter-field-right" :title="READ_ONLY_TITLE">
-              Read-only — this page never writes to the KV store.
-            </span>
-          </div>
-          <!-- Hints live UNDER the row, never inside a column: the row aligns
-               its columns at the bottom, so a one-line hint beside a two-line
-               one lifted each label and input by a different amount and the
-               card read as two rows. Down here a hint can be any length. -->
-          <div class="filter-foot">
-            <span v-if="namespacesUnavailable" class="filter-hint">
-              Namespace list unavailable — type a namespace and press Enter
-            </span>
-            <span v-else-if="unlistedNamespace" class="filter-hint">
-              Not in this tenant's namespace list — asking the broker anyway
-            </span>
-            <span v-else-if="noNamespaces" class="filter-hint">Nothing written to the store yet.</span>
-            <span v-else class="filter-hint">Counts are exact, taken with the list.</span>
-            <span class="filter-hint">{{ prefixHint }}</span>
-          </div>
-        </div>
-      </div>
+      <!-- The namespace is not a filter, it is the ADDRESS: KV keys are unique
+           inside one namespace and the stored procedure takes it as a required
+           argument, so nothing is listable without one. -->
+      <PageTools>
+        <!-- A select rather than an Autocomplete: the exact key count belongs
+             IN the option. A tenant has a handful of namespaces (declared, not
+             derived from traffic), so the list stays short by construction. -->
+        <label class="tool-field" for="kv-namespace">
+          <span class="tool-label">Namespace</span>
+          <select
+            v-if="!namespacesUnavailable"
+            id="kv-namespace"
+            v-model="namespace"
+            class="input"
+            :disabled="nsLoading && !options.length"
+          >
+            <option value="">{{ namespacePlaceholder }}</option>
+            <option v-for="o in options" :key="o.namespace" :value="o.namespace">{{ o.label }}</option>
+          </select>
+          <input
+            v-else
+            id="kv-namespace"
+            v-model="namespaceDraft"
+            class="input"
+            placeholder="type one, then Enter"
+            spellcheck="false"
+            @change="applyNamespaceDraft"
+          />
+        </label>
+        <!-- The prefix replaces "jump to page 47": keys here are structured
+             (`wh.deliver:<tenant>:<id>`), so a prefix is a tight index range —
+             one seek, the same cost as the first page. -->
+        <label class="tool-field" for="kv-prefix" :title="prefixHint">
+          <span class="tool-label">Prefix</span>
+          <input
+            id="kv-prefix"
+            v-model="prefixDraft"
+            class="input"
+            placeholder="e.g. wh.deliver:"
+            spellcheck="false"
+            @keyup.enter="applyPrefixNow"
+          />
+        </label>
+        <span v-if="namespacesUnavailable" class="tool-note">Namespace list unavailable — type a namespace and press Enter</span>
+        <span v-else-if="unlistedNamespace" class="tool-note">Not in this tenant's namespace list — asking the broker anyway</span>
+        <template #view>
+          <label class="tool-field" for="kv-limit">
+            <span class="tool-label">Show</span>
+            <select id="kv-limit" v-model.number="limit" class="input">
+              <option :value="50">50</option>
+              <option :value="100">100</option>
+              <option :value="250">250</option>
+            </select>
+          </label>
+        </template>
+      </PageTools>
 
       <!-- ===================== The page =====================
            One request, one page, no client-side slice: DataTable is fed
@@ -184,13 +150,13 @@
 
           <template #expires="{ row }">
             <div :class="row.expired ? 'kv-expiry warn' : 'kv-expiry'">{{ row.expires }}</div>
-            <div v-if="row.expiresAt" class="font-mono kv-sub" :title="formatTimestampUtc(row.expiresAt)">
+            <div v-if="row.expiresAt" class="kv-sub tabular-nums" :title="formatTimestampUtc(row.expiresAt)">
               {{ formatTimestamp(row.expiresAt) }}
             </div>
           </template>
 
           <template #updated="{ row }">
-            <span class="font-mono kv-sub" :title="formatTimestampUtc(row.updatedAt)">
+            <span class="kv-sub tabular-nums" :title="formatTimestampUtc(row.updatedAt)">
               {{ formatTimestamp(row.updatedAt) }}
             </span>
           </template>
@@ -213,7 +179,7 @@
           <span class="pager-count">
             <template v-if="firstLoad">Loading…</template>
             <template v-else>
-              Page <span class="font-mono tabular-nums">{{ loadedPage }}</span>
+              Page <span class="tabular-nums">{{ loadedPage }}</span>
               · {{ pageRows.length }} row{{ pageRows.length === 1 ? '' : 's' }}
               <template v-if="pageBytes !== null">
                 · <span :title="PAGE_BYTES_TITLE">{{ formatBytes(pageBytes) }} of values</span>
@@ -238,6 +204,22 @@
           <p>Nothing loaded — this is a failure, not an empty namespace.</p>
           <button class="btn btn-ghost" @click="reload">Retry</button>
         </div>
+
+        <template v-else-if="!namespace && options.length">
+          <div class="card-header">
+            <h3>Namespaces</h3>
+            <span class="card-sub">keys are listed one namespace at a time; the counts are exact</span>
+          </div>
+          <ul class="pick-list">
+            <li v-for="o in options" :key="o.namespace">
+              <button class="pick-row" @click="namespace = o.namespace">
+                <span class="pick-name">{{ o.namespace }}</span>
+                <span class="pick-count">{{ o.keys === null ? '—' : `${formatNumber(o.keys)} ${o.keys === 1 ? 'key' : 'keys'}` }}</span>
+                <span class="pick-go" aria-hidden="true">Open →</span>
+              </button>
+            </li>
+          </ul>
+        </template>
 
         <div v-else-if="!namespace" class="empty-state">
           <svg class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
@@ -397,6 +379,8 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import DataTable from '@/components/DataTable.vue'
+import PageHead from '@/components/PageHead.vue'
+import PageTools from '@/components/PageTools.vue'
 import DetailDrawer from '@/components/DetailDrawer.vue'
 import DetailField from '@/components/DetailField.vue'
 import JsonViewer from '@/components/JsonViewer.vue'
@@ -418,7 +402,7 @@ import { routeSupport } from '@/stores/routeSupport'
 
 const route = useRoute()
 const router = useRouter()
-const { epoch, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
+const { epoch } = useIdentity()
 const { notifyError } = useToast()
 
 /** How long the prefix box waits for the typing to stop. Every applied prefix
@@ -786,7 +770,7 @@ reload()
 <style scoped>
 /* The namespace names and the key prefixes are long and dotted; the page-size
    select next to them is three digits wide and must not take the same room. */
-.filter-field-wide { flex-basis: 260px; max-width: 340px; }
+
 
 /* DataTable renders its own card and exposes no footer slot, so the keyset
    strip is a second card joined to the first: one border, one rule between

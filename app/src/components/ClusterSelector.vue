@@ -1,15 +1,6 @@
 <template>
   <div class="cluster-select" ref="root">
-    <!-- Collapsed rail: the acting cluster still has to be identifiable, or
-         the user cannot tell whose numbers are on screen. -->
-    <button
-      v-if="collapsed"
-      class="cluster-chip-mini"
-      :title="titleText"
-      @click="open = !open"
-    >{{ miniLabel }}</button>
-
-    <button v-else class="cluster-chip" :title="titleText" @click="open = !open">
+    <button class="cluster-chip" :title="titleText" @click="open = !open">
       <div class="cluster-chip-text">
         <div class="cluster-line">
           <span class="cluster-tenant">{{ actingTenantSlug || '—' }}</span>
@@ -71,7 +62,6 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import { useIdentity } from '@/stores/identity'
 
-defineProps({ collapsed: Boolean })
 
 const {
   clusters, actingCluster, actingClusterSlug, actingTenantSlug, actingCellSlug,
@@ -96,10 +86,6 @@ const roleLabel = computed(() => {
   if (operatorLive.value) return 'operator · admin'
   return role.value ? `role ${role.value}` : 'no role'
 })
-
-const miniLabel = computed(() =>
-  (actingClusterSlug.value || '?').slice(0, 2).toUpperCase()
-)
 
 const titleText = computed(() =>
   `tenant ${actingTenantSlug.value || '—'} · cluster ${actingClusterSlug.value || '—'} · cell ${actingCellSlug.value || 'unknown'} · ${roleLabel.value}`

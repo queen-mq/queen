@@ -1,98 +1,81 @@
 <template>
   <div class="view-container">
 
-    <!-- Scope strip. Every number below is this tenant's; the cell it runs on
-         is named too, so a tenant figure is never read as a cell figure. -->
-    <div class="scope-strip">
-      <span class="chip chip-mute">tenant scope</span>
-      <span class="scope-text">
-        <strong>{{ actingTenantSlug || 'no tenant' }}</strong>
-        <span class="scope-sep">/</span>{{ actingClusterSlug || 'no cluster' }}
-        <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
-      </span>
-      <span class="scope-fill"></span>
-      <!-- The fallback is a DIFFERENT provenance, so it is labelled: these
-           numbers were rolled up in this browser, not by the broker. -->
-      <span v-if="fallbackMode" class="chip chip-mute" :title="FALLBACK_TITLE">computed client-side</span>
-      <span class="scope-meta" :title="rangeUtcTitle">{{ rangeLabel }}</span>
-      <span class="scope-meta">{{ stamp(workload) }}</span>
-    </div>
-
-    <!-- Filters -->
-    <div class="card filters">
-      <div class="card-body filter-rows">
-        <div class="filter-row">
-          <div class="filter-field">
-            <span class="label-xs">Range</span>
-            <div class="seg">
-              <button
-                v-for="r in timeRanges"
-                :key="r.value"
-                :class="{ on: selectedRange === r.value && !customMode }"
-                @click="selectQuickRange(r.value)"
-              >{{ r.label }}</button>
-              <button :class="{ on: customMode }" @click="toggleCustomMode">Custom</button>
-            </div>
-          </div>
-
-          <div class="filter-field">
-            <span class="label-xs">Group by</span>
-            <div class="seg">
-              <button :class="{ on: groupBy === 'namespace' }" @click="selectGroupBy('namespace')">namespace</button>
-              <button :class="{ on: groupBy === 'task' }" @click="selectGroupBy('task')">task</button>
-            </div>
-          </div>
-
-          <div class="filter-field">
-            <span class="label-xs">{{ groupBy }}</span>
-            <select class="input" :value="focus === null ? '*' : focus" @change="pickFocus($event.target.value)">
-              <option value="*">{{ rootCrumb }}</option>
-              <option v-for="o in focusOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
-            </select>
-          </div>
-
-          <div class="filter-field">
-            <span class="label-xs">Compare</span>
-            <div class="seg">
-              <button
-                v-for="c in compareModes"
-                :key="c.value"
-                :class="{ on: compare === c.value }"
-                @click="selectCompare(c.value)"
-              >{{ c.label }}</button>
-            </div>
-          </div>
-
-          <span class="filter-hint">{{ focusHint }}</span>
+    <PageHead title="Workload" :live="refreshAgo">
+      <template #sub>
+        <span :title="rangeUtcTitle">{{ rangeLabel }}</span>
+        <!-- The fallback is a DIFFERENT provenance, so it is labelled: these
+             numbers were rolled up in this browser, not by the broker. -->
+        <template v-if="fallbackMode"> · <span :title="FALLBACK_TITLE">computed in this browser</span></template>
+      </template>
+      <template #range>
+        <div class="seg" role="group" aria-label="Time range">
+          <button
+            v-for="r in timeRanges"
+            :key="r.value"
+            :class="{ on: selectedRange === r.value && !customMode }"
+            @click="selectQuickRange(r.value)"
+          >{{ r.label }}</button>
+          <button :class="{ on: customMode }" @click="toggleCustomMode">Custom</button>
         </div>
+      </template>
+    </PageHead>
 
-        <div v-if="customMode" class="filter-row filter-row-sep">
-          <div class="filter-field">
-            <span class="label-xs">From</span>
-            <input v-model="customFrom" type="datetime-local" class="input" :title="formatTimestampUtc(customFrom)" />
-          </div>
-          <div class="filter-field">
-            <span class="label-xs">To</span>
-            <input v-model="customTo" type="datetime-local" class="input" :title="formatTimestampUtc(customTo)" />
-          </div>
-          <span v-if="customError" class="filter-hint">{{ customError }}</span>
-          <button class="btn btn-primary" :disabled="!customRangeValid" @click="applyCustomRange">Apply</button>
-        </div>
-
-        <!-- Focus breadcrumb. Drilling in is a REFETCH with groupBy=queue and
-             the namespace/task as a filter, not a client-side slice. -->
-        <div class="filter-row filter-row-sep wl-crumbs">
-          <button class="crumb" :disabled="focus === null" @click="goRoot">{{ rootCrumb }}</button>
-          <template v-if="focus !== null">
-            <span class="crumb-sep">›</span>
-            <button class="crumb" :disabled="!selectedQueue" @click="selectedQueue = null">{{ focusName }}</button>
-          </template>
-          <template v-if="selectedQueue">
-            <span class="crumb-sep">›</span>
-            <button class="crumb" disabled>{{ selectedQueue }}</button>
-          </template>
-        </div>
+    <PageTools>
+      <label class="tool-field" :title="focusHint">
+        <span class="tool-label">{{ groupBy === 'task' ? 'Task' : 'Namespace' }}</span>
+        <select class="input" :value="focus === null ? '*' : focus" @change="pickFocus($event.target.value)">
+          <option value="*">{{ rootCrumb }}</option>
+          <option v-for="o in focusOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+        </select>
+      </label>
+      <!-- Where the drill stands, once it has left the root. Drilling in is a
+           REFETCH with groupBy=queue and the namespace/task as a filter, not a
+           client-side slice. -->
+      <div v-if="focus !== null" class="wl-crumbs">
+        <button class="crumb" @click="goRoot">{{ rootCrumb }}</button>
+        <span class="crumb-sep">›</span>
+        <button class="crumb" :disabled="!selectedQueue" @click="selectedQueue = null">{{ focusName }}</button>
+        <template v-if="selectedQueue">
+          <span class="crumb-sep">›</span>
+          <button class="crumb" disabled>{{ selectedQueue }}</button>
+        </template>
       </div>
+      <template #view>
+        <div class="tool-seg">
+          <span class="tool-label">Group by</span>
+          <div class="seg">
+            <button :class="{ on: groupBy === 'namespace' }" @click="selectGroupBy('namespace')">Namespace</button>
+            <button :class="{ on: groupBy === 'task' }" @click="selectGroupBy('task')">Task</button>
+          </div>
+        </div>
+        <div class="tool-seg">
+          <span class="tool-label">Compare</span>
+          <div class="seg">
+            <button
+              v-for="c in compareModes"
+              :key="c.value"
+              :class="{ on: compare === c.value }"
+              @click="selectCompare(c.value)"
+            >{{ c.label }}</button>
+          </div>
+        </div>
+      </template>
+    </PageTools>
+
+    <!-- A window of your own: the only range that waits for Apply, because a
+         half-typed date must not re-scope the page. -->
+    <div v-if="customMode" class="page-tools">
+      <label class="tool-field">
+        <span class="tool-label">From</span>
+        <input v-model="customFrom" type="datetime-local" class="input" :title="formatTimestampUtc(customFrom)" />
+      </label>
+      <label class="tool-field">
+        <span class="tool-label">To</span>
+        <input v-model="customTo" type="datetime-local" class="input" :title="formatTimestampUtc(customTo)" />
+      </label>
+      <button class="btn btn-primary" :disabled="!customRangeValid" @click="applyCustomRange">Apply</button>
+      <span v-if="customError" class="tool-note is-bad">{{ customError }}</span>
     </div>
 
     <!-- Counts. The tenant totals, whatever the rows below are filtered to. -->
@@ -268,7 +251,7 @@
       <div class="card">
         <div class="card-header">
           <h3>Pending</h3>
-          <span class="card-sub">red = no consumer group</span>
+          <span class="card-sub">amber = no consumer group</span>
           <span class="chip chip-mute">now</span>
         </div>
         <div class="card-body">
@@ -657,19 +640,22 @@ import Heatmap from '@/components/Heatmap.vue'
 import { analytics, consumers, describeApiError, system } from '@/api'
 import { useApi } from '@/composables/useApi'
 import { categorySlot } from '@/composables/useCategoryColors'
-import { alpha, categoryPalette, chartPalette, chartTheme, semanticColors, themeVersion } from '@/composables/useChartTheme'
+import { alpha, categoryPalette, chartPalette, chartTheme, legendLabels, semanticColors, themeVersion } from '@/composables/useChartTheme'
 import { ackFailureSeverity, backlogSeverity } from '@/composables/useSeverity'
 import {
   formatDateTimeLocal, formatTimestampRange, formatTimestampRangeUtc, formatTimestampUtc,
   validateRange,
 } from '@/composables/useFormat'
 import { useAutoRefresh } from '@/composables/useRefresh'
+import { useRefreshAgo } from '@/composables/useRefreshAgo'
+import PageHead from '@/components/PageHead.vue'
+import PageTools from '@/components/PageTools.vue'
 import { stamp } from '@/composables/useStamp'
 import {
   comparisonRange, deeperFindings, efficiency, enrichRows, findings, flowSeries, formatters as fmt,
   heatCells, rollupFromQueueOps, sameHourBaseline, totalSeries, trimOpenBucket, weeklyProfile, windowDeltas,
 } from '@/composables/useWorkload'
-import { onClusterChange, useIdentity } from '@/stores/identity'
+import { onClusterChange } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
 import { isMissingRoute, routeSupport } from '@/stores/routeSupport'
 
@@ -687,7 +673,6 @@ Chart.register(
   LineElement, LinearScale, LogarithmicScale, PointElement, Tooltip,
 )
 
-const { actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
 const queuesStore = useQueuesStore()
 
 // ---------------------------------------------------------------------------
@@ -977,10 +962,10 @@ const levelWord = computed(() => (level.value === 'queue' ? 'queue' : groupBy.va
 // five minutes on the refresh tick: a 7 day comparison is not a cheap read.
 // ---------------------------------------------------------------------------
 const compareModes = [
-  { value: 'off', label: 'off' },
-  { value: 'previous', label: 'previous period' },
-  { value: 'yesterday', label: 'same time yesterday' },
-  { value: 'lastWeek', label: 'same time last week' },
+  { value: 'off', label: 'Off' },
+  { value: 'previous', label: 'Previous period' },
+  { value: 'yesterday', label: 'Same time yesterday' },
+  { value: 'lastWeek', label: 'Same time last week' },
 ]
 const compare = ref('off')
 const compareLabel = computed(() => (
@@ -1063,6 +1048,8 @@ function fetchAll() {
 
 fetchAll()
 useAutoRefresh(fetchAll)
+// The live tick counts from the last load that succeeded.
+const refreshAgo = useRefreshAgo(workload.lastUpdated)
 
 // A different cluster can be a different cell running a different broker, so
 // the verdict resets with it — exactly as the tenant-keyed stores do.
@@ -1304,9 +1291,7 @@ function applyDefaults() {
   Chart.defaults.plugins.tooltip.bodyColor = chartTheme.tooltipBody
   Chart.defaults.plugins.tooltip.padding = 8
   Chart.defaults.plugins.tooltip.cornerRadius = 6
-  Chart.defaults.plugins.legend.labels.usePointStyle = true
-  Chart.defaults.plugins.legend.labels.boxWidth = 8
-  Chart.defaults.plugins.legend.labels.color = chartTheme.tooltipBody
+  Object.assign(Chart.defaults.plugins.legend.labels, legendLabels())
 }
 
 // Queue names are long and their distinctive part is the tail, so they are
@@ -1574,7 +1559,7 @@ function renderPending() {
       labels,
       datasets: [
         { label: 'with a consumer group', data: sorted.map((r) => r.now.pending - r.now.pendingWithoutGroup), backgroundColor: sorted.map((r) => alpha(tone(r.now.pending), 0.85)), borderRadius: 2 },
-        { label: 'no consumer group', data: sorted.map((r) => r.now.pendingWithoutGroup), backgroundColor: alpha(semanticColors.bad.line, 0.9), borderRadius: 2 },
+        { label: 'no consumer group', data: sorted.map((r) => r.now.pendingWithoutGroup), backgroundColor: alpha(semanticColors.warn.line, 0.9), borderRadius: 2 },
       ],
     },
     options,
@@ -2475,7 +2460,7 @@ onUnmounted(() => {
 
 /* Counts strip tones (the strip itself is global). */
 .wl-warn { color: var(--warn-400) !important; }
-.count-delta { font-style: normal; font-family: var(--font-mono); font-size: 11px; color: var(--text-low); margin-left: 6px; }
+.count-delta { font-style: normal; font-size: 11px; color: var(--text-low); margin-left: 6px; font-variant-numeric: tabular-nums; }
 .wl-bad { color: var(--ember-400) !important; }
 
 /* Findings: dot · sentence · evidence, one hairline per row. */
@@ -2510,9 +2495,9 @@ onUnmounted(() => {
 .empty { padding: 22px 0; text-align: center; font-size: 12.5px; color: var(--text-low); }
 
 /* Focus breadcrumb in the filter card. */
-.wl-crumbs { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 12px; }
+.wl-crumbs { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
 .crumb {
-  background: none; border: none; padding: 2px 4px; font-size: 12px; font-family: var(--font-mono);
+  background: none; border: none; padding: 2px 4px; font-size: 13px;
   color: var(--text-hi); cursor: pointer; border-radius: var(--r-chip, 4px);
   text-decoration: underline; text-decoration-color: var(--text-faint); text-underline-offset: 3px;
 }
@@ -2523,10 +2508,7 @@ onUnmounted(() => {
 
 /* Section label between the two layers: the app's uppercase label, a rule, a note. */
 .wl-eyebrow { display: flex; align-items: center; gap: 12px; margin: 28px 2px 14px; }
-.eyebrow-text {
-  font-family: var(--font-mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .12em;
-  color: var(--text-mid); font-weight: 500;
-}
+.eyebrow-text { font-size: 13px; font-weight: 600; color: var(--text-hi); }
 .eyebrow-rule { height: 1px; background: var(--bd); flex: 0 0 48px; }
 .eyebrow-sub { font-size: 11.5px; color: var(--text-low); }
 

@@ -32,26 +32,26 @@ import { reactive, ref, watch } from 'vue'
 import { theme } from './useTheme.js'
 
 const FALLBACK = {
-  '--text-hi': '#f5f5f5',
-  '--text-mid': '#9e9e9e',
-  '--text-low': '#808080',
-  '--ink-3': '#171717',
-  '--bd': '#262626',
-  '--bd-hi': '#404040',
-  '--ok-500': '#4ade80',
-  '--warn-400': '#e6b450',
-  '--ember-400': '#fb7185',
-  '--ember-500': '#f43f5e',
-  '--series-1': '#e6e6e6',
-  '--series-2': '#8b8b8b',
-  '--series-3': '#6a6a6a',
-  '--series-4': '#b8b8b8',
-  '--series-5': '#4a4a4a',
-  '--cat-1': '#3b82f6',
-  '--cat-2': '#0d9488',
-  '--cat-3': '#8b5cf6',
-  '--cat-4': '#65a30d',
-  '--cat-5': '#c026d3',
+  '--text-hi': '#eeebe6',
+  '--text-mid': '#aaa59e',
+  '--text-low': '#8f8a83',
+  '--ink-3': '#171615',
+  '--bd': '#1f1d1b',
+  '--bd-hi': '#34312e',
+  '--ok-500': '#8f8a83',
+  '--warn-400': '#e8a849',
+  '--ember-400': '#f07a5f',
+  '--ember-500': '#e0664b',
+  '--series-1': '#eeebe6',
+  '--series-2': '#8f8a83',
+  '--series-3': '#66625c',
+  '--series-4': '#bdb7af',
+  '--series-5': '#4a4743',
+  '--cat-1': '#7f9fd0',
+  '--cat-2': '#6fb3a3',
+  '--cat-3': '#b092d0',
+  '--cat-4': '#a3b56f',
+  '--cat-5': '#d08fae',
 }
 
 // Resolved from the live document, then cached. Chart.js option objects are
@@ -138,8 +138,21 @@ export const chartTheme = reactive({
   tooltipBorder: '',
   tooltipText: '',
   tooltipBody: '',
-  fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+  // Axis numbers, times and legends are read, not copied, so they are set in
+  // the UI face like every other number on the page. Mono is for literals.
+  fontFamily: "'Inter', ui-sans-serif, system-ui, sans-serif",
   fontFamilyUI: "'Inter', ui-sans-serif, system-ui, sans-serif",
+})
+
+// Legend keys are short strokes, the same mark the series draws, rather than
+// circles or filled boxes. A caller that shows a legend inherits these.
+export const legendLabels = () => ({
+  color: chartTheme.tooltipBody,
+  font: { family: chartTheme.fontFamilyUI, size: 11 },
+  usePointStyle: false,
+  boxWidth: 14,
+  boxHeight: 2,
+  padding: 14,
 })
 
 // Shortcut palettes for common chart shapes (keep legacy call sites happy).

@@ -370,8 +370,12 @@ const pushAnother = () => {
    margin for the card bodies that stack it above content. */
 .push-form .panel-err { margin-bottom: 0; }
 .push-field { display: grid; gap: 6px; }
-.push-help { color: var(--text-low); font-size: 11.5px; line-height: 1.45; }
-.push-invalid { color: var(--ember-400); font-size: 11.5px; line-height: 1.45; }
+/* The configure form's type: a field's name in the words' ink, its help a
+   step quieter, a hairline between fields. */
+.push-field > .label-xs { font-size: 13px; font-weight: 500; color: var(--text-hi); }
+.push-field + .push-field { padding-top: 14px; border-top: 1px solid var(--bd-soft); }
+.push-help { color: var(--text-low); font-size: 12px; line-height: 1.5; }
+.push-invalid { color: var(--ember-400); font-size: 12px; line-height: 1.5; }
 .push-meter { margin: 0; }
 .push-meter strong { color: var(--text-mid); font-weight: 600; }
 

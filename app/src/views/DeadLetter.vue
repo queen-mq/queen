@@ -1,19 +1,18 @@
 <template>
   <div class="view-container">
 
-    <!-- Scope. These are the acting tenant's dead-lettered messages on the
-         acting cluster, not the cell total. Built from identity, not from the
-         fetch, so it states the scope while the list is loading, empty or
-         failed — which is what the old tooltip was compensating for. -->
-    <div class="scope-strip">
-      <span class="chip chip-mute">tenant scope</span>
-      <span class="scope-text">
-        <strong>{{ actingTenantSlug || 'no tenant' }}</strong>
-        <span class="scope-sep">/</span>{{ actingClusterSlug || 'no cluster' }}
-        <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
-      </span>
-      <span class="scope-fill"></span>
-    </div>
+    <PageHead title="Dead letter" :live="refreshAgo">
+      <!-- The page's one bulk write. It needs a queue: purging "by criteria"
+           across the whole DLQ is not offered. -->
+      <template v-if="canAdmin" #actions>
+        <button
+          class="btn btn-danger"
+          :disabled="!filterQueue.trim() || bulkPurging"
+          :title="filterQueue.trim() ? bulkPurgeButtonTitle : 'Choose a queue before bulk purging'"
+          @click="openBulkPurge"
+        >Purge by criteria</button>
+      </template>
+    </PageHead>
 
     <!-- The list failed: say so instead of drawing an empty, healthy-looking page. -->
     <div v-if="error" class="status-banner banner-bad view-banner">
@@ -31,71 +30,52 @@
       <span>This broker returns the whole dead-letter queue at once — paging is disabled</span>
     </div>
 
-    <!-- Filters. Applied server-side (the endpoint takes queue + consumerGroup),
-         so they select from the whole DLQ, not from the loaded page. -->
-    <div class="card filters">
-      <div class="card-body filter-rows">
-        <div class="filter-row">
-          <!-- Autocomplete, not a select: a cell carries hundreds of queues and
-               the names are long and dotted, so scanning one flat list is the
-               slow way to reach `smartchat.agent.document-to-process`. Free
-               entry stays open because the queue list and the DLQ come from two
-               different endpoints — a queue that only exists in the DLQ must
-               still be filterable. -->
-          <div class="filter-field-col filter-field-wide">
-            <label class="label-xs" for="dlq-queue-filter">Queue</label>
-            <Autocomplete
-              id="dlq-queue-filter"
-              v-model="filterQueue"
-              :options="queueOptions"
-              :loading="queuesLoading"
-              label="Queue"
-              placeholder="All queues"
-              allow-custom
-            />
-            <span v-if="queuesUnavailable" class="filter-hint">
-              Queue list unavailable - type a name to filter
-            </span>
-            <span v-else-if="unlistedQueue" class="filter-hint">
-              Not in this cluster's queue list - filtering by name anyway
-            </span>
-          </div>
-          <div class="filter-field-col">
-            <label class="label-xs">Consumer group</label>
-            <input
-              v-model="filterGroup"
-              class="input"
-              list="dlq-group-options"
-              placeholder="All groups"
-              @change="reload"
-              @keyup.enter="reload"
-            />
-            <datalist id="dlq-group-options">
-              <option v-for="g in groupSuggestions" :key="g" :value="g" />
-            </datalist>
-          </div>
-          <div class="filter-field-col">
-            <label class="label-xs">Page size</label>
-            <select v-model.number="pageSize" class="input">
-              <option :value="50">50</option>
-              <option :value="100">100</option>
-              <option :value="200">200</option>
-            </select>
-          </div>
-          <div v-if="canAdmin" class="filter-field-col dlq-bulk-action">
-            <label class="label-xs">Bulk cleanup</label>
-            <button
-              class="btn btn-danger"
-              :disabled="!filterQueue.trim() || bulkPurging"
-              :title="filterQueue.trim() ? bulkPurgeButtonTitle : 'Choose a queue before bulk purging'"
-              @click="openBulkPurge"
-            >
-              Purge by criteria
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+    <!-- Applied server-side (the endpoint takes queue + consumerGroup), so they
+         select from the whole DLQ, not from the loaded page. -->
+    <PageTools>
+      <!-- Autocomplete, not a select: a cell carries hundreds of queues and the
+           names are long and dotted. Free entry stays open because the queue
+           list and the DLQ come from two different endpoints — a queue that
+           only exists in the DLQ must still be filterable. -->
+      <label class="tool-field" for="dlq-queue-filter">
+        <span class="tool-label">Queue</span>
+        <Autocomplete
+          id="dlq-queue-filter"
+          v-model="filterQueue"
+          :options="queueOptions"
+          :loading="queuesLoading"
+          label="Queue"
+          placeholder="All"
+          allow-custom
+        />
+      </label>
+      <label class="tool-field">
+        <span class="tool-label">Consumer group</span>
+        <input
+          v-model="filterGroup"
+          class="input"
+          list="dlq-group-options"
+          placeholder="All"
+          @change="reload"
+          @keyup.enter="reload"
+        />
+        <datalist id="dlq-group-options">
+          <option v-for="g in groupSuggestions" :key="g" :value="g" />
+        </datalist>
+      </label>
+      <span v-if="queuesUnavailable" class="tool-note">Queue list unavailable — type a name to filter</span>
+      <span v-else-if="unlistedQueue" class="tool-note">Not in this cluster's queue list — filtering by name anyway</span>
+      <template #view>
+        <label class="tool-field">
+          <span class="tool-label">Show</span>
+          <select v-model.number="pageSize" class="input">
+            <option :value="50">50</option>
+            <option :value="100">100</option>
+            <option :value="200">200</option>
+          </select>
+        </label>
+      </template>
+    </PageTools>
 
     <!-- Summary. What an operator opens this page for is WHICH failure is
          dominating, so that is the only summary kept: a count of rows on the
@@ -145,7 +125,7 @@
             :aria-pressed="errorFilter === entry.error"
             @click="toggleErrorFilter(entry.error)"
           >
-            <span class="dlq-err-count font-mono tabular-nums">{{ entry.count }}</span>
+            <span class="dlq-err-count tabular-nums">{{ entry.count }}</span>
             <span class="dlq-err-text">{{ entry.error }}</span>
           </button>
         </div>
@@ -162,8 +142,7 @@
     <div class="card" style="margin-bottom:16px;">
       <div class="card-header">
         <h3>Dead-lettered messages</h3>
-        <span class="chip chip-mute">{{ formatNumber(pageMessages.length) }} loaded</span>
-        <span class="chip chip-mute">page <span class="font-mono tabular-nums">{{ page }}</span></span>
+        <span class="card-sub">{{ formatNumber(pageMessages.length) }} loaded · page {{ page }}</span>
         <!-- A narrowed table must say so where the row count is read, not only
              up in the breakdown that narrowed it. -->
         <button v-if="errorFilter" type="button" class="chip chip-mute dlq-filter-chip" @click="errorFilter = null">
@@ -230,8 +209,8 @@
                 <td>
                   <span class="font-mono dlq-err-cell">{{ truncateError(msg.errorMessage) }}</span>
                 </td>
-                <td class="font-mono" style="font-size:12px;">{{ msg.retryCount ?? '—' }}</td>
-                <td class="font-mono" style="font-size:12px; color:var(--text-mid);">{{ formatRelativeTime(msg.failedAt) }}</td>
+                <td class="tabular-nums" style="font-size:12px;">{{ msg.retryCount ?? '—' }}</td>
+                <td style="font-size:12px; color:var(--text-mid);">{{ formatRelativeTime(msg.failedAt) }}</td>
                 <td v-if="canAdmin" style="text-align:right; white-space:nowrap;" @click.stop>
                   <!-- Replay before Purge: the recoverable action reads first,
                        and the destructive one keeps the far-right position it
@@ -293,7 +272,7 @@
            that ignores the limit: Previous/Next there offer travel that goes
            nowhere. -->
       <div v-if="serverPaginates && (pageMessages.length || page > 1)" class="pager">
-        <span class="pager-count">Page <span class="font-mono tabular-nums">{{ page }}</span></span>
+        <span class="pager-count">Page <span class="tabular-nums">{{ page }}</span></span>
         <div class="pager-nav">
           <button class="btn btn-ghost" :disabled="page === 1" @click="prevPage">Previous</button>
           <button class="btn btn-ghost" :disabled="!canPageForward" @click="nextPage">Next</button>
@@ -426,7 +405,7 @@
                   </svg>
                 </span>
                 Advanced — replay somewhere else
-                <span v-if="replayTarget.moved" class="chip chip-warn dlq-toggle-badge">destination changed</span>
+                <span v-if="replayTarget.moved" class="detail-note dlq-toggle-badge">· destination changed</span>
               </button>
 
               <div v-if="showReplayAdvanced" class="dlq-replay-advanced">
@@ -490,7 +469,7 @@
 
     <DetailDrawer
       :open="Boolean(selectedMsg)"
-      title="DLQ Message Detail"
+      title="Dead letter"
       :subtitle="selectedMsg?.transactionId || selectedMsg?.id || ''"
       wide
       split
@@ -507,13 +486,12 @@
       </template>
 
       <template v-if="selectedMsg">
+        <!-- What it is, in words — and never red: a dead letter is a message
+             the broker has already given up on and parked, history rather
+             than something failing now. The retry count is how hard it tried. -->
         <div class="detail-status-row">
-          <span class="chip chip-bad">dead_letter</span>
-          <!-- A retry count is a count: how hard the broker tried before it
-               gave up. The `dead_letter` chip beside it carries the verdict. -->
-          <span v-if="selectedMsg.retryCount" class="chip chip-mute">
-            {{ selectedMsg.retryCount }} retries
-          </span>
+          <span class="detail-status">Dead-lettered</span>
+          <span v-if="selectedMsg.retryCount" class="detail-note">· after {{ selectedMsg.retryCount }} {{ selectedMsg.retryCount === 1 ? 'retry' : 'retries' }}</span>
         </div>
 
         <div class="detail-fields">
@@ -551,7 +529,7 @@
           mono
           copyable
           boxed
-          tone="danger"
+          tone="high"
         />
 
         <!-- Actions. Replay re-pushes this snapshot on the broker's move
@@ -559,9 +537,9 @@
              state what happened to the row instead of guessing; purge is the
              end of the line for a message nobody will process. -->
         <div v-if="canAdmin" class="detail-actions">
+          <div class="detail-buttons">
           <button
-            class="btn btn-ghost"
-            style="width:100%; justify-content:center;"
+            class="btn"
             :disabled="!selectedMsg.id || isReplaying(selectedMsg) || replayUnavailable"
             :title="replayUnavailable
               ? 'This cell does not serve the replay route — the broker predates it, or the proxy in front does not classify it'
@@ -574,13 +552,13 @@
           </button>
           <button
             class="btn btn-danger"
-            style="width:100%; justify-content:center;"
             :disabled="isDeleting(selectedMsg)"
             @click="purge(selectedMsg)"
           >
             {{ isDeleting(selectedMsg) ? 'Purging…' : 'Purge message' }}
           </button>
-          <p v-if="rowError(selectedMsg)" style="font-size:12px; color:var(--ember-400);">
+          </div>
+          <p v-if="rowError(selectedMsg)" class="detail-note is-bad">
             {{ rowError(selectedMsg) }}
           </p>
         </div>
@@ -627,6 +605,9 @@ import { useToast } from '@/composables/useToast'
 import { currentEpoch, useIdentity } from '@/stores/identity'
 import { routeSupport } from '@/stores/routeSupport'
 import Autocomplete from '@/components/Autocomplete.vue'
+import PageHead from '@/components/PageHead.vue'
+import PageTools from '@/components/PageTools.vue'
+import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import DetailDrawer from '@/components/DetailDrawer.vue'
 import DetailField from '@/components/DetailField.vue'
 import JsonViewer from '@/components/JsonViewer.vue'
@@ -754,6 +735,7 @@ const listPanel = useApi((params, config) => dlq.list(params, config), {
     }
   },
 })
+const refreshAgo = useRefreshAgo(listPanel.lastUpdated)
 
 const {
   data: listData,
@@ -1189,8 +1171,7 @@ fetchMessages()
 <style scoped>
 /* Queue names here are dotted and long (`connect.newsletter.sendgrid`), so the
    picker gets more room than the 220px the shared filter column allows. */
-.filter-field-wide { flex-basis: 240px; max-width: 300px; }
-.dlq-bulk-action { flex: 0 0 auto; }
+
 .dlq-bulk-note { margin-top: 12px; color: var(--text-low); font-size: 12px; }
 
 /* --- Failure breakdown -----------------------------------------------------

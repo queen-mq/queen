@@ -1,6 +1,33 @@
 <template>
   <div class="view-container">
 
+    <!-- The cell, said in the head: this page's numbers cover every tenant
+         on it, and a cell figure read as the acting tenant's is the exact lie
+         this page could tell. -->
+    <PageHead title="System">
+      <template #sub>
+        <span :title="`Host resources and the replicated log for cell ${actingCellSlug || 'unknown'}, shared by every tenant on it, not scoped to ${actingTenantSlug || 'your tenant'}`">cell <b>{{ actingCellSlug || 'unknown' }}</b> · every tenant on it</span>
+      </template>
+      <template v-if="canOperate && dataSource === 'system'" #range>
+        <div class="seg" role="group" aria-label="Time range">
+          <button
+            v-for="range in timeRanges"
+            :key="range.value"
+            :class="{ on: timeRange === range.value && !customMode }"
+            @click="selectQuickRange(range.value)"
+          >{{ range.label }}</button>
+          <button :class="{ on: customMode }" @click="toggleCustomMode">Custom</button>
+        </div>
+      </template>
+      <template v-if="canOperate" #switch>
+        <div class="seg" role="group" aria-label="Source">
+          <button :class="{ on: dataSource === 'system' }" @click="selectSource('system')">Server resources</button>
+          <!-- The storage the cell runs on: the Raft cluster. -->
+          <button :class="{ on: dataSource === 'storage' }" @click="selectSource('storage')">Raft</button>
+        </div>
+      </template>
+    </PageHead>
+
     <!-- CELL-LEVEL PAGE. Every source below is an operator route the proxy
          answers 200 for only when /auth/me says operator_live; the numbers
          cover the whole cell, every tenant on it. Say that on screen — a cell
@@ -16,22 +43,6 @@
     </div>
 
     <template v-else>
-      <!-- SCOPE STRIP. Cell variant: same container as every other view's
-           strip, drawn in the scope hue because the SCOPE differs — not
-           because anything is wrong. (It was amber until the colour policy:
-           this page opened with a warning chip on a healthy cell.) Built from
-           useIdentity(), so it renders while loading, on a failed fetch and on
-           an empty page. -->
-      <div class="scope-strip scope-strip-cell">
-        <span class="chip chip-scope"><span class="dot"></span>cell · operator</span>
-        <span class="scope-text">
-          host resources and the replicated log for
-          <strong>cell {{ actingCellSlug || 'unknown' }}</strong>
-          <span class="scope-sep">·</span>
-          shared by every tenant on it, not scoped to {{ actingTenantSlug || 'your tenant' }}
-        </span>
-      </div>
-
       <!-- PAGE BANNERS. The Source switch decides which fetch the whole page is
            made of, so either failure is a fact about the page. A single panel's
            failure stays inside that panel as .panel-err. -->
@@ -44,74 +55,48 @@
         <span :title="formatTimestampUtc(raftMembers.lastUpdated.value)"><strong>Could not load the Raft cluster</strong> · {{ describeRaftFailure(raftMembers.error.value) }}<template v-if="raftMembers.data.value"> · showing the last members that loaded{{ raftMembers.lastUpdated.value ? ` (as of ${formatTimestamp(raftMembers.lastUpdated.value)})` : '' }}</template></span>
       </div>
 
-      <!-- =================== FILTERS =================== -->
-      <div class="card filters">
-        <div class="card-body filter-rows">
-
-          <div class="filter-row">
-            <div v-if="dataSource === 'system'" class="filter-field">
-              <span class="label-xs">Range</span>
-              <div class="seg">
-                <button
-                  v-for="range in timeRanges"
-                  :key="range.value"
-                  :class="{ on: timeRange === range.value && !customMode }"
-                  @click="selectQuickRange(range.value)"
-                >{{ range.label }}</button>
-                <button :class="{ on: customMode }" @click="toggleCustomMode">Custom</button>
-              </div>
-            </div>
-
-            <div class="filter-field">
-              <span class="label-xs">Source</span>
-              <div class="seg">
-                <button :class="{ on: dataSource === 'system' }" @click="selectSource('system')">Server resources</button>
-                <!-- The storage the cell runs on: the Raft cluster. -->
-                <button :class="{ on: dataSource === 'storage' }" @click="selectSource('storage')">Raft</button>
-              </div>
+      <PageTools v-if="dataSource === 'system'">
+        <span class="tool-note">
+          {{ viewMode === 'aggregate'
+            ? `Summed across ${replicaCountLabel}; a bucket where a replica sent no sample sums only those that did`
+            : 'One line per broker replica; gaps are buckets that replica never reported' }}
+        </span>
+        <template #view>
+          <div class="tool-seg">
+            <span class="tool-label">View</span>
+            <div class="seg">
+              <button :class="{ on: viewMode === 'individual' }" @click="viewMode = 'individual'">Per server</button>
+              <button :class="{ on: viewMode === 'aggregate' }" @click="viewMode = 'aggregate'">Aggregate</button>
             </div>
           </div>
-
-          <div v-if="dataSource === 'system'" class="filter-row">
-            <div class="filter-field">
-              <span class="label-xs">View</span>
-              <div class="seg">
-                <button :class="{ on: viewMode === 'individual' }" @click="viewMode = 'individual'">Per server</button>
-                <button :class="{ on: viewMode === 'aggregate' }" @click="viewMode = 'aggregate'">Aggregate</button>
-              </div>
+          <div class="tool-seg">
+            <span class="tool-label">Metric</span>
+            <div class="seg">
+              <button
+                v-for="agg in aggregationTypes"
+                :key="agg.value"
+                :class="{ on: aggregationType === agg.value }"
+                @click="aggregationType = agg.value"
+              >{{ agg.label }}</button>
             </div>
-            <div class="filter-field">
-              <span class="label-xs">Metric</span>
-              <div class="seg">
-                <button
-                  v-for="agg in aggregationTypes"
-                  :key="agg.value"
-                  :class="{ on: aggregationType === agg.value }"
-                  @click="aggregationType = agg.value"
-                >{{ agg.label }}</button>
-              </div>
-            </div>
-            <span class="filter-hint">
-              {{ viewMode === 'aggregate'
-                ? `summed across ${replicaCountLabel}; a bucket where a replica sent no sample sums only those that did`
-                : 'one line per broker replica; gaps are buckets that replica never reported' }}
-            </span>
           </div>
+        </template>
+      </PageTools>
 
-          <div v-if="dataSource === 'system' && customMode" class="filter-row filter-row-sep">
-            <div class="filter-field">
-              <span class="label-xs">From</span>
-              <input v-model="customFrom" type="datetime-local" class="input" :title="formatTimestampUtc(customFrom)" />
-            </div>
-            <div class="filter-field">
-              <span class="label-xs">To</span>
-              <input v-model="customTo" type="datetime-local" class="input" :title="formatTimestampUtc(customTo)" />
-            </div>
-            <button class="btn btn-primary" :disabled="!customRangeValid" @click="applyCustomRange">Apply</button>
-            <span v-if="customError" class="filter-invalid">{{ customError }}</span>
-          </div>
-        </div>
-      </div>
+    <!-- A window of your own: the only range that waits for Apply, because a
+         half-typed date must not re-scope the page. -->
+    <div v-if="dataSource === 'system' && customMode" class="page-tools">
+      <label class="tool-field">
+        <span class="tool-label">From</span>
+        <input v-model="customFrom" type="datetime-local" class="input" :title="formatTimestampUtc(customFrom)" />
+      </label>
+      <label class="tool-field">
+        <span class="tool-label">To</span>
+        <input v-model="customTo" type="datetime-local" class="input" :title="formatTimestampUtc(customTo)" />
+      </label>
+      <button class="btn btn-primary" :disabled="!customRangeValid" @click="applyCustomRange">Apply</button>
+      <span v-if="customError" class="tool-note is-bad">{{ customError }}</span>
+    </div>
 
       <!-- =================== REPLICATED LOG ===================
            The page's summary block, shown under either source: what the node
@@ -122,7 +107,6 @@
           <span v-if="node && node.nodeId !== null" class="card-sub">
             node {{ node.nodeId }}{{ node.hostname ? ` · ${node.hostname}` : '' }}
           </span>
-          <span class="chip chip-mute">cell-level</span>
           <span class="muted">{{ stamp(raftStatus) }}</span>
         </div>
         <div class="card-body">
@@ -138,14 +122,14 @@
               <div class="stat">
                 <div class="stat-label">Role</div>
                 <div class="stat-value">
-                  <span v-if="!node?.state" class="font-mono">—</span>
-                  <span v-else class="chip" :class="node.chip.cls"><span class="dot"></span>{{ node.chip.label }}</span>
+                  <span v-if="!node?.state">—</span>
+                  <span v-else class="sys-state"><span class="g" :class="chipGlyph(node.chip.cls)" aria-hidden="true" />{{ capital(node.chip.label) }}</span>
                 </div>
                 <div class="stat-foot">{{ node?.clusterNote || '—' }}</div>
               </div>
               <div class="stat">
                 <div class="stat-label">Term</div>
-                <div class="stat-value font-mono">{{ metric(node?.term) }}</div>
+                <div class="stat-value">{{ metric(node?.term) }}</div>
                 <div class="stat-foot">
                   <span v-if="node" :class="{ 'num warn': node.leaderSeverity === 'warn' }">{{ node.leaderNote }}</span>
                   <span v-else>—</span>
@@ -156,23 +140,23 @@
                    a nine-digit index never wraps mid-sentence. -->
               <div class="stat">
                 <div class="stat-label">Applied</div>
-                <div class="stat-value font-mono">{{ formatIndex(node?.applied) }}</div>
-                <div class="stat-foot">committed <span class="font-mono tabular-nums">{{ formatIndex(node?.committed) }}</span></div>
-                <div class="stat-foot">durable <span class="font-mono tabular-nums">{{ formatIndex(node?.durable) }}</span></div>
+                <div class="stat-value">{{ formatIndex(node?.applied) }}</div>
+                <div class="stat-foot">committed <span class="tabular-nums">{{ formatIndex(node?.committed) }}</span></div>
+                <div class="stat-foot">durable <span class="tabular-nums">{{ formatIndex(node?.durable) }}</span></div>
               </div>
               <div class="stat">
                 <div class="stat-label">Inflight</div>
-                <div class="stat-value font-mono">{{ metric(node?.inflight) }}</div>
+                <div class="stat-value">{{ metric(node?.inflight) }}</div>
                 <div class="stat-foot">appended, not yet applied</div>
               </div>
               <div class="stat">
                 <div class="stat-label">Log</div>
-                <div class="stat-value font-mono">{{ bytes(node?.logBytes) }}</div>
+                <div class="stat-value">{{ bytes(node?.logBytes) }}</div>
                 <div class="stat-foot">{{ metric(node?.logFiles) }} files</div>
               </div>
               <div class="stat">
                 <div class="stat-label">Store map</div>
-                <div class="stat-value font-mono num" :class="numTone(node?.mapSeverity)">{{ formatMapPct(node?.mapPct) }}</div>
+                <div class="stat-value num" :class="numTone(node?.mapSeverity)">{{ formatMapPct(node?.mapPct) }}</div>
                 <div class="stat-foot">{{ bytes(node?.mapUsed) }} of {{ bytes(node?.mapBytes) }}</div>
               </div>
             </div>
@@ -195,7 +179,6 @@
                 <div class="card-header">
                   <h3>CPU usage</h3>
                   <span class="card-sub">{{ replicaCountLabel }}</span>
-                  <span class="chip chip-mute">cell-level</span>
                   <span class="muted">{{ stamp(metrics) }}</span>
                 </div>
                 <div class="card-body">
@@ -210,7 +193,6 @@
               <div class="card">
                 <div class="card-header">
                   <h3>Memory usage</h3>
-                  <span class="chip chip-mute">cell-level</span>
                   <span class="muted">{{ stamp(metrics) }}</span>
                 </div>
                 <div class="card-body">
@@ -226,7 +208,6 @@
             <div class="card" style="margin-bottom:16px;">
               <div class="card-header">
                 <h3>Broker workers</h3>
-                <span class="chip chip-mute">cell-level</span>
                 <span class="muted">{{ stamp(status) }}</span>
               </div>
               <div class="card-body">
@@ -238,15 +219,13 @@
                 </div>
                 <div v-else class="sys-workers">
                   <div v-for="w in workers" :key="`${w.hostname}:${w.workerId}`" class="sys-worker">
-                    <span class="sys-worker-host font-mono">{{ w.hostname }}</span>
-                    <span class="chip" :class="workerChip(w).cls">
-                      <span class="dot"></span>{{ workerChip(w).label }}
+                    <span class="sys-state"><span class="g" :class="chipGlyph(workerChip(w).cls)" aria-hidden="true" />{{ capital(workerChip(w).label) }}</span>
+                    <span class="sys-worker-host">{{ w.hostname }}</span>
+                    <span class="sys-worker-meta">
+                      Event loop {{ msOrDash(w.avgEventLoopLagMs) }} average, {{ msOrDash(w.maxEventLoopLagMs) }} peak
                     </span>
-                    <span class="sys-worker-meta font-mono">
-                      loop {{ msOrDash(w.avgEventLoopLagMs) }} avg · {{ msOrDash(w.maxEventLoopLagMs) }} peak
-                    </span>
-                    <span class="sys-worker-meta font-mono">
-                      {{ metric(toNum(w.messagesProcessed)) }} msg / 2 min
+                    <span class="sys-worker-meta sys-worker-end">
+                      {{ metric(toNum(w.messagesProcessed)) }} messages in 2 min
                     </span>
                   </div>
                   <!-- No DB-errors figure: nothing increments that counter,
@@ -254,7 +233,7 @@
                        their series too. -->
                   <p class="sys-note">
                     Ack failures since broker start (cell-wide):
-                    <span class="font-mono">{{ metric(lifetimeAckFailed) }}</span>
+                    <span class="tabular-nums">{{ metric(lifetimeAckFailed) }}</span>
                   </p>
                 </div>
               </div>
@@ -263,31 +242,30 @@
             <div class="card" style="margin-bottom:16px;">
               <div class="card-header">
                 <h3>Cell summary</h3>
-                <span class="chip chip-mute">cell-level</span>
                 <span class="muted">{{ stamp(metrics) }}</span>
               </div>
               <div class="card-body">
                 <div class="stat-grid stat-grid-5">
                   <div class="stat">
                     <div class="stat-label">Replicas</div>
-                    <div class="stat-value font-mono">{{ metric(toNum(systemData.replicaCount)) }}</div>
+                    <div class="stat-value">{{ metric(toNum(systemData.replicaCount)) }}</div>
                   </div>
                   <div class="stat">
                     <div class="stat-label">Data points</div>
-                    <div class="stat-value font-mono">{{ metric(toNum(systemData.pointCount)) }}</div>
+                    <div class="stat-value">{{ metric(toNum(systemData.pointCount)) }}</div>
                   </div>
                   <div class="stat">
                     <div class="stat-label">Bucket size</div>
-                    <div class="stat-value font-mono">{{ formatBucketSize(systemData.bucketMinutes) }}</div>
+                    <div class="stat-value">{{ formatBucketSize(systemData.bucketMinutes) }}</div>
                   </div>
                   <div class="stat">
                     <div class="stat-label">CPU</div>
-                    <div class="stat-value font-mono">{{ pct(latest.cpuUser) }}</div>
+                    <div class="stat-value">{{ pct(latest.cpuUser) }}</div>
                     <div class="stat-foot">{{ acrossLabel }}</div>
                   </div>
                   <div class="stat">
                     <div class="stat-label">Memory</div>
-                    <div class="stat-value font-mono">{{ mb(latest.rss) }}</div>
+                    <div class="stat-value">{{ mb(latest.rss) }}</div>
                     <div class="stat-foot">{{ acrossLabel }}</div>
                   </div>
                 </div>
@@ -298,7 +276,6 @@
               <div class="card-header">
                 <h3>Server details</h3>
                 <span class="card-sub">last sample per replica</span>
-                <span class="chip chip-mute">cell-level</span>
                 <span class="muted">{{ stamp(metrics) }}</span>
               </div>
               <div class="card-body">
@@ -316,10 +293,10 @@
                     <tbody>
                       <tr v-for="replica in replicas" :key="`${replica.hostname}:${replica.port}`">
                         <td style="font-weight:500;">{{ replica.hostname }}</td>
-                        <td class="right font-mono tabular-nums">{{ replica.port }}</td>
-                        <td class="right font-mono tabular-nums">{{ pct(cpuOf(replica, 'user_us')) }}</td>
-                        <td class="right font-mono tabular-nums">{{ pct(cpuOf(replica, 'system_us')) }}</td>
-                        <td class="right font-mono tabular-nums">{{ mb(lastOf(replica, ['memory', 'rss_bytes'])) }}</td>
+                        <td class="right tabular-nums">{{ replica.port }}</td>
+                        <td class="right tabular-nums">{{ pct(cpuOf(replica, 'user_us')) }}</td>
+                        <td class="right tabular-nums">{{ pct(cpuOf(replica, 'system_us')) }}</td>
+                        <td class="right tabular-nums">{{ mb(lastOf(replica, ['memory', 'rss_bytes'])) }}</td>
                       </tr>
                     </tbody>
                   </table>
@@ -348,6 +325,8 @@ import { computed, ref, watch } from 'vue'
 
 import BaseChart from '@/components/BaseChart.vue'
 import RaftCluster from '@/components/RaftCluster.vue'
+import PageHead from '@/components/PageHead.vue'
+import PageTools from '@/components/PageTools.vue'
 import { describeApiError, operator } from '@/api'
 import { formatBytes, formatNumber, toNum, useApi } from '@/composables/useApi'
 import { chartColor } from '@/composables/useChartTheme'
@@ -686,7 +665,7 @@ const latest = computed(() => ({
 
 // Chart options
 const cpuOptions = {
-  plugins: { legend: { display: true, position: 'top', labels: { usePointStyle: true, padding: 14 } } },
+  plugins: { legend: { display: true, position: 'top' } },
   scales: {
     y: {
       title: { display: true, text: 'CPU %', font: { size: 11 } },
@@ -695,9 +674,13 @@ const cpuOptions = {
   },
 }
 const memoryOptions = {
-  plugins: { legend: { display: true, position: 'top', labels: { usePointStyle: true, padding: 14 } } },
+  plugins: { legend: { display: true, position: 'top' } },
   scales: { y: { title: { display: true, text: 'Memory (MB)', font: { size: 11 } } } },
 }
+
+// The state marks of the rest of the app: dot, ring, triangle, diamond.
+const chipGlyph = (cls) => ({ 'chip-ok': 'ok', 'chip-warn': 'warn', 'chip-bad': 'bad' }[cls] || 'idle')
+const capital = (label) => (label ? label.charAt(0).toUpperCase() + label.slice(1) : label)
 </script>
 
 <style scoped>
@@ -718,13 +701,16 @@ const memoryOptions = {
    rhythm, so it keeps its own rule (as Analytics' .an-grid-2 does). */
 .sys-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 
-.sys-workers { display: flex; flex-direction: column; gap: 8px; }
+.sys-workers { display: flex; flex-direction: column; }
 .sys-worker {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
-  padding: 8px 10px; border: 1px solid var(--bd); border-radius: var(--r-card);
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 16px;
+  padding: 10px 0; border-bottom: 1px solid var(--bd-soft);
 }
-.sys-worker-host { font-size: 12px; color: var(--text-hi); font-weight: 500; }
-.sys-worker-meta { font-size: 11px; color: var(--text-mid); }
+.sys-state { display: inline-flex; align-items: center; gap: 8px; min-width: 120px; font-size: 13px; color: var(--text-hi); }
+.stat-value .sys-state { font-size: inherit; font-weight: inherit; }
+.sys-worker-host { font-family: var(--font-mono); font-size: 12px; color: var(--text-mid); }
+.sys-worker-meta { font-size: 12px; color: var(--text-mid); font-variant-numeric: tabular-nums; }
+.sys-worker-end { margin-left: auto; }
 
 @media (max-width: 1100px) {
   .sys-grid-2 { grid-template-columns: 1fr; }

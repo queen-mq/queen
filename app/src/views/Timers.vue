@@ -1,25 +1,17 @@
 <template>
   <div class="view-container">
 
-    <!-- Tenant scope, from identity and never from the fetch. The timer count
-         beside it is the TENANT's, from the queue listing's root, and it is a
-         sweeper snapshot — hence `≈`, everywhere it appears. -->
-    <div class="scope-strip">
-      <span class="chip chip-mute">tenant scope</span>
-      <span class="scope-text">
-        <strong>{{ actingTenantSlug || 'no tenant' }}</strong>
-        <span class="scope-sep">/</span>{{ actingClusterSlug || 'no cluster' }}
-        <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
-      </span>
-      <span class="scope-fill"></span>
-      <span v-if="tenantTotalMeasured" class="chip chip-mute" :title="TENANT_TOTAL_TITLE">
-        ≈ {{ formatNumber(timerRows) }} timers pending
-      </span>
-      <span v-if="tenantTotalMeasured && timerBytes !== null" class="scope-meta" :title="TENANT_TOTAL_TITLE">
-        ≈ {{ formatBytes(timerBytes) }}
-      </span>
-      <span class="scope-meta">{{ stamp(listPanel) }}</span>
-    </div>
+    <!-- The timer count beside the title is the TENANT's, from the queue
+         listing's root, and it is a sweeper snapshot — hence `≈`, everywhere
+         it appears; it is shown only when it is a measurement. -->
+    <PageHead title="Timers">
+      <template #sub>
+        <template v-if="tenantTotalMeasured">
+          <span :title="TENANT_TOTAL_TITLE">≈ {{ formatNumber(timerRows) }} pending</span><template v-if="timerBytes !== null"> · <span :title="TENANT_TOTAL_TITLE">≈ {{ formatBytes(timerBytes) }}</span></template>
+        </template>
+        <template v-if="stamp(listPanel)"><template v-if="tenantTotalMeasured"> · </template>{{ stamp(listPanel) }}</template>
+      </template>
+    </PageHead>
 
     <!-- ===================== The three quiet states =====================
          Not here / not in the plan / not being served right now. One card, no
@@ -76,82 +68,60 @@
         </span>
       </div>
 
-      <!-- Filters. The queue is not a filter, it is the ADDRESS: the route is
-           queue-scoped because a tenant-wide timer list would be a scan whose
-           call rate is decided by somebody else's web traffic (§4.1). -->
-      <div class="card filters">
-        <div class="card-body filter-rows">
-          <div class="filter-row">
-            <div class="filter-field-col filter-field-wide">
-              <label class="label-xs" for="timers-queue">Queue</label>
-              <Autocomplete
-                id="timers-queue"
-                v-model="queue"
-                :options="queueOptions"
-                :loading="queuesLoading"
-                label="Queue"
-                placeholder="Pick a queue"
-                allow-custom
-              />
-            </div>
-
-            <div class="filter-field-col">
-              <label class="label-xs" for="timers-limit">Page size</label>
-              <select id="timers-limit" v-model.number="limit" class="input">
-                <option :value="50">50</option>
-                <option :value="100">100</option>
-                <option :value="250">250</option>
-              </select>
-            </div>
-
-            <!-- The exact count. A whole-queue count is REFUSED by the stored
-                 procedure, not by this form: an exact aggregate cannot have
-                 the list's LIMIT, so it is prefix-scoped to stay an index
-                 range (handlers/timers.rs timer_read_query). -->
-            <div class="filter-field-col filter-field-wide">
-              <label class="label-xs" for="timers-prefix">Exact count under a prefix</label>
-              <div class="timers-count-row">
-                <input
-                  id="timers-prefix"
-                  v-model="countPrefix"
-                  class="input"
-                  placeholder="prefix — required, e.g. retry:"
-                  @keyup.enter="runCount"
-                />
-                <button
-                  class="btn btn-ghost"
-                  :disabled="!queue || !countPrefix || counting"
-                  :title="countPrefix ? 'Count every pending timer whose key starts with this' : 'The broker refuses a whole-queue count — give a non-empty prefix'"
-                  @click="runCount"
-                >{{ counting ? 'Counting…' : 'Count' }}</button>
-              </div>
-            </div>
-          </div>
-          <!-- Hints and the count's answer live UNDER the row, never inside a
-               column: the row aligns its columns at the bottom, so a one-line
-               hint beside a two-line one lifted each label and input by a
-               different amount and the card read as two rows. -->
-          <div class="filter-foot">
-            <span v-if="queuesUnavailable" class="filter-hint">
-              Queue list unavailable — type a queue name
-            </span>
-            <span v-else-if="unlistedQueue" class="filter-hint">
-              Not in this cluster's queue list — asking the broker anyway
-            </span>
-            <span v-if="countError" class="filter-hint">{{ countError }}</span>
-            <span v-else-if="countResult && countResult.count !== null" class="filter-hint">
-              {{ formatNumber(countResult.count) }} pending under
-              <code>{{ countResult.prefix }}</code>
-            </span>
-            <span v-else-if="countResult" class="filter-hint">
-              The broker answered no count for <code>{{ countResult.prefix }}</code>
-            </span>
-            <span v-else class="filter-hint">
-              An exact count is prefix-scoped; a whole-queue count would be a scan.
-            </span>
-          </div>
-        </div>
-      </div>
+      <!-- The queue is not a filter, it is the ADDRESS: the route is queue-scoped
+           because a tenant-wide timer list would be a scan whose call rate is
+           decided by somebody else's web traffic (§4.1). -->
+      <PageTools>
+        <label class="tool-field" for="timers-queue">
+          <span class="tool-label">Queue</span>
+          <Autocomplete
+            id="timers-queue"
+            v-model="queue"
+            :options="queueOptions"
+            :loading="queuesLoading"
+            label="Queue"
+            placeholder="Pick a queue"
+            allow-custom
+          />
+        </label>
+        <!-- The exact count. A whole-queue count is REFUSED by the stored
+             procedure, not by this form: an exact aggregate cannot have the
+             list's LIMIT, so it is prefix-scoped to stay an index range
+             (handlers/timers.rs timer_read_query). -->
+        <label class="tool-field" for="timers-prefix" title="An exact count is prefix-scoped; a whole-queue count would be a scan">
+          <span class="tool-label">Count under</span>
+          <input
+            id="timers-prefix"
+            v-model="countPrefix"
+            class="input"
+            placeholder="a prefix, e.g. retry:"
+            @keyup.enter="runCount"
+          />
+        </label>
+        <button
+          class="btn btn-ghost"
+          :disabled="!queue || !countPrefix || counting"
+          :title="countPrefix ? 'Count every pending timer whose key starts with this' : 'The broker refuses a whole-queue count — give a non-empty prefix'"
+          @click="runCount"
+        >{{ counting ? 'Counting…' : 'Count' }}</button>
+        <span v-if="countError" class="tool-note is-bad">{{ countError }}</span>
+        <span v-else-if="countResult && countResult.count !== null" class="tool-note">
+          {{ formatNumber(countResult.count) }} pending under <code>{{ countResult.prefix }}</code>
+        </span>
+        <span v-else-if="countResult" class="tool-note">The broker answered no count for <code>{{ countResult.prefix }}</code></span>
+        <span v-if="queuesUnavailable" class="tool-note">Queue list unavailable — type a queue name</span>
+        <span v-else-if="unlistedQueue" class="tool-note">Not in this cluster's queue list — asking the broker anyway</span>
+        <template #view>
+          <label class="tool-field" for="timers-limit">
+            <span class="tool-label">Show</span>
+            <select id="timers-limit" v-model.number="limit" class="input">
+              <option :value="50">50</option>
+              <option :value="100">100</option>
+              <option :value="250">250</option>
+            </select>
+          </label>
+        </template>
+      </PageTools>
 
       <!-- ===================== The page ===================== -->
       <div class="card">
@@ -199,7 +169,7 @@
                   <td><span style="font-size:12px; color:var(--text-mid);">{{ row.partition || '—' }}</span></td>
                   <td :title="utcTitle(row.deliverAt)">
                     <div :class="dueClass(row)" style="font-size:12px;">{{ formatDeliverIn(row.deliverAt, asOf) }}</div>
-                    <div class="font-mono" style="font-size:11px; color:var(--text-low);">
+                    <div class="tabular-nums" style="font-size:12px; color:var(--text-low);">
                       {{ localStamp(row.deliverAt) }}
                     </div>
                   </td>
@@ -222,8 +192,8 @@
                   </td>
                   <td
                     :title="utcTitle(row.createdAt)"
-                    class="font-mono tabular-nums"
-                    style="text-align:right; font-size:11.5px; color:var(--text-mid); white-space:nowrap;"
+                    class="tabular-nums"
+                    style="text-align:right; font-size:12px; color:var(--text-mid); white-space:nowrap;"
                   >{{ localStamp(row.createdAt) }}</td>
                 </tr>
               </template>
@@ -281,7 +251,7 @@
              count and this is an index range, not an offset. -->
         <div v-if="queue && (rows.length || canPrev)" class="pager">
           <span class="pager-count">
-            Page <span class="font-mono tabular-nums">{{ pageNumber }}</span>
+            Page <span class="tabular-nums">{{ pageNumber }}</span>
             · {{ rows.length }} row{{ rows.length === 1 ? '' : 's' }}
             <template v-if="!canNext && !listError"> · end of the queue</template>
           </span>
@@ -419,7 +389,7 @@
             <!-- The verdict, as the stored procedure issued it. `cancelled` is
                  the only one of the three that means the timer will not fire. -->
             <div v-if="cancelVerdict" class="timers-verdict">
-              <span class="chip" :class="cancelVerdict.tone === 'ok' ? 'chip-ok' : 'chip-warn'">
+              <span class="detail-status" :class="{ 'is-warn': cancelVerdict.tone !== 'ok' }">
                 {{ cancelVerdict.status || 'no status' }}
               </span>
               <p style="color:var(--text-hi); margin-top:8px;">{{ cancelVerdict.sentence }}</p>
@@ -485,6 +455,8 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import Autocomplete from '@/components/Autocomplete.vue'
+import PageHead from '@/components/PageHead.vue'
+import PageTools from '@/components/PageTools.vue'
 import DetailDrawer from '@/components/DetailDrawer.vue'
 import DetailField from '@/components/DetailField.vue'
 import JsonViewer from '@/components/JsonViewer.vue'
@@ -507,7 +479,7 @@ import { routeSupport } from '@/stores/routeSupport'
 
 const route = useRoute()
 const router = useRouter()
-const { can, epoch, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
+const { can, epoch } = useIdentity()
 const { notifySuccess } = useToast()
 
 const TENANT_TOTAL_TITLE =
@@ -872,7 +844,7 @@ reload()
 <style scoped>
 /* The queue names and the timer prefixes are long and dotted; the page-size
    select next to them is three digits wide and must not take the same room. */
-.filter-field-wide { flex-basis: 260px; max-width: 340px; }
+
 
 .timers-row { cursor: pointer; }
 .timers-key { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -887,8 +859,7 @@ reload()
   font-size: 11.5px; color: var(--ember-400);
 }
 
-.timers-count-row { display: flex; gap: 8px; align-items: center; }
-.timers-count-row .input { flex: 1; min-width: 0; }
+
 
 .timers-fields { display: flex; flex-direction: column; gap: 14px; }
 

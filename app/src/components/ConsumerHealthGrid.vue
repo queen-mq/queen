@@ -4,6 +4,7 @@
     <div class="chead">
       <div></div>
       <div class="h-name">Consumer group</div>
+      <div class="h-status">Status</div>
       <div class="h-c">Partitions</div>
       <div class="h-c">Lagging</div>
       <div class="h-c">Time lag</div>
@@ -15,6 +16,7 @@
       <div v-for="i in 8" :key="`s-${i}`" class="crow crow-skeleton">
         <span></span>
         <span class="skeleton" style="height: 12px; width: 60%;"></span>
+        <span class="skeleton" style="height: 12px; width: 60px;"></span>
         <span class="skeleton" style="height: 18px; width: 40px; margin: 0 auto;"></span>
         <span class="skeleton" style="height: 18px; width: 50px; margin: 0 auto;"></span>
         <span class="skeleton" style="height: 18px; width: 60px; margin: 0 auto;"></span>
@@ -43,7 +45,7 @@
         :class="`sev-${cardSev(g)}`"
         @click="$emit('select', g)"
       >
-        <span class="cdot"></span>
+        <span class="g" :class="glyph(cardSev(g))" aria-hidden="true"></span>
 
         <span class="cname">
           <!-- Queue mode: queue name leads (the meaningful identifier);
@@ -57,6 +59,8 @@
           <span class="nm">{{ primaryName(g) }}</span>
           <span class="ns" v-if="g.name !== '__QUEUE_MODE__'"> · {{ g.queueName }}</span>
         </span>
+
+        <span class="cstatus" :class="`sev-${cardSev(g)}`">{{ statusWord(cardSev(g)) }}</span>
 
         <span class="cell-c">
           <!-- "members" in the API = partitions assigned to this consumer group;
@@ -194,6 +198,14 @@ function lagPartsSev(g) {
  * Queue-mode groups have a synthetic `__QUEUE_MODE__` name that's pure
  * noise to the operator — the meaningful identifier is the queue. Named
  * groups put the group name first with the queue as muted subtitle. */
+// The row verdict as a shape and a word, in the page legend's vocabulary.
+function glyph(sev) {
+  return sev === 'bad' ? 'bad' : sev === 'warn' ? 'warn' : sev === 'mute' ? 'idle' : 'ok'
+}
+function statusWord(sev) {
+  return sev === 'bad' ? 'Stuck' : sev === 'warn' ? 'Lagging' : sev === 'mute' ? 'Never consumed' : 'Stable'
+}
+
 const primaryName = (g) => g.name === '__QUEUE_MODE__' ? g.queueName : g.name
 
 /* ---------------- formatters ---------------- */
@@ -462,5 +474,40 @@ const displayed = computed(() => {
   }
   .chead > :nth-child(3),
   .crow > :nth-child(3) { display: none; }
+}
+
+/* ---- v3: one card, rows on hairlines, plain numbers, a word per row ------- */
+.chead, .crow {
+  grid-template-columns: 14px minmax(180px, 1fr) 100px 96px 110px 96px 110px;
+  gap: 12px;
+  padding: 0 12px 0 16px;
+}
+.chead {
+  height: 36px; background: transparent; font-size: 12px; letter-spacing: 0;
+  text-transform: none; font-weight: 500;
+}
+.chead .h-name { padding-left: 0; }
+.chead .h-c { text-align: right; }
+.crow { height: var(--row-h, 40px); font-size: 13px; border-bottom-color: var(--bd-soft); }
+.crow:hover { background: var(--ink-3); }
+.crow::before { display: none; }
+.crow.sev-bad, .crow.sev-warn { background: transparent; }
+.crow.sev-mute { opacity: 1; }
+.crow .g { justify-self: center; }
+.cname { font-family: inherit; font-size: 13px; }
+.cname-tag { font-family: inherit; font-size: 11px; letter-spacing: 0; text-transform: none; font-weight: 500; }
+.cstatus { font-size: 12px; color: var(--text-low); white-space: nowrap; }
+.cstatus.sev-warn { color: var(--warn-400); }
+.cstatus.sev-bad { color: var(--ember-400); }
+.cell-c { text-align: right; }
+.cc { background: transparent !important; border: 0 !important; padding: 0 !important; min-width: 0 !important;
+  font-family: inherit !important; font-size: 13px !important; font-weight: 400 !important; color: var(--text-hi); }
+.cc i { font-size: 11px; color: var(--text-low); opacity: 1; margin-left: 3px; font-style: normal; }
+.cc.sev-warn { color: var(--warn-400); }
+.cc.sev-bad { color: var(--ember-400); }
+.cc.sev-ok, .cc.sev-mute, .cc.sev-ice { color: var(--text-hi); }
+@media (max-width: 760px) {
+  .chead, .crow { grid-template-columns: 14px minmax(120px, 1fr) 80px 80px; }
+  .chead > :nth-child(3), .crow > :nth-child(3), .chead > :nth-child(4), .crow > :nth-child(4), .chead > :last-child, .crow > :last-child { display: none; }
 }
 </style>
