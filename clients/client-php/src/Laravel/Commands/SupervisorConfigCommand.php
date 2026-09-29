@@ -4,7 +4,6 @@ namespace Queen\Laravel\Commands;
 
 use Illuminate\Console\Command;
 use Queen\Laravel\Supervisor\SupervisorConfiguration;
-use Symfony\Component\Console\Output\ConsoleOutputInterface;
 
 class SupervisorConfigCommand extends Command
 {
@@ -26,21 +25,10 @@ class SupervisorConfigCommand extends Command
 
             return self::FAILURE;
         }
+        // --for-engine is how the native (Rust) engine loads its contract,
+        // remote_status included: both engines publish it.
         if (!$this->option('for-engine')) {
             $resolved = $this->redact($resolved);
-        } elseif (array_key_exists('remote_status', $resolved)) {
-            // --for-engine is how the native (Rust) engine loads its contract.
-            // It does not publish remote status and rejects unknown keys, so
-            // the setting is withheld rather than preventing the start.
-            unset($resolved['remote_status']);
-            // Only a real stderr: stdout carries the contract the engine parses.
-            $output = $this->output->getOutput();
-            if ($output instanceof ConsoleOutputInterface) {
-                $output->getErrorOutput()->writeln(
-                    'Queen supervisor remote_status is only published by the PHP engine '
-                    . '(php artisan queen:supervise); the native engine runs without it.',
-                );
-            }
         }
         $resolved = $this->normalizeJsonMaps($resolved);
 

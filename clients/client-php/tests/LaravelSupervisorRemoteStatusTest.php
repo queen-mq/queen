@@ -135,19 +135,27 @@ final class LaravelSupervisorRemoteStatusTest extends TestCase
         $this->assertInstanceOf(\stdClass::class, json_decode(trim($output->fetch()))->remote_status->connection->headers);
     }
 
-    public function testTheNativeEngineExportWithholdsRemoteStatusItCannotPublish(): void
+    public function testTheNativeEngineExportCarriesRemoteStatusWithItsWriteCredentials(): void
     {
         $this->app['config']->set('queen.supervisor.remote_status', ['enabled' => true, 'key' => 'orders']);
+        $this->app['config']->set('queue.connections.queen.bearer_token', 'write-secret');
         $kernel = $this->app->make(\Illuminate\Contracts\Console\Kernel::class);
 
         $output = new BufferedOutput();
         $this->assertSame(0, $kernel->call('queen:supervisor-config', ['--for-engine' => true], $output));
-        $engine = json_decode(trim($output->fetch()), true, 512, JSON_THROW_ON_ERROR);
+        $json = trim($output->fetch());
+        $engine = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
 
-        // The Rust engine rejects unknown contract keys: the setting must not
-        // reach it, while the rest of the contract is exported unchanged.
-        $this->assertArrayNotHasKey('remote_status', $engine);
+        // The Rust engine publishes too, so it receives the same resolved
+        // setting as the PHP engine, unredacted like every other credential.
         $this->assertSame(2, $engine['version']);
+        $this->assertSame('orders', $engine['remote_status']['key']);
+        $this->assertSame('queen-supervisor', $engine['remote_status']['namespace']);
+        $this->assertSame('write-secret', $engine['remote_status']['connection']['bearer_token']);
+        $this->assertSame($engine['poll_interval'], $engine['remote_status']['interval']);
+        $this->assertGreaterThanOrEqual($engine['heartbeat_timeout'], $engine['remote_status']['ttl']);
+        // Rust decodes headers as a string map, never as a JSON list.
+        $this->assertInstanceOf(\stdClass::class, json_decode($json)->remote_status->connection->headers);
     }
 
     public function testThePhpEngineAlsoPublishesEveryStatusItWritesLocally(): void

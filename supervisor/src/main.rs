@@ -1,3 +1,6 @@
+mod remote_status;
+
+use remote_status::{RemoteStatusConfig, RemoteStatusPublisher};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -65,6 +68,9 @@ struct Config {
     #[serde(default)]
     connections: HashMap<String, QueenConfig>,
     supervisors: HashMap<String, SupervisorConfig>,
+    // Emitted by Laravel only when enabled, so an absent key means disabled.
+    #[serde(default)]
+    remote_status: Option<RemoteStatusConfig>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -398,12 +404,16 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
     let mut paused = false;
     let mut last_command_nonce: Option<String> = None;
     let mut status_failure: Option<String> = None;
+    let mut remote_status = config
+        .remote_status
+        .as_ref()
+        .map(RemoteStatusPublisher::new);
 
     eprintln!(
         "queen-supervisor started ({} pool definitions)",
         config.supervisors.len()
     );
-    state.write_status(
+    let status = state.write_status(
         "rust",
         "running",
         StatusSnapshot {
@@ -416,6 +426,7 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
             depths_available: &depths_available,
         },
     )?;
+    remote_status::publish(&mut remote_status, &client, &status);
     while running.load(Ordering::SeqCst) {
         match state.command(last_command_nonce.as_deref()) {
             Ok(Some(control)) => {
@@ -446,7 +457,7 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                         "terminating"
                     }
                 };
-                if let Err(error) = state.write_status(
+                match state.write_status(
                     "rust",
                     control_state,
                     StatusSnapshot {
@@ -459,8 +470,11 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                         depths_available: &depths_available,
                     },
                 ) {
-                    status_failure = Some(format!("state status write failed: {error}"));
-                    running.store(false, Ordering::SeqCst);
+                    Ok(status) => remote_status::publish(&mut remote_status, &client, &status),
+                    Err(error) => {
+                        status_failure = Some(format!("state status write failed: {error}"));
+                        running.store(false, Ordering::SeqCst);
+                    }
                 }
             }
             Ok(None) => {}
@@ -594,7 +608,7 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 last_reconcile.insert(name, Instant::now());
             }
-            if let Err(error) = state.write_status(
+            match state.write_status(
                 "rust",
                 if paused { "paused" } else { "running" },
                 StatusSnapshot {
@@ -607,8 +621,11 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                     depths_available: &depths_available,
                 },
             ) {
-                status_failure = Some(format!("state status write failed: {error}"));
-                running.store(false, Ordering::SeqCst);
+                Ok(status) => remote_status::publish(&mut remote_status, &client, &status),
+                Err(error) => {
+                    status_failure = Some(format!("state status write failed: {error}"));
+                    running.store(false, Ordering::SeqCst);
+                }
             }
             last_poll = Instant::now();
         }
@@ -618,7 +635,7 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         thread::sleep(Duration::from_millis(200));
     }
 
-    if let Err(error) = state.write_status(
+    match state.write_status(
         "rust",
         "terminating",
         StatusSnapshot {
@@ -631,10 +648,13 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
             depths_available: &depths_available,
         },
     ) {
-        let error = format!("state status write failed: {error}");
-        eprintln!("{error}");
-        if status_failure.is_none() {
-            status_failure = Some(error);
+        Ok(status) => remote_status::publish(&mut remote_status, &client, &status),
+        Err(error) => {
+            let error = format!("state status write failed: {error}");
+            eprintln!("{error}");
+            if status_failure.is_none() {
+                status_failure = Some(error);
+            }
         }
     }
     shutdown(
@@ -644,7 +664,7 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         Duration::from_secs(config.shutdown_grace),
         &mut pending_telemetry_cleanup,
     );
-    if let Err(error) = state.write_status(
+    match state.write_status(
         "rust",
         "stopped",
         StatusSnapshot {
@@ -657,10 +677,13 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
             depths_available: &depths_available,
         },
     ) {
-        let error = format!("state status write failed: {error}");
-        eprintln!("{error}");
-        if status_failure.is_none() {
-            status_failure = Some(error);
+        Ok(status) => remote_status::publish(&mut remote_status, &client, &status),
+        Err(error) => {
+            let error = format!("state status write failed: {error}");
+            eprintln!("{error}");
+            if status_failure.is_none() {
+                status_failure = Some(error);
+            }
         }
     }
     match status_failure {
@@ -1032,6 +1055,9 @@ fn validate_config(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
+    if let Some(remote_status) = &config.remote_status {
+        remote_status.validate(config.heartbeat_timeout)?;
+    }
     let loop_budget = control_loop_budget(config)?;
     if config.control_ttl <= loop_budget {
         return Err(format!(
@@ -1146,6 +1172,11 @@ fn control_loop_budget(config: &Config) -> Result<u64, Box<dyn std::error::Error
                 .checked_add(TELEMETRY_SCAN_BUDGET_SECONDS)
                 .ok_or("control-loop telemetry timing budget overflowed")?;
         }
+    }
+    if let Some(remote_status) = &config.remote_status {
+        budget = budget
+            .checked_add(remote_status.publish_budget(config.http_timeout)?)
+            .ok_or("control-loop remote status timing budget overflowed")?;
     }
 
     Ok(budget)
@@ -1626,7 +1657,7 @@ impl State {
         engine: &str,
         state: &str,
         snapshot: StatusSnapshot<'_>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
         self.verify_directory()?;
         let StatusSnapshot {
             config,
@@ -1789,7 +1820,8 @@ impl State {
             return Err(format!("supervisor status exceeds {MAX_STATUS_BYTES} bytes").into());
         }
         atomic_json(&self.directory.join("status.json"), &status)?;
-        self.verify_directory()
+        self.verify_directory()?;
+        Ok(status)
     }
 }
 
@@ -3177,6 +3209,7 @@ mod tests {
             },
             connections: HashMap::new(),
             supervisors: HashMap::from([("default".into(), options)]),
+            remote_status: None,
         }
     }
 
@@ -4143,6 +4176,75 @@ mod tests {
 
         resolved.heartbeat_timeout = budget + 1;
         validate_config(&resolved).unwrap();
+    }
+
+    #[test]
+    fn the_laravel_remote_status_contract_parses_and_joins_the_loop_budget() {
+        let document: serde_json::Value = serde_json::from_str(
+            r#"{
+                "version": 2,
+                "cwd": "/app",
+                "php_binary": "/usr/bin/php",
+                "artisan": "/app/artisan",
+                "state_directory": "/tmp/queen-supervisor-test",
+                "poll_interval": 3,
+                "http_timeout": 5,
+                "control_ttl": 3600,
+                "heartbeat_timeout": 34,
+                "shutdown_grace": 75,
+                "process_limit": 256,
+                "telemetry_ttl": 300,
+                "queen": {"url": "http://127.0.0.1:6632", "urls": ["http://127.0.0.1:6632"], "bearer_token": null, "headers": {}},
+                "connections": {
+                    "queen": {"url": "http://127.0.0.1:6632", "urls": ["http://127.0.0.1:6632"], "bearer_token": null, "headers": {}}
+                },
+                "supervisors": {
+                    "default": {
+                        "connection": "queen", "consumer_group": "workers", "queues": ["default"],
+                        "balance": "off", "strategy": "size", "processes": 1, "min_processes": 1,
+                        "max_processes": 1, "target_jobs_per_process": 10, "target_clear_seconds": 60,
+                        "default_runtime_seconds": 1, "balance_cooldown": 3, "balance_max_shift": 1,
+                        "scale_down_delay": 10, "restart_backoff": 1, "restart_backoff_max": 30,
+                        "stable_after": 60, "sleep": 3, "timeout": 60, "retry_after": 90,
+                        "lease_renewal": false, "tries": 3, "memory": 128, "backoff": 0,
+                        "max_jobs": 0, "max_time": 0, "rest": 0, "force": false, "quiet": true
+                    }
+                },
+                "remote_status": {
+                    "connection": {
+                        "url": "http://127.0.0.1:6632",
+                        "urls": ["http://127.0.0.1:6632", "http://127.0.0.1:6633"],
+                        "bearer_token": "write-secret",
+                        "headers": {"X-Queen-Key": "header-secret"}
+                    },
+                    "namespace": "queen-supervisor",
+                    "key": "orders",
+                    "interval": 3,
+                    "ttl": 300
+                }
+            }"#,
+        )
+        .unwrap();
+        let mut resolved: Config = serde_json::from_value(document.clone()).unwrap();
+        let remote_status = resolved.remote_status.as_ref().unwrap();
+        assert_eq!(
+            remote_status.connection.bearer_token.as_deref(),
+            Some("write-secret")
+        );
+        assert_eq!(remote_status.key, "orders");
+
+        // poll 3 + one depth batch * 1 endpoint * timeout 5 + 1 process start * 5
+        // + margin 5 + one publish per remote endpoint (2) * timeout 5.
+        assert_eq!(control_loop_budget(&resolved).unwrap(), 28);
+        validate_config(&resolved).unwrap();
+
+        resolved.heartbeat_timeout = 28;
+        let error = validate_config(&resolved).unwrap_err().to_string();
+        assert!(error.contains("heartbeat_timeout"), "{error}");
+
+        let mut unknown = document;
+        unknown["remote_status"]["enabled"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<Config>(unknown).is_err());
     }
 
     #[test]

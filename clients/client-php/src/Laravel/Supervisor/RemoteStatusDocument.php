@@ -23,8 +23,9 @@ use Queen\Support\KvOp;
  * short read, and the document is still validated field by field by its
  * reader. Base64 keeps each value's size independent of JSON string escaping.
  *
- * Only the PHP engine publishes today. Any other engine that learns to publish
- * must write exactly this format, because the dashboard reads nothing else.
+ * Both engines publish it: the Rust supervisor writes exactly this format in
+ * supervisor/src/remote_status.rs, because the dashboard reads nothing else.
+ * A change here must land in both writers.
  */
 final class RemoteStatusDocument
 {
