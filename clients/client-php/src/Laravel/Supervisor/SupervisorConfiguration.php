@@ -282,6 +282,16 @@ final class SupervisorConfiguration
             $resolved,
             static fn (array $options): bool => $options['strategy'] === 'time' && $options['balance'] !== 'simple',
         ));
+        $remoteStatus = self::remoteStatusSettings($raw, $queen, $queueConnections);
+        if ($remoteStatus !== null) {
+            // One synchronous publish per endpoint may run inside a control
+            // loop iteration, so it belongs to the heartbeat budget.
+            $publishBudget = count($remoteStatus['connection']['urls']) * $httpTimeout;
+            if ($maximumControlLoopSeconds > PHP_INT_MAX - $publishBudget) {
+                throw new InvalidArgumentException('Queen supervisor remote status publish budget is too large.');
+            }
+            $maximumControlLoopSeconds += $publishBudget;
+        }
         $controlLoopRemainder = ($totalMaxProcesses * self::PROCESS_START_BUDGET_SECONDS)
             + ($timeSupervisors * self::TELEMETRY_SCAN_BUDGET_SECONDS)
             + self::CONTROL_LOOP_MARGIN_SECONDS;
@@ -333,6 +343,11 @@ final class SupervisorConfiguration
             'connections' => $connections,
             'supervisors' => $resolved,
         ];
+        if ($remoteStatus !== null) {
+            // Emitted only when enabled: engines reject unknown contract keys,
+            // so a disabled feature keeps the document byte-identical.
+            $result['remote_status'] = self::remoteStatusTiming($remoteStatus, $pollInterval, $heartbeatTimeout);
+        }
         $encoded = json_encode($result, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
         if (strlen($encoded) + 1 > self::MAX_CONFIG_BYTES) {
             throw new InvalidArgumentException(
@@ -391,6 +406,89 @@ final class SupervisorConfiguration
         }
 
         return $stateDirectory;
+    }
+
+    /**
+     * Where the supervisor publishes its status document, or null when remote
+     * status is disabled. The dashboard reads the same key through this
+     * method, so publisher and reader cannot drift apart.
+     *
+     * The connection is resolved without read_bearer_token: publishing is a
+     * key/value write, which a read-only credential cannot perform.
+     *
+     * @param array<string, mixed> $raw the `queen.supervisor` configuration
+     * @param array<string, mixed> $queen the `queen` configuration
+     * @param array<string, mixed> $queueConnections the `queue.connections` configuration
+     * @return array{connection: array{url: string, urls: list<string>, bearer_token: ?string, headers: array<string, string>}, namespace: string, key: string, interval: mixed, ttl: mixed}|null
+     */
+    public static function remoteStatusSettings(array $raw, array $queen, array $queueConnections): ?array
+    {
+        $settings = $raw['remote_status'] ?? null;
+        if ($settings === null) {
+            return null;
+        }
+        if (!is_array($settings)) {
+            throw new InvalidArgumentException('Queen supervisor remote_status must be an array.');
+        }
+        if (!self::boolean($settings['enabled'] ?? false, 'remote_status.enabled')) {
+            return null;
+        }
+
+        $connection = $settings['connection'] ?? 'queen';
+        $namespace = $settings['namespace'] ?? 'queen-supervisor';
+        $key = $settings['key'] ?? null;
+        foreach (['connection' => $connection, 'namespace' => $namespace, 'key' => $key] as $label => $value) {
+            if (!is_string($value)) {
+                throw new InvalidArgumentException(
+                    "Queen supervisor remote_status.{$label} must be a string when remote status is enabled.",
+                );
+            }
+            self::identifier($value, "supervisor remote_status.{$label}");
+        }
+
+        return [
+            'connection' => self::readConnection(self::connectionConfig($connection, $queen, $queueConnections, [])),
+            'namespace' => $namespace,
+            'key' => $key,
+            'interval' => $settings['interval'] ?? null,
+            'ttl' => $settings['ttl'] ?? null,
+        ];
+    }
+
+    /**
+     * @param array{connection: array<string, mixed>, namespace: string, key: string, interval: mixed, ttl: mixed} $settings
+     * @return array{connection: array<string, mixed>, namespace: string, key: string, interval: int, ttl: int}
+     */
+    private static function remoteStatusTiming(array $settings, int $pollInterval, int $heartbeatTimeout): array
+    {
+        $interval = $settings['interval'] === null || $settings['interval'] === ''
+            ? $pollInterval
+            : self::positiveDuration($settings['interval'], 'remote_status.interval');
+        if ($interval >= $heartbeatTimeout) {
+            throw new InvalidArgumentException(
+                "Queen supervisor remote_status.interval [{$interval}] must be shorter than heartbeat_timeout "
+                . "[{$heartbeatTimeout}], or every published document would already look stale.",
+            );
+        }
+
+        $ttl = $settings['ttl'] === null || $settings['ttl'] === ''
+            ? min(86400, max(300, 2 * $heartbeatTimeout))
+            : self::positiveInteger($settings['ttl'], 'remote_status.ttl');
+        if ($ttl < $heartbeatTimeout || $ttl > 86400) {
+            throw new InvalidArgumentException(
+                "Queen supervisor remote_status.ttl [{$ttl}] must be at least heartbeat_timeout "
+                . "[{$heartbeatTimeout}] and at most 86400 seconds, so a stopped supervisor shows as stale "
+                . 'before its document expires.',
+            );
+        }
+
+        return [
+            'connection' => $settings['connection'],
+            'namespace' => $settings['namespace'],
+            'key' => $settings['key'],
+            'interval' => $interval,
+            'ttl' => $ttl,
+        ];
     }
 
     private static function connectionConfig(string $name, array $queen, array $queueConnections, array $supervisor): array

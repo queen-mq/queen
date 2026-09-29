@@ -55,6 +55,7 @@ verifiedBy:
   - clients/client-php/tests/LaravelDashboardTest.php
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
 # sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): QUEUE_DEFAULTS is nine keys, the configure paragraph is rewritten for the merge rule, and retryMessage carries the move primitive's consequences.
+# sourceOfTruth re-read 2026-09-29 (through fc71b65b + this patch): adds the supervisor.remote_status keys and the dashboard's published-status source.
 ---
 
 The Composer package is `queen-mq/php-client`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
@@ -487,6 +488,12 @@ Publish the config with the `queen-config` tag; it lands at `config/queen.php`. 
 | `supervisor.process_limit` | `QUEEN_SUPERVISOR_PROCESS_LIMIT` | `256` |
 | `supervisor.state_directory` | `QUEEN_SUPERVISOR_STATE_DIRECTORY` | `storage/queen-supervisor` |
 | `supervisor.telemetry_ttl` | `QUEEN_SUPERVISOR_TELEMETRY_TTL` | `300` seconds |
+| `supervisor.remote_status.enabled` | `QUEEN_SUPERVISOR_REMOTE_STATUS` | `false` |
+| `supervisor.remote_status.key` | `QUEEN_SUPERVISOR_REMOTE_STATUS_KEY` | unset; required when enabled |
+| `supervisor.remote_status.connection` | `QUEEN_SUPERVISOR_REMOTE_STATUS_CONNECTION` | `queen` |
+| `supervisor.remote_status.namespace` | `QUEEN_SUPERVISOR_REMOTE_STATUS_NAMESPACE` | `queen-supervisor` |
+| `supervisor.remote_status.interval` | `QUEEN_SUPERVISOR_REMOTE_STATUS_INTERVAL` | unset; `poll_interval` |
+| `supervisor.remote_status.ttl` | `QUEEN_SUPERVISOR_REMOTE_STATUS_TTL` | unset; twice `heartbeat_timeout`, at least 300 seconds |
 | `dashboard.enabled` | `QUEEN_DASHBOARD_ENABLED` | `false` |
 | `dashboard.path` | `QUEEN_DASHBOARD_PATH` | `queen` |
 | `dashboard.domain` | `QUEEN_DASHBOARD_DOMAIN` | unset |
@@ -702,7 +709,9 @@ surge overlap, such as `Recreate`.
 
 The package also provides a disabled-by-default local panel. It reads bounded state from the one
 local master and protects HTML, JSON and controls with the same `viewQueenDashboard` Gate. In
-production, enabling the route without defining an allowing Gate still returns `403`.
+production, enabling the route without defining an allowing Gate still returns `403`. With
+`supervisor.remote_status` enabled, the PHP engine also publishes that state to the broker's
+key/value store, and a panel on another host shows it read-only.
 
 The complete authorization example, route-cache procedure and local-versus-global scope are in
 [Supervisor dashboard](/use/laravel/dashboard).

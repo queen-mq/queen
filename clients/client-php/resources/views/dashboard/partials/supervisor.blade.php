@@ -2,8 +2,11 @@
     <div class="card-header">
         <div>
             <h2 id="supervisors-title">Supervisor instance</h2>
-            <p>{{ ucfirst($supervisor['engine'] ?? 'unknown') }} master · {{ $stateLabel }} · {{ $readinessLabel }}</p>
+            <p>{{ ucfirst($supervisor['engine'] ?? 'unknown') }} master · {{ $stateLabel }} · {{ $readinessLabel }}@if (($supervisor['source'] ?? null) === 'remote') · published through the broker @endif</p>
         </div>
+        @if (($supervisor['source'] ?? null) === 'remote')
+        <p class="controls-note">Read-only: this supervisor runs on another host. Pause, continue or terminate it there with <code>php artisan queen:supervisor</code>.</p>
+        @else
         <div class="controls" aria-label="Supervisor controls">
             <form method="post" action="{{ route('queen.dashboard.control', ['command' => 'pause'], false) }}">
                 @csrf
@@ -21,6 +24,7 @@
                 <button class="button danger" type="submit" @disabled($supervisor['availability'] !== 'live')>Terminate</button>
             </form>
         </div>
+        @endif
     </div>
     <div class="instance-meta">
         <div><span class="meta-label">Instance ID</span><code>{{ $supervisor['instance_id'] ?? 'No active instance' }}</code></div>

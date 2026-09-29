@@ -51,6 +51,7 @@ final class PhpSupervisor
     private SupervisorState $state;
     /** @var array<string, Queen> */
     private array $depthClients = [];
+    private RemoteStatusPublisher|false|null $remoteStatus = null;
 
     public function __construct(
         private QueueManager $queues,
@@ -1036,7 +1037,7 @@ final class PhpSupervisor
             && !in_array(false, array_column($poolStatus, 'ready'), true);
         $capacitySatisfied = $poolStatus !== []
             && !in_array(false, array_column($poolStatus, 'capacity_satisfied'), true);
-        $this->state->writeStatus([
+        $document = $this->state->writeStatus([
             'engine' => 'php',
             'state' => $status,
             'ready' => $ready,
@@ -1054,6 +1055,51 @@ final class PhpSupervisor
             'pool_status' => $poolStatus,
             'configuration' => $this->statusConfiguration(),
         ]);
+        $this->remoteStatusPublisher()?->publish($document);
+    }
+
+    /**
+     * Built on first use from the resolved contract; null when remote status
+     * is disabled. The client gets one attempt per endpoint, like depth
+     * polling, because the resolver budgets exactly that into the heartbeat.
+     */
+    private function remoteStatusPublisher(): ?RemoteStatusPublisher
+    {
+        if ($this->remoteStatus !== null) {
+            return $this->remoteStatus ?: null;
+        }
+
+        $settings = $this->config['remote_status'] ?? null;
+        if (!is_array($settings)) {
+            $this->remoteStatus = false;
+
+            return null;
+        }
+
+        $connection = $settings['connection'];
+        $options = [
+            'urls' => $connection['urls'] ?? [$connection['url']],
+            'bearerToken' => $connection['bearer_token'] ?? null,
+            'headers' => $connection['headers'] ?? [],
+            'timeoutMillis' => ($this->config['http_timeout'] ?? 5) * 1000,
+            'retryAttempts' => 1,
+            'retryDelayMillis' => 0,
+        ];
+        $client = $this->queenFactory !== null
+            ? ($this->queenFactory)('remote_status', $options)
+            : new Queen($options);
+        if (!$client instanceof Queen) {
+            throw new \RuntimeException('Queen supervisor client factory must return a Queen client.');
+        }
+
+        return $this->remoteStatus = new RemoteStatusPublisher(
+            $client,
+            $settings['namespace'],
+            $settings['key'],
+            (int) $settings['interval'],
+            (int) $settings['ttl'],
+            $this->output,
+        );
     }
 
     /** @return array<string, mixed> */

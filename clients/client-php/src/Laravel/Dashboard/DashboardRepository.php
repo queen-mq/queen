@@ -23,20 +23,23 @@ final class DashboardRepository
 
     /**
      * @param \Closure(int): mixed $failedJobs
+     * @param (\Closure(): (array<string, mixed>|null))|null $remoteStatus reads the
+     *   document a supervisor on another host published; null when disabled
      */
     public function __construct(
         private SupervisorState $state,
         private ConfigRepository $config,
         private \Closure $failedJobs,
+        private ?\Closure $remoteStatus = null,
     ) {
     }
 
     /** @return array<string, mixed> */
     public function snapshot(): array
     {
-        $document = $this->statusDocument();
+        [$document, $source] = $this->statusDocument();
         $configuration = $this->safeConfiguration($document['configuration'] ?? null);
-        $supervisor = $this->supervisor($document, $configuration);
+        $supervisor = $this->supervisor($document, $configuration, $source);
         $configuration ??= ['supervisors' => []];
 
         return [
@@ -56,6 +59,11 @@ final class DashboardRepository
         if (!$this->validInstanceId($expectedInstanceId)) {
             throw new DashboardConflictException('The supervisor instance identifier is invalid.');
         }
+        if ($this->statusDocument()[1] === 'remote') {
+            throw new DashboardConflictException(
+                'This supervisor runs on another host. Send the command from that host with php artisan queen:supervisor.',
+            );
+        }
 
         try {
             // SupervisorState checks heartbeat, owner lock and the selected
@@ -69,23 +77,53 @@ final class DashboardRepository
         }
     }
 
-    /** @return array<string, mixed>|null */
-    private function statusDocument(): ?array
+    /**
+     * The local status document when its supervisor is live on this host,
+     * otherwise the published remote copy, otherwise whatever local document
+     * remains (reported as stale).
+     *
+     * @return array{0: array<string, mixed>|null, 1: 'local'|'remote'|null}
+     */
+    private function statusDocument(): array
     {
         try {
-            $status = $this->state->status();
+            $local = $this->state->status();
         } catch (\Throwable) {
-            return null;
+            $local = null;
+        }
+        $local = is_array($local) ? $local : null;
+        if ($local !== null && $this->isLocallyLive($local)) {
+            return [$local, 'local'];
         }
 
-        return is_array($status) ? $status : null;
+        if ($this->remoteStatus !== null) {
+            try {
+                $remote = ($this->remoteStatus)();
+            } catch (\Throwable) {
+                $remote = null;
+            }
+            if (is_array($remote)) {
+                return [$remote, 'remote'];
+            }
+        }
+
+        return [$local, $local !== null ? 'local' : null];
+    }
+
+    private function isLocallyLive(array $status): bool
+    {
+        try {
+            return $this->state->isLive($status);
+        } catch (\Throwable) {
+            return false;
+        }
     }
 
     /**
      * @param array<string, mixed>|null $raw
      * @param array<string, mixed>|null $configuration
      */
-    private function supervisor(?array $raw, ?array $configuration): array
+    private function supervisor(?array $raw, ?array $configuration, ?string $source): array
     {
         if ($raw === null || $configuration === null) {
             return $this->unavailableSupervisor();
@@ -105,7 +143,11 @@ final class DashboardRepository
         $now = time();
         $age = $now - $epoch;
         try {
-            $live = $this->state->isLive($raw);
+            // A remote document cannot be checked against this host's owner
+            // lock; its heartbeat age is the only evidence available.
+            $live = $source === 'remote'
+                ? $this->state->isFresh($raw)
+                : $this->state->isLive($raw);
         } catch (\Throwable) {
             $live = false;
         }
@@ -139,6 +181,8 @@ final class DashboardRepository
 
         return [
             'availability' => $live ? 'live' : 'stale',
+            'source' => $source === 'remote' ? 'remote' : 'local',
+            'controls_available' => $source !== 'remote',
             'engine' => in_array($raw['engine'] ?? null, ['php', 'rust'], true) ? $raw['engine'] : 'unknown',
             'state' => $state,
             'instance_id' => $instanceId,
@@ -161,6 +205,8 @@ final class DashboardRepository
     {
         return [
             'availability' => 'unavailable',
+            'source' => null,
+            'controls_available' => false,
             'engine' => null,
             'state' => null,
             'instance_id' => null,

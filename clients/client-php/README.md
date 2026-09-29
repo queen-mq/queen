@@ -321,6 +321,33 @@ cannot command a replaced master. The panel reads one local state directory; it 
 aggregator. Global backlog analytics and DLQ operations live in the Queen broker dashboard.
 [Dashboard reference](https://queenmq.com/use/laravel/dashboard).
 
+**Supervisor on another host.** When the dashboard is served by other processes than the supervisor
+— Kubernetes web pods and a separate worker pod, for instance — the PHP engine can also publish its
+status to the broker's key/value store:
+
+```dotenv
+QUEEN_SUPERVISOR_REMOTE_STATUS=true
+QUEEN_SUPERVISOR_REMOTE_STATUS_KEY=orders-production   # unique per application and environment
+```
+
+Set both on the supervisor host and on the web hosts. The dashboard shows the local supervisor when
+one is live, otherwise the published copy, marked as such and **read-only**: pause, continue and
+terminate stay with `php artisan queen:supervisor` on the supervisor host. Liveness comes from the
+published heartbeat alone. The document is split across `<key>/head` and `<key>/chunk/NNNN` in the
+`queen-supervisor` namespace, written in one transaction, so it never depends on the key/value value
+ceiling. Publishing is best effort and budgeted into the heartbeat; a broker outage shows the
+supervisor as stale and never stops supervision. The native engine does not publish: `queen:supervisor-config
+--for-engine` withholds the setting and prints a notice.
+
+| Variable | Default | |
+| --- | --- | --- |
+| `QUEEN_SUPERVISOR_REMOTE_STATUS` | `false` | publish the status document |
+| `QUEEN_SUPERVISOR_REMOTE_STATUS_KEY` | — | required when enabled |
+| `QUEEN_SUPERVISOR_REMOTE_STATUS_CONNECTION` | `queen` | Queen connection whose broker and credentials are used |
+| `QUEEN_SUPERVISOR_REMOTE_STATUS_NAMESPACE` | `queen-supervisor` | key/value namespace |
+| `QUEEN_SUPERVISOR_REMOTE_STATUS_INTERVAL` | `poll_interval` | seconds between publishes; a state change publishes at once |
+| `QUEEN_SUPERVISOR_REMOTE_STATUS_TTL` | `2 × heartbeat_timeout`, min 300 | expiry of the published copy |
+
 ---
 
 ## What Laravel keeps

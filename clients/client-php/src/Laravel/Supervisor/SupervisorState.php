@@ -202,6 +202,26 @@ final class SupervisorState
 
     public function isLive(array $status, ?int $staleAfterSeconds = null): bool
     {
+        if (!$this->isFresh($status, $staleAfterSeconds)) {
+            return false;
+        }
+        $owner = $this->lockedOwner();
+
+        return ($owner['instance_id'] ?? null) === $status['instance_id']
+            && ($owner['pid'] ?? null) === $status['pid'];
+    }
+
+    /**
+     * Whether a status document describes a running generation with a recent
+     * heartbeat, judged from the document alone.
+     *
+     * This is the half of isLive() that does not need the local owner lock,
+     * so it also applies to a document published by a supervisor on another
+     * host. It cannot prove that the publishing process still exists; only
+     * the heartbeat age stands in for that.
+     */
+    public function isFresh(array $status, ?int $staleAfterSeconds = null): bool
+    {
         if ($staleAfterSeconds !== null && $staleAfterSeconds < 1) {
             throw new RuntimeException('Queen supervisor stale-after must be a positive number of seconds.');
         }
@@ -233,10 +253,8 @@ final class SupervisorState
             || ($status['stopping'] ?? null) !== false) {
             return false;
         }
-        $owner = $this->lockedOwner();
 
-        return ($owner['instance_id'] ?? null) === $instanceId
-            && ($owner['pid'] ?? null) === $pid;
+        return true;
     }
 
     /**
@@ -329,7 +347,10 @@ final class SupervisorState
         return ['healthy' => $issues === [], 'issues' => $issues];
     }
 
-    public function writeStatus(array $status): void
+    /**
+     * @return array<string, mixed> the document as written, metadata included
+     */
+    public function writeStatus(array $status): array
     {
         $updatedAtEpoch = time();
         $state = is_string($status['state'] ?? null) ? $status['state'] : 'unknown';
@@ -342,7 +363,10 @@ final class SupervisorState
             'paused' => $state === 'paused',
             'stopping' => $state === 'terminating',
         ];
-        $this->writeJson('status.json', array_replace($status, $metadata));
+        $document = array_replace($status, $metadata);
+        $this->writeJson('status.json', $document);
+
+        return $document;
     }
 
     public function status(): ?array

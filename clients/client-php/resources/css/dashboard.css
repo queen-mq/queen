@@ -314,6 +314,13 @@ code {
     flex-wrap: wrap;
 }
 .controls form { margin: 0; }
+.controls-note {
+    max-width: 360px;
+    margin: 0;
+    color: var(--muted);
+    font-size: 13px;
+    text-align: right;
+}
 .button {
     min-height: 40px;
     padding: 7px 12px;

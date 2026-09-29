@@ -97,6 +97,22 @@ return [
         // is deployed as 0775.
         'state_directory' => env('QUEEN_SUPERVISOR_STATE_DIRECTORY', storage_path('queen-supervisor')),
         'telemetry_ttl' => env('QUEEN_SUPERVISOR_TELEMETRY_TTL', 300),
+        // Also publish the status document to the broker's key/value store,
+        // so a dashboard served by another host or pod (Kubernetes web pods,
+        // a separate web server) can show this supervisor. PHP engine only
+        // (php artisan queen:supervise). Read-only: pause, continue and
+        // terminate stay with the supervisor's own host. The key must be
+        // unique per application and environment on the broker. A null
+        // interval publishes at most once per poll_interval; a null TTL keeps
+        // the document for twice the heartbeat timeout (minimum 300s).
+        'remote_status' => [
+            'enabled' => env('QUEEN_SUPERVISOR_REMOTE_STATUS', false),
+            'connection' => env('QUEEN_SUPERVISOR_REMOTE_STATUS_CONNECTION', 'queen'),
+            'namespace' => env('QUEEN_SUPERVISOR_REMOTE_STATUS_NAMESPACE', 'queen-supervisor'),
+            'key' => env('QUEEN_SUPERVISOR_REMOTE_STATUS_KEY'),
+            'interval' => env('QUEEN_SUPERVISOR_REMOTE_STATUS_INTERVAL'),
+            'ttl' => env('QUEEN_SUPERVISOR_REMOTE_STATUS_TTL'),
+        ],
         'supervisors' => [
             'default' => [
                 'connection' => 'queen',
