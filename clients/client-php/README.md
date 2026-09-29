@@ -305,7 +305,10 @@ endpoint-failover read token are covered in
 ### Dashboard
 
 A server-rendered local panel at `/queen`, disabled by default, showing supervisor health, pools,
-restart state, sampled depth and bounded failed-job metadata.
+restart state, sampled depth and failed-job metadata. Each section is its own page (`/queen`,
+`/queen/workload`, `/queen/supervisors`, `/queen/failed-jobs`, `/queen/configuration`). Failed jobs
+are paged newest first with a keyset cursor, never an `OFFSET` or `COUNT(*)`, so a table with
+millions of rows costs the same per page.
 
 ```dotenv
 QUEEN_DASHBOARD_ENABLED=true
@@ -319,6 +322,15 @@ and falls back to its own routes otherwise:
 
 ```bash
 php artisan vendor:publish --tag=queen-assets --force
+```
+
+To see why a job failed, opt in to the detail page. Job IDs then link to
+`/queen/failed-jobs/{id}`, which shows the job class, attempts, the exception message and the stack
+trace (paths relative to the application root), but never the payload. It is off by default because
+exception messages can carry application data:
+
+```dotenv
+QUEEN_DASHBOARD_FAILED_JOB_DETAILS=true
 ```
 
 In production it is **deny-by-default even when enabled** until the application defines the ability:

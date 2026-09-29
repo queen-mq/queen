@@ -1,13 +1,12 @@
 /*
- * Queen supervisor dashboard: partial auto-refresh and in-page navigation.
+ * Queen supervisor dashboard: partial auto-refresh with a pause control.
  *
  * Served same-origin, content-hashed and with Subresource Integrity; the
  * Content Security Policy allows no inline code. The page works without this
  * file: a <noscript> meta refresh reloads it whole.
  *
  * Every refresh fetches the current page and swaps only the header and the
- * main region, so scroll position, the sidebar and the section in view stay
- * put. It pauses while the tab is hidden, while the reader is selecting text
+ * main region, so scroll position and the sidebar stay put. It pauses while the tab is hidden, while the reader is selecting text
  * or has focus on a control that would be replaced, and stops for good when
  * the response is no longer this dashboard (an expired session redirects to
  * the application's login page).
@@ -17,6 +16,10 @@
 
     var STORAGE_KEY = 'queen-dashboard:auto-refresh';
     var body = document.body;
+    if (!body.hasAttribute('data-refresh-seconds')) {
+        // A page with nothing to refresh, such as a failed-job detail.
+        return;
+    }
     var seconds = Math.max(2, parseInt(body.getAttribute('data-refresh-seconds'), 10) || 5);
     var enabled = readPreference();
     var stopped = false;
@@ -163,21 +166,6 @@
         });
     }
 
-    function sectionLink(target) {
-        return target && target.closest ? target.closest('.sidebar .nav-link') : null;
-    }
-
-    function markActive(link) {
-        var links = document.querySelectorAll('.sidebar .nav-link');
-        for (var i = 0; i < links.length; i++) {
-            if (links[i] === link) {
-                links[i].setAttribute('aria-current', 'page');
-            } else {
-                links[i].removeAttribute('aria-current');
-            }
-        }
-    }
-
     document.addEventListener('click', function (event) {
         if (event.target && event.target.closest && event.target.closest('[data-refresh-toggle]')) {
             enabled = !enabled;
@@ -187,39 +175,6 @@
                 refresh();
             } else {
                 window.clearTimeout(timer);
-            }
-            return;
-        }
-
-        var link = sectionLink(event.target);
-        if (!link || event.defaultPrevented || event.button !== 0
-            || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
-            return;
-        }
-        var url = new URL(link.href);
-        if (url.origin !== window.location.origin || url.pathname !== window.location.pathname) {
-            return;
-        }
-        // Same page: move to the section without a reload, and keep ?view=
-        // in the address so a manual reload or a shared link lands there too.
-        event.preventDefault();
-        window.history.pushState(null, '', url.toString());
-        markActive(link);
-        var section = url.hash ? document.getElementById(url.hash.slice(1)) : null;
-        if (section) {
-            section.scrollIntoView({ block: 'start' });
-        } else {
-            window.scrollTo(0, 0);
-        }
-    });
-
-    window.addEventListener('popstate', function () {
-        var view = new URL(window.location.href).searchParams.get('view') || 'overview';
-        var links = document.querySelectorAll('.sidebar .nav-link');
-        for (var i = 0; i < links.length; i++) {
-            var linkView = new URL(links[i].href).searchParams.get('view') || 'overview';
-            if (linkView === view) {
-                markActive(links[i]);
             }
         }
     });

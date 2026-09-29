@@ -22,20 +22,23 @@ final class DashboardRepository
     private const MAX_PROCESS_LIMIT = 4096;
 
     /**
-     * @param \Closure(int): mixed $failedJobs
+     * @param \Closure(int, ?int): mixed $failedJobs a page of the failed-job index
      * @param (\Closure(): (array<string, mixed>|null))|null $remoteStatus reads the
      *   document a supervisor on another host published; null when disabled
+     * @param (\Closure(string): mixed)|null $failedJob one failed job with its
+     *   exception, for the opt-in detail page
      */
     public function __construct(
         private SupervisorState $state,
         private ConfigRepository $config,
         private \Closure $failedJobs,
         private ?\Closure $remoteStatus = null,
+        private ?\Closure $failedJob = null,
     ) {
     }
 
     /** @return array<string, mixed> */
-    public function snapshot(): array
+    public function snapshot(?int $failedJobsCursor = null): array
     {
         [$document, $source] = $this->statusDocument();
         $configuration = $this->safeConfiguration($document['configuration'] ?? null);
@@ -47,7 +50,7 @@ final class DashboardRepository
             'supervisor' => $supervisor,
             'configuration' => $configuration,
             'queues' => $this->queueDepths($configuration, $supervisor['pools']),
-            'failed_jobs' => $this->failedJobs(),
+            'failed_jobs' => $this->failedJobs($failedJobsCursor),
         ];
     }
 
@@ -713,7 +716,7 @@ final class DashboardRepository
     }
 
     /** @return array<string, mixed> */
-    private function failedJobs(): array
+    private function failedJobs(?int $cursor): array
     {
         $limit = $this->boundedInteger(
             $this->config->get('queen.dashboard.failed_jobs_limit', 50),
@@ -723,7 +726,7 @@ final class DashboardRepository
         );
 
         try {
-            $readModel = ($this->failedJobs)($limit);
+            $readModel = ($this->failedJobs)($limit, $cursor);
             if (!is_array($readModel)
                 || !is_int($readModel['total'] ?? null)
                 || ($readModel['total'] ?? -1) < 0
@@ -751,6 +754,8 @@ final class DashboardRepository
                 ];
             }
 
+            $nextCursor = $readModel['next_cursor'] ?? null;
+
             return [
                 'available' => true,
                 'total' => $readModel['total'],
@@ -758,6 +763,8 @@ final class DashboardRepository
                 'showing' => count($items),
                 'limit' => $limit,
                 'items' => $items,
+                'cursor' => $cursor,
+                'next_cursor' => is_int($nextCursor) && $nextCursor > 0 ? $nextCursor : null,
             ];
         } catch (\Throwable) {
             return [
@@ -767,8 +774,61 @@ final class DashboardRepository
                 'showing' => 0,
                 'limit' => $limit,
                 'items' => [],
+                'cursor' => $cursor,
+                'next_cursor' => null,
             ];
         }
+    }
+
+    /**
+     * One failed job for the opt-in detail page: its identity, the job name
+     * and attempt counters read from the payload, and the exception split into
+     * summary and stack trace. The payload itself never leaves this method, and
+     * paths under the application root are shown relative to it.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function failedJob(string $id, string $basePath = ''): ?array
+    {
+        if ($this->failedJob === null || $this->safeIdentifier($id) === null) {
+            return null;
+        }
+        try {
+            $record = ($this->failedJob)($id);
+        } catch (\Throwable) {
+            return null;
+        }
+        if (!is_array($record) || $this->safeIdentifier($record['id'] ?? null) === null) {
+            return null;
+        }
+
+        $payload = is_string($record['payload'] ?? null) ? json_decode($record['payload'], true, 32) : null;
+        $payload = is_array($payload) ? $payload : [];
+        $exception = is_string($record['exception'] ?? null) ? $record['exception'] : '';
+        if ($basePath !== '') {
+            $exception = str_replace(rtrim($basePath, '/') . '/', '', $exception);
+        }
+        $parts = preg_split('/\R(?:Stack trace:|Next )/', $exception, 2) ?: [$exception];
+        $summary = trim($parts[0]);
+        $trace = trim(substr($exception, strlen($parts[0])));
+        $class = preg_match('/^([A-Za-z_\\\\][A-Za-z0-9_\\\\]*)(?::|\s|$)/', $summary, $matches) === 1 ? $matches[1] : null;
+        $connection = $this->safeString($record['connection'] ?? null, 128);
+
+        return [
+            'id' => $this->safeIdentifier($record['id']),
+            'connection' => $connection,
+            'queue' => $this->safeString($record['queue'] ?? null, 256),
+            'failed_at' => $this->safeTimestamp($record['failed_at'] ?? null),
+            'lifecycle_policy' => $this->failedLifecycle($connection),
+            'job' => $this->safeString($payload['displayName'] ?? null, 256),
+            'uuid' => $this->safeString($payload['uuid'] ?? null, 64),
+            'attempts' => $this->nonNegativeInteger($payload['attempts'] ?? null),
+            'max_tries' => $this->nonNegativeInteger($payload['maxTries'] ?? null),
+            'timeout' => $this->nonNegativeInteger($payload['timeout'] ?? null),
+            'exception_class' => $class !== null ? $this->safeString($class, 256) : null,
+            'exception_summary' => $this->safeText($summary, 8192),
+            'exception_trace' => $this->safeText($trace, 65536),
+        ];
     }
 
     private function safeIdentifier(mixed $value): string|int|null
@@ -813,6 +873,25 @@ final class DashboardRepository
         }
 
         return $value;
+    }
+
+    /**
+     * Multi-line text for display: line breaks and tabs kept, other control
+     * characters removed, invalid UTF-8 replaced, and cut (not rejected) at
+     * the byte bound so a long trace still shows its useful beginning.
+     */
+    private function safeText(mixed $value, int $maximumBytes): ?string
+    {
+        if (!is_string($value) || $value === '') {
+            return null;
+        }
+        $value = mb_convert_encoding(str_replace("\r\n", "\n", $value), 'UTF-8', 'UTF-8');
+        $value = preg_replace('/[\x00-\x08\x0B-\x1F\x7F]/', '', $value) ?? '';
+        if (strlen($value) > $maximumBytes) {
+            $value = mb_strcut($value, 0, $maximumBytes, 'UTF-8') . "\n[truncated]";
+        }
+
+        return trim($value) === '' ? null : $value;
     }
 
     private function validInstanceId(mixed $value): bool

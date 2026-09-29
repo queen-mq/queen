@@ -225,10 +225,11 @@ class QueenServiceProvider extends ServiceProvider
             return new DashboardRepository(
                 new SupervisorState($directory),
                 $app['config'],
-                fn (int $limit): array => $app->make(FailedJobsReadModel::class)->read($limit),
+                fn (int $limit, ?int $cursor = null): array => $app->make(FailedJobsReadModel::class)->read($limit, $cursor),
                 $this->remoteStatusEnabled($app)
                     ? fn (): ?array => $app->make(RemoteStatusReader::class)->read()
                     : null,
+                fn (string $id): ?array => $app->make(FailedJobsReadModel::class)->find($id),
             );
         });
 
