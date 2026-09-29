@@ -56,6 +56,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
 # sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): QUEUE_DEFAULTS is nine keys, the configure paragraph is rewritten for the merge rule, and retryMessage carries the move primitive's consequences.
 # sourceOfTruth re-read 2026-09-29 (through fc71b65b + this patch): adds the supervisor.remote_status keys and the dashboard's published-status source.
+# sourceOfTruth re-read 2026-09-29 (through cb253ff9 + this patch): the provider also publishes the dashboard stylesheet (queen-assets); transactions are described as broker transactions, not PostgreSQL ones.
 ---
 
 The Composer package is `queen-mq/php-client`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
@@ -337,7 +338,7 @@ removed. See [Messages and dead letters](/reference/http/messages-dlq).
 
 ## `TransactionBuilder`
 
-`$queen->transaction()`. Pushes and acks in one PostgreSQL transaction, all-or-nothing.
+`$queen->transaction()`. Pushes and acks in one atomic broker transaction, all-or-nothing.
 
 | Method | Notes |
 | --- | --- |

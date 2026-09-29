@@ -5,23 +5,26 @@
 
   Its one job is the thing the prose has to say twice otherwise: a pop does
   not remove and an ack does not delete. Both are moves on a cursor.
+
+  The third participant is the broker's storage, named generically: which
+  engine persists the log is a broker deployment detail no client sees.
 */}
 
 <pre class="mermaid">{`
 sequenceDiagram
   participant C as client
   participant B as broker
-  participant PG as PostgreSQL
+  participant S as storage
   C->>B: push, naming a queue and a partition
-  B->>PG: create both if absent, store the message
-  PG-->>B: offset allocated
+  B->>S: create both if absent, store the message
+  S-->>B: offset allocated
   B-->>C: 201, per-item status queued
   C->>B: pop, with a batch size and a wait
-  B->>PG: claim the partition under a lease
-  PG-->>B: messages from committed + 1
+  B->>S: claim the partition under a lease
+  S-->>B: messages from committed + 1
   B-->>C: 200, the messages and a leaseId
   C->>B: ack, by transactionId and partitionId
-  B->>PG: move committed past it, release the lease
+  B->>S: move committed past it, release the lease
   B-->>C: 200, success true on the item
-  Note over PG: nothing was deleted.<br/>The cursor moved.
+  Note over S: nothing was deleted.<br/>The cursor moved.
 `}</pre>
