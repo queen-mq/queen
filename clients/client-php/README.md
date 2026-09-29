@@ -4,7 +4,7 @@
 [Queen MQ](https://queenmq.com).**
 
 Your jobs stay ordinary Laravel jobs. What changes underneath them is the backlog — Redis becomes
-Queen on PostgreSQL — and the control plane, where Horizon's PHP master becomes a Rust one.
+Queen and its durable storage — and the control plane, where Horizon's PHP master becomes a Rust one.
 
 ```bash
 composer require queen-mq/php-client
@@ -18,7 +18,7 @@ PHP 8.3 / 8.4 · Apache-2.0
 ```text
    Horizon                              Queen
    ───────                              ─────
-   dispatch() ──► Redis                 dispatch() ──► Queen ──► PostgreSQL
+   dispatch() ──► Redis                 dispatch() ──► Queen ──► storage
                     │                                     │
    horizon master ──┤  65.0 MiB PHP     queen-supervisor ─┤  2.9 MiB Rust
                     │                                     │
@@ -27,7 +27,7 @@ PHP 8.3 / 8.4 · Apache-2.0
 
 Median proportional set size of the orchestrator alone, from the
 [supervisor benchmark](https://queenmq.com/benchmarks/laravel-supervisors). It is a control-plane
-number, not a whole-stack claim: Queen still runs a broker and PostgreSQL. The PHP reference master
+number, not a whole-stack claim: Queen still runs a broker and its storage. The PHP reference master
 measures 35.1 MiB.
 
 ---
@@ -38,8 +38,9 @@ measures 35.1 MiB.
 partition per ordering key — `customer:4471`, `account:9`, `device:aa:bb` — created by the first
 push that names it. One customer's jobs never queue behind another customer's.
 
-**The backlog lives in the database you already back up.** Queue state is PostgreSQL rows, inside
-your transactions, your replicas, your PITR window. No second durability story for Redis.
+**The backlog is durable, not a cache.** Queue state is persisted by the broker's storage instead of
+living in Redis memory, so it follows the broker's durability and backup story rather than adding a
+second one for Redis.
 
 **A control plane that is not a Laravel application.** The Rust supervisor loads Artisan once to
 resolve configuration, then leaves only Rust and your ordinary `queue:work` processes resident.
@@ -304,11 +305,28 @@ endpoint-failover read token are covered in
 ### Dashboard
 
 A server-rendered local panel at `/queen`, disabled by default, showing supervisor health, pools,
-restart state, sampled depth and bounded failed-job metadata.
+restart state, sampled depth and failed-job metadata. Each section is its own page (`/queen`,
+`/queen/workload`, `/queen/supervisors`, `/queen/failed-jobs`, `/queen/configuration`). Failed jobs
+are paged newest first with a keyset cursor, never an `OFFSET` or `COUNT(*)`, so a table with
+millions of rows costs the same per page.
 
 ```dotenv
 QUEEN_DASHBOARD_ENABLED=true
 ```
+
+The panel refreshes in place with a small packaged script (header and main region only, with a
+**Pause auto-refresh** control) and falls back to a `<noscript>` meta refresh without JavaScript.
+If the web server answers every `*.css` or `*.js` from `public/` without reaching PHP (a common
+static-asset rule), publish the assets. The panel uses each copy only while it matches the package,
+and falls back to its own routes otherwise:
+
+```bash
+php artisan vendor:publish --tag=queen-assets --force
+```
+
+Each failed job links to `/queen/failed-jobs/{id}`, which shows why it failed: the job class,
+maximum tries, the exception message and the stack trace (paths relative to the application root), but
+never the payload.
 
 In production it is **deny-by-default even when enabled** until the application defines the ability:
 

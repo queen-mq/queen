@@ -10,6 +10,7 @@ use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Queue\Events\JobProcessing;
 use Illuminate\Support\ServiceProvider;
 use Queen\Laravel\Dashboard\DashboardRepository;
+use Queen\Laravel\Dashboard\DashboardScript;
 use Queen\Laravel\Dashboard\DashboardStylesheet;
 use Queen\Laravel\Dashboard\FailedJobsReadModel;
 use Queen\Laravel\Dashboard\RemoteStatusReader;
@@ -193,7 +194,14 @@ class QueenServiceProvider extends ServiceProvider
 
     private function registerDashboardServices(): void
     {
-        $this->app->singleton(DashboardStylesheet::class);
+        $this->app->singleton(
+            DashboardStylesheet::class,
+            fn ($app): DashboardStylesheet => new DashboardStylesheet($app->publicPath()),
+        );
+        $this->app->singleton(
+            DashboardScript::class,
+            fn ($app): DashboardScript => new DashboardScript($app->publicPath()),
+        );
 
         $this->app->singleton(FailedJobsReadModel::class, function ($app): FailedJobsReadModel {
             return new FailedJobsReadModel(
@@ -217,10 +225,11 @@ class QueenServiceProvider extends ServiceProvider
             return new DashboardRepository(
                 new SupervisorState($directory),
                 $app['config'],
-                fn (int $limit): array => $app->make(FailedJobsReadModel::class)->read($limit),
+                fn (int $limit, ?int $cursor = null): array => $app->make(FailedJobsReadModel::class)->read($limit, $cursor),
                 $this->remoteStatusEnabled($app)
                     ? fn (): ?array => $app->make(RemoteStatusReader::class)->read()
                     : null,
+                fn (string $id): ?array => $app->make(FailedJobsReadModel::class)->find($id),
             );
         });
 
@@ -302,6 +311,14 @@ class QueenServiceProvider extends ServiceProvider
             $this->publishes([
                 __DIR__ . '/../../config/queen.php' => config_path('queen.php'),
             ], 'queen-config');
+            // Optional: only for web servers that serve every *.css or *.js
+            // from the public directory. The dashboard falls back to its own
+            // routes whenever a copy is missing or stale. `laravel-assets` makes
+            // the default skeleton's post-update-cmd republish them on upgrade.
+            $this->publishes([
+                __DIR__ . '/../../resources/css/dashboard.css' => public_path(DashboardStylesheet::PUBLISHED_FILE),
+                __DIR__ . '/../../resources/js/dashboard.js' => public_path(DashboardScript::PUBLISHED_FILE),
+            ], ['queen-assets', 'laravel-assets']);
 
             $this->commands([
                 Commands\ConsumeCommand::class,

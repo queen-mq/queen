@@ -5,7 +5,8 @@ namespace Queen\Laravel\Http\Controllers;
 use Illuminate\Http\Request;
 use Queen\Laravel\Dashboard\DashboardConflictException;
 use Queen\Laravel\Dashboard\DashboardRepository;
-use Queen\Laravel\Dashboard\DashboardStylesheet;
+use Queen\Laravel\Dashboard\DashboardSections;
+use Queen\Laravel\Dashboard\DashboardPage;
 use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Response;
 
@@ -14,7 +15,7 @@ final class SupervisorControlController
     public function __invoke(
         Request $request,
         DashboardRepository $dashboard,
-        DashboardStylesheet $stylesheet,
+        DashboardPage $page,
         string $command,
     ): Response {
         $instanceId = $request->input('instance_id');
@@ -28,17 +29,12 @@ final class SupervisorControlController
         try {
             $dashboard->request($command, $instanceId);
         } catch (DashboardConflictException $exception) {
-            return response()->view('queen::dashboard', [
-                'snapshot' => $dashboard->snapshot(),
-                'refreshSeconds' => $this->refreshSeconds(),
-                'refreshUrl' => route('queen.dashboard.index', [], false),
-                'stylesheetUrl' => route('queen.dashboard.stylesheet', [
-                    'version' => $stylesheet->version(),
-                ], false),
-                'stylesheetIntegrity' => $stylesheet->integrity(),
+            return response()->view('queen::dashboard', $page->data($request, 'supervisors', $dashboard->snapshot(), [
+                // A refresh must GET the page, never repeat this POST.
+                'refreshUrl' => DashboardSections::url('supervisors'),
                 'controlError' => $exception->getMessage(),
                 'controlStatus' => null,
-            ], 409);
+            ]), 409);
         }
 
         $request->session()->flash(
@@ -46,16 +42,6 @@ final class SupervisorControlController
             "Supervisor command [{$command}] accepted and pending consumption.",
         );
 
-        return new RedirectResponse(route('queen.dashboard.index', [], false), 303);
-    }
-
-    private function refreshSeconds(): int
-    {
-        $value = config('queen.dashboard.refresh_seconds', 5);
-        if (is_string($value) && preg_match('/^[0-9]+$/D', $value) === 1) {
-            $value = (int) $value;
-        }
-
-        return is_int($value) && $value >= 2 && $value <= 60 ? $value : 5;
+        return new RedirectResponse(DashboardSections::url('supervisors'), 303);
     }
 }

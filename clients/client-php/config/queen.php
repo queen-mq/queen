@@ -162,6 +162,7 @@ return [
         'middleware' => ['web'],
         'refresh_seconds' => env('QUEEN_DASHBOARD_REFRESH_SECONDS', 5),
         'allow_local' => env('QUEEN_DASHBOARD_ALLOW_LOCAL', true),
+        // Page size of the failed-jobs page (keyset pagination, newest first).
         'failed_jobs_limit' => env('QUEEN_DASHBOARD_FAILED_JOBS_LIMIT', 50),
     ],
 

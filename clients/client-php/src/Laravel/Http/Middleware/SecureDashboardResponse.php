@@ -13,14 +13,17 @@ final class SecureDashboardResponse
         $response = $next($request);
         $response->headers->set(
             'Content-Security-Policy',
-            "default-src 'none'; style-src 'self'; style-src-attr 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+            // script-src and connect-src serve the packaged, content-hashed
+            // refresh script and its same-origin fetch of this page; neither
+            // allows inline code or another origin.
+            "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; style-src-attr 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
         );
-        $cacheableStylesheet = $request->routeIs('queen.dashboard.stylesheet')
+        $cacheableAsset = $request->routeIs('queen.dashboard.stylesheet', 'queen.dashboard.script')
             && in_array($response->getStatusCode(), [Response::HTTP_OK, Response::HTTP_NOT_MODIFIED], true);
-        if ($cacheableStylesheet) {
-            // The stylesheet route intentionally shares the dashboard's web
-            // session and authorization middleware. Keep its content-addressed
-            // response in the browser cache, never a shared cache that could
+        if ($cacheableAsset) {
+            // The asset routes intentionally share the dashboard's web
+            // session and authorization middleware. Keep their content-addressed
+            // responses in the browser cache, never a shared cache that could
             // replay Set-Cookie headers. `no-transform` also protects the SRI
             // digest from intermediary rewrites.
             $response->headers->set('Cache-Control', 'private, max-age=31536000, immutable, no-transform');

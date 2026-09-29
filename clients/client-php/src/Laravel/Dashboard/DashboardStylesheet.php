@@ -2,51 +2,23 @@
 
 namespace Queen\Laravel\Dashboard;
 
-use RuntimeException;
-
-/**
- * The immutable stylesheet shipped with the Composer package.
- *
- * Its digest is used for both the route version and Subresource Integrity, so
- * changing the CSS produces a new cache key without a publish or build step.
- */
-final class DashboardStylesheet
+/** The dashboard stylesheet. See DashboardAsset for versioning and publishing. */
+final class DashboardStylesheet extends DashboardAsset
 {
-    private ?string $contents = null;
+    public const PUBLISHED_FILE = 'vendor/queen/dashboard.css';
 
-    private ?string $digest = null;
-
-    public function contents(): string
+    public function sourceFile(): string
     {
-        if ($this->contents !== null) {
-            return $this->contents;
-        }
-
-        $path = dirname(__DIR__, 3) . '/resources/css/dashboard.css';
-        if (!is_file($path) || is_link($path) || !is_readable($path)) {
-            throw new RuntimeException('The Queen dashboard stylesheet is unavailable.');
-        }
-
-        $contents = file_get_contents($path);
-        if (!is_string($contents) || $contents === '') {
-            throw new RuntimeException('The Queen dashboard stylesheet could not be read.');
-        }
-
-        return $this->contents = $contents;
+        return 'resources/css/dashboard.css';
     }
 
-    public function version(): string
+    public function publishedFile(): string
     {
-        return bin2hex($this->digest());
+        return self::PUBLISHED_FILE;
     }
 
-    public function integrity(): string
+    protected function routeName(): string
     {
-        return 'sha256-' . base64_encode($this->digest());
-    }
-
-    private function digest(): string
-    {
-        return $this->digest ??= hash('sha256', $this->contents(), true);
+        return 'queen.dashboard.stylesheet';
     }
 }

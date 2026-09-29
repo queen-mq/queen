@@ -3,11 +3,14 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta http-equiv="refresh" content="{{ $refreshSeconds }};url={{ $refreshUrl }}">
-    <title>Queen Supervisor</title>
+    @if ($autoRefresh)
+    <noscript><meta http-equiv="refresh" content="{{ $refreshSeconds }};url={{ $refreshUrl }}"></noscript>
+    @endif
+    <title>{{ $pageTitle }} · Queen Supervisor</title>
     <link rel="stylesheet" href="{{ $stylesheetUrl }}" integrity="{{ $stylesheetIntegrity }}">
+    <script src="{{ $scriptUrl }}" integrity="{{ $scriptIntegrity }}" defer></script>
 </head>
-<body>
+<body @if ($autoRefresh) data-refresh-seconds="{{ $refreshSeconds }}" @endif>
 @php
     $supervisor = $snapshot['supervisor'];
     $queues = $snapshot['queues'];
@@ -69,18 +72,14 @@
 
         <main id="main-content" class="content" tabindex="-1">
             <div class="page-heading">
-                <h1>Overview</h1>
-                <p>Current state of this application's local Queen worker supervisor.</p>
+                <h1>{{ $pageTitle }}</h1>
+                <p>{{ $pageDescription }}</p>
             </div>
 
             @include('queen::dashboard.partials.notices')
-            @include('queen::dashboard.partials.overview')
-            @include('queen::dashboard.partials.workload')
-            @include('queen::dashboard.partials.supervisor')
-            @include('queen::dashboard.partials.failed-jobs')
-            @include('queen::dashboard.partials.configuration')
+            @include($contentView)
 
-            <footer class="footer">Auto-refreshes every {{ $refreshSeconds }} seconds · local supervisor state only</footer>
+            <footer class="footer">@if ($autoRefresh)<span data-refresh-state>Auto-refreshes every {{ $refreshSeconds }} seconds</span> · @endif{{ ($snapshot['supervisor']['source'] ?? null) === 'remote' ? 'supervisor state published through the broker' : 'local supervisor state only' }}</footer>
         </main>
     </div>
 </div>

@@ -7,8 +7,10 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\ServiceProvider;
 use GuzzleHttp\HandlerStack;
 use Orchestra\Testbench\TestCase;
+use Queen\Laravel\Dashboard\DashboardScript;
 use Queen\Laravel\Dashboard\DashboardStylesheet;
 use Queen\Laravel\Dashboard\RemoteStatusReader;
 use Queen\Laravel\QueenServiceProvider;
@@ -116,14 +118,13 @@ final class LaravelDashboardTest extends TestCase
             ]],
         ]);
 
+        $this->get('/queen/supervisors')->assertOk()->assertSee('3 / 4')->assertSee('Active');
         $response = $this->get('/queen');
 
         $response->assertOk()
             ->assertSee('Queen Supervisor')
             ->assertSee('Dashboard sections')
             ->assertSee('live')
-            ->assertSee('Active')
-            ->assertSee('3 / 4')
             ->assertSee('71+')
             ->assertSee('1 queue depth unavailable')
             ->assertHeader('X-Frame-Options', 'DENY')
@@ -139,24 +140,44 @@ final class LaravelDashboardTest extends TestCase
         $content = $response->getContent();
         $this->assertStringNotContainsString('http://', $content);
         $this->assertStringNotContainsString('https://', $content);
-        $this->assertStringNotContainsString('<script', $content);
+        // Exactly one script: the packaged, same-origin, content-hashed file
+        // with Subresource Integrity. No inline code.
+        $this->assertSame(1, substr_count($content, '<script'));
         $this->assertStringNotContainsString(' style=', $content);
 
         $xpath = $this->dashboardXPath($content);
         $this->assertSame(1, $xpath->query('//h1')->length);
         $this->assertSame(1, $xpath->query('//main[@id="main-content"]')->length);
-        foreach (['overview', 'workload', 'supervisors', 'failed-jobs', 'configuration'] as $section) {
-            $this->assertSame(1, $xpath->query('//section[@id="' . $section . '"]')->length);
+        // One section per page; the sidebar links to every page.
+        $this->assertSame(1, $xpath->query('//section[@id="overview"]')->length);
+        $this->assertSame(1, $xpath->query('//main//section')->length);
+        foreach (['/queen', '/queen/workload', '/queen/supervisors', '/queen/failed-jobs', '/queen/configuration'] as $url) {
+            $this->assertSame(1, $xpath->query('//nav[@aria-label="Dashboard sections"]//a[@href="' . $url . '"]')->length, $url);
+        }
+        foreach (['workload' => 'workload', 'supervisors' => 'supervisors', 'failed-jobs' => 'failed-jobs', 'configuration' => 'configuration'] as $path => $section) {
+            $page = $this->dashboardXPath($this->get('/queen/' . $path)->assertOk()->getContent());
+            $this->assertSame(1, $page->query('//main//section[@id="' . $section . '"]')->length, $path);
+            $this->assertSame('/queen/' . $path, $page->query('//nav//a[@aria-current="page"]')->item(0)->getAttribute('href'));
         }
         $this->assertSame(0, $xpath->query('//th[not(@scope="col")]')->length);
         $this->assertSame(0, $xpath->query('//style')->length);
-        $this->assertSame(0, $xpath->query('//script')->length);
+        $this->assertSame(0, $xpath->query('//script[not(@src)]')->length);
+        $script = $xpath->query('//script[@src]')->item(0);
+        $this->assertInstanceOf(\DOMElement::class, $script);
+        $this->assertMatchesRegularExpression('#^/queen/assets/dashboard-[a-f0-9]{64}\.js$#D', $script->getAttribute('src'));
+        $this->assertMatchesRegularExpression('#^sha256-[A-Za-z0-9+/]{43}=$#D', $script->getAttribute('integrity'));
+        $this->assertTrue($script->hasAttribute('defer'));
+        $this->assertStringContainsString("script-src 'self'", $contentSecurityPolicy);
+        // Without scripts the page still refreshes itself, whole.
+        $this->assertSame(1, $xpath->query('//noscript/meta[@http-equiv="refresh"]')->length);
+        $this->assertSame(0, $xpath->query('//head/meta[@http-equiv="refresh"]')->length);
         $this->assertSame(0, $xpath->query('//*[@style]')->length);
         $this->assertSame(1, $xpath->query('//link[@rel="stylesheet"]')->length);
 
-        $this->assertDashboardButtonState($xpath, 'Pause', false);
-        $this->assertDashboardButtonState($xpath, 'Continue', true);
-        $this->assertDashboardButtonState($xpath, 'Terminate', false);
+        $supervisors = $this->dashboardXPath($this->get('/queen/supervisors')->assertOk()->getContent());
+        $this->assertDashboardButtonState($supervisors, 'Pause', false);
+        $this->assertDashboardButtonState($supervisors, 'Continue', true);
+        $this->assertDashboardButtonState($supervisors, 'Terminate', false);
     }
 
     public function testDashboardSeparatesLivenessReadinessAndDesiredCapacityAndShowsProcessBudget(): void
@@ -238,15 +259,11 @@ final class LaravelDashboardTest extends TestCase
         $this->assertSame(8, $high['reserved_processes']);
         $this->assertSame(4, $high['renewal_helpers_reserved']);
 
-        $page = $this->get('/queen')->assertOk();
-        $page->assertSee('Live')
-            ->assertSee('Ready')
-            ->assertSee('Processing health is degraded')
-            ->assertSee('9 / 256')
-            ->assertSee('247 available')
-            ->assertSee('Reserved / helpers')
-            ->assertSee('8 / 4');
-        $this->assertStringNotContainsString(' style=', $page->getContent());
+        $pages = $this->allSectionPages();
+        foreach (['Live', 'Ready', 'Processing health is degraded', '9 / 256', '247 available', 'Reserved / helpers', '8 / 4'] as $text) {
+            $this->assertStringContainsString($text, $pages);
+        }
+        $this->assertStringNotContainsString(' style=', $pages);
 
         $status = $state->status();
         $this->assertIsArray($status);
@@ -377,7 +394,7 @@ final class LaravelDashboardTest extends TestCase
         $this->assertStringNotContainsString('public', $cacheControl);
         $this->assertStringNotContainsString('no-store', $cacheControl);
         $this->assertSame(
-            "default-src 'none'; style-src 'self'; style-src-attr 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+            "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; style-src-attr 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
             $stylesheet->headers->get('Content-Security-Policy'),
         );
 
@@ -414,7 +431,7 @@ final class LaravelDashboardTest extends TestCase
             'pool_status' => [],
         ]);
 
-        $response = $this->get('/queen')->assertOk();
+        $response = $this->get('/queen/supervisors')->assertOk();
         $response->assertSee('Paused');
 
         $xpath = $this->dashboardXPath($response->getContent());
@@ -439,8 +456,9 @@ final class LaravelDashboardTest extends TestCase
             json_encode($status, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
         );
 
-        $response = $this->get('/queen')->assertOk();
+        $response = $this->get('/queen/supervisors')->assertOk();
         $response->assertSee('Stale')->assertDontSee('Active');
+        $this->get('/queen')->assertOk()->assertSee('Stale')->assertDontSee('Active');
 
         $xpath = $this->dashboardXPath($response->getContent());
         $this->assertDashboardButtonState($xpath, 'Pause', true);
@@ -715,7 +733,7 @@ final class LaravelDashboardTest extends TestCase
         $response = $this->withSession(['_token' => 'queen-csrf'])
             ->post('/queen/control/pause', ['_token' => 'queen-csrf', 'instance_id' => $instanceId]);
         $response->assertStatus(303)
-            ->assertHeader('Location', '/queen')
+            ->assertHeader('Location', '/queen/supervisors')
             ->assertSessionHas(
                 'queen_dashboard_control_status',
                 'Supervisor command [pause] accepted and pending consumption.',
@@ -747,7 +765,7 @@ final class LaravelDashboardTest extends TestCase
             '#^sha256-[A-Za-z0-9+/]{43}=$#D',
             $conflictStylesheet->getAttribute('integrity'),
         );
-        $this->assertSame(0, $conflictXPath->query('//style|//script|//*[@style]')->length);
+        $this->assertSame(0, $conflictXPath->query('//style|//script[not(@src)]|//*[@style]')->length);
 
         $state->request('pause', $instanceId, 15);
         $this->post('/queen/control/continue', ['instance_id' => $instanceId])->assertStatus(409);
@@ -791,7 +809,7 @@ final class LaravelDashboardTest extends TestCase
         }
         file_put_contents($this->failedPath, json_encode($records, JSON_THROW_ON_ERROR));
 
-        $response = $this->get('/queen')->assertOk();
+        $response = $this->get('/queen/failed-jobs')->assertOk();
         $response->assertSee('&lt;img src=x onerror=alert(1)&gt;', false)
             ->assertDontSee('<img src=x onerror=alert(1)>', false)
             ->assertDontSee($secret)
@@ -907,7 +925,7 @@ final class LaravelDashboardTest extends TestCase
             json_decode((string) $request->getBody(), true)['operations'],
         );
 
-        $response = $this->get('/queen')->assertOk();
+        $response = $this->get('/queen/supervisors')->assertOk();
         $response->assertSee('published through the broker')
             ->assertSee('Read-only: this supervisor runs on another host.');
         $xpath = $this->dashboardXPath($response->getContent());
@@ -960,6 +978,380 @@ final class LaravelDashboardTest extends TestCase
         $this->getJson('/queen/api/status')->assertOk()
             ->assertJsonPath('supervisor.availability', 'unavailable')
             ->assertJsonPath('supervisor.source', null);
+    }
+
+    public function testEachPageRefreshesItselfAndIgnoresUnknownQueryParameters(): void
+    {
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+
+        $xpath = $this->dashboardXPath($this->get('/queen/supervisors?view=../../etc&x=1')->assertOk()->getContent());
+
+        $this->assertSame('5;url=/queen/supervisors', $xpath->query('//noscript/meta[@http-equiv="refresh"]')->item(0)->getAttribute('content'));
+        $this->assertSame('Supervisors · Queen Supervisor', trim($xpath->query('//title')->item(0)->textContent));
+        $this->assertSame('Supervisors', trim($xpath->query('//h1')->item(0)->textContent));
+    }
+
+    public function testTheFooterNamesWhereTheSupervisorStateComesFrom(): void
+    {
+        $this->remoteSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+
+        $this->get('/queen')->assertOk()
+            ->assertSee('supervisor state published through the broker')
+            ->assertDontSee('local supervisor state only');
+    }
+
+    public function testVersionedScriptIsServedWithIntegrityAndImmutableCaching(): void
+    {
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+        $script = $this->app->make(DashboardScript::class);
+
+        $response = $this->get('/queen/assets/dashboard-' . $script->version() . '.js')->assertOk();
+        $this->assertSame('text/javascript; charset=UTF-8', $response->headers->get('Content-Type'));
+        $this->assertStringContainsString('immutable', (string) $response->headers->get('Cache-Control'));
+        $this->assertSame($script->contents(), $response->getContent());
+        $this->assertSame(
+            'sha256-' . base64_encode(hash('sha256', (string) $response->getContent(), true)),
+            $script->integrity(),
+        );
+
+        $this->withHeader('If-None-Match', (string) $response->headers->get('ETag'))
+            ->get('/queen/assets/dashboard-' . $script->version() . '.js')
+            ->assertStatus(304);
+        $this->get('/queen/assets/dashboard-' . str_repeat('0', 64) . '.js')->assertNotFound();
+    }
+
+    public function testThePauseControlIsRenderedForTheScriptToEnable(): void
+    {
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+
+        $xpath = $this->dashboardXPath($this->get('/queen')->assertOk()->getContent());
+
+        $toggle = $xpath->query('//button[@data-refresh-toggle]')->item(0);
+        $this->assertInstanceOf(\DOMElement::class, $toggle);
+        $this->assertTrue($toggle->hasAttribute('hidden'), 'Without the script the control must not appear.');
+        $this->assertSame('false', $toggle->getAttribute('aria-pressed'));
+        $this->assertSame('5', $xpath->query('//body')->item(0)->getAttribute('data-refresh-seconds'));
+        $this->assertSame(1, $xpath->query('//*[@data-refresh-state]')->length);
+    }
+
+    public function testAPublishedScriptIsLinkedWhileItMatchesThePackage(): void
+    {
+        $script = $this->app->make(DashboardScript::class);
+        $packaged = $script->contents();
+        $this->usePublishedAsset(DashboardScript::PUBLISHED_FILE, $packaged);
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+
+        $element = $this->dashboardXPath($this->get('/queen')->assertOk()->getContent())
+            ->query('//script[@src]')->item(0);
+
+        $this->assertInstanceOf(\DOMElement::class, $element);
+        $this->assertSame('/vendor/queen/dashboard.js?v=' . hash('sha256', $packaged), $element->getAttribute('src'));
+    }
+
+    public function testAPublishedStylesheetIsLinkedWhileItMatchesThePackage(): void
+    {
+        $stylesheet = $this->app->make(DashboardStylesheet::class);
+        $packaged = $stylesheet->contents();
+        $this->usePublishedStylesheet($packaged);
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+
+        $link = $this->dashboardXPath($this->get('/queen')->assertOk()->getContent())
+            ->query('//link[@rel="stylesheet"]')->item(0);
+
+        $this->assertInstanceOf(\DOMElement::class, $link);
+        $this->assertSame(
+            '/vendor/queen/dashboard.css?v=' . hash('sha256', $packaged),
+            $link->getAttribute('href'),
+        );
+        $this->assertSame('sha256-' . base64_encode(hash('sha256', $packaged, true)), $link->getAttribute('integrity'));
+    }
+
+    public function testAStalePublishedStylesheetFallsBackToThePackageRoute(): void
+    {
+        $this->usePublishedStylesheet('/* left behind by an older release */');
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+
+        $link = $this->dashboardXPath($this->get('/queen')->assertOk()->getContent())
+            ->query('//link[@rel="stylesheet"]')->item(0);
+
+        $this->assertInstanceOf(\DOMElement::class, $link);
+        $this->assertMatchesRegularExpression('#^/queen/assets/dashboard-[a-f0-9]{64}\.css$#D', $link->getAttribute('href'));
+    }
+
+    public function testTheAssetsArePublishableWithTheQueenAndLaravelAssetTags(): void
+    {
+        foreach (['queen-assets', 'laravel-assets'] as $tag) {
+            $paths = array_map('realpath', array_flip(ServiceProvider::pathsToPublish(QueenServiceProvider::class, $tag)));
+            foreach ([
+                'resources/css/dashboard.css' => 'vendor/queen/dashboard.css',
+                'resources/js/dashboard.js' => 'vendor/queen/dashboard.js',
+            ] as $source => $target) {
+                $published = array_search(realpath(__DIR__ . '/../' . $source), $paths, true);
+                $this->assertSame(public_path($target), $published, "{$tag}: {$source}");
+            }
+        }
+    }
+
+    public function testDatabaseFailedJobsArePagedWithAKeysetCursorAndNeverAnOffsetOrCount(): void
+    {
+        $this->failedJobsTable(5);
+        $queries = [];
+        DB::listen(static function ($query) use (&$queries): void {
+            $queries[] = strtolower($query->sql);
+        });
+
+        $first = $this->dashboardXPath($this->get('/queen/failed-jobs')->assertOk()->getContent());
+        $this->assertSame(['5', '4'], $this->failedJobIds($first));
+        $this->assertSame('/queen/failed-jobs?cursor=4', $first->query('//nav[@class="pager"]/a[@rel="next"]')->item(0)->getAttribute('href'));
+        $this->assertSame(0, $first->query('//nav[@class="pager"]/a[normalize-space(.)="Newest"]')->length);
+
+        $second = $this->dashboardXPath($this->get('/queen/failed-jobs?cursor=4')->assertOk()->getContent());
+        $this->assertSame(['3', '2'], $this->failedJobIds($second));
+        $this->assertSame('/queen/failed-jobs?cursor=2', $second->query('//nav[@class="pager"]/a[@rel="next"]')->item(0)->getAttribute('href'));
+        $this->assertSame('/queen/failed-jobs', $second->query('//nav[@class="pager"]/a[normalize-space(.)="Newest"]')->item(0)->getAttribute('href'));
+        // The refresh keeps the reader on the page they are reading.
+        $this->assertSame('5;url=/queen/failed-jobs?cursor=4', $second->query('//noscript/meta[@http-equiv="refresh"]')->item(0)->getAttribute('content'));
+
+        $last = $this->dashboardXPath($this->get('/queen/failed-jobs?cursor=2')->assertOk()->getContent());
+        $this->assertSame(['1'], $this->failedJobIds($last));
+        $this->assertSame(0, $last->query('//nav[@class="pager"]/a[@rel="next"]')->length);
+
+        $this->get('/queen/failed-jobs?cursor=1')->assertOk()->assertSee('No older failed jobs.');
+
+        $this->assertNotSame([], $queries);
+        foreach ($queries as $query) {
+            $this->assertStringNotContainsString('offset', $query);
+            $this->assertStringNotContainsString('count(', $query);
+        }
+    }
+
+    public function testFileFailedJobsArePagedByPosition(): void
+    {
+        $this->failedJobsFile(3);
+
+        $first = $this->dashboardXPath($this->get('/queen/failed-jobs')->assertOk()->getContent());
+        $this->assertSame(['failed-1', 'failed-2'], $this->failedJobIds($first));
+        $this->assertSame('/queen/failed-jobs?cursor=2', $first->query('//nav[@class="pager"]/a[@rel="next"]')->item(0)->getAttribute('href'));
+
+        $second = $this->dashboardXPath($this->get('/queen/failed-jobs?cursor=2')->assertOk()->getContent());
+        $this->assertSame(['failed-3'], $this->failedJobIds($second));
+        $this->assertSame(0, $second->query('//nav[@class="pager"]/a[@rel="next"]')->length);
+    }
+
+    public function testAMalformedCursorShowsTheNewestPage(): void
+    {
+        $this->failedJobsTable(3);
+
+        foreach (['abc', '0', '-4', '4 OR 1=1', str_repeat('9', 19)] as $cursor) {
+            $xpath = $this->dashboardXPath($this->get('/queen/failed-jobs?cursor=' . rawurlencode($cursor))->assertOk()->getContent());
+            $this->assertSame(['3', '2'], $this->failedJobIds($xpath), "Cursor {$cursor}");
+            $this->assertSame('5;url=/queen/failed-jobs', $xpath->query('//noscript/meta[@http-equiv="refresh"]')->item(0)->getAttribute('content'));
+        }
+    }
+
+    public function testOtherPagesIgnoreTheFailedJobsCursor(): void
+    {
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+
+        $xpath = $this->dashboardXPath($this->get('/queen/supervisors?cursor=4')->assertOk()->getContent());
+
+        $this->assertSame('5;url=/queen/supervisors', $xpath->query('//noscript/meta[@http-equiv="refresh"]')->item(0)->getAttribute('content'));
+    }
+
+    public function testFailedJobDetailShowsWhyItFailedWithoutThePayload(): void
+    {
+        $secret = 'QUEEN_PAYLOAD_SECRET';
+        $basePath = rtrim($this->app->basePath(), '/');
+        $exception = "RuntimeException: Mail server refused the connection in {$basePath}/app/Jobs/SendInvoice.php:42 (see https://status.example{$basePath}/mail)\n"
+            . "Stack trace:\n"
+            . "#0 {$basePath}/vendor/laravel/framework/src/Illuminate/Queue/CallQueuedHandler.php(134): App\\Jobs\\SendInvoice->handle()\n"
+            . '#1 {main}';
+        $this->failedJobsFile(1, [
+            'payload' => json_encode([
+                'uuid' => '9b2c1d3e-0000-4000-8000-000000000001',
+                'displayName' => 'App\\Jobs\\SendInvoice',
+                'attempts' => 3,
+                'maxTries' => 3,
+                'timeout' => 60,
+                'data' => ['command' => "serialized-{$secret}"],
+            ], JSON_THROW_ON_ERROR),
+            'exception' => $exception,
+        ]);
+
+        $list = $this->dashboardXPath($this->get('/queen/failed-jobs')->assertOk()->getContent());
+        $this->assertSame('/queen/failed-jobs/failed-1', $list->query('//table//a')->item(0)->getAttribute('href'));
+
+        $response = $this->get('/queen/failed-jobs/failed-1')->assertOk();
+        $response->assertSee('RuntimeException')
+            ->assertSee('App\\Jobs\\SendInvoice')
+            ->assertSee('Mail server refused the connection in app/Jobs/SendInvoice.php:42')
+            ->assertSee('vendor/laravel/framework/src/Illuminate/Queue/CallQueuedHandler.php(134)')
+            ->assertSee('60s')
+            ->assertSee('https://status.example' . $basePath . '/mail')
+            ->assertSee('php artisan queue:retry failed-1')
+            ->assertDontSee($secret)
+            ->assertDontSee(' ' . $basePath . '/');
+        $xpath = $this->dashboardXPath($response->getContent());
+        $this->assertSame('3', trim($xpath->query('//dl[@class="detail-list"]/div[dt="Max tries"]/dd')->item(0)->textContent));
+        // Laravel's payload counter is not the number of attempts made; it is not shown.
+        $this->assertSame(0, $xpath->query('//dl[@class="detail-list"]/div[dt="Attempts"]')->length);
+        $this->assertSame('Failed job · Queen Supervisor', trim($xpath->query('//title')->item(0)->textContent));
+        $this->assertStringStartsWith('RuntimeException: Mail server refused', trim($xpath->query('//pre[@class="exception-summary"]')->item(0)->textContent));
+        $this->assertStringStartsWith('Stack trace:', trim($xpath->query('//details/pre[@class="exception-trace"]')->item(0)->textContent));
+        $this->assertSame('/queen/failed-jobs', $xpath->query('//nav//a[@aria-current="page"]')->item(0)?->getAttribute('href'));
+        // A failed job does not change: no refresh of any kind.
+        $this->assertFalse($xpath->query('//body')->item(0)->hasAttribute('data-refresh-seconds'));
+        $this->assertSame(0, $xpath->query('//noscript/meta[@http-equiv="refresh"]')->length);
+    }
+
+    public function testFailedJobDetailReadsDatabaseStoresByTheirLaravelIdentifier(): void
+    {
+        $this->failedJobsTable(2, uuids: true);
+
+        $this->get('/queen/failed-jobs/00000000-0000-4000-8000-000000000002')->assertOk()
+            ->assertSee('RuntimeException')
+            ->assertSee('Failure 2');
+        // The database id is not the identifier of a database-uuids store.
+        $this->get('/queen/failed-jobs/2')->assertNotFound();
+    }
+
+    public function testFailedJobDetailReadsABoundedPrefixOfLargeColumns(): void
+    {
+        $this->failedJobsTable(1);
+        $payload = json_encode([
+            'uuid' => '00000000-0000-4000-8000-000000000001',
+            'displayName' => 'App\\Jobs\\ImportCatalogue',
+            'maxTries' => 5,
+            'timeout' => 120,
+            'data' => ['command' => str_repeat('x', 2 * 1048576)],
+        ], JSON_THROW_ON_ERROR);
+        DB::table('failed_jobs')->where('id', 1)->update([
+            'payload' => $payload,
+            'exception' => "RuntimeException: Catalogue too large\n" . str_repeat('y', 2 * 1048576),
+        ]);
+        $queries = [];
+        DB::listen(static function ($query) use (&$queries): void {
+            $queries[] = strtolower($query->sql);
+        });
+
+        $response = $this->get('/queen/failed-jobs/1')->assertOk()
+            ->assertSee('App\\Jobs\\ImportCatalogue')
+            ->assertSee('RuntimeException: Catalogue too large')
+            ->assertSee('[truncated]');
+        $xpath = $this->dashboardXPath($response->getContent());
+        $this->assertSame('5', trim($xpath->query('//dl[@class="detail-list"]/div[dt="Max tries"]/dd')->item(0)->textContent));
+        $this->assertSame('120s', trim($xpath->query('//dl[@class="detail-list"]/div[dt="Timeout"]/dd')->item(0)->textContent));
+        $detailQueries = array_values(array_filter($queries, static fn (string $query): bool => str_contains($query, '"exception"')));
+        $this->assertCount(1, $detailQueries);
+        $this->assertStringContainsString('substr("exception", 1, 1048576)', $detailQueries[0]);
+        $this->assertStringContainsString('substr("payload", 1, 1048576)', $detailQueries[0]);
+    }
+
+    public function testUnknownOrMalformedFailedJobIdentifiersAreNotFound(): void
+    {
+        $this->failedJobsTable(1);
+
+        $this->get('/queen/failed-jobs/99')->assertNotFound();
+        $this->get('/queen/failed-jobs/not-a-number')->assertNotFound();
+        $this->get('/queen/failed-jobs/' . rawurlencode('<script>'))->assertNotFound();
+        $this->get('/queen/failed-jobs/' . str_repeat('a', 129))->assertNotFound();
+        $this->get('/queen/failed-jobs/1')->assertOk();
+    }
+
+    public function testAnIdentifierTheDetailRouteCannotCarryIsListedWithoutALink(): void
+    {
+        $this->failedJobsFile(1, ['id' => 'failed job/1']);
+
+        $xpath = $this->dashboardXPath($this->get('/queen/failed-jobs')->assertOk()->getContent());
+
+        $this->assertSame(['failed job/1'], $this->failedJobIds($xpath));
+        $this->assertSame(0, $xpath->query('//table//a')->length);
+    }
+
+    public function testFailedJobDetailIsAuthorizedLikeTheDashboard(): void
+    {
+        $this->failedJobsFile(1);
+        Gate::define('viewQueenDashboard', static fn (?Authenticatable $user = null): bool => false);
+
+        $this->get('/queen/failed-jobs/failed-1')->assertForbidden();
+    }
+
+    private function failedJobsTable(int $rows, bool $uuids = false): void
+    {
+        Schema::create('failed_jobs', function (Blueprint $table): void {
+            $table->bigIncrements('id');
+            $table->string('uuid')->unique();
+            $table->string('connection');
+            $table->string('queue');
+            $table->longText('payload');
+            $table->longText('exception');
+            $table->timestamp('failed_at');
+        });
+        DB::table('failed_jobs')->insert(array_map(static fn (int $id): array => [
+            'uuid' => sprintf('00000000-0000-4000-8000-%012d', $id),
+            'connection' => 'queen',
+            'queue' => "queue-{$id}",
+            'payload' => json_encode(['displayName' => 'App\\Jobs\\Example'], JSON_THROW_ON_ERROR),
+            'exception' => "RuntimeException: Failure {$id}\nStack trace:\n#0 {main}",
+            'failed_at' => '2026-08-29 10:00:00',
+        ], range(1, $rows)));
+        $this->app['config']->set('queue.failed', [
+            'driver' => $uuids ? 'database-uuids' : 'database',
+            'database' => 'testing',
+            'table' => 'failed_jobs',
+        ]);
+    }
+
+    /** @param array<string, mixed> $overrides applied to every record */
+    private function failedJobsFile(int $records, array $overrides = []): void
+    {
+        file_put_contents($this->failedPath, json_encode(array_map(static fn (int $id): array => array_replace([
+            'id' => "failed-{$id}",
+            'connection' => 'queen',
+            'queue' => 'default',
+            'payload' => '{}',
+            'exception' => "RuntimeException: Failure {$id}",
+            'failed_at' => '2026-08-29 10:00:00',
+        ], $overrides), range(1, $records)), JSON_THROW_ON_ERROR));
+    }
+
+    /** @return list<string> */
+    private function failedJobIds(\DOMXPath $xpath): array
+    {
+        $ids = [];
+        foreach ($xpath->query('//table/tbody/tr/td[1]') as $cell) {
+            $ids[] = trim($cell->textContent);
+        }
+
+        return $ids;
+    }
+
+    private function allSectionPages(): string
+    {
+        $content = '';
+        foreach (['/queen', '/queen/workload', '/queen/supervisors', '/queen/failed-jobs', '/queen/configuration'] as $url) {
+            $content .= $this->get($url)->assertOk()->getContent();
+        }
+
+        return $content;
+    }
+
+    private function usePublishedStylesheet(string $contents): void
+    {
+        $this->usePublishedAsset(DashboardStylesheet::PUBLISHED_FILE, $contents);
+    }
+
+    private function usePublishedAsset(string $file, string $contents): void
+    {
+        $publicPath = sys_get_temp_dir() . '/queen-dashboard-public-' . bin2hex(random_bytes(6));
+        mkdir(dirname($publicPath . '/' . $file), 0755, true);
+        file_put_contents($publicPath . '/' . $file, $contents);
+        $this->beforeApplicationDestroyed(function () use ($publicPath): void {
+            $this->removeDirectory($publicPath);
+        });
+        $this->app->usePublicPath($publicPath);
+        $this->app->forgetInstance(DashboardStylesheet::class);
+        $this->app->forgetInstance(DashboardScript::class);
     }
 
     /** @param array<string, mixed> $status */

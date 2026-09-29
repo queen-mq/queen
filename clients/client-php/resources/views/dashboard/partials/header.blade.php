@@ -1,5 +1,5 @@
 <header class="topbar">
-    <a class="brand" href="{{ $refreshUrl }}" aria-label="Queen Supervisor dashboard">
+    <a class="brand" href="{{ $sectionUrls['overview'] }}" aria-label="Queen Supervisor dashboard">
         <svg class="brand-mark" viewBox="2.01 2.01 255.99 255.99" aria-hidden="true" focusable="false">
             <g fill="currentColor">
                 <path d="M166.295 209.709A105 105 0 1 1 209.709 166.295l-34.434-18.31a66 66 0 1 0-27.29 27.29Z"/>
@@ -15,6 +15,8 @@
     </a>
 
     <div class="topbar-meta">
+        {{-- Enabled by dashboard.js; without scripts the <noscript> meta refresh applies. --}}
+        <button type="button" class="refresh-toggle" data-refresh-toggle aria-pressed="false" hidden>Pause auto-refresh</button>
         <span>
             Updated
             @if ($supervisor['updated_at'])

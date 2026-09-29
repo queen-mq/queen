@@ -12,6 +12,7 @@ sourceOfTruth:
   - clients/client-php/resources/css/dashboard.css
   - clients/client-php/resources/views/dashboard.blade.php
   - clients/client-php/resources/views/dashboard/partials/configuration.blade.php
+  - clients/client-php/resources/views/dashboard/partials/failed-job.blade.php
   - clients/client-php/resources/views/dashboard/partials/failed-jobs.blade.php
   - clients/client-php/resources/views/dashboard/partials/header.blade.php
   - clients/client-php/resources/views/dashboard/partials/notices.blade.php
@@ -22,7 +23,13 @@ sourceOfTruth:
   - clients/client-php/resources/views/dashboard/partials/workload.blade.php
   - clients/client-php/src/Laravel/QueenServiceProvider.php
   - clients/client-php/src/Laravel/Dashboard/DashboardRepository.php
+  - clients/client-php/src/Laravel/Dashboard/DashboardSections.php
+  - clients/client-php/src/Laravel/Dashboard/DashboardPage.php
+  - clients/client-php/src/Laravel/Dashboard/DashboardAsset.php
+  - clients/client-php/src/Laravel/Dashboard/DashboardScript.php
   - clients/client-php/src/Laravel/Dashboard/DashboardStylesheet.php
+  - clients/client-php/resources/js/dashboard.js
+  - clients/client-php/src/Laravel/Http/Controllers/DashboardScriptController.php
   - clients/client-php/src/Laravel/Dashboard/FailedJobsReadModel.php
   - clients/client-php/src/Laravel/Dashboard/RemoteStatusReader.php
   - clients/client-php/src/Laravel/Supervisor/RemoteStatusDocument.php
@@ -30,6 +37,7 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Supervisor/SupervisorConfiguration.php
   - clients/client-php/src/Laravel/Supervisor/SupervisorState.php
   - clients/client-php/src/Laravel/Http/Controllers/DashboardController.php
+  - clients/client-php/src/Laravel/Http/Controllers/FailedJobController.php
   - clients/client-php/src/Laravel/Http/Controllers/DashboardStylesheetController.php
   - clients/client-php/src/Laravel/Http/Middleware/AuthorizeDashboard.php
   - clients/client-php/src/Laravel/Http/Middleware/SecureDashboardResponse.php
@@ -40,7 +48,7 @@ verifiedBy:
   - clients/client-php/tests/LaravelSupervisorRemoteStatusTest.php
   - clients/client-php/tests/RemoteStatusDocumentTest.php
   - clients/client-php/tests/RemoteStatusPublisherTest.php
-# sourceOfTruth re-read 2026-09-29 (through fc71b65b + this patch): adds the published remote status and its read-only panel; page matches the code.
+# sourceOfTruth re-read 2026-09-29 (through 5b7aabef + this patch): adds the published assets with route fallback, the in-place refresh script with its pause control, one page per section, keyset-paged failed jobs and the failed-job detail page with its bounded SQL read; page matches the code.
 ---
 
 The Laravel panel answers one question: **what is this application's Queen supervisor doing?** It
@@ -68,6 +76,24 @@ QUEEN_DASHBOARD_FAILED_JOBS_LIMIT=50
 
 Open `/queen`. Local and testing environments may use the built-in local allowance while
 `queen.dashboard.allow_local` is true.
+
+Each sidebar section is its own page, so a reload or a shared link lands on the same view:
+
+| Page | Path |
+| --- | --- |
+| Overview | `/queen` |
+| Workload | `/queen/workload` |
+| Supervisors | `/queen/supervisors` |
+| Failed jobs | `/queen/failed-jobs` |
+| Configuration | `/queen/configuration` |
+
+Each page refreshes every `QUEEN_DASHBOARD_REFRESH_SECONDS` in place: a small packaged script
+fetches the page again and swaps only the header and the main region, so scroll position and the
+sidebar stay put. **Pause auto-refresh** in the header stops it; the choice is kept in the browser's
+local storage. Refreshing waits while the tab is hidden, while text is selected or while focus is on
+a control that would be replaced, and stops with a notice when the response is no longer the panel,
+for example after the session expired. Without JavaScript the pages still work: a `<noscript>` meta
+refresh reloads the current page whole.
 
 To test the production authorization path locally, disable that allowance:
 
@@ -125,11 +151,13 @@ control actions.
 - last queue depth already sampled by the supervisor;
 - restart and circuit state;
 - a safe allowlist of worker settings;
-- bounded metadata from supported Laravel database or file failed-job stores.
+- paged metadata from supported Laravel database or file failed-job stores, and the reason each
+  job failed.
 
-The read model never returns broker endpoints, bearer tokens, custom headers, filesystem paths,
-job payloads, exception bodies or raw backend errors. Unsupported or unavailable failed stores are
-shown as unavailable instead of falling back to an unbounded read.
+The read model never returns broker endpoints, bearer tokens, custom headers, job payloads or raw
+backend errors. Exception text appears only on the [detail page](#why-a-job-failed) of a failed job.
+Unsupported or unavailable failed stores are shown as unavailable instead of falling back to an
+unbounded read.
 
 ## What the panel controls
 
@@ -171,9 +199,30 @@ php artisan queue:forget <id>
 php artisan queue:prune-failed
 ```
 
-The Queen panel displays bounded failed-job metadata but does not provide web actions for retry,
-forget, flush or prune. When failed-job synchronization is enabled, those Laravel commands also
-coordinate the matching Queen DLQ snapshot.
+The Queen panel displays failed-job metadata but does not provide web actions for retry, forget,
+flush or prune. When failed-job synchronization is enabled, those Laravel commands also coordinate
+the matching Queen DLQ snapshot.
+
+The failed-jobs page shows `QUEEN_DASHBOARD_FAILED_JOBS_LIMIT` jobs, newest first, with **Older**
+and **Newest** links. The pages use a keyset cursor instead of an offset: on a database store each
+page is one `id < ?` range read on the primary key, with one extra row to learn whether an older page
+exists, and never a `COUNT(*)`. A table with millions of failed jobs therefore costs the same per
+page as a table with ten, and the total shows as a lower bound (`51+`) when more rows exist. A file
+store is read whole, within the 4 MiB bound the panel always applies to it, and its pages are
+positions: a new failure or a retry while you read an older page shifts that page by one row.
+
+### Why a job failed
+
+Each job ID on the failed-jobs page links to `/queen/failed-jobs/{id}`. The page shows the job
+class, the queue and connection, the maximum tries and timeout read from the payload, the exception
+class and message under **Why it failed**, the stack trace, and the `queue:retry` command for that
+job. The payload itself is never displayed. Paths under the application root are shown relative
+to it, and the page does not refresh itself. The exception and the payload are read from the
+store cut to 1 MiB, in SQL on a database store, so a row of many megabytes costs no more memory
+than that. The page does not show an attempt count: Laravel's payload counter is only kept current
+by the Redis driver, so it would read `0` for a job that used every try.
+The exception message can contain application data, so the page sits behind the same
+`viewQueenDashboard` Gate as the rest of the panel.
 
 Use the [broker dashboard](/deploy/dashboard) for global queue analytics and DLQ operations. The
 two dashboards intentionally cover different scopes:
@@ -234,11 +283,31 @@ Without remote status, the panel is not a multi-host aggregator. Route the admin
 to the host that owns the supervisor, or use a sticky dedicated admin endpoint. A GET on host A
 followed by a control POST on host B intentionally fails the instance fence.
 
-The view loads no scripts, fonts or assets from a CDN and contains no inline style blocks or style
-attributes. The package serves its content-hashed stylesheet from the dashboard route, without a
-`vendor:publish` or frontend build step. Its link includes Subresource Integrity. Content Security
-Policy allows styles only from the same origin and explicitly rejects inline style attributes.
-Dynamic responses use `no-store`, while successful stylesheet responses use an immutable one-year
-private browser cache with intermediary transformations disabled to preserve the integrity digest.
+The view loads no fonts or assets from a CDN and contains no inline scripts, style blocks or style
+attributes. The package serves its content-hashed stylesheet and refresh script from the dashboard
+routes, without a `vendor:publish` or frontend build step. Both links include Subresource
+Integrity. Content Security Policy allows scripts, styles and `fetch` only from the same origin and
+explicitly rejects inline style attributes. Dynamic responses use `no-store`, while successful
+asset responses use an immutable one-year private browser cache with intermediary transformations
+disabled to preserve the integrity digest.
 Error responses are never cached. Responses also carry frame denial, MIME-sniffing denial and a
 no-referrer policy.
+
+### Web servers that serve every asset statically
+
+Some web server configurations answer every `*.css` or `*.js` request from the public directory and
+never reach PHP, for example an nginx or Caddy rule for static assets. The asset routes then return
+the web server's `404`: the panel renders unstyled and falls back to whole-page refreshes. Publish
+the assets instead, as Horizon does with its own:
+
+```bash
+php artisan vendor:publish --tag=queen-assets --force
+```
+
+The copies land in `public/vendor/queen/dashboard.css` and `public/vendor/queen/dashboard.js`. The
+panel links to each, with the content version as a query string and the same integrity digest,
+only while it is byte-identical to the packaged file. A missing or stale copy, for example after an
+upgrade without republishing, falls back to the route, so publishing can never serve the wrong
+styles. The file is also tagged
+`laravel-assets`, which the default Laravel `post-update-cmd` republishes on every
+`composer update`. In container builds, run the publish command next to the other asset steps.
