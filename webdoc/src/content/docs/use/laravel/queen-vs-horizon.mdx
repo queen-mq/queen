@@ -24,6 +24,7 @@ verifiedBy:
   - clients/client-php/tests/LaravelSupervisorProductionTest.php
   - clients/client-php/tests/LaravelDashboardTest.php
 # sourceOfTruth re-read 2026-09-29 (through cb253ff9 + this patch): the publishable stylesheet adds no comparison row; Queen's backend is named as its storage except where the benchmark fixture really used PostgreSQL; page matches the code.
+# sourceOfTruth re-read 2026-09-29 (through cd2c7135): failed jobs are paged and the opt-in detail page shows the exception; the failed-jobs row and the dashboard section say so.
 ---
 
 Queen is not a drop-in reimplementation of Horizon. Both can supervise Laravel workers, but they
@@ -67,7 +68,7 @@ implementation and tests named in this page's frontmatter.
 | Job tags and silencing | Automatic/manual tags and silenced jobs | Not implemented in the Laravel supervisor panel |
 | Long-wait notifications | Mail, Slack and SMS routes with per-queue thresholds | No package-native wait alert routing yet |
 | Per-supervisor controls | Pause, continue and status for individual supervisors | Controls currently apply to the complete local master |
-| Failed jobs | Horizon commands and dashboard integration | Laravel commands remain authoritative; Queen synchronizes a DLQ snapshot and shows bounded metadata |
+| Failed jobs | Horizon commands and dashboard integration | Laravel commands remain authoritative; Queen synchronizes a DLQ snapshot and shows paged metadata, plus the exception on an opt-in detail page |
 | Clear a queue | `horizon:clear` | No atomic clear across ready jobs, live leases and Laravel timers |
 | Native binary | Not needed | Rust engine requires an explicit version-pinned installation |
 
@@ -125,8 +126,8 @@ storage and state-directory decisions.
 
 Horizon includes retained throughput and runtime snapshots, job tags, silencing, long-wait
 notifications and per-supervisor controls. Queen's current Laravel panel focuses on local process
-health and safe master controls. Global backlog analytics and DLQ operations live in the separate
-broker dashboard, and failed-job web mutations are not implemented.
+health, safe master controls and read-only failed-job details. Global backlog analytics and DLQ
+operations live in the separate broker dashboard, and failed-job web mutations are not implemented.
 
 ### Multi-host supervisors
 
