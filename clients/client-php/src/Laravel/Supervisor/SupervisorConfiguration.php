@@ -456,6 +456,23 @@ final class SupervisorConfiguration
     }
 
     /**
+     * The endpoints and read credential the dashboard uses for one of the
+     * supervisor's connections: read_bearer_token wins over the connection's
+     * token, as it does for the supervisor's depth sampling.
+     *
+     * @param array<string, mixed> $raw the `queen.supervisor` configuration
+     * @param array<string, mixed> $queen the `queen` configuration
+     * @param array<string, mixed> $queueConnections the `queue.connections` configuration
+     * @return array{url: string, urls: list<string>, bearer_token: ?string, headers: array<string, string>}
+     */
+    public static function readOnlyConnection(string $name, array $raw, array $queen, array $queueConnections): array
+    {
+        self::identifier($name, 'dashboard connection');
+
+        return self::readConnection(self::connectionConfig($name, $queen, $queueConnections, $raw));
+    }
+
+    /**
      * @param array{connection: array<string, mixed>, namespace: string, key: string, interval: mixed, ttl: mixed} $settings
      * @return array{connection: array<string, mixed>, namespace: string, key: string, interval: int, ttl: int}
      */

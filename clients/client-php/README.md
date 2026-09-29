@@ -308,7 +308,9 @@ A server-rendered local panel at `/queen`, disabled by default, showing supervis
 restart state, sampled depth and failed-job metadata. Each section is its own page (`/queen`,
 `/queen/workload`, `/queen/supervisors`, `/queen/failed-jobs`, `/queen/configuration`). Failed jobs
 are paged newest first with a keyset cursor, never an `OFFSET` or `COUNT(*)`, so a table with
-millions of rows costs the same per page.
+millions of rows costs the same per page. The Workload page charts jobs completed, failed and
+dispatched over the last hour, 6 hours, day or week from the broker's own per-queue counters
+(`GET /api/v1/analytics/queue-ops`), so it adds no write to the job path.
 
 ```dotenv
 QUEEN_DASHBOARD_ENABLED=true

@@ -14,6 +14,7 @@ use Queen\Laravel\Dashboard\DashboardScript;
 use Queen\Laravel\Dashboard\DashboardStylesheet;
 use Queen\Laravel\Dashboard\FailedJobsReadModel;
 use Queen\Laravel\Dashboard\RemoteStatusReader;
+use Queen\Laravel\Dashboard\ThroughputReader;
 use Queen\Laravel\Http\Middleware\AuthorizeDashboard;
 use Queen\Laravel\Http\Middleware\SecureDashboardResponse;
 use Queen\Laravel\Queue\QueenConnector;
@@ -230,6 +231,38 @@ class QueenServiceProvider extends ServiceProvider
                     ? fn (): ?array => $app->make(RemoteStatusReader::class)->read()
                     : null,
                 fn (string $id): ?array => $app->make(FailedJobsReadModel::class)->find($id),
+            );
+        });
+
+        $this->app->singleton(ThroughputReader::class, function ($app): ThroughputReader {
+            // A dashboard render must not queue behind retries or a slow broker.
+            $timeout = min(5, $this->configurationInteger(
+                $app['config']->get('queen.supervisor.http_timeout', 5),
+                'queen.supervisor.http_timeout',
+                1,
+            ));
+
+            return new ThroughputReader(
+                function (string $connection) use ($app, $timeout): Queen {
+                    $resolved = SupervisorConfiguration::readOnlyConnection(
+                        $connection,
+                        (array) $app['config']->get('queen.supervisor', []),
+                        (array) $app['config']->get('queen', []),
+                        (array) $app['config']->get('queue.connections', []),
+                    );
+
+                    return new Queen([
+                        'urls' => $resolved['urls'],
+                        'bearerToken' => $resolved['bearer_token'],
+                        'headers' => $resolved['headers'],
+                        'timeoutMillis' => $timeout * 1000,
+                        'retryAttempts' => 1,
+                        'retryDelayMillis' => 0,
+                    ]);
+                },
+                $app->bound('cache') ? fn () => $app['cache']->store() : null,
+                null,
+                $timeout * 1000,
             );
         });
 

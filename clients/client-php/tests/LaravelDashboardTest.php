@@ -9,10 +9,14 @@ use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
 use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Promise\FulfilledPromise;
+use GuzzleHttp\Psr7\Response;
+use Psr\Http\Message\RequestInterface;
 use Orchestra\Testbench\TestCase;
 use Queen\Laravel\Dashboard\DashboardScript;
 use Queen\Laravel\Dashboard\DashboardStylesheet;
 use Queen\Laravel\Dashboard\RemoteStatusReader;
+use Queen\Laravel\Dashboard\ThroughputReader;
 use Queen\Laravel\QueenServiceProvider;
 use Queen\Laravel\Supervisor\RemoteStatusDocument;
 use Queen\Laravel\Supervisor\SupervisorState;
@@ -28,12 +32,20 @@ final class LaravelDashboardTest extends TestCase
     /** @var list<resource> */
     private array $supervisorLocks = [];
 
+    /** @var list<RequestInterface> */
+    private array $throughputRequests = [];
+
+    /** 2026-09-29T15:03:30Z */
+    private const THROUGHPUT_NOW = 1790694210;
+
     protected function setUp(): void
     {
         $suffix = bin2hex(random_bytes(8));
         $this->stateDirectory = sys_get_temp_dir() . '/queen-dashboard-state-' . $suffix;
         $this->failedPath = sys_get_temp_dir() . '/queen-dashboard-failed-' . $suffix . '.json';
         parent::setUp();
+        // No test reaches a real broker for the throughput counters.
+        $this->throughputBroker([]);
     }
 
     protected function tearDown(): void
@@ -88,6 +100,7 @@ final class LaravelDashboardTest extends TestCase
             'path' => $this->failedPath,
             'limit' => 10,
         ]);
+        $app['config']->set('cache.default', 'array');
         $app['config']->set('database.default', 'testing');
         $app['config']->set('database.connections.testing', [
             'driver' => 'sqlite',
@@ -1324,6 +1337,229 @@ final class LaravelDashboardTest extends TestCase
         }
 
         return $ids;
+    }
+
+    public function testWorkloadShowsJobsProcessedFromTheBrokerCounters(): void
+    {
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+        $this->throughputBroker([
+            'high' => [
+                $this->queueOps('high', '2026-09-29T15:02:00Z', 5, 1, 6),
+            ],
+            'default' => [
+                $this->queueOps('default', '2026-09-29T15:00:00Z', 2, 0, 2),
+                $this->queueOps('default', '2026-09-29T15:02:00Z', 3, 0, 4),
+            ],
+        ]);
+
+        $xpath = $this->dashboardXPath($this->get('/queen/workload')->assertOk()->getContent());
+
+        $this->assertSame(['10', '1', '12', '9'], $this->throughputMetrics($xpath));
+        // 14:03 to 15:03 UTC: one bar slot per minute, bars only where jobs finished.
+        $this->assertSame(61, $xpath->query('//figure[@class="throughput-chart"]//g')->length);
+        $this->assertSame(2, $xpath->query('//figure[@class="throughput-chart"]//rect[@class="completed"]')->length);
+        $this->assertSame(1, $xpath->query('//figure[@class="throughput-chart"]//rect[@class="failed"]')->length);
+        $this->assertSame('15:02 UTC: 8 completed, 1 failed, 10 dispatched', trim($xpath->query('//figure[@class="throughput-chart"]//g[60]/title')->item(0)->textContent));
+        $this->assertSame(
+            [['high', 'queen', '5', '1', '6'], ['default', 'queen', '5', '0', '6']],
+            $this->tableRows($xpath, 'Jobs processed per queue'),
+        );
+        $this->assertSame('/queen/workload', $xpath->query('//nav[@aria-label="Time range"]/a[@aria-current="page"]')->item(0)->getAttribute('href'));
+
+        $this->assertCount(2, $this->throughputRequests);
+        foreach ($this->throughputRequests as $request) {
+            $this->assertSame('/api/v1/analytics/queue-ops', $request->getUri()->getPath());
+            parse_str($request->getUri()->getQuery(), $query);
+            $this->assertSame('2026-09-29T14:03:30Z', $query['from']);
+            $this->assertSame('2026-09-29T15:03:30Z', $query['to']);
+        }
+    }
+
+    public function testTheRangeSelectorWidensTheWindowAndTheRefreshKeepsIt(): void
+    {
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+        $this->throughputBroker([
+            'high' => [$this->queueOps('high', '2026-09-29T14:45:00Z', 40, 2, 42)],
+        ]);
+
+        $xpath = $this->dashboardXPath($this->get('/queen/workload?range=24h')->assertOk()->getContent());
+
+        parse_str($this->throughputRequests[0]->getUri()->getQuery(), $query);
+        $this->assertSame('2026-09-28T15:03:30Z', $query['from']);
+        $this->assertSame('/queen/workload?range=24h', $xpath->query('//nav[@aria-label="Time range"]/a[@aria-current="page"]')->item(0)->getAttribute('href'));
+        $this->assertSame('5;url=/queen/workload?range=24h', $xpath->query('//noscript/meta[@http-equiv="refresh"]')->item(0)->getAttribute('content'));
+        // A day in 15-minute buckets: 15:00 yesterday to 15:00 today.
+        $this->assertSame(97, $xpath->query('//figure[@class="throughput-chart"]//g')->length);
+        $this->assertSame('14:45 UTC: 40 completed, 2 failed, 42 dispatched', trim($xpath->query('//figure[@class="throughput-chart"]//g[96]/title')->item(0)->textContent));
+        $this->assertSame(['40', '2', '42', '42'], $this->throughputMetrics($xpath));
+
+        $unknown = $this->dashboardXPath($this->get('/queen/workload?range=90d')->assertOk()->getContent());
+        $this->assertSame('/queen/workload', $unknown->query('//nav[@aria-label="Time range"]/a[@aria-current="page"]')->item(0)->getAttribute('href'));
+        $this->assertSame('5;url=/queen/workload', $unknown->query('//noscript/meta[@http-equiv="refresh"]')->item(0)->getAttribute('content'));
+    }
+
+    public function testBucketWidthsFollowTheBrokerWindowRule(): void
+    {
+        $this->assertSame(1, ThroughputReader::bucketMinutes(ThroughputReader::RANGES['1h']));
+        $this->assertSame(5, ThroughputReader::bucketMinutes(ThroughputReader::RANGES['6h']));
+        $this->assertSame(15, ThroughputReader::bucketMinutes(ThroughputReader::RANGES['24h']));
+        $this->assertSame(60, ThroughputReader::bucketMinutes(ThroughputReader::RANGES['7d']));
+        $this->assertSame('1h', ThroughputReader::range(['7d']));
+    }
+
+    public function testAnUnreachableBrokerLeavesTheCountersUnavailable(): void
+    {
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+        $this->throughputBroker([], 503);
+
+        $this->get('/queen/workload')->assertOk()
+            ->assertSee("The broker's queue counters could not be read.", false)
+            // The depth table does not depend on the counters.
+            ->assertSee('Current workload');
+    }
+
+    public function testOneUnreadableQueueIsMarkedWithoutHidingTheOthers(): void
+    {
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+        $this->throughputBroker([
+            'high' => [$this->queueOps('high', '2026-09-29T15:02:00Z', 7, 0, 7)],
+        ], 200, ['default' => 500]);
+
+        $xpath = $this->dashboardXPath($this->get('/queen/workload')->assertOk()->getContent());
+
+        $this->assertSame(['7', '0', '7', '7'], $this->throughputMetrics($xpath));
+        $this->assertStringContainsString('Counters for 1 queue could not be read.', $xpath->query('//p[@class="throughput-note"]')->item(0)->textContent);
+        $this->assertSame([['high', 'queen', '7', '0', '7'], ['default', 'queen', 'Unavailable']], $this->tableRows($xpath, 'Jobs processed per queue'));
+    }
+
+    public function testMalformedAndForeignCounterRowsAreIgnored(): void
+    {
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+        $this->throughputBroker([
+            'high' => [
+                $this->queueOps('orders', '2026-09-29T15:02:00Z', 100, 0, 100),
+                $this->queueOps('high', 'not a time', 100, 0, 100),
+                ['queueName' => 'high', 'bucket' => '2026-09-29T15:02:00Z', 'ackSuccess' => -3, 'ackFailed' => 0, 'pushMessages' => 0],
+                ['queueName' => 'high', 'bucket' => '2026-09-29T15:02:00Z', 'ackSuccess' => '9', 'ackFailed' => 0, 'pushMessages' => 0],
+                $this->queueOps('high', '2026-09-29T15:02:00Z', 4, 0, 4),
+                // Outside the window: neither drawn nor counted.
+                $this->queueOps('high', '2026-09-27T10:00:00Z', 1, 0, 1),
+            ],
+        ]);
+
+        $xpath = $this->dashboardXPath($this->get('/queen/workload')->assertOk()->getContent());
+
+        $this->assertSame(['4', '0', '4', '4'], $this->throughputMetrics($xpath));
+        $this->assertSame(['high', 'queen', '4', '0', '4'], $this->tableRows($xpath, 'Jobs processed per queue')[0]);
+    }
+
+    public function testCountersAreCachedBrieflyAcrossRefreshes(): void
+    {
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+        $this->throughputBroker(['high' => [$this->queueOps('high', '2026-09-29T15:02:00Z', 1, 0, 1)]]);
+
+        $this->get('/queen/workload')->assertOk();
+        $this->get('/queen/workload')->assertOk();
+        $this->assertCount(2, $this->throughputRequests);
+
+        $this->get('/queen/workload?range=6h')->assertOk();
+        $this->assertCount(4, $this->throughputRequests);
+    }
+
+    public function testOnlyTheWorkloadPageReadsTheCounters(): void
+    {
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+
+        foreach (['/queen', '/queen/supervisors', '/queen/failed-jobs', '/queen/configuration', '/queen/api/status'] as $url) {
+            $this->get($url)->assertOk();
+        }
+
+        $this->assertSame([], $this->throughputRequests);
+    }
+
+    public function testCountersUseTheSupervisorsReadCredential(): void
+    {
+        $this->app['config']->set('queen.bearer_token', 'write-token');
+        $this->app['config']->set('queen.supervisor.read_bearer_token', 'read-token');
+
+        $connection = \Queen\Laravel\Supervisor\SupervisorConfiguration::readOnlyConnection(
+            'queen',
+            (array) $this->app['config']->get('queen.supervisor'),
+            (array) $this->app['config']->get('queen'),
+            (array) $this->app['config']->get('queue.connections', []),
+        );
+
+        $this->assertSame('read-token', $connection['bearer_token']);
+    }
+
+    /**
+     * @param array<string, list<array<string, mixed>>> $seriesByQueue
+     * @param array<string, int> $statusByQueue
+     */
+    private function throughputBroker(array $seriesByQueue, int $status = 200, array $statusByQueue = []): void
+    {
+        $this->throughputRequests = [];
+        $handler = function (RequestInterface $request) use ($seriesByQueue, $status, $statusByQueue): FulfilledPromise {
+            $this->throughputRequests[] = $request;
+            parse_str($request->getUri()->getQuery(), $query);
+            $queue = (string) ($query['queue'] ?? '');
+            $code = $statusByQueue[$queue] ?? $status;
+            $body = $code === 200
+                ? ['bucketMinutes' => 1, 'series' => $seriesByQueue[$queue] ?? [], 'queues' => [$queue]]
+                : ['error' => 'unavailable'];
+
+            return new FulfilledPromise(new Response($code, ['Content-Type' => 'application/json'], json_encode($body)));
+        };
+        $this->app->instance(ThroughputReader::class, new ThroughputReader(
+            fn (string $connection): Queen => new Queen([
+                'url' => 'http://queen.test:6632',
+                'retryAttempts' => 1,
+                'retryDelayMillis' => 0,
+                'enableFailover' => false,
+                'handler' => HandlerStack::create($handler),
+            ]),
+            fn () => $this->app['cache']->store(),
+            fn (): int => self::THROUGHPUT_NOW,
+        ));
+    }
+
+    /** @return array<string, mixed> */
+    private function queueOps(string $queue, string $bucket, int $completed, int $failed, int $pushed): array
+    {
+        return [
+            'bucket' => $bucket,
+            'queueName' => $queue,
+            'ackSuccess' => $completed,
+            'ackFailed' => $failed,
+            'pushMessages' => $pushed,
+            'popMessages' => $completed + $failed,
+        ];
+    }
+
+    /** @return list<string> */
+    private function throughputMetrics(\DOMXPath $xpath): array
+    {
+        $values = [];
+        foreach ($xpath->query('//section[@id="throughput"]//dl[@class="metrics"]//dd') as $value) {
+            $values[] = trim($value->textContent);
+        }
+
+        return $values;
+    }
+
+    /** @return list<list<string>> */
+    private function tableRows(\DOMXPath $xpath, string $label): array
+    {
+        $rows = [];
+        foreach ($xpath->query('//div[@aria-label="' . $label . '"]//tbody/tr') as $row) {
+            $cells = [];
+            foreach ($xpath->query('./td', $row) as $cell) {
+                $cells[] = trim($cell->textContent);
+            }
+            $rows[] = $cells;
+        }
+
+        return $rows;
     }
 
     private function allSectionPages(): string
