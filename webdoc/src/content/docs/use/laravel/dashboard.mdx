@@ -51,7 +51,7 @@ verifiedBy:
   - clients/client-php/tests/RemoteStatusDocumentTest.php
   - clients/client-php/tests/RemoteStatusPublisherTest.php
 # sourceOfTruth re-read 2026-09-29 (through 5b7aabef + this patch): adds the published assets with route fallback, the in-place refresh script with its pause control, one page per section, keyset-paged failed jobs and the failed-job detail page with its bounded SQL read; page matches the code.
-# sourceOfTruth re-read 2026-09-29 (through 109b23c2 + this patch): adds the jobs-processed chart read from the broker's queue-ops counters; page matches the code.
+# sourceOfTruth re-read 2026-09-29 (through 109b23c2 + this patch): adds the jobs-processed chart read from the broker's queue-ops counters, and the failed-job drawer; page matches the code.
 ---
 
 The Laravel panel answers one question: **what is this application's Queen supervisor doing?** It
@@ -245,10 +245,12 @@ positions: a new failure or a retry while you read an older page shifts that pag
 
 ### Why a job failed
 
-Each job ID on the failed-jobs page links to `/queen/failed-jobs/{id}`. The page shows the job
-class, the queue and connection, the maximum tries and timeout read from the payload, the exception
-class and message under **Why it failed**, the stack trace, and the `queue:retry` command for that
-job. The payload itself is never displayed. Paths under the application root are shown relative
+Each row of the failed-jobs page ends with an arrow and opens that job in a drawer beside the
+list; **Open as page** shows the same detail at `/queen/failed-jobs/{id}`, which is also where the
+row leads without JavaScript. Automatic refresh pauses while the drawer is open. The detail shows
+the job class, the queue and connection, the maximum tries and timeout read from the payload, the
+exception class and message in red under **Why it failed**, the stack trace, and the `queue:retry`
+command for that job. The payload itself is never displayed. Paths under the application root are shown relative
 to it, and the page does not refresh itself. The exception and the payload are read from the
 store cut to 1 MiB, in SQL on a database store, so a row of many megabytes costs no more memory
 than that. The page does not show an attempt count: Laravel's payload counter is only kept current
