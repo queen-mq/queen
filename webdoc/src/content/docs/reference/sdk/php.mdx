@@ -58,6 +58,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-29 (through fc71b65b + this patch): adds the supervisor.remote_status keys and the dashboard's published-status source.
 # sourceOfTruth re-read 2026-09-29 (through cb253ff9 + this patch): the provider also publishes the dashboard stylesheet (queen-assets); transactions are described as broker transactions, not PostgreSQL ones.
 # sourceOfTruth re-read 2026-09-29 (through 5b7aabef + this patch): the dashboard has one route per section, keyset-paged failed jobs and a detail page per failed job; no new config key.
+# sourceOfTruth re-read 2026-09-29 (through 8ca3d2a9): the failed-job detail read is bounded in SQL and shows max tries instead of attempts; nothing this reference describes changes.
 ---
 
 The Composer package is `queen-mq/php-client`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
