@@ -17,7 +17,94 @@
  * A link marked data-drawer opens its page's #failed-job section in a modal
  * <dialog> instead of navigating. Without this file, or without <dialog>, the
  * same link opens the detail page itself.
+ *
+ * A button marked data-copy copies the <pre> of its .detail-block. The
+ * buttons stay hidden until this file runs.
  */
+(function () {
+    'use strict';
+
+    document.documentElement.classList.add('copy-enabled');
+
+    // Without the Clipboard API (an http:// origin is not a secure context),
+    // copy through a selected, invisible textarea next to the button: inside
+    // a modal drawer, anything outside it is inert and cannot be selected.
+    function copyText(text, near) {
+        if (navigator.clipboard && window.isSecureContext) {
+            return navigator.clipboard.writeText(text);
+        }
+        return new Promise(function (resolve, reject) {
+            var buffer = document.createElement('textarea');
+            buffer.className = 'copy-buffer';
+            buffer.setAttribute('readonly', '');
+            buffer.setAttribute('aria-hidden', 'true');
+            buffer.value = text;
+            near.parentNode.appendChild(buffer);
+            buffer.select();
+            var copied = false;
+            try {
+                copied = document.execCommand('copy');
+            } catch (error) {
+                copied = false;
+            }
+            buffer.remove();
+            near.focus();
+            if (copied) {
+                resolve();
+            } else {
+                reject(new Error('copy refused'));
+            }
+        });
+    }
+
+    function announce(button, copied) {
+        var section = button.closest('section');
+        var status = section ? section.querySelector('[data-copy-status]') : null;
+        var label = button.getAttribute('aria-label') || 'Text';
+        if (status) {
+            status.textContent = copied
+                ? label.replace(/^Copy the /, '').replace(/^./, function (c) { return c.toUpperCase(); }) + ' copied to the clipboard.'
+                : 'Copy failed: the text is selected, press Ctrl+C or Cmd+C.';
+        }
+        button.textContent = copied ? 'Copied' : 'Select';
+        if (copied) {
+            button.setAttribute('data-copied', '');
+        }
+        window.clearTimeout(button.copyTimer);
+        button.copyTimer = window.setTimeout(function () {
+            button.textContent = 'Copy';
+            button.removeAttribute('data-copied');
+        }, 2000);
+    }
+
+    function selectContents(node) {
+        var range = document.createRange();
+        range.selectNodeContents(node);
+        var selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+    }
+
+    document.addEventListener('click', function (event) {
+        var button = event.target && event.target.closest ? event.target.closest('button[data-copy]') : null;
+        if (button === null) {
+            return;
+        }
+        var block = button.closest('.detail-block');
+        var source = block ? block.querySelector('pre') : null;
+        if (source === null) {
+            return;
+        }
+        copyText(source.textContent, button).then(function () {
+            announce(button, true);
+        }, function () {
+            // Leave the text selected so the reader can copy it by hand.
+            selectContents(source);
+            announce(button, false);
+        });
+    });
+}());
+
 (function () {
     'use strict';
 

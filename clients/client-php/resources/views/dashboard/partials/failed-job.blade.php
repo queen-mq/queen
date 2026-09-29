@@ -16,17 +16,29 @@
         <div><dt>Index policy</dt><dd><span class="badge muted">{{ $failedJob['lifecycle_policy'] }}</span></dd></div>
     </dl>
     <div class="detail-block failure-reason">
-        <h3>Why it failed</h3>
+        <div class="detail-heading">
+            <h3>Why it failed</h3>
+            @if ($failedJob['exception_summary'] !== null)
+                <button type="button" class="button copy-button" data-copy aria-label="Copy the error message">Copy</button>
+            @endif
+        </div>
         <pre class="exception-summary">{{ $failedJob['exception_summary'] ?? 'No exception was recorded.' }}</pre>
     </div>
     @if ($failedJob['exception_trace'] !== null)
         <details class="detail-block">
             <summary>Stack trace</summary>
+            <div class="detail-heading detail-heading-end">
+                <button type="button" class="button copy-button" data-copy aria-label="Copy the stack trace">Copy</button>
+            </div>
             <pre class="exception-trace">{{ $failedJob['exception_trace'] }}</pre>
         </details>
     @endif
     <div class="detail-block">
-        <h3>Retry</h3>
+        <div class="detail-heading">
+            <h3>Retry</h3>
+            <button type="button" class="button copy-button" data-copy aria-label="Copy the retry command">Copy</button>
+        </div>
         <pre><code>php artisan queue:retry {{ $failedJob['id'] }}</code></pre>
     </div>
+    <p class="sr-only" role="status" data-copy-status></p>
 </section>

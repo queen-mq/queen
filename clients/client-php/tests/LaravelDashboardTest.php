@@ -1223,6 +1223,18 @@ final class LaravelDashboardTest extends TestCase
         $this->assertSame('RuntimeException', trim($xpath->query('.//h2[@class="failure-title"]', $section)->item(0)->textContent));
         $this->assertSame(1, $xpath->query('.//div[contains(@class, "failure-reason")]/pre[@class="exception-summary"]', $section)->length);
         $this->assertTrue($xpath->query('.//a[normalize-space(.)="All failed jobs"]', $section)->item(0)->hasAttribute('data-page-only'));
+        // One copy button per block, each copying the <pre> of its own block.
+        $copyButtons = [];
+        foreach ($xpath->query('.//button[@data-copy]', $section) as $button) {
+            $pre = $xpath->query('ancestor::*[contains(@class, "detail-block")][1]//pre', $button)->item(0);
+            $copyButtons[$button->getAttribute('aria-label')] = $pre?->getAttribute('class') ?? 'command';
+        }
+        $this->assertSame([
+            'Copy the error message' => 'exception-summary',
+            'Copy the stack trace' => 'exception-trace',
+            'Copy the retry command' => '',
+        ], $copyButtons);
+        $this->assertSame(1, $xpath->query('.//*[@role="status"][@data-copy-status]', $section)->length);
         $this->assertStringStartsWith('RuntimeException: Mail server refused', trim($xpath->query('//pre[@class="exception-summary"]')->item(0)->textContent));
         $this->assertStringStartsWith('Stack trace:', trim($xpath->query('//details/pre[@class="exception-trace"]')->item(0)->textContent));
         $this->assertSame('/queen/failed-jobs', $xpath->query('//nav//a[@aria-current="page"]')->item(0)?->getAttribute('href'));

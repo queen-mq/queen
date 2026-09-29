@@ -328,7 +328,7 @@ php artisan vendor:publish --tag=queen-assets --force
 
 Each failed job opens in a drawer (or as a page at `/queen/failed-jobs/{id}`) that shows why it
 failed: the job class, maximum tries, the exception message and the stack trace (paths relative to
-the application root), but never the payload.
+the application root), each with a Copy button, but never the payload.
 
 In production it is **deny-by-default even when enabled** until the application defines the ability:
 
