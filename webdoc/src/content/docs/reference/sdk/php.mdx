@@ -58,6 +58,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-29 (through fc71b65b + this patch): adds the supervisor.remote_status keys and the dashboard's published-status source.
 # sourceOfTruth re-read 2026-09-29 (through cb253ff9 + this patch): the provider also publishes the dashboard stylesheet (queen-assets); transactions are described as broker transactions, not PostgreSQL ones.
 # sourceOfTruth re-read 2026-09-29 (through 5b7aabef + this patch): the dashboard has one route per section, keyset-paged failed jobs and a detail page per failed job; no new config key.
+# sourceOfTruth re-read 2026-09-29 (through 109b23c2 + this patch): Admin gains getQueueOps and getQueueOpsAsync, which the dashboard's jobs-processed chart reads; no new config key.
 # sourceOfTruth re-read 2026-09-29 (through 8ca3d2a9): the failed-job detail read is bounded in SQL and shows max tries instead of attempts; nothing this reference describes changes.
 ---
 
@@ -403,6 +404,7 @@ upgrade.
 | `getQueueStats(array $params = [])` | `GET /api/v1/status/queues` |
 | `getQueueDetail(string $name, array $params = [])` | `GET /api/v1/status/queues/:name` |
 | `getAnalytics(array $params = [])` | `GET /api/v1/status/analytics` |
+| `getQueueOps(array $params = [])`, `getQueueOpsAsync(array $params = [], ?int $timeoutMillis = null)` | `GET /api/v1/analytics/queue-ops` |
 | `getSystemMetrics(array $params = [])` | `GET /api/v1/analytics/system-metrics` |
 | `getWorkerMetrics(array $params = [])` | `GET /api/v1/analytics/worker-metrics` |
 | `getPostgresStats()` | `GET /api/v1/analytics/postgres-stats` |

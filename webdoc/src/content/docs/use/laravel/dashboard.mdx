@@ -31,6 +31,8 @@ sourceOfTruth:
   - clients/client-php/resources/js/dashboard.js
   - clients/client-php/src/Laravel/Http/Controllers/DashboardScriptController.php
   - clients/client-php/src/Laravel/Dashboard/FailedJobsReadModel.php
+  - clients/client-php/src/Laravel/Dashboard/ThroughputReader.php
+  - clients/client-php/src/Admin.php
   - clients/client-php/src/Laravel/Dashboard/RemoteStatusReader.php
   - clients/client-php/src/Laravel/Supervisor/RemoteStatusDocument.php
   - clients/client-php/src/Laravel/Supervisor/RemoteStatusPublisher.php
@@ -49,6 +51,7 @@ verifiedBy:
   - clients/client-php/tests/RemoteStatusDocumentTest.php
   - clients/client-php/tests/RemoteStatusPublisherTest.php
 # sourceOfTruth re-read 2026-09-29 (through 5b7aabef + this patch): adds the published assets with route fallback, the in-place refresh script with its pause control, one page per section, keyset-paged failed jobs and the failed-job detail page with its bounded SQL read; page matches the code.
+# sourceOfTruth re-read 2026-09-29 (through 109b23c2 + this patch): adds the jobs-processed chart read from the broker's queue-ops counters, and the failed-job drawer; page matches the code.
 ---
 
 The Laravel panel answers one question: **what is this application's Queen supervisor doing?** It
@@ -149,6 +152,8 @@ control actions.
 - whether that status is local or published by a supervisor on another host;
 - pools, queues, worker counts and workers currently draining;
 - last queue depth already sampled by the supervisor;
+- [jobs completed, failed and dispatched](#jobs-processed) per queue over the last hour, six hours,
+  day or week, from the broker's own counters;
 - restart and circuit state;
 - a safe allowlist of worker settings;
 - paged metadata from supported Laravel database or file failed-job stores, and the reason each
@@ -188,6 +193,33 @@ Control TTL and heartbeat timeout are values published by the active supervisor 
 newly deployed Laravel configuration cannot silently reinterpret an old master's liveness or run an
 expired command. Restart the supervisor to activate timing changes.
 
+## Jobs processed
+
+The Workload page charts how many jobs completed and failed per time bucket, like Horizon's
+throughput view. It reads the counters the broker already keeps for every queue, through
+[`GET /api/v1/analytics/queue-ops`](/reference/http/analytics), so it adds no write to the job
+path and needs no setting.
+
+| Figure | Broker counter | For Laravel jobs |
+| --- | --- | --- |
+| Completed | `ackSuccess` | jobs acknowledged as completed |
+| Failed | `ackFailed` | jobs moved to the dead-letter queue, plus rejected acknowledgements |
+| Dispatched | `pushMessages` | jobs pushed to the queue |
+
+A job that Laravel releases for another attempt is a broker transaction, not an acknowledgement,
+so a retried attempt is not counted as completed. The counters are per queue: every consumer
+group that acknowledges the queue adds to them.
+
+The **1h**, **6h**, **24h** and **7d** links set the window, which also sets the bucket width the
+broker uses: 1 minute for an hour, 5 minutes for six hours, 15 minutes for a day and 60 minutes for
+a week. The selected window stays in the page address (`?range=24h`) and in the automatic
+refresh. Times are shown in UTC. A table below the chart gives the totals per queue.
+
+Only the Workload page reads the counters. It sends one request per configured queue, in
+parallel, with the supervisor's `read_bearer_token` when one is set and a timeout of at most five
+seconds, and caches the result for 15 seconds in Laravel's default cache store. A queue whose
+counters cannot be read is marked unavailable without hiding the others.
+
 ## Failed jobs and the broker dashboard
 
 Laravel remains the command index for Laravel jobs:
@@ -213,10 +245,14 @@ positions: a new failure or a retry while you read an older page shifts that pag
 
 ### Why a job failed
 
-Each job ID on the failed-jobs page links to `/queen/failed-jobs/{id}`. The page shows the job
-class, the queue and connection, the maximum tries and timeout read from the payload, the exception
-class and message under **Why it failed**, the stack trace, and the `queue:retry` command for that
-job. The payload itself is never displayed. Paths under the application root are shown relative
+Each row of the failed-jobs page ends with an arrow and opens that job in a drawer beside the
+list; **Open as page** shows the same detail at `/queen/failed-jobs/{id}`, which is also where the
+row leads without JavaScript. Automatic refresh pauses while the drawer is open. The detail shows
+the job class, the queue and connection, the maximum tries and timeout read from the payload, the
+exception class and message in red under **Why it failed**, the stack trace, and the `queue:retry`
+command for that job. Each of the last three has a **Copy** button; where the browser offers no
+clipboard access, for example on a plain `http://` origin, the button copies through a selection
+instead. The payload itself is never displayed. Paths under the application root are shown relative
 to it, and the page does not refresh itself. The exception and the payload are read from the
 store cut to 1 MiB, in SQL on a database store, so a row of many megabytes costs no more memory
 than that. The page does not show an attempt count: Laravel's payload counter is only kept current
