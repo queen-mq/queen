@@ -17,11 +17,17 @@ pub async fn handle_delete_message(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     Path((partition_id, transaction_id)): Path<(String, String)>,
 ) -> Response {
+    // The facade reads a path the way the wire carries it and decodes each
+    // segment: encode the ids this call was handed as plain strings.
+    let (pid, txn) = (
+        crate::handlers::raft::percent_encode(&partition_id),
+        crate::handlers::raft::percent_encode(&transaction_id),
+    );
     return crate::handlers::raft::dispatch_api(
         &st,
         tenant.as_str(),
         "DELETE",
-        &format!("/api/v1/messages/{partition_id}/{transaction_id}"),
+        &format!("/api/v1/messages/{pid}/{txn}"),
         None,
         Bytes::new(),
     )
@@ -58,11 +64,15 @@ pub async fn handle_retry_message(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     Path((partition_id, transaction_id)): Path<(String, String)>,
 ) -> Response {
+    let (pid, txn) = (
+        crate::handlers::raft::percent_encode(&partition_id),
+        crate::handlers::raft::percent_encode(&transaction_id),
+    );
     return crate::handlers::raft::dispatch_api(
         &st,
         tenant.as_str(),
         "POST",
-        &format!("/api/v1/messages/{partition_id}/{transaction_id}/retry"),
+        &format!("/api/v1/messages/{pid}/{txn}/retry"),
         None,
         Bytes::new(),
     )

@@ -152,16 +152,24 @@ impl RaftFacade {
     ) -> Result<Option<ApiOut>, RsmError> {
         let p: Vec<&str> = req.path.trim_matches('/').split('/').collect();
         let out = match p.as_slice() {
+            // The partition and transaction ids are percent-decoded like the
+            // names below: a transaction id is the client's string, and one
+            // like `metric-sample|<uuid>` arrives as `metric-sample%7C<uuid>`.
             ["api", "v1", "messages", pid, txn] if req.method == "GET" => {
-                Some(self.api_message(ctx.clone(), pid, txn).await?)
+                let (pid, txn) = (pct_decode(pid), pct_decode(txn));
+                Some(self.api_message(ctx.clone(), &pid, &txn).await?)
             }
             ["api", "v1", "messages", pid, txn] if req.method == "DELETE" => {
-                Some(self.api_message_delete(ctx.clone(), pid, txn).await?)
+                let (pid, txn) = (pct_decode(pid), pct_decode(txn));
+                Some(self.api_message_delete(ctx.clone(), &pid, &txn).await?)
             }
-            ["api", "v1", "messages", pid, txn, "retry"] if req.method == "POST" => Some(
-                self.api_dlq_move(ctx.clone(), None, Some((pid, txn)), &req.body)
-                    .await?,
-            ),
+            ["api", "v1", "messages", pid, txn, "retry"] if req.method == "POST" => {
+                let (pid, txn) = (pct_decode(pid), pct_decode(txn));
+                Some(
+                    self.api_dlq_move(ctx.clone(), None, Some((&pid, &txn)), &req.body)
+                        .await?,
+                )
+            }
             ["api", "v1", "dlq", id, "replay"] if req.method == "POST" => Some(
                 self.api_dlq_move(ctx.clone(), Some(id), None, &req.body)
                     .await?,

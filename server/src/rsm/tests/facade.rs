@@ -1102,6 +1102,77 @@ async fn raft_push_stamps_authenticated_subject_and_round_trips_encrypted_payloa
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The message routes take the ids off the path as the wire carries them: a
+/// transaction id like channel-go's `metric-sample|<uuid>` arrives encoded
+/// (`%7C`), and one with a `/` or a `%` must still name its message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_message_detail_decodes_the_ids_in_its_path() {
+    let dir = scratch("msg-detail-encoded");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    let txn = "metric-sample|a/b%c d";
+    facade
+        .push(
+            ctx(),
+            PushReq {
+                raw: format!(
+                    r#"{{"items":[{{"queue":"ids","payload":{{"n":1}},"transactionId":"{txn}"}}]}}"#
+                )
+                .into_bytes(),
+            },
+        )
+        .await
+        .expect("push");
+    let popped = facade
+        .pop_wildcard(
+            ctx(),
+            PopReq {
+                queue: "ids".into(),
+                group: None,
+                batch: 1,
+                auto_ack: false,
+                wait: false,
+                timeout_ms: 1_000,
+                options: Default::default(),
+            },
+        )
+        .await
+        .expect("pop");
+    let pid = parse(&popped.body)["partitionId"]
+        .as_str()
+        .expect("partition id")
+        .to_string();
+    let get = |path: String| {
+        let facade = &facade;
+        async move {
+            facade
+                .api(
+                    ctx(),
+                    ApiReq {
+                        method: "GET".into(),
+                        path,
+                        query: None,
+                        body: Vec::new(),
+                    },
+                )
+                .await
+                .expect("message detail")
+        }
+    };
+    let enc = crate::handlers::raft::percent_encode;
+    let found = get(format!("/api/v1/messages/{}/{}", enc(&pid), enc(txn))).await;
+    assert_eq!(found.status, 200, "{}", found.body);
+    assert_eq!(parse(&found.body)["data"]["n"], 1, "{}", found.body);
+    let missing = get(format!(
+        "/api/v1/messages/{pid}/{}",
+        enc("metric-sample|nope")
+    ))
+    .await;
+    assert_eq!(missing.status, 404, "{}", missing.body);
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------------------
 // PERF-1 (O18): the queen_raft_* timing surface is reachable and non-zero after
 // a real push/pop/ack cycle, and the Prometheus exporter renders the families.
