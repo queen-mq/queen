@@ -3,11 +3,12 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta http-equiv="refresh" content="{{ $refreshSeconds }};url={{ $refreshUrl }}">
+    <noscript><meta http-equiv="refresh" content="{{ $refreshSeconds }};url={{ $refreshUrl }}"></noscript>
     <title>Queen Supervisor</title>
     <link rel="stylesheet" href="{{ $stylesheetUrl }}" integrity="{{ $stylesheetIntegrity }}">
+    <script src="{{ $scriptUrl }}" integrity="{{ $scriptIntegrity }}" defer></script>
 </head>
-<body>
+<body data-refresh-seconds="{{ $refreshSeconds }}">
 @php
     $supervisor = $snapshot['supervisor'];
     $queues = $snapshot['queues'];
@@ -80,7 +81,7 @@
             @include('queen::dashboard.partials.failed-jobs')
             @include('queen::dashboard.partials.configuration')
 
-            <footer class="footer">Auto-refreshes every {{ $refreshSeconds }} seconds · {{ ($snapshot['supervisor']['source'] ?? null) === 'remote' ? 'supervisor state published through the broker' : 'local supervisor state only' }}</footer>
+            <footer class="footer"><span data-refresh-state>Auto-refreshes every {{ $refreshSeconds }} seconds</span> · {{ ($snapshot['supervisor']['source'] ?? null) === 'remote' ? 'supervisor state published through the broker' : 'local supervisor state only' }}</footer>
         </main>
     </div>
 </div>

@@ -6,6 +6,7 @@ use Illuminate\Contracts\View\View;
 use Illuminate\Http\Request;
 use Queen\Laravel\Dashboard\DashboardRepository;
 use Queen\Laravel\Dashboard\DashboardSections;
+use Queen\Laravel\Dashboard\DashboardScript;
 use Queen\Laravel\Dashboard\DashboardStylesheet;
 
 final class DashboardController
@@ -14,6 +15,7 @@ final class DashboardController
         Request $request,
         DashboardRepository $dashboard,
         DashboardStylesheet $stylesheet,
+        DashboardScript $script,
     ): View {
         $activeSection = DashboardSections::active($request->query('view'));
 
@@ -25,6 +27,8 @@ final class DashboardController
             'sectionUrls' => DashboardSections::urls(),
             'stylesheetUrl' => $stylesheet->url($request->getBasePath()),
             'stylesheetIntegrity' => $stylesheet->integrity(),
+            'scriptUrl' => $script->url($request->getBasePath()),
+            'scriptIntegrity' => $script->integrity(),
             'controlError' => $request->session()->get('queen_dashboard_control_error'),
             'controlStatus' => $request->session()->get('queen_dashboard_control_status'),
         ]);

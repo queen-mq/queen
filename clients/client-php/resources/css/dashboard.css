@@ -314,6 +314,21 @@ code {
     flex-wrap: wrap;
 }
 .controls form { margin: 0; }
+.refresh-toggle {
+    min-height: 32px;
+    padding: 4px 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    background: var(--surface);
+    color: inherit;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+}
+.refresh-toggle:hover { background: var(--surface-hover); }
+.refresh-toggle:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.refresh-toggle[aria-pressed="true"] { background: var(--surface-muted); }
+.refresh-toggle[hidden] { display: none; }
 .controls-note {
     max-width: 360px;
     margin: 0;

@@ -311,9 +311,11 @@ restart state, sampled depth and bounded failed-job metadata.
 QUEEN_DASHBOARD_ENABLED=true
 ```
 
-If the web server answers every `*.css` from `public/` without reaching PHP (a common static-asset
-rule), publish the stylesheet. The panel uses the copy only while it matches the package, and falls
-back to its own route otherwise:
+The panel refreshes in place with a small packaged script (header and main region only, with a
+**Pause auto-refresh** control) and falls back to a `<noscript>` meta refresh without JavaScript.
+If the web server answers every `*.css` or `*.js` from `public/` without reaching PHP (a common
+static-asset rule), publish the assets. The panel uses each copy only while it matches the package,
+and falls back to its own routes otherwise:
 
 ```bash
 php artisan vendor:publish --tag=queen-assets --force

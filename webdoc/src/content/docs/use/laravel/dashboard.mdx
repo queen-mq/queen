@@ -23,7 +23,11 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/QueenServiceProvider.php
   - clients/client-php/src/Laravel/Dashboard/DashboardRepository.php
   - clients/client-php/src/Laravel/Dashboard/DashboardSections.php
+  - clients/client-php/src/Laravel/Dashboard/DashboardAsset.php
+  - clients/client-php/src/Laravel/Dashboard/DashboardScript.php
   - clients/client-php/src/Laravel/Dashboard/DashboardStylesheet.php
+  - clients/client-php/resources/js/dashboard.js
+  - clients/client-php/src/Laravel/Http/Controllers/DashboardScriptController.php
   - clients/client-php/src/Laravel/Dashboard/FailedJobsReadModel.php
   - clients/client-php/src/Laravel/Dashboard/RemoteStatusReader.php
   - clients/client-php/src/Laravel/Supervisor/RemoteStatusDocument.php
@@ -41,7 +45,7 @@ verifiedBy:
   - clients/client-php/tests/LaravelSupervisorRemoteStatusTest.php
   - clients/client-php/tests/RemoteStatusDocumentTest.php
   - clients/client-php/tests/RemoteStatusPublisherTest.php
-# sourceOfTruth re-read 2026-09-29 (through cb253ff9 + this patch): adds the optional published stylesheet with route fallback and section links that survive the refresh; page matches the code.
+# sourceOfTruth re-read 2026-09-29 (through cb253ff9 + this patch): adds the published assets with route fallback, the in-place refresh script with its pause control, and section links that survive the refresh; page matches the code.
 ---
 
 The Laravel panel answers one question: **what is this application's Queen supervisor doing?** It
@@ -70,10 +74,17 @@ QUEEN_DASHBOARD_FAILED_JOBS_LIMIT=50
 Open `/queen`. Local and testing environments may use the built-in local allowance while
 `queen.dashboard.allow_local` is true.
 
-The page reloads itself every `QUEEN_DASHBOARD_REFRESH_SECONDS` without JavaScript. Sidebar links
-carry their section in the query string as well as the fragment (`/queen?view=supervisors#supervisors`),
-so the highlighted entry and the scroll position survive each reload. A fragment alone could not:
-reloading the same URL with the same fragment only scrolls, and fetches nothing.
+The panel refreshes every `QUEEN_DASHBOARD_REFRESH_SECONDS` in place: a small packaged script
+fetches the page again and swaps only the header and the main region, so scroll position, the
+sidebar and the section in view stay put. **Pause auto-refresh** in the header stops it; the choice
+is kept in the browser's local storage. Refreshing waits while the tab is hidden, while text is
+selected or while focus is on a control that would be replaced, and stops with a notice when the
+response is no longer the panel, for example after the session expired.
+
+Sidebar links carry their section in the query string as well as the fragment
+(`/queen?view=supervisors#supervisors`), so a reload or a shared link lands on the same section.
+Without JavaScript the page still works: a `<noscript>` meta refresh reloads it whole, keeping the
+section in the same way.
 
 To test the production authorization path locally, disable that allowance:
 
@@ -240,29 +251,30 @@ Without remote status, the panel is not a multi-host aggregator. Route the admin
 to the host that owns the supervisor, or use a sticky dedicated admin endpoint. A GET on host A
 followed by a control POST on host B intentionally fails the instance fence.
 
-The view loads no scripts, fonts or assets from a CDN and contains no inline style blocks or style
-attributes. The package serves its content-hashed stylesheet from the dashboard route, without a
-`vendor:publish` or frontend build step. Its link includes Subresource Integrity. Content Security
-Policy allows styles only from the same origin and explicitly rejects inline style attributes.
-Dynamic responses use `no-store`, while successful stylesheet responses use an immutable one-year
-private browser cache with intermediary transformations disabled to preserve the integrity digest.
+The view loads no fonts or assets from a CDN and contains no inline scripts, style blocks or style
+attributes. The package serves its content-hashed stylesheet and refresh script from the dashboard
+routes, without a `vendor:publish` or frontend build step. Both links include Subresource
+Integrity. Content Security Policy allows scripts, styles and `fetch` only from the same origin and
+explicitly rejects inline style attributes. Dynamic responses use `no-store`, while successful
+asset responses use an immutable one-year private browser cache with intermediary transformations
+disabled to preserve the integrity digest.
 Error responses are never cached. Responses also carry frame denial, MIME-sniffing denial and a
 no-referrer policy.
 
-### Web servers that serve every stylesheet statically
+### Web servers that serve every asset statically
 
-Some web server configurations answer every `*.css` request from the public directory and never
-reach PHP, for example an nginx or Caddy rule for static assets. The stylesheet route then returns
-the web server's `404` and the panel renders unstyled. Publish the stylesheet instead, as Horizon
-does with its assets:
+Some web server configurations answer every `*.css` or `*.js` request from the public directory and
+never reach PHP, for example an nginx or Caddy rule for static assets. The asset routes then return
+the web server's `404`: the panel renders unstyled and falls back to whole-page refreshes. Publish
+the assets instead, as Horizon does with its own:
 
 ```bash
 php artisan vendor:publish --tag=queen-assets --force
 ```
 
-The copy lands in `public/vendor/queen/dashboard.css`. The panel links to it, with the content
-version as a query string and the same integrity digest, only while it is byte-identical to the
-packaged stylesheet. A missing or stale copy, for example after an upgrade without republishing,
+The copies land in `public/vendor/queen/dashboard.css` and `public/vendor/queen/dashboard.js`. The
+panel links to each, with the content version as a query string and the same integrity digest,
+only while it is byte-identical to the packaged file. A missing or stale copy, for example after an upgrade without republishing,
 falls back to the route, so publishing can never serve the wrong styles. The file is also tagged
 `laravel-assets`, which the default Laravel `post-update-cmd` republishes on every
 `composer update`. In container builds, run the publish command next to the other asset steps.

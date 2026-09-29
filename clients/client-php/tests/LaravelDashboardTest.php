@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
 use GuzzleHttp\HandlerStack;
 use Orchestra\Testbench\TestCase;
+use Queen\Laravel\Dashboard\DashboardScript;
 use Queen\Laravel\Dashboard\DashboardStylesheet;
 use Queen\Laravel\Dashboard\RemoteStatusReader;
 use Queen\Laravel\QueenServiceProvider;
@@ -140,7 +141,9 @@ final class LaravelDashboardTest extends TestCase
         $content = $response->getContent();
         $this->assertStringNotContainsString('http://', $content);
         $this->assertStringNotContainsString('https://', $content);
-        $this->assertStringNotContainsString('<script', $content);
+        // Exactly one script: the packaged, same-origin, content-hashed file
+        // with Subresource Integrity. No inline code.
+        $this->assertSame(1, substr_count($content, '<script'));
         $this->assertStringNotContainsString(' style=', $content);
 
         $xpath = $this->dashboardXPath($content);
@@ -151,7 +154,16 @@ final class LaravelDashboardTest extends TestCase
         }
         $this->assertSame(0, $xpath->query('//th[not(@scope="col")]')->length);
         $this->assertSame(0, $xpath->query('//style')->length);
-        $this->assertSame(0, $xpath->query('//script')->length);
+        $this->assertSame(0, $xpath->query('//script[not(@src)]')->length);
+        $script = $xpath->query('//script[@src]')->item(0);
+        $this->assertInstanceOf(\DOMElement::class, $script);
+        $this->assertMatchesRegularExpression('#^/queen/assets/dashboard-[a-f0-9]{64}\.js$#D', $script->getAttribute('src'));
+        $this->assertMatchesRegularExpression('#^sha256-[A-Za-z0-9+/]{43}=$#D', $script->getAttribute('integrity'));
+        $this->assertTrue($script->hasAttribute('defer'));
+        $this->assertStringContainsString("script-src 'self'", $contentSecurityPolicy);
+        // Without scripts the page still refreshes itself, whole.
+        $this->assertSame(1, $xpath->query('//noscript/meta[@http-equiv="refresh"]')->length);
+        $this->assertSame(0, $xpath->query('//head/meta[@http-equiv="refresh"]')->length);
         $this->assertSame(0, $xpath->query('//*[@style]')->length);
         $this->assertSame(1, $xpath->query('//link[@rel="stylesheet"]')->length);
 
@@ -378,7 +390,7 @@ final class LaravelDashboardTest extends TestCase
         $this->assertStringNotContainsString('public', $cacheControl);
         $this->assertStringNotContainsString('no-store', $cacheControl);
         $this->assertSame(
-            "default-src 'none'; style-src 'self'; style-src-attr 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+            "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; style-src-attr 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
             $stylesheet->headers->get('Content-Security-Policy'),
         );
 
@@ -748,7 +760,7 @@ final class LaravelDashboardTest extends TestCase
             '#^sha256-[A-Za-z0-9+/]{43}=$#D',
             $conflictStylesheet->getAttribute('integrity'),
         );
-        $this->assertSame(0, $conflictXPath->query('//style|//script|//*[@style]')->length);
+        $this->assertSame(0, $conflictXPath->query('//style|//script[not(@src)]|//*[@style]')->length);
 
         $state->request('pause', $instanceId, 15);
         $this->post('/queen/control/continue', ['instance_id' => $instanceId])->assertStatus(409);
@@ -1002,6 +1014,54 @@ final class LaravelDashboardTest extends TestCase
             ->assertDontSee('local supervisor state only');
     }
 
+    public function testVersionedScriptIsServedWithIntegrityAndImmutableCaching(): void
+    {
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+        $script = $this->app->make(DashboardScript::class);
+
+        $response = $this->get('/queen/assets/dashboard-' . $script->version() . '.js')->assertOk();
+        $this->assertSame('text/javascript; charset=UTF-8', $response->headers->get('Content-Type'));
+        $this->assertStringContainsString('immutable', (string) $response->headers->get('Cache-Control'));
+        $this->assertSame($script->contents(), $response->getContent());
+        $this->assertSame(
+            'sha256-' . base64_encode(hash('sha256', (string) $response->getContent(), true)),
+            $script->integrity(),
+        );
+
+        $this->withHeader('If-None-Match', (string) $response->headers->get('ETag'))
+            ->get('/queen/assets/dashboard-' . $script->version() . '.js')
+            ->assertStatus(304);
+        $this->get('/queen/assets/dashboard-' . str_repeat('0', 64) . '.js')->assertNotFound();
+    }
+
+    public function testThePauseControlIsRenderedForTheScriptToEnable(): void
+    {
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+
+        $xpath = $this->dashboardXPath($this->get('/queen')->assertOk()->getContent());
+
+        $toggle = $xpath->query('//button[@data-refresh-toggle]')->item(0);
+        $this->assertInstanceOf(\DOMElement::class, $toggle);
+        $this->assertTrue($toggle->hasAttribute('hidden'), 'Without the script the control must not appear.');
+        $this->assertSame('false', $toggle->getAttribute('aria-pressed'));
+        $this->assertSame('5', $xpath->query('//body')->item(0)->getAttribute('data-refresh-seconds'));
+        $this->assertSame(1, $xpath->query('//*[@data-refresh-state]')->length);
+    }
+
+    public function testAPublishedScriptIsLinkedWhileItMatchesThePackage(): void
+    {
+        $script = $this->app->make(DashboardScript::class);
+        $packaged = $script->contents();
+        $this->usePublishedAsset(DashboardScript::PUBLISHED_FILE, $packaged);
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+
+        $element = $this->dashboardXPath($this->get('/queen')->assertOk()->getContent())
+            ->query('//script[@src]')->item(0);
+
+        $this->assertInstanceOf(\DOMElement::class, $element);
+        $this->assertSame('/vendor/queen/dashboard.js?v=' . hash('sha256', $packaged), $element->getAttribute('src'));
+    }
+
     public function testAPublishedStylesheetIsLinkedWhileItMatchesThePackage(): void
     {
         $stylesheet = $this->app->make(DashboardStylesheet::class);
@@ -1032,26 +1092,36 @@ final class LaravelDashboardTest extends TestCase
         $this->assertMatchesRegularExpression('#^/queen/assets/dashboard-[a-f0-9]{64}\.css$#D', $link->getAttribute('href'));
     }
 
-    public function testTheStylesheetIsPublishableWithTheQueenAndLaravelAssetTags(): void
+    public function testTheAssetsArePublishableWithTheQueenAndLaravelAssetTags(): void
     {
-        $source = realpath(__DIR__ . '/../resources/css/dashboard.css');
         foreach (['queen-assets', 'laravel-assets'] as $tag) {
             $paths = array_map('realpath', array_flip(ServiceProvider::pathsToPublish(QueenServiceProvider::class, $tag)));
-            $published = array_search($source, $paths, true);
-            $this->assertSame(public_path('vendor/queen/dashboard.css'), $published, $tag);
+            foreach ([
+                'resources/css/dashboard.css' => 'vendor/queen/dashboard.css',
+                'resources/js/dashboard.js' => 'vendor/queen/dashboard.js',
+            ] as $source => $target) {
+                $published = array_search(realpath(__DIR__ . '/../' . $source), $paths, true);
+                $this->assertSame(public_path($target), $published, "{$tag}: {$source}");
+            }
         }
     }
 
     private function usePublishedStylesheet(string $contents): void
     {
+        $this->usePublishedAsset(DashboardStylesheet::PUBLISHED_FILE, $contents);
+    }
+
+    private function usePublishedAsset(string $file, string $contents): void
+    {
         $publicPath = sys_get_temp_dir() . '/queen-dashboard-public-' . bin2hex(random_bytes(6));
-        mkdir($publicPath . '/vendor/queen', 0755, true);
-        file_put_contents($publicPath . '/vendor/queen/dashboard.css', $contents);
+        mkdir(dirname($publicPath . '/' . $file), 0755, true);
+        file_put_contents($publicPath . '/' . $file, $contents);
         $this->beforeApplicationDestroyed(function () use ($publicPath): void {
             $this->removeDirectory($publicPath);
         });
         $this->app->usePublicPath($publicPath);
         $this->app->forgetInstance(DashboardStylesheet::class);
+        $this->app->forgetInstance(DashboardScript::class);
     }
 
     /** @param array<string, mixed> $status */

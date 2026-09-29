@@ -10,6 +10,7 @@ use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Queue\Events\JobProcessing;
 use Illuminate\Support\ServiceProvider;
 use Queen\Laravel\Dashboard\DashboardRepository;
+use Queen\Laravel\Dashboard\DashboardScript;
 use Queen\Laravel\Dashboard\DashboardStylesheet;
 use Queen\Laravel\Dashboard\FailedJobsReadModel;
 use Queen\Laravel\Dashboard\RemoteStatusReader;
@@ -197,6 +198,10 @@ class QueenServiceProvider extends ServiceProvider
             DashboardStylesheet::class,
             fn ($app): DashboardStylesheet => new DashboardStylesheet($app->publicPath()),
         );
+        $this->app->singleton(
+            DashboardScript::class,
+            fn ($app): DashboardScript => new DashboardScript($app->publicPath()),
+        );
 
         $this->app->singleton(FailedJobsReadModel::class, function ($app): FailedJobsReadModel {
             return new FailedJobsReadModel(
@@ -305,12 +310,13 @@ class QueenServiceProvider extends ServiceProvider
             $this->publishes([
                 __DIR__ . '/../../config/queen.php' => config_path('queen.php'),
             ], 'queen-config');
-            // Optional: only for web servers that serve every *.css from the
-            // public directory. The dashboard falls back to its own route
-            // whenever the copy is missing or stale. `laravel-assets` makes the
-            // default skeleton's post-update-cmd republish it on upgrade.
+            // Optional: only for web servers that serve every *.css or *.js
+            // from the public directory. The dashboard falls back to its own
+            // routes whenever a copy is missing or stale. `laravel-assets` makes
+            // the default skeleton's post-update-cmd republish them on upgrade.
             $this->publishes([
                 __DIR__ . '/../../resources/css/dashboard.css' => public_path(DashboardStylesheet::PUBLISHED_FILE),
+                __DIR__ . '/../../resources/js/dashboard.js' => public_path(DashboardScript::PUBLISHED_FILE),
             ], ['queen-assets', 'laravel-assets']);
 
             $this->commands([

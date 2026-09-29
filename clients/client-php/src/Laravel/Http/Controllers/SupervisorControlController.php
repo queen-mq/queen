@@ -6,6 +6,7 @@ use Illuminate\Http\Request;
 use Queen\Laravel\Dashboard\DashboardConflictException;
 use Queen\Laravel\Dashboard\DashboardRepository;
 use Queen\Laravel\Dashboard\DashboardSections;
+use Queen\Laravel\Dashboard\DashboardScript;
 use Queen\Laravel\Dashboard\DashboardStylesheet;
 use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Response;
@@ -16,6 +17,7 @@ final class SupervisorControlController
         Request $request,
         DashboardRepository $dashboard,
         DashboardStylesheet $stylesheet,
+        DashboardScript $script,
         string $command,
     ): Response {
         $instanceId = $request->input('instance_id');
@@ -37,6 +39,8 @@ final class SupervisorControlController
                 'sectionUrls' => DashboardSections::urls(),
                 'stylesheetUrl' => $stylesheet->url($request->getBasePath()),
                 'stylesheetIntegrity' => $stylesheet->integrity(),
+                'scriptUrl' => $script->url($request->getBasePath()),
+                'scriptIntegrity' => $script->integrity(),
                 'controlError' => $exception->getMessage(),
                 'controlStatus' => null,
             ], 409);
