@@ -577,6 +577,102 @@ a.button {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
 }
+.failed-table tr.has-detail {
+    position: relative;
+    cursor: pointer;
+}
+.failed-table .row-action {
+    width: 48px;
+    padding-left: 0;
+    text-align: right;
+}
+.row-link {
+    display: inline-flex;
+    width: 28px;
+    height: 28px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    color: var(--muted);
+}
+/* The whole row opens the detail; the arrow is the visible cue. */
+.row-link::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+}
+.row-link:focus-visible { outline: none; }
+.failed-table tr:has(.row-link:focus-visible) {
+    outline: 2px solid var(--brand);
+    outline-offset: -2px;
+}
+.failed-table tr.has-detail:hover .row-link,
+.row-link:focus-visible {
+    background: var(--brand-soft);
+    color: var(--brand);
+}
+.chevron {
+    width: 18px;
+    height: 18px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+.failure-kicker { margin: 0 0 6px; }
+.failure-title { color: var(--danger); }
+.failure-reason h3 { color: var(--danger); }
+.failure-reason pre {
+    border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+    border-left: 3px solid var(--danger);
+    background: color-mix(in srgb, var(--danger-soft) 55%, var(--surface));
+    color: var(--text);
+}
+dialog.drawer {
+    inset: 0;
+    width: min(780px, 100vw);
+    max-width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
+    margin: 0 0 0 auto;
+    padding: 0;
+    overflow: auto;
+    border: 0;
+    border-left: 1px solid var(--border);
+    background: var(--background);
+    color: var(--text);
+    box-shadow: -12px 0 32px rgb(0 0 0 / .18);
+}
+dialog.drawer::backdrop { background: rgb(17 24 39 / .45); }
+body:has(dialog.drawer[open]) { overflow: hidden; }
+.drawer-bar {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+}
+.drawer-body { padding: 16px; }
+.drawer-body .card { margin: 0; }
+.drawer [data-page-only] { display: none; }
+.drawer .detail-list > div:first-child { grid-column: 1 / -1; }
+.drawer-status {
+    margin: 0;
+    padding: 24px 4px;
+    color: var(--muted);
+}
+@media (prefers-reduced-motion: no-preference) {
+    dialog.drawer[open] { animation: drawer-in .18s ease-out; }
+    @keyframes drawer-in {
+        from { opacity: .4; transform: translateX(32px); }
+    }
+}
 .failed-help {
     margin: 0;
     padding: 12px 20px;

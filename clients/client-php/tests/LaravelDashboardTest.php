@@ -1192,7 +1192,14 @@ final class LaravelDashboardTest extends TestCase
         ]);
 
         $list = $this->dashboardXPath($this->get('/queen/failed-jobs')->assertOk()->getContent());
-        $this->assertSame('/queen/failed-jobs/failed-1', $list->query('//table//a')->item(0)->getAttribute('href'));
+        $link = $list->query('//table//a')->item(0);
+        $this->assertSame('/queen/failed-jobs/failed-1', $link->getAttribute('href'));
+        // The arrow at the end of the row opens the drawer; the whole row is its hit area.
+        $this->assertTrue($link->hasAttribute('data-drawer'));
+        $this->assertSame('row-link', $link->getAttribute('class'));
+        $this->assertSame('Why job failed-1 failed', $link->getAttribute('aria-label'));
+        $this->assertSame(1, $list->query('//table//a/svg[@class="chevron"][@aria-hidden="true"]')->length);
+        $this->assertSame('has-detail', $list->query('//table/tbody/tr')->item(0)->getAttribute('class'));
 
         $response = $this->get('/queen/failed-jobs/failed-1')->assertOk();
         $response->assertSee('RuntimeException')
@@ -1209,6 +1216,13 @@ final class LaravelDashboardTest extends TestCase
         // Laravel's payload counter is not the number of attempts made; it is not shown.
         $this->assertSame(0, $xpath->query('//dl[@class="detail-list"]/div[dt="Attempts"]')->length);
         $this->assertSame('Failed job · Queen Supervisor', trim($xpath->query('//title')->item(0)->textContent));
+        // The drawer takes #failed-job from this page and hides what only the page needs.
+        $section = $xpath->query('//section[@id="failed-job"]')->item(0);
+        $this->assertSame('failed-job-title', $section->getAttribute('aria-labelledby'));
+        $this->assertSame('Failed', trim($xpath->query('.//span[@class="badge danger"]', $section)->item(0)->textContent));
+        $this->assertSame('RuntimeException', trim($xpath->query('.//h2[@class="failure-title"]', $section)->item(0)->textContent));
+        $this->assertSame(1, $xpath->query('.//div[contains(@class, "failure-reason")]/pre[@class="exception-summary"]', $section)->length);
+        $this->assertTrue($xpath->query('.//a[normalize-space(.)="All failed jobs"]', $section)->item(0)->hasAttribute('data-page-only'));
         $this->assertStringStartsWith('RuntimeException: Mail server refused', trim($xpath->query('//pre[@class="exception-summary"]')->item(0)->textContent));
         $this->assertStringStartsWith('Stack trace:', trim($xpath->query('//details/pre[@class="exception-trace"]')->item(0)->textContent));
         $this->assertSame('/queen/failed-jobs', $xpath->query('//nav//a[@aria-current="page"]')->item(0)?->getAttribute('href'));
