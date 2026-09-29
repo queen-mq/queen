@@ -24,7 +24,9 @@
   Checker, rules that hold whatever the budget did:
     - every acknowledged push ends exactly once: completed (an ack `completed`
       that succeeded) or dead-lettered (in the DLQ at the end), never both,
-      never neither;
+      never neither. An ack `completed` whose answer never came (the node died,
+      the call timed out) is indeterminate: it may have been applied, so its
+      value is not counted lost (reported as :completed-unknown);
     - a value no consumer ever nacked (:normal) is never dead-lettered, and a
       :poison or :forced one never completes;
     - an ack item that answered dlq:true is in the DLQ; the DLQ holds no value
@@ -280,6 +282,11 @@
                                    dq-ops))
             done      (filter #(and (= "completed" (:sent %)) (= :acked (:ack %))) ds)
             completed (set (map :v done))
+            ; A completed ack whose answer never came (the node died or the
+            ; call timed out) may have been applied: indeterminate, not lost.
+            maybe-done (set (map :v (filter #(and (= "completed" (:sent %))
+                                                  (= :unknown (:ack %)))
+                                            ds)))
             ; An ack call that nacked nothing: its successes are settled.
             pure-op   (set (keep (fn [op] (when (every? #(= "completed" (:sent %)) (:msgs op))
                                             (:index op)))
@@ -303,7 +310,7 @@
                                       (when (seq d) [n (vec (take 16 d))])))
                                   per-node))
             views     (distinct (map (comp set keys val) per-node))
-            lost      (sort (remove #(or (completed %) (dlq %)) pushed))
+            lost      (sort (remove #(or (completed %) (dlq %) (maybe-done %)) pushed))
             both      (sort (filter dlq completed))
             normal    (sort (filter #(= :normal (fate %)) dlq))
             wrong-done (sort (filter #(#{:poison :forced} (fate %)) completed))
@@ -319,6 +326,7 @@
                                   (empty? after) (empty? bad-txn))
          :pushed             (count pushed)
          :completed          (count completed)
+         :completed-unknown  (count (remove #(or (completed %) (dlq %)) maybe-done))
          :dead-lettered      (count dlq)
          :by-fate            (frequencies (map fate dlq))
          :dlq-reads          (into (sorted-map) (map (fn [[n fr]] [n (count fr)]) per-node))
