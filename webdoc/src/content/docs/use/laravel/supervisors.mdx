@@ -31,6 +31,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-29 (through cd2c7135): the config change is a dashboard comment only and changes no supervisor setting; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through e54bb5b3): SupervisorConfiguration gains readOnlyConnection for the dashboard and changes no supervisor setting; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through f94b76ec + this patch): the Rust engine now publishes remote status and --for-engine exports it; page matches the code.
+# sourceOfTruth re-read 2026-09-29 (through 1ef4bb47 + this patch): the installer and launcher now run on thread-safe PHP; the requirement is documented; page matches the code.
 ---
 
 The Queen supervisor is a **local control plane**. It starts ordinary Laravel
@@ -56,6 +57,9 @@ The supervisor engines currently target Unix process semantics.
 - `symfony/process` for the PHP engine.
 - PHP `pcntl` and `posix` for process control, state ownership and the Composer launcher.
 - PHP `phar` and an available `proc_open` for native installation and smoke verification.
+- Thread-safe (ZTS) PHP, such as the build FrankenPHP embeds, is supported. `chdir()` does not move a
+  ZTS process, so there the launcher executes the verified binary by its absolute path: every check
+  still runs, but the exec is not pinned to the verified inode as it is on non-thread-safe PHP.
 - An outer process monitor such as systemd, Kubernetes or Supervisor to restart the master if it
   exits.
 

@@ -25,6 +25,7 @@ sourceOfTruth:
   - .github/workflows/tests.yml
 # sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 # sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): classify gained the two DLQ replay arms; the sink's own routes, classes and retention interaction are untouched.
+# sourceOfTruth re-read 2026-09-29 (through 1ef4bb47 + this patch): the workflow change adds a php-client job and leaves the S3 sink tests unchanged; page matches the code.
 ---
 
 `queen-s3` is a separate binary that reads a queue's log through Queen's own HTTP API and writes
