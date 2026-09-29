@@ -5,6 +5,7 @@ namespace Queen\Laravel\Http\Controllers;
 use Illuminate\Contracts\View\View;
 use Illuminate\Http\Request;
 use Queen\Laravel\Dashboard\DashboardRepository;
+use Queen\Laravel\Dashboard\DashboardSections;
 use Queen\Laravel\Dashboard\DashboardStylesheet;
 
 final class DashboardController
@@ -14,10 +15,14 @@ final class DashboardController
         DashboardRepository $dashboard,
         DashboardStylesheet $stylesheet,
     ): View {
+        $activeSection = DashboardSections::active($request->query('view'));
+
         return view('queen::dashboard', [
             'snapshot' => $dashboard->snapshot(),
             'refreshSeconds' => $this->refreshSeconds($request),
-            'refreshUrl' => route('queen.dashboard.index', [], false),
+            'refreshUrl' => DashboardSections::refreshUrl($activeSection, time()),
+            'activeSection' => $activeSection,
+            'sectionUrls' => DashboardSections::urls(),
             'stylesheetUrl' => $stylesheet->url($request->getBasePath()),
             'stylesheetIntegrity' => $stylesheet->integrity(),
             'controlError' => $request->session()->get('queen_dashboard_control_error'),

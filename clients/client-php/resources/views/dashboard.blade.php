@@ -80,7 +80,7 @@
             @include('queen::dashboard.partials.failed-jobs')
             @include('queen::dashboard.partials.configuration')
 
-            <footer class="footer">Auto-refreshes every {{ $refreshSeconds }} seconds · local supervisor state only</footer>
+            <footer class="footer">Auto-refreshes every {{ $refreshSeconds }} seconds · {{ ($snapshot['supervisor']['source'] ?? null) === 'remote' ? 'supervisor state published through the broker' : 'local supervisor state only' }}</footer>
         </main>
     </div>
 </div>

@@ -963,6 +963,45 @@ final class LaravelDashboardTest extends TestCase
             ->assertJsonPath('supervisor.source', null);
     }
 
+    public function testSectionLinksKeepTheSectionAcrossTheAutomaticRefresh(): void
+    {
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+
+        $content = $this->get('/queen?view=supervisors')->assertOk()->getContent();
+        $xpath = $this->dashboardXPath($content);
+
+        $current = $xpath->query('//nav[@aria-label="Dashboard sections"]//a[@aria-current="page"]');
+        $this->assertSame(1, $current->length);
+        $this->assertSame('/queen?view=supervisors#supervisors', $current->item(0)->getAttribute('href'));
+        $this->assertSame('/queen', $xpath->query('//nav[@aria-label="Dashboard sections"]//a')->item(0)->getAttribute('href'));
+
+        // Same section, a query that changes on every render: a real reload
+        // rather than a same-document scroll to the fragment.
+        $refresh = $xpath->query('//meta[@http-equiv="refresh"]')->item(0)->getAttribute('content');
+        $this->assertMatchesRegularExpression('#^5;url=/queen\?view=supervisors&at=\d+\#supervisors$#D', $refresh);
+    }
+
+    public function testAnUnknownSectionFallsBackToTheOverview(): void
+    {
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+
+        $xpath = $this->dashboardXPath($this->get('/queen?view=../../etc')->assertOk()->getContent());
+
+        $current = $xpath->query('//nav[@aria-label="Dashboard sections"]//a[@aria-current="page"]');
+        $this->assertSame(1, $current->length);
+        $this->assertSame('/queen', $current->item(0)->getAttribute('href'));
+        $this->assertSame('5;url=/queen', $xpath->query('//meta[@http-equiv="refresh"]')->item(0)->getAttribute('content'));
+    }
+
+    public function testTheFooterNamesWhereTheSupervisorStateComesFrom(): void
+    {
+        $this->remoteSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+
+        $this->get('/queen')->assertOk()
+            ->assertSee('supervisor state published through the broker')
+            ->assertDontSee('local supervisor state only');
+    }
+
     public function testAPublishedStylesheetIsLinkedWhileItMatchesThePackage(): void
     {
         $stylesheet = $this->app->make(DashboardStylesheet::class);

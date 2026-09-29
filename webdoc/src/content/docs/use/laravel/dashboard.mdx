@@ -22,6 +22,7 @@ sourceOfTruth:
   - clients/client-php/resources/views/dashboard/partials/workload.blade.php
   - clients/client-php/src/Laravel/QueenServiceProvider.php
   - clients/client-php/src/Laravel/Dashboard/DashboardRepository.php
+  - clients/client-php/src/Laravel/Dashboard/DashboardSections.php
   - clients/client-php/src/Laravel/Dashboard/DashboardStylesheet.php
   - clients/client-php/src/Laravel/Dashboard/FailedJobsReadModel.php
   - clients/client-php/src/Laravel/Dashboard/RemoteStatusReader.php
@@ -40,7 +41,7 @@ verifiedBy:
   - clients/client-php/tests/LaravelSupervisorRemoteStatusTest.php
   - clients/client-php/tests/RemoteStatusDocumentTest.php
   - clients/client-php/tests/RemoteStatusPublisherTest.php
-# sourceOfTruth re-read 2026-09-29 (through cb253ff9 + this patch): adds the optional published stylesheet with route fallback; page matches the code.
+# sourceOfTruth re-read 2026-09-29 (through cb253ff9 + this patch): adds the optional published stylesheet with route fallback and section links that survive the refresh; page matches the code.
 ---
 
 The Laravel panel answers one question: **what is this application's Queen supervisor doing?** It
@@ -68,6 +69,11 @@ QUEEN_DASHBOARD_FAILED_JOBS_LIMIT=50
 
 Open `/queen`. Local and testing environments may use the built-in local allowance while
 `queen.dashboard.allow_local` is true.
+
+The page reloads itself every `QUEEN_DASHBOARD_REFRESH_SECONDS` without JavaScript. Sidebar links
+carry their section in the query string as well as the fragment (`/queen?view=supervisors#supervisors`),
+so the highlighted entry and the scroll position survive each reload. A fragment alone could not:
+reloading the same URL with the same fragment only scrolls, and fetches nothing.
 
 To test the production authorization path locally, disable that allowance:
 

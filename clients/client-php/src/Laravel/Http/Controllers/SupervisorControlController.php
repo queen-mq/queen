@@ -5,6 +5,7 @@ namespace Queen\Laravel\Http\Controllers;
 use Illuminate\Http\Request;
 use Queen\Laravel\Dashboard\DashboardConflictException;
 use Queen\Laravel\Dashboard\DashboardRepository;
+use Queen\Laravel\Dashboard\DashboardSections;
 use Queen\Laravel\Dashboard\DashboardStylesheet;
 use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Response;
@@ -32,6 +33,8 @@ final class SupervisorControlController
                 'snapshot' => $dashboard->snapshot(),
                 'refreshSeconds' => $this->refreshSeconds(),
                 'refreshUrl' => route('queen.dashboard.index', [], false),
+                'activeSection' => DashboardSections::active(null),
+                'sectionUrls' => DashboardSections::urls(),
                 'stylesheetUrl' => $stylesheet->url($request->getBasePath()),
                 'stylesheetIntegrity' => $stylesheet->integrity(),
                 'controlError' => $exception->getMessage(),
