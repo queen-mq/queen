@@ -27,6 +27,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-29 (through cd2c7135): failed jobs are paged and the detail page shows the exception; the failed-jobs row and the dashboard section say so.
 # sourceOfTruth re-read 2026-09-29 (through 8ca3d2a9): the detail page still shows the exception; the failed-jobs row holds.
 # sourceOfTruth re-read 2026-09-29 (through e54bb5b3): the panel now charts jobs completed and failed per queue from the broker's counters; the richer-dashboard section says so and keeps per-job-class metrics as a Horizon advantage.
+# sourceOfTruth re-read 2026-09-29 (through f94b76ec + this patch): remote status is no longer PHP-only; page matches the code.
 ---
 
 Queen is not a drop-in reimplementation of Horizon. Both can supervise Laravel workers, but they
@@ -93,8 +94,8 @@ storage.
 
 PHP and Rust consume the same resolved configuration and publish the same versioned status and
 control protocol. A deployment can validate behavior with the readable PHP reference engine, then
-move to Rust without changing pool definitions or dashboard commands. The one PHP-only feature is
-publishing that status to the broker for a dashboard on another host.
+move to Rust without changing pool definitions or dashboard commands. Both can also publish that
+status to the broker for a dashboard on another host.
 
 ### Queen queue semantics
 
