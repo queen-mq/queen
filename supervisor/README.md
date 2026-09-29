@@ -134,6 +134,17 @@ a replaced supervisor is discarded. Status includes both an ISO-8601 UTC
 `updated_at` value and its `updated_at_epoch` counterpart, plus the number of
 workers currently draining.
 
+When `queen.supervisor.remote_status` is enabled, the engine also copies each
+status document to the broker's key/value store, so a Laravel dashboard served
+by other hosts (web pods beside a worker pod) can show it read-only. Both
+engines write the same `queen.supervisor.remote-status/v1` format: `<key>/head`
+plus base64 `<key>/chunk/NNNN` slices, all in one `POST /api/v1/kv` batch, so
+the document never depends on the 64 KiB value ceiling. Publishing is throttled
+to `interval`, forced on every state change (pause, terminate, stop), tries each
+broker endpoint once, and is budgeted into the heartbeat. It is best effort: a
+failure is reported once per failure streak and never stops supervision. The
+local `status.json` stays authoritative for control commands.
+
 ## Production topology
 
 > **Run exactly one supervisor replica for an application/consumer group.**

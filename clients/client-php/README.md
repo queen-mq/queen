@@ -342,7 +342,7 @@ aggregator. Global backlog analytics and DLQ operations live in the Queen broker
 [Dashboard reference](https://queenmq.com/use/laravel/dashboard).
 
 **Supervisor on another host.** When the dashboard is served by other processes than the supervisor
-— Kubernetes web pods and a separate worker pod, for instance — the PHP engine can also publish its
+— Kubernetes web pods and a separate worker pod, for instance — either engine can also publish its
 status to the broker's key/value store:
 
 ```dotenv
@@ -356,8 +356,8 @@ terminate stay with `php artisan queen:supervisor` on the supervisor host. Liven
 published heartbeat alone. The document is split across `<key>/head` and `<key>/chunk/NNNN` in the
 `queen-supervisor` namespace, written in one transaction, so it never depends on the key/value value
 ceiling. Publishing is best effort and budgeted into the heartbeat; a broker outage shows the
-supervisor as stale and never stops supervision. The native engine does not publish: `queen:supervisor-config
---for-engine` withholds the setting and prints a notice.
+supervisor as stale and never stops supervision. The Rust engine publishes the same format from
+supervisor 0.2.0, which is the release this package pins.
 
 | Variable | Default | |
 | --- | --- | --- |

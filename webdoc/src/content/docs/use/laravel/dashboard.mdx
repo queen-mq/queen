@@ -52,11 +52,12 @@ verifiedBy:
   - clients/client-php/tests/RemoteStatusPublisherTest.php
 # sourceOfTruth re-read 2026-09-29 (through 5b7aabef + this patch): adds the published assets with route fallback, the in-place refresh script with its pause control, one page per section, keyset-paged failed jobs and the failed-job detail page with its bounded SQL read; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through 109b23c2 + this patch): adds the jobs-processed chart read from the broker's queue-ops counters, and the failed-job drawer; page matches the code.
+# sourceOfTruth re-read 2026-09-29 (through f94b76ec + this patch): the Rust engine publishes the same remote status format from supervisor 0.2.0; page matches the code.
 ---
 
 The Laravel panel answers one question: **what is this application's Queen supervisor doing?** It
 reads the private supervisor state already written by the PHP or Rust engine on this host. When the
-supervisor runs on another host, it can read instead the copy the PHP engine
+supervisor runs on another host, it can read instead the copy the engine
 [publishes to the broker](#a-supervisor-on-another-host). It does not poll queue depth again and it
 is not a replacement for Queen's global broker dashboard.
 
@@ -274,7 +275,7 @@ two dashboards intentionally cover different scopes:
 
 The panel reads one local `state_directory`. When the dashboard is served by other processes than
 the supervisor, for example Kubernetes web pods beside a dedicated worker pod, that directory is
-empty and the supervisor shows as unavailable. The PHP engine can close that gap by also publishing
+empty and the supervisor shows as unavailable. Either engine can close that gap by also publishing
 its status document to the broker's [key/value store](/use/kv):
 
 ```dotenv
@@ -309,9 +310,10 @@ connection is resolved without `read_bearer_token`, because publishing is a key/
 
 Publishing is best effort. The resolver adds one request timeout per broker endpoint to the
 heartbeat budget, a failure is reported once per failure streak, and a broker outage shows the
-supervisor as stale without ever stopping supervision. The native engine does not publish:
-`queen:supervisor-config --for-engine` withholds the setting, prints a notice on standard error and
-the Rust master starts without it.
+supervisor as stale without ever stopping supervision. The Rust engine writes the same format from
+supervisor 0.2.0: `queen:supervisor-config --for-engine` hands it the setting with its write
+credential, and it publishes after every status write, throttled to the interval and forced on
+every state change, exactly like the PHP engine.
 
 ## Behind a load balancer
 

@@ -60,6 +60,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-29 (through 5b7aabef + this patch): the dashboard has one route per section, keyset-paged failed jobs and a detail page per failed job; no new config key.
 # sourceOfTruth re-read 2026-09-29 (through 109b23c2 + this patch): Admin gains getQueueOps and getQueueOpsAsync, which the dashboard's jobs-processed chart reads; no new config key.
 # sourceOfTruth re-read 2026-09-29 (through 8ca3d2a9): the failed-job detail read is bounded in SQL and shows max tries instead of attempts; nothing this reference describes changes.
+# sourceOfTruth re-read 2026-09-29 (through f94b76ec + this patch): either engine publishes remote status and the package pins supervisor 0.2.0; page matches the code.
 ---
 
 The Composer package is `queen-mq/php-client`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
@@ -715,7 +716,7 @@ surge overlap, such as `Recreate`.
 The package also provides a disabled-by-default local panel. It reads bounded state from the one
 local master and protects HTML, JSON and controls with the same `viewQueenDashboard` Gate. In
 production, enabling the route without defining an allowing Gate still returns `403`. With
-`supervisor.remote_status` enabled, the PHP engine also publishes that state to the broker's
+`supervisor.remote_status` enabled, either engine also publishes that state to the broker's
 key/value store, and a panel on another host shows it read-only. Failed jobs are paged with a
 keyset cursor, and each has a detail page with its exception and stack trace, never its
 payload.

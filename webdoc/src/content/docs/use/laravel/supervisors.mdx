@@ -30,6 +30,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-29 (through fc71b65b + this patch): adds PHP-only remote status publication and its heartbeat budget; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through cd2c7135): the config change is a dashboard comment only and changes no supervisor setting; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through e54bb5b3): SupervisorConfiguration gains readOnlyConnection for the dashboard and changes no supervisor setting; page matches the code.
+# sourceOfTruth re-read 2026-09-29 (through f94b76ec + this patch): the Rust engine now publishes remote status and --for-engine exports it; page matches the code.
 ---
 
 The Queen supervisor is a **local control plane**. It starts ordinary Laravel
@@ -43,9 +44,9 @@ Both engines consume the same resolved configuration:
 | Queen PHP | A Laravel application remains resident | `artisan queue:work queen` | Reference implementation and fallback |
 | Queen Rust | Rust remains resident after one Artisan config load | `artisan queue:work queen` | Lower master memory, process-group fencing and crash-loop circuit breaker |
 
-Switching engines does not change the pool configuration, CLI controls or dashboard protocol. One
-exception: only the PHP engine can [publish its status](/use/laravel/dashboard#a-supervisor-on-another-host)
-for a dashboard on another host.
+Switching engines does not change the pool configuration, CLI controls or dashboard protocol. Both
+engines can also [publish their status](/use/laravel/dashboard#a-supervisor-on-another-host) for a
+dashboard on another host; the Rust engine does so from supervisor 0.2.0.
 
 ## Requirements
 
@@ -136,8 +137,8 @@ php artisan queen:supervisor-config --pretty
 ```
 
 This form redacts tokens and header values. `--for-engine` contains credentials and must not be
-written to logs or ordinary build artifacts. It is the form the Rust engine loads, so it withholds
-`remote_status`, which that engine does not implement, and prints a notice on standard error.
+written to logs or ordinary build artifacts. It is the form the Rust engine loads, `remote_status`
+included with its write credential, because that engine publishes the status document too.
 
 ## Balancing modes
 
