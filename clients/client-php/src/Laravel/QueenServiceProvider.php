@@ -12,6 +12,7 @@ use Illuminate\Support\ServiceProvider;
 use Queen\Laravel\Dashboard\DashboardRepository;
 use Queen\Laravel\Dashboard\DashboardStylesheet;
 use Queen\Laravel\Dashboard\FailedJobsReadModel;
+use Queen\Laravel\Dashboard\RemoteStatusReader;
 use Queen\Laravel\Http\Middleware\AuthorizeDashboard;
 use Queen\Laravel\Http\Middleware\SecureDashboardResponse;
 use Queen\Laravel\Queue\QueenConnector;
@@ -217,8 +218,47 @@ class QueenServiceProvider extends ServiceProvider
                 new SupervisorState($directory),
                 $app['config'],
                 fn (int $limit): array => $app->make(FailedJobsReadModel::class)->read($limit),
+                $this->remoteStatusEnabled($app)
+                    ? fn (): ?array => $app->make(RemoteStatusReader::class)->read()
+                    : null,
             );
         });
+
+        $this->app->singleton(RemoteStatusReader::class, function ($app): RemoteStatusReader {
+            $settings = SupervisorConfiguration::remoteStatusSettings(
+                (array) $app['config']->get('queen.supervisor', []),
+                (array) $app['config']->get('queen', []),
+                (array) $app['config']->get('queue.connections', []),
+            );
+            if ($settings === null) {
+                throw new RuntimeException('Queen supervisor remote status is disabled.');
+            }
+            $connection = $settings['connection'];
+            $timeout = $this->configurationInteger(
+                $app['config']->get('queen.supervisor.http_timeout', 5),
+                'queen.supervisor.http_timeout',
+                1,
+            );
+
+            return new RemoteStatusReader(
+                new Queen([
+                    'urls' => $connection['urls'],
+                    'bearerToken' => $connection['bearer_token'],
+                    'headers' => $connection['headers'],
+                    'timeoutMillis' => $timeout * 1000,
+                    // A dashboard render must not queue behind retries.
+                    'retryAttempts' => 1,
+                    'retryDelayMillis' => 0,
+                ]),
+                $settings['namespace'],
+                $settings['key'],
+            );
+        });
+    }
+
+    private function remoteStatusEnabled($app): bool
+    {
+        return $app['config']->get('queen.supervisor.remote_status.enabled', false) === true;
     }
 
     private function configurationInteger(mixed $value, string $name, int $minimum): int

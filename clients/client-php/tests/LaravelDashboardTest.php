@@ -7,10 +7,15 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Schema;
+use GuzzleHttp\HandlerStack;
 use Orchestra\Testbench\TestCase;
 use Queen\Laravel\Dashboard\DashboardStylesheet;
+use Queen\Laravel\Dashboard\RemoteStatusReader;
 use Queen\Laravel\QueenServiceProvider;
+use Queen\Laravel\Supervisor\RemoteStatusDocument;
 use Queen\Laravel\Supervisor\SupervisorState;
+use Queen\Queen;
+use Queen\Tests\Support\PlanHandler;
 
 final class LaravelDashboardTest extends TestCase
 {
@@ -867,6 +872,130 @@ final class LaravelDashboardTest extends TestCase
         } finally {
             $this->artisan('route:clear')->assertSuccessful();
         }
+    }
+
+    public function testRemoteStatusShowsASupervisorRunningOnAnotherHostReadOnly(): void
+    {
+        $handler = $this->remoteSupervisor([
+            'engine' => 'php',
+            'state' => 'running',
+            'ready' => true,
+            'capacity_satisfied' => true,
+            'pool_status' => [[
+                'supervisor' => 'default',
+                'queue' => 'high',
+                'running' => 2,
+                'desired' => 2,
+                'pids' => [201, 202],
+                'depth' => 9,
+                'depth_available' => true,
+            ]],
+        ]);
+
+        $this->getJson('/queen/api/status')->assertOk()
+            ->assertJsonPath('supervisor.availability', 'live')
+            ->assertJsonPath('supervisor.source', 'remote')
+            ->assertJsonPath('supervisor.controls_available', false)
+            ->assertJsonPath('supervisor.engine', 'php')
+            ->assertJsonPath('supervisor.workers', 2)
+            ->assertJsonPath('queues.0.depth', 9);
+
+        $request = $handler->requests[0];
+        $this->assertSame('/api/v1/kv', $request->getUri()->getPath());
+        $this->assertSame(
+            [['op' => 'getPrefix', 'ns' => 'queen-supervisor', 'prefix' => 'orders/', 'limit' => 100]],
+            json_decode((string) $request->getBody(), true)['operations'],
+        );
+
+        $response = $this->get('/queen')->assertOk();
+        $response->assertSee('published through the broker')
+            ->assertSee('Read-only: this supervisor runs on another host.');
+        $xpath = $this->dashboardXPath($response->getContent());
+        $this->assertSame(0, $xpath->query('//form[contains(@action, "/queen/control/")]')->length);
+    }
+
+    public function testRemoteStatusWithAnOldHeartbeatIsStale(): void
+    {
+        $this->remoteSupervisor(['engine' => 'rust', 'state' => 'running', 'pool_status' => []], time() - 3601);
+
+        $this->getJson('/queen/api/status')->assertOk()
+            ->assertJsonPath('supervisor.availability', 'stale')
+            ->assertJsonPath('supervisor.source', 'remote');
+    }
+
+    public function testALiveLocalSupervisorTakesPrecedenceOverTheRemoteCopy(): void
+    {
+        $this->remoteSupervisor(['engine' => 'rust', 'state' => 'paused', 'pool_status' => []]);
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+
+        $this->getJson('/queen/api/status')->assertOk()
+            ->assertJsonPath('supervisor.source', 'local')
+            ->assertJsonPath('supervisor.controls_available', true)
+            ->assertJsonPath('supervisor.state', 'running');
+    }
+
+    public function testControlsAreRefusedForARemoteSupervisor(): void
+    {
+        $this->remoteSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+
+        $this->post('/queen/control/pause', ['instance_id' => str_repeat('c', 32)])
+            ->assertStatus(409)
+            ->assertSee('This supervisor runs on another host.');
+    }
+
+    public function testAnUnreachableBrokerLeavesTheRemoteSupervisorUnavailable(): void
+    {
+        $this->app['config']->set('queen.supervisor.remote_status', ['enabled' => true, 'key' => 'orders']);
+        $this->app->instance(RemoteStatusReader::class, new RemoteStatusReader(
+            new Queen([
+                'url' => 'http://queen.test:6632',
+                'retryAttempts' => 1,
+                'retryDelayMillis' => 0,
+                'handler' => HandlerStack::create(new PlanHandler([], ['status' => 503, 'json' => []])),
+            ]),
+            'queen-supervisor',
+            'orders',
+        ));
+
+        $this->getJson('/queen/api/status')->assertOk()
+            ->assertJsonPath('supervisor.availability', 'unavailable')
+            ->assertJsonPath('supervisor.source', null);
+    }
+
+    /** @param array<string, mixed> $status */
+    private function remoteSupervisor(array $status, ?int $updatedAtEpoch = null): PlanHandler
+    {
+        $this->app['config']->set('queen.supervisor.remote_status', ['enabled' => true, 'key' => 'orders']);
+        $updatedAtEpoch ??= time();
+        $document = array_replace([
+            'configuration' => $this->statusConfiguration(),
+        ], $status, [
+            'schema' => SupervisorState::STATUS_SCHEMA,
+            'updated_at' => gmdate('Y-m-d\TH:i:s\Z', $updatedAtEpoch),
+            'updated_at_epoch' => $updatedAtEpoch,
+            'pid' => 4242,
+            'instance_id' => str_repeat('c', 32),
+            'paused' => ($status['state'] ?? null) === 'paused',
+            'stopping' => ($status['state'] ?? null) === 'terminating',
+        ]);
+        $operations = RemoteStatusDocument::operations($document, 'queen-supervisor', 'orders', 600, str_repeat('d', 32));
+        $handler = new PlanHandler([], ['status' => 200, 'json' => ['results' => [[
+            'rows' => array_map(fn (array $op): array => ['key' => $op['key'], 'value' => $op['value']], $operations),
+            'truncated' => false,
+            'nextAfter' => null,
+        ]]]]);
+        $this->app->instance(RemoteStatusReader::class, new RemoteStatusReader(
+            new Queen([
+                'url' => 'http://queen.test:6632',
+                'retryAttempts' => 1,
+                'retryDelayMillis' => 0,
+                'handler' => HandlerStack::create($handler),
+            ]),
+            'queen-supervisor',
+            'orders',
+        ));
+
+        return $handler;
     }
 
     /** @param array<string, mixed> $status */
