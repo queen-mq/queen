@@ -32,9 +32,7 @@ final class SupervisorControlController
                 'snapshot' => $dashboard->snapshot(),
                 'refreshSeconds' => $this->refreshSeconds(),
                 'refreshUrl' => route('queen.dashboard.index', [], false),
-                'stylesheetUrl' => route('queen.dashboard.stylesheet', [
-                    'version' => $stylesheet->version(),
-                ], false),
+                'stylesheetUrl' => $stylesheet->url($request->getBasePath()),
                 'stylesheetIntegrity' => $stylesheet->integrity(),
                 'controlError' => $exception->getMessage(),
                 'controlStatus' => null,

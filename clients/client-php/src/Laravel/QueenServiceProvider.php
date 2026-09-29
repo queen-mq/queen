@@ -193,7 +193,10 @@ class QueenServiceProvider extends ServiceProvider
 
     private function registerDashboardServices(): void
     {
-        $this->app->singleton(DashboardStylesheet::class);
+        $this->app->singleton(
+            DashboardStylesheet::class,
+            fn ($app): DashboardStylesheet => new DashboardStylesheet($app->publicPath()),
+        );
 
         $this->app->singleton(FailedJobsReadModel::class, function ($app): FailedJobsReadModel {
             return new FailedJobsReadModel(
@@ -302,6 +305,13 @@ class QueenServiceProvider extends ServiceProvider
             $this->publishes([
                 __DIR__ . '/../../config/queen.php' => config_path('queen.php'),
             ], 'queen-config');
+            // Optional: only for web servers that serve every *.css from the
+            // public directory. The dashboard falls back to its own route
+            // whenever the copy is missing or stale. `laravel-assets` makes the
+            // default skeleton's post-update-cmd republish it on upgrade.
+            $this->publishes([
+                __DIR__ . '/../../resources/css/dashboard.css' => public_path(DashboardStylesheet::PUBLISHED_FILE),
+            ], ['queen-assets', 'laravel-assets']);
 
             $this->commands([
                 Commands\ConsumeCommand::class,

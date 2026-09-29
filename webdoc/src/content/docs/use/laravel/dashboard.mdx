@@ -40,7 +40,7 @@ verifiedBy:
   - clients/client-php/tests/LaravelSupervisorRemoteStatusTest.php
   - clients/client-php/tests/RemoteStatusDocumentTest.php
   - clients/client-php/tests/RemoteStatusPublisherTest.php
-# sourceOfTruth re-read 2026-09-29 (through fc71b65b + this patch): adds the published remote status and its read-only panel; page matches the code.
+# sourceOfTruth re-read 2026-09-29 (through cb253ff9 + this patch): adds the optional published stylesheet with route fallback; page matches the code.
 ---
 
 The Laravel panel answers one question: **what is this application's Queen supervisor doing?** It
@@ -242,3 +242,21 @@ Dynamic responses use `no-store`, while successful stylesheet responses use an i
 private browser cache with intermediary transformations disabled to preserve the integrity digest.
 Error responses are never cached. Responses also carry frame denial, MIME-sniffing denial and a
 no-referrer policy.
+
+### Web servers that serve every stylesheet statically
+
+Some web server configurations answer every `*.css` request from the public directory and never
+reach PHP, for example an nginx or Caddy rule for static assets. The stylesheet route then returns
+the web server's `404` and the panel renders unstyled. Publish the stylesheet instead, as Horizon
+does with its assets:
+
+```bash
+php artisan vendor:publish --tag=queen-assets --force
+```
+
+The copy lands in `public/vendor/queen/dashboard.css`. The panel links to it, with the content
+version as a query string and the same integrity digest, only while it is byte-identical to the
+packaged stylesheet. A missing or stale copy, for example after an upgrade without republishing,
+falls back to the route, so publishing can never serve the wrong styles. The file is also tagged
+`laravel-assets`, which the default Laravel `post-update-cmd` republishes on every
+`composer update`. In container builds, run the publish command next to the other asset steps.

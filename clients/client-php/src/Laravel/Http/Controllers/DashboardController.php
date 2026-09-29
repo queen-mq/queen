@@ -18,9 +18,7 @@ final class DashboardController
             'snapshot' => $dashboard->snapshot(),
             'refreshSeconds' => $this->refreshSeconds($request),
             'refreshUrl' => route('queen.dashboard.index', [], false),
-            'stylesheetUrl' => route('queen.dashboard.stylesheet', [
-                'version' => $stylesheet->version(),
-            ], false),
+            'stylesheetUrl' => $stylesheet->url($request->getBasePath()),
             'stylesheetIntegrity' => $stylesheet->integrity(),
             'controlError' => $request->session()->get('queen_dashboard_control_error'),
             'controlStatus' => $request->session()->get('queen_dashboard_control_status'),

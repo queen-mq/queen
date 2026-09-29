@@ -7,6 +7,7 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\ServiceProvider;
 use GuzzleHttp\HandlerStack;
 use Orchestra\Testbench\TestCase;
 use Queen\Laravel\Dashboard\DashboardStylesheet;
@@ -960,6 +961,58 @@ final class LaravelDashboardTest extends TestCase
         $this->getJson('/queen/api/status')->assertOk()
             ->assertJsonPath('supervisor.availability', 'unavailable')
             ->assertJsonPath('supervisor.source', null);
+    }
+
+    public function testAPublishedStylesheetIsLinkedWhileItMatchesThePackage(): void
+    {
+        $stylesheet = $this->app->make(DashboardStylesheet::class);
+        $packaged = $stylesheet->contents();
+        $this->usePublishedStylesheet($packaged);
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+
+        $link = $this->dashboardXPath($this->get('/queen')->assertOk()->getContent())
+            ->query('//link[@rel="stylesheet"]')->item(0);
+
+        $this->assertInstanceOf(\DOMElement::class, $link);
+        $this->assertSame(
+            '/vendor/queen/dashboard.css?v=' . hash('sha256', $packaged),
+            $link->getAttribute('href'),
+        );
+        $this->assertSame('sha256-' . base64_encode(hash('sha256', $packaged, true)), $link->getAttribute('integrity'));
+    }
+
+    public function testAStalePublishedStylesheetFallsBackToThePackageRoute(): void
+    {
+        $this->usePublishedStylesheet('/* left behind by an older release */');
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+
+        $link = $this->dashboardXPath($this->get('/queen')->assertOk()->getContent())
+            ->query('//link[@rel="stylesheet"]')->item(0);
+
+        $this->assertInstanceOf(\DOMElement::class, $link);
+        $this->assertMatchesRegularExpression('#^/queen/assets/dashboard-[a-f0-9]{64}\.css$#D', $link->getAttribute('href'));
+    }
+
+    public function testTheStylesheetIsPublishableWithTheQueenAndLaravelAssetTags(): void
+    {
+        $source = realpath(__DIR__ . '/../resources/css/dashboard.css');
+        foreach (['queen-assets', 'laravel-assets'] as $tag) {
+            $paths = array_map('realpath', array_flip(ServiceProvider::pathsToPublish(QueenServiceProvider::class, $tag)));
+            $published = array_search($source, $paths, true);
+            $this->assertSame(public_path('vendor/queen/dashboard.css'), $published, $tag);
+        }
+    }
+
+    private function usePublishedStylesheet(string $contents): void
+    {
+        $publicPath = sys_get_temp_dir() . '/queen-dashboard-public-' . bin2hex(random_bytes(6));
+        mkdir($publicPath . '/vendor/queen', 0755, true);
+        file_put_contents($publicPath . '/vendor/queen/dashboard.css', $contents);
+        $this->beforeApplicationDestroyed(function () use ($publicPath): void {
+            $this->removeDirectory($publicPath);
+        });
+        $this->app->usePublicPath($publicPath);
+        $this->app->forgetInstance(DashboardStylesheet::class);
     }
 
     /** @param array<string, mixed> $status */

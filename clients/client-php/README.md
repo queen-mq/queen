@@ -310,6 +310,14 @@ restart state, sampled depth and bounded failed-job metadata.
 QUEEN_DASHBOARD_ENABLED=true
 ```
 
+If the web server answers every `*.css` from `public/` without reaching PHP (a common static-asset
+rule), publish the stylesheet. The panel uses the copy only while it matches the package, and falls
+back to its own route otherwise:
+
+```bash
+php artisan vendor:publish --tag=queen-assets --force
+```
+
 In production it is **deny-by-default even when enabled** until the application defines the ability:
 
 ```php
