@@ -148,6 +148,7 @@ final class SupervisorBinary
      *
      * Executing the returned relative path prevents a writable ancestor from
      * swapping the installation tree between the final check and pcntl_exec.
+     * A thread-safe PHP receives an absolute path instead; see executablePath().
      */
     public static function pinInstalledForExecution(string $basePath, array $platform): string
     {
@@ -219,11 +220,51 @@ final class SupervisorBinary
                 $effectiveUserId,
             );
 
-            return $binary;
+            return self::executablePath($binary);
         } catch (\Throwable $exception) {
             @chdir($previousDirectory);
             throw $exception;
         }
+    }
+
+    /**
+     * The working directory a child process must be given explicitly after
+     * chdir() pinned a verified directory, or null when the process already
+     * runs there.
+     *
+     * A non-thread-safe PHP moves the process with chdir(), so relative paths
+     * handed to the kernel resolve against the pinned inode. A thread-safe
+     * (ZTS) PHP, which FrankenPHP embeds, keeps a per-thread virtual working
+     * directory instead: file functions honour it, but pcntl_exec() and
+     * proc_open() hand paths to the kernel, which resolves them against the
+     * directory PHP started in. There the pinned directory is reachable only
+     * by its absolute name, re-resolved at exec time; the checks are unchanged.
+     */
+    public static function pinnedDirectoryForExec(bool $threadSafe = PHP_ZTS): ?string
+    {
+        if (!$threadSafe) {
+            return null;
+        }
+
+        $directory = getcwd();
+        if (!is_string($directory) || !str_starts_with($directory, DIRECTORY_SEPARATOR)) {
+            throw new RuntimeException('Cannot resolve the pinned Queen supervisor directory for execution.');
+        }
+
+        return $directory;
+    }
+
+    /**
+     * The path to hand pcntl_exec(), which cannot be given a working
+     * directory: the pinned relative path, or on ZTS its absolute name.
+     */
+    public static function executablePath(string $pinnedRelativeBinary, bool $threadSafe = PHP_ZTS): string
+    {
+        $directory = self::pinnedDirectoryForExec($threadSafe);
+
+        return $directory === null
+            ? $pinnedRelativeBinary
+            : rtrim($directory, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . basename($pinnedRelativeBinary);
     }
 
     private static function assertInstalledInDirectory(

@@ -73,13 +73,22 @@ jobs:
       fail-fast: false
       matrix:
         php-version: ["8.3", "8.4"]
+        phpts: ["nts"]
+        include:
+          # Thread-safe PHP (FrankenPHP embeds it) keeps a virtual working
+          # directory that exec() never sees; the supervisor launcher and
+          # installer must work there too.
+          - php-version: "8.4"
+            phpts: "ts"
     defaults:
       run:
         working-directory: clients/client-php
     steps:
       - uses: actions/checkout@v4
-      - name: Set up PHP ${{ matrix.php-version }}
+      - name: Set up PHP ${{ matrix.php-version }} (${{ matrix.phpts }})
         uses: shivammathur/setup-php@v2
+        env:
+          phpts: ${{ matrix.phpts }}
         with:
           php-version: ${{ matrix.php-version }}
           extensions: mbstring, pcntl, posix, dom, xml, xmlwriter
