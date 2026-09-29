@@ -91,11 +91,46 @@ async fn bind_listener(addr: &str) -> std::io::Result<tokio::net::TcpListener> {
 
 #[tokio::main]
 async fn main() {
+    #[cfg(target_os = "linux")]
+    let thp_off = transparent_huge_pages_off();
     // LOGGING_PLAN.md Phase 0: install the tracing subscriber (honours
     // LOG_LEVEL/RUST_LOG) and the panic hook BEFORE anything can log or panic.
     obs::init();
     obs::install_panic_hook();
+    #[cfg(target_os = "linux")]
+    if thp_off {
+        tracing::info!(target: "boot", "transparent huge pages off for this process");
+    }
     run_raft(config::load()).await;
+}
+
+/// Transparent huge pages off for this process. mimalloc asks for them on its
+/// arenas (`madvise(MADV_HUGEPAGE)`), and once the page cache has taken the
+/// free memory the kernel compacts on the fault path to make one: on three
+/// nodes at 480-600k msg/s every node stalled together for seconds, and a
+/// 10-minute soak did not recover; with them off the same soak ran clean
+/// (2026-09-28). The flag is the process's (`PR_SET_THP_DISABLE`), so it holds
+/// for memory mapped before this call too. `MIMALLOC_ALLOW_THP=1` keeps them.
+#[cfg(target_os = "linux")]
+fn transparent_huge_pages_off() -> bool {
+    let keep = std::env::var("MIMALLOC_ALLOW_THP").is_ok_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on" | "yes"
+        )
+    });
+    // SAFETY: PR_SET_THP_DISABLE reads no memory; the unused arguments must
+    // be zero, passed at the width the kernel reads them.
+    !keep
+        && unsafe {
+            libc::prctl(
+                libc::PR_SET_THP_DISABLE,
+                1 as libc::c_ulong,
+                0 as libc::c_ulong,
+                0 as libc::c_ulong,
+                0 as libc::c_ulong,
+            )
+        } == 0
 }
 
 /// The broker boot: auth, the replicated state machine, the router (the

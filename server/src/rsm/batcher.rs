@@ -202,7 +202,7 @@ pub struct BatcherConfig {
     /// (`queen_raft_keep_overlay_total{outcome="mismatch"}`) and the rebuild is
     /// what plans. A diagnostic: it costs the rebuild it exists to save.
     pub keep_overlay_verify: bool,
-    /// `QUEEN_LANES` (default 1): how many lane threads plan a cycle's
+    /// `QUEEN_LANES` (default 8): how many lane threads plan a cycle's
     /// commands in parallel ([`lanes`]). 1 is the single planner, exactly as
     /// before lanes.
     pub lanes: u64,
@@ -241,7 +241,7 @@ impl Default for BatcherConfig {
             maintenance: crate::rsm::maintenance::Config::default(),
             keep_overlay: true,
             keep_overlay_verify: false,
-            lanes: 1,
+            lanes: 8,
             monotonic_clock: true,
             retention_scan: None,
         }

@@ -659,12 +659,20 @@ async fn assert_push_survives(fx: &Fx, old: Pid, pids: &[Pid], new: Pid, id: u64
 }
 
 /// Same cycle: a push drained with the delete that takes its partition away.
-/// The delete sits in the priority lane, so it is planned first; the push must
-/// see the queue as gone and create a new partition. A one-deep pipeline held
-/// full by an unrelated entry makes the driver drain both in one batch.
+/// The delete sits in the priority lane, so the single planner plans it first;
+/// the push must see the queue as gone and create a new partition. A one-deep
+/// pipeline held full by an unrelated entry makes the driver drain both in one
+/// batch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_push_planned_after_a_queue_delete_in_the_same_cycle_gets_a_new_partition() {
-    let fx = Fx::open("same-cycle", batcher_cfg(1)).await;
+    let fx = Fx::open(
+        "same-cycle",
+        BatcherConfig {
+            lanes: 1,
+            ..batcher_cfg(1)
+        },
+    )
+    .await;
     let old = seed(&fx, 1).await;
     let (delete, pids) = queue_delete(&fx.store, 2, "q", 1_000);
     assert_eq!(pids, vec![old]);
@@ -690,6 +698,53 @@ async fn a_push_planned_after_a_queue_delete_in_the_same_cycle_gets_a_new_partit
     assert_eq!(offset, 0, "a fresh partition starts at 0");
     fx.settle(done(&racing).1).await;
     assert_push_survives(&fx, old, &pids, new, 5).await;
+    fx.close().await;
+}
+
+/// Same cycle, with lanes: the push goes to its partition's lane and the delete
+/// to control, which plans after the lanes, so the push comes first in the
+/// entry — its message lands in the old partition and goes with the queue.
+/// Two commands of one cycle are concurrent, so either order is a serial one;
+/// what must hold is that apply takes the entry, an append to a partition the
+/// same entry then deletes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn with_lanes_a_push_in_the_same_cycle_as_its_queue_delete_goes_with_the_queue() {
+    let fx = Fx::open(
+        "same-cycle-lanes",
+        BatcherConfig {
+            lanes: 8,
+            ..batcher_cfg(1)
+        },
+    )
+    .await;
+    let old = seed(&fx, 1).await;
+    let (delete, pids) = queue_delete(&fx.store, 2, "q", 1_000);
+    assert_eq!(pids, vec![old]);
+
+    fx.gate.close();
+    let blocker = fx.send(push(3, "other", "p0", &["x"])).await;
+    fx.gate.wait_proposals(2).await;
+    let del = fx.send(delete).await;
+    let racing = fx.send(push(4, "q", "p0", &["raced"])).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    fx.gate.open();
+
+    let _ = done(&blocker.await.expect("blocker"));
+    let del = reply_and_health(&fx, del, "the queue delete").await;
+    let racing = reply_and_health(&fx, racing, "the racing push").await;
+    assert_eq!(done(&del).1, done(&racing).1, "one entry");
+    assert_eq!(
+        created(&racing),
+        (old, 1),
+        "appended to the old partition, ahead of the delete"
+    );
+    fx.settle(done(&racing).1).await;
+    fx.finish_chunks(&pids, GarbageScope::Queue, 1_000).await;
+    let gone = fx
+        .store
+        .read(|r| Ok(r.partition(old)?.is_none() && r.garbage(old)?.is_none()))
+        .expect("read");
+    assert!(gone, "the old partition went with the queue");
     fx.close().await;
 }
 
