@@ -325,7 +325,7 @@ php artisan vendor:publish --tag=queen-assets --force
 ```
 
 Each failed job links to `/queen/failed-jobs/{id}`, which shows why it failed: the job class,
-attempts, the exception message and the stack trace (paths relative to the application root), but
+maximum tries, the exception message and the stack trace (paths relative to the application root), but
 never the payload.
 
 In production it is **deny-by-default even when enabled** until the application defines the ability:

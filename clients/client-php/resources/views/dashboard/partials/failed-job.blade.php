@@ -10,7 +10,7 @@
         <div><dt>ID</dt><dd><code>{{ $failedJob['id'] }}</code></dd></div>
         <div><dt>Connection</dt><dd>{{ $failedJob['connection'] ?? '—' }}</dd></div>
         <div><dt>Queue</dt><dd>{{ $failedJob['queue'] ?? '—' }}</dd></div>
-        <div><dt>Attempts</dt><dd>{{ $failedJob['attempts'] ?? '—' }}@if ($failedJob['max_tries'] !== null) of {{ $failedJob['max_tries'] }}@endif</dd></div>
+        <div><dt>Max tries</dt><dd>{{ $failedJob['max_tries'] ?? '—' }}</dd></div>
         <div><dt>Timeout</dt><dd>{{ $failedJob['timeout'] !== null ? $failedJob['timeout'] . 's' : '—' }}</dd></div>
         <div><dt>Index policy</dt><dd><span class="badge muted">{{ $failedJob['lifecycle_policy'] }}</span></dd></div>
     </dl>

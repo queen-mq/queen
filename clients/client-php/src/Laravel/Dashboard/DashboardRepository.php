@@ -802,11 +802,17 @@ final class DashboardRepository
             return null;
         }
 
-        $payload = is_string($record['payload'] ?? null) ? json_decode($record['payload'], true, 32) : null;
-        $payload = is_array($payload) ? $payload : [];
+        $payload = $this->payloadFields(is_string($record['payload'] ?? null) ? $record['payload'] : '');
         $exception = is_string($record['exception'] ?? null) ? $record['exception'] : '';
+        $basePath = rtrim($basePath, '/');
         if ($basePath !== '') {
-            $exception = str_replace(rtrim($basePath, '/') . '/', '', $exception);
+            // Only where a path starts, so a URL that happens to contain the
+            // same segment is left alone.
+            $exception = preg_replace(
+                '#(?<![^\s(\'"])' . preg_quote($basePath, '#') . '/#',
+                '',
+                $exception,
+            ) ?? $exception;
         }
         $parts = preg_split('/\R(?:Stack trace:|Next )/', $exception, 2) ?: [$exception];
         $summary = trim($parts[0]);
@@ -822,13 +828,42 @@ final class DashboardRepository
             'lifecycle_policy' => $this->failedLifecycle($connection),
             'job' => $this->safeString($payload['displayName'] ?? null, 256),
             'uuid' => $this->safeString($payload['uuid'] ?? null, 64),
-            'attempts' => $this->nonNegativeInteger($payload['attempts'] ?? null),
             'max_tries' => $this->nonNegativeInteger($payload['maxTries'] ?? null),
             'timeout' => $this->nonNegativeInteger($payload['timeout'] ?? null),
             'exception_class' => $class !== null ? $this->safeString($class, 256) : null,
             'exception_summary' => $this->safeText($summary, 8192),
             'exception_trace' => $this->safeText($trace, 65536),
         ];
+    }
+
+    /**
+     * The few top-level payload fields the detail page shows. A payload cut at
+     * the read bound is no longer valid JSON; Laravel writes these fields
+     * before the job data, so they are then read from the prefix instead.
+     * Attempts are not among them: drivers other than Redis never update the
+     * payload's counter, so it would read 0 for a job that used every try.
+     *
+     * @return array{uuid?: mixed, displayName?: mixed, maxTries?: mixed, timeout?: mixed}
+     */
+    private function payloadFields(string $payload): array
+    {
+        $decoded = json_decode($payload, true, 32);
+        if (is_array($decoded)) {
+            return array_intersect_key($decoded, array_flip(['uuid', 'displayName', 'maxTries', 'timeout']));
+        }
+        $fields = [];
+        foreach (['uuid', 'displayName'] as $key) {
+            if (preg_match('/"' . $key . '"\s*:\s*("(?:[^"\\\\]|\\\\.){1,512}")/', $payload, $matches) === 1) {
+                $fields[$key] = json_decode($matches[1], false, 1);
+            }
+        }
+        foreach (['maxTries', 'timeout'] as $key) {
+            if (preg_match('/"' . $key . '"\s*:\s*([0-9]{1,9})(?![0-9])/', $payload, $matches) === 1) {
+                $fields[$key] = (int) $matches[1];
+            }
+        }
+
+        return $fields;
     }
 
     private function safeIdentifier(mixed $value): string|int|null

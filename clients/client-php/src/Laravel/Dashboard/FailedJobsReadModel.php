@@ -84,8 +84,16 @@ final class FailedJobsReadModel
         if ($identifier === 'id' && preg_match('/^[0-9]{1,18}$/D', $id) !== 1) {
             return null;
         }
-        $record = $this->table($failed)
-            ->select([$identifier, 'connection', 'queue', 'failed_at', 'exception', 'payload'])
+        $query = $this->table($failed)->select([$identifier, 'connection', 'queue', 'failed_at']);
+        // Cut the two text columns in SQL: a failed row can hold a payload of
+        // many megabytes, and loading it whole before truncating would make
+        // one page view cost that much PHP memory.
+        $substring = $query->getConnection()->getDriverName() === 'sqlsrv' ? 'SUBSTRING' : 'SUBSTR';
+        foreach (['exception', 'payload'] as $column) {
+            $wrapped = $query->getGrammar()->wrap($column);
+            $query->selectRaw("{$substring}({$wrapped}, 1, " . self::MAX_DETAIL_BYTES . ") as {$wrapped}");
+        }
+        $record = $query
             ->where($identifier, $identifier === 'id' ? (int) $id : $id)
             ->limit(1)
             ->first();

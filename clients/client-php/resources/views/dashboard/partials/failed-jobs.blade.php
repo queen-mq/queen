@@ -10,7 +10,7 @@
     @if (!($failedJobs['available'] ?? false))
         <div class="empty"><span class="badge warning">Unavailable</span> Failed-job metadata could not be read safely.</div>
     @elseif ($failedJobs['items'] === [])
-        <div class="empty">No failed jobs.</div>
+        <div class="empty">{{ $failedJobs['cursor'] === null ? 'No failed jobs.' : 'No older failed jobs.' }}</div>
     @else
         <div class="table-wrap" role="region" aria-label="Failed jobs table" tabindex="0">
             <table>

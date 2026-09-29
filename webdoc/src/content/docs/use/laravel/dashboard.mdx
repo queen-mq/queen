@@ -48,7 +48,7 @@ verifiedBy:
   - clients/client-php/tests/LaravelSupervisorRemoteStatusTest.php
   - clients/client-php/tests/RemoteStatusDocumentTest.php
   - clients/client-php/tests/RemoteStatusPublisherTest.php
-# sourceOfTruth re-read 2026-09-29 (through 5b7aabef + this patch): adds the published assets with route fallback, the in-place refresh script with its pause control, one page per section, keyset-paged failed jobs and the failed-job detail page; page matches the code.
+# sourceOfTruth re-read 2026-09-29 (through 5b7aabef + this patch): adds the published assets with route fallback, the in-place refresh script with its pause control, one page per section, keyset-paged failed jobs and the failed-job detail page with its bounded SQL read; page matches the code.
 ---
 
 The Laravel panel answers one question: **what is this application's Queen supervisor doing?** It
@@ -208,15 +208,19 @@ and **Newest** links. The pages use a keyset cursor instead of an offset: on a d
 page is one `id < ?` range read on the primary key, with one extra row to learn whether an older page
 exists, and never a `COUNT(*)`. A table with millions of failed jobs therefore costs the same per
 page as a table with ten, and the total shows as a lower bound (`51+`) when more rows exist. A file
-store is read whole, within the 4 MiB bound the panel always applies to it.
+store is read whole, within the 4 MiB bound the panel always applies to it, and its pages are
+positions: a new failure or a retry while you read an older page shifts that page by one row.
 
 ### Why a job failed
 
 Each job ID on the failed-jobs page links to `/queen/failed-jobs/{id}`. The page shows the job
-class, the queue and connection, the attempts and timeout read from the payload, the exception
+class, the queue and connection, the maximum tries and timeout read from the payload, the exception
 class and message under **Why it failed**, the stack trace, and the `queue:retry` command for that
 job. The payload itself is never displayed. Paths under the application root are shown relative
-to it, the exception and trace are truncated at a fixed size, and the page does not refresh itself.
+to it, and the page does not refresh itself. The exception and the payload are read from the
+store cut to 1 MiB, in SQL on a database store, so a row of many megabytes costs no more memory
+than that. The page does not show an attempt count: Laravel's payload counter is only kept current
+by the Redis driver, so it would read `0` for a job that used every try.
 The exception message can contain application data, so the page sits behind the same
 `viewQueenDashboard` Gate as the rest of the panel.
 

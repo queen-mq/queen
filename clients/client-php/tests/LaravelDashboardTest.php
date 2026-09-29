@@ -1116,6 +1116,8 @@ final class LaravelDashboardTest extends TestCase
         $this->assertSame(['1'], $this->failedJobIds($last));
         $this->assertSame(0, $last->query('//nav[@class="pager"]/a[@rel="next"]')->length);
 
+        $this->get('/queen/failed-jobs?cursor=1')->assertOk()->assertSee('No older failed jobs.');
+
         $this->assertNotSame([], $queries);
         foreach ($queries as $query) {
             $this->assertStringNotContainsString('offset', $query);
@@ -1160,7 +1162,7 @@ final class LaravelDashboardTest extends TestCase
     {
         $secret = 'QUEEN_PAYLOAD_SECRET';
         $basePath = rtrim($this->app->basePath(), '/');
-        $exception = "RuntimeException: Mail server refused the connection in {$basePath}/app/Jobs/SendInvoice.php:42\n"
+        $exception = "RuntimeException: Mail server refused the connection in {$basePath}/app/Jobs/SendInvoice.php:42 (see https://status.example{$basePath}/mail)\n"
             . "Stack trace:\n"
             . "#0 {$basePath}/vendor/laravel/framework/src/Illuminate/Queue/CallQueuedHandler.php(134): App\\Jobs\\SendInvoice->handle()\n"
             . '#1 {main}';
@@ -1184,12 +1186,15 @@ final class LaravelDashboardTest extends TestCase
             ->assertSee('App\\Jobs\\SendInvoice')
             ->assertSee('Mail server refused the connection in app/Jobs/SendInvoice.php:42')
             ->assertSee('vendor/laravel/framework/src/Illuminate/Queue/CallQueuedHandler.php(134)')
-            ->assertSee('3 of 3')
             ->assertSee('60s')
+            ->assertSee('https://status.example' . $basePath . '/mail')
             ->assertSee('php artisan queue:retry failed-1')
             ->assertDontSee($secret)
-            ->assertDontSee($basePath . '/');
+            ->assertDontSee(' ' . $basePath . '/');
         $xpath = $this->dashboardXPath($response->getContent());
+        $this->assertSame('3', trim($xpath->query('//dl[@class="detail-list"]/div[dt="Max tries"]/dd')->item(0)->textContent));
+        // Laravel's payload counter is not the number of attempts made; it is not shown.
+        $this->assertSame(0, $xpath->query('//dl[@class="detail-list"]/div[dt="Attempts"]')->length);
         $this->assertSame('Failed job · Queen Supervisor', trim($xpath->query('//title')->item(0)->textContent));
         $this->assertStringStartsWith('RuntimeException: Mail server refused', trim($xpath->query('//pre[@class="exception-summary"]')->item(0)->textContent));
         $this->assertStringStartsWith('Stack trace:', trim($xpath->query('//details/pre[@class="exception-trace"]')->item(0)->textContent));
@@ -1208,6 +1213,38 @@ final class LaravelDashboardTest extends TestCase
             ->assertSee('Failure 2');
         // The database id is not the identifier of a database-uuids store.
         $this->get('/queen/failed-jobs/2')->assertNotFound();
+    }
+
+    public function testFailedJobDetailReadsABoundedPrefixOfLargeColumns(): void
+    {
+        $this->failedJobsTable(1);
+        $payload = json_encode([
+            'uuid' => '00000000-0000-4000-8000-000000000001',
+            'displayName' => 'App\\Jobs\\ImportCatalogue',
+            'maxTries' => 5,
+            'timeout' => 120,
+            'data' => ['command' => str_repeat('x', 2 * 1048576)],
+        ], JSON_THROW_ON_ERROR);
+        DB::table('failed_jobs')->where('id', 1)->update([
+            'payload' => $payload,
+            'exception' => "RuntimeException: Catalogue too large\n" . str_repeat('y', 2 * 1048576),
+        ]);
+        $queries = [];
+        DB::listen(static function ($query) use (&$queries): void {
+            $queries[] = strtolower($query->sql);
+        });
+
+        $response = $this->get('/queen/failed-jobs/1')->assertOk()
+            ->assertSee('App\\Jobs\\ImportCatalogue')
+            ->assertSee('RuntimeException: Catalogue too large')
+            ->assertSee('[truncated]');
+        $xpath = $this->dashboardXPath($response->getContent());
+        $this->assertSame('5', trim($xpath->query('//dl[@class="detail-list"]/div[dt="Max tries"]/dd')->item(0)->textContent));
+        $this->assertSame('120s', trim($xpath->query('//dl[@class="detail-list"]/div[dt="Timeout"]/dd')->item(0)->textContent));
+        $detailQueries = array_values(array_filter($queries, static fn (string $query): bool => str_contains($query, '"exception"')));
+        $this->assertCount(1, $detailQueries);
+        $this->assertStringContainsString('substr("exception", 1, 1048576)', $detailQueries[0]);
+        $this->assertStringContainsString('substr("payload", 1, 1048576)', $detailQueries[0]);
     }
 
     public function testUnknownOrMalformedFailedJobIdentifiersAreNotFound(): void
