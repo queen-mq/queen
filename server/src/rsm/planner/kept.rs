@@ -221,6 +221,70 @@ impl KeptOverlay {
         Ok(self)
     }
 
+    /// [`KeptOverlay::advance`] for an overlay that may have missed the newest
+    /// entries in flight — kept by a step that does not run every cycle: its
+    /// entries still in flight must be a prefix of them, and the entries after
+    /// it are ingested as [`KeptOverlay::rebuild`] would. A rebuild's work less
+    /// every entry the overlay already holds.
+    pub(crate) fn advance_ingest(
+        mut self,
+        folded: &[(u64, Arc<Entry>)],
+        store_applied: u64,
+        base_pid: u64,
+        base_kv: u64,
+    ) -> Result<KeptOverlay, &'static str> {
+        let desired: Vec<&Arc<Entry>> = folded
+            .iter()
+            .filter(|(index, _)| *index > store_applied)
+            .map(|(_, e)| e)
+            .collect();
+        let landed = match desired.first() {
+            Some(first) => self
+                .entries
+                .iter()
+                .position(|k| Arc::ptr_eq(&k.entry, first))
+                .unwrap_or(self.entries.len()),
+            None => self.entries.len(),
+        };
+        let held = self.entries.len() - landed;
+        if held > desired.len()
+            || !self
+                .entries
+                .iter()
+                .skip(landed)
+                .zip(desired.iter())
+                .all(|(k, d)| Arc::ptr_eq(&k.entry, d))
+        {
+            return Err("the kept entries are not the oldest entries in flight");
+        }
+        let mut refold: HashSet<TimerKey> = HashSet::new();
+        for _ in 0..landed {
+            let k = self.entries.pop_front().expect("counted above");
+            self.ov.unfold_entry(&k.entry, k.tag, &mut refold)?;
+        }
+        if !refold.is_empty() {
+            self.ov
+                .refold_timers(&refold, self.entries.iter().map(|k| (k.tag, &*k.entry)));
+        }
+        if landed > 0 {
+            self.ov.shrink_idle();
+        }
+        for e in &desired[held..] {
+            if e.commands
+                .iter()
+                .any(|c| self.ov.request_ids.contains_key(&c.request_id))
+            {
+                self.exact = false;
+            }
+            let tag = self.take_tag();
+            self.ov.set_tag(tag);
+            self.ov.ingest_entry(e);
+            self.entries.push_back(KeptEntry::new((*e).clone(), tag));
+        }
+        // Every kept entry is one in flight now: the maxima as `advance` sets them.
+        self.advance(folded, store_applied, base_pid, base_kv)
+    }
+
     pub(crate) fn overlay(&self) -> &Overlay {
         &self.ov
     }

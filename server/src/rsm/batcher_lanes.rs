@@ -129,7 +129,9 @@ impl Touched {
 /// One entry in flight, as the lanes know it.
 struct Record {
     full: Arc<Entry>,
-    /// Each lane's slice: exactly what that lane folded for this entry.
+    /// Each lane's slice: exactly what that lane folded for this entry (its
+    /// commands carry no outcome: the router answers every id in flight from
+    /// the full entries, [`LanesState::ids`]).
     subs: Vec<Arc<Entry>>,
     now_us: i64,
     pid_hi: u64,
@@ -166,6 +168,10 @@ pub(crate) struct LanesState {
     rr: HashMap<RingKey, u64>,
     /// The router's state for the cycle it is routing (reset every cycle).
     cycle: RouterCycle,
+    /// Control's overlay, kept between the cycles it plans in: each takes out
+    /// what landed and ingests only the entries it has not seen, instead of
+    /// rebuilding every entry in flight.
+    control: Option<KeptOverlay>,
 }
 
 /// tenant → queue → name → `V`: nested so a lookup borrows `&str` instead of
@@ -339,11 +345,27 @@ struct LaneOut {
 /// A clone of `e` without its payload: a lane's slice is only ever unfolded
 /// (keys, offsets, hashes), never applied or written.
 fn strip(e: &Effect) -> Effect {
-    let mut c = e.clone();
-    if let Effect::Append { blob, .. } = &mut c {
-        *blob = Vec::new();
+    match e {
+        // Every field but the payload, which is never copied.
+        Effect::Append {
+            pid,
+            bucket,
+            base_offset,
+            count,
+            created_at_us,
+            hashes,
+            blob: _,
+        } => Effect::Append {
+            pid: *pid,
+            bucket: *bucket,
+            base_offset: *base_offset,
+            count: *count,
+            created_at_us: *created_at_us,
+            hashes: hashes.clone(),
+            blob: Vec::new(),
+        },
+        other => other.clone(),
     }
-    c
 }
 
 /// Which lanes must fold `e`: its partition's lane, every lane (catalog), or
@@ -399,7 +421,7 @@ fn split(full: &Entry, n: u64) -> Vec<Arc<Entry>> {
         }
         for (l, effects) in per.into_iter().enumerate() {
             if !effects.is_empty() {
-                let _ = subs[l].add_command(c.request_id, c.outcome.clone(), effects);
+                let _ = subs[l].add_command(c.request_id, Outcome::Empty, effects);
             }
         }
     }
@@ -533,12 +555,14 @@ impl LanesState {
             cycles: 0,
             rr: HashMap::new(),
             cycle: RouterCycle::default(),
+            control: None,
         }
     }
 
     fn reset(&mut self) {
         self.records.clear();
         self.ids.clear();
+        self.control = None;
         for l in &self.lanes {
             let mut s = l.lock().expect("lane state");
             s.kept = None;
@@ -1128,7 +1152,7 @@ fn plan_lane<S: Store>(
                         let stripped: Vec<Effect> = effects.iter().map(strip).collect();
                         match out
                             .sub
-                            .add_command(id, outcome.clone(), stripped)
+                            .add_command(id, Outcome::Empty, stripped)
                             .and_then(|()| out.part.add_command(id, outcome, effects))
                         {
                             Ok(()) => {
@@ -1244,6 +1268,7 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
             s.kept = None;
             s.rings = None;
         }
+        ls.control = None;
     }
     ls.sync(&folded);
     let busy = ls.busy();
@@ -1555,11 +1580,21 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
     let (mut expired, mut expire_more, mut kv_swept, mut fired, mut fire_more) =
         (false, false, false, false, false);
     let (mut maintained, mut maintenance_more) = (false, false);
+    // (overlay, the cycle's tag, its fold count before the cycle)
+    let mut control_state: Option<(KeptOverlay, u64, u64)> = None;
     if needs_control {
+        let mut prior = ls.control.take();
         let st = store.clone();
         st.read(|r| {
-            let mut kept = KeptOverlay::rebuild(&folded, store_applied, base_pid, base_kv);
-            let _tag = kept.begin_cycle();
+            let mut kept = match prior
+                .take()
+                .map(|k| k.advance_ingest(&folded, store_applied, base_pid, base_kv))
+            {
+                Some(Ok(k)) => k,
+                _ => KeptOverlay::rebuild(&folded, store_applied, base_pid, base_kv),
+            };
+            let tag = kept.begin_cycle();
+            let folds0 = kept.overlay().folds();
             let ov = kept.overlay_mut();
             ov.mark_cycle_start();
             pid_base = ov.cycle_pid_base();
@@ -1704,6 +1739,7 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
                     entry.effects_of(c).to_vec(),
                 ));
             }
+            control_state = Some((kept, tag, folds0));
             Ok(())
         })?;
     }
@@ -1799,6 +1835,21 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
             ls.ids.insert(c.request_id, c.outcome.clone());
         }
         ls.records.push_back(record_of(full.clone(), sub_arcs));
+    }
+    // Control keeps its overlay when it folded exactly this cycle's entry
+    // (lanes, creations, control, in entry order): the entry is then in
+    // flight in it. Anything else is rebuilt next time.
+    if let Some((mut kept, tag, folds0)) = control_state {
+        let effects = entry.as_ref().map_or(0, |e| e.effects.len()) as u64;
+        let exact = kept.exact() && kept.overlay().folds() - folds0 == effects;
+        let kept_ok = exact
+            && match &entry {
+                Some(full) => kept.push_entry(full.clone(), tag).is_ok(),
+                None => true,
+            };
+        if kept_ok {
+            ls.control = Some(kept);
+        }
     }
 
     add(&LANE_STATS.merge_us, t_merge.elapsed().as_micros() as u64);
