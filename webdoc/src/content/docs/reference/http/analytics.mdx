@@ -133,7 +133,10 @@ dashboard's queue-operations view renders.
       "parkedCount": 12.5
     }
   ],
-  "queues": ["orders"]
+  "queues": ["orders"],
+  "backlog": [
+    { "bucket": "2026-07-30T10:41:00Z", "pending": 220, "processing": 40 }
+  ]
 }
 ```
 
@@ -144,6 +147,19 @@ rate-normalised. `avgLagMs` and `maxLagMs` are `null` for a bucket with no pop s
 `partitionsDeleted` count the partitions created and removed in the bucket, as the log entries
 that did it applied. `queues` lists the queue names present in the window, so a chart can build
 its legend before the first datapoint arrives. Points are ordered oldest first.
+
+`pushMessages` counts the messages a queue stored, whether a push, a transaction or a Streams
+cycle wrote them; a duplicate the broker refused is not one. `ackSuccess` and `ackFailed` count
+the acks a queue settled the same three ways. The request counters (`pushRequests`,
+`ackRequests`) count push and ack calls only.
+
+`backlog` is the tenant's backlog, or with `queue` that queue's: what waits for a consumer
+(`pending`) and what is leased (`processing`), the figures the overview and the queue list
+report. The leader reads it once a minute. It is a level, not a counter, so each bucket holds its
+last reading: a wide bucket shows where it ended. A bucket without a reading is absent; a queue
+that held nothing at a reading reads `0`. Summing `pushMessages − ackSuccess` does not give it:
+a message also leaves by retention or the dead-letter queue, and each consumer group acks it
+once.
 
 ## GET /api/v1/analytics/queue-parked-replicas
 

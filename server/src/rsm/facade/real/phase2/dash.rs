@@ -52,6 +52,7 @@ impl RaftFacade {
                         rows.system.extend(peer.system);
                         rows.queue.extend(peer.queue);
                         rows.parked.extend(peer.parked);
+                        rows.backlog.extend(peer.backlog);
                     }
                     Err(e) => {
                         tracing::debug!(target: "rsm", node = id, error = %e, "dashboard gather: peer did not answer");
@@ -365,6 +366,7 @@ impl RaftFacade {
         Vec<crate::rsm::dashboard::model::ParkedRow>,
         Vec<crate::rsm::dashboard::model::ChurnRow>,
         (i64, i64),
+        Vec<crate::rsm::dashboard::model::BacklogRow>,
     ) {
         use crate::rsm::dashboard::model::{merge_queue_rows, US_PER_MIN};
         let now = super::super::wall_micros();
@@ -380,7 +382,13 @@ impl RaftFacade {
             .filter(|r| r.tenant == tenant)
             .collect();
         let churn = self.local_metrics.churn_rows(tenant, from, to + US_PER_MIN);
-        (queue, parked, churn, (from, to))
+        let backlog = g
+            .rows
+            .backlog
+            .into_iter()
+            .filter(|r| r.tenant == tenant)
+            .collect();
+        (queue, parked, churn, (from, to), backlog)
     }
 
     /// `GET /api/v1/analytics/queue-ops` — `get_queue_ops_v1`.
@@ -390,12 +398,18 @@ impl RaftFacade {
         query: Option<&str>,
     ) -> Result<ApiOut, RsmError> {
         let f = raw_filters(query);
-        let (rows, _, churn, _) = self.tenant_queue_rows(&ctx.tenant, &f).await;
+        let (rows, _, churn, _, backlog) = self.tenant_queue_rows(&ctx.tenant, &f).await;
         let (metas, _) = self.queue_catalog(&ctx.tenant).await?;
         let now = super::super::wall_micros();
-        answer(crate::rsm::dashboard::queue_views::queue_ops_json(
-            &f, now, &rows, &churn, &metas,
-        ))
+        let mut v =
+            crate::rsm::dashboard::queue_views::queue_ops_json(&f, now, &rows, &churn, &metas);
+        if let Some(o) = v.as_object_mut().filter(|o| !o.contains_key("error")) {
+            o.insert(
+                "backlog".into(),
+                crate::rsm::dashboard::queue_views::backlog_json(&f, now, &backlog),
+            );
+        }
+        answer(v)
     }
 
     /// `GET /api/v1/analytics/queue-parked-replicas` —
@@ -406,7 +420,7 @@ impl RaftFacade {
         query: Option<&str>,
     ) -> Result<ApiOut, RsmError> {
         let f = raw_filters(query);
-        let (_, parked, _, _) = self.tenant_queue_rows(&ctx.tenant, &f).await;
+        let (_, parked, _, _, _) = self.tenant_queue_rows(&ctx.tenant, &f).await;
         let now = super::super::wall_micros();
         answer(crate::rsm::dashboard::queue_views::parked_replicas_json(
             &f, now, &parked,
@@ -421,7 +435,7 @@ impl RaftFacade {
         query: Option<&str>,
     ) -> Result<ApiOut, RsmError> {
         let f = raw_filters(query);
-        let (rows, _, churn, (from, to)) = self.tenant_queue_rows(&ctx.tenant, &f).await;
+        let (rows, _, churn, (from, to), _) = self.tenant_queue_rows(&ctx.tenant, &f).await;
         let (_, nows) = self.queue_catalog(&ctx.tenant).await?;
         let retention = self.local_metrics.retention_rows(&ctx.tenant, from, to + 1);
         let now = super::super::wall_micros();
@@ -463,7 +477,7 @@ impl RaftFacade {
         query: Option<&str>,
     ) -> Result<ApiOut, RsmError> {
         let f = raw_filters(query);
-        let (rows, _, churn, _) = self.tenant_queue_rows(&ctx.tenant, &f).await;
+        let (rows, _, churn, _, _) = self.tenant_queue_rows(&ctx.tenant, &f).await;
         let (metas, _) = self.queue_catalog(&ctx.tenant).await?;
         let get = |k: &str| f.get(k).and_then(Value::as_str).filter(|v| !v.is_empty());
         let now = super::super::wall_micros();

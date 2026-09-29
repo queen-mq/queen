@@ -158,15 +158,15 @@
         <MetricTile
           label="Pending Δ"
           :value="pendingDeltaDisplay"
-          unit="msgs"
+          :unit="pendingDeltaDisplay === '—' ? '' : 'msgs'"
           :context="pendingDeltaContext"
           :sparkline="pendingDeltaSeries"
-          :labels="chartLabels"
+          :labels="backlogLabels"
           :value-format="fmtCount"
           :severity="pendingDeltaSeverity"
           :loading="loadingOps"
           :error="opsError"
-          tooltip="Cumulative (push − ack) across the selected window. Positive = queue filling, negative = draining."
+          tooltip="Messages of this queue waiting for a consumer, read by the broker once a minute. The value is how much that changed across the window: up = filling, down = draining."
           :selected="selectedMetric === 'pendingDelta'"
           @select="selectedMetric = 'pendingDelta'"
         />
@@ -286,7 +286,7 @@
             v-else
             :data="focus.sparkline || []"
             :series="focus.series || null"
-            :labels="chartLabels"
+            :labels="focus.labels || chartLabels"
             :tone="focus.tone || 'mute'"
             :value-format="focus.valueFormat || null"
             :unit="focus.unit"
@@ -670,34 +670,46 @@ const throughputContext = computed(() => {
 })
 
 // ---------------------------------------------------------------------------
-// Pending Δ row — cumulative push − pop across the window
+// Pending Δ row — this queue's backlog, as the broker reads it once a minute
+// (queue-ops `backlog` with `queue`: per bucket its last reading of what waits
+// and what is in flight). VALUE = how much Pending changed across the window;
+// the chart is Pending itself, so it comes back down when the queue drains.
+//
+// It is NOT push − pop: every consumer group pops each message, a redelivery
+// pops it again, and retention and the DLQ take messages nobody popped, so
+// summed over a window that difference drifts for ever. (Same source as the
+// Overview's Pending Δ, for one queue.)
 // ---------------------------------------------------------------------------
-// Cumulative push − pop. When both source values are missing for a bucket
-// we emit null (chart gap); otherwise we still accumulate so the line
-// continues from the last known total once data resumes.
-const pendingDeltaSeries = computed(() => {
-  const h = history.value
-  if (!h.length) return []
-  let cum = 0
-  return h.map(x => {
-    const push = toNum(x.pushMessages)
-    const pop  = toNum(x.popMessages)
-    if (push === null && pop === null) return null
-    cum += (push || 0) - (pop || 0)
-    return cum
-  })
+const backlog = computed(() => {
+  const b = opsData.value?.backlog
+  return Array.isArray(b) ? b.filter(x => toNum(x?.pending) !== null) : []
 })
-const pendingDeltaLatest = computed(() => latestFinite(pendingDeltaSeries.value) ?? 0)
+const backlogMultiDay = computed(() => {
+  const b = backlog.value
+  return b.length > 1 && new Date(b[0].bucket).toDateString() !== new Date(b[b.length - 1].bucket).toDateString()
+})
+const backlogLabels = computed(() =>
+  backlog.value.map(b => formatChartLabel(new Date(b.bucket), backlogMultiDay.value))
+)
+const pendingDeltaSeries = computed(() => backlog.value.map(b => toNum(b.pending)))
+const backlogSeries = computed(() => {
+  if (!backlog.value.length) return null
+  return [
+    { label: 'Pending', data: pendingDeltaSeries.value },
+    { label: 'In flight', data: backlog.value.map(b => toNum(b.processing)) },
+  ]
+})
+const backlogLast = computed(() => latestFinite(pendingDeltaSeries.value))
+// A change needs two readings; a broker that has just started reading has one.
+const pendingDeltaLatest = computed(() => {
+  const s = pendingDeltaSeries.value
+  return s.length > 1 ? s[s.length - 1] - s[0] : null
+})
 const pendingDeltaDisplay = computed(() => {
   const v = pendingDeltaLatest.value
+  if (v === null) return '—'
   if (v === 0) return '0'
   return (v > 0 ? '+' : '−') + formatNumber(Math.abs(v))
-})
-const pendingDeltaContext = computed(() => {
-  const v = pendingDeltaLatest.value
-  if (v === 0) return 'flat · push = pop across window'
-  if (v > 0) return 'queue filling · push > pop'
-  return 'queue draining · pop > push'
 })
 // Judged as a share of what was pushed into this queue in the same window:
 // +1 000 is nothing on a queue that took half a million and a stall on one
@@ -708,6 +720,17 @@ const pushedTotal = computed(() =>
 const pendingDeltaSeverity = computed(() =>
   pendingDriftSeverity({ delta: pendingDeltaLatest.value, pushed: pushedTotal.value })
 )
+const pendingDeltaContext = computed(() => {
+  const now = backlogLast.value
+  if (now === null) return 'no backlog readings in window'
+  const waiting = `${formatNumber(now)} pending now`
+  const v = pendingDeltaLatest.value
+  if (v === null) return `${waiting} · first reading`
+  if (v === 0) return `flat · ${waiting}`
+  if (v < 0) return `draining · ${waiting}`
+  const sev = pendingDeltaSeverity.value
+  return `${sev === 'warn' || sev === 'bad' ? 'falling behind' : 'filling'} · ${waiting}`
+})
 
 // ---------------------------------------------------------------------------
 // Time lag row — avg / max from queue-ops series
@@ -1035,7 +1058,7 @@ const formatRelative = (ts) => {
 // ---------------------------------------------------------------------------
 const focus = computed(() => {
   switch (selectedMetric.value) {
-    case 'pendingDelta': return { title: 'Pending Δ', sub: 'cumulative push − ack across the window', sparkline: pendingDeltaSeries.value, valueFormat: fmtCount, unit: 'msgs (cumulative)', tone: pendingDeltaSeverity.value || 'mute' }
+    case 'pendingDelta': return { title: 'Pending', sub: 'waiting and in flight, read by the broker once a minute', series: backlogSeries.value, labels: backlogLabels.value, valueFormat: fmtCount, unit: 'msgs' }
     case 'timeLag': return { title: 'Time lag', sub: 'average and maximum delivery delay per bucket', series: lagSeriesData.value, valueFormat: fmtLagMs, unit: 'ms' }
     case 'fillRatio': return { title: 'Fill ratio', sub: 'long-polls that came back with a message', series: fillSeriesData.value, valueFormat: fmtFillPct, unit: '%' }
     case 'errors': return { title: 'Ack failures', sub: 'failed acks per bucket', sparkline: errorsSeries.value, valueFormat: fmtCount, unit: 'ack failures', tone: errorsSeverity.value || 'mute' }

@@ -15,7 +15,8 @@ use crate::rsm::planner::EffectsCommand;
 use crate::rsm::replicator::{ProposeError, Replicator};
 use crate::rsm::store::keys::{self, Counter};
 use crate::rsm::store::rows;
-use crate::rsm::store::{Keyspace, Reads, Store, TypedReads};
+use crate::rsm::store::rows::PartitionRow;
+use crate::rsm::store::{Keyspace, Reads, Store, StoreError, TypedReads};
 
 mod admin;
 mod dash;
@@ -874,31 +875,9 @@ impl RaftFacade {
                         if let Ok(Some(p)) = r.partition(pid) {
                             c.parts += 1;
                             c.total += (p.last_offset - p.log_start as i64 + 1).max(0);
-                            let mut named_min: Option<i64> = None;
-                            let mut queue_mode: Option<i64> = None;
-                            let mut processing = 0i64;
-                            let _ = r.scan_cursors(pid, usize::MAX, &mut |g, cur| {
-                                if g == "__QUEUE_MODE__" {
-                                    queue_mode = Some(
-                                        queue_mode.map_or(cur.committed, |v| v.min(cur.committed)),
-                                    );
-                                } else {
-                                    named_min = Some(
-                                        named_min.map_or(cur.committed, |v| v.min(cur.committed)),
-                                    );
-                                }
-                                if rows::lease_live(&cur, now) {
-                                    processing += cur
-                                        .batch_end
-                                        .map(|end| (end as i64 - cur.committed).max(0))
-                                        .unwrap_or(0);
-                                }
-                                true
-                            });
-                            let pending =
-                                p.pending_from(named_min.or(queue_mode).unwrap_or(-1)) as i64;
+                            let (pending, processing) = partition_backlog(r, pid, &p, now);
                             c.pending += pending;
-                            c.processing += processing.min(pending);
+                            c.processing += processing;
                             c.dead_letter +=
                                 r.partition_counter(pid, Counter::DlqCount).unwrap_or(0);
                             c.retained += r
@@ -1294,6 +1273,100 @@ fn config_options(c: &QueueConfig) -> Value {
 fn configured_json(name: &str, c: &QueueConfig) -> Value {
     json!({"configured":true,"queueId":uuid_bytes_to_string(&c.id),"partitionId":Value::Null,"queue":name,"namespace":c.namespace.clone().unwrap_or_default(),"task":c.task.clone().unwrap_or_default(),"storage":"segments","options":config_options(c)})
 }
+/// One partition's backlog as the queue list counts it, `(pending,
+/// processing)`: `pending` is what the slowest named group's cursor (the
+/// queue-mode cursor when there is no named group) has not consumed, leased
+/// frames included; `processing` the frames of live leases, never above it.
+fn partition_backlog<R: TypedReads + ?Sized>(
+    r: &R,
+    pid: crate::rsm::effect::Pid,
+    p: &PartitionRow,
+    now: i64,
+) -> (i64, i64) {
+    let mut named_min: Option<i64> = None;
+    let mut queue_mode: Option<i64> = None;
+    let mut processing = 0i64;
+    let _ = r.scan_cursors(pid, usize::MAX, &mut |g, cur| {
+        if g == "__QUEUE_MODE__" {
+            queue_mode = Some(queue_mode.map_or(cur.committed, |v| v.min(cur.committed)));
+        } else {
+            named_min = Some(named_min.map_or(cur.committed, |v| v.min(cur.committed)));
+        }
+        if rows::lease_live(&cur, now) {
+            processing += cur
+                .batch_end
+                .map(|end| (end as i64 - cur.committed).max(0))
+                .unwrap_or(0);
+        }
+        true
+    });
+    let pending = p.pending_from(named_min.or(queue_mode).unwrap_or(-1)) as i64;
+    (pending, processing.min(pending))
+}
+
+/// Every tenant's backlog and every backlogged queue's, `(tenant, queue,
+/// pending, processing)`: what waits for a consumer and what is leased, as the
+/// overview and the queue list count them. A tenant's total comes first with
+/// an empty `queue` (written at zero too); a queue follows only when it holds
+/// something. The queue list's walk without its segment and counter reads; the
+/// dashboard's backlog sampler reads it once a minute (`dashboard::collector`).
+pub(crate) fn tenant_backlogs<R: TypedReads + ?Sized>(
+    r: &R,
+    now: i64,
+) -> Result<Vec<(String, String, i64, i64)>, StoreError> {
+    // Queue keys are (tenant, queue), so a scan from the empty prefix names
+    // every queue of every tenant, a tenant's queues side by side.
+    let mut queues: Vec<(String, String)> = Vec::new();
+    r.scan_raw(Keyspace::Queues, &[], &[], usize::MAX, &mut |k, _| {
+        if let Some((tenant, at)) = keys::read_name(k, 0) {
+            if let Some((queue, _)) = keys::read_name(k, at) {
+                queues.push((tenant, queue));
+            }
+        }
+        true
+    })?;
+    // The overview's split, per queue as the queue list shows it and per
+    // tenant over the sums: `pending` net of what is leased.
+    let split = |pending: i64, processing: i64| ((pending - processing).max(0), processing);
+    let mut out: Vec<(String, String, i64, i64)> = Vec::new();
+    let mut total: Option<(String, i64, i64, usize)> = None;
+    for (tenant, queue) in queues {
+        if total.as_ref().is_some_and(|t| t.0 != tenant) {
+            if let Some((t, pending, processing, at)) = total.take() {
+                let (p, q) = split(pending, processing);
+                out[at] = (t, String::new(), p, q);
+            }
+        }
+        if total.is_none() {
+            // The tenant's slot, filled once its last queue is summed.
+            out.push((tenant.clone(), String::new(), 0, 0));
+            total = Some((tenant.clone(), 0, 0, out.len() - 1));
+        }
+        let (mut pending, mut processing) = (0i64, 0i64);
+        r.scan_queue_partitions(&tenant, &queue, None, usize::MAX, &mut |pid| {
+            if let Ok(Some(p)) = r.partition(pid) {
+                let (a, b) = partition_backlog(r, pid, &p, now);
+                pending += a;
+                processing += b;
+            }
+            true
+        })?;
+        if let Some(t) = total.as_mut() {
+            t.1 += pending;
+            t.2 += processing;
+        }
+        if pending > 0 {
+            let (p, q) = split(pending, processing);
+            out.push((tenant, queue, p, q));
+        }
+    }
+    if let Some((t, pending, processing, at)) = total {
+        let (p, q) = split(pending, processing);
+        out[at] = (t, String::new(), p, q);
+    }
+    Ok(out)
+}
+
 /// One queue's figures for the list views, summed over its partitions.
 #[derive(Default)]
 struct SnapCounts {

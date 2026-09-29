@@ -5,7 +5,8 @@
 //! Every `METRICS_FLUSH_MS` (default 60 s) it diffs the process counters the
 //! raft facade feeds ([`crate::metrics::global`]) into one [`WorkerRow`], one
 //! [`SystemRow`] (CPU, RSS, and the raft family), and a [`QueueRow`] /
-//! [`ParkedRow`] per queue with activity.
+//! [`ParkedRow`] per queue with activity; and it reads each tenant's backlog
+//! through the facades' [`BacklogSampler`]s into one [`BacklogRow`] per tenant.
 //!
 //! One thread per process, started by the first facade that opens.
 
@@ -15,7 +16,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::model::{trunc_us, ParkedRow, QueueRow, SystemRow, WorkerRow, US_PER_MIN, US_PER_SEC};
+use super::model::{
+    trunc_us, BacklogRow, ParkedRow, QueueRow, SystemRow, WorkerRow, US_PER_MIN, US_PER_SEC,
+};
 use super::store::{DashStore, Flush};
 
 /// The raft family of a [`SystemRow`]: what this node's log and store look
@@ -23,7 +26,43 @@ use super::store::{DashStore, Flush};
 /// `map_used_pct`), sampled by the facade that started the collector.
 pub type RaftGauges = Arc<dyn Fn() -> Option<[f64; 5]> + Send + Sync>;
 
+/// One facade's backlog reading at `now_us`: `(tenant, queue, pending,
+/// processing)` for every tenant of its group (`queue` empty: the tenant's
+/// total) and every queue holding a backlog, or `None` when this node does not
+/// read it (it does not lead the group, or the facade is gone). The counters
+/// cannot stand in for it: a message leaves the backlog by an ack, a
+/// transaction, a stream cycle, retention or the DLQ, and several consumer
+/// groups ack each message once each.
+pub type BacklogSampler = Arc<dyn Fn(i64) -> Option<Vec<(String, String, i64, i64)>> + Send + Sync>;
+
 static STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Every facade's sampler: a process runs one facade per raft group, and a
+/// tenant lives in exactly one group.
+static SAMPLERS: std::sync::Mutex<Vec<BacklogSampler>> = std::sync::Mutex::new(Vec::new());
+
+/// Add a facade's backlog sampler (whether or not it started the collector).
+pub fn register_backlog_sampler(f: BacklogSampler) {
+    SAMPLERS.lock().unwrap_or_else(|p| p.into_inner()).push(f);
+}
+
+/// The backlog rows of one flush.
+fn sample_backlog(now_us: i64, bucket_us: i64, at_us: i64) -> Vec<BacklogRow> {
+    let samplers = SAMPLERS.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    samplers
+        .iter()
+        .filter_map(|f| f(now_us))
+        .flatten()
+        .map(|(tenant, queue, pending, processing)| BacklogRow {
+            bucket_us,
+            at_us,
+            tenant,
+            queue,
+            pending,
+            processing,
+        })
+        .collect()
+}
 
 /// Start the collector once per process. `node_id` names the rows.
 pub fn spawn_once(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges) {
@@ -211,6 +250,8 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
                 || row.pop_empty != 0
                 || row.transactions != 0
                 || row.ack_requests != 0
+                || row.ack_success != 0
+                || row.ack_failed != 0
                 || row.conflated != 0
                 || parked_avg != 0;
             if !active {
@@ -265,6 +306,7 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
             system: vec![system],
             queue: queue_rows,
             parked: parked_rows,
+            backlog: sample_backlog(now, bucket_us, at_us),
         });
     }
 }

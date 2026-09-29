@@ -106,6 +106,26 @@ pub struct ParkedRow {
     pub parked_count: i32,
 }
 
+/// One backlog reading at one flush, the overview's two live numbers:
+/// `pending` waits for a consumer, `processing` is leased. Sampled by the node
+/// that leads the tenant's group (every replica holds the same state, so one
+/// reading is enough); `at_us` orders two readings of one minute taken across
+/// a leader change.
+///
+/// A reading is one row per tenant (`queue` empty: the tenant's total, written
+/// even at zero, so it also says a reading happened) plus one per queue that
+/// held a backlog; a queue without a row at a reading held nothing.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct BacklogRow {
+    pub bucket_us: i64,
+    pub at_us: i64,
+    pub tenant: String,
+    #[serde(default)]
+    pub queue: String,
+    pub pending: i64,
+    pub processing: i64,
+}
+
 /// The partition-lifecycle columns of `queue_lag_metrics`
 /// (`partitions_created` / `partitions_deleted`). Recorded by apply, so every
 /// node holds the same rows: a read uses the answering node's rows only and

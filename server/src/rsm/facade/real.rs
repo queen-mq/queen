@@ -611,6 +611,24 @@ impl RaftFacade {
                 });
                 let node_id = repl.cluster_view().map(|v| v.node_id).unwrap_or(1);
                 crate::rsm::dashboard::collector::spawn_once(dash, node_id, gauges);
+                // The backlog chart's samples: this group's tenants, read by
+                // its leader only (a follower holds the same state).
+                let (repl_b, store_b) = (Arc::downgrade(&repl), Arc::downgrade(&store));
+                crate::rsm::dashboard::collector::register_backlog_sampler(Arc::new(
+                    move |now_us| {
+                        let (repl, store) = (repl_b.upgrade()?, store_b.upgrade()?);
+                        if !repl.role().is_leader() {
+                            return None;
+                        }
+                        match store.read(|r| phase2::tenant_backlogs(r, now_us)) {
+                            Ok(v) => Some(v),
+                            Err(e) => {
+                                tracing::warn!(target: "metrics", error = %e, "backlog sample unreadable");
+                                None
+                            }
+                        }
+                    },
+                ));
             }
             Err(e) => tracing::warn!(
                 target: "rsm",
@@ -1181,6 +1199,14 @@ impl RaftFacade {
             })
             .expect("read dlq rows")
     }
+
+    /// Test-only: what the dashboard's backlog sampler reads on this node.
+    #[cfg(test)]
+    pub(crate) fn backlogs(&self) -> Vec<(String, String, i64, i64)> {
+        self.store
+            .read(|r| phase2::tenant_backlogs(r, wall_micros()))
+            .expect("read backlogs")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1714,6 +1740,15 @@ impl RaftFacade {
             }
             targets.extend(t);
         }
+        // Dashboard tallies per ack target, taken before the targets move into
+        // the command: (queue, ok items, failed items), as the ack path counts.
+        let ack_tallies: Vec<(String, u64, u64)> = targets
+            .iter()
+            .map(|t| {
+                let ok = t.items.iter().filter(|i| i.status == AckStatus::Ok).count() as u64;
+                (t.queue.clone(), ok, t.items.len() as u64 - ok)
+            })
+            .collect();
 
         let cmd = Command::Transaction(crate::rsm::batcher::TxnCommand {
             request_id: ctx.request_id,
@@ -1871,7 +1906,10 @@ impl RaftFacade {
             });
         }
         // Dashboard counters (data.rs ≈6090): one transaction, and one per
-        // distinct queue it pushed to; its DLQ filings.
+        // distinct queue it pushed to; its DLQ filings. And per queue what it
+        // stored and settled, which a push or an ack call would have counted:
+        // without them a pipeline that acks and forwards in one transaction
+        // shows pops never acked upstream and acks never pushed downstream.
         if let Some(m) = crate::metrics::global() {
             m.transactions
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1880,6 +1918,25 @@ impl RaftFacade {
                 if seen.insert(p.queue.as_str()) {
                     m.per_queue.add_transaction(&ctx.tenant, &p.queue);
                 }
+            }
+            for (g, members) in push_members.iter().enumerate() {
+                let stored = members
+                    .iter()
+                    .enumerate()
+                    .filter(|&(k, _)| {
+                        matches!(
+                            out.pushes.get(g).and_then(|o| o.items.get(k)),
+                            Some(PushVerdict::Created { .. })
+                        )
+                    })
+                    .count() as u64;
+                if let Some(&first) = members.first() {
+                    m.per_queue
+                        .add_pushed(&ctx.tenant, &pushes[first].queue, stored);
+                }
+            }
+            for (q, ok, failed) in &ack_tallies {
+                m.per_queue.add_settled(&ctx.tenant, q, *ok, *failed);
             }
             if txn_dlq > 0 {
                 m.dlq_moved
@@ -2415,12 +2472,14 @@ impl RaftFacade {
         }
 
         // Dashboard counters: one push request of N items; per queue one
-        // request and its items.
+        // request and the items it stored. A duplicate or a refused item adds
+        // nothing to the queue, so it is no pushed message there.
         if let Some(m) = crate::metrics::global() {
             m.push.record_request(resolved.len());
             let mut per_q: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
-            for r in &resolved {
-                *per_q.entry(r.queue.as_str()).or_insert(0) += 1;
+            for (r, o) in resolved.iter().zip(&out) {
+                let stored = o.as_ref().is_some_and(|o| o.status == "queued");
+                *per_q.entry(r.queue.as_str()).or_insert(0) += u64::from(stored);
             }
             for (q, n) in per_q {
                 m.per_queue.add_push(&ctx.tenant, q, n);

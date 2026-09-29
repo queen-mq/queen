@@ -38,7 +38,7 @@
           <p class="hero-sum">
             <template v-if="pushNow !== null">{{ formatNumber(queues.length) }} {{ queues.length === 1 ? 'queue takes' : 'queues take' }} in <b>{{ fmtMsgRate(pushNow) }}</b> and deliver <b>{{ fmtMsgRate(popNow) }}</b> to {{ formatNumber(consumers.length) }} consumer {{ consumers.length === 1 ? 'group' : 'groups' }}.</template>
             <template v-else>No traffic samples in the last {{ selectedRange }}.</template>
-            <template v-if="pendingNow !== null"> The backlog is <b>{{ formatNumber(pendingNow) }}</b><template v-if="pendingDeltaLatest !== null"> ({{ pendingDeltaDisplay }} over {{ selectedRange }})</template>.</template>
+            <template v-if="pendingNow !== null"> The backlog is <b>{{ formatNumber(pendingNow) }}</b><template v-if="pendingDeltaLatest !== null"> ({{ pendingDeltaDisplay }} {{ pendingDeltaSpan }})</template>.</template>
             <template v-if="lagMaxSeconds !== null"> The oldest message has waited <b>{{ fmtLagSeconds(lagMaxSeconds) }}</b>.</template>
             <template v-if="ackAttempts > 0">{{ ' ' }}<b>{{ ackFailPct }}</b> of acks failed in this window.</template>
           </p>
@@ -149,12 +149,12 @@
         :unit="pendingDeltaDisplay === '—' ? '' : 'msgs'"
         :context="pendingDeltaContext"
         :sparkline="pendingDeltaSeries"
-        :labels="chartLabels"
+        :labels="backlogLabels"
         :value-format="fmtCount"
         :severity="pendingDeltaSeverity"
         :loading="loadingOps"
         :error="opsError"
-        tooltip="Cumulative (push − ack) over the selected window. Positive = falling behind, negative = catching up."
+        tooltip="Messages waiting for a consumer, read by the broker once a minute. The value is how much that changed across the window: up = falling behind, down = catching up."
         :selected="selectedMetric === 'pendingDelta'"
         @select="selectMetric('pendingDelta')"
       />
@@ -711,36 +711,58 @@ const throughputContext = computed(() => {
 })
 
 // ---------------------------------------------------------------------------
-// Pending Δ row — cumulative (push − ack) across the window.
-// Positive = falling behind, negative = catching up. When a bucket's source
-// values are missing we emit `null` (not 0) so the chart shows a gap; the
-// cumulative carries forward so the next valid bucket continues the total.
+// Pending Δ row — the backlog itself, as the broker reads it once a minute
+// (queue-ops `backlog`: per bucket its last reading of what waits and what is
+// in flight). VALUE = how much Pending changed across the window; the chart is
+// Pending itself, so it comes back down when consumers catch up.
+//
+// It is NOT push − ack. A message also leaves by a transaction, a stream
+// cycle, retention or the DLQ, and every consumer group acks it once: summed
+// over a window that difference drifts for ever — on stage it read +436 over
+// an hour while the backlog was 0.
 // ---------------------------------------------------------------------------
-const pendingDeltaSeries = computed(() => {
-  const h = history.value
-  if (!h.length) return []
-  let cum = 0
-  return h.map(x => {
-    const pushed = toNum(x.pushMessages)
-    const acked = toNum(x.ackSuccess)
-    if (pushed === null && acked === null) return null
-    cum += (pushed || 0) - (acked || 0)
-    return cum
-  })
+const backlog = computed(() => {
+  const b = opsQ.data.value?.backlog
+  return Array.isArray(b) ? b.filter(x => toNum(x?.pending) !== null) : []
 })
-const pendingDeltaLatest = computed(() => latestFinite(pendingDeltaSeries.value))
+const backlogMultiDay = computed(() => {
+  const b = backlog.value
+  return b.length > 1 && new Date(b[0].bucket).toDateString() !== new Date(b[b.length - 1].bucket).toDateString()
+})
+const backlogLabels = computed(() =>
+  backlog.value.map(b => formatChartLabel(new Date(b.bucket), backlogMultiDay.value))
+)
+const pendingDeltaSeries = computed(() => backlog.value.map(b => toNum(b.pending)))
+const backlogSeries = computed(() => {
+  if (!backlog.value.length) return null
+  return [
+    { label: 'Pending', data: pendingDeltaSeries.value },
+    { label: 'In flight', data: backlog.value.map(b => toNum(b.processing)) },
+  ]
+})
+const backlogLast = computed(() => latestFinite(pendingDeltaSeries.value))
+// A change needs two readings; a broker that has just started reading has one.
+const pendingDeltaLatest = computed(() => {
+  const s = pendingDeltaSeries.value
+  return s.length > 1 ? s[s.length - 1] - s[0] : null
+})
 const pendingDeltaDisplay = computed(() => {
   const v = pendingDeltaLatest.value
   if (v === null) return '—'
   if (v === 0) return '0'
   return (v > 0 ? '+' : '−') + formatNumber(Math.abs(v))
 })
-const pendingDeltaContext = computed(() => {
-  const v = pendingDeltaLatest.value
-  if (v === null) return 'no push / ack samples in window'
-  if (v === 0) return 'flat · push = ack across window'
-  if (v > 0) return 'falling behind · push > ack'
-  return 'catching up · ack > push'
+// The readings can begin inside the window (a broker that started reading
+// recently): the change is then "since" the first reading, not "over" the range.
+const pendingDeltaSpan = computed(() => {
+  const b = backlog.value
+  const from = Date.parse(opsQ.data.value?.timeRange?.from || '')
+  if (!b.length || Number.isNaN(from)) return `over ${selectedRange.value}`
+  const first = Date.parse(b[0].bucket)
+  const step = (opsQ.data.value?.bucketMinutes || 1) * 60_000
+  return first - from > 2 * step
+    ? `since ${formatChartLabel(new Date(first), backlogMultiDay.value)}`
+    : `over ${selectedRange.value}`
 })
 // The drift is judged against the work that arrived, not against a constant:
 // +1 000 is a rounding error on a window that pushed half a million and a
@@ -751,6 +773,17 @@ const pushedTotal = computed(() =>
 const pendingDeltaSeverity = computed(() =>
   pendingDriftSeverity({ delta: pendingDeltaLatest.value, pushed: pushedTotal.value })
 )
+const pendingDeltaContext = computed(() => {
+  const now = backlogLast.value
+  if (now === null) return 'no backlog readings in window'
+  const waiting = `${formatNumber(now)} pending now`
+  const v = pendingDeltaLatest.value
+  if (v === null) return `${waiting} · first reading`
+  if (v === 0) return `flat · ${waiting}`
+  if (v < 0) return `catching up · ${waiting}`
+  const sev = pendingDeltaSeverity.value
+  return `${sev === 'warn' || sev === 'bad' ? 'falling behind' : 'grew'} · ${waiting}`
+})
 
 // ---------------------------------------------------------------------------
 // Time lag row.
@@ -1219,7 +1252,7 @@ const selectedMetric = ref('throughput')
 const selectMetric = (key) => { selectedMetric.value = key }
 const focus = computed(() => {
   switch (selectedMetric.value) {
-    case 'pendingDelta': return { title: 'Pending Δ', sub: 'cumulative push − ack across the window', sparkline: pendingDeltaSeries.value, labels: chartLabels.value, valueFormat: fmtCount, unit: 'msgs (cumulative)', tone: pendingDeltaSeverity.value || 'mute', error: opsError.value }
+    case 'pendingDelta': return { title: 'Pending', sub: 'waiting and in flight, read by the broker once a minute', series: backlogSeries.value, labels: backlogLabels.value, valueFormat: fmtCount, unit: 'msgs', error: opsError.value }
     case 'timeLag': return { title: 'Time lag', sub: 'pop-sampled per bucket, with gaps where nothing was consumed', series: lagSeriesData.value, labels: chartLabels.value, valueFormat: fmtLagMs, unit: 'ms', error: opsError.value }
     case 'errors': return { title: 'Ack failures', sub: 'failed acks per bucket', sparkline: errorSeriesData.value, labels: chartLabels.value, valueFormat: fmtCount, unit: 'ack failures', tone: errorSeverity.value || 'mute', error: opsError.value }
     case 'parked': return { title: 'Parked', sub: 'long-polls waiting for work, summed across queues', series: parkedSeriesData.value, labels: chartLabels.value, valueFormat: fmtCount, unit: 'long-polls', error: opsError.value }

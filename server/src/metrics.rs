@@ -290,6 +290,26 @@ impl PerQueue {
         c.ack_success.fetch_add(ok, Ordering::Relaxed);
         c.ack_failed.fetch_add(failed, Ordering::Relaxed);
     }
+    /// Messages a transaction or a stream cycle stored in `queue`: a push's
+    /// messages, without a push request.
+    pub fn add_pushed(&self, tenant: &str, queue: &str, msgs: u64) {
+        if msgs == 0 {
+            return;
+        }
+        self.counters(&crate::handlers::tenant_queue_key(tenant, queue))
+            .push_messages
+            .fetch_add(msgs, Ordering::Relaxed);
+    }
+    /// Acks a transaction or a stream cycle settled on `queue`: an ack call's
+    /// outcome counts, without an ack request.
+    pub fn add_settled(&self, tenant: &str, queue: &str, ok: u64, failed: u64) {
+        if ok == 0 && failed == 0 {
+            return;
+        }
+        let c = self.counters(&crate::handlers::tenant_queue_key(tenant, queue));
+        c.ack_success.fetch_add(ok, Ordering::Relaxed);
+        c.ack_failed.fetch_add(failed, Ordering::Relaxed);
+    }
     /// PLAN_CONFLATION §6.2: log positions a conflating ack retired WITHOUT a
     /// handler invocation (the ack's `conflated`). Fed from the ack handler.
     pub fn add_conflated(&self, tenant: &str, queue: &str, n: u64) {

@@ -1956,3 +1956,259 @@ fn conflate_like_the_receiver(
         ..Default::default()
     }
 }
+
+/// The per-queue counters behind queue-ops, for one queue of the default
+/// tenant: (pushed, acked, failed acks).
+fn counted(q: &str) -> (u64, u64, u64) {
+    let snap = crate::metrics::global()
+        .expect("process metrics")
+        .per_queue
+        .snapshot();
+    let c = snap
+        .get(&crate::handlers::tenant_queue_key(
+            crate::config::DEFAULT_TENANT,
+            q,
+        ))
+        .copied()
+        .unwrap_or_default();
+    (c.push_messages, c.ack_success, c.ack_failed)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_transaction_and_a_stream_cycle_count_what_they_store_and_settle() {
+    // The dashboard's push − ack only balances when every way a message enters
+    // or leaves a queue is counted on it: stage showed pops never acked on a
+    // stream's source and acks never pushed on a transaction's target.
+    if crate::metrics::global().is_none() {
+        crate::metrics::install_global(std::sync::Arc::new(crate::metrics::Metrics::new()));
+    }
+    let dir = scratch("counted");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    let call = |method: &str, path: &str, body: Value| ApiReq {
+        method: method.to_string(),
+        path: path.to_string(),
+        query: None,
+        body: serde_json::to_vec(&body).unwrap(),
+    };
+    let push = |raw: &'static [u8]| facade.push(ctx(), PushReq { raw: raw.to_vec() });
+
+    // A push stores three; a retry of one of them stores nothing.
+    push(
+        br#"{"items":[
+            {"queue":"counted-in","payload":{"n":1},"transactionId":"ci1"},
+            {"queue":"counted-in","payload":{"n":2},"transactionId":"ci2"},
+            {"queue":"counted-in","payload":{"n":3},"transactionId":"ci3"}
+        ]}"#,
+    )
+    .await
+    .expect("push");
+    let again =
+        push(br#"{"items":[{"queue":"counted-in","payload":{"n":1},"transactionId":"ci1"}]}"#)
+            .await
+            .expect("push again");
+    assert_eq!(
+        parse(&again.body)[0]["status"],
+        "duplicate",
+        "{}",
+        again.body
+    );
+    assert_eq!(
+        counted("counted-in").0,
+        3,
+        "a duplicate adds no message to the queue"
+    );
+
+    // One transaction acks the three and forwards two.
+    let pop = pop_q(&facade, "counted-in").await;
+    let pid = pop["partitionId"]
+        .as_str()
+        .expect("partitionId")
+        .to_string();
+    let lease = pop["leaseId"].as_str().expect("leaseId").to_string();
+    let done = txn(
+        &facade,
+        serde_json::json!({"operations": [
+            {"type": "ack", "transactionId": "ci1", "partitionId": pid, "leaseId": lease},
+            {"type": "ack", "transactionId": "ci2", "partitionId": pid, "leaseId": lease},
+            {"type": "ack", "transactionId": "ci3", "partitionId": pid, "leaseId": lease},
+            {"type": "push", "items": [
+                {"queue": "counted-mid", "payload": {"m": 1}, "transactionId": "cm1"},
+                {"queue": "counted-mid", "payload": {"m": 2}, "transactionId": "cm2"}
+            ]}
+        ]}),
+    )
+    .await;
+    assert_eq!(done["success"], true, "{done}");
+    assert_eq!(counted("counted-in"), (3, 3, 0), "the transaction's acks");
+    assert_eq!(counted("counted-mid").0, 2, "the transaction's pushes");
+
+    // A stream cycle settles those two and emits one.
+    let registered = facade
+        .api(
+            ctx(),
+            call(
+                "POST",
+                "/streams/v1/queries",
+                serde_json::json!({
+                    "name": "counted-stream",
+                    "source_queue": "counted-mid",
+                    "sink_queue": "counted-out",
+                    "config_hash": "counted-1"
+                }),
+            ),
+        )
+        .await
+        .expect("register stream");
+    assert_eq!(registered.status, 200, "{}", registered.body);
+    let qid = parse(&registered.body)["query_id"]
+        .as_str()
+        .expect("query id")
+        .to_string();
+    let popped = facade
+        .pop_wildcard(
+            ctx(),
+            PopReq {
+                queue: "counted-mid".into(),
+                group: Some("counted-group".into()),
+                batch: 2,
+                auto_ack: false,
+                wait: false,
+                timeout_ms: 1_000,
+                options: crate::rsm::facade::PopOptions {
+                    subscription_mode: "all".into(),
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .expect("stream pop");
+    let pop = parse(&popped.body);
+    assert_eq!(pop["messages"].as_array().map(Vec::len), Some(2), "{pop}");
+    let cycle = facade
+        .api(
+            ctx(),
+            call(
+                "POST",
+                "/streams/v1/cycle",
+                serde_json::json!({
+                    "query_id": qid,
+                    "partition_id": pop["partitionId"],
+                    "consumer_group": "counted-group",
+                    "state_ops": [],
+                    "push_items": [{"queue": "counted-out", "payload": {"sum": 3}}],
+                    "ack": {"leaseId": pop["leaseId"], "status": "completed", "count": 2},
+                    "release_lease": true
+                }),
+            ),
+        )
+        .await
+        .expect("stream cycle");
+    assert_eq!(parse(&cycle.body)["success"], true, "{}", cycle.body);
+    assert_eq!(counted("counted-mid"), (2, 2, 0), "the cycle's acks");
+    assert_eq!(counted("counted-out").0, 1, "the cycle's sink push");
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn the_backlog_sample_is_what_the_overview_reports() {
+    let dir = scratch("backlog");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    // A queue that exists and holds nothing.
+    let made = facade
+        .api(
+            ctx(),
+            ApiReq {
+                method: "POST".into(),
+                path: "/api/v1/configure".into(),
+                query: None,
+                body: br#"{"queue":"backlog-empty","options":{}}"#.to_vec(),
+            },
+        )
+        .await
+        .expect("configure");
+    assert_eq!(made.status, 200, "{}", made.body);
+    facade
+        .push(
+            ctx(),
+            PushReq {
+                raw: br#"{"items":[
+                    {"queue":"backlog-q","payload":1,"transactionId":"b1"},
+                    {"queue":"backlog-q","payload":2,"transactionId":"b2"},
+                    {"queue":"backlog-q","payload":3,"transactionId":"b3"},
+                    {"queue":"backlog-q","payload":4,"transactionId":"b4"},
+                    {"queue":"backlog-q","payload":5,"transactionId":"b5"}
+                ]}"#
+                .to_vec(),
+            },
+        )
+        .await
+        .expect("push");
+    let popped = facade
+        .pop_wildcard(
+            ctx(),
+            PopReq {
+                queue: "backlog-q".into(),
+                group: None,
+                batch: 2,
+                auto_ack: false,
+                wait: false,
+                timeout_ms: 1_000,
+                options: Default::default(),
+            },
+        )
+        .await
+        .expect("pop two");
+    assert_eq!(
+        parse(&popped.body)["messages"].as_array().map(Vec::len),
+        Some(2)
+    );
+
+    let overview = facade
+        .api(
+            ctx(),
+            ApiReq {
+                method: "GET".into(),
+                path: "/api/v1/resources/overview".into(),
+                query: None,
+                body: Vec::new(),
+            },
+        )
+        .await
+        .expect("overview");
+    let messages = parse(&overview.body)["messages"].clone();
+    let sample = facade.backlogs();
+    let of = |q: &str| {
+        sample
+            .iter()
+            .find(|(t, name, _, _)| t == crate::config::DEFAULT_TENANT && name == q)
+            .map(|r| (r.2, r.3))
+    };
+    assert_eq!(
+        of(""),
+        Some((3, 2)),
+        "the tenant: three wait, two are leased: {sample:?}"
+    );
+    assert_eq!(
+        (
+            messages["pending"].as_i64(),
+            messages["processing"].as_i64()
+        ),
+        (Some(3), Some(2)),
+        "the chart's right edge is the overview's number: {messages}"
+    );
+    assert_eq!(
+        of("backlog-q"),
+        Some((3, 2)),
+        "the queue's own reading: {sample:?}"
+    );
+    assert_eq!(
+        of("backlog-empty"),
+        None,
+        "an empty queue writes no row: {sample:?}"
+    );
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

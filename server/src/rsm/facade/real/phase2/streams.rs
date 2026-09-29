@@ -151,6 +151,7 @@ impl RaftFacade {
         }
 
         let mut positional_acks = Vec::new();
+        let mut ack_ok = true;
         if let Some(a) = root.get("ack").filter(|a| !a.is_null()) {
             let ok = matches!(
                 a.get("status")
@@ -160,6 +161,7 @@ impl RaftFacade {
                     .as_str(),
                 "completed" | "success" | "acked" | "ok" | ""
             );
+            ack_ok = ok;
             positional_acks.push(AckPositionalCommand {
                 request_id: super::super::derived_request_id(ctx.request_id, 0x7fff_fffe),
                 pid,
@@ -262,6 +264,26 @@ impl RaftFacade {
                 json!({"queueName":queue,"messageId":mid,"transactionId":txn,"status":status})
             })
             .collect();
+        // Dashboard counters: the sink messages the cycle stored and the source
+        // messages it settled, as a push and an ack call would count them.
+        if let Some(m) = crate::metrics::global() {
+            for r in &push_results {
+                if r["status"] == "created" {
+                    if let Some(q) = r["queueName"].as_str() {
+                        m.per_queue.add_pushed(&ctx.tenant, q, 1);
+                    }
+                }
+            }
+            if let Some(a) = out.acks.results.first() {
+                let (ok, failed) = if ack_ok { (a.acked, 0) } else { (0, a.acked) };
+                m.per_queue.add_settled(
+                    &ctx.tenant,
+                    &source.queue,
+                    u64::from(ok),
+                    u64::from(failed),
+                );
+            }
+        }
         let ack_result=out.acks.results.first().map(|a|json!({"success":a.stale_hashes.is_empty(),"count":a.acked,"lease_released":a.lease_released,"dlq":a.dlq>0}));
         Ok(ApiOut::json(200,json!({"success":true,"query_id":uuid_bytes_to_string(&qid),"partition_id":partition_id,"queueName":source.queue,"state_ops_applied":state_count,"push_results":push_results,"ack_result":ack_result}).to_string()))
     }

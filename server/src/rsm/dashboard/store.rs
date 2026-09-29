@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3::xxh3_64;
 
-use super::model::{ParkedRow, QueueRow, SystemRow, WorkerRow, US_PER_SEC};
+use super::model::{BacklogRow, ParkedRow, QueueRow, SystemRow, WorkerRow, US_PER_SEC};
 
 const MAGIC: &[u8; 8] = b"QNDASH1\0";
 const MAX_RECORD: usize = 16 << 20;
@@ -62,6 +62,18 @@ pub struct Flush {
     pub queue: Vec<QueueRow>,
     #[serde(default)]
     pub parked: Vec<ParkedRow>,
+    #[serde(default)]
+    pub backlog: Vec<BacklogRow>,
+}
+
+impl Flush {
+    fn len(&self) -> usize {
+        self.worker.len()
+            + self.system.len()
+            + self.queue.len()
+            + self.parked.len()
+            + self.backlog.len()
+    }
 }
 
 /// Rows in a time range, as a gather returns them (JSON on the wire).
@@ -73,13 +85,18 @@ struct Window {
     system: VecDeque<SystemRow>,
     queue: VecDeque<QueueRow>,
     parked: VecDeque<ParkedRow>,
+    backlog: VecDeque<BacklogRow>,
     /// Rows appended to the journal since it was last rewritten.
     journaled: usize,
 }
 
 impl Window {
     fn live(&self) -> usize {
-        self.worker.len() + self.system.len() + self.queue.len() + self.parked.len()
+        self.worker.len()
+            + self.system.len()
+            + self.queue.len()
+            + self.parked.len()
+            + self.backlog.len()
     }
 
     fn add(&mut self, f: Flush) {
@@ -87,6 +104,7 @@ impl Window {
         self.system.extend(f.system);
         self.queue.extend(f.queue);
         self.parked.extend(f.parked);
+        self.backlog.extend(f.backlog);
     }
 
     fn trim(&mut self, now_us: i64, r: &Retention) {
@@ -113,6 +131,14 @@ impl Window {
             || self.parked.len() > r.max_queue_rows
         {
             self.parked.pop_front();
+        }
+        while self
+            .backlog
+            .front()
+            .is_some_and(|x| x.bucket_us < queue_floor)
+            || self.backlog.len() > r.max_queue_rows
+        {
+            self.backlog.pop_front();
         }
     }
 }
@@ -167,8 +193,7 @@ impl DashStore {
                             break;
                         }
                         if let Ok(f) = serde_json::from_slice::<Flush>(payload) {
-                            win.journaled +=
-                                f.worker.len() + f.system.len() + f.queue.len() + f.parked.len();
+                            win.journaled += f.len();
                             win.add(f);
                         }
                         at += len;
@@ -205,7 +230,7 @@ impl DashStore {
 
     /// Record one flush: journal it, keep it in memory, drop what aged out.
     pub fn append(&self, f: Flush) {
-        let n = f.worker.len() + f.system.len() + f.queue.len() + f.parked.len();
+        let n = f.len();
         if n == 0 {
             return;
         }
@@ -289,6 +314,12 @@ impl DashStore {
                 .filter(|r| inr(r.bucket_us))
                 .cloned()
                 .collect(),
+            backlog: win
+                .backlog
+                .iter()
+                .filter(|r| inr(r.bucket_us))
+                .cloned()
+                .collect(),
         }
     }
 }
@@ -348,6 +379,18 @@ fn rewrite(path: &Path, win: &Window) -> io::Result<()> {
             ..Default::default()
         })?;
     }
+    for c in win
+        .backlog
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .chunks(CHUNK)
+    {
+        put(&Flush {
+            backlog: c.to_vec(),
+            ..Default::default()
+        })?;
+    }
     file.sync_all()?;
     std::fs::rename(tmp, path)
 }
@@ -361,6 +404,37 @@ mod tests {
             std::env::temp_dir().join(format!("queen-dash-{}-{}", std::process::id(), now_us()));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn backlog_rows_survive_reopen_and_age_out_with_the_queue_rows() {
+        let d = dir();
+        let path = d.join("dash.db");
+        let now = now_us();
+        let keep = Retention {
+            node_us: 3600 * US_PER_SEC,
+            queue_us: 600 * US_PER_SEC,
+            max_queue_rows: 100,
+        };
+        let row = |age_s: i64, pending: i64| BacklogRow {
+            bucket_us: now - age_s * US_PER_SEC,
+            at_us: now - age_s * US_PER_SEC,
+            tenant: "t".into(),
+            queue: String::new(),
+            pending,
+            processing: 0,
+        };
+        {
+            let s = DashStore::open(path.clone(), keep).unwrap();
+            s.append(Flush {
+                backlog: vec![row(1200, 1), row(60, 2)],
+                ..Default::default()
+            });
+        }
+        let s = DashStore::open(path, keep).unwrap();
+        let got = s.range(now - 3600 * US_PER_SEC, now + 1).backlog;
+        assert_eq!(got.iter().map(|r| r.pending).collect::<Vec<_>>(), vec![2]);
+        let _ = std::fs::remove_dir_all(d);
     }
 
     #[test]

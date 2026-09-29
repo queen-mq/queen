@@ -6,6 +6,7 @@
 //! | function | route |
 //! |---|---|
 //! | [`queue_ops_json`] | `GET /api/v1/analytics/queue-ops` |
+//! | [`backlog_json`] | its `backlog` array |
 //! | [`parked_replicas_json`] | `GET /api/v1/analytics/queue-parked-replicas` |
 //! | [`workload_json`] | `GET /api/v1/analytics/workload` (`handle_workload`) |
 //! | [`retention_json`] | `GET /api/v1/analytics/retention` (`handle_retention`) |
@@ -201,6 +202,58 @@ pub fn queue_ops_json(
         "series": series,
         "queues": names.into_iter().collect::<Vec<_>>(),
     })
+}
+
+/// The `backlog` array of `GET /api/v1/analytics/queue-ops`: the backlog as
+/// sampled once a minute ([`BacklogRow`]), one `{bucket, pending, processing}`
+/// per bucket of the view's window — the tenant's, or with `queue` that
+/// queue's. A level, not a sum: a bucket holds its LAST reading, where a wide
+/// bucket ended. A bucket without a reading is absent (no gap filling, as in
+/// `series`); a reading without a row for the queue is a queue that held
+/// nothing then, so it reads 0. `null` on a window the view refuses.
+pub fn backlog_json(filters: &Map<String, Value>, now_us: i64, rows: &[BacklogRow]) -> Value {
+    let Ok(win) = Window::from_filters(filters, now_us) else {
+        return Value::Null;
+    };
+    let queue = filter_set(filters, "queue");
+    // A reading is its tenant row; the last one of each bucket stands for it.
+    let mut last: BTreeMap<i64, &BacklogRow> = BTreeMap::new();
+    for r in rows
+        .iter()
+        .filter(|r| r.queue.is_empty() && win.contains(r.bucket_us))
+    {
+        let b = win.floor(r.bucket_us);
+        if last
+            .get(&b)
+            .is_none_or(|p| (p.bucket_us, p.at_us) < (r.bucket_us, r.at_us))
+        {
+            last.insert(b, r);
+        }
+    }
+    let of_queue = |t: &BacklogRow, q: &str| {
+        rows.iter()
+            .find(|r| {
+                r.queue == q
+                    && r.tenant == t.tenant
+                    && (r.bucket_us, r.at_us) == (t.bucket_us, t.at_us)
+            })
+            .map_or((0, 0), |r| (r.pending, r.processing))
+    };
+    Value::Array(
+        last.iter()
+            .map(|(&b, t)| {
+                let (pending, processing) = match queue.as_deref() {
+                    Some(q) => of_queue(t, q),
+                    None => (t.pending, t.processing),
+                };
+                json!({
+                    "bucket": to_char_s(b),
+                    "pending": pending,
+                    "processing": processing,
+                })
+            })
+            .collect(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1577,6 +1630,73 @@ mod tests {
         assert_eq!(
             to_char_ms(ts("2026-09-24T10:30:45Z")),
             "2026-09-24T10:30:45.000Z"
+        );
+    }
+
+    // -- the tenant's backlog -----------------------------------------------
+
+    #[test]
+    fn the_backlog_is_each_buckets_last_reading_for_the_tenant_or_one_queue() {
+        let row = |queue: &str, bucket: &str, at: &str, pending: i64| BacklogRow {
+            bucket_us: ts(bucket),
+            at_us: ts(at),
+            tenant: "t".into(),
+            queue: queue.into(),
+            pending,
+            processing: pending / 10,
+        };
+        // One-minute buckets: one element per reading, in bucket order; a
+        // minute read twice (a leader change) keeps the later reading; a
+        // reading outside the window is dropped.
+        let hour = filters(&[
+            ("from", "2026-09-24T10:00:00Z"),
+            ("to", "2026-09-24T11:00:00Z"),
+        ]);
+        let rows = [
+            row("", "2026-09-24T10:02:00Z", "2026-09-24T10:02:30Z", 40),
+            row("q1", "2026-09-24T10:02:00Z", "2026-09-24T10:02:30Z", 30),
+            row("", "2026-09-24T09:59:00Z", "2026-09-24T09:59:30Z", 999),
+            row("", "2026-09-24T10:01:00Z", "2026-09-24T10:01:05Z", 10),
+            row("q1", "2026-09-24T10:01:00Z", "2026-09-24T10:01:05Z", 10),
+            row("", "2026-09-24T10:01:00Z", "2026-09-24T10:01:50Z", 20),
+        ];
+        assert_eq!(
+            backlog_json(&hour, now(), &rows),
+            json!([
+                { "bucket": "2026-09-24T10:01:00Z", "pending": 20, "processing": 2 },
+                { "bucket": "2026-09-24T10:02:00Z", "pending": 40, "processing": 4 },
+            ])
+        );
+        // One queue: its row at each bucket's last reading, and 0 at a reading
+        // it has no row in (at 10:01:50 q1 held nothing).
+        assert_eq!(
+            backlog_json(&with(&hour, &[("queue", "q1")]), now(), &rows),
+            json!([
+                { "bucket": "2026-09-24T10:01:00Z", "pending": 0, "processing": 0 },
+                { "bucket": "2026-09-24T10:02:00Z", "pending": 30, "processing": 3 },
+            ])
+        );
+        // Five-minute buckets (a six-hour window): a level, so where each
+        // bucket ended, never a sum of its readings.
+        let six = filters(&[
+            ("from", "2026-09-24T04:00:00Z"),
+            ("to", "2026-09-24T10:00:00Z"),
+        ]);
+        let wide = [
+            row("", "2026-09-24T05:00:00Z", "2026-09-24T05:00:10Z", 5),
+            row("", "2026-09-24T05:04:00Z", "2026-09-24T05:04:10Z", 9),
+            row("", "2026-09-24T05:02:00Z", "2026-09-24T05:02:10Z", 7),
+        ];
+        assert_eq!(
+            backlog_json(&six, now(), &wide),
+            json!([{ "bucket": "2026-09-24T05:00:00Z", "pending": 9, "processing": 0 }])
+        );
+        // A queue row never stands in for a reading, and a window the view
+        // refuses gets nothing.
+        assert_eq!(backlog_json(&hour, now(), &rows[1..2]), json!([]));
+        assert_eq!(
+            backlog_json(&filters(&[("from", "nonsense")]), now(), &rows),
+            Value::Null
         );
     }
 
