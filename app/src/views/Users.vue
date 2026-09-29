@@ -49,6 +49,7 @@
           <option v-for="tenant in tenants" :key="tenant.id" :value="tenant.id">{{ tenant.slug }}</option>
         </select>
       </label>
+      <button v-if="hasActiveFilter" class="btn btn-ghost" @click="clearFilters">Clear filters</button>
     </PageTools>
 
     <div class="card">
@@ -111,6 +112,9 @@
           <h3>{{ users.length ? 'No users match these filters' : 'No users on this cell' }}</h3>
           <p>{{ users.length ? 'Try another email or tenant.' : 'Create the first account and grant its initial cluster role.' }}</p>
           <button v-if="!users.length && tenants.length" class="btn btn-primary" @click="openCreate">Add user</button>
+          <!-- A restored slice can be the reason nothing matches; the way out
+               is offered where that sentence is read. -->
+          <button v-else-if="users.length && hasActiveFilter" class="btn btn-ghost" @click="clearFilters">Clear filters</button>
         </div>
       </div>
     </div>
@@ -251,6 +255,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { operator, describeApiError } from '@/api'
+import { text, usePersistedFilters } from '@/composables/usePersistedFilters'
 import { useRefresh } from '@/composables/useRefresh'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
@@ -270,6 +275,15 @@ const loaded = ref(false)
 const error = ref(null)
 const search = ref('')
 const tenantFilter = ref('')
+
+// Kept in the URL and the tab's memory, so a trip to another page and back
+// lands on the same slice. No cluster scope: this page is the cell's, whatever
+// cluster is acting. A remembered tenant that no longer exists is dropped by
+// loadUsers once the list says so.
+const { hasActiveFilter, clearFilters } = usePersistedFilters('users', {
+  q: { ref: search, codec: text },
+  tenant: { ref: tenantFilter, codec: text },
+})
 
 const cellSlug = computed(() => responseCell.value?.slug || actingCellSlug.value || 'unknown')
 const grantCount = computed(() => users.value.reduce((sum, user) => sum + user.roles.length, 0))

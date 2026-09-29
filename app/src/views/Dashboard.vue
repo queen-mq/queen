@@ -511,6 +511,7 @@ import {
   pendingDriftSeverity, timeLagSeverity,
 } from '@/composables/useSeverity'
 import { groupAttention, queueAttention } from '@/composables/useAttention'
+import { oneOf, usePersistedFilters } from '@/composables/usePersistedFilters'
 import { useGroupsStore } from '@/stores/groupsStore'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
@@ -535,6 +536,11 @@ const timeRanges = [
   { label: '6h',  value: '6h',  minutes: 360 },
   { label: '24h', value: '24h', minutes: 1440 },
 ]
+// Kept in the URL and the tab's memory, so a trip to a queue and back reads
+// the same window. Not per cluster: a range means the same on every one.
+usePersistedFilters('dashboard', {
+  range: { ref: selectedRange, codec: oneOf(timeRanges.map(r => r.value)), keep: true },
+})
 const selectQuickRange = (value) => { selectedRange.value = value }
 // Resolved range, for the scope strip's free slot.
 const rangeLabel = computed(() => `last ${selectedRange.value}`)

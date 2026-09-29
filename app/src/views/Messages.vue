@@ -77,7 +77,7 @@
           <option value="dead_letter">Dead letter</option>
         </select>
       </label>
-      <button v-if="hasActiveFilters" class="btn btn-ghost" @click="clearFilters">Clear</button>
+      <button v-if="hasActiveFilter" class="btn btn-ghost" @click="clearFilters">Clear filters</button>
       <template #view>
         <label class="tool-field">
           <span class="tool-label">Show</span>
@@ -218,6 +218,7 @@
                     <h3>No messages found</h3>
                     <p>Try a wider time range, or fewer filters.</p>
                   </template>
+                  <button v-if="hasActiveFilter" class="btn btn-ghost" @click="clearFilters">Clear filters</button>
                 </div>
               </td>
             </tr>
@@ -436,7 +437,8 @@ import { useRoute } from 'vue-router'
 import { messages as messagesApi, queues as queuesApi, describeApiError } from '@/api'
 import { useApi, formatNumber, formatRelativeTime } from '@/composables/useApi'
 import { filtersForPushedMessage, isEncryptedEnvelope } from '@/composables/usePushVerdict'
-import { formatDateTimeLocal, formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
+import { formatDateTimeLocal, formatTimestamp, formatTimestampUtc, validateRange } from '@/composables/useFormat'
+import { interval, oneOf, text, usePersistedFilters } from '@/composables/usePersistedFilters'
 import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
 import { useToast } from '@/composables/useToast'
@@ -450,7 +452,7 @@ import PageHead from '@/components/PageHead.vue'
 import PageTools from '@/components/PageTools.vue'
 
 const route = useRoute()
-const { can } = useIdentity()
+const { can, actingCluster } = useIdentity()
 const { notifySuccess, notifyError } = useToast()
 
 // State
@@ -538,10 +540,6 @@ const filteredMessages = computed(() => {
   return result
 })
 
-const hasActiveFilters = computed(() => {
-  return searchQuery.value || filterQueue.value || filterPartition.value || filterStatus.value
-})
-
 // A log queue reports its groups per message even when the queue-level mode
 // probe says nothing, so take whichever evidence exists.
 const busGroups = computed(() => {
@@ -593,10 +591,12 @@ const RANGE_PRESETS = [
   { value: '24h', hours: 24 },
   { value: '7d', hours: 168 },
 ]
-const rangePreset = ref(route.query.from || route.query.to ? 'custom' : '1h')
+const rangePreset = ref('1h')
 const pickRange = (preset) => {
   rangePreset.value = preset.value
+  appliedWindow.value = null
   setTimeRange(preset.hours)
+  if (preset.value === '1h') markLastHour()
   applyFilters()
 }
 
@@ -609,17 +609,59 @@ const setTimeRange = (hours) => {
   filterTo.value = formatDateTimeLocal(now)
 }
 
-// Clear all filters
+// The default window is always the latest hour on each visit. Quick ranges
+// stay relative to now; only an applied Custom window is stored as dates.
+let lastHour = null
+const markLastHour = () => { lastHour = { from: filterFrom.value, to: filterTo.value } }
+const onLastHour = () => filterFrom.value === lastHour?.from && filterTo.value === lastHour?.to
+const fillLastHour = () => { setTimeRange(1); markLastHour() }
+fillLastHour()
+
+// The limit and the window are drafts until a fetch sends them, so what is
+// remembered is what the list was last fetched with, not the controls. Setting
+// one puts its controls back on it; a null window is the last hour.
+const appliedLimit = ref(limit.value)
+const appliedWindow = ref(null)
+const limitSetting = computed({
+  get: () => appliedLimit.value,
+  set: (n) => {
+    appliedLimit.value = n
+    limit.value = n
+  },
+})
+const windowSetting = computed({
+  get: () => (rangePreset.value === 'custom' ? appliedWindow.value : null),
+  set: (w) => {
+    appliedWindow.value = w
+    if (w) {
+      rangePreset.value = 'custom'
+      filterFrom.value = formatDateTimeLocal(w.from)
+      filterTo.value = formatDateTimeLocal(w.to)
+    } else {
+      if (rangePreset.value === 'custom') rangePreset.value = '1h'
+      setTimeRange(RANGE_PRESETS.find(r => r.value === rangePreset.value)?.hours || 1)
+      if (rangePreset.value === '1h') markLastHour()
+    }
+  },
+})
+
+// Kept in the URL and the tab's memory, so a trip to another page and back
+// lands on the same rows. `queue`, `partition` and `status` are the keys the
+// cross-links already write. The limit is how many rows a page holds, not a
+// narrowing: Clear leaves it.
+const { hasActiveFilter, clearFilters: clearPersistedFilters } = usePersistedFilters('messages', {
+  range: { ref: rangePreset, codec: oneOf(['1h', '24h', '7d', 'custom']), keep: true },
+  q: { ref: searchQuery, codec: text },
+  queue: { ref: filterQueue, codec: text },
+  partition: { ref: filterPartition, codec: text },
+  status: { ref: filterStatus, codec: oneOf(['pending', 'processing', 'completed', 'dead_letter']) },
+  window: { ref: windowSetting, codec: interval },
+  limit: { ref: limitSetting, codec: oneOf([50, 100, 200, 500]), keep: true },
+}, { scope: () => actingCluster.value?.id })
+
+// Clearing the window refills the last hour.
 const clearFilters = () => {
-  searchQuery.value = ''
-  filterQueue.value = ''
-  filterPartition.value = ''
-  filterStatus.value = ''
-
-  // Reset to default last 1 hour
-  rangePreset.value = '1h'
-  setTimeRange(1)
-
+  clearPersistedFilters()
   applyFilters()
 }
 
@@ -637,10 +679,20 @@ const buildParams = () => {
   return params
 }
 
+// The window a fetch sends, as it is remembered. One the interval cannot hold
+// — a cleared input sends an open end — is remembered as the last hour.
+const chosenWindow = () => {
+  if (rangePreset.value !== 'custom') return null
+  const range = validateRange(filterFrom.value, filterTo.value)
+  return range.error ? null : { from: range.from, to: range.to }
+}
+
 // A failed load keeps the rows that are already on screen — the banner says
 // they are stale. The failure itself is already on the global surface.
 const fetchMessages = () => {
   requestedPage = currentPage.value
+  appliedLimit.value = limit.value
+  appliedWindow.value = chosenWindow()
   return executeList(buildParams()).catch(() => {})
 }
 
@@ -772,11 +824,15 @@ const onPushed = ({ queue, partition }) => {
     next.status !== filterStatus.value ||
     next.queue !== filterQueue.value ||
     next.partition !== filterPartition.value
+  // The last hour stretched to the push is still the default: the operator
+  // chose no window, so none is remembered.
+  const wasLastHour = onLastHour()
 
   filterTo.value = next.to
   filterStatus.value = next.status
   filterQueue.value = next.queue
   filterPartition.value = next.partition
+  if (wasLastHour) markLastHour()
 
   // The row sorts to the head of page 1 (ORDER BY created_at DESC), so a push
   // made from page 3 must not refresh page 3.
@@ -813,23 +869,10 @@ const copyPayload = async () => {
 // Register for global refresh
 useRefresh(fetchMessages)
 
-// Initialize from query params and set the default time range. This runs in
-// setup, not onMounted, so the very first paint is the loading state rather
+// The filters were restored when they were bound, above. The first fetch runs
+// in setup, not onMounted, so the very first paint is the loading state rather
 // than "No messages found" — an empty table before the first request is an
 // answer we do not have yet.
-if (route.query.queue) {
-  filterQueue.value = route.query.queue
-}
-if (route.query.partition) {
-  filterPartition.value = route.query.partition
-}
-if (route.query.status) {
-  filterStatus.value = route.query.status
-}
-if (!route.query.from && !route.query.to) {
-  setTimeRange(1)
-}
-
 refreshQueues()
 fetchMessages()
 

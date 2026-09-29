@@ -79,7 +79,7 @@
             :disabled="nsLoading && !options.length"
           >
             <option value="">{{ namespacePlaceholder }}</option>
-            <option v-for="o in options" :key="o.namespace" :value="o.namespace">{{ o.label }}</option>
+            <option v-for="o in pickerOptions" :key="o.namespace" :value="o.namespace">{{ o.label }}</option>
           </select>
           <input
             v-else
@@ -107,6 +107,7 @@
         </label>
         <span v-if="namespacesUnavailable" class="tool-note">Namespace list unavailable — type a namespace and press Enter</span>
         <span v-else-if="unlistedNamespace" class="tool-note">Not in this tenant's namespace list — asking the broker anyway</span>
+        <button v-if="hasActiveFilter" class="btn btn-ghost" @click="clearFilters">Clear filters</button>
         <template #view>
           <label class="tool-field" for="kv-limit">
             <span class="tool-label">Show</span>
@@ -376,7 +377,6 @@
 // version CAS in the form, an audit trail). The page says so rather than
 // leaving an operator to conclude the button is missing.
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
 
 import DataTable from '@/components/DataTable.vue'
 import PageHead from '@/components/PageHead.vue'
@@ -393,6 +393,7 @@ import {
   describeKvState, describePageEnd, formatExpiry, kvListBody, kvRefusalText,
   namespaceOptions, sweeperUsageIsMeasured, valueBytes,
 } from '@/composables/useKvView'
+import { oneOf, text, usePersistedFilters } from '@/composables/usePersistedFilters'
 import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
 import { useToast } from '@/composables/useToast'
@@ -400,15 +401,15 @@ import { useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
 import { routeSupport } from '@/stores/routeSupport'
 
-const route = useRoute()
-const router = useRouter()
-const { epoch } = useIdentity()
+const { epoch, actingCluster } = useIdentity()
 const { notifyError } = useToast()
 
 /** How long the prefix box waits for the typing to stop. Every applied prefix
  *  is a metered read, so the box does not fire per keystroke — and
  *  Enter skips the wait for an operator who already knows what they want. */
 const PREFIX_DEBOUNCE_MS = 300
+/** The page sizes the picker offers, and the only ones a URL may name. */
+const PAGE_SIZES = [50, 100, 250]
 
 // The tenant figure and the namespace figure are both exact counts of every
 // stored row, expired ones included, but they are taken by two different reads
@@ -448,11 +449,24 @@ const { kvRows, kvBytes, fetchQueues } = queuesStore
 // page size. Each of the three starts a NEW sequence — the cursors on the
 // pager's stack address the old one and would silently page through it.
 // ---------------------------------------------------------------------------
-const namespace = ref(typeof route.query.ns === 'string' ? route.query.ns : '')
-const namespaceDraft = ref(namespace.value)
-const prefixDraft = ref('')
+const namespace = ref('')
 const appliedPrefix = ref('')
 const limit = ref(100)
+
+// Kept so a trip elsewhere and back lands on the same keys. The namespace is
+// in the URL, to be pasted into a ticket; the PREFIX is tab-only: it is a
+// fragment of a key, kept out of the address bar, the history and a
+// screenshot for the reason the cursor travels in a POST body. The cursors
+// are not kept: they address a walk that has moved on by the return.
+const { hasActiveFilter, clearFilters } = usePersistedFilters('kv', {
+  ns: { ref: namespace, codec: text, keep: true },
+  prefix: { ref: appliedPrefix, codec: text, url: false },
+  limit: { ref: limit, codec: oneOf(PAGE_SIZES), keep: true },
+}, { scope: () => actingCluster.value?.id })
+
+// The boxes open on what is applied, which a restore may have set.
+const namespaceDraft = ref(namespace.value)
+const prefixDraft = ref(appliedPrefix.value)
 
 /** What the rows on screen answer. A change here invalidates them, which is
  *  why it is compared rather than assumed: without it, switching namespaces
@@ -502,6 +516,13 @@ const listPanel = useApi(listKeys, { immediate: false })
 const nsPanel = useApi(listNamespaces, { immediate: false })
 
 const options = computed(() => namespaceOptions(nsPanel.data.value))
+// A restored or linked namespace the list does not hold (yet, or any more) is
+// still offered: a select whose value has no option renders blank.
+const pickerOptions = computed(() => (
+  !namespace.value || options.value.some(o => o.namespace === namespace.value)
+    ? options.value
+    : [...options.value, { namespace: namespace.value, label: namespace.value }]
+))
 const nsLoading = computed(() => nsPanel.loading.value)
 /** The list failed and left nothing behind: the picker degrades to free text
  *  rather than to a dead control, exactly as the timers queue picker does. */
@@ -599,6 +620,13 @@ const syncEpoch = () => {
 }
 watch(epoch, syncEpoch)
 
+// Which request the rows on screen came from, as views/Timers.vue keeps it:
+// useApi.execute RESOLVES a superseded call with the previous data, and
+// committing its key would print "No keys" over a page still in flight. A
+// cluster switch restores that cluster's slice: each ref that moves reloads,
+// and the shell's refresh reloads again behind them.
+let reqSeq = 0
+
 const reload = async () => {
   syncEpoch()
   if (!namespace.value) return
@@ -615,14 +643,17 @@ const reload = async () => {
     after: pager.current(),
     limit: limit.value,
   })
+  const mine = ++reqSeq
   try {
     const data = await listPanel.execute(body)
+    if (mine !== reqSeq) return
     verdict.value = null
     loadedKey.value = asked
     loadedNamespace.value = ns
     loadedPage.value = pager.page.value
     pager.received(data)
   } catch (err) {
+    if (mine !== reqSeq) return
     verdict.value = gatedVerdict(err)
   }
 }
@@ -663,20 +694,14 @@ const probeAgain = async () => {
   await reload()
 }
 
-// The namespace lives in the URL so a namespace an operator is looking at is
-// something they can paste into a ticket. The PREFIX does not: it is a
-// fragment of a key, and the reason the cursor travels in a POST body applies
-// to the address bar, the browser history and a screenshot just as well.
 watch(namespace, (ns) => {
   resetQuery()
   namespaceDraft.value = ns
-  const current = typeof route.query.ns === 'string' ? route.query.ns : ''
-  // Replace, never push, so Back leaves the page instead of walking the
-  // picker's history.
-  if (current !== ns) router.replace({ query: { ...route.query, ns: ns || undefined } })
   reload()
 })
-watch(appliedPrefix, () => { resetQuery(); reload() })
+// A restore or a Clear moves the applied prefix from outside the box; the box
+// follows, or it would show one prefix over another's rows.
+watch(appliedPrefix, (p) => { prefixDraft.value = p; resetQuery(); reload() })
 watch(limit, () => { resetQuery(); reload() })
 
 // ---------------------------------------------------------------------------

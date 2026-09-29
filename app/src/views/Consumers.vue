@@ -51,6 +51,7 @@
         <input v-model="showLaggingOnly" type="checkbox" />
         <span>Lagging only</span>
       </label>
+      <button v-if="hasActiveFilter" class="btn btn-ghost" @click="clearFilters">Clear filters</button>
       <template #view>
         <div class="tool-seg">
           <span class="tool-label">Sort</span>
@@ -118,7 +119,7 @@
               v-for="preset in lagPresets"
               :key="preset.value"
               :class="{ on: lagThreshold === preset.value }"
-              @click="lagThreshold = preset.value; loadLaggingPartitions()"
+              @click="lagThreshold = preset.value"
             >{{ preset.label }}</button>
           </div>
           <button
@@ -256,6 +257,11 @@
               ? 'Consumer groups will appear here when clients connect.'
               : 'Try adjusting your search or filter.' }}
           </p>
+          <!-- A restored slice can be the reason the grid is empty; the way
+               out is offered where that sentence is read. -->
+          <button v-if="consumers.length && hasActiveFilter" class="btn btn-ghost" @click="clearFilters">
+            Clear filters
+          </button>
         </div>
       </template>
     </ConsumerHealthGrid>
@@ -455,7 +461,6 @@
 
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
 
 import ConsumerHealthGrid from '@/components/ConsumerHealthGrid.vue'
 import { consumers as consumersApi, describeApiError } from '@/api'
@@ -465,6 +470,7 @@ import {
 } from '@/composables/useApi'
 import { conflatingKeys, isConflating, partitionConflates } from '@/composables/useConflation'
 import { formatDateTimeLocal, formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
+import { flag, oneOf, text, usePersistedFilters, withSelected } from '@/composables/usePersistedFilters'
 import { useRefresh } from '@/composables/useRefresh'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
@@ -477,7 +483,7 @@ import { useQueuesStore } from '@/stores/queuesStore'
 // TENANT PAGE. /api/v1/consumer-groups* is tenant-scoped broker-side; the
 // mutating routes (delete / seek) are RouteClass::QueueAdmin at the proxy, so
 // their controls are shown only to a role that may actually use them.
-const { can } = useIdentity()
+const { can, actingCluster } = useIdentity()
 // notifyWarn carries an outcome the shared HTTP client cannot see: a 2xx that did
 // nothing (no partition matched, nothing deleted) is a failure to the user.
 const { notifySuccess, notifyWarn } = useToast()
@@ -493,9 +499,7 @@ const headSub = computed(() => [
 // queueMeta gives us the queue → { namespace, task } join we need to scope
 // consumer rows by namespace/task without a second API call when the data
 // is fresh.
-const { queueMeta, namespaces, tasks, fetchQueues } = useQueuesStore()
-
-const route = useRoute()
+const { queueMeta, namespaces: storeNamespaces, tasks: storeTasks, fetchQueues } = useQueuesStore()
 
 // ---------------------------------------------------------------------------
 // State
@@ -541,6 +545,26 @@ const lagPresets = [
   { value: 21600, label: '6h'  },
   { value: 86400, label: '24h' },
 ]
+
+// Kept in the URL and the tab's memory, so a trip to another page and back
+// lands on the same slice. `search` is the key QueueDetail and the header's
+// search already link here with. The sort and the lag threshold are how the
+// page is read, not a narrowing: Clear leaves them. Bound before the fetchers
+// below, which read the threshold as they are built.
+const { hasActiveFilter, clearFilters } = usePersistedFilters('consumers', {
+  search: { ref: searchQuery, codec: text },
+  ns: { ref: filterNamespace, codec: text },
+  task: { ref: filterTask, codec: text },
+  queue: { ref: filterQueue, codec: text },
+  lagging: { ref: showLaggingOnly, codec: flag },
+  sort: { ref: sortBy, codec: oneOf(sortOptions.map(o => o.value)), keep: true },
+  threshold: { ref: lagThreshold, codec: oneOf(lagPresets.map(p => p.value)), keep: true },
+}, { scope: () => actingCluster.value?.id })
+
+// The store-derived lists, plus a restored selection the store has not listed
+// (yet, or at all) — a <select> whose value has no option renders blank.
+const namespaces = computed(() => withSelected(storeNamespaces.value, filterNamespace.value, ''))
+const tasks = computed(() => withSelected(storeTasks.value, filterTask.value, ''))
 
 // ---------------------------------------------------------------------------
 // Fetchers. Both keep their own error so a failed refresh can never be shown
@@ -643,8 +667,11 @@ const filteredConsumers = computed(() => {
 })
 
 // Clear queue filter when it falls out of the namespace/task scope, so
-// the user doesn't end up with an empty result set after narrowing.
+// the user doesn't end up with an empty result set after narrowing. Not
+// before the groups have loaded: a slice restored on a cluster switch lands
+// before that cluster's rows do, and would be judged against none.
 watch([filterNamespace, filterTask], () => {
+  if (!groups.data.value) return
   if (filterQueue.value && !scopedQueueNames.value.includes(filterQueue.value)) {
     filterQueue.value = ''
   }
@@ -860,10 +887,14 @@ watch(showLaggingSection, (shown) => {
   if (shown) loadLaggingPartitions()
 })
 
+// The threshold refetches on its own, not from the preset's click, so a
+// threshold restored from another cluster's memory asks with the value on
+// screen too.
+watch(lagThreshold, loadLaggingPartitions)
+
 useRefresh(refreshAll)
 
 onMounted(() => {
-  if (route.query.search) searchQuery.value = route.query.search
   // Reuse the shared queue cache when possible — if the Queues page recently
   // populated it, this returns immediately without a network round-trip.
   // (The consumer and lagging lists are already in flight via useApi.)

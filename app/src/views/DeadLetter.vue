@@ -65,6 +65,7 @@
       </label>
       <span v-if="queuesUnavailable" class="tool-note">Queue list unavailable — type a name to filter</span>
       <span v-else-if="unlistedQueue" class="tool-note">Not in this cluster's queue list — filtering by name anyway</span>
+      <button v-if="hasActiveFilter" class="btn btn-ghost" @click="clearFilters">Clear filters</button>
       <template #view>
         <label class="tool-field">
           <span class="tool-label">Show</span>
@@ -260,7 +261,10 @@
                     <path stroke-linecap="round" stroke-linejoin="round" d="M9 4h6v3H9z" />
                   </svg>
                   <h3>{{ page > 1 ? 'No more dead-lettered messages' : 'Dead letter queue is empty' }}</h3>
-                  <p>{{ hasFilters ? 'No failed messages match these filters.' : 'No failed messages to review.' }}</p>
+                  <p>{{ hasActiveFilter ? 'No failed messages match these filters.' : 'No failed messages to review.' }}</p>
+                  <!-- A restored slice can be the reason the table is empty; the
+                       way out is offered where that sentence is read. -->
+                  <button v-if="hasActiveFilter" class="btn btn-ghost" @click="clearFilters">Clear filters</button>
                 </div>
               </td>
             </tr>
@@ -599,6 +603,7 @@ import { useApi, formatNumber, formatRelativeTime } from '@/composables/useApi'
 import { formatDlqMarkdown } from '@/composables/useDlqMarkdown'
 import { dlqRowKey, replayRequest, replayVerdict } from '@/composables/useDlqReplay'
 import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
+import { oneOf, text, usePersistedFilters } from '@/composables/usePersistedFilters'
 import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
 import { useToast } from '@/composables/useToast'
@@ -612,9 +617,11 @@ import DetailDrawer from '@/components/DetailDrawer.vue'
 import DetailField from '@/components/DetailField.vue'
 import JsonViewer from '@/components/JsonViewer.vue'
 
-const { can, epoch, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
+const { can, epoch, actingCluster, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
 const { notifySuccess, notifyInfo, notifyWarn, notifyError } = useToast()
 
+/** The page sizes on offer — and the only ones a URL may restore. */
+const PAGE_SIZES = [50, 100, 200]
 /** Error groups shown before the breakdown has to be expanded. Two columns, so
     an even number keeps the grid square. */
 const COLLAPSED_ERRORS = 6
@@ -650,6 +657,18 @@ const bulkPurgeError = ref(null)
 // Rows this session verified as purged (success:true). Cleared on every reload,
 // so a row that comes back is a row the broker still has.
 const purged = ref(new Set())
+
+// Kept in the URL and the tab's memory, so a trip to Messages and back lands on
+// the same slice. `queue` is the key the queue page links here with. The error
+// filter is the tab's only: it is a whole error text, which can quote the
+// payload, and the address bar is logged, bookmarked and pasted. The page
+// size is how the list is read, not a narrowing: Clear leaves it.
+const { hasActiveFilter, clearFilters: resetFilters } = usePersistedFilters('dlq', {
+  queue: { ref: filterQueue, codec: text },
+  group: { ref: filterGroup, codec: text },
+  error: { ref: errorFilter, codec: text, url: false },
+  size: { ref: pageSize, codec: oneOf(PAGE_SIZES), keep: true },
+}, { scope: () => actingCluster.value?.id })
 
 // ---------------------------------------------------------------------------
 // Replay (PLAN_DASHBOARD_ACTIONS.md §2.3). One row at a time: the confirm modal
@@ -877,7 +896,6 @@ const groupSuggestions = computed(
   () => [...new Set(pageMessages.value.map(m => m.consumerGroup).filter(Boolean))].sort()
 )
 
-const hasFilters = computed(() => Boolean(filterQueue.value || filterGroup.value || errorFilter.value))
 // Against the page, not the filtered view: an error filter narrows what is on
 // screen, it does not tell us the broker has no further page.
 const canPageForward = computed(
@@ -962,6 +980,15 @@ const reload = () => {
   routeSupport.forget(REPLAY_ROUTE)
   replayProbed.value += 1
   fetchMessages()
+}
+
+// Nothing watches the group — it is applied on Enter, not per keystroke. A
+// Clear that empties the queue is reloaded by the queue's watcher; one that
+// empties only the group has to ask again here.
+const clearFilters = () => {
+  const groupOnly = Boolean(filterGroup.value) && !filterQueue.value
+  resetFilters()
+  if (groupOnly) reload()
 }
 
 const prevPage = () => {

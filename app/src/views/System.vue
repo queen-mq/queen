@@ -337,6 +337,7 @@ import {
 import {
   describeRaftFailure, formatIndex, formatMapPct, nodeView,
 } from '@/composables/useRaftCluster'
+import { appliedRange, interval, oneOf, usePersistedFilters } from '@/composables/usePersistedFilters'
 import { useRefresh } from '@/composables/useRefresh'
 import { numTone } from '@/composables/useSeverity'
 import { stamp } from '@/composables/useStamp'
@@ -375,6 +376,19 @@ const aggregationTypes = [
   { label: 'Maximum', value: 'max' },
   { label: 'Minimum', value: 'min' },
 ]
+
+const customRange = appliedRange({ customMode, appliedCustom, customFrom, customTo })
+
+// Kept in the URL and the tab's memory. Every field is how the cell is read,
+// none narrows it, so there is nothing to clear; and none names a tenant's
+// resource, so the memory is not per cluster.
+usePersistedFilters('system', {
+  source: { ref: dataSource, codec: oneOf(['system', 'storage']), keep: true },
+  range: { ref: timeRange, codec: oneOf(timeRanges.map(r => r.value)), keep: true },
+  custom: { ref: customRange, codec: interval, keep: true },
+  view: { ref: viewMode, codec: oneOf(['individual', 'aggregate']), keep: true },
+  metric: { ref: aggregationType, codec: oneOf(aggregationTypes.map(a => a.value)), keep: true },
+})
 
 // ---------------------------------------------------------------------------
 // Range
