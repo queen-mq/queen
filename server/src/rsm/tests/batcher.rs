@@ -1365,6 +1365,57 @@ async fn lanes_a_woken_long_poll_pop_of_a_one_lane_queue_claims_on_its_first_rep
     );
 }
 
+/// LANES: pushes that create their partition, many in one cycle, are planned
+/// by the creation step: their partitions take dense ids from the cycle's base
+/// (an entry whose creates are not dense would not validate), two pushes to one
+/// new partition in the same batch share it, and a push to a partition an
+/// entry in flight created goes to that partition's lane.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn lanes_pushes_that_create_partitions_in_one_cycle_take_dense_ids() {
+    const LANES: u64 = 8;
+    let node = LanesNode::open("lanes-create", LANES);
+    let tx = node.tx.clone();
+    // 24 new partitions, "p0" twice: submitted together, so the batcher drains
+    // them into as few cycles as it can.
+    let mut calls = Vec::new();
+    for i in 0..24u64 {
+        let tx = tx.clone();
+        calls.push(tokio::spawn(async move {
+            submit(
+                &tx,
+                push(60_000 + i, "fresh", &format!("p{i}"), &[&format!("t{i}")]),
+            )
+            .await
+        }));
+    }
+    let tx2 = tx.clone();
+    calls.push(tokio::spawn(async move {
+        submit(&tx2, push(60_100, "fresh", "p0", &["t0-again"])).await
+    }));
+    let mut pids: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for (i, call) in calls.into_iter().enumerate() {
+        let reply = call.await.expect("join");
+        let (pid, _) = push_created(&reply);
+        let name = if i < 24 {
+            format!("p{i}")
+        } else {
+            "p0".to_string()
+        };
+        let prev = pids.insert(name.clone(), pid);
+        assert!(
+            prev.is_none_or(|p| p == pid),
+            "{name}: one partition, one pid ({prev:?} then {pid})"
+        );
+    }
+    let mut all: Vec<u64> = pids.values().copied().collect();
+    all.sort_unstable();
+    all.dedup();
+    assert_eq!(all.len(), 24, "24 partitions, 24 pids: {pids:?}");
+    // The batcher stops when its last sender goes.
+    drop(tx);
+    node.close().await;
+}
+
 /// LANES: the same when the queue's partitions span lanes. The router can only
 /// guess which lane holds the ready one; a guessed lane that finds nothing
 /// hands the pop to control, which sees every partition — a long-poll pop too,

@@ -208,10 +208,10 @@ impl LocalMetrics {
         }
         state.retention.push_back(event);
         state.appended += 1;
-        if state.appended >= RETENTION_CAP * 2 {
-            if rewrite(&self.path, &state.retention, &state.churn).is_ok() {
-                state.appended = state.retention.len() + 1;
-            }
+        if state.appended >= RETENTION_CAP * 2
+            && rewrite(&self.path, &state.retention, &state.churn).is_ok()
+        {
+            state.appended = state.retention.len() + 1;
         }
     }
 
@@ -302,13 +302,15 @@ impl LocalMetrics {
             .range((from_us, String::new(), String::new())..)
             .take_while(|((b, _, _), _)| *b < to_us)
             .filter(|((_, t, _), _)| t == tenant)
-            .map(|((b, t, q), (c, d))| crate::rsm::dashboard::model::ChurnRow {
-                bucket_us: *b,
-                tenant: t.clone(),
-                queue: q.clone(),
-                created: *c,
-                deleted: *d,
-            })
+            .map(
+                |((b, t, q), (c, d))| crate::rsm::dashboard::model::ChurnRow {
+                    bucket_us: *b,
+                    tenant: t.clone(),
+                    queue: q.clone(),
+                    created: *c,
+                    deleted: *d,
+                },
+            )
             .collect()
     }
 
@@ -407,17 +409,21 @@ fn rewrite(
     }
     let rows: Vec<crate::rsm::dashboard::model::ChurnRow> = churn
         .iter()
-        .map(|((b, t, q), (c, d))| crate::rsm::dashboard::model::ChurnRow {
-            bucket_us: *b,
-            tenant: t.clone(),
-            queue: q.clone(),
-            created: *c,
-            deleted: *d,
-        })
+        .map(
+            |((b, t, q), (c, d))| crate::rsm::dashboard::model::ChurnRow {
+                bucket_us: *b,
+                tenant: t.clone(),
+                queue: q.clone(),
+                created: *c,
+                deleted: *d,
+            },
+        )
         .collect();
     for chunk in rows.chunks(5_000) {
-        let payload =
-            serde_json::to_vec(&ChurnRecord { churn: chunk.to_vec() }).map_err(io::Error::other)?;
+        let payload = serde_json::to_vec(&ChurnRecord {
+            churn: chunk.to_vec(),
+        })
+        .map_err(io::Error::other)?;
         file.write_all(&(payload.len() as u32).to_le_bytes())?;
         file.write_all(&xxh3_64(&payload).to_le_bytes())?;
         file.write_all(&payload)?;

@@ -441,8 +441,11 @@ impl LogStore {
         let t0 = std::time::Instant::now();
         let mut rx = self.inner.written.subscribe();
         loop {
-            match tokio::time::timeout(std::time::Duration::from_millis(100), rx.wait_for(|w| *w >= want))
-                .await
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                rx.wait_for(|w| *w >= want),
+            )
+            .await
             {
                 Ok(Ok(_)) => {
                     let us = t0.elapsed().as_micros() as u64;
@@ -570,9 +573,7 @@ impl LogStore {
     /// returned as it is. Recovered entries are a contiguous run from the start of
     /// the cache, so one range read covers them.
     fn rehydrate_payload_free(&self, entries: Vec<REntry>) -> io::Result<Vec<REntry>> {
-        let bare = |e: &REntry| {
-            matches!(&e.payload, EntryPayload::Normal(app) if app.full().is_none() && app.stored_parts().is_none())
-        };
+        let bare = |e: &REntry| matches!(&e.payload, EntryPayload::Normal(app) if app.full().is_none() && app.stored_parts().is_none());
         let Some(first) = entries.iter().position(bare) else {
             return Ok(entries);
         };

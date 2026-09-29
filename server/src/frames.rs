@@ -91,7 +91,7 @@ pub fn pack_frames(frames: &[FrameIn]) -> Vec<u8> {
         // The length is written as a u16 below while `body_len` counts the full
         // usize, so an over-long txn would produce a frame whose declared body
         // length and actual content disagree. The push handler rejects those at
-        // the HTTP boundary (`handlers::data::MAX_TXN_BYTES`); this pins the
+        // facade (`MAX_TXN_BYTES` in `rsm::facade::real`); this pins the
         // invariant here, where it is actually load-bearing.
         debug_assert!(
             txn.len() <= u16::MAX as usize,
@@ -141,6 +141,9 @@ pub fn uuid_hex_into(out: &mut String, b: &[u8; 16]) {
     out.push_str(unsafe { std::str::from_utf8_unchecked(&buf) });
 }
 
+/// An owned unpacked frame ([`unpack_frames`]); the broker reads frames with
+/// [`unpack_frames_ref`], so only the fuzz decoders and the tests use this.
+#[cfg(any(test, feature = "fuzzing"))]
 pub struct FrameOut {
     pub message_id: String,
     pub txn: String,
@@ -235,6 +238,7 @@ pub fn unpack_frames_ref(raw: &[u8]) -> Option<Vec<FrameRef<'_>>> {
     }
 }
 
+#[cfg(any(test, feature = "fuzzing"))]
 pub fn unpack_frames(raw: &[u8]) -> Option<Vec<FrameOut>> {
     let mut out = Vec::new();
     let mut o = 0usize;
@@ -310,8 +314,13 @@ pub fn unpack_frames(raw: &[u8]) -> Option<Vec<FrameOut>> {
     }
 }
 
+#[cfg(test)]
 pub fn zstd_compress(raw: &[u8], level: i32) -> Vec<u8> {
     zstd::stream::encode_all(raw, level).unwrap_or_default()
+}
+
+pub fn zstd_decompress(blob: &[u8]) -> Vec<u8> {
+    zstd::stream::decode_all(blob).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -362,8 +371,4 @@ mod tests {
         assert_eq!(brw[1].trace_id, None);
         assert_eq!(brw[0].payload, br#"{"a":1}"#);
     }
-}
-
-pub fn zstd_decompress(blob: &[u8]) -> Vec<u8> {
-    zstd::stream::decode_all(blob).unwrap_or_default()
 }

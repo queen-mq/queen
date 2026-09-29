@@ -285,7 +285,10 @@ struct SyncJob {
     /// The queue-log barrier still owed for this group (Phase C): the logs its
     /// write touched, fsynced by the syncer while the writer writes the next
     /// group.
-    qlog: Option<(crate::rsm::qlog::set::QLogSyncer, crate::rsm::qlog::set::SyncTicket)>,
+    qlog: Option<(
+        crate::rsm::qlog::set::QLogSyncer,
+        crate::rsm::qlog::set::SyncTicket,
+    )>,
     log_files: u64,
     log_bytes: u64,
 }
@@ -381,9 +384,9 @@ impl QlogWrite {
         for it in items.iter() {
             match &it.body {
                 GroupBody::Entry { entry, .. } => {
-                    pf.push(Bytes::from(encode_entry_payload_free(entry).map_err(|e| {
-                        io::Error::other(format!("payload-free entry encode: {e:?}"))
-                    })?))
+                    pf.push(Bytes::from(encode_entry_payload_free(entry).map_err(
+                        |e| io::Error::other(format!("payload-free entry encode: {e:?}")),
+                    )?))
                 }
                 GroupBody::Stored { pf: b, .. } => pf.push(b.clone()),
                 GroupBody::Raw { bytes, .. } => pf.push(Bytes::copy_from_slice(bytes)),
@@ -659,9 +662,9 @@ impl QlogWrite {
                         .collect();
                     let mut res = write_lane(first);
                     for j in joins {
-                        let r = j.join().unwrap_or_else(|_| {
-                            Err(io::Error::other("qlog lane writer panicked"))
-                        });
+                        let r = j
+                            .join()
+                            .unwrap_or_else(|_| Err(io::Error::other("qlog lane writer panicked")));
                         if res.is_ok() {
                             res = r;
                         }

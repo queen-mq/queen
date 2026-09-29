@@ -51,6 +51,7 @@ ctrs!(
     fwd_transport_retry,
     fwd_unanswered_pops,
     fwd_unanswered_claims,
+    fwd_pops_gated,
     render_gap_recovered,
     render_gap_claims,
     apply_waited_write,

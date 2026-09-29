@@ -1462,9 +1462,16 @@ fn a_writing_calls_reads_see_nothing_planned_after_it() {
     assert!(cycle.logged, "both calls write");
     let got_a = ra.take().expect("a rendered at its position").expect("a");
     let got_b = rb.take().expect("b rendered at its position").expect("b");
-    assert_eq!(got_a[0]["rows"], json!([]), "a read b's later write: {got_a:?}");
+    assert_eq!(
+        got_a[0]["rows"],
+        json!([]),
+        "a read b's later write: {got_a:?}"
+    );
     assert_eq!(got_a[0]["missing"], json!(["y"]));
-    assert_eq!(got_b[0]["rows"][0]["value"], "a", "b reads a's write: {got_b:?}");
+    assert_eq!(
+        got_b[0]["rows"][0]["value"], "a",
+        "b reads a's write: {got_b:?}"
+    );
     assert!(applied(&got_a[1]) && applied(&got_b[1]));
     // Nothing is left waiting once the calls are done.
     drop((ra, rb));

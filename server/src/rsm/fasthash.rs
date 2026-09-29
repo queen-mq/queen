@@ -78,7 +78,7 @@ pub type FxBuild = BuildHasherDefault<FxHasher>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::hash::{BuildHasher, Hash};
+    use std::hash::BuildHasher;
 
     #[test]
     fn big_endian_suffixed_keys_spread_over_the_bucket_bits() {
@@ -90,9 +90,8 @@ mod tests {
             k.extend_from_slice(&7u64.to_be_bytes());
             k.extend_from_slice(&off.to_be_bytes());
             let key: std::sync::Arc<[u8]> = std::sync::Arc::from(k);
-            let mut h = b.build_hasher();
-            key.hash(&mut h);
-            buckets.insert(h.finish() & 0xFFFF);
+
+            buckets.insert(b.hash_one(&key) & 0xFFFF);
         }
         // Random hashing puts 20,000 keys in ~17,600 of 65,536 buckets.
         assert!(buckets.len() > 15_000, "only {} buckets", buckets.len());

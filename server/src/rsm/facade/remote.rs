@@ -150,11 +150,15 @@ async fn submit_local(
     deadline: Instant,
 ) -> Result<Reply, RsmError> {
     let _admitted = match (admit, command.grows_storage()) {
-        (Some(gate), true) => Some(gate.admit(command.size_hint()).await.map_err(|o| {
-            RsmError::Overloaded {
-                retry_after_s: o.retry_after_s,
-            }
-        })?),
+        (Some(gate), true) => {
+            Some(
+                gate.admit(command.size_hint())
+                    .await
+                    .map_err(|o| RsmError::Overloaded {
+                        retry_after_s: o.retry_after_s,
+                    })?,
+            )
+        }
         _ => None,
     };
     let Some(tx) = cmd_tx.upgrade() else {

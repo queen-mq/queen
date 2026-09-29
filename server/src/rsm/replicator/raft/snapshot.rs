@@ -94,10 +94,14 @@ impl Restart {
     }
 }
 
+/// Copies the store's checkpoint into a directory; answers the applied index
+/// and term the copy holds.
+pub(crate) type CopyStore = Box<dyn Fn(&Path) -> io::Result<(u64, u64)> + Send + Sync>;
+
 /// What a node needs to send its snapshot.
 pub(crate) struct SendCtx {
     pub(crate) data_dir: PathBuf,
-    pub(crate) copy_store: Box<dyn Fn(&Path) -> io::Result<(u64, u64)> + Send + Sync>,
+    pub(crate) copy_store: CopyStore,
     pub(crate) qlog: QLogReader,
     /// The membership in force at the copied checkpoint.
     pub(crate) membership_at: MembershipAt,
@@ -558,9 +562,8 @@ pub(crate) async fn receive<S: Store + 'static>(
         .map_err(|_| io::Error::other("the snapshot writer panicked"))?;
     let trailer = match (stream_result, digest) {
         (Ok(t), Ok(d)) if u64::from_le_bytes(t) == d => t,
-        (Ok(_), Ok(_)) => Err(bad("snapshot checksum mismatch")).map_err(|e| {
+        (Ok(_), Ok(_)) => Err(bad("snapshot checksum mismatch")).inspect_err(|_e| {
             let _ = fs::remove_dir_all(&staged);
-            e
         })?,
         (Err(e), _) | (_, Err(e)) => {
             let _ = fs::remove_dir_all(&staged);

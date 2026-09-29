@@ -212,7 +212,7 @@ fn hash_lists_outlive_retention_deleted_segments_over_txns() {
 fn prune_trims_the_txns_authority_in_step_with_rows() {
     let t = TempStore::new();
     for i in 0..6u64 {
-        record_both(t.s(), 1, i, &[fh(i as u64 + 1)], 1_000 + i as i64);
+        record_both(t.s(), 1, i, &[fh(i + 1)], 1_000 + i as i64);
     }
     // Prune appends 0..=3 (cutoff 1_004 covers created 1_000..1_003).
     {

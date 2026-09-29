@@ -285,7 +285,7 @@ fn as_outcome(p: &Planned) -> Option<Outcome> {
 fn bounded_and_baseline_agree_on_random_workloads() {
     let mut total_claims = 0usize;
     for seed in 0..50u64 {
-        total_claims += run_seed(0xA11CE_0000 ^ seed.wrapping_mul(0x9E37_79B9));
+        total_claims += run_seed(0xA_11CE_0000 ^ seed.wrapping_mul(0x9E37_79B9));
     }
     // The workloads must actually claim frames, or the differential proves
     // nothing about the claim path.

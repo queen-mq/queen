@@ -1276,7 +1276,11 @@ fn stub_parts_merge_into_whole_entries() {
         vec![(1, 3), (2, 1), (3, 2), (4, 2)]
     );
     for r in &got {
-        assert_eq!(r.entry, b[r.seq as usize], "entry {} is the whole record", r.seq);
+        assert_eq!(
+            r.entry, b[r.seq as usize],
+            "entry {} is the whole record",
+            r.seq
+        );
         assert_eq!(r.now_us, 1_000 + r.seq as i64);
     }
     assert_eq!((out.next_seq, out.stopped.clone()), (5, None));
@@ -1341,7 +1345,11 @@ fn a_missing_stub_or_whole_record_leaves_the_entry_not_durable() {
         }
         let mut set = reopen(&root, opts);
         let (got, out) = scan_all(&set, 1);
-        assert_eq!(got.iter().map(|r| r.seq).collect::<Vec<_>>(), vec![1], "{missing}");
+        assert_eq!(
+            got.iter().map(|r| r.seq).collect::<Vec<_>>(),
+            vec![1],
+            "{missing}"
+        );
         assert_eq!(
             (out.next_seq, out.discarded, out.max_seq_found),
             (2, 2, 3),
@@ -1396,11 +1404,26 @@ fn stubs_that_do_not_name_the_whole_record_or_stand_alone_are_refused() {
         assert!(err.to_string().contains(want), "{name}: {err}");
     };
     // A stub naming other bytes (a stale part of an older seq 1).
-    refused("stub-digest", vec![ent(1, 2, &a)], vec![stub(1, 2, &b)], "disagree");
+    refused(
+        "stub-digest",
+        vec![ent(1, 2, &a)],
+        vec![stub(1, 2, &b)],
+        "disagree",
+    );
     // A stub whose copies differ from the whole record's.
-    refused("stub-copies", vec![ent(1, 2, &a)], vec![stub(1, 3, &a)], "disagree");
+    refused(
+        "stub-copies",
+        vec![ent(1, 2, &a)],
+        vec![stub(1, 3, &a)],
+        "disagree",
+    );
     // Every part a stub: no log holds the whole record.
-    refused("stub-only", vec![stub(1, 2, &a)], vec![stub(1, 2, &a)], "stubs");
+    refused(
+        "stub-only",
+        vec![stub(1, 2, &a)],
+        vec![stub(1, 2, &a)],
+        "stubs",
+    );
 }
 
 /// A real `LocalReplicator` on the stub layout: each entry's whole record is in
@@ -1460,9 +1483,8 @@ async fn the_stub_layout_writes_each_entry_once() {
         if layout == EntryLayout::Stub {
             // The entries both queues share (copies 2): whole in the lower
             // log, a stub in the higher.
-            let shared = |v: Vec<(u64, char, u32)>| {
-                v.into_iter().filter(|p| p.2 == 2).collect::<Vec<_>>()
-            };
+            let shared =
+                |v: Vec<(u64, char, u32)>| v.into_iter().filter(|p| p.2 == 2).collect::<Vec<_>>();
             assert_eq!(
                 shared(parts_in(&set, lo)),
                 vec![(1, 'W', 2), (2, 'W', 2), (5, 'W', 2)],
@@ -1494,7 +1516,9 @@ async fn the_stub_layout_writes_each_entry_once() {
     // plus 61 bytes each.
     let whole_twice: usize = [0usize, 1, 4]
         .iter()
-        .map(|i| super::record::FIXED_PREFIX + encode_entry_payload_free(&entries[*i]).unwrap().len())
+        .map(|i| {
+            super::record::FIXED_PREFIX + encode_entry_payload_free(&entries[*i]).unwrap().len()
+        })
         .sum();
     assert_eq!(
         part_bytes[0] - part_bytes[1],
@@ -1631,7 +1655,9 @@ async fn stub_layout_a_lost_part_is_cut_and_its_index_reused() {
             // part of the old N besides what the new N wrote (A only).
             let other_parts = parts_in(&set, if victim == home { other } else { home });
             assert!(
-                other_parts.iter().all(|p| p.0 < n || (p.0 == n && p.2 == 1)),
+                other_parts
+                    .iter()
+                    .all(|p| p.0 < n || (p.0 == n && p.2 == 1)),
                 "{missing}: {other_parts:?}"
             );
         }
@@ -1728,7 +1754,11 @@ async fn read_range_rehydrates_stub_layout_entries() {
                 }
             }
         }
-        assert_eq!(&whole[1..], &[1, 1, 1, 1, 1], "exactly one whole record per entry");
+        assert_eq!(
+            &whole[1..],
+            &[1, 1, 1, 1, 1],
+            "exactly one whole record per entry"
+        );
         assert_eq!(stubs, 2 + 2 + 1 + 1, "E1, E2: 3 logs; E3, E5: 2 logs");
     }
 
@@ -1828,7 +1858,11 @@ async fn read_range_rehydrates_stub_layout_entries() {
             .unwrap();
     }
     let opened = open("raft-c").expect("open after the lost stub");
-    assert_eq!(opened.recovered, n - 1, "the entry missing a stub is not durable");
+    assert_eq!(
+        opened.recovered,
+        n - 1,
+        "the entry missing a stub is not durable"
+    );
     let mut st = opened.store.clone();
     let got = st.try_get_log_entries(0..n).await.expect("read_range");
     check(&got, n - 1);

@@ -868,7 +868,12 @@ fn a_cut_is_written_on_another_thread_while_the_writer_carries_on() {
         let mut cut = w.take_cut().unwrap().expect("a cut");
         assert!(cut.keys() >= 4, "{} rows", cut.keys());
         for ks in Keyspace::ALL {
-            assert_eq!(s.dirty_len(ks), 0, "{}: the cut took the dirty set", ks.name());
+            assert_eq!(
+                s.dirty_len(ks),
+                0,
+                "{}: the cut took the dirty set",
+                ks.name()
+            );
         }
 
         // The writer carries on after the cut: an overwrite, a delete and a new
@@ -892,8 +897,14 @@ fn a_cut_is_written_on_another_thread_while_the_writer_carries_on() {
             r.expect("write the cut");
         });
         assert_eq!(StoreMetrics::get(&s.metrics().durable_commits), 1);
-        assert_eq!(checkpoint(s, Keyspace::Queues, b"a").as_deref(), Some(&b"1"[..]));
-        assert_eq!(checkpoint(s, Keyspace::Queues, b"b").as_deref(), Some(&b"1"[..]));
+        assert_eq!(
+            checkpoint(s, Keyspace::Queues, b"a").as_deref(),
+            Some(&b"1"[..])
+        );
+        assert_eq!(
+            checkpoint(s, Keyspace::Queues, b"b").as_deref(),
+            Some(&b"1"[..])
+        );
         assert_eq!(checkpoint(s, Keyspace::Queues, b"z"), None);
         // The live tables have the writer's newer values.
         w.put_raw(Keyspace::Groups, b"g", b"1").unwrap();

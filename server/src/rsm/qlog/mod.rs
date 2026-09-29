@@ -1045,7 +1045,10 @@ impl QLog {
 
     /// `(active file id, logical end)`: where the next group's bytes go.
     pub(crate) fn write_target(&self) -> (u64, u64) {
-        (self.files.last().expect("active meta").id, self.active_len())
+        (
+            self.files.last().expect("active meta").id,
+            self.active_len(),
+        )
     }
 
     /// A handle to the active file for a positional write made OUTSIDE the
@@ -1328,7 +1331,10 @@ impl QLog {
     /// removed; a later write re-creates it.
     pub(crate) fn is_empty_log(&self) -> bool {
         self.sealed.is_empty()
-            && self.files.iter().all(|m| !m.sealed && m.bytes <= FILE_HEADER_LEN)
+            && self
+                .files
+                .iter()
+                .all(|m| !m.sealed && m.bytes <= FILE_HEADER_LEN)
     }
 
     /// [`QLog::is_empty_log`], and safe to REMOVE: every empty file's
@@ -1932,7 +1938,10 @@ impl QLog {
                     }));
                 } else {
                     let (digest, len) = record::stub_fields(rr.payload).ok_or_else(|| {
-                        corrupt(&path, &format!("entry stub {} has a malformed payload", h.seq))
+                        corrupt(
+                            &path,
+                            &format!("entry stub {} has a malformed payload", h.seq),
+                        )
                     })?;
                     out.push(EntryPart::Stub(EntryStub {
                         seq: h.seq,
@@ -2021,7 +2030,7 @@ impl QLog {
             return self.truncate_seq_from(cut);
         };
         let mut dropped = 0u64;
-        for m in self.files[i + 1..].to_vec() {
+        for m in &self.files[i + 1..] {
             dropped += m.bytes;
             self.sealed.remove(&m.id);
             self.cache.forget_file(m.id);
@@ -2508,7 +2517,7 @@ fn record_is_dead(
 ) -> bool {
     txns_starts
         .get(&record.pid)
-        .map_or(true, |start| record.end <= *start)
+        .is_none_or(|start| record.end <= *start)
 }
 
 impl FileMeta {
@@ -2784,11 +2793,7 @@ impl ReadCache {
     /// its slot to a newer one; otherwise the fd serves the caller alone. The
     /// open runs outside the lock (a concurrent reader may win the insert).
     fn file(&self, file_id: u64) -> io::Result<Arc<File>> {
-        if let Some(f) = self
-            .fds
-            .lock_unpoisoned()
-            .get(&file_id)
-        {
+        if let Some(f) = self.fds.lock_unpoisoned().get(&file_id) {
             return Ok(f.clone());
         }
         let f = Arc::new(File::open(file_path(&self.dir, file_id))?);
@@ -2813,12 +2818,7 @@ impl ReadCache {
 
     /// Forget the fd of a file retention unlinked.
     fn forget_file(&self, file_id: u64) {
-        if self
-            .fds
-            .lock_unpoisoned()
-            .remove(&file_id)
-            .is_some()
-        {
+        if self.fds.lock_unpoisoned().remove(&file_id).is_some() {
             FDS_CACHED.fetch_sub(1, Ordering::Relaxed);
         }
     }
@@ -2846,9 +2846,7 @@ impl ReadCache {
         // Declared before the guards so a cleared shard is freed after its unlock.
         let mut evicted: Vec<HashCache> = Vec::new();
         for (pid, base, h) in blocks {
-            let mut hc = self
-                .hash_shard(*pid)
-                .lock_unpoisoned();
+            let mut hc = self.hash_shard(*pid).lock_unpoisoned();
             let add = h.len() + HASH_CACHE_ENTRY_OVERHEAD;
             if add > cap || hc.map.contains_key(&(*pid, *base)) {
                 continue;

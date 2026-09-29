@@ -53,7 +53,10 @@ pub fn enabled() -> bool {
 /// `broker_port` (the broker's `PORT`). `None`: the proxy fronts `PORT` and
 /// the broker router has no socket.
 pub fn separate_port(broker_port: &str) -> Option<String> {
-    separate_port_of(std::env::var("QUEEN_PROXY_PORT").ok().as_deref(), broker_port)
+    separate_port_of(
+        std::env::var("QUEEN_PROXY_PORT").ok().as_deref(),
+        broker_port,
+    )
 }
 
 fn separate_port_of(proxy_port: Option<&str>, broker_port: &str) -> Option<String> {
@@ -187,7 +190,13 @@ mod tests {
         assert_eq!(separate_port_of(None, "6632"), None);
         assert_eq!(separate_port_of(Some(""), "6632"), None);
         assert_eq!(separate_port_of(Some(" 6632 "), "6632"), None);
-        assert_eq!(separate_port_of(Some("6711"), "6632"), Some("6711".to_string()));
-        assert_eq!(separate_port_of(Some(" 6711\n"), "6632"), Some("6711".to_string()));
+        assert_eq!(
+            separate_port_of(Some("6711"), "6632"),
+            Some("6711".to_string())
+        );
+        assert_eq!(
+            separate_port_of(Some(" 6711\n"), "6632"),
+            Some("6711".to_string())
+        );
     }
 }

@@ -280,6 +280,7 @@ pub fn ack(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn ack_pos(
     id: u64,
     pid: Pid,
@@ -293,6 +294,7 @@ pub fn ack_pos(
     ack_pos_with_release(id, pid, queue, group, worker, upto, ok, true, acked_count)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn ack_pos_with_release(
     id: u64,
     pid: Pid,
@@ -501,8 +503,7 @@ impl Cell {
                 }
                 let now = ov.plan_now(&committed, wall).expect("plan now");
                 ov.mark_cycle_start();
-                let planner =
-                    Planner::new(
+                let planner = Planner::new(
                     committed,
                     now,
                     PlanConfig {
@@ -559,8 +560,7 @@ impl Cell {
                 let committed = Committed::new(r, &d);
                 let mut ov = Overlay::new(r.next_pid()?, r.kv_version_next()?);
                 ov.mark_cycle_start();
-                let mut planner =
-                    Planner::new(
+                let mut planner = Planner::new(
                     committed,
                     now,
                     PlanConfig {
@@ -630,28 +630,25 @@ impl Cell {
     pub fn pid_of(&self, queue: &str, partition: &str) -> Option<Pid> {
         self.node
             .store()
-            .read(|r| Ok(r.pid_of(TENANT, queue, partition)?))
+            .read(|r| r.pid_of(TENANT, queue, partition))
             .expect("read")
     }
 
     pub fn cursor(&self, pid: Pid, group: &str) -> Option<CursorRow> {
         self.node
             .store()
-            .read(|r| Ok(r.cursor(pid, group)?))
+            .read(|r| r.cursor(pid, group))
             .expect("read")
     }
 
     pub fn partition(&self, pid: Pid) -> Option<PartitionRow> {
-        self.node
-            .store()
-            .read(|r| Ok(r.partition(pid)?))
-            .expect("read")
+        self.node.store().read(|r| r.partition(pid)).expect("read")
     }
 
     pub fn queue(&self, queue: &str) -> Option<QueueConfig> {
         self.node
             .store()
-            .read(|r| Ok(r.queue(TENANT, queue)?))
+            .read(|r| r.queue(TENANT, queue))
             .expect("read")
     }
 
@@ -665,7 +662,7 @@ impl Cell {
     pub fn partition_counter(&self, pid: Pid, c: Counter) -> i64 {
         self.node
             .store()
-            .read(|r| Ok(r.partition_counter(pid, c)?))
+            .read(|r| r.partition_counter(pid, c))
             .expect("read")
     }
 

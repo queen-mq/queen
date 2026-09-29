@@ -311,7 +311,11 @@ static EARLY_HITS: AtomicUsize = AtomicUsize::new(0);
 
 fn early() -> &'static [Mutex<HashMap<u128, Early>>] {
     static SHARDS: OnceLock<Vec<Mutex<HashMap<u128, Early>>>> = OnceLock::new();
-    SHARDS.get_or_init(|| (0..EARLY_SHARDS).map(|_| Mutex::new(HashMap::new())).collect())
+    SHARDS.get_or_init(|| {
+        (0..EARLY_SHARDS)
+            .map(|_| Mutex::new(HashMap::new()))
+            .collect()
+    })
 }
 
 fn early_shard(key: u128) -> &'static Mutex<HashMap<u128, Early>> {
@@ -479,7 +483,11 @@ mod tests {
         assert!(take_early(&raw).is_none(), "an early job is taken once");
         let z = pre.finish().expect("compressed");
         assert_eq!(decompress(&z).unwrap(), raw);
-        assert_eq!(Some(z), compress_one(&raw), "the same stored form as at propose");
+        assert_eq!(
+            Some(z),
+            compress_one(&raw),
+            "the same stored form as at propose"
+        );
 
         // Small blobs are never kept.
         let small = b"tiny".to_vec();

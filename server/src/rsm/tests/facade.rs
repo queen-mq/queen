@@ -646,8 +646,15 @@ async fn a_nacked_batch_goes_to_the_dlq_as_a_batch_and_each_flag_is_true() {
             .await
             .expect("pop");
         let pop = parse(&popped.body);
-        assert_eq!(pop["messages"].as_array().map(|m| m.len()), Some(3), "round {round}");
-        let pid = pop["partitionId"].as_str().expect("partitionId").to_string();
+        assert_eq!(
+            pop["messages"].as_array().map(|m| m.len()),
+            Some(3),
+            "round {round}"
+        );
+        let pid = pop["partitionId"]
+            .as_str()
+            .expect("partitionId")
+            .to_string();
         let lease = pop["leaseId"].as_str().expect("leaseId").to_string();
         let acks: Vec<String> = txns
             .iter()
@@ -1772,7 +1779,10 @@ async fn an_autopilot_pop_fills_its_batch_from_several_sparse_partitions() {
     // A pop that did not opt in: one partition, no echo.
     let manual = pop(false).await;
     assert_eq!(manual["messages"].as_array().map(Vec::len), Some(3));
-    assert!(manual.get("autopilot").is_none(), "no echo without the opt-in");
+    assert!(
+        manual.get("autopilot").is_none(),
+        "no echo without the opt-in"
+    );
 
     // Opted in: seven partitions are ready and one pop is live, so the width
     // covers all of them and one pop collects 7 x 3 messages. A cold lane's
@@ -1808,14 +1818,22 @@ async fn an_autopilot_pop_fills_its_batch_from_several_sparse_partitions() {
         .expect("ack");
     let res = parse(&acked.body);
     assert!(
-        res.as_array().is_some_and(|a| a.iter().all(|r| r["success"] == true)),
+        res.as_array()
+            .is_some_and(|a| a.iter().all(|r| r["success"] == true)),
         "{res}"
     );
     // Nothing is ready now: the width falls back to one, the batch keeps a
     // sample (at least the minimum).
     let after = pop(true).await;
-    assert_eq!(after["messages"].as_array().map(Vec::len), Some(0), "{after}");
-    assert!(after["autopilot"]["batch"].as_u64().unwrap_or(0) >= 100, "{after}");
+    assert_eq!(
+        after["messages"].as_array().map(Vec::len),
+        Some(0),
+        "{after}"
+    );
+    assert!(
+        after["autopilot"]["batch"].as_u64().unwrap_or(0) >= 100,
+        "{after}"
+    );
 
     facade.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
@@ -1904,12 +1922,20 @@ async fn a_conflating_group_echoes_its_policy_on_every_answer() {
     assert!(!plain.conflation && !plain.conflation_conflict);
     let plain_empty = pop(Some("g-plain"), Some(false)).await;
     assert!(plain_empty.empty && !plain_empty.conflation && !plain_empty.conflation_conflict);
-    assert!(!plain_empty.body.contains("conflation"), "{}", plain_empty.body);
+    assert!(
+        !plain_empty.body.contains("conflation"),
+        "{}",
+        plain_empty.body
+    );
 
     // Queue mode has no group to hang a policy on: never a key, never a conflict.
     let queue_mode = pop(None, Some(false)).await;
     assert!(!queue_mode.conflation && !queue_mode.conflation_conflict);
-    assert!(!queue_mode.body.contains("conflation"), "{}", queue_mode.body);
+    assert!(
+        !queue_mode.body.contains("conflation"),
+        "{}",
+        queue_mode.body
+    );
 
     facade.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);

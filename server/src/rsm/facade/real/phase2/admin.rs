@@ -639,13 +639,16 @@ impl RaftFacade {
     /// `GET /api/v1/raft/status` — this node's block of the Raft view plus the
     /// cluster's name, leader, size (§14.6).
     pub(super) async fn api_raft_status(&self, _ctx: ReqCtx) -> Result<ApiOut, RsmError> {
-        let mut v = local_node_json(&self.repl, &*self.store);
+        let mut v = local_node_json(&self.repl, &self.store);
         let view = self.repl.cluster_view();
         let (cluster, voters) = cluster_identity(view.as_ref(), &v);
         if let Some(o) = v.as_object_mut() {
             o.insert("engine".into(), json!("raft"));
             o.insert("clusterId".into(), json!(cluster));
-            o.insert("self".into(), o.get("nodeId").cloned().unwrap_or(Value::Null));
+            o.insert(
+                "self".into(),
+                o.get("nodeId").cloned().unwrap_or(Value::Null),
+            );
             o.insert("voters".into(), json!(voters));
             o.insert("singleNode".into(), json!(voters <= 1));
         }
@@ -659,7 +662,7 @@ impl RaftFacade {
     /// follower's replication (`matchIndex`, `lagEntries`, `heartbeatAgeMs`)
     /// is folded in from whichever block is the leader's.
     pub(super) async fn api_raft_members(&self, _ctx: ReqCtx) -> Result<ApiOut, RsmError> {
-        let local = local_node_json(&self.repl, &*self.store);
+        let local = local_node_json(&self.repl, &self.store);
         let view = self.repl.cluster_view();
         let (cluster, voters) = cluster_identity(view.as_ref(), &local);
         let mut members: Vec<Value> = match &view {
@@ -745,16 +748,13 @@ impl RaftFacade {
             }
         }
         members.sort_by_key(|m| m.get("nodeId").and_then(Value::as_u64).unwrap_or(0));
-        let leader = view
-            .as_ref()
-            .and_then(|v| v.leader)
-            .or_else(|| {
-                local
-                    .get("state")
-                    .and_then(Value::as_str)
-                    .filter(|s| *s == "leader")
-                    .and(local.get("nodeId").and_then(Value::as_u64))
-            });
+        let leader = view.as_ref().and_then(|v| v.leader).or_else(|| {
+            local
+                .get("state")
+                .and_then(Value::as_str)
+                .filter(|s| *s == "leader")
+                .and(local.get("nodeId").and_then(Value::as_u64))
+        });
         Ok(ApiOut::json(
             200,
             json!({
@@ -847,7 +847,10 @@ impl RaftFacade {
     ) -> Result<ApiOut, RsmError> {
         let q = query_map(query);
         let Some(queue) = q.get("queue").filter(|v| !v.is_empty()).cloned() else {
-            return Ok(ApiOut::json(400, json!({"error":"queue required"}).to_string()));
+            return Ok(ApiOut::json(
+                400,
+                json!({"error":"queue required"}).to_string(),
+            ));
         };
         let limit = q
             .get("limit")
@@ -931,7 +934,9 @@ impl RaftFacade {
             .filter_map(|v| {
                 let name = v.get("name")?.as_str()?.to_string();
                 let p = v.pointer("/messages/pending")?.as_i64()?
-                    + v.pointer("/messages/processing").and_then(Value::as_i64).unwrap_or(0);
+                    + v.pointer("/messages/processing")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0);
                 Some((name, p))
             })
             .collect();
@@ -961,7 +966,8 @@ impl RaftFacade {
                         pids.push(pid);
                         true
                     })?;
-                    let (mut parts, mut l1, mut l24, mut l7, mut c24) = (0i64, 0i64, 0i64, 0i64, 0i64);
+                    let (mut parts, mut l1, mut l24, mut l7, mut c24) =
+                        (0i64, 0i64, 0i64, 0i64, 0i64);
                     let (mut oldest, mut newest): (Option<i64>, Option<i64>) = (None, None);
                     for pid in pids {
                         let Some(p) = r.partition(pid)? else { continue };
@@ -1011,7 +1017,11 @@ pub(super) fn error_signature(error: &str) -> String {
     let t = error.trim();
     let s = if t.is_empty() { "(no message)" } else { t };
     let s = replace_uuids(s);
-    let s = replace_words(&s, |w| w.len() >= 20 && w.chars().all(|c| c.is_ascii_hexdigit()), "<id>");
+    let s = replace_words(
+        &s,
+        |w| w.len() >= 20 && w.chars().all(|c| c.is_ascii_hexdigit()),
+        "<id>",
+    );
     let s = replace_dates(&s);
     let s = replace_words(&s, |w| w.chars().all(|c| c.is_ascii_digit()), "<n>");
     let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1086,7 +1096,11 @@ fn replace_dates(s: &str) -> String {
             && d(i + 9);
         if date {
             let mut j = i + 10;
-            if j < b.len() && b[j] == b'T' && j + 1 < b.len() && (d(j + 1) || b[j + 1] == b':' || b[j + 1] == b'.') {
+            if j < b.len()
+                && b[j] == b'T'
+                && j + 1 < b.len()
+                && (d(j + 1) || b[j + 1] == b':' || b[j + 1] == b'.')
+            {
                 j += 1;
                 while j < b.len() && (d(j) || b[j] == b':' || b[j] == b'.') {
                     j += 1;
@@ -1104,26 +1118,6 @@ fn replace_dates(s: &str) -> String {
         }
     }
     out
-}
-
-#[cfg(test)]
-mod signature_tests {
-    use super::error_signature;
-
-    #[test]
-    fn folds_like_the_stored_procedure() {
-        assert_eq!(error_signature("  "), "(no message)");
-        assert_eq!(
-            error_signature("order 01a0d2c7-e81f-702c-8734-c88401672347 failed at 2026-09-24T09:57:29.004Z after 3 tries"),
-            "order <id> failed at <date> after <n> tries"
-        );
-        assert_eq!(
-            error_signature("hash deadbeefdeadbeefdeadbeef\n\tretry   7"),
-            "hash <id> retry <n>"
-        );
-        assert_eq!(error_signature("v2 abc123 x1"), "v2 abc123 x1");
-        assert_eq!(error_signature(&"x".repeat(200)).len(), 120);
-    }
 }
 
 fn clear_cursor_lease(c: &mut CursorRow) {
@@ -1269,4 +1263,24 @@ pub(crate) fn raft_liveness_json(cm: &crate::rsm::replicator::ClusterMembers) ->
         "viewLeaderId": cm.view.as_ref().map(|v| v.leader),
         "members": members,
     })
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::error_signature;
+
+    #[test]
+    fn folds_like_the_stored_procedure() {
+        assert_eq!(error_signature("  "), "(no message)");
+        assert_eq!(
+            error_signature("order 01a0d2c7-e81f-702c-8734-c88401672347 failed at 2026-09-24T09:57:29.004Z after 3 tries"),
+            "order <id> failed at <date> after <n> tries"
+        );
+        assert_eq!(
+            error_signature("hash deadbeefdeadbeefdeadbeef\n\tretry   7"),
+            "hash <id> retry <n>"
+        );
+        assert_eq!(error_signature("v2 abc123 x1"), "v2 abc123 x1");
+        assert_eq!(error_signature(&"x".repeat(200)).len(), 120);
+    }
 }

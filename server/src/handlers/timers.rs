@@ -284,10 +284,10 @@ async fn prepare_schedule(
     mut op: Map<String, Value>,
     index: usize,
 ) -> Result<Value, Response> {
-    if !op
+    if op
         .get("queue")
         .and_then(|v| v.as_str())
-        .is_some_and(|q| !q.is_empty())
+        .is_none_or(|q| q.is_empty())
     {
         return Err(bad_request(
             "timers_queue_required",

@@ -496,9 +496,7 @@ impl RaftFacade {
             .and_then(|s| s.parse().ok())
             .unwrap_or(200usize)
             .clamp(1, 1000);
-        let offset = get("offset")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0usize);
+        let offset = get("offset").and_then(|s| s.parse().ok()).unwrap_or(0usize);
         let now = super::super::wall_micros();
         let from_us = get("from")
             .and_then(|s| parse_ts_us(&s))
@@ -540,7 +538,9 @@ impl RaftFacade {
                         true
                     })?;
                     for pid in pids {
-                        let Some(row) = r.partition(pid)? else { continue };
+                        let Some(row) = r.partition(pid)? else {
+                            continue;
+                        };
                         if partition.as_ref().is_some_and(|x| x != &row.partition) {
                             continue;
                         }
@@ -1023,10 +1023,10 @@ impl RaftFacade {
         let tenant = ctx.tenant.clone();
         let names = tokio::task::spawn_blocking(move || {
             store.read(|r| {
-                let mut stats: std::collections::BTreeMap<
-                    String,
-                    (usize, BTreeSet<(Option<Pid>, String)>, i64),
-                > = std::collections::BTreeMap::new();
+                // name → (count, the (pid, partition) it touched, last at).
+                type TraceStats = (usize, BTreeSet<(Option<Pid>, String)>, i64);
+                let mut stats: std::collections::BTreeMap<String, TraceStats> =
+                    std::collections::BTreeMap::new();
                 r.scan_traces(usize::MAX, &mut |_k, e| {
                     if e.tenant == tenant {
                         for n in &e.names {
@@ -1146,7 +1146,11 @@ impl RaftFacade {
             let store = self.store.clone();
             let tenant = tenant.to_string();
             return tokio::task::spawn_blocking(move || {
-                store.read(|r| Ok(r.partition(p)?.filter(|row| row.tenant == tenant).map(|_| p)))
+                store.read(|r| {
+                    Ok(r.partition(p)?
+                        .filter(|row| row.tenant == tenant)
+                        .map(|_| p))
+                })
             })
             .await
             .map_err(|e| RsmError::Internal(format!("partition lookup: {e}")))?
@@ -1310,6 +1314,7 @@ impl RaftFacade {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn walk_records(
     reader: &crate::rsm::segments::Reader,
     qlog: Option<&QLogReader>,
@@ -1387,6 +1392,9 @@ pub(super) fn payload_json(b: &[u8]) -> Value {
     }
 }
 
+/// One DLQ row with the queue, group and id it is filed under.
+type DlqEntry = (String, String, [u8; 16], DlqRow);
+
 fn decrypt_record(encryption: &crate::encryption::Encryption, record: &mut Record) {
     if record.encrypted {
         if let Some(payload) = encryption.decrypt_payload_bytes(&record.payload) {
@@ -1404,7 +1412,7 @@ pub(super) fn scan_dlq_rows<R: Reads + ?Sized>(
     tenant: &str,
     queue: Option<&str>,
     group: Option<&str>,
-) -> crate::rsm::store::Result<Vec<(String, String, [u8; 16], DlqRow)>> {
+) -> crate::rsm::store::Result<Vec<DlqEntry>> {
     let prefix = keys::queues_prefix(tenant);
     let mut out = Vec::new();
     let mut err = None;
@@ -1715,7 +1723,9 @@ fn group_view<R: Reads + ?Sized>(
     let mut groups: std::collections::BTreeMap<(String, String), Agg> =
         std::collections::BTreeMap::new();
     for l in cursor_lags(r, qlog, reader, tenant, None, now)? {
-        let a = groups.entry((l.group.clone(), l.queue.clone())).or_default();
+        let a = groups
+            .entry((l.group.clone(), l.queue.clone()))
+            .or_default();
         a.members += 1;
         if l.pending > 0 {
             a.with_lag += 1;

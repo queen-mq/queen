@@ -38,9 +38,9 @@
 
 use crate::rsm::dedup::IndexMode;
 use crate::rsm::dedup::TxnsRow;
+use crate::rsm::effect::CursorRow;
 use crate::rsm::effect::{Effect, GroupMeta, Pid, QueueConfig, SubscriptionMode};
 use crate::rsm::entry::{Outcome, PopClaim, PopOutcome};
-use crate::rsm::effect::CursorRow;
 use crate::rsm::store::rows::{cursor_fresh, lease_live, GroupRow};
 use crate::rsm::store::{keys, Keyspace, Reads, StoreError, TypedReads};
 
@@ -55,6 +55,12 @@ use super::{
 /// make one pop allocate without limit. A tighter bound (gather near the budget)
 /// is a follow-up, and the same O(ready) the pgless walk had (R-105).
 const CANDIDATE_GATHER_CAP: usize = 65_536;
+
+/// A steady-state wildcard walk first gathers this many ring candidates per
+/// partition the pop may claim (at least [`SHORT_GATHER_MIN`]), and the whole
+/// ring only when that run claims nothing although the ring holds more.
+const SHORT_GATHER_PER_PART: usize = 4;
+const SHORT_GATHER_MIN: usize = 64;
 
 /// One segment as the claim walk sees it, carrying the per-frame hashes when the
 /// bounded claim path (PERF-I) collected them in the same pass it read the
@@ -458,47 +464,76 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             self.register_on_first_contact(ov, &mut effects, &cmd.tenant, queue, &cmd.group, cmd)?;
         let first_contact = !existed;
 
-        let candidates = self.wildcard_candidates(
-            ov,
-            &cmd.tenant,
-            queue,
-            &cmd.group,
-            first_contact,
-            group_row.as_ref(),
-        )?;
-
-        {
-            use crate::rsm::dbgctr::{inc, C};
-            inc(&C.pop_over_queue, 1);
-            inc(&C.pop_cands, candidates.len() as u64);
-        }
-        let n_cands = candidates.len();
-        let mut remaining = cmd.budget.max(1);
+        // In steady state the walk first gathers a short run of the ring — a
+        // few times what the pop may claim — rather than every ready partition:
+        // a queue with thousands ready made each pop gather all of them to
+        // claim one. Only a short run that claims nothing although the ring
+        // holds more goes on to the whole ring. First contact enumerates the
+        // queue, whole, as before.
         let max_parts = if cmd.max_parts <= 0 {
             i32::MAX
         } else {
             cmd.max_parts
         };
+        let short = if first_contact || cmd.max_parts <= 0 {
+            CANDIDATE_GATHER_CAP
+        } else {
+            (cmd.max_parts as usize)
+                .saturating_mul(SHORT_GATHER_PER_PART)
+                .clamp(SHORT_GATHER_MIN, CANDIDATE_GATHER_CAP)
+        };
+        let mut n_cands = 0usize;
+        let mut remaining = cmd.budget.max(1);
         let mut claimed = 0i32;
         let mut claims: Vec<PopClaim> = Vec::new();
-        for pid in candidates {
-            if remaining <= 0 || claimed >= max_parts {
+        let mut tried: std::collections::HashSet<Pid> = std::collections::HashSet::new();
+        let mut cap = short;
+        loop {
+            let (candidates, truncated) = self.wildcard_candidates(
+                ov,
+                &cmd.tenant,
+                queue,
+                &cmd.group,
+                first_contact,
+                group_row.as_ref(),
+                cap,
+            )?;
+            n_cands += candidates.len();
+            for pid in candidates {
+                if remaining <= 0 || claimed >= max_parts {
+                    break;
+                }
+                // A partition the short run already tried: its claim found
+                // nothing then, and its effects (none, or a seal) are not
+                // folded yet — do not plan it twice.
+                if !tried.insert(pid) {
+                    continue;
+                }
+                if let Some(claim) = self.claim_one(
+                    ov,
+                    &mut effects,
+                    cfg,
+                    group_row.as_ref(),
+                    cmd,
+                    pid,
+                    remaining,
+                )? {
+                    let took =
+                        (claim.end_offset as i64 - claim.start_offset as i64 + 1).max(0) as i32;
+                    remaining -= took;
+                    claimed += 1;
+                    claims.push(claim);
+                }
+            }
+            if !claims.is_empty() || !truncated || cap >= CANDIDATE_GATHER_CAP {
                 break;
             }
-            if let Some(claim) = self.claim_one(
-                ov,
-                &mut effects,
-                cfg,
-                group_row.as_ref(),
-                cmd,
-                pid,
-                remaining,
-            )? {
-                let took = (claim.end_offset as i64 - claim.start_offset as i64 + 1).max(0) as i32;
-                remaining -= took;
-                claimed += 1;
-                claims.push(claim);
-            }
+            cap = CANDIDATE_GATHER_CAP;
+        }
+        {
+            use crate::rsm::dbgctr::{inc, C};
+            inc(&C.pop_over_queue, 1);
+            inc(&C.pop_cands, n_cands as u64);
         }
         {
             use crate::rsm::dbgctr::{inc, C};
@@ -685,6 +720,10 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     ///   so it skips the enumeration and rides the ring alone.
     /// * STEADY STATE: the committed ready ring (FIFO), then any partition this
     ///   cycle's overlay appended to that the ring does not already hold.
+    ///
+    /// The ring's part stops at `cap` pids; `true` alongside when it did (the
+    /// ring may hold more).
+    #[allow(clippy::too_many_arguments)]
     fn wildcard_candidates(
         &self,
         ov: &Overlay,
@@ -693,9 +732,11 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         group: &str,
         first_contact: bool,
         group_row: Option<&GroupRow>,
-    ) -> Result<Vec<Pid>, Refusal> {
+        cap: usize,
+    ) -> Result<(Vec<Pid>, bool), Refusal> {
         let mut out: Vec<Pid> = Vec::new();
         let mut seen: std::collections::HashSet<Pid> = std::collections::HashSet::new();
+        let cap = cap.clamp(1, CANDIDATE_GATHER_CAP);
 
         let enumerate =
             first_contact && group_row.is_some_and(|g| g.meta.mode != SubscriptionMode::New);
@@ -703,11 +744,11 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             let mut bad: Option<Refusal> = None;
             self.committed
                 .reads()
-                .scan_queue_partitions(tenant, queue, None, CANDIDATE_GATHER_CAP, &mut |pid| {
+                .scan_queue_partitions(tenant, queue, None, cap, &mut |pid| {
                     if seen.insert(pid) {
                         out.push(pid);
                     }
-                    out.len() < CANDIDATE_GATHER_CAP
+                    out.len() < cap
                 })
                 .map_err(|e| {
                     bad = Some(Refusal::from_store(e.clone()));
@@ -719,13 +760,14 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             }
         } else {
             self.committed
-                .candidates(tenant, queue, group, CANDIDATE_GATHER_CAP, &mut |pid| {
+                .candidates(tenant, queue, group, cap, &mut |pid| {
                     if seen.insert(pid) {
                         out.push(pid);
                     }
-                    out.len() < CANDIDATE_GATHER_CAP
+                    out.len() < cap
                 });
         }
+        let truncated = out.len() >= cap;
 
         // Overlay-appended partitions of this queue that the ring cannot yet
         // know about (a push planned earlier this cycle): a bounded set (one
@@ -743,7 +785,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 }
             }
         }
-        Ok(out)
+        Ok((out, truncated))
     }
 
     /// Claim frames of ONE partition for one group — the claim core (004

@@ -836,8 +836,14 @@ impl RaftFacade {
             let e = agg.entry(label.to_string()).or_default();
             e.0 += 1;
             e.1 += row.get("partitions").and_then(Value::as_i64).unwrap_or(0);
-            e.2 += row.pointer("/messages/total").and_then(Value::as_i64).unwrap_or(0);
-            e.3 += row.pointer("/messages/pending").and_then(Value::as_i64).unwrap_or(0);
+            e.2 += row
+                .pointer("/messages/total")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            e.3 += row
+                .pointer("/messages/pending")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
         }
         let values: Vec<Value> = agg
             .into_iter()
@@ -1463,10 +1469,7 @@ mod configure_tests {
     #[test]
     fn an_explicit_out_of_range_sink_hold_ceiling_is_still_refused() {
         let mut cfg = configured_defaults(0);
-        let err = apply_config_options(
-            &mut cfg,
-            &opts(json!({"retentionSinkHoldMaxSeconds": 0})),
-        );
+        let err = apply_config_options(&mut cfg, &opts(json!({"retentionSinkHoldMaxSeconds": 0})));
         assert!(err.is_err());
     }
 

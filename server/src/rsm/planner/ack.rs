@@ -266,7 +266,13 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                     None if r.ok => AckStatus::Ok,
                     None => continue,
                 };
-                let rank = |s: AckStatus| if s == AckStatus::Ok { 3 } else { signal_rank(s) };
+                let rank = |s: AckStatus| {
+                    if s == AckStatus::Ok {
+                        3
+                    } else {
+                        signal_rank(s)
+                    }
+                };
                 let slot = above.entry(off).or_insert((status, i));
                 if rank(status) < rank(slot.0) {
                     *slot = (status, i);
@@ -295,9 +301,14 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             while has_lease && (p as u64) <= batch_end {
                 match above.get(&p) {
                     Some((AckStatus::Dlq, i)) => steps.push((p, Step::File(*i))),
-                    Some((AckStatus::Failed, i)) if exhausted => {
-                        steps.push((p, if dlq_enabled { Step::File(*i) } else { Step::Drop }))
-                    }
+                    Some((AckStatus::Failed, i)) if exhausted => steps.push((
+                        p,
+                        if dlq_enabled {
+                            Step::File(*i)
+                        } else {
+                            Step::Drop
+                        },
+                    )),
                     Some((AckStatus::Failed, _)) => return (steps, true),
                     Some((AckStatus::Ok, _)) => steps.push((p, Step::Complete)),
                     Some(_) => break,
@@ -321,7 +332,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             for (off, step) in &steps {
                 if let Step::File(i) = step {
                     let item = &target.items[*i];
-                    let error = item.error.clone().unwrap_or_else(|| dlq_error());
+                    let error = item.error.clone().unwrap_or_else(&dlq_error);
                     self.file_dlq(
                         effects,
                         target,

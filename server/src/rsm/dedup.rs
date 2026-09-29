@@ -1213,7 +1213,9 @@ impl DedupFront {
         DedupFront {
             enabled,
             byte_cap,
-            parts: (0..FRONT_SHARDS).map(|_| Mutex::new(HashMap::new())).collect(),
+            parts: (0..FRONT_SHARDS)
+                .map(|_| Mutex::new(HashMap::new()))
+                .collect(),
             total_bytes: AtomicU64::new(0),
             messages: AtomicU64::new(0),
             probes_issued: AtomicU64::new(0),

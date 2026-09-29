@@ -230,6 +230,17 @@ fn store_err(e: StoreError) -> Refusal {
     Refusal::from_store(e)
 }
 
+/// What [`Planner::planned_pending`] decided for one `(pid, group)` row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlannedPending {
+    /// Unknown from the planned state: leave the ring as it is.
+    Keep,
+    /// No work for the group there.
+    Clear,
+    /// Work from this instant on.
+    At(i64),
+}
+
 /// What a `plan_*` decided (§5.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Plan {
@@ -1677,6 +1688,48 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             return Ok(t.v.clone());
         }
         self.committed.cursor(pid, group).map_err(store_err)
+    }
+
+    /// The `(tenant, queue)` a partition belongs to, as the overlay sees it
+    /// (`None` when it is unknown or on its way out).
+    pub(crate) fn partition_queue(
+        &self,
+        ov: &Overlay,
+        pid: Pid,
+    ) -> Result<Option<(String, String)>, Refusal> {
+        Ok(self.partition(ov, pid)?.map(|p| (p.tenant, p.queue)))
+    }
+
+    /// The `pending` row apply will hold for `(pid, group)` once everything the
+    /// overlay carries has landed, by apply's own rules (`cursor_set`,
+    /// `append_pending`): no row when the group is caught up, the lease expiry
+    /// while a lease is live, else ready now. `appended`: the overlay appends to
+    /// `pid` — with no cursor for the group that is what arms the row; without
+    /// an append and without a cursor the planner cannot tell (the row may
+    /// predate the group's registration), so the ring keeps what it has.
+    /// `None` when the partition is unknown or on its way out. A delayed or
+    /// window-buffered queue's future visibility is not modelled: the row reads
+    /// ready now and the claim, which re-verifies, finds nothing.
+    pub(crate) fn planned_pending(
+        &self,
+        ov: &Overlay,
+        pid: Pid,
+        group: &str,
+        appended: bool,
+    ) -> Result<Option<(String, String, PlannedPending)>, Refusal> {
+        let Some(part) = self.partition(ov, pid)? else {
+            return Ok(None);
+        };
+        let state = match self.cursor(ov, pid, group)? {
+            Some(c) if c.committed >= part.last_offset => PlannedPending::Clear,
+            Some(c) if crate::rsm::store::rows::lease_live(&c, self.now_us) => {
+                PlannedPending::At(c.lease_expires_at_us.unwrap_or(self.now_us))
+            }
+            Some(_) => PlannedPending::At(self.now_us),
+            None if appended => PlannedPending::At(self.now_us),
+            None => PlannedPending::Keep,
+        };
+        Ok(Some((part.tenant, part.queue, state)))
     }
 
     // ---- segments (from the txns keyspace + overlay) ----------------------

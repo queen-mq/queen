@@ -1853,6 +1853,7 @@ impl Metrics {
 ///  * a 100 ms scheduler-lag probe (sleep-overshoot => "event loop" lag), and
 ///  * a 1 Hz parked-long-poll sampler (averaged into the dashboard's queue rows
 ///    by syscollect).
+///
 /// Both are tiny (two atomic ops / a map scan per tick).
 static GLOBAL: std::sync::OnceLock<Arc<Metrics>> = std::sync::OnceLock::new();
 

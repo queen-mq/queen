@@ -98,12 +98,18 @@ impl Window {
         while self.system.front().is_some_and(|x| x.at_us < node_floor) {
             self.system.pop_front();
         }
-        while self.queue.front().is_some_and(|x| x.bucket_us < queue_floor)
+        while self
+            .queue
+            .front()
+            .is_some_and(|x| x.bucket_us < queue_floor)
             || self.queue.len() > r.max_queue_rows
         {
             self.queue.pop_front();
         }
-        while self.parked.front().is_some_and(|x| x.bucket_us < queue_floor)
+        while self
+            .parked
+            .front()
+            .is_some_and(|x| x.bucket_us < queue_floor)
             || self.parked.len() > r.max_queue_rows
         {
             self.parked.pop_front();
@@ -150,7 +156,8 @@ impl DashStore {
                     while at + 12 <= bytes.len() {
                         let len = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap_or([0; 4]))
                             as usize;
-                        let sum = u64::from_le_bytes(bytes[at + 4..at + 12].try_into().unwrap_or([0; 8]));
+                        let sum =
+                            u64::from_le_bytes(bytes[at + 4..at + 12].try_into().unwrap_or([0; 8]));
                         at += 12;
                         if len > MAX_RECORD || at + len > bytes.len() {
                             break;
@@ -160,14 +167,18 @@ impl DashStore {
                             break;
                         }
                         if let Ok(f) = serde_json::from_slice::<Flush>(payload) {
-                            win.journaled += f.worker.len() + f.system.len() + f.queue.len() + f.parked.len();
+                            win.journaled +=
+                                f.worker.len() + f.system.len() + f.queue.len() + f.parked.len();
                             win.add(f);
                         }
                         at += len;
                         valid = at;
                     }
                     if valid < bytes.len() {
-                        OpenOptions::new().write(true).open(&path)?.set_len(valid as u64)?;
+                        OpenOptions::new()
+                            .write(true)
+                            .open(&path)?
+                            .set_len(valid as u64)?;
                     }
                 } else if !bytes.is_empty() {
                     let _ = std::fs::rename(&path, path.with_extension("db.old"));
@@ -177,7 +188,10 @@ impl DashStore {
             Err(e) => return Err(e),
         }
         if !path.exists() {
-            let mut file = OpenOptions::new().create_new(true).write(true).open(&path)?;
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&path)?;
             file.write_all(MAGIC)?;
             file.sync_all()?;
         }
@@ -251,10 +265,30 @@ impl DashStore {
         let win = self.win.lock().unwrap_or_else(|p| p.into_inner());
         let inr = |t: i64| t >= from_us && t < to_us;
         Rows {
-            worker: win.worker.iter().filter(|r| inr(r.at_us)).cloned().collect(),
-            system: win.system.iter().filter(|r| inr(r.at_us)).cloned().collect(),
-            queue: win.queue.iter().filter(|r| inr(r.bucket_us)).cloned().collect(),
-            parked: win.parked.iter().filter(|r| inr(r.bucket_us)).cloned().collect(),
+            worker: win
+                .worker
+                .iter()
+                .filter(|r| inr(r.at_us))
+                .cloned()
+                .collect(),
+            system: win
+                .system
+                .iter()
+                .filter(|r| inr(r.at_us))
+                .cloned()
+                .collect(),
+            queue: win
+                .queue
+                .iter()
+                .filter(|r| inr(r.bucket_us))
+                .cloned()
+                .collect(),
+            parked: win
+                .parked
+                .iter()
+                .filter(|r| inr(r.bucket_us))
+                .cloned()
+                .collect(),
         }
     }
 }
@@ -291,16 +325,28 @@ fn rewrite(path: &Path, win: &Window) -> io::Result<()> {
         file.write_all(&payload)
     };
     for c in win.worker.iter().cloned().collect::<Vec<_>>().chunks(CHUNK) {
-        put(&Flush { worker: c.to_vec(), ..Default::default() })?;
+        put(&Flush {
+            worker: c.to_vec(),
+            ..Default::default()
+        })?;
     }
     for c in win.system.iter().cloned().collect::<Vec<_>>().chunks(CHUNK) {
-        put(&Flush { system: c.to_vec(), ..Default::default() })?;
+        put(&Flush {
+            system: c.to_vec(),
+            ..Default::default()
+        })?;
     }
     for c in win.queue.iter().cloned().collect::<Vec<_>>().chunks(CHUNK) {
-        put(&Flush { queue: c.to_vec(), ..Default::default() })?;
+        put(&Flush {
+            queue: c.to_vec(),
+            ..Default::default()
+        })?;
     }
     for c in win.parked.iter().cloned().collect::<Vec<_>>().chunks(CHUNK) {
-        put(&Flush { parked: c.to_vec(), ..Default::default() })?;
+        put(&Flush {
+            parked: c.to_vec(),
+            ..Default::default()
+        })?;
     }
     file.sync_all()?;
     std::fs::rename(tmp, path)
@@ -311,11 +357,8 @@ mod tests {
     use super::*;
 
     fn dir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "queen-dash-{}-{}",
-            std::process::id(),
-            now_us()
-        ));
+        let d =
+            std::env::temp_dir().join(format!("queen-dash-{}-{}", std::process::id(), now_us()));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -383,7 +426,13 @@ mod tests {
             ..Default::default()
         };
         s.append(Flush {
-            queue: vec![q(now - 120 * US_PER_SEC), q(now - 3), q(now - 2), q(now - 1), q(now)],
+            queue: vec![
+                q(now - 120 * US_PER_SEC),
+                q(now - 3),
+                q(now - 2),
+                q(now - 1),
+                q(now),
+            ],
             ..Default::default()
         });
         let r = s.range(0, i64::MAX);

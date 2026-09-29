@@ -267,7 +267,12 @@ impl AppEntry {
         if at != bytes.len() {
             return Err(bad("stored entry has trailing bytes"));
         }
-        Ok(AppEntry::stored(Arc::new(pf), pf_bytes, payloads, Some(bytes)))
+        Ok(AppEntry::stored(
+            Arc::new(pf),
+            pf_bytes,
+            payloads,
+            Some(bytes),
+        ))
     }
 
     /// Await the codec work on a full entry's payloads (started at propose, on
@@ -384,9 +389,10 @@ impl AppEntry {
         if let Some(b) = self.0.pf_bytes.get() {
             return Ok(b.clone());
         }
-        let full = self.0.full.as_ref().ok_or_else(|| {
-            std::io::Error::other("a payload-free entry cannot be replicated")
-        })?;
+        let full =
+            self.0.full.as_ref().ok_or_else(|| {
+                std::io::Error::other("a payload-free entry cannot be replicated")
+            })?;
         let b = Bytes::from(
             encode_entry_payload_free(full)
                 .map_err(|e| std::io::Error::other(format!("payload-free encode: {e:?}")))?,

@@ -1253,13 +1253,16 @@ pub trait Store: Send + Sync {
     fn restore_cut(&self, _cut: CheckpointCut) {}
 }
 
+/// One keyspace's rows in a [`CheckpointCut`]: key, value (`None`: deleted).
+pub(crate) type CutRows = Vec<(std::sync::Arc<[u8]>, Option<std::sync::Arc<[u8]>>)>;
+
 /// A checkpoint cut ([`Writes::take_cut`]): every RAM row changed since the
 /// last checkpoint and its value at the cut (`None` = deleted), keyspace by
 /// keyspace (put in key order by [`Store::write_cut`], off the writer). The values are shared (`Arc`), so a cut costs
 /// one reference count per row, and a later write to a row replaces the map's
 /// value without touching the cut's.
 pub struct CheckpointCut {
-    pub(crate) rows: Vec<(Keyspace, Vec<(std::sync::Arc<[u8]>, Option<std::sync::Arc<[u8]>>)>)>,
+    pub(crate) rows: Vec<(Keyspace, CutRows)>,
     pub(crate) keys: usize,
 }
 

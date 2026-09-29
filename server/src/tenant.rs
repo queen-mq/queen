@@ -10,8 +10,8 @@
 //!
 //! Semantics (identical-when-off is load-bearing — the OSS 117/117 suite must stay
 //! green):
-//!   * flag OFF  → every request uses `config::DEFAULT_TENANT` (byte-identical to
-//!                 pre-Track-B; the DDL column defaults to the same constant).
+//!   * flag OFF → every request uses `config::DEFAULT_TENANT` (byte-identical
+//!     to pre-Track-B; the DDL column defaults to the same constant).
 //!   * flag ON, header absent/empty → `config::DEFAULT_TENANT`.
 //!   * flag ON, header present + valid UUID → that tenant (opaque; NOT validated
 //!     against anything — trust is the cell network, per §2/§5).

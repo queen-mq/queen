@@ -123,7 +123,10 @@ impl Waker for NotifierWaker {
     }
 
     fn wants_append_wakes(&self) -> bool {
-        self.gates.pinned_total.load(std::sync::atomic::Ordering::Relaxed) > 0
+        self.gates
+            .pinned_total
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0
     }
 
     fn wants_appended(&self) -> bool {
@@ -328,6 +331,10 @@ pub struct RaftFacade {
     /// while another node leads, [`RaftFacade::submit`] sends the prepared
     /// command there and waits for its own apply ([`super::remote`]).
     offload: bool,
+    /// The applied index this node must reach before it sends the leader
+    /// another pop: the highest a pop's answer waited for in vain
+    /// ([`RaftFacade::pop_gate_open`]).
+    pop_floor: std::sync::atomic::AtomicU64,
     data_dir: PathBuf,
     storage_full: std::sync::atomic::AtomicBool,
     storage_pressure_enabled: bool,
@@ -393,6 +400,13 @@ impl RaftFacade {
     #[cfg(test)]
     pub(crate) fn repl_for_test(&self) -> Arc<NodeReplicator<HeedStore>> {
         self.repl.clone()
+    }
+
+    /// As if a pop's answer had waited in vain for this node to apply `index`.
+    #[cfg(test)]
+    pub(crate) fn hold_pops_until_for_test(&self, index: u64) {
+        self.pop_floor
+            .fetch_max(index, std::sync::atomic::Ordering::AcqRel);
     }
 
     #[cfg(test)]
@@ -694,6 +708,7 @@ impl RaftFacade {
             autopilot: super::autopilot::Autopilot::from_env(),
             admit,
             offload,
+            pop_floor: std::sync::atomic::AtomicU64::new(0),
             data_dir: dir,
             storage_full: std::sync::atomic::AtomicBool::new(false),
             storage_pressure_enabled,
@@ -738,6 +753,7 @@ impl RaftFacade {
             disk_high_pct: _,
             disk_low_pct: _,
             offload: _,
+            pop_floor: _,
         } = self;
         drop(cmd_tx); // the batcher sees a closed channel, drains, and exits
         let _ = batcher_join.await; // its Arc<repl>/Arc<store> drop here
@@ -868,6 +884,14 @@ impl RaftFacade {
                     Err(_elapsed) => return Err(RsmError::Timeout),
                 }
             } else {
+                let pop = matches!(
+                    command,
+                    Command::PopWildcard(_) | Command::PopPinned(_) | Command::PopDiscover(_)
+                );
+                if pop && !self.pop_gate_open(ctx).await {
+                    crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.fwd_pops_gated, 1);
+                    return Err(RsmError::Timeout);
+                }
                 let b = match &body {
                     Some(b) => b.clone(),
                     None => {
@@ -879,11 +903,7 @@ impl RaftFacade {
                         b
                     }
                 };
-                match self
-                    .repl
-                    .forward_command(b, ctx.deadline.remaining())
-                    .await
-                {
+                match self.repl.forward_command(b, ctx.deadline.remaining()).await {
                     Ok(answer) => match super::remote::decode_reply(&answer)? {
                         (Reply::Retry { .. }, _) => {}
                         (reply @ Reply::Done { .. }, upto) => {
@@ -896,7 +916,12 @@ impl RaftFacade {
                                 // in time: hand the leases back now, instead of
                                 // letting each hold its partition for the whole
                                 // lease (measured on a 3-node cluster: ~1% of
-                                // messages ~30 s late).
+                                // messages ~30 s late), and send no pop again
+                                // before this node has got that far.
+                                if pop {
+                                    self.pop_floor
+                                        .fetch_max(upto, std::sync::atomic::Ordering::AcqRel);
+                                }
                                 self.release_unanswered(&command, &reply);
                                 return Err(RsmError::Timeout);
                             }
@@ -926,6 +951,27 @@ impl RaftFacade {
             tokio::time::sleep(nap).await;
             backoff = (backoff * 2).min(Duration::from_millis(200));
         }
+    }
+
+    /// Whether this node may send the leader a pop now. Its claims are leases
+    /// only this node can deliver, so once an answer came too late (the
+    /// caller's deadline passed before this node applied the claim), the next
+    /// pop first waits until this node has applied that far — and is not sent
+    /// if that did not happen in time, or took more than the budget left
+    /// (answering a claim takes about as long again). A node that fell behind
+    /// stops taking partitions it cannot serve, and the one it just released
+    /// goes to a consumer of a node that can. (Jepsen P12 W5, a follower whose
+    /// disk was 300 ms slow: its callers' pops took one partition, released it
+    /// at their deadline and, sent again at once, took it again first; every
+    /// consumer elsewhere found the queue empty until the drain gave up.)
+    async fn pop_gate_open(&self, ctx: &ReqCtx) -> bool {
+        let floor = self.pop_floor.load(std::sync::atomic::Ordering::Acquire);
+        if self.repl.applied_index() >= floor {
+            return true;
+        }
+        let t0 = std::time::Instant::now();
+        self.repl.wait_applied(floor, ctx.deadline.instant()).await
+            && ctx.deadline.remaining() >= t0.elapsed()
     }
 
     /// A pop the leader answered with claims this node will not deliver (its
@@ -990,7 +1036,13 @@ impl RaftFacade {
     /// optimisation.
     /// The pop autopilot's width input: the group's partitions claimable now,
     /// counted up to `cap` off the committed store (`None` when unknown).
-    async fn ready_count(&self, tenant: &str, queue: &str, group: &str, cap: usize) -> Option<usize> {
+    async fn ready_count(
+        &self,
+        tenant: &str,
+        queue: &str,
+        group: &str,
+        cap: usize,
+    ) -> Option<usize> {
         let store = self.store.clone();
         let tenant = tenant.to_string();
         let queue = queue.to_string();
@@ -1337,9 +1389,9 @@ impl RaftFacade {
                             .find(|k| v.get(*k).is_some_and(|x| !x.is_array() && !x.is_null()))
                     });
                 let msg = match rider {
-                    Some(k) => format!(
-                        "`{k}` must be an array at the TOP LEVEL of the transaction body"
-                    ),
+                    Some(k) => {
+                        format!("`{k}` must be an array at the TOP LEVEL of the transaction body")
+                    }
                     None => format!("bad body: {e}"),
                 };
                 return Ok(refuse("bad_request", &msg));
@@ -1821,7 +1873,8 @@ impl RaftFacade {
         // Dashboard counters (data.rs ≈6090): one transaction, and one per
         // distinct queue it pushed to; its DLQ filings.
         if let Some(m) = crate::metrics::global() {
-            m.transactions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            m.transactions
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
             for p in &pushes {
                 if seen.insert(p.queue.as_str()) {
@@ -1850,7 +1903,7 @@ impl RaftFacade {
 // ---------------------------------------------------------------------------
 
 /// The frame codec stores a transaction id behind a u16 length
-/// (`frames::pack_frames`, `handlers::data::MAX_TXN_BYTES`), so the push paths
+/// (`frames::pack_frames`), so the push paths
 /// enforce the limit themselves: a longer id
 /// packs a frame whose declared txn length is truncated — a `debug_assert`
 /// panic in debug, a corrupt stored frame in release (found by W7 fuzzing).
@@ -2592,17 +2645,18 @@ impl RaftFacade {
             // deadline is not started — a pop that times out while queued still
             // CLAIMS, and nobody would ever ack that lease.
             if attempt > 0 && ctx.deadline.remaining() < *POP_SUBMIT_MIN {
-                return self.answer_pop(
-                    ctx,
-                    &queue,
-                    &group,
-                    &worker,
-                    auto_ack,
-                    Vec::new(),
-                    options.conflate_requested,
-                    last_plan,
-                )
-                .await;
+                return self
+                    .answer_pop(
+                        ctx,
+                        &queue,
+                        &group,
+                        &worker,
+                        auto_ack,
+                        Vec::new(),
+                        options.conflate_requested,
+                        last_plan,
+                    )
+                    .await;
             }
             attempt += 1;
             // P1.2: the planner refuses to claim once nobody can receive the answer.
@@ -2744,65 +2798,71 @@ impl RaftFacade {
                     self.autopilot
                         .delivered(&gate_key, &worker, n.min(u32::MAX as u64) as u32);
                 }
-                return self.answer_pop(
-                    ctx,
-                    &queue,
-                    &group,
-                    &worker,
-                    auto_ack,
-                    claims,
-                    options.conflate_requested,
-                    last_plan,
-                )
-                .await;
+                return self
+                    .answer_pop(
+                        ctx,
+                        &queue,
+                        &group,
+                        &worker,
+                        auto_ack,
+                        claims,
+                        options.conflate_requested,
+                        last_plan,
+                    )
+                    .await;
             }
 
             // Empty. Long-poll only for a queue-scoped pop (§9.5); discovery has
             // no single gate here.
             if !wait || partition.is_none() && (!namespace.is_empty() || !task.is_empty()) {
-                return self.answer_pop(
-                    ctx,
-                    &queue,
-                    &group,
-                    &worker,
-                    auto_ack,
-                    Vec::new(),
-                    options.conflate_requested,
-                    last_plan,
-                )
-                .await;
+                return self
+                    .answer_pop(
+                        ctx,
+                        &queue,
+                        &group,
+                        &worker,
+                        auto_ack,
+                        Vec::new(),
+                        options.conflate_requested,
+                        last_plan,
+                    )
+                    .await;
             }
             let remaining = ctx.deadline.remaining();
             if remaining.is_zero() {
-                return self.answer_pop(
-                    ctx,
-                    &queue,
-                    &group,
-                    &worker,
-                    auto_ack,
-                    Vec::new(),
-                    options.conflate_requested,
-                    last_plan,
-                )
-                .await;
+                return self
+                    .answer_pop(
+                        ctx,
+                        &queue,
+                        &group,
+                        &worker,
+                        auto_ack,
+                        Vec::new(),
+                        options.conflate_requested,
+                        last_plan,
+                    )
+                    .await;
             }
             let park = remaining.min(self.pop_park_recheck);
             // The dashboard's parked gauge (1 Hz samples, data.rs ≈1197).
             let _parked = crate::metrics::global().map(|m| m.parked.enter(&ctx.tenant, &queue));
-            let _pinned = partition.is_some().then(|| self.gates.park_pinned(&gate_key));
+            let _pinned = partition
+                .is_some()
+                .then(|| self.gates.park_pinned(&gate_key));
             woke = self.gates.wait(&gate_key, park).await;
             if ctx.deadline.expired() {
-                return self.answer_pop(
-                    ctx,
-                    &queue,
-                    &group,
-                    &worker,
-                    auto_ack,
-                    Vec::new(),
-                    options.conflate_requested,
-                    last_plan,
-                )
-                .await;
+                return self
+                    .answer_pop(
+                        ctx,
+                        &queue,
+                        &group,
+                        &worker,
+                        auto_ack,
+                        Vec::new(),
+                        options.conflate_requested,
+                        last_plan,
+                    )
+                    .await;
             }
             // Loop and re-poll.
         }
@@ -3443,7 +3503,8 @@ impl RaftFacade {
             for (i, (q, ok, failed)) in tallies.iter().enumerate() {
                 m.per_queue.add_ack(&ctx.tenant, q, *ok, *failed);
                 if let Some(r) = results.get(i) {
-                    m.per_queue.add_conflated(&ctx.tenant, q, r.conflated as u64);
+                    m.per_queue
+                        .add_conflated(&ctx.tenant, q, r.conflated as u64);
                     m.conflated.fetch_add(r.conflated as u64, Relaxed);
                 }
             }
@@ -3524,9 +3585,9 @@ fn resolve_ack_targets(
             // common case and costs no hash lookup.
             let mut last: Option<(usize, usize, bool)> = None;
             for (fi, f) in flats.iter().enumerate() {
-                if !parts.contains_key(&f.pid) {
+                if let std::collections::hash_map::Entry::Vacant(e) = parts.entry(f.pid) {
                     let row = r.partition(f.pid)?;
-                    parts.insert(f.pid, row);
+                    e.insert(row);
                 }
                 let Some(part) = parts.get(&f.pid).and_then(|p| p.as_ref()) else {
                     bad.push((f.index, format!("{NO_PARTITION} {}", f.pid)));
@@ -3790,10 +3851,6 @@ fn render_ack(
                         .is_some_and(|all| res.dlq >= *all || p.status == AckStatus::Dlq);
                 let error = if stale && p.lease_invalid {
                     Some("invalid or expired lease")
-                } else if stale && !matches!(p.status, AckStatus::Ok) {
-                    Some(
-                            "transaction is unresolvable, already committed, or acknowledgment is stale",
-                        )
                 } else if stale {
                     Some(
                             "transaction is unresolvable, already committed, or acknowledgment is stale",
@@ -4571,7 +4628,7 @@ pub fn real_builder(ctx: &RsmBuildCtx) -> Arc<dyn Rsm> {
 // ---------------------------------------------------------------------------
 
 /// Splice bytes expected to be valid UTF-8 (payload JSON), lossy on the rare
-/// invalid tail — the same policy as `handlers/data.rs::push_utf8`.
+/// invalid tail: std's `from_utf8` check is much cheaper than the lossy walk.
 fn push_utf8(out: &mut String, bytes: &[u8]) {
     match std::str::from_utf8(bytes) {
         Ok(s) => out.push_str(s),

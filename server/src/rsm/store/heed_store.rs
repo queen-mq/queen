@@ -1650,11 +1650,7 @@ impl<'s> HeedWrite<'s> {
         if self.txn.is_none() {
             // An all-RAM handle opens none up front; an LMDB-direct write (no
             // keyspace is one today) opens it on demand.
-            let t = self
-                .store
-                .env
-                .write_txn()
-                .map_err(|e| err(self.store, e))?;
+            let t = self.store.env.write_txn().map_err(|e| err(self.store, e))?;
             StoreMetrics::inc(&self.store.metrics.write_txns, 1);
             self.txn = Some(t);
         }

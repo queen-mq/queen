@@ -42,10 +42,13 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// One cluster test at a time: each runs three full nodes (stores, apply
 /// threads, runtimes), and the suite runs hundreds of store tests beside them.
-static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// An async mutex: a test holds its guard across every await of its run, and
+/// the tests (each on its own runtime) queue on it. A test that panics drops
+/// its guard, so the next one starts (no poisoning to clear).
+static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn serial() -> std::sync::MutexGuard<'static, ()> {
-    ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner())
+async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
+    ONE_AT_A_TIME.lock().await
 }
 
 /// `QUEEN_TEST_LOG=<filter>` prints the nodes' logs (one test at a time).
@@ -304,7 +307,7 @@ fn converge(nodes: Vec<Option<RaftReplicator<HeedStore>>>, total: u64, tag: &str
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn three_nodes_apply_the_same_entries() {
-    let _one = serial();
+    let _one = serial().await;
     const N: u64 = 300;
     let entries = workload(SEED, N);
     let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("replicate")).collect();
@@ -322,7 +325,7 @@ async fn three_nodes_apply_the_same_entries() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_new_leader_takes_over_and_the_old_one_catches_up() {
-    let _one = serial();
+    let _one = serial().await;
     const N: u64 = 150;
     let entries = workload(SEED, 2 * N);
     let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("failover")).collect();
@@ -381,7 +384,7 @@ fn heard(r: &RaftReplicator<HeedStore>, member: u64) -> Option<(u64, u64)> {
 /// back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_node_reports_the_leaders_view_of_who_is_live() {
-    let _one = serial();
+    let _one = serial().await;
     log_init();
     let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("members")).collect();
     let ports = free_ports(3);
@@ -474,7 +477,7 @@ async fn every_node_reports_the_leaders_view_of_who_is_live() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_follower_catches_up_from_the_queue_logs() {
-    let _one = serial();
+    let _one = serial().await;
     const N: u64 = 200;
     let entries = workload(SEED, 2 * N);
     let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("disk")).collect();
@@ -514,7 +517,7 @@ async fn a_follower_catches_up_from_the_queue_logs() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_follower_behind_the_purge_point_gets_a_snapshot() {
-    let _one = serial();
+    let _one = serial().await;
     log_init();
     const N: u64 = 200;
     let entries = workload(SEED, 3 * N);
@@ -604,7 +607,7 @@ async fn a_follower_behind_the_purge_point_gets_a_snapshot() {
 /// stopped answering, and the cluster goes on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_leader_on_its_way_out_hands_leadership_to_a_live_peer() {
-    let _one = serial();
+    let _one = serial().await;
     log_init();
     const N: u64 = 100;
     let entries = workload(SEED, 2 * N);
@@ -665,7 +668,7 @@ async fn a_leader_on_its_way_out_hands_leadership_to_a_live_peer() {
 /// in an election when it exits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_node_that_handed_off_is_not_handed_leadership_back() {
-    let _one = serial();
+    let _one = serial().await;
     log_init();
     const N: u64 = 100;
     let entries = workload(SEED, 2 * N);
@@ -805,7 +808,7 @@ fn push_body(n: u64) -> Vec<u8> {
 /// (Jepsen P8 smokes: KV puts 10 s, a push 5 s whose entry had committed).
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn a_request_in_flight_across_a_leader_transfer_is_answered_quickly() {
-    let _one = serial();
+    let _one = serial().await;
     log_init();
     let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("transfer")).collect();
     let ports = free_ports(3);
@@ -885,6 +888,77 @@ async fn a_request_in_flight_across_a_leader_transfer_is_answered_quickly() {
         failed.is_empty(),
         "every push is answered (a retry is taken to the new leader): {failed:?}"
     );
+    for n in nodes.into_iter().flatten() {
+        close_facade(n).await;
+    }
+    for d in dirs {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+/// A node behind where a pop's answer last came too late sends no pop to the
+/// leader until it has applied that far: its callers' pops fail without taking
+/// a lease, and the partition stays for consumers of nodes that can deliver it.
+/// (Jepsen P12 W5: a follower with a slow disk took one partition, released it
+/// at its callers' deadline and took it again first, over and over.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_behind_its_last_late_answer_takes_no_lease() {
+    use crate::rsm::facade::{Deadline, PopOptions, PopReq, PushReq, ReqCtx, RsmError};
+    let _one = serial().await;
+    log_init();
+    let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("popgate")).collect();
+    let ports = free_ports(3);
+    let opts = vec![test_opts(); 3];
+    let nodes = open_facades(&dirs, &opts, |id| cluster_config(&ports, id)).await;
+    let l = facade_leader(&nodes).await;
+    let leader = nodes[l].clone().expect("leader");
+    let follower = nodes[(l + 1) % 3].clone().expect("follower");
+    let ctx = |ms: u64| {
+        ReqCtx::new(
+            crate::config::DEFAULT_TENANT,
+            Deadline::after(Duration::from_millis(ms)),
+        )
+    };
+    let pop = |wait: bool| PopReq {
+        queue: "gate".into(),
+        group: Some("g".into()),
+        batch: 1,
+        auto_ack: false,
+        wait,
+        timeout_ms: 300,
+        options: PopOptions {
+            lease_seconds: 30,
+            subscription_mode: "all".into(),
+            ..PopOptions::default()
+        },
+    };
+    let raw = br#"{"items":[{"queue":"gate","partition":"p","payload":{"n":1}}]}"#;
+    leader
+        .push(ctx(5_000), PushReq { raw: raw.to_vec() })
+        .await
+        .expect("push");
+    let t0 = Instant::now();
+    follower.hold_pops_until_for_test(u64::MAX / 2);
+    let r = follower.pop_wildcard(ctx(300), pop(true)).await;
+    assert!(
+        matches!(r, Err(RsmError::Timeout)),
+        "a node that cannot catch up in time answers a timeout: {r:?}"
+    );
+    assert!(t0.elapsed() < Duration::from_secs(2), "within its deadline");
+
+    // No lease was taken: a consumer of the leader gets the message at once,
+    // on its first delivery.
+    let out = leader
+        .pop_wildcard(ctx(5_000), pop(false))
+        .await
+        .expect("pop");
+    assert!(!out.empty, "the message is still there: {}", out.body);
+    assert!(
+        out.body.contains("\"deliveryAttempt\":1"),
+        "delivered for the first time: {}",
+        out.body
+    );
+    drop((leader, follower));
     for n in nodes.into_iter().flatten() {
         close_facade(n).await;
     }
@@ -994,7 +1068,7 @@ async fn until_silent(r: &RaftReplicator<HeedStore>, id: u64) {
 /// again changes nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_dead_voter_is_removed_and_the_cluster_keeps_writing() {
-    let _one = serial();
+    let _one = serial().await;
     log_init();
     const N: u64 = 100;
     let entries = workload(SEED, 2 * N);
@@ -1076,7 +1150,7 @@ async fn a_dead_voter_is_removed_and_the_cluster_keeps_writing() {
 /// addresses a refusal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_new_node_joins_as_a_learner_catches_up_and_is_promoted() {
-    let _one = serial();
+    let _one = serial().await;
     log_init();
     const N: u64 = 150;
     let entries = workload(SEED, 3 * N);
@@ -1182,7 +1256,7 @@ async fn a_new_node_joins_as_a_learner_catches_up_and_is_promoted() {
 /// voter, and — left on after members were added — refuses to recover again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn one_survivor_is_force_recovered_and_two_new_nodes_join_it() {
-    let _one = serial();
+    let _one = serial().await;
     log_init();
     const N: u64 = 100;
     let entries = workload(SEED, 3 * N);
@@ -1295,7 +1369,7 @@ async fn one_survivor_is_force_recovered_and_two_new_nodes_join_it() {
 /// whatever the survivor did not hold.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_survivors_directory_cloned_onto_two_new_nodes_forms_the_cluster_again() {
-    let _one = serial();
+    let _one = serial().await;
     log_init();
     const N: u64 = 100;
     let entries = workload(SEED, 2 * N);
@@ -1410,7 +1484,7 @@ fn poisoned_entry(
 /// digest is refused at boot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_entry_every_node_refuses_is_skipped_and_leaves_nothing_behind() {
-    let _one = serial();
+    let _one = serial().await;
     log_init();
     const K: u64 = 60;
     const N: u64 = 160;
@@ -1619,7 +1693,7 @@ async fn the_membership_endpoints_answer_through_the_router() {
     use axum::http::{Method, Request, StatusCode};
     use tower::ServiceExt;
 
-    let _one = serial();
+    let _one = serial().await;
     log_init();
     let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("endpoints")).collect();
     let ports = free_ports(3);
@@ -1775,7 +1849,7 @@ async fn the_membership_endpoints_answer_through_the_router() {
 /// (Jepsen membership nemesis, 2026-09-25).
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn writes_go_on_across_membership_changes() {
-    let _one = serial();
+    let _one = serial().await;
     log_init();
     let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("member-writes")).collect();
     let ports = free_ports(4);
@@ -1872,7 +1946,7 @@ async fn writes_go_on_across_membership_changes() {
 /// find its state and join, and the cluster's state is node 1's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fresh_nodes_wait_while_the_node_with_the_data_is_silent() {
-    let _one = serial();
+    let _one = serial().await;
     log_init();
     const N: u64 = 60;
     let entries = workload(SEED, 2 * N);

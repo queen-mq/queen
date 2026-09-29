@@ -545,7 +545,7 @@ fn prealloc_zero_run_is_cut_at_roll_and_reopen() {
     {
         let (mut q, _) = QLog::open(td.path(), qid, opts).unwrap();
         fill(&mut q, 3, warm);
-        let active = q.files().last().unwrap().clone();
+        let active = *q.files().last().unwrap();
         let phys = std::fs::metadata(qlog_file(td.path(), qid, active.id))
             .unwrap()
             .len();
@@ -569,7 +569,7 @@ fn prealloc_zero_run_is_cut_at_roll_and_reopen() {
     assert!(!rep.truncated_tail, "a zero run is not a torn tail");
     assert_eq!(rep.records, n);
     assert_eq!(rep.rebuilt_indexes, 0);
-    let active = q.files().last().unwrap().clone();
+    let active = *q.files().last().unwrap();
     let phys = std::fs::metadata(qlog_file(td.path(), qid, active.id))
         .unwrap()
         .len();
@@ -907,7 +907,7 @@ fn crash_header_short_newest_file_is_dropped() {
     }
     // Simulate the half-created next file.
     let next = last_good + 1;
-    std::fs::write(&qlog_file(td.path(), 1, next), b"QNQ").unwrap(); // < 32 bytes
+    std::fs::write(qlog_file(td.path(), 1, next), b"QNQ").unwrap(); // < 32 bytes
 
     let (mut q, rep) = QLog::open(td.path(), 1, opts).unwrap();
     assert!(rep.truncated_tail);
@@ -1109,7 +1109,11 @@ fn prealloc_waits_for_sustained_traffic_and_sizes_the_run_to_it() {
     assert_eq!(run(MIB, 0, 1, 2048), Some(MIB));
     assert_eq!(run(MIB, 0, 1, 0), None, "no estimate yet");
     assert_eq!(run(MIB, 0, 1, 40 << 10), None, "big syncs need no run");
-    assert_eq!(run(0, 64, 1000, 2048), None, "QUEEN_RAFT_QLOG_PREALLOC_KB=0");
+    assert_eq!(
+        run(0, 64, 1000, 2048),
+        None,
+        "QUEEN_RAFT_QLOG_PREALLOC_KB=0"
+    );
     // Gated: nothing before the 64th sync (a queue's create + first contact)…
     assert_eq!(run(MIB, 64, 63, 2048), None);
     // …then about 64 syncs' worth: 64 × 2 KiB.
@@ -1117,7 +1121,11 @@ fn prealloc_waits_for_sustained_traffic_and_sizes_the_run_to_it() {
     // Clamped to [64 KiB, chunk].
     assert_eq!(run(MIB, 64, 64, 100), Some(64 << 10));
     assert_eq!(run(MIB, 64, 1000, 30 << 10), Some(MIB));
-    assert_eq!(run(32 << 10, 64, 1000, 100), Some(32 << 10), "a chunk under the floor wins");
+    assert_eq!(
+        run(32 << 10, 64, 1000, 100),
+        Some(32 << 10),
+        "a chunk under the floor wins"
+    );
 }
 
 /// Jepsen P5 (`repro/qlog-bitflip-hole.sh`): one damaged byte in the middle of
@@ -1146,10 +1154,15 @@ fn damage_inside_durable_records_refuses_the_open() {
             .err()
             .expect("a damaged durable record must refuse the open");
         assert!(
-            err.to_string().contains("corruption inside acknowledged data"),
+            err.to_string()
+                .contains("corruption inside acknowledged data"),
             "{err}"
         );
-        assert_eq!(std::fs::read(&path).unwrap(), bytes, "the refusal cut nothing");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "the refusal cut nothing"
+        );
 
         // Only the records after the damage are above the durable index: the
         // torn-tail rule, as before.
@@ -1470,7 +1483,10 @@ fn reclaim_step_unlinks_every_dead_file_and_caps_rewrites() {
     assert!(step.changed >= 2, "several dead files unlinked in one step");
     assert!(q.file_count() < before);
     for offset in 0..20 {
-        assert!(q.read_payload(11, offset).unwrap().is_some(), "live pid 11 survives");
+        assert!(
+            q.read_payload(11, offset).unwrap().is_some(),
+            "live pid 11 survives"
+        );
     }
 }
 

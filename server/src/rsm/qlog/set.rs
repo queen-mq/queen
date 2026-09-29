@@ -61,9 +61,9 @@
 
 use std::collections::BTreeMap;
 use std::io;
+use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::os::unix::fs::FileExt;
 use std::sync::{Arc, RwLock};
 
 use crate::rsm::qlog::{
@@ -749,7 +749,10 @@ fn read_lanes_file(root: &std::path::Path) -> io::Result<Option<u64>> {
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("{}: not a lane count: {s:?}", root.join(LANES_FILE).display()),
+                    format!(
+                        "{}: not a lane count: {s:?}",
+                        root.join(LANES_FILE).display()
+                    ),
                 )
             }),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -2250,7 +2253,10 @@ impl QLogReader {
     pub fn describe(&self, queue_id: u64, pid: u64, offset: u64) -> String {
         let id = self.log_id_for(queue_id, pid);
         match self.log(id) {
-            Some(l) => format!("log {id}: {}", l.read().expect("qlog poisoned").describe(pid, offset)),
+            Some(l) => format!(
+                "log {id}: {}",
+                l.read().expect("qlog poisoned").describe(pid, offset)
+            ),
             None => format!("log {id}: not open"),
         }
     }

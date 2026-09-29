@@ -807,7 +807,7 @@ fn cadence_independence(pending_transitions: bool) {
                 node.store(),
                 &node.seg_dir(),
                 seg_opts(),
-                cfg.clone(),
+                cfg,
                 Arc::new(crate::rsm::apply::NoNotify),
             )
             .expect("open");
@@ -899,7 +899,7 @@ fn pending_transitions_rebuild_from_pending_equals_the_live_rings() {
             node.store(),
             &node.seg_dir(),
             seg_opts(),
-            cfg.clone(),
+            cfg,
             Arc::new(crate::rsm::apply::NoNotify),
         )
         .expect("open");
@@ -1332,7 +1332,7 @@ fn a_lease_expiry_re_arms_the_live_ring_at_the_next_entry() {
     a.commit().expect("commit");
     let rebuilt = node
         .store()
-        .read(|r| Ok(crate::rsm::state::Derived::rebuild(r, exp + 1)?))
+        .read(|r| crate::rsm::state::Derived::rebuild(r, exp + 1))
         .expect("read");
     assert!(
         rebuilt.ring_has_ready(TENANT, QUEUE, "g1"),
@@ -1461,7 +1461,7 @@ fn slow_consumers_never_leave_the_ring_empty_while_lag_remains() {
     let mut lease_exp = [None::<i64>; N as usize];
     let mut idx = 2u64;
     let mut ids = 1_000u64;
-    for p in 0..N as usize {
+    for (p, last_p) in last.iter_mut().enumerate() {
         a.apply(
             &Build::new(BASE_US + 10 + p as i64, 1 + N, ids)
                 .cmd(vec![Effect::Append {
@@ -1476,7 +1476,7 @@ fn slow_consumers_never_leave_the_ring_empty_while_lag_remains() {
                 .at(idx, 1),
         )
         .expect("seed");
-        last[p] = 2;
+        *last_p = 2;
         idx += 1;
         ids += 1;
     }
@@ -1588,7 +1588,7 @@ fn crash_at_non_durable_commit(pending_transitions: bool) {
             clean.store(),
             &clean.seg_dir(),
             seg_opts(),
-            cfg.clone(),
+            cfg,
             Arc::new(crate::rsm::apply::NoNotify),
         )
         .expect("open");
@@ -1609,7 +1609,7 @@ fn crash_at_non_durable_commit(pending_transitions: bool) {
             node.store(),
             &node.seg_dir(),
             seg_opts(),
-            cfg.clone(),
+            cfg,
             Arc::new(crate::rsm::apply::NoNotify),
         )
         .expect("open");
@@ -1634,7 +1634,7 @@ fn crash_at_non_durable_commit(pending_transitions: bool) {
             node.store(),
             &node.seg_dir(),
             seg_opts(),
-            cfg.clone(),
+            cfg,
             Arc::new(crate::rsm::apply::NoNotify),
         )
         .expect("open");
@@ -2387,10 +2387,17 @@ fn retention_takes_the_dead_letters_it_passes_and_moves_the_oldest_stamp() {
         .read(|r| {
             for (id, _, offset) in dead {
                 let kept = r.dlq(TENANT, QUEUE, &uuid(100 + id)).unwrap().is_some();
-                assert_eq!(kept, offset < 0 || offset >= 3, "dead letter {id} at {offset}");
+                assert_eq!(
+                    kept,
+                    !(0..3).contains(&offset),
+                    "dead letter {id} at {offset}"
+                );
             }
             assert_eq!(r.partition_counter(1, Counter::DlqCount).unwrap(), 2);
-            assert_eq!(r.queue_counter(TENANT, QUEUE, Counter::DlqCount).unwrap(), 2);
+            assert_eq!(
+                r.queue_counter(TENANT, QUEUE, Counter::DlqCount).unwrap(),
+                2
+            );
             let p = r.partition(1).unwrap().unwrap();
             assert_eq!(p.oldest_live_at_us, Some(BASE_US + 13), "offset 3's stamp");
             Ok(())
@@ -5857,7 +5864,11 @@ fn an_async_point_whose_cut_fails_reports_nothing_and_stops_the_node() {
     node.store().restore_cut(cut);
     let refused = a.checkpoint_done(at, Err(e)).unwrap_err();
     assert!(refused.lost_durable_point(), "{refused}");
-    assert_eq!(a.durable_index(), durable_before, "no durable index reported");
+    assert_eq!(
+        a.durable_index(),
+        durable_before,
+        "no durable index reported"
+    );
     assert_eq!(a.stats().durable_points_failed, 1);
     // The node stops: nothing else is applied.
     let next = a.apply(
@@ -5873,5 +5884,8 @@ fn an_async_point_whose_cut_fails_reports_nothing_and_stops_the_node() {
             }])
             .at(index, 1),
     );
-    assert!(next.is_err(), "a node whose durable point failed applies nothing");
+    assert!(
+        next.is_err(),
+        "a node whose durable point failed applies nothing"
+    );
 }

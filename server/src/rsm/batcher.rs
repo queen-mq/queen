@@ -2366,59 +2366,56 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         let lanes_n = self.cfg.lanes;
         let epoch0 = self.plan_epoch;
         let hold0 = self.holding_until.is_some();
-        let rx = self
-            .planner_thread
-            .run(move |state| {
-                let w0 = Instant::now();
-                let c0 = crate::rsm::timing::thread_cpu_ns();
-                let r = if lanes_n > 1 {
-                    let ls = state
-                        .lanes
-                        .get_or_insert_with(|| Box::new(lanes::LanesState::new(lanes_n)));
-                    lanes::plan_cycle_lanes(
-                        &store,
-                        &front,
-                        ls,
-                        keep,
-                        reader,
-                        qlog_reader,
-                        folded,
-                        commands,
-                        cfg,
-                        wall_us,
-                        expire_window_us,
-                        kv_sweep_limit,
-                        fire_cfg,
-                        maintenance_cfg,
-                    )
-                } else {
-                    plan_cycle_blocking(
-                        &*store,
-                        &front,
-                        state,
-                        keep,
-                        reader,
-                        qlog_reader,
-                        folded,
-                        commands,
-                        cfg,
-                        wall_us,
-                        expire_window_us,
-                        kv_sweep_limit,
-                        fire_cfg,
-                        maintenance_cfg,
-                        scan,
-                    )
-                };
-                if crate::rsm::timing::enabled() {
-                    let tm = crate::rsm::timing::metrics();
-                    tm.plan_whole_wall.record_dur(w0.elapsed());
-                    tm.plan_whole_cpu
-                        .record(crate::rsm::timing::thread_cpu_ns().saturating_sub(c0));
-                }
-                r
-            })
-            ;
+        let rx = self.planner_thread.run(move |state| {
+            let w0 = Instant::now();
+            let c0 = crate::rsm::timing::thread_cpu_ns();
+            let r = if lanes_n > 1 {
+                let ls = state
+                    .lanes
+                    .get_or_insert_with(|| Box::new(lanes::LanesState::new(lanes_n)));
+                lanes::plan_cycle_lanes(
+                    &store,
+                    &front,
+                    ls,
+                    keep,
+                    reader,
+                    qlog_reader,
+                    folded,
+                    commands,
+                    cfg,
+                    wall_us,
+                    expire_window_us,
+                    kv_sweep_limit,
+                    fire_cfg,
+                    maintenance_cfg,
+                )
+            } else {
+                plan_cycle_blocking(
+                    &*store,
+                    &front,
+                    state,
+                    keep,
+                    reader,
+                    qlog_reader,
+                    folded,
+                    commands,
+                    cfg,
+                    wall_us,
+                    expire_window_us,
+                    kv_sweep_limit,
+                    fire_cfg,
+                    maintenance_cfg,
+                    scan,
+                )
+            };
+            if crate::rsm::timing::enabled() {
+                let tm = crate::rsm::timing::metrics();
+                tm.plan_whole_wall.record_dur(w0.elapsed());
+                tm.plan_whole_cpu
+                    .record(crate::rsm::timing::thread_cpu_ns().saturating_sub(c0));
+            }
+            r
+        });
         // While the planner thread plans, keep answering the entries that
         // landed: a slot freed now is reused by the next cycle at once, rather
         // than after this one (each cycle used to wait out the planning of the
@@ -3634,10 +3631,26 @@ mod clock_tests {
         let t0 = Instant::now();
         let anchor = Some((1_000 * S, t0));
         let t1 = t0 + Duration::from_secs(10);
-        assert_eq!(paced_wall(anchor, 1_010 * S, t1), 1_010 * S, "in step with the wall");
-        assert_eq!(paced_wall(anchor, 1_310 * S, t1), 1_010 * S, "a 300 s leap: ignored");
-        assert_eq!(paced_wall(anchor, 840 * S, t1), 1_010 * S, "a 170 s drop: ignored");
+        assert_eq!(
+            paced_wall(anchor, 1_010 * S, t1),
+            1_010 * S,
+            "in step with the wall"
+        );
+        assert_eq!(
+            paced_wall(anchor, 1_310 * S, t1),
+            1_010 * S,
+            "a 300 s leap: ignored"
+        );
+        assert_eq!(
+            paced_wall(anchor, 840 * S, t1),
+            1_010 * S,
+            "a 170 s drop: ignored"
+        );
         let t2 = t0 + Duration::from_secs(13);
-        assert_eq!(paced_wall(anchor, 0, t2), 1_013 * S, "3 s of real time is 3 s");
+        assert_eq!(
+            paced_wall(anchor, 0, t2),
+            1_013 * S,
+            "3 s of real time is 3 s"
+        );
     }
 }

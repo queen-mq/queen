@@ -561,10 +561,7 @@ mod server {
         json_answer(&st.raft.append_entries(req).await)
     }
 
-    async fn vote<S: Store + 'static>(
-        State(st): State<Arc<RpcState<S>>>,
-        body: Bytes,
-    ) -> Response {
+    async fn vote<S: Store + 'static>(State(st): State<Arc<RpcState<S>>>, body: Bytes) -> Response {
         match serde_json::from_slice::<VoteRequest<TypeConfig>>(&body) {
             Ok(req) => json_answer(&st.raft.vote(req).await),
             Err(e) => bad_request(e),
@@ -611,7 +608,11 @@ mod server {
         body: Bytes,
     ) -> Response {
         let Some(h) = st.remote.get().cloned() else {
-            return (StatusCode::SERVICE_UNAVAILABLE, "no facade on this node yet").into_response();
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no facade on this node yet",
+            )
+                .into_response();
         };
         match h(body).await {
             Ok(b) => (
@@ -632,10 +633,18 @@ mod server {
         body: Bytes,
     ) -> Response {
         let Some(h) = st.local.get().cloned() else {
-            return (StatusCode::SERVICE_UNAVAILABLE, "no facade on this node yet").into_response();
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no facade on this node yet",
+            )
+                .into_response();
         };
         match h(body).await {
-            Ok(b) => (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], b)
+            Ok(b) => (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                b,
+            )
                 .into_response(),
             Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
         }
@@ -644,9 +653,7 @@ mod server {
     /// A follower's linearizable read point: this node confirms it still leads
     /// (a heartbeat round) and answers the RSM index the follower must have
     /// applied before it reads.
-    async fn read_index<S: Store + 'static>(
-        State(st): State<Arc<RpcState<S>>>,
-    ) -> Response {
+    async fn read_index<S: Store + 'static>(State(st): State<Arc<RpcState<S>>>) -> Response {
         match st
             .raft
             .ensure_linearizable(openraft::raft::ReadPolicy::ReadIndex)
@@ -795,7 +802,10 @@ mod server {
             )
             // A snapshot is streamed to disk (the `Body` extractor has no cap).
             .merge(axum::Router::new().route("/raft/v1/snapshot", post(snapshot::<S>)))
-            .layer(axum::middleware::from_fn_with_state(state.clone(), guard::<S>))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                guard::<S>,
+            ))
             .with_state(state);
         if let Err(e) = axum::serve(listener, router)
             .with_graceful_shutdown(shutdown)

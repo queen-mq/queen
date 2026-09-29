@@ -1,10 +1,16 @@
+// The twin-list rule of lib.rs: this binary compiles the library's modules
+// itself, so what only the library's embedders reach (`queen::Broker`, e.g. the
+// ephemeral configure/delete calls) is unused here. Those modules carry
+// `#[allow(dead_code)]` in this root; the library target still checks them.
 mod auth;
 mod config;
 mod encryption;
 // EPHEMERAL_QUEUES.md §3.2 — the in-RAM queue class. In BOTH crate roots (the
 // twin-list rule of lib.rs).
+#[allow(dead_code)]
 mod ephemeral;
 mod frames;
+#[allow(dead_code)]
 mod handlers;
 mod httpget;
 #[cfg(feature = "server")]
@@ -14,17 +20,21 @@ mod proxy_embed;
 // its own runtime, calling the broker through the router — no child.
 #[cfg(feature = "kafka")]
 mod kafka_inproc;
+#[allow(dead_code)]
 mod metrics;
+#[allow(dead_code)]
 mod notify;
 mod obs;
 // The broker→broker forwarding client. Twin of the `mod peerclient;` in lib.rs
 // (the twin-list rule of lib.rs's header).
 mod peerclient;
+#[allow(dead_code)]
 mod quota;
 // The replicated state machine: the broker's storage. Twin of the `mod rsm;`
 // in lib.rs (the twin-list rule of lib.rs's header).
 #[allow(dead_code)]
 mod rsm;
+#[allow(dead_code)]
 mod switches;
 mod syscollect;
 mod tenant;

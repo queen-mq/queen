@@ -890,6 +890,21 @@ impl Entry {
         Ok(())
     }
 
+    /// Append every command of `part` (planned for this same cycle, e.g. by a
+    /// lane) after this entry's own, in its order: the effects move, and only
+    /// each command's `first_effect` shifts — no effect is cloned or re-checked
+    /// (`part` was built with [`Entry::add_command`], which checked them).
+    /// `part`'s header is dropped; this entry's stays.
+    pub fn append_part(&mut self, part: Entry) {
+        let shift = self.effects.len() as u32;
+        self.kinds_version = self.kinds_version.max(part.kinds_version);
+        self.effects.extend(part.effects);
+        self.commands.extend(part.commands.into_iter().map(|mut c| {
+            c.first_effect += shift;
+            c
+        }));
+    }
+
     /// The effects of one command.
     pub fn effects_of(&self, cmd: &CommandRecord) -> &[Effect] {
         let a = cmd.first_effect as usize;

@@ -280,6 +280,7 @@ fn relay_headers(tenant: &str, inbound: &HeaderMap) -> Vec<(HeaderName, HeaderVa
 
 /// One relay attempt. `Ok(None)` means the peer answered `owner_moved` — a
 /// placement disagreement, which is the caller's business, not a failure.
+#[allow(clippy::too_many_arguments)]
 async fn relay_once(
     st: &AppState,
     tenant: &str,
@@ -417,6 +418,8 @@ async fn forward_to_owner(
     }
 }
 
+// The error is the HTTP answer itself, built only on the cold path.
+#[allow(clippy::result_large_err)]
 fn check_name(what: &str, v: &str) -> Result<(), Response> {
     if v.is_empty() {
         return Err(bad_request(&format!("{what} must not be empty")));

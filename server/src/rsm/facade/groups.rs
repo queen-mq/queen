@@ -105,9 +105,7 @@ fn label_group(text: &str, g: usize, keep_meta: bool) -> String {
             continue;
         }
         // name{labels} value  |  name value
-        let name_end = line
-            .find(|c: char| c == '{' || c == ' ')
-            .unwrap_or(line.len());
+        let name_end = line.find(['{', ' ']).unwrap_or(line.len());
         let (name, rest) = line.split_at(name_end);
         out.push_str(name);
         if let Some(inner) = rest.strip_prefix('{') {
@@ -180,11 +178,7 @@ impl Rsm for GroupRouter {
     async fn timer_peek(&self, ctx: ReqCtx, req: TimerPeekReq) -> Result<TimerReadOut, RsmError> {
         self.pick(&ctx.tenant).timer_peek(ctx, req).await
     }
-    async fn timers_list(
-        &self,
-        ctx: ReqCtx,
-        req: TimersListReq,
-    ) -> Result<TimerReadOut, RsmError> {
+    async fn timers_list(&self, ctx: ReqCtx, req: TimersListReq) -> Result<TimerReadOut, RsmError> {
         self.pick(&ctx.tenant).timers_list(ctx, req).await
     }
     async fn timers_count(
@@ -367,6 +361,9 @@ mod tests {
             label_group(t, 2, true),
             "# HELP x a\n# TYPE x counter\nx{group=\"2\"} 1\ny{group=\"2\",a=\"b\"} 2\n"
         );
-        assert_eq!(label_group(t, 1, false), "x{group=\"1\"} 1\ny{group=\"1\",a=\"b\"} 2\n");
+        assert_eq!(
+            label_group(t, 1, false),
+            "x{group=\"1\"} 1\ny{group=\"1\",a=\"b\"} 2\n"
+        );
     }
 }

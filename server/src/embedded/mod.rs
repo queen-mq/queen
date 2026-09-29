@@ -963,9 +963,11 @@ mod tests {
     /// handler's OWN params structs so a rename on either side fails here.
     #[test]
     fn pop_params_forward_conflation_to_every_route() {
-        let mut p = qp::PopParams::default();
-        p.consumer_group = Some("workers".into());
-        p.conflation = Some(true);
+        let p = qp::PopParams {
+            consumer_group: Some("workers".into()),
+            conflation: Some(true),
+            ..Default::default()
+        };
 
         // The handler structs keep their fields private, so assert on the JSON
         // this function actually hands the extractor: same bytes, no accessors
@@ -982,8 +984,10 @@ mod tests {
             pop_params(&p, Some("billing"), Some("invoice")).unwrap();
 
         // Absent stays absent: a call that never asked must be byte-identical.
-        let mut off = qp::PopParams::default();
-        off.consumer_group = Some("workers".into());
+        let off = qp::PopParams {
+            consumer_group: Some("workers".into()),
+            ..Default::default()
+        };
         let plain: serde_json::Value = pop_params(&off, None, None).unwrap();
         assert!(plain.get("conflation").is_none(), "{plain}");
     }

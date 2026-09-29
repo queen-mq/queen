@@ -15,10 +15,6 @@ use serde::Deserialize;
 
 // ------------------------------------------------------------------ push
 
-/// Wire limit on `transactionId`, dictated by the u16 length prefix the segment
-/// frame codec writes for it (`frames::pack_frames`).
-pub(crate) const MAX_TXN_BYTES: usize = u16::MAX as usize;
-
 pub async fn handle_push(
     State(st): State<Arc<AppState>>,
     Extension(authed): Extension<crate::auth::AuthedSub>,
@@ -344,18 +340,6 @@ pub async fn handle_pop_discover(
         },
     )
     .await
-}
-
-// Append raw bytes that are expected to be valid UTF-8 (payloads stored from
-// client JSON). std's from_utf8 validation is markedly cheaper than the lossy
-// chunk iterator; invalid bytes fall back to lossy replacement.
-// pub(crate) so the fetch renderer (handlers/fetch.rs) splices payloads through
-// the SAME function the pop renderer does — one lossy-UTF8 policy, not two.
-pub(crate) fn push_utf8(out: &mut String, bytes: &[u8]) {
-    match std::str::from_utf8(bytes) {
-        Ok(s) => out.push_str(s),
-        Err(_) => out.push_str(&String::from_utf8_lossy(bytes)),
-    }
 }
 
 // ------------------------------------------------------------------- ack

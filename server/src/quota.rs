@@ -116,18 +116,18 @@ pub enum Resource {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
     Allow,
-    /// 403. Never 429: a `Retry-After` on a row quota is a lie — no delay
+    /// HTTP 403. Never 429: a `Retry-After` on a row quota is a lie — no delay
     /// resolves it — and it would make the client retry in a loop exactly when
     /// the tenant is already over. Never 507 either: that is WebDAV, no client
     /// treats it specially, and the proxy already answers 403 for the same
     /// concept, so a third status would be a second dialect of "out of space" to
     /// keep aligned across seven clients forever.
     OverQuota(Resource),
-    /// 403. Not on the plan, or (with tenancy on) no quota row at all.
+    /// HTTP 403. Not on the plan, or (with tenancy on) no quota row at all.
     NotGranted,
     /// 429, carrying the seconds to advertise in `Retry-After`.
     RateLimited(u32),
-    /// 503. The per-tenant table is full (§9.4 point 2) — a cell condition, not
+    /// HTTP 503. The per-tenant table is full (§9.4 point 2) — a cell condition, not
     /// the tenant's doing, so it gets the cell's status and not a 403.
     NoRoom,
 }

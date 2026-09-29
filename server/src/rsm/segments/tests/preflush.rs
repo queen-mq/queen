@@ -14,9 +14,6 @@
 //!    commit" window — the helper synced, the point did not, and I11 discards
 //!    the tail rather than trusting it.
 
-use std::fs::OpenOptions;
-use std::io::Write;
-
 use super::super::*;
 use super::*;
 

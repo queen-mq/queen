@@ -271,7 +271,13 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
 
 /// The `metrics` JSON of a [`SystemRow`] (every leaf `{avg,min,max,last}`),
 /// plus `raft`.
-fn system_json(uptime: u64, cpu_user: f64, cpu_sys: f64, rss: u64, raft: Option<[f64; 5]>) -> Value {
+fn system_json(
+    uptime: u64,
+    cpu_user: f64,
+    cpu_sys: f64,
+    rss: u64,
+    raft: Option<[f64; 5]>,
+) -> Value {
     fn m(v: f64) -> Value {
         json!({ "avg": v, "min": v, "max": v, "last": v })
     }

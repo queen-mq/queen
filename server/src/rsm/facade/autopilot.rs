@@ -29,7 +29,7 @@
 //! of the command (I2).
 
 use std::collections::HashMap;
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::hash::{BuildHasher, Hash};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -97,7 +97,11 @@ pub(crate) struct Live<'a> {
 
 impl Drop for Live<'_> {
     fn drop(&mut self) {
-        let mut g = self.ap.lane_shard(&self.key).lock().expect("autopilot lanes");
+        let mut g = self
+            .ap
+            .lane_shard(&self.key)
+            .lock()
+            .expect("autopilot lanes");
         if let Some(l) = g.get_mut(&self.key) {
             l.live = l.live.saturating_sub(1);
         }
@@ -136,9 +140,7 @@ impl Autopilot {
     }
 
     fn shard_of<K: Hash + ?Sized>(&self, k: &K) -> usize {
-        let mut h = self.hasher.build_hasher();
-        k.hash(&mut h);
-        (h.finish() as usize) % SHARDS
+        (self.hasher.hash_one(k) as usize) % SHARDS
     }
 
     fn lane_shard(&self, key: &LaneKey) -> &Mutex<HashMap<LaneKey, Lane>> {
@@ -307,23 +309,41 @@ mod tests {
         let ap = Autopilot::new(200, 100, 1000);
         let _live = ap.enter(key());
         let p = ap.plan(&key(), Some(500), false, false, 3, 250);
-        assert_eq!(p, Plan { partitions: 3, batch: 250 });
+        assert_eq!(
+            p,
+            Plan {
+                partitions: 3,
+                batch: 250
+            }
+        );
     }
 
     #[test]
     fn the_width_divides_the_ready_partitions_among_the_live_pops() {
         let ap = Autopilot::new(200, 100, 1000);
         let a = ap.enter(key());
-        assert_eq!(ap.plan(&key(), Some(40), true, false, 1, 200).partitions, 40);
+        assert_eq!(
+            ap.plan(&key(), Some(40), true, false, 1, 200).partitions,
+            40
+        );
         let b = ap.enter(key());
         let c = ap.enter(key());
         let d = ap.enter(key());
-        assert_eq!(ap.plan(&key(), Some(40), true, false, 1, 200).partitions, 10);
-        assert_eq!(ap.plan(&key(), Some(1000), true, false, 1, 200).partitions, 64);
+        assert_eq!(
+            ap.plan(&key(), Some(40), true, false, 1, 200).partitions,
+            10
+        );
+        assert_eq!(
+            ap.plan(&key(), Some(1000), true, false, 1, 200).partitions,
+            64
+        );
         assert_eq!(ap.plan(&key(), Some(0), true, false, 1, 200).partitions, 1);
         assert_eq!(ap.plan(&key(), None, true, false, 5, 200).partitions, 5);
         drop((a, b, c));
-        assert_eq!(ap.plan(&key(), Some(40), true, false, 1, 200).partitions, 40);
+        assert_eq!(
+            ap.plan(&key(), Some(40), true, false, 1, 200).partitions,
+            40
+        );
         drop(d);
     }
 
@@ -352,13 +372,34 @@ mod tests {
     #[test]
     fn the_echo_is_additive() {
         let mut b = "{\"messages\":[]}".to_string();
-        echo(&mut b, Plan { partitions: 4, batch: 500 });
-        assert_eq!(b, "{\"messages\":[],\"autopilot\":{\"partitions\":4,\"batch\":500}}");
+        echo(
+            &mut b,
+            Plan {
+                partitions: 4,
+                batch: 500,
+            },
+        );
+        assert_eq!(
+            b,
+            "{\"messages\":[],\"autopilot\":{\"partitions\":4,\"batch\":500}}"
+        );
         let mut empty = "{}".to_string();
-        echo(&mut empty, Plan { partitions: 1, batch: 100 });
+        echo(
+            &mut empty,
+            Plan {
+                partitions: 1,
+                batch: 100,
+            },
+        );
         assert_eq!(empty, "{\"autopilot\":{\"partitions\":1,\"batch\":100}}");
         let mut not_obj = "[]".to_string();
-        echo(&mut not_obj, Plan { partitions: 1, batch: 100 });
+        echo(
+            &mut not_obj,
+            Plan {
+                partitions: 1,
+                batch: 100,
+            },
+        );
         assert_eq!(not_obj, "[]");
     }
 }

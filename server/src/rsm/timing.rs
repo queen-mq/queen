@@ -1111,6 +1111,17 @@ pub fn emit_timing_log(stats: &ApplyStats) {
     );
 }
 
+/// This thread's CPU time, in nanoseconds (`CLOCK_THREAD_CPUTIME_ID`).
+pub fn thread_cpu_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid, writable timespec for the call's duration.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1154,15 +1165,4 @@ mod tests {
         assert_eq!(s.p50, 0);
         assert_eq!(s.max, 0);
     }
-}
-
-/// This thread's CPU time, in nanoseconds (`CLOCK_THREAD_CPUTIME_ID`).
-pub fn thread_cpu_ns() -> u64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: `ts` is a valid, writable timespec for the call's duration.
-    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
-    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }

@@ -58,7 +58,9 @@ impl ReplicatorKind {
     }
 }
 
-/// The node's replicator.
+/// The node's replicator. One per node, so the variants' size difference costs
+/// nothing worth an indirection on every call.
+#[allow(clippy::large_enum_variant)]
 pub enum NodeReplicator<S: Store + 'static> {
     Local(LocalReplicator<S>),
     Raft(RaftReplicator<S>),
@@ -219,9 +221,7 @@ impl<S: Store + 'static> NodeReplicator<S> {
     pub fn offloads_clients(&self) -> bool {
         match self {
             NodeReplicator::Local(_) => false,
-            NodeReplicator::Raft(r) => {
-                r.is_cluster() && super::raft::client_offload_from_env()
-            }
+            NodeReplicator::Raft(r) => r.is_cluster() && super::raft::client_offload_from_env(),
         }
     }
 

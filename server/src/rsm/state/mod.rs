@@ -422,12 +422,15 @@ impl Derived {
         now_us: i64,
         keys: Option<&[RingKey]>,
     ) -> Result<Derived> {
+        // Each ring offers its ready rows the partition that has waited longest
+        // first — `(ready_at, pid)`, the order the kept rings walk too — not in
+        // the scan's pid order, so a busy queue's high pids are not starved.
         let mut d = Derived::default();
+        let mut rows: Vec<(RingKey, i64, Pid)> = Vec::new();
         match keys {
             None => {
                 reads.scan_pending(&[], usize::MAX, &mut |t, q, g, pid, ready_at| {
-                    d.set_pending_inner(t, q, g, pid, ready_at, now_us);
-                    d.pending_rows += 1;
+                    rows.push(((t.to_string(), q.to_string(), g.to_string()), ready_at, pid));
                     true
                 })?;
             }
@@ -438,12 +441,20 @@ impl Derived {
                         if tt != t || qq != q || gg != g {
                             return false; // past this group's rows
                         }
-                        d.set_pending_inner(tt, qq, gg, pid, ready_at, now_us);
-                        d.pending_rows += 1;
+                        rows.push((
+                            (tt.to_string(), qq.to_string(), gg.to_string()),
+                            ready_at,
+                            pid,
+                        ));
                         true
                     })?;
                 }
             }
+        }
+        rows.sort_unstable();
+        for ((t, q, g), ready_at, pid) in rows {
+            d.set_pending_inner(&t, &q, &g, pid, ready_at, now_us);
+            d.pending_rows += 1;
         }
         Ok(d)
     }
@@ -766,13 +777,32 @@ pub struct PlanRings {
     lane: Option<(u64, u64)>,
 }
 
+/// What one lane's kept ring can give a wildcard pop at the router's clock
+/// ([`PlanRings::view`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RingView {
+    /// Partitions claimable as far as the planned state knows: the ready rows,
+    /// and the deferred ones (leases) whose instant the clock has passed.
+    pub left: usize,
+    /// The first [`RING_VIEW_ROWS`] of their instants, oldest first — the
+    /// order the lane claims in.
+    pub rows: Vec<i64>,
+}
+
+/// How many instants a [`RingView`] carries: the first pops of a ring a cycle
+/// sends one lane go oldest first; past them the router balances by what each
+/// lane has left. Small, because the router reads every lane's view of a ring
+/// on its own thread.
+pub const RING_VIEW_ROWS: usize = 8;
+
 /// One kept ring: the `pending` rows of one (tenant, queue, group).
 #[derive(Debug, Default)]
 struct PlanRing {
     /// `pid → ready_at`: the rows, exactly.
     at: HashMap<Pid, i64, crate::rsm::fasthash::FxBuild>,
-    /// The pids with `ready_at <= now`, in pid order: what the walk offers.
-    ready: BTreeSet<Pid>,
+    /// `(ready_at, pid)` for the rows with `ready_at <= now`: what the walk
+    /// offers, the partition that has waited longest first.
+    ready: BTreeSet<(i64, Pid)>,
     /// `(ready_at, pid)` for the rest, deadline first.
     deferred: BTreeSet<(i64, Pid)>,
     /// The last cycle whose batch walked this ring (idle rings are evicted).
@@ -783,14 +813,14 @@ impl PlanRing {
     /// Mirror one `pending` row: `Some(ready_at)` written, `None` deleted.
     fn set(&mut self, pid: Pid, at: Option<i64>, now_us: i64) {
         if let Some(old) = self.at.remove(&pid) {
-            if !self.ready.remove(&pid) {
+            if !self.ready.remove(&(old, pid)) {
                 self.deferred.remove(&(old, pid));
             }
         }
         if let Some(at) = at {
             self.at.insert(pid, at);
             if at <= now_us {
-                self.ready.insert(pid);
+                self.ready.insert((at, pid));
             } else {
                 self.deferred.insert((at, pid));
             }
@@ -803,7 +833,7 @@ impl PlanRing {
                 break;
             }
             self.deferred.pop_first();
-            self.ready.insert(pid);
+            self.ready.insert((at, pid));
         }
     }
 
@@ -814,7 +844,7 @@ impl PlanRing {
         self.deferred.clear();
         for (&pid, &at) in &self.at {
             if at <= now_us {
-                self.ready.insert(pid);
+                self.ready.insert((at, pid));
             } else {
                 self.deferred.insert((at, pid));
             }
@@ -841,6 +871,83 @@ impl PlanRings {
             .and_then(|qs| qs.get(q))
             .and_then(|gs| gs.get(g))
             .map_or(0, |r| r.ready.len())
+    }
+
+    /// Set `(group, pid)`'s row in the kept ring of `(tenant, queue, group)` to
+    /// its PLANNED state (`None`: no work for the group there), the row apply
+    /// will write once the planned effects land. A lane moves its rings with its
+    /// own planned effects, so what it tells the router is not the landed state
+    /// a cycle or two behind: the landing re-read ([`PlanRings::advance`]) still
+    /// writes the committed truth, and the lane re-plans the rows of the entries
+    /// still in flight over it every cycle. A no-op for another lane's partition
+    /// or a ring that is not kept.
+    pub fn plan_set(&mut self, tenant: &str, queue: &str, group: &str, pid: Pid, at: Option<i64>) {
+        if !self.owns(pid) {
+            return;
+        }
+        let now = self.now_us;
+        if let Some(ring) = self
+            .rings
+            .get_mut(tenant)
+            .and_then(|qs| qs.get_mut(queue))
+            .and_then(|gs| gs.get_mut(group))
+        {
+            ring.set(pid, at, now);
+        }
+    }
+
+    /// The groups of `(tenant, queue)` whose ring is kept: the rows an append
+    /// to one of the queue's partitions arms.
+    pub fn ring_groups(&self, tenant: &str, queue: &str) -> Vec<String> {
+        self.rings
+            .get(tenant)
+            .and_then(|qs| qs.get(queue))
+            .map(|gs| gs.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// What the ring of `key` can give at `now_us` (the router's clock, at or
+    /// past the rings'): its ready rows, then the deferred rows `now_us` has
+    /// reached. `None` when the ring is not kept.
+    pub fn view(&self, key: &RingKey, now_us: i64) -> Option<RingView> {
+        let (t, q, g) = key;
+        let ring = self.ring(t, q, g)?;
+        let mut rows: Vec<i64> = ring
+            .ready
+            .iter()
+            .take(RING_VIEW_ROWS)
+            .map(|(at, _)| *at)
+            .collect();
+        let mut left = ring.ready.len();
+        for (at, _) in &ring.deferred {
+            if *at > now_us {
+                break;
+            }
+            left += 1;
+            if rows.len() < RING_VIEW_ROWS {
+                rows.push(*at);
+            }
+        }
+        Some(RingView { left, rows })
+    }
+
+    /// Keep the ring of `key` with exactly `rows` (`(pid, ready_at)`), split
+    /// at the rings' clock: what a lane would hold after scanning them.
+    #[cfg(test)]
+    pub fn keep_rows(&mut self, key: &RingKey, rows: &[(Pid, i64)]) {
+        let (t, q, g) = key;
+        let now = self.now_us;
+        let ring = self
+            .rings
+            .entry(t.clone())
+            .or_default()
+            .entry(q.clone())
+            .or_default()
+            .entry(g.clone())
+            .or_default();
+        for (pid, at) in rows {
+            ring.set(*pid, Some(*at), now);
+        }
     }
 
     /// An empty mirror that has accounted for every entry up to `landed_to`.
@@ -1153,7 +1260,7 @@ impl PlanRings {
             return 0;
         };
         let mut n = 0;
-        for pid in ring.ready.iter() {
+        for (_, pid) in ring.ready.iter() {
             n += 1;
             if !cb(*pid) || n >= limit {
                 break;
@@ -1169,7 +1276,7 @@ impl PlanRings {
         let mut rows: Vec<(Pid, i64)> = ring.at.iter().map(|(p, a)| (*p, *a)).collect();
         rows.sort_unstable();
         Some(RingSnapshot {
-            ready: ring.ready.iter().copied().collect(),
+            ready: ring.ready.iter().map(|(_, pid)| *pid).collect(),
             deferred: ring.deferred.len(),
             next_deadline: ring.deferred.first().map(|(at, _)| *at),
             rows,

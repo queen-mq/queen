@@ -134,15 +134,12 @@ pub(super) fn write_footprint(ops: &[Value]) -> (i64, i64) {
     let mut rows = 0i64;
     let mut bytes = 0i64;
     for o in ops {
-        match o.get("op").and_then(|v| v.as_str()) {
-            Some("put" | "putIfAbsent" | "incr") => {
-                rows += 1;
-                bytes += o
-                    .get("value")
-                    .map(|v| v.to_string().len() as i64)
-                    .unwrap_or(0);
-            }
-            _ => {}
+        if let Some("put" | "putIfAbsent" | "incr") = o.get("op").and_then(|v| v.as_str()) {
+            rows += 1;
+            bytes += o
+                .get("value")
+                .map(|v| v.to_string().len() as i64)
+                .unwrap_or(0);
         }
     }
     (rows, bytes)
@@ -1098,11 +1095,7 @@ mod tests {
         assert_eq!(b.namespace, "orders");
         assert_eq!(b.prefix(), "", "an absent prefix lists the whole namespace");
         assert_eq!(b.after(), None, "no cursor is the first page");
-        assert_eq!(
-            b.limit(),
-            None,
-            "the limit's one home is the planner"
-        );
+        assert_eq!(b.limit(), None, "the limit's one home is the planner");
         assert!(
             !b.keys_only(),
             "values come back unless the caller opts out"

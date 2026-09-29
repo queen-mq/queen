@@ -156,9 +156,9 @@ pub fn decode_append(body: &Bytes) -> io::Result<AppendEntriesRequest<TypeConfig
         let from = c.at;
         let bytes = c.take(len)?;
         let payload = match kind {
-            KIND_APP_STORED => EntryPayload::Normal(AppEntry::from_stored_wire(
-                body.slice(from..from + len),
-            )?),
+            KIND_APP_STORED => {
+                EntryPayload::Normal(AppEntry::from_stored_wire(body.slice(from..from + len))?)
+            }
             KIND_APP => EntryPayload::Normal(AppEntry::from_wire(bytes)?),
             KIND_BLANK => EntryPayload::Blank,
             KIND_MEMBERSHIP => {

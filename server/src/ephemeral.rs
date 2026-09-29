@@ -1045,16 +1045,16 @@ impl AckStatus {
 /// The per-id answer of §3.1. A CLOSED vocabulary of four, and every terminal
 /// outcome is `Acked`:
 ///
-///   * `Acked`       — the ack was applied and the message is retired. That
-///                     includes a `failed` whose attempts were already spent:
-///                     the message is gone and `eph_dropped_retry` is where
-///                     that is visible, because inventing a fifth outcome would
-///                     break every client that matches this enum.
+///   * `Acked` — the ack was applied and the message is retired. That
+///     includes a `failed` whose attempts were already spent: the message is
+///     gone and `eph_dropped_retry` is where that is visible, because
+///     inventing a fifth outcome would break every client that matches this
+///     enum.
 ///   * `Redelivered` — the ack was applied and the message comes back.
-///   * `Stale`       — the id was minted by another incarnation (§3.1). Never
-///                     an error: this is the fencing that survives restarts.
-///   * `Unknown`     — our epoch, but no live lease: already acked, already
-///                     expired and redelivered to someone else, or evicted.
+///   * `Stale` — the id was minted by another incarnation (§3.1). Never an
+///     error: this is the fencing that survives restarts.
+///   * `Unknown` — our epoch, but no live lease: already acked, already
+///     expired and redelivered to someone else, or evicted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AckOutcome {
     Acked,

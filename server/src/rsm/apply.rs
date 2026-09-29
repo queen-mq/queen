@@ -2016,7 +2016,8 @@ impl<'s, S: Store> Applier<'s, S> {
                 let owner = self.writes.partition(*pid)?.map(|p| (p.tenant, p.queue));
                 self.partition_delete(*pid)?;
                 if let Some((tenant, queue)) = owner {
-                    self.local_metrics.record_churn(now_us, &tenant, &queue, 0, 1);
+                    self.local_metrics
+                        .record_churn(now_us, &tenant, &queue, 0, 1);
                 }
                 Ok(())
             }
@@ -2725,29 +2726,6 @@ impl<'s, S: Store> Applier<'s, S> {
         }
     }
 
-    /// Maintain one group's `pending` row (and its ring mirror) for an append.
-    ///
-    /// With `transitions` off this is the shipped path: an unconditional
-    /// `put_pending` + `set_pending` on every append, which OVERWRITES the
-    /// stored `ready_at` with this frame's — so a delayed/window queue can push
-    /// an already-claimable partition into the future, and an append to a leased
-    /// partition undercuts the lease. With it on (PERF-D, §6.1), `ready_at` is
-    /// maintained to the EARLIEST wall-time the partition could yield a claim:
-    ///
-    /// - a LIVE lease floors it at the lease expiry — the partition is not
-    ///   claimable by anyone else until then, so a fresh frame arms it for
-    ///   AFTER the lease, never under it (the wildcard pop would only skip it);
-    /// - it is written only on a TRANSITION — no row yet, or the floored
-    ///   `ready_at` is EARLIER than the stored one — so a stream of appends to a
-    ///   partition that already looks ready is one store put, not one per frame,
-    ///   and the row keeps the earliest visibility, never a later one.
-    ///
-    /// Every input is committed state read through the write handle plus the
-    /// lease's RAM twin (rebuilt from `leases_by_worker`), so the decision is a
-    /// pure, cadence-free function of the replicated log (I2), and the ring is
-    /// moved on exactly the transitions that write the row — a rebuild from
-    /// `pending` reproduces it.
-    #[allow(clippy::too_many_arguments)]
     /// Arm, for a just-registered group, every partition of the queue that
     /// already holds frames (see the `GroupUpsert` arm): one `pending` row at
     /// `now_us` each, in pid order (deterministic, I2), and — for `all`, whose
@@ -2791,6 +2769,29 @@ impl<'s, S: Store> Applier<'s, S> {
         Ok(())
     }
 
+    /// Maintain one group's `pending` row (and its ring mirror) for an append.
+    ///
+    /// With `transitions` off this is the shipped path: an unconditional
+    /// `put_pending` + `set_pending` on every append, which OVERWRITES the
+    /// stored `ready_at` with this frame's — so a delayed/window queue can push
+    /// an already-claimable partition into the future, and an append to a leased
+    /// partition undercuts the lease. With it on (PERF-D, §6.1), `ready_at` is
+    /// maintained to the EARLIEST wall-time the partition could yield a claim:
+    ///
+    /// - a LIVE lease floors it at the lease expiry — the partition is not
+    ///   claimable by anyone else until then, so a fresh frame arms it for
+    ///   AFTER the lease, never under it (the wildcard pop would only skip it);
+    /// - it is written only on a TRANSITION — no row yet, or the floored
+    ///   `ready_at` is EARLIER than the stored one — so a stream of appends to a
+    ///   partition that already looks ready is one store put, not one per frame,
+    ///   and the row keeps the earliest visibility, never a later one.
+    ///
+    /// Every input is committed state read through the write handle plus the
+    /// lease's RAM twin (rebuilt from `leases_by_worker`), so the decision is a
+    /// pure, cadence-free function of the replicated log (I2), and the ring is
+    /// moved on exactly the transitions that write the row — a rebuild from
+    /// `pending` reproduces it.
+    #[allow(clippy::too_many_arguments)]
     fn append_pending(
         &mut self,
         tenant: &str,
@@ -4961,7 +4962,9 @@ pub fn spawn<S: Store + 'static>(
     clock: Arc<dyn Clock>,
     rx: Receiver<Committed>,
 ) -> std::thread::JoinHandle<Result<ApplyStats>> {
-    spawn_with_reader(store, seg_root, seg_opts, cfg, notify, clock, rx, None, None)
+    spawn_with_reader(
+        store, seg_root, seg_opts, cfg, notify, clock, rx, None, None,
+    )
 }
 
 /// [`spawn`], plus a one-shot sink the thread publishes the segment
@@ -5019,7 +5022,13 @@ pub fn spawn_with_reader<S: Store + 'static>(
                 checkpoint_async = cfg.checkpoint_async,
                 "rsm apply thread started",
             );
-            run(&mut applier, &rx, clock.as_ref(), preflush.as_ref(), ckpt.as_ref())?;
+            run(
+                &mut applier,
+                &rx,
+                clock.as_ref(),
+                preflush.as_ref(),
+                ckpt.as_ref(),
+            )?;
             Ok(applier.stats())
         })
         .expect("spawn the apply thread")

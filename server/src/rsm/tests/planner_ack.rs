@@ -178,7 +178,14 @@ fn lease_cfg(c: &mut Cell, txns: &[&str], retry_limit: i32, dlq: bool) -> u64 {
 fn a_spent_budget_files_every_nacked_message_of_the_batch() {
     let mut c = Cell::new("ack-nack-all");
     let pid = lease_cfg(&mut c, &["a", "b", "c"], 0, true);
-    let cy = c.run(&[ack(3, pid, "q", "g", "w1", &[("a", Failed), ("b", Failed), ("c", Failed)])]);
+    let cy = c.run(&[ack(
+        3,
+        pid,
+        "q",
+        "g",
+        "w1",
+        &[("a", Failed), ("b", Failed), ("c", Failed)],
+    )]);
     let r = ackres(&cy.outcome(0));
     assert_eq!(r.dlq, 3, "the whole nacked batch");
     assert_eq!(r.committed, 2, "past the batch");
@@ -194,7 +201,14 @@ fn a_spent_budget_files_every_nacked_message_of_the_batch() {
 fn a_spent_budget_completes_the_acks_above_the_head() {
     let mut c = Cell::new("ack-nack-then-ok");
     let pid = lease_cfg(&mut c, &["a", "b", "c"], 0, true);
-    let cy = c.run(&[ack(3, pid, "q", "g", "w1", &[("a", Failed), ("b", Ok), ("c", Ok)])]);
+    let cy = c.run(&[ack(
+        3,
+        pid,
+        "q",
+        "g",
+        "w1",
+        &[("a", Failed), ("b", Ok), ("c", Ok)],
+    )]);
     let r = ackres(&cy.outcome(0));
     assert_eq!((r.dlq, r.committed), (1, 2), "a filed, b and c completed");
 }
@@ -203,7 +217,14 @@ fn a_spent_budget_completes_the_acks_above_the_head() {
 fn a_spent_budget_settles_below_the_head_and_above_it() {
     let mut c = Cell::new("ack-ok-then-nack");
     let pid = lease_cfg(&mut c, &["a", "b", "c"], 0, true);
-    let cy = c.run(&[ack(3, pid, "q", "g", "w1", &[("a", Ok), ("b", Failed), ("c", Failed)])]);
+    let cy = c.run(&[ack(
+        3,
+        pid,
+        "q",
+        "g",
+        "w1",
+        &[("a", Ok), ("b", Failed), ("c", Failed)],
+    )]);
     let r = ackres(&cy.outcome(0));
     assert_eq!((r.dlq, r.committed), (2, 2), "a completed, b and c filed");
 }
@@ -212,7 +233,14 @@ fn a_spent_budget_settles_below_the_head_and_above_it() {
 fn a_retry_above_the_head_stops_the_settling() {
     let mut c = Cell::new("ack-nack-retry");
     let pid = lease_cfg(&mut c, &["a", "b", "c"], 0, true);
-    let cy = c.run(&[ack(3, pid, "q", "g", "w1", &[("a", Failed), ("b", Retry), ("c", Failed)])]);
+    let cy = c.run(&[ack(
+        3,
+        pid,
+        "q",
+        "g",
+        "w1",
+        &[("a", Failed), ("b", Retry), ("c", Failed)],
+    )]);
     let r = ackres(&cy.outcome(0));
     assert_eq!((r.dlq, r.committed), (1, 0), "only a; b and c come back");
     assert!(r.lease_released);
@@ -255,7 +283,14 @@ fn a_nacked_batch_is_delivered_retry_limit_plus_one_times() {
 fn with_no_dlq_a_spent_budget_drops_every_nacked_message() {
     let mut c = Cell::new("ack-nack-drop");
     let pid = lease_cfg(&mut c, &["a", "b", "c"], 0, false);
-    let cy = c.run(&[ack(3, pid, "q", "g", "w1", &[("a", Failed), ("b", Failed), ("c", Failed)])]);
+    let cy = c.run(&[ack(
+        3,
+        pid,
+        "q",
+        "g",
+        "w1",
+        &[("a", Failed), ("b", Failed), ("c", Failed)],
+    )]);
     let r = ackres(&cy.outcome(0));
     assert_eq!((r.dlq, r.committed), (0, 2), "all three dropped and passed");
     assert!(c.dlq_rows().is_empty());
@@ -265,9 +300,20 @@ fn with_no_dlq_a_spent_budget_drops_every_nacked_message() {
 fn a_forced_dlq_head_stops_at_a_failed_whose_budget_remains() {
     let mut c = Cell::new("ack-dlq-then-failed");
     let pid = lease_cfg(&mut c, &["a", "b", "c"], 3, true);
-    let cy = c.run(&[ack(3, pid, "q", "g", "w1", &[("a", Dlq), ("b", Failed), ("c", Dlq)])]);
+    let cy = c.run(&[ack(
+        3,
+        pid,
+        "q",
+        "g",
+        "w1",
+        &[("a", Dlq), ("b", Failed), ("c", Dlq)],
+    )]);
     let r = ackres(&cy.outcome(0));
-    assert_eq!((r.dlq, r.committed), (1, 0), "a filed; b has budget, so b and c come back");
+    assert_eq!(
+        (r.dlq, r.committed),
+        (1, 0),
+        "a filed; b has budget, so b and c come back"
+    );
     assert_eq!(r.batch_retry_count, 0, "b is not charged here");
 }
 

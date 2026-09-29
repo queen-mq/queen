@@ -24,7 +24,8 @@ impl RaftFacade {
         let mut missing = Vec::new();
         if let Some(view) = self.repl.cluster_view() {
             let body = bytes::Bytes::from(
-                serde_json::json!({"kind":"rows","fromUs":from_us,"toUs":to_us,"totals":totals}).to_string(),
+                serde_json::json!({"kind":"rows","fromUs":from_us,"toUs":to_us,"totals":totals})
+                    .to_string(),
             );
             let calls = view
                 .members
@@ -38,7 +39,9 @@ impl RaftFacade {
                         let got = repl
                             .call_peer(&addr, "/raft/v1/local", body, super::admin::PEER_GATHER_TTL)
                             .await
-                            .and_then(|b| serde_json::from_slice::<Rows>(&b).map_err(|e| e.to_string()));
+                            .and_then(|b| {
+                                serde_json::from_slice::<Rows>(&b).map_err(|e| e.to_string())
+                            });
                         (id, got)
                     }
                 });
@@ -161,8 +164,13 @@ impl RaftFacade {
 
     /// The replicated half of `get_status_v3`: the tenant's queues with their
     /// counts, the live leases and the dead letters.
-    async fn status_state(&self, tenant: &str) -> Result<crate::rsm::dashboard::node_views::StatusState, RsmError> {
-        use crate::rsm::dashboard::node_views::{DlqErrorCount, StatusDlq, StatusLease, StatusQueue, StatusState};
+    async fn status_state(
+        &self,
+        tenant: &str,
+    ) -> Result<crate::rsm::dashboard::node_views::StatusState, RsmError> {
+        use crate::rsm::dashboard::node_views::{
+            DlqErrorCount, StatusDlq, StatusLease, StatusQueue, StatusState,
+        };
         use crate::rsm::store::{Store, TypedReads};
         let snaps = self.queue_snapshots(tenant).await?;
         let queues: Vec<StatusQueue> = snaps
@@ -289,25 +297,26 @@ impl RaftFacade {
             .iter()
             .filter_map(|q| q.get("name").and_then(Value::as_str).map(str::to_string))
             .collect();
-        let groups: std::collections::HashMap<String, i64> = tokio::task::spawn_blocking(move || {
-            store.read(|r| {
-                let mut out = std::collections::HashMap::new();
-                for q in names {
-                    let mut n = 0i64;
-                    r.scan_groups(&t, &q, usize::MAX, &mut |_, g| {
-                        if g.meta.partition_name.is_empty() {
-                            n += 1;
-                        }
-                        true
-                    })?;
-                    out.insert(q, n);
-                }
-                Ok(out)
+        let groups: std::collections::HashMap<String, i64> =
+            tokio::task::spawn_blocking(move || {
+                store.read(|r| {
+                    let mut out = std::collections::HashMap::new();
+                    for q in names {
+                        let mut n = 0i64;
+                        r.scan_groups(&t, &q, usize::MAX, &mut |_, g| {
+                            if g.meta.partition_name.is_empty() {
+                                n += 1;
+                            }
+                            true
+                        })?;
+                        out.insert(q, n);
+                    }
+                    Ok(out)
+                })
             })
-        })
-        .await
-        .map_err(|e| RsmError::Internal(format!("group count read: {e}")))?
-        .map_err(super::read_error)?;
+            .await
+            .map_err(|e| RsmError::Internal(format!("group count read: {e}")))?
+            .map_err(super::read_error)?;
         let mut metas = Vec::with_capacity(snaps.len());
         let mut nows = Vec::with_capacity(snaps.len());
         for q in &snaps {
@@ -364,7 +373,12 @@ impl RaftFacade {
         let (from, to) = window(f, now, US_PER_MIN);
         let g = self.gather_rows(from, to + US_PER_MIN, false).await;
         let queue = merge_queue_rows(g.rows.queue.into_iter().filter(|r| r.tenant == tenant));
-        let parked = g.rows.parked.into_iter().filter(|r| r.tenant == tenant).collect();
+        let parked = g
+            .rows
+            .parked
+            .into_iter()
+            .filter(|r| r.tenant == tenant)
+            .collect();
         let churn = self.local_metrics.churn_rows(tenant, from, to + US_PER_MIN);
         (queue, parked, churn, (from, to))
     }
@@ -415,7 +429,10 @@ impl RaftFacade {
             &f, now, &rows, &churn, &retention, &nows,
         ) {
             Ok(v) => answer(v),
-            Err(e) => Ok(ApiOut::json(400, serde_json::json!({"error":e}).to_string())),
+            Err(e) => Ok(ApiOut::json(
+                400,
+                serde_json::json!({"error":e}).to_string(),
+            )),
         }
     }
 
@@ -432,7 +449,10 @@ impl RaftFacade {
         let (metas, _) = self.queue_catalog(&ctx.tenant).await?;
         match crate::rsm::dashboard::queue_views::retention_json(&f, now, &rows, &metas) {
             Ok(v) => answer(v),
-            Err(e) => Ok(ApiOut::json(400, serde_json::json!({"error":e}).to_string())),
+            Err(e) => Ok(ApiOut::json(
+                400,
+                serde_json::json!({"error":e}).to_string(),
+            )),
         }
     }
 

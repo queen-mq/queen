@@ -861,7 +861,9 @@ async fn prefer_step<S: Store + 'static>(
                 to = pref,
                 "raft: handing leadership to this group's preferred node",
             ),
-            Err(e) => tracing::warn!(target: "rsm", to = pref, error = %e, "raft: leadership hand-off"),
+            Err(e) => {
+                tracing::warn!(target: "rsm", to = pref, error = %e, "raft: leadership hand-off")
+            }
         }
     }
 }
@@ -898,7 +900,9 @@ pub fn qlog_options(cfg: &OpenConfig) -> crate::rsm::qlog::QLogOptions {
     }
 }
 
-/// The network a node runs.
+/// The network a node runs (one per node: the variants' size difference is
+/// not worth an indirection).
+#[allow(clippy::large_enum_variant)]
 enum Net {
     None(NoNetwork),
     Http(HttpNetwork),
@@ -1637,7 +1641,11 @@ impl<S: Store + 'static> RaftReplicator<S> {
         // that slot frees is reused.
         let _slot = match tokio::time::timeout(ttl, forward_gate().acquire()).await {
             Ok(Ok(slot)) => slot,
-            _ => return Err(RemoteError::Transport("no forward slot within the deadline".into())),
+            _ => {
+                return Err(RemoteError::Transport(
+                    "no forward slot within the deadline".into(),
+                ))
+            }
         };
         network::post(
             client,
