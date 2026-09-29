@@ -40,8 +40,8 @@
 //! state, entry) (I2) rather than of something the planner saw.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::rsm::effect::Pid;
 use crate::rsm::store::keys;
@@ -860,10 +860,15 @@ pub fn delete_partition_chunk<W: Writes + ?Sized>(
 const FRONT_BITS_PER_HASH: usize = 16;
 /// A generation's fixed overhead (boxed words + counters + deque slot).
 const FRONT_BYTES_PER_GEN: usize = 64;
-/// Smallest generation capacity, in hashes (a 8 KiB filter). Powers of two are
+/// Smallest generation capacity, in hashes (a 512 B filter). Powers of two are
 /// not required here — a generation is filled by counting, never by a no-copy
-/// buffer seal — but keeping it a round number keeps `nblocks` clean.
-const FRONT_GEN_CAP_MIN: usize = 4096;
+/// buffer seal — but keeping it a round number keeps `nblocks` clean. Sized for
+/// the many quiet partitions of a wide queue: at 4,096 (8 KiB) 500,000
+/// partitions a few generations each wanted ~20 GiB, so all but ~13,000 fell
+/// back to scanning their whole window for every message (2026-09-29, 1M msg/s:
+/// 60% of the lanes' time); a busy partition still tiers up by
+/// [`FRONT_GEN_TIER`] per full generation.
+const FRONT_GEN_CAP_MIN: usize = 256;
 /// Largest generation capacity (a 2 MiB filter), tiering ×8 from the minimum so
 /// an idle partition pays one tiny filter and a hot one settles at a few big
 /// generations.
@@ -885,12 +890,18 @@ const FRONT_GEN_SLICE_MIN_US: i64 = 250_000;
 fn gen_slice_us(created_us: i64, floor_us: i64) -> i64 {
     (created_us.saturating_sub(floor_us) / FRONT_GEN_SLICES).max(FRONT_GEN_SLICE_MIN_US)
 }
-/// Default global cap in MiB (`QUEEN_RAFT_DEDUP_FRONT_MB`). 512 MiB fronts
-/// ~256 M in-window hashes at 2 B each before any partition falls back.
-/// How many shards the front's per-partition map is split into.
-const FRONT_SHARDS: usize = 64;
+/// How many shards the front's per-partition map is split into. Small shards
+/// keep the sweeper's hold on one short: ~500 partitions at 500,000.
+const FRONT_SHARDS: usize = 1024;
+/// The sweeper ([`DedupFront::spawn_sweeper`]) wakes every tick and ages this
+/// many shards, so a whole pass takes about a second.
+const FRONT_SWEEP_TICK: std::time::Duration = std::time::Duration::from_millis(10);
+const FRONT_SWEEP_SHARDS_PER_TICK: usize = FRONT_SHARDS / 100;
 
-pub const FRONT_DEFAULT_CAP_MB: usize = 512;
+/// Default global cap in MiB (`QUEEN_RAFT_DEDUP_FRONT_MB`). 2 GiB fronts ~1 G
+/// in-window hashes at 2 B each, or 500,000 quiet partitions with a few
+/// minimum generations each, before any partition falls back.
+pub const FRONT_DEFAULT_CAP_MB: usize = 2048;
 /// The most hashes one first-touch seed scan of a pre-existing partition will
 /// read before giving up and marking it FALLBACK. Bounds the one-off planning
 /// stall a large preloaded partition can cause; fresh partitions are born
@@ -997,6 +1008,15 @@ struct PartFront {
     gen_next_cap: usize,
     /// Resident filter bytes (kept in step with the global `total_bytes`).
     bytes: usize,
+    /// The newest stamp this partition may hold in its window: the newest hash
+    /// planned here or seeded, fallback or not (`i64::MAX` = unknown, after a
+    /// seed overflow). Once the window floor passes it, nothing of this
+    /// partition is in window, so an empty front is exact again.
+    last_created_us: i64,
+    /// Its queue's dedup window as last seen (`i64::MAX` = not yet known): the
+    /// sweeper ages the partition at `now - window_us`. Never under the window,
+    /// so it never ages too early.
+    window_us: i64,
 }
 
 impl PartFront {
@@ -1006,6 +1026,21 @@ impl PartFront {
             gens: VecDeque::new(),
             gen_next_cap: 0,
             bytes: 0,
+            last_created_us: i64::MIN,
+            window_us: i64::MAX,
+        }
+    }
+
+    /// A FALLBACK partition becomes an empty seeded front again once nothing it
+    /// may hold is in window (its newest stamp is below `floor_us`). Returns
+    /// whether it did.
+    fn recover_if_quiet(&mut self, floor_us: i64) -> bool {
+        if self.fallback && self.last_created_us < floor_us {
+            self.fallback = false;
+            self.gen_next_cap = 0;
+            true
+        } else {
+            false
         }
     }
 
@@ -1103,6 +1138,7 @@ impl PartFront {
             .back_mut()
             .unwrap()
             .insert(h, base_off, msg_off, created_us);
+        self.last_created_us = self.last_created_us.max(created_us);
         added
     }
 
@@ -1127,12 +1163,18 @@ pub struct FrontStats {
     pub probes_issued: u64,
     /// LMDB committed probes the front avoided (definitely absent).
     pub probes_skipped: u64,
+    /// Of the probes issued, those that scanned the WHOLE window (unseeded,
+    /// fallback or disabled front) rather than one generation's band.
+    pub probes_whole: u64,
     /// Hashes inserted at plan time.
     pub inserts: u64,
     /// Partitions currently tracked (seeded + fallback).
     pub partitions: u64,
     /// Of those, in the always-probe fallback state.
     pub fallback_partitions: u64,
+    /// Fallback partitions that went quiet for a whole window and got an empty
+    /// front back.
+    pub fallback_recovered: u64,
     /// Resident filter bytes.
     pub bytes: u64,
 }
@@ -1158,22 +1200,45 @@ impl FrontStats {
 }
 
 /// The planner-side dedup front: one shared, persistent instance per broker,
-/// owned by the batcher across planning cycles. All mutation happens under the
-/// single planning thread, so the map lock is uncontended; it exists only to
-/// make the front `Sync` for the `spawn_blocking` hand-off.
+/// owned by the batcher across planning cycles. The planner's lanes probe and
+/// feed it; the sweeper thread ages the partitions nobody touches.
 pub struct DedupFront {
     enabled: bool,
     byte_cap: usize,
     /// Per-partition fronts, sharded by pid ([`FRONT_SHARDS`]): the planner's
     /// lanes plan different partitions at the same time, and one mutex over
     /// every partition serialized them.
-    parts: Vec<Mutex<HashMap<Pid, PartFront>>>,
+    parts: Vec<Mutex<Shard>>,
     total_bytes: AtomicU64,
-    // counters (own source of truth; mirrored to timing::metrics on publish)
+    /// The planning clock the batcher last published ([`DedupFront::set_clock`];
+    /// `i64::MIN` until the first cycle): never ahead of any cycle still to
+    /// plan, so the sweeper's floors never pass the planner's.
+    clock_us: AtomicI64,
+    // Counters of a DISABLED front (an enabled one counts per shard, under the
+    // lock it already holds: eight lanes bumping shared atomics for every
+    // message kept one cache line bouncing between their cores).
     messages: AtomicU64,
     probes_issued: AtomicU64,
     probes_skipped: AtomicU64,
+    probes_whole: AtomicU64,
     inserts: AtomicU64,
+    recovered: AtomicU64,
+    /// Partitions tracked, and of those in fallback: counted as they change
+    /// (under the shard lock), so [`DedupFront::stats`] never walks the map.
+    n_parts: AtomicU64,
+    n_fallback: AtomicU64,
+}
+
+/// One shard of the front: its partitions and the per-message counters of the
+/// probes and inserts that went through it.
+#[derive(Default)]
+struct Shard {
+    map: HashMap<Pid, PartFront>,
+    messages: u64,
+    probes_issued: u64,
+    probes_skipped: u64,
+    probes_whole: u64,
+    inserts: u64,
 }
 
 /// One in-window occurrence the seed scan collected, with everything the front
@@ -1214,13 +1279,110 @@ impl DedupFront {
             enabled,
             byte_cap,
             parts: (0..FRONT_SHARDS)
-                .map(|_| Mutex::new(HashMap::new()))
+                .map(|_| Mutex::new(Shard::default()))
                 .collect(),
             total_bytes: AtomicU64::new(0),
+            clock_us: AtomicI64::new(i64::MIN),
             messages: AtomicU64::new(0),
             probes_issued: AtomicU64::new(0),
             probes_skipped: AtomicU64::new(0),
+            probes_whole: AtomicU64::new(0),
             inserts: AtomicU64::new(0),
+            recovered: AtomicU64::new(0),
+            n_parts: AtomicU64::new(0),
+            n_fallback: AtomicU64::new(0),
+        }
+    }
+
+    /// Publish the clock of the cycle about to plan. The planner's own clock is
+    /// never below it, now or later (`plan_now` only moves forward from the
+    /// wall), which is what lets the sweeper age with it.
+    pub fn set_clock(&self, now_us: i64) {
+        self.clock_us.fetch_max(now_us, Ordering::AcqRel);
+    }
+
+    /// Start the thread that ages the partitions nobody touches. Aging on touch
+    /// alone keeps a quiet partition's stale generations for as long as it stays
+    /// quiet: 500,000 partitions written round robin, each once every ~450 s,
+    /// grew the front ~5 MB/s into its cap in under five minutes and pushed
+    /// every newly written partition to whole-window scans (2026-09-29, 1M
+    /// msg/s). The thread holds the front weakly and ends with it.
+    pub fn spawn_sweeper(front: &Arc<DedupFront>) {
+        if !front.enabled {
+            return;
+        }
+        let weak = Arc::downgrade(front);
+        let spawned = std::thread::Builder::new()
+            .name("queen-rsm-dedupsweep".into())
+            .spawn(move || {
+                let mut shard = 0usize;
+                loop {
+                    std::thread::sleep(FRONT_SWEEP_TICK);
+                    let Some(front) = weak.upgrade() else {
+                        return;
+                    };
+                    let now_us = front.clock_us.load(Ordering::Acquire);
+                    if now_us == i64::MIN {
+                        continue;
+                    }
+                    for _ in 0..FRONT_SWEEP_SHARDS_PER_TICK {
+                        front.sweep_shard(shard, now_us);
+                        shard = (shard + 1) % FRONT_SHARDS;
+                    }
+                }
+            });
+        if let Err(e) = spawned {
+            tracing::warn!(target: "rsm", error = %e, "dedup front sweeper not started: quiet partitions age only when touched");
+        }
+    }
+
+    /// Age every partition of shard `s` at `now_us` less its own window, and
+    /// give fallback partitions that went quiet an empty front back.
+    fn sweep_shard(&self, s: usize, now_us: i64) {
+        let (mut freed, mut recovered) = (0usize, 0u64);
+        let mut parts = self.parts[s].lock().unwrap();
+        for pf in parts.map.values_mut() {
+            let floor_us = now_us.saturating_sub(pf.window_us);
+            if pf.fallback {
+                recovered += pf.recover_if_quiet(floor_us) as u64;
+                continue;
+            }
+            let f = pf.age(floor_us);
+            if f > 0 && pf.gens.is_empty() {
+                pf.gens.shrink_to_fit();
+            }
+            freed += f;
+        }
+        // Still under the shard lock, like every other adjustment: a reset
+        // clears this shard either before the walk above or after these.
+        if freed > 0 {
+            self.total_bytes.fetch_sub(freed as u64, Ordering::Relaxed);
+        }
+        if recovered > 0 {
+            self.recovered.fetch_add(recovered, Ordering::Relaxed);
+            self.n_fallback.fetch_sub(recovered, Ordering::Relaxed);
+        }
+        drop(parts);
+    }
+
+    /// `(partitions, fallback)` counted by walking the map (tests: the counters
+    /// must agree).
+    #[cfg(test)]
+    fn walk_counts(&self) -> (u64, u64) {
+        let (mut partitions, mut fallback) = (0u64, 0u64);
+        for shard in &self.parts {
+            let parts = shard.lock().unwrap();
+            partitions += parts.map.len() as u64;
+            fallback += parts.map.values().filter(|p| p.fallback).count() as u64;
+        }
+        (partitions, fallback)
+    }
+
+    /// Sweep every shard once (tests).
+    #[cfg(test)]
+    fn sweep_all(&self, now_us: i64) {
+        for s in 0..FRONT_SHARDS {
+            self.sweep_shard(s, now_us);
         }
     }
 
@@ -1256,7 +1418,7 @@ impl DedupFront {
 
     /// The shard holding partition `pid`'s front.
     #[inline]
-    fn shard(&self, pid: Pid) -> std::sync::MutexGuard<'_, HashMap<Pid, PartFront>> {
+    fn shard(&self, pid: Pid) -> std::sync::MutexGuard<'_, Shard> {
         self.parts[(pid % FRONT_SHARDS as u64) as usize]
             .lock()
             .unwrap()
@@ -1269,9 +1431,11 @@ impl DedupFront {
             return;
         }
         for shard in &self.parts {
-            shard.lock().unwrap().clear();
+            shard.lock().unwrap().map.clear();
         }
         self.total_bytes.store(0, Ordering::Relaxed);
+        self.n_parts.store(0, Ordering::Relaxed);
+        self.n_fallback.store(0, Ordering::Relaxed);
     }
 
     /// True iff this partition still needs a first-touch seed scan (it is
@@ -1281,7 +1445,7 @@ impl DedupFront {
         if !self.enabled {
             return false;
         }
-        !self.shard(pid).contains_key(&pid)
+        !self.shard(pid).map.contains_key(&pid)
     }
 
     /// A partition minted this front-lifetime: born seeded, empty and complete.
@@ -1289,7 +1453,10 @@ impl DedupFront {
         if !self.enabled {
             return;
         }
-        self.shard(pid).entry(pid).or_insert_with(PartFront::seeded);
+        if let std::collections::hash_map::Entry::Vacant(v) = self.shard(pid).map.entry(pid) {
+            v.insert(PartFront::seeded());
+            self.n_parts.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Install a first-touch seed the planner collected. `Complete` builds the
@@ -1301,14 +1468,18 @@ impl DedupFront {
         let mut parts = self.shard(pid);
         // A concurrent path never runs (single planning thread), but a second
         // seed of the same pid this cycle is a no-op.
-        if parts.contains_key(&pid) {
+        if parts.map.contains_key(&pid) {
             return;
         }
         match seed {
             Seed::Overflow => {
                 let mut pf = PartFront::seeded();
                 pf.fallback = true;
-                parts.insert(pid, pf);
+                // What it holds is unknown: it never recovers by going quiet.
+                pf.last_created_us = i64::MAX;
+                parts.map.insert(pid, pf);
+                self.n_parts.fetch_add(1, Ordering::Relaxed);
+                self.n_fallback.fetch_add(1, Ordering::Relaxed);
             }
             Seed::Complete(hashes) => {
                 let mut pf = PartFront::seeded();
@@ -1317,6 +1488,8 @@ impl DedupFront {
                     .map(|sh| sh.created_us)
                     .max()
                     .unwrap_or(floor_us);
+                // Covers the hashes a cap fallback below never gets to insert.
+                pf.last_created_us = newest;
                 let slice_us = gen_slice_us(newest, floor_us);
                 for sh in hashes {
                     if sh.created_us < floor_us {
@@ -1330,6 +1503,7 @@ impl DedupFront {
                         // Cap pressure mid-seed: give up on this partition.
                         let freed = pf.mark_fallback();
                         self.total_bytes.fetch_sub(freed as u64, Ordering::Relaxed);
+                        self.n_fallback.fetch_add(1, Ordering::Relaxed);
                         break;
                     }
                     let added = pf.insert(
@@ -1343,7 +1517,8 @@ impl DedupFront {
                         self.total_bytes.fetch_add(added as u64, Ordering::Relaxed);
                     }
                 }
-                parts.insert(pid, pf);
+                parts.map.insert(pid, pf);
+                self.n_parts.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -1353,28 +1528,32 @@ impl DedupFront {
     /// committed window — treat as new". Counts every call as a message.
     #[inline]
     pub fn should_probe(&self, pid: Pid, hash: &[u8; 16], floor_us: i64) -> bool {
-        self.messages.fetch_add(1, Ordering::Relaxed);
         if !self.enabled {
+            self.messages.fetch_add(1, Ordering::Relaxed);
             self.probes_issued.fetch_add(1, Ordering::Relaxed);
             return true;
         }
         let h = u128::from_le_bytes(*hash);
         let mut parts = self.shard(pid);
-        let issue = match parts.get_mut(&pid) {
+        let issue = match parts.map.get_mut(&pid) {
             None => true, // not seeded: probe (planner seeds first)
-            Some(pf) if pf.fallback => true,
             Some(pf) => {
-                let freed = pf.age(floor_us);
-                if freed > 0 {
-                    self.total_bytes.fetch_sub(freed as u64, Ordering::Relaxed);
+                if pf.fallback && !self.recover(pf, floor_us) {
+                    true
+                } else {
+                    let freed = pf.age(floor_us);
+                    if freed > 0 {
+                        self.total_bytes.fetch_sub(freed as u64, Ordering::Relaxed);
+                    }
+                    pf.maybe(h)
                 }
-                pf.maybe(h)
             }
         };
+        parts.messages += 1;
         if issue {
-            self.probes_issued.fetch_add(1, Ordering::Relaxed);
+            parts.probes_issued += 1;
         } else {
-            self.probes_skipped.fetch_add(1, Ordering::Relaxed);
+            parts.probes_skipped += 1;
         }
         issue
     }
@@ -1393,32 +1572,39 @@ impl DedupFront {
         out: &mut Vec<(u64, u64)>,
     ) -> ProbeVerdict {
         out.clear();
-        self.messages.fetch_add(1, Ordering::Relaxed);
         if !self.enabled {
+            self.messages.fetch_add(1, Ordering::Relaxed);
             self.probes_issued.fetch_add(1, Ordering::Relaxed);
             return ProbeVerdict::Whole;
         }
         let h = u128::from_le_bytes(*hash);
         let mut parts = self.shard(pid);
-        let verdict = match parts.get_mut(&pid) {
+        let verdict = match parts.map.get_mut(&pid) {
             None => ProbeVerdict::Whole, // not seeded: the planner seeds first
-            Some(pf) if pf.fallback => ProbeVerdict::Whole,
             Some(pf) => {
-                let freed = pf.age(floor_us);
-                if freed > 0 {
-                    self.total_bytes.fetch_sub(freed as u64, Ordering::Relaxed);
-                }
-                if pf.matching_ranges(h, out) {
-                    ProbeVerdict::Ranges
+                if pf.fallback && !self.recover(pf, floor_us) {
+                    ProbeVerdict::Whole
                 } else {
-                    ProbeVerdict::Skip
+                    let freed = pf.age(floor_us);
+                    if freed > 0 {
+                        self.total_bytes.fetch_sub(freed as u64, Ordering::Relaxed);
+                    }
+                    if pf.matching_ranges(h, out) {
+                        ProbeVerdict::Ranges
+                    } else {
+                        ProbeVerdict::Skip
+                    }
                 }
             }
         };
-        if verdict == ProbeVerdict::Skip {
-            self.probes_skipped.fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.probes_issued.fetch_add(1, Ordering::Relaxed);
+        parts.messages += 1;
+        match verdict {
+            ProbeVerdict::Skip => parts.probes_skipped += 1,
+            ProbeVerdict::Whole => {
+                parts.probes_issued += 1;
+                parts.probes_whole += 1;
+            }
+            ProbeVerdict::Ranges => parts.probes_issued += 1,
         }
         verdict
     }
@@ -1442,10 +1628,16 @@ impl DedupFront {
         }
         let h = u128::from_le_bytes(*hash);
         let mut parts = self.shard(pid);
-        let Some(pf) = parts.get_mut(&pid) else {
+        let parts = &mut *parts;
+        let Some(pf) = parts.map.get_mut(&pid) else {
             return;
         };
-        if pf.fallback {
+        pf.window_us = created_us.saturating_sub(floor_us);
+        let fallback = pf.fallback && !self.recover(pf, floor_us);
+        // Counted before any cap decision: the hash that tips the partition into
+        // fallback is planned all the same.
+        pf.last_created_us = pf.last_created_us.max(created_us);
+        if fallback {
             return;
         }
         let freed = pf.age(floor_us);
@@ -1458,6 +1650,7 @@ impl DedupFront {
             if self.total_bytes.load(Ordering::Relaxed) + pf.next_gen_bytes() as u64 > cap {
                 let freed = pf.mark_fallback();
                 self.total_bytes.fetch_sub(freed as u64, Ordering::Relaxed);
+                self.n_fallback.fetch_add(1, Ordering::Relaxed);
                 return;
             }
         }
@@ -1465,26 +1658,41 @@ impl DedupFront {
         if added > 0 {
             self.total_bytes.fetch_add(added as u64, Ordering::Relaxed);
         }
-        self.inserts.fetch_add(1, Ordering::Relaxed);
+        parts.inserts += 1;
     }
 
     /// A snapshot of the counters and the resident footprint.
     pub fn stats(&self) -> FrontStats {
-        let (mut partitions, mut fallback) = (0u64, 0u64);
-        for shard in &self.parts {
-            let parts = shard.lock().unwrap();
-            partitions += parts.len() as u64;
-            fallback += parts.values().filter(|p| p.fallback).count() as u64;
-        }
-        FrontStats {
+        let mut st = FrontStats {
             messages: self.messages.load(Ordering::Relaxed),
             probes_issued: self.probes_issued.load(Ordering::Relaxed),
             probes_skipped: self.probes_skipped.load(Ordering::Relaxed),
+            probes_whole: self.probes_whole.load(Ordering::Relaxed),
             inserts: self.inserts.load(Ordering::Relaxed),
-            partitions,
-            fallback_partitions: fallback,
+            partitions: self.n_parts.load(Ordering::Relaxed),
+            fallback_partitions: self.n_fallback.load(Ordering::Relaxed),
+            fallback_recovered: self.recovered.load(Ordering::Relaxed),
             bytes: self.total_bytes.load(Ordering::Relaxed),
+        };
+        for shard in &self.parts {
+            let sh = shard.lock().unwrap();
+            st.messages += sh.messages;
+            st.probes_issued += sh.probes_issued;
+            st.probes_skipped += sh.probes_skipped;
+            st.probes_whole += sh.probes_whole;
+            st.inserts += sh.inserts;
         }
+        st
+    }
+
+    /// [`PartFront::recover_if_quiet`], counted.
+    fn recover(&self, pf: &mut PartFront, floor_us: i64) -> bool {
+        let recovered = pf.recover_if_quiet(floor_us);
+        if recovered {
+            self.recovered.fetch_add(1, Ordering::Relaxed);
+            self.n_fallback.fetch_sub(1, Ordering::Relaxed);
+        }
+        recovered
     }
 }
 
@@ -1550,7 +1758,7 @@ mod tests {
         let floor = now - window_us;
         {
             let parts = f.shard(9);
-            let pf = parts.get(&9).expect("partition tracked");
+            let pf = parts.map.get(&9).expect("partition tracked");
             assert!(!pf.fallback, "must not fall back");
             for g in &pf.gens {
                 let span = g.max_created_us - g.min_created_us;
@@ -1692,6 +1900,147 @@ mod tests {
         assert!(f.should_probe(5, &fh(1), i64::MIN));
         assert!(f.should_probe(5, &fh(2), i64::MIN));
         assert_eq!(f.stats().probes_skipped, 0);
+    }
+
+    #[test]
+    fn the_sweeper_ages_a_partition_nobody_touches() {
+        let f = DedupFront::new(true, 64 << 20);
+        let w = 60_000_000i64;
+        f.note_created(7);
+        for i in 0..10u64 {
+            f.insert(7, &fh(i), i, i, 1_000_000, 1_000_000 - w);
+        }
+        assert!(f.stats().bytes > 0);
+        // The floor reaches the newest stamp but not past it: all kept.
+        f.sweep_all(1_000_000 + w);
+        assert!(f.stats().bytes > 0);
+        for i in 0..10u64 {
+            assert!(f.should_probe(7, &fh(i), 1_000_000 - w), "hash {i} lost");
+        }
+        // One µs later the whole generation is out of window, untouched.
+        f.sweep_all(1_000_001 + w);
+        assert_eq!(f.stats().bytes, 0);
+        assert_eq!(f.stats().partitions, 1);
+    }
+
+    #[test]
+    fn the_sweeper_leaves_a_partition_whose_window_it_does_not_know() {
+        let f = DedupFront::new(true, 64 << 20);
+        let hashes: Vec<SeedHash> = (0..100)
+            .map(|i| SeedHash {
+                hash: fh(i),
+                created_us: 1_000 + i as i64,
+                base_off: i,
+                msg_off: i,
+            })
+            .collect();
+        f.install_seed(8, Seed::Complete(hashes), 500);
+        f.sweep_all(i64::MAX - 1);
+        for i in 0..100u64 {
+            assert!(f.should_probe(8, &fh(i), 500), "seeded hash {i} swept");
+        }
+    }
+
+    #[test]
+    fn a_fallback_partition_recovers_once_its_window_is_quiet() {
+        let f = DedupFront::new(true, 128); // below one generation: every roll falls back
+        let w = 60_000_000i64;
+        let mut out = Vec::new();
+        f.note_created(5);
+        f.insert(5, &fh(1), 1, 1, 1_000_000, 1_000_000 - w);
+        assert_eq!(f.stats().fallback_partitions, 1);
+        // Planned while in fallback: moves the quiet mark forward.
+        f.insert(5, &fh(2), 2, 2, 2_000_000, 2_000_000 - w);
+        assert_eq!(
+            f.probe_plan(5, &fh(2), 1_500_000, &mut out),
+            ProbeVerdict::Whole
+        );
+        f.sweep_all(1_500_000 + w);
+        assert_eq!(f.stats().fallback_partitions, 1);
+        // Past both stamps: empty and exact again, by the sweeper...
+        f.sweep_all(2_000_001 + w);
+        let s = f.stats();
+        assert_eq!((s.fallback_partitions, s.fallback_recovered), (0, 1));
+        assert_eq!(
+            f.probe_plan(5, &fh(2), 2_000_001, &mut out),
+            ProbeVerdict::Skip
+        );
+        // ...or on the next touch.
+        f.insert(5, &fh(3), 3, 3, 3_000_000, 3_000_000 - w);
+        assert_eq!(f.stats().fallback_partitions, 1);
+        assert_eq!(
+            f.probe_plan(5, &fh(3), 3_000_001, &mut out),
+            ProbeVerdict::Skip
+        );
+        assert_eq!(f.stats().fallback_recovered, 2);
+    }
+
+    #[test]
+    fn an_overflowed_seed_never_recovers_by_going_quiet() {
+        let f = DedupFront::new(true, 64 << 20);
+        let mut out = Vec::new();
+        f.install_seed(11, Seed::Overflow, 0);
+        f.insert(11, &fh(1), 1, 1, 1_000, 0);
+        f.sweep_all(i64::MAX - 1);
+        assert_eq!(
+            f.probe_plan(11, &fh(9), i64::MAX - 1, &mut out),
+            ProbeVerdict::Whole
+        );
+        assert_eq!(f.stats().fallback_recovered, 0);
+    }
+
+    #[test]
+    fn sweeps_and_recoveries_never_skip_an_in_window_hash() {
+        // A few partitions written in bursts, a second apart, a 5 s window, a
+        // cap that forces fallbacks, and a sweep every other second at a clock
+        // that lags the planner's: no in-window hash may ever come back Skip.
+        let w = 5_000_000i64;
+        let f = DedupFront::new(true, 6 * 600);
+        let mut out = Vec::new();
+        let mut planned: Vec<(u64, u64, i64)> = Vec::new(); // (pid, hash, created)
+        let mut n = 0u64;
+        for t in 1..200i64 {
+            let now = t * 1_000_000;
+            let floor = now - w;
+            for pid in 0..8u64 {
+                // Active ten seconds in thirty: quiet long enough to recover.
+                if !(t as u64 / 10 + pid).is_multiple_of(3) {
+                    continue;
+                }
+                if f.needs_seed(pid) {
+                    f.note_created(pid);
+                }
+                for _ in 0..(1 + (t as u64 * 7 + pid) % 40) {
+                    n += 1;
+                    f.insert(pid, &fh(n), n, n, now, floor);
+                    planned.push((pid, n, now));
+                }
+            }
+            if t % 2 == 0 {
+                f.sweep_all(now - 1);
+            }
+            for &(pid, h, created) in &planned {
+                if created >= floor {
+                    assert_ne!(
+                        f.probe_plan(pid, &fh(h), floor, &mut out),
+                        ProbeVerdict::Skip,
+                        "t={t} pid={pid} hash={h} created={created}"
+                    );
+                }
+            }
+            planned.retain(|&(_, _, c)| c >= floor);
+            let s = f.stats();
+            assert_eq!(
+                (s.partitions, s.fallback_partitions),
+                f.walk_counts(),
+                "t={t}"
+            );
+        }
+        let s = f.stats();
+        assert!(
+            s.fallback_recovered > 0,
+            "the cap never forced a recovery: {s:?}"
+        );
     }
 
     #[test]

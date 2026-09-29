@@ -228,6 +228,12 @@ struct LaneStats {
     job_wall_us: std::sync::atomic::AtomicU64,
     job_cpu_us: std::sync::atomic::AtomicU64,
     jobs: std::sync::atomic::AtomicU64,
+    /// Per cycle: the slowest job's wall, the longest wait from handing a job
+    /// to its lane to its start, and control's overlay advance (on the
+    /// planning thread, while the lanes run).
+    job_max_us: std::sync::atomic::AtomicU64,
+    job_start_us: std::sync::atomic::AtomicU64,
+    advance_us: std::sync::atomic::AtomicU64,
     /// Pushes the creation step planned, and its microseconds.
     create: std::sync::atomic::AtomicU64,
     create_us: std::sync::atomic::AtomicU64,
@@ -245,6 +251,9 @@ static LANE_STATS: LaneStats = LaneStats {
     job_wall_us: std::sync::atomic::AtomicU64::new(0),
     job_cpu_us: std::sync::atomic::AtomicU64::new(0),
     jobs: std::sync::atomic::AtomicU64::new(0),
+    job_max_us: std::sync::atomic::AtomicU64::new(0),
+    job_start_us: std::sync::atomic::AtomicU64::new(0),
+    advance_us: std::sync::atomic::AtomicU64::new(0),
     create: std::sync::atomic::AtomicU64::new(0),
     create_us: std::sync::atomic::AtomicU64::new(0),
     last: Mutex::new(None),
@@ -255,11 +264,12 @@ fn add(c: &std::sync::atomic::AtomicU64, v: u64) {
 }
 
 impl LaneStats {
-    fn maybe_log(&self) {
+    /// Log the line every 10 s; `true` when this call did.
+    fn maybe_log(&self) -> bool {
         let mut last = self.last.lock().expect("lane stats");
         let now = std::time::Instant::now();
         if last.is_some_and(|t| now.duration_since(t) < std::time::Duration::from_secs(10)) {
-            return;
+            return false;
         }
         *last = Some(now);
         use std::sync::atomic::Ordering::Relaxed;
@@ -275,6 +285,11 @@ impl LaneStats {
             per(&self.merge_us, cycles),
         );
         let (job_wall, job_cpu) = (per(&self.job_wall_us, jobs), per(&self.job_cpu_us, jobs));
+        let (job_max, job_start, advance) = (
+            per(&self.job_max_us, cycles),
+            per(&self.job_start_us, cycles),
+            per(&self.advance_us, cycles),
+        );
         let create = self.create.swap(0, Relaxed);
         let create_us = per(&self.create_us, cycles);
         if lane + control + create > 0 {
@@ -282,17 +297,22 @@ impl LaneStats {
                 target: "rsm",
                 lane,
                 control,
+                cycles,
                 router_us = router,
                 lanes_us = lanes,
                 control_us = ctl,
                 merge_us = merge,
                 job_wall_us = job_wall,
                 job_cpu_us = job_cpu,
+                job_max_us = job_max,
+                job_start_max_us = job_start,
+                advance_us = advance,
                 create,
                 create_us,
                 "lanes: commands planned since the last line (per-cycle means)",
             );
         }
+        true
     }
 }
 
@@ -1393,6 +1413,7 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
         let fl = lane_folded[l].clone();
         let cfg = cfg.clone();
         let keys = ring_keys.clone();
+        let handed = std::time::Instant::now();
         let job = Box::new(move || {
             let w0 = std::time::Instant::now();
             let c0 = crate::rsm::timing::thread_cpu_ns();
@@ -1414,13 +1435,15 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
                 cycle_no,
             );
             drop(st);
-            add(&LANE_STATS.job_wall_us, w0.elapsed().as_micros() as u64);
+            let wall = w0.elapsed().as_micros() as u64;
+            add(&LANE_STATS.job_wall_us, wall);
             add(
                 &LANE_STATS.job_cpu_us,
                 crate::rsm::timing::thread_cpu_ns().saturating_sub(c0) / 1000,
             );
             add(&LANE_STATS.jobs, 1);
-            let _ = tx.send(res);
+            let started = w0.duration_since(handed).as_micros() as u64;
+            let _ = tx.send((res, wall, started));
         });
         if ls.workers[l].tx.send(job).is_err() {
             return Err(crate::rsm::store::StoreError::Io(
@@ -1429,15 +1452,40 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
         }
         waits.push((l, rx));
     }
+    // Control's overlay catches up with the entries that landed and the ones it
+    // has not folded while the lanes plan: it needs only the in-flight list and
+    // the committed bases, and it was the biggest serial piece of the control
+    // phase (~1.4 ms of each ~8 ms cycle at 1M msg/s, 2026-09-29). Whether
+    // control plans at all is known only after the lanes (they can hand it
+    // commands back), so this runs every cycle it has an overlay; each entry is
+    // still ingested and unfolded once.
+    let t_advance = std::time::Instant::now();
+    let mut prior_control = ls
+        .control
+        .take()
+        .map(|k| k.advance_ingest(&folded, store_applied, base_pid, base_kv));
+    add(
+        &LANE_STATS.advance_us,
+        t_advance.elapsed().as_micros() as u64,
+    );
     let mut lane_outs: Vec<Option<LaneOut>> = (0..n).map(|_| None).collect();
     let mut failed: Option<crate::rsm::store::StoreError> = None;
+    let (mut job_max, mut start_max) = (0u64, 0u64);
     for (l, rx) in waits {
         match rx.recv() {
-            Ok(Ok(out)) => lane_outs[l] = Some(out),
-            Ok(Err(e)) => failed = Some(e),
+            Ok((res, wall, started)) => {
+                job_max = job_max.max(wall);
+                start_max = start_max.max(started);
+                match res {
+                    Ok(out) => lane_outs[l] = Some(out),
+                    Err(e) => failed = Some(e),
+                }
+            }
             Err(_) => failed = Some(crate::rsm::store::StoreError::Io("a lane job died".into())),
         }
     }
+    add(&LANE_STATS.job_max_us, job_max);
+    add(&LANE_STATS.job_start_us, start_max);
     if let Some(e) = failed {
         // Nothing of this cycle is kept anywhere: every lane rebuilds.
         ls.reset();
@@ -1485,7 +1533,24 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
     LANE_STATS
         .control
         .fetch_add(control_cmds, std::sync::atomic::Ordering::Relaxed);
-    LANE_STATS.maybe_log();
+    if LANE_STATS.maybe_log() {
+        // The dedup front beside it: whether it still answers for every
+        // partition (fallbacks, bytes against its cap) and how many probes
+        // scan a whole window rather than one generation's band.
+        let f = front.stats();
+        tracing::info!(
+            target: "rsm",
+            partitions = f.partitions,
+            fallback = f.fallback_partitions,
+            bytes_mb = f.bytes >> 20,
+            messages = f.messages,
+            probes_issued = f.probes_issued,
+            probes_whole = f.probes_whole,
+            probes_skipped = f.probes_skipped,
+            recovered = f.fallback_recovered,
+            "dedup front (cumulative counters)",
+        );
+    }
 
     add(&LANE_STATS.lanes_us, t_lanes.elapsed().as_micros() as u64);
     // ---- creations ----------------------------------------------------------
@@ -1574,6 +1639,12 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
         || maintenance.is_some()
         || kv_sweep_limit.is_some()
         || expire_window_us.is_some();
+    if !needs_control {
+        // Kept, advanced: the next cycle that plans control starts from here.
+        if let Some(Ok(k)) = prior_control.take() {
+            ls.control = Some(k);
+        }
+    }
     let mut control_logged: Vec<(RequestId, Outcome, Vec<Effect>)> = Vec::new();
     let mut pid_base = cycle_pid_base;
     let mut kv_base = cycle_kv_base;
@@ -1583,13 +1654,9 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
     // (overlay, the cycle's tag, its fold count before the cycle)
     let mut control_state: Option<(KeptOverlay, u64, u64)> = None;
     if needs_control {
-        let mut prior = ls.control.take();
         let st = store.clone();
         st.read(|r| {
-            let mut kept = match prior
-                .take()
-                .map(|k| k.advance_ingest(&folded, store_applied, base_pid, base_kv))
-            {
+            let mut kept = match prior_control.take() {
                 Some(Ok(k)) => k,
                 _ => KeptOverlay::rebuild(&folded, store_applied, base_pid, base_kv),
             };

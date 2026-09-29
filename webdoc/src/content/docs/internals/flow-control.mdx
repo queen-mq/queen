@@ -103,7 +103,7 @@ the command wait, and the request's deadline bounds the wait.
   4 MiB, or 5 ms of planning, whichever comes first. Every command that is not a plain push (acks,
   pops, renewals, transactions, KV, timers) waits in a priority lane that each cycle drains before any
   push: the work that empties the system goes ahead of the work that fills it.
-- **The pipeline.** At most `QUEEN_RAFT_PIPELINE` entries (default 4) are proposed and not yet applied.
+- **The pipeline.** At most `QUEEN_RAFT_PIPELINE` entries (default 8) are proposed and not yet applied.
   While the pipeline is full, the next cycle waits for the oldest entry to apply.
 - **Forwarding from a follower.** A follower keeps at most `QUEEN_RAFT_FWD_INFLIGHT` calls to the
   leader in flight (default 4096), prepared commands and read barriers together; past that a call waits

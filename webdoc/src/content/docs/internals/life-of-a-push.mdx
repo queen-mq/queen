@@ -106,7 +106,7 @@ command's request id is looked up first: a command already planned and committed
 its recorded outcome and never planned twice. That lookup is what makes a follower's retry of a
 forwarded command safe after a lost answer or a leader change.
 
-Nothing waits on a timer. While up to 4 entries are in flight (`QUEEN_RAFT_PIPELINE`), the commands
+Nothing waits on a timer. While up to 8 entries are in flight (`QUEEN_RAFT_PIPELINE`), the commands
 that arrive join the next cycle, so an entry carries one command at low load and many under load.
 Batching is emergent, not configured.
 

@@ -1152,8 +1152,12 @@ impl<S: Store + 'static> RaftReplicator<S> {
         // timeout: 3 s by default.
         let quorum_loss =
             Duration::from_millis(config.election_timeout_max + config.election_timeout_min);
+        // `QUEEN_RAFT_RT_THREADS` (default 4): openraft's core, the replication
+        // streams to every follower and the Raft RPC server share this runtime.
+        // Two threads ran ~60% busy on a leader shipping ~700 MB/s to two
+        // followers (1M msg/s), and every commit queued behind them.
         let rt = match tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
+            .worker_threads(env_u64("QUEEN_RAFT_RT_THREADS", 4) as usize)
             .thread_name("queen-raft")
             .enable_all()
             .build()

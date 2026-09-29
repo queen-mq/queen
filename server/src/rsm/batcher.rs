@@ -1,7 +1,7 @@
 //! The cycle driver (PLAN_RAFT.md §7.1, WP-1.6b): the one place on the leader
 //! that turns queued client commands into log entries and answers their
-//! receivers. It owns the bounded pipeline (D4: `QUEEN_RAFT_PIPELINE` = 4
-//! entries in flight), the [`Overlay`] across that pipeline, and the request-id
+//! receivers. It owns the bounded pipeline (D4: `QUEEN_RAFT_PIPELINE`, default
+//! 8 entries in flight), the [`Overlay`] across that pipeline, and the request-id
 //! expiry step of §10.1.
 //!
 //! # The cycle (§7.1)
@@ -115,7 +115,11 @@ const HOLD_POLL_MS: u64 = 2;
 /// (WP-1.7); nothing here is read from the environment on the hot path.
 #[derive(Clone, Debug)]
 pub struct BatcherConfig {
-    /// `QUEEN_RAFT_PIPELINE` (D4, I3): at most this many entries in flight.
+    /// `QUEEN_RAFT_PIPELINE` (D4, I3): at most this many entries in flight
+    /// (default 8). A slot frees only when its entry applies here, ~30-50 ms
+    /// after its proposal on three nodes at 1M msg/s, so 4 capped the leader at
+    /// ~100 cycles/s: with each cycle at the 4 MiB drain cap, just 1M msg/s,
+    /// and the queue never drained after the first retention wave (2026-09-29).
     pub pipeline: usize,
     /// `QUEEN_RAFT_BATCH_MAX_CMDS` (§5.1).
     pub batch_max_cmds: usize,
@@ -221,7 +225,7 @@ pub struct BatcherConfig {
 impl Default for BatcherConfig {
     fn default() -> BatcherConfig {
         BatcherConfig {
-            pipeline: 4,
+            pipeline: 8,
             batch_max_cmds: crate::rsm::entry::BATCH_MAX_CMDS_DEFAULT,
             batch_max_bytes: crate::rsm::entry::BATCH_MAX_BYTES_DEFAULT,
             propose_ms: 5000,
@@ -1626,11 +1630,13 @@ pub struct Batcher<S: Store, R: Replicator> {
 
 impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
     pub fn new(store: Arc<S>, repl: Arc<R>, cfg: BatcherConfig) -> Batcher<S, R> {
+        let front = Arc::new(DedupFront::from_env());
+        DedupFront::spawn_sweeper(&front);
         Batcher {
             store,
             repl,
             cfg,
-            front: Arc::new(DedupFront::from_env()),
+            front,
             reader: None,
             qlog_reader: None,
             quiesce_rx: None,
@@ -2344,6 +2350,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             .collect();
 
         let wall_us = self.plan_wall();
+        self.front.set_clock(wall_us);
         let expire_window_us = expire.then(|| self.cfg.request_id_window_s as i64 * 1_000_000);
         let kv_sweep_limit = kv_sweep.then_some(self.cfg.kv_sweep_limit);
         let store = self.store.clone();

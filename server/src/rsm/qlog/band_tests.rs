@@ -268,9 +268,9 @@ fn band_read_min_equals_the_whole_window_scan() {
         "never an uncommitted record"
     );
     assert_eq!(min_in_window_offset(&frames, &TAIL, floor()), None);
-    // A younger generation's band only: gen 2 starts mid-record 83 (the 4097th
-    // in-window hash, offset 4196), so the band read stays far below the whole
-    // window (records 83..=117).
+    // A younger generation's band only: offset 5000 sits in a generation that
+    // starts well after the window's first hashes (generations tier up from the
+    // minimum), so the band read stays below the whole window.
     let v = front.probe_plan(P, &hash_at(P, 5000), floor(), &mut ranges);
     assert_eq!(v, ProbeVerdict::Ranges);
     let frames = q
@@ -281,8 +281,8 @@ fn band_read_min_equals_the_whole_window_scan() {
         Some(5000)
     );
     assert!(
-        frames.len() < 40,
-        "gen-2 band read {} records",
+        (frames.len() as u64) < COMMITTED_RECS * 3 / 4,
+        "a young band read {} of {COMMITTED_RECS} records",
         frames.len()
     );
 
