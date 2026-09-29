@@ -366,6 +366,11 @@ impl BatcherConfig {
                 visit_cap: num("QUEEN_RAFT_RETENTION_VISIT", d.maintenance.visit_cap as u64)
                     as usize,
                 walk: Default::default(),
+                visit_total: num(
+                    "QUEEN_RAFT_RETENTION_VISIT_TOTAL",
+                    d.maintenance.visit_total as u64,
+                ) as usize,
+                walk_queue: Default::default(),
                 txn_window_min_s: num(
                     "QUEEN_RAFT_TXN_WINDOW_MIN_S",
                     d.maintenance.txn_window_min_s as u64,
@@ -1919,12 +1924,46 @@ struct PlannerThread {
 
 type PlannerJob = Box<dyn FnOnce(&mut PlannerState) + Send>;
 
+/// `QUEEN_RAFT_PLAN_NICE` (default -10; 0 = leave it): the nice value the
+/// planner and lane threads ask for. A cycle forks eight lane jobs and waits
+/// for the slowest; on a leader running ~10 of its 16 cores (HTTP workers,
+/// replication, compression) the last lane thread started ~2 ms after its
+/// job was handed over, a fifth of the cycle (2026-09-29). Without the
+/// privilege (most containers) the call fails and nothing changes.
+static PLAN_NICE: std::sync::LazyLock<i32> = std::sync::LazyLock::new(|| {
+    std::env::var("QUEEN_RAFT_PLAN_NICE")
+        .ok()
+        .and_then(|v| v.trim().parse::<i32>().ok())
+        .unwrap_or(-10)
+        .clamp(-20, 19)
+});
+
+/// Give the calling thread [`PLAN_NICE`] (Linux; best effort).
+pub(crate) fn raise_planning_thread_priority() {
+    #[cfg(target_os = "linux")]
+    {
+        let nice = *PLAN_NICE;
+        if nice == 0 {
+            return;
+        }
+        // SAFETY: gettid takes no arguments; setpriority reads only its
+        // integer arguments. A refusal (EPERM/EACCES) leaves the thread as it was.
+        unsafe {
+            let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
+            if libc::setpriority(libc::PRIO_PROCESS, tid, nice) != 0 {
+                tracing::debug!(target: "rsm", nice, "planning thread priority unchanged (no privilege)");
+            }
+        }
+    }
+}
+
 impl PlannerThread {
     fn spawn() -> PlannerThread {
         let (tx, rx) = std::sync::mpsc::channel::<PlannerJob>();
         std::thread::Builder::new()
             .name("queen-planner".into())
             .spawn(move || {
+                raise_planning_thread_priority();
                 let mut state = PlannerState::default();
                 while let Ok(job) = rx.recv() {
                     job(&mut state);

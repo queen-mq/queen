@@ -2719,6 +2719,7 @@ impl RaftFacade {
                     .await;
             }
             attempt += 1;
+            crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.pop_h_attempts, 1);
             // P1.2: the planner refuses to claim once nobody can receive the answer.
             // A follower serving its own client also has to apply the claim and
             // render it after the leader answers, so it asks the leader to stop
@@ -2744,7 +2745,12 @@ impl RaftFacade {
                     Some(n)
                 } else {
                     let cap = self.autopilot.ready_scan_cap(&gate_key);
+                    let t_ready = std::time::Instant::now();
                     let n = self.ready_count(&ctx.tenant, &queue, &group, cap).await;
+                    crate::rsm::dbgctr::inc(
+                        &crate::rsm::dbgctr::C.pop_h_ready_us,
+                        t_ready.elapsed().as_micros() as u64,
+                    );
                     if let Some(n) = n {
                         self.autopilot.store_ready(&gate_key, n);
                     }
@@ -2820,7 +2826,8 @@ impl RaftFacade {
             // `concurrent_consumers_never_deliver_the_same_message_twice` got
             // 144-175 of its 200 messages through in its 6 s with the fast
             // path off.
-            let claims = if self.pop_fastpath_empty
+            let t_fast = std::time::Instant::now();
+            let fast_empty = self.pop_fastpath_empty
                 && !woke
                 && matches!(command, Command::PopWildcard(_))
                 && self
@@ -2830,11 +2837,22 @@ impl RaftFacade {
                     || (self.linearizable(ctx).await.is_ok()
                         && self
                             .wildcard_would_be_empty(&ctx.tenant, &queue, &group)
-                            .await))
-            {
+                            .await));
+            crate::rsm::dbgctr::inc(
+                &crate::rsm::dbgctr::C.pop_h_fastpath_us,
+                t_fast.elapsed().as_micros() as u64,
+            );
+            let claims = if fast_empty {
+                crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.pop_h_fastpath_empty, 1);
                 Vec::new()
             } else {
+                let t_submit = std::time::Instant::now();
+                crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.pop_h_submits, 1);
                 let reply = self.submit(ctx, command).await?;
+                crate::rsm::dbgctr::inc(
+                    &crate::rsm::dbgctr::C.pop_h_submit_us,
+                    t_submit.elapsed().as_micros() as u64,
+                );
                 match reply {
                     Reply::Done { outcome, .. } => match outcome {
                         Outcome::Pop(o) => o.claims,
@@ -2848,6 +2866,9 @@ impl RaftFacade {
                 }
             };
 
+            if claims.is_empty() && !fast_empty {
+                crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.pop_h_submit_empty, 1);
+            }
             if !claims.is_empty() {
                 if auto && !auto_ack {
                     // The lease's drain clock starts (the batch's input).
@@ -2858,7 +2879,8 @@ impl RaftFacade {
                     self.autopilot
                         .delivered(&gate_key, &worker, n.min(u32::MAX as u64) as u32);
                 }
-                return self
+                let t_render = std::time::Instant::now();
+                let answer = self
                     .answer_pop(
                         ctx,
                         &queue,
@@ -2870,6 +2892,11 @@ impl RaftFacade {
                         last_plan,
                     )
                     .await;
+                crate::rsm::dbgctr::inc(
+                    &crate::rsm::dbgctr::C.pop_h_render_us,
+                    t_render.elapsed().as_micros() as u64,
+                );
+                return answer;
             }
 
             // Empty. Long-poll only for a queue-scoped pop (§9.5); discovery has
@@ -2909,7 +2936,16 @@ impl RaftFacade {
             let _pinned = partition
                 .is_some()
                 .then(|| self.gates.park_pinned(&gate_key));
+            let t_park = std::time::Instant::now();
+            crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.pop_h_parks, 1);
             woke = self.gates.wait(&gate_key, park).await;
+            crate::rsm::dbgctr::inc(
+                &crate::rsm::dbgctr::C.pop_h_park_us,
+                t_park.elapsed().as_micros() as u64,
+            );
+            if woke {
+                crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.pop_h_park_woke, 1);
+            }
             if ctx.deadline.expired() {
                 return self
                     .answer_pop(

@@ -134,6 +134,9 @@ struct AppEntryInner {
     z: OnceLock<Arc<Vec<Option<Bytes>>>>,
     /// A stored entry's `Append` payloads, in effect order.
     stored: Option<Arc<Vec<StoredPayload>>>,
+    /// When the leader proposed it (`None` on a follower): the apply path's
+    /// stage timings start here.
+    proposed_at: Option<std::time::Instant>,
     /// The wire encoding (stored form), made once and shared by every follower
     /// the entry is sent to (and every resend).
     wire: OnceLock<Bytes>,
@@ -167,7 +170,9 @@ impl AppEntry {
         if let Some(b) = wire {
             let _ = w.set(b);
         }
+        let proposed_at = full.is_some().then(std::time::Instant::now);
         AppEntry(Arc::new(AppEntryInner {
+            proposed_at,
             full,
             payload_free,
             pf_bytes: pfb,
@@ -448,6 +453,11 @@ impl AppEntry {
     /// The payload-free form apply takes: the one the writer recorded, or,
     /// for an entry the writer never saw, derived from the full entry exactly
     /// as the writer derives it.
+    /// When this node proposed the entry, if it did.
+    pub fn proposed_at(&self) -> Option<std::time::Instant> {
+        self.0.proposed_at
+    }
+
     pub fn payload_free(&self) -> std::io::Result<Arc<Entry>> {
         if let Some(pf) = self.0.payload_free.get() {
             return Ok(pf.clone());

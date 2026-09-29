@@ -1233,6 +1233,11 @@ pub struct Planner<'a, R: Reads + ?Sized> {
     /// sealed-file list), cached so both the shape read and the bounded pop hash
     /// read reuse one `partition_files` scan. `None` = no committed frames.
     seg_ctx_cache: RefCell<HashMap<Pid, Option<Rc<SegCtx>>>>,
+    /// Per ring, the partition this cycle's wildcard pops have tried up to: the next pop of the ring walks on from there instead of re-trying,
+    /// from the head, every partition the earlier ones claimed or found
+    /// unclaimable (with many ready partitions, a cycle's pops were quadratic:
+    /// ~1 s a cycle at 10M, 2026-09-29).
+    ring_walked: RefCell<HashMap<(String, String, String), Pid>>,
 }
 
 /// The process-wide `QUEEN_RAFT_CLAIM_FROM_RING` default (PERF-I), read once.
@@ -1324,6 +1329,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             seg_cache: RefCell::new(HashMap::new()),
             seg_shape_cache: RefCell::new(HashMap::new()),
             seg_ctx_cache: RefCell::new(HashMap::new()),
+            ring_walked: RefCell::new(HashMap::new()),
         }
     }
 

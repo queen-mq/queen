@@ -207,11 +207,94 @@ pub(crate) fn err(store: &HeedStore, e: heed::Error) -> StoreError {
 // RAM keyspaces (Phase C)
 // ---------------------------------------------------------------------------
 
-/// Keys and values are `Arc`s so that a reader can take a row out from under
-/// the lock for the price of a reference count — a scan's chunk, a `get`'s
-/// arena — and so that marking a key dirty never allocates.
-type RamKey = Arc<[u8]>;
+/// Values are `Arc`s so that a reader can take a row out from under the lock
+/// for the price of a reference count — a scan's chunk, a `get`'s arena.
 type RamVal = Arc<[u8]>;
+
+/// How many key bytes a [`RamKey`] keeps in place. 30 makes the key 32 bytes:
+/// the counters, cursors and partition rows fit (and save their own heap
+/// block), a `pending` key does not. 54 (every hot key inline) was 1.1x on
+/// consumption at 10M partitions but +21% resident memory (2026-09-29).
+const RAM_KEY_INLINE: usize = 30;
+
+/// A RAM key. Up to [`RAM_KEY_INLINE`] bytes live in the key itself, so in the
+/// tree's nodes: a lookup compares a node's keys where they sit instead of
+/// chasing one pointer per comparison (with millions of rows each chase was a
+/// cache miss: `RamTable::get` + `memcmp` were half of the apply thread at 10M
+/// partitions, 2026-09-29). Longer keys stay behind an `Arc`. Ordered, compared
+/// and hashed exactly as their bytes (`Borrow<[u8]>`), so every lookup, range
+/// and the dirty map read them as the byte keys they were.
+#[derive(Clone)]
+pub(crate) enum RamKey {
+    Inline(u8, [u8; RAM_KEY_INLINE]),
+    Heap(Arc<[u8]>),
+}
+
+impl RamKey {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            RamKey::Inline(n, b) => &b[..*n as usize],
+            RamKey::Heap(a) => a,
+        }
+    }
+}
+
+impl From<&[u8]> for RamKey {
+    fn from(k: &[u8]) -> RamKey {
+        if k.len() <= RAM_KEY_INLINE {
+            let mut b = [0u8; RAM_KEY_INLINE];
+            b[..k.len()].copy_from_slice(k);
+            RamKey::Inline(k.len() as u8, b)
+        } else {
+            RamKey::Heap(Arc::from(k))
+        }
+    }
+}
+
+impl std::ops::Deref for RamKey {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        self.bytes()
+    }
+}
+
+impl std::borrow::Borrow<[u8]> for RamKey {
+    fn borrow(&self) -> &[u8] {
+        self.bytes()
+    }
+}
+
+impl PartialEq for RamKey {
+    fn eq(&self, o: &RamKey) -> bool {
+        self.bytes() == o.bytes()
+    }
+}
+
+impl Eq for RamKey {}
+
+impl PartialOrd for RamKey {
+    fn partial_cmp(&self, o: &RamKey) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
+}
+
+impl Ord for RamKey {
+    fn cmp(&self, o: &RamKey) -> std::cmp::Ordering {
+        self.bytes().cmp(o.bytes())
+    }
+}
+
+impl std::hash::Hash for RamKey {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.bytes().hash(h)
+    }
+}
+
+impl std::fmt::Debug for RamKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.bytes().fmt(f)
+    }
+}
 
 /// What one [`RamTable`]'s lock guards.
 struct RamRows {
@@ -270,7 +353,7 @@ impl RamTable {
                         // shares the map's key allocation.
                         let k = match rows.map.get_key_value(key) {
                             Some((k, _)) => k.clone(),
-                            None => Arc::from(key),
+                            None => RamKey::from(key),
                         };
                         rows.dirty.insert(k, Some(val));
                         None
@@ -278,7 +361,7 @@ impl RamTable {
                 };
                 (Some(old), old_dirty)
             } else {
-                let k: RamKey = Arc::from(key);
+                let k: RamKey = RamKey::from(key);
                 let old_dirty = match rows.dirty.get_mut(key) {
                     Some(d) => d.replace(val.clone()),
                     None => {
@@ -2305,7 +2388,7 @@ fn load_keyspace(
         } else if integrity::verifies(seed, k, v) {
             return Err(lost_format_row(ks, k));
         }
-        rows.push((Arc::from(k), Arc::from(v)));
+        rows.push((RamKey::from(k), Arc::from(v)));
     }
     let header = db
         .len(txn)

@@ -30,6 +30,14 @@ pub struct Config {
     /// next pass. Leader-local and advisory: it only orders which partitions a
     /// pass looks at first; every effect is still judged from committed state.
     pub walk: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<(String, String), Pid>>>,
+    /// `QUEEN_RAFT_RETENTION_VISIT_TOTAL` (default 4096): partitions a pass
+    /// looks at over ALL queues. `visit_cap` bounds one queue; with it alone a
+    /// pass over 1,000 queues of 10 partitions judged all 10,000 in one cycle
+    /// (13.7% of the planning thread at 1M msg/s, 2026-09-29). A pass that
+    /// runs out resumes at the next queue ([`Config::walk_queue`]).
+    pub visit_total: usize,
+    /// The queue the next pass starts at, `None` = the first.
+    pub walk_queue: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
     /// `QUEEN_RAFT_TXN_WINDOW_MIN_S` (default 900): the least time a message's
     /// hash list — and so its queue-log record — is kept, whatever the queue's
     /// dedup window and completed retention. The physical reclaim of a queue
@@ -50,6 +58,8 @@ impl Default for Config {
             partition_cleanup_days: 30,
             visit_cap: 8_192,
             walk: Default::default(),
+            visit_total: 4_096,
+            walk_queue: Default::default(),
             txn_window_min_s: 900,
             partition_walk: true,
         }
@@ -213,16 +223,30 @@ pub fn plan<R: Reads + ?Sized>(r: &R, now_us: i64, cfg: &Config) -> Result<Plann
     } else {
         Vec::new()
     };
+    let resume = cfg.walk_queue.lock().expect("retention walk").take();
+    let mut visits_left = cfg.visit_total.max(1);
+    let mut stopped_at: Option<(String, String)> = None;
     for (tenant, queue, qcfg) in queues {
+        if resume
+            .as_ref()
+            .is_some_and(|(t, q)| (tenant.as_str(), queue.as_str()) < (t.as_str(), q.as_str()))
+        {
+            continue;
+        }
         if budget == 0 {
             out.more = true;
+            break;
+        }
+        if visits_left == 0 {
+            // The rest of the queues wait for the next pass.
+            stopped_at = Some((tenant.clone(), queue.clone()));
             break;
         }
         let cut = queue_cutoffs(r, now_us, cfg, &tenant, &queue, &qcfg);
 
         // A bounded window of the queue's partitions, resuming where the last
         // pass stopped and wrapping to the first ones (see `visit_cap`).
-        let cap = cfg.visit_cap.max(1);
+        let cap = cfg.visit_cap.max(1).min(visits_left);
         let walk_key = (tenant.clone(), queue.clone());
         let start = cfg
             .walk
@@ -262,6 +286,7 @@ pub fn plan<R: Reads + ?Sized>(r: &R, now_us: i64, cfg: &Config) -> Result<Plann
                 next = Some(pid);
                 break;
             }
+            visits_left = visits_left.saturating_sub(1);
             if r.garbage(pid)?.is_some() {
                 continue;
             }
@@ -298,7 +323,13 @@ pub fn plan<R: Reads + ?Sized>(r: &R, now_us: i64, cfg: &Config) -> Result<Plann
                 }
             }
         }
+        if visits_left == 0 && next.is_some() {
+            // This queue is not done: the next pass starts here.
+            stopped_at = Some((tenant.clone(), queue.clone()));
+            break;
+        }
     }
+    *cfg.walk_queue.lock().expect("retention walk") = stopped_at;
 
     // D18: only log an expiry command when the oldest index row is due.
     let trace_cutoff = now_us.saturating_sub(cfg.trace_retention_s.max(1) * 1_000_000);
@@ -374,6 +405,23 @@ pub(crate) fn judge_partition<R: Reads + ?Sized>(
     let prefix = keys::txns_prefix(pid);
     let from = keys::txns(pid, part.txns_start);
     let mut corrupt = false;
+    // Rows are in created order: when the oldest is newer than every cutoff,
+    // nothing here is stale, and the full scan below would move no watermark.
+    let newest_cut = [cut.all, cut.max_wait, cut.completed]
+        .into_iter()
+        .flatten()
+        .fold(cut.txns, i64::max);
+    let mut oldest_fresh = true;
+    r.scan_raw(Keyspace::Txns, &from, &prefix, 1, &mut |_key, value| {
+        match TxnsRow::decode(value) {
+            Ok(row) => oldest_fresh = row.created_at_us >= newest_cut,
+            Err(_) => oldest_fresh = false,
+        }
+        false
+    })?;
+    if oldest_fresh {
+        return idle_verdict(r, now_us, cfg, pid, part);
+    }
     r.scan_raw(
         Keyspace::Txns,
         &from,
@@ -448,6 +496,18 @@ pub(crate) fn judge_partition<R: Reads + ?Sized>(
             txns_start: txn_target,
         }));
     }
+    idle_verdict(r, now_us, cfg, pid, part)
+}
+
+/// The partition-cleanup half of [`judge_partition`]: delete a partition idle
+/// past the cleanup age.
+fn idle_verdict<R: Reads + ?Sized>(
+    r: &R,
+    now_us: i64,
+    cfg: &Config,
+    pid: Pid,
+    part: &rows::PartitionRow,
+) -> Result<Option<Verdict>> {
     if cfg.partition_cleanup_enabled
         && partition_dead(
             r,

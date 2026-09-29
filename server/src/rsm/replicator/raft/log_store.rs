@@ -864,6 +864,13 @@ impl RaftLogStorage<TypeConfig> for LogStore {
             if m.is_empty() {
                 m.start = next;
             }
+            {
+                let now = std::time::Instant::now();
+                let mut at = APPENDED_AT.lock().unwrap_or_else(|p| p.into_inner());
+                for e in &entries {
+                    at.insert(rsm_index(e.log_id.index), now);
+                }
+            }
             for e in &entries {
                 if e.log_id.index != next {
                     return Err(io::Error::other(format!(
@@ -1161,6 +1168,14 @@ fn finish_group(
     apps: Vec<Option<AppEntry>>,
     callbacks: Vec<IOFlushed<TypeConfig>>,
 ) {
+    {
+        let mut at = APPENDED_AT.lock().unwrap_or_else(|p| p.into_inner());
+        for it in items {
+            if let Some(t) = at.remove(&it.seq) {
+                super::state_machine::stage_add(7, t.elapsed());
+            }
+        }
+    }
     for (it, app) in items.iter().zip(apps) {
         if let (GroupBody::Entry { entry, .. }, Some(app)) = (&it.body, app) {
             app.set_payload_free(entry.clone());
@@ -1170,6 +1185,12 @@ fn finish_group(
         cb.io_completed(Ok(()));
     }
 }
+
+/// When each index was handed to [`LogStore::append`] (diagnostics: its flush
+/// latency is taken when its group is fsync'd).
+static APPENDED_AT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<u64, std::time::Instant>>,
+> = std::sync::LazyLock::new(Default::default);
 
 fn set_poison(poison: &Poison, why: String) {
     let mut g = poison.lock().expect("poison");

@@ -73,24 +73,40 @@ use crate::rsm::store::{Reads, Store, TypedReads};
 
 use super::{Command, Reply};
 
+/// What a lane thread is sent: a planning job.
+enum LaneMsg {
+    Job(Box<dyn FnOnce() + Send>),
+}
+
 /// A persistent lane thread running planning jobs.
 struct LaneWorker {
-    tx: std::sync::mpsc::Sender<Box<dyn FnOnce() + Send>>,
+    tx: std::sync::mpsc::Sender<LaneMsg>,
 }
 
 impl LaneWorker {
     fn spawn(lane: usize) -> LaneWorker {
-        let (tx, rx) = std::sync::mpsc::channel::<Box<dyn FnOnce() + Send>>();
+        let (tx, rx) = std::sync::mpsc::channel::<LaneMsg>();
         std::thread::Builder::new()
             .name(format!("queen-lane-{lane}"))
             .spawn(move || {
-                for job in rx {
+                crate::rsm::batcher::raise_planning_thread_priority();
+                while let Ok(LaneMsg::Job(job)) = rx.recv() {
                     job();
+                    // What the job did after it answered (dropping what it
+                    // captured) delays this lane's next job.
+                    if let Some(t) = JOB_SENT.with(|c| c.take()).map(|t| t.elapsed()) {
+                        add(&LANE_STATS.job_tail_us, t.as_micros() as u64);
+                    }
                 }
             })
             .expect("spawn a lane thread");
         LaneWorker { tx }
     }
+}
+
+thread_local! {
+    /// When this lane thread's current job sent its result.
+    static JOB_SENT: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
 }
 
 /// What one lane keeps between cycles.
@@ -172,6 +188,17 @@ pub(crate) struct LanesState {
     /// what landed and ingests only the entries it has not seen, instead of
     /// rebuilding every entry in flight.
     control: Option<KeptOverlay>,
+    /// The router's committed-catalog lookups, kept between cycles.
+    kept_facts: KeptFacts,
+    /// A catalog change was in flight since the facts were kept: start over
+    /// once it has landed.
+    kept_stale: bool,
+    /// Control's rings, kept between cycles and advanced by what lands every
+    /// cycle, as a lane keeps its own: rebuilding them from `pending` in each
+    /// cycle that plans a wildcard pop in control cost O(pending rows of the
+    /// popped groups) — ~10 s a cycle with 10M pending partitions in one queue
+    /// (2026-09-29).
+    control_rings: Option<PlanRings>,
 }
 
 /// tenant → queue → name → `V`: nested so a lookup borrows `&str` instead of
@@ -233,10 +260,25 @@ struct LaneStats {
     /// planning thread, while the lanes run).
     job_max_us: std::sync::atomic::AtomicU64,
     job_start_us: std::sync::atomic::AtomicU64,
+    /// Summed over jobs: from a job's answer to its thread being free again.
+    job_tail_us: std::sync::atomic::AtomicU64,
     advance_us: std::sync::atomic::AtomicU64,
     /// Pushes the creation step planned, and its microseconds.
     create: std::sync::atomic::AtomicU64,
     create_us: std::sync::atomic::AtomicU64,
+    /// Diagnostics: lane-state resets (and those from a misaligned in-flight
+    /// list), kept rings scanned from `pending` and times every ring was
+    /// dropped (lanes and control), lane jobs skipped, and wildcard pops sent
+    /// to control because their queue was busy / their queue or group was not
+    /// committed / no lane had anything and the pop does not wait.
+    resets: std::sync::atomic::AtomicU64,
+    sync_resets: std::sync::atomic::AtomicU64,
+    ring_loads: std::sync::atomic::AtomicU64,
+    ring_drops: std::sync::atomic::AtomicU64,
+    skips: std::sync::atomic::AtomicU64,
+    wild_busy: std::sync::atomic::AtomicU64,
+    wild_unknown: std::sync::atomic::AtomicU64,
+    wild_nothing: std::sync::atomic::AtomicU64,
     last: Mutex<Option<std::time::Instant>>,
 }
 
@@ -253,9 +295,18 @@ static LANE_STATS: LaneStats = LaneStats {
     jobs: std::sync::atomic::AtomicU64::new(0),
     job_max_us: std::sync::atomic::AtomicU64::new(0),
     job_start_us: std::sync::atomic::AtomicU64::new(0),
+    job_tail_us: std::sync::atomic::AtomicU64::new(0),
     advance_us: std::sync::atomic::AtomicU64::new(0),
     create: std::sync::atomic::AtomicU64::new(0),
     create_us: std::sync::atomic::AtomicU64::new(0),
+    resets: std::sync::atomic::AtomicU64::new(0),
+    sync_resets: std::sync::atomic::AtomicU64::new(0),
+    ring_loads: std::sync::atomic::AtomicU64::new(0),
+    ring_drops: std::sync::atomic::AtomicU64::new(0),
+    skips: std::sync::atomic::AtomicU64::new(0),
+    wild_busy: std::sync::atomic::AtomicU64::new(0),
+    wild_unknown: std::sync::atomic::AtomicU64::new(0),
+    wild_nothing: std::sync::atomic::AtomicU64::new(0),
     last: Mutex::new(None),
 };
 
@@ -285,6 +336,7 @@ impl LaneStats {
             per(&self.merge_us, cycles),
         );
         let (job_wall, job_cpu) = (per(&self.job_wall_us, jobs), per(&self.job_cpu_us, jobs));
+        let job_tail = per(&self.job_tail_us, jobs);
         let (job_max, job_start, advance) = (
             per(&self.job_max_us, cycles),
             per(&self.job_start_us, cycles),
@@ -292,6 +344,20 @@ impl LaneStats {
         );
         let create = self.create.swap(0, Relaxed);
         let create_us = per(&self.create_us, cycles);
+        let (resets, sync_resets) = (
+            self.resets.swap(0, Relaxed),
+            self.sync_resets.swap(0, Relaxed),
+        );
+        let (ring_loads, ring_drops) = (
+            self.ring_loads.swap(0, Relaxed),
+            self.ring_drops.swap(0, Relaxed),
+        );
+        let skips = self.skips.swap(0, Relaxed);
+        let (wild_busy, wild_unknown, wild_nothing) = (
+            self.wild_busy.swap(0, Relaxed),
+            self.wild_unknown.swap(0, Relaxed),
+            self.wild_nothing.swap(0, Relaxed),
+        );
         if lane + control + create > 0 {
             tracing::info!(
                 target: "rsm",
@@ -306,9 +372,18 @@ impl LaneStats {
                 job_cpu_us = job_cpu,
                 job_max_us = job_max,
                 job_start_max_us = job_start,
+                job_tail_us = job_tail,
                 advance_us = advance,
                 create,
                 create_us,
+                resets,
+                sync_resets,
+                ring_loads,
+                ring_drops,
+                skips,
+                wild_busy,
+                wild_unknown,
+                wild_nothing,
                 "lanes: commands planned since the last line (per-cycle means)",
             );
         }
@@ -527,6 +602,43 @@ fn record_of(full: Arc<Entry>, subs: Vec<Arc<Entry>>) -> Record {
     }
 }
 
+impl Record {
+    /// Whether this entry changes any catalog fact the router caches.
+    fn catalog(&self) -> bool {
+        !self.queues.is_empty()
+            || !self.tenants.is_empty()
+            || !self.pids.is_empty()
+            || !self.creates.is_empty()
+    }
+}
+
+/// `QUEEN_LANES_ROUTER_KEEP` (default on): keep the router's committed-catalog
+/// lookups (queue and group rows, partition name -> pid, live pids, the lane
+/// holding a whole queue) from one cycle to the next while no catalog change is
+/// in flight. Re-reading them each cycle cost ~2 ms of the ~11 ms cycle at
+/// 1,000 queues, serial, before any lane starts (2026-09-29).
+static ROUTER_KEEP: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    !matches!(
+        std::env::var("QUEEN_LANES_ROUTER_KEEP")
+            .as_deref()
+            .map(str::trim),
+        Ok("0") | Ok("false") | Ok("off")
+    )
+});
+
+/// The most kept partitions (live pids) before the kept lookups start over.
+const ROUTER_KEEP_MAX_PIDS: usize = 1 << 20;
+
+/// The router's committed-catalog lookups kept between cycles ([`ROUTER_KEEP`]).
+#[derive(Default)]
+struct KeptFacts {
+    queues: HashMap<String, HashMap<String, bool>>,
+    groups: ByName<bool>,
+    pids: ByName<Option<(Pid, bool)>>,
+    live: HashMap<Pid, bool>,
+    whole: HashMap<(String, String), Option<u64>>,
+}
+
 /// The in-flight catalog work commands must not race (L1).
 struct Busy {
     /// tenant → queues with a catalog change in flight.
@@ -576,13 +688,20 @@ impl LanesState {
             rr: HashMap::new(),
             cycle: RouterCycle::default(),
             control: None,
+            kept_facts: KeptFacts::default(),
+            kept_stale: false,
+            control_rings: None,
         }
     }
 
     fn reset(&mut self) {
+        add(&LANE_STATS.resets, 1);
         self.records.clear();
         self.ids.clear();
         self.control = None;
+        self.control_rings = None;
+        self.kept_facts = KeptFacts::default();
+        self.kept_stale = false;
         for l in &self.lanes {
             let mut s = l.lock().expect("lane state");
             s.kept = None;
@@ -613,6 +732,7 @@ impl LanesState {
                 .zip(folded.iter())
                 .all(|(r, (_, e))| Arc::ptr_eq(&r.full, e));
         if !aligned {
+            add(&LANE_STATS.sync_resets, 1);
             self.reset();
             for (_, e) in folded {
                 let subs = split(e, self.n);
@@ -692,11 +812,22 @@ impl LanesState {
                 self.cycle.pop_workers.insert(c.worker.clone());
                 let key = (c.tenant.clone(), c.queue.clone(), c.group.clone());
                 if c.conflate || !self.wildcard_may_lane(r, &key, busy)? {
+                    if !c.conflate {
+                        if busy.queue(&c.tenant, &c.queue) {
+                            add(&LANE_STATS.wild_busy, 1);
+                        } else {
+                            add(&LANE_STATS.wild_unknown, 1);
+                        }
+                    }
                     Dest::Control
                 } else if let Some(l) = self.whole_lane_once(r, &c.tenant, &c.queue, busy)? {
                     Dest::Whole(l)
                 } else {
-                    self.wildcard_dest(&key, c.max_parts, c.wait)
+                    let d = self.wildcard_dest(&key, c.max_parts, c.wait);
+                    if d == Dest::Control {
+                        add(&LANE_STATS.wild_nothing, 1);
+                    }
+                    d
                 }
             }
             Command::Ack(c) => {
@@ -1102,6 +1233,7 @@ fn plan_lane<S: Store>(
             p.set_lane(lane, n);
             p
         });
+        let (loads0, drops0) = (pr.loads, pr.drops);
         pr.advance(r, folded, store_applied, base_now)?;
         for k in ring_keys {
             pr.ensure(r, k, cycle_no)?;
@@ -1109,6 +1241,8 @@ fn plan_lane<S: Store>(
         if cycle_no.is_multiple_of(RING_EVICT_EVERY) {
             pr.evict_idle(cycle_no.saturating_sub(RING_IDLE_CYCLES));
         }
+        add(&LANE_STATS.ring_loads, pr.loads - loads0);
+        add(&LANE_STATS.ring_drops, pr.drops - drops0);
         // The rows this lane's entries still in flight move: `advance` just
         // read the landed truth into the rings, and they go back to their
         // planned state below, every cycle, until their entries land.
@@ -1289,6 +1423,7 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
             s.rings = None;
         }
         ls.control = None;
+        ls.control_rings = None;
     }
     ls.sync(&folded);
     let busy = ls.busy();
@@ -1325,8 +1460,21 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
                 reader.clone(),
             );
             let no_overlay = Overlay::new(base_pid, base_kv);
+            // The kept lookups hold while no catalog change is in flight; one
+            // that was starts them over once it has landed.
+            let keep = *ROUTER_KEEP && !ls.records.iter().any(Record::catalog);
+            if !keep || ls.kept_stale {
+                ls.kept_facts = KeptFacts::default();
+            }
+            ls.kept_stale = !keep;
+            let kept = std::mem::take(&mut ls.kept_facts);
             ls.cycle = RouterCycle {
                 now_us,
+                queues: kept.queues,
+                groups: kept.groups,
+                pids: kept.pids,
+                live: kept.live,
+                whole: kept.whole,
                 ..RouterCycle::default()
             };
             // A request id seen twice in one batch (a client retry) goes where
@@ -1381,6 +1529,24 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
                     }
                 }
             }
+            if keep {
+                let named: usize = ls
+                    .cycle
+                    .pids
+                    .values()
+                    .flat_map(|qs| qs.values())
+                    .map(|ps| ps.len())
+                    .sum();
+                if ls.cycle.live.len().max(named) <= ROUTER_KEEP_MAX_PIDS {
+                    ls.kept_facts = KeptFacts {
+                        queues: std::mem::take(&mut ls.cycle.queues),
+                        groups: std::mem::take(&mut ls.cycle.groups),
+                        pids: std::mem::take(&mut ls.cycle.pids),
+                        live: std::mem::take(&mut ls.cycle.live),
+                        whole: std::mem::take(&mut ls.cycle.whole),
+                    };
+                }
+            }
             Ok((store_applied, base_pid, base_kv, now_us))
         })?
     };
@@ -1400,7 +1566,21 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
     let mut waits = Vec::new();
     let mut ran = vec![false; n as usize];
     for (l, cmds) in per_lane.into_iter().enumerate() {
-        if cmds.is_empty() && ring_keys.is_empty() {
+        // A lane with nothing to plan still runs while it keeps rings: they
+        // must see every landed entry, and one that left the in-flight list
+        // unseen drops them all, to be scanned afresh from `pending` (a full
+        // scan per lane at every such cycle: seconds with millions of pending
+        // partitions, 2026-09-29).
+        if cmds.is_empty()
+            && ring_keys.is_empty()
+            && !ls.lanes[l]
+                .lock()
+                .expect("lane state")
+                .rings
+                .as_ref()
+                .is_some_and(PlanRings::keeps_any)
+        {
+            add(&LANE_STATS.skips, 1);
             continue;
         }
         ran[l] = true;
@@ -1443,9 +1623,10 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
             );
             add(&LANE_STATS.jobs, 1);
             let started = w0.duration_since(handed).as_micros() as u64;
+            JOB_SENT.with(|c| c.set(Some(std::time::Instant::now())));
             let _ = tx.send((res, wall, started));
         });
-        if ls.workers[l].tx.send(job).is_err() {
+        if ls.workers[l].tx.send(LaneMsg::Job(job)).is_err() {
             return Err(crate::rsm::store::StoreError::Io(
                 "a lane thread is gone".into(),
             ));
@@ -1464,6 +1645,23 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
         .control
         .take()
         .map(|k| k.advance_ingest(&folded, store_applied, base_pid, base_kv));
+    // Control's rings follow every landed entry, every cycle, whether control
+    // plans or not: an entry that leaves the in-flight list unseen would drop
+    // them all, to be scanned afresh.
+    if let Some(mut pr) = ls.control_rings.take() {
+        let advanced = store.read(|r| {
+            let drops0 = pr.drops;
+            pr.advance(r, &folded, store_applied, now_us)?;
+            add(&LANE_STATS.ring_drops, pr.drops - drops0);
+            if cycle_no.is_multiple_of(RING_EVICT_EVERY) {
+                pr.evict_idle(cycle_no.saturating_sub(RING_IDLE_CYCLES));
+            }
+            Ok(())
+        });
+        if advanced.is_ok() {
+            ls.control_rings = Some(pr);
+        }
+    }
     add(
         &LANE_STATS.advance_us,
         t_advance.elapsed().as_micros() as u64,
@@ -1653,6 +1851,11 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
     let (mut maintained, mut maintenance_more) = (false, false);
     // (overlay, the cycle's tag, its fold count before the cycle)
     let mut control_state: Option<(KeptOverlay, u64, u64)> = None;
+    let mut control_rings = if keep.enabled {
+        ls.control_rings.take()
+    } else {
+        None
+    };
     if needs_control {
         let st = store.clone();
         st.read(|r| {
@@ -1694,8 +1897,25 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
                 keys.dedup();
                 Some(keys)
             };
-            let derived = Derived::rebuild_rings(r, now_us, control_keys.as_deref())?;
-            let committed = Committed::new(r, &derived);
+            // The rings its wildcard pops walk, kept (advanced above); a ring
+            // is scanned from `pending` only the first time control walks it.
+            // A discovery pop spans every ring: rebuilt, as before.
+            let kept_rings = keep.enabled && control_keys.is_some();
+            let derived = if kept_rings {
+                let pr = control_rings.get_or_insert_with(|| PlanRings::new(store_applied, now_us));
+                let loads0 = pr.loads;
+                for k in control_keys.as_deref().unwrap_or_default() {
+                    pr.ensure(r, k, cycle_no)?;
+                }
+                add(&LANE_STATS.ring_loads, pr.loads - loads0);
+                Derived::default()
+            } else {
+                Derived::rebuild_rings(r, now_us, control_keys.as_deref())?
+            };
+            let committed = match control_rings.as_ref() {
+                Some(pr) if kept_rings => Committed::with_plan_rings(r, &derived, pr),
+                _ => Committed::new(r, &derived),
+            };
             let mut planner = Planner::new(committed, now_us, cfg.clone(), front, reader.clone());
             planner.set_qlog_reader(qlog_reader.clone());
             let mut entry = Entry::new(now_us, pid_base, kv_base);
@@ -1810,6 +2030,7 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
             Ok(())
         })?;
     }
+    ls.control_rings = control_rings;
 
     add(
         &LANE_STATS.control_us,

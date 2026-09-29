@@ -264,6 +264,31 @@ impl ReadyIndex {
         n
     }
 
+    /// [`ReadyIndex::walk`] from just past `after` (`None`, or a pid the ring
+    /// does not hold live: from the head).
+    pub fn walk_from(
+        &self,
+        after: Option<Pid>,
+        limit: usize,
+        cb: &mut dyn FnMut(Pid) -> bool,
+    ) -> usize {
+        let start = after
+            .filter(|p| self.in_ready.contains(p))
+            .and_then(|p| self.ready.iter().position(|x| *x == p))
+            .map_or(0, |i| i + 1);
+        let mut n = 0;
+        for pid in self.ready.iter().skip(start) {
+            if !self.in_ready.contains(pid) {
+                continue;
+            }
+            n += 1;
+            if !cb(*pid) || n >= limit {
+                break;
+            }
+        }
+        n
+    }
+
     /// Live candidates.
     pub fn live_len(&self) -> usize {
         self.in_ready.len()
@@ -960,6 +985,11 @@ impl PlanRings {
     }
 
     /// Drop every ring (and the pid cache): each is scanned afresh on next use.
+    /// Whether any ring is kept.
+    pub fn keeps_any(&self) -> bool {
+        !self.rings.is_empty()
+    }
+
     pub fn clear(&mut self) {
         self.rings.clear();
         self.queue_of.clear();
@@ -1269,6 +1299,48 @@ impl PlanRings {
         n
     }
 
+    /// [`PlanRings::walk`] from just past the row of `after` (`None`, or a
+    /// pid the ring does not hold: from the head), so a walk resumes where an
+    /// earlier one of the same cycle stopped. The same walk as
+    /// [`ReadyIndex::walk_from`] over a rebuild.
+    pub fn walk_from(
+        &self,
+        tenant: &str,
+        queue: &str,
+        group: &str,
+        after: Option<Pid>,
+        limit: usize,
+        cb: &mut dyn FnMut(Pid) -> bool,
+    ) -> usize {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let Some(ring) = self.ring(tenant, queue, group) else {
+            return 0;
+        };
+        let mut n = 0;
+        let mut visit = |&(_, pid): &(i64, Pid)| {
+            n += 1;
+            cb(pid) && n < limit
+        };
+        let from = after.and_then(|p| ring.at.get(&p).map(|at| (*at, p)));
+        match from {
+            Some(k) if ring.ready.contains(&k) => {
+                for row in ring.ready.range((Excluded(k), Unbounded)) {
+                    if !visit(row) {
+                        break;
+                    }
+                }
+            }
+            _ => {
+                for row in ring.ready.iter() {
+                    if !visit(row) {
+                        break;
+                    }
+                }
+            }
+        }
+        n
+    }
+
     /// `(ready in walk order, deferred count, next deadline, rows)` of one kept
     /// ring — for the equivalence check against a rebuild.
     pub fn snapshot(&self, tenant: &str, queue: &str, group: &str) -> Option<RingSnapshot> {
@@ -1448,6 +1520,31 @@ impl<'a, R: Reads + ?Sized> Committed<'a, R> {
         }
         match self.derived.ring(tenant, queue, group) {
             Some(r) => r.walk(limit, cb),
+            None => 0,
+        }
+    }
+
+    /// [`Committed::candidates`] from just past `after` in ring order: the
+    /// kept rings' [`PlanRings::walk_from`] or the rebuilt ring's
+    /// [`ReadyIndex::walk_from`] — the same walk either way.
+    pub fn candidates_from(
+        &self,
+        tenant: &str,
+        queue: &str,
+        group: &str,
+        after: Option<Pid>,
+        limit: usize,
+        cb: &mut dyn FnMut(Pid) -> bool,
+    ) -> usize {
+        if let Some(rings) = self.plan_rings {
+            debug_assert!(
+                rings.has(tenant, queue, group),
+                "a walked ring is not kept: the batcher ensures every ring of the batch"
+            );
+            return rings.walk_from(tenant, queue, group, after, limit, cb);
+        }
+        match self.derived.ring(tenant, queue, group) {
+            Some(r) => r.walk_from(after, limit, cb),
             None => 0,
         }
     }

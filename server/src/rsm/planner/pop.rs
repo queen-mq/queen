@@ -488,6 +488,9 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         let mut claims: Vec<PopClaim> = Vec::new();
         let mut tried: std::collections::HashSet<Pid> = std::collections::HashSet::new();
         let mut cap = short;
+        // The last ring partition this pop tried (walk order): the ring's next
+        // pop this cycle walks on from there (`ring_walked`).
+        let mut last_tried: Option<Pid> = None;
         loop {
             let (candidates, truncated) = self.wildcard_candidates(
                 ov,
@@ -499,7 +502,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 cap,
             )?;
             n_cands += candidates.len();
-            for pid in candidates {
+            for (pid, from_ring) in candidates {
                 if remaining <= 0 || claimed >= max_parts {
                     break;
                 }
@@ -508,6 +511,9 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 // folded yet — do not plan it twice.
                 if !tried.insert(pid) {
                     continue;
+                }
+                if from_ring {
+                    last_tried = Some(pid);
                 }
                 if let Some(claim) = self.claim_one(
                     ov,
@@ -529,6 +535,12 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 break;
             }
             cap = CANDIDATE_GATHER_CAP;
+        }
+        if let Some(pid) = last_tried {
+            self.ring_walked.borrow_mut().insert(
+                (cmd.tenant.clone(), queue.to_string(), cmd.group.clone()),
+                pid,
+            );
         }
         {
             use crate::rsm::dbgctr::{inc, C};
@@ -733,8 +745,10 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         first_contact: bool,
         group_row: Option<&GroupRow>,
         cap: usize,
-    ) -> Result<(Vec<Pid>, bool), Refusal> {
-        let mut out: Vec<Pid> = Vec::new();
+    ) -> Result<(Vec<(Pid, bool)>, bool), Refusal> {
+        // Each candidate with whether it came from the ring walk (the mark the
+        // ring's next pop this cycle walks from).
+        let mut out: Vec<(Pid, bool)> = Vec::new();
         let mut seen: std::collections::HashSet<Pid> = std::collections::HashSet::new();
         let cap = cap.clamp(1, CANDIDATE_GATHER_CAP);
 
@@ -746,7 +760,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 .reads()
                 .scan_queue_partitions(tenant, queue, None, cap, &mut |pid| {
                     if seen.insert(pid) {
-                        out.push(pid);
+                        out.push((pid, false));
                     }
                     out.len() < cap
                 })
@@ -759,10 +773,16 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 return Err(e);
             }
         } else {
+            // On from where this cycle's earlier pops of the ring stopped.
+            let after = self
+                .ring_walked
+                .borrow()
+                .get(&(tenant.to_string(), queue.to_string(), group.to_string()))
+                .copied();
             self.committed
-                .candidates(tenant, queue, group, cap, &mut |pid| {
+                .candidates_from(tenant, queue, group, after, cap, &mut |pid| {
                     if seen.insert(pid) {
-                        out.push(pid);
+                        out.push((pid, true));
                     }
                     out.len() < cap
                 });
@@ -781,7 +801,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             if let Some(part) = self.partition(ov, pid)? {
                 if part.tenant == tenant && part.queue == queue {
                     seen.insert(pid);
-                    out.push(pid);
+                    out.push((pid, false));
                 }
             }
         }

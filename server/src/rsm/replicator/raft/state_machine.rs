@@ -237,7 +237,14 @@ impl<S: Store + 'static> RaftStateMachine<TypeConfig> for QueenSm<S> {
             oneshot::Receiver<AppliedAt>,
         )> = Vec::new();
         let mut last: Option<u64> = None;
+        let mut sent_at: Vec<std::time::Instant> = Vec::new();
         while let Some((entry, responder)) = entries.try_next().await? {
+            let t_commit = std::time::Instant::now();
+            if let EntryPayload::Normal(app) = &entry.payload {
+                if let Some(p) = app.proposed_at() {
+                    STAGES.add(0, t_commit.duration_since(p));
+                }
+            }
             let index = rsm_index(entry.log_id.index);
             let term = term_of(&entry.log_id);
             // Already in the store (it reopened past it): the apply thread would
@@ -263,7 +270,11 @@ impl<S: Store + 'static> RaftStateMachine<TypeConfig> for QueenSm<S> {
                 }
             };
             // Never ahead of this node's own queue logs (see `log_store::Written`).
+            let t_clone = std::time::Instant::now();
             self.log.wait_written(entry.log_id.index).await?;
+            let t_written = std::time::Instant::now();
+            STAGES.add(1, t_written.duration_since(t_clone));
+            STAGES.add(2, t_clone.duration_since(t_commit));
             // Registered BEFORE the send, so the apply thread's notify always
             // finds it.
             let (tx, rx) = oneshot::channel();
@@ -278,13 +289,15 @@ impl<S: Store + 'static> RaftStateMachine<TypeConfig> for QueenSm<S> {
                 entry: e,
             })
             .await?;
+            sent_at.push(std::time::Instant::now());
             waiting.push((responder, rx));
             last = Some(entry.log_id.index);
         }
-        for (responder, rx) in waiting {
+        for ((responder, rx), sent) in waiting.into_iter().zip(sent_at) {
             rx.await.map_err(|_| {
                 io::Error::other("the apply thread stopped before applying an entry")
             })?;
+            STAGES.add(3, sent.elapsed());
             if let Some(r) = responder {
                 r.send(());
             }
@@ -338,5 +351,83 @@ impl<S: Store + 'static> RaftSnapshotBuilder<TypeConfig> for SnapshotBuilder<S> 
 
     async fn build_snapshot(&mut self) -> Result<Snapshot, io::Error> {
         self.parts.build()
+    }
+}
+
+/// Per-entry stage timings of the apply path, logged every 10 s (diagnostics):
+/// 0 proposed -> handed to the state machine (commit), 1 waiting for this
+/// node's own queue-log write, 2 decoding/cloning the payload-free entry,
+/// 3 handed to the apply thread -> applied, 4 a follower decoding an append,
+/// 5 a follower's `append_entries` (log write + flush), 6 the leader's append
+/// RPC round trip, 7 this node's log flush (append -> fsync'd group).
+struct Stages {
+    sum_us: [std::sync::atomic::AtomicU64; 8],
+    n: [std::sync::atomic::AtomicU64; 8],
+    max_us: [std::sync::atomic::AtomicU64; 8],
+    last: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+/// Record one sample of stage `i` (diagnostics; see [`Stages`]).
+pub(crate) fn stage_add(i: usize, d: std::time::Duration) {
+    STAGES.add(i, d);
+}
+
+static STAGES: Stages = Stages {
+    sum_us: [const { std::sync::atomic::AtomicU64::new(0) }; 8],
+    n: [const { std::sync::atomic::AtomicU64::new(0) }; 8],
+    max_us: [const { std::sync::atomic::AtomicU64::new(0) }; 8],
+    last: std::sync::Mutex::new(None),
+};
+
+impl Stages {
+    fn add(&self, i: usize, d: std::time::Duration) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let us = d.as_micros() as u64;
+        self.sum_us[i].fetch_add(us, Relaxed);
+        self.n[i].fetch_add(1, Relaxed);
+        self.max_us[i].fetch_max(us, Relaxed);
+        if i == 3 {
+            self.maybe_log();
+        }
+    }
+
+    fn maybe_log(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut last = self.last.lock().unwrap_or_else(|p| p.into_inner());
+        let now = std::time::Instant::now();
+        if last.is_some_and(|t| now.duration_since(t) < std::time::Duration::from_secs(10)) {
+            return;
+        }
+        *last = Some(now);
+        let mut avg = [0u64; 8];
+        let mut max = [0u64; 8];
+        let mut cnt = [0u64; 8];
+        for i in 0..8 {
+            cnt[i] = self.n[i].load(Relaxed);
+            let n = self.n[i].swap(0, Relaxed).max(1);
+            avg[i] = self.sum_us[i].swap(0, Relaxed) / n;
+            max[i] = self.max_us[i].swap(0, Relaxed);
+        }
+        tracing::info!(
+            target: "rsm",
+            commit_us = avg[0],
+            commit_max_us = max[0],
+            written_us = avg[1],
+            written_max_us = max[1],
+            clone_us = avg[2],
+            clone_max_us = max[2],
+            apply_us = avg[3],
+            apply_max_us = max[3],
+            fdecode_us = avg[4],
+            fappend_us = avg[5],
+            fappend_max_us = max[5],
+            fappends = cnt[5],
+            rpc_us = avg[6],
+            rpc_max_us = max[6],
+            rpcs = cnt[6],
+            flush_us = avg[7],
+            flush_max_us = max[7],
+            "apply path stages (means since the last line)"
+        );
     }
 }

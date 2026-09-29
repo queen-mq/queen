@@ -1254,7 +1254,7 @@ pub trait Store: Send + Sync {
 }
 
 /// One keyspace's rows in a [`CheckpointCut`]: key, value (`None`: deleted).
-pub(crate) type CutRows = Vec<(std::sync::Arc<[u8]>, Option<std::sync::Arc<[u8]>>)>;
+pub(crate) type CutRows = Vec<(heed_store::RamKey, Option<std::sync::Arc<[u8]>>)>;
 
 /// A checkpoint cut ([`Writes::take_cut`]): every RAM row changed since the
 /// last checkpoint and its value at the cut (`None` = deleted), keyspace by

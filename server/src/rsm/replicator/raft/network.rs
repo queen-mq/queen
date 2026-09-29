@@ -375,6 +375,7 @@ impl RaftNetworkV2<TypeConfig> for HttpPeer {
         // Every append — heartbeats included — carries the leader's members
         // view: the liveness evidence and the view of it travel together
         // (super::members).
+        let t_rpc = std::time::Instant::now();
         let res = self
             .call::<AppendEntriesResponse<TypeConfig>>(
                 "/raft/v1/append",
@@ -384,6 +385,9 @@ impl RaftNetworkV2<TypeConfig> for HttpPeer {
                 self.members.header(),
             )
             .await?;
+        if n > 0 {
+            super::state_machine::stage_add(6, t_rpc.elapsed());
+        }
         match res {
             // The request was cut at MAX_APPEND_BYTES: report how far it got,
             // openraft sends the rest next.
@@ -579,11 +583,19 @@ mod server {
         if let Some(v) = headers.get(super::super::members::MEMBERS_HEADER) {
             st.members.receive(v.as_bytes());
         }
+        let t0 = std::time::Instant::now();
         let req = match wire::decode_append(&body) {
             Ok(r) => r,
             Err(e) => return bad_request(e),
         };
-        json_answer(&st.raft.append_entries(req).await)
+        let has_entries = !req.entries.is_empty();
+        let t1 = std::time::Instant::now();
+        let res = st.raft.append_entries(req).await;
+        if has_entries {
+            crate::rsm::replicator::raft::state_machine::stage_add(4, t1.duration_since(t0));
+            crate::rsm::replicator::raft::state_machine::stage_add(5, t1.elapsed());
+        }
+        json_answer(&res)
     }
 
     async fn vote<S: Store + 'static>(State(st): State<Arc<RpcState<S>>>, body: Bytes) -> Response {
