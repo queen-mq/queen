@@ -324,14 +324,9 @@ and falls back to its own routes otherwise:
 php artisan vendor:publish --tag=queen-assets --force
 ```
 
-To see why a job failed, opt in to the detail page. Job IDs then link to
-`/queen/failed-jobs/{id}`, which shows the job class, attempts, the exception message and the stack
-trace (paths relative to the application root), but never the payload. It is off by default because
-exception messages can carry application data:
-
-```dotenv
-QUEEN_DASHBOARD_FAILED_JOB_DETAILS=true
-```
+Each failed job links to `/queen/failed-jobs/{id}`, which shows why it failed: the job class,
+attempts, the exception message and the stack trace (paths relative to the application root), but
+never the payload.
 
 In production it is **deny-by-default even when enabled** until the application defines the ability:
 

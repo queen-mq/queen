@@ -48,7 +48,7 @@ verifiedBy:
   - clients/client-php/tests/LaravelSupervisorRemoteStatusTest.php
   - clients/client-php/tests/RemoteStatusDocumentTest.php
   - clients/client-php/tests/RemoteStatusPublisherTest.php
-# sourceOfTruth re-read 2026-09-29 (through 5b7aabef + this patch): adds the published assets with route fallback, the in-place refresh script with its pause control, one page per section, keyset-paged failed jobs and the opt-in failed-job detail page; page matches the code.
+# sourceOfTruth re-read 2026-09-29 (through 5b7aabef + this patch): adds the published assets with route fallback, the in-place refresh script with its pause control, one page per section, keyset-paged failed jobs and the failed-job detail page; page matches the code.
 ---
 
 The Laravel panel answers one question: **what is this application's Queen supervisor doing?** It
@@ -151,11 +151,11 @@ control actions.
 - last queue depth already sampled by the supervisor;
 - restart and circuit state;
 - a safe allowlist of worker settings;
-- paged metadata from supported Laravel database or file failed-job stores, and on request the
-  reason each job failed.
+- paged metadata from supported Laravel database or file failed-job stores, and the reason each
+  job failed.
 
 The read model never returns broker endpoints, bearer tokens, custom headers, job payloads or raw
-backend errors. Exception text appears only on the [opt-in detail page](#why-a-job-failed).
+backend errors. Exception text appears only on the [detail page](#why-a-job-failed) of a failed job.
 Unsupported or unavailable failed stores are shown as unavailable instead of falling back to an
 unbounded read.
 
@@ -212,18 +212,13 @@ store is read whole, within the 4 MiB bound the panel always applies to it.
 
 ### Why a job failed
 
-The detail page of each failed job is off by default, because the exception message can contain
-application data. Enable it where the panel's audience may read that data:
-
-```dotenv
-QUEEN_DASHBOARD_FAILED_JOB_DETAILS=true
-```
-
-Job IDs on the failed-jobs page then link to `/queen/failed-jobs/{id}`. The page shows the job
+Each job ID on the failed-jobs page links to `/queen/failed-jobs/{id}`. The page shows the job
 class, the queue and connection, the attempts and timeout read from the payload, the exception
 class and message under **Why it failed**, the stack trace, and the `queue:retry` command for that
 job. The payload itself is never displayed. Paths under the application root are shown relative
 to it, the exception and trace are truncated at a fixed size, and the page does not refresh itself.
+The exception message can contain application data, so the page sits behind the same
+`viewQueenDashboard` Gate as the rest of the panel.
 
 Use the [broker dashboard](/deploy/dashboard) for global queue analytics and DLQ operations. The
 two dashboards intentionally cover different scopes:

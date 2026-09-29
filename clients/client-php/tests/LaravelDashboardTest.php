@@ -1156,19 +1156,8 @@ final class LaravelDashboardTest extends TestCase
         $this->assertSame('5;url=/queen/supervisors', $xpath->query('//noscript/meta[@http-equiv="refresh"]')->item(0)->getAttribute('content'));
     }
 
-    public function testFailedJobDetailsAreOffByDefault(): void
-    {
-        $this->failedJobsFile(1);
-
-        $this->get('/queen/failed-jobs/failed-1')->assertNotFound();
-        $xpath = $this->dashboardXPath($this->get('/queen/failed-jobs')->assertOk()->getContent());
-        $this->assertSame(['failed-1'], $this->failedJobIds($xpath));
-        $this->assertSame(0, $xpath->query('//table//a')->length);
-    }
-
     public function testFailedJobDetailShowsWhyItFailedWithoutThePayload(): void
     {
-        $this->app['config']->set('queen.dashboard.failed_job_details', true);
         $secret = 'QUEEN_PAYLOAD_SECRET';
         $basePath = rtrim($this->app->basePath(), '/');
         $exception = "RuntimeException: Mail server refused the connection in {$basePath}/app/Jobs/SendInvoice.php:42\n"
@@ -1212,7 +1201,6 @@ final class LaravelDashboardTest extends TestCase
 
     public function testFailedJobDetailReadsDatabaseStoresByTheirLaravelIdentifier(): void
     {
-        $this->app['config']->set('queen.dashboard.failed_job_details', true);
         $this->failedJobsTable(2, uuids: true);
 
         $this->get('/queen/failed-jobs/00000000-0000-4000-8000-000000000002')->assertOk()
@@ -1224,7 +1212,6 @@ final class LaravelDashboardTest extends TestCase
 
     public function testUnknownOrMalformedFailedJobIdentifiersAreNotFound(): void
     {
-        $this->app['config']->set('queen.dashboard.failed_job_details', true);
         $this->failedJobsTable(1);
 
         $this->get('/queen/failed-jobs/99')->assertNotFound();
@@ -1236,7 +1223,6 @@ final class LaravelDashboardTest extends TestCase
 
     public function testAnIdentifierTheDetailRouteCannotCarryIsListedWithoutALink(): void
     {
-        $this->app['config']->set('queen.dashboard.failed_job_details', true);
         $this->failedJobsFile(1, ['id' => 'failed job/1']);
 
         $xpath = $this->dashboardXPath($this->get('/queen/failed-jobs')->assertOk()->getContent());
@@ -1247,7 +1233,6 @@ final class LaravelDashboardTest extends TestCase
 
     public function testFailedJobDetailIsAuthorizedLikeTheDashboard(): void
     {
-        $this->app['config']->set('queen.dashboard.failed_job_details', true);
         $this->failedJobsFile(1);
         Gate::define('viewQueenDashboard', static fn (?Authenticatable $user = null): bool => false);
 

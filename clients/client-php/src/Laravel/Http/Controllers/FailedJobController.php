@@ -8,14 +8,12 @@ use Queen\Laravel\Dashboard\DashboardPage;
 use Queen\Laravel\Dashboard\DashboardRepository;
 
 /**
- * The opt-in detail page of one failed job: why it failed, never its payload.
+ * The detail page of one failed job: why it failed, never its payload.
  */
 final class FailedJobController
 {
     public function __invoke(Request $request, string $id, DashboardRepository $dashboard, DashboardPage $page): View
     {
-        abort_unless(config('queen.dashboard.failed_job_details', false) === true, 404);
-
         $failedJob = $dashboard->failedJob($id, app()->basePath());
         abort_if($failedJob === null, 404);
 

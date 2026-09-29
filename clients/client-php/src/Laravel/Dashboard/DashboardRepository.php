@@ -26,7 +26,7 @@ final class DashboardRepository
      * @param (\Closure(): (array<string, mixed>|null))|null $remoteStatus reads the
      *   document a supervisor on another host published; null when disabled
      * @param (\Closure(string): mixed)|null $failedJob one failed job with its
-     *   exception, for the opt-in detail page
+     *   exception, for the detail page
      */
     public function __construct(
         private SupervisorState $state,
@@ -781,7 +781,7 @@ final class DashboardRepository
     }
 
     /**
-     * One failed job for the opt-in detail page: its identity, the job name
+     * One failed job for the detail page: its identity, the job name
      * and attempt counters read from the payload, and the exception split into
      * summary and stack trace. The payload itself never leaves this method, and
      * paths under the application root are shown relative to it.

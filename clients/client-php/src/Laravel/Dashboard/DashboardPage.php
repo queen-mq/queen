@@ -42,7 +42,6 @@ final class DashboardPage
             'stylesheetIntegrity' => $this->stylesheet->integrity(),
             'scriptUrl' => $this->script->url($basePath),
             'scriptIntegrity' => $this->script->integrity(),
-            'failedJobDetails' => config('queen.dashboard.failed_job_details', false) === true,
             'controlError' => $request->hasSession() ? $request->session()->get('queen_dashboard_control_error') : null,
             'controlStatus' => $request->hasSession() ? $request->session()->get('queen_dashboard_control_status') : null,
         ], $overrides);

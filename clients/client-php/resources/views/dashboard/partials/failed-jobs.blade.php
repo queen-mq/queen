@@ -6,7 +6,7 @@
         </div>
         <span class="header-meta">@if (!($failedJobs['available'] ?? false))Backend unavailable@elseif ($failedJobs['cursor'] === null){{ $failedLabel }} total@else Older page @endif</span>
     </div>
-    <p class="failed-help">Use Laravel's queue commands to retry, forget, flush or prune jobs.@if ($failedJobDetails) Open a job to see why it failed; payloads are never displayed.@else This dashboard never displays payloads or exception bodies.@endif</p>
+    <p class="failed-help">Open a job to see why it failed; payloads are never displayed. Use Laravel's queue commands to retry, forget, flush or prune jobs.</p>
     @if (!($failedJobs['available'] ?? false))
         <div class="empty"><span class="badge warning">Unavailable</span> Failed-job metadata could not be read safely.</div>
     @elseif ($failedJobs['items'] === [])
@@ -17,7 +17,7 @@
                 <thead><tr><th scope="col">ID</th><th scope="col">Connection</th><th scope="col">Queue</th><th scope="col">Index policy</th><th scope="col">Failed at</th></tr></thead>
                 <tbody>
                 @foreach ($failedJobs['items'] as $failed)
-                    @php($detailUrl = $failedJobDetails ? \Queen\Laravel\Dashboard\DashboardSections::failedJobUrl($failed['id']) : null)
+                    @php($detailUrl = \Queen\Laravel\Dashboard\DashboardSections::failedJobUrl($failed['id']))
                     <tr><td>@if ($detailUrl !== null)<a href="{{ $detailUrl }}"><code>{{ $failed['id'] }}</code></a>@else<code>{{ $failed['id'] }}</code>@endif</td><td>{{ $failed['connection'] ?? '—' }}</td><td>{{ $failed['queue'] ?? '—' }}</td><td><span class="badge muted">{{ $failed['lifecycle_policy'] }}</span></td><td class="technical">{{ $failed['failed_at'] ?? '—' }}</td></tr>
                 @endforeach
                 </tbody>

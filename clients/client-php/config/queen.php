@@ -164,12 +164,6 @@ return [
         'allow_local' => env('QUEEN_DASHBOARD_ALLOW_LOCAL', true),
         // Page size of the failed-jobs page (keyset pagination, newest first).
         'failed_jobs_limit' => env('QUEEN_DASHBOARD_FAILED_JOBS_LIMIT', 50),
-        // Opt-in detail page per failed job: exception class, message and
-        // stack trace (paths relative to the application root), plus the job
-        // name and attempt counters. Exception text can carry data from the
-        // failing code, so it stays off until the application enables it. The
-        // job payload is never shown.
-        'failed_job_details' => env('QUEEN_DASHBOARD_FAILED_JOB_DETAILS', false),
     ],
 
     // The Rust supervisor is version-pinned by this Composer package, but is

@@ -57,7 +57,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): QUEUE_DEFAULTS is nine keys, the configure paragraph is rewritten for the merge rule, and retryMessage carries the move primitive's consequences.
 # sourceOfTruth re-read 2026-09-29 (through fc71b65b + this patch): adds the supervisor.remote_status keys and the dashboard's published-status source.
 # sourceOfTruth re-read 2026-09-29 (through cb253ff9 + this patch): the provider also publishes the dashboard stylesheet (queen-assets); transactions are described as broker transactions, not PostgreSQL ones.
-# sourceOfTruth re-read 2026-09-29 (through 5b7aabef + this patch): the dashboard has one route per section, keyset-paged failed jobs and the opt-in failed_job_details page; the config table gains that key.
+# sourceOfTruth re-read 2026-09-29 (through 5b7aabef + this patch): the dashboard has one route per section, keyset-paged failed jobs and a detail page per failed job; no new config key.
 ---
 
 The Composer package is `queen-mq/php-client`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
@@ -503,7 +503,6 @@ Publish the config with the `queen-config` tag; it lands at `config/queen.php`. 
 | `dashboard.refresh_seconds` | `QUEEN_DASHBOARD_REFRESH_SECONDS` | `5` seconds |
 | `dashboard.allow_local` | `QUEEN_DASHBOARD_ALLOW_LOCAL` | `true` |
 | `dashboard.failed_jobs_limit` | `QUEEN_DASHBOARD_FAILED_JOBS_LIMIT` | `50` rows per page |
-| `dashboard.failed_job_details` | `QUEEN_DASHBOARD_FAILED_JOB_DETAILS` | `false` |
 | `supervisor_binary.install_path` | `QUEEN_SUPERVISOR_INSTALL_PATH` | `storage/queen-supervisor-bin` |
 | `supervisor_binary.release_base_url` | `QUEEN_SUPERVISOR_RELEASE_BASE_URL` | unset |
 | `supervisor_binary.manifest` | `QUEEN_SUPERVISOR_MANIFEST` | unset |
@@ -715,8 +714,8 @@ local master and protects HTML, JSON and controls with the same `viewQueenDashbo
 production, enabling the route without defining an allowing Gate still returns `403`. With
 `supervisor.remote_status` enabled, the PHP engine also publishes that state to the broker's
 key/value store, and a panel on another host shows it read-only. Failed jobs are paged with a
-keyset cursor; `dashboard.failed_job_details` adds a page per job with its exception and stack
-trace, never its payload.
+keyset cursor, and each has a detail page with its exception and stack trace, never its
+payload.
 
 The complete authorization example, route-cache procedure and local-versus-global scope are in
 [Supervisor dashboard](/use/laravel/dashboard).
