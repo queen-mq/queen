@@ -1619,6 +1619,74 @@ async fn kv_set_operator_once(kv: &dyn KvBackend, email: &str, enabled: bool) ->
     commit(kv, tx).await
 }
 
+/// What [`sync_operators`] wrote: the emails granted and revoked, and the
+/// listed emails with no account yet (their first sign-in grants them).
+#[derive(Debug, Default, PartialEq)]
+pub struct OperatorSync {
+    pub granted: Vec<String>,
+    pub revoked: Vec<String>,
+    pub pending: Vec<String>,
+}
+
+/// Make every account's `is_operator` say whether its email is in `listed`
+/// (lowercased): `QUEEN_PROXY_OPERATORS` applied at boot. Only an account whose
+/// flag differs is written and audited, so every node can run it at once and
+/// a boot that changes nothing writes nothing.
+pub async fn sync_operators(store: &Store, listed: &[String]) -> Result<OperatorSync, WebError> {
+    let Store::Kv(kv) = store else { return Err(WebError::NotConfigured) };
+    let users = kv::scan::<UserDoc>(kv.as_ref(), ns::USERS, schema::K).await?;
+    let mut out = OperatorSync::default();
+    for (_, u) in &users {
+        let want = listed.contains(&u.value.email);
+        if u.value.is_operator != want && retrying!(kv_operator_bit_once(kv.as_ref(), u.value.id, want))? {
+            if want { &mut out.granted } else { &mut out.revoked }.push(u.value.email.clone());
+        }
+    }
+    out.pending = listed
+        .iter()
+        .filter(|e| !users.iter().any(|(_, u)| &u.value.email == *e))
+        .cloned()
+        .collect();
+    Ok(out)
+}
+
+/// At sign-in: grant a listed account that does not hold the flag yet — one
+/// created after the boot sync, by OAuth auto-provision. `Ok(true)` when it
+/// wrote.
+pub async fn grant_listed_operator(store: &Store, user_id: Uuid, listed: &[String]) -> Result<bool, WebError> {
+    let Store::Kv(kv) = store else { return Err(WebError::NotConfigured) };
+    let Some(u) = by_id::<UserDoc>(kv.as_ref(), ns::USERS, user_id).await? else { return Ok(false) };
+    if u.value.is_operator || !listed.contains(&u.value.email) {
+        return Ok(false);
+    }
+    retrying!(kv_operator_bit_once(kv.as_ref(), user_id, true))
+}
+
+/// One account's flag to `enabled`, unless it already is: then `Ok(false)` and
+/// no write, which is what turns a lost race's retry into a no-op instead of
+/// a second audit row.
+async fn kv_operator_bit_once(kv: &dyn KvBackend, user_id: Uuid, enabled: bool) -> Result<bool, WebError> {
+    let Some(u) = by_id::<UserDoc>(kv, ns::USERS, user_id).await? else { return Ok(false) };
+    if u.value.is_operator == enabled {
+        return Ok(false);
+    }
+    let mut doc = u.value.clone();
+    doc.is_operator = enabled;
+    let mut tx = Tx::default();
+    tx.fresh(ns::USERS, schema::key(doc.id), &doc, Some(u.version));
+    tx.record(&Audit {
+        tenant_id: doc.tenant_id,
+        cluster_id: None,
+        actor: "system",
+        actor_id: None,
+        action: if enabled { "operator_granted" } else { "operator_revoked" },
+        target: Some(doc.email.clone()),
+        meta: json!({ "is_operator": enabled, "was": !enabled, "source": "QUEEN_PROXY_OPERATORS" }),
+    })?;
+    commit(kv, tx).await?;
+    Ok(true)
+}
+
 /// `set_tenant_status(tenant, status)`. Returns the tenant's clusters for
 /// [`invalidate_local`].
 pub async fn set_tenant_status(store: &Store, tenant_id: Uuid, status: &str) -> Result<Vec<Uuid>, WebError> {
@@ -2930,6 +2998,66 @@ mod tests {
             set_operator(&st, "no-at-sign", true).await,
             Err(WebError::Raised("set_operator: invalid email no-at-sign".into()))
         );
+    }
+
+    #[tokio::test]
+    async fn the_operator_list_grants_the_listed_revokes_the_rest_and_a_rerun_writes_nothing() {
+        let (m, st) = store();
+        let cell = seed(&m, "local").await;
+        let a = bootstrap_tenant(&st, &boot("acme", "acme-c", cell, "admin@acme.io", None)).await.unwrap();
+        let b = bootstrap_tenant(&st, &boot("beta", "beta-c", cell, "root@beta.io", None)).await.unwrap();
+        let (tenant_a, user_a) = (uid(&a, "tenant_id"), uid(&a, "user_id"));
+        let (tenant_b, user_b) = (uid(&b, "tenant_id"), uid(&b, "user_id"));
+        set_operator(&st, "root@beta.io", true).await.unwrap();
+
+        let listed = vec!["admin@acme.io".to_string(), "later@acme.io".to_string()];
+        assert_eq!(
+            sync_operators(&st, &listed).await.unwrap(),
+            OperatorSync {
+                granted: vec!["admin@acme.io".into()],
+                revoked: vec!["root@beta.io".into()],
+                pending: vec!["later@acme.io".into()],
+            }
+        );
+        assert!(me_user(&st, user_a).await.unwrap().unwrap().is_operator);
+        assert!(!me_user(&st, user_b).await.unwrap().unwrap().is_operator);
+        let op = &list_operations(&st, tenant_a, None, 1).await.unwrap()[0];
+        assert_eq!(
+            (op.actor.as_str(), op.action.as_str(), op.target.as_deref()),
+            ("system", "operator_granted", Some("admin@acme.io"))
+        );
+        assert_eq!(op.meta["source"], "QUEEN_PROXY_OPERATORS");
+        assert_eq!(list_operations(&st, tenant_b, None, 1).await.unwrap()[0].action, "operator_revoked");
+
+        // Every node runs it at every boot: a rerun writes and audits nothing.
+        let (before_a, before_b) = (ops_of(&st, tenant_a).await.len(), ops_of(&st, tenant_b).await.len());
+        assert_eq!(
+            sync_operators(&st, &listed).await.unwrap(),
+            OperatorSync { pending: vec!["later@acme.io".into()], ..Default::default() }
+        );
+        assert_eq!((ops_of(&st, tenant_a).await.len(), ops_of(&st, tenant_b).await.len()), (before_a, before_b));
+
+        // Set but empty: nobody is an operator.
+        assert_eq!(sync_operators(&st, &[]).await.unwrap().revoked, vec!["admin@acme.io".to_string()]);
+        assert!(!me_user(&st, user_a).await.unwrap().unwrap().is_operator);
+    }
+
+    #[tokio::test]
+    async fn a_listed_account_is_granted_at_sign_in_and_an_unlisted_one_is_not() {
+        let (m, st) = store();
+        let cell = seed(&m, "local").await;
+        let a = bootstrap_tenant(&st, &boot("acme", "acme-c", cell, "admin@acme.io", None)).await.unwrap();
+        let (tenant, user) = (uid(&a, "tenant_id"), uid(&a, "user_id"));
+        let listed = vec!["admin@acme.io".to_string()];
+
+        assert!(!grant_listed_operator(&st, user, &["other@acme.io".to_string()]).await.unwrap());
+        assert!(!me_user(&st, user).await.unwrap().unwrap().is_operator);
+        assert!(grant_listed_operator(&st, user, &listed).await.unwrap());
+        assert!(me_user(&st, user).await.unwrap().unwrap().is_operator);
+        let audited = ops_of(&st, tenant).await.len();
+        assert!(!grant_listed_operator(&st, user, &listed).await.unwrap(), "already an operator");
+        assert_eq!(ops_of(&st, tenant).await.len(), audited, "and nothing written");
+        assert!(!grant_listed_operator(&st, Uuid::new_v4(), &listed).await.unwrap(), "no such account");
     }
 
     // ---- user rename -------------------------------------------------------------

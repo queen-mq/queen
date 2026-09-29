@@ -206,6 +206,7 @@ async fn establish_session(st: &St, headers: &HeaderMap, user: UserRef, next: &s
         }
     };
     record_login(st, user.user_id).await;
+    grant_listed_operator(st, user.user_id).await;
     let cookie = session_cookie(st, headers, &token);
     redirect(StatusCode::SEE_OTHER, next, Some(&cookie))
 }
@@ -223,6 +224,24 @@ async fn record_login(st: &St, user_id: Uuid) {
         // The old path returned silently when the pool had no connection.
         Err(e) if e.is_unavailable() => {}
         Err(e) => tracing::warn!(target: "oauth", err = %e, "record_user_login failed (non-fatal)"),
+    }
+}
+
+/// `QUEEN_PROXY_OPERATORS` at sign-in: an account created after the boot sync
+/// (OAuth auto-provision) holds the operator flag from its first session.
+/// Best-effort like `record_login`: the next boot's sync grants it anyway.
+async fn grant_listed_operator(st: &St, user_id: Uuid) {
+    let Some(listed) = st.cfg.operators.as_deref() else { return };
+    if listed.is_empty() || !st.store.is_some() {
+        return;
+    }
+    match web::grant_listed_operator(&st.store, user_id, listed).await {
+        Ok(true) => {
+            st.keys.invalidate_operator(user_id);
+            tracing::info!(target: "oauth", user = %user_id, "operator granted at sign-in (QUEEN_PROXY_OPERATORS)");
+        }
+        Ok(false) => {}
+        Err(e) => tracing::warn!(target: "oauth", err = %e, "operator grant at sign-in failed (non-fatal)"),
     }
 }
 

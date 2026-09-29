@@ -28,7 +28,7 @@ string, and it is written to fail closed.
 <Steps>
 
 1. **The operator subset is checked first**, because the prefix blocks below would
-   otherwise swallow two of its entries. It is a closed list of seven paths. Matching
+   otherwise swallow two of its entries. It is a closed list of six paths. Matching
    it opens nothing on its own: reaching one still needs a live operator principal, and
    on a cell with `QUEEN_PROXY_OPERATOR_ENABLED` off the route answers `404` before
    authentication runs at all.

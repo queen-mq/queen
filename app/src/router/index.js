@@ -166,6 +166,29 @@ const routes = [
     }
   },
   {
+    // Tenant-level, cluster admins only: who may use the acting cluster and with
+    // which credentials. The proxy owns these identities (proxy/src/console.rs),
+    // so a broker-direct build has nothing to show.
+    path: '/members',
+    name: 'Members',
+    component: () => import('@/views/Members.vue'),
+    meta: {
+      title: 'Members', subtitle: 'Who may use this cluster, and with which role',
+      requires: 'clusterAdmin', scope: 'tenant', proxyOnly: true,
+      nav: { group: 'Access', icon: 'members', order: 1 },
+    }
+  },
+  {
+    path: '/keys',
+    name: 'ApiKeys',
+    component: () => import('@/views/ApiKeys.vue'),
+    meta: {
+      title: 'API keys', subtitle: 'Credentials services use to call this cluster',
+      requires: 'clusterAdmin', scope: 'tenant', proxyOnly: true,
+      nav: { group: 'Access', icon: 'keys', order: 2 },
+    }
+  },
+  {
     // Cell-level: host resources and the replicated log cover every tenant on
     // this cell, which is why the proxy answers it for live operators only.
     path: '/system',

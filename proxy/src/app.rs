@@ -230,6 +230,9 @@ pub fn build_embedded(e: Embedded) -> Result<(St, Router), String> {
 /// | `QUEEN_PROXY_BOOTSTRAP_PASSWORD` | admin password (none = OAuth/key only) |
 /// | `QUEEN_PROXY_BOOTSTRAP_PLAN` | plan code (default `dev`) |
 /// | `QUEEN_PROXY_BOOTSTRAP_API_KEY` | plaintext key to issue on that cluster |
+///
+/// Then, when `QUEEN_PROXY_OPERATORS` is set, the operator flag of every
+/// account is made to match that list (`store::web::sync_operators`).
 pub async fn seed_embedded(st: &St) -> Result<(), String> {
     use crate::store::data;
     let kv = st.store.kv().ok_or("no KV store")?;
@@ -280,6 +283,23 @@ pub async fn seed_embedded(st: &St) -> Result<(), String> {
             }
         }
         tracing::info!(target: "proxy", tenant = %slug, created = out.get("api_key").is_some_and(|k| !k.is_null()), "bootstrap tenant ready");
+    }
+    // After the bootstrap, so its admin can be one of the operators.
+    if let Some(listed) = &st.cfg.operators {
+        let out = crate::store::web::sync_operators(&st.store, listed).await.map_err(|e| e.to_string())?;
+        tracing::info!(
+            target: "proxy",
+            granted = ?out.granted,
+            revoked = ?out.revoked,
+            no_account_yet = ?out.pending,
+            "operators synced from QUEEN_PROXY_OPERATORS"
+        );
+        if !st.cfg.operator_enabled && !listed.is_empty() {
+            tracing::warn!(
+                target: "proxy",
+                "QUEEN_PROXY_OPERATORS names operators but QUEEN_PROXY_OPERATOR_ENABLED is off: none of them sees a cell-level page"
+            );
+        }
     }
     tracing::info!(target: "proxy", "proxy state seeded");
     Ok(())

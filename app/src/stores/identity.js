@@ -260,11 +260,14 @@ const CAPABILITIES = {
   produce: r => r === 'admin' || r === 'producer',
   consume: r => r === 'admin' || r === 'consumer',
   queueAdmin: r => r === 'admin',
+  // Not a RouteClass: the proxy's own member and key routes, each behind
+  // `require_admin` (proxy/src/console.rs).
+  clusterAdmin: r => r === 'admin',
 }
 
 /**
  * The only permission question a view may ask.
- *   can('read') | can('produce') | can('consume') | can('queueAdmin')
+ *   can('read') | can('produce') | can('consume') | can('queueAdmin') | can('clusterAdmin')
  *   can('operator')  -> cell-level surfaces, live operators only
  */
 export function can(capability) {

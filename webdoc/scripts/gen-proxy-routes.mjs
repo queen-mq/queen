@@ -97,8 +97,12 @@ const PROXY_ROUTES = "proxy/src/routes.rs";
 // `is_operator_route` lost `/api/v1/analytics/postgres-stats`, which the broker
 // no longer serves. The comment edits around the PG-era wording in the Rust
 // do not move the fingerprints.
+// 2026-09-29: `is_operator_route` grew `/api/v1/raft/status` and
+// `/api/v1/raft/members`, the System page's replicated log and members on a
+// raft cell; the liveness probe stays blocked with the rest of the family.
+// `classify` is untouched.
 const CLASSIFY_FINGERPRINT = "826f7c720cacd775";
-const OPERATOR_FINGERPRINT = "aee5990e5ef5fb90";
+const OPERATOR_FINGERPRINT = "0eca43d77dc8c6f2";
 
 // --- mirror of `is_operator_route` -----------------------------------------
 
@@ -106,7 +110,10 @@ const OPERATOR_ROUTES = new Set([
   "/api/v1/status",
   "/api/v1/analytics/system-metrics",
   "/api/v1/analytics/worker-metrics",
-  // `/system/shared-state` is deliberately NOT here and stays blocked.
+  "/api/v1/raft/status",
+  "/api/v1/raft/members",
+  // `/system/shared-state` and `/raft/liveness` are deliberately NOT here and
+  // stay blocked.
   "/metrics/prometheus",
 ]);
 

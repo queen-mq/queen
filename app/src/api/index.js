@@ -295,6 +295,29 @@ export const system = {
 }
 
 // ============================================
+// ACCESS API — TENANT-SCOPED, CLUSTER ADMINS ONLY. Who may use the acting
+// cluster and with which credentials: the proxy's /api/console/* routes
+// (proxy/src/console.rs), every one behind `require_admin`. The proxy owns
+// these identities, so a broker-direct build has none of them (proxyOnly).
+// ============================================
+export const access = {
+  /** `[{email, role, granted_at}]` — the acting cluster's members. */
+  listMembers: (config) => client.get('/api/console/members', config),
+  /**
+   * Grant `role` to `email` on the acting cluster. An upsert: the same call
+   * adds a member and changes one. The address must already be a user of the
+   * tenant (a first sign-in creates it); a cluster must keep one admin.
+   */
+  grantMember: (email, role, config) => client.post('/api/console/members', { email, role }, config),
+  revokeMember: (email, config) => client.delete('/api/console/members', { data: { email }, ...config }),
+  /** `[{id, name, scopes, created_at, last_used_at, revoked_at}]`. */
+  listKeys: (config) => client.get('/api/console/keys', config),
+  /** `{name, scopes}` → `{id, key}`. The key is in this answer only. */
+  createKey: (body, config) => client.post('/api/console/keys', body, config),
+  revokeKey: (id, config) => client.delete(`/api/console/keys/${encodeURIComponent(id)}`, config),
+}
+
+// ============================================
 // OPERATOR API — CELL-LEVEL. 200 only when /auth/me says operator_live;
 // 404 {"code":"route_blocked"} for every other principal.
 // Never render one of these numbers without saying it covers the whole cell.

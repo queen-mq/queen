@@ -168,6 +168,7 @@ quotas are hard regardless ([quotas](/reference/multi-tenant/quotas)).
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | unset | GitHub login |
 | `QUEEN_PROXY_AUTOPROVISION` | `false` | Create a user on a first OAuth login, with `QUEEN_PROXY_DEFAULT_ROLE` (`viewer`) |
 | `QUEEN_PROXY_OPERATOR_ENABLED` | `false` | Lets live operators open cell-wide routes |
+| `QUEEN_PROXY_OPERATORS` | unset | Emails of the operators (single binary): granted at boot or at first sign-in, every other operator revoked at boot; set but empty revokes all |
 | `QUEEN_EDGE_TRUSTED_PROXIES` | unset | Load balancer ranges whose forwarded client address the edge believes |
 | `QUEEN_PROXY_UPSTREAM_TIMEOUT_MS` | `35000` | Ceiling on one broker call that is not a long-poll pop |
 | `QUEEN_PROXY_LONGPOLL_MAX_MS` | `90000` | Clamp on the wait a client may ask for on `wait=true` |

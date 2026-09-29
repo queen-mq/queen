@@ -763,6 +763,7 @@ mod tests {
             auth_portal_url: None,
             auth_portal_label: crate::config::AUTH_PORTAL_LABEL.to_string(),
             operator_enabled: false,
+            operators: None,
             google_client_id: None,
             google_client_secret: None,
             google_allowed_domains: Vec::new(),

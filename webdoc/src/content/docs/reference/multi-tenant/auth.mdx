@@ -310,7 +310,8 @@ hard block gives, with no lookup and no way in.
 
 A live operator is `admin` on every cluster on that cell, membership or not, and is
 the only principal that can open the cell-wide surfaces: broker status, buffer state,
-host and worker metrics, maintenance mode, and the proxy-backed Users page. That page can
+host and worker metrics, the replicated log and its members, maintenance mode, and the
+proxy-backed Users page. That page can
 create and name local or OAuth-first accounts for tenants represented on the selected cell,
 edit their display names, show their latest successful login, and add, change, or remove
 their roles on clusters on that cell. It cannot set the operator bit. Operator access is
@@ -322,6 +323,13 @@ the control-plane token instead
 No route sets the operator bit: not the console, not the Users page, not the control
 plane. That is deliberate. See
 [Tenants, clusters and cells](/reference/multi-tenant/tenants/).
+
+On the single binary the bit follows the cell's configuration instead:
+`QUEEN_PROXY_OPERATORS` lists the operators' emails. At boot every node grants a listed
+account and revokes every operator the list does not name; an account that does not
+exist yet is granted by its first sign-in. Unset, the bits are left as they are; set
+but empty, nobody is an operator. Each change is audited as `operator_granted` or
+`operator_revoked` with actor `system`.
 
 <Aside type="caution">
 Leave `QUEEN_PROXY_OPERATOR_ENABLED` off on every cell that carries other people's

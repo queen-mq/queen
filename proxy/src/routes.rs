@@ -88,14 +88,19 @@ pub enum RouteClass {
 /// The EXACT set of otherwise-blocked broker surfaces a live operator may
 /// open. Everything else `classify` blocks stays blocked for EVERY principal:
 /// `/api/v1/migration/*`, `/internal/*`, `/api/v1/stats/refresh`, the
-/// discovery `GET /api/v1/pop`, bare `/metrics`, the broker's own `/status`
-/// and the rest of `/api/v1/system/*` are not dashboard data.
+/// discovery `GET /api/v1/pop`, bare `/metrics`, the broker's own `/status`,
+/// the rest of `/api/v1/system/*` and the rest of `/api/v1/raft/*` (the
+/// liveness probe) are not dashboard data. The two raft routes are the System
+/// page's replicated log and members: GET-only at the broker, cell-wide by
+/// nature (every node, its log, its disk).
 fn is_operator_route(p: &str) -> bool {
     matches!(
         p,
         "/api/v1/status"
             | "/api/v1/analytics/system-metrics"
             | "/api/v1/analytics/worker-metrics"
+            | "/api/v1/raft/status"
+            | "/api/v1/raft/members"
             | "/metrics/prometheus"
     )
 }
@@ -1043,18 +1048,22 @@ mod tests {
     /// be blocked must still be blocked — the whole point of the per-cell flag
     /// is that turning it on widens the surface by exactly these four paths.
     #[test]
-    fn operator_subset_is_exactly_the_agreed_four() {
+    fn operator_subset_is_exactly_the_agreed_six() {
         for p in [
             "/api/v1/status",
             "/api/v1/analytics/system-metrics",
             "/api/v1/analytics/worker-metrics",
+            "/api/v1/raft/status",
+            "/api/v1/raft/members",
             "/metrics/prometheus",
         ] {
             assert_eq!(classify(&Method::GET, p), RouteClass::Operator, "{p}");
         }
-        // The rest of `/api/v1/system/*` stays blocked, for every method.
+        // The rest of `/api/v1/system/*` and `/api/v1/raft/*` stays blocked,
+        // for every method.
         for m in [Method::GET, Method::POST] {
             assert_eq!(classify(&m, "/api/v1/system/shared-state"), RouteClass::Blocked, "{m}");
+            assert_eq!(classify(&m, "/api/v1/raft/liveness"), RouteClass::Blocked, "{m}");
         }
     }
 

@@ -63,6 +63,12 @@ pub fn csv_lower(key: &str) -> Vec<String> {
         .collect()
 }
 
+/// `csv_lower`, but `None` while the variable is unset: for a list whose
+/// presence is itself the setting (set but empty is not the same as unset).
+pub fn csv_lower_opt(key: &str) -> Option<Vec<String>> {
+    env::var_os(key).map(|_| csv_lower(key))
+}
+
 /// A Host header value with its `:port` stripped. Only strips when what follows
 /// the last colon is all digits, so an IPv6 literal (`[::1]`) and any other
 /// colon survive untouched.
@@ -489,6 +495,14 @@ pub struct Config {
     /// off, `classify`'s operator class 404s before authentication even runs,
     /// exactly as a hard block does.
     pub operator_enabled: bool,
+    /// `QUEEN_PROXY_OPERATORS`: the emails that hold `users.is_operator`,
+    /// lowercased. On the single binary this list is the flag's only lever
+    /// (`set_operator` has no route): at boot a listed account is granted and
+    /// every operator not listed is revoked; an account created later, by its
+    /// first sign-in, is granted then. `None` (unset) leaves the flags as they
+    /// are; set but empty revokes every operator. Inert without
+    /// `operator_enabled`, which is what makes the flag grant anything.
+    pub operators: Option<Vec<String>>,
     pub google_client_id: Option<String>,
     pub google_client_secret: Option<String>,
     /// Google Workspace domains allowed to sign in, lowercased. EMPTY MEANS ANY
@@ -587,6 +601,7 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| AUTH_PORTAL_LABEL.to_string()),
             operator_enabled: env_bool("QUEEN_PROXY_OPERATOR_ENABLED", false),
+            operators: csv_lower_opt("QUEEN_PROXY_OPERATORS"),
             google_client_id: env_opt("GOOGLE_CLIENT_ID"),
             google_client_secret: env_opt("GOOGLE_CLIENT_SECRET"),
             google_allowed_domains: csv_lower("GOOGLE_ALLOWED_DOMAINS"),
@@ -631,6 +646,7 @@ pub(crate) fn test_config(hosts: &[&str]) -> Config {
         auth_portal_url: None,
         auth_portal_label: AUTH_PORTAL_LABEL.to_string(),
         operator_enabled: false,
+        operators: None,
         google_client_id: None,
         google_client_secret: None,
         google_allowed_domains: Vec::new(),
@@ -712,6 +728,20 @@ mod tests {
         std::env::set_var("QUEEN_TEST_CSV", " Smartpricing.IT , ,smartness.com,");
         assert_eq!(csv_lower("QUEEN_TEST_CSV"), vec!["smartpricing.it", "smartness.com"]);
         std::env::remove_var("QUEEN_TEST_CSV");
+    }
+
+    #[test]
+    fn csv_lower_opt_tells_unset_from_set_but_empty() {
+        std::env::remove_var("QUEEN_TEST_CSV_OPT");
+        assert_eq!(csv_lower_opt("QUEEN_TEST_CSV_OPT"), None);
+        std::env::set_var("QUEEN_TEST_CSV_OPT", "");
+        assert_eq!(csv_lower_opt("QUEEN_TEST_CSV_OPT"), Some(vec![]));
+        std::env::set_var("QUEEN_TEST_CSV_OPT", " Ops@Smartness.com ,admin@localhost");
+        assert_eq!(
+            csv_lower_opt("QUEEN_TEST_CSV_OPT"),
+            Some(vec!["ops@smartness.com".to_string(), "admin@localhost".to_string()])
+        );
+        std::env::remove_var("QUEEN_TEST_CSV_OPT");
     }
 
     #[test]

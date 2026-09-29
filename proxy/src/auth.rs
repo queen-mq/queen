@@ -1007,6 +1007,12 @@ impl Keys {
         self.role_cache.lock().unwrap().remove(&(user_id, cluster_id));
     }
 
+    /// Drop one cached operator answer after the flag was written here, so
+    /// the session that caused the write sees it on its first request.
+    pub fn invalidate_operator(&self, user_id: Uuid) {
+        self.operator_cache.lock().unwrap().remove(&user_id);
+    }
+
     /// Does this user hold the operator bit (the user's `is_operator`)?
     /// Cached `ROLE_TTL`, both answers.
     ///

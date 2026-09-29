@@ -151,6 +151,8 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | --- | --- |
 | `GET` | `/api/v1/analytics/system-metrics` |
 | `GET` | `/api/v1/analytics/worker-metrics` |
+| `GET` | `/api/v1/raft/members` |
+| `GET` | `/api/v1/raft/status` |
 | `GET` | `/api/v1/status` |
 | `GET` | `/metrics/prometheus` |
 
@@ -160,8 +162,6 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | --- | --- |
 | `GET` | `/api/v1/pop` |
 | `GET` | `/api/v1/raft/liveness` |
-| `GET` | `/api/v1/raft/members` |
-| `GET` | `/api/v1/raft/status` |
 | `POST` | `/api/v1/resources/quota` |
 | `DELETE` | `/api/v1/resources/tenant` |
 | `POST` | `/api/v1/stats/refresh` |

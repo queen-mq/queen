@@ -305,7 +305,7 @@ const isActive = (path) => path === '/' ? route.path === '/' : route.path.starts
 // is last and named for what it covers, because its pages answer for the
 // CELL and not for the acting tenant. The first group carries no label.
 // ---------------------------------------------------------------------------
-const GROUP_ORDER = ['Overview', 'Routing', 'Observability', 'Cell']
+const GROUP_ORDER = ['Overview', 'Routing', 'Observability', 'Access', 'Cell']
 const OPERATOR_GROUP = 'Cell'
 
 const navGroups = computed(() => {
@@ -350,6 +350,8 @@ const icons = {
   analytics: AnalyticsIcon,
   workload: WorkloadIcon,
   dlq: DlqIcon,
+  members: MembersIcon,
+  keys: ApiKeysIcon,
   system: SystemIcon,
   users: UsersIcon,
 }
@@ -373,6 +375,12 @@ function TracesIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24
 function WorkloadIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round' }, [h('rect',{x:'3',y:'4',width:'8',height:'6',rx:'1.5'}),h('rect',{x:'13',y:'4',width:'8',height:'11',rx:'1.5'}),h('rect',{x:'3',y:'14',width:'8',height:'6',rx:'1.5'}),h('path',{d:'M17 18v2'})]) }
 function AnalyticsIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('path',{d:'M4 20V10M10 20V4M16 20v-8M22 20H2'})]) }
 function SystemIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('rect',{x:'3',y:'4',width:'18',height:'6',rx:'1.6'}),h('rect',{x:'3',y:'14',width:'18',height:'6',rx:'1.6'}),h('circle',{cx:'7',cy:'7',r:'.9',fill:'currentColor'}),h('circle',{cx:'7',cy:'17',r:'.9',fill:'currentColor'})]) }
+/* Members: a person and the roster lines beside them. Users (every tenant,
+   operators only) is a person with a plus; Consumers is two people. */
+function MembersIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('circle',{cx:'9',cy:'8',r:'3'}),h('path',{d:'M3.5 20c0-3.3 2.5-6 5.5-6s5.5 2.7 5.5 6'}),h('path',{d:'M16 8h5M16 12h5M17.5 16H21'})]) }
+/* API keys: a credential card, not a key. The key glyph is KV's, and a key
+   here is what a service shows the proxy, i.e. a card with a name on it. */
+function ApiKeysIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('rect',{x:'3',y:'6',width:'18',height:'12',rx:'1.6'}),h('circle',{cx:'8.5',cy:'12',r:'2'}),h('path',{d:'M13 10.5h5M13 13.5h3.5'})]) }
 function UsersIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('circle',{cx:'9',cy:'8',r:'3'}),h('path',{d:'M3.5 20c0-3.3 2.5-6 5.5-6s5.5 2.7 5.5 6'}),h('path',{d:'M17 8v6M14 11h6'})]) }
 function DlqIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('path',{d:'M5 7h14l-1.2 11.2a2 2 0 01-2 1.8H8.2a2 2 0 01-2-1.8L5 7Z'}),h('path',{d:'M9 4h6v3H9z'})]) }
 </script>
