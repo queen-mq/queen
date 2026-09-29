@@ -23,7 +23,7 @@ verifiedBy:
   - clients/client-php/tests/LaravelSupervisorTest.php
   - clients/client-php/tests/LaravelSupervisorProductionTest.php
   - clients/client-php/tests/LaravelDashboardTest.php
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-29 (through fc71b65b + this patch): the local panel can show a PHP supervisor on another host, read-only; page matches the code.
 ---
 
 Queen is not a drop-in reimplementation of Horizon. Both can supervise Laravel workers, but they
@@ -62,7 +62,7 @@ implementation and tests named in this page's frontmatter.
 | Master runtime | PHP with Laravel/Horizon loaded | PHP reference engine or optimized Rust engine |
 | Crash-loop control | Process restart behavior managed by Horizon and the outer monitor | Capped restart backoff plus an open/one-probe circuit breaker in both engines |
 | Multiple master hosts | Master records and supervisor state are shared through Horizon's Redis repository | Not safe yet; one master per application and consumer group |
-| Dashboard | Mature Horizon dashboard over its Redis state | Local supervisor panel plus a separate global Queen broker dashboard |
+| Dashboard | Mature Horizon dashboard over its Redis state | Local supervisor panel, which can also show a PHP supervisor on another host read-only, plus a separate global Queen broker dashboard |
 | Retained job and queue metrics | Snapshot command and retained graphs | Live bounded supervisor state; broker analytics are separate |
 | Job tags and silencing | Automatic/manual tags and silenced jobs | Not implemented in the Laravel supervisor panel |
 | Long-wait notifications | Mail, Slack and SMS routes with per-queue thresholds | No package-native wait alert routing yet |
@@ -90,7 +90,8 @@ PostgreSQL.
 
 PHP and Rust consume the same resolved configuration and publish the same versioned status and
 control protocol. A deployment can validate behavior with the readable PHP reference engine, then
-move to Rust without changing pool definitions or dashboard commands.
+move to Rust without changing pool definitions or dashboard commands. The one PHP-only feature is
+publishing that status to the broker for a dashboard on another host.
 
 ### Queen queue semantics
 

@@ -19,7 +19,7 @@ verifiedBy:
   - clients/client-php/tests/LaravelServiceProviderTest.php
   - clients/client-php/tests/LaravelQueueDriverTest.php
   - clients/client-php/tests/ProcessLeaseRenewerTest.php
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-29 (through fc71b65b + this patch): notes the PHP-only remote status for the dashboard; page matches the code.
 ---
 
 Queen can play two separate roles in a Laravel application:
@@ -147,8 +147,9 @@ make external side effects exactly once, so jobs must remain idempotent.
 | Queen PHP | You want Horizon-like local pools with no native artifact | Laravel remains loaded in one PHP master |
 | Queen Rust | You want the smallest control plane and crash-loop circuit breaking | Rust, after one temporary Artisan configuration load |
 
-The PHP and Rust engines read the same configuration and publish the same state protocol. Begin
-with [Worker supervisors](/use/laravel/supervisors), then enable the
+The PHP and Rust engines read the same configuration and publish the same state protocol. Only the
+PHP engine can also publish it to the broker for a dashboard served by other hosts. Begin with
+[Worker supervisors](/use/laravel/supervisors), then enable the
 [Laravel dashboard](/use/laravel/dashboard) only after authentication is in place.
 
 <CardGrid>

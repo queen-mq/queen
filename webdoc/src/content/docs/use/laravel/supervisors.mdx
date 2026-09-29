@@ -15,6 +15,7 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Commands/SupervisorInstallCommand.php
   - clients/client-php/src/Laravel/Supervisor/SupervisorConfiguration.php
   - clients/client-php/src/Laravel/Supervisor/PhpSupervisor.php
+  - clients/client-php/src/Laravel/Supervisor/RemoteStatusPublisher.php
   - clients/client-php/src/Laravel/Supervisor/SupervisorState.php
   - clients/client-php/src/Laravel/Supervisor/AutoScaler.php
   - clients/client-php/src/Laravel/Supervisor/Binary/SupervisorBinaryInstaller.php
@@ -25,7 +26,8 @@ verifiedBy:
   - clients/client-php/tests/LaravelSupervisorCommandTest.php
   - clients/client-php/tests/LaravelSupervisorProductionTest.php
   - clients/client-php/tests/SupervisorBinaryInstallerTest.php
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+  - clients/client-php/tests/LaravelSupervisorRemoteStatusTest.php
+# sourceOfTruth re-read 2026-09-29 (through fc71b65b + this patch): adds PHP-only remote status publication and its heartbeat budget; page matches the code.
 ---
 
 The Queen supervisor is a **local control plane**. It starts ordinary Laravel
@@ -39,7 +41,9 @@ Both engines consume the same resolved configuration:
 | Queen PHP | A Laravel application remains resident | `artisan queue:work queen` | Reference implementation and fallback |
 | Queen Rust | Rust remains resident after one Artisan config load | `artisan queue:work queen` | Lower master memory, process-group fencing and crash-loop circuit breaker |
 
-Switching engines does not change the pool configuration, CLI controls or dashboard protocol.
+Switching engines does not change the pool configuration, CLI controls or dashboard protocol. One
+exception: only the PHP engine can [publish its status](/use/laravel/dashboard#a-supervisor-on-another-host)
+for a dashboard on another host.
 
 ## Requirements
 
@@ -119,7 +123,9 @@ The important inequalities are enforced at startup:
 - `max_processes` must cover every queue in `auto` mode;
 - aggregate pool maxima must fit `process_limit`; a renewal-enabled worker reserves two child
   process slots, one for Artisan and one for its lazy helper;
-- control TTL and heartbeat timeout must exceed the bounded reconciliation loop.
+- control TTL and heartbeat timeout must exceed the bounded reconciliation loop. With
+  `remote_status` enabled, that loop also includes one request timeout per broker endpoint for the
+  publish, and the publish interval must be shorter than the heartbeat timeout.
 
 Inspect the document that either engine will consume:
 
@@ -128,7 +134,8 @@ php artisan queen:supervisor-config --pretty
 ```
 
 This form redacts tokens and header values. `--for-engine` contains credentials and must not be
-written to logs or ordinary build artifacts.
+written to logs or ordinary build artifacts. It is the form the Rust engine loads, so it withholds
+`remote_status`, which that engine does not implement, and prints a notice on standard error.
 
 ## Balancing modes
 
