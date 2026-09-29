@@ -530,6 +530,7 @@ pub fn log_effective(cfg: &Config) {
             "{}r/{}rb/{}w/{}wb",
             cfg.kv_read_rate, cfg.kv_read_burst, cfg.kv_write_rate, cfg.kv_write_burst),
         kv_max_tenants = cfg.kv_max_tenants,
+        kv_max_value_bytes = crate::rsm::planner::kv::max_value_bytes(),
         kv_quota = %format!(
             "release {}% / hot above {}%",
             cfg.kv_quota_release_percent, cfg.kv_quota_hot_percent),

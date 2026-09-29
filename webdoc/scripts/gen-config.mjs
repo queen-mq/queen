@@ -364,9 +364,9 @@ const EXTRA_VARS = [
   {
     name: "QUEEN_KV_MAX_VALUE_BYTES",
     type: "integer",
-    def: "65536",
+    def: "65536 (64 KiB)",
     aliases: [],
-    source: "server/src/handlers/kv.rs",
+    source: "server/src/rsm/planner/kv.rs", // max_value_bytes; the HTTP edge reads the same
   },
   {
     name: "QUEEN_KV_MAX_OPS_PER_CALL",

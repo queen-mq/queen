@@ -333,6 +333,30 @@ impl HttpPeer {
     }
 }
 
+/// The deadline of an append. openraft's soft TTL (three quarters of a
+/// heartbeat: 75 ms by default) fits one without entries. One with entries has
+/// its bytes to cross the wire and to be written and fsynced before the answer,
+/// so it gets [`APPEND_SLACK`] more and a microsecond for every
+/// [`APPEND_MIN_BYTES_PER_US`] bytes. At a flat 75 ms, once a follower fell a
+/// moment behind, each catch-up append (up to [`wire::MAX_APPEND_BYTES`])
+/// missed its deadline and was resent bigger: at 1M msg/s over three nodes
+/// both followers stopped catching up ~500 s in and commits went from ~30 ms
+/// to ~1.5 s (2026-09-29).
+fn append_ttl(soft: Duration, entries: usize, body_len: usize) -> Duration {
+    if entries == 0 {
+        return soft;
+    }
+    soft + APPEND_SLACK + Duration::from_micros((body_len / APPEND_MIN_BYTES_PER_US) as u64)
+}
+
+/// What an append with entries may take on top of the soft TTL whatever its
+/// size: a follower's write and fsync under memory pressure.
+const APPEND_SLACK: Duration = Duration::from_secs(1);
+
+/// 50 MB/s: the transfer rate an append's deadline assumes, far under what a
+/// cluster's private network carries (~350 MB/s to each follower measured).
+const APPEND_MIN_BYTES_PER_US: usize = 50;
+
 impl RaftNetworkV2<TypeConfig> for HttpPeer {
     type SnapshotData = Checkpoint;
 
@@ -347,6 +371,7 @@ impl RaftNetworkV2<TypeConfig> for HttpPeer {
         })?;
         let cut = n < rpc.entries.len();
         let last_sent = n.checked_sub(1).map(|i| rpc.entries[i].log_id);
+        let ttl = append_ttl(option.soft_ttl(), n, body.len());
         // Every append — heartbeats included — carries the leader's members
         // view: the liveness evidence and the view of it travel together
         // (super::members).
@@ -355,7 +380,7 @@ impl RaftNetworkV2<TypeConfig> for HttpPeer {
                 "/raft/v1/append",
                 "application/octet-stream",
                 body,
-                option.soft_ttl(),
+                ttl,
                 self.members.header(),
             )
             .await?;
@@ -813,5 +838,27 @@ mod server {
         {
             tracing::error!(target: "rsm", error = %e, "raft RPC server stopped");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_append_without_entries_keeps_the_heartbeat_deadline() {
+        let soft = Duration::from_millis(75);
+        assert_eq!(append_ttl(soft, 0, 300), soft);
+    }
+
+    #[test]
+    fn an_append_with_entries_gets_time_for_its_bytes() {
+        let soft = Duration::from_millis(75);
+        let small = append_ttl(soft, 1, 4 << 20);
+        let full = append_ttl(soft, 64, wire::MAX_APPEND_BYTES);
+        assert!(small >= soft + APPEND_SLACK, "{small:?}");
+        assert!(full > small, "{full:?} vs {small:?}");
+        // 32 MiB at 50 MB/s: ~671 ms on top of the slack.
+        assert_eq!(full, soft + APPEND_SLACK + Duration::from_micros(671_088));
     }
 }

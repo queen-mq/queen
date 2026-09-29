@@ -69,8 +69,21 @@ pub fn frames(data: &[u8]) {
 /// `{"operations": [...]}`) and of a transaction's KV rider.
 pub fn kv_ops(data: &[u8]) {
     let Some(ops) = ops_of(data) else { return };
-    let _ = crate::rsm::planner::kv::parse_ops(&ops, crate::config::DEFAULT_TENANT, false, 511);
-    let _ = crate::rsm::planner::kv::parse_ops(&ops, crate::config::DEFAULT_TENANT, true, 511);
+    let max_value = crate::rsm::planner::kv::MAX_VALUE_BYTES_DEFAULT;
+    let _ = crate::rsm::planner::kv::parse_ops(
+        &ops,
+        crate::config::DEFAULT_TENANT,
+        false,
+        511,
+        max_value,
+    );
+    let _ = crate::rsm::planner::kv::parse_ops(
+        &ops,
+        crate::config::DEFAULT_TENANT,
+        true,
+        511,
+        max_value,
+    );
 }
 
 /// The timer ops of a transaction / timer request.

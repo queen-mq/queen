@@ -139,6 +139,12 @@ somebody else's web traffic. So every KV call is checked before it reaches the s
 - **Ceilings on one call**: at most 256 operations (`QUEEN_KV_MAX_OPS_PER_CALL`), at most 1024 keys
   counted across them, a prefix read counting as its limit (`QUEEN_KV_MAX_KEYS_PER_CALL`), and at most
   65536 bytes per serialized value (`QUEEN_KV_MAX_VALUE_BYTES`), answered `413`.
+- **The value ceiling is one setting**: `QUEEN_KV_MAX_VALUE_BYTES` is read by both checks, the request
+  body and the broker's own on the compact JSON, on the node that receives the call. Set it the same on
+  every node: a node set lower refuses what another accepts. Raising it has a price: every value is
+  written to the replicated log beside the messages and stored on every node, and the write rate limits
+  count writes, not bytes. The request body limits still bound a value from above
+  (`QUEEN_MAX_BODY_BYTES`, and the proxy's `QUEEN_EDGE_MAX_BODY_BYTES`, 64 MiB each by default).
 - **The disk gate**, shared with every write: a KV write that adds a value is refused with `507` once
   the node's data directory is full past `QUEEN_RAFT_DISK_HIGH_PCT` ([Operations](/deploy/operations#the-disk-gate)).
 

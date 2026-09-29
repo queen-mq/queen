@@ -145,23 +145,16 @@ pub(super) fn write_footprint(ops: &[Value]) -> (i64, i64) {
     (rows, bytes)
 }
 
-/// Read a positive integer env knob once. These four ceilings are the HTTP-edge
-/// half of §9.2: the planner carries the same numbers as constants and is the floor
-/// nothing can get under, while these guard the body BEFORE a connection is
-/// taken. The value ceiling is the documented case where the two halves measure
-/// different things — raw body bytes here, compact JSON in the planner,
-/// normally shorter — and that surprise belongs in the documentation, not in a
-/// bug report from the first user with a value near the ceiling.
-///
-/// SEAM: `Config` ALREADY carries every one of these (`kv_max_value_bytes`,
-/// `kv_max_ops_per_call`, `kv_max_keys_per_call`, `timers_max_*`) — they are read
-/// here from the environment only because `AppState` does not carry them yet, and
-/// `AppState` is not this phase's file. For the HTTP broker the two agree by
-/// construction: same variable, same default, resolved once. For the EMBEDDED
-/// broker they can diverge, because its configuration comes from a builder and
-/// not from the process environment — which is the same reason the enable flag
-/// above is read from the resolved config instead. Four fields on `AppState`
-/// close it, and these four functions disappear.
+/// Read a positive integer env knob once. These ceilings are the HTTP-edge half
+/// of §9.2: the planner is the floor nothing can get under, while these guard
+/// the body BEFORE any work is done. The op and key ceilings here may be
+/// stricter than the planner's constants. The value ceiling is ONE setting,
+/// `QUEEN_KV_MAX_VALUE_BYTES`, resolved once by the planner
+/// ([`crate::rsm::planner::kv::max_value_bytes`]) and read here, so the two
+/// halves cannot disagree — they only measure different things: raw body bytes
+/// here, compact JSON in the planner, normally shorter. That surprise belongs in
+/// the documentation, not in a bug report from the first user with a value near
+/// the ceiling.
 fn env_usize(key: &'static str, def: usize) -> usize {
     std::env::var(key)
         .ok()
@@ -171,8 +164,7 @@ fn env_usize(key: &'static str, def: usize) -> usize {
 }
 
 fn max_value_bytes() -> usize {
-    static V: OnceLock<usize> = OnceLock::new();
-    *V.get_or_init(|| env_usize("QUEEN_KV_MAX_VALUE_BYTES", 65_536))
+    crate::rsm::planner::kv::max_value_bytes()
 }
 
 fn max_ops_per_call() -> usize {

@@ -1221,7 +1221,14 @@ fn kv_put(id: u64, tenant: &str, key: &str, value: i64, expect: Option<u64>) -> 
     Command::Kv(KvCommand {
         request_id: rid(id),
         tenant: tenant.to_string(),
-        ops: parse_ops(&[op], tenant, false, 511).expect("kv op"),
+        ops: parse_ops(
+            &[op],
+            tenant,
+            false,
+            511,
+            crate::rsm::planner::kv::MAX_VALUE_BYTES_DEFAULT,
+        )
+        .expect("kv op"),
     })
 }
 

@@ -79,8 +79,8 @@ use super::{store_err, Overlay, Plan, Planned, Planner, Refusal};
 // and the read evaluation cannot drift from each other.
 // ---------------------------------------------------------------------------
 
-/// `C_MAX_VALUE_BYTES`: the value ceiling, on the compact JSON.
-pub const MAX_VALUE_BYTES: usize = 65_536;
+/// `C_MAX_VALUE_BYTES`: the value ceiling's default, on the compact JSON.
+pub const MAX_VALUE_BYTES_DEFAULT: usize = 65_536;
 /// `C_MAX_READ_BYTES`: the aggregate read budget of one call (4 MiB).
 pub const MAX_READ_BYTES: i64 = 4_194_304;
 /// `C_PREFIX_DEFAULT` / `C_PREFIX_CAP`: getPrefix's limit, clamped, never refused.
@@ -98,6 +98,45 @@ pub const MAX_KEY_BYTES: usize = 512;
 pub const DETAIL_CAP: usize = 4096;
 /// The most rows one leader sweep step deletes.
 pub const SWEEP_LIMIT_DEFAULT: usize = 512;
+
+/// The value ceiling in force, on the compact JSON: `QUEEN_KV_MAX_VALUE_BYTES`,
+/// else [`MAX_VALUE_BYTES_DEFAULT`], read once per process. The HTTP edge
+/// (`handlers::kv`) guards the raw body with this same number, so the two
+/// halves cannot disagree.
+///
+/// It is checked where a call is received ([`parse_ops`]), never in apply:
+/// two nodes set differently disagree about what they accept, never about the
+/// state they hold. Raising it has a price the default was chosen to avoid —
+/// every value travels the replicated log beside the messages and is stored on
+/// every node — and above it the body limits (`QUEEN_MAX_BODY_BYTES`, the
+/// proxy's `QUEEN_EDGE_MAX_BODY_BYTES`, 64 MiB each by default) and the entry
+/// ceiling (`QUEEN_RAFT_ENTRY_MAX_BYTES`, 96 MiB) still apply.
+pub fn max_value_bytes() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        let raw = std::env::var("QUEEN_KV_MAX_VALUE_BYTES").ok();
+        let n = value_ceiling(raw.as_deref());
+        if raw
+            .as_deref()
+            .is_some_and(|r| r.trim().parse::<usize>().ok() != Some(n))
+        {
+            tracing::warn!(
+                target: "boot",
+                value = raw.as_deref().unwrap_or(""),
+                ceiling = n,
+                "QUEEN_KV_MAX_VALUE_BYTES is not a positive byte count; using the default"
+            );
+        }
+        n
+    })
+}
+
+/// [`max_value_bytes`]'s parse: a positive byte count, anything else the default.
+pub fn value_ceiling(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(MAX_VALUE_BYTES_DEFAULT)
+}
 
 const SEC_US: i64 = 1_000_000;
 
@@ -546,12 +585,14 @@ fn int_of(v: &Value) -> Option<i128> {
 /// input order, then one write per key, then the key budget). `in_wire`
 /// marks the transaction wire, which forbids getPrefix and has the
 /// smaller budgets. `max_store_key` is the store's key ceiling
-/// ([`Reads::max_key_len`]).
+/// ([`Reads::max_key_len`]); `max_value` the value ceiling, which a receiver
+/// passes as [`max_value_bytes`].
 pub fn parse_ops(
     ops: &[Value],
     tenant: &str,
     in_wire: bool,
     max_store_key: usize,
+    max_value: usize,
 ) -> Result<Vec<KvOp>, KvInvalid> {
     let n = ops.len();
     if n == 0 {
@@ -566,7 +607,7 @@ pub fn parse_ops(
     }
     let mut out = Vec::with_capacity(n);
     for (i, op) in ops.iter().enumerate() {
-        out.push(parse_one(i, op, tenant, in_wire, max_store_key)?);
+        out.push(parse_one(i, op, tenant, in_wire, max_store_key, max_value)?);
     }
 
     // §6.1 point 3, LOAD-BEARING here (a key's
@@ -614,6 +655,7 @@ fn parse_one(
     tenant: &str,
     in_wire: bool,
     max_store_key: usize,
+    max_value: usize,
 ) -> Result<KvOp, KvInvalid> {
     let Some(o) = v.as_object() else {
         return Err(bad(
@@ -736,11 +778,11 @@ fn parse_one(
             ));
         };
         value = serde_json::to_vec(v).unwrap_or_else(|_| b"null".to_vec());
-        if value.len() > MAX_VALUE_BYTES {
+        if value.len() > max_value {
             return Err(too_large(
                 "kv_value_too_large",
                 format!(
-                    "op at index {i}: value is {} bytes, the ceiling is {MAX_VALUE_BYTES}",
+                    "op at index {i}: value is {} bytes, the ceiling is {max_value}",
                     value.len()
                 ),
             ));

@@ -182,7 +182,7 @@ has to pass both.
 | Ops per call | 256 (64 in a transaction) |
 | Keys per call, counting a `getMany` by its keys and a `getPrefix` by its clamped limit | 4096 (256 in a transaction) |
 | Key | 512 bytes, or less when the tenant and namespace are long: the whole store key has to fit LMDB's 511-byte limit (`kv_key_too_large`, 413) |
-| Value | 65,536 bytes of compact JSON |
+| Value | `QUEEN_KV_MAX_VALUE_BYTES` bytes of compact JSON, 65,536 by default |
 | Values read by one call | 4 MiB |
 | `getPrefix` limit | 1 to 1000, default 100 |
 

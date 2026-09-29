@@ -227,7 +227,8 @@ or queries. [Streams](/use/streams) states the rule where an operator author wil
 
 No query by value, no predicates, no secondary indexes, no listing without a prefix, no watch,
 subscribe or long poll, no `merge`, no `deletePrefix`, no compare-and-set on the value, and no value
-above 64 KiB. Keys are capped at 512 bytes, and at fewer when the tenant and namespace names are long,
+above 64 KiB unless the broker raises it (`QUEEN_KV_MAX_VALUE_BYTES`). Keys are capped at 512 bytes, and
+at fewer when the tenant and namespace names are long,
 because the store key carries all three and is itself bounded.
 
 Values are never cached by the broker, at any TTL, and a read waits until the node answering it has

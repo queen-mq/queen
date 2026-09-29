@@ -1466,6 +1466,7 @@ impl RaftFacade {
             &ctx.tenant,
             true,
             self.store.max_key_len(),
+            crate::rsm::planner::kv::max_value_bytes(),
         ) {
             Ok(o) => o,
             Err(e) => return Ok(answer(e.status, e.reason, &e.detail)),

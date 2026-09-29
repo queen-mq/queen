@@ -16,7 +16,7 @@ use crate::rsm::entry::{
 };
 use crate::rsm::planner::kv::{
     namespaces_of, page_of, parse_ops, precondition_detail, render_call, ts_jsonb, ts_list,
-    KvInvalid, MAX_READ_BYTES,
+    value_ceiling, KvInvalid, MAX_READ_BYTES, MAX_VALUE_BYTES_DEFAULT,
 };
 use crate::rsm::planner::{KvCommand, KvOp, Plan};
 use crate::rsm::store::rows::KvRow;
@@ -33,8 +33,14 @@ const MAX_KEY: usize = 511;
 // ---------------------------------------------------------------------------
 
 fn ops_for(tenant: &str, v: &Value) -> Vec<KvOp> {
-    parse_ops(v.as_array().expect("an op array"), tenant, false, MAX_KEY)
-        .unwrap_or_else(|e| panic!("invalid ops {v}: {e:?}"))
+    parse_ops(
+        v.as_array().expect("an op array"),
+        tenant,
+        false,
+        MAX_KEY,
+        MAX_VALUE_BYTES_DEFAULT,
+    )
+    .unwrap_or_else(|e| panic!("invalid ops {v}: {e:?}"))
 }
 
 fn kv_cmd(id: u64, v: Value) -> Cmd {
@@ -130,7 +136,14 @@ fn count(cell: &Cell, ks: Keyspace) -> u64 {
 }
 
 fn refused(v: Value) -> KvInvalid {
-    parse_ops(v.as_array().unwrap(), TENANT, false, MAX_KEY).expect_err("the call must be refused")
+    parse_ops(
+        v.as_array().unwrap(),
+        TENANT,
+        false,
+        MAX_KEY,
+        MAX_VALUE_BYTES_DEFAULT,
+    )
+    .expect_err("the call must be refused")
 }
 
 // ---------------------------------------------------------------------------
@@ -1020,6 +1033,7 @@ fn pass_one_refuses_what_024_refuses() {
         TENANT,
         false,
         MAX_KEY,
+        MAX_VALUE_BYTES_DEFAULT,
     )
     .is_ok());
 
@@ -1031,7 +1045,7 @@ fn pass_one_refuses_what_024_refuses() {
     let wire: Vec<Value> = (0..65)
         .map(|i| json!({"op":"get","ns":"n","key":format!("k{i}")}))
         .collect();
-    let e = parse_ops(&wire, TENANT, true, MAX_KEY).unwrap_err();
+    let e = parse_ops(&wire, TENANT, true, MAX_KEY, MAX_VALUE_BYTES_DEFAULT).unwrap_err();
     assert_eq!(e.reason, "kv_too_many_ops");
     let keys: Vec<String> = (0..4097).map(|i| format!("k{i}")).collect();
     assert_eq!(
@@ -1045,6 +1059,7 @@ fn pass_one_refuses_what_024_refuses() {
         TENANT,
         true,
         MAX_KEY,
+        MAX_VALUE_BYTES_DEFAULT,
     )
     .unwrap_err();
     assert_eq!(e.reason, "kv_get_prefix_not_allowed_in_transaction");
@@ -1060,6 +1075,7 @@ fn pass_one_refuses_what_024_refuses() {
         &tenant,
         false,
         MAX_KEY,
+        MAX_VALUE_BYTES_DEFAULT,
     )
     .unwrap_err();
     assert_eq!(
@@ -1077,8 +1093,42 @@ fn pass_one_refuses_what_024_refuses() {
         &tenant,
         false,
         MAX_KEY,
+        MAX_VALUE_BYTES_DEFAULT,
     )
     .is_ok());
+}
+
+#[test]
+fn the_value_ceiling_is_the_setting_on_the_compact_json() {
+    // QUEEN_KV_MAX_VALUE_BYTES: a positive byte count; anything else is the
+    // default, never a ceiling of zero.
+    assert_eq!(value_ceiling(None), MAX_VALUE_BYTES_DEFAULT);
+    assert_eq!(value_ceiling(Some(" 1048576 ")), 1_048_576);
+    for bad in ["", "0", "-5", "64k", "1.5"] {
+        assert_eq!(value_ceiling(Some(bad)), MAX_VALUE_BYTES_DEFAULT, "{bad:?}");
+    }
+
+    // A 1 MiB value: refused at the default, accepted once the ceiling is
+    // raised, in a plain call and in the transaction wire alike.
+    let big = json!([{"op":"put","ns":"n","key":"k","value":"x".repeat(1 << 20),"forever":true}]);
+    let big = big.as_array().unwrap();
+    for in_wire in [false, true] {
+        let e = parse_ops(big, TENANT, in_wire, MAX_KEY, MAX_VALUE_BYTES_DEFAULT).unwrap_err();
+        assert_eq!(
+            (e.status, e.reason),
+            (413, "kv_value_too_large"),
+            "{}",
+            e.detail
+        );
+        assert!(e.detail.ends_with("the ceiling is 65536"), "{}", e.detail);
+        assert!(parse_ops(big, TENANT, in_wire, MAX_KEY, 2 << 20).is_ok());
+    }
+
+    // Measured on the compact JSON: a string's two quotes count.
+    let put =
+        |n: usize| json!([{"op":"put","ns":"n","key":"k","value":"x".repeat(n),"forever":true}]);
+    assert!(parse_ops(put(98).as_array().unwrap(), TENANT, false, MAX_KEY, 100).is_ok());
+    assert!(parse_ops(put(99).as_array().unwrap(), TENANT, false, MAX_KEY, 100).is_err());
 }
 
 #[test]

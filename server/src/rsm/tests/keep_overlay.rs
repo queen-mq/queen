@@ -439,6 +439,7 @@ impl Workload {
                 TENANT,
                 true,
                 511,
+                crate::rsm::planner::kv::MAX_VALUE_BYTES_DEFAULT,
             )
             .expect("kv op")
         } else {
@@ -473,7 +474,14 @@ impl Workload {
         Command::Kv(KvCommand {
             request_id: self.id(),
             tenant: TENANT.to_string(),
-            ops: parse_ops(&[op], TENANT, false, 511).expect("kv op"),
+            ops: parse_ops(
+                &[op],
+                TENANT,
+                false,
+                511,
+                crate::rsm::planner::kv::MAX_VALUE_BYTES_DEFAULT,
+            )
+            .expect("kv op"),
         })
     }
 

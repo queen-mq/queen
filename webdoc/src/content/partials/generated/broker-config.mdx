@@ -16,6 +16,7 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/rsm/dashboard/collector.rs
       - server/src/rsm/dashboard/store.rs
       - server/src/rsm/facade/groups.rs
+      - server/src/rsm/planner/kv.rs
       - server/src/rsm/planner/timers.rs
       - server/src/rsm/qlog/set.rs
       - server/src/rsm/replicator/node.rs
@@ -43,7 +44,7 @@ The broker is configured entirely through environment variables: 97 of them, lis
 | `QUEEN_KV_MAX_KEYS_PER_CALL` | integer | `1024` |  |
 | `QUEEN_KV_MAX_OPS_PER_CALL` | integer | `256` |  |
 | `QUEEN_KV_MAX_TENANTS` | integer | `10_000` |  |
-| `QUEEN_KV_MAX_VALUE_BYTES` | integer | `65536` |  |
+| `QUEEN_KV_MAX_VALUE_BYTES` | integer | `65536 (64 KiB)` |  |
 | `QUEEN_KV_QUOTA_HOT_PERCENT` | integer | `80` |  |
 | `QUEEN_KV_QUOTA_RELEASE_PERCENT` | integer | `90` |  |
 | `QUEEN_KV_READ_BURST` | integer | `400` |  |

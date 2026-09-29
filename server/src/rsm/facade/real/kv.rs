@@ -68,7 +68,14 @@ impl RaftFacade {
     /// `POST /api/v1/kv` and the path routes (024 `kv_apply_v1`, HTTP surface).
     pub(super) async fn kv_impl(&self, ctx: ReqCtx, req: KvReq) -> Result<KvOut, KvFailure> {
         let max_key = self.store.max_key_len();
-        let ops = kvp::parse_ops(&req.ops, &ctx.tenant, false, max_key).map_err(invalid)?;
+        let ops = kvp::parse_ops(
+            &req.ops,
+            &ctx.tenant,
+            false,
+            max_key,
+            kvp::max_value_bytes(),
+        )
+        .map_err(invalid)?;
         if ops.is_empty() {
             return Ok(KvOut {
                 results: Vec::new(),

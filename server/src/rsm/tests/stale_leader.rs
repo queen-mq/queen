@@ -223,7 +223,14 @@ fn claim(id: u64, key: &str, value: &str) -> Command {
     Command::Kv(KvCommand {
         request_id: rid(id),
         tenant: TENANT.into(),
-        ops: parse_ops(ops.as_array().expect("ops"), TENANT, false, 511).expect("valid claim"),
+        ops: parse_ops(
+            ops.as_array().expect("ops"),
+            TENANT,
+            false,
+            511,
+            crate::rsm::planner::kv::MAX_VALUE_BYTES_DEFAULT,
+        )
+        .expect("valid claim"),
     })
 }
 
