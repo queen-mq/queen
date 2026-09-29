@@ -63,6 +63,7 @@ final class SupervisorBinaryInstaller
 
             $result = $this->installLocked(
                 '.',
+                $expectedBase,
                 $manifestSource,
                 $archiveSource,
                 $releaseBaseUrl,
@@ -97,6 +98,7 @@ final class SupervisorBinaryInstaller
 
     private function installLocked(
         string $installBase,
+        array $expectedBase,
         string $manifestSource,
         ?string $archiveSource,
         ?string $releaseBaseUrl,
@@ -135,6 +137,7 @@ final class SupervisorBinaryInstaller
             'target directory',
         );
         $this->assertInstallDirectoriesStillMatch(
+            $expectedBase,
             $versionDirectory,
             $expectedVersionDirectory,
             $targetDirectory,
@@ -182,6 +185,7 @@ final class SupervisorBinaryInstaller
                 '..' . DIRECTORY_SEPARATOR . '..',
             );
             $this->assertInstallDirectoriesStillMatch(
+                $expectedBase,
                 $versionDirectory,
                 $expectedVersionDirectory,
                 $targetDirectory,
@@ -210,6 +214,7 @@ final class SupervisorBinaryInstaller
             );
 
             $this->assertInstallDirectoriesStillMatch(
+                $expectedBase,
                 $versionDirectory,
                 $expectedVersionDirectory,
                 $targetDirectory,
@@ -221,6 +226,7 @@ final class SupervisorBinaryInstaller
             }
             $binaryTemporaryPath = null;
             $this->assertInstallDirectoriesStillMatch(
+                $expectedBase,
                 $versionDirectory,
                 $expectedVersionDirectory,
                 $targetDirectory,
@@ -231,6 +237,7 @@ final class SupervisorBinaryInstaller
             }
             $receiptTemporaryPath = null;
             $this->assertInstallDirectoriesStillMatch(
+                $expectedBase,
                 $versionDirectory,
                 $expectedVersionDirectory,
                 $targetDirectory,
@@ -412,7 +419,8 @@ final class SupervisorBinaryInstaller
             [$binary, '--version'],
             [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
             $pipes,
-            null,
+            // Run the binary inside its pinned directory on every PHP build.
+            SupervisorBinary::pinnedDirectoryForExec(),
             null,
             ['bypass_shell' => true],
         );
@@ -576,11 +584,16 @@ final class SupervisorBinaryInstaller
      * @param array<string, int> $expectedTargetDirectory
      */
     private function assertInstallDirectoriesStillMatch(
+        array $expectedBase,
         string $versionDirectory,
         array $expectedVersionDirectory,
         string $targetDirectory,
         array $expectedTargetDirectory,
     ): void {
+        // Always true where chdir() moved the process onto the pinned inode. A
+        // ZTS chdir() pins by name only, so a swapped base must be caught here,
+        // before anything is published into the replacement directory.
+        $this->assertDirectoryStillMatches('.', $expectedBase, 'pinned installation base');
         $this->assertDirectoryStillMatches(
             $versionDirectory,
             $expectedVersionDirectory,
