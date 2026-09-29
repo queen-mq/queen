@@ -250,7 +250,9 @@ list; **Open as page** shows the same detail at `/queen/failed-jobs/{id}`, which
 row leads without JavaScript. Automatic refresh pauses while the drawer is open. The detail shows
 the job class, the queue and connection, the maximum tries and timeout read from the payload, the
 exception class and message in red under **Why it failed**, the stack trace, and the `queue:retry`
-command for that job. The payload itself is never displayed. Paths under the application root are shown relative
+command for that job. Each of the last three has a **Copy** button; where the browser offers no
+clipboard access, for example on a plain `http://` origin, the button copies through a selection
+instead. The payload itself is never displayed. Paths under the application root are shown relative
 to it, and the page does not refresh itself. The exception and the payload are read from the
 store cut to 1 MiB, in SQL on a database store, so a row of many megabytes costs no more memory
 than that. The page does not show an attempt count: Laravel's payload counter is only kept current
