@@ -351,6 +351,182 @@ pub fn partition_decode(b: &[u8]) -> Result<PartitionRow, CodecError> {
     })
 }
 
+/// A length-prefixed string of a row, BORROWED from its bytes (the row codec's
+/// `str`, without the copy).
+fn str_ref<'a>(r: &mut Reader<'a>, f: &'static str) -> Result<&'a str, CodecError> {
+    let n = r.u32(f)? as usize;
+    let rest = r.rest();
+    if n > rest.len() {
+        return Err(CodecError::Field(f));
+    }
+    let s = std::str::from_utf8(&rest[..n]).map_err(|_| CodecError::Field(f))?;
+    r.skip(n, f)?;
+    Ok(s)
+}
+
+/// A partition row's fixed-width fields: what the push and pop paths read on
+/// every command. [`partition_head_decode`] reads them without allocating —
+/// the three names are skipped — so a typed read can decode them under the
+/// table's lock ([`super::TypedReads::partition_head`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PartitionHead {
+    pub uuid: [u8; 16],
+    /// The allocated (and visible) tail, `-1` when empty.
+    pub last_offset: i64,
+    pub log_start: u64,
+    pub txns_start: u64,
+    pub last_write_at_us: i64,
+    pub oldest_live_at_us: Option<i64>,
+    pub created_at_us: i64,
+    pub last_created_at_us: i64,
+}
+
+impl PartitionHead {
+    /// See [`PartitionRow::floor`].
+    pub fn floor(&self) -> i64 {
+        self.log_start as i64 - 1
+    }
+
+    /// See [`PartitionRow::pending_from`].
+    pub fn pending_from(&self, committed: i64) -> u64 {
+        (self.last_offset - committed.max(self.floor())).max(0) as u64
+    }
+}
+
+/// A partition row BORROWED from its stored bytes: the names as `&str`, the
+/// rest as [`PartitionHead`]. Built by [`partition_ref_decode`] with no
+/// allocation; [`PartitionRef::to_row`] makes the owned row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PartitionRef<'a> {
+    pub tenant: &'a str,
+    pub queue: &'a str,
+    pub partition: &'a str,
+    pub head: PartitionHead,
+}
+
+impl PartitionRef<'_> {
+    pub fn to_row(self) -> PartitionRow {
+        PartitionRow {
+            uuid: self.head.uuid,
+            tenant: self.tenant.to_string(),
+            queue: self.queue.to_string(),
+            partition: self.partition.to_string(),
+            last_offset: self.head.last_offset,
+            log_start: self.head.log_start,
+            txns_start: self.head.txns_start,
+            last_write_at_us: self.head.last_write_at_us,
+            oldest_live_at_us: self.head.oldest_live_at_us,
+            created_at_us: self.head.created_at_us,
+            last_created_at_us: self.head.last_created_at_us,
+        }
+    }
+}
+
+impl PartitionRow {
+    /// The fixed-width half of the row.
+    pub fn head(&self) -> PartitionHead {
+        PartitionHead {
+            uuid: self.uuid,
+            last_offset: self.last_offset,
+            log_start: self.log_start,
+            txns_start: self.txns_start,
+            last_write_at_us: self.last_write_at_us,
+            oldest_live_at_us: self.oldest_live_at_us,
+            created_at_us: self.created_at_us,
+            last_created_at_us: self.last_created_at_us,
+        }
+    }
+}
+
+/// The tail of a partition row after its three names.
+fn partition_tail(r: &mut Reader<'_>, uuid: [u8; 16]) -> Result<PartitionHead, CodecError> {
+    Ok(PartitionHead {
+        uuid,
+        last_offset: r.i64("last_offset")?,
+        log_start: r.u64("log_start")?,
+        txns_start: r.u64("txns_start")?,
+        last_write_at_us: r.i64("last_write_at_us")?,
+        oldest_live_at_us: r.opt_i64("oldest_live_at_us")?,
+        created_at_us: r.i64("created_at_us")?,
+        last_created_at_us: r.i64("last_created_at_us")?,
+    })
+}
+
+/// [`partition_decode`]'s fixed-width fields, with no allocation.
+pub fn partition_head_decode(b: &[u8]) -> Result<PartitionHead, CodecError> {
+    let mut r = Reader::new(b);
+    expect_v1(&mut r, "partition row version")?;
+    let uuid = r.bytes16("uuid")?;
+    for f in ["tenant", "queue", "partition"] {
+        let n = r.u32(f)? as usize;
+        r.skip(n, f)?;
+    }
+    partition_tail(&mut r, uuid)
+}
+
+/// Rewrite a partition row's fixed-width fields — the uuid, the offsets, the
+/// watermarks and the stamps — into `out`, copying its three names as they
+/// are: `f` gets the row's head. Returns whether anything changed (`out` is
+/// left empty when nothing did). The bytes are exactly
+/// [`partition_encode`]'s for the row with the new head.
+pub fn partition_rewrite_head(
+    b: &[u8],
+    out: &mut Vec<u8>,
+    f: impl FnOnce(&mut PartitionHead),
+) -> Result<bool, CodecError> {
+    let mut r = Reader::new(b);
+    expect_v1(&mut r, "partition row version")?;
+    let uuid = r.bytes16("uuid")?;
+    let names_at = b.len() - r.remaining();
+    for f in ["tenant", "queue", "partition"] {
+        let n = r.u32(f)? as usize;
+        r.skip(n, f)?;
+    }
+    let tail_at = b.len() - r.remaining();
+    let head = partition_tail(&mut r, uuid)?;
+    let mut new = head;
+    f(&mut new);
+    out.clear();
+    if new == head {
+        return Ok(false);
+    }
+    out.reserve(b.len() + 8);
+    out.push(ROW_V1);
+    out.extend_from_slice(&new.uuid);
+    out.extend_from_slice(&b[names_at..tail_at]);
+    out.extend_from_slice(&new.last_offset.to_le_bytes());
+    out.extend_from_slice(&new.log_start.to_le_bytes());
+    out.extend_from_slice(&new.txns_start.to_le_bytes());
+    out.extend_from_slice(&new.last_write_at_us.to_le_bytes());
+    match new.oldest_live_at_us {
+        Some(v) => {
+            out.push(1);
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        None => out.push(0),
+    }
+    out.extend_from_slice(&new.created_at_us.to_le_bytes());
+    out.extend_from_slice(&new.last_created_at_us.to_le_bytes());
+    Ok(true)
+}
+
+/// [`partition_decode`] borrowing the names from `b`, with no allocation.
+pub fn partition_ref_decode(b: &[u8]) -> Result<PartitionRef<'_>, CodecError> {
+    let mut r = Reader::new(b);
+    expect_v1(&mut r, "partition row version")?;
+    let uuid = r.bytes16("uuid")?;
+    let tenant = str_ref(&mut r, "tenant")?;
+    let queue = str_ref(&mut r, "queue")?;
+    let partition = str_ref(&mut r, "partition")?;
+    let head = partition_tail(&mut r, uuid)?;
+    Ok(PartitionRef {
+        tenant,
+        queue,
+        partition,
+        head,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // cursors
 // ---------------------------------------------------------------------------
@@ -413,6 +589,141 @@ pub fn cursor_decode(b: &[u8]) -> Result<CursorRow, CodecError> {
             String::new()
         },
     })
+}
+
+/// A cursor row's scalars — everything but the worker name, the delivered set
+/// and the metadata, which are what allocate. [`cursor_head_decode`] reads it
+/// with no allocation, so a typed read can decode it under the table's lock
+/// ([`super::TypedReads::cursor_head`]): the reads that ask "is the group
+/// caught up", "is a lease live" or "is there a cursor at all" need no more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CursorHead {
+    pub committed: i64,
+    pub batch_end: Option<u64>,
+    /// `worker.is_some()`.
+    pub has_worker: bool,
+    pub lease_expires_at_us: Option<i64>,
+    pub lease_acquired_at_us: Option<i64>,
+    pub batch_retry_count: u32,
+    pub attempt_offset: Option<u64>,
+    pub attempt_count: u32,
+    pub total_consumed: u64,
+    pub lease_conflated: bool,
+    /// `delivered.len()`.
+    pub delivered_len: u32,
+    pub created_at_us: i64,
+}
+
+impl CursorHead {
+    /// [`lease_live`] on the head: a set worker AND a future expiry.
+    pub fn lease_live(&self, now_us: i64) -> bool {
+        self.has_worker && self.lease_expires_at_us.is_some_and(|e| e > now_us)
+    }
+}
+
+/// A cursor row BORROWED from its stored bytes ([`cursor_ref_decode`]): the
+/// head, the worker and the metadata as `&str`, the delivered set as its raw
+/// 16-byte ids.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CursorRef<'a> {
+    pub head: CursorHead,
+    pub worker: Option<&'a str>,
+    /// `delivered_len × 16` bytes: the ids back to back.
+    pub delivered_raw: &'a [u8],
+    pub metadata: &'a str,
+}
+
+impl<'a> CursorRef<'a> {
+    /// The delivered set's ids, in order.
+    pub fn delivered(&self) -> impl Iterator<Item = [u8; 16]> + 'a {
+        self.delivered_raw
+            .chunks_exact(16)
+            .map(|c| c.try_into().expect("16 bytes"))
+    }
+
+    pub fn to_row(self) -> CursorRow {
+        CursorRow {
+            committed: self.head.committed,
+            batch_end: self.head.batch_end,
+            worker: self.worker.map(str::to_string),
+            lease_expires_at_us: self.head.lease_expires_at_us,
+            lease_acquired_at_us: self.head.lease_acquired_at_us,
+            batch_retry_count: self.head.batch_retry_count,
+            attempt_offset: self.head.attempt_offset,
+            attempt_count: self.head.attempt_count,
+            total_consumed: self.head.total_consumed,
+            lease_conflated: self.head.lease_conflated,
+            delivered: self.delivered().collect(),
+            created_at_us: self.head.created_at_us,
+            metadata: self.metadata.to_string(),
+        }
+    }
+}
+
+/// [`cursor_decode`] borrowing from `b`, with no allocation.
+pub fn cursor_ref_decode(b: &[u8]) -> Result<CursorRef<'_>, CodecError> {
+    let mut r = Reader::new(b);
+    let version = r.u8("cursor row version")?;
+    if version != ROW_V1 && version != ROW_V2 {
+        return Err(CodecError::UnknownVersion {
+            kind: 0,
+            version: version as u16,
+        });
+    }
+    let committed = r.i64("committed")?;
+    let batch_end = r.opt_u64("batch_end")?;
+    let worker = match r.u8("worker")? {
+        0 => None,
+        1 => Some(str_ref(&mut r, "worker")?),
+        _ => return Err(CodecError::Field("worker")),
+    };
+    let lease_expires_at_us = r.opt_i64("lease_expires_at_us")?;
+    let lease_acquired_at_us = r.opt_i64("lease_acquired_at_us")?;
+    let batch_retry_count = r.u32("batch_retry_count")?;
+    let attempt_offset = r.opt_u64("attempt_offset")?;
+    let attempt_count = r.u32("attempt_count")?;
+    let total_consumed = r.u64("total_consumed")?;
+    let lease_conflated = r.bool("lease_conflated")?;
+    let n = r.u32("delivered")?;
+    let bytes = (n as usize)
+        .checked_mul(16)
+        .ok_or(CodecError::Field("delivered"))?;
+    let rest = r.rest();
+    if bytes > rest.len() {
+        return Err(CodecError::Field("delivered"));
+    }
+    let delivered_raw = &rest[..bytes];
+    r.skip(bytes, "delivered")?;
+    let created_at_us = r.i64("created_at_us")?;
+    let metadata = if version == ROW_V2 {
+        str_ref(&mut r, "metadata")?
+    } else {
+        ""
+    };
+    Ok(CursorRef {
+        head: CursorHead {
+            committed,
+            batch_end,
+            has_worker: worker.is_some(),
+            lease_expires_at_us,
+            lease_acquired_at_us,
+            batch_retry_count,
+            attempt_offset,
+            attempt_count,
+            total_consumed,
+            lease_conflated,
+            delivered_len: n,
+            created_at_us,
+        },
+        worker,
+        delivered_raw,
+        metadata,
+    })
+}
+
+/// [`cursor_decode`]'s scalars, with no allocation.
+pub fn cursor_head_decode(b: &[u8]) -> Result<CursorHead, CodecError> {
+    cursor_ref_decode(b).map(|c| c.head)
 }
 
 /// The claim predicate: a cursor with no worker, no lease expiry, or an
@@ -1086,6 +1397,88 @@ mod tests {
         assert_eq!(p.last_created_at_us, p.created_at_us - 1);
         assert_eq!(p.floor(), -1);
         assert_eq!(p.pending_from(-1), 0);
+    }
+
+    #[test]
+    fn a_head_rewrite_is_the_encoding_of_the_rewritten_row() {
+        let mut p = PartitionRow::new([3u8; 16], "tenant-uuid", "q", "p-1", 42);
+        let mut out = Vec::new();
+        for (oldest_before, oldest_after) in [
+            (None, None),
+            (None, Some(7)),
+            (Some(7), None),
+            (Some(7), Some(9)),
+        ] {
+            p.oldest_live_at_us = oldest_before;
+            let b = partition_encode(&p);
+            let changed = partition_rewrite_head(&b, &mut out, |h| {
+                h.last_offset += 10;
+                h.last_write_at_us = 99;
+                h.last_created_at_us = 98;
+                h.oldest_live_at_us = oldest_after;
+            })
+            .unwrap();
+            assert!(changed);
+            let mut want = p.clone();
+            want.last_offset += 10;
+            want.last_write_at_us = 99;
+            want.last_created_at_us = 98;
+            want.oldest_live_at_us = oldest_after;
+            assert_eq!(out, partition_encode(&want), "byte for byte");
+            // No change: nothing written.
+            assert!(!partition_rewrite_head(&b, &mut out, |_| {}).unwrap());
+            assert!(out.is_empty());
+        }
+        assert!(partition_rewrite_head(&[ROW_V1, 1, 2], &mut out, |_| {}).is_err());
+    }
+
+    #[test]
+    fn the_borrowed_views_decode_what_the_owned_rows_decode() {
+        let mut p = PartitionRow::new([3u8; 16], "tenant-uuid", "q\u{e9}", "", 42);
+        for oldest in [None, Some(-5)] {
+            p.oldest_live_at_us = oldest;
+            p.last_offset = 77;
+            p.log_start = 3;
+            let b = partition_encode(&p);
+            let h = partition_head_decode(&b).unwrap();
+            assert_eq!(h, p.head());
+            assert_eq!(h.pending_from(10), p.pending_from(10));
+            let r = partition_ref_decode(&b).unwrap();
+            assert_eq!(r.to_row(), p);
+            assert_eq!(
+                (r.tenant, r.queue, r.partition),
+                ("tenant-uuid", "q\u{e9}", "")
+            );
+            // A truncated row is refused by every decoder.
+            for cut in [0, 1, 17, 25, b.len() - 1] {
+                assert!(partition_decode(&b[..cut]).is_err());
+                assert!(partition_head_decode(&b[..cut]).is_err(), "{cut}");
+                assert!(partition_ref_decode(&b[..cut]).is_err(), "{cut}");
+            }
+        }
+        let mut c = samples::cursor_row();
+        for (worker, delivered, metadata) in [
+            (None, vec![], ""),
+            (Some("w-1"), vec![[1u8; 16], [2u8; 16]], ""),
+            (Some(""), vec![[7u8; 16]], "kafka-meta"),
+        ] {
+            c.worker = worker.map(str::to_string);
+            c.delivered = delivered;
+            c.metadata = metadata.to_string();
+            let b = cursor_encode(&c);
+            let r = cursor_ref_decode(&b).unwrap();
+            assert_eq!(r.to_row(), c);
+            assert_eq!(r.head, cursor_head_decode(&b).unwrap());
+            assert_eq!(r.head.delivered_len as usize, c.delivered.len());
+            assert_eq!(r.head.has_worker, c.worker.is_some());
+            for now in [0, i64::MAX] {
+                assert_eq!(r.head.lease_live(now), lease_live(&c, now));
+            }
+            for cut in [0, 1, 9, b.len() - 1] {
+                assert!(cursor_decode(&b[..cut]).is_err());
+                assert!(cursor_ref_decode(&b[..cut]).is_err(), "{cut}");
+            }
+        }
     }
 
     #[test]

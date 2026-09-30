@@ -67,6 +67,39 @@ pub const TIMER_DLQ_GROUP: &str = "__timer__";
 /// The default `partition`.
 pub const DEFAULT_PARTITION: &str = "Default";
 
+/// B27: whether the fire step at `now_us` may find a timer to fire — and so
+/// plan a push, which reads partition state. Conservative: `true` whenever it
+/// cannot rule one out (a read error, more due keys than it looks at). The
+/// committed due index is walked from its front, skipping the keys the overlay
+/// owns (a fire or a change still in flight), as the step's own gather does.
+pub(crate) fn fire_may_push<R: Reads + ?Sized>(r: &R, ov: &Overlay, now_us: i64) -> bool {
+    const LOOK: usize = 64;
+    let mut due = false;
+    let mut seen = 0usize;
+    let walked = r.scan_timers_due(LOOK, &mut |at, t, q, k| {
+        if at > now_us {
+            return false;
+        }
+        seen += 1;
+        let owned = ov
+            .timers
+            .contains_key(&(t.to_string(), q.to_string(), k.to_string()));
+        if !owned && !ov.tenant_purged(t) {
+            due = true;
+            return false;
+        }
+        true
+    });
+    if walked.is_err() || due || seen >= LOOK {
+        return true;
+    }
+    ov.timers.values().any(|slot| match &slot.v {
+        TimerOverlay::Row(row) => timer_due_us(row) <= now_us,
+        TimerOverlay::Deleted => false,
+        TimerOverlay::Backoff { visible_at_us, .. } => *visible_at_us <= now_us,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Command inputs and results
 // ---------------------------------------------------------------------------

@@ -298,6 +298,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                     // later wildcard pop will enumerate the queue for it, so the
                     // whole partition set must be made reachable NOW by the
                     // queue-wide bulk seed (004:243-296).
+                    self.place_unplaced(ov)?;
                     Some(self.register_pinned_conflating(
                         ov,
                         &mut effects,
@@ -463,6 +464,9 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         let group_row =
             self.register_on_first_contact(ov, &mut effects, &cmd.tenant, queue, &cmd.group, cmd)?;
         let first_contact = !existed;
+        // B13: the in-flight candidates come from the queue's own appended
+        // pids; the ones no planner placed yet are read once, here.
+        self.place_unplaced(ov)?;
 
         // In steady state the walk first gathers a short run of the ring — a
         // few times what the pop may claim — rather than every ready partition:
@@ -492,8 +496,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         // pop this cycle walks on from there (`ring_walked`).
         let mut last_tried: Option<Pid> = None;
         loop {
-            let (candidates, truncated) = self.wildcard_candidates(
-                ov,
+            let (ring, seen, truncated) = self.wildcard_candidates(
                 &cmd.tenant,
                 queue,
                 &cmd.group,
@@ -501,11 +504,20 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 group_row.as_ref(),
                 cap,
             )?;
-            n_cands += candidates.len();
-            for (pid, from_ring) in candidates {
+            // The ring's (or the enumeration's) candidates, then the queue's
+            // partitions appended in flight that the ring cannot know about
+            // yet, in pid order — taken one at a time, so a pop stops reading
+            // them once it has claimed what it may.
+            let view: &Overlay = ov;
+            let in_flight = view
+                .appended_candidates(&cmd.tenant, queue)
+                .filter(|pid| !seen.contains(pid))
+                .map(|pid| (pid, false));
+            for (pid, from_ring) in ring.into_iter().chain(in_flight) {
                 if remaining <= 0 || claimed >= max_parts {
                     break;
                 }
+                n_cands += 1;
                 // A partition the short run already tried: its claim found
                 // nothing then, and its effects (none, or a seal) are not
                 // folded yet — do not plan it twice.
@@ -516,7 +528,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                     last_tried = Some(pid);
                 }
                 if let Some(claim) = self.claim_one(
-                    ov,
+                    view,
                     &mut effects,
                     cfg,
                     group_row.as_ref(),
@@ -707,17 +719,13 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         if let Some(e) = bad {
             return Err(e);
         }
-        let mut overlay_pids: Vec<Pid> = ov.appended_pids();
-        overlay_pids.sort_unstable();
-        for pid in overlay_pids {
-            if seen.contains(&pid) {
-                continue;
-            }
-            if let Some(part) = self.partition(ov, pid)? {
-                if part.tenant == tenant && part.queue == queue {
-                    seen.insert(pid);
-                    out.push(pid);
-                }
+        // The queue's partitions appended in flight (B13: the caller placed
+        // every appended pid). A pid whose partition is not live after all is
+        // skipped by the caller's own `partition` read, as before.
+        debug_assert!(ov.appended_placed(), "place_unplaced runs first");
+        for pid in ov.appended_candidates(tenant, queue) {
+            if seen.insert(pid) {
+                out.push(pid);
             }
         }
         Ok(out)
@@ -730,22 +738,23 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     ///   the SQL's bulk seed, because a just-registered group has no `pending`
     ///   rows for the partitions that predate it. A `new` group has no backlog,
     ///   so it skips the enumeration and rides the ring alone.
-    /// * STEADY STATE: the committed ready ring (FIFO), then any partition this
-    ///   cycle's overlay appended to that the ring does not already hold.
+    /// * STEADY STATE: the committed ready ring (FIFO).
     ///
+    /// Either way the caller follows them with the partitions of the queue
+    /// appended in flight that these do not hold ([`Overlay::appended_candidates`]).
     /// The ring's part stops at `cap` pids; `true` alongside when it did (the
-    /// ring may hold more).
-    #[allow(clippy::too_many_arguments)]
+    /// ring may hold more). The pids offered are returned as a set too, for
+    /// the caller's in-flight part to skip.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn wildcard_candidates(
         &self,
-        ov: &Overlay,
         tenant: &str,
         queue: &str,
         group: &str,
         first_contact: bool,
         group_row: Option<&GroupRow>,
         cap: usize,
-    ) -> Result<(Vec<(Pid, bool)>, bool), Refusal> {
+    ) -> Result<(Vec<(Pid, bool)>, std::collections::HashSet<Pid>, bool), Refusal> {
         // Each candidate with whether it came from the ring walk (the mark the
         // ring's next pop this cycle walks from).
         let mut out: Vec<(Pid, bool)> = Vec::new();
@@ -788,24 +797,37 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 });
         }
         let truncated = out.len() >= cap;
+        Ok((out, seen, truncated))
+    }
 
-        // Overlay-appended partitions of this queue that the ring cannot yet
-        // know about (a push planned earlier this cycle): a bounded set (one
-        // cycle's appends).
-        let mut overlay_pids: Vec<Pid> = ov.appended_pids();
-        overlay_pids.sort_unstable();
-        for pid in overlay_pids {
-            if seen.contains(&pid) {
-                continue;
-            }
-            if let Some(part) = self.partition(ov, pid)? {
-                if part.tenant == tenant && part.queue == queue {
-                    seen.insert(pid);
-                    out.push((pid, false));
+    /// The in-flight part of a wildcard gather as it was before the append
+    /// index (B13): every appended pid, in pid order, whose partition view
+    /// names `(tenant, queue)`. The reference the index is checked against.
+    #[cfg(test)]
+    pub(crate) fn appended_candidates_by_scan(
+        &self,
+        ov: &Overlay,
+        tenant: &str,
+        queue: &str,
+    ) -> Result<Vec<Pid>, Refusal> {
+        let mut pids: Vec<Pid> = ov
+            .parts
+            .iter()
+            .filter(|(_, p)| !p.appends.is_empty())
+            .map(|(pid, _)| *pid)
+            .collect();
+        pids.sort_unstable();
+        let mut out = Vec::new();
+        for pid in pids {
+            if self.partition(ov, pid)?.is_some() {
+                if let Some((t, q)) = self.partition_queue(ov, pid)? {
+                    if t == tenant && q == queue {
+                        out.push(pid);
+                    }
                 }
             }
         }
-        Ok((out, truncated))
+        Ok(out)
     }
 
     /// Claim frames of ONE partition for one group — the claim core (004
@@ -815,7 +837,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     #[allow(clippy::too_many_arguments)]
     fn claim_one(
         &self,
-        ov: &mut Overlay,
+        ov: &Overlay,
         effects: &mut Vec<Effect>,
         cfg: &QueueConfig,
         group_row: Option<&GroupRow>,
@@ -1280,15 +1302,6 @@ fn claims_of(outcome: Outcome) -> Vec<PopClaim> {
 }
 
 impl Overlay {
-    /// The pids the overlay has appended to this cycle/pipeline.
-    fn appended_pids(&self) -> Vec<Pid> {
-        self.parts
-            .iter()
-            .filter(|(_, p)| !p.appends.is_empty())
-            .map(|(pid, _)| *pid)
-            .collect()
-    }
-
     /// The newest overlay append of a partition, as a [`Seg`].
     fn newest_append(&self, pid: Pid) -> Option<Seg> {
         self.parts.get(&pid).and_then(|p| {

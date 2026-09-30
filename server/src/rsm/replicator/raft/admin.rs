@@ -88,6 +88,12 @@ pub(crate) struct AdminCtx {
     /// recently. Three election timeouts by default: a heartbeat goes out every
     /// 100 ms, so a member silent this long is not merely slow.
     pub(crate) live_within: Duration,
+    /// The runtime the facade serves its clients on, set with the facade's
+    /// remote handler ([`super::RaftReplicator::set_remote_handler`]). Shared
+    /// with the Raft RPC server, which hands the commands followers forward
+    /// over to it ([`super::forward`]) instead of working them on its own
+    /// runtime's few threads.
+    pub(crate) clients: std::sync::OnceLock<tokio::runtime::Handle>,
 }
 
 impl AdminCtx {
@@ -97,6 +103,7 @@ impl AdminCtx {
             quiesce: std::sync::OnceLock::new(),
             promote_max_lag,
             live_within,
+            clients: std::sync::OnceLock::new(),
         }
     }
 }

@@ -7,6 +7,7 @@
 //!
 //! | route | body | answer |
 //! |---|---|---|
+//! | `POST /raft/v1/stream` | append frames, for the connection's life | answer frames ([`super::stream`]: pipelined replication) |
 //! | `POST /raft/v1/append` | [`super::wire`] binary | `Result<AppendEntriesResponse, RaftError>` JSON |
 //! | `POST /raft/v1/vote` | `VoteRequest` JSON | `Result<VoteResponse, RaftError>` JSON |
 //! | `POST /raft/v1/prevote` | `VoteRequest` JSON | `Result<VoteResponse, RaftError>` JSON |
@@ -17,7 +18,9 @@
 //! | `POST /raft/v1/state` | empty | `NodeState` JSON: whether this node holds cluster state (a fresh node asks before it initializes one) |
 //!
 //! Every `append` from the leader also carries its members view in the
-//! `x-queen-raft-members` header ([`super::members`]).
+//! `x-queen-raft-members` header ([`super::members`]), and every stream frame
+//! carries it too. A follower's answers to both say which wire features it
+//! reads ([`super::wire::WIRE_HEADER`]: compressed entries).
 //!
 //! A transport failure is `Unreachable` when the peer could not be connected
 //! (openraft backs off) and a network error otherwise (openraft retries).
@@ -35,20 +38,22 @@ use std::time::Duration;
 use axum::body::{Body, Bytes};
 use axum::http::{header, Method, Request, StatusCode};
 use http_body_util::BodyExt;
+use openraft::base::{BoxFuture, BoxStream};
 use openraft::errors::{
     NetworkError, RPCError, RaftError, ReplicationClosed, StreamingError, Unreachable,
 };
 use openraft::network::v2::RaftNetworkV2;
-use openraft::network::{RPCOption, RaftNetworkFactory};
+use openraft::network::{stream_append_sequential, RPCOption, RaftNetworkFactory};
 use openraft::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, TransferLeaderRequest,
-    TransferLeaderResponse, VoteRequest, VoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, StreamAppendResult,
+    TransferLeaderRequest, TransferLeaderResponse, VoteRequest, VoteResponse,
 };
 use openraft::OptionalSend;
 use serde::de::DeserializeOwned;
 
 use super::cluster::TOKEN_HEADER;
 use super::state_machine::{Checkpoint, Snapshot};
+use super::stream::{Session, SessionCtx, StreamPeer};
 use super::types::{Node, NodeId, TypeConfig, Vote};
 use super::wire;
 
@@ -208,6 +213,8 @@ impl RaftNetworkFactory<TypeConfig> for HttpNetwork {
             token: self.token.clone(),
             snap: self.snap.clone(),
             members: self.members.clone(),
+            reads_zstd: false,
+            stream: StreamPeer::default(),
         }
     }
 }
@@ -221,6 +228,11 @@ pub(crate) struct HttpPeer {
     token: Option<Arc<str>>,
     snap: Arc<super::snapshot::SendCtx>,
     members: Arc<super::members::MembersState>,
+    /// The peer said it reads compressed entries ([`wire::WIRE_HEADER`]): its
+    /// appends carry them from then on (`QUEEN_RAFT_WIRE_ZSTD`).
+    reads_zstd: bool,
+    /// The pipelined append stream to this peer ([`super::stream`]).
+    stream: StreamPeer,
 }
 
 /// POST `body` to `url` and return the answer's bytes; anything but a 2xx is a
@@ -247,6 +259,22 @@ async fn post_with(
     ttl: Duration,
     members: Option<axum::http::HeaderValue>,
 ) -> Result<Bytes, Fail> {
+    post_answer(client, url, token, content_type, body, ttl, members)
+        .await
+        .map(|(b, _)| b)
+}
+
+/// [`post_with`], also answering whether the peer said it reads compressed
+/// entries ([`wire::WIRE_HEADER`]).
+async fn post_answer(
+    client: &HttpClient,
+    url: &str,
+    token: Option<&str>,
+    content_type: &str,
+    body: Body,
+    ttl: Duration,
+    members: Option<axum::http::HeaderValue>,
+) -> Result<(Bytes, bool), Fail> {
     let mut req = Request::builder()
         .method(Method::POST)
         .uri(url)
@@ -265,6 +293,7 @@ async fn post_with(
         Ok(Ok(r)) => r,
     };
     let status = resp.status();
+    let reads_zstd = wire::reads_zstd(resp.headers().get(wire::WIRE_HEADER).map(|v| v.as_bytes()));
     let bytes = match tokio::time::timeout(ttl, resp.into_body().collect()).await {
         Err(_) => return Err(Fail::Network(format!("{url}: the answer stalled"))),
         Ok(Err(e)) => return Err(Fail::Network(format!("{url}: {e}"))),
@@ -279,7 +308,7 @@ async fn post_with(
         let text = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]).into_owned();
         return Err(Fail::Network(format!("{url}: {status}: {text}")));
     }
-    Ok(bytes)
+    Ok((bytes, reads_zstd))
 }
 
 fn decode<T: DeserializeOwned>(bytes: &[u8], what: &str) -> Result<T, Fail> {
@@ -342,7 +371,7 @@ impl HttpPeer {
 /// missed its deadline and was resent bigger: at 1M msg/s over three nodes
 /// both followers stopped catching up ~500 s in and commits went from ~30 ms
 /// to ~1.5 s (2026-09-29).
-fn append_ttl(soft: Duration, entries: usize, body_len: usize) -> Duration {
+pub(crate) fn append_ttl(soft: Duration, entries: usize, body_len: usize) -> Duration {
     if entries == 0 {
         return soft;
     }
@@ -360,12 +389,65 @@ const APPEND_MIN_BYTES_PER_US: usize = 50;
 impl RaftNetworkV2<TypeConfig> for HttpPeer {
     type SnapshotData = Checkpoint;
 
+    /// Pipelined: every request of openraft's stream goes out on this peer's
+    /// one append stream as soon as it is read, up to the in-flight budget,
+    /// and the answers come back in order ([`super::stream`]). The unary route
+    /// (one append in flight) with `QUEEN_RAFT_STREAM_APPEND=0`, or for a
+    /// follower that does not serve the stream.
+    fn stream_append<'s, S>(
+        &'s mut self,
+        input: S,
+        option: RPCOption,
+    ) -> BoxFuture<
+        's,
+        Result<
+            BoxStream<'s, Result<StreamAppendResult<TypeConfig>, RPCError<TypeConfig>>>,
+            RPCError<TypeConfig>,
+        >,
+    >
+    where
+        S: futures_util::Stream<Item = AppendEntriesRequest<TypeConfig>>
+            + OptionalSend
+            + Unpin
+            + 'static,
+    {
+        if self.stream.unary() {
+            return stream_append_sequential(self, input, option);
+        }
+        Box::pin(async move {
+            let open = self
+                .stream
+                .conn(&self.client, &self.base, &self.token)
+                .await?
+                .is_some();
+            if !open {
+                return stream_append_sequential(self, input, option).await;
+            }
+            let ctx = SessionCtx {
+                id: self.stream.session(),
+                target: self.target,
+                soft: option.soft_ttl(),
+                members: self.members.clone(),
+            };
+            let conn = self.stream.open_conn().expect("the stream is open");
+            let s: BoxStream<'s, _> = Box::pin(Session::new(conn, ctx, input).into_stream());
+            Ok(s)
+        })
+    }
+
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<TypeConfig>,
         option: RPCOption,
     ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
-        let (body, n) = wire::encode_append(&rpc).map_err(|e| {
+        let zstd = self.reads_zstd && wire::zstd_from_env() && !rpc.entries.is_empty();
+        if zstd {
+            wire::prepare_zstd(&rpc).await.map_err(|e| {
+                tracing::error!(target: "rsm", target_node = self.target, error = %e, "raft append does not compress");
+                RPCError::Network(NetworkError::new(&e))
+            })?;
+        }
+        let (body, n) = wire::encode_append(&rpc, zstd).map_err(|e| {
             tracing::error!(target: "rsm", target_node = self.target, error = %e, "raft append does not encode");
             RPCError::Network(NetworkError::new(&e))
         })?;
@@ -376,15 +458,21 @@ impl RaftNetworkV2<TypeConfig> for HttpPeer {
         // view: the liveness evidence and the view of it travel together
         // (super::members).
         let t_rpc = std::time::Instant::now();
-        let res = self
-            .call::<AppendEntriesResponse<TypeConfig>>(
-                "/raft/v1/append",
-                "application/octet-stream",
-                body,
-                ttl,
-                self.members.header(),
-            )
-            .await?;
+        let url = format!("{}/raft/v1/append", self.base);
+        let (bytes, reads_zstd) = post_answer(
+            &self.client,
+            &url,
+            self.token.as_deref(),
+            "application/octet-stream",
+            Body::from(body),
+            ttl,
+            self.members.header(),
+        )
+        .await
+        .map_err(Fail::rpc)?;
+        self.reads_zstd = reads_zstd;
+        let res: Result<AppendEntriesResponse<TypeConfig>, RaftError<TypeConfig>> =
+            decode(&bytes, "/raft/v1/append").map_err(Fail::rpc)?;
         if n > 0 {
             super::state_machine::stage_add(6, t_rpc.elapsed());
         }
@@ -595,7 +683,13 @@ mod server {
             crate::rsm::replicator::raft::state_machine::stage_add(4, t1.duration_since(t0));
             crate::rsm::replicator::raft::state_machine::stage_add(5, t1.elapsed());
         }
-        json_answer(&res)
+        let mut answer = json_answer(&res);
+        // What this node reads: the leader may send it compressed entries.
+        answer.headers_mut().insert(
+            wire::WIRE_HEADER,
+            axum::http::HeaderValue::from_static(wire::WIRE_FEATURES),
+        );
+        answer
     }
 
     async fn vote<S: Store + 'static>(State(st): State<Arc<RpcState<S>>>, body: Bytes) -> Response {
@@ -773,6 +867,36 @@ mod server {
         json_answer(&super::super::NodeState::of(&m))
     }
 
+    /// The leader's append stream ([`super::super::stream`]): the body is
+    /// read as it arrives and the answers are written back into the
+    /// response's, for as long as the connection lives.
+    async fn stream<S: Store + 'static>(
+        State(st): State<Arc<RpcState<S>>>,
+        body: Body,
+    ) -> Response {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(1024);
+        tokio::spawn(crate::obs::panic_policy::non_core(
+            super::super::stream::serve(st.raft.clone(), st.members.clone(), body, tx),
+        ));
+        let out = futures_util::stream::unfold(rx, |mut rx| async move {
+            rx.recv()
+                .await
+                .map(|b| (Ok::<Bytes, std::convert::Infallible>(b), rx))
+        });
+        let mut resp = Response::new(Body::from_stream(out));
+        let h = resp.headers_mut();
+        h.insert(
+            header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/octet-stream"),
+        );
+        // What this node reads: the leader may send it compressed entries.
+        h.insert(
+            wire::WIRE_HEADER,
+            axum::http::HeaderValue::from_static(wire::WIRE_FEATURES),
+        );
+        resp
+    }
+
     async fn snapshot<S: Store + 'static>(
         State(st): State<Arc<RpcState<S>>>,
         body: Body,
@@ -837,14 +961,30 @@ mod server {
                     .route("/raft/v1/state", post(node_state::<S>))
                     .layer(DefaultBodyLimit::max(CONTROL_BODY_CAP)),
             )
-            // A snapshot is streamed to disk (the `Body` extractor has no cap).
-            .merge(axum::Router::new().route("/raft/v1/snapshot", post(snapshot::<S>)))
+            // A snapshot is streamed to disk, and the append stream is read
+            // frame by frame (the `Body` extractor has no cap; each frame is
+            // capped by `stream::max_frame`).
+            .merge(
+                axum::Router::new()
+                    .route("/raft/v1/snapshot", post(snapshot::<S>))
+                    .route(super::super::stream::STREAM_PATH, post(stream::<S>)),
+            )
+            // A follower's stream of commands, open as long as it lives: no
+            // cap either (each frame is capped, super::forward).
+            .merge(axum::Router::new().route(
+                super::super::forward::ROUTE,
+                post(super::super::forward::intake::<S>),
+            ))
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 guard::<S>,
             ))
             .with_state(state);
+        // No Nagle: the append stream's answers are small frames written one
+        // at a time, and a unary answer is one small body; either would wait
+        // for the peer's delayed ACK.
         if let Err(e) = axum::serve(listener, router)
+            .tcp_nodelay(true)
             .with_graceful_shutdown(shutdown)
             .await
         {

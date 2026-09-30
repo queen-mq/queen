@@ -54,7 +54,9 @@ use crate::frames::{
 use crate::notify::Notifier;
 use crate::obs::panic_policy::RwLockExt;
 use crate::rsm::apply::SystemClock;
-use crate::rsm::batcher::{Batcher, BatcherConfig, Command, CommandTx, Reply, Submission};
+use crate::rsm::batcher::{
+    Batcher, BatcherConfig, Command, CommandTx, MultiPushCommand, Reply, Submission,
+};
 use crate::rsm::effect::{Pid, QueueConfig};
 use crate::rsm::entry::{Outcome, PopClaim, PushVerdict, RequestId};
 use crate::rsm::planner::timers::{
@@ -122,6 +124,16 @@ impl Waker for NotifierWaker {
         self.notifier.wake_local_hint(&qkey, "");
     }
 
+    /// An append made a partition claimable for `group`: on the leader the
+    /// plan-time wake (`batcher::PlanWaker`) already woke a pop for it and
+    /// left a token, which this spends; otherwise (a follower, a timer fire, a
+    /// token gone stale) it is the wake it always was.
+    fn wake_append(&self, tenant: &str, queue: &str, group: &str) {
+        self.gates.wake_applied_append(tenant, queue, group);
+        let qkey = crate::handlers::tenant_queue_key(tenant, queue);
+        self.notifier.wake_local_hint(&qkey, "");
+    }
+
     fn wants_append_wakes(&self) -> bool {
         self.gates
             .pinned_total
@@ -157,7 +169,22 @@ struct WaitGates {
         std::collections::HashMap<(String, String), std::collections::HashMap<String, usize>>,
     >,
     pinned_total: std::sync::atomic::AtomicUsize,
+    /// Wakes already given at PLAN time (`batcher::PlanWaker`), per (tenant,
+    /// queue, group), and when: the apply-time wake of the same append spends
+    /// one instead of waking a second pop (which would find the partition
+    /// claimed and re-park, one wasted pipeline trip per append). Tokens
+    /// older than [`PLAN_TOKEN_TTL`] are ignored: an entry planned but never
+    /// applied here (a lost leadership) must not swallow later wakes.
+    plan_tokens: std::sync::Mutex<PlanTokens>,
 }
+
+/// (tenant, queue, group) -> (plan-time wakes not yet spent, when last given).
+type PlanTokens = std::collections::HashMap<(String, String, String), (usize, std::time::Instant)>;
+
+/// How long a plan-time wake token stands in for its apply-time wake: well
+/// past the plan-to-apply time of a healthy entry (tens of ms), short enough
+/// that a lost entry's tokens cannot hide a later append's wake for long.
+const PLAN_TOKEN_TTL: Duration = Duration::from_secs(2);
 
 /// A pinned pop's registration while it is parked (see [`WaitGates::pinned`]).
 struct PinnedPark<'a> {
@@ -238,6 +265,68 @@ impl WaitGates {
         for g in groups {
             self.wake_one(tenant, queue, Some(&g));
         }
+    }
+
+    /// `appends` partitions of (tenant, queue) got frames in an entry this
+    /// node just PLANNED as leader: wake that many parked pops of every group
+    /// of the queue now (the claim lands in a later entry, after the append),
+    /// and leave a token per wake for the apply-time wake of the same append.
+    fn wake_planned(&self, tenant: &str, queue: &str, appends: usize) {
+        let gates: Vec<(String, Arc<tokio::sync::Notify>)> = {
+            let map = self.map.read_unpoisoned();
+            map.iter()
+                .filter(|((t, q, _), _)| t == tenant && q == queue)
+                .map(|((_, _, g), gate)| (g.clone(), gate.clone()))
+                .collect()
+        };
+        if gates.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        {
+            let mut tokens = self
+                .plan_tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for (g, _) in &gates {
+                let slot = tokens
+                    .entry((tenant.to_string(), queue.to_string(), g.clone()))
+                    .or_insert((0, now));
+                if now.duration_since(slot.1) > PLAN_TOKEN_TTL {
+                    slot.0 = 0;
+                }
+                slot.0 += appends;
+                slot.1 = now;
+            }
+        }
+        for (_, gate) in gates {
+            for _ in 0..appends {
+                gate.notify_one();
+            }
+        }
+    }
+
+    /// The apply-time wake of an append: spent against a plan-time token when
+    /// one stands for it, else a wake as always.
+    fn wake_applied_append(&self, tenant: &str, queue: &str, group: &str) {
+        {
+            let mut tokens = self
+                .plan_tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let key = (tenant.to_string(), queue.to_string(), group.to_string());
+            if let Some(slot) = tokens.get_mut(&key) {
+                if slot.0 > 0 && slot.1.elapsed() <= PLAN_TOKEN_TTL {
+                    slot.0 -= 1;
+                    if slot.0 == 0 {
+                        tokens.remove(&key);
+                    }
+                    return;
+                }
+                tokens.remove(&key);
+            }
+        }
+        self.wake_one(tenant, queue, Some(group));
     }
 
     fn wake_one(&self, tenant: &str, queue: &str, group: Option<&str>) {
@@ -373,25 +462,9 @@ fn env_flag(name: &str, default_on: bool) -> bool {
         .unwrap_or(default_on)
 }
 
-#[cfg(unix)]
 fn filesystem_used_pct(path: &std::path::Path) -> Option<f64> {
-    use std::os::unix::ffi::OsStrExt;
-    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    // SAFETY: `path` is NUL-terminated and `statvfs` initializes `stat` on 0.
-    if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
-        return None;
-    }
-    // SAFETY: the successful call above initialized every field.
-    let stat = unsafe { stat.assume_init() };
-    let total = stat.f_blocks as f64 * stat.f_frsize as f64;
-    let available = stat.f_bavail as f64 * stat.f_frsize as f64;
-    (total > 0.0).then_some((total - available) * 100.0 / total)
-}
-
-#[cfg(not(unix))]
-fn filesystem_used_pct(_path: &std::path::Path) -> Option<f64> {
-    None
+    let (total, available) = crate::syscollect::filesystem_usage(path)?;
+    (total > 0).then(|| total.saturating_sub(available) as f64 * 100.0 / total as f64)
 }
 
 impl RaftFacade {
@@ -448,6 +521,7 @@ impl RaftFacade {
             self.storage_full.store(full, Ordering::Relaxed);
             tracing::warn!(target:"rsm", full, map_pct, disk_pct, "raft storage pressure changed");
         }
+        crate::rsm::dashboard::set_storage_full(full);
         full
     }
 
@@ -522,6 +596,13 @@ impl RaftFacade {
         };
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("create raft data dir {}: {e}", dir.display()))?;
+        // What /api/v1/raft/{status,members} report about this node's disk.
+        crate::rsm::dashboard::set_disk_gate(crate::rsm::dashboard::DiskGate {
+            dir: dir.clone(),
+            high_pct: ctx.disk_high_pct,
+            low_pct: ctx.disk_low_pct,
+            enabled: storage_pressure_enabled,
+        });
 
         // `QUEEN_RAFT_REPLICATOR`: the local replicator (default) or openraft;
         // `QUEEN_RAFT_PEERS`: a cluster (openraft only).
@@ -620,7 +701,10 @@ impl RaftFacade {
                         if !repl.role().is_leader() {
                             return None;
                         }
-                        match store.read(|r| phase2::tenant_backlogs(r, now_us)) {
+                        // Budgeted: past the exact budget the figures of the
+                        // paced background walk (`phase2::stats`), never a
+                        // walk of every partition on the collector thread.
+                        match phase2::tenant_backlogs_of(&store, now_us) {
                             Ok(v) => Some(v),
                             Err(e) => {
                                 tracing::warn!(target: "metrics", error = %e, "backlog sample unreadable");
@@ -646,10 +730,16 @@ impl RaftFacade {
         // A membership change pauses the batcher around openraft's own config
         // entries (batcher::QuiesceReq).
         let (quiesce_tx, quiesce_rx) = tokio::sync::mpsc::unbounded_channel();
-        let batcher = Batcher::new(store.clone(), repl.clone(), batcher_cfg)
+        let mut batcher = Batcher::new(store.clone(), repl.clone(), batcher_cfg)
             .with_reader(reader.clone())
             .with_qlog_reader(qlog_reader.clone())
             .with_quiesce(quiesce_rx);
+        if crate::rsm::batcher::wake_at_plan() {
+            let g = gates.clone();
+            batcher = batcher.with_plan_waker(Arc::new(move |tenant, queue, appends| {
+                g.wake_planned(tenant, queue, appends)
+            }));
+        }
         let (cmd_tx, batcher_join) = batcher.spawn();
         if let NodeReplicator::Raft(r) = &*repl {
             r.set_quiesce_hook(crate::rsm::batcher::quiesce_hook(quiesce_tx));
@@ -871,13 +961,19 @@ impl RaftFacade {
     }
 
     /// A cluster node's submit: planned here while this node leads, otherwise
-    /// sent to the leader as a prepared command. A `Done` reply is returned only
+    /// sent to the leader as a prepared command. A `Done` reply is returned
     /// once THIS node has applied its entry, so the caller renders it from
-    /// local state exactly as on the leader. Leader changes, a lost answer and
-    /// "not leader" replies are retried (same request id) until the deadline.
+    /// local state exactly as on the leader — or, for a push or an ack whose
+    /// answer renders from the outcome alone ([`RaftFacade::answers_at_commit`]),
+    /// once this node knows the entry committed with the reply's term, which
+    /// is one append after the leader commits instead of wherever this node's
+    /// apply has got to. Leader changes, a lost answer, "not leader" replies
+    /// and a batcher's `unavailable` refusals ([`RaftFacade::retries_refusal`])
+    /// are retried (same request id) until the deadline.
     async fn submit_offloaded(&self, ctx: &ReqCtx, command: Command) -> Result<Reply, RsmError> {
-        use crate::rsm::replicator::raft::RemoteError;
+        use crate::rsm::replicator::raft::{Landed, RemoteError};
         use crate::rsm::replicator::Role;
+        let answers_at_commit = Self::answers_at_commit;
         let mut backoff = Duration::from_millis(5);
         let mut body: Option<bytes::Bytes> = None;
         loop {
@@ -895,6 +991,7 @@ impl RaftFacade {
                 }
                 match tokio::time::timeout(ctx.deadline.remaining(), rx).await {
                     Ok(Ok(Reply::Retry { .. })) => {}
+                    Ok(Ok(Reply::Refused(r))) if Self::retries_refusal(&r) => {}
                     Ok(Ok(reply)) => return Ok(reply),
                     Ok(Err(_dropped)) => {
                         return Err(RsmError::Internal("planner dropped the reply".into()))
@@ -921,9 +1018,28 @@ impl RaftFacade {
                         b
                     }
                 };
-                match self.repl.forward_command(b, ctx.deadline.remaining()).await {
+                // Drain work (pops, acks, renews) never waits for the
+                // forward window behind pushes: its bytes are few, and a
+                // consumer's ack stuck behind a queue of pushes stalls its
+                // consumption (2026-09-30: follower acks 0.55 s vs 0.1 s).
+                let drain = !command.grows_storage();
+                match self
+                    .repl
+                    .forward_command(b, ctx.deadline.remaining(), drain)
+                    .await
+                {
                     Ok(answer) => match super::remote::decode_reply(&answer)? {
                         (Reply::Retry { .. }, _) => {}
+                        (Reply::Refused(r), _) if Self::retries_refusal(&r) => {}
+                        (reply @ Reply::Done { .. }, _) if answers_at_commit(&command, &reply) => {
+                            match self.landed_here(&reply, ctx).await {
+                                Landed::Committed => return Ok(reply),
+                                // Unknown: ask whoever leads now, under the
+                                // same request id (the W3c case below).
+                                Landed::Superseded => {}
+                                Landed::NotYet => return Err(RsmError::Timeout),
+                            }
+                        }
                         (reply @ Reply::Done { .. }, upto) => {
                             // Read-your-writes here: the entry (or, for an
                             // answer from committed state, everything the leader
@@ -968,6 +1084,81 @@ impl RaftFacade {
             let nap = backoff.min(ctx.deadline.remaining());
             tokio::time::sleep(nap).await;
             backoff = (backoff * 2).min(Duration::from_millis(200));
+        }
+    }
+
+    /// Whether a refusal is taken to the leader again (same request id) until
+    /// the deadline instead of answered: the whole-cycle refusal of a batcher
+    /// whose pipeline changed while it planned (a leadership or epoch change,
+    /// `batcher`), or whose store read failed — both `unavailable`, retryable,
+    /// and nothing of the command was proposed. The caller would answer them
+    /// 503 and the SDK retry; across a membership change or a leader transfer
+    /// that was a failed request the retry here absorbs.
+    pub(crate) fn retries_refusal(r: &crate::rsm::planner::Refusal) -> bool {
+        r.retryable && r.code == "unavailable"
+    }
+
+    /// Whether a follower may answer `reply` to `command` as soon as it knows
+    /// the entry committed, without waiting for its own apply
+    /// (`QUEEN_RAFT_FOLLOWER_ANSWER_AT_DONE`, default on): the caller renders
+    /// a push's or an ack's answer from the outcome alone. Not a push with a
+    /// duplicate (its answer reads the original message id from this node's
+    /// queue log), and never a pop (its answer reads the claimed payloads from
+    /// this node's own state).
+    pub(crate) fn answers_at_commit(command: &Command, reply: &Reply) -> bool {
+        static ON: std::sync::LazyLock<bool> =
+            std::sync::LazyLock::new(|| env_flag("QUEEN_RAFT_FOLLOWER_ANSWER_AT_DONE", true));
+        *ON && match (command, reply) {
+            (
+                Command::Push(_) | Command::MultiPush(_),
+                Reply::Done {
+                    outcome: Outcome::Push(p),
+                    ..
+                },
+            ) => !p
+                .items
+                .iter()
+                .any(|v| matches!(v, PushVerdict::Duplicate { .. })),
+            (
+                Command::Ack(_),
+                Reply::Done {
+                    outcome: Outcome::Ack(_),
+                    ..
+                },
+            ) => true,
+            _ => false,
+        }
+    }
+
+    /// Where the entry a `Done` reply names stands here. A reply answered
+    /// from the leader's committed state alone (`at` = `None`, a request-id
+    /// hit) names no entry: what it reports is committed already.
+    async fn landed_here(
+        &self,
+        reply: &Reply,
+        ctx: &ReqCtx,
+    ) -> crate::rsm::replicator::raft::Landed {
+        use crate::rsm::replicator::raft::Landed;
+        let Reply::Done { at: Some(at), .. } = reply else {
+            return Landed::Committed;
+        };
+        match &*self.repl {
+            NodeReplicator::Raft(r) => {
+                r.wait_committed(at.index, at.term, ctx.deadline.instant())
+                    .await
+            }
+            // Never offloads (a single node); its apply is the commit.
+            NodeReplicator::Local(_) => {
+                if self
+                    .repl
+                    .wait_applied(at.index, ctx.deadline.instant())
+                    .await
+                {
+                    Landed::Committed
+                } else {
+                    Landed::NotYet
+                }
+            }
         }
     }
 
@@ -1039,7 +1230,9 @@ impl RaftFacade {
             let budget = Duration::from_secs(5);
             for cmd in nacks {
                 if let Ok(b) = super::remote::encode_request(&cmd, budget) {
-                    let _ = repl.forward_command(bytes::Bytes::from(b), budget).await;
+                    let _ = repl
+                        .forward_command(bytes::Bytes::from(b), budget, true)
+                        .await;
                 }
             }
         });
@@ -1279,6 +1472,57 @@ fn reply_error(reply: Reply) -> RsmError {
     }
 }
 
+/// `QUEEN_RAFT_MULTIPUSH` (default on): a push naming several partitions is
+/// submitted as ONE [`Command::MultiPush`] instead of one command per
+/// partition. `0` restores one command per (queue, partition) group.
+static MULTIPUSH: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    !matches!(
+        std::env::var("QUEEN_RAFT_MULTIPUSH")
+            .as_deref()
+            .map(str::trim),
+        Ok("0") | Ok("false") | Ok("off") | Ok("no")
+    )
+});
+
+/// The ordinal a multi-push's own request id is derived with: no group of a
+/// request reaches it (a request carries far fewer than 2^32 groups), so the
+/// id never collides with a per-group one of the same request.
+const MULTIPUSH_ORDINAL: u32 = u32::MAX;
+
+/// A multi-push's reply as one reply per group, in group order: a push outcome
+/// is cut into each group's verdicts; any other reply (a retry, a refusal) is
+/// every group's.
+fn split_multi_reply(reply: Reply, sizes: &[usize]) -> Result<Vec<Reply>, RsmError> {
+    match reply {
+        Reply::Done {
+            outcome: Outcome::Push(p),
+            at,
+        } => {
+            let total: usize = sizes.iter().sum();
+            if p.items.len() != total {
+                return Err(RsmError::Internal(format!(
+                    "multi-push answered {} verdicts for {total} items",
+                    p.items.len()
+                )));
+            }
+            let mut items = p.items.into_iter();
+            Ok(sizes
+                .iter()
+                .map(|&n| Reply::Done {
+                    outcome: Outcome::Push(crate::rsm::entry::PushOutcome {
+                        items: items.by_ref().take(n).collect(),
+                    }),
+                    at,
+                })
+                .collect())
+        }
+        Reply::Done { outcome, .. } => Err(RsmError::Internal(format!(
+            "multi-push got a non-push outcome: {outcome:?}"
+        ))),
+        other => Ok(sizes.iter().map(|_| other.clone()).collect()),
+    }
+}
+
 /// Derive a distinct request id per split command from the receiver's minted
 /// one (D6): the base is unique per HTTP request (uuidv7), and XOR-ing the
 /// ordinal keeps it unique per group AND reproducible on a forwarding retry of
@@ -1320,6 +1564,7 @@ fn store_opts_from_env() -> StoreOpts {
         o.map_bytes = Some(v);
     }
     o.verify_at_open = env_flag("QUEEN_STORE_VERIFY", false);
+    o.verify_reads = env_flag("QUEEN_STORE_VERIFY_READS", false);
     o.migrate_legacy = env_flag("QUEEN_STORE_MIGRATE", true);
     // The store has already refused every later call; ending the process makes
     // leadership move and stops whatever swallowed the error. The restart's load
@@ -2289,7 +2534,57 @@ impl RaftFacade {
                 create_cfg: default_queue_config(&g.queue),
             })
         };
-        if self.offload {
+        // One command for the whole request when it names several partitions
+        // (`QUEEN_RAFT_MULTIPUSH`, default on): one channel slot, one forward,
+        // one request id and one outcome row instead of one per partition —
+        // the per-command costs that the one-key-per-message workload pays per
+        // message. Each group's verdicts come back in the outcome in group
+        // order and are handed to the collector below as that group's reply.
+        let multi = *MULTIPUSH && groups.len() > 1;
+        if multi {
+            let pushes: Vec<PushCommand> = groups
+                .iter()
+                .enumerate()
+                .map(|(ordinal, g)| match push_cmd(ordinal, g) {
+                    Command::Push(p) => p,
+                    _ => unreachable!("push_cmd builds a push"),
+                })
+                .collect();
+            let cmd = Command::MultiPush(MultiPushCommand {
+                request_id: derived_request_id(ctx.request_id, MULTIPUSH_ORDINAL),
+                pushes,
+            });
+            let reply = if self.offload {
+                self.submit_offloaded(&ctx, cmd).await?
+            } else {
+                let (sub, rx) = Submission::new(cmd);
+                let _t_send = crate::rsm::timing::stamp();
+                let sent =
+                    tokio::time::timeout(ctx.deadline.remaining(), self.cmd_tx.send(sub)).await;
+                if let Some(t) = _t_send {
+                    _submit_ns = _submit_ns.saturating_add(t.elapsed().as_nanos() as u64);
+                }
+                match sent {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => return Err(RsmError::Internal("planner channel closed".into())),
+                    Err(_) => return Err(RsmError::Timeout),
+                }
+                match tokio::time::timeout(ctx.deadline.remaining(), rx).await {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(_)) => {
+                        return Err(RsmError::Internal("planner dropped the reply".into()))
+                    }
+                    Err(_) => return Err(RsmError::Timeout),
+                }
+            };
+            let sizes: Vec<usize> = groups.iter().map(|g| g.members.len()).collect();
+            for (g, reply) in groups.iter().zip(split_multi_reply(reply, &sizes)?) {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let _ = tx.send(reply);
+                rxs.push((g.members.clone(), rx));
+            }
+        }
+        if self.offload && !multi {
             // A cluster node: every group goes through the offload path (to the
             // leader when another node leads), all in flight together; each
             // answer arrives once this node has applied it.
@@ -2306,7 +2601,7 @@ impl RaftFacade {
             }
         }
         for (ordinal, g) in groups.iter().enumerate() {
-            if self.offload {
+            if self.offload || multi {
                 break;
             }
             let cmd = push_cmd(ordinal, g);
@@ -2834,7 +3129,11 @@ impl RaftFacade {
                     .wildcard_would_be_empty(&ctx.tenant, &queue, &group)
                     .await
                 && (wait
-                    || (self.linearizable(ctx).await.is_ok()
+                    // Behind the leader's read index a moment later (a
+                    // lagging follower): the pop goes to the leader now
+                    // instead of waiting out the lag first and then again for
+                    // its claim to apply (`caught_up`).
+                    || (matches!(self.caught_up(ctx).await, Ok(true))
                         && self
                             .wildcard_would_be_empty(&ctx.tenant, &queue, &group)
                             .await));

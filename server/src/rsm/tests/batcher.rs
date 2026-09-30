@@ -455,7 +455,7 @@ async fn step_down_with_four_in_flight_leaves_committed_state_equal_to_the_log()
             a.apply(&ApplyCommitted {
                 index: i as u64 + 1,
                 term: 1,
-                entry,
+                entry: entry.into(),
             })
             .expect("apply");
         }

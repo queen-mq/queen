@@ -5,6 +5,7 @@
       <template #sub>
         <span>cluster <b>{{ actingClusterSlug || '—' }}</b> · tenant <b>{{ actingTenantSlug || '—' }}</b></span>
       </template>
+      <template #switch><AccessScope /></template>
       <template #actions>
         <button class="btn btn-primary" @click="openGrant">Add member</button>
       </template>
@@ -142,6 +143,7 @@ import { useRefresh } from '@/composables/useRefresh'
 import { useToast } from '@/composables/useToast'
 import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
 import { useIdentity } from '@/stores/identity'
+import AccessScope from '@/components/AccessScope.vue'
 import PageHead from '@/components/PageHead.vue'
 
 // proxy/src/console.rs VALID_ROLES, most privileged first; what each allows is

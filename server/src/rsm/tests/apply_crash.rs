@@ -940,3 +940,205 @@ fn a_completion_entry_crashed_mid_apply_repairs() {
         got_local.first_difference(&want_local)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Sharded apply: a node killed with runs in flight on its shard threads
+// ---------------------------------------------------------------------------
+//
+// The child applies the WIDE workload (`apply_shards::Wide`: dozens of
+// partitions per entry, creates, claims, acks, watermarks, dead letters, and
+// global effects between the runs) at four shards, every entry on the pool.
+// The kill lands wherever it lands — most of the child's time is inside runs,
+// so usually with shard threads half way through an entry. The parent reopens
+// the directory at ONE shard (the count is node-local and may change across a
+// restart), replays from the durable index, and must hold exactly what an
+// uninterrupted one-thread run holds: replicated and node-local state.
+
+const WIDE_CHILD_TEST: &str = "rsm::tests::apply_crash::crash_child_wide_sharded_applier";
+const WIDE_ENTRIES: u64 = 400;
+const WIDE_SEED: u64 = 0x5AA2_D000_0001;
+
+fn wide_cfg(shards: usize) -> crate::rsm::apply::ApplyConfig {
+    crate::rsm::apply::ApplyConfig {
+        apply_shards: shards,
+        apply_shard_min: 1,
+        ..cfg()
+    }
+}
+
+#[test]
+fn crash_child_wide_sharded_applier() {
+    let Ok(dir) = std::env::var(CRASH_DIR_ENV) else {
+        return;
+    };
+    if std::env::var(WIDE_CHILD_ENV).is_err() {
+        return;
+    }
+    let dir = PathBuf::from(dir);
+    let store = crate::rsm::store::HeedStore::open(&dir.join("store"), &super::apply::store_opts())
+        .expect("child: open store");
+    let (mut a, _rec) = Applier::open(
+        &store,
+        &dir.join("seg"),
+        seg_opts(),
+        wide_cfg(4),
+        Arc::new(NoNotify),
+    )
+    .expect("child: open applier");
+    let mut w = super::apply_shards::Wide::new(WIDE_SEED);
+    for i in 1..=WIDE_ENTRIES {
+        a.apply(&w.next()).expect("child: apply");
+        if i.is_multiple_of(23) {
+            a.durable_point().expect("child: durable point");
+        } else if i.is_multiple_of(5) {
+            a.commit().expect("child: commit");
+        }
+        a.gc_pass().expect("child: gc");
+        if i == 1 {
+            say("WRITING");
+        }
+    }
+    say(&format!("EXHAUSTED {WIDE_ENTRIES}"));
+    std::thread::sleep(Duration::from_secs(120));
+    panic!("child: was not killed");
+}
+
+/// Set on the wide child only, so the timing child above never runs it.
+const WIDE_CHILD_ENV: &str = "QUEEN_RSM_APPLY_CRASH_WIDE";
+
+fn spawn_wide_child(dir: &Path) -> Kid {
+    let exe = std::env::current_exe().expect("test binary");
+    let mut child = Command::new(&exe)
+        .args([
+            "--exact",
+            WIDE_CHILD_TEST,
+            "--nocapture",
+            "--test-threads",
+            "1",
+        ])
+        .env(CRASH_DIR_ENV, dir)
+        .env(WIDE_CHILD_ENV, "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the wide child");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let (tx, lines) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout)
+            .lines()
+            .map_while(std::result::Result::ok)
+        {
+            if tx.send(line).is_err() {
+                return;
+            }
+        }
+    });
+    Kid { child, lines }
+}
+
+#[test]
+fn a_node_killed_with_runs_in_flight_repairs_at_another_shard_count() {
+    // The reference: one thread, uninterrupted, the same cadences.
+    let (want, want_local) = {
+        let node = Node::new("wide-crash-ref");
+        {
+            let (mut a, _) = Applier::open(
+                node.store(),
+                &node.seg_dir(),
+                seg_opts(),
+                wide_cfg(1),
+                Arc::new(NoNotify),
+            )
+            .expect("ref: open");
+            let mut w = super::apply_shards::Wide::new(WIDE_SEED);
+            for i in 1..=WIDE_ENTRIES {
+                a.apply(&w.next()).expect("ref: apply");
+                if i.is_multiple_of(23) {
+                    a.durable_point().expect("ref: durable point");
+                } else if i.is_multiple_of(5) {
+                    a.commit().expect("ref: commit");
+                }
+                a.gc_pass().expect("ref: gc");
+            }
+            settle(&mut a);
+        }
+        (node.digest(), node.local_digest())
+    };
+
+    let mut weak = 0;
+    for (round, delay) in KILL_AFTER.iter().enumerate() {
+        let dir = std::env::temp_dir().join(format!(
+            "queen-rsm-apply-crash-wide-{}-{round}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("round dir");
+        let kid = spawn_wide_child(&dir);
+        assert!(
+            kid.wait_for("WRITING"),
+            "round {round}: the child never started"
+        );
+        std::thread::sleep(*delay);
+        if kid.exhausted() {
+            weak += 1;
+        }
+        kid.kill();
+
+        let node = Node::at(dir.clone());
+        {
+            // Reopened at ONE shard: the count is node-local.
+            let (mut a, rec) = Applier::open(
+                node.store(),
+                &node.seg_dir(),
+                seg_opts(),
+                wide_cfg(1),
+                Arc::new(NoNotify),
+            )
+            .expect("round: the killed node reopens");
+            assert_eq!(rec.applied_index, rec.durable_index);
+            let mut w = super::apply_shards::Wide::new(WIDE_SEED);
+            let mut replayed = 0u64;
+            for i in 1..=WIDE_ENTRIES {
+                let c = w.next();
+                if i <= rec.replay_after {
+                    continue;
+                }
+                if let crate::rsm::apply::Applied::Executed { .. } = a.apply(&c).expect("replay") {
+                    replayed += 1;
+                }
+                if i.is_multiple_of(23) {
+                    a.durable_point().expect("durable point");
+                } else if i.is_multiple_of(5) {
+                    a.commit().expect("commit");
+                }
+                a.gc_pass().expect("gc");
+            }
+            settle(&mut a);
+            assert!(replayed > 0, "round {round}: nothing was left to replay");
+            assert_eq!(
+                a.segments_mut().saturated_releases(),
+                0,
+                "round {round}: a segment claim was released twice"
+            );
+        }
+        let got = node.digest();
+        assert_eq!(
+            got.whole,
+            want.whole,
+            "round {round} ({delay:?}): the repaired state differs, first at {:?}",
+            got.first_difference(&want)
+        );
+        let got_local = node.local_digest();
+        assert_eq!(
+            got_local.whole,
+            want_local.whole,
+            "round {round} ({delay:?}): the node-local state differs, first at {:?}",
+            got_local.first_difference(&want_local)
+        );
+    }
+    assert!(
+        weak < KILL_AFTER.len(),
+        "every round killed a child that had already finished"
+    );
+}

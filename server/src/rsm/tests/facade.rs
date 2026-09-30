@@ -904,6 +904,21 @@ async fn phase_two_admin_detail_and_stream_state_accept_the_raft_partition_id() 
     // `role` is the membership role, `state` the Raft state (WP-4.8).
     assert_eq!(parse(&raft_status.body)["role"], "voter");
     assert_eq!(parse(&raft_status.body)["state"], "leader");
+    // The machine under the node, for the Overview's broker strip.
+    let host = &parse(&raft_status.body)["host"];
+    assert!(host["cpus"].as_u64().is_some_and(|n| n >= 1), "{host}");
+    assert!(host["rssBytes"].as_u64().is_some_and(|n| n > 0), "{host}");
+    assert!(
+        host["memLimitBytes"].as_u64().is_some_and(|n| n > 0),
+        "{host}"
+    );
+    // Tests run with the gate off; the directory is whichever facade of this
+    // test binary opened first, which another test may already have removed.
+    if let Some(pct) = host["disk"]["usedPct"].as_f64() {
+        assert!((0.0..=100.0).contains(&pct), "{host}");
+        assert_eq!(host["disk"]["gate"], false, "{host}");
+        assert_eq!(host["disk"]["writesRefused"], false, "{host}");
+    }
 
     facade.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
@@ -1027,6 +1042,145 @@ async fn the_lean_queue_reads_answer_what_the_full_ones_do() {
     assert_eq!(members["members"][0]["lastAckMs"], 0, "{members}");
     assert_eq!(members["members"][0]["local"], true, "{members}");
     assert_eq!(members["leaderId"], members["nodeId"], "{members}");
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `/resources/partitions` ranks the tenant's partitions by pending, counts
+/// pending as the queue detail does, and carries a lag only while there is
+/// something to consume.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn the_partition_read_ranks_by_pending_and_lags_only_the_unconsumed() {
+    let dir = scratch("partitions-read");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    // wide/0 holds 1, wide/1 holds 2, wide/2 holds 3; narrow/a holds 1.
+    let items: Vec<Value> = (0..3)
+        .flat_map(|p| {
+            (0..=p).map(move |n| {
+                serde_json::json!({"queue":"wide","partition":p.to_string(),"payload":{"n":n}})
+            })
+        })
+        .chain(std::iter::once(
+            serde_json::json!({"queue":"narrow","partition":"a","payload":{}}),
+        ))
+        .collect();
+    facade
+        .push(
+            ctx(),
+            PushReq {
+                raw: serde_json::to_vec(&serde_json::json!({ "items": items })).unwrap(),
+            },
+        )
+        .await
+        .expect("push");
+    let get = |query: Option<&str>| ApiReq {
+        method: "GET".into(),
+        path: "/api/v1/resources/partitions".into(),
+        query: query.map(str::to_string),
+        body: Vec::new(),
+    };
+    let rows = |body: &str| -> Vec<(String, String, i64, Value)> {
+        parse(body)["partitions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                (
+                    p["queue"].as_str().unwrap().to_string(),
+                    p["partition"].as_str().unwrap().to_string(),
+                    p["pending"].as_i64().unwrap(),
+                    p["lagSeconds"].clone(),
+                )
+            })
+            .collect()
+    };
+
+    let all = facade.api(ctx(), get(None)).await.expect("all partitions");
+    assert_eq!(all.status, 200, "{}", all.body);
+    let body = parse(&all.body);
+    assert_eq!(body["walked"], 4, "{body}");
+    assert_eq!(body["truncated"], false, "{body}");
+    let all = rows(&all.body);
+    assert_eq!(
+        all.iter()
+            .map(|(q, p, n, _)| (q.as_str(), p.as_str(), *n))
+            .take(2)
+            .collect::<Vec<_>>(),
+        [("wide", "2", 3), ("wide", "1", 2)]
+    );
+    assert_eq!(all.len(), 4);
+    assert!(
+        all.iter().all(|r| r.3.as_i64().is_some_and(|s| s >= 0)),
+        "every partition holds a message, so every one has a lag: {all:?}"
+    );
+
+    // The same pending the queue detail shows.
+    let detail = facade
+        .api(
+            ctx(),
+            ApiReq {
+                method: "GET".into(),
+                path: "/api/v1/resources/queues/wide".into(),
+                query: None,
+                body: Vec::new(),
+            },
+        )
+        .await
+        .expect("detail");
+    let from_detail: std::collections::BTreeMap<String, i64> = parse(&detail.body)["partitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["name"].as_str().unwrap().to_string(),
+                p["messages"]["pending"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    let wide = facade
+        .api(ctx(), get(Some("queue=wide&limit=2")))
+        .await
+        .expect("one queue");
+    assert_eq!(wide.status, 200, "{}", wide.body);
+    assert_eq!(parse(&wide.body)["walked"], 3);
+    let wide = rows(&wide.body);
+    assert_eq!(wide.len(), 2, "limit=2: {wide:?}");
+    for (_, p, n, _) in &wide {
+        assert_eq!(from_detail.get(p), Some(n), "partition {p}");
+    }
+
+    // Consumed: nothing pending, no lag.
+    facade
+        .pop_wildcard(
+            ctx(),
+            PopReq {
+                queue: "narrow".into(),
+                group: None,
+                batch: 10,
+                auto_ack: true,
+                wait: false,
+                timeout_ms: 1000,
+                options: Default::default(),
+            },
+        )
+        .await
+        .expect("pop");
+    let narrow = facade
+        .api(ctx(), get(Some("queue=narrow")))
+        .await
+        .expect("narrow");
+    assert_eq!(
+        rows(&narrow.body),
+        [("narrow".to_string(), "a".to_string(), 0, Value::Null)]
+    );
+
+    let missing = facade
+        .api(ctx(), get(Some("queue=nope")))
+        .await
+        .expect("no such queue");
+    assert_eq!(missing.status, 404);
 
     facade.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);

@@ -47,7 +47,7 @@ pub(crate) enum Proposal {
 }
 
 impl Proposal {
-    fn pid(&self) -> Pid {
+    pub(crate) fn pid(&self) -> Pid {
         match *self {
             Proposal::Watermark { pid, .. } | Proposal::Delete { pid } => pid,
         }

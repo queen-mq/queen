@@ -5,6 +5,7 @@
       <template #sub>
         <span>cell <b>{{ cellSlug }}</b> · every tenant represented on it</span>
       </template>
+      <template #switch><AccessScope /></template>
       <template #actions>
         <button class="btn btn-primary" :disabled="!tenants.length" @click="openCreate">Add user</button>
       </template>
@@ -58,7 +59,7 @@
         <span v-if="loading" class="muted">refreshing…</span>
       </div>
       <div class="table-container">
-        <table v-if="filteredUsers.length" class="table">
+        <table v-if="filteredUsers.length" class="t">
           <thead>
             <tr>
               <th>User</th>
@@ -254,6 +255,7 @@ import { operator, describeApiError } from '@/api'
 import { useRefresh } from '@/composables/useRefresh'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
+import AccessScope from '@/components/AccessScope.vue'
 import PageHead from '@/components/PageHead.vue'
 import PageTools from '@/components/PageTools.vue'
 

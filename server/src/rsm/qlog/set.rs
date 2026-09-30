@@ -619,6 +619,11 @@ impl QLogSyncer {
     /// file it seals before it switches, so whichever file was cloned, every
     /// byte written before this call is durable when it returns.
     pub fn sync(&self, t: &SyncTicket) -> io::Result<()> {
+        // Drop-behind: the bytes this sync makes durable that are also far
+        // enough behind their log's end leave the page cache once it returns.
+        let hot = crate::rsm::qlog::drop_behind_bytes();
+        let drop_behind = hot > 0 && self.mode != crate::rsm::qlog::Fsync::Off;
+        let mut drops: Vec<crate::rsm::qlog::DropJob> = Vec::new();
         let synced = (|| -> io::Result<Vec<(u64, u64)>> {
             let mut handles: Vec<std::fs::File> = Vec::with_capacity(t.qids.len());
             let mut pairs: Vec<(u64, u64)> = Vec::new();
@@ -637,6 +642,15 @@ impl QLogSyncer {
                     if let Some(f) = g.active_clone()? {
                         handles.push(f);
                         pairs.push((*qid, tail));
+                        // Every byte of the log up to its end now is in the
+                        // cloned file or a sealed one: clean after the fsync.
+                        if drop_behind {
+                            for (id, from, to) in g.take_cold_ranges(hot) {
+                                if let Ok(fd) = g.read_fd(id) {
+                                    drops.push((fd, from, to));
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -646,6 +660,9 @@ impl QLogSyncer {
             self.fsync_all(handles)?;
             Ok(pairs)
         })();
+        if synced.is_ok() {
+            crate::rsm::qlog::drop_behind_async(drops);
+        }
         if let Some(tails) = &self.tails {
             match &synced {
                 Ok(pairs) => tails.note_synced(pairs, t.seq),

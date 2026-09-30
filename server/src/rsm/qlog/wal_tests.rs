@@ -147,7 +147,12 @@ fn active_file(root: &Path, qid: u64) -> PathBuf {
             .and_then(|r| r.strip_suffix(".qlog"))
             .and_then(|n| n.parse::<u64>().ok())
         {
-            if best.as_ref().is_none_or(|(b, _)| id > *b) {
+            // The next file created ahead of its roll is not the active one.
+            let head = std::fs::read(&p).expect("read a queue log");
+            let ahead = head.len() >= 24
+                && u64::from_le_bytes(head[16..24].try_into().expect("8 bytes"))
+                    == super::PRECREATED;
+            if !ahead && best.as_ref().is_none_or(|(b, _)| id > *b) {
                 best = Some((id, p));
             }
         }
@@ -1727,6 +1732,7 @@ async fn read_range_rehydrates_stub_layout_entries() {
                     entry: Arc::new(e.clone()),
                     pre: Vec::new(),
                     z: None,
+                    pf: None,
                 },
             })
             .collect();

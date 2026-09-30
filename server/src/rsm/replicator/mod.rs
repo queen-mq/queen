@@ -412,6 +412,22 @@ pub trait Replicator: Send + Sync + 'static {
         None
     }
 
+    /// The last log id this node knows COMMITTED, `(index, term)`, in RSM
+    /// index numbering, as a watch that moves when the commit index advances
+    /// (before the entries apply here). `None`: the backend does not report
+    /// commits apart from local apply, and the driver answers and frees its
+    /// pipeline at apply, as it always did.
+    ///
+    /// What it proves (the driver's rule): an entry this leader proposed in
+    /// term `T` at index `i` is committed once the watch shows `(c, T)` with
+    /// `c >= i` — the committed entry at `c` was written by the term-`T`
+    /// leader, this node, and log matching makes every entry up to `c` the one
+    /// it wrote. A commit id of another term proves nothing about this node's
+    /// entries; those wait for apply (and its term check) as before.
+    fn committed_watch(&self) -> Option<tokio::sync::watch::Receiver<(u64, u64)>> {
+        None
+    }
+
     /// A linearizable read index (§9.4): apply must reach it before a read is
     /// answered. On a single node it is the current applied index.
     async fn read_barrier(&self, deadline: Instant) -> Result<u64, ProposeError>;

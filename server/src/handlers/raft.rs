@@ -1069,6 +1069,13 @@ pub(crate) fn build_raft_router(
 /// waits for room holds only its connection — its bytes stay in the socket and
 /// TCP slows the sender. Inside auth and tenancy (an unauthenticated request
 /// never takes budget); the facade sees the request as already admitted.
+///
+/// On the leader these are this node's clients' share of the planner's budget
+/// ([`crate::rsm::admit::Source::Local`], served in turn with each
+/// follower's). On a follower they only guard its memory: the leader admits
+/// the prepared commands, and its overload comes back within a short hold as
+/// this request's `429` with a `Retry-After`, so a follower's permits are
+/// never held for seconds while the leader is saturated.
 #[cfg(feature = "server")]
 async fn admit_edge(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let Some(gate) = crate::rsm::admit::global() else {

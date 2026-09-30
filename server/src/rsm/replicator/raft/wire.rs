@@ -11,10 +11,20 @@
 //!
 //! `kind` is 3 for an application entry in stored form (the payload-free
 //! entry plus every payload as the leader's queue log stores it, compressed or
-//! raw: [`AppEntry::from_stored_wire`]), 1 for a blank entry, 2 for a
-//! membership entry (its bytes are the membership as JSON). Kind 0, the full
-//! entry with raw payloads, is still read. Every integer is little-endian.
-//! Every other message is JSON: they are small.
+//! raw: [`AppEntry::from_stored_wire`]), 4 for the same bytes as ONE zstd frame
+//! ([`AppEntry::wire_zstd`], compressed once per entry for every follower), 1
+//! for a blank entry, 2 for a membership entry (its bytes are the membership as
+//! JSON). Kind 0, the full entry with raw payloads, is still read. Every
+//! integer is little-endian. Every other message is JSON: they are small.
+//!
+//! # Kind 4 and older nodes
+//!
+//! A node that predates kind 4 refuses it ("unknown kind": the append fails,
+//! nothing is misread). So a leader sends kind 4 only to a follower that said
+//! it reads it — the `x-queen-raft-wire` answer header ([`WIRE_HEADER`]) on
+//! its appends, or on the stream's handshake — and never with
+//! `QUEEN_RAFT_WIRE_ZSTD=0`. A mixed-version cluster keeps replicating in kind
+//! 3 to the old nodes.
 
 use std::io;
 
@@ -30,6 +40,48 @@ const KIND_APP: u8 = 0;
 const KIND_BLANK: u8 = 1;
 const KIND_MEMBERSHIP: u8 = 2;
 const KIND_APP_STORED: u8 = 3;
+const KIND_APP_STORED_ZSTD: u8 = 4;
+
+/// The answer header a follower sets on its appends: the wire features it
+/// reads. `2`: kind 4.
+pub const WIRE_HEADER: &str = "x-queen-raft-wire";
+
+/// What this node reads ([`WIRE_HEADER`]).
+pub const WIRE_FEATURES: &str = "2";
+
+/// Whether a follower's [`WIRE_HEADER`] value says it reads kind 4.
+pub fn reads_zstd(header: Option<&[u8]>) -> bool {
+    header
+        .and_then(|v| std::str::from_utf8(v).ok())
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .is_some_and(|v| v >= 2)
+}
+
+/// `QUEEN_RAFT_WIRE_ZSTD` (default on): compress each entry's wire bytes once
+/// (zstd level 1, kept when it saves a tenth) for the followers that read it.
+/// Off: every entry goes as kind 3, as before.
+pub fn zstd_from_env() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("QUEEN_RAFT_WIRE_ZSTD") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        Err(_) => true,
+    })
+}
+
+/// Make the compressed wire form of every application entry of `req` (once
+/// per entry, shared: [`AppEntry::wire_zstd`]) so [`encode_append`] can send
+/// it.
+pub async fn prepare_zstd(req: &AppendEntriesRequest<TypeConfig>) -> io::Result<()> {
+    for e in &req.entries {
+        if let EntryPayload::Normal(app) = &e.payload {
+            app.wire_zstd().await?;
+        }
+    }
+    Ok(())
+}
 
 /// The largest AppendEntries body the sender builds. A request over it is cut
 /// at an entry boundary (at least one entry always goes) and the rest follows
@@ -57,13 +109,21 @@ fn bad(msg: impl Into<String>) -> io::Error {
 }
 
 /// Encode `req`, keeping at most [`MAX_APPEND_BYTES`] of entries (never fewer
-/// than one). Returns the bytes and how many entries they carry.
-pub fn encode_append(req: &AppendEntriesRequest<TypeConfig>) -> io::Result<(Vec<u8>, usize)> {
+/// than one). Returns the bytes and how many entries they carry. With `zstd`
+/// (the follower reads kind 4), an entry whose compressed form is made
+/// ([`prepare_zstd`]) and worth it goes compressed.
+pub fn encode_append(
+    req: &AppendEntriesRequest<TypeConfig>,
+    zstd: bool,
+) -> io::Result<(Vec<u8>, usize)> {
     let mut parts: Vec<(u64, u64, u8, Bytes)> = Vec::with_capacity(req.entries.len());
     let mut total = 0usize;
     for e in &req.entries {
         let (kind, bytes) = match &e.payload {
-            EntryPayload::Normal(app) => (KIND_APP_STORED, app.wire()?),
+            EntryPayload::Normal(app) => match app.wire_zstd_ready().flatten() {
+                Some(z) if zstd => (KIND_APP_STORED_ZSTD, z),
+                _ => (KIND_APP_STORED, app.wire()?),
+            },
             EntryPayload::Blank => (KIND_BLANK, Bytes::new()),
             EntryPayload::Membership(m) => (
                 KIND_MEMBERSHIP,
@@ -159,6 +219,9 @@ pub fn decode_append(body: &Bytes) -> io::Result<AppendEntriesRequest<TypeConfig
             KIND_APP_STORED => {
                 EntryPayload::Normal(AppEntry::from_stored_wire(body.slice(from..from + len))?)
             }
+            KIND_APP_STORED_ZSTD => EntryPayload::Normal(AppEntry::from_stored_wire_zstd(
+                body.slice(from..from + len),
+            )?),
             KIND_APP => EntryPayload::Normal(AppEntry::from_wire(bytes)?),
             KIND_BLANK => EntryPayload::Blank,
             KIND_MEMBERSHIP => {

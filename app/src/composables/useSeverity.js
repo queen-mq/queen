@@ -117,6 +117,15 @@ export const THRESHOLDS = Object.freeze({
   // storage_full, and service resumes only below MAP_LOW_PCT.
   storeMapWarnPct: 80,          // MAP_LOW_PCT
   storeMapBadPct: 85,           // MAP_HIGH_PCT
+  // --- The machine under a node (the Overview's broker strip) -------------
+  // Shares, so proportional by construction. CPU is the process's share of
+  // the CPUs it may use (its cgroup quota or affinity): at 90% a burst has
+  // nowhere to go, which is saturation, not failure, so never red. Memory is
+  // the resident set against the limit the kernel enforces: at the limit the
+  // process is killed, so red comes with a tenth of it still free.
+  cpuWarnShare: 0.9,
+  memWarnShare: 0.8,
+  memBadShare: 0.9,
 })
 
 const T = THRESHOLDS
@@ -348,6 +357,48 @@ export function storeMapSeverity(pct) {
   if (v === null || v < T.storeMapWarnPct) return SEV_NONE
   if (v >= T.storeMapBadPct) return SEV_BAD
   return SEV_WARN
+}
+
+/** A node's CPU as a share of the CPUs its process may use. Never red. */
+export function cpuShareSeverity(share) {
+  const v = n(share)
+  if (v === null || v < T.cpuWarnShare) return SEV_NONE
+  return SEV_WARN
+}
+
+/** A node's resident memory as a share of the limit it runs under. */
+export function memoryShareSeverity(share) {
+  const v = n(share)
+  if (v === null || v < T.memWarnShare) return SEV_NONE
+  if (v >= T.memBadShare) return SEV_BAD
+  return SEV_WARN
+}
+
+/**
+ * A node's data filesystem on the node's own disk gate
+ * (server/src/rsm/facade/real.rs storage_pressure): at `highPct` used, writes
+ * are refused with 507 until usage falls below `lowPct`. Red is the gate
+ * closed, or usage past its line; amber is the band a closed gate stays
+ * closed in. The lines are the node's, so none are invented here; a node
+ * with the gate off has none, and no verdict.
+ *
+ * @param {object} o
+ * @param {number|null} o.usedPct
+ * @param {number|null} o.highPct
+ * @param {number|null} o.lowPct
+ * @param {boolean} [o.gate]     the gate is on
+ * @param {boolean} [o.refused]  the gate is closed now
+ * @returns {''|'warn'|'bad'}
+ */
+export function diskSeverity({ usedPct, highPct, lowPct, gate = true, refused = false } = {}) {
+  if (refused) return SEV_BAD
+  const u = n(usedPct)
+  if (u === null || !gate) return SEV_NONE
+  const hi = n(highPct)
+  const lo = n(lowPct)
+  if (hi !== null && u >= hi) return SEV_BAD
+  if (lo !== null && u >= lo) return SEV_WARN
+  return SEV_NONE
 }
 
 /**

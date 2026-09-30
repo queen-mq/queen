@@ -67,13 +67,16 @@
 mod admin;
 pub use admin::QuiesceHook;
 pub mod cluster;
+pub(crate) mod forward;
 pub(crate) mod log_store;
 mod members;
 mod network;
 mod repair;
 pub mod snapshot;
 pub(crate) mod state_machine;
+mod stream;
 pub mod types;
+mod waiters;
 mod wire;
 
 pub use self::admin::MembershipStatus;
@@ -128,9 +131,11 @@ pub(crate) struct Shared {
     waiters: Mutex<HashMap<u64, oneshot::Sender<AppliedAt>>>,
     /// Pulsed when the applied index advances (the batcher's driver-notify).
     applied_notify: Arc<ApplyWake>,
-    /// The applied index, for every waiter at once ([`RaftReplicator::wait_applied`]:
-    /// `applied_notify` wakes ONE waiter per pulse, the batcher's).
-    applied_watch: watch::Sender<u64>,
+    /// The callers waiting for this node to apply an index
+    /// ([`RaftReplicator::wait_applied`]; `applied_notify` wakes ONE waiter
+    /// per pulse, the batcher's), and those waiting for it to know an index
+    /// committed ([`RaftReplicator::wait_committed`]).
+    edge: Edge,
     /// On the leader: the openraft index every live follower has replicated
     /// (the cache keeps entries above it). `u64::MAX` otherwise.
     replicated: AtomicU64,
@@ -271,6 +276,149 @@ impl Shared {
     }
 }
 
+/// What a node keeps for the callers it serves while another node leads: who
+/// waits for which index, applied or committed ([`waiters`]), and its streams
+/// to the leader ([`forward`]).
+struct Edge {
+    applied: waiters::IndexWaiters,
+    committed: waiters::IndexWaiters,
+    /// Set once the commit watch runs ([`RaftReplicator::start_commit_watch`]).
+    commit_watch: OnceLock<()>,
+    /// The batched forwarder, made by the first forwarded command.
+    fwd: OnceLock<forward::Forwarder>,
+    /// The read barriers waiting for a read-index call
+    /// ([`RaftReplicator::leader_read_index`]).
+    reads: Mutex<ReadCalls>,
+    /// Read-index calls made (a test counts them).
+    read_calls: AtomicU64,
+}
+
+impl Edge {
+    fn new(applied: u64) -> Edge {
+        Edge {
+            applied: waiters::IndexWaiters::new(applied, "applied"),
+            committed: waiters::IndexWaiters::drained_inline(0, "committed"),
+            commit_watch: OnceLock::new(),
+            fwd: OnceLock::new(),
+            reads: Mutex::new(ReadCalls::default()),
+            read_calls: AtomicU64::new(0),
+        }
+    }
+}
+
+type ReadIndexAnswer = Result<u64, RemoteError>;
+
+/// The shared read-index calls of a follower.
+#[derive(Default)]
+struct ReadCalls {
+    /// A call is on its way, or about to be.
+    calling: bool,
+    /// The barriers the next call answers, with their deadlines.
+    next: Vec<(oneshot::Sender<ReadIndexAnswer>, Instant)>,
+}
+
+/// The read-index calls: each takes every barrier waiting when it is sent,
+/// until none waits.
+async fn read_index_rounds(
+    shared: Arc<Shared>,
+    client: network::HttpClient,
+    token: Option<Arc<str>>,
+) {
+    // A panic in a call must not leave `calling` set: every later barrier
+    // would wait for a call nobody makes.
+    struct Unstick(Arc<Shared>, bool);
+    impl Drop for Unstick {
+        fn drop(&mut self) {
+            if self.1 {
+                let mut st = self.0.edge.reads.lock().unwrap_or_else(|p| p.into_inner());
+                st.calling = false;
+                st.next.clear();
+            }
+        }
+    }
+    let mut unstick = Unstick(shared.clone(), true);
+    loop {
+        let batch: Vec<_> = {
+            let mut st = shared.edge.reads.lock().expect("reads");
+            if st.next.is_empty() {
+                st.calling = false;
+                unstick.1 = false;
+                return;
+            }
+            std::mem::take(&mut st.next)
+        }
+        .into_iter()
+        .filter(|(tx, _)| !tx.is_closed())
+        .collect();
+        let Some(latest) = batch.iter().map(|(_, d)| *d).max() else {
+            continue;
+        };
+        let ttl = latest.saturating_duration_since(Instant::now());
+        let answer = one_read_index(&shared, &client, token.as_deref(), ttl).await;
+        for (tx, _) in batch {
+            let _ = tx.send(match &answer {
+                Ok(i) => Ok(*i),
+                Err(RemoteError::NoLeader) => Err(RemoteError::NoLeader),
+                Err(RemoteError::Transport(m)) => Err(RemoteError::Transport(m.clone())),
+            });
+        }
+    }
+}
+
+/// One read-index call to the leader.
+async fn one_read_index(
+    shared: &Shared,
+    client: &network::HttpClient,
+    token: Option<&str>,
+    ttl: Duration,
+) -> ReadIndexAnswer {
+    let Some(addr) = shared.leader_raft.read().expect("leader_raft").clone() else {
+        return Err(RemoteError::NoLeader);
+    };
+    shared.edge.read_calls.fetch_add(1, Ordering::Relaxed);
+    let _slot = match tokio::time::timeout(ttl, forward_gate().acquire()).await {
+        Ok(Ok(slot)) => slot,
+        _ => {
+            return Err(RemoteError::Transport(
+                "no forward slot within the deadline".into(),
+            ))
+        }
+    };
+    let b = network::post(
+        client,
+        &format!("http://{addr}/raft/v1/read_index"),
+        token,
+        "application/json",
+        axum::body::Body::from(bytes::Bytes::new()),
+        ttl,
+    )
+    .await
+    .map_err(|e| match e {
+        network::Fail::Unreachable(m) | network::Fail::Network(m) => RemoteError::Transport(m),
+    })?;
+    #[derive(serde::Deserialize)]
+    struct Read {
+        index: u64,
+    }
+    serde_json::from_slice::<Read>(&b)
+        .map(|r| r.index)
+        .map_err(|e| RemoteError::Transport(format!("read index answer: {e}")))
+}
+
+/// Where the entry a forwarded reply names stands on this node
+/// ([`RaftReplicator::wait_committed`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Landed {
+    /// This node knows the entry at the index committed, and it is of the
+    /// reply's term: the reply's outcome is the committed one.
+    Committed,
+    /// Another term's entry is at the index: the reply's entry never
+    /// committed (a leader that had lost its term answered for it).
+    Superseded,
+    /// Not known committed here by the deadline.
+    NotYet,
+}
+
 /// The apply thread's notifier. When the apply thread exits (a refused entry
 /// stops the node) this is dropped with it, and every waiter is failed, so no
 /// state machine call waits forever on an entry that will never apply.
@@ -291,11 +439,17 @@ impl Notify for RaftNotify {
             let _ = tx.send(AppliedAt { index, term });
         }
         self.shared.applied_notify.notify_one();
-        self.shared.applied_watch.send_replace(index);
+        // Publishes the index; the waiters at or below it are answered by the
+        // wake thread, never here (waiters.rs).
+        self.shared.edge.applied.advance(index);
     }
 
     fn wake(&self, tenant: &str, queue: &str, group: Option<&str>) {
         self.waker.wake(tenant, queue, group);
+    }
+
+    fn wake_append(&self, tenant: &str, queue: &str, group: &str) {
+        self.waker.wake_append(tenant, queue, group);
     }
 
     fn wants_append_wakes(&self) -> bool {
@@ -346,6 +500,9 @@ impl Notify for RaftNotify {
 impl Drop for RaftNotify {
     fn drop(&mut self) {
         self.shared.waiters.lock().expect("waiters").clear();
+        // Nothing applies here any more: a caller waiting for an index is
+        // answered now, not at its deadline.
+        self.shared.edge.applied.close();
     }
 }
 
@@ -1060,7 +1217,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
             poison,
             waiters: Mutex::new(HashMap::new()),
             applied_notify: Arc::new(ApplyWake::new()),
-            applied_watch: watch::channel(0).0,
+            edge: Edge::new(applied),
             replicated: AtomicU64::new(u64::MAX),
             terms: Mutex::new(if applied > 0 {
                 BTreeMap::from([(applied, term)])
@@ -1165,6 +1322,13 @@ impl<S: Store + 'static> RaftReplicator<S> {
             Ok(rt) => rt,
             Err(e) => return Err(fail(e, None, &mut writer_join, &mut apply_join, &log)),
         };
+        // Committed entries reach the apply thread the moment openraft commits
+        // them, not when it next calls the state machine
+        // (`QUEEN_RAFT_APPLY_AHEAD`, [`state_machine`]).
+        let mut sm = sm;
+        if state_machine::apply_ahead_from_env() {
+            sm.start_apply_ahead(rt.handle());
+        }
 
         // The operator's repairs, before openraft reads the log ([`repair`]):
         // an apply-skip rewrite a crash interrupted, the entries
@@ -1512,8 +1676,13 @@ impl<S: Store + 'static> RaftReplicator<S> {
     }
 
     /// Install the handler that plans a follower's prepared command on this
-    /// node (the facade, once it exists). Set once.
+    /// node (the facade, once it exists). Set once. The runtime it is set
+    /// from is taken for the one the facade serves clients on: the Raft RPC
+    /// server hands the followers' command streams to it ([`forward`]).
     pub fn set_remote_handler(&self, h: RemoteHandler) {
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let _ = self.shared.admin.clients.set(rt);
+        }
         let _ = self.shared.remote.set(h);
     }
 
@@ -1666,49 +1835,186 @@ impl<S: Store + 'static> RaftReplicator<S> {
     }
 
     /// Send a prepared command to the leader; the answer is the encoded reply.
+    /// Over this node's batched streams ([`forward`], `QUEEN_RAFT_FWD_BATCH`),
+    /// or as one `/raft/v1/submit` call when that is off or the leader does
+    /// not serve them (an older version). `drain`: a command that stores
+    /// nothing (a pop, an ack), which does not wait for the forward window.
     pub async fn forward_command(
         &self,
         body: bytes::Bytes,
         ttl: Duration,
+        drain: bool,
     ) -> Result<bytes::Bytes, RemoteError> {
+        let cfg = forward::FwdConfig::from_env();
+        if cfg.on {
+            let Some((_, token)) = self.rpc.as_ref() else {
+                return Err(RemoteError::NoLeader);
+            };
+            let Some(addr) = self.shared.leader_raft.read().expect("leader_raft").clone() else {
+                return Err(RemoteError::NoLeader);
+            };
+            let fwd =
+                self.shared.edge.fwd.get_or_init(|| {
+                    forward::Forwarder::new(self.shared.node_id, token.clone(), cfg)
+                });
+            if !fwd.is_legacy(&addr) {
+                match fwd.call(&addr, body.clone(), ttl, drain).await {
+                    Ok(answer) => return Ok(answer),
+                    Err(forward::FwdError::Transport(m)) => return Err(RemoteError::Transport(m)),
+                    Err(forward::FwdError::Unsupported) => {}
+                }
+            }
+        }
         self.call_leader("/raft/v1/submit", "application/octet-stream", body, ttl)
             .await
     }
 
     /// The leader's read index (RSM numbering) for a linearizable read here.
+    ///
+    /// The read barriers of a follower share their calls: one call is on its
+    /// way at a time, and every barrier that starts meanwhile waits for the
+    /// NEXT one, which then answers all of them. A call only answers the
+    /// barriers that started before it was sent — the leader's read index is
+    /// its commit point when the call reaches it, so it covers every write
+    /// answered before those barriers started — and the leader sees one
+    /// read-index round per round trip, however many reads this node serves.
     pub async fn leader_read_index(&self, ttl: Duration) -> Result<u64, RemoteError> {
-        let b = self
-            .call_leader(
-                "/raft/v1/read_index",
-                "application/json",
-                bytes::Bytes::new(),
-                ttl,
-            )
-            .await?;
-        #[derive(serde::Deserialize)]
-        struct Read {
-            index: u64,
+        let Some((client, token)) = self.rpc.clone() else {
+            return Err(RemoteError::NoLeader);
+        };
+        let deadline = Instant::now() + ttl;
+        let (tx, rx) = oneshot::channel();
+        let start = {
+            let mut st = self.shared.edge.reads.lock().expect("reads");
+            st.next.push((tx, deadline));
+            !std::mem::replace(&mut st.calling, true)
+        };
+        if start {
+            tokio::spawn(read_index_rounds(self.shared.clone(), client, token));
         }
-        serde_json::from_slice::<Read>(&b)
-            .map(|r| r.index)
-            .map_err(|e| RemoteError::Transport(format!("read index answer: {e}")))
+        match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), rx).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => Err(RemoteError::Transport(
+                "the read index call was dropped".into(),
+            )),
+            Err(_) => Err(RemoteError::Transport(
+                "no read index within the deadline".into(),
+            )),
+        }
     }
 
-    /// Wait until this node has applied `index`; `false` at the deadline.
+    /// Read-index calls this node made to a leader.
+    #[cfg(test)]
+    pub(crate) fn read_index_calls_for_test(&self) -> u64 {
+        self.shared.edge.read_calls.load(Ordering::Relaxed)
+    }
+
+    /// Wait until this node has applied `index`; `false` at the deadline, or
+    /// once this node stopped applying short of it.
     pub async fn wait_applied(&self, index: u64, deadline: Instant) -> bool {
-        let mut rx = self.shared.applied_watch.subscribe();
-        loop {
-            if self.shared.applied_index.load(Ordering::Acquire) >= index {
-                return true;
-            }
-            match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), rx.changed())
-                .await
-            {
-                Ok(Ok(())) => {}
-                // The node stopped, or the deadline passed.
-                _ => return self.shared.applied_index.load(Ordering::Acquire) >= index,
-            }
+        if self.shared.applied_index.load(Ordering::Acquire) >= index {
+            return true;
         }
+        self.shared.edge.applied.wait(index, deadline).await
+            || self.shared.applied_index.load(Ordering::Acquire) >= index
+    }
+
+    /// Wait until this node knows the entry at RSM `index` committed, and say
+    /// whether it is of `term` — the leader's reply for an entry it planned at
+    /// `(index, term)` — or another term's entry took that index.
+    ///
+    /// Committed HERE is this node's own view: its log holds the entry and
+    /// the leader told it the commit point passed it (openraft's local
+    /// committed: the entries up to it match the log that committed them). A
+    /// committed entry is never replaced, so its term is final, and the
+    /// answer needs nothing from the leader's honesty: a leader that lost its
+    /// term and answered for an index the new leader's entry holds (Jepsen
+    /// W3c, pause) is caught as `Superseded`, as the applied-term check
+    /// caught it — only sooner. The commit point reaches a follower one
+    /// append after the leader commits; its apply may run seconds behind.
+    pub async fn wait_committed(&self, index: u64, term: u64, deadline: Instant) -> Landed {
+        if self.shared.applied_index.load(Ordering::Acquire) >= index {
+            return self.landed_applied(index, term);
+        }
+        self.start_commit_watch();
+        if !self.shared.edge.committed.wait(index, deadline).await {
+            // The commit watch ends with openraft; apply may still have got
+            // there.
+            if self.shared.applied_index.load(Ordering::Acquire) >= index {
+                return self.landed_applied(index, term);
+            }
+            return Landed::NotYet;
+        }
+        match self.log_term_at(index).await {
+            Some(t) if t == term => Landed::Committed,
+            Some(_) => Landed::Superseded,
+            // Only applied entries leave the log's memory: it applied.
+            None if self.shared.applied_index.load(Ordering::Acquire) >= index => {
+                self.landed_applied(index, term)
+            }
+            None => Landed::NotYet,
+        }
+    }
+
+    /// [`RaftReplicator::wait_committed`] for an index this node applied: the
+    /// applied term decides. An unknown term (an index below what this run
+    /// opened at) is taken as the reply's, as the follower's check always did.
+    fn landed_applied(&self, index: u64, term: u64) -> Landed {
+        match self.shared.term_at(index) {
+            Some(t) if t != term => Landed::Superseded,
+            _ => Landed::Committed,
+        }
+    }
+
+    /// The term of the entry at RSM `index` in this node's log, if the log
+    /// still holds it.
+    async fn log_term_at(&self, index: u64) -> Option<u64> {
+        use openraft::RaftLogReader;
+        let at = index.checked_sub(1)?;
+        let mut log = self.log.clone();
+        let entries = log.try_get_log_entries(at..at + 1).await.ok()?;
+        entries
+            .first()
+            .filter(|e| e.log_id.index == at)
+            .map(|e| term_of(&e.log_id))
+    }
+
+    /// Start publishing this node's commit point to [`Edge::committed`]: one
+    /// task on the caller's runtime (the client-facing one), watching
+    /// openraft's metrics, which it flushes on every turn of its loop. Once.
+    fn start_commit_watch(&self) {
+        let edge = &self.shared.edge;
+        if edge.commit_watch.get().is_some() {
+            return;
+        }
+        let (Some(raft), Ok(rt)) = (self.raft.as_ref(), tokio::runtime::Handle::try_current())
+        else {
+            return;
+        };
+        edge.commit_watch.get_or_init(|| {
+            let mut metrics = raft.metrics();
+            let shared = Arc::downgrade(&self.shared);
+            rt.spawn(async move {
+                loop {
+                    let committed = metrics
+                        .borrow_watched()
+                        .local_committed
+                        .as_ref()
+                        .map_or(0, |l| rsm_index(l.index));
+                    let Some(sh) = shared.upgrade() else {
+                        return;
+                    };
+                    sh.edge.committed.advance_and_drain(committed);
+                    drop(sh);
+                    if metrics.changed().await.is_err() {
+                        if let Some(sh) = shared.upgrade() {
+                            sh.edge.committed.close();
+                        }
+                        return;
+                    }
+                }
+            });
+        });
     }
 
     /// The HTTP address of the leader when another node leads (a follower
@@ -1894,6 +2200,16 @@ impl<S: Store + 'static> RaftReplicator<S> {
     #[cfg(test)]
     pub(crate) fn store_for_test(&self) -> Arc<S> {
         self.store.clone()
+    }
+
+    /// openraft's own `last_applied` (RSM numbering), for a test that checks
+    /// it never runs ahead of the store.
+    #[cfg(test)]
+    pub(crate) fn openraft_applied_for_test(&self) -> u64 {
+        self.metrics_now()
+            .and_then(|m| m.last_applied)
+            .map(|l| rsm_index(l.index))
+            .unwrap_or(0)
     }
 
     /// The segment reader for pop payloads (§7.5).
@@ -2286,6 +2602,15 @@ impl<S: Store + 'static> Replicator for RaftReplicator<S> {
 
     fn applied_notify(&self) -> Option<Arc<ApplyWake>> {
         Some(self.shared.applied_notify.clone())
+    }
+
+    /// The commit point exactly as openraft saves it in this node's log
+    /// (`LogStore::save_committed`): `(RSM index, term)` of the last committed
+    /// entry — the term OF that entry — moving forward only, the moment
+    /// openraft commits and before the entry is applied here; `(0, 0)` before
+    /// this run's first commit.
+    fn committed_watch(&self) -> Option<watch::Receiver<(u64, u64)>> {
+        Some(self.log.subscribe_committed())
     }
 
     async fn read_barrier(&self, deadline: Instant) -> Result<u64, ProposeError> {

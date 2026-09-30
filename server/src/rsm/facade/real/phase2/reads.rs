@@ -40,14 +40,6 @@ pub(super) struct Record {
     pub(super) encrypted: bool,
 }
 
-/// The overview's lag block ([`RaftFacade::lag_summary`]).
-pub(super) struct LagSummary {
-    pub(super) time_avg: i64,
-    pub(super) time_max: i64,
-    pub(super) offset_avg: i64,
-    pub(super) offset_max: i64,
-}
-
 /// The newest message stamp a partition can hold: no message in it is newer.
 fn newest_stamp(p: &PartitionRow) -> i64 {
     p.last_created_at_us.max(p.last_write_at_us)
@@ -879,51 +871,6 @@ impl RaftFacade {
         .map_err(|e| RsmError::Internal(format!("lag read: {e}")))?
         .map_err(read_error)?;
         Ok(ApiOut::json(200, Value::Array(rows).to_string()))
-    }
-
-    /// The tenant's lag right now, over every cursor (queue mode included):
-    /// `(avg, max)` of each queue's oldest unconsumed message age in seconds,
-    /// and `(avg, max)` of each queue's unconsumed count — the `lag` block of
-    /// `/api/v1/resources/overview` (`get_system_overview_v3`, 019 ≈513, reads
-    /// the same figures from `queen.stats`). Averages are over lagging queues.
-    pub(super) async fn lag_summary(&self, tenant: &str) -> Result<LagSummary, RsmError> {
-        let store = self.store.clone();
-        let qlog = self.qlog_reader.clone();
-        let reader = self.reader.clone();
-        let tenant = tenant.to_string();
-        let now = super::super::wall_micros();
-        let lags = tokio::task::spawn_blocking(move || {
-            store.read(|r| cursor_lags(r, qlog.as_ref(), &reader, &tenant, None, now))
-        })
-        .await
-        .map_err(|e| RsmError::Internal(format!("lag read: {e}")))?
-        .map_err(read_error)?;
-        // queue -> (max age s, max pending)
-        let mut per_queue: HashMap<String, (i64, u64)> = HashMap::new();
-        for l in &lags {
-            let e = per_queue.entry(l.queue.clone()).or_default();
-            e.0 = e.0.max(l.lag_seconds(now).unwrap_or(0));
-            e.1 = e.1.max(l.pending);
-        }
-        let mean = |v: Vec<i64>| {
-            if v.is_empty() {
-                0
-            } else {
-                v.iter().sum::<i64>() / v.len() as i64
-            }
-        };
-        let ages: Vec<i64> = per_queue.values().map(|x| x.0).filter(|x| *x > 0).collect();
-        let offs: Vec<i64> = per_queue
-            .values()
-            .map(|x| x.1 as i64)
-            .filter(|x| *x > 0)
-            .collect();
-        Ok(LagSummary {
-            time_max: ages.iter().copied().max().unwrap_or(0),
-            time_avg: mean(ages),
-            offset_max: offs.iter().copied().max().unwrap_or(0),
-            offset_avg: mean(offs),
-        })
     }
 
     pub(super) async fn api_trace_record(

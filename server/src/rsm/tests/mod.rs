@@ -26,6 +26,9 @@
 //! - [`apply_crash`] `kill -9` of a child process mid-apply, then re-apply
 //!   from the durable index and compare the digest with an uninterrupted run:
 //!   the crash half of the idempotence above.
+//! - [`apply_shards`] sharded apply (`QUEEN_RAFT_APPLY_SHARDS`) against the
+//!   one-thread path: the same entries at several shard counts leave the same
+//!   rows, files, qlog bytes, notifications, counts and refusal reports.
 //! - [`store_crash`] `kill -9` of a child process while it commits, and inside
 //!   an uncommitted transaction, then a reopen: the check G0 made WP-1.2 owe
 //!   for D9 — minus its durability leg, which only dropped unflushed writes on
@@ -37,9 +40,11 @@
 
 mod apply;
 mod apply_crash;
+mod apply_shards;
 mod batcher;
 mod dedup_txns;
 mod delete_race;
+mod edge;
 mod facade;
 mod facade_kv;
 mod fuzz;
@@ -48,8 +53,10 @@ mod golden;
 mod keep_overlay;
 mod kv;
 mod kv_crash;
+mod multipush;
 mod planner_ack;
 pub(super) mod planner_harness;
+mod planner_indexes;
 mod planner_overlay;
 mod planner_pop;
 mod planner_push;
@@ -59,6 +66,7 @@ mod qlog_read;
 mod qlog_shadow;
 mod qlog_wal;
 mod raft;
+mod raft_apply_ahead;
 mod raft_cluster;
 mod replicator;
 mod replicator_crash;

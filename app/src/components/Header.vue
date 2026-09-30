@@ -1,6 +1,26 @@
 <template>
   <div class="topbar-wrap">
   <header class="topbar">
+    <!-- Three parts: the page on the left, the broker in the middle, search
+         and the buttons on the right. The two sides share the rest equally,
+         so the middle is the bar's centre whatever the page is called. -->
+    <div class="topbar-side">
+    <!-- The sidebar's width: the full column or its rail of icons. A wide
+         screen only; below that the sidebar is a drawer with its own button
+         in this same corner. -->
+    <button
+      class="top-btn nav-toggle"
+      @click="toggleSidebar()"
+      :title="collapsed ? 'Expand sidebar (⌘\\)' : 'Collapse sidebar (⌘\\)'"
+      :aria-label="collapsed ? 'Expand sidebar' : 'Collapse sidebar'"
+      :aria-expanded="!collapsed"
+    >
+      <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+        <rect x="3" y="4.5" width="18" height="15" rx="2" />
+        <path d="M9 4.5v15" />
+      </svg>
+    </button>
+
     <div class="crumbs">
       <template v-if="parentCrumb">
         <router-link class="crumb-link" :to="parentCrumb.to">{{ parentCrumb.label }}</router-link>
@@ -8,7 +28,11 @@
       </template>
       <span class="here">{{ pageTitle }}</span>
     </div>
+    </div>
 
+    <BrokerBar />
+
+    <div class="topbar-side topbar-end">
     <div class="cmd-search" :class="{ open: searchOpen }" ref="searchContainer" @click="focusSearch">
       <svg style="width:14px; height:14px; flex-shrink:0;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
       <input
@@ -61,6 +85,7 @@
     <button class="top-btn" @click="handleRefresh" :disabled="isRefreshing" title="Refresh">
       <svg style="width:15px; height:15px;" :class="{ 'animate-spin': isRefreshing }" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.6"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"/></svg>
     </button>
+    </div>
   </header>
   </div>
 </template>
@@ -70,6 +95,8 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { queues as queuesApi, consumers as consumersApi } from '@/api'
 import { isDark, toggleTheme } from '@/composables/useTheme'
+import { collapsed, toggleSidebar, wide } from '@/composables/useSidebar'
+import BrokerBar from '@/components/BrokerBar.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -139,7 +166,11 @@ const loadSearchData = async () => {
   finally { searchLoading.value = false }
 }
 
-const handleKeydown = (e) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); focusSearch() } }
+const handleKeydown = (e) => {
+  if (!(e.metaKey || e.ctrlKey)) return
+  if (e.key.toLowerCase() === 'k') { e.preventDefault(); focusSearch() }
+  else if (e.key === '\\' && wide.value) { e.preventDefault(); toggleSidebar() }
+}
 
 const isRefreshing = ref(false)
 const handleRefresh = async () => {

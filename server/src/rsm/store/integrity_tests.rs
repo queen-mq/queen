@@ -5,8 +5,10 @@
 //! bytes; the checksum is pinned (a change is a FORMAT change); a byte flipped
 //! inside `data.mdb` is refused at the reopen and found by the scrub, naming the
 //! keyspace and the key; a value under the wrong key or keyspace fails like a
-//! flipped bit; a corrupt value found at runtime poisons THIS store only (every
-//! later call refused, the hook called once, no checkpoint written past it); the
+//! flipped bit; a corrupt value found at runtime — by a read with
+//! `verify_reads`, by the checkpoint or the scrub by default — poisons THIS
+//! store only (every later call refused, the hook called once, no checkpoint
+//! written past it); the
 //! format row is invisible to and refused by the keyspace API; a format-0 store
 //! opens unverified with migration off, is migrated once with it on, and a store
 //! that lost its format row or carries a newer format is refused; the digest is
@@ -44,6 +46,15 @@ fn opts() -> StoreOpts {
     StoreOpts {
         map_bytes: Some(64 << 20),
         ..Default::default()
+    }
+}
+
+/// `QUEEN_STORE_VERIFY_READS=1`: every RAM read verifies the value it serves
+/// (the default verifies at the checkpoint, the load and the scrub).
+fn verifying_opts() -> StoreOpts {
+    StoreOpts {
+        verify_reads: true,
+        ..opts()
     }
 }
 
@@ -468,8 +479,10 @@ fn a_flip_while_the_store_is_open_is_found_by_the_scrub_and_poisons_it() {
 
 #[test]
 fn a_value_under_the_wrong_key_or_in_the_wrong_keyspace_fails_its_check() {
+    // With `verify_reads` the READ meets it; by default the checkpoint and the
+    // scrub do (`a_value_damaged_in_ram_is_caught_at_the_checkpoint_by_default`).
     let d = Dir::new("misplaced");
-    let s = d.open(&opts());
+    let s = d.open(&verifying_opts());
     {
         let mut w = s.write().unwrap();
         w.put_raw(Keyspace::Queues, b"a", b"value-a").unwrap();
@@ -492,7 +505,7 @@ fn a_value_under_the_wrong_key_or_in_the_wrong_keyspace_fails_its_check() {
 
     // The same bytes under the same key in ANOTHER keyspace fail as well.
     let d = Dir::new("misplaced-ks");
-    let s = d.open(&opts());
+    let s = d.open(&verifying_opts());
     {
         let mut w = s.write().unwrap();
         w.put_raw(Keyspace::Queues, b"a", b"value-a").unwrap();
@@ -507,6 +520,124 @@ fn a_value_under_the_wrong_key_or_in_the_wrong_keyspace_fails_its_check() {
         .unwrap_err();
     assert_eq!(corrupt_value_of(&e), ("groups", b"a".to_vec()));
     s.close();
+
+    // A pid-indexed keyspace (a dense table), through `get_with` — the path
+    // every typed read takes.
+    let d = Dir::new("misplaced-dense");
+    let s = d.open(&verifying_opts());
+    {
+        let mut w = s.write().unwrap();
+        w.put_raw(Keyspace::Partitions, &keys::pid(1), b"row-1")
+            .unwrap();
+        w.put_raw(Keyspace::Partitions, &keys::pid(2), b"row-2")
+            .unwrap();
+        w.commit().unwrap();
+    }
+    let one = s
+        .ram_get_stored(Keyspace::Partitions, &keys::pid(1))
+        .unwrap();
+    s.ram_put_stored(Keyspace::Partitions, &keys::pid(2), &one);
+    let e = s
+        .read(|r| r.get_with(Keyspace::Partitions, &keys::pid(2), &mut |_v| {}))
+        .unwrap_err();
+    assert_eq!(corrupt_value_of(&e), ("partitions", keys::pid(2)));
+    s.close();
+}
+
+/// The DEFAULT path (`verify_reads` off): a value damaged in RAM is served by
+/// the read that meets it — the price of not hashing every read — but it never
+/// reaches the file. The checkpoint verifies every value it writes: it
+/// refuses, the store is poisoned (every later call refused, the hook called
+/// once), the file keeps its last good image, and the restart reloads it. The
+/// scrub finds the same damage without a checkpoint.
+#[test]
+fn a_value_damaged_in_ram_is_caught_at_the_checkpoint_by_default() {
+    for cut in [false, true] {
+        let d = Dir::new(if cut {
+            "ram-damage-cut"
+        } else {
+            "ram-damage-inline"
+        });
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let s = d.open(&StoreOpts {
+            on_corrupt: Some(CorruptHook::new(move |e| {
+                assert!(e.corrupt_store());
+                c.fetch_add(1, Ordering::SeqCst);
+            })),
+            ..opts()
+        });
+        fill(&s);
+        // The partition row's RAM copy is damaged after its put.
+        {
+            let mut w = s.write().unwrap();
+            w.put_raw(Keyspace::Partitions, &keys::pid(3), b"partition-row")
+                .unwrap();
+            w.put_raw(Keyspace::Cursors, b"c-canary", b"a newer cursor")
+                .unwrap();
+        }
+        let mut stored = s
+            .ram_get_stored(Keyspace::Partitions, &keys::pid(3))
+            .unwrap();
+        stored[1] ^= 0x10;
+        s.ram_put_stored(Keyspace::Partitions, &keys::pid(3), &stored);
+        // Served as it is: the read does not hash it.
+        s.read(|r| {
+            let got = r.get_raw(Keyspace::Partitions, &keys::pid(3))?.unwrap();
+            assert_ne!(got, b"partition-row");
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let mut w = s.write().unwrap();
+        let e = if cut {
+            let mut c = w.take_cut().unwrap().expect("a cut");
+            let e = s.write_cut(&mut c).unwrap_err();
+            s.restore_cut(c);
+            e
+        } else {
+            w.durable_commit().unwrap_err()
+        };
+        assert!(e.lost_durable_point(), "{e}");
+        assert!(e.to_string().contains("by the checkpoint"), "{e}");
+        let poison = s.poisoned().expect("the checkpoint poisons the store");
+        assert_eq!(corrupt_value_of(&poison), ("partitions", keys::pid(3)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the hook runs once");
+        assert!(w.put_raw(Keyspace::Queues, b"x", b"y").is_err());
+        drop(w);
+        assert!(s.read(|r| r.applied_index()).is_err());
+        s.close();
+
+        // The file kept the last good checkpoint: `fill`'s rows, and neither
+        // the damaged row nor the cursor written after it.
+        let s = d.open(&opts());
+        assert!(s.poisoned().is_none());
+        assert_filled(&s);
+        s.read(|r| {
+            assert!(r.get_raw(Keyspace::Partitions, &keys::pid(3))?.is_none());
+            Ok(())
+        })
+        .unwrap();
+        s.close();
+    }
+
+    // The scrub finds it too, without a checkpoint.
+    let d = Dir::new("ram-damage-scrub");
+    let s = d.open(&opts());
+    fill(&s);
+    {
+        let mut w = s.write().unwrap();
+        w.put_raw(Keyspace::Txns, &keys::txns(5, 0), b"txns-row")
+            .unwrap();
+    }
+    let mut stored = s.ram_get_stored(Keyspace::Txns, &keys::txns(5, 0)).unwrap();
+    stored[0] ^= 0x01;
+    s.ram_put_stored(Keyspace::Txns, &keys::txns(5, 0), &stored);
+    let e = s.scrub().unwrap_err();
+    assert_eq!(corrupt_value_of(&e), ("txns", keys::txns(5, 0)));
+    assert!(s.poisoned().is_some());
+    s.close();
 }
 
 #[test]
@@ -515,12 +646,14 @@ fn a_corrupt_value_at_runtime_poisons_this_store_only_and_writes_no_checkpoint_p
     let b_dir = Dir::new("node-b");
     let calls = Arc::new(AtomicUsize::new(0));
     let c = calls.clone();
+    // `verify_reads`: the read is what meets the damage here (by default the
+    // checkpoint is, `a_value_damaged_in_ram_is_caught_at_the_checkpoint_by_default`).
     let hooked = StoreOpts {
         on_corrupt: Some(CorruptHook::new(move |e| {
             assert!(e.corrupt_store());
             c.fetch_add(1, Ordering::SeqCst);
         })),
-        ..opts()
+        ..verifying_opts()
     };
     let a = a_dir.open(&hooked);
     let b = b_dir.open(&opts());

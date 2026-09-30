@@ -16,12 +16,15 @@ import {
   ackFailureSeverity,
   backlogSeverity,
   consumerGroupSeverity,
+  cpuShareSeverity,
+  diskSeverity,
   dlqGrowthSeverity,
   eventLoopSeverity,
   keepUpSeverity,
   lagMsSeverity,
   laggingPartitionsSeverity,
   lossSeverity,
+  memoryShareSeverity,
   numTone,
   pendingDriftSeverity,
   quorumSeverity,
@@ -248,6 +251,30 @@ test("the store map follows the broker's refusal gate", () => {
   assert.equal(storeMapSeverity(80), 'warn')
   assert.equal(storeMapSeverity(85), 'bad')            // pushes answer 507 storage_full
   assert.equal(storeMapSeverity(null), '')
+})
+
+test("a node's disk follows the node's own write gate", () => {
+  // Defaults QUEEN_RAFT_DISK_HIGH_PCT 85 / QUEEN_RAFT_DISK_LOW_PCT 80.
+  const gate = { highPct: 85, lowPct: 80 }
+  assert.equal(diskSeverity({ usedPct: 41, ...gate }), '')
+  assert.equal(diskSeverity({ usedPct: 79.9, ...gate }), '')
+  assert.equal(diskSeverity({ usedPct: 80, ...gate }), 'warn')
+  assert.equal(diskSeverity({ usedPct: 85, ...gate }), 'bad')     // writes answer 507
+  assert.equal(diskSeverity({ usedPct: 82, ...gate, refused: true }), 'bad') // closed, not yet below 80
+  assert.equal(diskSeverity({ usedPct: 99, ...gate, gate: false }), '')      // no gate, no lines
+  assert.equal(diskSeverity({ usedPct: null, ...gate }), '')
+})
+
+test('CPU and memory are shares of what the node may use', () => {
+  assert.equal(THRESHOLDS.cpuWarnShare, 0.9)
+  assert.equal(cpuShareSeverity(0.89), '')
+  assert.equal(cpuShareSeverity(0.9), 'warn')
+  assert.equal(cpuShareSeverity(1.4), 'warn')    // saturation is never red
+  assert.equal(cpuShareSeverity(null), '')
+  assert.equal(memoryShareSeverity(0.79), '')
+  assert.equal(memoryShareSeverity(0.8), 'warn')
+  assert.equal(memoryShareSeverity(0.9), 'bad')  // the kernel kills at the limit
+  assert.equal(memoryShareSeverity(null), '')
 })
 
 test('a quorum is broken only below a majority of voters', () => {

@@ -33,17 +33,15 @@
 //! has to carry the latest value of every hot row on every commit: for those
 //! rows it is a CHECKPOINT store.
 //!
-//! - **RAM keyspaces** ([`Keyspace::is_ram`]: `meta`, `queues`, `groups`,
-//!   `partitions`, `partitions_by_key`, `queue_partitions`, `cursors`,
-//!   `leases_by_worker`, `pending`, `counters`, `request_ids`,
-//!   `request_expiry`) are served from one ordered map per keyspace
-//!   ([`RamTable`]), loaded IN FULL at [`HeedStore::open`] with no dirty key.
-//!   A write mutates the map under its write lock and marks the key dirty (a
-//!   dirty key whose value is absent is a delete). A read — from the apply
-//!   thread's write handle or from any read handle — sees the map LIVE.
-//! - **LMDB-direct keyspaces** (`garbage`, `partition_files`, `dlq`,
-//!   `dlq_by_pos`, `dedup`, `txns`, `seg_loc`, `files`) are exactly what they
-//!   were: rows in the open write transaction, committed on the §11.3 cadence.
+//! - **RAM keyspaces** ([`Keyspace::is_ram`]: every keyspace since the final
+//!   Phase C split) are served from one table each ([`RamTable`], in the
+//!   container [`super::ram::layout`] picks), loaded IN FULL at
+//!   [`HeedStore::open`] with no dirty key. A write mutates the table under
+//!   the lock of the row's stripe and marks the key dirty (a dirty key whose
+//!   value is absent is a delete). A read — from the apply thread's write
+//!   handle, a shard writer or any read handle — sees the table LIVE.
+//! - **LMDB-direct keyspaces** (none today) would be exactly what they were:
+//!   rows in the open write transaction, committed on the §11.3 cadence.
 //!
 //! ## Commit semantics
 //!
@@ -86,32 +84,54 @@
 //!
 //! A RAM table holds every value in its STORED form, `value ‖ checksum`,
 //! sealed once by `put_raw`; the checkpoint copies those bytes to LMDB as they
-//! are, and the load at open reads them back into the tables, verifying every
-//! one (plus the key order and each B-tree's row count). Every read —
-//! `get_raw` and both scans, on either handle, RAM or LMDB — verifies the
-//! checksum and hands out the logical bytes only. The first mismatch found at
-//! runtime poisons the store ([`HeedStore::poisoned`]): from then on every
-//! read, write, commit, checkpoint and copy refuses with it, so nothing more is
-//! served from, or checkpointed over, a store known to be damaged.
+//! are, VERIFYING each one on the way (a value damaged in RAM never reaches
+//! the file), and the load at open reads them back into the tables, verifying
+//! every one (plus the key order and each B-tree's row count). The scrub walks
+//! both. A read hands out the logical bytes only; it verifies the checksum
+//! only with [`StoreOpts::verify_reads`] — the bytes it reads were sealed in
+//! this process a moment ago, and two xxh3 passes per read were a measured
+//! share of every planning lane. The first mismatch found at runtime poisons
+//! the store ([`HeedStore::poisoned`]): from then on every read, write,
+//! commit, checkpoint and copy refuses with it, so nothing more is served from,
+//! or checkpointed over, a store known to be damaged.
+//!
+//! # The RAM tables ([`super::ram`])
+//!
+//! Each keyspace's container is picked by [`super::ram::layout`]: the
+//! pid-keyed keyspaces live in a pid-indexed table striped over many locks,
+//! the rest in one B-tree each. Reads copy small values out under the table's
+//! read lock (or decode them there, [`super::Reads::get_with`]) rather than
+//! sharing them, so the writer can rewrite a value in its own allocation.
+//!
+//! # Concurrent writers ([`ShardWrite`])
+//!
+//! Besides the one write handle, any number of shard writers
+//! ([`HeedStore::shard_writer`]) may write the RAM tables at once, each a
+//! DIFFERENT set of keys: every mutation happens under the lock of the stripe
+//! or table that holds the row, dirty set included. The checkpoint cut is
+//! taken with no shard writer alive — the sharded apply's coordinator joins
+//! its shards before it commits — and a debug build asserts it.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap};
 use std::io::Write as _;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use heed::types::Bytes;
 use heed::{Database, Env, EnvFlags, EnvOpenOptions, RwTxn, WithTls};
 
 use super::integrity::{
-    self, CorruptHook, ScrubCursor, ScrubPhase, ScrubReport, StoreFormat, CHECKSUM_LEN, FORMAT_KEY,
+    self, CorruptHook, Mismatch, ScrubCursor, ScrubPhase, ScrubReport, StoreFormat, CHECKSUM_LEN,
+    FORMAT_KEY,
 };
+pub(crate) use super::ram::RamKey;
+use super::ram::{range_is_walkable, Arena, DirtyMap, PooledBuf, RamTable, RamVal, ScanBuf};
 use super::sigbus::{self, MapWatch};
 use super::{
     CheckpointCut, EntryGate, Keyspace, MapUsage, Result, Scope, Store, StoreError, StoreMetrics,
-    StoreOpts, MAX_DBS,
+    StoreOpts, UpsertFn, MAX_DBS,
 };
 
 /// Every keyspace's checksum seed, by slot ([`integrity::seeds`]).
@@ -122,12 +142,19 @@ type Seeds = [u64; Keyspace::ALL.len()];
 /// rule never hands LMDB a size it silently rounds down.
 pub const MAP_ROUND: usize = 1 << 16;
 
-/// How many rows a RAM scan copies out (two `Arc` clones each) under the read
-/// lock at a time. The callback NEVER runs under the lock, so a slow callback
-/// cannot stall the apply thread's writes, and a callback that reads — or, on
-/// the apply thread, writes — the same keyspace cannot deadlock against it
-/// (`std`'s `RwLock` may block a recursive read behind a waiting writer).
+/// How many rows a RAM scan copies out ([`ScanBuf`]) under the table's locks
+/// at a time. The callback NEVER runs under a lock, so a slow callback cannot
+/// stall the writers, and a callback that reads — or, on a write handle,
+/// writes — the same keyspace cannot deadlock against it (`std`'s `RwLock` may
+/// block a recursive read behind a waiting writer).
 const RAM_SCAN_CHUNK: usize = 256;
+
+/// [`ram_scan`]'s chunks grow from [`RAM_SCAN_FIRST`] rows to this many: a
+/// scan whose callback stops after a few rows copies few, and a long walk (the
+/// digest, a retention round) pays a dense table's per-window locks once per
+/// thousand rows rather than once per sixty-four.
+const RAM_SCAN_MAX_CHUNK: usize = 1024;
+const RAM_SCAN_FIRST: usize = 64;
 
 thread_local! {
     /// Pin 2. True while this thread is inside [`HeedStore::read`]. With
@@ -204,256 +231,26 @@ pub(crate) fn err(store: &HeedStore, e: heed::Error) -> StoreError {
 }
 
 // ---------------------------------------------------------------------------
-// RAM keyspaces (Phase C)
+// RAM keyspaces (Phase C): the tables are in `super::ram`
 // ---------------------------------------------------------------------------
 
-/// Values are `Arc`s so that a reader can take a row out from under the lock
-/// for the price of a reference count — a scan's chunk, a `get`'s arena.
-type RamVal = Arc<[u8]>;
-
-/// How many key bytes a [`RamKey`] keeps in place. 30 makes the key 32 bytes:
-/// the counters, cursors and partition rows fit (and save their own heap
-/// block), a `pending` key does not. 54 (every hot key inline) was 1.1x on
-/// consumption at 10M partitions but +21% resident memory (2026-09-29).
-const RAM_KEY_INLINE: usize = 30;
-
-/// A RAM key. Up to [`RAM_KEY_INLINE`] bytes live in the key itself, so in the
-/// tree's nodes: a lookup compares a node's keys where they sit instead of
-/// chasing one pointer per comparison (with millions of rows each chase was a
-/// cache miss: `RamTable::get` + `memcmp` were half of the apply thread at 10M
-/// partitions, 2026-09-29). Longer keys stay behind an `Arc`. Ordered, compared
-/// and hashed exactly as their bytes (`Borrow<[u8]>`), so every lookup, range
-/// and the dirty map read them as the byte keys they were.
-#[derive(Clone)]
-pub(crate) enum RamKey {
-    Inline(u8, [u8; RAM_KEY_INLINE]),
-    Heap(Arc<[u8]>),
-}
-
-impl RamKey {
-    fn bytes(&self) -> &[u8] {
-        match self {
-            RamKey::Inline(n, b) => &b[..*n as usize],
-            RamKey::Heap(a) => a,
-        }
-    }
-}
-
-impl From<&[u8]> for RamKey {
-    fn from(k: &[u8]) -> RamKey {
-        if k.len() <= RAM_KEY_INLINE {
-            let mut b = [0u8; RAM_KEY_INLINE];
-            b[..k.len()].copy_from_slice(k);
-            RamKey::Inline(k.len() as u8, b)
-        } else {
-            RamKey::Heap(Arc::from(k))
-        }
-    }
-}
-
-impl std::ops::Deref for RamKey {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        self.bytes()
-    }
-}
-
-impl std::borrow::Borrow<[u8]> for RamKey {
-    fn borrow(&self) -> &[u8] {
-        self.bytes()
-    }
-}
-
-impl PartialEq for RamKey {
-    fn eq(&self, o: &RamKey) -> bool {
-        self.bytes() == o.bytes()
-    }
-}
-
-impl Eq for RamKey {}
-
-impl PartialOrd for RamKey {
-    fn partial_cmp(&self, o: &RamKey) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(o))
-    }
-}
-
-impl Ord for RamKey {
-    fn cmp(&self, o: &RamKey) -> std::cmp::Ordering {
-        self.bytes().cmp(o.bytes())
-    }
-}
-
-impl std::hash::Hash for RamKey {
-    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
-        self.bytes().hash(h)
-    }
-}
-
-impl std::fmt::Debug for RamKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.bytes().fmt(f)
-    }
-}
-
-/// What one [`RamTable`]'s lock guards.
-struct RamRows {
-    /// The live rows, in `memcmp` order — LMDB's comparator, so every range
-    /// walk is the walk the LMDB keyspace would do.
-    map: BTreeMap<RamKey, RamVal>,
-    /// The rows changed since the last checkpoint, each with its value as of
-    /// its last write (`None` = deleted) — the same `Arc` the map holds, so a
-    /// checkpoint cut is a swap of this map, not a lookup per key. Only the
-    /// apply thread (the one writer) touches it; readers never do.
-    dirty: HashMap<RamKey, Option<RamVal>, crate::rsm::fasthash::FxBuild>,
-}
-
-/// One RAM keyspace: the live rows and their dirty set (module header).
-pub(crate) struct RamTable {
-    rows: RwLock<RamRows>,
-}
-
-impl RamTable {
-    fn loaded(rows: Vec<(RamKey, RamVal)>) -> RamTable {
-        RamTable {
-            rows: RwLock::new(RamRows {
-                // The rows come in key order off an LMDB cursor, so the
-                // collect's sort is a single linear pass before the bulk build.
-                map: rows.into_iter().collect(),
-                dirty: HashMap::default(),
-            }),
-        }
-    }
-
-    // A panic under the WRITE lock is an allocation failure inside one
-    // `BTreeMap`/`HashSet` operation, which leaves both structurally whole, so
-    // a poisoned lock is read through rather than turned into a second panic.
-    fn read(&self) -> RwLockReadGuard<'_, RamRows> {
-        self.rows.read().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn write(&self) -> RwLockWriteGuard<'_, RamRows> {
-        self.rows.write().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn get(&self, key: &[u8]) -> Option<RamVal> {
-        self.read().map.get(key).cloned()
-    }
-
-    fn put(&self, key: &[u8], val: RamVal) {
-        let (old, old_dirty) = {
-            let mut g = self.write();
-            let rows = &mut *g;
-            if let Some(slot) = rows.map.get_mut(key) {
-                let old = std::mem::replace(slot, val.clone());
-                let old_dirty = match rows.dirty.get_mut(key) {
-                    Some(d) => d.replace(val),
-                    None => {
-                        // First change since the checkpoint: the dirty map
-                        // shares the map's key allocation.
-                        let k = match rows.map.get_key_value(key) {
-                            Some((k, _)) => k.clone(),
-                            None => RamKey::from(key),
-                        };
-                        rows.dirty.insert(k, Some(val));
-                        None
-                    }
-                };
-                (Some(old), old_dirty)
-            } else {
-                let k: RamKey = RamKey::from(key);
-                let old_dirty = match rows.dirty.get_mut(key) {
-                    Some(d) => d.replace(val.clone()),
-                    None => {
-                        rows.dirty.insert(k.clone(), Some(val.clone()));
-                        None
-                    }
-                };
-                rows.map.insert(k, val);
-                (None, old_dirty)
-            }
-        };
-        // The replaced values are freed outside the lock.
-        drop(old);
-        drop(old_dirty);
-    }
-
-    /// Returns the removed value (freed by the caller, outside the lock).
-    fn remove(&self, key: &[u8]) -> Option<RamVal> {
-        let mut g = self.write();
-        let rows = &mut *g;
-        let (k, v) = rows.map.remove_entry(key)?;
-        // Already dirty: `insert` keeps the map's key and replaces the value.
-        rows.dirty.insert(k, None);
-        Some(v)
-    }
-
-    /// Empty the keyspace: every row it held becomes a dirty delete, so the
-    /// checkpoint loses them at the next durable cycle and not before.
-    fn clear(&self) {
-        let old = {
-            let mut g = self.write();
-            let rows = &mut *g;
-            let old = std::mem::take(&mut rows.map);
-            for k in old.keys() {
-                rows.dirty.insert(k.clone(), None);
-            }
-            old
-        };
-        drop(old);
-    }
-
-    /// Take the dirty rows, leaving an empty map (O(1) under the lock).
-    fn take_dirty(&self) -> HashMap<RamKey, Option<RamVal>, crate::rsm::fasthash::FxBuild> {
-        std::mem::take(&mut self.write().dirty)
-    }
-
-    /// Mark keys dirty again — a durable cycle that did not happen — with
-    /// their CURRENT values; a key written again since keeps that newer entry.
-    fn restore_dirty(&self, keys: Vec<RamKey>) {
-        let mut g = self.write();
-        let rows = &mut *g;
-        for k in keys {
-            if !rows.dirty.contains_key(&*k) {
-                let v = rows.map.get(&*k).cloned();
-                rows.dirty.insert(k, v);
-            }
-        }
-    }
-}
-
-/// Keep `v` alive for as long as the handle that owns `arena`, and hand out a
-/// slice of it borrowed for that long.
+/// Hand out, borrowed for as long as the handle that owns `arena`, the bytes
+/// the arena keeps for one read ([`Arena::hold`]).
 ///
 /// This is how `get_raw` keeps its `Option<&[u8]>` signature over a RAM row
-/// that the apply thread can replace or delete at any moment: the reader owns
-/// a reference to the value it was given.
-fn pin_in_arena(arena: &RefCell<Vec<RamVal>>, v: RamVal) -> &[u8] {
-    let p: *const [u8] = &*v;
-    arena.borrow_mut().push(v);
-    // SAFETY: `p` points into the heap allocation of the `Arc` just pushed
-    // into `arena`, and an `Arc`'s pointee never moves — growing the `Vec`
-    // moves the fat pointer, not the bytes. The allocation stays alive while
-    // `arena` holds that `Arc`, and `arena` only ever LOSES an element when
-    // (a) the handle that owns it is dropped, or (b) a `&mut self` method of
-    // [`HeedWrite`] clears it through `RefCell::get_mut`. Both need every
-    // `&self` borrow of the handle to have ended, and the returned slice is
-    // bounded by exactly such a borrow (the lifetime of `arena` here), so it
-    // can never outlive the `Arc` that keeps its bytes.
+/// that a writer can replace or delete at any moment: the reader owns a copy
+/// (or a reference) of the value it was given.
+#[inline]
+fn arena_slice(_arena: &RefCell<Arena>, p: *const [u8]) -> &[u8] {
+    // SAFETY: `p` points into bytes `arena` keeps — a block it allocated and
+    // never moves, or the heap allocation of an `Arc` it holds (an `Arc`'s
+    // pointee never moves). The arena only ever lets go of them when (a) the
+    // handle that owns it is dropped, or (b) a `&mut self` method of the handle
+    // clears it through `RefCell::get_mut`. Both need every `&self` borrow of
+    // the handle to have ended, and the returned slice is bounded by exactly
+    // such a borrow (the lifetime of `_arena` here), so it can never outlive
+    // the bytes.
     unsafe { &*p }
-}
-
-/// Whether `BTreeMap::range` accepts these bounds. It PANICS on an inverted
-/// range (and on an empty one with both ends excluded), where an LMDB cursor
-/// just yields nothing — so such a range is answered as empty, as LMDB does.
-fn range_is_walkable(lo: Bound<&[u8]>, hi: Bound<&[u8]>) -> bool {
-    match (lo, hi) {
-        (Bound::Unbounded, _) | (_, Bound::Unbounded) => true,
-        (Bound::Excluded(a), Bound::Excluded(b)) => a < b,
-        (Bound::Included(a) | Bound::Excluded(a), Bound::Included(b) | Bound::Excluded(b)) => {
-            a <= b
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -489,8 +286,15 @@ pub struct HeedStore {
     format: StoreFormat,
     /// `format.checksummed()`, read on every value access.
     checksummed: bool,
+    /// [`StoreOpts::verify_reads`]: every RAM read verifies its value's
+    /// checksum, not only the checkpoint, the load and the scrub.
+    verify_reads: bool,
     /// Every keyspace's checksum seed, by slot.
     seeds: Seeds,
+    /// Shard writers alive ([`HeedStore::shard_writer`]). A checkpoint cut is
+    /// taken with none (the contract of [`ShardWrite`]); debug builds assert
+    /// it.
+    shards: AtomicUsize,
     /// Set by the first corrupt value found at RUNTIME ([`HeedStore::poisoned`]):
     /// from then on every read, write, checkpoint and copy answers `poison`,
     /// so a node never serves a store it knows to be damaged.
@@ -683,7 +487,7 @@ impl HeedStore {
                     continue;
                 }
                 let rows = load_keyspace(&r, dbs[ks.slot()], ks, format, seeds[ks.slot()])?;
-                ram[ks.slot()] = Some(RamTable::loaded(rows));
+                ram[ks.slot()] = Some(RamTable::load(ks, rows));
             }
         }
         if format == StoreFormat::Legacy {
@@ -713,7 +517,9 @@ impl HeedStore {
             gate: EntryGate::new(),
             format,
             checksummed: format.checksummed(),
+            verify_reads: opts.verify_reads,
             seeds,
+            shards: AtomicUsize::new(0),
             poisoned: AtomicBool::new(false),
             poison: OnceLock::new(),
             on_corrupt: opts.on_corrupt.clone(),
@@ -734,7 +540,7 @@ impl HeedStore {
     /// last checkpoint). 0 for an LMDB-direct keyspace.
     #[cfg(test)]
     pub fn dirty_len(&self, ks: Keyspace) -> usize {
-        self.ram(ks).map(|t| t.read().dirty.len()).unwrap_or(0)
+        self.ram(ks).map(|t| t.dirty_len()).unwrap_or(0)
     }
 
     /// TEST ONLY: the row as the LMDB image holds it — for a RAM keyspace, the
@@ -780,7 +586,8 @@ impl HeedStore {
     #[cfg(test)]
     pub fn ram_put_stored(&self, ks: Keyspace, key: &[u8], stored: &[u8]) {
         if let Some(t) = self.ram(ks) {
-            t.put(key, Arc::from(stored));
+            let old = t.put_arc(key, Arc::from(stored));
+            drop(old);
         }
     }
 
@@ -906,15 +713,59 @@ impl HeedStore {
         }
     }
 
-    /// The stored form of `val` under `key`: sealed in format 1, as it is in
-    /// format 0. The ONE place a value's checksum is computed.
+    /// `put_raw` into a RAM table. Format 1: sealed HERE, where the value is
+    /// born — the checksum computed before the table's lock is taken, the lock
+    /// held for a copy — and the checkpoint carries these bytes to the file
+    /// unchanged. The ONE place a RAM value's checksum is computed.
     #[inline]
-    fn seal(&self, ks: Keyspace, key: &[u8], val: &[u8]) -> RamVal {
-        if self.checksummed {
-            integrity::seal_arc(self.seeds[ks.slot()], key, val)
-        } else {
-            Arc::from(val)
+    fn ram_put(&self, t: &RamTable, ks: Keyspace, key: &[u8], val: &[u8]) {
+        let (sum, n) = self.trailer(ks, key, val);
+        // A value the put could not rewrite in place is freed here, outside
+        // the table's lock.
+        let replaced = t.put(key, val, &sum[..n]);
+        drop(replaced);
+    }
+
+    /// `upsert_raw` into a RAM table: under the row's write lock, `f` gets the
+    /// logical bytes and writes the new logical value, sealed right there (the
+    /// checksum depends on it). Returns `(existed, logical bytes written)`, or
+    /// the corruption a stored value too short for its checksum is.
+    fn ram_upsert(
+        &self,
+        t: &RamTable,
+        ks: Keyspace,
+        key: &[u8],
+        scratch: &mut Vec<u8>,
+        f: &mut UpsertFn<'_>,
+    ) -> Result<(bool, Option<usize>)> {
+        let mut bad: Option<Mismatch> = None;
+        let mut written: Option<usize> = None;
+        let seed = self.seeds[ks.slot()];
+        let u = t.upsert(key, scratch, |stored, out| {
+            let cur = match stored.map(|s| self.logical(ks, key, s)) {
+                None => None,
+                Some(Ok(v)) => Some(v),
+                Some(Err(m)) => {
+                    bad = Some(m);
+                    return false;
+                }
+            };
+            if !f(cur, out) {
+                return false;
+            }
+            written = Some(out.len());
+            if self.checksummed {
+                let sum = integrity::checksum(seed, key, out);
+                out.extend_from_slice(&sum.to_le_bytes());
+            }
+            true
+        });
+        // A value the rewrite could not reuse is freed here, outside the lock.
+        drop(u.replaced);
+        if let Some(m) = bad {
+            return Err(self.corrupt_found(integrity::mismatch_error(ks, key, m, "by a read")));
         }
+        Ok((u.existed, written))
     }
 
     /// Verify a stored value and return its logical bytes (format 1), or the
@@ -927,6 +778,56 @@ impl HeedStore {
         match integrity::open(self.seeds[ks.slot()], key, stored) {
             Ok(v) => Ok(v),
             Err(m) => Err(self.corrupt_found(integrity::mismatch_error(ks, key, m, "by a read"))),
+        }
+    }
+
+    /// The logical bytes of a value read from a RAM table (format 1: the
+    /// stored bytes without their checksum).
+    ///
+    /// NOT verified unless [`StoreOpts::verify_reads`]: the value was sealed in
+    /// this process at its put, and the checksum is verified where the bytes
+    /// leave RAM or enter it — every checkpoint write, the load, the scrub.
+    /// What a read still refuses is a value too short to carry a checksum at
+    /// all, which is damage no slice can be cut from.
+    #[inline]
+    fn ram_value<'v>(&self, ks: Keyspace, key: &[u8], stored: &'v [u8]) -> Result<&'v [u8]> {
+        self.logical(ks, key, stored)
+            .map_err(|m| self.corrupt_found(integrity::mismatch_error(ks, key, m, "by a read")))
+    }
+
+    /// [`HeedStore::ram_value`] without its side effect: what a closure under
+    /// a table's lock may call (the poison and the hook run after the lock).
+    #[inline]
+    fn logical<'v>(
+        &self,
+        ks: Keyspace,
+        key: &[u8],
+        stored: &'v [u8],
+    ) -> std::result::Result<&'v [u8], Mismatch> {
+        if !self.checksummed {
+            return Ok(stored);
+        }
+        if self.verify_reads {
+            return integrity::open(self.seeds[ks.slot()], key, stored);
+        }
+        match stored.len().checked_sub(CHECKSUM_LEN) {
+            Some(n) => Ok(&stored[..n]),
+            None => Err(Mismatch::Short(stored.len())),
+        }
+    }
+
+    /// The trailer `put_raw` stores after `val` under `key`: its checksum in
+    /// format 1, nothing in format 0. Computed BEFORE the table's lock is
+    /// taken, so the lock covers a copy only.
+    #[inline]
+    fn trailer(&self, ks: Keyspace, key: &[u8], val: &[u8]) -> ([u8; CHECKSUM_LEN], usize) {
+        if self.checksummed {
+            (
+                integrity::checksum(self.seeds[ks.slot()], key, val).to_le_bytes(),
+                CHECKSUM_LEN,
+            )
+        } else {
+            ([0u8; CHECKSUM_LEN], 0)
         }
     }
 
@@ -989,19 +890,32 @@ impl HeedStore {
             scrub_image(&txn, &self.dbs, self.format, &self.seeds, "by the scrub")
         };
         if self.checksummed {
+            let mut buf = ScanBuf::new();
+            let mut after: Vec<u8> = Vec::new();
             for ks in Keyspace::ALL {
                 let Some(t) = self.ram(ks) else { continue };
                 let seed = self.seeds[ks.slot()];
-                let rows: Vec<(RamKey, RamVal)> = t
-                    .read()
-                    .map
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                for (k, v) in rows {
-                    if let Err(m) = integrity::open(seed, &k, &v) {
-                        report.fail(integrity::mismatch_error(ks, &k, m, "in RAM by the scrub"));
+                let mut first = true;
+                loop {
+                    buf.clear();
+                    let lo = if first {
+                        Bound::Unbounded
+                    } else {
+                        Bound::Excluded(&after[..])
+                    };
+                    t.copy_range(lo, Bound::Unbounded, false, RAM_SCAN_CHUNK, &mut buf);
+                    for i in 0..buf.len() {
+                        let (k, v) = (buf.key(i), buf.stored(i));
+                        if let Err(m) = integrity::open(seed, k, v) {
+                            report.fail(integrity::mismatch_error(ks, k, m, "in RAM by the scrub"));
+                        }
                     }
+                    if buf.len() < RAM_SCAN_CHUNK {
+                        break;
+                    }
+                    after.clear();
+                    after.extend_from_slice(buf.key(buf.len() - 1));
+                    first = false;
                 }
             }
         }
@@ -1075,34 +989,31 @@ impl HeedStore {
                 continue;
             };
             let take = left.min(RAM_SCAN_CHUNK);
-            let rows: Vec<(RamKey, RamVal)> = {
-                let g = t.read();
+            let mut buf = ScanBuf::new();
+            {
                 let lo = match &cur.after {
                     Some(a) => Bound::Excluded(&a[..]),
                     None => Bound::Unbounded,
                 };
-                g.map
-                    .range::<[u8], _>((lo, Bound::Unbounded))
-                    .take(take)
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect()
-            };
+                t.copy_range(lo, Bound::Unbounded, false, take, &mut buf);
+            }
             let seed = self.seeds[ks.slot()];
-            for (k, v) in &rows {
+            for i in 0..buf.len() {
+                let (k, v) = (buf.key(i), buf.stored(i));
                 if let Err(m) = integrity::open(seed, k, v) {
                     let e = integrity::mismatch_error(ks, k, m, "in RAM by the scrub");
                     return Err(self.corrupt_found(e));
                 }
             }
-            left -= rows.len();
-            cur.rows += rows.len() as u64;
-            StoreMetrics::inc(&self.metrics.scrubbed_rows, rows.len() as u64);
-            match rows.last() {
-                Some((k, _)) if rows.len() == take => cur.after = Some(k.to_vec()),
-                _ => {
-                    cur.slot += 1;
-                    cur.after = None;
-                }
+            let got = buf.len();
+            left -= got;
+            cur.rows += got as u64;
+            StoreMetrics::inc(&self.metrics.scrubbed_rows, got as u64);
+            if got == take && got > 0 {
+                cur.after = Some(buf.key(got - 1).to_vec());
+            } else {
+                cur.slot += 1;
+                cur.after = None;
             }
         }
         if self.checksummed && cur.slot < n {
@@ -1130,7 +1041,8 @@ impl HeedStore {
     }
 
     /// The checkpoint half of a durable cycle: write every dirty RAM key into
-    /// `txn` — its current value, or a delete when it is gone — in key order.
+    /// `txn` — its current value, or a delete when it is gone — in key order,
+    /// each value VERIFIED on its way to the file.
     ///
     /// The keys taken are appended to `taken` BEFORE they are written, so a
     /// caller whose cycle fails at any later step (a put here, the commit, the
@@ -1140,13 +1052,17 @@ impl HeedStore {
         txn: &mut RwTxn<'_>,
         taken: &mut Vec<(usize, Vec<RamKey>)>,
     ) -> Result<()> {
+        self.assert_no_shard("a durable cycle");
+        let mut maps: Vec<DirtyMap> = Vec::new();
         for ks in Keyspace::ALL {
             let Some(t) = self.ram(ks) else { continue };
-            let dirty = t.take_dirty();
-            if dirty.is_empty() {
+            maps.clear();
+            t.take_dirty(&mut maps);
+            let mut pairs: Vec<(RamKey, Option<RamVal>)> =
+                maps.drain(..).flat_map(|m| m.into_iter()).collect();
+            if pairs.is_empty() {
                 continue;
             }
-            let mut pairs: Vec<(RamKey, Option<RamVal>)> = dirty.into_iter().collect();
             // Key order: LMDB's B-tree is written leaf after leaf, not at
             // random.
             pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
@@ -1154,7 +1070,10 @@ impl HeedStore {
             let db = *self.db(ks);
             for (k, v) in &pairs {
                 match v {
-                    Some(v) => db.put(txn, k, v).map_err(|e| err(self, e))?,
+                    Some(v) => {
+                        self.check_for_file(ks, k, v)?;
+                        db.put(txn, k, v).map_err(|e| err(self, e))?
+                    }
                     None => {
                         db.delete(txn, k).map_err(|e| err(self, e))?;
                     }
@@ -1174,22 +1093,56 @@ impl HeedStore {
         }
     }
 
+    /// A value on its way to the file (format 1): VERIFIED, since a read no
+    /// longer checks every value it serves. A value damaged in RAM since its
+    /// put stops here: the store is poisoned and the checkpoint fails, so the
+    /// file keeps its last good image and the next boot reloads it.
+    #[inline]
+    fn check_for_file(&self, ks: Keyspace, k: &[u8], v: &[u8]) -> Result<()> {
+        if !self.checksummed {
+            return Ok(());
+        }
+        match integrity::open(self.seeds[ks.slot()], k, v) {
+            Ok(_) => Ok(()),
+            Err(m) => Err(self.corrupt_found(integrity::mismatch_error(
+                ks,
+                k,
+                m,
+                "in RAM by the checkpoint",
+            ))),
+        }
+    }
+
+    /// Debug builds: the checkpoint cut is taken with no shard writer alive
+    /// (the contract of [`ShardWrite`]).
+    #[inline]
+    fn assert_no_shard(&self, what: &str) {
+        debug_assert_eq!(
+            self.shards.load(Ordering::Acquire),
+            0,
+            "{what} with a shard writer alive: the sharded apply joins its shards first"
+        );
+        let _ = what;
+    }
+
     /// The checkpoint CUT: every RAM keyspace's dirty rows, each with its
-    /// value as of its last write. Only the single writer calls it, between
-    /// entries, so those values ARE the store's image at this point; taking
-    /// them is a swap of each keyspace's dirty map (O(1) under its lock), and
-    /// the sort into key order is left to the checkpoint thread.
+    /// value as of its last write. Taken between entries, with no shard writer
+    /// alive, so those values ARE the store's image at this point; taking them
+    /// is a swap of each dirty set (O(stripes) under the locks), and the sort
+    /// into key order is left to the checkpoint thread.
     fn cut_dirty(&self) -> CheckpointCut {
+        self.assert_no_shard("a checkpoint cut");
         let mut rows = Vec::new();
         let mut keys_total = 0usize;
         for ks in Keyspace::ALL {
             let Some(t) = self.ram(ks) else { continue };
-            let dirty = t.take_dirty();
-            if dirty.is_empty() {
+            let mut maps: Vec<DirtyMap> = Vec::new();
+            t.take_dirty(&mut maps);
+            if maps.is_empty() {
                 continue;
             }
-            keys_total += dirty.len();
-            rows.push((ks, dirty.into_iter().collect::<Vec<_>>()));
+            keys_total += maps.iter().map(|m| m.len()).sum::<usize>();
+            rows.push((ks, maps));
         }
         CheckpointCut {
             rows,
@@ -1198,22 +1151,27 @@ impl HeedStore {
     }
 
     /// Write a cut: ONE LMDB write transaction with every row (a put, or a
-    /// delete), its commit, then the environment sync. Any error leaves LMDB at
-    /// the previous checkpoint (the transaction aborts on drop, or the commit
-    /// is not synced and is superseded by the next one).
-    fn write_cut_inner(&self, cut: &mut CheckpointCut) -> Result<()> {
+    /// delete, each value verified on its way), its commit, then the
+    /// environment sync. Any error leaves LMDB at the previous checkpoint (the
+    /// transaction aborts on drop, or the commit is not synced and is
+    /// superseded by the next one).
+    fn write_cut_inner(&self, cut: &CheckpointCut) -> Result<()> {
         // The transaction walks the B-tree through the map to find each leaf.
         let _watch = MapWatch::new(&self.sigbus);
-        // Key order: LMDB's B-tree is written leaf after leaf, not at random.
-        for (_, pairs) in cut.rows.iter_mut() {
-            pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        }
         let mut txn = self.env.write_txn().map_err(|e| err(self, e))?;
-        for (ks, pairs) in &cut.rows {
+        for (ks, maps) in &cut.rows {
+            // Key order: LMDB's B-tree is written leaf after leaf, not at
+            // random.
+            let mut pairs: Vec<(&RamKey, &Option<RamVal>)> =
+                maps.iter().flat_map(|m| m.iter()).collect();
+            pairs.sort_unstable_by(|a, b| a.0.cmp(b.0));
             let db = *self.db(*ks);
             for (k, v) in pairs {
                 match v {
-                    Some(v) => db.put(&mut txn, k, v).map_err(|e| err(self, e))?,
+                    Some(v) => {
+                        self.check_for_file(*ks, k, v)?;
+                        db.put(&mut txn, k, v).map_err(|e| err(self, e))?
+                    }
                     None => {
                         db.delete(&mut txn, k).map_err(|e| err(self, e))?;
                     }
@@ -1226,9 +1184,9 @@ impl HeedStore {
 
     /// A cut that was not written: its keys go back to their dirty sets.
     fn restore_cut_inner(&self, cut: CheckpointCut) {
-        for (ks, pairs) in cut.rows {
+        for (ks, maps) in cut.rows {
             if let Some(t) = self.ram(ks) {
-                t.restore_dirty(pairs.into_iter().map(|(k, _)| k).collect());
+                t.restore_dirty(maps.into_iter().flat_map(|m| m.into_keys()));
             }
         }
     }
@@ -1245,6 +1203,11 @@ impl HeedStore {
 impl Store for HeedStore {
     type Read<'s> = HeedRead<'s>;
     type Write<'s> = HeedWrite<'s>;
+    type Shard<'s> = ShardWrite<'s>;
+
+    fn shard_writer(&self) -> Result<ShardWrite<'_>> {
+        HeedStore::shard_writer(self)
+    }
 
     fn read<R>(&self, f: impl FnOnce(&HeedRead<'_>) -> Result<R>) -> Result<R> {
         // Format 1: a store that found a corrupt value serves nothing more.
@@ -1256,7 +1219,7 @@ impl Store for HeedStore {
         let handle = HeedRead {
             store: self,
             txn,
-            arena: RefCell::new(Vec::new()),
+            arena: RefCell::new(Arena::new()),
         };
         f(&handle)
     }
@@ -1282,7 +1245,8 @@ impl Store for HeedStore {
                 store: self,
                 txn: None,
                 poison: None,
-                arena: RefCell::new(Vec::new()),
+                arena: RefCell::new(Arena::new()),
+                scratch: Vec::new(),
             });
         }
         let txn = match self.env.write_txn() {
@@ -1297,7 +1261,8 @@ impl Store for HeedStore {
             store: self,
             txn: Some(txn),
             poison: None,
-            arena: RefCell::new(Vec::new()),
+            arena: RefCell::new(Arena::new()),
+            scratch: Vec::new(),
         })
     }
 
@@ -1323,12 +1288,7 @@ impl Store for HeedStore {
     fn ram_stats(&self) -> Vec<(&'static str, usize, usize)> {
         Keyspace::ALL
             .iter()
-            .filter_map(|ks| {
-                self.ram(*ks).map(|t| {
-                    let g = t.read();
-                    (ks.name(), g.map.len(), g.dirty.len())
-                })
-            })
+            .filter_map(|ks| self.ram(*ks).map(|t| (ks.name(), t.len(), t.dirty_len())))
             .collect()
     }
 
@@ -1507,11 +1467,12 @@ fn scan_with<'t>(
 /// prefix belt, `limit` (a limit of 0 still hands over the first row, as the
 /// LMDB walk does) and early stop.
 ///
-/// The rows are copied out in chunks of [`RAM_SCAN_CHUNK`] under the read lock
-/// and handed to `cb` with the lock released; the next chunk resumes strictly
-/// past the last key handed over. Every key is therefore seen at most once and
-/// in order, each with its value as of its chunk — the live, read-uncommitted
-/// view the module header describes.
+/// The rows are copied out in chunks of [`RAM_SCAN_FIRST`] to
+/// [`RAM_SCAN_MAX_CHUNK`] rows under the table's locks
+/// ([`RamTable::copy_range`]) and handed to `cb` with no lock held; the
+/// next chunk resumes strictly past the last key handed over. Every key is
+/// therefore seen at most once and in order, each with its value as of its
+/// chunk — the live, read-uncommitted view the module header describes.
 #[allow(clippy::too_many_arguments)]
 fn ram_scan(
     store: &HeedStore,
@@ -1534,43 +1495,45 @@ fn ram_scan(
     let (lo, hi) = scan_bounds(from, prefix, end.as_deref(), rev);
     let want = limit.max(1);
     let mut n = 0usize;
-    let mut buf: Vec<(RamKey, RamVal)> = Vec::with_capacity(want.min(RAM_SCAN_CHUNK));
-    let mut last: Option<RamKey> = None;
+    let mut buf = PooledBuf::take();
+    let mut last: Vec<u8> = Vec::new();
+    let mut have_last = false;
+    let mut chunk = RAM_SCAN_FIRST;
     loop {
-        let take = (want - n).min(RAM_SCAN_CHUNK);
+        let take = (want - n).min(chunk);
+        chunk = (chunk * 2).min(RAM_SCAN_MAX_CHUNK);
         {
-            let (clo, chi) = match (&last, rev) {
-                (None, _) => (lo, hi),
-                (Some(k), false) => (Bound::Excluded(&**k), hi),
-                (Some(k), true) => (lo, Bound::Excluded(&**k)),
+            let (clo, chi) = match (have_last, rev) {
+                (false, _) => (lo, hi),
+                (true, false) => (Bound::Excluded(&last[..]), hi),
+                (true, true) => (lo, Bound::Excluded(&last[..])),
             };
             if !range_is_walkable(clo, chi) {
                 break;
             }
-            let g = table.read();
-            let it = g.map.range::<[u8], _>((clo, chi));
-            if rev {
-                buf.extend(it.rev().take(take).map(|(k, v)| (k.clone(), v.clone())));
-            } else {
-                buf.extend(it.take(take).map(|(k, v)| (k.clone(), v.clone())));
-            }
+            buf.clear();
+            table.copy_range(clo, chi, rev, take, &mut buf);
         }
-        let exhausted = buf.len() < take;
-        for (k, v) in buf.drain(..) {
+        let got = buf.len();
+        for i in 0..got {
+            let k = buf.key(i);
             if !prefix.is_empty() && !k.starts_with(prefix) {
                 return Ok(n);
             }
-            // Verified here, off the table's lock, before the callback sees it.
-            let val = store.open_value(ks, &k, &v)?;
+            // The logical bytes (verified too with `verify_reads`), off the
+            // table's locks, before the callback sees them.
+            let val = store.ram_value(ks, k, buf.stored(i))?;
             n += 1;
-            if !cb(&k, val) || n >= want {
+            if !cb(k, val) || n >= want {
                 return Ok(n);
             }
-            last = Some(k);
         }
-        if exhausted {
+        if got < take {
             break;
         }
+        last.clear();
+        last.extend_from_slice(buf.key(got - 1));
+        have_last = true;
     }
     Ok(n)
 }
@@ -1578,6 +1541,54 @@ fn ram_scan(
 // ---------------------------------------------------------------------------
 // The read handle
 // ---------------------------------------------------------------------------
+
+/// `get_raw` over a RAM table: the stored value copied (or, when large,
+/// pinned) into the handle's `arena` under the table's read lock, and its
+/// logical bytes handed out, borrowed for as long as the handle.
+#[inline]
+fn ram_get<'a>(
+    store: &HeedStore,
+    t: &RamTable,
+    arena: &'a RefCell<Arena>,
+    ks: Keyspace,
+    key: &[u8],
+) -> Result<Option<&'a [u8]>> {
+    let held = {
+        let mut a = arena.borrow_mut();
+        t.with(key, |v| a.hold(v))
+    };
+    match held {
+        None => Ok(None),
+        Some(p) => store.ram_value(ks, key, arena_slice(arena, p)).map(Some),
+    }
+}
+
+/// `get_with` over a RAM table: `f` over the logical bytes, under the table's
+/// read lock — no copy, no reference count, nothing kept by the handle.
+#[inline]
+fn ram_get_with(
+    store: &HeedStore,
+    t: &RamTable,
+    ks: Keyspace,
+    key: &[u8],
+    f: &mut dyn FnMut(&[u8]),
+) -> Result<bool> {
+    let got = t.with(key, |v| match store.logical(ks, key, v) {
+        Ok(b) => {
+            f(b);
+            Ok(())
+        }
+        Err(m) => Err(m),
+    });
+    match got {
+        None => Ok(false),
+        Some(Ok(())) => Ok(true),
+        // The hook runs here, with the table's lock released.
+        Some(Err(m)) => {
+            Err(store.corrupt_found(integrity::mismatch_error(ks, key, m, "by a read")))
+        }
+    }
+}
 
 /// A read transaction. Cannot be `Send` (thread-local reader slots) and cannot
 /// outlive the [`Store::read`] call that made it.
@@ -1587,9 +1598,9 @@ fn ram_scan(
 pub struct HeedRead<'s> {
     store: &'s HeedStore,
     txn: heed::RoTxn<'s, WithTls>,
-    /// The RAM values this handle has returned from `get_raw`, kept alive for
-    /// as long as the handle ([`pin_in_arena`]).
-    arena: RefCell<Vec<RamVal>>,
+    /// The RAM values this handle has returned from `get_raw`, kept for as
+    /// long as the handle ([`Arena`], [`arena_slice`]).
+    arena: RefCell<Arena>,
 }
 
 impl super::Reads for HeedRead<'_> {
@@ -1601,13 +1612,7 @@ impl super::Reads for HeedRead<'_> {
         self.store.check_key(ks, key)?;
         self.store.check_poison()?;
         if let Some(t) = self.store.ram(ks) {
-            return match t.get(key) {
-                None => Ok(None),
-                Some(v) => {
-                    let stored = pin_in_arena(&self.arena, v);
-                    self.store.open_value(ks, key, stored).map(Some)
-                }
-            };
+            return ram_get(self.store, t, &self.arena, ks, key);
         }
         if is_format_row(ks, key) {
             return Ok(None);
@@ -1620,6 +1625,21 @@ impl super::Reads for HeedRead<'_> {
         {
             None => Ok(None),
             Some(stored) => self.store.open_value(ks, key, stored).map(Some),
+        }
+    }
+
+    fn get_with(&self, ks: Keyspace, key: &[u8], f: &mut dyn FnMut(&[u8])) -> Result<bool> {
+        self.store.check_key(ks, key)?;
+        self.store.check_poison()?;
+        if let Some(t) = self.store.ram(ks) {
+            return ram_get_with(self.store, t, ks, key, f);
+        }
+        match self.get_raw(ks, key)? {
+            Some(v) => {
+                f(v);
+                Ok(true)
+            }
+            None => Ok(false),
         }
     }
 
@@ -1652,6 +1672,25 @@ impl super::Reads for HeedRead<'_> {
         }
         scan_with(self.store, &self.txn, ks, from, prefix, limit, true, cb)
     }
+
+    fn count(&self, ks: Keyspace) -> Result<u64> {
+        self.store.check_poison()?;
+        match self.store.ram(ks) {
+            // The table's own row counts, not a walk of every row.
+            Some(t) => Ok(t.len() as u64),
+            None => ram_count_by_scan(self, ks),
+        }
+    }
+}
+
+/// [`super::Reads::count`]'s walk, for a keyspace outside RAM.
+fn ram_count_by_scan<R: super::Reads + ?Sized>(r: &R, ks: Keyspace) -> Result<u64> {
+    let mut n = 0u64;
+    r.scan_raw(ks, &[], &[], usize::MAX, &mut |_k, _v| {
+        n += 1;
+        true
+    })?;
+    Ok(n)
 }
 
 /// The adapter's own format row ([`integrity::FORMAT_KEY`] in `meta`), which
@@ -1696,11 +1735,12 @@ pub struct HeedWrite<'s> {
     /// is closed", which `fatal()` would read as continuable.
     poison: Option<StoreError>,
     /// The RAM values `get_raw` has returned since the last `&mut self` call,
-    /// kept alive for the `&self` borrows they were returned under
-    /// ([`pin_in_arena`]). Every `&mut self` method clears it first — no
-    /// borrow can be outstanding then — so it never grows past one run of
-    /// reads.
-    arena: RefCell<Vec<RamVal>>,
+    /// kept for the `&self` borrows they were returned under ([`Arena`],
+    /// [`arena_slice`]). Every `&mut self` method clears it first — no borrow
+    /// can be outstanding then — so it never grows past one run of reads.
+    arena: RefCell<Arena>,
+    /// `upsert_raw`'s buffer, kept between calls.
+    scratch: Vec<u8>,
 }
 
 impl Drop for HeedWrite<'_> {
@@ -1879,8 +1919,8 @@ impl<'s> HeedWrite<'s> {
             StoreMetrics::inc(&self.store.metrics.commits, 1);
             return Ok(());
         }
-        let mut cut = self.store.cut_dirty();
-        match self.store.write_cut_inner(&mut cut) {
+        let cut = self.store.cut_dirty();
+        match self.store.write_cut_inner(&cut) {
             Ok(()) => {
                 StoreMetrics::inc(&self.store.metrics.durable_commits, 1);
                 Ok(())
@@ -1919,13 +1959,7 @@ impl super::Reads for HeedWrite<'_> {
         self.store.check_key(ks, key)?;
         if let Some(t) = self.store.ram(ks) {
             self.usable()?;
-            return match t.get(key) {
-                None => Ok(None),
-                Some(v) => {
-                    let stored = pin_in_arena(&self.arena, v);
-                    self.store.open_value(ks, key, stored).map(Some)
-                }
-            };
+            return ram_get(self.store, t, &self.arena, ks, key);
         }
         if is_format_row(ks, key) {
             return Ok(None);
@@ -1938,6 +1972,21 @@ impl super::Reads for HeedWrite<'_> {
         {
             None => Ok(None),
             Some(stored) => self.store.open_value(ks, key, stored).map(Some),
+        }
+    }
+
+    fn get_with(&self, ks: Keyspace, key: &[u8], f: &mut dyn FnMut(&[u8])) -> Result<bool> {
+        self.store.check_key(ks, key)?;
+        if let Some(t) = self.store.ram(ks) {
+            self.usable()?;
+            return ram_get_with(self.store, t, ks, key, f);
+        }
+        match self.get_raw(ks, key)? {
+            Some(v) => {
+                f(v);
+                Ok(true)
+            }
+            None => Ok(false),
         }
     }
 
@@ -1972,6 +2021,16 @@ impl super::Reads for HeedWrite<'_> {
         let txn = self.txn()?;
         scan_with(self.store, txn, ks, from, prefix, limit, true, cb)
     }
+
+    fn count(&self, ks: Keyspace) -> Result<u64> {
+        match self.store.ram(ks) {
+            Some(t) => {
+                self.usable()?;
+                Ok(t.len() as u64)
+            }
+            None => ram_count_by_scan(self, ks),
+        }
+    }
 }
 
 impl super::Writes for HeedWrite<'_> {
@@ -1985,9 +2044,7 @@ impl super::Writes for HeedWrite<'_> {
         let n = (key.len() + val.len()) as u64;
         if let Some(t) = store.ram(ks) {
             self.usable()?;
-            // Format 1: sealed HERE, where the value is born; the checkpoint
-            // carries these bytes to the file unchanged.
-            t.put(key, store.seal(ks, key, val));
+            store.ram_put(t, ks, key, val);
         } else {
             let db = *store.db(ks);
             let (checksummed, seed) = (store.checksummed, store.seeds[ks.slot()]);
@@ -2005,6 +2062,31 @@ impl super::Writes for HeedWrite<'_> {
         StoreMetrics::inc(&store.metrics.rows_put, 1);
         StoreMetrics::inc(&store.metrics.logical_bytes, n);
         Ok(())
+    }
+
+    fn upsert_raw(&mut self, ks: Keyspace, key: &[u8], f: &mut UpsertFn<'_>) -> Result<bool> {
+        self.release_arena();
+        self.store.check_key(ks, key)?;
+        if is_format_row(ks, key) {
+            return Err(format_row_refused());
+        }
+        let store = self.store;
+        let Some(t) = store.ram(ks) else {
+            // No keyspace is outside RAM today: the read-then-write default.
+            let cur = super::Reads::get_raw(self, ks, key)?.map(<[u8]>::to_vec);
+            let mut out = Vec::new();
+            if f(cur.as_deref(), &mut out) {
+                self.put_raw(ks, key, &out)?;
+            }
+            return Ok(cur.is_some());
+        };
+        self.usable()?;
+        let (existed, written) = store.ram_upsert(t, ks, key, &mut self.scratch, f)?;
+        if let Some(n) = written {
+            StoreMetrics::inc(&store.metrics.rows_put, 1);
+            StoreMetrics::inc(&store.metrics.logical_bytes, (key.len() + n) as u64);
+        }
+        Ok(existed)
     }
 
     fn del_raw(&mut self, ks: Keyspace, key: &[u8]) -> Result<bool> {
@@ -2036,31 +2118,8 @@ impl super::Writes for HeedWrite<'_> {
         prefix: &[u8],
         limit: usize,
     ) -> Result<(usize, Option<Vec<u8>>)> {
-        use super::Reads;
         self.release_arena();
-        // Collect first, delete second: the iterator borrows the transaction
-        // immutably and `delete` needs it mutably. `limit` bounds the buffer,
-        // which is what makes a `DeleteChunk` bounded (§5.2 rules).
-        let mut victims: Vec<Vec<u8>> = Vec::with_capacity(limit.min(4096));
-        self.scan_raw(ks, from, prefix, limit, &mut |k, _v| {
-            victims.push(k.to_vec());
-            true
-        })?;
-        let mut resume: Option<Vec<u8>> = None;
-        if victims.len() == limit {
-            // One past the last deleted key. NOT `last ‖ 0x00`: for a key at
-            // the engine's limit that is a key the engine cannot hold, and
-            // every later chunk would be refused with `KeyTooLong` — see
-            // [`super::resume_after`]. `None` means no storable key is
-            // greater, so the range is exhausted.
-            if let Some(last) = victims.last() {
-                resume = super::resume_after(last, self.store.max_key);
-            }
-        }
-        for k in &victims {
-            self.del_raw(ks, k)?;
-        }
-        Ok((victims.len(), resume))
+        delete_range_via(self, self.store.max_key, ks, from, prefix, limit)
     }
 
     fn commit(&mut self) -> Result<()> {
@@ -2124,12 +2183,282 @@ impl super::Writes for HeedWrite<'_> {
 
     fn clear_node_local(&mut self) -> Result<()> {
         self.release_arena();
+        // Every row of a keyspace at once: no other writer may be in it.
+        self.store
+            .assert_no_shard("clearing the node-local keyspaces");
         for ks in Keyspace::ALL {
             if ks.scope() == Scope::NodeLocal {
                 self.clear(ks)?;
             }
         }
         Ok(())
+    }
+}
+
+/// `delete_range` of both writing handles: collect first, delete second (the
+/// scan hands out keys the deletes then need). `limit` bounds the buffer,
+/// which is what makes a `DeleteChunk` bounded (§5.2 rules).
+fn delete_range_via<W: super::Writes + ?Sized>(
+    w: &mut W,
+    max_key: usize,
+    ks: Keyspace,
+    from: &[u8],
+    prefix: &[u8],
+    limit: usize,
+) -> Result<(usize, Option<Vec<u8>>)> {
+    let mut victims: Vec<Vec<u8>> = Vec::with_capacity(limit.min(4096));
+    w.scan_raw(ks, from, prefix, limit, &mut |k, _v| {
+        victims.push(k.to_vec());
+        true
+    })?;
+    let mut resume: Option<Vec<u8>> = None;
+    if victims.len() == limit {
+        // One past the last deleted key. NOT `last ‖ 0x00`: for a key at the
+        // engine's limit that is a key the engine cannot hold, and every later
+        // chunk would be refused with `KeyTooLong` — see
+        // [`super::resume_after`]. `None` means no storable key is greater, so
+        // the range is exhausted.
+        if let Some(last) = victims.last() {
+            resume = super::resume_after(last, max_key);
+        }
+    }
+    for k in &victims {
+        w.del_raw(ks, k)?;
+    }
+    Ok((victims.len(), resume))
+}
+
+// ---------------------------------------------------------------------------
+// Shard writers (the sharded apply)
+// ---------------------------------------------------------------------------
+
+/// A concurrent writer of the RAM keyspaces ([`HeedStore::shard_writer`]).
+///
+/// The sharded apply runs the effects of different partitions on different
+/// threads, each with one of these, while its coordinator keeps the write
+/// handle. A shard writer reads and writes the live RAM tables exactly as the
+/// write handle does — `put_raw` seals the value, every write marks its key
+/// dirty, a read sees every writer's rows at once — so the next checkpoint
+/// carries what it wrote. The typed reads and writes are its too
+/// ([`super::TypedReads`], [`super::TypedWrites`]).
+///
+/// # The contract
+///
+/// - No two writers — shard writers, or one and the write handle — write the
+///   same KEY at once. Different keys of one keyspace are fine, in every
+///   keyspace (the name-keyed ones included): each mutation holds the write
+///   lock of the stripe or table that holds its row, dirty set included.
+///   [`super::Writes::upsert_raw`] — and so `add_counter` and
+///   `update_partition_tail` — is atomic even on ONE key shared by writers;
+///   the other read-then-write helpers (`put_dlq`'s position list, `put_kv`,
+///   `put_timer`, `set_file_len`) are not, so a row two shards would both
+///   update through them belongs to the coordinator.
+/// - No engine transaction: `commit` and `durable_commit` refuse, `take_cut`
+///   has nothing to cut, `abort` is a no-op (RAM writes are never undone, as
+///   on the write handle) and `clear_node_local` refuses.
+/// - The coordinator commits, takes a checkpoint cut or runs a durable cycle
+///   on the write handle only once every shard writer is DROPPED — its shards
+///   joined — so the cut is the image between two entries. Debug builds assert
+///   it: the store counts the shard writers alive.
+/// - `Send`, not `Sync`: one thread uses a handle at a time. `get_raw` keeps
+///   what it hands out until the handle's next `&mut` call, as the write
+///   handle does.
+pub struct ShardWrite<'s> {
+    store: &'s HeedStore,
+    arena: RefCell<Arena>,
+    /// `upsert_raw`'s buffer, kept between calls.
+    scratch: Vec<u8>,
+    /// Counted here and added to the store's metrics at the drop: N shards
+    /// bumping shared counters per row would meet on their cache line.
+    rows_put: u64,
+    rows_deleted: u64,
+    logical_bytes: u64,
+}
+
+impl HeedStore {
+    /// A shard writer (see [`ShardWrite`]). Refused on a poisoned store, and
+    /// on a store with a keyspace outside RAM (none today: a shard writer has
+    /// no engine transaction to write one through).
+    pub fn shard_writer(&self) -> Result<ShardWrite<'_>> {
+        self.check_poison()?;
+        if !self.all_ram {
+            return Err(StoreError::Io(
+                "a shard writer needs every keyspace in RAM".into(),
+            ));
+        }
+        self.shards.fetch_add(1, Ordering::AcqRel);
+        Ok(ShardWrite {
+            store: self,
+            arena: RefCell::new(Arena::new()),
+            scratch: Vec::new(),
+            rows_put: 0,
+            rows_deleted: 0,
+            logical_bytes: 0,
+        })
+    }
+
+    /// Shard writers alive now.
+    pub fn shard_writers(&self) -> usize {
+        self.shards.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for ShardWrite<'_> {
+    fn drop(&mut self) {
+        let m = &self.store.metrics;
+        StoreMetrics::inc(&m.rows_put, self.rows_put);
+        StoreMetrics::inc(&m.rows_deleted, self.rows_deleted);
+        StoreMetrics::inc(&m.logical_bytes, self.logical_bytes);
+        self.store.shards.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl ShardWrite<'_> {
+    /// The RAM table of `ks` (every keyspace has one: `shard_writer` refuses
+    /// a store where one does not).
+    fn table(&self, ks: Keyspace) -> Result<&RamTable> {
+        self.store.check_poison()?;
+        self.store
+            .ram(ks)
+            .ok_or_else(|| StoreError::Io(format!("{} is not a RAM keyspace", ks.name())))
+    }
+
+    /// TEST ONLY: how many values the arena is holding.
+    #[cfg(test)]
+    pub fn arena_len(&self) -> usize {
+        self.arena.borrow().len()
+    }
+
+    fn refused(what: &str) -> StoreError {
+        StoreError::Io(format!(
+            "a shard writer does not {what}: the coordinator does, on the write handle, \
+             with every shard writer dropped"
+        ))
+    }
+}
+
+impl super::Reads for ShardWrite<'_> {
+    fn max_key_len(&self) -> usize {
+        self.store.max_key
+    }
+
+    fn get_raw(&self, ks: Keyspace, key: &[u8]) -> Result<Option<&[u8]>> {
+        self.store.check_key(ks, key)?;
+        let t = self.table(ks)?;
+        ram_get(self.store, t, &self.arena, ks, key)
+    }
+
+    fn get_with(&self, ks: Keyspace, key: &[u8], f: &mut dyn FnMut(&[u8])) -> Result<bool> {
+        self.store.check_key(ks, key)?;
+        let t = self.table(ks)?;
+        ram_get_with(self.store, t, ks, key, f)
+    }
+
+    fn scan_raw(
+        &self,
+        ks: Keyspace,
+        from: &[u8],
+        prefix: &[u8],
+        limit: usize,
+        cb: &mut dyn FnMut(&[u8], &[u8]) -> bool,
+    ) -> Result<usize> {
+        let t = self.table(ks)?;
+        ram_scan(self.store, t, ks, from, prefix, limit, false, cb)
+    }
+
+    fn scan_rev_raw(
+        &self,
+        ks: Keyspace,
+        from: &[u8],
+        prefix: &[u8],
+        limit: usize,
+        cb: &mut dyn FnMut(&[u8], &[u8]) -> bool,
+    ) -> Result<usize> {
+        let t = self.table(ks)?;
+        ram_scan(self.store, t, ks, from, prefix, limit, true, cb)
+    }
+
+    fn count(&self, ks: Keyspace) -> Result<u64> {
+        Ok(self.table(ks)?.len() as u64)
+    }
+}
+
+impl super::Writes for ShardWrite<'_> {
+    fn put_raw(&mut self, ks: Keyspace, key: &[u8], val: &[u8]) -> Result<()> {
+        self.arena.get_mut().clear();
+        self.store.check_key(ks, key)?;
+        if is_format_row(ks, key) {
+            return Err(format_row_refused());
+        }
+        let t = self.table(ks)?;
+        self.store.ram_put(t, ks, key, val);
+        self.rows_put += 1;
+        self.logical_bytes += (key.len() + val.len()) as u64;
+        Ok(())
+    }
+
+    fn upsert_raw(&mut self, ks: Keyspace, key: &[u8], f: &mut UpsertFn<'_>) -> Result<bool> {
+        self.arena.get_mut().clear();
+        self.store.check_key(ks, key)?;
+        if is_format_row(ks, key) {
+            return Err(format_row_refused());
+        }
+        let store = self.store;
+        store.check_poison()?;
+        let t = store
+            .ram(ks)
+            .ok_or_else(|| StoreError::Io(format!("{} is not a RAM keyspace", ks.name())))?;
+        let (existed, written) = store.ram_upsert(t, ks, key, &mut self.scratch, f)?;
+        if let Some(n) = written {
+            self.rows_put += 1;
+            self.logical_bytes += (key.len() + n) as u64;
+        }
+        Ok(existed)
+    }
+
+    fn del_raw(&mut self, ks: Keyspace, key: &[u8]) -> Result<bool> {
+        self.arena.get_mut().clear();
+        self.store.check_key(ks, key)?;
+        if is_format_row(ks, key) {
+            return Err(format_row_refused());
+        }
+        let t = self.table(ks)?;
+        // The removed value is freed here, outside the table's lock.
+        let had = t.remove(key).is_some();
+        if had {
+            self.rows_deleted += 1;
+        }
+        Ok(had)
+    }
+
+    fn delete_range(
+        &mut self,
+        ks: Keyspace,
+        from: &[u8],
+        prefix: &[u8],
+        limit: usize,
+    ) -> Result<(usize, Option<Vec<u8>>)> {
+        self.arena.get_mut().clear();
+        let max_key = self.store.max_key;
+        delete_range_via(self, max_key, ks, from, prefix, limit)
+    }
+
+    fn commit(&mut self) -> Result<()> {
+        Err(ShardWrite::refused("commit"))
+    }
+
+    fn durable_commit(&mut self) -> Result<()> {
+        Err(ShardWrite::refused("run a durable cycle"))
+    }
+
+    fn abort(&mut self) -> Result<()> {
+        // Nothing to throw away: RAM writes are never undone (module header).
+        self.arena.get_mut().clear();
+        Ok(())
+    }
+
+    fn clear_node_local(&mut self) -> Result<()> {
+        Err(ShardWrite::refused("clear the node-local keyspaces"))
     }
 }
 

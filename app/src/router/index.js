@@ -17,6 +17,8 @@ const { standalone } = useIdentity()
 //              number is the lie class this shell exists to prevent.
 //   nav      : { group, order } to appear in the sidebar. Omit to stay
 //              reachable by URL but out of the nav.
+//   navParent: the nav row that stands for this page when it has none of its
+//              own: that row is the one lit while you are here.
 //   proxyOnly: the broker-direct dashboard has no pxdb-backed account store.
 const routes = [
   {
@@ -201,13 +203,17 @@ const routes = [
     }
   },
   {
+    // Cell-level: every account on the cell. Not a row of its own: a live
+    // operator is an admin on every cluster, so Members is always in their nav
+    // too, and the two lists are the same people at two scopes. Members'
+    // "Every tenant" switch opens this page (components/AccessScope.vue).
     path: '/users',
     name: 'Users',
     component: () => import('@/views/Users.vue'),
     meta: {
       title: 'Users', subtitle: 'Cell-level: user accounts and cluster access',
       requires: 'operator', scope: 'cell', proxyOnly: true,
-      nav: { group: 'Cell', icon: 'users', order: 2 },
+      navParent: '/members',
     }
   },
   {

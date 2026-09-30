@@ -108,3 +108,95 @@ fn current_rss_bytes() -> Option<u64> {
 fn current_rss_bytes() -> Option<u64> {
     None
 }
+
+/// The CPUs this process may run on: its affinity and, on Linux, a cgroup CPU
+/// quota (std reads both), so a broker held to 4 cores of 16 says 4.
+pub(crate) fn cpus() -> Option<usize> {
+    std::thread::available_parallelism().ok().map(|n| n.get())
+}
+
+/// The memory this process may use before the kernel steps in: its cgroup's
+/// limit when the container has one, else the machine's RAM. Read once: a
+/// limit does not move under a running process in practice.
+pub(crate) fn memory_limit_bytes() -> Option<u64> {
+    static LIMIT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| cgroup_memory_limit().or_else(physical_memory))
+}
+
+// cgroup v2 `memory.max`, else v1 `memory.limit_in_bytes`. "max" does not
+// parse, which is v2 saying "no limit"; v1 says it with a number past the RAM.
+#[cfg(target_os = "linux")]
+fn cgroup_memory_limit() -> Option<u64> {
+    let read = |p: &str| {
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+    };
+    let physical = physical_memory();
+    read("/sys/fs/cgroup/memory.max")
+        .or_else(|| read("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
+        .filter(|&limit| limit > 0 && physical.is_none_or(|p| limit < p))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cgroup_memory_limit() -> Option<u64> {
+    None
+}
+
+#[cfg(unix)]
+fn physical_memory() -> Option<u64> {
+    // SAFETY: sysconf has no preconditions.
+    let (pages, page) = unsafe {
+        (
+            libc::sysconf(libc::_SC_PHYS_PAGES),
+            libc::sysconf(libc::_SC_PAGESIZE),
+        )
+    };
+    (pages > 0 && page > 0).then(|| (pages as u64).saturating_mul(page as u64))
+}
+
+#[cfg(not(unix))]
+fn physical_memory() -> Option<u64> {
+    None
+}
+
+/// The filesystem holding `path`: its size and the bytes still available to
+/// an unprivileged writer (`statvfs`), which is what the disk gate measures.
+// The statvfs fields are u32 on some targets and u64 on others.
+#[cfg(unix)]
+#[allow(clippy::unnecessary_cast)]
+pub(crate) fn filesystem_usage(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is NUL-terminated and `statvfs` initializes `stat` on 0.
+    if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: the successful call above initialized every field.
+    let stat = unsafe { stat.assume_init() };
+    let frsize = stat.f_frsize as u64;
+    Some((
+        (stat.f_blocks as u64).saturating_mul(frsize),
+        (stat.f_bavail as u64).saturating_mul(frsize),
+    ))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn filesystem_usage(_path: &std::path::Path) -> Option<(u64, u64)> {
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_host_probes_answer_on_this_machine() {
+        assert!(super::cpus().is_some_and(|n| n >= 1));
+        assert!(super::memory_limit_bytes().is_some_and(|b| b > 0));
+        if cfg!(unix) {
+            let (total, available) =
+                super::filesystem_usage(&std::env::temp_dir()).expect("statvfs of the temp dir");
+            assert!(total > 0 && available <= total, "{total} {available}");
+        }
+    }
+}

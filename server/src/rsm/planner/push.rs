@@ -23,6 +23,18 @@ use crate::rsm::store::Reads;
 impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// Plan a push of one partition (003).
     pub fn plan_push(&self, ov: &mut Overlay, cmd: &PushCommand) -> Planned {
+        self.plan_push_known(ov, cmd, None)
+    }
+
+    /// [`Planner::plan_push`] with the partition's live pid when the caller
+    /// resolved it already (the lanes' router, from the same committed state
+    /// and in-flight catalog): the name is not looked up again.
+    pub fn plan_push_known(
+        &self,
+        ov: &mut Overlay,
+        cmd: &PushCommand,
+        known_pid: Option<Pid>,
+    ) -> Planned {
         if cmd.items.is_empty() {
             // Nothing to do and nothing to answer beyond an empty verdict list.
             return Ok(Plan::Empty(Outcome::Push(PushOutcome::default())));
@@ -46,7 +58,17 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         // Resolve the partition. Only an existing partition can hold a
         // duplicate — a fresh one has no dedup rows — so the probe runs only
         // then, and an all-duplicate push therefore never created anything.
-        let existing_pid = self.pid_of(ov, &cmd.tenant, &cmd.queue, &cmd.partition)?;
+        let existing_pid = match known_pid {
+            Some(pid) if !ov.is_gone(pid) => {
+                debug_assert_eq!(
+                    self.pid_of(ov, &cmd.tenant, &cmd.queue, &cmd.partition)?,
+                    Some(pid),
+                    "the router's pid is the planner's"
+                );
+                Some(pid)
+            }
+            _ => self.pid_of(ov, &cmd.tenant, &cmd.queue, &cmd.partition)?,
+        };
 
         let (pid, part_last_offset, part_last_created): (Pid, i64, i64) = match existing_pid {
             Some(pid) => {
@@ -70,12 +92,13 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             let floor = self
                 .now_us
                 .saturating_sub(cfg.dedup_window_seconds as i64 * SEC_US);
-            // Seed the dedup front for this partition on first touch (PERF-B), so
-            // the per-hash probes below can skip the committed LMDB read for
-            // hashes it proves absent.
-            self.front_prepare(ov, pid, floor)?;
-            for (i, it) in cmd.items.iter().enumerate() {
-                if let Some(off) = self.dedup_probe_one(ov, pid, &it.hash, floor)? {
+            // The dedup front (PERF-B), seeded for this partition on first
+            // touch, lets the per-hash probes skip the committed read for the
+            // hashes it proves absent; B31: it is consulted for every item
+            // under one lock.
+            let found = self.dedup_probe_many(ov, pid, &cmd.items, floor)?;
+            for (i, off) in found.into_iter().enumerate() {
+                if let Some(off) = off {
                     verdicts[i] = Some(PushVerdict::Duplicate { pid, offset: off });
                 }
             }
@@ -171,6 +194,9 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         // Fold the command's effects so a later command in the cycle sees the
         // new partition, the new tail and the new dedup occurrences (§7.2).
         ov.apply_effects(&effects);
+        // B13: this push knows its partition's queue; a wildcard pop then
+        // finds the append without reading the partition row.
+        ov.place_appended(pid, &cmd.tenant, &cmd.queue);
 
         // Keep the dedup front (PERF-B) a superset of the committed index it
         // fronts: a partition minted here is born seeded, and every planned
@@ -183,11 +209,16 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             let floor = self
                 .now_us
                 .saturating_sub(cfg.dedup_window_seconds as i64 * SEC_US);
-            for (k, &i) in survivors.iter().enumerate() {
-                let off = base + k as u64;
-                self.front()
-                    .insert(pid, &cmd.items[i].hash, base, off, created_at, floor);
-            }
+            self.front().insert_many(
+                pid,
+                survivors
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &i)| (&cmd.items[i].hash, base + k as u64)),
+                base,
+                created_at,
+                floor,
+            );
         }
         Ok(Plan::logged(effects, Outcome::Push(PushOutcome { items })))
     }

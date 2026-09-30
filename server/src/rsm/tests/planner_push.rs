@@ -33,7 +33,8 @@ fn a_first_push_provisions_the_queue_and_partition_and_assigns_gapless_offsets()
     }
     let p = c.partition(pid).unwrap();
     assert_eq!(p.last_offset, 2);
-    assert_eq!(c.partition_counter(pid, Counter::Pushed), 3);
+    // Pushed is kept at queue and tenant scope only (no partition reader).
+    assert_eq!(c.partition_counter(pid, Counter::Pushed), 0);
 }
 
 #[test]

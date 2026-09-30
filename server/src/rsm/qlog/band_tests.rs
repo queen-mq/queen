@@ -713,7 +713,7 @@ mod planner_e2e {
             a.apply(&ApplyCommitted {
                 index: c + 1,
                 term: 1,
-                entry: entry.expect("a logged push"),
+                entry: entry.expect("a logged push").into(),
             })
             .expect("apply");
             a.durable_point().expect("durable point");

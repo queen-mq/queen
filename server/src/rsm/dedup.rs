@@ -219,16 +219,52 @@ impl TxnsRow {
     }
 
     pub fn decode(b: &[u8]) -> std::result::Result<TxnsRow, &'static str> {
-        if b.len() < TXNS_HEADER_LEN || !(b.len() - TXNS_HEADER_LEN).is_multiple_of(16) {
+        if b.len() < TXNS_HEADER_LEN {
             return Err("txns row length");
         }
+        let body = b.len() - TXNS_HEADER_LEN;
+        let hashes_end = match body % 16 {
+            0 => b.len(),
+            // A v2 row: the retained frame length follows the hashes.
+            TXNS_LEN_TAIL => b.len() - TXNS_LEN_TAIL,
+            _ => return Err("txns row length"),
+        };
         Ok(TxnsRow {
             end: u64::from_le_bytes(b[0..8].try_into().unwrap()),
             created_at_us: i64::from_le_bytes(b[8..16].try_into().unwrap()),
-            hashes: b[TXNS_HEADER_LEN..].to_vec(),
+            hashes: b[TXNS_HEADER_LEN..hashes_end].to_vec(),
         })
     }
+
+    /// The append's retained frame bytes, when the row carries them (v2, see
+    /// [`TXNS_LEN_TAIL`]); `None` for a row an older build wrote.
+    pub fn retained_len_of(b: &[u8]) -> Option<u32> {
+        if b.len() < TXNS_HEADER_LEN + TXNS_LEN_TAIL
+            || (b.len() - TXNS_HEADER_LEN) % 16 != TXNS_LEN_TAIL
+        {
+            return None;
+        }
+        Some(u32::from_le_bytes(b[b.len() - 4..].try_into().unwrap()))
+    }
+
+    /// The v2 encoding: this row with the retained frame length after the
+    /// hashes.
+    pub fn encode_with_len(&self, retained_len: u32) -> Vec<u8> {
+        let mut v = self.encode();
+        v.extend_from_slice(&retained_len.to_le_bytes());
+        v
+    }
 }
+
+/// A v2 `txns` row carries, after its hashes, the frame bytes the append
+/// retains (`u32`, little endian): what `RetainedBytes` counted for it and what
+/// the watermark gives back when retention passes it. On the queue-log path
+/// the only other copy was a node-local `seg_loc` row per append, written just
+/// to remember that length — a second B-tree row for every append (~45% of the
+/// per-append RAM with one message per append). The row's length tells the
+/// two formats apart: hashes are 16-byte multiples, so the body of a v1 row is
+/// `0 mod 16` and a v2 row's `4 mod 16`.
+pub const TXNS_LEN_TAIL: usize = 4;
 
 // ---------------------------------------------------------------------------
 // Probe (003) — planning
@@ -373,6 +409,60 @@ pub fn record_rows<W: Writes + ?Sized>(
         writes.put_raw(Keyspace::Dedup, &k, &v)?;
     }
     write_txns_row(writes, pid, base, end, accepted, created_at_us)
+}
+
+/// [`record`], carrying the append's retained frame length in its `txns`
+/// row (v2, [`TXNS_LEN_TAIL`]) so apply needs no `seg_loc` row to give the
+/// bytes back at retention. `Segment` mode writes no `txns` row: the caller
+/// keeps its `seg_loc` row there.
+pub fn record_with_len<W: Writes + ?Sized>(
+    writes: &mut W,
+    pid: Pid,
+    base: u64,
+    end: u64,
+    accepted: &[([u8; 16], u64)],
+    created_at_us: i64,
+    retained_len: u32,
+) -> Result<()> {
+    if accepted.is_empty() {
+        return Ok(());
+    }
+    if record_index_mode() == IndexMode::Rows {
+        for (h, off) in accepted {
+            let k = keys::dedup(pid, h);
+            let mut v = match writes.get_raw(Keyspace::Dedup, &k)? {
+                Some(b) => {
+                    check_occurrences(b)?;
+                    let mut v = Vec::with_capacity(b.len() + OCCURRENCE_LEN);
+                    v.extend_from_slice(b);
+                    v
+                }
+                None => Vec::with_capacity(OCCURRENCE_LEN),
+            };
+            push_occurrence(&mut v, *off, created_at_us);
+            writes.put_raw(Keyspace::Dedup, &k, &v)?;
+        }
+    } else if record_index_mode() == IndexMode::Segment {
+        return Ok(());
+    }
+    let mut hashes = Vec::with_capacity(accepted.len() * 16);
+    for (h, _) in accepted {
+        hashes.extend_from_slice(h);
+    }
+    let row = TxnsRow {
+        end,
+        created_at_us,
+        hashes,
+    };
+    let k = keys::txns(pid, base);
+    writes.put_raw(Keyspace::Txns, &k, &row.encode_with_len(retained_len))
+}
+
+/// Whether apply's `record_with_len` writes a `txns` row (every mode but
+/// `Segment`), i.e. whether the append's length lives there instead of in a
+/// `seg_loc` row.
+pub fn txns_carry_len() -> bool {
+    record_index_mode() != IndexMode::Segment
 }
 
 /// Write the one `txns` row an append leaves — shared by both record paths.
@@ -1044,6 +1134,17 @@ impl PartFront {
         }
     }
 
+    /// B26: nothing of this partition can be in window any more — no
+    /// generation left, its window known, and its newest planned or seeded
+    /// stamp below the floor — so dropping its front loses nothing a re-seed
+    /// would not rebuild.
+    fn quiet(&self, floor_us: i64) -> bool {
+        !self.fallback
+            && self.gens.is_empty()
+            && self.window_us != i64::MAX
+            && self.last_created_us < floor_us
+    }
+
     /// Drop whole front generations that are entirely below the window floor.
     /// Returns the bytes freed (for the global accounting). Sound because
     /// generations are created-monotone, so the oldest holds the smallest
@@ -1260,6 +1361,16 @@ pub enum Seed {
     Overflow,
 }
 
+/// B31: one hash's plan from [`DedupFront::probe_plan_many`] — its verdict
+/// and, for [`ProbeVerdict::Ranges`], its bands: `bands[from..to]` of the
+/// buffer the caller passed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HashPlan {
+    pub verdict: ProbeVerdict,
+    pub from: usize,
+    pub to: usize,
+}
+
 /// What the front tells the planner to do for one hash under `DEDUP_INDEX=txns`
 /// ([`DedupFront::probe_plan`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1336,23 +1447,37 @@ impl DedupFront {
         }
     }
 
-    /// Age every partition of shard `s` at `now_us` less its own window, and
-    /// give fallback partitions that went quiet an empty front back.
+    /// Age every partition of shard `s` at `now_us` less its own window, give
+    /// fallback partitions that went quiet an empty front back, and forget
+    /// the partitions with nothing left in window (B26): each kept a
+    /// `PartFront` for ever — ~136 B a partition, and every sweep walked all
+    /// of them. A forgotten partition is unseeded again: its next push seeds
+    /// it, and that seed reads no committed row when the partition's newest
+    /// stamp is out of window ([`Planner::front_prepare`]). So the map, and
+    /// the walk, follow the partitions with an in-window hash.
     fn sweep_shard(&self, s: usize, now_us: i64) {
-        let (mut freed, mut recovered) = (0usize, 0u64);
+        let (mut freed, mut recovered, mut forgotten) = (0usize, 0u64, 0u64);
         let mut parts = self.parts[s].lock().unwrap();
-        for pf in parts.map.values_mut() {
+        parts.map.retain(|_, pf| {
             let floor_us = now_us.saturating_sub(pf.window_us);
             if pf.fallback {
-                recovered += pf.recover_if_quiet(floor_us) as u64;
-                continue;
+                if !pf.recover_if_quiet(floor_us) {
+                    return true;
+                }
+                recovered += 1;
             }
             let f = pf.age(floor_us);
             if f > 0 && pf.gens.is_empty() {
                 pf.gens.shrink_to_fit();
             }
             freed += f;
-        }
+            if pf.quiet(floor_us) {
+                freed += pf.bytes;
+                forgotten += 1;
+                return false;
+            }
+            true
+        });
         // Still under the shard lock, like every other adjustment: a reset
         // clears this shard either before the walk above or after these.
         if freed > 0 {
@@ -1362,7 +1487,30 @@ impl DedupFront {
             self.recovered.fetch_add(recovered, Ordering::Relaxed);
             self.n_fallback.fetch_sub(recovered, Ordering::Relaxed);
         }
+        if forgotten > 0 {
+            self.n_parts.fetch_sub(forgotten, Ordering::Relaxed);
+        }
         drop(parts);
+    }
+
+    /// B26: forget partitions that are gone (a delete planned): their fronts
+    /// would only age out a window later. Sound whatever becomes of the
+    /// delete — a partition the front does not hold is seeded afresh.
+    pub fn forget(&self, pids: &[Pid]) {
+        if !self.enabled {
+            return;
+        }
+        for pid in pids {
+            let mut parts = self.shard(*pid);
+            if let Some(pf) = parts.map.remove(pid) {
+                self.total_bytes
+                    .fetch_sub(pf.bytes as u64, Ordering::Relaxed);
+                self.n_parts.fetch_sub(1, Ordering::Relaxed);
+                if pf.fallback {
+                    self.n_fallback.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+        }
     }
 
     /// `(partitions, fallback)` counted by walking the map (tests: the counters
@@ -1609,6 +1757,142 @@ impl DedupFront {
         verdict
     }
 
+    /// B31: [`DedupFront::probe_plan`] for every hash of one push under ONE
+    /// hold of the partition's shard (it took one per message, and one more
+    /// per survivor to insert it). The verdicts are the ones the calls one by
+    /// one would give: what a probe changes — a fallback partition that went
+    /// quiet recovered, whole generations aged out — depends only on the
+    /// floor, the same for every hash of the command, so it happens once
+    /// here. `window_us` is the queue's dedup window (the sweeper ages the
+    /// partition by it). `false`, with nothing planned or counted, when the
+    /// partition is not seeded yet: the planner seeds it and asks again.
+    pub fn probe_plan_many<'h>(
+        &self,
+        pid: Pid,
+        hashes: impl Iterator<Item = &'h [u8; 16]>,
+        floor_us: i64,
+        window_us: i64,
+        bands: &mut Vec<(u64, u64)>,
+        out: &mut Vec<HashPlan>,
+    ) -> bool {
+        bands.clear();
+        out.clear();
+        let whole = HashPlan {
+            verdict: ProbeVerdict::Whole,
+            from: 0,
+            to: 0,
+        };
+        if !self.enabled {
+            out.extend(hashes.map(|_| whole));
+            let n = out.len() as u64;
+            self.messages.fetch_add(n, Ordering::Relaxed);
+            self.probes_issued.fetch_add(n, Ordering::Relaxed);
+            return true;
+        }
+        let mut parts = self.shard(pid);
+        let parts = &mut *parts;
+        let Some(pf) = parts.map.get_mut(&pid) else {
+            return false;
+        };
+        // The queue's window as this probe sees it: the sweeper ages and
+        // forgets the partition by it (a push that finds only duplicates
+        // inserts nothing, and would leave it unknown).
+        pf.window_us = window_us.max(0);
+        let fallback = pf.fallback && !self.recover(pf, floor_us);
+        if !fallback {
+            let freed = pf.age(floor_us);
+            if freed > 0 {
+                self.total_bytes.fetch_sub(freed as u64, Ordering::Relaxed);
+            }
+        }
+        for hash in hashes {
+            let plan = if fallback {
+                whole
+            } else {
+                let from = bands.len();
+                if pf.matching_ranges(u128::from_le_bytes(*hash), bands) {
+                    HashPlan {
+                        verdict: ProbeVerdict::Ranges,
+                        from,
+                        to: bands.len(),
+                    }
+                } else {
+                    HashPlan {
+                        verdict: ProbeVerdict::Skip,
+                        from,
+                        to: from,
+                    }
+                }
+            };
+            parts.messages += 1;
+            match plan.verdict {
+                ProbeVerdict::Skip => parts.probes_skipped += 1,
+                ProbeVerdict::Whole => {
+                    parts.probes_issued += 1;
+                    parts.probes_whole += 1;
+                }
+                ProbeVerdict::Ranges => parts.probes_issued += 1,
+            }
+            out.push(plan);
+        }
+        true
+    }
+
+    /// B31: [`DedupFront::insert`] of every survivor of one push — `(hash,
+    /// message offset)` in offset order, all from append `base_off` stamped
+    /// `created_us` — under one hold of the shard. Exactly the inserts one by
+    /// one.
+    pub fn insert_many<'h>(
+        &self,
+        pid: Pid,
+        hashes: impl Iterator<Item = (&'h [u8; 16], u64)>,
+        base_off: u64,
+        created_us: i64,
+        floor_us: i64,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let mut parts = self.shard(pid);
+        let parts = &mut *parts;
+        let Some(pf) = parts.map.get_mut(&pid) else {
+            return;
+        };
+        for (hash, msg_off) in hashes {
+            pf.window_us = created_us.saturating_sub(floor_us);
+            let fallback = pf.fallback && !self.recover(pf, floor_us);
+            pf.last_created_us = pf.last_created_us.max(created_us);
+            if fallback {
+                continue;
+            }
+            let freed = pf.age(floor_us);
+            if freed > 0 {
+                self.total_bytes.fetch_sub(freed as u64, Ordering::Relaxed);
+            }
+            let slice_us = gen_slice_us(created_us, floor_us);
+            if pf.needs_new_gen(created_us, slice_us) {
+                let cap = self.byte_cap as u64;
+                if self.total_bytes.load(Ordering::Relaxed) + pf.next_gen_bytes() as u64 > cap {
+                    let freed = pf.mark_fallback();
+                    self.total_bytes.fetch_sub(freed as u64, Ordering::Relaxed);
+                    self.n_fallback.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+            }
+            let added = pf.insert(
+                u128::from_le_bytes(*hash),
+                base_off,
+                msg_off,
+                created_us,
+                slice_us,
+            );
+            if added > 0 {
+                self.total_bytes.fetch_add(added as u64, Ordering::Relaxed);
+            }
+            parts.inserts += 1;
+        }
+    }
+
     /// Record a planned (survivor) append hash (from append `base_off`, at
     /// message offset `msg_off`). Keeps the front a superset of the committed
     /// index it fronts (see the module note) and its generations' offset bands
@@ -1717,6 +2001,41 @@ mod tests {
     fn a_malformed_txns_row_is_refused() {
         assert!(TxnsRow::decode(&[0u8; 8]).is_err());
         assert!(TxnsRow::decode(&[0u8; 17]).is_err());
+        // A body of 4 mod 16 is a v2 row, anything else but 0 is damage.
+        assert!(TxnsRow::decode(&[0u8; 16 + 16 + 5]).is_err());
+    }
+
+    #[test]
+    fn a_v2_txns_row_carries_its_retained_length_and_the_same_hashes() {
+        let row = TxnsRow {
+            end: 9,
+            created_at_us: 1_700_000_000_000_000,
+            hashes: [[7u8; 16], [8u8; 16], [9u8; 16]].concat(),
+        };
+        let v2 = row.encode_with_len(4_321);
+        assert_eq!(v2.len(), TXNS_HEADER_LEN + 48 + TXNS_LEN_TAIL);
+        assert_eq!(
+            TxnsRow::decode(&v2).unwrap(),
+            row,
+            "the same row for every reader"
+        );
+        assert_eq!(TxnsRow::retained_len_of(&v2), Some(4_321));
+        assert_eq!(
+            TxnsRow::retained_len_of(&row.encode()),
+            None,
+            "a v1 row has none"
+        );
+        // One message: a 36 B row.
+        let one = TxnsRow {
+            end: 0,
+            created_at_us: 5,
+            hashes: vec![3u8; 16],
+        };
+        assert_eq!(
+            TxnsRow::retained_len_of(&one.encode_with_len(300)),
+            Some(300)
+        );
+        assert_eq!(TxnsRow::decode(&one.encode_with_len(300)).unwrap(), one);
     }
 
     #[test]
@@ -1917,10 +2236,13 @@ mod tests {
         for i in 0..10u64 {
             assert!(f.should_probe(7, &fh(i), 1_000_000 - w), "hash {i} lost");
         }
-        // One µs later the whole generation is out of window, untouched.
+        // One µs later the whole generation is out of window, untouched —
+        // and with nothing left in window the partition is forgotten (B26):
+        // its next push seeds it again.
         f.sweep_all(1_000_001 + w);
         assert_eq!(f.stats().bytes, 0);
-        assert_eq!(f.stats().partitions, 1);
+        assert_eq!(f.stats().partitions, 0);
+        assert!(f.needs_seed(7));
     }
 
     #[test]
@@ -1957,10 +2279,15 @@ mod tests {
         );
         f.sweep_all(1_500_000 + w);
         assert_eq!(f.stats().fallback_partitions, 1);
-        // Past both stamps: empty and exact again, by the sweeper...
+        // Past both stamps: empty and exact again, by the sweeper — which, the
+        // partition having nothing in window, forgets it (B26): seeded afresh
+        // (here, empty) on its next push...
         f.sweep_all(2_000_001 + w);
         let s = f.stats();
         assert_eq!((s.fallback_partitions, s.fallback_recovered), (0, 1));
+        assert_eq!(s.partitions, 0);
+        assert!(f.needs_seed(5));
+        f.install_seed(5, Seed::Complete(Vec::new()), 2_000_001);
         assert_eq!(
             f.probe_plan(5, &fh(2), 2_000_001, &mut out),
             ProbeVerdict::Skip
@@ -2050,6 +2377,91 @@ mod tests {
         assert!(!f.needs_seed(11));
         assert_eq!(f.stats().fallback_partitions, 1);
         assert!(f.should_probe(11, &fh(1), i64::MIN));
+    }
+
+    /// Two fronts fed the same stream, one call per hash and one call per
+    /// command (B31): the verdicts, the bands and the counters agree.
+    #[test]
+    fn one_lock_per_command_plans_and_inserts_exactly_as_one_call_per_hash() {
+        struct R(u64);
+        impl R {
+            fn below(&mut self, n: u64) -> u64 {
+                self.0 ^= self.0 << 13;
+                self.0 ^= self.0 >> 7;
+                self.0 ^= self.0 << 17;
+                self.0 % n.max(1)
+            }
+        }
+        // A roomy cap, and a tiny one that sends partitions to fallback.
+        for cap in [64usize << 20, 4 << 10] {
+            let (a, b) = (DedupFront::new(true, cap), DedupFront::new(true, cap));
+            let w = 10_000_000i64;
+            let mut rng = R(0xB31 ^ cap as u64);
+            let mut now = 1_000_000_000i64;
+            let mut next_off = [0u64; 8];
+            let (mut ranges, mut bands, mut plans) = (Vec::new(), Vec::new(), Vec::new());
+            for pid in 0..8u64 {
+                if pid < 6 {
+                    a.note_created(pid);
+                    b.note_created(pid);
+                }
+            }
+            for round in 0..400u64 {
+                now += rng.below(400_000) as i64;
+                let floor = now - w;
+                let pid = rng.below(8);
+                let n = 1 + rng.below(40);
+                let hashes: Vec<[u8; 16]> = (0..n).map(|_| fh(rng.below(3_000))).collect();
+                // Probe: every hash, one call each vs one call.
+                let planned =
+                    b.probe_plan_many(pid, hashes.iter(), floor, w, &mut bands, &mut plans);
+                assert_eq!(planned, !a.needs_seed(pid), "round {round}: seeded");
+                if planned {
+                    for (h, plan) in hashes.iter().zip(&plans) {
+                        let v = a.probe_plan(pid, h, floor, &mut ranges);
+                        assert_eq!(v, plan.verdict, "round {round}");
+                        assert_eq!(&ranges[..], &bands[plan.from..plan.to], "round {round}");
+                    }
+                }
+                // Insert the survivors (here: the first half), one append.
+                let base = next_off[pid as usize];
+                let survivors: Vec<([u8; 16], u64)> = hashes
+                    .iter()
+                    .take((n as usize).div_ceil(2))
+                    .enumerate()
+                    .map(|(k, h)| (*h, base + k as u64))
+                    .collect();
+                next_off[pid as usize] += survivors.len() as u64;
+                for (h, off) in &survivors {
+                    a.insert(pid, h, base, *off, now, floor);
+                }
+                b.insert_many(
+                    pid,
+                    survivors.iter().map(|(h, o)| (h, *o)),
+                    base,
+                    now,
+                    floor,
+                );
+                assert_eq!(a.stats(), b.stats(), "round {round}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_deleted_partition_is_forgotten_at_once() {
+        let f = DedupFront::new(true, 64 << 20);
+        for pid in 0..4u64 {
+            f.note_created(pid);
+            f.insert(pid, &fh(pid), 0, 0, 1_000_000, 0);
+        }
+        let s0 = f.stats();
+        assert_eq!(s0.partitions, 4);
+        f.forget(&[1, 3, 99]);
+        let s = f.stats();
+        assert_eq!(s.partitions, 2);
+        assert!(s.bytes < s0.bytes, "their filters are given back");
+        assert!(f.needs_seed(1) && f.needs_seed(3) && !f.needs_seed(0));
+        assert_eq!((s.partitions, s.fallback_partitions), f.walk_counts());
     }
 
     #[test]

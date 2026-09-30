@@ -1036,7 +1036,7 @@ impl Cycles {
             a.apply(&ApplyCommitted {
                 index,
                 term: 1,
-                entry: (*e).clone(),
+                entry: e,
             })
             .unwrap_or_else(|err| panic!("apply entry {index}: {err:?}"));
             self.applied = index;

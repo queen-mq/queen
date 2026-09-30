@@ -11,23 +11,31 @@
     <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.6"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
   </button>
 
-  <aside class="sidebar" :class="{ 'sidebar-mobile-open': mobileOpen }">
-    <!-- Brand. As tall as the top bar, so one hairline runs under both. The
-         sunflower is the only colour here that is not a state. -->
+  <aside class="sidebar" :class="{ 'sidebar-mobile-open': mobileOpen, rail }">
+    <!-- Brand. As tall as the top bar, so the two share a baseline; no rule
+         under it. The sunflower is the only colour here that is not a state. -->
     <div class="brand">
       <img src="/queen-sunflower.webp" alt="" class="brand-mark" width="24" height="24" />
-      <span class="brand-word">Queen</span>
-      <span v-if="brokerVersion" class="brand-ver" :title="`Broker ${brokerVersion}`">{{ shortVersion }}</span>
+      <template v-if="!rail">
+        <span class="brand-word">QueenMQ</span>
+        <span v-if="brokerVersion" class="brand-ver" :title="`Broker ${brokerVersion}`">{{ shortVersion }}</span>
+      </template>
     </div>
 
     <div class="sidebar-content">
       <!-- Navigation, derived from route meta filtered by what identity
            grants. An entry the user cannot use is never in the DOM. On the
            right of a row that lists things: how many there are — or, when
-           something there needs you, the Overview's marks instead. -->
+           something there needs you, the Overview's marks instead. In the
+           rail a row is its icon, the most severe mark sits on the icon's
+           corner, and a group's label is a short rule of the same height, so
+           no icon moves when the sidebar changes width. -->
       <nav class="nav-groups" aria-label="Main">
         <div class="nav-group" v-for="(group, gi) in navGroups" :key="group.label">
-          <div v-if="gi > 0" class="nav-label">{{ group.label }}</div>
+          <template v-if="gi > 0">
+            <div v-if="rail" class="nav-rule" aria-hidden="true" />
+            <div v-else class="nav-label">{{ group.label }}</div>
+          </template>
           <router-link
             v-for="item in group.items"
             :key="item.path"
@@ -35,18 +43,23 @@
             class="nav-item"
             :class="{ 'nav-item-active': isActive(item.path) }"
             :aria-current="isActive(item.path) ? 'page' : undefined"
-            :title="item.scope === 'cell' ? `${item.name} — covers every tenant on this cell` : undefined"
+            :title="!rail && item.scope === 'cell' ? `${item.name} — covers every tenant on this cell` : undefined"
             @click="closeMobile"
+            @mouseenter="showTip($event, item.name, railNote(item))"
+            @mouseleave="hideTip"
+            @focus="showTip($event, item.name, railNote(item))"
+            @blur="hideTip"
           >
             <component :is="icons[item.icon]" v-if="icons[item.icon]" class="nav-icon" aria-hidden="true" />
-            <span class="nav-name">{{ item.name }}</span>
-            <span v-if="marks[item.path]" class="nav-mark" :title="marks[item.path].title">
+            <span class="nav-name" :class="{ 'sr-only': rail }">{{ item.name }}</span>
+            <span v-if="rail && marks[item.path]" class="g nav-corner" :class="marks[item.path].parts[0].glyph" aria-hidden="true" />
+            <span v-else-if="marks[item.path]" class="nav-mark" :title="marks[item.path].title">
               <span v-for="part in marks[item.path].parts" :key="part.glyph" class="nav-mark-part">
                 <span class="g" :class="part.glyph" aria-hidden="true" /><span v-if="part.n" aria-hidden="true">{{ part.n }}</span>
               </span>
               <span class="sr-only">{{ marks[item.path].title }}</span>
             </span>
-            <span v-else-if="figures[item.path]" class="nav-fig" :title="figures[item.path].title">{{ figures[item.path].text }}</span>
+            <span v-else-if="figures[item.path] && !rail" class="nav-fig" :title="figures[item.path].title">{{ figures[item.path].text }}</span>
           </router-link>
         </div>
       </nav>
@@ -55,34 +68,46 @@
            how that cell is. A control only when there is something to switch
            to; otherwise words, which must not look like a button. -->
       <div class="sidebar-foot">
+        <template v-if="!rail">
         <ClusterSelector v-if="switchable" />
         <div v-else class="whoami" :title="whoamiTitle">
           <b>{{ tenantLabel }}<template v-if="!standalone && clusterLabel"><span class="whoami-sep"> / </span><span class="whoami-cluster">{{ clusterLabel }}</span></template></b>
           <span class="whoami-sub">{{ whoamiSub }}</span>
         </div>
+        </template>
 
         <component
           :is="canOperate ? 'router-link' : 'p'"
           v-bind="canOperate ? { to: '/system' } : {}"
           class="cell-line"
-          :title="healthTitle"
+          :title="rail ? undefined : healthTitle"
           @click="closeMobile"
+          @mouseenter="showTip($event, `${tenantLabel}${clusterLabel ? ` / ${clusterLabel}` : ''}`, `${cellWord}${raftText ? ` · ${raftText}` : ''}`)"
+          @mouseleave="hideTip"
         >
           <span class="g" :class="cellGlyph" aria-hidden="true" />
-          <span class="cell-words">
+          <span class="cell-words" :class="{ 'sr-only': rail }">
             <b :class="cellTone">{{ cellWord }}</b><template v-if="raftText"> · {{ raftText }}</template><template v-if="raftLagText"> · <span :class="raftLagTone">{{ raftLagText }}</span></template>
           </span>
         </component>
 
         <!-- The session. Standalone has none: no email to show, and a sign-out
              that could only reload the page. -->
-        <div v-if="!standalone" class="session-row">
+        <div v-if="!standalone && !rail" class="session-row">
           <span class="session-email" :title="email || 'signed in'">{{ email || 'signed in' }}</span>
           <button class="session-out" type="button" @click="logout">Sign out</button>
         </div>
       </div>
     </div>
   </aside>
+
+  <!-- The rail's names, at once and beside the icon. On the body, so the
+       column's own scrolling cannot clip it. -->
+  <Teleport to="body">
+    <div v-if="tip" class="rail-tip" role="tooltip" :style="{ left: `${tip.x}px`, top: `${tip.y}px` }">
+      {{ tip.text }}<span v-if="tip.note" class="rail-tip-note">{{ tip.note }}</span>
+    </div>
+  </Teleport>
 </template>
 
 <script setup>
@@ -99,6 +124,7 @@ import { useEphemeralStore } from '@/stores/ephemeralStore'
 import { useGroupsStore } from '@/stores/groupsStore'
 import { useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
+import { rail } from '@/composables/useSidebar'
 
 const route = useRoute()
 const router = useRouter()
@@ -298,7 +324,28 @@ const marks = computed(() => {
   return out
 })
 
-const isActive = (path) => path === '/' ? route.path === '/' : route.path.startsWith(path)
+// ---------------------------------------------------------------------------
+// The rail. Its rows are icons, so a row's name (and what its count or mark
+// says) is shown beside it on hover or focus, without the browser's title
+// delay.
+// ---------------------------------------------------------------------------
+const tip = ref(null)
+const showTip = (e, text, note = '') => {
+  if (!rail.value) return
+  const r = e.currentTarget.getBoundingClientRect()
+  tip.value = { text, note, x: Math.round(r.right + 10), y: Math.round(r.top + r.height / 2) }
+}
+const hideTip = () => { tip.value = null }
+watch(rail, hideTip)
+watch(() => route.path, hideTip)
+const railNote = (item) => marks.value[item.path]?.title || figures.value[item.path]?.title || ''
+
+// A page with no row of its own lights the row that stands for it (Users,
+// under Members).
+const isActive = (path) => {
+  if (route.meta?.navParent === path) return true
+  return path === '/' ? route.path === '/' : route.path.startsWith(path)
+}
 
 // ---------------------------------------------------------------------------
 // Nav, straight off the route table. Group order is fixed; the operator group
@@ -353,7 +400,6 @@ const icons = {
   members: MembersIcon,
   keys: ApiKeysIcon,
   system: SystemIcon,
-  users: UsersIcon,
 }
 
 function DashboardIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('rect',{x:'3',y:'3',width:'7',height:'9',rx:'1.5'}),h('rect',{x:'14',y:'3',width:'7',height:'5',rx:'1.5'}),h('rect',{x:'14',y:'12',width:'7',height:'9',rx:'1.5'}),h('rect',{x:'3',y:'16',width:'7',height:'5',rx:'1.5'})]) }
@@ -375,13 +421,12 @@ function TracesIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24
 function WorkloadIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round' }, [h('rect',{x:'3',y:'4',width:'8',height:'6',rx:'1.5'}),h('rect',{x:'13',y:'4',width:'8',height:'11',rx:'1.5'}),h('rect',{x:'3',y:'14',width:'8',height:'6',rx:'1.5'}),h('path',{d:'M17 18v2'})]) }
 function AnalyticsIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('path',{d:'M4 20V10M10 20V4M16 20v-8M22 20H2'})]) }
 function SystemIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('rect',{x:'3',y:'4',width:'18',height:'6',rx:'1.6'}),h('rect',{x:'3',y:'14',width:'18',height:'6',rx:'1.6'}),h('circle',{cx:'7',cy:'7',r:'.9',fill:'currentColor'}),h('circle',{cx:'7',cy:'17',r:'.9',fill:'currentColor'})]) }
-/* Members: a person and the roster lines beside them. Users (every tenant,
-   operators only) is a person with a plus; Consumers is two people. */
+/* Members: a person and the roster lines beside them; Consumers is two
+   people. */
 function MembersIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('circle',{cx:'9',cy:'8',r:'3'}),h('path',{d:'M3.5 20c0-3.3 2.5-6 5.5-6s5.5 2.7 5.5 6'}),h('path',{d:'M16 8h5M16 12h5M17.5 16H21'})]) }
 /* API keys: a credential card, not a key. The key glyph is KV's, and a key
    here is what a service shows the proxy, i.e. a card with a name on it. */
 function ApiKeysIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('rect',{x:'3',y:'6',width:'18',height:'12',rx:'1.6'}),h('circle',{cx:'8.5',cy:'12',r:'2'}),h('path',{d:'M13 10.5h5M13 13.5h3.5'})]) }
-function UsersIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('circle',{cx:'9',cy:'8',r:'3'}),h('path',{d:'M3.5 20c0-3.3 2.5-6 5.5-6s5.5 2.7 5.5 6'}),h('path',{d:'M17 8v6M14 11h6'})]) }
 function DlqIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('path',{d:'M5 7h14l-1.2 11.2a2 2 0 01-2 1.8H8.2a2 2 0 01-2-1.8L5 7Z'}),h('path',{d:'M9 4h6v3H9z'})]) }
 </script>
 

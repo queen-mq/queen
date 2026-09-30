@@ -106,6 +106,148 @@ fn with(cap: usize) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// Keys on the stack
+// ---------------------------------------------------------------------------
+
+/// A key built on the stack: every key of the message path fits in 96 bytes
+/// unless its names are long, and one that does not spills to the heap. The
+/// typed reads build their keys here — a read that allocates a `Vec` for its
+/// key and frees it right after was a measured part of the allocator's share
+/// of the planning lanes and the apply thread (2026-09-29).
+pub type KeyBuf = smallvec::SmallVec<[u8; 96]>;
+
+/// [`push_name`] into a [`KeyBuf`]: the same bytes.
+pub fn push_name_buf(out: &mut KeyBuf, s: &str) {
+    let b = s.as_bytes();
+    if !b.contains(&0) {
+        out.extend_from_slice(b);
+    } else {
+        for &c in b {
+            if c == 0x00 {
+                out.push(0x00);
+                out.push(0xFF);
+            } else {
+                out.push(c);
+            }
+        }
+    }
+    out.push(0x00);
+    out.push(0x00);
+}
+
+/// [`pid`] on the stack.
+pub fn pid_key(p: Pid) -> [u8; 8] {
+    p.to_be_bytes()
+}
+
+/// [`counter_partition`] on the stack.
+pub fn counter_partition_key(p: Pid, c: Counter) -> [u8; 11] {
+    let mut k = [0u8; 11];
+    k[0] = CounterScope::Partition as u8;
+    k[1..9].copy_from_slice(&p.to_be_bytes());
+    k[9..11].copy_from_slice(&(c as u16).to_be_bytes());
+    k
+}
+
+/// [`queues`] on the stack.
+pub fn queues_buf(tenant: &str, queue: &str) -> KeyBuf {
+    let mut k = KeyBuf::new();
+    push_name_buf(&mut k, tenant);
+    push_name_buf(&mut k, queue);
+    k
+}
+
+/// [`groups`] on the stack.
+pub fn groups_buf(tenant: &str, queue: &str, group: &str) -> KeyBuf {
+    let mut k = queues_buf(tenant, queue);
+    push_name_buf(&mut k, group);
+    k
+}
+
+/// [`partitions_by_key`] on the stack.
+pub fn partitions_by_key_buf(tenant: &str, queue: &str, partition: &str) -> KeyBuf {
+    let mut k = queues_buf(tenant, queue);
+    push_name_buf(&mut k, partition);
+    k
+}
+
+/// [`queue_partitions`] on the stack.
+pub fn queue_partitions_buf(tenant: &str, queue: &str, p: Pid) -> KeyBuf {
+    let mut k = queues_buf(tenant, queue);
+    k.extend_from_slice(&p.to_be_bytes());
+    k
+}
+
+/// [`cursors`] on the stack.
+pub fn cursors_buf(p: Pid, group: &str) -> KeyBuf {
+    let mut k = KeyBuf::new();
+    k.extend_from_slice(&p.to_be_bytes());
+    push_name_buf(&mut k, group);
+    k
+}
+
+/// [`pending`] on the stack.
+pub fn pending_buf(tenant: &str, queue: &str, group: &str, p: Pid) -> KeyBuf {
+    let mut k = groups_buf(tenant, queue, group);
+    k.extend_from_slice(&p.to_be_bytes());
+    k
+}
+
+/// [`leases_by_worker`] on the stack.
+pub fn leases_by_worker_buf(worker: &str, p: Pid, group: &str) -> KeyBuf {
+    let mut k = KeyBuf::new();
+    push_name_buf(&mut k, worker);
+    k.extend_from_slice(&p.to_be_bytes());
+    push_name_buf(&mut k, group);
+    k
+}
+
+/// [`dlq_by_pos`] on the stack.
+pub fn dlq_by_pos_buf(p: Pid, group: &str, offset: i64) -> KeyBuf {
+    let mut k = cursors_buf(p, group);
+    k.extend_from_slice(&((offset as u64) ^ (1u64 << 63)).to_be_bytes());
+    k
+}
+
+/// [`counter_queue`] on the stack.
+pub fn counter_queue_buf(tenant: &str, queue: &str, c: Counter) -> KeyBuf {
+    let mut k = KeyBuf::new();
+    k.push(CounterScope::Queue as u8);
+    push_name_buf(&mut k, tenant);
+    push_name_buf(&mut k, queue);
+    k.extend_from_slice(&(c as u16).to_be_bytes());
+    k
+}
+
+/// [`counter_tenant`] on the stack.
+pub fn counter_tenant_buf(tenant: &str, c: Counter) -> KeyBuf {
+    let mut k = KeyBuf::new();
+    k.push(CounterScope::Tenant as u8);
+    push_name_buf(&mut k, tenant);
+    k.extend_from_slice(&(c as u16).to_be_bytes());
+    k
+}
+
+/// [`counter_group`] on the stack.
+pub fn counter_group_buf(tenant: &str, queue: &str, group: &str, c: Counter) -> KeyBuf {
+    let mut k = KeyBuf::new();
+    k.push(CounterScope::Group as u8);
+    push_name_buf(&mut k, tenant);
+    push_name_buf(&mut k, queue);
+    push_name_buf(&mut k, group);
+    k.extend_from_slice(&(c as u16).to_be_bytes());
+    k
+}
+
+/// [`seg_loc`] / [`txns`] on the stack.
+pub fn pid_u64_key(p: Pid, v: u64) -> [u8; 16] {
+    let mut k = [0u8; 16];
+    k[..8].copy_from_slice(&p.to_be_bytes());
+    k[8..].copy_from_slice(&v.to_be_bytes());
+    k
+}
+
+// ---------------------------------------------------------------------------
 // queues, groups
 // ---------------------------------------------------------------------------
 
@@ -993,6 +1135,48 @@ mod tests {
         );
         // A prefix never reaches into the next queue.
         assert!(!timers("t", "qq", "a").starts_with(&timers_key_prefix("t", "q", "")));
+    }
+
+    #[test]
+    fn keys_on_the_stack_are_the_same_bytes() {
+        for (t, q, g) in [("t", "q", "g"), ("ten\0ant", "q\0", ""), ("", "", "\0\0")] {
+            assert_eq!(&queues_buf(t, q)[..], &queues(t, q)[..]);
+            assert_eq!(&groups_buf(t, q, g)[..], &groups(t, q, g)[..]);
+            assert_eq!(
+                &partitions_by_key_buf(t, q, g)[..],
+                &partitions_by_key(t, q, g)[..]
+            );
+            assert_eq!(
+                &queue_partitions_buf(t, q, 9)[..],
+                &queue_partitions(t, q, 9)[..]
+            );
+            assert_eq!(&cursors_buf(9, g)[..], &cursors(9, g)[..]);
+            assert_eq!(&pending_buf(t, q, g, 9)[..], &pending(t, q, g, 9)[..]);
+            assert_eq!(
+                &leases_by_worker_buf(t, 9, g)[..],
+                &leases_by_worker(t, 9, g)[..]
+            );
+            assert_eq!(&dlq_by_pos_buf(9, g, -1)[..], &dlq_by_pos(9, g, -1)[..]);
+            assert_eq!(
+                &counter_queue_buf(t, q, Counter::Pending)[..],
+                &counter_queue(t, q, Counter::Pending)[..]
+            );
+            assert_eq!(
+                &counter_tenant_buf(t, Counter::Pending)[..],
+                &counter_tenant(t, Counter::Pending)[..]
+            );
+            assert_eq!(
+                &counter_group_buf(t, q, g, Counter::Consumed)[..],
+                &counter_group(t, q, g, Counter::Consumed)[..]
+            );
+        }
+        assert_eq!(&pid_key(77)[..], &pid(77)[..]);
+        assert_eq!(
+            &counter_partition_key(77, Counter::LastPopUs)[..],
+            &counter_partition(77, Counter::LastPopUs)[..]
+        );
+        assert_eq!(&pid_u64_key(7, 12)[..], &txns(7, 12)[..]);
+        assert_eq!(&pid_u64_key(7, 12)[..], &seg_loc(7, 12)[..]);
     }
 
     #[test]

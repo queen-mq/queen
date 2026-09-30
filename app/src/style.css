@@ -291,8 +291,8 @@
 
 /* =========================================================================
    APP SHELL — one surface. The sidebar and the page share the page's black,
-   one hairline between them, and the line under the brand continues the top
-   bar's: a single sheet, not a panel lying on a frame.
+   one hairline between them; the brand sits on the top bar's line, with no
+   rule of its own under it: a single sheet, not a panel lying on a frame.
    ========================================================================= */
 .app-shell {
   position: relative; z-index: 1;
@@ -355,26 +355,26 @@
 .brand {
   display: flex; align-items: center; gap: 10px;
   height: 52px; flex: none; padding: 0 16px;
-  border-bottom: 1px solid var(--bd);
 }
 .brand-mark { width: 24px; height: 24px; flex: none; border-radius: 50%; display: block; }
 .brand-word { font-size: 13px; font-weight: 600; line-height: 1; color: var(--text-hi); letter-spacing: -0.01em; }
 .brand-ver { margin-left: auto; font-size: 11px; color: var(--text-low); white-space: nowrap; }
 
 .sidebar-content {
-  display: flex; flex-direction: column; gap: 20px;
+  display: flex; flex-direction: column; gap: 14px;
   flex: 1; min-height: 0; overflow-y: auto;
-  padding: 16px 8px 14px;
+  padding: 12px 8px 10px;
 }
 
-
-.nav-groups { display: flex; flex-direction: column; gap: 18px; flex: 1; }
+/* Sized so the whole column, footer included, fits a laptop window (about
+   800px tall) without scrolling. */
+.nav-groups { display: flex; flex-direction: column; gap: 12px; flex: 1; }
 .nav-group { display: flex; flex-direction: column; gap: 1px; }
-.nav-label { padding: 0 8px 6px; font-size: 11px; font-weight: 600; color: var(--text-mid); letter-spacing: .01em; }
+.nav-label { padding: 0 8px 4px; font-size: 11px; line-height: 16px; font-weight: 600; color: var(--text-mid); letter-spacing: .01em; }
 
 .nav-item {
   display: flex; align-items: center; gap: 8px;
-  height: 30px; padding: 0 8px; border-radius: var(--r-control);
+  height: 28px; padding: 0 8px; border-radius: var(--r-control);
   color: var(--text-mid); font-size: 13px; font-weight: 400;
   cursor: pointer; text-decoration: none;
   transition: color .12s var(--ease), background .12s var(--ease);
@@ -399,8 +399,8 @@
    SIDEBAR FOOTER — the cell, in one sentence, from /health.
    ========================================================================= */
 .sidebar-foot {
-  display: flex; flex-direction: column; gap: 10px;
-  padding-top: 14px; border-top: 1px solid var(--bd);
+  display: flex; flex-direction: column; gap: 8px;
+  padding-top: 10px; border-top: 1px solid var(--bd);
 }
 
 /* Where you are: words when there is nothing to switch to. */
@@ -431,6 +431,32 @@ a.cell-line:hover { color: var(--text-mid); background: var(--ink-2); }
 .session-out:hover { color: var(--text-hi); }
 
 /* =========================================================================
+   THE RAIL — the sidebar at icon width, the operator's choice on a wide
+   screen (composables/useSidebar.js; the toggle leads the top bar). Every row
+   keeps its height and a group's label becomes a rule of the same height, so
+   nothing moves up or down when the width changes.
+   ========================================================================= */
+.app-shell.nav-rail { grid-template-columns: 52px minmax(0, 1fr); }
+.sidebar.rail .brand { padding: 0; justify-content: center; }
+.sidebar.rail .sidebar-content { scrollbar-width: none; }
+.sidebar.rail .nav-item { position: relative; justify-content: center; padding: 0; }
+.sidebar.rail .nav-icon { margin-right: 0; }
+/* 4 + 1 + 15 = the label's 20px, the rule centred between the rows around it. */
+.nav-rule { width: 16px; height: 1px; margin: 4px auto 15px; background: var(--bd-hi); }
+/* The row's most severe mark, on the icon's corner. */
+.nav-corner { position: absolute; top: 3px; right: 4px; transform: scale(.8); }
+.sidebar.rail .cell-line { justify-content: center; padding: 5px 0; }
+.rail-tip {
+  position: fixed; z-index: 60; transform: translateY(-50%);
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 5px 9px; border-radius: var(--r-chip);
+  background: var(--ink-3); border: 1px solid var(--bd-hi);
+  font-size: 12px; line-height: 1.4; color: var(--text-hi);
+  white-space: nowrap; pointer-events: none;
+}
+.rail-tip-note { color: var(--text-low); }
+
+/* =========================================================================
    TOPBAR — the head of the page, on the same line as the brand.
    ========================================================================= */
 .topbar {
@@ -448,7 +474,7 @@ a.cell-line:hover { color: var(--text-mid); background: var(--ink-2); }
 
 .cmd-search {
   margin-left: auto; display: flex; align-items: center; gap: 8px;
-  min-width: 220px; max-width: 360px; flex: 1;
+  min-width: 160px; max-width: 360px; flex: 1;
   height: 32px; padding: 0 10px; border-radius: var(--r-control);
   border: 1px solid var(--bd); color: var(--text-low);
   font-size: 13px; cursor: text; position: relative; transition: border-color .12s, background .12s;
@@ -474,6 +500,69 @@ a.cell-line:hover { color: var(--text-mid); background: var(--ink-2); }
 }
 .top-btn:hover { color: var(--text-hi); background: var(--ink-4); }
 .top-btn svg { width: 15px !important; height: 15px !important; }
+/* The sidebar toggle leads the bar (the rail, below). Up to 1100px the
+   sidebar is a drawer with its own button in this corner. */
+.nav-toggle { margin-left: -8px; }
+@media (max-width: 1100px) { .nav-toggle { display: none; } }
+
+/* The bar's three parts (Header.vue): both sides take equal shares of what
+   the middle leaves, which keeps the middle on the bar's centre line. */
+.topbar-side { flex: 1 1 0; min-width: 0; display: flex; align-items: center; gap: 10px; }
+.topbar-end { justify-content: flex-end; }
+.topbar-wrap { container-type: inline-size; }
+
+/* The broker (components/BrokerBar.vue): the cell's machine in the middle of
+   the bar, each figure over a hairline of how full it is; a click opens every
+   node. Quiet ink until a line is crossed. */
+.bbar { position: relative; flex: none; }
+.bbar-btn {
+  display: flex; align-items: center; gap: 16px; height: 34px; padding: 0 10px;
+  border: 0; border-radius: var(--r-control); background: transparent;
+  font: inherit; color: inherit; cursor: pointer; transition: background .12s;
+}
+.bbar-btn:hover, .bbar-btn.open { background: var(--ink-3); }
+.bbar-item { position: relative; display: inline-flex; align-items: baseline; gap: 5px; padding-bottom: 5px; font-size: 12px; white-space: nowrap; }
+.bbar-item .k { color: var(--text-low); }
+.bbar-item b, .bbar-cell b { font-weight: 600; color: var(--text-mid); font-variant-numeric: tabular-nums; }
+.bbar b.warn { color: var(--warn-400); }
+.bbar b.bad { color: var(--ember-400); }
+.bbar-meter { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; border-radius: 1px; background: var(--ink-4); }
+.bbar-meter > i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 1px; background: var(--text-faint); }
+.bbar-meter > i.warn { background: var(--warn-400); }
+.bbar-meter > i.bad { background: var(--ember-400); }
+/* A node's write line on its disk hairline. */
+.bbar-line { position: absolute; top: -2px; bottom: -2px; width: 1px; background: var(--text-low); }
+.bbar-sum { display: none; align-items: center; padding-bottom: 0; }
+.bbar .g.leader { border-radius: 50%; background: var(--text-mid); }
+
+.bbar-panel {
+  position: fixed; top: 56px; right: 12px; z-index: 50;
+  width: min(640px, calc(100vw - 24px));
+  border: 1px solid var(--bd-hi); border-radius: var(--r-card);
+  background: var(--ink-3); box-shadow: var(--shadow-pop);
+}
+.bbar-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  padding: 10px 14px; border-bottom: 1px solid var(--bd); font-size: 12px; color: var(--text-low);
+}
+.bbar-head b { color: var(--text-hi); font-weight: 600; }
+.bbar-link { flex: none; color: var(--text-mid); text-decoration: none; }
+.bbar-link:hover { color: var(--text-hi); }
+.bbar-scroll { overflow-x: auto; }
+.bbar-table { width: 100%; }
+.bbar-table td { position: relative; padding-bottom: 12px; font-size: 12px; white-space: nowrap; }
+.bbar-table td .bbar-meter { left: 12px; right: 12px; bottom: 6px; }
+.bbar-cell { display: inline-flex; align-items: baseline; gap: 5px; color: var(--text-low); }
+.bbar-node { color: var(--text-hi); }
+.bbar-node .g { margin-right: 7px; width: 6px; height: 6px; }
+.bbar-none, .bbar-raft { color: var(--text-low); }
+.bbar-msg { padding: 14px; font-size: 12px; color: var(--text-low); }
+.bbar-foot { margin: 0; padding: 9px 14px 11px; border-top: 1px solid var(--bd); font-size: 11.5px; line-height: 1.5; color: var(--text-low); }
+/* A bar too narrow for four figures says one word and the worst mark. */
+@container (max-width: 980px) {
+  .bbar-full { display: none; }
+  .bbar-sum { display: inline-flex; gap: 6px; }
+}
 
 /* Status banner strip below the topbar */
 .topbar-wrap { position: relative; z-index: 5; }

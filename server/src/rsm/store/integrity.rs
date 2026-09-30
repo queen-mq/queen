@@ -23,7 +23,7 @@
 //! chained one-shot hashes keep the key/value boundary unambiguous without a
 //! copy of either.
 //!
-//! # Computed once, verified on every read
+//! # Computed once, verified at every boundary
 //!
 //! - COMPUTED where the value is born: [`super::Writes::put_raw`] seals it (the
 //!   RAM table holds the sealed bytes; an LMDB-direct keyspace writes them with
@@ -31,11 +31,20 @@
 //!   checksum that reaches the file, a snapshot and the next boot is the one
 //!   computed from the value apply wrote: end to end, through RAM, the
 //!   checkpoint thread, the file, a copy and the reload.
-//! - VERIFIED on every read: `get_raw`, `scan_raw` and `scan_rev_raw` of both
-//!   handles — so every typed read, the planner's, pop's and apply's, and the
-//!   §12.9 digest — plus the load at open (every row of every keyspace, the key
-//!   order, and each B-tree's own row count), the scrub, the copy a snapshot
-//!   ships, and `read_checkpoint_meta`.
+//! - VERIFIED where the bytes cross a boundary: every value a checkpoint
+//!   writes to the file (a value damaged in RAM never reaches it), the load at
+//!   open (every row of every keyspace, the key order, and each B-tree's own
+//!   row count), the scrub (the file, then the RAM tables), the copy a
+//!   snapshot ships, and `read_checkpoint_meta`.
+//! - A READ of a RAM table verifies too with `StoreOpts::verify_reads`
+//!   (`get_raw`, `get_with` and both scans, on every handle, so every typed
+//!   read and the §12.9 digest). Off by default: the value was sealed in this
+//!   process at its put, and two xxh3 passes per read were a measured share of
+//!   every planning lane (2026-09-29). What the default gives up is catching
+//!   memory damage at the read that meets it, before a planner or apply acts
+//!   on it; the checkpoint still refuses to write it and poisons the store,
+//!   and the digest compares nodes. A read still refuses a value too short to
+//!   carry a checksum.
 //! - The checksum never leaves the adapter: every caller sees the LOGICAL
 //!   bytes, which is why the §12.9 digest is the same over both formats and on
 //!   every node.
@@ -169,26 +178,6 @@ pub(crate) fn seeds() -> [u64; Keyspace::ALL.len()] {
 #[inline]
 pub fn checksum(seed: u64, key: &[u8], val: &[u8]) -> u64 {
     xxh3_64_with_seed(val, xxh3_64_with_seed(key, seed))
-}
-
-/// The stored form of `val`, `val ‖ checksum`, in ONE allocation — the same
-/// single allocation `Arc::from(val)` made before format 1.
-#[inline]
-pub(crate) fn seal_arc(seed: u64, key: &[u8], val: &[u8]) -> Arc<[u8]> {
-    let sum = checksum(seed, key, val).to_le_bytes();
-    let n = val.len();
-    let mut out = Arc::<[u8]>::new_uninit_slice(n + CHECKSUM_LEN);
-    let dst = Arc::get_mut(&mut out).expect("a fresh Arc has no other owner");
-    // SAFETY: `dst` is exactly `n + CHECKSUM_LEN` bytes long and the two copies
-    // below write all of them — `n` bytes of `val` at 0, the 8 checksum bytes at
-    // `n` — from sources that cannot overlap a fresh allocation. So every byte
-    // is initialized before `assume_init`.
-    unsafe {
-        let p = dst.as_mut_ptr() as *mut u8;
-        std::ptr::copy_nonoverlapping(val.as_ptr(), p, n);
-        std::ptr::copy_nonoverlapping(sum.as_ptr(), p.add(n), CHECKSUM_LEN);
-        out.assume_init()
-    }
 }
 
 /// The stored form of `val` as a plain vector (the format row, the migration,

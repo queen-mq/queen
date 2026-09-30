@@ -183,6 +183,7 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
         // percent × 100, the unit System.vue divides by 100.
         let cpu_user = user_us.saturating_sub(last_user_us) as f64 / (secs * 100.0);
         let cpu_sys = sys_us.saturating_sub(last_sys_us) as f64 / (secs * 100.0);
+        super::set_cpu_pct((cpu_user + cpu_sys) / 100.0, secs.round() as u64);
         last_user_us = user_us;
         last_sys_us = sys_us;
         let system = SystemRow {

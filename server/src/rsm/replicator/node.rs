@@ -268,10 +268,11 @@ impl<S: Store + 'static> NodeReplicator<S> {
         &self,
         body: bytes::Bytes,
         ttl: std::time::Duration,
+        drain: bool,
     ) -> Result<bytes::Bytes, super::raft::RemoteError> {
         match self {
             NodeReplicator::Local(_) => Err(super::raft::RemoteError::NoLeader),
-            NodeReplicator::Raft(r) => r.forward_command(body, ttl).await,
+            NodeReplicator::Raft(r) => r.forward_command(body, ttl, drain).await,
         }
     }
 
@@ -351,6 +352,13 @@ impl<S: Store + 'static> Replicator for NodeReplicator<S> {
         match self {
             NodeReplicator::Local(r) => r.applied_notify(),
             NodeReplicator::Raft(r) => r.applied_notify(),
+        }
+    }
+
+    fn committed_watch(&self) -> Option<tokio::sync::watch::Receiver<(u64, u64)>> {
+        match self {
+            NodeReplicator::Local(r) => r.committed_watch(),
+            NodeReplicator::Raft(r) => r.committed_watch(),
         }
     }
 

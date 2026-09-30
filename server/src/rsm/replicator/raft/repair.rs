@@ -375,7 +375,9 @@ fn encode_journal(prev: Option<LogId>, entries: &[REntry]) -> io::Result<Vec<u8>
             entries: entries[at..].to_vec(),
             leader_commit: None,
         };
-        let (bytes, n) = super::wire::encode_append(&req)?;
+        // Plain stored form (kind 3): the journal is read back at boot, before
+        // anything could be compressed or negotiated.
+        let (bytes, n) = super::wire::encode_append(&req, false)?;
         if n == 0 {
             return Err(io::Error::other(
                 "the skip journal: an entry does not encode",

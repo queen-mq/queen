@@ -231,7 +231,11 @@ impl Default for BatcherConfig {
             propose_ms: 5000,
             request_id_window_s: 60,
             request_expire_every_ms: 10_000,
-            command_queue_depth: 1024,
+            // The channel is only the hand-off: admission bounds what waits
+            // (and the drain is by bytes and commands). At 1024 the facade's
+            // senders blocked once a cycle's worth was queued, capping intake
+            // at ~1024 per plan window with one command per message.
+            command_queue_depth: 16_384,
             plan: PlanConfig::default(),
             driver_notify: true,
             push_priority: true,
@@ -428,6 +432,84 @@ pub enum Command {
     Timers(TimersCommand),
     /// Deterministic Phase-2 metadata/control effects.
     Effects(EffectsCommand),
+    /// One HTTP push that names several partitions: ONE command, ONE request
+    /// id, ONE outcome (every item's verdict, in input order), instead of one
+    /// command per (queue, partition) group. The lanes plan its groups in
+    /// parallel, each in its partition's lane, and the merge logs it as one
+    /// command. Not atomic across partitions (neither was a push request):
+    /// each group is a plain push. Last in the enum so the forward codec keeps
+    /// the indices of every older variant.
+    MultiPush(MultiPushCommand),
+}
+
+/// A push request's per-(queue, partition) groups as one command
+/// ([`Command::MultiPush`]). Each group is a whole [`PushCommand`] (its own
+/// derived request id is not recorded: the parent's is).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct MultiPushCommand {
+    pub request_id: RequestId,
+    /// In input order: the outcome's verdicts are these groups' items, group
+    /// after group.
+    pub pushes: Vec<PushCommand>,
+}
+
+impl MultiPushCommand {
+    /// Plan every group against one overlay, in order, as ONE command: the
+    /// single planner's reference for what the lanes produce in parallel.
+    /// A group refused with nothing planned for the request so far refuses the
+    /// whole command (a retryable refusal stays retryable); otherwise a
+    /// refused group answers its items with a per-item refusal, as a push
+    /// request does for an item it cannot take.
+    pub(crate) fn plan<R: Reads + ?Sized>(&self, p: &Planner<'_, R>, ov: &mut Overlay) -> Planned {
+        let mut effects: Vec<Effect> = Vec::new();
+        let mut items: Vec<crate::rsm::entry::PushVerdict> = Vec::new();
+        for push in &self.pushes {
+            match p.plan_push(ov, push) {
+                Ok(Plan::Logged {
+                    effects: e,
+                    outcome,
+                }) => {
+                    effects.extend(e);
+                    items.extend(push_items(outcome, push.items.len()));
+                }
+                Ok(Plan::Empty(outcome)) => items.extend(push_items(outcome, push.items.len())),
+                Ok(Plan::Refused(refusal)) | Err(refusal) => {
+                    if effects.is_empty() && items.is_empty() && self.pushes.len() == 1 {
+                        return Err(refusal);
+                    }
+                    items.extend(refused_items(&refusal, push.items.len()));
+                }
+            }
+        }
+        let outcome = Outcome::Push(crate::rsm::entry::PushOutcome { items });
+        if effects.is_empty() {
+            Ok(Plan::Empty(outcome))
+        } else {
+            Ok(Plan::Logged { effects, outcome })
+        }
+    }
+}
+
+/// A push group's verdicts out of its outcome (a push outcome always carries
+/// one per item; anything else is answered as a refusal of each item).
+pub(crate) fn push_items(outcome: Outcome, n: usize) -> Vec<crate::rsm::entry::PushVerdict> {
+    match outcome {
+        Outcome::Push(o) if o.items.len() == n => o.items,
+        _ => refused_items(
+            &Refusal::retry("internal", "a push planned a non-push outcome"),
+            n,
+        ),
+    }
+}
+
+/// `n` per-item refusals carrying `refusal`'s code and message.
+pub(crate) fn refused_items(refusal: &Refusal, n: usize) -> Vec<crate::rsm::entry::PushVerdict> {
+    (0..n)
+        .map(|_| crate::rsm::entry::PushVerdict::Refused {
+            code: refusal.code.to_string(),
+            message: refusal.message.to_string(),
+        })
+        .collect()
 }
 
 impl Command {
@@ -447,7 +529,7 @@ impl Command {
                 .any(|e| matches!(e, Effect::TraceAppend { .. }))
         };
         match self {
-            Command::Push(_) => true,
+            Command::Push(_) | Command::MultiPush(_) => true,
             Command::Transaction(c) => {
                 !c.pushes.is_empty()
                     || kv_grows(&c.kv)
@@ -478,13 +560,14 @@ impl Command {
             Command::Kv(c) => c.request_id,
             Command::Timers(c) => c.request_id,
             Command::Effects(c) => c.request_id,
+            Command::MultiPush(c) => c.request_id,
         }
     }
 
     /// The kind, for the O18 per-kind planner metrics and the slow-command log.
     pub fn kind(&self) -> CommandKind {
         match self {
-            Command::Push(_) => CommandKind::Push,
+            Command::Push(_) | Command::MultiPush(_) => CommandKind::Push,
             Command::PopPinned(_) => CommandKind::PopPinned,
             Command::PopWildcard(_) => CommandKind::PopWildcard,
             Command::PopDiscover(_) => CommandKind::PopDiscover,
@@ -507,6 +590,11 @@ impl Command {
     pub(crate) fn size_hint(&self) -> usize {
         match self {
             Command::Push(c) => c.items.iter().map(|i| i.frame.len() + 16).sum::<usize>() + 64,
+            Command::MultiPush(c) => c
+                .pushes
+                .iter()
+                .map(|p| p.items.iter().map(|i| i.frame.len() + 16).sum::<usize>() + 64)
+                .sum::<usize>(),
             Command::Ack(c) => {
                 c.targets
                     .iter()
@@ -566,6 +654,7 @@ impl Command {
     fn message_count(&self) -> u64 {
         match self {
             Command::Push(c) => c.items.len() as u64,
+            Command::MultiPush(c) => c.pushes.iter().map(|p| p.items.len() as u64).sum(),
             Command::Ack(c) => c.targets.iter().map(|t| t.items.len() as u64).sum(),
             Command::Transaction(c) => {
                 c.pushes.iter().map(|p| p.items.len() as u64).sum::<u64>()
@@ -584,6 +673,11 @@ impl Command {
     fn label(&self) -> (&str, &str) {
         match self {
             Command::Push(c) => (&c.tenant, &c.queue),
+            Command::MultiPush(c) => c
+                .pushes
+                .first()
+                .map(|p| (p.tenant.as_str(), p.queue.as_str()))
+                .unwrap_or(("", "")),
             Command::PopPinned(c) | Command::PopWildcard(c) | Command::PopDiscover(c) => {
                 (&c.tenant, &c.queue)
             }
@@ -627,6 +721,7 @@ impl Command {
             Command::Kv(c) => p.plan_kv(ov, c),
             Command::Timers(c) => p.plan_timers(ov, c),
             Command::Effects(c) => p.plan_effects(ov, c),
+            Command::MultiPush(c) => c.plan(p, ov),
         }
     }
 }
@@ -748,6 +843,11 @@ struct InFlightEntry {
     /// A `Timeout` kept this entry in flight (I3): its waiters were already
     /// answered `Retry`, and it stays folded into the overlay until it applies.
     timed_out: bool,
+    /// Known committed ([`Replicator::committed_watch`]) before it applied
+    /// here: it no longer holds a pipeline slot, and the waiters whose answer
+    /// needs nothing but the outcome were answered ([`InFlightEntry::answer_committed`]).
+    /// It stays in flight (folded into the overlay) until it applies.
+    committed: bool,
     /// When `propose` was submitted (PERF-1): the `propose_roundtrip`
     /// histogram measures from here to the moment the result arrives. `None`
     /// when the instrumentation is off (`QUEEN_RAFT_METRICS=0`), so the knob
@@ -806,6 +906,47 @@ impl InFlightEntry {
             .iter()
             .flat_map(|pop| self.leased_of(&pop.claims))
             .collect()
+    }
+
+    /// The entry is committed (not yet applied here): answer every waiter
+    /// whose reply is its outcome alone — a push, a multi-push, an ack, a
+    /// nack, and an empty read that barriered on this entry. A pop keeps
+    /// waiting for local apply (its answer reads this node's rows and payload
+    /// files), as do KV calls (rendered by apply, at their position),
+    /// transactions, renews and dead-letter reads.
+    fn answer_committed(&mut self, at: AppliedAt) {
+        let waiters = std::mem::take(&mut self.waiters);
+        for w in waiters {
+            match w {
+                Waiter::Command { request_id, reply } => {
+                    let outcome = self
+                        .entry
+                        .commands
+                        .iter()
+                        .find(|c| c.request_id == request_id)
+                        .map(|c| &c.outcome);
+                    match outcome {
+                        Some(o) if answerable_at_commit(o) => {
+                            let _ = reply.send(Reply::Done {
+                                outcome: o.clone(),
+                                at: Some(at),
+                            });
+                        }
+                        _ => self.waiters.push(Waiter::Command { request_id, reply }),
+                    }
+                }
+                Waiter::Fixed { outcome, reply } => {
+                    if answerable_at_commit(&outcome) {
+                        let _ = reply.send(Reply::Done {
+                            outcome,
+                            at: Some(at),
+                        });
+                    } else {
+                        self.waiters.push(Waiter::Fixed { outcome, reply });
+                    }
+                }
+            }
+        }
     }
 
     /// `(pid, group, worker)` of every LEASED claim in `claims`; the group is
@@ -1176,8 +1317,10 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
     state.cycles += 1;
     let cycle_no = state.cycles;
     if keep.reset_every > 0 && cycle_no.is_multiple_of(keep.reset_every) {
+        // The overlay starts over; the rings are kept: they check themselves
+        // against `pending` a ring at a time as they advance (B34), where
+        // dropping them rescanned every pending row of every kept ring at once.
         state.overlay = None;
-        state.rings = None;
     }
     // Taken OUT for the cycle: only a cycle that reaches its end puts them
     // back, so an error part-way (a store read refused, a panic) leaves
@@ -1631,6 +1774,118 @@ pub struct Batcher<S: Store, R: Replicator> {
     qlog_reader: Option<QLogReader>,
     /// Membership changes pausing the driver ([`QuiesceReq`]).
     quiesce_rx: Option<mpsc::UnboundedReceiver<QuiesceReq>>,
+    /// Wakes the pops parked on a queue when an append to it is PLANNED
+    /// ([`PlanWaker`]); `None` leaves every wake to apply.
+    plan_waker: Option<PlanWaker>,
+}
+
+/// Called by the driver once per cycle, after it proposed an entry, with each
+/// `(tenant, queue)` the entry's pushes appended to and how many partitions
+/// they appended to: the facade wakes that many parked pops of every group of
+/// the queue there and then, instead of when the entry applies — the claim is
+/// planned against the in-flight append in a later cycle and commits after it,
+/// so a consumer sees the message one raft round earlier. Leader-side only (a
+/// follower plans nothing); followers keep their apply-time wakes.
+pub type PlanWaker = Arc<dyn Fn(&str, &str, usize) + Send + Sync>;
+
+/// `QUEEN_RAFT_WAKE_AT_PLAN` (default on): see [`PlanWaker`].
+static WAKE_AT_PLAN: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    !matches!(
+        std::env::var("QUEEN_RAFT_WAKE_AT_PLAN")
+            .as_deref()
+            .map(str::trim),
+        Ok("0") | Ok("false") | Ok("off") | Ok("no")
+    )
+});
+
+/// Whether the facade should install a [`PlanWaker`].
+pub fn wake_at_plan() -> bool {
+    *WAKE_AT_PLAN
+}
+
+/// `QUEEN_RAFT_ANSWER_AT_COMMIT` (default on): free pipeline slots and answer
+/// pushes and acks when their entry commits, not when it applies here
+/// ([`Replicator::committed_watch`]).
+static ANSWER_AT_COMMIT: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    !matches!(
+        std::env::var("QUEEN_RAFT_ANSWER_AT_COMMIT")
+            .as_deref()
+            .map(str::trim),
+        Ok("0") | Ok("false") | Ok("off") | Ok("no")
+    )
+});
+
+/// `QUEEN_RAFT_COMMIT_LAG_MAX` (default 64): how many entries past the pipeline
+/// may be committed and not yet applied here before planning waits for apply.
+/// Each is folded into every planning overlay until it applies, and holds its
+/// entry in RAM.
+static COMMIT_LAG_MAX: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+    std::env::var("QUEEN_RAFT_COMMIT_LAG_MAX")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(64)
+});
+
+/// `QUEEN_RAFT_PIPELINED_PLANNING` (default on): a cycle launches the next
+/// one as soon as its own entry is known good, before routing its answers and
+/// proposing it ([`RunState::prefetch`]).
+static PIPELINED_PLANNING: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    !matches!(
+        std::env::var("QUEEN_RAFT_PIPELINED_PLANNING")
+            .as_deref()
+            .map(str::trim),
+        Ok("0") | Ok("false") | Ok("off") | Ok("no")
+    )
+});
+
+/// A cycle handed to the planner thread and not finished yet: everything
+/// the second half needs ([`RunState::finish`]).
+struct Launched {
+    rx: tokio::sync::oneshot::Receiver<crate::rsm::store::Result<PlanOutput>>,
+    replies: Vec<oneshot::Sender<Reply>>,
+    received: Vec<Option<Instant>>,
+    arrivals: Vec<Instant>,
+    wake_hint: Option<Vec<Vec<(String, String)>>>,
+    epoch0: u64,
+    hold0: bool,
+    expire: bool,
+    kv_sweep: bool,
+    fire: bool,
+    maintenance: bool,
+    scanned: bool,
+    trace: bool,
+    tr: (usize, usize, usize, u64, usize),
+    timing_on: bool,
+    drain_started: Option<Instant>,
+}
+
+/// Whether a reply is its outcome alone, rendered with no read of this
+/// node's state: an ack, or a push none of whose items is a duplicate. A
+/// duplicate's answer carries the ORIGINAL message id, read from the original
+/// frame in this node's queue log, which a commit reached by the followers'
+/// acks may precede here; a pop reads rows and payloads. Those wait for apply.
+fn answerable_at_commit(o: &Outcome) -> bool {
+    match o {
+        Outcome::Ack(_) => true,
+        Outcome::Push(p) => !p
+            .items
+            .iter()
+            .any(|v| matches!(v, crate::rsm::entry::PushVerdict::Duplicate { .. })),
+        _ => false,
+    }
+}
+
+/// Resolves when the watch changes; never when there is none (a disabled
+/// `select!` arm must still type-check).
+async fn watch_changed(rx: &mut Option<watch::Receiver<(u64, u64)>>) {
+    match rx.as_mut() {
+        Some(rx) => {
+            if rx.changed().await.is_err() {
+                std::future::pending::<()>().await
+            }
+        }
+        None => std::future::pending::<()>().await,
+    }
 }
 
 impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
@@ -1645,6 +1900,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             reader: None,
             qlog_reader: None,
             quiesce_rx: None,
+            plan_waker: None,
         }
     }
 
@@ -1652,6 +1908,12 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
     /// entries ([`QuiesceReq`]).
     pub fn with_quiesce(mut self, rx: mpsc::UnboundedReceiver<QuiesceReq>) -> Batcher<S, R> {
         self.quiesce_rx = Some(rx);
+        self
+    }
+
+    /// Wake parked pops when an append is planned ([`PlanWaker`]).
+    pub fn with_plan_waker(mut self, w: PlanWaker) -> Batcher<S, R> {
+        self.plan_waker = Some(w);
         self
     }
 
@@ -1722,11 +1984,15 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
         } else {
             None
         };
-        // Background retention: the partition walk leaves the planning thread
-        // (single planner only; lanes keep the walk in the cycle).
+        // Background retention: the partition walk leaves the planning thread.
+        // With lanes, each watermark proposal is judged by its partition's
+        // lane, in parallel, and only partition deletes go to control: the walk
+        // left in control covered 819 partitions/s (a round took 20 min at 1M
+        // partitions, 3.4 h at 10M), and judging every proposal in control cost
+        // ~2 ms of each serial cycle (2026-09-29).
         let mut cfg = self.cfg;
         let scan = match cfg.retention_scan {
-            Some(scan_cfg) if maintenance_on && cfg.lanes <= 1 => {
+            Some(scan_cfg) if maintenance_on => {
                 let shared = crate::rsm::retention_scan::ScanShared::new(&cfg.maintenance);
                 match crate::rsm::retention_scan::spawn(
                     self.store.clone(),
@@ -1753,6 +2019,11 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
         let scan_on = scan.is_some();
         let mut scan_tick = tokio::time::interval(Duration::from_millis(200));
         scan_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let committed_rx = if *ANSWER_AT_COMMIT {
+            self.repl.committed_watch()
+        } else {
+            None
+        };
         let mut st = RunState {
             planner_thread: PlannerThread::spawn(),
             scan,
@@ -1768,6 +2039,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             result_tx,
             result_rx,
             applied_notify,
+            committed_rx,
             queue: VecDeque::new(),
             lane: VecDeque::new(),
             inflight: VecDeque::new(),
@@ -1791,6 +2063,8 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             last_cycle_at: None,
             plan_epoch: 0,
             quiesce_rx: self.quiesce_rx,
+            plan_waker: self.plan_waker,
+            prefetch: None,
             quiescing: None,
             realign_at: None,
             term_start_us: None,
@@ -1810,8 +2084,16 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                 st.enqueue(more);
             }
             st.sync_scan();
-            while st.can_plan() {
+            // A cycle launched early by the last one is always finished, even
+            // when nothing else is left to plan (it may have drained the queue).
+            while st.prefetch.is_some() || st.can_plan() {
                 st.plan_cycle().await;
+                // Take what arrived while that cycle planned before the next
+                // one drains (the channel is otherwise read only at the top of
+                // this loop, and back-to-back cycles would leave it full).
+                while let Ok(more) = st.cmd_rx.try_recv() {
+                    st.enqueue(more);
+                }
             }
             if st.should_exit() {
                 break;
@@ -1843,6 +2125,12 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                 _ = wait_notify(&st.applied_notify), if st.applied_notify.is_some() => {
                     st.note_wake("applied_notify");
                     st.on_applied_wake();
+                }
+                // The commit index advanced: free the slots of this leader's
+                // entries it covers and answer what needs no local apply.
+                _ = watch_changed(&mut st.committed_rx), if st.committed_rx.is_some() => {
+                    st.note_wake("committed");
+                    st.on_committed();
                 }
                 _ = expire.tick() => {
                     st.note_wake("expire");
@@ -2012,6 +2300,10 @@ struct RunState<S: Store, R: Replicator> {
     /// PERF-G: the replicator's applied-index wake (`QUEEN_RAFT_DRIVER_NOTIFY`),
     /// or `None` when the knob is off or the backend does not expose it.
     applied_notify: Option<Arc<Notify>>,
+    /// The replicator's committed log id ([`Replicator::committed_watch`]),
+    /// `None` when `QUEEN_RAFT_ANSWER_AT_COMMIT=0` or the backend reports
+    /// commits only through apply.
+    committed_rx: Option<watch::Receiver<(u64, u64)>>,
     queue: VecDeque<Submission>,
     /// The priority lane (`drain_lane`): non-push commands, drained first.
     lane: VecDeque<Submission>,
@@ -2061,6 +2353,11 @@ struct RunState<S: Store, R: Replicator> {
     /// Membership changes pausing the driver ([`QuiesceReq`]), and the one
     /// pausing it now.
     quiesce_rx: Option<mpsc::UnboundedReceiver<QuiesceReq>>,
+    /// See [`PlanWaker`].
+    plan_waker: Option<PlanWaker>,
+    /// The next cycle, launched by the one being finished before it proposed
+    /// (`QUEEN_RAFT_PIPELINED_PLANNING`); finished by the next `plan_cycle`.
+    prefetch: Option<Launched>,
     quiescing: Option<Quiescing>,
     /// An entry landed at another index than planned: planning resumes, from
     /// the log's end, once apply reaches this index ([`RunState::check_hold`]).
@@ -2161,13 +2458,33 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         });
     }
 
-    /// Entries proposed but not yet applied locally (the I3 pipeline count):
-    /// a `Timeout` does NOT decrement it until the entry applies.
+    /// Entries proposed but not yet applied locally: a `Timeout` does NOT
+    /// decrement it until the entry applies.
     fn unresolved(&self) -> usize {
         self.inflight
             .iter()
             .filter(|e| e.resolved.is_none())
             .count()
+    }
+
+    /// The pipeline count (I3): entries proposed and neither applied here nor
+    /// known committed. A slot frees at COMMIT when the backend reports it
+    /// ([`Replicator::committed_watch`]): the planner already folds every
+    /// entry up to the store's applied index into its overlay, committed or
+    /// not, so what a committed entry still costs here is only its place in
+    /// that overlay — bounded apart by [`COMMIT_LAG_MAX`]. With apply clocking
+    /// every slot (a batch of entries applied, then the next handed over) the
+    /// pipeline ran at 8 entries per commit-plus-apply round (2026-09-30).
+    fn uncommitted(&self) -> usize {
+        self.inflight
+            .iter()
+            .filter(|e| e.resolved.is_none() && !e.committed && !e.timed_out)
+            .count()
+            + self
+                .inflight
+                .iter()
+                .filter(|e| e.resolved.is_none() && e.timed_out)
+                .count()
     }
 
     /// While another node is known to lead (this one follows it, or is a
@@ -2210,7 +2527,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             let _ = sub.reply.send(Reply::Retry { hint });
             return;
         }
-        if self.cfg.drain_lane && !matches!(sub.command, Command::Push(_)) {
+        if self.cfg.drain_lane && !matches!(sub.command, Command::Push(_) | Command::MultiPush(_)) {
             self.lane.push_back(sub);
         } else {
             self.queue.push_back(sub);
@@ -2220,7 +2537,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     /// Put a submission back at the FRONT of its lane (a budget-cut deferral,
     /// an orphan-release nack): it is the next of its kind to be planned.
     fn requeue_front(&mut self, sub: Submission) {
-        if self.cfg.drain_lane && !matches!(sub.command, Command::Push(_)) {
+        if self.cfg.drain_lane && !matches!(sub.command, Command::Push(_) | Command::MultiPush(_)) {
             self.lane.push_front(sub);
         } else {
             self.queue.push_front(sub);
@@ -2237,7 +2554,8 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             && !self.paused
             && self.holding_until.is_none()
             && self.quiescing.is_none()
-            && self.unresolved() < self.cfg.pipeline
+            && self.uncommitted() < self.cfg.pipeline
+            && self.unresolved() < self.cfg.pipeline + *COMMIT_LAG_MAX
             && (self.queued() > 0
                 || ((self.expire_due
                     || self.kv_sweep_due
@@ -2283,23 +2601,58 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         batch
     }
 
-    /// One cycle: drain, plan on the blocking pool, propose, route answers.
+    /// One cycle: drain, plan on the planner thread, propose, route answers.
+    /// A cycle launched early by the one before it ([`RunState::prefetch`])
+    /// is finished here instead of launching a new one.
     async fn plan_cycle(&mut self) {
+        let launched = match self.prefetch.take() {
+            Some(l) => Some(l),
+            None => self.launch(None, true),
+        };
+        if let Some(l) = launched {
+            self.finish(l).await;
+        }
+    }
+
+    /// Whether the cycle being finished may launch the next one before its own
+    /// entry is proposed ([`RunState::prefetch`]): what [`Self::can_plan`] asks,
+    /// with that entry counted in flight, and commands waiting.
+    fn can_prefetch(&self) -> bool {
+        *PIPELINED_PLANNING
+            && self.prefetch.is_none()
+            && !self.stopped
+            && !self.paused
+            && !self.closing
+            && self.holding_until.is_none()
+            && self.quiescing.is_none()
+            && self.uncommitted() + 1 < self.cfg.pipeline
+            && self.unresolved() + 1 < self.cfg.pipeline + *COMMIT_LAG_MAX
+            && self.queued() > 0
+    }
+
+    /// The first half of a cycle: drain the queue and hand the batch to the
+    /// planner thread. `extra` is an entry about to be proposed at that index
+    /// (the cycle launching this one): it is planned on as if in flight. With
+    /// `steps` off the cycle plans commands only — the leader steps (expiry,
+    /// sweep, maintenance, scanner) run in cycles that launch on their own,
+    /// because the maintenance walk judges committed state alone and would
+    /// plan the previous cycle's watermarks again.
+    fn launch(&mut self, extra: Option<(u64, Arc<Entry>)>, steps: bool) -> Option<Launched> {
         let batch = self.drain_batch();
-        let expire = self.expire_due && !self.closing;
-        let kv_sweep = self.kv_sweep_due && !self.closing;
+        let expire = steps && self.expire_due && !self.closing;
+        let kv_sweep = steps && self.kv_sweep_due && !self.closing;
         // WP-2.3: the fire step runs on its tick, and in any cycle that plans a
         // timers command (a timer scheduled already due fires in its own entry).
         let fire = self.cfg.timer_tick_ms > 0
             && !self.closing
-            && (self.timers_due
+            && ((steps && self.timers_due)
                 || batch
                     .iter()
                     .any(|s| matches!(s.command, Command::Timers(_))));
-        let maintenance = self.maintenance_due && !self.closing;
-        let scanned = self.scan_due && !self.closing;
+        let maintenance = steps && self.maintenance_due && !self.closing;
+        let scanned = steps && self.scan_due && !self.closing;
         if batch.is_empty() && !expire && !kv_sweep && !fire && !maintenance && !scanned {
-            return;
+            return None;
         }
         // PERF-K trace: capture the before-state and the inter-cycle gap now
         // (before draining/proposing changes the counts). Gated on
@@ -2377,6 +2730,28 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         // when the metrics knob is off, since `received_at` is then `None`.
         let received: Vec<Option<Instant>> = batch.iter().map(|s| s.received_at).collect();
 
+        // The queues each drained push appends to, by batch position, for the
+        // plan-time wake ([`PlanWaker`]); taken before the commands move.
+        let wake_hint: Option<Vec<Vec<(String, String)>>> = self.plan_waker.as_ref().map(|_| {
+            batch
+                .iter()
+                .map(|s| match &s.command {
+                    Command::Push(c) => vec![(c.tenant.clone(), c.queue.clone())],
+                    Command::MultiPush(c) => c
+                        .pushes
+                        .iter()
+                        .map(|p| (p.tenant.clone(), p.queue.clone()))
+                        .collect(),
+                    Command::Transaction(c) => c
+                        .pushes
+                        .iter()
+                        .map(|p| (p.tenant.clone(), p.queue.clone()))
+                        .collect(),
+                    _ => Vec::new(),
+                })
+                .collect()
+        });
+
         // Split the submissions: commands go to the blocking planner, reply
         // senders stay here in the same order.
         let (commands, replies): (Vec<Command>, Vec<oneshot::Sender<Reply>>) =
@@ -2386,6 +2761,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             .inflight
             .iter()
             .map(|e| (e.index, e.entry.clone()))
+            .chain(extra)
             .collect();
 
         let wall_us = self.plan_wall();
@@ -2434,6 +2810,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     kv_sweep_limit,
                     fire_cfg,
                     maintenance_cfg,
+                    scan,
                 )
             } else {
                 plan_cycle_blocking(
@@ -2456,12 +2833,69 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             };
             if crate::rsm::timing::enabled() {
                 let tm = crate::rsm::timing::metrics();
+                // The single planner records its command loop as `plan`; with
+                // lanes the whole cycle is the planning (router, lanes,
+                // control, merge), and it went unrecorded: the histogram read
+                // zero on every lanes node.
+                if lanes_n > 1 {
+                    tm.plan.record_dur(w0.elapsed());
+                }
                 tm.plan_whole_wall.record_dur(w0.elapsed());
                 tm.plan_whole_cpu
                     .record(crate::rsm::timing::thread_cpu_ns().saturating_sub(c0));
             }
             r
         });
+        Some(Launched {
+            rx,
+            replies,
+            received,
+            arrivals,
+            wake_hint,
+            epoch0,
+            hold0,
+            expire,
+            kv_sweep,
+            fire,
+            maintenance,
+            scanned,
+            trace,
+            tr: (
+                tr_drained,
+                tr_unresolved0,
+                tr_inflight0,
+                tr_gap_us,
+                tr_qbefore,
+            ),
+            timing_on,
+            drain_started,
+        })
+    }
+
+    /// The second half of a cycle: wait for the plan, then encode, route the
+    /// answers and propose. Once the entry is known good it launches the next
+    /// cycle before proposing it ([`Self::can_prefetch`]), so the planner
+    /// thread plans while this task routes and proposes.
+    async fn finish(&mut self, l: Launched) {
+        let Launched {
+            rx,
+            replies,
+            received,
+            arrivals,
+            wake_hint,
+            epoch0,
+            hold0,
+            expire: _,
+            kv_sweep,
+            fire,
+            maintenance,
+            scanned: _,
+            trace,
+            tr,
+            timing_on,
+            drain_started,
+        } = l;
+        let (tr_drained, tr_unresolved0, tr_inflight0, tr_gap_us, tr_qbefore) = tr;
         // While the planner thread plans, keep answering the entries that
         // landed: a slot freed now is reused by the next cycle at once, rather
         // than after this one (each cycle used to wait out the planning of the
@@ -2480,6 +2914,19 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 _ = wait_notify(&self.applied_notify), if self.applied_notify.is_some() => {
                     self.note_wake("applied_notify");
                     self.on_applied_wake();
+                }
+                _ = watch_changed(&mut self.committed_rx), if self.committed_rx.is_some() => {
+                    self.note_wake("committed");
+                    self.on_committed();
+                }
+                // Keep taking arrivals while the planner thread plans: they
+                // wait in the queue for the next cycle instead of blocking
+                // their senders on a full channel.
+                Some(sub) = self.cmd_rx.recv() => {
+                    self.enqueue(sub);
+                    while let Ok(more) = self.cmd_rx.try_recv() {
+                        self.enqueue(more);
+                    }
                 }
             }
         };
@@ -2611,6 +3058,19 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         } else {
             (0, 0, false)
         };
+        // Launch the next cycle now, with this entry counted in flight at its
+        // index: the planner thread is free, and routing and proposing this one
+        // no longer idles it. Not after a cycle that deferred commands: those
+        // go back to the front of the queue and must be planned before later
+        // arrivals.
+        if has_entry
+            && !out.slots.iter().any(|s| matches!(s, Slot::Deferred(_)))
+            && self.can_prefetch()
+        {
+            if let Some(entry) = out.entry.clone() {
+                self.prefetch = self.launch(Some((index, entry)), false);
+            }
+        }
         // PERF-K trace: the command count that went into this cycle's entry.
         let tr_entry_cmds = if trace {
             out.entry.as_ref().map(|e| e.commands.len()).unwrap_or(0)
@@ -2640,6 +3100,24 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             proposed_arrivals(&out.slots, &arrivals, seq, barrier_seq)
         } else {
             Vec::new()
+        };
+
+        // The plan-time wake's counts: one per partition a LOGGED push of this
+        // entry appends to, by queue (an all-duplicate group appends nothing
+        // and overcounts by one wake at worst: the pop it wakes re-parks).
+        let plan_wakes: Vec<((String, String), usize)> = match (&wake_hint, has_entry) {
+            (Some(hint), true) => {
+                let mut m: HashMap<(String, String), usize> = HashMap::new();
+                for (pos, slot) in out.slots.iter().enumerate() {
+                    if let Slot::Logged(_) = slot {
+                        for tq in hint.get(pos).into_iter().flatten() {
+                            *m.entry(tq.clone()).or_default() += 1;
+                        }
+                    }
+                }
+                m.into_iter().collect()
+            }
+            _ => Vec::new(),
         };
 
         let mut waiters: Vec<Waiter> = Vec::new();
@@ -2720,6 +3198,11 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     .record_dur(started.elapsed());
             }
             self.propose(seq, index, entry, waiters, bytes);
+            if let Some(w) = self.plan_waker.as_ref() {
+                for ((tenant, queue), n) in &plan_wakes {
+                    w(tenant, queue, *n);
+                }
+            }
         } else {
             debug_assert!(waiters.is_empty(), "no entry but waiters were attached");
         }
@@ -2834,6 +3317,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             waiters,
             resolved: None,
             timed_out: false,
+            committed: false,
             proposed_at: crate::rsm::timing::stamp(),
         });
         // §13.5 `propose.sent`: the entry is about to reach the replicator; the
@@ -3193,6 +3677,32 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         self.resolve_applied(applied);
     }
 
+    /// The replicator's committed log id moved to `(c, t)`: every in-flight
+    /// entry at or below `c` that this node proposed in term `t` is committed
+    /// (see [`Replicator::committed_watch`] for why only term `t`'s), so it
+    /// leaves the pipeline and its outcome-only waiters are answered. The rest
+    /// of its lifecycle — the overlay, the waiters that need local rows, the
+    /// orphaned-lease release, the term check — stays at apply.
+    fn on_committed(&mut self) {
+        let Some(rx) = self.committed_rx.as_mut() else {
+            return;
+        };
+        let (c, t) = *rx.borrow_and_update();
+        for e in self.inflight.iter_mut() {
+            if e.index > c {
+                break;
+            }
+            if e.resolved.is_some() || e.committed || e.timed_out || e.term != t {
+                continue;
+            }
+            e.committed = true;
+            e.answer_committed(AppliedAt {
+                index: e.index,
+                term: e.term,
+            });
+        }
+    }
+
     /// Resolve, in index order, every in-flight entry whose index the applied
     /// index has passed. D7/I4 hold: `applied_index` only advances past an
     /// entry AFTER it committed and applied locally, so answering here is
@@ -3359,7 +3869,7 @@ fn interleave_push_first(batch: Vec<Submission>) -> Vec<Submission> {
     let n = batch.len();
     let (pushes, others): (Vec<Submission>, Vec<Submission>) = batch
         .into_iter()
-        .partition(|s| matches!(s.command, Command::Push(_)));
+        .partition(|s| matches!(s.command, Command::Push(_) | Command::MultiPush(_)));
     // All one kind: nothing to interleave, and the original order is already
     // right (the partition preserved it).
     if pushes.is_empty() || others.is_empty() {

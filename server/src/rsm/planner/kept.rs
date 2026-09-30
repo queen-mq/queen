@@ -45,6 +45,23 @@
 //! minus a landed prefix, a landed contribution that is not where the fold put
 //! it, a request id in two entries — is an `Err`, and the batcher rebuilds
 //! from scratch (the old path) that same cycle.
+//!
+//! # Control's overlay keeps less (B27)
+//!
+//! With lanes, control plans after them and, in steady state, plans almost
+//! nothing that reads partition state — yet its overlay folded and unfolded
+//! every message of every entry (238-595 ns per pushed message on the serial
+//! planner thread). [`KeptOverlay::rebuild_catalog`] keeps the catalog, KV,
+//! timers and creates only, and no request ids (the router looks those up,
+//! L5); [`KeptOverlay::partitions`] folds the partition state of every entry
+//! it holds, each under its own tag, for a cycle that reads it, and drops it
+//! again once nobody has for [`PARTITIONS_IDLE_CYCLES`]. Each entry records
+//! whether its partition state is folded, so a landing takes out exactly what
+//! went in. Catalog and partition effects write disjoint maps, so folding the
+//! partition state after the catalog leaves what folding each entry whole
+//! leaves (`rsm::tests::planner_indexes` checks it against a rebuild). The
+//! request ids an overlay does record are kept by reference to their entry,
+//! not as cloned outcomes.
 
 use std::collections::hash_map::Entry as MapEntry;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -52,7 +69,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::Arc;
 
-use super::{frame_hash, Overlay, Tagged};
+use super::{frame_hash, is_partition_state, InFlightOutcome, Overlay, Tagged};
 use crate::rsm::effect::Effect;
 use crate::rsm::entry::Entry;
 use crate::rsm::fasthash::FxBuild;
@@ -64,6 +81,8 @@ type TimerKey = (String, String, String);
 struct KeptEntry {
     entry: Arc<Entry>,
     tag: u64,
+    /// B27: its partition state is folded (see [`Overlay::partition_state`]).
+    parts: bool,
     /// `max(pid + 1)` over its `PartitionCreate`s (0: none).
     pid_hi: u64,
     /// `max(version + 1)` over its `KvPut`s (0: none).
@@ -73,7 +92,7 @@ struct KeptEntry {
 }
 
 impl KeptEntry {
-    fn new(entry: Arc<Entry>, tag: u64) -> KeptEntry {
+    fn new(entry: Arc<Entry>, tag: u64, parts: bool) -> KeptEntry {
         let (mut pid_hi, mut kv_hi, mut created_hi) = (0u64, 0u64, 0i64);
         for eff in &entry.effects {
             match eff {
@@ -91,6 +110,7 @@ impl KeptEntry {
         KeptEntry {
             entry,
             tag,
+            parts,
             pid_hi,
             kv_hi,
             created_hi,
@@ -108,7 +128,16 @@ pub(crate) struct KeptOverlay {
     /// overlay is right for THIS cycle (first writer wins, as always), but the
     /// landing of the first could not restore the second's, so it is not kept.
     exact: bool,
+    /// B27: the last cycle whose planning needed the partition state
+    /// ([`KeptOverlay::partitions`]).
+    parts_used_at: u64,
 }
+
+/// B27: how many cycles control's overlay keeps its partition state after the
+/// last cycle that needed it. Folding it back costs about one fold per entry
+/// in flight (the pipeline's depth, 8 by default), keeping it one fold and one
+/// landing per cycle: past about that many idle cycles dropping it is cheaper.
+pub(crate) const PARTITIONS_IDLE_CYCLES: u64 = 8;
 
 impl KeptOverlay {
     /// THE OLD PATH: a fresh overlay over the committed bases with every entry
@@ -126,23 +155,61 @@ impl KeptOverlay {
             entries: VecDeque::new(),
             next_tag: 1,
             exact: true,
+            parts_used_at: 0,
         };
+        k.ingest_all(folded, store_applied);
+        k
+    }
+
+    /// B27: [`KeptOverlay::rebuild`] without the partition state and the
+    /// request ids — control's overlay with lanes, which plans after the lanes
+    /// and mostly plans nothing that reads either (the router looks the ids
+    /// up, L5). [`KeptOverlay::partitions`] folds the partition state in for a
+    /// cycle that needs it.
+    pub(crate) fn rebuild_catalog(
+        folded: &[(u64, Arc<Entry>)],
+        store_applied: u64,
+        base_pid: u64,
+        base_kv: u64,
+    ) -> KeptOverlay {
+        let mut ov = Overlay::new(base_pid, base_kv);
+        ov.partition_state = false;
+        ov.record_ids = false;
+        let mut k = KeptOverlay {
+            ov,
+            entries: VecDeque::new(),
+            next_tag: 1,
+            exact: true,
+            parts_used_at: 0,
+        };
+        k.ingest_all(folded, store_applied);
+        k
+    }
+
+    /// Fold every entry of `folded` above `store_applied`, in index order.
+    fn ingest_all(&mut self, folded: &[(u64, Arc<Entry>)], store_applied: u64) {
         for (index, e) in folded {
             if *index <= store_applied {
                 continue;
             }
-            if e.commands
-                .iter()
-                .any(|c| k.ov.request_ids.contains_key(&c.request_id))
-            {
-                k.exact = false;
-            }
-            let tag = k.take_tag();
-            k.ov.set_tag(tag);
-            k.ov.ingest_entry(e);
-            k.entries.push_back(KeptEntry::new(e.clone(), tag));
+            self.ingest_one(e);
         }
-        k
+    }
+
+    /// Fold one more entry in flight under a tag of its own.
+    fn ingest_one(&mut self, e: &Arc<Entry>) {
+        if e.commands
+            .iter()
+            .any(|c| self.ov.request_ids.contains_key(&c.request_id))
+        {
+            self.exact = false;
+        }
+        let tag = self.take_tag();
+        self.ov.set_tag(tag);
+        self.ov.ingest(e);
+        let parts = self.ov.partition_state;
+        self.entries
+            .push_back(KeptEntry::new(e.clone(), tag, parts));
     }
 
     fn take_tag(&mut self) -> u64 {
@@ -194,7 +261,8 @@ impl KeptOverlay {
         let mut refold: HashSet<TimerKey> = HashSet::new();
         for _ in 0..landed {
             let k = self.entries.pop_front().expect("counted above");
-            self.ov.unfold_entry(&k.entry, k.tag, &mut refold)?;
+            self.ov
+                .unfold_entry(&k.entry, k.tag, k.parts, &mut refold)?;
         }
         if !refold.is_empty() {
             self.ov
@@ -260,7 +328,8 @@ impl KeptOverlay {
         let mut refold: HashSet<TimerKey> = HashSet::new();
         for _ in 0..landed {
             let k = self.entries.pop_front().expect("counted above");
-            self.ov.unfold_entry(&k.entry, k.tag, &mut refold)?;
+            self.ov
+                .unfold_entry(&k.entry, k.tag, k.parts, &mut refold)?;
         }
         if !refold.is_empty() {
             self.ov
@@ -270,16 +339,7 @@ impl KeptOverlay {
             self.ov.shrink_idle();
         }
         for e in &desired[held..] {
-            if e.commands
-                .iter()
-                .any(|c| self.ov.request_ids.contains_key(&c.request_id))
-            {
-                self.exact = false;
-            }
-            let tag = self.take_tag();
-            self.ov.set_tag(tag);
-            self.ov.ingest_entry(e);
-            self.entries.push_back(KeptEntry::new((*e).clone(), tag));
+            self.ingest_one(e);
         }
         // Every kept entry is one in flight now: the maxima as `advance` sets them.
         self.advance(folded, store_applied, base_pid, base_kv)
@@ -307,19 +367,84 @@ impl KeptOverlay {
     /// already in the overlay (an entry in flight carrying it) is an `Err`:
     /// the old path's first-writer-wins could not be undone at landing.
     pub(crate) fn push_entry(&mut self, entry: Arc<Entry>, tag: u64) -> Result<(), &'static str> {
-        for c in &entry.commands {
-            match self.ov.request_ids.entry(c.request_id) {
-                MapEntry::Occupied(_) => return Err("a request id is in two entries in flight"),
-                MapEntry::Vacant(v) => {
-                    v.insert(Tagged {
-                        v: c.outcome.clone(),
-                        tag,
-                    });
+        if self.ov.record_ids {
+            for (i, c) in entry.commands.iter().enumerate() {
+                match self.ov.request_ids.entry(c.request_id) {
+                    MapEntry::Occupied(_) => {
+                        return Err("a request id is in two entries in flight")
+                    }
+                    MapEntry::Vacant(v) => {
+                        v.insert(Tagged {
+                            v: InFlightOutcome {
+                                entry: entry.clone(),
+                                command: i,
+                            },
+                            tag,
+                        });
+                    }
                 }
             }
         }
-        self.entries.push_back(KeptEntry::new(entry, tag));
+        let parts = self.ov.partition_state;
+        self.entries.push_back(KeptEntry::new(entry, tag, parts));
         Ok(())
+    }
+
+    /// B27: make the overlay hold the partition state or not, for a cycle that
+    /// `needs` it or not (`cycle` numbers the cycles). A catalog-only overlay
+    /// folds the partition effects of every entry it holds, oldest first,
+    /// each under its own tag — the state a full fold leaves, since catalog
+    /// and partition effects write disjoint maps. One that has held it for
+    /// [`PARTITIONS_IDLE_CYCLES`] cycles nobody needed it drops it again.
+    /// Call before the cycle's own folds ([`KeptOverlay::begin_cycle`]).
+    pub(crate) fn partitions(&mut self, needs: bool, cycle: u64) {
+        if needs {
+            self.parts_used_at = cycle;
+            if !self.ov.partition_state {
+                self.fold_partitions();
+            }
+        } else if self.ov.partition_state
+            && !self.ov.record_ids
+            && cycle.saturating_sub(self.parts_used_at) > PARTITIONS_IDLE_CYCLES
+        {
+            self.drop_partitions();
+        }
+    }
+
+    /// Whether the overlay holds the partition state (B27).
+    pub(crate) fn has_partitions(&self) -> bool {
+        self.ov.partition_state
+    }
+
+    fn fold_partitions(&mut self) {
+        let (tag0, folds0) = (self.ov.tag, self.ov.folds);
+        self.ov.partition_state = true;
+        for k in self.entries.iter_mut() {
+            self.ov.set_tag(k.tag);
+            for eff in k.entry.effects.iter().filter(|e| is_partition_state(e)) {
+                self.ov.fold_effect(eff);
+            }
+            k.parts = true;
+        }
+        // Not this cycle's folds: the batcher counts those from `begin_cycle`.
+        self.ov.set_tag(tag0);
+        self.ov.folds = folds0;
+    }
+
+    fn drop_partitions(&mut self) {
+        let ov = &mut self.ov;
+        ov.partition_state = false;
+        ov.parts.retain(|_, p| {
+            p.appends.clear();
+            p.watermark = None;
+            !p.is_empty()
+        });
+        ov.cursors = HashMap::default();
+        ov.dedup = HashMap::default();
+        ov.appended = Default::default();
+        for k in self.entries.iter_mut() {
+            k.parts = false;
+        }
     }
 
     /// The first difference between this overlay and `reference` — the old
@@ -327,6 +452,23 @@ impl KeptOverlay {
     /// the entry they name (its position in each one's in-flight list), never
     /// as numbers: the two numbered their folds independently.
     pub(crate) fn diff(&self, reference: &KeptOverlay) -> Option<String> {
+        if self.ov.partition_state != reference.ov.partition_state
+            || self.ov.record_ids != reference.ov.record_ids
+        {
+            return Some(format!(
+                "what the folds keep: kept (partitions {}, ids {}) vs rebuilt ({}, {})",
+                self.ov.partition_state,
+                self.ov.record_ids,
+                reference.ov.partition_state,
+                reference.ov.record_ids
+            ));
+        }
+        self.diff_state(reference, true)
+    }
+
+    /// [`KeptOverlay::diff`] without its check that both keep the same things
+    /// (B27), and without the request ids unless `ids`.
+    pub(crate) fn diff_state(&self, reference: &KeptOverlay, ids: bool) -> Option<String> {
         if self.entries.len() != reference.entries.len()
             || !self
                 .entries
@@ -408,8 +550,19 @@ impl KeptOverlay {
                     &pb,
                 )
             })
-            .or_else(|| diff_tagged("request_ids", &a.request_ids, &b.request_ids, &pa, &pb))
+            .or_else(|| {
+                if ids {
+                    diff_tagged("request_ids", &a.request_ids, &b.request_ids, &pa, &pb)
+                } else {
+                    None
+                }
+            })
             .or_else(|| diff_parts(a, b, &pa, &pb))
+            // B13: each index is its own overlay's; where both placed a pid,
+            // under the same queue (the kept one places more of them).
+            .or_else(|| a.append_index_diff().map(|d| format!("kept: {d}")))
+            .or_else(|| b.append_index_diff().map(|d| format!("rebuilt: {d}")))
+            .or_else(|| diff_placements(a, b))
             .or_else(|| diff_map("dedup", &a.dedup, &b.dedup, |x, y| x == y))
             .or_else(|| {
                 diff_map("timers", &a.timers, &b.timers, |x, y| {
@@ -447,6 +600,28 @@ fn diff_tagged<K: Eq + Hash + Debug, V: PartialEq + Debug>(
     pb: &dyn Fn(u64) -> Option<usize>,
 ) -> Option<String> {
     diff_map(name, a, b, |x, y| x.v == y.v && pa(x.tag) == pb(y.tag))
+}
+
+/// B13: a pid both overlays placed must be under the same queue.
+fn diff_placements(a: &Overlay, b: &Overlay) -> Option<String> {
+    let queue_of = |o: &Overlay, pid: &u64| -> Option<(String, String)> {
+        let h = o.appended.placed.get(pid)?;
+        o.appended.by_queue.get(h)?.iter().find_map(|q| {
+            q.pids
+                .contains(pid)
+                .then(|| (q.tenant.clone(), q.queue.clone()))
+        })
+    };
+    for pid in a.appended.placed.keys() {
+        if b.appended.placed.contains_key(pid) && queue_of(a, pid) != queue_of(b, pid) {
+            return Some(format!(
+                "append index: pid {pid} placed under {:?} (kept) vs {:?} (rebuilt)",
+                queue_of(a, pid),
+                queue_of(b, pid)
+            ));
+        }
+    }
+    None
 }
 
 fn diff_parts(
@@ -517,17 +692,24 @@ impl Overlay {
         shrink(&mut self.kv);
         shrink(&mut self.timers);
         shrink(&mut self.gone);
+        shrink(&mut self.appended.placed);
+        shrink(&mut self.appended.by_queue);
     }
 
-    /// Take out everything entry `e` put in when it was folded under `tag`.
+    /// Take out everything entry `e` put in when it was folded under `tag` —
+    /// its partition state only when `parts` (B27: it was folded).
     /// Timer keys whose value was derived THROUGH `e` go to `refold`.
     fn unfold_entry(
         &mut self,
         e: &Entry,
         tag: u64,
+        parts: bool,
         refold: &mut HashSet<TimerKey>,
     ) -> Result<(), &'static str> {
         for eff in &e.effects {
+            if !parts && is_partition_state(eff) {
+                continue;
+            }
             match eff {
                 Effect::QueueUpsert { tenant, queue, .. } => {
                     drop_if_tagged(&mut self.queues, &(tenant.clone(), queue.clone()), tag)?;
@@ -612,6 +794,9 @@ impl Overlay {
                         .position(|a| a.tag == tag && a.base == *base_offset)
                         .ok_or("a landed append is not in the overlay")?;
                     p.appends.remove(at);
+                    if p.appends.is_empty() {
+                        self.appended.remove(*pid);
+                    }
                     if p.is_empty() {
                         self.parts.remove(pid);
                     }
@@ -686,6 +871,9 @@ impl Overlay {
                 // Not folded (see `fold_effect`): nothing to take out.
                 _ => {}
             }
+        }
+        if !self.record_ids {
+            return Ok(());
         }
         for c in &e.commands {
             match self.request_ids.get(&c.request_id) {

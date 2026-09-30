@@ -15,10 +15,15 @@
 //!   ([`Mem::cache`]), so apply never reads a file. An entry evicted once
 //!   applied is read back from the queue logs if a caller ever asks
 //!   ([`QLogReader::entry_records_range`]).
-//! - **Vote and purge point**: `raft/state.json`, replaced atomically
-//!   (temporary file, fsync, rename, directory fsync) before the call returns.
-//!   Written by the writer thread, so a vote and an append are ordered, as
-//!   openraft requires.
+//! - **Vote**: `raft/state.json`, replaced atomically (temporary file,
+//!   fsync, rename, directory fsync) before the call returns. Written by the
+//!   writer thread, so a vote and an append are ordered, as openraft requires.
+//! - **Purge point**: in memory at once, durable a little later
+//!   (`raft/purged.json`, [`Purger`]): openraft's purge only discards, and
+//!   asks for no durability, so RaftCore never waits on its fsyncs. Queue-log
+//!   files at or below it become reclaimable only once it is durable
+//!   ([`FloorGate`]), so a purge point that lags after a crash names entries
+//!   that are all still there.
 //! - **Commit point**: `raft/committed.json`, rewritten in place and never
 //!   fsynced. openraft calls it optional; a lost or torn copy only means the
 //!   node re-applies less at restart and catches up once it commits again.
@@ -73,6 +78,9 @@ use crate::rsm::replicator::local::{
 
 const STATE_FILE: &str = "state.json";
 const COMMITTED_FILE: &str = "committed.json";
+/// The purge point as the background persister last made it durable (see
+/// [`Purger`]); the log's purge point is the later of it and `state.json`'s.
+const PURGED_FILE: &str = "purged.json";
 
 /// One write group's caps, as the local writer's.
 const GROUP_MAX_ENTRIES: usize = 4096;
@@ -180,6 +188,76 @@ struct Inner {
     cache_cap: usize,
     /// See [`Written`].
     written: Written,
+    /// The commit point openraft saved last, as `(RSM index, term)` (`(0, 0)`:
+    /// none yet this run). It moves the moment openraft commits, before
+    /// openraft queues the apply: the state machine's feeder hands the entries
+    /// to the apply thread on it ([`super::state_machine`]), and a leader's
+    /// batcher watches it (`Replicator::committed_watch`).
+    committed_at: tokio::sync::watch::Sender<(u64, u64)>,
+    /// Makes purge points durable in the background.
+    purger: Purger,
+}
+
+/// Makes the purge point durable off RaftCore and off the log writer: a
+/// thread of its own writes `raft/purged.json` (temporary file, fsync, rename,
+/// directory fsync) for the latest purge point it was given, then lets the
+/// retention floor pass it ([`FloorGate::purged`]). A purge used to wait for
+/// the writer to drain its syncer and for that write, with openraft's core
+/// blocked behind it, every ~1024 entries on the leader and every follower.
+/// A write that fails is logged and left to the next purge: the files stay.
+pub(crate) struct Purger {
+    tx: Mutex<Option<StdSender<LogId>>>,
+    join: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Purger {
+    fn start(state_dir: PathBuf, gate: Arc<FloorGate>) -> io::Result<Purger> {
+        let (tx, rx) = std::sync::mpsc::channel::<LogId>();
+        let join = std::thread::Builder::new()
+            .name("queen-raft-purge".into())
+            .spawn(move || {
+                while let Ok(mut at) = rx.recv() {
+                    // Only the latest purge point matters.
+                    while let Ok(later) = rx.try_recv() {
+                        if later > at {
+                            at = later;
+                        }
+                    }
+                    let res = serde_json::to_vec(&Some(at))
+                        .map_err(io::Error::other)
+                        .and_then(|b| write_atomic(&state_dir, PURGED_FILE, &b));
+                    match res {
+                        Ok(()) => gate.purged(rsm_index(at.index)),
+                        Err(e) => tracing::warn!(
+                            target: "rsm",
+                            error = %e,
+                            purged = ?at,
+                            "raft: the purge point was not made durable; its files stay until the next purge"
+                        ),
+                    }
+                }
+            })
+            .map_err(|e| io::Error::other(format!("spawn the raft purge persister: {e}")))?;
+        Ok(Purger {
+            tx: Mutex::new(Some(tx)),
+            join: Mutex::new(Some(join)),
+        })
+    }
+
+    fn send(&self, at: LogId) {
+        if let Some(tx) = self.tx.lock().expect("purger").as_ref() {
+            let _ = tx.send(at);
+        }
+    }
+
+    /// Stop taking purge points and wait for the ones taken: a store reopened
+    /// in this process never races a late write of an older one.
+    fn close(&self) {
+        self.tx.lock().expect("purger").take();
+        if let Some(j) = self.join.lock().expect("purger").take() {
+            let _ = j.join();
+        }
+    }
 }
 
 /// The highest entry (RSM numbering) this node's queue logs hold: written and
@@ -384,6 +462,7 @@ impl LogStore {
             } else {
                 (None, None, Some(committed_file))
             };
+        let state_dir_for_purger = cfg.state_dir.clone();
         let writer = Writer {
             q: QlogWrite {
                 set,
@@ -402,16 +481,20 @@ impl LogStore {
             .name("queen-raft-log".into())
             .spawn(move || writer.run(rx))
             .map_err(|e| io::Error::other(format!("spawn the raft log writer: {e}")))?;
+        // It ends once the log store is closed (or dropped).
+        let purger = Purger::start(state_dir_for_purger, gate.clone())?;
         Ok(Opened {
             store: LogStore {
                 inner: Arc::new(Inner {
                     mem: Mutex::new(mem),
                     writer_tx: Mutex::new(Some(tx)),
+                    purger,
                     reader: reader.clone(),
                     poison: cfg.poison,
                     gate: gate.clone(),
                     cache_cap: cfg.cache_cap,
                     written,
+                    committed_at: tokio::sync::watch::Sender::new((0, 0)),
                 }),
             },
             writer: join,
@@ -427,6 +510,7 @@ impl LogStore {
     /// every clone of this store has also been dropped by openraft.
     pub(crate) fn close(&self) {
         self.inner.writer_tx.lock().expect("writer_tx").take();
+        self.inner.purger.close();
     }
 
     /// Wait until this node's queue logs hold the entry at `raft_index`
@@ -463,6 +547,24 @@ impl LogStore {
                 }
             }
         }
+    }
+
+    /// The commit point as openraft saves it, `(RSM index, term)`; `(0, 0)`
+    /// until the first save of this run. Only ever moves forward.
+    pub(crate) fn subscribe_committed(&self) -> tokio::sync::watch::Receiver<(u64, u64)> {
+        self.inner.committed_at.subscribe()
+    }
+
+    /// The entries with an openraft index in `[start, end)` that are in memory,
+    /// as they are (no read from the queue logs, no rehydration): what the
+    /// apply feeder hands over. An entry above the applied index is always in
+    /// memory (only applied entries are evicted).
+    pub(crate) fn cached_range(&self, start: u64, end: u64) -> Vec<REntry> {
+        if start >= end {
+            return Vec::new();
+        }
+        let m = self.inner.mem.lock().expect("log mem");
+        m.cache.range(start..end).map(|(_, e)| e.clone()).collect()
     }
 
     /// The last entry in the log (openraft numbering).
@@ -738,13 +840,25 @@ pub(crate) fn state_after_snapshot(state_dir: &Path, purged: Option<LogId>) -> i
     Ok(())
 }
 
+/// `state.json`, with the purge point the later of its own and
+/// `purged.json`'s (see [`Purger`]).
 fn read_state(dir: &Path) -> io::Result<Persisted> {
-    match fs::read(dir.join(STATE_FILE)) {
+    let mut state: Persisted = match fs::read(dir.join(STATE_FILE)) {
         Ok(b) => serde_json::from_slice(&b)
-            .map_err(|e| io::Error::other(format!("raft/{STATE_FILE} does not parse: {e}"))),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Persisted::default()),
-        Err(e) => Err(e),
+            .map_err(|e| io::Error::other(format!("raft/{STATE_FILE} does not parse: {e}")))?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Persisted::default(),
+        Err(e) => return Err(e),
+    };
+    match fs::read(dir.join(PURGED_FILE)) {
+        Ok(b) => {
+            let purged: Option<LogId> = serde_json::from_slice(&b)
+                .map_err(|e| io::Error::other(format!("raft/{PURGED_FILE} does not parse: {e}")))?;
+            state.purged = max_log_id(state.purged, purged);
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
+    Ok(state)
 }
 
 /// The commit point written in place without fsync: a torn or missing file
@@ -831,6 +945,18 @@ impl RaftLogStorage<TypeConfig> for LogStore {
 
     async fn save_committed(&mut self, committed: Option<LogId>) -> Result<(), io::Error> {
         self.inner.mem.lock().expect("log mem").committed = committed;
+        // openraft calls this the moment the commit point moves, before it
+        // queues the apply: the feeder starts on it at once.
+        if let Some(c) = committed {
+            let at = (rsm_index(c.index), term_of(&c));
+            self.inner.committed_at.send_if_modified(|v| {
+                let moved = at.0 > v.0;
+                if moved {
+                    *v = at;
+                }
+                moved
+            });
+        }
         self.send(Cmd::Committed { committed })
     }
 
@@ -927,8 +1053,14 @@ impl RaftLogStorage<TypeConfig> for LogStore {
             .map_err(|_| io::Error::other("the raft log writer stopped before the truncation"))?
     }
 
+    /// Discard every entry up to `log_id` from memory at once; the purge
+    /// point is made durable in the background ([`Purger`]), which is also
+    /// when retention may reclaim the files at or below it.
     async fn purge(&mut self, log_id: LogId) -> Result<(), io::Error> {
-        let state = {
+        if let Some(why) = self.inner.poison.lock().expect("poison").clone() {
+            return Err(io::Error::other(why));
+        }
+        {
             let mut m = self.inner.mem.lock().expect("log mem");
             if m.purged.is_some_and(|p| p >= log_id) {
                 return Ok(());
@@ -942,19 +1074,8 @@ impl RaftLogStorage<TypeConfig> for LogStore {
             if m.last_log_id.is_none_or(|l| l < log_id) {
                 m.last_log_id = Some(log_id);
             }
-            Persisted {
-                vote: m.vote,
-                purged: m.purged,
-                floor_v: FLOOR_V,
-            }
-        };
-        let (tx, rx) = oneshot::channel();
-        self.send(Cmd::Persist { state, done: tx })?;
-        rx.await
-            .map_err(|_| io::Error::other("the raft log writer stopped before the purge"))??;
-        // Durable: retention may now reclaim the files wholly at or below it
-        // (and the store's durable index).
-        self.inner.gate.purged(rsm_index(log_id.index));
+        }
+        self.inner.purger.send(log_id);
         Ok(())
     }
 }
@@ -1051,7 +1172,6 @@ enum SyncMsg {
     Group {
         ticket: crate::rsm::qlog::set::SyncTicket,
         items: Vec<GroupItem>,
-        apps: Vec<Option<AppEntry>>,
         callbacks: Vec<IOFlushed<TypeConfig>>,
     },
     /// The commit point, written after every earlier group is durable.
@@ -1123,15 +1243,12 @@ impl Syncer {
             for m in batch {
                 match m {
                     SyncMsg::Group {
-                        items,
-                        apps,
-                        callbacks,
-                        ..
+                        items, callbacks, ..
                     } => match &failed {
                         None => {
                             crate::rsm::faults::hit("qlog.record_fsynced");
                             crate::rsm::faults::hit("log.flushed");
-                            finish_group(&items, apps, callbacks);
+                            finish_group(&items, callbacks);
                         }
                         Some(why) => {
                             for cb in callbacks {
@@ -1161,13 +1278,8 @@ fn sync_ahead_from_env() -> usize {
         .unwrap_or(16)
 }
 
-/// A group is durable: record each entry's payload-free form and answer
-/// openraft, in order.
-fn finish_group(
-    items: &[GroupItem],
-    apps: Vec<Option<AppEntry>>,
-    callbacks: Vec<IOFlushed<TypeConfig>>,
-) {
+/// A group is durable: answer openraft, in order.
+fn finish_group(items: &[GroupItem], callbacks: Vec<IOFlushed<TypeConfig>>) {
     {
         let mut at = APPENDED_AT.lock().unwrap_or_else(|p| p.into_inner());
         for it in items {
@@ -1176,13 +1288,21 @@ fn finish_group(
             }
         }
     }
+    for cb in callbacks {
+        cb.io_completed(Ok(()));
+    }
+}
+
+/// A group is written: hand every entry of it its payload-free form (the
+/// write left it in the item), BEFORE the written mark moves — apply takes
+/// the entry only once it is written (`Written`), and then finds the form set,
+/// shared, instead of re-encoding and re-decoding the whole entry itself (up
+/// to milliseconds for a large one, on the apply path).
+fn record_payload_free(items: &[GroupItem], apps: &[Option<AppEntry>]) {
     for (it, app) in items.iter().zip(apps) {
         if let (GroupBody::Entry { entry, .. }, Some(app)) = (&it.body, app) {
             app.set_payload_free(entry.clone());
         }
-    }
-    for cb in callbacks {
-        cb.io_completed(Ok(()));
     }
 }
 
@@ -1308,6 +1428,17 @@ impl Writer {
                 match e.payload {
                     EntryPayload::Normal(app) => {
                         if let Some(full) = app.full() {
+                            // The payload-free bytes the entry records carry:
+                            // encoded once per entry, shared with the wire.
+                            let pf = match app.pf_bytes() {
+                                Ok(b) => Some(b),
+                                Err(err) => {
+                                    failed.get_or_insert_with(|| {
+                                        format!("entry {seq}: payload-free encode: {err}")
+                                    });
+                                    None
+                                }
+                            };
                             items.push(GroupItem {
                                 seq,
                                 term,
@@ -1315,6 +1446,7 @@ impl Writer {
                                     entry: full.clone(),
                                     pre: app.take_pre(),
                                     z: app.z(),
+                                    pf,
                                 },
                             });
                             apps.push(Some(app));
@@ -1411,11 +1543,11 @@ impl Writer {
                         &crate::rsm::dbgctr::C.writer_write_max_us,
                         tw.elapsed().as_micros() as u64,
                     );
+                    record_payload_free(&items, &apps);
                     self.note_written(max_seq);
                     let msg = SyncMsg::Group {
                         ticket,
                         items,
-                        apps,
                         callbacks,
                     };
                     let th = std::time::Instant::now();
@@ -1437,8 +1569,9 @@ impl Writer {
         }
         match self.q.write_group(&mut items) {
             Ok(()) => {
+                record_payload_free(&items, &apps);
                 self.note_written(max_seq);
-                finish_group(&items, apps, callbacks)
+                finish_group(&items, callbacks)
             }
             Err(e) => self.fail_group(format!("raft log write failed: {e}"), callbacks),
         }
@@ -1543,4 +1676,97 @@ impl Drop for PersistTimer {
 }
 fn scopeguard_max(t: std::time::Instant) -> PersistTimer {
     PersistTimer(t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        use std::sync::atomic::AtomicU64;
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "queen-raft-log-{tag}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn open(dir: &Path, durable: u64) -> Opened {
+        LogStore::open(OpenCfg {
+            qlog_root: dir.join("qlog"),
+            qopts: QLogOptions::testing(1 << 20),
+            state_dir: dir.join("raft"),
+            lookup: Arc::new(|_| Ok(None)),
+            durable_index: durable,
+            applied: None,
+            qlog_durable_index: 0,
+            qlog_tail: Box::new(|_| Ok(None)),
+            poison: Arc::new(Mutex::new(None)),
+            cache_cap: 1 << 30,
+        })
+        .expect("open the log")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_purge_returns_at_once_and_its_point_is_durable_behind_it() {
+        use openraft::type_config::TypeConfigExt;
+        let dir = scratch("purge");
+        let opened = open(&dir, 0);
+        let mut log = opened.store.clone();
+        let entries: Vec<REntry> = (0..20)
+            .map(|i| REntry {
+                log_id: log_id(1, i),
+                payload: EntryPayload::Blank,
+            })
+            .collect();
+        let (tx, rx) = TypeConfig::oneshot();
+        log.append(entries, IOFlushed::signal(tx)).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(20), rx)
+            .await
+            .expect("flushed within 20 s")
+            .unwrap()
+            .unwrap();
+        // The store made everything durable: only the purge point holds the
+        // retention floor back.
+        log.gate().durable(21);
+
+        log.purge(log_id(1, 9)).await.expect("purge");
+        let st = log.get_log_state().await.unwrap();
+        assert_eq!(
+            st.last_purged_log_id,
+            Some(log_id(1, 9)),
+            "in memory at once"
+        );
+        assert!(
+            log.cached_range(0, 10).is_empty(),
+            "purged entries leave memory"
+        );
+        log.purge(log_id(1, 14)).await.expect("purge");
+
+        // Closing waits for the purge persister: the point is durable, and
+        // the retention floor passed it only then.
+        log.close();
+        drop(log);
+        let persisted: Option<LogId> =
+            serde_json::from_slice(&fs::read(dir.join("raft").join(PURGED_FILE)).unwrap()).unwrap();
+        assert_eq!(persisted, Some(log_id(1, 14)));
+        assert_eq!(
+            opened.reader.recovery_floor(),
+            15,
+            "min(durable 21, purged 15)"
+        );
+        drop(opened);
+
+        // A reopen starts after it.
+        let again = open(&dir, 21);
+        let st = again.store.clone().get_log_state().await.unwrap();
+        assert_eq!(st.last_purged_log_id, Some(log_id(1, 14)));
+        again.store.close();
+        drop(again);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

@@ -996,23 +996,19 @@ impl Entry {
             }
         }
         // I18: the counters the planner handed out, against the bases this
-        // entry's own header carries.
-        let mut next_pid = self.pid_base;
+        // entry's own header carries. The partitions an entry creates take
+        // exactly the ids `pid_base .. pid_base + k`, each once, in ANY order:
+        // with lanes each new partition is created by its own lane, with the
+        // id the router gave it, and the lanes' parts sit in lane order, not
+        // in id order. Apply advances `next_pid` by the count, so the set is
+        // what must be dense.
+        let mut created: Vec<u64> = Vec::new();
         let mut next_kv_version = self.kv_version_base;
         for eff in &self.effects {
             eff.check()?;
             match eff.assigns() {
                 Assigns::Nothing => {}
-                Assigns::Pid(pid) => {
-                    if pid != next_pid {
-                        return Err(CodecError::Layout(
-                            "a created pid is not pid_base + its ordinal",
-                        ));
-                    }
-                    next_pid = next_pid
-                        .checked_add(1)
-                        .ok_or(CodecError::Layout("pid_base + ordinal overflows"))?;
-                }
+                Assigns::Pid(pid) => created.push(pid),
                 Assigns::KvVersion(version) => {
                     if version != next_kv_version {
                         return Err(CodecError::Layout(
@@ -1022,6 +1018,23 @@ impl Entry {
                     next_kv_version = next_kv_version
                         .checked_add(1)
                         .ok_or(CodecError::Layout("kv_version_base + ordinal overflows"))?;
+                }
+            }
+        }
+        if !created.is_empty() {
+            self.pid_base
+                .checked_add(created.len() as u64 - 1)
+                .ok_or(CodecError::Layout("pid_base + ordinal overflows"))?;
+            created.sort_unstable();
+            for (i, pid) in created.iter().enumerate() {
+                let want = self
+                    .pid_base
+                    .checked_add(i as u64)
+                    .ok_or(CodecError::Layout("pid_base + ordinal overflows"))?;
+                if *pid != want {
+                    return Err(CodecError::Layout(
+                        "the created pids are not pid_base .. pid_base + count, each once",
+                    ));
                 }
             }
         }

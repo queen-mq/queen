@@ -200,7 +200,22 @@ pub fn cfg() -> ApplyConfig {
         // owns any qlog it opens; the qlog tests opt into `qlog: true` and rely
         // on this being false so apply writes the qlog they read back.
         qlog_writer_external: false,
+        // One shard (the one-thread path) unless `QUEEN_TEST_APPLY_SHARDS`
+        // asks for more — then every entry, however small, runs its pid-keyed
+        // effects on the shards, so the whole suite checks the sharded path.
+        apply_shards: test_shards(),
+        apply_shard_min: 1,
     }
+}
+
+/// The shard count the shared test config runs at: `QUEEN_TEST_APPLY_SHARDS`,
+/// 1 when unset. A crash test's child inherits it with the environment.
+pub fn test_shards() -> usize {
+    std::env::var("QUEEN_TEST_APPLY_SHARDS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -367,7 +382,7 @@ impl Build {
         Committed {
             index,
             term,
-            entry: self.entry,
+            entry: self.entry.into(),
         }
     }
 }
@@ -926,7 +941,7 @@ fn pending_transitions_rebuild_from_pending_equals_the_live_rings() {
                 Ok(())
             })
             .expect("read");
-        summary(a.derived())
+        summary(&a.derived())
     };
     let rebuilt = node
         .store()
@@ -1416,7 +1431,7 @@ fn transitions_ring_equals_a_rebuild_at_every_boundary() {
         idx += 1;
         a.commit().expect("commit");
 
-        let live = ring_summary(a.derived(), &groups);
+        let live = ring_summary(&a.derived(), &groups);
         let rebuilt = node
             .store()
             .read(|r| {
@@ -1537,7 +1552,7 @@ fn slow_consumers_never_leave_the_ring_empty_while_lag_remains() {
         // what is claimable at this same `now` and assert BOTH rings hold it.
         let mut want = claimable(&committed, &last, &lease_exp);
         want.sort_unstable();
-        let live = ring_summary(a.derived(), &["g1"]);
+        let live = ring_summary(&a.derived(), &["g1"]);
         let rebuilt = node
             .store()
             .read(|r| {
@@ -1748,7 +1763,7 @@ fn the_planner_assigned_bases_are_asserted_against_meta() {
     let c = Committed {
         index: 1,
         term: 1,
-        entry: e,
+        entry: e.into(),
     };
     match a.apply(&c) {
         Err(ApplyError::Bases {
@@ -1951,8 +1966,9 @@ fn an_append_writes_the_payload_the_index_and_the_pending_rows() {
                 r.pending_at(TENANT, QUEUE, "g1", 1).unwrap(),
                 Some(BASE_US + 10)
             );
-            // Counters (§6.4).
-            assert_eq!(r.partition_counter(1, Counter::Pushed).unwrap(), 3);
+            // Counters (§6.4). Pushed is counted at queue and tenant scope
+            // only: the partition keeps just what a reader asks it for.
+            assert_eq!(r.partition_counter(1, Counter::Pushed).unwrap(), 0);
             assert_eq!(r.queue_counter(TENANT, QUEUE, Counter::Pushed).unwrap(), 3);
             assert_eq!(r.tenant_counter(TENANT, Counter::Pushed).unwrap(), 3);
             assert!(r.partition_counter(1, Counter::RetainedBytes).unwrap() > 0);
@@ -2606,10 +2622,12 @@ fn counters_equal_a_recount() {
                 let p = r.partition(*pid).unwrap().expect("partition row");
                 // Offsets are gapless from 0, so the tail IS the count pushed.
                 let pushed = p.last_offset + 1;
+                // Not kept at partition scope (no reader): the queue's sum is
+                // the check below.
                 assert_eq!(
                     r.partition_counter(*pid, Counter::Pushed).unwrap(),
-                    pushed,
-                    "pid {pid} pushed"
+                    0,
+                    "pid {pid} keeps no pushed counter"
                 );
                 queue_pushed += pushed;
 
@@ -5888,4 +5906,302 @@ fn an_async_point_whose_cut_fails_reports_nothing_and_stops_the_node() {
         next.is_err(),
         "a node whose durable point failed applies nothing"
     );
+}
+
+// ---------------------------------------------------------------------------
+// B07: on the queue-log path the retained length rides on the txns row
+// ---------------------------------------------------------------------------
+
+/// Setup and appends for [`the_queue_log_path_keeps_the_retained_length_on_the_txns_row`]:
+/// one queue, one group, two partitions, `frames` appends of 1-3 messages
+/// each. `payload_free` hands the append its 4-byte frame length (what the
+/// queue-log writer gives apply live and on replay), else the payload itself.
+fn b07_entries(frames: u64, payload_free: bool) -> Vec<Committed> {
+    let mut out = vec![Build::new(BASE_US, 1, 0)
+        .cmd(vec![
+            Effect::QueueUpsert {
+                tenant: TENANT.into(),
+                queue: QUEUE.into(),
+                cfg: queue_config(BASE_US),
+            },
+            Effect::GroupUpsert {
+                tenant: TENANT.into(),
+                queue: QUEUE.into(),
+                group: "g1".into(),
+                meta: group_meta(0, BASE_US),
+            },
+            Effect::PartitionCreate {
+                pid: 1,
+                uuid: uuid(1),
+                tenant: TENANT.into(),
+                queue: QUEUE.into(),
+                partition: "p0".into(),
+                created_at_us: BASE_US,
+            },
+            Effect::PartitionCreate {
+                pid: 2,
+                uuid: uuid(2),
+                tenant: TENANT.into(),
+                queue: QUEUE.into(),
+                partition: "p1".into(),
+                created_at_us: BASE_US,
+            },
+        ])
+        .at(1, 1)];
+    let mut next = [0u64; 3];
+    for i in 0..frames {
+        let pid = 1 + i % 2;
+        let count = 1 + (i % 3) as u32;
+        let payload = vec![0x5Au8; 30 + i as usize];
+        let blob = if payload_free {
+            (crate::rsm::segments::frame::encoded_len(count, payload.len()) as u32)
+                .to_le_bytes()
+                .to_vec()
+        } else {
+            payload
+        };
+        let now = BASE_US + 10 + i as i64;
+        out.push(
+            Build::new(now, 3, 100 + i * 10)
+                .cmd(vec![Effect::Append {
+                    pid,
+                    bucket: pid as u16,
+                    base_offset: next[pid as usize],
+                    count,
+                    created_at_us: now,
+                    hashes: hashes(1000 + i, count),
+                    blob,
+                }])
+                .at(2 + i, 1),
+        );
+        next[pid as usize] += count as u64;
+    }
+    // Retention passes everything, payload and hash lists, in two steps.
+    let now = BASE_US + 1_000_000;
+    let mut idx = 2 + frames;
+    for (log, txns) in [(0.5f64, 0.25f64), (1.0, 1.0)] {
+        let mut effects = Vec::new();
+        for pid in 1..=2u64 {
+            let end = next[pid as usize];
+            let log_start = (end as f64 * log) as u64;
+            let txns_start = ((end as f64 * txns) as u64).min(log_start);
+            effects.push(Effect::Watermark {
+                pid,
+                log_start,
+                txns_start,
+            });
+        }
+        out.push(
+            Build::new(now + idx as i64, 3, 10_000 + idx * 10)
+                .cmd(effects)
+                .at(idx, 1),
+        );
+        idx += 1;
+    }
+    out
+}
+
+fn retained(node: &Node) -> (i64, i64, i64, i64) {
+    node.store()
+        .read(|r| {
+            Ok((
+                r.partition_counter(1, Counter::RetainedBytes)?,
+                r.partition_counter(2, Counter::RetainedBytes)?,
+                r.queue_counter(TENANT, QUEUE, Counter::RetainedBytes)?,
+                r.tenant_counter(TENANT, Counter::RetainedBytes)?,
+            ))
+        })
+        .expect("read")
+}
+
+#[test]
+fn the_queue_log_path_keeps_the_retained_length_on_the_txns_row() {
+    let live = ApplyConfig {
+        qlog: true,
+        qlog_writer_external: true,
+        ..cfg()
+    };
+    let frames = 40u64;
+    let entries = b07_entries(frames, true);
+    let (appends, retention) = entries.split_at(entries.len() - 2);
+
+    // The queue-log path.
+    let node = Node::new("b07-live");
+    // The segment path, same entries with their payloads: the reference.
+    let seg = Node::new("b07-seg");
+    let seg_entries = b07_entries(frames, false);
+    {
+        let (mut a, _) = Applier::open(
+            node.store(),
+            &node.seg_dir(),
+            seg_opts(),
+            live,
+            Arc::new(crate::rsm::apply::NoNotify),
+        )
+        .expect("open");
+        let (mut b, _) = Applier::open(
+            seg.store(),
+            &seg.seg_dir(),
+            seg_opts(),
+            cfg(),
+            Arc::new(crate::rsm::apply::NoNotify),
+        )
+        .expect("open");
+        for c in appends {
+            a.apply(c).expect("apply");
+        }
+        for c in &seg_entries[..appends.len()] {
+            b.apply(c).expect("apply");
+        }
+        a.commit().expect("commit");
+        b.commit().expect("commit");
+
+        // No `seg_loc` row on the queue-log path; every append's length is on
+        // its txns row, and it is what `RetainedBytes` counted.
+        node.store()
+            .read(|r| {
+                assert_eq!(r.count(Keyspace::SegLoc)?, 0, "no seg_loc rows");
+                let mut lens = 0i64;
+                let mut rows = 0u64;
+                r.scan_raw(Keyspace::Txns, &[], &[], usize::MAX, &mut |_k, v| {
+                    lens += dedup::TxnsRow::retained_len_of(v).expect("a v2 txns row") as i64;
+                    rows += 1;
+                    true
+                })?;
+                assert_eq!(rows, frames);
+                let q = r.queue_counter(TENANT, QUEUE, Counter::RetainedBytes)?;
+                assert_eq!(lens, q, "the txns rows carry what RetainedBytes counted");
+                Ok(())
+            })
+            .expect("read");
+        assert_eq!(
+            retained(&node),
+            retained(&seg),
+            "RetainedBytes is the segment path's"
+        );
+        assert!(retained(&node).2 > 0);
+
+        for (c, d) in retention.iter().zip(&seg_entries[appends.len()..]) {
+            a.apply(c).expect("apply");
+            b.apply(d).expect("apply");
+            a.commit().expect("commit");
+            b.commit().expect("commit");
+            assert_eq!(retained(&node), retained(&seg), "after a watermark");
+        }
+        settle(&mut a);
+        settle(&mut b);
+    }
+    assert_eq!(
+        retained(&node),
+        (0, 0, 0, 0),
+        "retention gave every byte back"
+    );
+    node.store()
+        .read(|r| {
+            assert_eq!(r.count(Keyspace::SegLoc)?, 0);
+            assert_eq!(r.count(Keyspace::Txns)?, 0, "the hash lists expired");
+            Ok(())
+        })
+        .expect("read");
+    // The replicated state is the segment path's: the same counters and the
+    // same (v2) txns rows; `seg_loc` is node-local.
+    assert_eq!(
+        node.digest(),
+        seg.digest(),
+        "first at {:?}",
+        node.digest().first_difference(&seg.digest())
+    );
+}
+
+#[test]
+fn a_frame_an_older_build_wrote_gives_its_bytes_back_from_seg_loc() {
+    // An older build wrote a v1 txns row and a sentinel `seg_loc` row per
+    // append on the queue-log path. Rewrite this node's rows to that shape,
+    // then let retention pass them: the length comes from `seg_loc`.
+    let live = ApplyConfig {
+        qlog: true,
+        qlog_writer_external: true,
+        ..cfg()
+    };
+    let entries = b07_entries(12, true);
+    let (appends, retention) = entries.split_at(entries.len() - 2);
+    let node = Node::new("b07-old");
+    {
+        let (mut a, _) = Applier::open(
+            node.store(),
+            &node.seg_dir(),
+            seg_opts(),
+            live,
+            Arc::new(crate::rsm::apply::NoNotify),
+        )
+        .expect("open");
+        for c in appends {
+            a.apply(c).expect("apply");
+        }
+        a.durable_point().expect("durable point");
+    }
+    let before = retained(&node);
+    {
+        use crate::rsm::store::{TypedWrites, Writes};
+        let mut rows: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        node.store()
+            .read(|r| {
+                r.scan_raw(Keyspace::Txns, &[], &[], usize::MAX, &mut |k, v| {
+                    rows.push((k.to_vec(), v.to_vec()));
+                    true
+                })?;
+                Ok(())
+            })
+            .expect("read");
+        let mut w = node.store().write().expect("write");
+        // Every other frame becomes an old one: v1 row plus sentinel.
+        for (i, (k, v)) in rows.iter().enumerate() {
+            if i % 2 == 1 {
+                continue;
+            }
+            let len = dedup::TxnsRow::retained_len_of(v).expect("v2");
+            w.put_raw(Keyspace::Txns, k, &v[..v.len() - dedup::TXNS_LEN_TAIL])
+                .expect("put");
+            let pid = keys::pid_of(k).expect("pid");
+            let base = keys::txns_base_of(k).expect("base");
+            w.put_seg_loc(
+                pid,
+                base,
+                &crate::rsm::store::rows::SegLocRow {
+                    bucket: pid as u16,
+                    file_id: 0,
+                    offset: 0,
+                    len,
+                },
+            )
+            .expect("seg_loc");
+        }
+        w.durable_commit().expect("durable");
+    }
+    {
+        let (mut a, _) = Applier::open(
+            node.store(),
+            &node.seg_dir(),
+            seg_opts(),
+            live,
+            Arc::new(crate::rsm::apply::NoNotify),
+        )
+        .expect("reopen");
+        assert_eq!(retained(&node), before);
+        for c in retention {
+            a.apply(c).expect("apply");
+        }
+        settle(&mut a);
+    }
+    assert_eq!(
+        retained(&node),
+        (0, 0, 0, 0),
+        "old and new frames both gave back"
+    );
+    node.store()
+        .read(|r| {
+            assert_eq!(r.count(Keyspace::SegLoc)?, 0, "the old sentinels expired");
+            Ok(())
+        })
+        .expect("read");
 }

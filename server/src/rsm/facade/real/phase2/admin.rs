@@ -1193,8 +1193,48 @@ pub(crate) fn local_node_json(
         "store":{"mapBytes":map.map_bytes,"usedBytes":map.used_bytes,"mapUsedPct":map.pct(),"readersInUse":map.readers_in_use,"maxReaders":map.max_readers},
         "version":crate::VERSION,
         "uptimeSeconds":crate::rsm::dashboard::started().elapsed().as_secs(),
+        "host":host_json(),
         "replication":replication,
         "error":Value::Null
+    })
+}
+
+/// The machine under this node, as the dashboard's top bar reads it: the
+/// process's CPU over the metrics collector's last interval (percent of one
+/// core, so 4 busy cores are 400; before the first interval closes, the
+/// average since start) against the CPUs it may use, its resident
+/// memory against the limit it runs under (the cgroup's, else the RAM), and
+/// the data directory's filesystem against the disk gate's two lines.
+fn host_json() -> Value {
+    let (user_us, sys_us, rss) = crate::syscollect::rusage();
+    // Until the collector's first interval closes, the average since start.
+    let cpu = crate::rsm::dashboard::cpu_pct().or_else(|| {
+        let up = crate::rsm::dashboard::started().elapsed().as_secs_f64();
+        (up >= 1.0).then(|| {
+            let busy = (user_us + sys_us) as f64 / 1_000_000.0;
+            (busy * 100.0 / up, up.round() as u64)
+        })
+    });
+    let disk = crate::rsm::dashboard::disk_gate().and_then(|g| {
+        let (total, available) = crate::syscollect::filesystem_usage(&g.dir)?;
+        let used = total.saturating_sub(available);
+        Some(json!({
+            "totalBytes":total,
+            "usedBytes":used,
+            "usedPct":if total > 0 { used as f64 * 100.0 / total as f64 } else { 0.0 },
+            "gate":g.enabled,
+            "highPct":g.high_pct,
+            "lowPct":g.low_pct,
+            "writesRefused":g.enabled && crate::rsm::dashboard::storage_full()
+        }))
+    });
+    json!({
+        "cpuPct":cpu.map(|c| c.0),
+        "cpuWindowSeconds":cpu.map(|c| c.1),
+        "cpus":crate::syscollect::cpus(),
+        "rssBytes":rss,
+        "memLimitBytes":crate::syscollect::memory_limit_bytes(),
+        "disk":disk
     })
 }
 

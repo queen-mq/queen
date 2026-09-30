@@ -14,6 +14,16 @@
 //!
 //! A row that does not decode is [`StoreError::Corrupt`]: fatal for this node,
 //! never skipped (see [`super::rows`]).
+//!
+//! Every point read decodes UNDER the table's read lock ([`Reads::get_with`]),
+//! with its key built on the stack ([`keys::KeyBuf`]): nothing is copied out
+//! of the table but what the row decodes into, nothing is pinned to the
+//! handle, and no key is allocated. The accessors that allocate nothing at all
+//! — [`TypedReads::partition_head`], [`TypedReads::cursor_head`],
+//! [`TypedReads::is_garbage`], [`TypedReads::has_partition`],
+//! [`TypedReads::has_cursor`], and the borrowed views
+//! [`TypedReads::partition_with`] / [`TypedReads::cursor_with`] — are for the
+//! reads the push and pop paths make on every command.
 
 use crate::rsm::effect::{
     CursorRow, Pid, QueueConfig, QuotaGrant, QuotaKind, StreamsQueryRow, TimerRow, TraceEvent,
@@ -21,22 +31,33 @@ use crate::rsm::effect::{
 
 use super::keys::{self, Counter};
 use super::rows::{
-    self, DlqRow, EphConfigRow, FileRow, GarbageRow, GroupRow, KvRow, PartitionRow, RequestIdRow,
-    SegLocRow, StreamsStateRow,
+    self, CursorHead, CursorRef, DlqRow, EphConfigRow, FileRow, GarbageRow, GroupRow, KvRow,
+    PartitionHead, PartitionRef, PartitionRow, RequestIdRow, SegLocRow, StreamsStateRow,
 };
 use super::{Keyspace, Reads, Result, StoreError, Writes};
+use crate::rsm::effect::CodecError;
 
-fn decode<T>(
+/// The row at `key`, decoded by `f` UNDER the table's read lock
+/// ([`Reads::get_with`]): the value is neither copied nor shared, and nothing
+/// is kept by the handle. Every typed point read goes through here. `f` is a
+/// decode and nothing else: it must not touch the store.
+fn decode_at<R: Reads + ?Sized, T>(
+    r: &R,
     ks: Keyspace,
-    v: Option<&[u8]>,
-    f: impl FnOnce(&[u8]) -> std::result::Result<T, crate::rsm::effect::CodecError>,
+    key: &[u8],
+    f: impl FnOnce(&[u8]) -> std::result::Result<T, CodecError>,
 ) -> Result<Option<T>> {
-    match v {
+    let mut f = Some(f);
+    let mut out: Option<std::result::Result<T, CodecError>> = None;
+    r.get_with(ks, key, &mut |b| {
+        if let Some(f) = f.take() {
+            out = Some(f(b));
+        }
+    })?;
+    match out {
         None => Ok(None),
-        Some(b) => match f(b) {
-            Ok(t) => Ok(Some(t)),
-            Err(e) => Err(StoreError::corrupt(ks, format!("{e}"))),
-        },
+        Some(Ok(t)) => Ok(Some(t)),
+        Some(Err(e)) => Err(StoreError::corrupt(ks, format!("{e}"))),
     }
 }
 
@@ -45,25 +66,19 @@ pub trait TypedReads: Reads {
     // ----------------------------------------------------------------- meta
 
     fn meta_u64(&self, name: &[u8]) -> Result<Option<u64>> {
-        decode(Keyspace::Meta, self.get_raw(Keyspace::Meta, name)?, |b| {
-            rows::u64_decode(b)
-        })
+        decode_at(self, Keyspace::Meta, name, rows::u64_decode)
     }
 
     fn meta_i64(&self, name: &[u8]) -> Result<Option<i64>> {
-        decode(Keyspace::Meta, self.get_raw(Keyspace::Meta, name)?, |b| {
-            rows::i64_decode(b)
-        })
+        decode_at(self, Keyspace::Meta, name, rows::i64_decode)
     }
 
     fn meta_u32(&self, name: &[u8]) -> Result<Option<u32>> {
-        decode(Keyspace::Meta, self.get_raw(Keyspace::Meta, name)?, |b| {
-            rows::u32_decode(b)
-        })
+        decode_at(self, Keyspace::Meta, name, rows::u32_decode)
     }
 
     fn meta_blob(&self, name: &[u8]) -> Result<Option<Vec<u8>>> {
-        Ok(self.get_raw(Keyspace::Meta, name)?.map(|b| b.to_vec()))
+        decode_at(self, Keyspace::Meta, name, |b| Ok(b.to_vec()))
     }
 
     /// The applied index, `0` when nothing has been applied (§11.4, I11).
@@ -106,12 +121,8 @@ pub trait TypedReads: Reads {
     // --------------------------------------------------------------- queues
 
     fn queue(&self, tenant: &str, queue: &str) -> Result<Option<QueueConfig>> {
-        let k = keys::queues(tenant, queue);
-        decode(
-            Keyspace::Queues,
-            self.get_raw(Keyspace::Queues, &k)?,
-            rows::queue_decode,
-        )
+        let k = keys::queues_buf(tenant, queue);
+        decode_at(self, Keyspace::Queues, &k, rows::queue_decode)
     }
 
     /// Every queue of a tenant, in name order, into `cb(queue_name, config)`.
@@ -148,12 +159,8 @@ pub trait TypedReads: Reads {
     // --------------------------------------------------------------- groups
 
     fn group(&self, tenant: &str, queue: &str, group: &str) -> Result<Option<GroupRow>> {
-        let k = keys::groups(tenant, queue, group);
-        decode(
-            Keyspace::Groups,
-            self.get_raw(Keyspace::Groups, &k)?,
-            rows::group_decode,
-        )
+        let k = keys::groups_buf(tenant, queue, group);
+        decode_at(self, Keyspace::Groups, &k, rows::group_decode)
     }
 
     /// Every group of a queue, in name order. The pop path needs the whole set
@@ -192,22 +199,49 @@ pub trait TypedReads: Reads {
     // ----------------------------------------------------------- partitions
 
     fn partition(&self, pid: Pid) -> Result<Option<PartitionRow>> {
-        let k = keys::pid(pid);
-        decode(
+        decode_at(
+            self,
             Keyspace::Partitions,
-            self.get_raw(Keyspace::Partitions, &k)?,
+            &keys::pid_key(pid),
             rows::partition_decode,
         )
     }
 
+    /// The partition row's fixed-width fields — the offsets, watermarks and
+    /// stamps the push and pop paths read on every command — decoded under
+    /// the table's lock with NO allocation: [`TypedReads::partition`] copies
+    /// the three names into `String`s on every call.
+    fn partition_head(&self, pid: Pid) -> Result<Option<PartitionHead>> {
+        decode_at(
+            self,
+            Keyspace::Partitions,
+            &keys::pid_key(pid),
+            rows::partition_head_decode,
+        )
+    }
+
+    /// Whether the partition row exists, with no decode.
+    fn has_partition(&self, pid: Pid) -> Result<bool> {
+        self.get_with(Keyspace::Partitions, &keys::pid_key(pid), &mut |_| {})
+    }
+
+    /// `f` over the partition row BORROWED from the table (names as `&str`),
+    /// under the table's read lock: a caller that compares the names or needs
+    /// only some of them allocates nothing. `f` must not touch the store.
+    fn partition_with<T>(
+        &self,
+        pid: Pid,
+        f: impl FnOnce(&PartitionRef<'_>) -> T,
+    ) -> Result<Option<T>> {
+        decode_at(self, Keyspace::Partitions, &keys::pid_key(pid), |b| {
+            rows::partition_ref_decode(b).map(|p| f(&p))
+        })
+    }
+
     /// The name index: `(tenant, queue, partition) → pid`.
     fn pid_of(&self, tenant: &str, queue: &str, partition: &str) -> Result<Option<Pid>> {
-        let k = keys::partitions_by_key(tenant, queue, partition);
-        decode(
-            Keyspace::PartitionsByKey,
-            self.get_raw(Keyspace::PartitionsByKey, &k)?,
-            rows::u64_decode,
-        )
+        let k = keys::partitions_by_key_buf(tenant, queue, partition);
+        decode_at(self, Keyspace::PartitionsByKey, &k, rows::u64_decode)
     }
 
     /// Every partition of a queue, in pid order: the wildcard and admin scan.
@@ -247,12 +281,19 @@ pub trait TypedReads: Reads {
     /// Whether a pid is in the garbage set: readers and planners ignore it
     /// (§5.2 rules), so every lookup that starts from a name must check it.
     fn garbage(&self, pid: Pid) -> Result<Option<GarbageRow>> {
-        let k = keys::pid(pid);
-        decode(
+        decode_at(
+            self,
             Keyspace::Garbage,
-            self.get_raw(Keyspace::Garbage, &k)?,
+            &keys::pid_key(pid),
             rows::garbage_decode,
         )
+    }
+
+    /// Whether a pid is in the garbage set — [`TypedReads::garbage`] without
+    /// decoding (and allocating) the row: the question every lookup that
+    /// starts from a name asks. An empty garbage set answers without a lock.
+    fn is_garbage(&self, pid: Pid) -> Result<bool> {
+        self.get_with(Keyspace::Garbage, &keys::pid_key(pid), &mut |_| {})
     }
 
     /// The sealed segment files that hold data of a partition, in file order
@@ -292,12 +333,39 @@ pub trait TypedReads: Reads {
     // -------------------------------------------------------------- cursors
 
     fn cursor(&self, pid: Pid, group: &str) -> Result<Option<CursorRow>> {
-        let k = keys::cursors(pid, group);
-        decode(
+        let k = keys::cursors_buf(pid, group);
+        decode_at(self, Keyspace::Cursors, &k, rows::cursor_decode)
+    }
+
+    /// Whether the group has a cursor on the partition, with no decode.
+    fn has_cursor(&self, pid: Pid, group: &str) -> Result<bool> {
+        self.get_with(
             Keyspace::Cursors,
-            self.get_raw(Keyspace::Cursors, &k)?,
-            rows::cursor_decode,
+            &keys::cursors_buf(pid, group),
+            &mut |_| {},
         )
+    }
+
+    /// The cursor's scalars (committed, lease, attempts, counts) with NO
+    /// allocation — [`TypedReads::cursor`] copies the worker, the delivered
+    /// set and the metadata on every call.
+    fn cursor_head(&self, pid: Pid, group: &str) -> Result<Option<CursorHead>> {
+        let k = keys::cursors_buf(pid, group);
+        decode_at(self, Keyspace::Cursors, &k, rows::cursor_head_decode)
+    }
+
+    /// `f` over the cursor row BORROWED from the table, under its read lock
+    /// (see [`TypedReads::partition_with`]). `f` must not touch the store.
+    fn cursor_with<T>(
+        &self,
+        pid: Pid,
+        group: &str,
+        f: impl FnOnce(&CursorRef<'_>) -> T,
+    ) -> Result<Option<T>> {
+        let k = keys::cursors_buf(pid, group);
+        decode_at(self, Keyspace::Cursors, &k, |b| {
+            rows::cursor_ref_decode(b).map(|c| f(&c))
+        })
     }
 
     /// Every group's cursor on one partition, in group-name order.
@@ -366,12 +434,8 @@ pub trait TypedReads: Reads {
 
     /// `pending`: when this partition is next worth looking at for this group.
     fn pending_at(&self, tenant: &str, queue: &str, group: &str, pid: Pid) -> Result<Option<i64>> {
-        let k = keys::pending(tenant, queue, group, pid);
-        decode(
-            Keyspace::Pending,
-            self.get_raw(Keyspace::Pending, &k)?,
-            rows::i64_decode,
-        )
+        let k = keys::pending_buf(tenant, queue, group, pid);
+        decode_at(self, Keyspace::Pending, &k, rows::i64_decode)
     }
 
     /// Every `pending` row, in key order: the O(pending) rebuild of the ready
@@ -403,11 +467,7 @@ pub trait TypedReads: Reads {
 
     fn dlq(&self, tenant: &str, queue: &str, dlq_id: &[u8; 16]) -> Result<Option<DlqRow>> {
         let k = keys::dlq(tenant, queue, dlq_id);
-        decode(
-            Keyspace::Dlq,
-            self.get_raw(Keyspace::Dlq, &k)?,
-            rows::dlq_decode,
-        )
+        decode_at(self, Keyspace::Dlq, &k, rows::dlq_decode)
     }
 
     /// The `(pid, group, offset)` index → the dead letters filed AT that
@@ -420,11 +480,13 @@ pub trait TypedReads: Reads {
     /// consumer group walks this index, so the row and its `dlq_count` would
     /// outlive the queue itself.
     fn dlq_ids_at(&self, pid: Pid, group: &str, offset: i64) -> Result<Vec<[u8; 16]>> {
-        let k = keys::dlq_by_pos(pid, group, offset);
-        match self.get_raw(Keyspace::DlqByPos, &k)? {
-            None => Ok(Vec::new()),
-            Some(b) => rows::dlq_ids_decode(b)
-                .map_err(|_| StoreError::corrupt(Keyspace::DlqByPos, "dlq id list")),
+        let k = keys::dlq_by_pos_buf(pid, group, offset);
+        match decode_at(self, Keyspace::DlqByPos, &k, rows::dlq_ids_decode) {
+            Ok(v) => Ok(v.unwrap_or_default()),
+            Err(StoreError::Corrupt { .. }) => {
+                Err(StoreError::corrupt(Keyspace::DlqByPos, "dlq id list"))
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -438,12 +500,7 @@ pub trait TypedReads: Reads {
     /// The recorded outcome of a command, if its id is still in the window
     /// (D6, I6).
     fn request_outcome(&self, id: &[u8; 16]) -> Result<Option<RequestIdRow>> {
-        let k = keys::request_ids(id);
-        decode(
-            Keyspace::RequestIds,
-            self.get_raw(Keyspace::RequestIds, &k)?,
-            rows::request_id_decode,
-        )
+        decode_at(self, Keyspace::RequestIds, id, rows::request_id_decode)
     }
 
     /// Request ids oldest first, for `RequestIdsExpire` (D6).
@@ -481,11 +538,7 @@ pub trait TypedReads: Reads {
             // into a `KeyTooLong`.
             return Ok(None);
         }
-        decode(
-            Keyspace::Kv,
-            self.get_raw(Keyspace::Kv, &k)?,
-            rows::kv_decode,
-        )
+        decode_at(self, Keyspace::Kv, &k, rows::kv_decode)
     }
 
     /// The rows of one namespace whose key starts with `key_prefix`, in key
@@ -603,28 +656,23 @@ pub trait TypedReads: Reads {
 
     /// A counter, `0` when it has never been written (D16).
     fn counter_at(&self, key: &[u8]) -> Result<i64> {
-        Ok(decode(
-            Keyspace::Counters,
-            self.get_raw(Keyspace::Counters, key)?,
-            rows::i64_decode,
-        )?
-        .unwrap_or(0))
+        Ok(decode_at(self, Keyspace::Counters, key, rows::i64_decode)?.unwrap_or(0))
     }
 
     fn partition_counter(&self, pid: Pid, c: Counter) -> Result<i64> {
-        self.counter_at(&keys::counter_partition(pid, c))
+        self.counter_at(&keys::counter_partition_key(pid, c))
     }
 
     fn queue_counter(&self, tenant: &str, queue: &str, c: Counter) -> Result<i64> {
-        self.counter_at(&keys::counter_queue(tenant, queue, c))
+        self.counter_at(&keys::counter_queue_buf(tenant, queue, c))
     }
 
     fn tenant_counter(&self, tenant: &str, c: Counter) -> Result<i64> {
-        self.counter_at(&keys::counter_tenant(tenant, c))
+        self.counter_at(&keys::counter_tenant_buf(tenant, c))
     }
 
     fn group_counter(&self, tenant: &str, queue: &str, group: &str, c: Counter) -> Result<i64> {
-        self.counter_at(&keys::counter_group(tenant, queue, group, c))
+        self.counter_at(&keys::counter_group_buf(tenant, queue, group, c))
     }
 
     // --------------------------------------------------------------- timers
@@ -632,11 +680,7 @@ pub trait TypedReads: Reads {
     /// One timer (PK `(tenant, queue, timer_key)`).
     fn timer(&self, tenant: &str, queue: &str, key: &str) -> Result<Option<TimerRow>> {
         let k = keys::timers(tenant, queue, key);
-        decode(
-            Keyspace::Timers,
-            self.get_raw(Keyspace::Timers, &k)?,
-            rows::timer_decode,
-        )
+        decode_at(self, Keyspace::Timers, &k, rows::timer_decode)
     }
 
     /// One queue's timers in timer-key BYTE order, starting strictly AFTER
@@ -722,9 +766,10 @@ pub trait TypedReads: Reads {
 
     fn streams_query(&self, tenant: &str, query_id: &[u8; 16]) -> Result<Option<StreamsQueryRow>> {
         let k = keys::streams_query(tenant, query_id);
-        decode(
+        decode_at(
+            self,
             Keyspace::StreamsQueries,
-            self.get_raw(Keyspace::StreamsQueries, &k)?,
+            &k,
             rows::streams_query_decode,
         )
     }
@@ -766,35 +811,21 @@ pub trait TypedReads: Reads {
         key: &str,
     ) -> Result<Option<StreamsStateRow>> {
         let k = keys::streams_state(query_id, pid, key);
-        decode(
-            Keyspace::StreamsState,
-            self.get_raw(Keyspace::StreamsState, &k)?,
-            rows::streams_state_decode,
-        )
+        decode_at(self, Keyspace::StreamsState, &k, rows::streams_state_decode)
     }
 
     fn flag(&self, name: &str) -> Result<Option<Vec<u8>>> {
-        Ok(self
-            .get_raw(Keyspace::Flags, &keys::flag(name))?
-            .map(ToOwned::to_owned))
+        decode_at(self, Keyspace::Flags, &keys::flag(name), |b| Ok(b.to_vec()))
     }
 
     fn quota(&self, kind: QuotaKind, tenant: &str) -> Result<Option<QuotaGrant>> {
         let k = keys::quota(kind, tenant);
-        decode(
-            Keyspace::Quotas,
-            self.get_raw(Keyspace::Quotas, &k)?,
-            rows::quota_decode,
-        )
+        decode_at(self, Keyspace::Quotas, &k, rows::quota_decode)
     }
 
     fn eph_config(&self, tenant: &str, queue: &str) -> Result<Option<EphConfigRow>> {
-        let k = keys::eph_config(tenant, queue);
-        decode(
-            Keyspace::EphConfig,
-            self.get_raw(Keyspace::EphConfig, &k)?,
-            rows::eph_config_decode,
-        )
+        let k = keys::queues_buf(tenant, queue);
+        decode_at(self, Keyspace::EphConfig, &k, rows::eph_config_decode)
     }
 
     fn scan_eph_configs(
@@ -855,12 +886,8 @@ pub trait TypedReads: Reads {
     // ----------------------------------------------------------- node-local
 
     fn seg_loc(&self, pid: Pid, base_offset: u64) -> Result<Option<SegLocRow>> {
-        let k = keys::seg_loc(pid, base_offset);
-        decode(
-            Keyspace::SegLoc,
-            self.get_raw(Keyspace::SegLoc, &k)?,
-            rows::seg_loc_decode,
-        )
+        let k = keys::pid_u64_key(pid, base_offset);
+        decode_at(self, Keyspace::SegLoc, &k, rows::seg_loc_decode)
     }
 
     /// A partition's positions, in offset order.
@@ -894,11 +921,7 @@ pub trait TypedReads: Reads {
     /// is sealed, its live bytes and its snapshot references (I11, §11.7).
     fn file(&self, bucket: u16, file_id: u32) -> Result<Option<FileRow>> {
         let k = keys::files(bucket, file_id);
-        decode(
-            Keyspace::Files,
-            self.get_raw(Keyspace::Files, &k)?,
-            rows::file_decode,
-        )
+        decode_at(self, Keyspace::Files, &k, rows::file_decode)
     }
 
     /// Every segment file this node knows, in `(bucket, file_id)` order. This
@@ -969,7 +992,7 @@ pub trait TypedWrites: Writes {
     // --------------------------------------------------------------- queues
 
     fn put_queue(&mut self, tenant: &str, queue: &str, cfg: &QueueConfig) -> Result<()> {
-        let k = keys::queues(tenant, queue);
+        let k = keys::queues_buf(tenant, queue);
         self.put_raw(Keyspace::Queues, &k, &rows::queue_encode(cfg))
     }
 
@@ -981,7 +1004,7 @@ pub trait TypedWrites: Writes {
     // --------------------------------------------------------------- groups
 
     fn put_group(&mut self, tenant: &str, queue: &str, group: &str, row: &GroupRow) -> Result<()> {
-        let k = keys::groups(tenant, queue, group);
+        let k = keys::groups_buf(tenant, queue, group);
         self.put_raw(Keyspace::Groups, &k, &rows::group_encode(row))
     }
 
@@ -997,36 +1020,77 @@ pub trait TypedWrites: Writes {
     /// no reader could make sense of.
     fn create_partition(&mut self, pid: Pid, row: &PartitionRow) -> Result<()> {
         self.put_partition(pid, row)?;
-        let k = keys::partitions_by_key(&row.tenant, &row.queue, &row.partition);
+        let k = keys::partitions_by_key_buf(&row.tenant, &row.queue, &row.partition);
         self.put_raw(Keyspace::PartitionsByKey, &k, &rows::u64_encode(pid))?;
-        let k = keys::queue_partitions(&row.tenant, &row.queue, pid);
+        let k = keys::queue_partitions_buf(&row.tenant, &row.queue, pid);
         self.put_raw(Keyspace::QueuePartitions, &k, rows::UNIT)
+    }
+
+    /// Rewrite the partition row's fixed-width fields — offsets, watermarks,
+    /// stamps — through `f`, in place: the three names are copied as they are,
+    /// never decoded into `String`s and encoded back (what
+    /// [`TypedWrites::put_partition`] of a row read with
+    /// [`TypedReads::partition`] costs). Atomic against every other writer of
+    /// the row's stripe ([`Writes::upsert_raw`]); `f` runs under its lock and
+    /// must not touch the store. Returns whether the row exists; nothing is
+    /// written when `f` changes nothing.
+    fn update_partition_tail(
+        &mut self,
+        pid: Pid,
+        f: impl FnOnce(&mut PartitionHead),
+    ) -> Result<bool> {
+        let mut f = Some(f);
+        let mut bad: Option<CodecError> = None;
+        let found = self.upsert_raw(
+            Keyspace::Partitions,
+            &keys::pid_key(pid),
+            &mut |cur, out| {
+                let (Some(cur), Some(f)) = (cur, f.take()) else {
+                    return false;
+                };
+                match rows::partition_rewrite_head(cur, out, f) {
+                    Ok(changed) => changed,
+                    Err(e) => {
+                        bad = Some(e);
+                        false
+                    }
+                }
+            },
+        )?;
+        match bad {
+            Some(e) => Err(StoreError::corrupt(Keyspace::Partitions, format!("{e}"))),
+            None => Ok(found),
+        }
     }
 
     /// Overwrite the partition row alone (offsets, watermarks, stamps).
     fn put_partition(&mut self, pid: Pid, row: &PartitionRow) -> Result<()> {
-        let k = keys::pid(pid);
-        self.put_raw(Keyspace::Partitions, &k, &rows::partition_encode(row))
+        self.put_raw(
+            Keyspace::Partitions,
+            &keys::pid_key(pid),
+            &rows::partition_encode(row),
+        )
     }
 
     /// Remove the partition row and both name indexes.
     fn del_partition(&mut self, pid: Pid, row: &PartitionRow) -> Result<bool> {
-        let k = keys::partitions_by_key(&row.tenant, &row.queue, &row.partition);
+        let k = keys::partitions_by_key_buf(&row.tenant, &row.queue, &row.partition);
         self.del_raw(Keyspace::PartitionsByKey, &k)?;
-        let k = keys::queue_partitions(&row.tenant, &row.queue, pid);
+        let k = keys::queue_partitions_buf(&row.tenant, &row.queue, pid);
         self.del_raw(Keyspace::QueuePartitions, &k)?;
-        let k = keys::pid(pid);
-        self.del_raw(Keyspace::Partitions, &k)
+        self.del_raw(Keyspace::Partitions, &keys::pid_key(pid))
     }
 
     fn put_garbage(&mut self, pid: Pid, row: &GarbageRow) -> Result<()> {
-        let k = keys::pid(pid);
-        self.put_raw(Keyspace::Garbage, &k, &rows::garbage_encode(row))
+        self.put_raw(
+            Keyspace::Garbage,
+            &keys::pid_key(pid),
+            &rows::garbage_encode(row),
+        )
     }
 
     fn del_garbage(&mut self, pid: Pid) -> Result<bool> {
-        let k = keys::pid(pid);
-        self.del_raw(Keyspace::Garbage, &k)
+        self.del_raw(Keyspace::Garbage, &keys::pid_key(pid))
     }
 
     /// Record that this node's sealed file `file_id` holds data of `pid`
@@ -1044,17 +1108,17 @@ pub trait TypedWrites: Writes {
     // -------------------------------------------------------------- cursors
 
     fn put_cursor(&mut self, pid: Pid, group: &str, row: &CursorRow) -> Result<()> {
-        let k = keys::cursors(pid, group);
+        let k = keys::cursors_buf(pid, group);
         self.put_raw(Keyspace::Cursors, &k, &rows::cursor_encode(row))
     }
 
     fn del_cursor(&mut self, pid: Pid, group: &str) -> Result<bool> {
-        let k = keys::cursors(pid, group);
+        let k = keys::cursors_buf(pid, group);
         self.del_raw(Keyspace::Cursors, &k)
     }
 
     fn put_lease(&mut self, worker: &str, pid: Pid, group: &str, expires_at_us: i64) -> Result<()> {
-        let k = keys::leases_by_worker(worker, pid, group);
+        let k = keys::leases_by_worker_buf(worker, pid, group);
         self.put_raw(
             Keyspace::LeasesByWorker,
             &k,
@@ -1063,7 +1127,7 @@ pub trait TypedWrites: Writes {
     }
 
     fn del_lease(&mut self, worker: &str, pid: Pid, group: &str) -> Result<bool> {
-        let k = keys::leases_by_worker(worker, pid, group);
+        let k = keys::leases_by_worker_buf(worker, pid, group);
         self.del_raw(Keyspace::LeasesByWorker, &k)
     }
 
@@ -1075,12 +1139,12 @@ pub trait TypedWrites: Writes {
         pid: Pid,
         ready_at_us: i64,
     ) -> Result<()> {
-        let k = keys::pending(tenant, queue, group, pid);
+        let k = keys::pending_buf(tenant, queue, group, pid);
         self.put_raw(Keyspace::Pending, &k, &rows::i64_encode(ready_at_us))
     }
 
     fn del_pending(&mut self, tenant: &str, queue: &str, group: &str, pid: Pid) -> Result<bool> {
-        let k = keys::pending(tenant, queue, group, pid);
+        let k = keys::pending_buf(tenant, queue, group, pid);
         self.del_raw(Keyspace::Pending, &k)
     }
 
@@ -1185,12 +1249,29 @@ pub trait TypedWrites: Writes {
     // ------------------------------------------------------------- counters
 
     /// Add to a counter and return the new value (D16: O(1) per effect, no
-    /// periodic aggregation).
+    /// periodic aggregation). One read-modify-write under the row's lock
+    /// ([`Writes::upsert_raw`]): atomic even when two shard writers add to
+    /// the same counter.
     fn add_counter(&mut self, key: &[u8], delta: i64) -> Result<i64> {
-        let cur = self.counter_at(key)?;
-        let next = cur.saturating_add(delta);
-        self.put_raw(Keyspace::Counters, key, &rows::i64_encode(next))?;
-        Ok(next)
+        let mut next = 0i64;
+        let mut bad: Option<CodecError> = None;
+        self.upsert_raw(Keyspace::Counters, key, &mut |cur, out| {
+            let base = match cur.map(rows::i64_decode) {
+                None => 0,
+                Some(Ok(v)) => v,
+                Some(Err(e)) => {
+                    bad = Some(e);
+                    return false;
+                }
+            };
+            next = base.saturating_add(delta);
+            out.extend_from_slice(&rows::i64_encode(next));
+            true
+        })?;
+        match bad {
+            Some(e) => Err(StoreError::corrupt(Keyspace::Counters, format!("{e}"))),
+            None => Ok(next),
+        }
     }
 
     fn set_counter(&mut self, key: &[u8], v: i64) -> Result<()> {
@@ -1286,12 +1367,12 @@ pub trait TypedWrites: Writes {
     // ----------------------------------------------------------- node-local
 
     fn put_seg_loc(&mut self, pid: Pid, base_offset: u64, row: &SegLocRow) -> Result<()> {
-        let k = keys::seg_loc(pid, base_offset);
+        let k = keys::pid_u64_key(pid, base_offset);
         self.put_raw(Keyspace::SegLoc, &k, &rows::seg_loc_encode(row))
     }
 
     fn del_seg_loc(&mut self, pid: Pid, base_offset: u64) -> Result<bool> {
-        let k = keys::seg_loc(pid, base_offset);
+        let k = keys::pid_u64_key(pid, base_offset);
         self.del_raw(Keyspace::SegLoc, &k)
     }
 

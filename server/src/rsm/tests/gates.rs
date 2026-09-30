@@ -403,13 +403,13 @@ fn a_pid_assigned_twice_in_one_entry_is_refused() {
     assert_eq!(
         twice.validate(),
         Err(CodecError::Layout(
-            "a created pid is not pid_base + its ordinal"
+            "the created pids are not pid_base .. pid_base + count, each once"
         ))
     );
     assert_eq!(
         encode_entry(&twice),
         Err(CodecError::Layout(
-            "a created pid is not pid_base + its ordinal"
+            "the created pids are not pid_base .. pid_base + count, each once"
         ))
     );
     // Forged past the encoder, it is a committed entry no node may apply, not
@@ -417,7 +417,7 @@ fn a_pid_assigned_twice_in_one_entry_is_refused() {
     let err = decode_entry(&encode_entry_unchecked(&twice)).unwrap_err();
     assert_eq!(
         err,
-        CodecError::Malformed("a created pid is not pid_base + its ordinal")
+        CodecError::Malformed("the created pids are not pid_base .. pid_base + count, each once")
     );
     assert!(err.fatal(), "{err}");
 
@@ -447,6 +447,32 @@ fn a_pid_assigned_twice_in_one_entry_is_refused() {
         .unwrap();
     good.validate().expect("100 then 101 from base 100");
     assert!(encode_entry(&good).is_ok());
+
+    // Lane-local creation: each lane creates its partitions with the ids the
+    // router assigned, and the lanes' parts sit in lane order, so the ids come
+    // in any order. The SET must still be dense from the base, each id once.
+    let mut permuted = Entry::new(1, 100, 7);
+    permuted
+        .add_command(uuid(1), Outcome::Empty, vec![partition_create(102)])
+        .unwrap();
+    permuted
+        .add_command(
+            uuid(2),
+            Outcome::Empty,
+            vec![partition_create(100), partition_create(101)],
+        )
+        .unwrap();
+    permuted.validate().expect("102, 100, 101 from base 100");
+    assert!(encode_entry(&permuted).is_ok());
+    let mut holed = Entry::new(1, 100, 7);
+    holed
+        .add_command(
+            uuid(1),
+            Outcome::Empty,
+            vec![partition_create(102), partition_create(100)],
+        )
+        .unwrap();
+    assert!(holed.validate().is_err(), "101 is missing");
 
     // And the base itself cannot be walked past the end of the number line.
     let mut overflow = Entry::new(1, u64::MAX, 7);

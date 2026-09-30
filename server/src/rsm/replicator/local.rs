@@ -114,6 +114,14 @@ pub trait Waker: Send + Sync {
 
     /// See `apply::Notify::appended`.
     fn appended(&self, _tenant: &str, _queue: &str, _partition: &str) {}
+
+    /// An append for `(tenant, queue)` reached `group`'s parked pops (see
+    /// `apply::Notify::wake_append`). By default the plain wake; a waker that
+    /// wakes pops when an append is PLANNED (the leader's facade) can tell the
+    /// two apart and skip this apply-time one.
+    fn wake_append(&self, tenant: &str, queue: &str, group: &str) {
+        self.wake(tenant, queue, Some(group))
+    }
 }
 
 /// A waker that drops every wake. Boot before the seam, and every test that
@@ -205,6 +213,10 @@ impl Notify for ReplNotify {
 
     fn wake(&self, tenant: &str, queue: &str, group: Option<&str>) {
         self.waker.wake(tenant, queue, group);
+    }
+
+    fn wake_append(&self, tenant: &str, queue: &str, group: &str) {
+        self.waker.wake_append(tenant, queue, group);
     }
 
     fn wants_append_wakes(&self) -> bool {
@@ -383,11 +395,13 @@ impl QlogWrite {
         let mut pf: Vec<Bytes> = Vec::with_capacity(items.len());
         for it in items.iter() {
             match &it.body {
-                GroupBody::Entry { entry, .. } => {
-                    pf.push(Bytes::from(encode_entry_payload_free(entry).map_err(
-                        |e| io::Error::other(format!("payload-free entry encode: {e:?}")),
-                    )?))
-                }
+                // Encoded once already (a raft leader's, shared with the wire).
+                GroupBody::Entry { pf: Some(b), .. } => pf.push(b.clone()),
+                GroupBody::Entry {
+                    entry, pf: None, ..
+                } => pf.push(Bytes::from(encode_entry_payload_free(entry).map_err(
+                    |e| io::Error::other(format!("payload-free entry encode: {e:?}")),
+                )?)),
                 GroupBody::Stored { pf: b, .. } => pf.push(b.clone()),
                 GroupBody::Raw { bytes, .. } => pf.push(Bytes::copy_from_slice(bytes)),
             }
@@ -398,7 +412,7 @@ impl QlogWrite {
         // compressed now. `None` = store raw. A stored-form entry needs none.
         let mut zblobs: Vec<Option<Bytes>> = Vec::new();
         for it in items.iter_mut() {
-            let GroupBody::Entry { entry, pre, z } = &mut it.body else {
+            let GroupBody::Entry { entry, pre, z, .. } = &mut it.body else {
                 continue;
             };
             let n = entry
@@ -433,14 +447,20 @@ impl QlogWrite {
             }
         }
         let lanes = self.set.lanes();
-        // Shared logs: every queue's records go to its shared log, written on
-        // the writer thread (lane 0); per-queue logs keep their lanes.
+        // The logs of different lanes are written in parallel. Shared logs:
+        // each shard's log is a lane of its own (the lane key IS the log id),
+        // so a group's shards are encoded, written and indexed at once instead
+        // of one after the other on this thread; per-queue logs keep their
+        // queue lanes.
         let shards = self.set.shards();
         let lane_for = |pid: u64| if shards > 0 { 0 } else { pid % lanes };
+        let lane_key = |log: u64, lane: u64| if shards > 0 { log } else { lane };
         let mut zi = 0usize;
         let mut max_seq = 0u64;
         // Every log written, with its lane.
         let mut lane_of_log: HashMap<u64, u64> = HashMap::new();
+        // The payload-free decodes of the group's planned entries, by item.
+        let mut decoded: Vec<(usize, Arc<Entry>)> = Vec::new();
         // The records borrow `items` (hashes, blobs, stored payloads), `pf`
         // (entry bytes) and `zblobs`, so the writes are scoped to end BEFORE the
         // entries are rewritten below.
@@ -481,7 +501,7 @@ impl QlogWrite {
                         | Effect::DlqInsert { tenant, queue, .. }
                         | Effect::DlqDelete { tenant, queue, .. } => {
                             let log = route_queue_log(QLogSet::queue_id_of(tenant, queue), shards);
-                            lane_of_log.insert(log, 0);
+                            lane_of_log.insert(log, lane_key(log, 0));
                             touched.insert(log);
                         }
                         Effect::PartitionCreate {
@@ -491,7 +511,7 @@ impl QlogWrite {
                             q.pid_qid.insert(*pid, qid);
                             let lane = lane_for(*pid);
                             let log = route_log(qid, *pid, lanes, shards);
-                            lane_of_log.insert(log, lane);
+                            lane_of_log.insert(log, lane_key(log, lane));
                             touched.insert(log);
                         }
                         Effect::PartitionDelete { pid } => {
@@ -499,7 +519,7 @@ impl QlogWrite {
                                 Some(qid) => {
                                     let lane = lane_for(*pid);
                                     let log = route_log(qid, *pid, lanes, shards);
-                                    lane_of_log.insert(log, lane);
+                                    lane_of_log.insert(log, lane_key(log, lane));
                                     touched.insert(log);
                                 }
                                 None => unresolved = true,
@@ -513,7 +533,7 @@ impl QlogWrite {
                                 Some(qid) => {
                                     let lane = lane_for(*pid);
                                     let log = route_log(qid, *pid, lanes, shards);
-                                    lane_of_log.insert(log, lane);
+                                    lane_of_log.insert(log, lane_key(log, lane));
                                     touched.insert(log);
                                 }
                                 None => unresolved = true,
@@ -536,7 +556,7 @@ impl QlogWrite {
                                 })?;
                             let lane = lane_for(*pid);
                             let log = route_log(qid, *pid, lanes, shards);
-                            lane_of_log.insert(log, lane);
+                            lane_of_log.insert(log, lane_key(log, lane));
                             touched.insert(log);
                             let (zstd, payload): (bool, &[u8]) = match stored {
                                 Some(sp) => {
@@ -645,33 +665,56 @@ impl QlogWrite {
                 }
                 Ok(())
             };
-            let mut lanes_iter = per_lane.values();
-            match per_lane.len() {
-                0 => {}
-                1 => write_lane(lanes_iter.next().expect("one lane"))?,
-                _ => std::thread::scope(|s| -> io::Result<()> {
-                    let first = lanes_iter.next().expect("a lane");
-                    let joins: Vec<std::thread::ScopedJoinHandle<'_, io::Result<()>>> = lanes_iter
-                        .map(|logs| {
-                            s.spawn(move || {
-                                // W1: a lane of the core log writer.
-                                crate::obs::panic_policy::mark_current_thread_core();
-                                write_lane(logs)
-                            })
-                        })
-                        .collect();
-                    let mut res = write_lane(first);
-                    for j in joins {
-                        let r = j
-                            .join()
-                            .unwrap_or_else(|_| Err(io::Error::other("qlog lane writer panicked")));
+            // Apply's payload-free form of every entry this node planned (see
+            // below), decoded while the lanes write: it needs only `pf`.
+            let items_ro: &[GroupItem] = items;
+            let pf_ro: &[Bytes] = &pf;
+            let decode = move || -> io::Result<Vec<(usize, Arc<Entry>)>> {
+                let mut out = Vec::new();
+                for (i, (it, bytes)) in items_ro.iter().zip(pf_ro.iter()).enumerate() {
+                    if let GroupBody::Entry { .. } = &it.body {
+                        out.push((
+                            i,
+                            Arc::new(decode_entry(bytes).map_err(|e| {
+                                io::Error::other(format!("payload-free entry re-decode: {e:?}"))
+                            })?),
+                        ));
+                    }
+                }
+                Ok(out)
+            };
+            type LaneJob<'j> =
+                Box<dyn FnOnce() -> io::Result<Vec<(usize, Arc<Entry>)>> + Send + 'j>;
+            let mut jobs: Vec<LaneJob<'_>> = Vec::with_capacity(per_lane.len() + 1);
+            if items_ro
+                .iter()
+                .any(|it| matches!(it.body, GroupBody::Entry { .. }))
+            {
+                jobs.push(Box::new(decode));
+            }
+            for logs in per_lane.values() {
+                let write_lane = &write_lane;
+                jobs.push(Box::new(move || write_lane(logs).map(|()| Vec::new())));
+            }
+            // The first job runs here, the others on the writer's helper
+            // threads (`qlog::pool`); all are done when this returns.
+            let mut res: io::Result<()> = Ok(());
+            for r in crate::rsm::qlog::pool::run_scoped(jobs) {
+                match r {
+                    Ok(Ok(d)) => decoded.extend(d),
+                    Ok(Err(e)) => {
                         if res.is_ok() {
-                            res = r;
+                            res = Err(e);
                         }
                     }
-                    res
-                })?,
+                    Err(_) => {
+                        if res.is_ok() {
+                            res = Err(io::Error::other("qlog lane writer panicked"));
+                        }
+                    }
+                }
             }
+            res?;
             let written: Vec<u64> = by_log.keys().copied().collect();
             q.set.note_written(written, max_seq);
             // `qlog.record_written` (and its raft-era twin `log.appended`): the
@@ -685,13 +728,11 @@ impl QlogWrite {
         // payload's 4-byte frame length — byte-identical to what a replay from the
         // queue logs hands it, so `RetainedBytes` (a REPLICATED counter) is
         // computed from the length on BOTH paths and the digest is replay-stable
-        // (I2). Cheap: the entry carries no payload. A stored-form entry already
+        // (I2). Decoded above, alongside the writes. A stored-form entry already
         // is that form.
-        for (it, bytes) in items.iter_mut().zip(pf.iter()) {
-            if let GroupBody::Entry { entry, .. } = &mut it.body {
-                *entry = Arc::new(decode_entry(bytes).map_err(|e| {
-                    io::Error::other(format!("payload-free entry re-decode: {e:?}"))
-                })?);
+        for (i, e) in decoded {
+            if let GroupBody::Entry { entry, .. } = &mut items[i].body {
+                *entry = e;
             }
         }
         Ok(self.set.take_ticket())
@@ -721,6 +762,10 @@ pub(crate) enum GroupBody {
         /// already known (a raft leader awaited it before proposing, and sent
         /// the same bytes to its followers). `None` = use `pre`, or compress.
         z: Option<Arc<Vec<Option<Bytes>>>>,
+        /// The entry's payload-free encoding when it is already made (a raft
+        /// leader's entry: the wire needs the same bytes, so they are encoded
+        /// once). `None` = encode it here.
+        pf: Option<Bytes>,
     },
     /// An application entry as a follower received it: the PAYLOAD-FREE entry
     /// and its encoding (the entry record), plus every `Append` payload
@@ -1064,6 +1109,7 @@ impl Writer {
                     entry: p.entry.clone(),
                     pre: std::mem::take(&mut p.pre),
                     z: None,
+                    pf: None,
                 },
             })
             .collect();
@@ -1173,8 +1219,8 @@ fn handoff_group(
         let committed = Committed {
             index,
             term: LOG_TERM,
-            // Unique by now (the payload-free replacement, or a decoded entry).
-            entry: Arc::try_unwrap(p.entry).unwrap_or_else(|a| (*a).clone()),
+            // The payload-free replacement, or a decoded entry: shared, as is.
+            entry: p.entry,
         };
         // PERF-1: mark the channel depth so the apply thread can read it.
         crate::rsm::timing::apply_channel_send();
@@ -1617,7 +1663,7 @@ impl<S: Store + 'static> LocalReplicator<S> {
             if !qlog_on {
                 // Knob OFF: the raft log is the WAL, exactly as before.
                 log.scan_from(store_durable + 1, &mut |index, term, body| {
-                    let entry = decode_replayed(index, body)?;
+                    let entry = Arc::new(decode_replayed(index, body)?);
                     apply_tx
                         .send(Committed { index, term, entry })
                         .map_err(|_| io::Error::other("replay: apply thread exited"))?;
@@ -1637,7 +1683,7 @@ impl<S: Store + 'static> LocalReplicator<S> {
                         format!("replay: legacy raft log jumps from {next} to {index}"),
                     ));
                 }
-                let entry = decode_replayed(index, body)?;
+                let entry = Arc::new(decode_replayed(index, body)?);
                 seed_pid_qid_from(&mut seed_pid_qid, &entry);
                 apply_tx
                     .send(Committed { index, term, entry })
@@ -1651,7 +1697,7 @@ impl<S: Store + 'static> LocalReplicator<S> {
             let set = qlog_set.as_mut().expect("qlog on");
             let scan = set.scan_entries(next, &mut |rec| {
                 let index = rec.seq;
-                let entry = decode_replayed(index, &rec.entry)?;
+                let entry = Arc::new(decode_replayed(index, &rec.entry)?);
                 // Seed the writer's `pid -> queue_id` map from the replay window:
                 // these creates are above the committed catalog the writer's
                 // on-demand lookup reads.

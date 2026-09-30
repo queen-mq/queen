@@ -183,6 +183,15 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
 /// Hard-link every regular file under `src` into `dst` (same layout), except
 /// indexes and temporaries (the receiver rebuilds indexes). A file that
 /// vanishes between the listing and the link was reclaimed as dead: skipped.
+///
+/// A queue log's files are taken NEWEST first, and a file created ahead of
+/// its roll and not taken yet is left out (`qlog::is_precreated_file`): each
+/// file is sent as far as it went when it was linked, so the receiver must
+/// never get a live file newer than one it got mid-write — that older file
+/// would reopen as SEALED with a torn tail, which is corruption. Newest first,
+/// a file that is live when linked had its predecessor sealed (whole and
+/// fsynced) before, and that predecessor is linked after; a file created ahead
+/// may turn live after the listing, so it is never sent.
 fn link_tree(src: &Path, dst: &Path, rel: &str, out: &mut Vec<FileEntry>) -> io::Result<()> {
     let rd = match fs::read_dir(src) {
         Ok(rd) => rd,
@@ -191,7 +200,7 @@ fn link_tree(src: &Path, dst: &Path, rel: &str, out: &mut Vec<FileEntry>) -> io:
     };
     fs::create_dir_all(dst)?;
     let mut names: Vec<_> = rd.collect::<Result<Vec<_>, _>>()?;
-    names.sort_by_key(|e| e.file_name());
+    names.sort_by_key(|e| std::cmp::Reverse(e.file_name()));
     for e in names {
         let name = e.file_name();
         let Some(n) = name.to_str() else { continue };
@@ -203,6 +212,14 @@ fn link_tree(src: &Path, dst: &Path, rel: &str, out: &mut Vec<FileEntry>) -> io:
         }
         if !ft.is_file() || n.ends_with(".qidx") || n.ends_with(".tmp") || n.contains(".compact") {
             continue;
+        }
+        if n.ends_with(".qlog") {
+            match crate::rsm::qlog::is_precreated_file(&e.path()) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err),
+            }
         }
         match fs::hard_link(e.path(), dst.join(n)) {
             Ok(()) => {}

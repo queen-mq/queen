@@ -710,7 +710,7 @@ async fn the_replicated_digest_is_replay_stable_with_the_qlog_on() {
                 a.apply(&apply::Committed {
                     index,
                     term: LOG_TERM,
-                    entry,
+                    entry: entry.into(),
                 })
                 .expect("apply replayed entry");
             }

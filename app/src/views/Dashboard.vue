@@ -85,7 +85,7 @@
           <h3>Partitions</h3>
           <span class="muted">{{ queuesFailed ? '—' : `${formatNumber(totalPartitions)} across ${formatNumber(queues.length)} queues` }}</span>
         </div>
-        <PartitionSunflower :queues="sunflowerQueues" :loading="loadingQueues" :error="queuesQ.error.value" />
+        <PartitionSunflower :queues="sunflowerQueues" :partitions="sunflowerPartitions" :loading="loadingQueues" :error="queuesQ.error.value" />
       </div>
     </section>
 
@@ -517,7 +517,8 @@ import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { stamp } from '@/composables/useStamp'
 import { useIdentity } from '@/stores/identity'
 import MetricTile from '@/components/MetricTile.vue'
-import PartitionSunflower from '@/components/PartitionSunflower.vue'
+import PartitionSunflower, { MAX_SEEDS } from '@/components/PartitionSunflower.vue'
+import { routeSupport } from '@/stores/routeSupport'
 import PageHead from '@/components/PageHead.vue'
 import RowChart from '@/components/RowChart.vue'
 
@@ -1353,12 +1354,32 @@ const sunflowerQueues = computed(() =>
   }))
 )
 
+// One seed per real partition, with its own pending and lag, needs
+// /resources/partitions. It is asked only while the flower draws one seed per
+// partition; past MAX_SEEDS a seed is a slice of a queue and the queue listing
+// is all it can show. New in 2.0: an older broker 404s once (a probe, so no
+// toast), stores/routeSupport remembers it, and the seeds stay per queue.
+const getPartitions = routeSupport.guard('resources-partitions', (params, config) =>
+  queuesApi.partitions(params, { ...config, probe: true }))
+const partitionsQ = useApi((config) => getPartitions({ limit: MAX_SEEDS }, config), { immediate: false })
+const refreshPartitions = () => {
+  if (queuesFailed.value || totalPartitions.value > MAX_SEEDS) return
+  return partitionsQ.refresh()
+}
+const sunflowerPartitions = computed(() => {
+  const d = partitionsQ.data.value
+  // A failed tick keeps the last rows (useApi keeps data); a missing route
+  // never had any.
+  if (!d || d.truncated || totalPartitions.value > MAX_SEEDS) return null
+  return d.partitions || null
+})
+
 // ---------------------------------------------------------------------------
 // Loading
 // ---------------------------------------------------------------------------
 const fetchAll = async () => {
   const jobs = [
-    overviewQ.refresh(), queuesQ.refresh(), consumersQ.refresh(),
+    overviewQ.refresh(), queuesQ.refresh().then(refreshPartitions), consumersQ.refresh(),
     opsQ.refresh(), retentionQ.refresh(),
   ]
   // The two cell-level sources are operator routes: for anyone else the proxy

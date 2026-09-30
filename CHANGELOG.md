@@ -74,6 +74,23 @@ binaries and the PostgreSQL client tools are gone. The dashboard is raft-only: t
 panel, the database pool and the disk-spool cards are removed, and the replicated log's status
 takes their place.
 
+**The partitions sunflower names its seeds.** Each queue owns a wedge of the flower, and hovering a
+seed lights its queue and shows the queue, the partition, its pending and its lag. The per-partition
+figures come from a new read-only route, `GET /api/v1/resources/partitions?queue=&limit=`: the
+partitions holding the most pending (default 610), each with `pending`, `processing` and
+`lagSeconds`, the age of the oldest message its slowest reader has not consumed (`null` when caught
+up). The Overview asks for it only while it draws one seed per partition.
+
+**The broker in the top bar.** For operators, every page's top bar shows the cell's CPU, memory,
+disk and Raft state, each figure its fullest node's, over a hairline of how full it is; a click
+opens every node. Colour appears only past a line: 90% of the CPUs a node may use, 80% and 90% of
+its memory limit, and the node's own disk write gate. `GET /api/v1/raft/status` and each member of
+`GET /api/v1/raft/members` gain `host`, the figures behind it.
+
+**The sidebar collapses to a rail of icons** (the button at the top left of the top bar, or `⌘\`),
+remembered per browser. Members and Users share one row: an operator switches between the acting
+cluster's members and every account on the cell from the Members page.
+
 ## 1.6.0 - 2026-09-11
 
 **A read-scoped credential could replay a dead letter through the proxy. It cannot now.**

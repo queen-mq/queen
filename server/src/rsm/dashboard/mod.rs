@@ -33,6 +33,60 @@ pub fn started() -> std::time::Instant {
     *STARTED.get_or_init(std::time::Instant::now)
 }
 
+// This process's CPU over the collector's last interval: percent of one core
+// (4 busy cores = 400) as f64 bits, u64::MAX until the first interval closes,
+// and that interval in seconds.
+static CPU_PCT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+static CPU_WINDOW_S: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Record the CPU the collector measured over its last `window_s` seconds.
+pub fn set_cpu_pct(pct: f64, window_s: u64) {
+    use std::sync::atomic::Ordering;
+    CPU_WINDOW_S.store(window_s, Ordering::Relaxed);
+    CPU_PCT.store(pct.to_bits(), Ordering::Relaxed);
+}
+
+/// The CPU of the collector's last interval and its length in seconds; `None`
+/// before the first one closes.
+pub fn cpu_pct() -> Option<(f64, u64)> {
+    use std::sync::atomic::Ordering;
+    let bits = CPU_PCT.load(Ordering::Relaxed);
+    (bits != u64::MAX).then(|| (f64::from_bits(bits), CPU_WINDOW_S.load(Ordering::Relaxed)))
+}
+
+/// The disk gate of this node's data directory: writes are refused once the
+/// filesystem is `high_pct` used and accepted again below `low_pct`.
+/// `enabled` is false where the gate is off (tests).
+pub struct DiskGate {
+    pub dir: std::path::PathBuf,
+    pub high_pct: f64,
+    pub low_pct: f64,
+    pub enabled: bool,
+}
+
+static DISK_GATE: std::sync::OnceLock<DiskGate> = std::sync::OnceLock::new();
+// Whether the gate is closed now. With several Raft groups in one process
+// (QUEEN_RAFT_GROUPS) the group that looked last speaks for all of them.
+static STORAGE_FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Name the gate; the first facade of the process wins.
+pub fn set_disk_gate(gate: DiskGate) {
+    let _ = DISK_GATE.set(gate);
+}
+
+pub fn disk_gate() -> Option<&'static DiskGate> {
+    DISK_GATE.get()
+}
+
+/// Mirror the gate's verdict whenever a facade re-judges it.
+pub fn set_storage_full(full: bool) {
+    STORAGE_FULL.store(full, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn storage_full() -> bool {
+    STORAGE_FULL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The cluster's name on the dashboard: `QUEEN_CELL_ID` when set, else
 /// `raft-` and eight hex digits of a hash of the membership (the voters' ids
 /// and Raft addresses), so every node of one cluster answers the same id and

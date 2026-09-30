@@ -460,8 +460,12 @@ impl Cell {
                 Arc::new(NoNotify),
             )
             .expect("open applier");
-            a.apply(&ApplyCommitted { index, term, entry })
-                .expect("apply");
+            a.apply(&ApplyCommitted {
+                index,
+                term,
+                entry: entry.into(),
+            })
+            .expect("apply");
             a.durable_point().expect("durable point");
         }
         (

@@ -19,7 +19,7 @@
     </div>
   </div>
 
-  <div v-else class="app-shell">
+  <div v-else class="app-shell" :class="{ 'nav-rail': rail }">
     <!-- Sidebar wrapper - hidden from grid flow on mobile -->
     <div class="sidebar-slot">
       <Sidebar />
@@ -65,6 +65,7 @@ import Sidebar from '@/components/Sidebar.vue'
 import Header from '@/components/Header.vue'
 import ToastHost from '@/components/ToastHost.vue'
 import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
+import { rail } from '@/composables/useSidebar'
 import { useIdentity } from '@/stores/identity'
 import { useUiStore } from '@/stores/ui'
 

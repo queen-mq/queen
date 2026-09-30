@@ -59,12 +59,13 @@
 //!
 //! LMDB has no checksums, so every value carries one: `value ‖ xxh3` over the
 //! keyspace, the key and the value, computed at the put, carried unchanged
-//! through RAM, the checkpoint and the file, and verified on every read, at the
-//! load and by the scrub. A failure is [`StoreError::CorruptValue`] (keyspace
-//! and key named), fatal and node-local: a corrupt store refuses to open, and a
-//! corrupt value found at runtime poisons the store. Callers only ever see
-//! logical bytes. The format, its row, legacy stores and snapshots are in
-//! [`integrity`].
+//! through RAM, the checkpoint and the file, and verified where the bytes
+//! cross a boundary — every checkpoint write, the load, the scrub, a snapshot
+//! copy — and on every read with [`StoreOpts::verify_reads`]. A failure is
+//! [`StoreError::CorruptValue`] (keyspace and key named), fatal and
+//! node-local: a corrupt store refuses to open, and a corrupt value found at
+//! runtime poisons the store. Callers only ever see logical bytes. The format,
+//! its row, legacy stores and snapshots are in [`integrity`].
 //!
 //! # Phase C: RAM keyspaces, LMDB as their checkpoint
 //!
@@ -166,13 +167,25 @@ pub mod integrity;
 #[cfg(test)]
 mod integrity_tests;
 pub mod keys;
+pub(crate) mod ram;
+#[cfg(test)]
+mod ram_bench;
+#[cfg(test)]
+mod ram_equiv_tests;
 #[cfg(test)]
 mod ram_tests;
 pub mod rows;
+#[cfg(test)]
+mod shard_tests;
 pub(crate) mod sigbus;
 pub mod typed;
 
 pub use heed_store::HeedStore;
+// The shard writer's type is named by the sharded apply through
+// `Store::Shard` and by the tests; a build that compiles these modules without
+// them (the binary) would call the re-export unused.
+#[allow(unused_imports)]
+pub use heed_store::ShardWrite;
 // `TypedWrites` has no caller until apply exists (WP-1.4); the re-export is
 // the pair's other half and must not be dropped in the meantime.
 #[allow(unused_imports)]
@@ -798,6 +811,16 @@ pub struct StoreOpts {
     /// atomically ([`integrity`]). Off: a legacy store keeps working
     /// unverified, with one warning.
     pub migrate_legacy: bool,
+    /// Proposed knob: `QUEEN_STORE_VERIFY_READS=1`. Verify the checksum of
+    /// EVERY value a RAM read hands out, as format 1 first did. Off (the
+    /// default), a value is verified where it enters or leaves RAM — the load,
+    /// every checkpoint write, the scrub — and a read only cuts the checksum
+    /// off: the bytes were sealed in this process at their put, and two xxh3
+    /// passes per read were a measured share of every planning lane. What the
+    /// default gives up is catching memory damage at the READ that meets it,
+    /// before a planner or apply acts on it; the checkpoint still refuses to
+    /// write it, and the §12.9 digest compares nodes.
+    pub verify_reads: bool,
     /// Called once with the first corrupt value found at runtime
     /// ([`integrity::CorruptHook`]). The binary's ends the process.
     pub on_corrupt: Option<integrity::CorruptHook>,
@@ -823,6 +846,7 @@ impl Default for StoreOpts {
             sync_every_commit: false,
             verify_at_open: false,
             migrate_legacy: true,
+            verify_reads: false,
             on_corrupt: None,
             #[cfg(test)]
             create_legacy: false,
@@ -987,6 +1011,26 @@ pub trait Reads {
     /// The bytes stored at `key`, borrowed from the transaction.
     fn get_raw(&self, ks: Keyspace, key: &[u8]) -> Result<Option<&[u8]>>;
 
+    /// `f` over the bytes stored at `key`, borrowed for the call only; returns
+    /// whether the row exists. The typed accessors decode here: on a RAM
+    /// keyspace `f` runs under the table's read lock, so nothing is copied,
+    /// no reference is counted and nothing is kept by the handle (a
+    /// `get_raw` keeps every value it hands out until the handle's next
+    /// `&mut` call or its end).
+    ///
+    /// `f` must NOT call back into the store — a nested read of the same
+    /// table can wait behind a queued writer (debug builds panic instead) —
+    /// and should be short: a decode, not I/O.
+    fn get_with(&self, ks: Keyspace, key: &[u8], f: &mut dyn FnMut(&[u8])) -> Result<bool> {
+        match self.get_raw(ks, key)? {
+            Some(v) => {
+                f(v);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     /// The longest key this engine accepts (LMDB: 511 B by default). A caller
     /// that builds a RESUME key needs it — see [`resume_after`] — so it is on
     /// the handle and not only on [`Store`], which a rebuild running against a
@@ -1030,7 +1074,9 @@ pub trait Reads {
         cb: &mut dyn FnMut(&[u8], &[u8]) -> bool,
     ) -> Result<usize>;
 
-    /// Rows in a keyspace. O(n): for tests, digests and reports only.
+    /// Rows in a keyspace. The default walks every row (O(n): for tests,
+    /// digests and reports only); the store's handles answer a RAM keyspace
+    /// from its table's own row counts.
     fn count(&self, ks: Keyspace) -> Result<u64> {
         let mut n = 0u64;
         self.scan_raw(ks, &[], &[], usize::MAX, &mut |_k, _v| {
@@ -1041,6 +1087,10 @@ pub trait Reads {
     }
 }
 
+/// The closure of [`Writes::upsert_raw`]: the row's logical bytes (`None`: no
+/// row) in, the new logical value written into the vector, `true` to write it.
+pub type UpsertFn<'a> = dyn FnMut(Option<&[u8]>, &mut Vec<u8>) -> bool + 'a;
+
 /// Writing committed state. Only the apply thread holds one of these (I1).
 ///
 /// The handle stays open ACROSS entries: §11.3's G0 amendment says the write
@@ -1050,6 +1100,25 @@ pub trait Reads {
 /// Raft log is the write-ahead log, so nothing is lost between commits.
 pub trait Writes: Reads {
     fn put_raw(&mut self, ks: Keyspace, key: &[u8], val: &[u8]) -> Result<()>;
+
+    /// Read-modify-write one row: `f` gets its logical bytes (`None`: no row)
+    /// and writes the new logical value into the vector it is handed (empty),
+    /// or returns false to leave the row as it is. Returns whether the row
+    /// was there.
+    ///
+    /// On the store's handles this is ATOMIC against every other writer of
+    /// the table (the write handle and the shard writers): `f` runs under the
+    /// row's write lock — so it must not call back into the store — and a
+    /// rewrite of the same length reuses the value's allocation. The default
+    /// is a read, then a write.
+    fn upsert_raw(&mut self, ks: Keyspace, key: &[u8], f: &mut UpsertFn<'_>) -> Result<bool> {
+        let cur = self.get_raw(ks, key)?.map(<[u8]>::to_vec);
+        let mut out = Vec::new();
+        if f(cur.as_deref(), &mut out) {
+            self.put_raw(ks, key, &out)?;
+        }
+        Ok(cur.is_some())
+    }
 
     /// Returns whether a row was there.
     fn del_raw(&mut self, ks: Keyspace, key: &[u8]) -> Result<bool>;
@@ -1190,6 +1259,10 @@ pub trait Store: Send + Sync {
     type Write<'s>: Writes
     where
         Self: 's;
+    /// A concurrent writer of the RAM keyspaces ([`Store::shard_writer`]).
+    type Shard<'s>: Writes + Send
+    where
+        Self: 's;
 
     /// Run `f` inside ONE read transaction (pin 2). The transaction begins
     /// and ends inside this call; the handle cannot escape it, and a nested
@@ -1204,6 +1277,16 @@ pub trait Store: Send + Sync {
     /// [`Writes::durable_commit`] keep it, because they open the next
     /// transaction on the same handle.
     fn write(&self) -> Result<Self::Write<'_>>;
+
+    /// A SHARD WRITER for the sharded apply: a handle that reads and writes
+    /// the RAM keyspaces directly — the same sealing, the same dirty sets —
+    /// alongside the write handle and any number of other shard writers, as
+    /// long as no two of them write the same KEY at once (any keyspace, any
+    /// two keys: every mutation holds the lock of the row's stripe or table).
+    /// It holds no engine transaction, never commits and takes no cut: the
+    /// coordinator commits on the write handle once every shard writer is
+    /// DROPPED (debug builds assert it). See [`HeedStore::shard_writer`].
+    fn shard_writer(&self) -> Result<Self::Shard<'_>>;
 
     /// The entry boundaries of the RAM keyspaces ([`EntryGate`]). The default
     /// is one gate for the process: correct, only coarser.
@@ -1253,14 +1336,16 @@ pub trait Store: Send + Sync {
     fn restore_cut(&self, _cut: CheckpointCut) {}
 }
 
-/// One keyspace's rows in a [`CheckpointCut`]: key, value (`None`: deleted).
-pub(crate) type CutRows = Vec<(heed_store::RamKey, Option<std::sync::Arc<[u8]>>)>;
+/// One keyspace's rows in a [`CheckpointCut`]: its dirty sets as they were
+/// taken (one per lock of its table), key → value (`None`: deleted).
+pub(crate) type CutRows = Vec<ram::DirtyMap>;
 
 /// A checkpoint cut ([`Writes::take_cut`]): every RAM row changed since the
 /// last checkpoint and its value at the cut (`None` = deleted), keyspace by
-/// keyspace (put in key order by [`Store::write_cut`], off the writer). The values are shared (`Arc`), so a cut costs
-/// one reference count per row, and a later write to a row replaces the map's
-/// value without touching the cut's.
+/// keyspace (put in key order by [`Store::write_cut`], off the writer). The
+/// values are shared (`Arc`), so a cut costs one reference count per row, and
+/// a later write to a row replaces the table's value (in a new allocation:
+/// the cut still holds the old one) without touching the cut's.
 pub struct CheckpointCut {
     pub(crate) rows: Vec<(Keyspace, CutRows)>,
     pub(crate) keys: usize,

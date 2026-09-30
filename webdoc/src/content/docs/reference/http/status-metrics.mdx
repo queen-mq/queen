@@ -204,9 +204,18 @@ This node's block plus the cluster's identity: `nodeId`, `hostname` (`QUEEN_SERV
 (`leader`, `follower`, `candidate`, `learner` or `shutdown`), `leaderId`, `term`,
 `lastLogIndex`, `committedIndex`, `appliedIndex`, `durableIndex`, `inflight`, `proposals`,
 `log` (`files`, `bytes`), `store` (`mapBytes`, `usedBytes`, `mapUsedPct`, `readersInUse`,
-`maxReaders`), `version`, `uptimeSeconds` and, on the leader, `replication` (each follower's
-`matchIndex` and `heartbeatAgeMs`). Added to it: `engine`, `clusterId`, `self`, `voters` and
-`singleNode`.
+`maxReaders`), `version`, `uptimeSeconds`, `host` and, on the leader, `replication` (each
+follower's `matchIndex` and `heartbeatAgeMs`). Added to it: `engine`, `clusterId`, `self`,
+`voters` and `singleNode`.
+
+`host` is the machine under the node, as the dashboard's top bar shows it: `cpuPct`, the
+process's CPU over the metrics collector's last interval in percent of one core (4 busy cores
+are 400), and `cpuWindowSeconds`, that interval (`METRICS_FLUSH_MS`); `cpus`, the CPUs the
+process may use (its affinity and cgroup quota); `rssBytes`, its resident memory, and
+`memLimitBytes`, its cgroup's memory limit, else the machine's RAM; and `disk`, the filesystem
+holding `QUEEN_RAFT_DIR`: `totalBytes`, `usedBytes`, `usedPct`, and the write gate, `gate`,
+`highPct` (`QUEEN_RAFT_DISK_HIGH_PCT`), `lowPct` (`QUEEN_RAFT_DISK_LOW_PCT`) and
+`writesRefused`. `cpuPct` is `null` until the first interval closes.
 
 `clusterId` is `QUEEN_CELL_ID` when set, else `raft-` and eight hex digits of a hash of the
 voters' ids and Raft addresses, so every node of one cluster answers the same id.

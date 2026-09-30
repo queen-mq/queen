@@ -1695,3 +1695,293 @@ fn per_file_retention_stops_at_its_lookup_budget_and_resumes() {
     assert_eq!(changed, before);
     assert_eq!(sealed_files(&set, log), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Drop-behind: the page cache keeps the hot tail
+// ---------------------------------------------------------------------------
+
+/// Every byte of `[0, end)` of every file, as `(file id, from, to)` runs
+/// merged per file.
+fn merged(ranges: &[(u64, u64, u64)]) -> std::collections::BTreeMap<u64, Vec<(u64, u64)>> {
+    let mut out: std::collections::BTreeMap<u64, Vec<(u64, u64)>> = Default::default();
+    for (id, from, to) in ranges {
+        let runs = out.entry(*id).or_default();
+        match runs.last_mut() {
+            Some(last) if last.1 == *from => last.1 = *to,
+            _ => runs.push((*from, *to)),
+        }
+    }
+    out
+}
+
+#[test]
+fn drop_behind_hands_out_each_cold_byte_once_and_keeps_the_hot_tail() {
+    let td = TmpDir::new("drop-behind");
+    let (mut q, _) = QLog::open(td.path(), 9, QLogOptions::testing(1024)).unwrap();
+    let hot = 1500u64;
+
+    // A log shorter than the hot tail: nothing is cold.
+    fill(&mut q, 1, 4);
+    let total: u64 = q.files().iter().map(|f| f.bytes).sum();
+    assert!(total <= hot, "{total}");
+    assert!(q.take_cold_ranges(hot).is_empty());
+
+    // Grow it across several files, taking the cold ranges as a syncer
+    // would after each group.
+    let mut taken: Vec<(u64, u64, u64)> = Vec::new();
+    for i in 4..60u64 {
+        append_one(&mut q, i, 1, i, 1_000 + i as i64);
+        taken.extend(q.take_cold_ranges(hot));
+        // Asked again with nothing new: nothing.
+        assert!(q.take_cold_ranges(hot).is_empty());
+    }
+    assert!(q.file_count() >= 4, "{} files", q.file_count());
+
+    // What was handed out is exactly the log minus its last `hot` bytes:
+    // contiguous from the first byte of the first file, never overlapping.
+    let files = q.files().to_vec();
+    let mut left = hot;
+    let mut boundary = (0u64, 0u64);
+    for m in files.iter().rev() {
+        if m.bytes <= left {
+            left -= m.bytes;
+            continue;
+        }
+        boundary = (m.id, m.bytes - left);
+        break;
+    }
+    let runs = merged(&taken);
+    for m in &files {
+        let want: Vec<(u64, u64)> = if m.id < boundary.0 {
+            vec![(0, m.bytes)]
+        } else if m.id == boundary.0 {
+            vec![(0, boundary.1)]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(
+            runs.get(&m.id).cloned().unwrap_or_default(),
+            want,
+            "file {} ({} bytes), boundary {boundary:?}",
+            m.id,
+            m.bytes
+        );
+    }
+
+    // Dropping them (a no-op off Linux) never changes what reads return.
+    for (id, from, to) in &taken {
+        let fd = q.read_fd(*id).unwrap();
+        super::fadvise_dontneed(&fd, *from, *to).unwrap();
+    }
+    for i in 0..60u64 {
+        assert_eq!(q.read_payload(1, i).unwrap(), Some(payload(i, 96)));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Seq points: an entry read starts near its first seq
+// ---------------------------------------------------------------------------
+
+fn entry_bytes(seq: u64) -> Vec<u8> {
+    payload(seq ^ 0xAB, 150 + (seq % 50) as usize)
+}
+
+/// Every window's entry records are exactly the entries in it, whole.
+fn check_windows(q: &QLog, last: u64, windows: &[(u64, u64)]) {
+    for &(a, b) in windows {
+        let got = q.entry_records_between(a, b).unwrap();
+        let want: Vec<u64> = (a..b.min(last + 1)).collect();
+        assert_eq!(
+            got.iter().map(|r| r.seq).collect::<Vec<_>>(),
+            want,
+            "window {a}..{b}"
+        );
+        for r in &got {
+            assert_eq!(r.entry, entry_bytes(r.seq), "entry {}", r.seq);
+            assert_eq!(r.term, 3);
+        }
+    }
+}
+
+#[test]
+fn entry_reads_start_at_seq_points_and_agree_with_a_full_scan() {
+    use super::{EntryInput, WriteRecord};
+    let td = TmpDir::new("seq-points");
+    let opts = QLogOptions::testing(512 * 1024);
+    const LAST: u64 = 6000;
+    {
+        let (mut q, _) = QLog::open(td.path(), 5, opts).unwrap();
+        for seq in 1..=LAST {
+            let h = hashes(seq, 1);
+            let p = payload(seq, 100);
+            let e = entry_bytes(seq);
+            q.write_mixed(&[
+                WriteRecord::Msg(RecordInput {
+                    seq,
+                    pid: 1,
+                    base_offset: seq,
+                    count: 1,
+                    created_at_us: 1,
+                    txn: None,
+                    hashes: &h,
+                    payload: &p,
+                }),
+                WriteRecord::Entry(EntryInput {
+                    seq,
+                    now_us: seq as i64,
+                    copies: 1,
+                    term: 3,
+                    entry: &e,
+                }),
+            ])
+            .unwrap();
+        }
+        q.sync().unwrap();
+        assert!(q.file_count() >= 3, "{} files", q.file_count());
+        let points: usize = q
+            .seq_points
+            .lock()
+            .unwrap()
+            .files
+            .values()
+            .map(Vec::len)
+            .sum();
+        assert!(
+            points > q.file_count(),
+            "the writes noted points ({points})"
+        );
+    }
+    let windows = [
+        (1, 65),
+        (700, 764),
+        (2500, 2501),
+        (4096, 4160),
+        (5990, 6100),
+        (1, LAST + 1),
+    ];
+    // Reopened: no point yet; the first reads fill them in.
+    let (q, _) = QLog::open(td.path(), 5, opts).unwrap();
+    assert!(q.seq_points.lock().unwrap().files.is_empty());
+    check_windows(&q, LAST, &windows);
+    assert!(
+        !q.seq_points.lock().unwrap().files.is_empty(),
+        "reads filled points"
+    );
+    check_windows(&q, LAST, &windows);
+
+    // Points that no longer hold (a rewrite this log missed) are caught and
+    // the files read from their start.
+    {
+        let mut p = q.seq_points.lock().unwrap();
+        for v in p.files.values_mut() {
+            for pt in v.iter_mut() {
+                pt.1 += 7;
+            }
+        }
+    }
+    check_windows(&q, LAST, &windows);
+    {
+        let mut p = q.seq_points.lock().unwrap();
+        for v in p.files.values_mut() {
+            for pt in v.iter_mut() {
+                pt.0 += 1;
+            }
+        }
+    }
+    check_windows(&q, LAST, &windows);
+}
+
+// ---------------------------------------------------------------------------
+// The next file, created ahead of its roll
+// ---------------------------------------------------------------------------
+
+/// The `first_seq` a file's header records.
+fn header_first_seq(root: &Path, qid: u64, id: u64) -> u64 {
+    let b = std::fs::read(qlog_file(root, qid, id)).unwrap();
+    u64::from_le_bytes(b[16..24].try_into().unwrap())
+}
+
+#[test]
+fn a_roll_takes_the_file_created_ahead_and_writes_its_first_seq() {
+    let td = TmpDir::new("precreate");
+    let opts = QLogOptions::testing(4096);
+    let (mut q, _) = QLog::open(td.path(), 11, opts).unwrap();
+    // Past half of the first file: its successor is created in the background.
+    let mut seq = 0u64;
+    while q.files().last().map_or(0, |f| f.bytes) < 2100 {
+        append_one(&mut q, seq, 1, seq, 1_000);
+        seq += 1;
+    }
+    let active = q.active_file_id().unwrap();
+    if let Some(j) = q.next_job.take() {
+        j.join().unwrap();
+    }
+    assert!(
+        qlog_file(td.path(), 11, active + 1).exists(),
+        "created ahead"
+    );
+    assert_eq!(
+        header_first_seq(td.path(), 11, active + 1),
+        super::PRECREATED
+    );
+    // Fill it: the roll takes that file and records the real first seq.
+    while q.active_file_id() == Some(active) {
+        append_one(&mut q, seq, 1, seq, 1_000);
+        seq += 1;
+    }
+    assert_eq!(q.active_file_id(), Some(active + 1));
+    assert_eq!(
+        header_first_seq(td.path(), 11, active + 1),
+        seq - 1,
+        "the roll wrote the seq of the record it was made for"
+    );
+    for i in 0..seq {
+        assert_eq!(q.read_payload(1, i).unwrap(), Some(payload(i, 96)));
+    }
+    // Several rolls later, a reopen reads everything and keeps no file ahead.
+    for _ in 0..200 {
+        append_one(&mut q, seq, 1, seq, 1_000);
+        seq += 1;
+    }
+    drop(q);
+    let (q, rep) = QLog::open(td.path(), 11, opts).unwrap();
+    assert!(!rep.truncated_tail);
+    assert_eq!(rep.records, seq);
+    assert!(q.files().iter().all(|f| f.first_seq != super::PRECREATED));
+    for i in 0..seq {
+        assert_eq!(q.read_payload(1, i).unwrap(), Some(payload(i, 96)));
+    }
+}
+
+#[test]
+fn open_drops_a_newest_file_that_was_never_taken() {
+    for zeros in [false, true] {
+        let td = TmpDir::new("precreated-left");
+        let opts = QLogOptions::testing(1 << 20);
+        let locs;
+        {
+            let (mut q, _) = QLog::open(td.path(), 12, opts).unwrap();
+            locs = fill(&mut q, 3, 5);
+        }
+        // A crash left the file created ahead (or one whose header never
+        // reached the disk) behind the active one.
+        let next = locs.last().unwrap().file_id + 1;
+        let mut h = [0u8; 32];
+        if !zeros {
+            h[0..8].copy_from_slice(b"QNQLOG1\0");
+            h[8..16].copy_from_slice(&next.to_le_bytes());
+            h[16..24].copy_from_slice(&super::PRECREATED.to_le_bytes());
+        }
+        std::fs::write(qlog_file(td.path(), 12, next), h).unwrap();
+        let (mut q, rep) = QLog::open(td.path(), 12, opts).unwrap();
+        assert!(!qlog_file(td.path(), 12, next).exists(), "dropped");
+        assert_eq!(q.active_file_id(), Some(next - 1));
+        assert_eq!(rep.records, 5);
+        assert_eq!(rep.max_seq, 4, "the durable tail is the real one");
+        // The log goes on where it was.
+        append_one(&mut q, 5, 3, 5, 1_005);
+        for i in 0..6u64 {
+            assert_eq!(q.read_payload(3, i).unwrap(), Some(payload(i, 96)));
+        }
+    }
+}

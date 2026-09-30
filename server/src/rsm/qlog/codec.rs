@@ -371,6 +371,36 @@ pub fn early_stats() -> (usize, usize) {
     )
 }
 
+// ---------------------------------------------------------------------------
+// The replication wire: one frame per entry, compressed once
+// ---------------------------------------------------------------------------
+
+/// The level the replication wire uses: the leader compresses each entry's
+/// wire bytes once, for every follower (`replicator/raft/wire.rs`).
+const WIRE_LEVEL: i32 = 1;
+
+/// Compression contexts for the wire, at [`WIRE_LEVEL`] whatever the disk
+/// level is (a context keeps the level it was made with).
+static WIRE_CCTX: Mutex<Vec<zstd::bulk::Compressor<'static>>> = Mutex::new(Vec::new());
+
+/// One entry's replication wire bytes as one zstd frame (level 1), or `None`
+/// when that saves under a tenth. No size floor: an entry's wire holds the
+/// payload-free entry and every payload the disk codec left raw (each under
+/// [`MIN_BYTES`]), which compress well together even when each alone would
+/// not.
+pub fn compress_wire(raw: &[u8]) -> Option<Vec<u8>> {
+    if raw.len() < 64 {
+        return None;
+    }
+    let mut c = match WIRE_CCTX.lock().expect("wire zstd cctx pool").pop() {
+        Some(c) => c,
+        None => zstd::bulk::Compressor::new(WIRE_LEVEL).ok()?,
+    };
+    let z = c.compress(raw).ok();
+    WIRE_CCTX.lock().expect("wire zstd cctx pool").push(c);
+    z.filter(|z| z.len() * 10 <= raw.len() * 9)
+}
+
 /// One `Append`'s payload as a queue log stores it: zstd (the record carries
 /// [`super::record::FLAG_PAYLOAD_ZSTD`]) or raw. A leader sends this form to
 /// its followers, which write it as they receive it.
@@ -493,6 +523,27 @@ mod tests {
         let small = b"tiny".to_vec();
         precompress(small.clone());
         assert!(take_early(&small).is_none());
+    }
+
+    #[test]
+    fn the_wire_frame_round_trips_and_is_kept_only_when_it_saves() {
+        // Many small payloads, each under the disk floor: together they compress.
+        let raw = json_batch(40);
+        let z = compress_wire(&raw).expect("small JSON messages compress together");
+        assert!(z.len() * 10 <= raw.len() * 9);
+        assert_eq!(decompress(&z).unwrap(), raw);
+
+        let mut x: u64 = 0x2545_F491_4F6C_DD1D;
+        let random: Vec<u8> = (0..4096)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect();
+        assert!(compress_wire(&random).is_none(), "incompressible: sent raw");
+        assert!(compress_wire(b"tiny").is_none());
     }
 
     #[test]

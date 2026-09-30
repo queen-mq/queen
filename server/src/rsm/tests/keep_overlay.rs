@@ -966,7 +966,7 @@ impl Rig {
             a.apply(&ApplyCommitted {
                 index,
                 term: 1,
-                entry: (*e).clone(),
+                entry: e,
             })
             .unwrap_or_else(|err| panic!("apply entry {index}: {err:?}"));
             self.applied = index;
@@ -1153,6 +1153,14 @@ fn gate(seed: u64, front_on: bool, cycles: usize) {
         );
     }
     assert_eq!(kept.digest, plain.digest, "the two stores diverged");
+    // B34: the kept rings check a few rows against `pending` every cycle; with
+    // apply quiescent between cycles they never differ, so the check never
+    // dropped one.
+    assert_eq!(
+        crate::rsm::state::verify_drops_on_this_thread(),
+        0,
+        "the ring check dropped a ring that did not differ"
+    );
     eprintln!(
         "keep_overlay gate seed {seed} front {front_on}: {} entries over {} cycles; kept {} \
          poisoned {} rebuilt {}; in flight {} lingering {}; ring loads {} drops {}; {:?}",

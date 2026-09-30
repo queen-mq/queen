@@ -733,11 +733,13 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         for (pid, group) in targets {
             // The lease index still lists a partition a delete in flight takes
             // away (or one being chunk-deleted): not a lease to renew.
-            let Some(part) = self.partition(ov, pid)? else {
+            if self.partition(ov, pid)?.is_none() {
                 continue;
-            };
-            if cmd.tenant.as_deref().is_some_and(|t| part.tenant != t) {
-                continue;
+            }
+            if let Some(t) = cmd.tenant.as_deref() {
+                if !self.partition_of_tenant(ov, pid, t)? {
+                    continue;
+                }
             }
             let Some(cur0) = self.cursor(ov, pid, &group)? else {
                 continue;

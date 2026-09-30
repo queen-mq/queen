@@ -116,6 +116,7 @@
 
 pub mod codec;
 pub mod index;
+pub(crate) mod pool;
 pub mod record;
 pub mod set;
 
@@ -149,6 +150,26 @@ const FILE_HEADER_LEN: u64 = 32;
 
 /// The first file id a fresh queue creates.
 const FIRST_FILE_ID: u64 = 1;
+
+/// The `first_seq` of a file created AHEAD of its roll ([`QLog::roll`]) and
+/// not taken yet: the roll writes the real one. A newest file still carrying
+/// it never held an acknowledged record, and [`QLog::open`] removes it.
+const PRECREATED: u64 = u64::MAX;
+
+/// `QUEEN_QLOG_PRECREATE` (default on): create each log's next file in the
+/// background once the active one is half full, so the roll only writes the
+/// new file's `first_seq` instead of creating it and fsyncing it and its
+/// directory on the log writer. Off: the roll creates it, as before.
+fn precreate_from_env() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("QUEEN_QLOG_PRECREATE") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        Err(_) => true,
+    })
+}
 
 /// The default roll size for a `.qlog` file. The log is the store, so a file is
 /// reclaimed only by retention (§5); this bounds how much one file mixes, which
@@ -463,6 +484,9 @@ pub(crate) struct EncodedGroup {
     locs: Vec<Loc>,
     new_recs: Vec<index::Record>,
     max_seq: u64,
+    /// `(seq, offset)` of the first record of each seq in the group (the
+    /// sparse seq points' candidates, [`SeqPoints`]).
+    seq_starts: Vec<(u64, u64)>,
 }
 
 /// Where one appended record landed: what a caller indexes it by.
@@ -666,6 +690,79 @@ pub struct QLog {
     /// once at least this percent of its message bytes is dead
     /// ([`QLog::set_compact_min_dead_pct`]); 0 = on the first dead message.
     compact_min_dead_pct: u8,
+    /// Drop-behind: every byte before this `(file id, offset)` has been handed
+    /// out for the page-cache drop ([`QLog::take_cold_ranges`]). Behind a
+    /// mutex: the syncer takes the ranges under the log's READ lock.
+    drop_mark: Mutex<(u64, u64)>,
+    /// Where seqs start in each file, sparsely: an entry read begins its scan
+    /// there instead of at the file's first byte ([`QLog::entry_parts_between`]).
+    /// Behind a mutex: a read under the READ lock fills in a file it scanned.
+    seq_points: Mutex<SeqPoints>,
+    /// The next file, created ahead of its roll (`QUEEN_QLOG_PRECREATE`):
+    /// `(id, handle)` once its header and directory entry are durable.
+    next_file: Arc<Mutex<Option<(u64, File)>>>,
+    /// The background creation of the next file, while it runs.
+    next_job: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for QLog {
+    /// A log goes with its next file's creation finished, never under it (a
+    /// reopen of the same directory must find the file whole or absent).
+    fn drop(&mut self) {
+        if let Some(j) = self.next_job.take() {
+            let _ = j.join();
+        }
+    }
+}
+
+/// One sparse point per this many bytes of a file at most.
+const SEQ_POINT_BYTES: u64 = 256 * 1024;
+
+/// Sparse `seq -> position` points of a log's files: where the FIRST record of
+/// a seq sits, at most one per [`SEQ_POINT_BYTES`] of a file. Seqs never
+/// decrease in a queue log, so every record at or above a seq lies at or after
+/// its point — a follower catching up from disk read each file from its start
+/// for every request of up to 64 entries. Noted when a group is written, and
+/// when a read scans a file that has none (one opened at boot). A point is
+/// checked when used (the record there must carry its seq); one that does not
+/// hold is dropped with its file's others and the file read from its start.
+#[derive(Default)]
+struct SeqPoints {
+    /// File id -> `(seq, offset)`, ascending in both.
+    files: BTreeMap<u64, Vec<(u64, u64)>>,
+}
+
+impl SeqPoints {
+    /// The first record of `seq` sits at `offset` of `file`.
+    fn note(&mut self, file: u64, seq: u64, offset: u64) {
+        let v = self.files.entry(file).or_default();
+        match v.last() {
+            Some(&(s, o)) if seq <= s || offset < o.saturating_add(SEQ_POINT_BYTES) => {}
+            _ => v.push((seq, offset)),
+        }
+    }
+
+    /// The last point of `file` at or below `seq`.
+    fn start(&self, file: u64, seq: u64) -> Option<(u64, u64)> {
+        let v = self.files.get(&file)?;
+        let i = v.partition_point(|(s, _)| *s <= seq);
+        (i > 0).then(|| v[i - 1])
+    }
+
+    fn has(&self, file: u64) -> bool {
+        self.files.get(&file).is_some_and(|v| !v.is_empty())
+    }
+
+    fn forget_file(&mut self, file: u64) {
+        self.files.remove(&file);
+    }
+
+    /// `file` was cut at `at`: no point at or past it.
+    fn cut(&mut self, file: u64, at: u64) {
+        if let Some(v) = self.files.get_mut(&file) {
+            v.retain(|(_, o)| *o < at);
+        }
+    }
 }
 
 /// Wall clock in µs, for file ages. Never part of replicated state.
@@ -748,15 +845,29 @@ impl QLog {
         // carries no record (the header precedes any record), so drop it and
         // fall back to the previous file as the active one. Only the newest
         // file can be in this state.
+        //
+        // The same goes for a newest file whose header never reached the disk
+        // (all zeros: a crash while it was being created — nothing is written
+        // into a file before its header is durable) and for one created ahead
+        // of its roll and never taken ([`PRECREATED`]): neither can hold an
+        // acknowledged record.
         while let Some(&last) = ids.last() {
-            let len = std::fs::metadata(file_path(&dir, last))?.len();
-            if len < FILE_HEADER_LEN {
-                std::fs::remove_file(file_path(&dir, last))?;
+            let path = file_path(&dir, last);
+            let len = std::fs::metadata(&path)?.len();
+            let never_used = len < FILE_HEADER_LEN || {
+                let mut h = [0u8; FILE_HEADER_LEN as usize];
+                File::open(&path)?.read_exact(&mut h)?;
+                h.iter().all(|b| *b == 0)
+                    || (h[0..8] == FILE_MAGIC
+                        && u64::from_le_bytes(h[16..24].try_into().expect("8 bytes")) == PRECREATED)
+            };
+            if never_used {
+                std::fs::remove_file(&path)?;
                 let _ = std::fs::remove_file(qidx_path(&dir, last));
                 let _ = std::fs::remove_file(qidx_tmp_path(&dir, last));
                 sync_dir(&dir)?;
                 ids.pop();
-                rec.truncated_tail = true;
+                rec.truncated_tail |= len < FILE_HEADER_LEN;
             } else {
                 break;
             }
@@ -911,6 +1022,10 @@ impl QLog {
             reclaim_cursor: FIRST_FILE_ID,
             active_opened_us: wall_now_us(),
             compact_min_dead_pct: compact_min_dead_pct_from_env().unwrap_or(0),
+            drop_mark: Mutex::new((0, 0)),
+            seq_points: Mutex::new(SeqPoints::default()),
+            next_file: Arc::new(Mutex::new(None)),
+            next_job: None,
         };
         tracing::info!(
             target: "rsm",
@@ -1081,10 +1196,14 @@ impl QLog {
         let mut locs = Vec::with_capacity(records.len());
         let mut new_recs: Vec<index::Record> = Vec::with_capacity(records.len());
         let mut max_seq = 0u64;
+        let mut seq_starts: Vec<(u64, u64)> = Vec::new();
         for w in records {
             let start = buf.len();
             let offset = base + start as u64;
             max_seq = max_seq.max(w.seq());
+            if seq_starts.last().is_none_or(|(s, _)| *s != w.seq()) {
+                seq_starts.push((w.seq(), offset));
+            }
             match w {
                 WriteRecord::Msg(r) | WriteRecord::Zstd(r) => {
                     let txn = r.txn.map(|t| (t.gtid, t.participants));
@@ -1139,6 +1258,7 @@ impl QLog {
             locs,
             new_recs,
             max_seq,
+            seq_starts,
         })
     }
 
@@ -1157,6 +1277,13 @@ impl QLog {
         let added = group.buf.len() as u64;
         self.prealloc_after_write(base + added, added)?;
         {
+            let file_id = self.files.last().expect("active meta").id;
+            let mut points = self.seq_points.lock_unpoisoned();
+            for (seq, offset) in &group.seq_starts {
+                points.note(file_id, *seq, *offset);
+            }
+        }
+        {
             let meta = self.files.last_mut().expect("active meta");
             meta.bytes += added;
             meta.records += group.new_recs.len() as u64;
@@ -1168,7 +1295,69 @@ impl QLog {
         for r in group.new_recs {
             self.active_index.insert(r);
         }
+        self.maybe_precreate();
         Ok(group.locs)
+    }
+
+    /// Once the active file is half full, create the next one in the
+    /// background (see [`PRECREATED`]).
+    fn maybe_precreate(&mut self) {
+        if !precreate_from_env() || self.next_job.is_some() {
+            return;
+        }
+        let Some(meta) = self.files.last() else {
+            return;
+        };
+        if meta.sealed || meta.bytes < self.opts.segment_bytes / 2 {
+            return;
+        }
+        let id = meta.id + 1;
+        if self.next_file.lock_unpoisoned().is_some() {
+            return;
+        }
+        let dir = self.dir.clone();
+        let slot = self.next_file.clone();
+        let fsync = self.opts.fsync;
+        let job = std::thread::Builder::new()
+            .name("queen-qlog-next".into())
+            .spawn(move || match create_precreated(&dir, id, fsync) {
+                Ok(f) => *slot.lock_unpoisoned() = Some((id, f)),
+                Err(e) => {
+                    tracing::debug!(target: "rsm", error = %e, id, "qlog: the next file was not created ahead")
+                }
+            });
+        self.next_job = job.ok();
+    }
+
+    /// The file created ahead for `id`, if there is one (waiting for its
+    /// creation to end). A creation that failed part-way leaves nothing in
+    /// the way of the roll's own.
+    fn take_precreated(&mut self, id: u64) -> io::Result<Option<File>> {
+        if let Some(j) = self.next_job.take() {
+            let _ = j.join();
+        }
+        let taken = self.next_file.lock_unpoisoned().take();
+        match taken {
+            Some((nid, f)) if nid == id => Ok(Some(f)),
+            other => {
+                drop(other);
+                remove_if_precreated(&file_path(&self.dir, id))?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Drop the file created ahead, if any: before this log is reopened from
+    /// disk.
+    fn discard_precreated(&mut self) -> io::Result<()> {
+        if let Some(j) = self.next_job.take() {
+            let _ = j.join();
+        }
+        if let Some((id, f)) = self.next_file.lock_unpoisoned().take() {
+            drop(f);
+            remove_if_precreated(&file_path(&self.dir, id))?;
+        }
+        Ok(())
     }
 
     /// Fsync the active file, making every record [`QLog::write_group`] wrote
@@ -1228,6 +1417,57 @@ impl QLog {
         Ok(())
     }
 
+    /// Drop-behind (`QUEEN_QLOG_DROP_BEHIND_MB`, [`drop_behind_bytes`]): the
+    /// byte ranges `(file id, from, to)` now at least `hot` bytes behind the
+    /// log's end that were not handed out before, oldest first — each byte
+    /// once. The caller drops them from the page cache after an fsync that
+    /// covers them ([`fadvise_dontneed`] drops only clean pages); the last
+    /// `hot` bytes — what pops of consumers near the head read — stay cached.
+    /// A truncation or a reopen can only make a later call hand out bytes the
+    /// kernel already dropped (harmless), never skip one still hot.
+    pub(crate) fn take_cold_ranges(&self, hot: u64) -> Vec<(u64, u64, u64)> {
+        // Walk back `hot` bytes from the end: the boundary below which every
+        // byte is cold.
+        let mut remaining = hot;
+        let mut boundary: Option<(u64, u64)> = None;
+        for m in self.files.iter().rev() {
+            if m.bytes <= remaining {
+                remaining -= m.bytes;
+                continue;
+            }
+            boundary = Some((m.id, m.bytes - remaining));
+            break;
+        }
+        let Some(b) = boundary else {
+            return Vec::new();
+        };
+        let mut mark = self.drop_mark.lock_unpoisoned();
+        if b <= *mark {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        // Files are ascending by id: start at the mark's, not at the oldest.
+        let first = self.files.partition_point(|m| m.id < mark.0);
+        for m in &self.files[first..] {
+            if m.id > b.0 {
+                break;
+            }
+            let from = if m.id == mark.0 { mark.1 } else { 0 };
+            let to = if m.id == b.0 { b.1 } else { m.bytes };
+            if to > from {
+                out.push((m.id, from, to));
+            }
+        }
+        *mark = b;
+        out
+    }
+
+    /// A read fd of `file_id` (the read cache's), for work done after the
+    /// log's lock is released.
+    pub(crate) fn read_fd(&self, file_id: u64) -> io::Result<Arc<File>> {
+        self.cache.file(file_id)
+    }
+
     /// A dup'd handle to the active file, so the caller can [`fsync_file`] it
     /// OUTSIDE the per-queue lock — the read-parallelism fix (a single hot
     /// queue's 64 consumers must not block for the writer's fsync). `fsync`
@@ -1247,7 +1487,23 @@ impl QLog {
     }
 
     /// Create a fresh active file id `id` whose header records `first_seq`.
+    ///
+    /// A file created ahead ([`PRECREATED`]) is taken instead: its header and
+    /// directory entry are durable already, so the roll only writes its
+    /// `first_seq` — made durable by the first fsync of a group written into
+    /// it, before any record of it is acknowledged; a crash before that leaves
+    /// it [`PRECREATED`] (or with the seq and no record), which open handles.
     fn create_active(&mut self, id: u64, first_seq: u64) -> io::Result<()> {
+        if let Some(mut f) = self.take_precreated(id)? {
+            f.write_all_at(&first_seq.to_le_bytes(), 16)?;
+            f.seek(SeekFrom::Start(FILE_HEADER_LEN))?;
+            self.active = Some(f);
+            self.prealloc_end = FILE_HEADER_LEN;
+            self.files.push(FileMeta::empty(id, first_seq));
+            self.active_index.open(id);
+            self.active_opened_us = wall_now_us();
+            return Ok(());
+        }
         let path = file_path(&self.dir, id);
         {
             // `create_new`: a collision means the disk already holds a file id
@@ -1380,9 +1636,13 @@ impl QLog {
             (m.id, m.bytes)
         };
         // `take` returns the records in (pid, base_offset) order (the map's
-        // order), which is exactly the order `index::encode` needs.
+        // order), which is exactly the order `index::encode` needs. Written
+        // WITHOUT its fsyncs: the roll runs on the log writer, which every
+        // write waits for, and a `.qidx` a crash leaves missing or torn is
+        // caught by its checksums and length at open and rebuilt by scanning
+        // the sealed file (which IS fsynced above).
         let recs = self.active_index.take();
-        write_qidx(&self.dir, old_id, old_bytes, &recs)?;
+        write_qidx_lazy(&self.dir, old_id, old_bytes, &recs)?;
         self.files.last_mut().expect("active meta").sealed = true;
         let view = index::View::open(&qidx_path(&self.dir, old_id), Some(old_bytes))?;
         self.sealed.insert(old_id, view);
@@ -1920,40 +2180,89 @@ impl QLog {
                 break;
             }
             let path = file_path(&self.dir, m.id);
-            let (_valid, torn) = scan_records(&path, m.bytes, |h, _pos, bytes| {
-                let kind = h.kind();
-                if !record::is_entry_kind(kind) || h.seq < from_seq || h.seq >= end_seq {
-                    return Ok(());
+            // Start at the file's last seq point at or below `from_seq` (every
+            // record from `from_seq` on lies after it), else at its first byte.
+            let point = self
+                .seq_points
+                .lock_unpoisoned()
+                .start(m.id, from_seq)
+                .filter(|(_, off)| *off >= FILE_HEADER_LEN && *off < m.bytes);
+            let fill = !self.seq_points.lock_unpoisoned().has(m.id);
+            let mut noted: Vec<(u64, u64)> = Vec::new();
+            let mut first = true;
+            let mut stale = false;
+            let mut found: Vec<EntryPart> = Vec::new();
+            let scan = scan_records_at(
+                &path,
+                point.map_or(FILE_HEADER_LEN, |(_, off)| off),
+                m.bytes,
+                |h, pos, bytes| {
+                    if first {
+                        first = false;
+                        if point.is_some_and(|(seq, _)| seq != h.seq) {
+                            stale = true;
+                            return Ok(false);
+                        }
+                    }
+                    if fill && noted.last().is_none_or(|(s, _)| *s != h.seq) {
+                        noted.push((h.seq, pos));
+                    }
+                    // Nothing further in this file is below `end_seq`.
+                    if h.seq >= end_seq {
+                        return Ok(fill);
+                    }
+                    let kind = h.kind();
+                    if !record::is_entry_kind(kind) || h.seq < from_seq {
+                        return Ok(true);
+                    }
+                    let rr = record::decode(bytes).map_err(io::Error::from)?;
+                    // `pid` carries `copies`; 0 (pre-Phase-C) reads as one.
+                    let copies = u32::try_from(h.pid).unwrap_or(u32::MAX).max(1);
+                    if kind == record::REC_ENTRY {
+                        found.push(EntryPart::Full(EntryRecord {
+                            seq: h.seq,
+                            now_us: h.created_at_us,
+                            copies,
+                            term: h.base_offset,
+                            entry: rr.payload.to_vec(),
+                        }));
+                    } else {
+                        let (digest, len) = record::stub_fields(rr.payload).ok_or_else(|| {
+                            corrupt(
+                                &path,
+                                &format!("entry stub {} has a malformed payload", h.seq),
+                            )
+                        })?;
+                        found.push(EntryPart::Stub(EntryStub {
+                            seq: h.seq,
+                            now_us: h.created_at_us,
+                            copies,
+                            term: h.base_offset,
+                            digest,
+                            len,
+                        }));
+                    }
+                    Ok(true)
+                },
+            );
+            let (_valid, torn) = scan?;
+            let torn_at_point = point.is_some()
+                && torn
+                    .as_ref()
+                    .is_some_and(|(at, _)| Some(*at) == point.map(|(_, off)| off));
+            if stale || torn_at_point {
+                // A point that does not hold: forget the file's points and
+                // read it from its first byte.
+                self.seq_points.lock_unpoisoned().forget_file(m.id);
+                return self.entry_parts_between(from_seq, end_seq);
+            }
+            if fill && torn.is_none() {
+                let mut points = self.seq_points.lock_unpoisoned();
+                for (seq, pos) in noted {
+                    points.note(m.id, seq, pos);
                 }
-                let rr = record::decode(bytes).map_err(io::Error::from)?;
-                // `pid` carries `copies`; 0 (pre-Phase-C) reads as one.
-                let copies = u32::try_from(h.pid).unwrap_or(u32::MAX).max(1);
-                if kind == record::REC_ENTRY {
-                    out.push(EntryPart::Full(EntryRecord {
-                        seq: h.seq,
-                        now_us: h.created_at_us,
-                        copies,
-                        term: h.base_offset,
-                        entry: rr.payload.to_vec(),
-                    }));
-                } else {
-                    let (digest, len) = record::stub_fields(rr.payload).ok_or_else(|| {
-                        corrupt(
-                            &path,
-                            &format!("entry stub {} has a malformed payload", h.seq),
-                        )
-                    })?;
-                    out.push(EntryPart::Stub(EntryStub {
-                        seq: h.seq,
-                        now_us: h.created_at_us,
-                        copies,
-                        term: h.base_offset,
-                        digest,
-                        len,
-                    }));
-                }
-                Ok(())
-            })?;
+            }
+            out.extend(found);
             if let Some((at, why)) = torn {
                 if m.sealed {
                     return Err(corrupt(
@@ -2034,6 +2343,7 @@ impl QLog {
             dropped += m.bytes;
             self.sealed.remove(&m.id);
             self.cache.forget_file(m.id);
+            self.seq_points.lock_unpoisoned().forget_file(m.id);
             remove_if_present(&file_path(&self.dir, m.id))?;
             remove_if_present(&qidx_path(&self.dir, m.id))?;
             remove_if_present(&qidx_tmp_path(&self.dir, m.id))?;
@@ -2049,6 +2359,7 @@ impl QLog {
         dropped += m.bytes.saturating_sub(at);
         self.sealed.remove(&m.id);
         self.cache.forget_file(m.id);
+        self.seq_points.lock_unpoisoned().forget_file(m.id);
         remove_if_present(&qidx_path(&self.dir, m.id))?;
         remove_if_present(&qidx_tmp_path(&self.dir, m.id))?;
         sync_dir(&self.dir)?;
@@ -2058,8 +2369,10 @@ impl QLog {
             .map(Path::to_path_buf)
             .ok_or_else(|| io::Error::other("a queue log directory has no parent"))?;
         let floor = self.floor.clone();
-        // Close this file handle before the reopen takes its own.
+        // Close this file handle before the reopen takes its own, and take the
+        // next file created ahead out of the directory the reopen reads.
         self.active = None;
+        self.discard_precreated()?;
         let (mut fresh, _) = QLog::open(&root, self.queue_id, self.opts)?;
         fresh.set_recovery_floor(floor);
         *self = fresh;
@@ -2168,6 +2481,7 @@ impl QLog {
             fsync_file(&f, self.opts.fsync)?;
         }
         self.prealloc_end = at;
+        self.seq_points.lock_unpoisoned().cut(last.id, at);
         if let Some(f) = self.active.as_mut() {
             f.seek(SeekFrom::Start(at))?;
         }
@@ -2225,6 +2539,7 @@ impl QLog {
             // P3.2: drop the cached read fd (an in-flight read keeps its own
             // `Arc<File>`, so the unlinked inode stays readable until it ends).
             self.cache.forget_file(*id);
+            self.seq_points.lock_unpoisoned().forget_file(*id);
             remove_if_present(&file_path(&self.dir, *id))?;
             remove_if_present(&qidx_path(&self.dir, *id))?;
             remove_if_present(&qidx_tmp_path(&self.dir, *id))?;
@@ -2487,6 +2802,7 @@ impl QLog {
 
         self.cache.forget_file(id);
         self.cache.clear_hashes();
+        self.seq_points.lock_unpoisoned().forget_file(id);
         self.sealed.insert(id, view);
         if let Some(meta) = self.files.iter_mut().find(|meta| meta.id == id) {
             meta.bytes = at;
@@ -3052,14 +3368,29 @@ fn scan_records(
     upto: u64,
     mut visit: impl FnMut(&record::Header, u64, &[u8]) -> io::Result<()>,
 ) -> io::Result<(u64, Option<(u64, record::RecordError)>)> {
+    scan_records_at(path, FILE_HEADER_LEN, upto, |h, pos, bytes| {
+        visit(h, pos, bytes)?;
+        Ok(true)
+    })
+}
+
+/// [`scan_records`] from byte `start` (a record boundary), stopping early
+/// once `visit` answers `false`.
+fn scan_records_at(
+    path: &Path,
+    start: u64,
+    upto: u64,
+    mut visit: impl FnMut(&record::Header, u64, &[u8]) -> io::Result<bool>,
+) -> io::Result<(u64, Option<(u64, record::RecordError)>)> {
     let f = File::open(path)?;
     let mut r = BufReader::with_capacity(1 << 16, f);
-    r.seek(SeekFrom::Start(FILE_HEADER_LEN))?;
-    let mut valid_bytes = FILE_HEADER_LEN;
+    let start = start.max(FILE_HEADER_LEN);
+    r.seek(SeekFrom::Start(start))?;
+    let mut valid_bytes = start;
     let mut torn: Option<(u64, record::RecordError)> = None;
     let mut prefix = [0u8; record::FIXED_PREFIX];
     let mut body: Vec<u8> = Vec::new();
-    let mut pos = FILE_HEADER_LEN;
+    let mut pos = start;
     while pos < upto {
         match read_exact_or_less(&mut r, &mut prefix)? {
             0 => break, // clean EOF at a record boundary
@@ -3115,9 +3446,12 @@ fn scan_records(
             torn = Some((pos, e));
             break;
         }
-        visit(&header, pos, body)?;
+        let more = visit(&header, pos, body)?;
         pos += total as u64;
         valid_bytes = pos;
+        if !more {
+            break;
+        }
     }
     Ok((valid_bytes, torn))
 }
@@ -3168,6 +3502,61 @@ fn scan_ids(dir: &Path) -> io::Result<Vec<u64>> {
     Ok(ids)
 }
 
+/// Create file `id` ahead of its roll: its header carries [`PRECREATED`],
+/// and it and its directory entry are fsynced before it is handed over.
+fn create_precreated(dir: &Path, id: u64, fsync: Fsync) -> io::Result<File> {
+    let path = file_path(dir, id);
+    let mut f = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .read(true)
+        .open(&path)?;
+    let mut h = [0u8; FILE_HEADER_LEN as usize];
+    h[0..8].copy_from_slice(&FILE_MAGIC);
+    h[8..16].copy_from_slice(&id.to_le_bytes());
+    h[16..24].copy_from_slice(&PRECREATED.to_le_bytes());
+    f.write_all(&h)?;
+    if fsync != Fsync::Off {
+        f.sync_all()?;
+        sync_dir(dir)?;
+    }
+    Ok(f)
+}
+
+/// Whether `path` is a queue-log file created ahead of its roll and not
+/// taken (yet): it holds no record, and a roll may still write its header.
+/// A snapshot leaves such a file out ([`crate::rsm::replicator::raft`]).
+pub(crate) fn is_precreated_file(path: &Path) -> io::Result<bool> {
+    let mut h = [0u8; FILE_HEADER_LEN as usize];
+    match File::open(path).and_then(|mut f| f.read_exact(&mut h)) {
+        Ok(()) => Ok(h[0..8] == FILE_MAGIC
+            && u64::from_le_bytes(h[16..24].try_into().expect("8 bytes")) == PRECREATED),
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Remove `path` if it is a file created ahead and never taken.
+fn remove_if_precreated(path: &Path) -> io::Result<()> {
+    let mut h = [0u8; FILE_HEADER_LEN as usize];
+    match File::open(path).and_then(|mut f| f.read_exact(&mut h)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        // Shorter than a header: never taken either.
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+            return remove_if_present(path);
+        }
+        Err(e) => return Err(e),
+    }
+    let never_used = h.iter().all(|b| *b == 0)
+        || (h[0..8] == FILE_MAGIC
+            && u64::from_le_bytes(h[16..24].try_into().expect("8 bytes")) == PRECREATED);
+    if never_used {
+        remove_if_present(path)?;
+    }
+    Ok(())
+}
+
 /// Read and validate a file's 32-byte header, returning its `first_seq`.
 fn read_file_header(path: &Path, id: u64) -> io::Result<u64> {
     let mut f = File::open(path)?;
@@ -3181,6 +3570,29 @@ fn read_file_header(path: &Path, id: u64) -> io::Result<u64> {
         return Err(corrupt(path, "file id in header does not match its name"));
     }
     Ok(u64::from_le_bytes(h[16..24].try_into().expect("8 bytes")))
+}
+
+/// [`write_qidx`] without the fsyncs (the roll's): the file and its rename
+/// reach the disk when the kernel writes them back. Sound because an index is
+/// only ever trusted after [`index::View::open`] verified its checksums, its
+/// file id and the length it indexes; anything else is rebuilt by a scan.
+fn write_qidx_lazy(
+    dir: &Path,
+    id: u64,
+    file_bytes: u64,
+    records: &[index::Record],
+) -> io::Result<()> {
+    let bytes = index::encode(id, file_bytes, records);
+    let tmp = qidx_tmp_path(dir, id);
+    {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp)?;
+        f.write_all(&bytes)?;
+    }
+    std::fs::rename(&tmp, qidx_path(dir, id))
 }
 
 /// Write a sealed file's `.qidx` atomically (temp + rename + directory fsync).
@@ -3241,6 +3653,88 @@ fn corrupt(path: &Path, what: &str) -> io::Error {
         io::ErrorKind::InvalidData,
         format!("rsm qlog corrupt ({}): {what}", path.display()),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Drop-behind: the page cache keeps the hot tail, not the whole log
+// ---------------------------------------------------------------------------
+
+/// Default hot tail per log, in MiB ([`drop_behind_bytes`]).
+const DROP_BEHIND_DEFAULT_MB: usize = 256;
+
+/// `QUEEN_QLOG_DROP_BEHIND_MB` (default 256; 0 = off): after an fsync, the
+/// bytes of a log more than this far behind its end are dropped from the page
+/// cache. Without it a node writing ~200-300 MB/s of queue log filled the page
+/// cache in ~100 s, then kswapd reclaimed under the writes and the fsyncs
+/// slowed: a ~20 s throughput dip, a follower stalling 2-4 s (3x16 vCPU, 1M
+/// msg/s). What pops read — consumers near the head — stays in the tail; a
+/// consumer further behind reads from disk. Linux only (a no-op elsewhere);
+/// never with `Fsync::Off` (dropping dirty pages would start writeback).
+pub fn drop_behind_bytes() -> u64 {
+    static V: OnceLock<u64> = OnceLock::new();
+    *V.get_or_init(|| {
+        (env_usize("QUEEN_QLOG_DROP_BEHIND_MB").unwrap_or(DROP_BEHIND_DEFAULT_MB) as u64)
+            .saturating_mul(1 << 20)
+    })
+}
+
+/// Ask the kernel to drop `[from, to)` of `f` from the page cache
+/// (`POSIX_FADV_DONTNEED`: clean pages only). Linux; a no-op elsewhere.
+pub(crate) fn fadvise_dontneed(f: &File, from: u64, to: u64) -> io::Result<()> {
+    if to <= from {
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: a plain syscall on an fd `f` keeps open for the call.
+        let rc = unsafe {
+            libc::posix_fadvise(
+                f.as_raw_fd(),
+                from as libc::off_t,
+                (to - from) as libc::off_t,
+                libc::POSIX_FADV_DONTNEED,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::from_raw_os_error(rc));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = f;
+    Ok(())
+}
+
+/// One range to drop: the fd, `from`, `to`.
+pub(crate) type DropJob = (Arc<File>, u64, u64);
+
+/// Drop `jobs` from the page cache on the drop-behind thread, off the sync
+/// path (the fsync's answer never waits for it). Best effort: a job the
+/// thread cannot take is dropped.
+pub(crate) fn drop_behind_async(jobs: Vec<DropJob>) {
+    static TX: OnceLock<Mutex<std::sync::mpsc::Sender<Vec<DropJob>>>> = OnceLock::new();
+    if jobs.is_empty() {
+        return;
+    }
+    let tx = TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<DropJob>>();
+        let spawned = std::thread::Builder::new()
+            .name("queen-qlog-drop".into())
+            .spawn(move || {
+                while let Ok(jobs) = rx.recv() {
+                    for (f, from, to) in jobs {
+                        if let Err(e) = fadvise_dontneed(&f, from, to) {
+                            tracing::debug!(target: "rsm", error = %e, "qlog drop-behind");
+                        }
+                    }
+                }
+            });
+        if let Err(e) = spawned {
+            tracing::warn!(target: "rsm", error = %e, "qlog drop-behind thread did not start");
+        }
+        Mutex::new(tx)
+    });
+    let _ = tx.lock_unpoisoned().send(jobs);
 }
 
 // ---------------------------------------------------------------------------

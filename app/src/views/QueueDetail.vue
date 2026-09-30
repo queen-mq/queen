@@ -469,7 +469,8 @@ import {
   ackFailureSeverity, backlogSeverity, numTone, pendingDriftSeverity, timeLagSeverity,
 } from '@/composables/useSeverity'
 import MetricTile from '@/components/MetricTile.vue'
-import PartitionSunflower from '@/components/PartitionSunflower.vue'
+import PartitionSunflower, { MAX_SEEDS } from '@/components/PartitionSunflower.vue'
+import { routeSupport } from '@/stores/routeSupport'
 import PageHead from '@/components/PageHead.vue'
 import PageTools from '@/components/PageTools.vue'
 import RowChart from '@/components/RowChart.vue'
@@ -1087,10 +1088,29 @@ const queueSev = computed(() => {
   const here = { name: queueName.value, messages: { pending: totalMessages.value.pending } }
   return queueAttention([here], groups)[0]?.sev || 'ok'
 })
+// Each seed's lag — the age of the oldest message its slowest reader has not
+// consumed — comes from /resources/partitions, for the seeds the flower can
+// draw. New in 2.0: on an older broker the probe 404s once and the seeds'
+// tips show pending alone.
+const getPartitionLags = routeSupport.guard('resources-partitions', (params) =>
+  queuesApi.partitions(params, { probe: true }))
+const partitionLags = ref(null) // Map partition name -> lagSeconds (null: caught up)
+const fetchPartitionLags = async () => {
+  const name = queueName.value
+  try {
+    const r = await getPartitionLags({ queue: name, limit: MAX_SEEDS })
+    if (name !== queueName.value) return
+    partitionLags.value = new Map((r.data?.partitions || []).map(p => [String(p.partition), p.lagSeconds ?? null]))
+  } catch {
+    // Keep the last lags; a missing route leaves them unknown.
+  }
+}
 const partitionSeeds = computed(() => partitions.value.map(p => {
   const m = p.messages || p.stats || {}
   const pending = Math.max(0, toNum(m.pending) || 0)
-  return { name: String(p.name ?? p.partition ?? p.id ?? '?'), partitions: 1, pending, sev: pending > 0 ? queueSev.value : 'ok' }
+  const name = String(p.name ?? p.partition ?? p.id ?? '?')
+  const lag = partitionLags.value?.has(name) ? partitionLags.value.get(name) : undefined
+  return { name, partitions: 1, pending, lag, sev: pending > 0 ? queueSev.value : 'ok' }
 }))
 
 function goMessages() {
@@ -1152,7 +1172,7 @@ const fetchAll = async () => {
   // The one exception is the conflation probe, and it is conditional on the
   // totals this call just returned: a queue deep enough to warn about buys a
   // third request, because on a conflating group that warning would be wrong.
-  await Promise.all([fetchQueueDetail(), fetchOps()])
+  await Promise.all([fetchQueueDetail(), fetchOps(), fetchPartitionLags()])
   probeGroupsIfDeep()
   lastRefreshAt.value = Date.now()
   loading.value = false
@@ -1207,6 +1227,7 @@ watch(queueName, () => {
   detailError.value = null
   detailStale.value = null
   statusData.value = null
+  partitionLags.value = null
   opsData.value = null
   opsError.value = null
   fetchAll()

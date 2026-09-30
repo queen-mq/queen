@@ -1582,7 +1582,7 @@ fn a_read_at_the_entry_gate_never_sees_half_a_batch() {
         let done = a.apply(&ApplyCommitted {
             index: 2,
             term: 1,
-            entry,
+            entry: entry.into(),
         });
         crate::rsm::faults::set_mid_entry_hook(None);
         done.expect("apply");

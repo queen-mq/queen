@@ -40,6 +40,14 @@ export const resources = {
 export const queues = {
   list: (params, config) => client.get('/api/v1/resources/queues', { params, ...config }),
   get: (name, config) => client.get(`/api/v1/resources/queues/${encodeURIComponent(name)}`, config),
+  /**
+   * `{partitions: [{queue, partition, id, pending, processing, lagSeconds}], walked, truncated}`:
+   * the partitions holding the most pending (one queue's with `queue`), at most
+   * `limit`. `lagSeconds` is the age of the oldest message the slowest reader
+   * has not consumed, null when caught up. NEW ROUTE (2.0): an older broker
+   * 404s, so callers guard it with stores/routeSupport.
+   */
+  partitions: (params, config) => client.get('/api/v1/resources/partitions', { params, ...config }),
   delete: (name, config) =>
     client.delete(`/api/v1/resources/queues/${encodeURIComponent(name)}`, config),
   /**

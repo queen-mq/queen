@@ -140,6 +140,10 @@ struct AppEntryInner {
     /// The wire encoding (stored form), made once and shared by every follower
     /// the entry is sent to (and every resend).
     wire: OnceLock<Bytes>,
+    /// The wire encoding as one zstd frame, made once for every follower that
+    /// reads it ([`AppEntry::wire_zstd`]); `Some(None)` when compressing it
+    /// saves too little.
+    wire_z: tokio::sync::OnceCell<Option<Bytes>>,
 }
 
 fn appends_of(e: &Entry) -> usize {
@@ -180,6 +184,7 @@ impl AppEntry {
             z: OnceLock::new(),
             stored,
             wire: w,
+            wire_z: tokio::sync::OnceCell::new(),
         }))
     }
 
@@ -278,6 +283,45 @@ impl AppEntry {
             payloads,
             Some(bytes),
         ))
+    }
+
+    /// An entry received from the leader as ONE zstd frame of its stored-form
+    /// wire bytes ([`AppEntry::wire_zstd`]): decompressed (the frame's declared
+    /// size is bounded by the codec), then read as [`AppEntry::from_stored_wire`].
+    /// The frame is kept: if this node leads next, it sends the same bytes.
+    pub fn from_stored_wire_zstd(z: Bytes) -> std::io::Result<AppEntry> {
+        let raw = crate::rsm::qlog::codec::decompress(&z)?;
+        let e = AppEntry::from_stored_wire(Bytes::from(raw))?;
+        let _ = e.0.wire_z.set(Some(z));
+        Ok(e)
+    }
+
+    /// The wire bytes ([`AppEntry::wire`]) as one zstd frame at level 1, or
+    /// `None` when that saves under a tenth. Made ONCE per entry — on the
+    /// blocking pool, never on a raft runtime thread — and shared by every
+    /// follower's append and every resend; a concurrent caller waits for the
+    /// first. The leader's payloads under the disk codec's floor go raw into
+    /// the queue logs and so, before this, raw onto the wire: at 1-20 messages
+    /// of ~300 B per push, ~2.4x the bytes per message.
+    pub async fn wire_zstd(&self) -> std::io::Result<Option<Bytes>> {
+        let entry = self.clone();
+        self.0
+            .wire_z
+            .get_or_try_init(|| async move {
+                let raw = entry.wire()?;
+                tokio::task::spawn_blocking(move || {
+                    crate::rsm::qlog::codec::compress_wire(&raw).map(Bytes::from)
+                })
+                .await
+                .map_err(|e| std::io::Error::other(format!("wire compression: {e}")))
+            })
+            .await
+            .cloned()
+    }
+
+    /// [`AppEntry::wire_zstd`]'s answer once made; `None` before.
+    pub fn wire_zstd_ready(&self) -> Option<Option<Bytes>> {
+        self.0.wire_z.get().cloned()
     }
 
     /// Await the codec work on a full entry's payloads (started at propose, on
@@ -389,8 +433,9 @@ impl AppEntry {
         Ok(bytes)
     }
 
-    /// The payload-free encoding (made once from the full entry when needed).
-    fn pf_bytes(&self) -> std::io::Result<Bytes> {
+    /// The payload-free encoding (made once from the full entry when needed,
+    /// shared by the wire and the log writer's entry records).
+    pub(crate) fn pf_bytes(&self) -> std::io::Result<Bytes> {
         if let Some(b) = self.0.pf_bytes.get() {
             return Ok(b.clone());
         }

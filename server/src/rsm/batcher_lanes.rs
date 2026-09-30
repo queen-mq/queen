@@ -61,17 +61,19 @@ use super::{
 use crate::rsm::dedup::DedupFront;
 use crate::rsm::effect::{Effect, Pid};
 use crate::rsm::entry::{Entry, Outcome, PopOutcome, RequestId};
+use crate::rsm::fasthash::FxBuild;
 use crate::rsm::planner::kept::KeptOverlay;
 use crate::rsm::planner::timers::TimerFireConfig;
 use crate::rsm::planner::{
-    Lookup, Overlay, Plan, PlanConfig, PlannedPending, Planner, Refusal, RenewCommand,
+    AckCommand, AckTarget, Lookup, Overlay, Plan, PlanConfig, PlannedPending, Planner, PushCommand,
+    Refusal, RenewCommand,
 };
 use crate::rsm::qlog::set::QLogReader;
 use crate::rsm::segments::Reader;
 use crate::rsm::state::{Committed, Derived, PlanRings, RingKey, RingView};
 use crate::rsm::store::{Reads, Store, TypedReads};
 
-use super::{Command, Reply};
+use super::{Command, MultiPushCommand, Reply};
 
 /// What a lane thread is sent: a planning job.
 enum LaneMsg {
@@ -90,7 +92,30 @@ impl LaneWorker {
             .name(format!("queen-lane-{lane}"))
             .spawn(move || {
                 crate::rsm::batcher::raise_planning_thread_priority();
-                while let Ok(LaneMsg::Job(job)) = rx.recv() {
+                let spin = std::time::Duration::from_micros(*LANE_SPIN_US);
+                loop {
+                    // With cycles back to back (pipelined planning) the next job
+                    // usually arrives within tens of microseconds: poll for it
+                    // that long before parking, since a futex wake on a busy
+                    // box cost 0.5-1.7 ms of every cycle's lane phase.
+                    let msg = if spin.is_zero() {
+                        rx.recv().ok()
+                    } else {
+                        let t0 = std::time::Instant::now();
+                        loop {
+                            match rx.try_recv() {
+                                Ok(m) => break Some(m),
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => break None,
+                                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                    if t0.elapsed() >= spin {
+                                        break rx.recv().ok();
+                                    }
+                                    std::hint::spin_loop();
+                                }
+                            }
+                        }
+                    };
+                    let Some(LaneMsg::Job(job)) = msg else { break };
                     job();
                     // What the job did after it answered (dropping what it
                     // captured) delays this lane's next job.
@@ -103,6 +128,17 @@ impl LaneWorker {
         LaneWorker { tx }
     }
 }
+
+/// `QUEEN_LANES_SPIN_US` (default 0 = off): how long a lane thread polls for
+/// its next job before parking on the channel. For A/B on the VMs: it trades a
+/// little CPU per idle lane for the wake latency of the lane phase.
+static LANE_SPIN_US: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+    std::env::var("QUEEN_LANES_SPIN_US")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+        .min(10_000)
+});
 
 thread_local! {
     /// When this lane thread's current job sent its result.
@@ -175,13 +211,18 @@ pub(crate) struct LanesState {
     workers: Vec<LaneWorker>,
     lanes: Vec<Arc<Mutex<LaneState>>>,
     records: VecDeque<Record>,
-    /// Every in-flight command's outcome by request id (L5).
-    ids: HashMap<RequestId, Outcome>,
+    /// Every in-flight command by request id (L5): its entry and its index
+    /// there, so the outcome is cloned only for a retry that hits it.
+    ids: HashMap<RequestId, (Arc<Entry>, u32), FxBuild>,
+    /// Workers with a lease write in flight ([`Record::workers`]), counted over
+    /// the records: kept as records come and go instead of gathered from every
+    /// record each cycle.
+    worker_refs: HashMap<String, u32, FxBuild>,
     epoch: u64,
     cycles: u64,
     /// Round-robin cursor per wildcard ring, for the pops of a ring some lane
     /// does not keep yet (its first cycle).
-    rr: HashMap<RingKey, u64>,
+    rr: HashMap<RingKey, u64, FxBuild>,
     /// The router's state for the cycle it is routing (reset every cycle).
     cycle: RouterCycle,
     /// Control's overlay, kept between the cycles it plans in: each takes out
@@ -203,7 +244,15 @@ pub(crate) struct LanesState {
 
 /// tenant → queue → name → `V`: nested so a lookup borrows `&str` instead of
 /// building an owned key per command.
-type ByName<V> = HashMap<String, HashMap<String, HashMap<String, V>>>;
+type ByName<V> = FxMap<String, FxMap<String, FxMap<String, V>>>;
+
+/// Where one group of a multi-push goes, and its partition's pid when known.
+type GroupDest = (Dest, Option<Pid>);
+
+/// A map on the crate's fast hasher: the router's per-command lookups hash names
+/// and ids millions of times a second.
+type FxMap<K, V> = HashMap<K, V, FxBuild>;
+type FxSet<K> = HashSet<K, FxBuild>;
 
 /// One lane's side of a ring in the cycle being routed.
 struct LaneAvail {
@@ -222,23 +271,23 @@ struct RouterCycle {
     /// at their planned state, the leases due by `now_us` claimable), less what
     /// the router has already sent it. `None` while some lane does not keep
     /// the ring: a pop of it is then guessed.
-    avail: HashMap<RingKey, Option<Vec<LaneAvail>>>,
+    avail: FxMap<RingKey, Option<Vec<LaneAvail>>>,
     /// Per queue: the lane holding every partition of it, if one does.
-    whole: HashMap<(String, String), Option<u64>>,
+    whole: FxMap<(String, String), Option<u64>>,
     /// Per ring: whether its queue and group are committed and its queue quiet
     /// (a wildcard pop may go to a lane at all).
-    wild: HashMap<RingKey, bool>,
+    wild: FxMap<RingKey, bool>,
     /// Workers a pop of this batch leases for: their renews go to control.
-    pop_workers: HashSet<String>,
+    pop_workers: FxSet<String>,
     /// tenant → queue → committed.
-    queues: HashMap<String, HashMap<String, bool>>,
+    queues: FxMap<String, FxMap<String, bool>>,
     /// tenant → queue → group → committed.
     groups: ByName<bool>,
     /// tenant → queue → partition name → its committed pid, and whether it is
     /// garbage.
     pids: ByName<Option<(Pid, bool)>>,
     /// pid → committed and not garbage.
-    live: HashMap<Pid, bool>,
+    live: FxMap<Pid, bool>,
 }
 
 /// How many commands the lanes and control planned (a log line every 10 s).
@@ -404,6 +453,9 @@ enum Dest {
     Empty,
     /// A push whose partition does not exist yet: the creation step plans it.
     Create,
+    /// An ack whose targets sit in several lanes, each target's lane known:
+    /// split by lane, each part planned by its lane, logged as ONE command.
+    SplitAck,
 }
 
 /// The most committed partitions the router reads to find the one lane of a
@@ -425,8 +477,197 @@ enum LaneSlot {
     Misrouted(Box<Command>),
 }
 
+/// One group of a [`Command::MultiPush`] routed to a lane or to the creation
+/// step: the multi-push it belongs to (its index in the cycle's list), the
+/// group's position in it, and the group itself.
+struct Piece {
+    multi: usize,
+    group: usize,
+    push: PushCommand,
+    /// The id the router assigned the group's new partition, when its lane
+    /// creates it (lane-local creation, [`LOCAL_CREATE`]).
+    create_pid: Option<Pid>,
+    /// The live pid the router resolved the group's partition name to.
+    known_pid: Option<Pid>,
+}
+
+/// `QUEEN_LANES_LOCAL_CREATE` (default on): a push to a partition that does
+/// not exist yet is planned by that partition's LANE, with the id the router
+/// assigns it from the cycle's base, instead of by the serial creation step.
+/// The entry's creates are then its dense ids in lane order, which
+/// `Entry::validate` accepts (the SET must be dense). A creation was ~8 us of
+/// serial planner time (creation step, router miss, control fold): ~120k new
+/// keys/s at most, with the whole of first contact on one thread.
+static LOCAL_CREATE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    !matches!(
+        std::env::var("QUEEN_LANES_LOCAL_CREATE")
+            .as_deref()
+            .map(str::trim),
+        Ok("0") | Ok("false") | Ok("off") | Ok("no")
+    )
+});
+
+/// A lane's commands for one cycle: batch position, command, whether the lane
+/// holds the command's whole queue ([`Dest::Whole`]), and the id the router
+/// assigned the partition the command creates (lane-local creation).
+type LaneCmds = Vec<(usize, Command, bool, Option<Pid>)>;
+
+/// Where the router sent a new partition's name this cycle: to a lane with an
+/// assigned id, or to the creation step. Every later push to the same name in
+/// the batch goes the same way (two creators of one name would create it
+/// twice).
+#[derive(Clone, Copy)]
+enum NewPart {
+    Local(Pid),
+    Step,
+}
+
+/// Where a push to a new partition goes (see [`NewPart`]): the lane of an id
+/// assigned from `base` in routing order, or the creation step when `local`
+/// is off (the knob, or a push too large for a lane to be sure to plan).
+fn new_part_dest(
+    seen: &mut HashMap<(String, String, String), NewPart>,
+    assigned: &mut u64,
+    base: u64,
+    push: &PushCommand,
+    local: bool,
+) -> NewPart {
+    let key = (
+        push.tenant.clone(),
+        push.queue.clone(),
+        push.partition.clone(),
+    );
+    if let Some(d) = seen.get(&key) {
+        return *d;
+    }
+    let d = if *LOCAL_CREATE && local {
+        let pid = base + *assigned;
+        *assigned += 1;
+        NewPart::Local(pid)
+    } else {
+        NewPart::Step
+    };
+    seen.insert(key, d);
+    d
+}
+
+/// The largest push a lane creates a partition for: a create that a lane
+/// could refuse (too large for an entry) would leave its assigned id unused
+/// and the entry's ids not dense, so anything near the limit goes to the
+/// creation step, which assigns ids only to what it plans.
+fn local_create_ok(size_hint: usize, entry_max_bytes: usize) -> bool {
+    size_hint.saturating_mul(2) <= entry_max_bytes
+}
+
+/// `QUEEN_LANES_ACK_SPLIT` (default on): an ack whose targets sit in several
+/// lanes is split by lane ([`Dest::SplitAck`]) instead of planned whole by
+/// control. A pop that claims partitions of several lanes (one planned by
+/// control, or a discovery pop) is acked with one such request.
+static ACK_SPLIT: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    !matches!(
+        std::env::var("QUEEN_LANES_ACK_SPLIT")
+            .as_deref()
+            .map(str::trim),
+        Ok("0") | Ok("false") | Ok("off") | Ok("no")
+    )
+});
+
+/// One lane's share of a split ack: its targets, and where each sat in the
+/// request (the outcome answers in input order).
+struct AckPiece {
+    ack: usize,
+    sub: AckCommand,
+    idx: Vec<usize>,
+}
+
+struct AckPieceOut {
+    ack: usize,
+    sub: AckCommand,
+    idx: Vec<usize>,
+    result: AckPieceResult,
+}
+
+enum AckPieceResult {
+    Logged {
+        effects: Vec<Effect>,
+        stripped: Vec<Effect>,
+        results: Vec<crate::rsm::entry::AckResult>,
+    },
+    Empty(Vec<crate::rsm::entry::AckResult>),
+    Refused(Refusal),
+    Misrouted,
+}
+
+/// A split ack: its batch position, id and target count.
+struct AckRoute {
+    pos: usize,
+    id: RequestId,
+    targets: usize,
+}
+
+/// A split ack ready to log (see [`MultiLogged`]).
+struct AckLogged {
+    id: RequestId,
+    outcome: Outcome,
+    effects: Vec<Effect>,
+    lane_subs: Vec<(u64, Vec<Effect>)>,
+}
+
+/// A multi-push the router split: where it sat in the batch, its id, and how
+/// many groups it has.
+struct MultiRoute {
+    pos: usize,
+    id: RequestId,
+    groups: usize,
+}
+
+/// The "lane" of a multi-push group planned by the creation step.
+const CREATE_LANE: u64 = u64::MAX;
+
+/// A multi-push ready to log: its effects (every group, in group order), its
+/// outcome, each lane's stripped share of it for that lane's slice, and the
+/// stripped effects of its groups the creation step planned (routed to their
+/// partitions' lanes like any creation).
+struct MultiLogged {
+    id: RequestId,
+    outcome: Outcome,
+    effects: Vec<Effect>,
+    lane_subs: Vec<(u64, Vec<Effect>)>,
+    routed: Vec<Effect>,
+}
+
+/// How a [`Piece`] fared. The push comes back with it, so a multi-push that
+/// has to be planned again (by control) is rebuilt without copying a frame.
+struct PieceOut {
+    multi: usize,
+    group: usize,
+    push: PushCommand,
+    result: PieceResult,
+}
+
+enum PieceResult {
+    /// Planned and folded: its effects (whole, and stripped for the lane's
+    /// slice) and its items' verdicts.
+    Logged {
+        effects: Vec<Effect>,
+        stripped: Vec<Effect>,
+        items: Vec<crate::rsm::entry::PushVerdict>,
+    },
+    /// Nothing to write (every item a duplicate): its verdicts.
+    Empty(Vec<crate::rsm::entry::PushVerdict>),
+    /// Refused: its items answer with the refusal.
+    Refused(Refusal),
+    /// It planned catalog state (L1 broke under the lane): the whole
+    /// multi-push is planned again by control.
+    Misrouted,
+}
+
 struct LaneOut {
     slots: Vec<(usize, LaneSlot)>,
+    /// The multi-push groups this lane planned, after its own commands.
+    pieces: Vec<PieceOut>,
+    /// Its shares of split acks, after the multi-push groups.
+    ack_pieces: Vec<AckPieceOut>,
     /// The lane folded something its logged commands do not account for.
     poisoned: bool,
     /// Its logged commands with their effects, as they go into the entry:
@@ -629,26 +870,63 @@ static ROUTER_KEEP: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
 /// The most kept partitions (live pids) before the kept lookups start over.
 const ROUTER_KEEP_MAX_PIDS: usize = 1 << 20;
 
+/// Free `v` on a thread of its own rather than on the serial planner thread:
+/// the records of landed entries (the planner often holds an entry's last
+/// reference, so every effect and frame is freed where it drops) and a cycle's
+/// spent multi-push groups. At one message per partition freeing was ~20% of
+/// the planner thread (2026-09-30).
+fn drop_later<T: Send + 'static>(v: T) {
+    type Garbage = Box<dyn Send>;
+    static TX: std::sync::LazyLock<Option<std::sync::mpsc::Sender<Garbage>>> =
+        std::sync::LazyLock::new(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<Garbage>();
+            std::thread::Builder::new()
+                .name("queen-rsm-drop".into())
+                .spawn(move || {
+                    for g in rx {
+                        drop(g);
+                    }
+                })
+                .ok()
+                .map(|_| tx)
+        });
+    match TX.as_ref() {
+        Some(tx) => {
+            if let Err(e) = tx.send(Box::new(v)) {
+                drop(e.0);
+            }
+        }
+        None => drop(v),
+    }
+}
+
+/// Control's rings serve only the wildcard pops the router hands it (a queue
+/// with a catalog change in flight, a ring no lane keeps yet), yet they follow
+/// every landed entry every cycle on the planner thread: a ring control walked
+/// once, in the drain at start, cost ~20 ms a cycle for thousands of cycles at
+/// 1 message per partition (2026-09-30). They go after 256 idle cycles, checked
+/// every 64 (the lanes keep the 4,096 of [`RING_IDLE_CYCLES`]).
+const CONTROL_RING_EVICT_EVERY: u64 = 64;
+const CONTROL_RING_IDLE_CYCLES: u64 = 256;
+
 /// The router's committed-catalog lookups kept between cycles ([`ROUTER_KEEP`]).
 #[derive(Default)]
 struct KeptFacts {
-    queues: HashMap<String, HashMap<String, bool>>,
+    queues: FxMap<String, FxMap<String, bool>>,
     groups: ByName<bool>,
     pids: ByName<Option<(Pid, bool)>>,
-    live: HashMap<Pid, bool>,
-    whole: HashMap<(String, String), Option<u64>>,
+    live: FxMap<Pid, bool>,
+    whole: FxMap<(String, String), Option<u64>>,
 }
 
 /// The in-flight catalog work commands must not race (L1).
 struct Busy {
     /// tenant → queues with a catalog change in flight.
-    queues: HashMap<String, HashSet<String>>,
-    tenants: HashSet<String>,
-    pids: HashSet<Pid>,
+    queues: FxMap<String, FxSet<String>>,
+    tenants: FxSet<String>,
+    pids: FxSet<Pid>,
     /// tenant → queues with a partition being created.
-    creating: HashMap<String, HashSet<String>>,
-    /// Workers with a lease write in flight ([`Record::workers`]).
-    workers: HashSet<String>,
+    creating: FxMap<String, FxSet<String>>,
     /// tenant → queue → partition name → pid, for the partitions created in
     /// flight ([`Record::created`]).
     created: ByName<Pid>,
@@ -682,10 +960,11 @@ impl LanesState {
                 .map(|_| Arc::new(Mutex::new(LaneState::default())))
                 .collect(),
             records: VecDeque::new(),
-            ids: HashMap::new(),
+            ids: HashMap::default(),
+            worker_refs: HashMap::default(),
             epoch: u64::MAX,
             cycles: 0,
-            rr: HashMap::new(),
+            rr: HashMap::default(),
             cycle: RouterCycle::default(),
             control: None,
             kept_facts: KeptFacts::default(),
@@ -698,6 +977,7 @@ impl LanesState {
         add(&LANE_STATS.resets, 1);
         self.records.clear();
         self.ids.clear();
+        self.worker_refs.clear();
         self.control = None;
         self.control_rings = None;
         self.kept_facts = KeptFacts::default();
@@ -714,6 +994,7 @@ impl LanesState {
     /// the lanes, which then rebuild from slices split off the full entries.
     fn sync(&mut self, folded: &[(u64, Arc<Entry>)]) {
         let first = folded.first().map(|(_, e)| e.clone());
+        let mut landed: Vec<Record> = Vec::new();
         while let Some(r) = self.records.front() {
             match &first {
                 Some(f) if Arc::ptr_eq(&r.full, f) => break,
@@ -722,8 +1003,13 @@ impl LanesState {
                     for c in &r.full.commands {
                         self.ids.remove(&c.request_id);
                     }
+                    self.forget_workers(&r);
+                    landed.push(r);
                 }
             }
+        }
+        if !landed.is_empty() {
+            drop_later(landed);
         }
         let aligned = self.records.len() == folded.len()
             && self
@@ -736,24 +1022,48 @@ impl LanesState {
             self.reset();
             for (_, e) in folded {
                 let subs = split(e, self.n);
-                for c in &e.commands {
+                for (i, c) in e.commands.iter().enumerate() {
                     self.ids
                         .entry(c.request_id)
-                        .or_insert_with(|| c.outcome.clone());
+                        .or_insert_with(|| (e.clone(), i as u32));
                 }
-                self.records.push_back(record_of(e.clone(), subs));
+                self.push_record(record_of(e.clone(), subs));
+            }
+        }
+    }
+
+    /// Take `r` in flight, counting its workers ([`LanesState::worker_refs`]).
+    fn push_record(&mut self, r: Record) {
+        for w in &r.workers {
+            match self.worker_refs.get_mut(w) {
+                Some(n) => *n += 1,
+                None => {
+                    self.worker_refs.insert(w.clone(), 1);
+                }
+            }
+        }
+        self.records.push_back(r);
+    }
+
+    /// `r` landed: its workers no longer count.
+    fn forget_workers(&mut self, r: &Record) {
+        for w in &r.workers {
+            if let Some(n) = self.worker_refs.get_mut(w) {
+                *n -= 1;
+                if *n == 0 {
+                    self.worker_refs.remove(w);
+                }
             }
         }
     }
 
     fn busy(&self) -> Busy {
         let mut b = Busy {
-            queues: HashMap::new(),
-            tenants: HashSet::new(),
-            pids: HashSet::new(),
-            creating: HashMap::new(),
-            workers: HashSet::new(),
-            created: HashMap::new(),
+            queues: HashMap::default(),
+            tenants: HashSet::default(),
+            pids: HashSet::default(),
+            creating: HashMap::default(),
+            created: HashMap::default(),
         };
         for r in &self.records {
             for (t, q) in &r.queues {
@@ -764,7 +1074,6 @@ impl LanesState {
             for (t, q) in &r.creates {
                 b.creating.entry(t.clone()).or_default().insert(q.clone());
             }
-            b.workers.extend(r.workers.iter().cloned());
             for (t, q, name, pid) in &r.created {
                 b.created
                     .entry(t.clone())
@@ -835,7 +1144,16 @@ impl LanesState {
                 for t in &c.targets {
                     lanes.push(self.pid_lane(r, &t.tenant, &t.queue, t.pid, busy)?);
                 }
-                one(&lanes)
+                match one(&lanes) {
+                    // Every target's lane is known but they differ: split,
+                    // rather than plan every target on control's thread.
+                    Dest::Control
+                        if *ACK_SPLIT && lanes.len() > 1 && lanes.iter().all(Option::is_some) =>
+                    {
+                        Dest::SplitAck
+                    }
+                    d => d,
+                }
             }
             Command::AckPositional(c) => {
                 match self.pid_lane(r, &c.tenant, &c.queue, c.pid, busy)? {
@@ -878,6 +1196,8 @@ impl LanesState {
             Command::PopDiscover(_) | Command::Kv(_) | Command::Timers(_) | Command::Effects(_) => {
                 Dest::Control
             }
+            // Split by the router loop (`plan_cycle_lanes`); whole, it is control's.
+            Command::MultiPush(_) => Dest::Control,
         })
     }
 
@@ -894,18 +1214,56 @@ impl LanesState {
         name: &str,
         busy: &Busy,
     ) -> crate::rsm::store::Result<Dest> {
+        Ok(self.push_dest_pid(r, tenant, queue, name, busy)?.0)
+    }
+
+    /// [`LanesState::push_dest`], with the partition's pid when it goes to a
+    /// lane: the lane plans the push on it without looking the name up again.
+    fn push_dest_pid<R: Reads + ?Sized>(
+        &mut self,
+        r: &R,
+        tenant: &str,
+        queue: &str,
+        name: &str,
+        busy: &Busy,
+    ) -> crate::rsm::store::Result<(Dest, Option<Pid>)> {
         if busy.queue(tenant, queue) || !self.queue_known(r, tenant, queue)? {
-            return Ok(Dest::Control);
+            return Ok((Dest::Control, None));
         }
         Ok(match self.committed_pid(r, tenant, queue, name)? {
-            Some((pid, false)) if !busy.pids.contains(&pid) => Dest::Lane(pid % self.n),
-            Some(_) => Dest::Control,
+            Some((pid, false)) if !busy.pids.contains(&pid) => {
+                (Dest::Lane(pid % self.n), Some(pid))
+            }
+            Some(_) => (Dest::Control, None),
             None => match busy.created(tenant, queue, name) {
-                Some(pid) if !busy.pids.contains(&pid) => Dest::Lane(pid % self.n),
-                Some(_) => Dest::Control,
-                None => Dest::Create,
+                Some(pid) if !busy.pids.contains(&pid) => (Dest::Lane(pid % self.n), Some(pid)),
+                Some(_) => (Dest::Control, None),
+                None => (Dest::Create, None),
             },
         })
+    }
+
+    /// Where each group of a multi-push goes — its partition's lane, or the
+    /// creation step — or `None` when any group must be planned by control
+    /// (its queue to create, a catalog change in flight, a partition on its
+    /// way out), which then plans the whole multi-push.
+    fn split_multi<R: Reads + ?Sized>(
+        &mut self,
+        r: &R,
+        mp: &MultiPushCommand,
+        busy: &Busy,
+    ) -> crate::rsm::store::Result<Option<Vec<GroupDest>>> {
+        if mp.pushes.is_empty() {
+            return Ok(None);
+        }
+        let mut dests = Vec::with_capacity(mp.pushes.len());
+        for p in &mp.pushes {
+            match self.push_dest_pid(r, &p.tenant, &p.queue, &p.partition, busy)? {
+                d @ (Dest::Lane(_) | Dest::Create, _) => dests.push(d),
+                _ => return Ok(None),
+            }
+        }
+        Ok(Some(dests))
     }
 
     /// The lane of a committed, live partition of a quiet queue, by name.
@@ -1168,7 +1526,7 @@ impl LanesState {
         c: &RenewCommand,
         busy: &Busy,
     ) -> crate::rsm::store::Result<Dest> {
-        if busy.workers.contains(&c.worker)
+        if self.worker_refs.contains_key(&c.worker)
             || self.cycle.pop_workers.contains(&c.worker)
             || !busy.queues.is_empty()
             || !busy.tenants.is_empty()
@@ -1210,11 +1568,15 @@ fn plan_lane<S: Store>(
     reader: Option<Reader>,
     qlog_reader: Option<QLogReader>,
     folded: &[(u64, Arc<Entry>)],
-    cmds: Vec<(usize, Command, bool)>,
+    cmds: LaneCmds,
     cfg: PlanConfig,
     now_us: i64,
     ring_keys: &[RingKey],
     cycle_no: u64,
+    retention: Vec<crate::rsm::retention_scan::Proposal>,
+    scan: Option<Arc<crate::rsm::retention_scan::ScanShared>>,
+    pieces: Vec<Piece>,
+    ack_pieces: Vec<AckPiece>,
 ) -> crate::rsm::store::Result<LaneOut> {
     let prior = if keep.enabled { st.kept.take() } else { None };
     let mut rings = if keep.enabled { st.rings.take() } else { None };
@@ -1243,14 +1605,15 @@ fn plan_lane<S: Store>(
         }
         add(&LANE_STATS.ring_loads, pr.loads - loads0);
         add(&LANE_STATS.ring_drops, pr.drops - drops0);
-        // The rows this lane's entries still in flight move: `advance` just
-        // read the landed truth into the rings, and they go back to their
-        // planned state below, every cycle, until their entries land.
+        // B14: the rows in flight this lane has not planned yet — every one
+        // when a ring was scanned this cycle (it holds the committed rows),
+        // else what the merge put in its slices since its last job (the
+        // creation step's, control's, the multi-pushes'). Its own commands'
+        // rows are planned below, once; a landing leaves a row an entry in
+        // flight writes at its planned state (`PlanRings::advance`).
         let mut touched = Touched::default();
-        for (index, e) in folded {
-            if *index > store_applied {
-                touched.note(&e.effects);
-            }
+        for effects in pr.rows_to_plan(folded, store_applied, pr.loads > loads0) {
+            touched.note(effects);
         }
         let derived = Derived::default();
         let committed = Committed::with_plan_rings(r, &derived, pr);
@@ -1262,6 +1625,8 @@ fn plan_lane<S: Store>(
 
         let mut out = LaneOut {
             slots: Vec::with_capacity(cmds.len()),
+            pieces: Vec::with_capacity(pieces.len()),
+            ack_pieces: Vec::with_capacity(ack_pieces.len()),
             poisoned: false,
             part: Entry::with_capacity(now_us, base_pid, base_kv, cmds.len()),
             sub: Entry::with_capacity(now_us, base_pid, base_kv, cmds.len()),
@@ -1270,8 +1635,13 @@ fn plan_lane<S: Store>(
         let start = std::time::Instant::now();
         let budget = std::time::Duration::from_millis(cfg.plan_budget_ms);
         let mut cut = false;
-        for (pos, cmd, whole) in cmds {
-            if cut {
+        // Per-kind planning times (`queen_raft_plan_*`), as the single planner
+        // records them: without them a lanes node reported no per-kind figure.
+        let timed = crate::rsm::timing::enabled();
+        for (pos, cmd, whole, create_pid) in cmds {
+            // A push creating its partition under an assigned id is never cut:
+            // its id must be used in this entry.
+            if cut && create_pid.is_none() {
                 out.slots.push((pos, LaneSlot::Deferred(Box::new(cmd))));
                 continue;
             }
@@ -1281,17 +1651,28 @@ fn plan_lane<S: Store>(
                 continue;
             }
             let folds0 = ov.folds();
-            let slot = match cmd.plan(&planner, ov) {
+            let kind = cmd.kind();
+            let t_cmd = timed.then(std::time::Instant::now);
+            let planned = match create_pid {
+                Some(pid) => ov.with_next_pid(pid, |ov| cmd.plan(&planner, ov)),
+                None => cmd.plan(&planner, ov),
+            };
+            if let Some(t) = t_cmd {
+                crate::rsm::timing::metrics()
+                    .kinds
+                    .record(kind, t.elapsed(), false);
+            }
+            let slot = match planned {
                 Ok(Plan::Logged { effects, outcome }) => {
-                    let catalog = effects.iter().any(|e| {
-                        matches!(
-                            e,
-                            Effect::PartitionCreate { .. }
-                                | Effect::QueueUpsert { .. }
-                                | Effect::GroupUpsert { .. }
-                                | Effect::QueueDelete { .. }
-                                | Effect::GroupDelete { .. }
-                        )
+                    let catalog = effects.iter().any(|e| match e {
+                        // The create the router assigned this push is the
+                        // lane's to plan; any other is control's (L1, L3).
+                        Effect::PartitionCreate { pid, .. } => Some(*pid) != create_pid,
+                        Effect::QueueUpsert { .. }
+                        | Effect::GroupUpsert { .. }
+                        | Effect::QueueDelete { .. }
+                        | Effect::GroupDelete { .. } => true,
+                        _ => false,
                     });
                     if catalog {
                         // L1 broke under us: the folds are not kept, control
@@ -1352,23 +1733,209 @@ fn plan_lane<S: Store>(
             out.slots.push((pos, slot));
             cut = start.elapsed() > budget;
         }
+        // The retention scanner's watermark proposals for this lane's
+        // partitions, judged against committed state and this lane's overlay
+        // (which holds every in-flight effect on its partitions, and the
+        // catalog deletes every lane folds), and logged as one command with a
+        // minted id that nobody waits on — as control logs the walk's.
+        if let (false, Some(scan)) = (retention.is_empty(), scan.as_ref()) {
+            let (effects, _dropped) =
+                crate::rsm::retention_scan::judge(r, ov, now_us, scan, &retention)?;
+            if !effects.is_empty() {
+                let id = crate::util::uuidv7_bytes();
+                let folds0 = ov.folds();
+                ov.apply_effects(&effects);
+                if ov.folds() - folds0 != effects.len() as u64 {
+                    out.poisoned = true;
+                }
+                let stripped: Vec<Effect> = effects.iter().map(strip).collect();
+                if out
+                    .sub
+                    .add_command(id, Outcome::Empty, stripped)
+                    .and_then(|()| out.part.add_command(id, Outcome::Empty, effects))
+                    .is_err()
+                {
+                    out.poisoned = true;
+                }
+            }
+        }
+        // The multi-push groups on this lane's partitions, after everything
+        // else the lane logged: the merge lays each multi-push out after every
+        // lane's part, so planning them last keeps the plan order the entry's.
+        // Never cut by the budget: a multi-push is logged whole or re-planned
+        // whole, never split across cycles.
+        for Piece {
+            multi,
+            group,
+            push,
+            create_pid,
+            known_pid,
+        } in pieces
+        {
+            let folds0 = ov.folds();
+            let t_cmd = timed.then(std::time::Instant::now);
+            let planned = match create_pid {
+                Some(pid) => ov.with_next_pid(pid, |ov| planner.plan_push(ov, &push)),
+                None => planner.plan_push_known(ov, &push, known_pid),
+            };
+            if let Some(t) = t_cmd {
+                crate::rsm::timing::metrics().kinds.record(
+                    crate::rsm::planner::CommandKind::Push,
+                    t.elapsed(),
+                    false,
+                );
+            }
+            let result = match planned {
+                Ok(Plan::Logged { effects, outcome }) => {
+                    let catalog = effects.iter().any(|e| match e {
+                        Effect::PartitionCreate { pid, .. } => Some(*pid) != create_pid,
+                        Effect::QueueUpsert { .. }
+                        | Effect::GroupUpsert { .. }
+                        | Effect::QueueDelete { .. }
+                        | Effect::GroupDelete { .. } => true,
+                        _ => false,
+                    });
+                    if catalog {
+                        out.poisoned = true;
+                        PieceResult::Misrouted
+                    } else {
+                        if ov.folds() - folds0 != effects.len() as u64 {
+                            out.poisoned = true;
+                        }
+                        touched.note(&effects);
+                        let stripped = effects.iter().map(strip).collect();
+                        let items = super::push_items(outcome, push.items.len());
+                        PieceResult::Logged {
+                            effects,
+                            stripped,
+                            items,
+                        }
+                    }
+                }
+                Ok(Plan::Empty(outcome)) => {
+                    if ov.folds() != folds0 {
+                        out.poisoned = true;
+                    }
+                    PieceResult::Empty(super::push_items(outcome, push.items.len()))
+                }
+                Ok(Plan::Refused(refusal)) | Err(refusal) => {
+                    if ov.folds() != folds0 {
+                        out.poisoned = true;
+                    }
+                    PieceResult::Refused(refusal)
+                }
+            };
+            out.pieces.push(PieceOut {
+                multi,
+                group,
+                push,
+                result,
+            });
+        }
+        // Its shares of split acks, last (the merge logs them after the
+        // multi-pushes).
+        for AckPiece { ack, sub, idx } in ack_pieces {
+            let folds0 = ov.folds();
+            let t_cmd = timed.then(std::time::Instant::now);
+            let planned = planner.plan_ack(ov, &sub);
+            if let Some(t) = t_cmd {
+                crate::rsm::timing::metrics().kinds.record(
+                    crate::rsm::planner::CommandKind::Ack,
+                    t.elapsed(),
+                    false,
+                );
+            }
+            let result = match planned {
+                Ok(Plan::Logged { effects, outcome }) => {
+                    let catalog = effects.iter().any(|e| {
+                        matches!(
+                            e,
+                            Effect::PartitionCreate { .. }
+                                | Effect::QueueUpsert { .. }
+                                | Effect::GroupUpsert { .. }
+                                | Effect::QueueDelete { .. }
+                                | Effect::GroupDelete { .. }
+                        )
+                    });
+                    match outcome {
+                        Outcome::Ack(o) if !catalog && o.results.len() == sub.targets.len() => {
+                            if ov.folds() - folds0 != effects.len() as u64 {
+                                out.poisoned = true;
+                            }
+                            touched.note(&effects);
+                            let stripped = effects.iter().map(strip).collect();
+                            AckPieceResult::Logged {
+                                effects,
+                                stripped,
+                                results: o.results,
+                            }
+                        }
+                        _ => {
+                            out.poisoned = true;
+                            AckPieceResult::Misrouted
+                        }
+                    }
+                }
+                Ok(Plan::Empty(Outcome::Ack(o))) if o.results.len() == sub.targets.len() => {
+                    if ov.folds() != folds0 {
+                        out.poisoned = true;
+                    }
+                    AckPieceResult::Empty(o.results)
+                }
+                Ok(Plan::Empty(_)) => {
+                    if ov.folds() != folds0 {
+                        out.poisoned = true;
+                    }
+                    AckPieceResult::Misrouted
+                }
+                Ok(Plan::Refused(refusal)) | Err(refusal) => {
+                    if ov.folds() != folds0 {
+                        out.poisoned = true;
+                    }
+                    AckPieceResult::Refused(refusal)
+                }
+            };
+            out.ack_pieces.push(AckPieceOut {
+                ack,
+                sub,
+                idx,
+                result,
+            });
+        }
         // Move every touched row of the kept rings to its planned state — what
         // apply will write once the entries land — so what the lane hands the
         // router counts its own claims, acks and appends in flight: a pop is
         // sent where a partition is claimable, and to no lane when none is.
+        // B14: a pid's queue comes from what is known already (the overlay's
+        // append index, the rings' cache), a queue with no kept ring has no
+        // row to move and nothing is read for it, and a partition is read
+        // once for all its groups.
         let mut moves: Vec<(String, String, String, Pid, Option<i64>)> = Vec::new();
-        let mut row = |t: String, q: String, g: &str, pid: Pid, state: PlannedPending| match state {
+        let mut row = |t: &str, q: &str, g: &str, pid: Pid, state: PlannedPending| match state {
             PlannedPending::Keep => {}
-            PlannedPending::Clear => moves.push((t, q, g.to_string(), pid, None)),
-            PlannedPending::At(at) => moves.push((t, q, g.to_string(), pid, Some(at))),
+            PlannedPending::Clear => moves.push((t.into(), q.into(), g.into(), pid, None)),
+            PlannedPending::At(at) => moves.push((t.into(), q.into(), g.into(), pid, Some(at))),
         };
+        let mut states: Vec<PlannedPending> = Vec::new();
         for pid in &touched.appended {
-            let Ok(Some((t, q))) = planner.partition_queue(ov, *pid) else {
+            let named = match ov.appended_queue(*pid).or_else(|| pr.cached_queue(*pid)) {
+                Some((t, q)) => Some((t.to_string(), q.to_string())),
+                None => planner.partition_queue(ov, *pid).ok().flatten(),
+            };
+            let Some((t, q)) = named else {
                 continue;
             };
-            for g in pr.ring_groups(&t, &q) {
-                if let Ok(Some((t, q, state))) = planner.planned_pending(ov, *pid, &g, true) {
-                    row(t, q, &g, *pid, state);
+            let groups: Vec<&str> = pr.ring_group_names(&t, &q).collect();
+            if groups.is_empty() {
+                continue;
+            }
+            states.clear();
+            if matches!(
+                planner.planned_rows(ov, *pid, &groups, true, &mut states),
+                Ok(true)
+            ) {
+                for (g, state) in groups.iter().zip(&states) {
+                    row(&t, &q, g, *pid, *state);
                 }
             }
         }
@@ -1376,14 +1943,18 @@ fn plan_lane<S: Store>(
             if touched.appended.contains(pid) {
                 continue; // every kept group of its queue, just above
             }
+            if pr.cached_queue(*pid).is_some_and(|(t, q)| !pr.has(t, q, g)) {
+                continue;
+            }
             if let Ok(Some((t, q, state))) = planner.planned_pending(ov, *pid, g, false) {
-                row(t, q, g, *pid, state);
+                row(&t, &q, g, *pid, state);
             }
         }
         drop(planner);
         for (t, q, g, pid, at) in moves {
             pr.plan_set(&t, &q, &g, pid, at);
         }
+        pr.planned_own(&out.sub);
         st.kept = Some(kept);
         st.rings = rings.take();
         Ok(out)
@@ -1408,6 +1979,7 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
     kv_sweep_limit: Option<usize>,
     fire: Option<TimerFireConfig>,
     maintenance: Option<crate::rsm::maintenance::Config>,
+    scan: Option<Arc<crate::rsm::retention_scan::ScanShared>>,
 ) -> crate::rsm::store::Result<PlanOutput> {
     let n = ls.n;
     if !keep.enabled || ls.epoch != keep.epoch {
@@ -1416,14 +1988,16 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
     }
     ls.cycles += 1;
     let cycle_no = ls.cycles;
+    // B34: the overlays are rebuilt from the entries in flight (cheap); the
+    // rings are not dropped wholesale — every lane and control checks a few of
+    // their rows against `pending` every cycle and drops a ring that differs
+    // (`PlanRings::advance`), instead of all of them rescanning every row at
+    // once here (seconds with millions of pending partitions).
     if keep.reset_every > 0 && cycle_no.is_multiple_of(keep.reset_every.min(KEEP_RESET_EVERY)) {
         for l in &ls.lanes {
-            let mut s = l.lock().expect("lane state");
-            s.kept = None;
-            s.rings = None;
+            l.lock().expect("lane state").kept = None;
         }
         ls.control = None;
-        ls.control_rings = None;
     }
     ls.sync(&folded);
     let busy = ls.busy();
@@ -1432,9 +2006,26 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
     // ---- the router ------------------------------------------------------
     let t_router = std::time::Instant::now();
     let mut slots: Vec<Option<Slot>> = (0..batch_len).map(|_| None).collect();
-    let mut per_lane: Vec<Vec<(usize, Command, bool)>> = (0..n).map(|_| Vec::new()).collect();
+    let mut per_lane: Vec<LaneCmds> = (0..n).map(|_| Vec::new()).collect();
+    // Lane-local creation: the names of new partitions and where they went,
+    // and how many ids the router assigned from the cycle's base.
+    let mut new_parts: HashMap<(String, String, String), NewPart> = HashMap::new();
+    let mut local_creates: u64 = 0;
+    let mut assign_base: u64 = 0;
     let mut control: Vec<(usize, Command)> = Vec::new();
     let mut creates: Vec<(usize, Command)> = Vec::new();
+    // Multi-pushes split by partition: each group goes to its lane or to the
+    // creation step, and the merge logs the whole as ONE command.
+    let mut multis: Vec<MultiRoute> = Vec::new();
+    let mut multi_of: HashMap<RequestId, usize> = HashMap::new();
+    let mut multi_dups: Vec<(usize, usize)> = Vec::new();
+    let mut lane_pieces: Vec<Vec<Piece>> = (0..n).map(|_| Vec::new()).collect();
+    // Acks split by lane ([`Dest::SplitAck`]).
+    let mut acks: Vec<AckRoute> = Vec::new();
+    let mut ack_of: HashMap<RequestId, usize> = HashMap::new();
+    let mut ack_dups: Vec<(usize, usize)> = Vec::new();
+    let mut lane_acks: Vec<Vec<AckPiece>> = (0..n).map(|_| Vec::new()).collect();
+    let mut create_pieces: Vec<Piece> = Vec::new();
     // The rings this cycle's wildcard pops read: every lane keeps them (and
     // the router reads them there) from this cycle on.
     let mut ring_keys: Vec<RingKey> = Vec::new();
@@ -1460,6 +2051,10 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
                 reader.clone(),
             );
             let no_overlay = Overlay::new(base_pid, base_kv);
+            // The ids this cycle's creates take start above everything in
+            // flight (as the creation step's did).
+            assign_base = ls.records.iter().map(|r| r.pid_hi).fold(base_pid, u64::max);
+            let entry_max = cfg.entry_max_bytes;
             // The kept lookups hold while no catalog change is in flight; one
             // that was starts them over once it has landed.
             let keep = *ROUTER_KEEP && !ls.records.iter().any(Record::catalog);
@@ -1494,13 +2089,75 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
                     }
                     Ok(_) => {}
                 }
-                if let Some(outcome) = ls.ids.get(&id) {
+                if let Some((e, i)) = ls.ids.get(&id) {
                     slots[pos] = Some(Slot::InFlightHit {
                         request_id: id,
-                        outcome: outcome.clone(),
+                        outcome: e.commands[*i as usize].outcome.clone(),
                     });
                     continue;
                 }
+                let cmd = match cmd {
+                    Command::MultiPush(mp) => {
+                        if let Some(&m) = multi_of.get(&id) {
+                            // A second copy in this batch (a client retry):
+                            // answered with the first one's result.
+                            multi_dups.push((pos, m));
+                            continue;
+                        }
+                        let dests = if routed.contains_key(&id) {
+                            None
+                        } else {
+                            ls.split_multi(r, &mp, &busy)?
+                        };
+                        match dests {
+                            Some(dests) => {
+                                let m = multis.len();
+                                multi_of.insert(id, m);
+                                let groups = mp.pushes.len();
+                                for (g, (push, (d, known_pid))) in
+                                    mp.pushes.into_iter().zip(dests).enumerate()
+                                {
+                                    let mut piece = Piece {
+                                        multi: m,
+                                        group: g,
+                                        push,
+                                        create_pid: None,
+                                        known_pid,
+                                    };
+                                    match d {
+                                        Dest::Lane(l) => lane_pieces[l as usize].push(piece),
+                                        _ => {
+                                            let hint = piece
+                                                .push
+                                                .items
+                                                .iter()
+                                                .map(|i| i.frame.len() + 16)
+                                                .sum::<usize>()
+                                                + 64;
+                                            match new_part_dest(
+                                                &mut new_parts,
+                                                &mut local_creates,
+                                                assign_base,
+                                                &piece.push,
+                                                local_create_ok(hint, entry_max),
+                                            ) {
+                                                NewPart::Local(pid) => {
+                                                    piece.create_pid = Some(pid);
+                                                    lane_pieces[(pid % n) as usize].push(piece);
+                                                }
+                                                NewPart::Step => create_pieces.push(piece),
+                                            }
+                                        }
+                                    }
+                                }
+                                multis.push(MultiRoute { pos, id, groups });
+                                continue;
+                            }
+                            None => Command::MultiPush(mp),
+                        }
+                    }
+                    other => other,
+                };
                 let dest = match routed.get(&id) {
                     Some(d) => *d,
                     None => {
@@ -1519,11 +2176,64 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
                     }
                 }
                 match dest {
+                    Dest::SplitAck => match cmd {
+                        Command::Ack(c) => {
+                            if let Some(&a) = ack_of.get(&id) {
+                                ack_dups.push((pos, a));
+                                continue;
+                            }
+                            let a = acks.len();
+                            ack_of.insert(id, a);
+                            let total = c.targets.len();
+                            let mut per: Vec<(Vec<AckTarget>, Vec<usize>)> =
+                                (0..n).map(|_| (Vec::new(), Vec::new())).collect();
+                            for (i, t) in c.targets.into_iter().enumerate() {
+                                let l = (t.pid % n) as usize;
+                                per[l].0.push(t);
+                                per[l].1.push(i);
+                            }
+                            for (l, (targets, idx)) in per.into_iter().enumerate() {
+                                if !targets.is_empty() {
+                                    lane_acks[l].push(AckPiece {
+                                        ack: a,
+                                        sub: AckCommand {
+                                            request_id: id,
+                                            targets,
+                                        },
+                                        idx,
+                                    });
+                                }
+                            }
+                            acks.push(AckRoute {
+                                pos,
+                                id,
+                                targets: total,
+                            });
+                        }
+                        other => control.push((pos, other)),
+                    },
                     Dest::Lane(l) | Dest::Whole(l) => {
-                        per_lane[l as usize].push((pos, cmd, dest == Dest::Whole(l)));
+                        per_lane[l as usize].push((pos, cmd, dest == Dest::Whole(l), None));
                     }
                     Dest::Control => control.push((pos, cmd)),
-                    Dest::Create => creates.push((pos, cmd)),
+                    Dest::Create => {
+                        let local = match &cmd {
+                            Command::Push(c) => Some(new_part_dest(
+                                &mut new_parts,
+                                &mut local_creates,
+                                assign_base,
+                                c,
+                                local_create_ok(cmd.size_hint(), entry_max),
+                            )),
+                            _ => None,
+                        };
+                        match local {
+                            Some(NewPart::Local(pid)) => {
+                                per_lane[(pid % n) as usize].push((pos, cmd, false, Some(pid)))
+                            }
+                            _ => creates.push((pos, cmd)),
+                        }
+                    }
                     Dest::Empty => {
                         slots[pos] = Some(Slot::Empty(Outcome::Pop(PopOutcome::default())));
                     }
@@ -1551,6 +2261,28 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
         })?
     };
 
+    // The retention scanner's proposals: a watermark goes to its partition's
+    // lane, which judges it in parallel with the others; a partition delete
+    // (rare, and a name-keyed change) goes to control. A pid with a delete in
+    // flight is left for the next round.
+    let mut lane_retention: Vec<Vec<crate::rsm::retention_scan::Proposal>> =
+        (0..n).map(|_| Vec::new()).collect();
+    let mut control_retention: Vec<crate::rsm::retention_scan::Proposal> = Vec::new();
+    if let Some(scan) = scan.as_ref() {
+        for p in scan.take(crate::rsm::retention_scan::TAKE_PER_CYCLE) {
+            let pid = p.pid();
+            if busy.pids.contains(&pid) {
+                continue;
+            }
+            match p {
+                crate::rsm::retention_scan::Proposal::Watermark { .. } => {
+                    lane_retention[(pid % n) as usize].push(p)
+                }
+                crate::rsm::retention_scan::Proposal::Delete { .. } => control_retention.push(p),
+            }
+        }
+    }
+
     add(&LANE_STATS.router_us, t_router.elapsed().as_micros() as u64);
     // ---- the lanes, in parallel -------------------------------------------
     let t_lanes = std::time::Instant::now();
@@ -1565,13 +2297,22 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
         .collect();
     let mut waits = Vec::new();
     let mut ran = vec![false; n as usize];
-    for (l, cmds) in per_lane.into_iter().enumerate() {
+    for ((((l, cmds), retention), pieces), ack_pieces) in per_lane
+        .into_iter()
+        .enumerate()
+        .zip(lane_retention.into_iter())
+        .zip(lane_pieces.into_iter())
+        .zip(lane_acks.into_iter())
+    {
         // A lane with nothing to plan still runs while it keeps rings: they
         // must see every landed entry, and one that left the in-flight list
         // unseen drops them all, to be scanned afresh from `pending` (a full
         // scan per lane at every such cycle: seconds with millions of pending
         // partitions, 2026-09-29).
         if cmds.is_empty()
+            && retention.is_empty()
+            && pieces.is_empty()
+            && ack_pieces.is_empty()
             && ring_keys.is_empty()
             && !ls.lanes[l]
                 .lock()
@@ -1593,6 +2334,7 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
         let fl = lane_folded[l].clone();
         let cfg = cfg.clone();
         let keys = ring_keys.clone();
+        let lane_scan = scan.clone();
         let handed = std::time::Instant::now();
         let job = Box::new(move || {
             let w0 = std::time::Instant::now();
@@ -1613,6 +2355,10 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
                 now_us,
                 &keys,
                 cycle_no,
+                retention,
+                lane_scan,
+                pieces,
+                ack_pieces,
             );
             drop(st);
             let wall = w0.elapsed().as_micros() as u64;
@@ -1653,12 +2399,12 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
             let drops0 = pr.drops;
             pr.advance(r, &folded, store_applied, now_us)?;
             add(&LANE_STATS.ring_drops, pr.drops - drops0);
-            if cycle_no.is_multiple_of(RING_EVICT_EVERY) {
-                pr.evict_idle(cycle_no.saturating_sub(RING_IDLE_CYCLES));
+            if cycle_no.is_multiple_of(CONTROL_RING_EVICT_EVERY) {
+                pr.evict_idle(cycle_no.saturating_sub(CONTROL_RING_IDLE_CYCLES));
             }
             Ok(())
         });
-        if advanced.is_ok() {
+        if advanced.is_ok() && pr.keeps_any() {
             ls.control_rings = Some(pr);
         }
     }
@@ -1694,9 +2440,46 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
     // order), the rest answered or handed to control.
     let mut lane_parts: Vec<Option<(Entry, Entry)>> = (0..n).map(|_| None).collect();
     let mut lane_poisoned = vec![false; n as usize];
+    // Each multi-push group's result, by (multi-push, group): the lane that
+    // planned it (`CREATE_LANE` for the creation step), the group, the result.
+    let mut piece_res: Vec<Vec<Option<(u64, PushCommand, PieceResult)>>> = multis
+        .iter()
+        .map(|m| (0..m.groups).map(|_| None).collect())
+        .collect();
+    let mut ack_res: Vec<Vec<(u64, AckPieceOut)>> = acks.iter().map(|_| Vec::new()).collect();
+    for (l, out) in lane_outs.iter_mut().enumerate() {
+        let Some(out) = out.as_mut() else { continue };
+        for po in std::mem::take(&mut out.pieces) {
+            piece_res[po.multi][po.group] = Some((l as u64, po.push, po.result));
+        }
+        for ap in std::mem::take(&mut out.ack_pieces) {
+            ack_res[ap.ack].push((l as u64, ap));
+        }
+    }
+    // A multi-push with a group a lane could not plan (it would have created
+    // catalog state) is planned again, whole, by control; every lane that
+    // folded one of its groups keeps nothing of this cycle.
+    let mut multi_fallback: Vec<bool> = piece_res
+        .iter()
+        .map(|groups| {
+            groups
+                .iter()
+                .flatten()
+                .any(|(_, _, r)| matches!(r, PieceResult::Misrouted))
+        })
+        .collect();
+    for (m, groups) in piece_res.iter().enumerate() {
+        if multi_fallback[m] {
+            for (l, _, _) in groups.iter().flatten() {
+                if *l != CREATE_LANE {
+                    lane_poisoned[*l as usize] = true;
+                }
+            }
+        }
+    }
     for (l, out) in lane_outs.into_iter().enumerate() {
         let Some(out) = out else { continue };
-        lane_poisoned[l] = out.poisoned;
+        lane_poisoned[l] |= out.poisoned;
         if !out.part.commands.is_empty() {
             lane_parts[l] = Some((out.part, out.sub));
         }
@@ -1766,7 +2549,7 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
     let cycle_pid_base = ls.records.iter().map(|r| r.pid_hi).fold(base_pid, u64::max);
     let cycle_kv_base = ls.records.iter().map(|r| r.kv_hi).fold(base_kv, u64::max);
     let mut created: Vec<(RequestId, Outcome, Vec<Effect>)> = Vec::new();
-    if !creates.is_empty() {
+    if !creates.is_empty() || !create_pieces.is_empty() {
         let mut spill: Vec<(usize, Command)> = Vec::new();
         let st = store.clone();
         st.read(|r| {
@@ -1779,12 +2562,61 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
                 reader.clone(),
             );
             planner.set_qlog_reader(qlog_reader.clone());
-            let mut ov = Overlay::new(cycle_pid_base, cycle_kv_base);
+            // After the ids the router assigned to the lanes' own creates.
+            let mut ov = Overlay::new(cycle_pid_base + local_creates, cycle_kv_base);
             ov.mark_cycle_start();
             let mut seen: HashSet<RequestId> = HashSet::new();
             let mut ours: HashSet<Pid> = HashSet::new();
+            // The multi-pushes' new partitions first: the merge lays the
+            // multi-pushes out before the creations, and an entry's creates are
+            // dense from its pid base in entry order (I18). A group that plans
+            // anything but its partition and frames sends its whole multi-push
+            // to control, and every creation behind it (their ids would have
+            // followed its).
+            let mut multi_spilled = false;
+            for Piece {
+                multi, group, push, ..
+            } in std::mem::take(&mut create_pieces)
+            {
+                if multi_spilled || multi_fallback[multi] {
+                    multi_fallback[multi] = true;
+                    piece_res[multi][group] = Some((CREATE_LANE, push, PieceResult::Misrouted));
+                    continue;
+                }
+                let items_n = push.items.len();
+                let result = match planner.plan_push(&mut ov, &push) {
+                    Ok(Plan::Logged { effects, outcome }) => {
+                        for e in &effects {
+                            if let Effect::PartitionCreate { pid, .. } = e {
+                                ours.insert(*pid);
+                            }
+                        }
+                        let own = effects.iter().all(|e| match e {
+                            Effect::PartitionCreate { .. } => true,
+                            Effect::Append { pid, .. } => ours.contains(pid),
+                            _ => false,
+                        });
+                        if own {
+                            PieceResult::Logged {
+                                effects,
+                                stripped: Vec::new(),
+                                items: super::push_items(outcome, items_n),
+                            }
+                        } else {
+                            multi_spilled = true;
+                            multi_fallback[multi] = true;
+                            PieceResult::Misrouted
+                        }
+                    }
+                    Ok(Plan::Empty(outcome)) => {
+                        PieceResult::Empty(super::push_items(outcome, items_n))
+                    }
+                    Ok(Plan::Refused(refusal)) | Err(refusal) => PieceResult::Refused(refusal),
+                };
+                piece_res[multi][group] = Some((CREATE_LANE, push, result));
+            }
             for (pos, cmd) in std::mem::take(&mut creates) {
-                if !spill.is_empty() {
+                if !spill.is_empty() || multi_spilled {
                     spill.push((pos, cmd));
                     continue;
                 }
@@ -1830,16 +2662,230 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
         .create
         .fetch_add(created.len() as u64, std::sync::atomic::Ordering::Relaxed);
     add(&LANE_STATS.create_us, t_create.elapsed().as_micros() as u64);
+    // ---- multi-pushes -------------------------------------------------------
+    // A multi-push whose every group planned is ONE command: its groups'
+    // effects in group order, every item's verdict in input order. One that
+    // cannot be logged whole goes to control, rebuilt from its groups, and
+    // every lane that folded one of its groups keeps nothing of this cycle.
+    let mut multi_logged: Vec<MultiLogged> = Vec::with_capacity(multis.len());
+    let mut spent: Vec<PushCommand> = Vec::new();
+    for (m, mr) in multis.iter().enumerate() {
+        let groups: Vec<Option<(u64, PushCommand, PieceResult)>> =
+            std::mem::take(&mut piece_res[m]);
+        let lost = groups.iter().any(Option::is_none);
+        if multi_fallback[m] || lost {
+            for (l, _, _) in groups.iter().flatten() {
+                if *l != CREATE_LANE && !lane_poisoned[*l as usize] {
+                    lane_poisoned[*l as usize] = true;
+                    ls.lanes[*l as usize].lock().expect("lane state").kept = None;
+                }
+            }
+            if lost {
+                slots[mr.pos] = Some(Slot::Immediate(Reply::Refused(Refusal::retry(
+                    "internal",
+                    "a multi-push group was lost between the lanes",
+                ))));
+            } else {
+                let pushes: Vec<PushCommand> =
+                    groups.into_iter().flatten().map(|(_, p, _)| p).collect();
+                control.push((
+                    mr.pos,
+                    Command::MultiPush(MultiPushCommand {
+                        request_id: mr.id,
+                        pushes,
+                    }),
+                ));
+            }
+            multi_fallback[m] = true;
+            continue;
+        }
+        let mut effects: Vec<Effect> = Vec::with_capacity(groups.len());
+        let mut items: Vec<crate::rsm::entry::PushVerdict> = Vec::with_capacity(groups.len());
+        let mut lane_subs: Vec<(u64, Vec<Effect>)> = Vec::new();
+        let mut routed_fx: Vec<Effect> = Vec::new();
+        spent.reserve(groups.len());
+        for (l, push, res) in groups.into_iter().flatten() {
+            match res {
+                PieceResult::Logged {
+                    effects: e,
+                    stripped,
+                    items: it,
+                } => {
+                    if l == CREATE_LANE {
+                        routed_fx.extend(e.iter().map(strip));
+                    } else {
+                        match lane_subs.iter_mut().find(|(x, _)| *x == l) {
+                            Some((_, v)) => v.extend(stripped),
+                            None => lane_subs.push((l, stripped)),
+                        }
+                    }
+                    effects.extend(e);
+                    items.extend(it);
+                }
+                PieceResult::Empty(it) => items.extend(it),
+                PieceResult::Refused(refusal) => {
+                    items.extend(super::refused_items(&refusal, push.items.len()))
+                }
+                PieceResult::Misrouted => {}
+            }
+            spent.push(push);
+        }
+        let outcome = Outcome::Push(crate::rsm::entry::PushOutcome { items });
+        if effects.is_empty() {
+            slots[mr.pos] = Some(Slot::Empty(outcome));
+        } else {
+            slots[mr.pos] = Some(Slot::Logged(mr.id));
+            multi_logged.push(MultiLogged {
+                id: mr.id,
+                outcome,
+                effects,
+                lane_subs,
+                routed: routed_fx,
+            });
+        }
+    }
+    if !spent.is_empty() {
+        drop_later(spent);
+    }
+    // ---- split acks ----------------------------------------------------------
+    // One command each: every lane's share in lane order, the results back in
+    // target order. A refusal of any share refuses the whole ack, as the single
+    // planner does; a share a lane could not plan sends the whole ack to
+    // control. Either way every lane that folded a share keeps nothing of
+    // this cycle.
+    let mut ack_logged: Vec<AckLogged> = Vec::new();
+    let mut ack_fallback: Vec<bool> = acks.iter().map(|_| false).collect();
+    for (a, ar) in acks.iter().enumerate() {
+        let mut parts = std::mem::take(&mut ack_res[a]);
+        parts.sort_by_key(|(l, _)| *l);
+        let covered: usize = parts.iter().map(|(_, p)| p.idx.len()).sum();
+        let misrouted = covered != ar.targets
+            || parts
+                .iter()
+                .any(|(_, p)| matches!(p.result, AckPieceResult::Misrouted));
+        let refused: Option<Refusal> = parts
+            .iter()
+            .filter_map(|(_, p)| match &p.result {
+                AckPieceResult::Refused(r) => p.idx.first().map(|i| (*i, r.clone())),
+                _ => None,
+            })
+            .min_by_key(|(i, _)| *i)
+            .map(|(_, r)| r);
+        if misrouted || refused.is_some() {
+            for (l, p) in &parts {
+                if matches!(p.result, AckPieceResult::Logged { .. }) && !lane_poisoned[*l as usize]
+                {
+                    lane_poisoned[*l as usize] = true;
+                    ls.lanes[*l as usize].lock().expect("lane state").kept = None;
+                }
+            }
+            if let Some(refusal) = refused {
+                slots[ar.pos] = Some(Slot::Immediate(Reply::Refused(refusal)));
+            } else {
+                // Rebuilt in input order for control.
+                let mut targets: Vec<(usize, AckTarget)> = Vec::with_capacity(ar.targets);
+                for (_, p) in parts {
+                    targets.extend(p.idx.into_iter().zip(p.sub.targets));
+                }
+                targets.sort_by_key(|(i, _)| *i);
+                control.push((
+                    ar.pos,
+                    Command::Ack(AckCommand {
+                        request_id: ar.id,
+                        targets: targets.into_iter().map(|(_, t)| t).collect(),
+                    }),
+                ));
+                ack_fallback[a] = true;
+            }
+            continue;
+        }
+        let mut results: Vec<Option<crate::rsm::entry::AckResult>> = vec![None; ar.targets];
+        let mut effects: Vec<Effect> = Vec::new();
+        let mut lane_subs: Vec<(u64, Vec<Effect>)> = Vec::new();
+        for (l, p) in parts {
+            match p.result {
+                AckPieceResult::Logged {
+                    effects: e,
+                    stripped,
+                    results: rs,
+                } => {
+                    for (i, r) in p.idx.into_iter().zip(rs) {
+                        results[i] = Some(r);
+                    }
+                    effects.extend(e);
+                    lane_subs.push((l, stripped));
+                }
+                AckPieceResult::Empty(rs) => {
+                    for (i, r) in p.idx.into_iter().zip(rs) {
+                        results[i] = Some(r);
+                    }
+                }
+                AckPieceResult::Refused(_) | AckPieceResult::Misrouted => {}
+            }
+        }
+        let Some(results) = results.into_iter().collect::<Option<Vec<_>>>() else {
+            slots[ar.pos] = Some(Slot::Immediate(Reply::Refused(Refusal::retry(
+                "internal",
+                "a split ack lost a target between the lanes",
+            ))));
+            continue;
+        };
+        let outcome = Outcome::Ack(crate::rsm::entry::AckOutcome { results });
+        if effects.is_empty() {
+            slots[ar.pos] = Some(Slot::Empty(outcome));
+        } else {
+            slots[ar.pos] = Some(Slot::Logged(ar.id));
+            ack_logged.push(AckLogged {
+                id: ar.id,
+                outcome,
+                effects,
+                lane_subs,
+            });
+        }
+    }
+    for (pos, a) in std::mem::take(&mut ack_dups) {
+        let first = acks[a].pos;
+        slots[pos] = Some(if ack_fallback[a] {
+            Slot::Immediate(Reply::Retry { hint: None })
+        } else {
+            match &slots[first] {
+                Some(Slot::Logged(id)) => Slot::SameCycle(*id),
+                Some(Slot::Empty(o)) => Slot::Empty(o.clone()),
+                Some(Slot::Immediate(r)) => Slot::Immediate(r.clone()),
+                _ => Slot::Immediate(Reply::Retry { hint: None }),
+            }
+        });
+    }
+    // A second copy of a multi-push in the batch answers as its first did; one
+    // whose first went to control retries (control answers the first).
+    for (pos, m) in std::mem::take(&mut multi_dups) {
+        let first = multis[m].pos;
+        slots[pos] = Some(if multi_fallback[m] {
+            Slot::Immediate(Reply::Retry { hint: None })
+        } else {
+            match &slots[first] {
+                Some(Slot::Logged(id)) => Slot::SameCycle(*id),
+                Some(Slot::Empty(o)) => Slot::Empty(o.clone()),
+                Some(Slot::Immediate(r)) => Slot::Immediate(r.clone()),
+                _ => Slot::Immediate(Reply::Retry { hint: None }),
+            }
+        });
+    }
+    control.sort_by_key(|(pos, _)| *pos);
     // ---- control ------------------------------------------------------------
     let t_control = std::time::Instant::now();
     let needs_control = !control.is_empty()
+        || !control_retention.is_empty()
         || fire.is_some()
         || maintenance.is_some()
         || kv_sweep_limit.is_some()
         || expire_window_us.is_some();
     if !needs_control {
-        // Kept, advanced: the next cycle that plans control starts from here.
-        if let Some(Ok(k)) = prior_control.take() {
+        // Kept, advanced: the next cycle that plans control starts from here
+        // (B27: without its partition state once nobody has needed it for a
+        // while).
+        if let Some(Ok(mut k)) = prior_control.take() {
+            k.partitions(false, cycle_no);
             ls.control = Some(k);
         }
     }
@@ -1861,8 +2907,22 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
         st.read(|r| {
             let mut kept = match prior_control.take() {
                 Some(Ok(k)) => k,
-                _ => KeptOverlay::rebuild(&folded, store_applied, base_pid, base_kv),
+                _ => KeptOverlay::rebuild_catalog(&folded, store_applied, base_pid, base_kv),
             };
+            // B27: control folds the partition state of the entries in flight
+            // (every message's dedup occurrence, every cursor) only for a
+            // cycle that plans something reading it: a command other than KV
+            // and timers, a fire that may push, retention. In steady state
+            // control plans ~none of these, and the folds were the serial
+            // planner thread's biggest piece.
+            let reads_partitions = control
+                .iter()
+                .any(|(_, c)| !matches!(c, Command::Kv(_) | Command::Timers(_)))
+                || maintenance.is_some()
+                || !control_retention.is_empty()
+                || (fire.is_some()
+                    && crate::rsm::planner::timers::fire_may_push(r, kept.overlay(), now_us));
+            kept.partitions(reads_partitions, cycle_no);
             let tag = kept.begin_cycle();
             let folds0 = kept.overlay().folds();
             let ov = kept.overlay_mut();
@@ -1873,6 +2933,14 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
             // after them, seeing them.
             for (part, _) in lane_parts.iter().flatten() {
                 ov.apply_effects(&part.effects);
+            }
+            // Then the multi-pushes and the split acks, laid out right after
+            // the lanes' parts.
+            for ml in &multi_logged {
+                ov.apply_effects(&ml.effects);
+            }
+            for al in &ack_logged {
+                ov.apply_effects(&al.effects);
             }
             // Then the creations: control's own partitions take the ids after.
             for (_, _, effects) in &created {
@@ -1923,6 +2991,8 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
                 .iter()
                 .flatten()
                 .flat_map(|(part, _)| part.commands.iter().map(|c| c.request_id))
+                .chain(multi_logged.iter().map(|ml| ml.id))
+                .chain(ack_logged.iter().map(|al| al.id))
                 .chain(created.iter().map(|(id, _, _)| *id))
                 .collect();
             let start = std::time::Instant::now();
@@ -1938,7 +3008,15 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
                     slots[pos] = Some(Slot::SameCycle(id));
                     continue;
                 }
-                let slot = match cmd.plan(&planner, ov) {
+                let kind = cmd.kind();
+                let t_cmd = crate::rsm::timing::enabled().then(std::time::Instant::now);
+                let planned = cmd.plan(&planner, ov);
+                if let Some(t) = t_cmd {
+                    crate::rsm::timing::metrics()
+                        .kinds
+                        .record(kind, t.elapsed(), false);
+                }
+                let slot = match planned {
                     Ok(Plan::Logged { effects, outcome }) => {
                         match entry.add_command(id, outcome.clone(), effects) {
                             Ok(()) => {
@@ -1979,6 +3057,21 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
                         .is_ok()
                     {
                         ov.apply_effects(&planned.effects);
+                    }
+                }
+            }
+            // The scanner's partition deletes, judged against committed state
+            // and everything in flight (a partition touched in flight is kept).
+            if let (false, Some(scan)) = (control_retention.is_empty(), scan.as_ref()) {
+                let (effects, _dropped) =
+                    crate::rsm::retention_scan::judge(r, ov, now_us, scan, &control_retention)?;
+                if !effects.is_empty() {
+                    let id = crate::util::uuidv7_bytes();
+                    if entry
+                        .add_command(id, Outcome::Empty, effects.clone())
+                        .is_ok()
+                    {
+                        ov.apply_effects(&effects);
                     }
                 }
             }
@@ -2044,8 +3137,27 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
         now_us,
         pid_base,
         kv_base,
-        lane_cmds as usize + created.len() + control_logged.len(),
+        lane_cmds as usize
+            + multi_logged.len()
+            + ack_logged.len()
+            + created.len()
+            + control_logged.len(),
     );
+    // Every effect the entry gets, reserved once: grown by doubling, a cycle of
+    // ~20k effects was copied several times over on this thread.
+    let effects_total: usize = lane_parts
+        .iter()
+        .flatten()
+        .map(|(part, _)| part.effects.len())
+        .sum::<usize>()
+        + multi_logged.iter().map(|m| m.effects.len()).sum::<usize>()
+        + ack_logged.iter().map(|a| a.effects.len()).sum::<usize>()
+        + created.iter().map(|(_, _, e)| e.len()).sum::<usize>()
+        + control_logged
+            .iter()
+            .map(|(_, _, e)| e.len())
+            .sum::<usize>();
+    full.effects.reserve(effects_total);
     let mut subs: Vec<Entry> = Vec::with_capacity(n as usize);
     for part in lane_parts {
         let mut sub = match part {
@@ -2064,6 +3176,50 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
     // order, folded into the lane's overlay under this cycle's tag and recorded
     // in its slice: a created partition's lane holds its create from now on.
     let mut routed: Vec<Vec<Effect>> = (0..n).map(|_| Vec::new()).collect();
+    // The multi-pushes first (entry order): each lane's share goes into its
+    // slice as one command under the multi-push's id, their new partitions to
+    // those partitions' lanes like any creation.
+    for ml in multi_logged {
+        for (l, stripped) in ml.lane_subs {
+            if subs[l as usize]
+                .add_command(ml.id, Outcome::Empty, stripped)
+                .is_err()
+            {
+                lane_poisoned[l as usize] = true;
+            }
+        }
+        for e in ml.routed {
+            match lanes_of(&e, n) {
+                LanesOf::One(l) => routed[l as usize].push(e),
+                LanesOf::All => {
+                    for rt in routed.iter_mut() {
+                        rt.push(e.clone());
+                    }
+                }
+                LanesOf::None => {}
+            }
+        }
+        if let Err(e) = full.add_command(ml.id, ml.outcome, ml.effects) {
+            return Err(crate::rsm::store::StoreError::Io(format!(
+                "multi-push entry build: {e:?}"
+            )));
+        }
+    }
+    for al in ack_logged {
+        for (l, stripped) in al.lane_subs {
+            if subs[l as usize]
+                .add_command(al.id, Outcome::Empty, stripped)
+                .is_err()
+            {
+                lane_poisoned[l as usize] = true;
+            }
+        }
+        if let Err(e) = full.add_command(al.id, al.outcome, al.effects) {
+            return Err(crate::rsm::store::StoreError::Io(format!(
+                "split ack entry build: {e:?}"
+            )));
+        }
+    }
     for (id, outcome, effects) in created.into_iter().chain(control_logged) {
         for e in &effects {
             match lanes_of(e, n) {
@@ -2080,6 +3236,35 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
             return Err(crate::rsm::store::StoreError::Io(format!(
                 "control entry build: {e:?}"
             )));
+        }
+    }
+    // Lane-local creation hands out ids before the lanes plan: one a lane did
+    // not end up creating (a multi-push that fell back to control after its
+    // lane created a partition for it — rare by construction: the router sends
+    // a lane only pushes to committed, quiet queues and small enough to plan)
+    // would leave the entry's ids not dense, which no node may apply. Refuse
+    // the cycle RETRYABLY instead (every lane rebuilds; the commands come back
+    // with their request ids), rather than let the encoder refuse its commands
+    // for good.
+    if local_creates > 0 {
+        let mut ids: Vec<u64> = full
+            .effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::PartitionCreate { pid, .. } => Some(*pid),
+                _ => None,
+            })
+            .collect();
+        ids.sort_unstable();
+        let dense = ids
+            .iter()
+            .enumerate()
+            .all(|(i, pid)| *pid == full.pid_base + i as u64);
+        if !dense {
+            ls.reset();
+            return Err(crate::rsm::store::StoreError::Io(
+                "a lane-assigned partition id was not created this cycle; planned again".into(),
+            ));
         }
     }
     let entry = if full.commands.is_empty() {
@@ -2119,10 +3304,10 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
             }
             sub_arcs.push(sub);
         }
-        for c in &full.commands {
-            ls.ids.insert(c.request_id, c.outcome.clone());
+        for (i, c) in full.commands.iter().enumerate() {
+            ls.ids.insert(c.request_id, (full.clone(), i as u32));
         }
-        ls.records.push_back(record_of(full.clone(), sub_arcs));
+        ls.push_record(record_of(full.clone(), sub_arcs));
     }
     // Control keeps its overlay when it folded exactly this cycle's entry
     // (lanes, creations, control, in entry order): the entry is then in
@@ -2228,7 +3413,7 @@ mod whole_lane_tests {
             .plan_entry(&[h::push(12, "one", "p1", &["d"])], None)
             .expect("an entry that creates one/p1");
         let subs = split(&entry, N);
-        ls.records.push_back(record_of(Arc::new(entry), subs));
+        ls.push_record(record_of(Arc::new(entry), subs));
         assert!(
             matches!(route(&mut ls, &cell, &wildcard(13, "one")), Dest::Lane(_)),
             "a partition in flight: the lane is a guess"
@@ -2532,7 +3717,7 @@ mod router_tests {
             .plan_entry(&[h::pop_pinned(15, "q", "b", "g3", "w1")], None)
             .expect("an entry that leases b to w1");
         let subs = split(&entry, N);
-        ls.records.push_back(record_of(Arc::new(entry), subs));
+        ls.push_record(record_of(Arc::new(entry), subs));
         assert_eq!(route(&mut ls, &cell, &renew(16, "w1")), Dest::Control);
     }
 
@@ -2576,7 +3761,7 @@ mod router_tests {
             })
             .expect("a create");
         let subs = split(&entry, N);
-        ls.records.push_back(record_of(Arc::new(entry), subs));
+        ls.push_record(record_of(Arc::new(entry), subs));
         cycle(&mut ls, &cell);
         assert_eq!(
             route(&mut ls, &cell, &push(14, "q", "b")),

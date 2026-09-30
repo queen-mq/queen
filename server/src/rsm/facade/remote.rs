@@ -7,13 +7,19 @@
 //! whose batcher plans it with every other command; the reply comes back with
 //! the index its entry landed at, and the follower waits until it has applied
 //! that index itself before it answers — so a pop reads its payloads from the
-//! follower's own queue logs, and a client reads its own writes wherever it
-//! connects.
+//! follower's own queue logs. A push or an ack whose answer renders from its
+//! outcome alone waits less: until the follower knows the entry committed with
+//! the reply's term, one append after the leader's commit, however far behind
+//! its apply runs (`QUEEN_RAFT_FOLLOWER_ANSWER_AT_DONE`, `RaftFacade::submit_offloaded`).
+//! A read of this node's state after such an answer takes the read barrier,
+//! as a read after another node's answer always had to.
 //!
 //! The request and the reply travel as postcard (payload bytes as raw bytes),
-//! over the Raft RPC listener (`/raft/v1/submit`), with the cluster token.
-//! A retried command keeps its request id, so a reply lost in transit and a
-//! retry never plan it twice (I6).
+//! over the Raft RPC listener, with the cluster token: many to a write over the
+//! follower's streams (`/raft/v1/forward`, [`crate::rsm::replicator::raft`]'s
+//! `forward`), or one `/raft/v1/submit` call each (`QUEEN_RAFT_FWD_BATCH=0`, or
+//! a leader that predates the streams). A retried command keeps its request
+//! id, so a reply lost in transit and a retry never plan it twice (I6).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -127,38 +133,46 @@ pub(super) fn decode_reply(b: &[u8]) -> Result<(Reply, u64), RsmError> {
 }
 
 /// The leader side: plan a follower's prepared command through this node's
-/// batcher, under the push admission budget, and answer the encoded reply.
+/// batcher, under the push admission budget (its share of it: `from` names
+/// the follower, [`crate::rsm::admit`]), and answer the encoded reply.
 /// `cmd_tx` is weak, so a follower's request never keeps a stopped facade's
 /// batcher alive.
 pub(super) async fn serve(
     cmd_tx: tokio::sync::mpsc::WeakSender<Submission>,
     admit: Option<&'static crate::rsm::admit::AdmitGate>,
     applied: Arc<dyn Fn() -> u64 + Send + Sync>,
+    from: crate::rsm::admit::Source,
     body: bytes::Bytes,
 ) -> Result<bytes::Bytes, String> {
     let req: SubmitReq =
         postcard::from_bytes(&body).map_err(|e| format!("prepared command: {e}"))?;
     let deadline = Instant::now() + Duration::from_millis(req.budget_ms.clamp(1, 120_000));
-    let reply = submit_local(cmd_tx, admit, req.command, deadline).await;
+    let reply = submit_local(cmd_tx, admit, from, req.command, deadline).await;
     Ok(bytes::Bytes::from(encode_reply(reply, applied())))
 }
 
 async fn submit_local(
     cmd_tx: tokio::sync::mpsc::WeakSender<Submission>,
     admit: Option<&'static crate::rsm::admit::AdmitGate>,
+    from: crate::rsm::admit::Source,
     command: Command,
     deadline: Instant,
 ) -> Result<Reply, RsmError> {
+    // The follower's own edge admitted the request as its memory guard; the
+    // leader decides how the planner's budget is shared, and answers an
+    // explicit overload (the follower's 429) well within the caller's time.
     let _admitted = match (admit, command.grows_storage()) {
-        (Some(gate), true) => {
-            Some(
-                gate.admit(command.size_hint())
-                    .await
-                    .map_err(|o| RsmError::Overloaded {
-                        retry_after_s: o.retry_after_s,
-                    })?,
+        (Some(gate), true) => Some(
+            gate.admit_forwarded(
+                from,
+                command.size_hint(),
+                deadline.saturating_duration_since(Instant::now()),
             )
-        }
+            .await
+            .map_err(|o| RsmError::Overloaded {
+                retry_after_s: o.retry_after_s,
+            })?,
+        ),
         _ => None,
     };
     let Some(tx) = cmd_tx.upgrade() else {
@@ -181,16 +195,43 @@ async fn submit_local(
 }
 
 /// The handler a cluster node installs on its replicator.
+///
+/// The Raft RPC server runs on the `queen-raft` runtime, whose few threads
+/// also carry openraft's core, the replication to every follower and the
+/// votes: a follower's command decoded, admitted and awaited there queued the
+/// commits behind it. Called from that runtime, the handler hands the work to
+/// the runtime the facade opened on (the client-facing one) and only awaits
+/// the answer there; called from anywhere else (the batched intake, which
+/// already runs off it) it runs in place.
 pub(super) fn handler(
     cmd_tx: &CommandTx,
     admit: Option<&'static crate::rsm::admit::AdmitGate>,
     applied: Arc<dyn Fn() -> u64 + Send + Sync>,
 ) -> crate::rsm::replicator::raft::RemoteHandler {
+    type Answer =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<bytes::Bytes, String>> + Send>>;
     let weak = cmd_tx.downgrade();
-    Arc::new(move |body| {
-        let weak = weak.clone();
-        Box::pin(serve(weak, admit, applied.clone(), body))
+    let clients = tokio::runtime::Handle::try_current().ok();
+    Arc::new(move |body: bytes::Bytes| -> Answer {
+        let from = crate::rsm::admit::forwarded_from();
+        let fut = serve(weak.clone(), admit, applied.clone(), from, body);
+        match &clients {
+            Some(rt) if on_raft_runtime() => {
+                let task = rt.spawn(fut);
+                Box::pin(async move {
+                    task.await
+                        .map_err(|e| format!("the forwarded command's task: {e}"))?
+                })
+            }
+            _ => Box::pin(fut),
+        }
     })
+}
+
+/// Whether the calling thread is one of the `queen-raft` runtime's
+/// (`replicator::raft`, `QUEEN_RAFT_RT_THREADS`).
+fn on_raft_runtime() -> bool {
+    std::thread::current().name() == Some("queen-raft")
 }
 
 #[cfg(test)]
@@ -199,6 +240,64 @@ mod tests {
     use crate::rsm::planner::positions::PositionOp;
     use crate::rsm::planner::txn::TxnCommand;
     use crate::rsm::planner::SubIntent;
+
+    /// Called from a `queen-raft` thread (the per-command route of the Raft RPC
+    /// server), the handler works the command on the runtime the facade
+    /// installed it from: it reaches the batcher while the raft runtime's only
+    /// thread is busy, and the raft runtime only awaits the encoded reply.
+    #[test]
+    fn a_command_from_the_raft_runtime_is_worked_on_the_clients_runtime() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let rt = |name: &str| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_name(name)
+                .enable_all()
+                .build()
+                .expect("runtime")
+        };
+        let (clients, raft) = (rt("clients"), rt("queen-raft"));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Submission>(8);
+        let h = clients.block_on(async { handler(&tx, None, Arc::new(|| 7)) });
+        let reached = Arc::new(AtomicBool::new(false));
+        let seen = reached.clone();
+        clients.spawn(async move {
+            while let Some(sub) = rx.recv().await {
+                seen.store(true, Ordering::SeqCst);
+                let _ = sub.reply.send(Reply::Retry { hint: Some(3) });
+            }
+        });
+        let cmd = Command::Nack(crate::rsm::planner::NackCommand {
+            request_id: [9; 16],
+            pid: 1,
+            tenant: String::new(),
+            queue: String::new(),
+            group: "g".into(),
+            worker: "w".into(),
+        });
+        let body = bytes::Bytes::from(encode_request(&cmd, Duration::from_secs(5)).unwrap());
+        let answer = raft
+            .block_on(raft.spawn(async move {
+                assert!(on_raft_runtime(), "called on the raft runtime");
+                let answer = h(body);
+                // The raft runtime's one thread stays busy: worked here, the
+                // command would not even start before it is awaited.
+                let t0 = std::time::Instant::now();
+                while !reached.load(Ordering::SeqCst) && t0.elapsed() < Duration::from_secs(5) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                assert!(
+                    reached.load(Ordering::SeqCst),
+                    "the command reached the batcher while the raft thread was busy"
+                );
+                answer.await
+            }))
+            .expect("the raft runtime's task");
+        let (reply, _) = decode_reply(&answer.expect("answered")).expect("decodes");
+        assert!(matches!(reply, Reply::Retry { hint: Some(3) }), "{reply:?}");
+        assert!(!on_raft_runtime(), "a test thread is not a raft one");
+        drop(tx);
+    }
 
     /// A follower's prepared transaction reaches the leader with its positions
     /// rider intact: the offload path is how a commit made on a follower is

@@ -94,7 +94,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
+use smallvec::SmallVec;
+
 use crate::rsm::effect::{CursorRow, Pid, QueueConfig};
+use crate::rsm::fasthash::FxBuild;
 use crate::rsm::store::keys::Counter;
 use crate::rsm::store::rows::{GarbageRow, GroupRow, PartitionRow};
 use crate::rsm::store::{Reads, Result, TypedReads};
@@ -768,7 +771,7 @@ impl Derived {
 /// row, an append's row in every kept ring of its queue, a partition delete's
 /// rows; a group or queue delete, a registration (which arms every predating
 /// partition) or a tenant purge drops the rings it touches, to be scanned
-/// afresh when next needed. Every effect kind is named in that match, so a new
+/// afresh when needed. Every effect kind is named in that match, so a new
 /// kind is a compile error there rather than a silent drift. Anything it
 /// cannot account for — a gap in the landed indexes, a partition row it can no
 /// longer find, the applied index going back — drops every ring.
@@ -780,26 +783,115 @@ impl Derived {
 /// re-verifies (the module header), so this is at most one cycle of lag,
 /// never a stranded partition. With apply quiescent between cycles (the gate
 /// test) the mirror equals the rebuild exactly.
+///
+/// # A lane's rings are PLANNED (B14)
+///
+/// A lane ([`PlanRings::set_lane`]) moves the rows its own entries write to
+/// their planned state — what apply will write once they land
+/// ([`PlanRings::plan_set`]) — so what it tells the router counts its claims,
+/// acks and appends in flight. A row is planned ONCE, when the effect that
+/// writes it is planned (or, for what the creation step and control route to
+/// the lane, in the lane's next job: [`PlanRings::rows_to_plan`]), and a
+/// landing re-reads a row only when no entry still in flight writes it: the
+/// row then stays at the planned state of its newest writer until that one
+/// lands. (It was re-planned for every entry in flight, every cycle: 3-7
+/// times per row, at ~5 store reads and ~10 allocations each.) A cycle that
+/// scanned a ring afresh plans every row in flight again, since a scanned
+/// ring holds the committed rows.
+///
+/// # Promotion is O(due) (B28)
+///
+/// `due` files every ring under its earliest deferred instant, kept in step
+/// by every change to a ring's deferred rows, so [`PlanRings::promote`]
+/// touches only the rings that have a row due. It walked every kept ring of
+/// every lane every cycle (~20% of lane CPU at 10,000 queues).
+///
+/// # Checked, a little every cycle (B34)
+///
+/// Every [`VERIFY_EVERY`]th [`PlanRings::advance`] compares up to
+/// [`VERIFY_ROWS`] rows of the kept rings with `pending`, in both directions,
+/// resuming where the last check stopped; rows an entry in flight writes are skipped (the mirror may
+/// rightly differ there). A ring that differs is dropped, counted
+/// (`verify_drops`), and scanned afresh when next needed. This bounds how
+/// long an undetected drift can live without the stall of dropping every
+/// ring at once (every 16,384 cycles, all of them rescanned: seconds with
+/// millions of pending partitions).
 #[derive(Debug, Default)]
 pub struct PlanRings {
-    /// tenant → queue → group → ring. `BTreeMap`s: nothing here may depend on
-    /// hash-map order.
-    rings: BTreeMap<String, BTreeMap<String, BTreeMap<String, PlanRing>>>,
+    /// tenant → queue → group → the kept ring. `BTreeMap`s: nothing here may
+    /// depend on hash-map order.
+    names: BTreeMap<String, BTreeMap<String, BTreeMap<String, RingId>>>,
+    /// `names` for lookups: the hash of `(tenant, queue, group)` → the ids
+    /// filed under it (a ring's own key tells them apart; ids of rings no
+    /// longer kept are skipped, and pruned with `names`). The router looks a
+    /// ring up in every lane for every wildcard pop's ring each cycle, and
+    /// three `BTreeMap` levels of long, alike names were ~45% of the planner
+    /// thread in `memcmp` at 10k queues (2026-09-30).
+    by_hash: HashMap<u64, SmallVec<[RingId; 1]>, FxBuild>,
+    /// The kept rings, by id (ids are never reused).
+    rings: BTreeMap<RingId, PlanRing>,
+    next_id: RingId,
+    /// B28: `(earliest deferred instant, ring)` for every ring with a
+    /// deferred row.
+    due: BTreeSet<(i64, RingId)>,
     /// The instant the rings are promoted to.
     now_us: i64,
     /// Every entry at or below this index is reflected in the rings.
     landed_to: u64,
     /// `pid → (tenant, queue)`, read once from the partition row (a partition
     /// never changes queue, and pids are never reused).
-    queue_of: HashMap<Pid, (String, String), crate::rsm::fasthash::FxBuild>,
+    queue_of: HashMap<Pid, (String, String), FxBuild>,
     /// Rings scanned from `pending` (first use, or again after a drop).
     pub loads: u64,
     /// Times every ring was dropped because an entry could not be accounted
     /// for.
     pub drops: u64,
+    /// B34: rings dropped because a row differed from `pending`.
+    pub verify_drops: u64,
     /// `(lane, lanes)`: a lane's rings hold only its own partitions
-    /// (`pid % lanes == lane`), the ones only it may claim.
+    /// (`pid % lanes == lane`), the ones only it may claim — and are planned.
     lane: Option<(u64, u64)>,
+    /// B14: every entry in flight at or below this index has had its rows
+    /// planned.
+    rows_planned_to: u64,
+    /// B14: the request ids of the commands the last job logged and planned
+    /// the rows of (their entry is the next one to show up in flight).
+    own: HashSet<crate::rsm::entry::RequestId, FxBuild>,
+    /// B34: where the check stands.
+    verify: VerifyCursor,
+    /// B34: the advances so far (the check runs every [`VERIFY_EVERY`]).
+    advances: u64,
+}
+
+type RingId = u64;
+
+/// The key of [`PlanRings::by_hash`].
+fn ring_hash(tenant: &str, queue: &str, group: &str) -> u64 {
+    use std::hash::BuildHasher;
+    FxBuild::default().hash_one((tenant, queue, group))
+}
+
+/// B34: every this many cycles [`PlanRings::advance`] checks up to
+/// [`VERIFY_ROWS`] rows of one ring against `pending`, in each direction: ~64
+/// rows a cycle, so a pass over 10M pending rows takes ~160,000 cycles — the
+/// old reset came every 16,384 and rescanned all of them at once. Not every
+/// cycle, because the check must know every row the entries in flight write
+/// (an O(effects in flight) pass, which control's rings otherwise skip).
+pub const VERIFY_EVERY: u64 = 4;
+/// B34: see [`VERIFY_EVERY`].
+pub const VERIFY_ROWS: usize = 256;
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: the rings the check dropped on this thread. A test that plans on
+    /// its own thread with apply quiescent between cycles asserts it stays 0.
+    static VERIFY_DROPS_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Tests: how many kept rings the check has dropped on this thread.
+#[cfg(test)]
+pub fn verify_drops_on_this_thread() -> u64 {
+    VERIFY_DROPS_HERE.with(|c| c.get())
 }
 
 /// What one lane's kept ring can give a wildcard pop at the router's clock
@@ -821,10 +913,11 @@ pub struct RingView {
 pub const RING_VIEW_ROWS: usize = 8;
 
 /// One kept ring: the `pending` rows of one (tenant, queue, group).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct PlanRing {
+    key: RingKey,
     /// `pid → ready_at`: the rows, exactly.
-    at: HashMap<Pid, i64, crate::rsm::fasthash::FxBuild>,
+    at: HashMap<Pid, i64, FxBuild>,
     /// `(ready_at, pid)` for the rows with `ready_at <= now`: what the walk
     /// offers, the partition that has waited longest first.
     ready: BTreeSet<(i64, Pid)>,
@@ -832,9 +925,22 @@ struct PlanRing {
     deferred: BTreeSet<(i64, Pid)>,
     /// The last cycle whose batch walked this ring (idle rings are evicted).
     last_used: u64,
+    /// The instant this ring is filed under in [`PlanRings::due`].
+    due_at: Option<i64>,
 }
 
 impl PlanRing {
+    fn new(key: RingKey, last_used: u64) -> PlanRing {
+        PlanRing {
+            key,
+            at: HashMap::default(),
+            ready: BTreeSet::new(),
+            deferred: BTreeSet::new(),
+            last_used,
+            due_at: None,
+        }
+    }
+
     /// Mirror one `pending` row: `Some(ready_at)` written, `None` deleted.
     fn set(&mut self, pid: Pid, at: Option<i64>, now_us: i64) {
         if let Some(old) = self.at.remove(&pid) {
@@ -877,8 +983,119 @@ impl PlanRing {
     }
 }
 
+/// B28: file `ring` under its earliest deferred instant, if that changed.
+fn sync_due(due: &mut BTreeSet<(i64, RingId)>, id: RingId, ring: &mut PlanRing) {
+    let next = ring.deferred.first().map(|(at, _)| *at);
+    if next == ring.due_at {
+        return;
+    }
+    if let Some(at) = ring.due_at {
+        due.remove(&(at, id));
+    }
+    if let Some(at) = next {
+        due.insert((at, id));
+    }
+    ring.due_at = next;
+}
+
+/// B34: where the check of the kept rings stands.
+#[derive(Debug, Default)]
+struct VerifyCursor {
+    /// The ring being checked; `None`: the next ring after `last`.
+    ring: Option<RingId>,
+    last: RingId,
+    /// `pending` → ring: the last pid checked.
+    pending_after: Option<Pid>,
+    /// Done with `pending`; the ring's own rows → `pending` now, ready ones
+    /// first (`deferred` once they are done), from just past `rows_after`.
+    rows: bool,
+    deferred: bool,
+    rows_after: Option<(i64, Pid)>,
+}
+
+/// What the entries still in flight write in the rings: `pending` rows (an
+/// append or a partition delete: every group's row of the pid; a cursor
+/// write: its own) and whole rings (a registration, a group or queue delete,
+/// a purge). Borrowed from the entries, built once per cycle.
+#[derive(Default)]
+struct InFlightRows<'e> {
+    appended: HashSet<Pid, FxBuild>,
+    deleted: HashSet<Pid, FxBuild>,
+    cursors: HashMap<Pid, SmallVec<[&'e str; 2]>, FxBuild>,
+    groups: Vec<(&'e str, &'e str, &'e str)>,
+    queues: Vec<(&'e str, &'e str)>,
+    tenants: Vec<&'e str>,
+}
+
+impl<'e> InFlightRows<'e> {
+    fn of(
+        folded: &'e [(u64, std::sync::Arc<crate::rsm::entry::Entry>)],
+        applied: u64,
+    ) -> InFlightRows<'e> {
+        use crate::rsm::effect::Effect;
+        let mut f = InFlightRows::default();
+        for (index, e) in folded {
+            if *index <= applied {
+                continue;
+            }
+            for eff in &e.effects {
+                match eff {
+                    Effect::Append { pid, .. } => {
+                        f.appended.insert(*pid);
+                    }
+                    Effect::PartitionDelete { pid } => {
+                        f.deleted.insert(*pid);
+                    }
+                    Effect::DeleteChunk { pids, .. } => f.deleted.extend(pids.iter().copied()),
+                    Effect::CursorSet { pid, group, .. } | Effect::CursorDelete { pid, group } => {
+                        f.cursors.entry(*pid).or_default().push(group.as_str())
+                    }
+                    Effect::GroupUpsert {
+                        tenant,
+                        queue,
+                        group,
+                        ..
+                    }
+                    | Effect::GroupDelete {
+                        tenant,
+                        queue,
+                        group,
+                    } => f.groups.push((tenant, queue, group)),
+                    Effect::QueueDelete { tenant, queue } => f.queues.push((tenant, queue)),
+                    Effect::TenantPurge { tenant } => f.tenants.push(tenant),
+                    _ => {}
+                }
+            }
+        }
+        f
+    }
+
+    /// B14: an entry in flight moves `(pid, group)`'s row to a planned state.
+    fn plans(&self, pid: Pid, group: &str) -> bool {
+        self.appended.contains(&pid) || self.cursors.get(&pid).is_some_and(|gs| gs.contains(&group))
+    }
+
+    /// B34: an entry in flight writes `(pid, group)`'s row.
+    fn writes(&self, pid: Pid, group: &str) -> bool {
+        self.plans(pid, group) || self.deleted.contains(&pid)
+    }
+
+    /// B34: an entry in flight rewrites or drops the whole ring.
+    fn writes_ring(&self, key: &RingKey) -> bool {
+        let (t, q, g) = (key.0.as_str(), key.1.as_str(), key.2.as_str());
+        self.tenants.contains(&t)
+            || self.queues.iter().any(|(a, b)| *a == t && *b == q)
+            || self
+                .groups
+                .iter()
+                .any(|(a, b, c)| *a == t && *b == q && *c == g)
+    }
+}
+
 impl PlanRings {
-    /// Keep only lane `lane`'s partitions (of `lanes`) from now on.
+    /// Keep only lane `lane`'s partitions (of `lanes`) from now on — and
+    /// plan the rows (B14: a landing leaves a row an entry in flight writes at
+    /// its planned state).
     pub fn set_lane(&mut self, lane: u64, lanes: u64) {
         self.lane = (lanes > 1).then_some((lane, lanes));
     }
@@ -887,15 +1104,37 @@ impl PlanRings {
         self.lane.is_none_or(|(l, n)| pid % n == l)
     }
 
+    /// Whether this is a lane's (planned) mirror.
+    fn planned(&self) -> bool {
+        self.lane.is_some()
+    }
+
+    fn id_of(&self, tenant: &str, queue: &str, group: &str) -> Option<RingId> {
+        let ids = self.by_hash.get(&ring_hash(tenant, queue, group))?;
+        ids.iter().copied().find(|id| {
+            self.rings.get(id).is_some_and(|r| {
+                let (t, q, g) = &r.key;
+                t == tenant && q == queue && g == group
+            })
+        })
+    }
+
+    fn ring(&self, tenant: &str, queue: &str, group: &str) -> Option<&PlanRing> {
+        self.rings.get(&self.id_of(tenant, queue, group)?)
+    }
+
+    /// The `(tenant, queue)` of `pid`, when a landing has read its row.
+    pub fn cached_queue(&self, pid: Pid) -> Option<(&str, &str)> {
+        self.queue_of
+            .get(&pid)
+            .map(|(t, q)| (t.as_str(), q.as_str()))
+    }
+
     /// How many partitions of `key` are ready now (0 when the ring is not
     /// kept): a lane's hint to the router.
     pub fn ready_len(&self, key: &RingKey) -> usize {
         let (t, q, g) = key;
-        self.rings
-            .get(t)
-            .and_then(|qs| qs.get(q))
-            .and_then(|gs| gs.get(g))
-            .map_or(0, |r| r.ready.len())
+        self.ring(t, q, g).map_or(0, |r| r.ready.len())
     }
 
     /// Set `(group, pid)`'s row in the kept ring of `(tenant, queue, group)` to
@@ -903,32 +1142,41 @@ impl PlanRings {
     /// will write once the planned effects land. A lane moves its rings with its
     /// own planned effects, so what it tells the router is not the landed state
     /// a cycle or two behind: the landing re-read ([`PlanRings::advance`]) still
-    /// writes the committed truth, and the lane re-plans the rows of the entries
-    /// still in flight over it every cycle. A no-op for another lane's partition
-    /// or a ring that is not kept.
+    /// writes the committed truth once the row's newest writer has landed. A
+    /// no-op for another lane's partition or a ring that is not kept.
     pub fn plan_set(&mut self, tenant: &str, queue: &str, group: &str, pid: Pid, at: Option<i64>) {
         if !self.owns(pid) {
             return;
         }
+        let Some(id) = self.id_of(tenant, queue, group) else {
+            return;
+        };
         let now = self.now_us;
-        if let Some(ring) = self
-            .rings
-            .get_mut(tenant)
-            .and_then(|qs| qs.get_mut(queue))
-            .and_then(|gs| gs.get_mut(group))
-        {
+        if let Some(ring) = self.rings.get_mut(&id) {
             ring.set(pid, at, now);
+            sync_due(&mut self.due, id, ring);
         }
     }
 
     /// The groups of `(tenant, queue)` whose ring is kept: the rows an append
     /// to one of the queue's partitions arms.
     pub fn ring_groups(&self, tenant: &str, queue: &str) -> Vec<String> {
-        self.rings
+        self.ring_group_names(tenant, queue)
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// [`PlanRings::ring_groups`], borrowed.
+    pub fn ring_group_names<'a>(
+        &'a self,
+        tenant: &str,
+        queue: &str,
+    ) -> impl Iterator<Item = &'a str> + 'a {
+        self.names
             .get(tenant)
             .and_then(|qs| qs.get(queue))
-            .map(|gs| gs.keys().cloned().collect())
-            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|gs| gs.keys().map(String::as_str))
     }
 
     /// What the ring of `key` can give at `now_us` (the router's clock, at or
@@ -960,19 +1208,13 @@ impl PlanRings {
     /// at the rings' clock: what a lane would hold after scanning them.
     #[cfg(test)]
     pub fn keep_rows(&mut self, key: &RingKey, rows: &[(Pid, i64)]) {
-        let (t, q, g) = key;
         let now = self.now_us;
-        let ring = self
-            .rings
-            .entry(t.clone())
-            .or_default()
-            .entry(q.clone())
-            .or_default()
-            .entry(g.clone())
-            .or_default();
+        let id = self.insert_ring(key, 0);
+        let ring = self.rings.get_mut(&id).expect("just kept");
         for (pid, at) in rows {
             ring.set(*pid, Some(*at), now);
         }
+        sync_due(&mut self.due, id, ring);
     }
 
     /// An empty mirror that has accounted for every entry up to `landed_to`.
@@ -980,20 +1222,86 @@ impl PlanRings {
         PlanRings {
             now_us,
             landed_to,
+            rows_planned_to: landed_to,
             ..PlanRings::default()
         }
     }
 
-    /// Drop every ring (and the pid cache): each is scanned afresh on next use.
     /// Whether any ring is kept.
     pub fn keeps_any(&self) -> bool {
         !self.rings.is_empty()
     }
 
+    /// Drop every ring (and the pid cache): each is scanned afresh on next use.
     pub fn clear(&mut self) {
+        self.names.clear();
+        self.by_hash.clear();
         self.rings.clear();
+        self.due.clear();
         self.queue_of.clear();
+        self.verify = VerifyCursor::default();
         self.drops += 1;
+    }
+
+    /// Keep an empty ring for `key` (its id), or the one kept already.
+    fn insert_ring(&mut self, key: &RingKey, cycle: u64) -> RingId {
+        let (t, q, g) = key;
+        let gs = self
+            .names
+            .entry(t.clone())
+            .or_default()
+            .entry(q.clone())
+            .or_default();
+        if let Some(id) = gs.get(g).filter(|id| self.rings.contains_key(id)) {
+            return *id;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        gs.insert(g.clone(), id);
+        self.by_hash.entry(ring_hash(t, q, g)).or_default().push(id);
+        self.rings.insert(id, PlanRing::new(key.clone(), cycle));
+        id
+    }
+
+    /// Forget one ring (its name stays until [`PlanRings::prune_names`]).
+    fn remove_ring(&mut self, id: RingId) {
+        if let Some(ring) = self.rings.remove(&id) {
+            if let Some(at) = ring.due_at {
+                self.due.remove(&(at, id));
+            }
+        }
+    }
+
+    /// Drop the rings of `tenant` (every queue), of `(tenant, queue)` (every
+    /// group), or of one group.
+    fn drop_rings(&mut self, tenant: &str, queue: Option<&str>, group: Option<&str>) {
+        let mut ids: Vec<RingId> = Vec::new();
+        if let Some(qs) = self.names.get_mut(tenant) {
+            match queue {
+                None => {
+                    ids.extend(qs.values().flat_map(|gs| gs.values().copied()));
+                    self.names.remove(tenant);
+                }
+                Some(q) => {
+                    if let Some(gs) = qs.get_mut(q) {
+                        match group {
+                            None => {
+                                ids.extend(gs.values().copied());
+                                qs.remove(q);
+                            }
+                            Some(g) => {
+                                if let Some(id) = gs.remove(g) {
+                                    ids.push(id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for id in ids {
+            self.remove_ring(id);
+        }
     }
 
     /// Account for every entry that landed since the last cycle and promote the
@@ -1001,7 +1309,8 @@ impl PlanRings {
     /// the index each entry occupies); `applied` is the planning read's applied
     /// index. Every index in `(landed_to, applied]` must be in `folded`: an
     /// entry leaves it only after a cycle has seen it land, so a gap means one
-    /// was never accounted for, and every ring is dropped.
+    /// was never accounted for, and every ring is dropped. Then a few rows are
+    /// checked against `pending` (B34).
     pub fn advance<R: Reads + ?Sized>(
         &mut self,
         reads: &R,
@@ -1009,9 +1318,29 @@ impl PlanRings {
         applied: u64,
         now_us: i64,
     ) -> Result<()> {
+        if self.rings.is_empty() {
+            // Nothing to re-read or check; what lands is accounted for.
+            if applied < self.landed_to {
+                self.clear();
+                self.rows_planned_to = applied;
+            }
+            self.landed_to = applied;
+            self.promote(now_us);
+            return Ok(());
+        }
+        self.advances += 1;
+        let verify = self.advances.is_multiple_of(VERIFY_EVERY);
+        // What the entries in flight write: for a lane's landings (B14) and
+        // for the check (B34); nobody else needs it.
+        let in_flight = if verify || (self.planned() && applied > self.landed_to) {
+            InFlightRows::of(folded, applied)
+        } else {
+            InFlightRows::default()
+        };
         if applied < self.landed_to {
             // The applied index went back (a restore): nothing here holds.
             self.clear();
+            self.rows_planned_to = applied;
         } else if applied > self.landed_to && !self.rings.is_empty() {
             let mut next = self.landed_to + 1;
             let mut accounted = true;
@@ -1023,7 +1352,7 @@ impl PlanRings {
                     break;
                 }
                 next += 1;
-                if !self.land(reads, e)? {
+                if !self.land(reads, e, &in_flight)? {
                     accounted = false;
                     break;
                 }
@@ -1034,18 +1363,35 @@ impl PlanRings {
         }
         self.landed_to = applied;
         self.promote(now_us);
+        if verify {
+            self.verify_step(reads, &in_flight, VERIFY_ROWS)?;
+        }
         Ok(())
     }
 
     /// Re-read every `pending` row one landed entry's effects can have written,
     /// in the kept rings. `false` when it cannot tell which rows those are.
-    fn land<R: Reads + ?Sized>(&mut self, reads: &R, e: &crate::rsm::entry::Entry) -> Result<bool> {
+    fn land<R: Reads + ?Sized>(
+        &mut self,
+        reads: &R,
+        e: &crate::rsm::entry::Entry,
+        in_flight: &InFlightRows<'_>,
+    ) -> Result<bool> {
         use crate::rsm::effect::Effect;
+        // B14: a lane leaves the rows an entry still in flight writes at the
+        // state that entry planned them to.
+        let skip = |pid: Pid, g: &str| in_flight.plans(pid, g);
+        let planned = self.planned();
         for eff in &e.effects {
             match eff {
                 // An append arms its partition for every group of the queue.
                 Effect::Append { pid, .. } => {
-                    if !self.reread_partition(reads, *pid, None)? {
+                    let ok = if planned {
+                        self.reread_partition(reads, *pid, None, &skip)?
+                    } else {
+                        self.reread_partition(reads, *pid, None, &|_, _| false)?
+                    };
+                    if !ok {
                         return Ok(false);
                     }
                 }
@@ -1053,20 +1399,25 @@ impl PlanRings {
                 // a partition whose row is already gone needs no queue: the
                 // rings that hold it are the only ones it can change.
                 Effect::PartitionDelete { pid } => {
-                    if !self.reread_partition(reads, *pid, None)? {
+                    if !self.reread_partition(reads, *pid, None, &|_, _| false)? {
                         self.reread_where_held(reads, *pid)?;
                     }
                 }
                 Effect::DeleteChunk { pids, .. } => {
                     for pid in pids {
-                        if !self.reread_partition(reads, *pid, None)? {
+                        if !self.reread_partition(reads, *pid, None, &|_, _| false)? {
                             self.reread_where_held(reads, *pid)?;
                         }
                     }
                 }
                 // A cursor write puts or deletes its own (group, pid) row.
                 Effect::CursorSet { pid, group, .. } | Effect::CursorDelete { pid, group } => {
-                    if !self.reread_partition(reads, *pid, Some(group))? {
+                    let ok = if planned {
+                        self.reread_partition(reads, *pid, Some(group), &skip)?
+                    } else {
+                        self.reread_partition(reads, *pid, Some(group), &|_, _| false)?
+                    };
+                    if !ok {
                         return Ok(false);
                     }
                 }
@@ -1082,21 +1433,9 @@ impl PlanRings {
                     tenant,
                     queue,
                     group,
-                } => {
-                    if let Some(qs) = self.rings.get_mut(tenant) {
-                        if let Some(gs) = qs.get_mut(queue) {
-                            gs.remove(group);
-                        }
-                    }
-                }
-                Effect::QueueDelete { tenant, queue } => {
-                    if let Some(qs) = self.rings.get_mut(tenant) {
-                        qs.remove(queue);
-                    }
-                }
-                Effect::TenantPurge { tenant } => {
-                    self.rings.remove(tenant);
-                }
+                } => self.drop_rings(tenant, Some(queue), Some(group)),
+                Effect::QueueDelete { tenant, queue } => self.drop_rings(tenant, Some(queue), None),
+                Effect::TenantPurge { tenant } => self.drop_rings(tenant, None, None),
                 // Never a `pending` row (apply's arms for these write none).
                 Effect::Noop
                 | Effect::QueueUpsert { .. }
@@ -1128,13 +1467,15 @@ impl PlanRings {
     }
 
     /// Re-read `pid`'s rows in the kept rings of its queue — every group's, or
-    /// only `group`'s. `false` when the partition's queue cannot be found (its
-    /// row is gone before this node ever resolved it).
+    /// only `group`'s — but the ones `skip` names. `false` when the
+    /// partition's queue cannot be found (its row is gone before this node
+    /// ever resolved it).
     fn reread_partition<R: Reads + ?Sized>(
         &mut self,
         reads: &R,
         pid: Pid,
         group: Option<&str>,
+        skip: &dyn Fn(Pid, &str) -> bool,
     ) -> Result<bool> {
         if !self.owns(pid) {
             // Another lane's partition: never in these rings.
@@ -1150,20 +1491,17 @@ impl PlanRings {
             self.queue_of.insert(pid, (row.tenant, row.queue));
         }
         let (tenant, queue) = &self.queue_of[&pid];
-        let Some(groups) = self.rings.get_mut(tenant).and_then(|qs| qs.get_mut(queue)) else {
+        let Some(groups) = self.names.get(tenant).and_then(|qs| qs.get(queue)) else {
             return Ok(true);
         };
         let now = self.now_us;
-        match group {
-            Some(g) => {
-                if let Some(ring) = groups.get_mut(g) {
-                    ring.set(pid, reads.pending_at(tenant, queue, g, pid)?, now);
-                }
+        for (g, id) in groups {
+            if group.is_some_and(|x| x != g.as_str()) || skip(pid, g) {
+                continue;
             }
-            None => {
-                for (g, ring) in groups.iter_mut() {
-                    ring.set(pid, reads.pending_at(tenant, queue, g, pid)?, now);
-                }
+            if let Some(ring) = self.rings.get_mut(id) {
+                ring.set(pid, reads.pending_at(tenant, queue, g, pid)?, now);
+                sync_due(&mut self.due, *id, ring);
             }
         }
         Ok(true)
@@ -1173,30 +1511,39 @@ impl PlanRings {
     /// partition whose queue is no longer readable: it can only remove rows).
     fn reread_where_held<R: Reads + ?Sized>(&mut self, reads: &R, pid: Pid) -> Result<()> {
         let now = self.now_us;
-        for (t, qs) in self.rings.iter_mut() {
-            for (q, gs) in qs.iter_mut() {
-                for (g, ring) in gs.iter_mut() {
-                    if ring.at.contains_key(&pid) {
-                        ring.set(pid, reads.pending_at(t, q, g, pid)?, now);
-                    }
-                }
+        for (id, ring) in self.rings.iter_mut() {
+            if ring.at.contains_key(&pid) {
+                let (t, q, g) = &ring.key;
+                let v = reads.pending_at(t, q, g, pid)?;
+                ring.set(pid, v, now);
+                sync_due(&mut self.due, *id, ring);
             }
         }
         Ok(())
     }
 
-    /// Move every row whose `ready_at` the clock has reached to ready. A clock
-    /// that went back re-splits every ring, as a rebuild at that instant would.
+    /// Move every row whose `ready_at` the clock has reached to ready: only
+    /// the rings with one due (B28). A clock that went back re-splits every
+    /// ring, as a rebuild at that instant would.
     pub fn promote(&mut self, now_us: i64) {
-        let back = now_us < self.now_us;
-        for qs in self.rings.values_mut() {
-            for gs in qs.values_mut() {
-                for ring in gs.values_mut() {
-                    if back {
-                        ring.resplit(now_us);
-                    } else {
-                        ring.promote(now_us);
-                    }
+        if now_us < self.now_us {
+            for (id, ring) in self.rings.iter_mut() {
+                ring.resplit(now_us);
+                sync_due(&mut self.due, *id, ring);
+            }
+        } else {
+            while let Some(&(at, id)) = self.due.first() {
+                if at > now_us {
+                    break;
+                }
+                if let Some(ring) = self.rings.get_mut(&id) {
+                    ring.promote(now_us);
+                    sync_due(&mut self.due, id, ring);
+                }
+                // Promoted, its entry is filed later now (or gone); one that
+                // was not (a filing out of step) must not stop the loop.
+                if self.due.first() == Some(&(at, id)) {
+                    self.due.pop_first();
                 }
             }
         }
@@ -1212,21 +1559,14 @@ impl PlanRings {
         cycle: u64,
     ) -> Result<()> {
         let (t, q, g) = key;
-        let now = self.now_us;
-        let gs = self
-            .rings
-            .entry(t.clone())
-            .or_default()
-            .entry(q.clone())
-            .or_default();
-        if let Some(ring) = gs.get_mut(g) {
-            ring.last_used = cycle;
-            return Ok(());
+        if let Some(id) = self.id_of(t, q, g) {
+            if let Some(ring) = self.rings.get_mut(&id) {
+                ring.last_used = cycle;
+                return Ok(());
+            }
         }
-        let mut ring = PlanRing {
-            last_used: cycle,
-            ..PlanRing::default()
-        };
+        let now = self.now_us;
+        let mut ring = PlanRing::new(key.clone(), cycle);
         let prefix = crate::rsm::store::keys::pending_prefix(t, q, g);
         let lane = self.lane;
         reads.scan_pending(&prefix, usize::MAX, &mut |tt, qq, gg, pid, ready_at| {
@@ -1238,37 +1578,60 @@ impl PlanRings {
             }
             true
         })?;
-        gs.insert(g.clone(), ring);
+        let id = self.insert_ring(key, cycle);
+        let slot = self.rings.get_mut(&id).expect("just kept");
+        *slot = ring;
+        sync_due(&mut self.due, id, slot);
         self.loads += 1;
         Ok(())
     }
 
     /// Forget every ring no batch has walked since `before`.
     pub fn evict_idle(&mut self, before: u64) {
-        for qs in self.rings.values_mut() {
+        let idle: Vec<RingId> = self
+            .rings
+            .iter()
+            .filter(|(_, r)| r.last_used < before)
+            .map(|(id, _)| *id)
+            .collect();
+        if idle.is_empty() {
+            return;
+        }
+        for id in idle {
+            self.remove_ring(id);
+        }
+        self.prune_names();
+    }
+
+    /// Drop the names of rings no longer kept, and the empty levels above.
+    fn prune_names(&mut self) {
+        let rings = &self.rings;
+        for qs in self.names.values_mut() {
             for gs in qs.values_mut() {
-                gs.retain(|_, ring| ring.last_used >= before);
+                gs.retain(|_, id| rings.contains_key(id));
             }
             qs.retain(|_, gs| !gs.is_empty());
         }
-        self.rings.retain(|_, qs| !qs.is_empty());
+        self.names.retain(|_, qs| !qs.is_empty());
+        self.by_hash.retain(|_, ids| {
+            ids.retain(|id| rings.contains_key(id));
+            !ids.is_empty()
+        });
     }
 
     /// The kept ring keys, in key order.
     pub fn keys(&self) -> Vec<RingKey> {
         let mut out = Vec::new();
-        for (t, qs) in &self.rings {
+        for (t, qs) in &self.names {
             for (q, gs) in qs {
-                for g in gs.keys() {
-                    out.push((t.clone(), q.clone(), g.clone()));
+                for (g, id) in gs {
+                    if self.rings.contains_key(id) {
+                        out.push((t.clone(), q.clone(), g.clone()));
+                    }
                 }
             }
         }
         out
-    }
-
-    fn ring(&self, tenant: &str, queue: &str, group: &str) -> Option<&PlanRing> {
-        self.rings.get(tenant)?.get(queue)?.get(group)
     }
 
     /// Whether the ring of `(tenant, queue, group)` is kept.
@@ -1354,6 +1717,216 @@ impl PlanRings {
             rows,
         })
     }
+
+    /// B28, the equivalence check: the first way `due` is not the index of
+    /// every ring's earliest deferred row, or `None`.
+    pub fn due_diff(&self) -> Option<String> {
+        let want: BTreeSet<(i64, RingId)> = self
+            .rings
+            .iter()
+            .filter_map(|(id, r)| r.deferred.first().map(|(at, _)| (*at, *id)))
+            .collect();
+        if want != self.due {
+            return Some(format!("due: filed {:?} vs rings {:?}", self.due, want));
+        }
+        for (id, r) in &self.rings {
+            if r.due_at != r.deferred.first().map(|(at, _)| *at) {
+                return Some(format!("ring {id}: filed at {:?}", r.due_at));
+            }
+            if r.ready.iter().any(|(at, _)| *at > self.now_us)
+                || r.deferred.iter().any(|(at, _)| *at <= self.now_us)
+            {
+                return Some(format!("ring {:?}: not split at {}", r.key, self.now_us));
+            }
+        }
+        None
+    }
+
+    // ---- B14: rows planned once ----------------------------------------
+
+    /// B14: the effects whose `pending` rows this lane must plan in this job,
+    /// besides its own commands' (planned as they are planned): every effect
+    /// in flight when `reload` (a ring was scanned this cycle: it holds the
+    /// committed rows), else those of the entries new since the last job that
+    /// the lane did not plan itself — what the creation step, control and the
+    /// multi-pushes put in its slice at the merge. Its own commands are known
+    /// by their request ids ([`PlanRings::planned_own`]), so the slice's
+    /// layout does not matter.
+    pub fn rows_to_plan<'e>(
+        &mut self,
+        folded: &'e [(u64, std::sync::Arc<crate::rsm::entry::Entry>)],
+        applied: u64,
+        reload: bool,
+    ) -> Vec<&'e [crate::rsm::effect::Effect]> {
+        let own = std::mem::take(&mut self.own);
+        let mut out: Vec<&'e [crate::rsm::effect::Effect]> = Vec::new();
+        let mut top = self.rows_planned_to;
+        for (index, e) in folded {
+            top = top.max(*index);
+            if *index <= applied || (!reload && *index <= self.rows_planned_to) {
+                continue;
+            }
+            if reload || own.is_empty() {
+                out.push(&e.effects[..]);
+                continue;
+            }
+            for c in &e.commands {
+                if !own.contains(&c.request_id) {
+                    out.push(e.effects_of(c));
+                }
+            }
+        }
+        self.rows_planned_to = top;
+        out
+    }
+
+    /// B14: the lane's job logged `sub`'s commands and planned their rows.
+    pub fn planned_own(&mut self, sub: &crate::rsm::entry::Entry) {
+        self.own.clear();
+        self.own.extend(sub.commands.iter().map(|c| c.request_id));
+    }
+
+    // ---- B34: checked a little every cycle ------------------------------
+
+    /// Compare up to `budget` rows of the kept rings with `pending` in each
+    /// direction, from where the last call stopped: first every `pending` row
+    /// of the ring (it must be the ring's), then every row of the ring (it
+    /// must be in `pending`, at the same instant, split at the rings' clock).
+    /// Rows an entry in flight writes are skipped. A ring that differs is
+    /// dropped and counted; the check moves on to the next ring.
+    fn verify_step<R: Reads + ?Sized>(
+        &mut self,
+        reads: &R,
+        in_flight: &InFlightRows<'_>,
+        budget: usize,
+    ) -> Result<()> {
+        let id = match self.verify.ring.filter(|id| self.rings.contains_key(id)) {
+            Some(id) => id,
+            None => {
+                use std::ops::Bound::{Excluded, Unbounded};
+                let next = self
+                    .rings
+                    .range((Excluded(self.verify.last), Unbounded))
+                    .next()
+                    .or_else(|| self.rings.iter().next())
+                    .map(|(id, _)| *id);
+                let Some(id) = next else {
+                    return Ok(());
+                };
+                self.verify = VerifyCursor {
+                    ring: Some(id),
+                    last: id,
+                    ..VerifyCursor::default()
+                };
+                id
+            }
+        };
+        let lane = self.lane;
+        let owns = |pid: Pid| lane.is_none_or(|(l, n)| pid % n == l);
+        let now = self.now_us;
+        let ring = &self.rings[&id];
+        if in_flight.writes_ring(&ring.key) {
+            // Rewritten or dropped when that entry lands: check it later.
+            self.verify.ring = None;
+            return Ok(());
+        }
+        let (t, q, g) = (&ring.key.0, &ring.key.1, &ring.key.2);
+        let mut bad: Option<String> = None;
+        let mut done = false;
+        if !self.verify.rows {
+            // `pending` → ring.
+            let prefix = crate::rsm::store::keys::pending_prefix(t, q, g);
+            let from = match self.verify.pending_after {
+                Some(p) => crate::rsm::store::keys::pending(t, q, g, p.saturating_add(1)),
+                None => prefix,
+            };
+            let mut seen = 0usize;
+            let mut last: Option<Pid> = None;
+            reads.scan_pending(&from, budget, &mut |tt, qq, gg, pid, at| {
+                if tt != t || qq != q || gg != g {
+                    return false;
+                }
+                seen += 1;
+                last = Some(pid);
+                if owns(pid) && !in_flight.writes(pid, g) && ring.at.get(&pid) != Some(&at) {
+                    bad = Some(format!(
+                        "pending ({pid}, {at}) vs kept {:?}",
+                        ring.at.get(&pid)
+                    ));
+                    return false;
+                }
+                true
+            })?;
+            if last.is_some_and(|p| p == Pid::MAX) || seen < budget {
+                self.verify.rows = true;
+            } else {
+                self.verify.pending_after = last;
+            }
+        } else {
+            // Ring → `pending`: its rows, ready ones then deferred ones.
+            use std::ops::Bound::{Excluded, Unbounded};
+            let set = if self.verify.deferred {
+                &ring.deferred
+            } else {
+                &ring.ready
+            };
+            let start = match self.verify.rows_after {
+                Some(k) => (Excluded(k), Unbounded),
+                None => (Unbounded, Unbounded),
+            };
+            let mut seen = 0usize;
+            let mut last: Option<(i64, Pid)> = None;
+            for &(at, pid) in set.range(start) {
+                if seen >= budget {
+                    break;
+                }
+                seen += 1;
+                last = Some((at, pid));
+                if (at <= now) == self.verify.deferred {
+                    bad = Some(format!("row ({pid}, {at}) on the wrong side of {now}"));
+                    break;
+                }
+                if in_flight.writes(pid, g) {
+                    continue;
+                }
+                let stored = reads.pending_at(t, q, g, pid)?;
+                if stored != Some(at) {
+                    bad = Some(format!("kept ({pid}, {at}) vs pending {stored:?}"));
+                    break;
+                }
+            }
+            if bad.is_none() {
+                if seen < budget {
+                    if self.verify.deferred {
+                        done = true;
+                    } else {
+                        self.verify.deferred = true;
+                        self.verify.rows_after = None;
+                    }
+                } else {
+                    self.verify.rows_after = last;
+                }
+            }
+        }
+        if let Some(what) = bad {
+            let key = self.rings[&id].key.clone();
+            tracing::warn!(
+                target: "rsm",
+                ring = ?key,
+                what,
+                "kept ring differs from pending: dropped, scanned afresh on next use"
+            );
+            self.verify_drops += 1;
+            #[cfg(test)]
+            VERIFY_DROPS_HERE.with(|c| c.set(c.get() + 1));
+            self.remove_ring(id);
+            self.prune_names();
+            self.verify.ring = None;
+        } else if done {
+            self.verify.ring = None;
+        }
+        Ok(())
+    }
 }
 
 /// One ring as the planner can observe it (the equivalence check).
@@ -1433,6 +2006,12 @@ impl<'a, R: Reads + ?Sized> Committed<'a, R> {
         self.reads
     }
 
+    /// The `(tenant, queue)` of `pid` when the kept rings have already read
+    /// its row (a partition never changes queue), else `None`: read the row.
+    pub fn cached_queue(&self, pid: Pid) -> Option<(&'a str, &'a str)> {
+        self.plan_rings.and_then(|r| r.cached_queue(pid))
+    }
+
     pub fn derived(&self) -> &'a Derived {
         self.derived
     }
@@ -1467,7 +2046,8 @@ impl<'a, R: Reads + ?Sized> Committed<'a, R> {
         let Some(pid) = self.reads.pid_of(tenant, queue, partition)? else {
             return Ok(None);
         };
-        if self.reads.garbage(pid)?.is_some() {
+        // Whether a garbage row exists, without decoding it.
+        if self.reads.is_garbage(pid)? {
             return Ok(None);
         }
         Ok(Some(pid))
@@ -1475,7 +2055,7 @@ impl<'a, R: Reads + ?Sized> Committed<'a, R> {
 
     /// The partition row, `None` for a garbage pid.
     pub fn partition(&self, pid: Pid) -> Result<Option<PartitionRow>> {
-        if self.reads.garbage(pid)?.is_some() {
+        if self.reads.is_garbage(pid)? {
             return Ok(None);
         }
         self.reads.partition(pid)
