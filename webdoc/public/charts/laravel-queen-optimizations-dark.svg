@@ -1,0 +1,230 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="607.125937pt" height="229.487606pt" viewBox="0 0 607.125937 229.487606" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M -0 229.487606 
+L 607.125938 229.487606 
+L 607.125938 -0 
+L -0 -0 
+L -0 229.487606 
+z
+" style="fill: none"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 196.725937 169.416 
+L 598.485938 169.416 
+L 598.485938 8.64 
+L 196.725937 8.64 
+L 196.725937 169.416 
+z
+" style="fill: none"/>
+   </g>
+   <g id="matplotlib.axis_1">
+    <g id="xtick_1">
+     <g id="line2d_1">
+      <path d="M 196.725937 169.416 
+L 196.725937 8.64 
+" clip-path="url(#p0)" style="fill: none; stroke: #2a2a29; stroke-linecap: round"/>
+     </g>
+     <g id="line2d_2"/>
+     <g id="text_1">
+      <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: middle; fill: #c3c2b7" x="196.725937" y="181.874672" transform="rotate(-0 196.725937 181.874672)">0</text>
+     </g>
+    </g>
+    <g id="xtick_2">
+     <g id="line2d_3">
+      <path d="M 252.487524 169.416 
+L 252.487524 8.64 
+" clip-path="url(#p0)" style="fill: none; stroke: #2a2a29; stroke-linecap: round"/>
+     </g>
+     <g id="line2d_4"/>
+     <g id="text_2">
+      <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: middle; fill: #c3c2b7" x="252.487524" y="181.874672" transform="rotate(-0 252.487524 181.874672)">100</text>
+     </g>
+    </g>
+    <g id="xtick_3">
+     <g id="line2d_5">
+      <path d="M 308.24911 169.416 
+L 308.24911 8.64 
+" clip-path="url(#p0)" style="fill: none; stroke: #2a2a29; stroke-linecap: round"/>
+     </g>
+     <g id="line2d_6"/>
+     <g id="text_3">
+      <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: middle; fill: #c3c2b7" x="308.24911" y="181.874672" transform="rotate(-0 308.24911 181.874672)">200</text>
+     </g>
+    </g>
+    <g id="xtick_4">
+     <g id="line2d_7">
+      <path d="M 364.010697 169.416 
+L 364.010697 8.64 
+" clip-path="url(#p0)" style="fill: none; stroke: #2a2a29; stroke-linecap: round"/>
+     </g>
+     <g id="line2d_8"/>
+     <g id="text_4">
+      <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: middle; fill: #c3c2b7" x="364.010697" y="181.874672" transform="rotate(-0 364.010697 181.874672)">300</text>
+     </g>
+    </g>
+    <g id="xtick_5">
+     <g id="line2d_9">
+      <path d="M 419.772283 169.416 
+L 419.772283 8.64 
+" clip-path="url(#p0)" style="fill: none; stroke: #2a2a29; stroke-linecap: round"/>
+     </g>
+     <g id="line2d_10"/>
+     <g id="text_5">
+      <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: middle; fill: #c3c2b7" x="419.772283" y="181.874672" transform="rotate(-0 419.772283 181.874672)">400</text>
+     </g>
+    </g>
+    <g id="xtick_6">
+     <g id="line2d_11">
+      <path d="M 475.53387 169.416 
+L 475.53387 8.64 
+" clip-path="url(#p0)" style="fill: none; stroke: #2a2a29; stroke-linecap: round"/>
+     </g>
+     <g id="line2d_12"/>
+     <g id="text_6">
+      <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: middle; fill: #c3c2b7" x="475.53387" y="181.874672" transform="rotate(-0 475.53387 181.874672)">500</text>
+     </g>
+    </g>
+    <g id="xtick_7">
+     <g id="line2d_13">
+      <path d="M 531.295456 169.416 
+L 531.295456 8.64 
+" clip-path="url(#p0)" style="fill: none; stroke: #2a2a29; stroke-linecap: round"/>
+     </g>
+     <g id="line2d_14"/>
+     <g id="text_7">
+      <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: middle; fill: #c3c2b7" x="531.295456" y="181.874672" transform="rotate(-0 531.295456 181.874672)">600</text>
+     </g>
+    </g>
+    <g id="text_8">
+     <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: middle; fill: #c3c2b7" x="397.605938" y="194.101078" transform="rotate(-0 397.605938 194.101078)">Completed jobs per second, 10 ms jobs, fsync every write, median of 5 runs</text>
+    </g>
+   </g>
+   <g id="matplotlib.axis_2">
+    <g id="ytick_1">
+     <g id="line2d_15"/>
+     <g id="text_9">
+      <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: end; fill: #c3c2b7" x="190.725937" y="156.50349" transform="rotate(-0 190.725937 156.50349)">Both, and the next batch popped ahead</text>
+     </g>
+    </g>
+    <g id="ytick_2">
+     <g id="line2d_16"/>
+     <g id="text_10">
+      <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: end; fill: #c3c2b7" x="190.725937" y="124.380413" transform="rotate(-0 190.725937 124.380413)">Supervisor renewal and asynchronous ACK</text>
+     </g>
+    </g>
+    <g id="ytick_3">
+     <g id="line2d_17"/>
+     <g id="text_11">
+      <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: end; fill: #c3c2b7" x="190.725937" y="92.257336" transform="rotate(-0 190.725937 92.257336)">Asynchronous ACK only</text>
+     </g>
+    </g>
+    <g id="ytick_4">
+     <g id="line2d_18"/>
+     <g id="text_12">
+      <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: end; fill: #c3c2b7" x="190.725937" y="60.134259" transform="rotate(-0 190.725937 60.134259)">Leases renewed by the supervisor</text>
+     </g>
+    </g>
+    <g id="ytick_5">
+     <g id="line2d_19"/>
+     <g id="text_13">
+      <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: end; fill: #c3c2b7" x="190.725937" y="28.011182" transform="rotate(-0 190.725937 28.011182)">Queen 0.5: helpers, synchronous ACK</text>
+     </g>
+    </g>
+   </g>
+   <g id="patch_3">
+    <path d="M 196.725937 162.108 
+L 555.440223 162.108 
+L 555.440223 144.440308 
+L 196.725937 144.440308 
+z
+" clip-path="url(#p0)" style="fill: #3987e5"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 196.725937 129.984923 
+L 514.957311 129.984923 
+L 514.957311 112.317231 
+L 196.725937 112.317231 
+z
+" clip-path="url(#p0)" style="fill: #3987e5"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 196.725937 97.861846 
+L 512.392278 97.861846 
+L 512.392278 80.194154 
+L 196.725937 80.194154 
+z
+" clip-path="url(#p0)" style="fill: #3987e5"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 196.725937 65.738769 
+L 449.437447 65.738769 
+L 449.437447 48.071077 
+L 196.725937 48.071077 
+z
+" clip-path="url(#p0)" style="fill: #3987e5"/>
+   </g>
+   <g id="patch_7">
+    <path d="M 196.725937 33.615692 
+L 449.270163 33.615692 
+L 449.270163 15.948 
+L 196.725937 15.948 
+z
+" clip-path="url(#p0)" style="fill: #3987e5"/>
+   </g>
+   <g id="line2d_20">
+    <path d="M 429.084468 169.416 
+L 429.084468 8.64 
+" clip-path="url(#p0)" style="fill: none; stroke-dasharray: 4.81,2.08; stroke-dashoffset: 0; stroke: #d95926; stroke-width: 1.3"/>
+   </g>
+   <g id="patch_8">
+    <path d="M 196.725937 169.416 
+L 196.725937 8.64 
+" style="fill: none; stroke: #2a2a29; stroke-linejoin: miter; stroke-linecap: square"/>
+   </g>
+   <g id="patch_9">
+    <path d="M 196.725937 169.416 
+L 598.485938 169.416 
+" style="fill: none; stroke: #2a2a29; stroke-linejoin: miter; stroke-linecap: square"/>
+   </g>
+   <g id="text_14">
+    <text style="font-size: 8px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: start; fill: #f5f5f5" x="559.440223" y="155.481654" transform="rotate(-0 559.440223 155.481654)">643</text>
+   </g>
+   <g id="text_15">
+    <text style="font-size: 8px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: start; fill: #f5f5f5" x="518.957311" y="123.358577" transform="rotate(-0 518.957311 123.358577)">571</text>
+   </g>
+   <g id="text_16">
+    <text style="font-size: 8px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: start; fill: #f5f5f5" x="516.392278" y="91.2355" transform="rotate(-0 516.392278 91.2355)">566</text>
+   </g>
+   <g id="text_17">
+    <text style="font-size: 8px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: start; fill: #f5f5f5" x="453.437447" y="59.112423" transform="rotate(-0 453.437447 59.112423)">453</text>
+   </g>
+   <g id="text_18">
+    <text style="font-size: 8px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: start; fill: #f5f5f5" x="453.270163" y="26.989346" transform="rotate(-0 453.270163 26.989346)">453</text>
+   </g>
+   <g id="legend_1">
+    <g id="line2d_21">
+     <path d="M 204.375937 212.704872 
+L 212.875937 212.704872 
+L 221.375937 212.704872 
+" style="fill: none; stroke-dasharray: 4.81,2.08; stroke-dashoffset: 0; stroke: #d95926; stroke-width: 1.3"/>
+    </g>
+    <g id="text_19">
+     <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: start; fill: #c3c2b7" x="228.175938" y="215.679872" transform="rotate(-0 228.175938 215.679872)">Horizon at the same durability: 417</text>
+    </g>
+   </g>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="p0">
+   <rect x="196.725937" y="8.64" width="401.76" height="160.776"/>
+  </clipPath>
+ </defs>
+</svg>

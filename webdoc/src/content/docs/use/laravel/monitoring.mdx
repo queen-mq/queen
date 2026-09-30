@@ -36,6 +36,7 @@ verifiedBy:
   - clients/client-php/tests/LaravelDashboardTest.php
   - clients/client-php/tests/LaravelQueueDriverTest.php
 # sourceOfTruth re-read 2026-09-30 (through dc5b5994): the event_driven switch changes no metric, tag or alert; page matches the code.
+# sourceOfTruth re-read 2026-10-01 (through this patch): config/queen.php adds ack_async and pop_ahead; QueenQueue settles detached ACKs and pops; neither changes the monitoring this page describes.
 ---
 
 The supervisor [dashboard](/use/laravel/dashboard) shows what the supervisors do. This page covers

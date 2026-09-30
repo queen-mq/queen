@@ -29,9 +29,13 @@ sourceOfTruth:
   - supervisor/src/coordination.rs
   - supervisor/src/prefork.rs
   - supervisor/src/watch.rs
+  - supervisor/src/lease/mod.rs
+  - clients/client-php/src/Laravel/Queue/SupervisorLeaseRenewer.php
+  - clients/client-php/src/Laravel/Queue/QueenConnector.php
   - .github/workflows/release-supervisor.yml
 verifiedBy:
   - clients/client-php/tests/LaravelSupervisorTest.php
+  - clients/client-php/tests/SupervisorLeaseRenewerTest.php
   - clients/client-php/tests/LaravelSupervisorCommandTest.php
   - clients/client-php/tests/LaravelSupervisorProductionTest.php
   - clients/client-php/tests/SupervisorBinaryInstallerTest.php
@@ -441,7 +445,9 @@ runs the helper's algorithm with the same safety rules:
 
 The master accepts only processes of its own user, identifies each worker from the kernel's socket
 credentials, and signals it through a pidfd, so a recycled PID never receives a signal. Every
-worker still dies with the master, as before.
+worker still dies with the master, as before. In the
+[benchmark](/benchmarks/laravel-supervisors#horizon-against-queen-on-raft-2026-10-01), eight workers
+with prefetch 4 and their master used 161 MiB with a helper per worker and 70 MiB without.
 
 A worker that cannot reach the master, or that the master refuses, logs the reason and starts its
 own helper, so renewal never stops. The PHP engine and macOS always use helpers. To use helpers

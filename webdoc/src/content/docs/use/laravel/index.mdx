@@ -151,6 +151,10 @@ handler, abandons the lease and discards the rest of its prefetched jobs, and th
 delivered again after its lease expires. Delivery stays at-least-once. `ack_async` requires
 `ack_batch=1`, because a batch already defers its acknowledgements.
 
+The gain is the broker's write latency per job. On the Raft broker, which fsyncs every acknowledged
+write, eight workers with 10 ms jobs and prefetch 4 went from 453 to 566 jobs/s with `ack_async`, and
+to 643 with `pop_ahead` too ([benchmark](/benchmarks/laravel-supervisors#horizon-against-queen-on-raft-2026-10-01)).
+
 ### Pop the next batch ahead
 
 With `pop_ahead`, a worker that starts the last job of its local batch also sends the pop for the
