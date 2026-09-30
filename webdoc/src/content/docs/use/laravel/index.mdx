@@ -151,6 +151,25 @@ handler, abandons the lease and discards the rest of its prefetched jobs, and th
 delivered again after its lease expires. Delivery stays at-least-once. `ack_async` requires
 `ack_batch=1`, because a batch already defers its acknowledgements.
 
+### Pop the next batch ahead
+
+With `pop_ahead`, a worker that starts the last job of its local batch also sends the pop for the
+next batch. The broker leases that batch while the job runs, and the worker takes it in when the
+job ends, so the next job starts without a round trip.
+
+```dotenv
+QUEEN_LEASE_RENEWAL=true
+QUEEN_POP_AHEAD=true
+```
+
+The batch is leased one job earlier than without the option, so it needs `lease_renewal` like any
+prefetched job. The worker tracks the new lease as soon as the job ends, before it can pause. A
+worker does not pop ahead after a job that took more than a third of `retry_after`, and when a job
+still leaves too little of the new lease to renew it safely, the worker returns the batch to the
+queue at once. A worker that serves a comma-separated queue list never pops ahead, because its
+next job may come from another queue. A pop sent ahead never waits for new jobs, so an idle queue
+behaves as before.
+
 ## What changes from another Laravel connection
 
 | Area | What stays the same | What changes with Queen |

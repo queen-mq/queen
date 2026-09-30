@@ -479,6 +479,7 @@ Publish the config with the `queen-config` tag; it lands at `config/queen.php`. 
 | `prefetch` | `QUEEN_PREFETCH` | `1` job |
 | `ack_batch` | `QUEEN_ACK_BATCH` | `1` job (cannot exceed `prefetch`) |
 | `ack_async` | `QUEEN_ACK_ASYNC` | `false` (requires `ack_batch=1`) |
+| `pop_ahead` | `QUEEN_POP_AHEAD` | `false` (requires `lease_renewal`) |
 | `lease_renewal` | `QUEEN_LEASE_RENEWAL` | `false` |
 | `lease_renewal_interval` | `QUEEN_LEASE_RENEWAL_INTERVAL` | derived from lease timing |
 | `lease_renewal_timeout` | `QUEEN_LEASE_RENEWAL_TIMEOUT` | `5` seconds |
