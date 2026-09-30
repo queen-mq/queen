@@ -163,8 +163,10 @@ class HttpClient
         $options = $this->buildRequestOptions($method, $body, null);
         // The answer may be settled long after it arrived, when the caller's
         // work ends: curl must not count that time against the request.
-        // settleDetached() bounds the wait instead.
+        // settleDetached() bounds the wait instead. That covers the connect
+        // too: a new connection only proceeds while the caller settles.
         $options['timeout'] = 0;
+        $options['connect_timeout'] = 0;
 
         $promise = $this->detachedClient()->requestAsync($method, $this->resolveUrl($affinityKey) . $path, $options)
             ->then(fn (ResponseInterface $response) => $this->parseResponse($response));

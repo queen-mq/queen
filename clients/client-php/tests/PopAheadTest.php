@@ -106,16 +106,60 @@ class PopAheadTest extends TestCase
             self::ACKED,
             self::ACKED,
         ]);
-        // A job over a third of retry_after (1 s) is long.
-        $queue = $this->queue($handler, new PopAheadLeaseRenewer(), retryAfter: 1);
+        // A job over a third of retry_after (2 s) is long.
+        $queue = $this->queue($handler, new PopAheadLeaseRenewer(), retryAfter: 2);
 
         $first = $queue->pop('emails');
-        usleep(400_000);
+        usleep(700_000);
         $first->delete();
         $this->assertSame(['pop', 'pop', 'ack'], $this->paths($handler), 'job-1 was quick to hand out');
 
         $queue->pop('emails')->delete();
         $this->assertSame(['pop', 'pop', 'ack', 'ack'], $this->paths($handler), 'job-2 came after a long job');
+    }
+
+    public function testABatchThatWaitedHalfItsLeaseIsHandedBackUntracked(): void
+    {
+        $handler = new PlanHandler([
+            $this->pop('lease-1', ['job-1']),
+            $this->pop('lease-2', ['job-2']),
+            self::ACKED,
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => true]]],
+        ]);
+        $renewer = new PopAheadLeaseRenewer();
+        $queue = $this->queue($handler, $renewer, retryAfter: 1);
+
+        $first = $queue->pop('emails');
+        usleep(600_000);
+        $first->delete();
+
+        $this->assertSame(['pop', 'pop', 'ack', 'ack'], $this->paths($handler));
+        $this->assertSame('retry', json_decode((string) $handler->requests[3]->getBody(), true)['acknowledgments'][0]['status']);
+        $this->assertNotContains('track lease-2', $renewer->calls);
+    }
+
+    public function testAsynchronousAcknowledgementsAndPopAheadTogether(): void
+    {
+        $handler = new PlanHandler([
+            $this->pop('lease-1', ['job-1']),
+            $this->pop('lease-2', ['job-2']),
+            self::ACKED,
+            ['status' => 200, 'json' => ['success' => true, 'messages' => []]],
+            self::ACKED,
+        ]);
+        $renewer = new PopAheadLeaseRenewer();
+        $queue = $this->queue($handler, $renewer, ackAsync: true);
+
+        $queue->pop('emails')->delete();
+        $this->assertSame(['track lease-1', 'forget lease-1', 'track lease-2'], $renewer->calls);
+
+        $second = $queue->pop('emails');
+        $this->assertSame('job-2', $second->getJobId());
+        $second->delete();
+        // job-2 came from the buffer; the fourth request pops ahead for the next batch.
+        $this->assertSame(['pop', 'pop', 'ack', 'pop', 'ack'], $this->paths($handler));
+        $queue->shutdown();
+        $this->assertSame(5, $handler->count(), 'the pending ACK settled without a retry');
     }
 
     public function testTheConnectorRequiresLeaseRenewal(): void
@@ -126,7 +170,13 @@ class PopAheadTest extends TestCase
         (new QueenConnector())->connect(['url' => 'http://queen.test:6632', 'pop_ahead' => true]);
     }
 
-    private function queue(PlanHandler $handler, LeaseRenewer $renewer, int $prefetch = 1, int $retryAfter = 120): QueenQueue
+    private function queue(
+        PlanHandler $handler,
+        LeaseRenewer $renewer,
+        int $prefetch = 1,
+        int $retryAfter = 120,
+        bool $ackAsync = false,
+    ): QueenQueue
     {
         $queue = new QueenQueue(
             new Queen(['url' => 'http://queen.test:6632', 'handler' => HandlerStack::create($handler)]),
@@ -134,6 +184,7 @@ class PopAheadTest extends TestCase
             retryAfter: $retryAfter,
             prefetch: $prefetch,
             leaseRenewer: $renewer,
+            ackAsync: $ackAsync,
             popAhead: true,
         );
         $queue->setContainer(new Container());

@@ -40,7 +40,8 @@ return [
     // broker writes the ACK while the next job runs. A failed ACK is then
     // reported one job later: that job may already have run on the same
     // lease, and the failed one is delivered again (at-least-once). Requires
-    // ack_batch 1.
+    // ack_batch 1, and gains little with prefetch 1 without pop_ahead, where
+    // the answer is read before the next pop.
     'ack_async' => env('QUEEN_ACK_ASYNC', false),
     // Pop the next batch while the last job of the current one runs, and take
     // it in when that job ends. The batch is leased one job earlier. Requires

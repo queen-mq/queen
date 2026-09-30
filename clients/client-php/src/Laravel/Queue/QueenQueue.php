@@ -518,9 +518,13 @@ class QueenQueue extends BaseQueue implements QueueContract
             );
         }
 
+        $message = $this->takePrefetched($queue) ?? $this->nextFromBroker($queue);
+        if (!$this->popAhead) {
+            return $message === null ? null : $this->makeJob($message, $queue);
+        }
+
         $previousJobMillis = $this->jobHandedOutMillis === null ? 0 : self::monotonicMillis() - $this->jobHandedOutMillis;
         $this->queuesPopped[$queue] = true;
-        $message = $this->takePrefetched($queue) ?? $this->nextFromBroker($queue);
         if ($message === null) {
             $this->jobHandedOutMillis = null;
             return null;
@@ -530,7 +534,7 @@ class QueenQueue extends BaseQueue implements QueueContract
         // The batch popped ahead waits for this job, leased but not renewed:
         // skip it after a job long enough to eat into that lease, and on a
         // priority list, where the next job may come from another queue.
-        if ($this->popAhead && $this->pendingPop === null && !isset($this->prefetched[$queue])
+        if ($this->pendingPop === null && !isset($this->prefetched[$queue])
             && count($this->queuesPopped) === 1 && $previousJobMillis * 3 < $this->retryAfter * 1000) {
             $this->popAhead($queue);
         }
@@ -652,6 +656,12 @@ class QueenQueue extends BaseQueue implements QueueContract
         }
         if (!$track) {
             $this->prefetched[$pending['queue']] = ['messages' => $messages, 'next' => 0];
+            return;
+        }
+        // After a job that used half the lease, too little may be left to
+        // renew it safely: hand the batch back before tracking anything.
+        if (self::monotonicMillis() - $pending['started'] > $this->retryAfter * 500) {
+            $this->releaseUnstarted($messages, $pending['queue'], new RuntimeException('half of its lease had passed'));
             return;
         }
         try {
@@ -831,8 +841,9 @@ class QueenQueue extends BaseQueue implements QueueContract
         );
         try {
             $promise = $this->queen->ackDetached($message, 'completed', $context);
-        } catch (\InvalidArgumentException) {
-            // The synchronous path reports the malformed message.
+        } catch (\Throwable) {
+            // Nothing was sent: the synchronous path acknowledges, or reports
+            // why it cannot.
             return false;
         }
         $this->pendingAck = ['promise' => $promise, 'message' => $message, 'context' => $context];
