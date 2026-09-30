@@ -11,6 +11,8 @@ use Queen\Tests\Support\PlanHandler;
 
 final class RemoteStatusPublisherTest extends TestCase
 {
+    private const INSTANCE = '0123456789abcdef0123456789abcdef';
+
     private float $now = 1000.0;
 
     /** @var list<array{0: string, 1: string}> */
@@ -27,11 +29,15 @@ final class RemoteStatusPublisherTest extends TestCase
         $this->assertSame('POST', $request->getMethod());
         $this->assertSame('/api/v1/kv', $request->getUri()->getPath());
         $operations = json_decode((string) $request->getBody(), true)['operations'];
-        $this->assertSame(['orders/head', 'orders/chunk/0000'], array_column($operations, 'key'));
+        // Each instance owns a slot, so pods sharing the key never overwrite each other.
+        $this->assertSame(
+            ['orders/' . self::INSTANCE . '/head', 'orders/' . self::INSTANCE . '/chunk/0000'],
+            array_column($operations, 'key'),
+        );
         $this->assertSame([900, 900], array_column($operations, 'ttlSeconds'));
         $published = RemoteStatusDocument::decode(
             array_map(fn (array $op): array => ['key' => $op['key'], 'value' => $op['value']], $operations),
-            'orders',
+            'orders/' . self::INSTANCE,
         );
         $this->assertArrayNotHasKey('pools', $published);
         $this->assertSame([['supervisor' => 'default', 'queue' => 'high']], $published['pool_status']);
@@ -103,6 +109,19 @@ final class RemoteStatusPublisherTest extends TestCase
         $this->assertStringContainsString('kv_precondition', $this->output[0][0]);
     }
 
+    public function testADocumentWithoutAValidInstanceIdIsAFailureAndIsNeverSent(): void
+    {
+        $handler = $this->applyingHandler();
+        $document = $this->document('running');
+        $document['instance_id'] = '../another-key';
+
+        $this->publisher($handler)->publish($document);
+
+        $this->assertSame(0, $handler->count());
+        $this->assertCount(1, $this->output);
+        $this->assertStringContainsString('no valid instance_id', $this->output[0][0]);
+    }
+
     private function publisher(PlanHandler $handler): RemoteStatusPublisher
     {
         return new RemoteStatusPublisher(
@@ -137,6 +156,7 @@ final class RemoteStatusPublisherTest extends TestCase
         return [
             'schema' => 'queen.supervisor.status/v1',
             'state' => $state,
+            'instance_id' => self::INSTANCE,
             'pools' => ['default' => ['high' => ['processes' => 1]]],
             'pool_status' => [['supervisor' => 'default', 'queue' => 'high']],
         ];

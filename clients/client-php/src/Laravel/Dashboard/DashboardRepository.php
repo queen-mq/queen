@@ -21,10 +21,12 @@ final class DashboardRepository
 
     private const MAX_PROCESS_LIMIT = 4096;
 
+    private const MAX_INSTANCES = 128;
+
     /**
      * @param \Closure(int, ?int): mixed $failedJobs a page of the failed-job index
-     * @param (\Closure(): (array<string, mixed>|null))|null $remoteStatus reads the
-     *   document a supervisor on another host published; null when disabled
+     * @param (\Closure(): mixed)|null $remoteStatus reads the list of documents
+     *   supervisors on other hosts published; null when disabled
      * @param (\Closure(string): mixed)|null $failedJob one failed job with its
      *   exception, for the detail page
      */
@@ -40,16 +42,24 @@ final class DashboardRepository
     /** @return array<string, mixed> */
     public function snapshot(?int $failedJobsCursor = null): array
     {
-        [$document, $source] = $this->statusDocument();
-        $configuration = $this->safeConfiguration($document['configuration'] ?? null);
-        $supervisor = $this->supervisor($document, $configuration, $source);
-        $configuration ??= ['supervisors' => []];
+        $instances = $this->instances();
+        $supervisors = array_column($instances, 'supervisor');
+        $supervisor = $this->aggregate($supervisors);
+        $live = array_values(array_filter(
+            $instances,
+            fn (array $instance): bool => $instance['supervisor']['availability'] === 'live',
+        ));
+        // The first instance is the local one when it is live, otherwise
+        // the freshest: its generation describes the configuration.
+        $configuration = $instances[0]['configuration'] ?? ['supervisors' => []];
 
         return [
             'generated_at' => gmdate(DATE_ATOM),
             'supervisor' => $supervisor,
+            'instances' => $supervisors,
             'configuration' => $configuration,
-            'queues' => $this->queueDepths($configuration, $supervisor['pools']),
+            'queues' => $this->queueDepths($live !== [] ? $live : $instances),
+            'shared_queues' => $this->sharedQueues($instances),
             'failed_jobs' => $this->failedJobs($failedJobsCursor),
         ];
     }
@@ -62,7 +72,7 @@ final class DashboardRepository
         if (!$this->validInstanceId($expectedInstanceId)) {
             throw new DashboardConflictException('The supervisor instance identifier is invalid.');
         }
-        if ($this->statusDocument()[1] === 'remote') {
+        if ($this->runsOnAnotherHost($expectedInstanceId)) {
             throw new DashboardConflictException(
                 'This supervisor runs on another host. Send the command from that host with php artisan queen:supervisor.',
             );
@@ -80,14 +90,25 @@ final class DashboardRepository
         }
     }
 
+    private function runsOnAnotherHost(string $instanceId): bool
+    {
+        foreach ($this->statusDocuments() as [$raw, $source]) {
+            if (($raw['instance_id'] ?? null) === $instanceId) {
+                return $source === 'remote';
+            }
+        }
+
+        return false;
+    }
+
     /**
      * The local status document when its supervisor is live on this host,
-     * otherwise the published remote copy, otherwise whatever local document
-     * remains (reported as stale).
+     * then every copy supervisors published to the broker, and otherwise
+     * whatever local document remains (reported as stale).
      *
-     * @return array{0: array<string, mixed>|null, 1: 'local'|'remote'|null}
+     * @return list<array{0: array<string, mixed>, 1: 'local'|'remote'}>
      */
-    private function statusDocument(): array
+    private function statusDocuments(): array
     {
         try {
             $local = $this->state->status();
@@ -95,8 +116,9 @@ final class DashboardRepository
             $local = null;
         }
         $local = is_array($local) ? $local : null;
+        $documents = [];
         if ($local !== null && $this->isLocallyLive($local)) {
-            return [$local, 'local'];
+            $documents[] = [$local, 'local'];
         }
 
         if ($this->remoteStatus !== null) {
@@ -105,12 +127,176 @@ final class DashboardRepository
             } catch (\Throwable) {
                 $remote = null;
             }
-            if (is_array($remote)) {
-                return [$remote, 'remote'];
+            foreach (is_array($remote) && array_is_list($remote) ? $remote : [] as $document) {
+                if (is_array($document)) {
+                    $documents[] = [$document, 'remote'];
+                }
             }
         }
 
-        return [$local, $local !== null ? 'local' : null];
+        if ($documents === [] && $local !== null) {
+            $documents[] = [$local, 'local'];
+        }
+
+        return $documents;
+    }
+
+    /**
+     * One entry per identifiable supervisor instance: the local one first
+     * when it is live, then live before stale, freshest heartbeat first. A
+     * live local document wins over its own published copy.
+     *
+     * @return list<array{supervisor: array<string, mixed>, configuration: array<string, mixed>}>
+     */
+    private function instances(): array
+    {
+        $instances = [];
+        $seen = [];
+        foreach ($this->statusDocuments() as [$raw, $source]) {
+            $configuration = $this->safeConfiguration($raw['configuration'] ?? null);
+            $supervisor = $this->supervisor($raw, $configuration, $source);
+            if ($supervisor['availability'] === 'unavailable' || isset($seen[$supervisor['instance_id']])) {
+                continue;
+            }
+            $seen[$supervisor['instance_id']] = true;
+            $instances[] = ['supervisor' => $supervisor, 'configuration' => $configuration];
+        }
+
+        $order = fn (array $supervisor): array => [
+            match (true) {
+                $supervisor['availability'] === 'live' && $supervisor['source'] === 'local' => 0,
+                $supervisor['availability'] === 'live' => 1,
+                default => 2,
+            },
+            -$supervisor['updated_at_epoch'],
+            $supervisor['instance_id'],
+        ];
+        usort($instances, fn (array $a, array $b): int => $order($a['supervisor']) <=> $order($b['supervisor']));
+
+        // Sorted first, so the cap never drops a live instance for a stale one.
+        return array_slice($instances, 0, self::MAX_INSTANCES);
+    }
+
+    /**
+     * Queues that more than one running instance supervises for the same
+     * consumer group. There is no distributed leader lease: every master
+     * sizes its pools from the whole backlog, so together they overshoot.
+     *
+     * @param list<array{supervisor: array<string, mixed>, configuration: array<string, mixed>}> $instances
+     * @return list<array{connection: string, consumer_group: string, queue: string, instances: int}>
+     */
+    private function sharedQueues(array $instances): array
+    {
+        $owners = [];
+        foreach ($instances as $instance) {
+            if ($instance['supervisor']['availability'] !== 'live' || $instance['supervisor']['state'] !== 'running') {
+                continue;
+            }
+            $owned = [];
+            foreach ($instance['configuration']['supervisors'] as $supervisor) {
+                foreach ($supervisor['queues'] as $queue) {
+                    $owned[$supervisor['connection'] . "\0" . $supervisor['consumer_group'] . "\0" . $queue] = true;
+                }
+            }
+            foreach (array_keys($owned) as $key) {
+                $owners[$key] = ($owners[$key] ?? 0) + 1;
+            }
+        }
+
+        $shared = [];
+        foreach ($owners as $key => $count) {
+            if ($count > 1) {
+                [$connection, $consumerGroup, $queue] = explode("\0", (string) $key, 3);
+                $shared[] = [
+                    'connection' => $connection,
+                    'consumer_group' => $consumerGroup,
+                    'queue' => $queue,
+                    'instances' => $count,
+                ];
+            }
+        }
+
+        return $shared;
+    }
+
+    /**
+     * The summary every page shows. One instance is summarized by itself;
+     * several are summed over the live ones (or over all of them when none
+     * is live), and are ready or healthy only when every one of them is. A
+     * stopping or stopped master is never live, so the old pod of a rollout
+     * does not count.
+     *
+     * @param list<array<string, mixed>> $instances
+     * @return array<string, mixed>
+     */
+    private function aggregate(array $instances): array
+    {
+        $live = array_values(array_filter(
+            $instances,
+            fn (array $instance): bool => $instance['availability'] === 'live',
+        ));
+        $counts = ['instances' => count($instances), 'live_instances' => count($live)];
+        if ($instances === []) {
+            return [...$this->unavailableSupervisor(), ...$counts];
+        }
+        $current = $live !== [] ? $live : $instances;
+        // One live instance beside expired generations, such as the pod a
+        // deployment replaced, keeps the shape of a single supervisor.
+        if (count($current) === 1) {
+            return [...$current[0], ...$counts];
+        }
+        $common = function (string $field) use ($current): mixed {
+            $values = array_unique(array_column($current, $field));
+
+            return count($values) === 1 ? reset($values) : 'mixed';
+        };
+        $every = fn (string $field): bool => !in_array(false, array_column($current, $field), true);
+        $oldest = min(array_column($current, 'updated_at_epoch'));
+        $ready = $live !== [] && $every('ready');
+        $capacitySatisfied = $every('capacity_satisfied');
+
+        return [
+            'availability' => $live !== [] ? 'live' : 'stale',
+            'source' => in_array('remote', array_column($current, 'source'), true) ? 'remote' : 'local',
+            // Commands address one instance; the supervisors page offers them.
+            'controls_available' => false,
+            'engine' => $common('engine'),
+            'state' => $common('state'),
+            'instance_id' => null,
+            'pid' => null,
+            'hostname' => null,
+            'updated_at' => gmdate(DATE_ATOM, $oldest),
+            'updated_at_epoch' => $oldest,
+            'age_seconds' => max(0, time() - $oldest),
+            'workers' => array_sum(array_column($current, 'workers')),
+            'draining' => array_sum(array_column($current, 'draining')),
+            'ready' => $ready,
+            'capacity_satisfied' => $capacitySatisfied,
+            'processing_healthy' => $ready && $capacitySatisfied && $every('processing_healthy'),
+            'process_budget' => $this->aggregateProcessBudget(array_column($current, 'process_budget')),
+            'pools' => array_merge(...array_column($current, 'pools')),
+            ...$counts,
+        ];
+    }
+
+    /**
+     * @param non-empty-list<array<string, bool|int|null>> $budgets
+     * @return array<string, bool|int|null>
+     */
+    private function aggregateProcessBudget(array $budgets): array
+    {
+        $limits = array_column($budgets, 'limit');
+        $limit = in_array(null, $limits, true) ? null : array_sum($limits);
+        if (in_array(false, array_column($budgets, 'valid'), true)) {
+            return [...$this->unavailableProcessBudget(), 'limit' => $limit];
+        }
+
+        $total = ['valid' => true, 'limit' => $limit];
+        foreach (['used', 'available', 'active_worker_processes', 'draining_worker_processes', 'renewal_helpers_reserved'] as $field) {
+            $total[$field] = array_sum(array_column($budgets, $field));
+        }
+
+        return $total;
     }
 
     private function isLocallyLive(array $status): bool
@@ -190,6 +376,7 @@ final class DashboardRepository
             'state' => $state,
             'instance_id' => $instanceId,
             'pid' => $this->positiveInteger($raw['pid'] ?? null),
+            'hostname' => $this->safeString($raw['hostname'] ?? null, 255),
             'updated_at' => gmdate(DATE_ATOM, $epoch),
             'updated_at_epoch' => $epoch,
             'age_seconds' => max(0, $age),
@@ -214,6 +401,7 @@ final class DashboardRepository
             'state' => null,
             'instance_id' => null,
             'pid' => null,
+            'hostname' => null,
             'updated_at' => null,
             'updated_at_epoch' => null,
             'age_seconds' => null,
@@ -667,48 +855,61 @@ final class DashboardRepository
     }
 
     /**
-     * @param array<string, mixed> $configuration
-     * @param list<array<string, mixed>> $pools
+     * Every queue the instances supervise, each with the depth its own
+     * supervisor last sampled. Instances may run different configurations,
+     * so a pool's depth is read only from the instance that configured it.
+     *
+     * @param list<array{supervisor: array<string, mixed>, configuration: array<string, mixed>}> $instances
+     *   freshest first: the first available sample of a queue wins
      * @return list<array<string, mixed>>
      */
-    private function queueDepths(array $configuration, array $pools): array
+    private function queueDepths(array $instances): array
     {
         $result = [];
-        $seen = [];
-        $poolDepths = [];
-        foreach ($pools as $pool) {
-            if (!is_array($pool) || !is_string($pool['supervisor'] ?? null) || !is_string($pool['queue'] ?? null)) {
-                continue;
+        $positions = [];
+        foreach ($instances as $instance) {
+            $poolDepths = [];
+            foreach ($instance['supervisor']['pools'] as $pool) {
+                if (is_array($pool) && is_string($pool['supervisor'] ?? null) && is_string($pool['queue'] ?? null)) {
+                    $poolDepths[$pool['supervisor'] . "\0" . $pool['queue']] = $pool;
+                }
             }
-            $poolDepths[$pool['supervisor'] . "\0" . $pool['queue']] = $pool;
-        }
-        foreach ($configuration['supervisors'] ?? [] as $supervisor) {
-            if (!is_array($supervisor)) {
-                continue;
-            }
-            foreach ($supervisor['queues'] ?? [] as $queue) {
-                $connection = $supervisor['connection'] ?? null;
-                $consumerGroup = $supervisor['consumer_group'] ?? null;
-                if (!is_string($connection) || !is_string($consumerGroup) || !is_string($queue)) {
+            foreach ($instance['configuration']['supervisors'] ?? [] as $supervisor) {
+                if (!is_array($supervisor)) {
                     continue;
                 }
-                // Queen depth is consumer-group scoped. The same physical
-                // queue may legitimately appear more than once here.
-                $key = $connection . "\0" . $consumerGroup . "\0" . $queue;
-                if (isset($seen[$key]) || count($result) >= self::MAX_POOLS) {
-                    continue;
+                foreach ($supervisor['queues'] ?? [] as $queue) {
+                    $connection = $supervisor['connection'] ?? null;
+                    $consumerGroup = $supervisor['consumer_group'] ?? null;
+                    if (!is_string($connection) || !is_string($consumerGroup) || !is_string($queue)) {
+                        continue;
+                    }
+                    $pool = $poolDepths[($supervisor['name'] ?? '') . "\0" . $queue] ?? [];
+                    $available = ($pool['depth_available'] ?? false) === true
+                        && $this->nonNegativeInteger($pool['depth'] ?? null) !== null;
+                    // Queen depth is consumer-group scoped. The same physical
+                    // queue may legitimately appear more than once here.
+                    $key = $connection . "\0" . $consumerGroup . "\0" . $queue;
+                    $position = $positions[$key] ?? null;
+                    if ($position !== null) {
+                        if ($available && !$result[$position]['available']) {
+                            $result[$position]['available'] = true;
+                            $result[$position]['depth'] = $pool['depth'];
+                        }
+                        continue;
+                    }
+                    if (count($result) >= self::MAX_POOLS) {
+                        continue;
+                    }
+                    $positions[$key] = count($result);
+                    $result[] = [
+                        'connection' => $connection,
+                        'consumer_group' => $consumerGroup,
+                        'queue' => $queue,
+                        'available' => $available,
+                        'depth' => $available ? $pool['depth'] : null,
+                    ];
                 }
-                $seen[$key] = true;
-                $pool = $poolDepths[($supervisor['name'] ?? '') . "\0" . $queue] ?? [];
-                $available = ($pool['depth_available'] ?? false) === true
-                    && $this->nonNegativeInteger($pool['depth'] ?? null) !== null;
-                $result[] = [
-                    'connection' => $connection,
-                    'consumer_group' => $consumerGroup,
-                    'queue' => $queue,
-                    'available' => $available,
-                    'depth' => $available ? $pool['depth'] : null,
-                ];
             }
         }
 

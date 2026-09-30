@@ -26,7 +26,13 @@
                     <span class="state-mark" aria-hidden="true"></span>{{ $livenessLabel }}
                 </span>
             </dd>
-            <small>Heartbeat and owner lock</small>
+            <small>
+                @if ($instanceCount > 1)
+                    {{ $liveInstanceCount === $instanceCount ? 'All' : $liveInstanceCount . ' of' }} {{ $instanceCount }} supervisor instances live
+                @else
+                    Heartbeat and owner lock
+                @endif
+            </small>
         </div>
         <div class="metric">
             <dt>Readiness</dt>
@@ -61,12 +67,12 @@
         <div class="metric">
             <dt>Engine</dt>
             <dd>{{ $supervisor['engine'] ?? '—' }}</dd>
-            <small>Local master process</small>
+            <small>{{ $instanceCount > 1 ? 'Across all instances' : 'Master process' }}</small>
         </div>
         <div class="metric">
             <dt>Worker pools</dt>
             <dd>{{ number_format($poolCount) }}</dd>
-            <small>Configured queue allocations</small>
+            <small>{{ $instanceCount > 1 ? 'Queue allocations across instances' : 'Configured queue allocations' }}</small>
         </div>
         <div class="metric">
             <dt>Draining</dt>
@@ -76,7 +82,7 @@
         <div class="metric">
             <dt>Heartbeat</dt>
             <dd>{{ $supervisor['age_seconds'] === null ? '—' : $supervisor['age_seconds'] . 's' }}</dd>
-            <small>Age of local state</small>
+            <small>{{ $instanceCount > 1 ? 'Oldest instance heartbeat' : 'Age of supervisor state' }}</small>
         </div>
     </dl>
 </section>

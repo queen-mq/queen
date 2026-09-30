@@ -954,15 +954,287 @@ final class LaravelDashboardTest extends TestCase
             ->assertJsonPath('supervisor.source', 'remote');
     }
 
-    public function testALiveLocalSupervisorTakesPrecedenceOverTheRemoteCopy(): void
+    public function testALiveLocalSupervisorTakesPrecedenceOverItsOwnPublishedCopy(): void
     {
-        $this->remoteSupervisor(['engine' => 'rust', 'state' => 'paused', 'pool_status' => []]);
-        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+        $state = $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+        $this->remoteSupervisor([
+            'engine' => 'php',
+            'state' => 'paused',
+            'instance_id' => $state->instanceId(),
+            'pool_status' => [],
+        ]);
 
         $this->getJson('/queen/api/status')->assertOk()
+            ->assertJsonCount(1, 'instances')
+            ->assertJsonPath('supervisor.instances', 1)
             ->assertJsonPath('supervisor.source', 'local')
             ->assertJsonPath('supervisor.controls_available', true)
             ->assertJsonPath('supervisor.state', 'running');
+    }
+
+    public function testEveryPodPublishingToTheKeyIsListedAndSummed(): void
+    {
+        $configuration = $this->highQueueOnlyConfiguration();
+        $pool = fn (int $running, int $depth): array => [[
+            'supervisor' => 'default',
+            'queue' => 'high',
+            'running' => $running,
+            'desired' => $running,
+            'draining' => 0,
+            'pids' => range(10, 9 + $running),
+            'ready' => true,
+            'capacity_satisfied' => true,
+            'depth' => $depth,
+            'depth_available' => true,
+        ]];
+        $this->remoteSupervisors([
+            $this->remoteDocument([
+                'engine' => 'rust',
+                'state' => 'running',
+                'ready' => true,
+                'capacity_satisfied' => true,
+                'configuration' => $configuration,
+                'instance_id' => '000000000000000018d9e392917a928f00000001',
+                'hostname' => 'orders-worker-7d9f-a',
+                'pid' => 1,
+                'pool_status' => $pool(2, 5),
+            ], time() - 1),
+            $this->remoteDocument([
+                'engine' => 'rust',
+                'state' => 'running',
+                'ready' => true,
+                'capacity_satisfied' => true,
+                'configuration' => $configuration,
+                'instance_id' => '000000000000000018d9e392a0c3417700000001',
+                'hostname' => 'orders-worker-7d9f-b',
+                'pid' => 1,
+                'pool_status' => $pool(3, 7),
+            ]),
+        ]);
+
+        $this->getJson('/queen/api/status')->assertOk()
+            ->assertJsonCount(2, 'instances')
+            ->assertJsonPath('instances.0.hostname', 'orders-worker-7d9f-b')
+            ->assertJsonPath('instances.1.hostname', 'orders-worker-7d9f-a')
+            ->assertJsonPath('instances.0.workers', 3)
+            ->assertJsonPath('supervisor.instances', 2)
+            ->assertJsonPath('supervisor.live_instances', 2)
+            ->assertJsonPath('supervisor.availability', 'live')
+            ->assertJsonPath('supervisor.engine', 'rust')
+            ->assertJsonPath('supervisor.state', 'running')
+            ->assertJsonPath('supervisor.ready', true)
+            ->assertJsonPath('supervisor.workers', 5)
+            ->assertJsonPath('supervisor.instance_id', null)
+            ->assertJsonPath('supervisor.controls_available', false)
+            // Both pods sample the queue; the freshest sample is shown.
+            ->assertJsonPath('queues.0.depth', 7)
+            // Two masters on one consumer group both scale to their maximum.
+            ->assertJsonPath('shared_queues', [[
+                'connection' => 'queen',
+                'consumer_group' => 'laravel',
+                'queue' => 'high',
+                'instances' => 2,
+            ]]);
+
+        $response = $this->get('/queen/supervisors')->assertOk()
+            ->assertSeeInOrder([
+                'Supervisor instance 1 of 2',
+                'orders-worker-7d9f-b',
+                '000000000000000018d9e392a0c3417700000001',
+                'Supervisor instance 2 of 2',
+                'orders-worker-7d9f-a',
+                '000000000000000018d9e392917a928f00000001',
+            ])
+            ->assertSee('2 supervisor instances');
+        $xpath = $this->dashboardXPath($response->getContent());
+        $this->assertSame(2, $xpath->query('//section[@aria-labelledby and .//h2[starts-with(normalize-space(.), "Supervisor instance")]]')->length);
+        $this->assertSame(1, $xpath->query('//*[@id="supervisors"]')->length);
+        $this->assertSame(0, $xpath->query('//form[contains(@action, "/queen/control/")]')->length);
+
+        $overviewResponse = $this->get('/queen')->assertOk()
+            ->assertSee('2 running supervisors share queue high of consumer group laravel')
+            ->assertSee('Run one supervisor replica per consumer group.');
+        $overview = $this->dashboardXPath($overviewResponse->getContent());
+        $this->assertSame('All 2 supervisor instances live', trim($overview->query('//dt[.="Liveness"]/following-sibling::small')->item(0)->textContent));
+    }
+
+    public function testSupervisorsOfDifferentConsumerGroupsDoNotShareAQueue(): void
+    {
+        $configuration = $this->highQueueOnlyConfiguration();
+        $emails = $configuration;
+        $emails['supervisors'][0]['consumer_group'] = 'emails';
+        $depth = fn (int $depth): array => [['supervisor' => 'default', 'queue' => 'high', 'depth' => $depth, 'depth_available' => true]];
+        $this->remoteSupervisors([
+            $this->remoteDocument(['engine' => 'rust', 'state' => 'running', 'configuration' => $configuration, 'pool_status' => $depth(3)]),
+            $this->remoteDocument([
+                'engine' => 'rust',
+                'state' => 'running',
+                'configuration' => $emails,
+                'instance_id' => str_repeat('f', 32),
+                'pool_status' => $depth(8),
+            ], time() - 1),
+        ]);
+
+        // Both pools are named default/high; each depth belongs to its own group.
+        $this->getJson('/queen/api/status')->assertOk()
+            ->assertJsonPath('supervisor.live_instances', 2)
+            ->assertJsonPath('shared_queues', [])
+            ->assertJsonCount(2, 'queues')
+            ->assertJsonPath('queues.0.consumer_group', 'laravel')
+            ->assertJsonPath('queues.0.depth', 3)
+            ->assertJsonPath('queues.1.consumer_group', 'emails')
+            ->assertJsonPath('queues.1.depth', 8);
+        $this->get('/queen')->assertOk()->assertDontSee('running supervisors share queue');
+    }
+
+    public function testAStaleInstanceIsListedButLeftOutOfTheSummary(): void
+    {
+        $configuration = $this->highQueueOnlyConfiguration();
+        $this->remoteSupervisors([
+            $this->remoteDocument([
+                'engine' => 'php',
+                'state' => 'running',
+                'ready' => false,
+                'configuration' => $configuration,
+                'instance_id' => str_repeat('a', 32),
+                'hostname' => 'gone-pod',
+                'pool_status' => [['supervisor' => 'default', 'queue' => 'high', 'running' => 5, 'desired' => 5]],
+            ], time() - 3601),
+            $this->remoteDocument([
+                'engine' => 'php',
+                'state' => 'running',
+                'ready' => true,
+                'capacity_satisfied' => true,
+                'configuration' => $configuration,
+                'instance_id' => str_repeat('b', 32),
+                'hostname' => 'current-pod',
+                'pool_status' => [[
+                    'supervisor' => 'default',
+                    'queue' => 'high',
+                    'running' => 2,
+                    'desired' => 2,
+                    'draining' => 0,
+                    'ready' => true,
+                    'capacity_satisfied' => true,
+                    'depth' => 0,
+                    'depth_available' => true,
+                ]],
+            ]),
+        ]);
+
+        $this->getJson('/queen/api/status')->assertOk()
+            ->assertJsonPath('shared_queues', [])
+            ->assertJsonPath('instances.0.hostname', 'current-pod')
+            ->assertJsonPath('instances.1.hostname', 'gone-pod')
+            ->assertJsonPath('instances.1.availability', 'stale')
+            ->assertJsonPath('supervisor.availability', 'live')
+            ->assertJsonPath('supervisor.live_instances', 1)
+            ->assertJsonPath('supervisor.instances', 2)
+            ->assertJsonPath('supervisor.ready', true)
+            ->assertJsonPath('supervisor.workers', 2)
+            // One live instance keeps the single-supervisor summary.
+            ->assertJsonPath('supervisor.hostname', 'current-pod')
+            ->assertJsonPath('supervisor.instance_id', str_repeat('b', 32))
+            ->assertJsonPath('supervisor.process_budget.valid', false);
+
+        $overview = $this->dashboardXPath($this->get('/queen')->assertOk()->getContent());
+        $this->assertSame('1 of 2 supervisor instances live', trim($overview->query('//dt[.="Liveness"]/following-sibling::small')->item(0)->textContent));
+    }
+
+    public function testAPodThatStoppedDuringARolloutIsListedButLeftOutOfTheSummary(): void
+    {
+        $configuration = $this->highQueueOnlyConfiguration();
+        $this->remoteSupervisors([
+            $this->remoteDocument([
+                'engine' => 'rust',
+                'state' => 'stopped',
+                'configuration' => $configuration,
+                'instance_id' => str_repeat('a', 32),
+                'hostname' => 'old-pod',
+                'pool_status' => [['supervisor' => 'default', 'queue' => 'high', 'running' => 0, 'desired' => 0]],
+            ], time() - 5),
+            $this->remoteDocument([
+                'engine' => 'rust',
+                'state' => 'running',
+                'ready' => true,
+                'capacity_satisfied' => true,
+                'configuration' => $configuration,
+                'instance_id' => str_repeat('b', 32),
+                'hostname' => 'new-pod',
+                'pool_status' => [[
+                    'supervisor' => 'default',
+                    'queue' => 'high',
+                    'running' => 1,
+                    'desired' => 1,
+                    'draining' => 0,
+                    'ready' => true,
+                    'capacity_satisfied' => true,
+                    'depth' => 0,
+                    'depth_available' => true,
+                ]],
+            ]),
+        ]);
+
+        $this->getJson('/queen/api/status')->assertOk()
+            ->assertJsonPath('instances.0.hostname', 'new-pod')
+            ->assertJsonPath('instances.1.hostname', 'old-pod')
+            ->assertJsonPath('instances.1.state', 'stopped')
+            ->assertJsonPath('instances.1.availability', 'stale')
+            ->assertJsonPath('supervisor.instances', 2)
+            ->assertJsonPath('supervisor.live_instances', 1)
+            ->assertJsonPath('supervisor.state', 'running')
+            ->assertJsonPath('supervisor.ready', true)
+            ->assertJsonPath('shared_queues', []);
+        $this->get('/queen/supervisors')->assertOk()->assertSeeInOrder(['new-pod', 'Active', 'old-pod', 'Stale']);
+    }
+
+    public function testALocalSupervisorKeepsItsControlsBesideRemotePods(): void
+    {
+        $state = $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+        $this->remoteSupervisor(['engine' => 'rust', 'state' => 'running', 'hostname' => 'other-pod', 'pool_status' => []]);
+
+        $this->getJson('/queen/api/status')->assertOk()
+            ->assertJsonPath('instances.0.source', 'local')
+            ->assertJsonPath('instances.0.instance_id', $state->instanceId())
+            ->assertJsonPath('instances.0.controls_available', true)
+            ->assertJsonPath('instances.1.source', 'remote')
+            ->assertJsonPath('instances.1.hostname', 'other-pod')
+            ->assertJsonPath('supervisor.state', 'running')
+            ->assertJsonPath('supervisor.engine', 'mixed')
+            ->assertJsonPath('supervisor.controls_available', false);
+
+        $response = $this->get('/queen/supervisors')->assertOk()
+            ->assertSee('Read-only: this supervisor runs on another host.');
+        $xpath = $this->dashboardXPath($response->getContent());
+        $targets = $xpath->query('//form[contains(@action, "/queen/control/")]/input[@name="instance_id"]');
+        $this->assertSame(3, $targets->length);
+        foreach ($targets as $target) {
+            $this->assertSame($state->instanceId(), $target->getAttribute('value'));
+        }
+
+        $this->post('/queen/control/pause', ['instance_id' => str_repeat('c', 32)])
+            ->assertStatus(409)
+            ->assertSee('This supervisor runs on another host.');
+        $this->post('/queen/control/pause', ['instance_id' => $state->instanceId()])->assertStatus(303);
+        $this->assertSame('pause', $state->command(null, $state->instanceId())['command'] ?? null);
+    }
+
+    public function testADocumentPublishedByAnEarlierReleaseIsStillShown(): void
+    {
+        $this->remoteSupervisors([
+            $this->remoteDocument(['engine' => 'rust', 'state' => 'running', 'hostname' => 'old-pod', 'pool_status' => []]),
+            $this->remoteDocument([
+                'engine' => 'rust',
+                'state' => 'running',
+                'instance_id' => str_repeat('e', 40),
+                'hostname' => 'new-pod',
+                'pool_status' => [],
+            ]),
+        ], legacySlot: true);
+
+        $this->getJson('/queen/api/status')->assertOk()
+            ->assertJsonPath('supervisor.instances', 2)
+            ->assertJsonPath('supervisor.live_instances', 2);
     }
 
     public function testControlsAreRefusedForARemoteSupervisor(): void
@@ -1619,22 +1891,56 @@ final class LaravelDashboardTest extends TestCase
     /** @param array<string, mixed> $status */
     private function remoteSupervisor(array $status, ?int $updatedAtEpoch = null): PlanHandler
     {
-        $this->app['config']->set('queen.supervisor.remote_status', ['enabled' => true, 'key' => 'orders']);
+        return $this->remoteSupervisors([$this->remoteDocument($status, $updatedAtEpoch)]);
+    }
+
+    /**
+     * A published status document; `instance_id`, `hostname` and `pid` in
+     * $status replace the defaults.
+     *
+     * @param array<string, mixed> $status
+     * @return array<string, mixed>
+     */
+    private function remoteDocument(array $status, ?int $updatedAtEpoch = null): array
+    {
         $updatedAtEpoch ??= time();
-        $document = array_replace([
+
+        return array_replace([
             'configuration' => $this->statusConfiguration(),
+            'instance_id' => str_repeat('c', 32),
+            'hostname' => 'worker-0',
+            'pid' => 4242,
         ], $status, [
             'schema' => SupervisorState::STATUS_SCHEMA,
             'updated_at' => gmdate('Y-m-d\TH:i:s\Z', $updatedAtEpoch),
             'updated_at_epoch' => $updatedAtEpoch,
-            'pid' => 4242,
-            'instance_id' => str_repeat('c', 32),
             'paused' => ($status['state'] ?? null) === 'paused',
             'stopping' => ($status['state'] ?? null) === 'terminating',
         ]);
-        $operations = RemoteStatusDocument::operations($document, 'queen-supervisor', 'orders', 600, str_repeat('d', 32));
+    }
+
+    /**
+     * Serve documents as their supervisors publish them, each in its own slot.
+     *
+     * @param list<array<string, mixed>> $documents
+     * @param bool $legacySlot write the first document where earlier releases did
+     */
+    private function remoteSupervisors(array $documents, bool $legacySlot = false): PlanHandler
+    {
+        $this->app['config']->set('queen.supervisor.remote_status', ['enabled' => true, 'key' => 'orders']);
+        $rows = [];
+        foreach ($documents as $index => $document) {
+            $key = $legacySlot && $index === 0
+                ? 'orders'
+                : RemoteStatusDocument::instanceKey('orders', $document['instance_id']);
+            foreach (RemoteStatusDocument::operations($document, 'queen-supervisor', $key, 600, str_repeat('d', 32)) as $op) {
+                $rows[$op['key']] = ['key' => $op['key'], 'value' => $op['value']];
+            }
+        }
+        // The broker returns a prefix in byte order.
+        ksort($rows, SORT_STRING);
         $handler = new PlanHandler([], ['status' => 200, 'json' => ['results' => [[
-            'rows' => array_map(fn (array $op): array => ['key' => $op['key'], 'value' => $op['value']], $operations),
+            'rows' => array_values($rows),
             'truncated' => false,
             'nextAfter' => null,
         ]]]]);
@@ -1663,6 +1969,15 @@ final class LaravelDashboardTest extends TestCase
         $state->writeStatus($status);
 
         return $state;
+    }
+
+    /** @return array<string, mixed> */
+    private function highQueueOnlyConfiguration(): array
+    {
+        $configuration = $this->statusConfiguration();
+        $configuration['supervisors'][0]['queues'] = ['high'];
+
+        return $configuration;
     }
 
     /** @return array<string, mixed> */

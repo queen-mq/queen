@@ -3,13 +3,14 @@
 //!
 //! The wire format is `queen.supervisor.remote-status/v1`, defined by the
 //! Laravel package's `RemoteStatusDocument` and read back by its
-//! `RemoteStatusReader`. A key/value value is capped at 64 KiB while a status
-//! document may reach 1 MiB, so the document is split across keys that share
-//! one prefix:
+//! `RemoteStatusReader`. Every instance publishes into its own slot, named by
+//! its instance id, so the hosts or pods sharing one key never overwrite each
+//! other. A key/value value is capped at 64 KiB while a status document may
+//! reach 1 MiB, so the document is split across keys that share the slot:
 //!
 //! ```text
-//! <key>/head        {format, write, chunks, bytes}
-//! <key>/chunk/0000  {write, index, data}   data: base64 of a document slice
+//! <key>/<instance>/head        {format, write, chunks, bytes}
+//! <key>/<instance>/chunk/0000  {write, index, data}   data: base64 of a document slice
 //! ```
 //!
 //! The head and every chunk travel in ONE batch call, which the broker applies
@@ -177,16 +178,36 @@ fn request_body(
     key: &str,
     ttl: u64,
 ) -> Result<(Vec<u8>, usize), Box<dyn std::error::Error>> {
+    let slot = instance_key(key, document)?;
     let mut document = document.clone();
     // The legacy nested pool map duplicates pool_status, which every current
     // reader prefers. Dropping it roughly halves what travels.
     if let Some(object) = document.as_object_mut() {
         object.remove("pools");
     }
-    let operations = operations(&document, namespace, key, ttl, &new_write_id()?)?;
+    let operations = operations(&document, namespace, &slot, ttl, &new_write_id()?)?;
     let count = operations.len();
     let body = serde_json::to_vec(&serde_json::json!({ "operations": operations }))?;
     Ok((body, count))
+}
+
+/// The key this instance publishes under. The reader accepts only instance
+/// ids as the engines generate them, lowercase hex, as slot names.
+pub(crate) fn instance_key(
+    key: &str,
+    document: &serde_json::Value,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let instance_id = document
+        .get("instance_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| {
+            (16..=128).contains(&id.len())
+                && id
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        })
+        .ok_or("the status document has no valid instance_id")?;
+    Ok(format!("{key}/{instance_id}"))
 }
 
 /// KV put operations for one batch call: the head, then every chunk in order.
@@ -348,6 +369,8 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
 
+    const INSTANCE: &str = "0000000000000000189a1b2c3d4e5f6000000001";
+
     fn remote_config(interval: u64, ttl: u64) -> RemoteStatusConfig {
         RemoteStatusConfig {
             connection: QueenConfig {
@@ -444,7 +467,7 @@ mod tests {
             .build()
             .unwrap();
         let mut publisher = RemoteStatusPublisher::new(&config);
-        let document = serde_json::json!({"state": "running", "pools": {}, "pool_status": []});
+        let document = serde_json::json!({"state": "running", "instance_id": INSTANCE, "pools": {}, "pool_status": []});
 
         publisher.publish(&client, &document);
 
@@ -462,7 +485,11 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(body).unwrap();
         let operations = body["operations"].as_array().unwrap();
         assert_eq!(operations.len(), 2);
-        assert_eq!(operations[0]["key"], "orders/head");
+        assert_eq!(operations[0]["key"], format!("orders/{INSTANCE}/head"));
+        assert_eq!(
+            operations[1]["key"],
+            format!("orders/{INSTANCE}/chunk/0000")
+        );
         assert_eq!(operations[0]["value"]["format"], FORMAT);
         assert_eq!(
             operations[1]["value"]["write"],
@@ -474,7 +501,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             published,
-            serde_json::json!({"state": "running", "pool_status": []})
+            serde_json::json!({"state": "running", "instance_id": INSTANCE, "pool_status": []})
         );
     }
 
@@ -492,9 +519,57 @@ mod tests {
             .unwrap();
         let mut publisher = RemoteStatusPublisher::new(&config);
 
-        publisher.publish(&client, &serde_json::json!({"state": "running"}));
+        publisher.publish(
+            &client,
+            &serde_json::json!({"state": "running", "instance_id": INSTANCE}),
+        );
 
         server.join().unwrap();
+        assert!(publisher.failing);
+    }
+
+    #[test]
+    fn every_instance_publishes_under_its_own_slot() {
+        let document = serde_json::json!({"instance_id": INSTANCE});
+        assert_eq!(
+            instance_key("orders", &document).unwrap(),
+            format!("orders/{INSTANCE}")
+        );
+        // The PHP engine's ids are 32 hex characters.
+        let php = serde_json::json!({"instance_id": "0123456789abcdef0123456789abcdef"});
+        assert_eq!(
+            instance_key("orders", &php).unwrap(),
+            "orders/0123456789abcdef0123456789abcdef"
+        );
+
+        for invalid in [
+            serde_json::json!({}),
+            serde_json::json!({"instance_id": 42}),
+            serde_json::json!({"instance_id": "0123456789ABCDEF"}),
+            serde_json::json!({"instance_id": "0123456789abcde"}),
+            serde_json::json!({"instance_id": "0123456789abcdef/head"}),
+            serde_json::json!({"instance_id": "a".repeat(129)}),
+        ] {
+            assert!(instance_key("orders", &invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn a_document_without_an_instance_id_is_a_failure_and_is_never_sent() {
+        let config = remote_config(3, 600);
+        let mut publisher = RemoteStatusPublisher::new(&config);
+        let sent = Cell::new(0);
+
+        publisher.publish_at(
+            Instant::now(),
+            &serde_json::json!({"state": "running"}),
+            |_: &[u8], _: usize| {
+                sent.set(sent.get() + 1);
+                Ok(())
+            },
+        );
+
+        assert_eq!(sent.get(), 0);
         assert!(publisher.failing);
     }
 
@@ -606,8 +681,12 @@ mod tests {
 
     #[test]
     fn the_legacy_pool_map_does_not_travel() {
-        let document =
-            serde_json::json!({"state": "running", "pools": {"default": {}}, "pool_status": []});
+        let document = serde_json::json!({
+            "state": "running",
+            "instance_id": INSTANCE,
+            "pools": {"default": {}},
+            "pool_status": [],
+        });
         let (body, count) = request_body(&document, "ns", "orders", 600).unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
@@ -616,7 +695,7 @@ mod tests {
         let published: serde_json::Value = serde_json::from_slice(&base64_decode(data)).unwrap();
         assert_eq!(
             published,
-            serde_json::json!({"state": "running", "pool_status": []})
+            serde_json::json!({"state": "running", "instance_id": INSTANCE, "pool_status": []})
         );
     }
 
@@ -672,7 +751,7 @@ mod tests {
             Ok(())
         };
         let start = Instant::now();
-        let running = serde_json::json!({"state": "running"});
+        let running = serde_json::json!({"state": "running", "instance_id": INSTANCE});
 
         publisher.publish_at(start, &running, send);
         publisher.publish_at(start + Duration::from_secs(1), &running, send);
@@ -680,20 +759,20 @@ mod tests {
 
         publisher.publish_at(
             start + Duration::from_secs(2),
-            &serde_json::json!({"state": "paused"}),
+            &serde_json::json!({"state": "paused", "instance_id": INSTANCE}),
             send,
         );
         assert_eq!(sent.get(), 2);
 
         publisher.publish_at(
             start + Duration::from_secs(4),
-            &serde_json::json!({"state": "paused"}),
+            &serde_json::json!({"state": "paused", "instance_id": INSTANCE}),
             send,
         );
         assert_eq!(sent.get(), 2);
         publisher.publish_at(
             start + Duration::from_secs(5),
-            &serde_json::json!({"state": "paused"}),
+            &serde_json::json!({"state": "paused", "instance_id": INSTANCE}),
             send,
         );
         assert_eq!(sent.get(), 3);
@@ -713,7 +792,7 @@ mod tests {
             outcomes.borrow_mut().pop().unwrap()
         };
         let start = Instant::now();
-        let running = serde_json::json!({"state": "running"});
+        let running = serde_json::json!({"state": "running", "instance_id": INSTANCE});
 
         publisher.publish_at(start, &running, send);
         assert!(publisher.failing);

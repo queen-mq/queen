@@ -354,11 +354,14 @@ final class SupervisorState
     {
         $updatedAtEpoch = time();
         $state = is_string($status['state'] ?? null) ? $status['state'] : 'unknown';
+        // Tells apart the hosts or pods that publish to one remote status key.
+        $hostname = gethostname();
         $metadata = [
             'schema' => self::STATUS_SCHEMA,
             'updated_at' => gmdate('Y-m-d\TH:i:s\Z', $updatedAtEpoch),
             'updated_at_epoch' => $updatedAtEpoch,
             'pid' => getmypid(),
+            'hostname' => is_string($hostname) && $hostname !== '' ? $hostname : null,
             'instance_id' => $this->instanceId,
             'paused' => $state === 'paused',
             'stopping' => $state === 'terminating',
