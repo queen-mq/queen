@@ -63,6 +63,8 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-29 (through f94b76ec + this patch): either engine publishes remote status and the package pins supervisor 0.2.0; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through 1ef4bb47 + this patch): thread-safe PHP support in the installer and launcher changes no setting or default listed here; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through 022337fb + this patch): remote status is published per supervisor instance, the package pins supervisor 0.3.0 and the panel lists every instance; no setting or default changes.
+# sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): adds the supervisor.coordination keys for coordinated replicas and pins supervisor 0.4.0.
+# sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): adds the prefork, per-queue minimum, fast scale-up, waits, notifications, job metrics, tags and Prometheus keys, and pins supervisor 0.4.0.
 ---
 
 The Composer package is `queen-mq/php-client`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
@@ -502,6 +504,25 @@ Publish the config with the `queen-config` tag; it lands at `config/queen.php`. 
 | `supervisor.remote_status.namespace` | `QUEEN_SUPERVISOR_REMOTE_STATUS_NAMESPACE` | `queen-supervisor` |
 | `supervisor.remote_status.interval` | `QUEEN_SUPERVISOR_REMOTE_STATUS_INTERVAL` | unset; `poll_interval` |
 | `supervisor.remote_status.ttl` | `QUEEN_SUPERVISOR_REMOTE_STATUS_TTL` | unset; twice `heartbeat_timeout`, at least 300 seconds |
+| `supervisor.coordination.enabled` | `QUEEN_SUPERVISOR_COORDINATION` | `false` |
+| `supervisor.coordination.connection` | `QUEEN_SUPERVISOR_COORDINATION_CONNECTION` | `queen` |
+| `supervisor.coordination.namespace` | `QUEEN_SUPERVISOR_COORDINATION_NAMESPACE` | `queen-supervisor` |
+| `supervisor.prefork` | `QUEEN_SUPERVISOR_PREFORK` | `false` |
+| `supervisor.supervisors.*.min_processes_per_queue` | `QUEEN_SUPERVISOR_MIN_PROCESSES_PER_QUEUE` | `0` |
+| `supervisor.supervisors.*.fast_scale_up` | `QUEEN_SUPERVISOR_FAST_SCALE_UP` | `false` |
+| `waits` | `QUEEN_WAIT_THRESHOLD` for the default queue | `['queen:default' => 60]` seconds |
+| `notifications.mail` | `QUEEN_NOTIFY_MAIL` | unset |
+| `notifications.throttle_minutes` | `QUEEN_NOTIFY_THROTTLE_MINUTES` | `5` |
+| `job_metrics.enabled` | `QUEEN_JOB_METRICS` | `true` |
+| `job_metrics.connection` | `QUEEN_JOB_METRICS_CONNECTION` | `queen` |
+| `job_metrics.namespace` | `QUEEN_JOB_METRICS_NAMESPACE` | `queen-metrics` |
+| `tags.enabled` | `QUEEN_TAGS` | `true` |
+| `tags.connection` | `QUEEN_TAGS_CONNECTION` | `queen` |
+| `tags.namespace` | `QUEEN_TAGS_NAMESPACE` | `queen-metrics` |
+| `tags.retention_minutes` | `QUEEN_TAGS_RETENTION_MINUTES` | `1440` |
+| `metrics.enabled` | `QUEEN_METRICS_ENABLED` | `false` |
+| `metrics.path` | `QUEEN_METRICS_PATH` | `queen/metrics` |
+| `metrics.token` | `QUEEN_METRICS_TOKEN` | unset; 32+ characters when enabled |
 | `dashboard.enabled` | `QUEEN_DASHBOARD_ENABLED` | `false` |
 | `dashboard.path` | `QUEEN_DASHBOARD_PATH` | `queen` |
 | `dashboard.domain` | `QUEEN_DASHBOARD_DOMAIN` | unset |

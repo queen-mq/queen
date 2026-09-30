@@ -20,6 +20,11 @@ sourceOfTruth:
   - benchmark-queen/laravel-supervisors/app/config/benchmark.php
   - benchmark-queen/laravel-supervisors/app/config/horizon.php
   - benchmark-queen/laravel-supervisors/app/config/queen.php
+  - benchmark-queen/2026-09-30-laravel-supervisor-features/README.md
+  - benchmark-queen/2026-09-30-laravel-supervisor-features/scripts/prefork-memory.sh
+  - benchmark-queen/2026-09-30-laravel-supervisor-features/scripts/prefork.php
+  - benchmark-queen/2026-09-30-laravel-supervisor-features/scripts/replicas-timeline.sh
+  - benchmark-queen/2026-09-30-laravel-supervisor-features/scripts/scale-up.sh
 verifiedBy:
   - benchmark-queen/laravel-supervisors/scripts/tests/test_campaign_stats.py
   - benchmark-queen/laravel-supervisors/scripts/tests/test_container_isolation.py
@@ -33,6 +38,7 @@ verifiedBy:
   - clients/client-php/tests/LaravelDashboardDisabledTest.php
   - clients/client-php/tests/ProcessLeaseRenewerTest.php
   - clients/client-php/tests/SyncedFailedJobProviderLifecycleTest.php
+# sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): coordination, prefork and fast scale-up are opt-in and off in the benchmarked configuration, so the qualification results stand; the supervisor-features section adds the new measurements.
 ---
 
 This qualification asks whether Queen can replace the **process control plane** of Laravel
@@ -168,6 +174,77 @@ The production performance candidate is therefore prefetch 4, ACK batch 1, renew
 must be measured again before the diagnostic ratios above can become a production performance
 claim. ACK batches greater than one remain separate fault-oriented experiments because they widen
 the duplicate and recovery window.
+
+## Supervisor features, 2026-09-30
+
+Three opt-in features of supervisor 0.4.0 were measured after the qualification: prefork workers,
+coordinated replicas and fast scale-up. One Apple Silicon host with Docker Desktop, Queen 1.6.0 and
+PostgreSQL 16 ran every case, with the same Laravel application as above. The results show what
+each feature changes; they are diagnostic, not a release performance claim. Scripts, raw samples and
+limits are in `benchmark-queen/2026-09-30-laravel-supervisor-features/`.
+
+### Prefork memory
+
+Inside a Linux container with PHP 8.4, N workers were started one by one (`spawned`) or forked from
+one booted Laravel (`forked`, the fork server included). The proportional set size (PSS) of every
+process was summed 15 seconds after the start, or after a burst of 600 jobs. PSS divides a shared
+page among the processes that share it, so the sum is the physical memory the workers hold together.
+
+| Case | Opcache | Spawned | Forked | Saving |
+| --- | --- | --- | --- | --- |
+| 4 idle workers | off | 146 MiB | 91 MiB | 38% |
+| 4 idle workers | on | 167 MiB | 69 MiB | 59% |
+| 8 workers after 600 jobs | off | 272 MiB | 142 MiB | 48% |
+| 8 workers after 600 jobs | on | 336 MiB | 85 MiB | 75% |
+
+Medians of three runs; the runs differed by at most 1 MiB. With opcache on, every spawned worker
+compiles its own copy of the framework, which forking shares. The resident set size barely moves
+(203 against 202 MiB for four idle workers) because it counts a shared page once in every process.
+A worker that runs for hours writes to more of the shared pages than one measured after 15 seconds,
+so the saving in production is lower than this table.
+
+<Chart
+  src="laravel-prefork-memory"
+  alt="Grouped bars of total PSS for four cases. Forked workers use less memory in every case: 91 against 146 MiB and 69 against 167 MiB for four idle workers, 142 against 272 MiB and 85 against 336 MiB for eight workers after 600 jobs."
+  caption="Total PSS of the workers, median of three runs, PHP 8.4 in a Linux container. Forked includes the fork server itself."
+  source="benchmark-queen/2026-09-30-laravel-supervisor-features/raw/prefork-memory.csv"
+/>
+
+### Coordinated replicas
+
+Two Rust supervisors served one queue and consumer group, as two pods would, each with
+`max_processes` 8, the `size` strategy and 10 jobs per worker, against a backlog of 150 jobs of three
+seconds. Both status documents were sampled every second for thirty seconds. The fleet target is
+what one pool of 16 would size for the sampled backlog: `ceil(depth / 10)`, at most 16.
+
+Without coordination, each pod sized the whole backlog on its own. The two ran above the fleet target
+in all 30 samples, and twice it once the target fell under 8: 12 workers for a target of 6. With
+coordination, the two shares added up to the target in all 30 samples. The uncoordinated run
+drained its backlog sooner because it ran more workers than configured; coordination keeps the
+fleet to the configured target, so raise `max_processes` or the replica count to go faster.
+
+<Chart
+  src="laravel-replicas"
+  alt="Two panels of worker processes over thirty seconds for two supervisor pods on one queue. Without coordination the pods together run above the dashed fleet target at every sample, up to twice it: 12 workers for a target of 6. With coordination their total equals the target at every sample."
+  caption="Two Rust supervisors, max_processes 8 each, target_jobs_per_process 10, the same 150-job backlog in both runs."
+  source="benchmark-queen/2026-09-30-laravel-supervisor-features/raw/replicas.csv"
+/>
+
+### Fast scale-up
+
+One Rust supervisor with `max_processes` 20, `balance_max_shift` 1 and a one-second poll and
+cooldown received 600 jobs of five seconds while running its minimum of one worker. Its running
+workers were sampled every half second. Stepping by one worker per cycle, it reached 20 workers after
+18.1 seconds; with `fast_scale_up`, which closes half of the remaining gap per cycle, after 3.6
+seconds. The production defaults are a three-second poll and cooldown, which multiply both times by
+about three.
+
+<Chart
+  src="laravel-fast-scale-up"
+  alt="Two lines of running worker processes after a burst of 600 jobs. fast_scale_up reaches twenty workers after 3.6 seconds; one step per cycle climbs by about one worker a second and reaches twenty after 18.1 seconds."
+  caption="One Rust supervisor, balance_cooldown 1, poll_interval 1, max_processes 20, the same burst in both runs."
+  source="benchmark-queen/2026-09-30-laravel-supervisor-features/raw/scale-up.csv"
+/>
 
 ## What remains before GA
 

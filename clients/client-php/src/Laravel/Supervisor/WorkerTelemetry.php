@@ -2,7 +2,12 @@
 
 namespace Queen\Laravel\Supervisor;
 
+use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Queue\Job;
+use Illuminate\Queue\Events\JobExceptionOccurred;
+use Illuminate\Queue\Events\JobFailed;
+use Illuminate\Queue\Events\JobProcessed;
+use Illuminate\Queue\Events\JobProcessing;
 
 final class WorkerTelemetry
 {
@@ -25,6 +30,34 @@ final class WorkerTelemetry
         // PID reuse must not make a new worker inherit a previous process's
         // runtime estimate before it has handled its first job.
         @unlink($this->path());
+    }
+
+    /**
+     * Record job runtimes when the supervisor asked for them: it sets
+     * QUEEN_SUPERVISOR_TELEMETRY_DIR in the environment of workers whose pool
+     * scales on runtime. A spawned worker reads it at boot, a preforked one
+     * right after its fork.
+     */
+    public static function listenFromEnvironment(Dispatcher $events): void
+    {
+        $directory = getenv('QUEEN_SUPERVISOR_TELEMETRY_DIR');
+        if (!is_string($directory) || $directory === '') {
+            return;
+        }
+
+        $connection = getenv('QUEEN_LARAVEL_CONNECTION');
+        $supervisor = getenv('QUEEN_LARAVEL_SUPERVISOR');
+        $group = getenv('QUEEN_LARAVEL_CONSUMER_GROUP');
+        $telemetry = new self(
+            $directory,
+            is_string($connection) && $connection !== '' ? $connection : 'queen',
+            is_string($supervisor) && $supervisor !== '' ? $supervisor : 'default',
+            is_string($group) && $group !== '' ? $group : 'laravel',
+        );
+        $events->listen(JobProcessing::class, fn (JobProcessing $event) => $telemetry->start($event->connectionName, $event->job));
+        $events->listen(JobProcessed::class, fn (JobProcessed $event) => $telemetry->finish($event->connectionName, $event->job));
+        $events->listen(JobExceptionOccurred::class, fn (JobExceptionOccurred $event) => $telemetry->finish($event->connectionName, $event->job, true));
+        $events->listen(JobFailed::class, fn (JobFailed $event) => $telemetry->finish($event->connectionName, $event->job, true));
     }
 
     public function start(string $connection, Job $job): void

@@ -12,7 +12,7 @@
         <div>
             <strong>{{ $sharedQueue['instances'] }} running supervisors share queue {{ $sharedQueue['queue'] }} of consumer group {{ $sharedQueue['consumer_group'] }}</strong>
             <span>
-                Each master sizes its workers from the whole backlog, so together they can exceed max_processes. Run one supervisor replica per consumer group.
+                Each master sizes its workers from the whole backlog, so together they can exceed max_processes. Enable QUEEN_SUPERVISOR_COORDINATION on every replica so they share one target.
                 @if ($otherSharedQueues > 0) {{ $otherSharedQueues }} other {{ $otherSharedQueues === 1 ? 'queue is' : 'queues are' }} shared too. @endif
             </span>
         </div>

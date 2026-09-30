@@ -23,6 +23,8 @@ final class DashboardRepository
 
     private const MAX_INSTANCES = 128;
 
+    private const MAX_REPLICAS = 10000;
+
     /**
      * @param \Closure(int, ?int): mixed $failedJobs a page of the failed-job index
      * @param (\Closure(): mixed)|null $remoteStatus reads the list of documents
@@ -42,6 +44,17 @@ final class DashboardRepository
     /** @return array<string, mixed> */
     public function snapshot(?int $failedJobsCursor = null): array
     {
+        return [...$this->supervision(), 'failed_jobs' => $this->failedJobs($failedJobsCursor)];
+    }
+
+    /**
+     * The snapshot without failed jobs: supervisor state only, cheap enough
+     * for a metrics scrape.
+     *
+     * @return array<string, mixed>
+     */
+    public function supervision(): array
+    {
         $instances = $this->instances();
         $supervisors = array_column($instances, 'supervisor');
         $supervisor = $this->aggregate($supervisors);
@@ -60,7 +73,6 @@ final class DashboardRepository
             'configuration' => $configuration,
             'queues' => $this->queueDepths($live !== [] ? $live : $instances),
             'shared_queues' => $this->sharedQueues($instances),
-            'failed_jobs' => $this->failedJobs($failedJobsCursor),
         ];
     }
 
@@ -178,40 +190,77 @@ final class DashboardRepository
     }
 
     /**
-     * Queues that more than one running instance supervises for the same
-     * consumer group. There is no distributed leader lease: every master
-     * sizes its pools from the whole backlog, so together they overshoot.
+     * Queues that more than one running instance autoscales for the same
+     * consumer group without sharing one target. Each such master sizes its
+     * pool from the whole backlog, so together they overshoot. Coordinated
+     * replicas of the same pool (same consumer group and queue set) split
+     * one target and are not reported; fixed pools do not follow the backlog.
      *
      * @param list<array{supervisor: array<string, mixed>, configuration: array<string, mixed>}> $instances
      * @return list<array{connection: string, consumer_group: string, queue: string, instances: int}>
      */
     private function sharedQueues(array $instances): array
     {
+        // connection, group, queue => sizing => owners; a coordinated sizing
+        // also records the fewest replicas any of its owners can see.
         $owners = [];
+        $seen = [];
         foreach ($instances as $instance) {
             if ($instance['supervisor']['availability'] !== 'live' || $instance['supervisor']['state'] !== 'running') {
                 continue;
             }
-            $owned = [];
-            foreach ($instance['configuration']['supervisors'] as $supervisor) {
-                foreach ($supervisor['queues'] as $queue) {
-                    $owned[$supervisor['connection'] . "\0" . $supervisor['consumer_group'] . "\0" . $queue] = true;
+            $replicas = [];
+            foreach ($instance['supervisor']['pools'] as $pool) {
+                if ($pool['replicas'] !== null) {
+                    $replicas[$pool['supervisor']] = min($replicas[$pool['supervisor']] ?? PHP_INT_MAX, $pool['replicas']);
                 }
             }
-            foreach (array_keys($owned) as $key) {
-                $owners[$key] = ($owners[$key] ?? 0) + 1;
+            $owned = [];
+            foreach ($instance['configuration']['supervisors'] as $supervisor) {
+                if ($supervisor['balance'] === 'simple') {
+                    continue;
+                }
+                $queues = $supervisor['queues'];
+                sort($queues, SORT_STRING);
+                $coordinated = isset($replicas[$supervisor['name']]);
+                // Pools of one instance never multiply each other's sizing
+                // across hosts, so an uncoordinated instance is one sizing.
+                $sizing = $coordinated
+                    ? "coordinated\0" . $supervisor['consumer_group'] . "\0" . implode("\0", $queues)
+                    : "alone\0" . $instance['supervisor']['instance_id'];
+                foreach ($supervisor['queues'] as $queue) {
+                    $key = $supervisor['connection'] . "\0" . $supervisor['consumer_group'] . "\0" . $queue;
+                    $owned[$key][$sizing] = $coordinated ? $replicas[$supervisor['name']] : null;
+                }
+            }
+            foreach ($owned as $key => $sizings) {
+                foreach ($sizings as $sizing => $visible) {
+                    $owners[$key][$sizing] = ($owners[$key][$sizing] ?? 0) + 1;
+                    if ($visible !== null) {
+                        $seen[$key][$sizing] = min($seen[$key][$sizing] ?? PHP_INT_MAX, $visible);
+                    }
+                }
             }
         }
 
         $shared = [];
-        foreach ($owners as $key => $count) {
-            if ($count > 1) {
+        foreach ($owners as $key => $sizings) {
+            $total = array_sum($sizings);
+            // Coordinated owners that cannot all see each other (another
+            // namespace, a broker outage) still each size alone.
+            $blind = false;
+            foreach ($sizings as $sizing => $count) {
+                if (isset($seen[$key][$sizing]) && $seen[$key][$sizing] < $count) {
+                    $blind = true;
+                }
+            }
+            if (count($sizings) > 1 || $blind) {
                 [$connection, $consumerGroup, $queue] = explode("\0", (string) $key, 3);
                 $shared[] = [
                     'connection' => $connection,
                     'consumer_group' => $consumerGroup,
                     'queue' => $queue,
-                    'instances' => $count,
+                    'instances' => $total,
                 ];
             }
         }
@@ -619,6 +668,8 @@ final class DashboardRepository
             'process_cost_per_worker' => $processCost,
             'reserved_processes' => $reservedProcesses,
             'renewal_helpers_reserved' => $renewalHelpers,
+            // Live replicas sharing this pool's target; null when not coordinated.
+            'replicas' => $this->strictBoundedInteger($entry['replicas'] ?? null, 1, self::MAX_REPLICAS),
         ];
     }
 

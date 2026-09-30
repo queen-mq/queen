@@ -186,6 +186,17 @@ class LaravelQueueDriverTest extends TestCase
         $this->assertArrayNotHasKey('manual_retry', $item['payload']['_queen']);
     }
 
+    public function testAPushedJobCarriesItsTagsInThePayload(): void
+    {
+        $handler = new PlanHandler([['status' => 201, 'json' => [['status' => 'queued']]]]);
+        [$queue] = $this->queueFor($handler);
+
+        $queue->push(new QueenTaggedTestJob(), '', 'emails');
+
+        $body = json_decode((string) $handler->requests[0]->getBody(), true);
+        $this->assertSame(['billing', 'customer:7'], $body['items'][0]['payload']['tags']);
+    }
+
     public function testDuplicatePushIsAcceptedAsAnIdempotentSuccess(): void
     {
         $handler = new PlanHandler([['status' => 200, 'json' => [['status' => 'duplicate']]]]);
@@ -1620,5 +1631,17 @@ class DelayedPartitionedTestJob implements QueenPartitionable
     public function queenPartition(): string
     {
         return $this->partition;
+    }
+}
+
+final class QueenTaggedTestJob implements \Illuminate\Contracts\Queue\ShouldQueue
+{
+    public function handle(): void
+    {
+    }
+
+    public function tags(): array
+    {
+        return ['billing', 'customer:7'];
     }
 }

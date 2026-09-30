@@ -20,6 +20,18 @@
                 </a>
             </li>
             <li>
+                <a class="nav-link" href="{{ $sectionUrls['jobs'] }}" @if ($activeSection === 'jobs') aria-current="page" @endif>
+                    <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4.5h12M4 10h12M4 15.5h7"/><circle cx="15" cy="15.5" r="1.5"/></svg>
+                    Jobs
+                </a>
+            </li>
+            <li>
+                <a class="nav-link" href="{{ $sectionUrls['tags'] }}" @if ($activeSection === 'tags') aria-current="page" @endif>
+                    <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3.5h6.5l7.5 7.5-6 6-7.5-7.5z"/><circle cx="7" cy="7.5" r="1"/></svg>
+                    Tags
+                </a>
+            </li>
+            <li>
                 <a class="nav-link" href="{{ $sectionUrls['failed-jobs'] }}" @if ($activeSection === 'failed-jobs') aria-current="page" @endif>
                     <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5"/><path d="M10 5.8v4.8M10 14.1h.01"/></svg>
                     Failed jobs

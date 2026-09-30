@@ -5,7 +5,7 @@ type: how-to
 tier: operate
 status: preview
 sidebar:
-  order: 4
+  order: 5
 sourceOfTruth:
   - clients/client-php/config/queen.php
   - clients/client-php/src/Laravel/QueenServiceProvider.php
@@ -24,6 +24,8 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-29 (through e54bb5b3): the jobs-processed chart and SupervisorConfiguration::readOnlyConnection are read-only and change nothing in the runbook; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through f94b76ec + this patch): Rust remote status publication changes nothing in the runbook; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through 022337fb + this patch): the host name in status and per-instance remote status slots change nothing in the runbook; page matches the code.
+# sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): coordinated replicas are an alternative to the single master; the checklist says so.
+# sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): the Horizon settings map gains per-queue minimums, fast scale-up, waits, notifications, job metrics, tags and coordination; the inventory says which Horizon surfaces Queen now covers.
 ---
 
 Moving from Horizon changes two things, not one:
@@ -53,8 +55,10 @@ processes:
 - per-supervisor pause and continue controls;
 - any deployment automation that calls `horizon:terminate`.
 
-Queen's current Laravel panel does not reproduce all of those surfaces. Decide where each missing
-signal or operation will live before cutover. The direct feature comparison is in
+Queen covers tags, wait notifications, per-job metrics and multi-host visibility with its own
+[monitoring](/use/laravel/monitoring); silenced jobs, job lists, batches, Slack and SMS routes and
+per-supervisor controls have no equivalent yet. Decide where each missing signal or operation will
+live before cutover. The direct feature comparison is in
 [Queen or Horizon](/use/laravel/queen-vs-horizon).
 
 ## Translate the pool configuration
@@ -71,9 +75,9 @@ implementations rather than a byte-for-byte Horizon clone.
 | `balance: false` | `balance: off` | Ordered queue list on every worker |
 | `autoScalingStrategy` | `strategy` | `size` or `time` |
 | `processes` | `processes` | Primarily used by `simple` mode |
-| `minProcesses` | `min_processes` | Lower target bound |
+| `minProcesses` | `min_processes_per_queue` | Horizon's minimum applies to every queue; `min_processes` bounds the whole pool |
 | `maxProcesses` | `max_processes` | Upper target bound |
-| `balanceMaxShift` | `balance_max_shift` | Maximum elastic change per cycle |
+| `balanceMaxShift` | `balance_max_shift` | Maximum elastic change per cycle; add `fast_scale_up` to close half the gap per cycle |
 | `balanceCooldown` | `balance_cooldown` | Seconds between elastic changes |
 | `maxJobs` | `max_jobs` | Worker recycle limit |
 | `maxTime` | `max_time` | Worker lifetime limit |
@@ -83,6 +87,17 @@ implementations rather than a byte-for-byte Horizon clone.
 
 For strict priority such as `high,default`, use `balance=off`, `prefetch=1` and a non-blocking
 queue scan. Auto balancing deliberately allocates by measured pressure rather than queue order.
+
+The rest of `config/horizon.php` maps to other Queen settings:
+
+| Horizon | Queen | Note |
+| --- | --- | --- |
+| `waits` | `waits` | Same `connection:queue => seconds` shape; schedule `queen:check-waits` every minute |
+| `Horizon::routeMailNotificationsTo()` | `notifications.mail` | Other routes listen to `LongWaitDetected` |
+| `metrics.trim_snapshots`, `horizon:snapshot` | `job_metrics` | Recorded live by every worker, kept for a day; nothing to schedule |
+| `tags()` on jobs, monitored tags | Same `tags()`, `tags` | Monitored from the dashboard's Tags page |
+| `silenced` | No equivalent | |
+| Several `horizon` processes on several hosts | `supervisor.coordination` | Replicas share every pool's target |
 
 ## Canary Queen beside Horizon
 
@@ -198,7 +213,8 @@ work.
 - `retry_after > timeout`, and the lease also covers the real job runtime.
 - Prefetch remains one, or lease renewal has been tested under broker failure.
 - The Queen state directory is private, application-owned and mode `0700`.
-- Exactly one Queen supervisor master owns the application and consumer group.
+- Exactly one Queen supervisor master owns the application and consumer group, or every replica has
+  [coordination](/use/laravel/supervisors#several-replicas) enabled.
 - The outer process monitor restarts the master after an unexpected exit.
 - Redis and Queen backlog ownership is explicit throughout cutover and rollback.
 - Replacements exist for every Horizon tag, metric, notification or operator action the team uses.

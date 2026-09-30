@@ -30,6 +30,18 @@ final class DashboardSections
             'title' => 'Supervisors',
             'description' => 'The master instance, its worker pools and its controls.',
         ],
+        'jobs' => [
+            'route' => 'queen.dashboard.jobs',
+            'view' => 'queen::dashboard.partials.jobs',
+            'title' => 'Jobs',
+            'description' => 'Throughput, failures and runtime per job class, recorded by every worker of every host.',
+        ],
+        'tags' => [
+            'route' => 'queen.dashboard.tags',
+            'view' => 'queen::dashboard.partials.tags',
+            'title' => 'Tags',
+            'description' => 'Jobs carrying a monitored tag, recorded by every worker of every host.',
+        ],
         'failed-jobs' => [
             'route' => 'queen.dashboard.failed-jobs',
             'view' => 'queen::dashboard.partials.failed-jobs',

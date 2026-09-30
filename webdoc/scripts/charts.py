@@ -341,7 +341,134 @@ def fig_cell(out: Path, theme: Theme) -> str:
     return "multitenant-cell"
 
 
-FIGURES = (fig_soak24, fig_pipeline, fig_cell)
+LARAVEL = BENCH / "2026-09-30-laravel-supervisor-features" / "raw"
+
+
+def fig_laravel_control_plane(out: Path, theme: Theme) -> str:
+    """Orchestrator memory of Horizon and both Queen engines, read from the
+    qualification summary's median table (the row is the claim; the chart only
+    draws it)."""
+    summary = BENCH / "laravel-supervisors" / "QUALIFICATION_SUMMARY_20260829.md"
+    row = next(
+        line for line in summary.read_text().splitlines() if line.startswith("| Orchestrator PSS")
+    )
+    values = [float(cell.split()[0]) for cell in row.strip("|").split("|")[1:]]
+    engines = ["Horizon", "Queen PHP", "Queen Rust"]
+
+    style(theme)
+    fig, ax = plt.subplots(figsize=(7.2, 2.1))
+    bars = ax.barh(engines[::-1], values[::-1], color=[theme.series[0], theme.series[2], theme.series[1]][::-1], height=0.55)
+    finish(ax, theme, "")
+    ax.grid(axis="x")
+    ax.grid(axis="y", visible=False)
+    ax.set_xlabel("Orchestrator PSS (MiB), median of 3 runs", color=theme.ink, fontsize=8.5)
+    ax.set_xlim(0, max(values) * 1.18)
+    for bar, value in zip(bars, values[::-1]):
+        ax.annotate(f"{value:g} MiB", xy=(bar.get_width(), bar.get_y() + bar.get_height() / 2),
+                    xytext=(6, 0), textcoords="offset points", va="center", fontsize=8.5,
+                    color=theme.ink_strong)
+
+    save(fig, out, "laravel-control-plane", theme)
+    return "laravel-control-plane"
+
+
+def fig_laravel_prefork(out: Path, theme: Theme) -> str:
+    """Worker memory, started one by one against forked from one booted
+    Laravel: the median of three runs per case."""
+    from statistics import median
+
+    rows = read_csv(LARAVEL / "prefork-memory.csv")
+    cases = [("4", "0", "4 idle workers"), ("8", "600", "8 workers, 600 jobs")]
+    groups, spawned, forked = [], [], []
+    for workers, jobs, label in cases:
+        for opcache, flag in (("0", "opcache off"), ("1", "opcache on")):
+            pick = lambda mode: median(
+                float(r["pss_mib"]) for r in rows
+                if r["workers"] == workers and r["jobs"] == jobs and r["opcache"] == opcache and r["mode"] == mode
+            )
+            groups.append(f"{label}\n{flag}")
+            spawned.append(pick("spawned"))
+            forked.append(pick("forked"))
+
+    style(theme)
+    fig, ax = plt.subplots(figsize=(7.2, 3.2))
+    x = range(len(groups))
+    width = 0.36
+    left = ax.bar([i - width / 2 for i in x], spawned, width, color=theme.series[1], label="Each worker boots Laravel")
+    right = ax.bar([i + width / 2 for i in x], forked, width, color=theme.series[0], label="Forked from one boot (prefork)")
+    finish(ax, theme, "Total PSS (MiB)")
+    ax.set_xticks(list(x), groups)
+    ax.set_ylim(0, max(spawned) * 1.22)
+    ax.legend(loc="upper left", ncol=2)
+    for bars in (left, right):
+        for bar in bars:
+            ax.annotate(f"{bar.get_height():.0f}", xy=(bar.get_x() + bar.get_width() / 2, bar.get_height()),
+                        xytext=(0, 3), textcoords="offset points", ha="center", fontsize=8,
+                        color=theme.ink_strong)
+
+    save(fig, out, "laravel-prefork-memory", theme)
+    return "laravel-prefork-memory"
+
+
+def fig_laravel_replicas(out: Path, theme: Theme) -> str:
+    """Two supervisor pods on one queue: the workers they run together against
+    the target one supervisor would size for the same backlog."""
+    rows = read_csv(LARAVEL / "replicas.csv")
+
+    style(theme)
+    fig, axes = plt.subplots(1, 2, figsize=(7.2, 2.9), sharey=True, gridspec_kw={"wspace": 0.12})
+    for ax, (mode, title) in zip(axes, (("uncoordinated", "Without coordination"), ("coordinated", "With coordination"))):
+        series = [r for r in rows if r["mode"] == mode and r["target"]]
+        t = [int(r["t"]) for r in series]
+        total = [int(r["workers_a"]) + int(r["workers_b"]) for r in series]
+        target = [int(r["target"]) for r in series]
+        ax.step(t, target, where="post", color=theme.ink, linestyle="--", linewidth=1.2, label="Fleet target")
+        ax.plot(t, total, color=theme.series[1] if mode == "uncoordinated" else theme.series[0], label="Workers, both pods")
+        finish(ax, theme, "Worker processes" if ax is axes[0] else "")
+        ax.set_title(title, color=theme.ink_strong, fontsize=9, loc="left")
+        ax.set_xlabel("Seconds", color=theme.ink, fontsize=8.5)
+        ax.set_ylim(0, 18)
+        ax.legend(loc="lower left")
+
+    save(fig, out, "laravel-replicas", theme)
+    return "laravel-replicas"
+
+
+def fig_laravel_scale_up(out: Path, theme: Theme) -> str:
+    """Time to reach twenty workers after a burst: one balance_max_shift step
+    per cycle against fast_scale_up, which closes half the gap per cycle."""
+    rows = read_csv(LARAVEL / "scale-up.csv")
+
+    style(theme)
+    fig, ax = plt.subplots(figsize=(7.2, 2.8))
+    for mode, color, label in (("fast", theme.series[0], "fast_scale_up"), ("step", theme.series[1], "One step per cycle")):
+        series = [r for r in rows if r["mode"] == mode]
+        t = [float(r["t"]) for r in series]
+        workers = [int(r["workers"]) for r in series]
+        # Both lines end at max_processes: mark when each got there instead.
+        full = next(x for x, w in zip(t, workers) if w == max(workers))
+        ax.plot(t, workers, color=color, label=f"{label}: {max(workers)} workers after {full:.1f} s")
+        ax.plot([full], [max(workers)], marker="o", markersize=4, color=color)
+    finish(ax, theme, "Worker processes")
+    ax.set_xlabel("Seconds after the burst", color=theme.ink, fontsize=8.5)
+    ax.set_xlim(0, 25)
+    ax.set_ylim(0, 22)
+    ax.set_yticks([0, 5, 10, 15, 20])
+    ax.legend(loc="lower right")
+
+    save(fig, out, "laravel-fast-scale-up", theme)
+    return "laravel-fast-scale-up"
+
+
+FIGURES = (
+    fig_soak24,
+    fig_pipeline,
+    fig_cell,
+    fig_laravel_control_plane,
+    fig_laravel_prefork,
+    fig_laravel_replicas,
+    fig_laravel_scale_up,
+)
 
 
 def main() -> None:

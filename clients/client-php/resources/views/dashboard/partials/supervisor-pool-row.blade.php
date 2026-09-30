@@ -13,7 +13,7 @@
 <tr>
     <td><strong>{{ $pool['supervisor'] }}</strong></td>
     <td>{{ $pool['queue'] }}</td>
-    <td class="number">{{ $pool['processes'] }} / {{ $pool['desired'] }}</td>
+    <td class="number">{{ $pool['processes'] }} / {{ $pool['desired'] }}@if (($pool['replicas'] ?? null) !== null)<span class="replica-share">share of {{ $pool['replicas'] }} {{ $pool['replicas'] === 1 ? 'replica' : 'replicas' }}</span>@endif</td>
     <td>
         <span class="health-badges">
             <span class="badge {{ $pool['ready'] ? 'success' : 'warning' }}">{{ $pool['ready'] ? 'Ready' : 'Not ready' }}</span>

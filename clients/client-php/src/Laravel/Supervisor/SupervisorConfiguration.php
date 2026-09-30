@@ -134,6 +134,22 @@ final class SupervisorConfiguration
             if ($balance === 'simple' && $processes < count($queues)) {
                 throw new InvalidArgumentException("Queen supervisor [{$name}] processes must cover every queue when balance is simple.");
             }
+            // Like Horizon's per-queue minProcesses: every queue of an auto
+            // pool keeps this many workers, even without backlog.
+            $minPerQueue = self::nonNegativeInteger(
+                $options['min_processes_per_queue'] ?? 0,
+                "supervisor [{$name}] min_processes_per_queue",
+            );
+            if ($minPerQueue > 0 && $balance !== 'auto') {
+                throw new InvalidArgumentException(
+                    "Queen supervisor [{$name}] min_processes_per_queue requires balance auto.",
+                );
+            }
+            if ($minPerQueue > intdiv($max, count($queues))) {
+                throw new InvalidArgumentException(
+                    "Queen supervisor [{$name}] min_processes_per_queue for every queue must fit max_processes [{$max}].",
+                );
+            }
             $balanceMaxShift = self::positiveInteger(
                 $options['balance_max_shift'] ?? 1,
                 "supervisor [{$name}] balance_max_shift",
@@ -265,6 +281,13 @@ final class SupervisorConfiguration
                 'force' => self::boolean($options['force'] ?? false, "supervisor [{$name}] force"),
                 'quiet' => self::boolean($options['quiet'] ?? true, "supervisor [{$name}] quiet"),
             ];
+            if ($minPerQueue > 0) {
+                // Emitted only when set: engines reject unknown contract keys.
+                $resolved[$name]['min_processes_per_queue'] = $minPerQueue;
+            }
+            if (self::boolean($options['fast_scale_up'] ?? false, "supervisor [{$name}] fast_scale_up")) {
+                $resolved[$name]['fast_scale_up'] = true;
+            }
         }
 
         $totalMaxProcesses = array_sum(array_column($resolved, 'max_processes'));
@@ -291,6 +314,26 @@ final class SupervisorConfiguration
                 throw new InvalidArgumentException('Queen supervisor remote status publish budget is too large.');
             }
             $maximumControlLoopSeconds += $publishBudget;
+        }
+        $coordination = self::coordinationSettings($raw, $queen, $queueConnections);
+        if ($coordination !== null) {
+            // Every control-loop iteration renews and lists the replicas of
+            // each autoscaling pool: one call per POOLS_PER_CALL pools, one
+            // attempt per endpoint.
+            $scopes = count(array_unique(array_map(
+                static fn (array $options): string => ReplicaCoordinator::scope(
+                    $connections[$options['connection']]['urls'],
+                    $options['consumer_group'],
+                    $options['queues'],
+                ),
+                array_filter($resolved, static fn (array $options): bool => $options['balance'] !== 'simple'),
+            )));
+            $calls = intdiv($scopes + ReplicaCoordinator::POOLS_PER_CALL - 1, ReplicaCoordinator::POOLS_PER_CALL);
+            $coordinationBudget = $calls * count($coordination['connection']['urls']) * $httpTimeout;
+            if ($maximumControlLoopSeconds > PHP_INT_MAX - $coordinationBudget) {
+                throw new InvalidArgumentException('Queen supervisor coordination budget is too large.');
+            }
+            $maximumControlLoopSeconds += $coordinationBudget;
         }
         $controlLoopRemainder = ($totalMaxProcesses * self::PROCESS_START_BUDGET_SECONDS)
             + ($timeSupervisors * self::TELEMETRY_SCAN_BUDGET_SECONDS)
@@ -347,6 +390,19 @@ final class SupervisorConfiguration
             // Emitted only when enabled: engines reject unknown contract keys,
             // so a disabled feature keeps the document byte-identical.
             $result['remote_status'] = self::remoteStatusTiming($remoteStatus, $pollInterval, $heartbeatTimeout);
+        }
+        if (self::boolean($raw['prefork'] ?? false, 'prefork')) {
+            // Emitted only when enabled: engines reject unknown contract keys.
+            $result['prefork'] = true;
+        }
+        if ($coordination !== null) {
+            // A live replica renews its key within every control-loop
+            // iteration; a crashed one stops counting when it expires, so the
+            // TTL is the loop bound, not a longer explicit heartbeat_timeout.
+            $result['coordination'] = [
+                ...$coordination,
+                'ttl' => min($heartbeatTimeout, max(15, $maximumControlLoopSeconds + 1)),
+            ];
         }
         $encoded = json_encode($result, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
         if (strlen($encoded) + 1 > self::MAX_CONFIG_BYTES) {
@@ -452,6 +508,46 @@ final class SupervisorConfiguration
             'key' => $key,
             'interval' => $settings['interval'] ?? null,
             'ttl' => $settings['ttl'] ?? null,
+        ];
+    }
+
+    /**
+     * Where replicas of the autoscaling pools register, or null when
+     * coordination is disabled. Registering is a key/value write, so the
+     * connection is resolved without read_bearer_token.
+     *
+     * @param array<string, mixed> $raw the `queen.supervisor` configuration
+     * @param array<string, mixed> $queen the `queen` configuration
+     * @param array<string, mixed> $queueConnections the `queue.connections` configuration
+     * @return array{connection: array{url: string, urls: list<string>, bearer_token: ?string, headers: array<string, string>}, namespace: string}|null
+     */
+    public static function coordinationSettings(array $raw, array $queen, array $queueConnections): ?array
+    {
+        $settings = $raw['coordination'] ?? null;
+        if ($settings === null) {
+            return null;
+        }
+        if (!is_array($settings)) {
+            throw new InvalidArgumentException('Queen supervisor coordination must be an array.');
+        }
+        if (!self::boolean($settings['enabled'] ?? false, 'coordination.enabled')) {
+            return null;
+        }
+
+        $connection = $settings['connection'] ?? 'queen';
+        $namespace = $settings['namespace'] ?? 'queen-supervisor';
+        foreach (['connection' => $connection, 'namespace' => $namespace] as $label => $value) {
+            if (!is_string($value)) {
+                throw new InvalidArgumentException(
+                    "Queen supervisor coordination.{$label} must be a string when coordination is enabled.",
+                );
+            }
+            self::identifier($value, "supervisor coordination.{$label}");
+        }
+
+        return [
+            'connection' => self::readConnection(self::connectionConfig($connection, $queen, $queueConnections, [])),
+            'namespace' => $namespace,
         ];
     }
 

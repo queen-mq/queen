@@ -56,6 +56,8 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-29 (through 109b23c2 + this patch): adds the jobs-processed chart read from the broker's queue-ops counters, and the failed-job drawer; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through f94b76ec + this patch): the Rust engine publishes the same remote status format from supervisor 0.2.0; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through 022337fb + this patch): every supervisor instance publishes into its own slot of the key (Rust from supervisor 0.3.0), so the panel lists each one with its host, sums the live ones and warns when two masters share a queue; page matches the code.
+# sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): pools report their coordinated replicas and the shared-queue warning ignores coordinated replicas and fixed pools; page matches the code.
+# sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): the panel gains the Jobs and Tags pages and a Prometheus endpoint, documented on the new monitoring page; per-pool rows show replica shares.
 ---
 
 The Laravel panel answers one question: **what is this application's Queen supervisor doing?** It
@@ -154,11 +156,16 @@ control actions.
 
 - master engine, host, PID, state, generation and live/stale heartbeat of each supervisor instance;
 - whether that status is local or published by a supervisor on another host;
-- a warning when more than one running master owns the same queue and consumer group;
+- a warning when more than one running master autoscales the same queue and consumer group without
+  coordinating, and each coordinated pool's share of its replicas;
 - pools, queues, worker counts and workers currently draining;
 - last queue depth already sampled by the supervisor;
 - [jobs completed, failed and dispatched](#jobs-processed) per queue over the last hour, six hours,
   day or week, from the broker's own counters;
+- on the **Jobs** page, [throughput, failures and runtime per job class](/use/laravel/monitoring#jobs-per-class)
+  from every worker of every host;
+- on the **Tags** page, [monitored tags](/use/laravel/monitoring#monitored-tags) and the recent jobs
+  carrying them;
 - restart and circuit state;
 - a safe allowlist of worker settings;
 - paged metadata from supported Laravel database or file failed-job stores, and the reason each
@@ -313,10 +320,11 @@ because a web host cannot check another supervisor's owner lock. Keep `heartbeat
 supervisors' clocks sane: a copy older than the heartbeat timeout shows as stale, and an expired
 one disappears.
 
-When more than one running instance owns the same queue for the same consumer group, the panel
-warns. There is no distributed leader lease, so each master sizes its workers from the whole
-backlog and together they can exceed `max_processes`; run
-[one supervisor replica](/use/laravel/supervisors) per consumer group.
+When more than one running instance autoscales the same queue for the same consumer group without
+coordinating, the panel warns: each master sizes its workers from the whole backlog, so together they
+can exceed `max_processes`. [Coordinated replicas](/use/laravel/supervisors#several-replicas) share
+one target and are not reported, and each of their pools shows its share of the replicas. Fixed
+pools do not follow the backlog and are not reported either.
 
 What travels is the same document as `status.json` without its legacy pool map. It is split across
 `<key>/<instance_id>/head` and `<key>/<instance_id>/chunk/NNNN`, written in one batch transaction,
@@ -334,6 +342,12 @@ supervisor as stale without ever stopping supervision. The Rust engine publishes
 0.2.0, and into its own instance slot from 0.3.0: `queen:supervisor-config --for-engine` hands it
 the setting with its write credential, and it publishes after every status write, throttled to the interval and forced on
 every state change, exactly like the PHP engine.
+
+## Metrics for scrapers
+
+The same state is available to Prometheus, and through it to Kubernetes autoscalers, at
+`/queen/metrics` with its own bearer token and no session. See
+[Prometheus and Kubernetes autoscaling](/use/laravel/monitoring#prometheus-and-kubernetes-autoscaling).
 
 ## Behind a load balancer
 

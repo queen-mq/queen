@@ -1053,9 +1053,215 @@ final class LaravelDashboardTest extends TestCase
 
         $overviewResponse = $this->get('/queen')->assertOk()
             ->assertSee('2 running supervisors share queue high of consumer group laravel')
-            ->assertSee('Run one supervisor replica per consumer group.');
+            ->assertSee('Enable QUEEN_SUPERVISOR_COORDINATION on every replica so they share one target.');
         $overview = $this->dashboardXPath($overviewResponse->getContent());
         $this->assertSame('All 2 supervisor instances live', trim($overview->query('//dt[.="Liveness"]/following-sibling::small')->item(0)->textContent));
+    }
+
+    public function testCoordinatedReplicasShareOneTargetAndAreNotWarnedAbout(): void
+    {
+        $configuration = $this->highQueueOnlyConfiguration();
+        $pod = fn (string $id, string $host, ?int $replicas): array => $this->remoteDocument([
+            'engine' => 'rust',
+            'state' => 'running',
+            'configuration' => $configuration,
+            'instance_id' => $id,
+            'hostname' => $host,
+            'pool_status' => [[
+                'supervisor' => 'default',
+                'queue' => 'high',
+                'running' => 3,
+                'desired' => 3,
+                'replicas' => $replicas,
+            ]],
+        ]);
+        $this->remoteSupervisors([$pod(str_repeat('a', 32), 'pod-a', 2), $pod(str_repeat('b', 32), 'pod-b', 2)]);
+
+        $this->getJson('/queen/api/status')->assertOk()
+            ->assertJsonPath('shared_queues', [])
+            ->assertJsonPath('instances.0.pools.0.replicas', 2)
+            ->assertJsonPath('supervisor.workers', 6);
+        $this->get('/queen/supervisors')->assertOk()
+            ->assertSee('share of 2 replicas')
+            ->assertDontSee('running supervisors share queue');
+    }
+
+    public function testReplicasThatCannotSeeEachOtherAreStillWarnedAbout(): void
+    {
+        $configuration = $this->highQueueOnlyConfiguration();
+        $pod = fn (string $id): array => $this->remoteDocument([
+            'engine' => 'rust',
+            'state' => 'running',
+            'configuration' => $configuration,
+            'instance_id' => $id,
+            'pool_status' => [['supervisor' => 'default', 'queue' => 'high', 'running' => 1, 'desired' => 1, 'replicas' => 1]],
+        ]);
+        // Both enabled coordination, but each sees only itself: another
+        // namespace, or a broker outage.
+        $this->remoteSupervisors([$pod(str_repeat('a', 32)), $pod(str_repeat('b', 32))]);
+
+        $this->getJson('/queen/api/status')->assertOk()
+            ->assertJsonPath('shared_queues.0.queue', 'high')
+            ->assertJsonPath('shared_queues.0.instances', 2);
+    }
+
+    public function testTwoPoolsOfOneInstanceOnOneQueueAreNotSeveralSupervisors(): void
+    {
+        $configuration = $this->highQueueOnlyConfiguration();
+        $second = $configuration['supervisors'][0];
+        $second['name'] = 'second';
+        $configuration['supervisors'][] = $second;
+        $this->remoteSupervisors([
+            $this->remoteDocument(['engine' => 'rust', 'state' => 'running', 'configuration' => $configuration, 'pool_status' => []]),
+        ]);
+
+        $this->getJson('/queen/api/status')->assertOk()
+            ->assertJsonPath('supervisor.live_instances', 1)
+            ->assertJsonCount(2, 'configuration.supervisors')
+            ->assertJsonPath('shared_queues', []);
+    }
+
+    public function testAReplicaThatDoesNotCoordinateIsStillWarnedAbout(): void
+    {
+        $configuration = $this->highQueueOnlyConfiguration();
+        $pod = fn (string $id, ?int $replicas): array => $this->remoteDocument([
+            'engine' => 'rust',
+            'state' => 'running',
+            'configuration' => $configuration,
+            'instance_id' => $id,
+            'pool_status' => [['supervisor' => 'default', 'queue' => 'high', 'running' => 1, 'desired' => 1, 'replicas' => $replicas]],
+        ]);
+        $this->remoteSupervisors([$pod(str_repeat('a', 32), 1), $pod(str_repeat('b', 32), null)]);
+
+        $this->getJson('/queen/api/status')->assertOk()
+            ->assertJsonPath('shared_queues.0.queue', 'high')
+            ->assertJsonPath('shared_queues.0.instances', 2);
+    }
+
+    public function testFixedPoolsOnSeveralPodsAreNotWarnedAbout(): void
+    {
+        $configuration = $this->highQueueOnlyConfiguration();
+        $configuration['supervisors'][0]['balance'] = 'simple';
+        $configuration['supervisors'][0]['processes'] = 2;
+        $configuration['supervisors'][0]['min_processes'] = 1;
+        $this->remoteSupervisors([
+            $this->remoteDocument(['engine' => 'rust', 'state' => 'running', 'configuration' => $configuration, 'pool_status' => []]),
+            $this->remoteDocument([
+                'engine' => 'rust',
+                'state' => 'running',
+                'configuration' => $configuration,
+                'instance_id' => str_repeat('f', 32),
+                'pool_status' => [],
+            ]),
+        ]);
+
+        $this->getJson('/queen/api/status')->assertOk()
+            ->assertJsonPath('supervisor.live_instances', 2)
+            ->assertJsonPath('shared_queues', []);
+    }
+
+    public function testTheJobsPageShowsEveryClassFromEveryWorker(): void
+    {
+        $this->liveSupervisor(['engine' => 'rust', 'state' => 'running', 'pool_status' => []]);
+        $this->app->instance(\Queen\Laravel\Dashboard\JobMetricsReader::class, new \Queen\Laravel\Dashboard\JobMetricsReader(
+            new Queen([
+                'url' => 'http://queen.test:6632',
+                'retryAttempts' => 1,
+                'retryDelayMillis' => 0,
+                'handler' => HandlerStack::create(new PlanHandler([], ['status' => 200, 'json' => ['results' => [[
+                    'rows' => [
+                        ['key' => 'jobs/v1/' . sprintf('%010d', intdiv(time(), 300) * 300) . '/aaaa', 'value' => ['classes' => [
+                            'App\Jobs\SendInvoice' => ['processed' => 12, 'failed' => 1, 'runtime_ms' => 2600],
+                            'App\Jobs\ResizeImage' => ['processed' => 3, 'failed' => 0, 'runtime_ms' => 900],
+                        ]]],
+                    ],
+                    'truncated' => false,
+                ]]]])),
+            ]),
+            'queen-metrics',
+        ));
+
+        $response = $this->get('/queen/jobs')->assertOk()
+            ->assertSee('Jobs by class')
+            ->assertSeeInOrder(['App\Jobs\SendInvoice', '12', 'App\Jobs\ResizeImage', '3'])
+            ->assertSee('200 ms');
+        $xpath = $this->dashboardXPath($response->getContent());
+        $this->assertSame('Jobs', trim($xpath->query('//a[@aria-current="page" and contains(@class, "nav-link")]')->item(0)->textContent));
+        $this->get('/queen/jobs?range=24h')->assertOk()->assertSee('Last 24 hours');
+    }
+
+    public function testWorkersOfQueenConnectionsRecordJobMetrics(): void
+    {
+        $this->app['config']->set('queue.connections.queen', ['driver' => 'queen']);
+        $handler = new PlanHandler([], ['status' => 200, 'json' => ['results' => [['applied' => true]]]]);
+        $queen = new Queen(['url' => 'http://queen.test:6632', 'retryAttempts' => 1, 'retryDelayMillis' => 0, 'handler' => HandlerStack::create($handler)]);
+        $this->app->instance(\Queen\Laravel\Monitoring\JobMetricsRecorder::class, new \Queen\Laravel\Monitoring\JobMetricsRecorder(fn (): Queen => $queen, 'queen-metrics'));
+        $job = $this->createStub(\Illuminate\Contracts\Queue\Job::class);
+        $job->method('resolveName')->willReturn('App\Jobs\SendInvoice');
+        $events = $this->app['events'];
+
+        $events->dispatch(new \Illuminate\Queue\Events\JobProcessing('queen', $job));
+        $events->dispatch(new \Illuminate\Queue\Events\JobProcessed('queen', $job));
+        $events->dispatch(new \Illuminate\Queue\Events\JobProcessing('queen', $job));
+        $events->dispatch(new \Illuminate\Queue\Events\JobExceptionOccurred('queen', $job, new \RuntimeException('boom')));
+        $events->dispatch(new \Illuminate\Queue\Events\JobFailed('queen', $job, new \RuntimeException('boom')));
+        $events->dispatch(new \Illuminate\Queue\Events\JobProcessed('sync', $job));
+        $events->dispatch(new \Illuminate\Queue\Events\WorkerStopping(0));
+
+        $puts = [];
+        foreach ($handler->requests as $request) {
+            foreach (json_decode((string) $request->getBody(), true)['operations'] as $operation) {
+                $puts[] = $operation;
+            }
+        }
+        $last = end($puts);
+        $this->assertSame('queen-metrics', $last['ns']);
+        $this->assertSame(1, $last['value']['classes']['App\Jobs\SendInvoice']['processed']);
+        $this->assertSame(1, $last['value']['classes']['App\Jobs\SendInvoice']['failed']);
+    }
+
+    public function testTheTagsPageListsMonitoredTagsAndTheirRecentJobs(): void
+    {
+        $this->liveSupervisor(['engine' => 'rust', 'state' => 'running', 'pool_status' => []]);
+        $this->tagMonitor([
+            ['status' => 200, 'json' => ['results' => [['found' => true, 'value' => ['App\Models\User:42', 'vip'], 'version' => 2]]]],
+            ['status' => 200, 'json' => ['results' => [['rows' => [
+                ['key' => 'k', 'value' => ['tag' => 'vip', 'class' => 'App\Jobs\Charge', 'queue' => 'high', 'status' => 'failed', 'attempts' => 3, 'runtime_ms' => 812, 'at' => '2026-09-30T10:00:00Z']],
+            ], 'truncated' => false]]]],
+        ]);
+
+        $response = $this->get('/queen/tags?tag=vip')->assertOk()
+            ->assertSee('App\Models\User:42')
+            ->assertSee('Recent jobs tagged')
+            ->assertSeeInOrder(['App\Jobs\Charge', 'high', 'Failed', '3', '812 ms']);
+        $xpath = $this->dashboardXPath($response->getContent());
+        $this->assertSame(1, $xpath->query('//form[contains(@action, "/queen/tags/stop")]/input[@name="tag" and @value="vip"]')->length);
+        $this->assertSame(1, $xpath->query('//form[@action="/queen/tags"]//input[@name="tag"]')->length);
+    }
+
+    public function testMonitoringATagFromTheDashboardRedirectsToIt(): void
+    {
+        $handler = $this->tagMonitor([
+            ['status' => 200, 'json' => ['results' => [['found' => false]]]],
+            ['status' => 200, 'json' => ['results' => [['applied' => true]]]],
+        ]);
+
+        $this->post('/queen/tags', ['tag' => 'vip'])
+            ->assertStatus(303)
+            ->assertHeader('Location', '/queen/tags?tag=vip')
+            ->assertSessionHas('queen_dashboard_control_status', 'Monitoring tag [vip].');
+        $this->assertSame(['vip'], json_decode((string) $handler->requests[1]->getBody(), true)['operations'][0]['value']);
+        $this->post('/queen/tags', ['tag' => ''])->assertStatus(422);
+    }
+
+    /** @param list<array<string, mixed>> $plan */
+    private function tagMonitor(array $plan): PlanHandler
+    {
+        $handler = new PlanHandler($plan);
+        $queen = new Queen(['url' => 'http://queen.test:6632', 'retryAttempts' => 1, 'retryDelayMillis' => 0, 'handler' => HandlerStack::create($handler)]);
+        $this->app->instance(\Queen\Laravel\Monitoring\TagMonitor::class, new \Queen\Laravel\Monitoring\TagMonitor(fn (): Queen => $queen, 'queen-metrics'));
+
+        return $handler;
     }
 
     public function testSupervisorsOfDifferentConsumerGroupsDoNotShareAQueue(): void
