@@ -124,7 +124,7 @@ services:
       - -c
       - shared_buffers=128MB
       - -c
-      - synchronous_commit=on
+      - synchronous_commit=${BENCH_POSTGRES_SYNCHRONOUS_COMMIT:-on}
     restart: "no"
     cpus: ${BENCH_POSTGRES_CPUS:-1.0}
     mem_limit: ${BENCH_POSTGRES_MEMORY:-1024m}

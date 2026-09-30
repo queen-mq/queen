@@ -31,6 +31,8 @@ QUEEN_OPCACHE_CLI="${BENCH_QUEEN_OPCACHE_CLI:-0}"
 QUEEN_EVENT_DRIVEN="${BENCH_QUEEN_EVENT_DRIVEN:-0}"
 QUEEN_FAST_SCALE_UP="${BENCH_QUEEN_FAST_SCALE_UP:-0}"
 QUEEN_POLL_INTERVAL="${BENCH_POLL_INTERVAL:-1}"
+# PostgreSQL durability, the Queen counterpart of --redis-appendfsync.
+POSTGRES_SYNCHRONOUS_COMMIT="${BENCH_POSTGRES_SYNCHRONOUS_COMMIT:-on}"
 LEDGER_MODE="${BENCH_LEDGER_MODE:-off}"
 REDIS_APPENDONLY="${BENCH_REDIS_APPENDONLY:-yes}"
 REDIS_APPEND_FSYNC="${BENCH_REDIS_APPEND_FSYNC:-everysec}"
@@ -92,6 +94,8 @@ Options:
   --queen-event-driven 0|1      Wake Queen supervisors on new jobs (default: 0)
   --queen-fast-scale-up 0|1     Close half the gap per Queen reconcile (default: 0)
   --queen-poll-interval N       Queen supervisor poll, seconds (default: 1)
+  --postgres-synchronous-commit on|off
+                                PostgreSQL commit durability (default: on)
   --redis-appendonly yes|no     Redis AOF durability (default: yes)
   --redis-appendfsync MODE      Redis AOF fsync: always|everysec|no (default: everysec)
   --ledger                      Enable durable attempt/effect auditing; changes the workload
@@ -206,6 +210,7 @@ while [ "$#" -gt 0 ]; do
         --queen-event-driven) QUEEN_EVENT_DRIVEN="${2:?--queen-event-driven requires a value}"; shift 2 ;;
         --queen-fast-scale-up) QUEEN_FAST_SCALE_UP="${2:?--queen-fast-scale-up requires a value}"; shift 2 ;;
         --queen-poll-interval) QUEEN_POLL_INTERVAL="${2:?--queen-poll-interval requires a value}"; shift 2 ;;
+        --postgres-synchronous-commit) POSTGRES_SYNCHRONOUS_COMMIT="${2:?--postgres-synchronous-commit requires a value}"; shift 2 ;;
         --redis-appendonly) REDIS_APPENDONLY="${2:?--redis-appendonly requires a value}"; shift 2 ;;
         --redis-appendfsync) REDIS_APPEND_FSYNC="${2:?--redis-appendfsync requires a value}"; shift 2 ;;
         --ledger) LEDGER_MODE="durable"; shift ;;
@@ -304,6 +309,7 @@ require_decimal "--target-clear" "$TARGET_CLEAR_SECONDS"
 [ "$QUEEN_EVENT_DRIVEN" -le 1 ] || die "--queen-event-driven must be 0 or 1"
 [ "$QUEEN_FAST_SCALE_UP" -le 1 ] || die "--queen-fast-scale-up must be 0 or 1"
 [ "$QUEEN_POLL_INTERVAL" -le 60 ] || die "--queen-poll-interval must not exceed 60"
+case "$POSTGRES_SYNCHRONOUS_COMMIT" in on|off) ;; *) die "--postgres-synchronous-commit must be on or off" ;; esac
 [ "$WORKER_TIMEOUT" -le 86400 ] || die "--worker-timeout must not exceed 86400"
 [ "$RETRY_AFTER" -le 86401 ] || die "--retry-after must not exceed 86401"
 if [ "$LEASE_RENEWAL" = true ]; then
@@ -875,6 +881,8 @@ export BENCHMARK_QUEEN_OPCACHE_CLI="$QUEEN_OPCACHE_CLI"
 export BENCHMARK_QUEEN_EVENT_DRIVEN="$QUEEN_EVENT_DRIVEN"
 export BENCHMARK_QUEEN_FAST_SCALE_UP="$QUEEN_FAST_SCALE_UP"
 export BENCHMARK_QUEEN_POLL_INTERVAL="$QUEEN_POLL_INTERVAL"
+export BENCHMARK_POSTGRES_SYNCHRONOUS_COMMIT="$POSTGRES_SYNCHRONOUS_COMMIT"
+export BENCH_POSTGRES_SYNCHRONOUS_COMMIT="$POSTGRES_SYNCHRONOUS_COMMIT"
 export BENCHMARK_SAMPLE_INTERVAL="$SAMPLE_INTERVAL"
 export BENCHMARK_POST_DRAIN="$POST_DRAIN_SECONDS"
 export BENCHMARK_WARMUP_JOBS="$WARMUP_JOBS"
@@ -1018,6 +1026,7 @@ settings = {
     "queen_event_driven": os.environ["BENCHMARK_QUEEN_EVENT_DRIVEN"] == "1",
     "queen_fast_scale_up": os.environ["BENCHMARK_QUEEN_FAST_SCALE_UP"] == "1",
     "queen_poll_interval_seconds": int(os.environ["BENCHMARK_QUEEN_POLL_INTERVAL"]),
+    "postgres_synchronous_commit": os.environ["BENCHMARK_POSTGRES_SYNCHRONOUS_COMMIT"],
     "sample_interval_seconds": float(os.environ["BENCHMARK_SAMPLE_INTERVAL"]),
     "warmup_jobs": int(os.environ["BENCHMARK_WARMUP_JOBS"]),
     "completion_timeout_seconds": int(os.environ["BENCHMARK_COMPLETION_TIMEOUT"]),

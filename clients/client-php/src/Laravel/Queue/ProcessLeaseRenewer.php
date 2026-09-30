@@ -354,6 +354,10 @@ final class ProcessLeaseRenewer implements LeaseRenewer
                 $this->phpBinary,
                 '-d',
                 'display_errors=stderr',
+                // The helper loads a handful of files once; a command-line
+                // opcache would only add its own shared memory to every helper.
+                '-d',
+                'opcache.enable_cli=0',
                 '-r',
                 'require $argv[1]; \\Queen\\Laravel\\Queue\\LeaseRenewalWorker::main();',
                 $autoload,
