@@ -138,8 +138,11 @@ final class ReplicaCoordinatorTest extends TestCase
         $this->assertSame('err', $this->output[0][1]);
         $this->assertStringContainsString('replica coordination failed', $this->output[0][0]);
 
+        $this->assertTrue($coordinator->hasView($scope));
         $this->now += 11;
         $this->assertSame([0, 1], $coordinator->position($scope));
+        // Without a view an event-driven step waits for the next heartbeat.
+        $this->assertFalse($coordinator->hasView($scope));
     }
 
     public function testRecoveryIsReported(): void
@@ -166,8 +169,10 @@ final class ReplicaCoordinatorTest extends TestCase
         ]);
         $coordinator = $this->coordinator($handler);
         $coordinator->heartbeat([$scope]);
+        $this->assertTrue($coordinator->hasView($scope));
 
         $coordinator->leave([$scope]);
+        $this->assertFalse($coordinator->hasView($scope));
 
         $this->assertSame([[
             'op' => 'delete',

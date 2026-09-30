@@ -131,7 +131,7 @@ Same concepts, snake_case names, independent implementations.
 | `waits` | `waits` | schedule `queen:check-waits` every minute |
 | `tags()`, monitored tags | same `tags()`, Tags page | |
 | `horizon:snapshot` metrics | `job_metrics` | live, nothing to schedule |
-| `balanceCooldown` | `balance_cooldown` | |
+| `balanceCooldown` | `balance_cooldown` | add `event_driven` to grow as soon as jobs arrive |
 | `maxJobs` / `maxTime` | `max_jobs` / `max_time` | worker recycle limits |
 | `timeout` `tries` `memory` `sleep` `rest` `force` | same names | |
 | `nice` | — | keep OS priority outside Queen |
@@ -295,6 +295,7 @@ Each pool reads these; the defaults are the ones shipped in `config/queen.php`.
 | `QUEEN_SUPERVISOR_BALANCE_MAX_SHIFT` | `1` | processes added or removed per decision |
 | `QUEEN_SUPERVISOR_MIN_PROCESSES_PER_QUEUE` | `0` | `auto` only: workers every queue keeps without backlog |
 | `QUEEN_SUPERVISOR_FAST_SCALE_UP` | `false` | close half of the gap to the target per decision |
+| `QUEEN_SUPERVISOR_EVENT_DRIVEN` | `false` | wake on new jobs through a read-only long poll instead of the next poll |
 | `QUEEN_SUPERVISOR_SCALE_DOWN_DELAY` | `10` | idle seconds before shrinking |
 | `QUEEN_SUPERVISOR_RESTART_BACKOFF` | `1` | first restart delay |
 | `QUEEN_SUPERVISOR_RESTART_BACKOFF_MAX` | `30` | backoff ceiling |
@@ -394,7 +395,7 @@ document is split across `<key>/<instance_id>/head` and `<key>/<instance_id>/chu
 ceiling. A `<key>/head` document from an earlier release is still read. Publishing is best effort
 and budgeted into the heartbeat; a broker outage shows the supervisor as stale and never stops
 supervision. The Rust engine publishes the same format from supervisor 0.3.0 (this package pins
-0.4.0); 0.2.0 wrote the single `<key>/head` slot.
+0.5.0); 0.2.0 wrote the single `<key>/head` slot.
 
 | Variable | Default | |
 | --- | --- | --- |

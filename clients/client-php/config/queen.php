@@ -117,6 +117,12 @@ return [
         // instead of booting each worker: workers share the framework and the
         // opcache copy-on-write. Needs ext-pcntl and ext-posix.
         'prefork' => filter_var(env('QUEEN_SUPERVISOR_PREFORK', false), FILTER_VALIDATE_BOOL),
+        // Wake on new jobs instead of waiting for the next poll: a read-only
+        // long poll on the broker (no lease, no cursor) watches the partition
+        // stripes of every autoscaling pool, and a pool with new backlog is
+        // resized at once, then every second while it climbs. Needs a broker
+        // with POST /api/v1/fetch and a token that may consume.
+        'event_driven' => filter_var(env('QUEEN_SUPERVISOR_EVENT_DRIVEN', false), FILTER_VALIDATE_BOOL),
         // Lets several replicas of this supervisor (Kubernetes pods, hosts)
         // share one backlog. Each replica registers in the broker's key/value
         // store and runs an even share of the worker target, so together they

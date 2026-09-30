@@ -335,6 +335,20 @@ final class SupervisorConfiguration
             }
             $maximumControlLoopSeconds += $coordinationBudget;
         }
+        $eventDriven = self::boolean($raw['event_driven'] ?? false, 'event_driven');
+        if ($eventDriven) {
+            // The PHP engine parks on one fetch per watched connection within
+            // a loop iteration, trying each endpoint: the wait plus one
+            // request per endpoint.
+            $watchBudget = 1 + array_sum(array_map(
+                static fn (array $connection): int => count($connection['urls']) * $httpTimeout,
+                $connections,
+            ));
+            if ($maximumControlLoopSeconds > PHP_INT_MAX - $watchBudget) {
+                throw new InvalidArgumentException('Queen supervisor event-driven budget is too large.');
+            }
+            $maximumControlLoopSeconds += $watchBudget;
+        }
         $controlLoopRemainder = ($totalMaxProcesses * self::PROCESS_START_BUDGET_SECONDS)
             + ($timeSupervisors * self::TELEMETRY_SCAN_BUDGET_SECONDS)
             + self::CONTROL_LOOP_MARGIN_SECONDS;
@@ -394,6 +408,18 @@ final class SupervisorConfiguration
         if (self::boolean($raw['prefork'] ?? false, 'prefork')) {
             // Emitted only when enabled: engines reject unknown contract keys.
             $result['prefork'] = true;
+        }
+        if ($eventDriven) {
+            // Emitted only when enabled: the partition stripes the Laravel
+            // driver pushes to on each connection, which the engines watch.
+            $stripes = [];
+            foreach (array_keys($connections) as $connection) {
+                $stripes[$connection] = self::stripes(
+                    (string) $connection,
+                    self::connectionConfig((string) $connection, $queen, $queueConnections, $raw),
+                );
+            }
+            $result['event_driven'] = ['stripes' => $stripes];
         }
         if ($coordination !== null) {
             // A live replica renews its key within every control-loop
@@ -629,6 +655,29 @@ final class SupervisorConfiguration
             }
         }
         return $resolved;
+    }
+
+    /**
+     * The stripes QueenConnector pushes to: `<partition_prefix>-0000` to
+     * `<partition_prefix>-<partitions - 1>`.
+     *
+     * @return array{prefix: string, count: int}
+     */
+    private static function stripes(string $name, array $connection): array
+    {
+        $count = $connection['partitions'] ?? 64;
+        if (is_string($count) && ctype_digit($count)) {
+            $count = (int) $count;
+        }
+        if (!is_int($count) || $count < 1 || $count > 64) {
+            throw new InvalidArgumentException("Queen connection [{$name}] partitions must be 1 to 64 for event_driven.");
+        }
+        $prefix = $connection['partition_prefix'] ?? 'laravel';
+        if (!is_string($prefix) || trim($prefix) === '' || preg_match('/[\x00-\x1F\x7F]/', $prefix) === 1) {
+            throw new InvalidArgumentException("Queen connection [{$name}] partition_prefix must be a non-empty string without control characters.");
+        }
+
+        return ['prefix' => $prefix, 'count' => $count];
     }
 
     private static function readConnection(array $connection): array

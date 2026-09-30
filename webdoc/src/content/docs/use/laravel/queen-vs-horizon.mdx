@@ -41,6 +41,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): coordinated replicas make several masters per consumer group possible; the multi-host row and section say so.
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): per-job metrics, monitored tags, long-wait alerts, a Prometheus endpoint, per-queue minimums, fast scale-up, prefork workers and coordinated replicas close or reverse several rows; the table, both advantage sections and the choice lists say so, with the control-plane and prefork charts.
 # sourceOfTruth re-read 2026-09-30 (through 93492e56): prefork.rs changed only its tests (the late-fork stray tests are deterministic); page matches the code.
+# sourceOfTruth re-read 2026-09-30 (through 708fd8b2): a skipped event-driven pool now counts as evaluated, and both coordinators expose whether they hold a replica view; no documented behavior changes; page matches the code.
 ---
 
 Queen is not a drop-in reimplementation of Horizon. Both can supervise Laravel workers, but they
@@ -75,7 +76,8 @@ implementation and tests named in this page's frontmatter.
 | Queue backend | Redis only; the official docs state Redis Cluster is not supported | Queen broker with its durable storage as source of truth |
 | Dynamic balancing | `auto`, with `size` or `time` strategy | `auto`, with independent `size` or `time` implementation |
 | Per-queue minimum | `minProcesses` applies to every queue | `min_processes_per_queue` |
-| Scale-up rate | `balanceMaxShift` workers per cooldown | The same, or `fast_scale_up`: half of the gap per cycle |
+| Reaction to new jobs | Reads the queue sizes every `balanceCooldown`, three seconds by default | The same polling, or `event_driven`: the broker wakes the master when jobs arrive |
+| Scale-up rate | `balanceMaxShift` workers per cooldown | The same, or `fast_scale_up`: half of the gap per cycle, every second with `event_driven` |
 | Fixed allocation | `simple` | `simple` |
 | Ordered queue priority | `balance=false` | `balance=off` |
 | Master runtime | PHP with Laravel/Horizon loaded | PHP reference engine or optimized Rust engine |

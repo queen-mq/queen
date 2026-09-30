@@ -162,6 +162,14 @@ final class ReplicaCoordinator
         }
     }
 
+    /** Whether a current view of the scope exists; without one, position() answers as if alone. */
+    public function hasView(string $scope): bool
+    {
+        $view = $this->views[$scope] ?? null;
+
+        return $view !== null && $this->now() - $view['at'] <= $this->ttlSeconds;
+    }
+
     /**
      * This instance's position among the live replicas of a scope, as
      * AutoScaler::desired takes it; alone when no current view exists.

@@ -19,6 +19,7 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Supervisor/SupervisorState.php
   - clients/client-php/src/Laravel/Supervisor/AutoScaler.php
   - clients/client-php/src/Laravel/Supervisor/ReplicaCoordinator.php
+  - clients/client-php/src/Laravel/Supervisor/QueueWatcher.php
   - clients/client-php/src/Laravel/Supervisor/Prefork/ForkServer.php
   - clients/client-php/src/Laravel/Supervisor/Prefork/ForkServerClient.php
   - clients/client-php/src/Laravel/Supervisor/Prefork/ForkedProcess.php
@@ -27,6 +28,7 @@ sourceOfTruth:
   - supervisor/src/main.rs
   - supervisor/src/coordination.rs
   - supervisor/src/prefork.rs
+  - supervisor/src/watch.rs
   - .github/workflows/release-supervisor.yml
 verifiedBy:
   - clients/client-php/tests/LaravelSupervisorTest.php
@@ -40,6 +42,7 @@ verifiedBy:
   - clients/client-php/tests/PerQueueMinimumTest.php
   - clients/client-php/tests/FastScaleUpTest.php
   - clients/client-php/tests/PreforkTest.php
+  - clients/client-php/tests/EventDrivenScalingTest.php
 # sourceOfTruth re-read 2026-09-29 (through fc71b65b + this patch): adds PHP-only remote status publication and its heartbeat budget; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through cd2c7135): the config change is a dashboard comment only and changes no supervisor setting; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through e54bb5b3): SupervisorConfiguration gains readOnlyConnection for the dashboard and changes no supervisor setting; page matches the code.
@@ -48,6 +51,8 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-30 (through 022337fb + this patch): both engines record the host name in status and publish into a per-instance slot; the package pins supervisor 0.3.0; the dashboard warns about two masters on one consumer group; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): adds coordinated replicas (ReplicaCoordinator, coordination.rs, the replica share in both scalers, the coordination settings and budget) and pins supervisor 0.4.0; the new Several replicas section describes them; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): adds min_processes_per_queue, fast_scale_up and prefork workers with their charts, and corrects the coordination TTL and scope; page matches the code.
+# sourceOfTruth re-read 2026-09-30 (through cdd1bcc9 + this patch): adds event_driven (watch.rs, QueueWatcher, the grow-only step in both engines, the stripes export and budget); the Event-driven scaling section describes it; page matches the code.
+# sourceOfTruth re-read 2026-09-30 (through 708fd8b2): a skipped event-driven pool now counts as evaluated, and both coordinators expose whether they hold a replica view; no documented behavior changes; page matches the code.
 ---
 
 The Queen supervisor is a **local control plane**. It starts ordinary Laravel
@@ -64,8 +69,9 @@ Both engines consume the same resolved configuration:
 Switching engines does not change the pool configuration, CLI controls or dashboard protocol. Both
 engines can also [publish their status](/use/laravel/dashboard#a-supervisor-on-another-host) for a
 dashboard on another host; the Rust engine does so from supervisor 0.2.0, and into its own
-instance slot from 0.3.0. The package pins 0.4.0, which also coordinates
-[several replicas](#several-replicas).
+instance slot from 0.3.0. The package pins 0.5.0: it coordinates
+[several replicas](#several-replicas) from 0.4.0 and scales on
+[broker events](#event-driven-scaling) from 0.5.0.
 
 ## Requirements
 
@@ -215,6 +221,45 @@ of the remaining gap instead, so the same burst takes five; scaling down keeps i
   caption="One Rust supervisor, balance_cooldown 1, poll_interval 1, max_processes 20, the same burst in both runs."
   source="benchmark-queen/2026-09-30-laravel-supervisor-features/raw/scale-up.csv"
 />
+
+### Event-driven scaling
+
+By default a supervisor reads the backlog every `poll_interval` and changes a pool at most once per
+`balance_cooldown`, three seconds each, as Horizon reads its queue sizes every `balanceCooldown`.
+With `event_driven`, the broker wakes the supervisor when jobs arrive:
+
+```dotenv
+QUEEN_SUPERVISOR_EVENT_DRIVEN=true
+```
+
+- The supervisor holds a read-only long poll on the broker, `POST /api/v1/fetch`, over the
+  partition stripes of every pool that follows the backlog: `<partition_prefix>-0000` to
+  `<partition_prefix>-<partitions - 1>`. It takes no lease and moves no consumer cursor, so it never
+  takes a job from a worker.
+- When jobs arrive on a watched queue, the pool reads its depth at once and adds workers, inside
+  `balance_cooldown` too. No queue loses a worker in such an early step. While the pool is below its
+  target, it grows again every second. Scaling down keeps `balance_cooldown` and `scale_down_delay`.
+- A pool is woken at most once a second and not at all at `max_processes`, so a busy queue costs at
+  most one fetch and one depth read per second.
+- Jobs pushed to another partition, such as by `QueenPartitionable`, are found by the regular poll,
+  as before. A queue that does not exist yet is probed again every 30 seconds.
+
+With the production defaults and `fast_scale_up`, a pool woken by the broker reached twenty workers
+after a burst in 5.6 seconds, against 13.9 seconds with polling:
+
+<Chart
+  src="laravel-event-driven"
+  alt="Step lines of running worker processes after a burst of 600 jobs, three runs per mode. With event_driven the workers climb every second and reach twenty after about 5.6 seconds; with polling they climb every three seconds and reach twenty after about 13.9 seconds."
+  caption="One Rust supervisor at the production cadence, poll_interval 3 and balance_cooldown 3, with fast_scale_up and max_processes 20; medians of three runs."
+  source="benchmark-queen/2026-09-30-laravel-supervisor-features/raw/event-driven.csv"
+/>
+
+The broker needs `POST /api/v1/fetch` (Queen 1.4 or later). Behind a Queen proxy, the connection's
+token must be allowed to consume, which a `read_bearer_token` is not; when the broker cannot serve
+the long poll, the supervisor logs it once and keeps polling. The long poll answers with the first
+new segment of each grown partition, payloads included, which the supervisor reads and discards; an
+answer over 8 MiB is not read and wakes every watched queue. The Rust engine parks up to 20 seconds
+in a thread; the PHP engine parks up to one second at a time in its loop.
 
 ## Run the PHP engine
 

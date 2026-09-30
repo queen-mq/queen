@@ -219,6 +219,18 @@ impl<'a> Coordinator<'a> {
         self.position_at(Instant::now(), scope)
     }
 
+    /// Whether a current view of the scope exists; without one, `position`
+    /// answers as if this replica were alone.
+    pub(crate) fn has_view(&self, scope: &str) -> bool {
+        self.has_view_at(Instant::now(), scope)
+    }
+
+    fn has_view_at(&self, now: Instant, scope: &str) -> bool {
+        self.views.get(scope).is_some_and(|(_, at)| {
+            now.saturating_duration_since(*at) <= Duration::from_secs(self.config.ttl)
+        })
+    }
+
     fn position_at(&self, now: Instant, scope: &str) -> (usize, usize) {
         match self.views.get(scope) {
             Some((members, at))
@@ -456,10 +468,13 @@ mod tests {
             coordinator.position_at(start + Duration::from_secs(30), &scope),
             (1, 2)
         );
+        assert!(coordinator.has_view_at(start + Duration::from_secs(30), &scope));
         assert_eq!(
             coordinator.position_at(start + Duration::from_secs(31), &scope),
             (0, 1)
         );
+        // Without a view an event-driven step waits for the next heartbeat.
+        assert!(!coordinator.has_view_at(start + Duration::from_secs(31), &scope));
 
         coordinator.heartbeat_at(
             start + Duration::from_secs(32),

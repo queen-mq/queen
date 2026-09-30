@@ -26,6 +26,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-30 (through 022337fb + this patch): the host name in status and per-instance remote status slots change nothing in the runbook; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): coordinated replicas are an alternative to the single master; the checklist says so.
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): the Horizon settings map gains per-queue minimums, fast scale-up, waits, notifications, job metrics, tags and coordination; the inventory says which Horizon surfaces Queen now covers.
+# sourceOfTruth re-read 2026-09-30 (through 708fd8b2): a skipped event-driven pool now counts as evaluated, and both coordinators expose whether they hold a replica view; no documented behavior changes; page matches the code.
 ---
 
 Moving from Horizon changes two things, not one:
@@ -78,7 +79,7 @@ implementations rather than a byte-for-byte Horizon clone.
 | `minProcesses` | `min_processes_per_queue` | Horizon's minimum applies to every queue; `min_processes` bounds the whole pool |
 | `maxProcesses` | `max_processes` | Upper target bound |
 | `balanceMaxShift` | `balance_max_shift` | Maximum elastic change per cycle; add `fast_scale_up` to close half the gap per cycle |
-| `balanceCooldown` | `balance_cooldown` | Seconds between elastic changes |
+| `balanceCooldown` | `balance_cooldown` | Seconds between elastic changes; with `event_driven`, increases wait one second |
 | `maxJobs` | `max_jobs` | Worker recycle limit |
 | `maxTime` | `max_time` | Worker lifetime limit |
 | `timeout`, `tries`, `memory`, `sleep`, `rest`, `force` | Same names | Same worker concepts |

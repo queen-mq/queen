@@ -25,6 +25,7 @@ sourceOfTruth:
   - benchmark-queen/2026-09-30-laravel-supervisor-features/scripts/prefork.php
   - benchmark-queen/2026-09-30-laravel-supervisor-features/scripts/replicas-timeline.sh
   - benchmark-queen/2026-09-30-laravel-supervisor-features/scripts/scale-up.sh
+  - benchmark-queen/2026-09-30-laravel-supervisor-features/scripts/event-driven.sh
 verifiedBy:
   - benchmark-queen/laravel-supervisors/scripts/tests/test_campaign_stats.py
   - benchmark-queen/laravel-supervisors/scripts/tests/test_container_isolation.py
@@ -244,6 +245,31 @@ about three.
   alt="Two lines of running worker processes after a burst of 600 jobs. fast_scale_up reaches twenty workers after 3.6 seconds; one step per cycle climbs by about one worker a second and reaches twenty after 18.1 seconds."
   caption="One Rust supervisor, balance_cooldown 1, poll_interval 1, max_processes 20, the same burst in both runs."
   source="benchmark-queen/2026-09-30-laravel-supervisor-features/raw/scale-up.csv"
+/>
+
+### Event-driven scaling
+
+One Rust supervisor at the production cadence, a three-second poll and cooldown, with
+`fast_scale_up`, `max_processes` 20 and `balance_max_shift` 1, idled at one worker on an existing
+queue. Then 600 jobs of five seconds were dispatched, and the running workers were sampled about
+every third of a second from the start of the dispatch. Three runs polled; three were woken by the
+broker with `event_driven`.
+
+| Mode | First extra worker | Twenty workers |
+| --- | --- | --- |
+| Polling | 1.6 s | 13.9 s |
+| `event_driven` | 0.5 s | 5.6 s |
+
+Medians of three runs. With polling, the first step depends on where the burst falls in the
+three-second cycle, and every later step waits for the cooldown. Woken by the broker, the pool took
+its first step as the first jobs arrived and then one step per second. The dispatch clock includes
+the Laravel boot of `bench:dispatch`, which is the same in both modes.
+
+<Chart
+  src="laravel-event-driven"
+  alt="Step lines of running worker processes after a burst of 600 jobs, three runs per mode. With event_driven the workers climb every second and reach twenty after about 5.6 seconds; with polling they climb every three seconds and reach twenty after about 13.9 seconds."
+  caption="One Rust supervisor at the production cadence, poll_interval 3 and balance_cooldown 3, with fast_scale_up and max_processes 20; medians of three runs."
+  source="benchmark-queen/2026-09-30-laravel-supervisor-features/raw/event-driven.csv"
 />
 
 ## What remains before GA
