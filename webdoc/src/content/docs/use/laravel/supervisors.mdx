@@ -349,6 +349,37 @@ is stopped.
   server purges database and Redis connections in every child; keep other connections lazy.
 - Deploys still restart the master: the fork server holds the code it booted.
 
+### Opcache and preload
+
+Opcache is off on the command line by default (`opcache.enable_cli=0`). A command-line PHP process
+keeps its own opcache memory, so with spawned workers every worker compiles and stores its own copy
+of the framework, and turning opcache on costs memory. With prefork, the fork server fills the
+opcache once and every forked worker shares it, so turning it on saves memory:
+
+| Eight workers after 600 jobs | Opcache off | Opcache on |
+| --- | --- | --- |
+| Spawned | 272 MiB | 336 MiB |
+| Forked | 142 MiB | 85 MiB |
+
+Total PSS, median of three runs, from the
+[supervisor features benchmark](/benchmarks/laravel-supervisors#prefork-memory). With prefork,
+enable opcache in the command-line configuration of the PHP binary that runs the workers
+(`php_binary`); without prefork, leave it off.
+
+```ini
+; conf.d/opcache-cli.ini, read by the command-line PHP
+opcache.enable=1
+opcache.enable_cli=1
+```
+
+`php -i | grep opcache.enable_cli` shows the value the workers get.
+
+`opcache.preload` compiles and loads a list of files when PHP starts. On the command line, PHP starts
+again in every process. With prefork, the fork server preloads once and every worker inherits it;
+without prefork, every spawned worker preloads on its own. Preload needs `opcache.enable_cli=1` and,
+when PHP runs as root, `opcache.preload_user`. Preloaded code changes only when the process
+restarts, which a deploy already does through `terminate`. Preload was not part of the benchmark.
+
 ## Production checks
 
 Before placing a Queen supervisor in production:

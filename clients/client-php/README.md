@@ -321,7 +321,8 @@ php artisan queen:supervisor-config --pretty  # resolved config, credentials red
 every worker from it, with the same arguments and environment a spawned worker gets. The server
 opens no connection before forking, purges database and Redis connections in each child, and
 SIGKILLs its workers if the master dies. A failed fork falls back to spawning. Needs `ext-pcntl`
-and `ext-posix`.
+and `ext-posix`. Enable `opcache.enable_cli` with prefork, where the fork server's opcache is shared
+by every worker; without prefork, each worker keeps its own copy and opcache costs memory.
 
 **Monitoring.** The dashboard's Jobs and Tags pages, `queen:check-waits` with the
 `LongWaitDetected` event and mail, and a Prometheus endpoint at `/queen/metrics`
