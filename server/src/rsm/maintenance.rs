@@ -31,12 +31,15 @@ pub struct Config {
     /// pass looks at first; every effect is still judged from committed state.
     pub walk: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<(String, String), Pid>>>,
     /// `QUEEN_RAFT_RETENTION_VISIT_TOTAL` (default 4096): partitions a pass
-    /// looks at over ALL queues. `visit_cap` bounds one queue; with it alone a
+    /// looks at over ALL queues. Also caps queue configurations inspected
+    /// per pass (plus one lookahead row), so empty queues consume bounded work.
+    /// `visit_cap` bounds one queue; with it alone a
     /// pass over 1,000 queues of 10 partitions judged all 10,000 in one cycle
     /// (13.7% of the planning thread at 1M msg/s, 2026-09-29). A pass that
     /// runs out resumes at the next queue ([`Config::walk_queue`]).
     pub visit_total: usize,
-    /// The queue the next pass starts at, `None` = the first.
+    /// The queue the next pass starts at, `None` = the first. The catalog
+    /// scan resumes here too; it never decodes queues preceding the cursor.
     pub walk_queue: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
     /// `QUEEN_RAFT_TXN_WINDOW_MIN_S` (default 900): the least time a message's
     /// hash list — and so its queue-log record — is kept, whatever the queue's
@@ -190,51 +193,56 @@ pub fn plan<R: Reads + ?Sized>(r: &R, now_us: i64, cfg: &Config) -> Result<Plann
         budget = budget.saturating_sub(1);
     }
 
+    let resume = cfg.walk_queue.lock().expect("retention walk").clone();
+    let mut stopped_at = resume.clone();
     let mut queues = Vec::new();
-    // The queue keyspace has no all-tenants typed iterator. Decode its
-    // self-delimiting key and retain the config row.
-    let mut bad_queue = false;
-    r.scan_raw(Keyspace::Queues, &[], &[], usize::MAX, &mut |key, value| {
-        let parsed = (|| {
-            let (tenant, at) = keys::read_name(key, 0)?;
-            let (queue, end) = keys::read_name(key, at)?;
-            (end == key.len()).then_some((tenant, queue))
-        })();
-        match (parsed, rows::queue_decode(value)) {
-            (Some((tenant, queue)), Ok(config)) => {
-                queues.push((tenant, queue, config));
-                true
-            }
-            _ => {
-                bad_queue = true;
-                false
-            }
-        }
-    })?;
-    if bad_queue {
-        return Err(crate::rsm::store::StoreError::corrupt(
-            Keyspace::Queues,
-            "queue row",
-        ));
-    }
-
-    let queues = if cfg.partition_walk {
-        queues
-    } else {
-        Vec::new()
-    };
-    let resume = cfg.walk_queue.lock().expect("retention walk").take();
-    let mut visits_left = cfg.visit_total.max(1);
-    let mut stopped_at: Option<(String, String)> = None;
-    for (tenant, queue, qcfg) in queues {
-        if resume
+    if cfg.partition_walk && budget > 0 {
+        // Bound the catalog as well as the partitions. One lookahead row is
+        // the inclusive cursor for the next pass; a deleted cursor naturally
+        // seeks to its successor, and reaching the end wraps on the next tick.
+        let cap = cfg.visit_total.max(1);
+        let from = resume
             .as_ref()
-            .is_some_and(|(t, q)| (tenant.as_str(), queue.as_str()) < (t.as_str(), q.as_str()))
-        {
-            continue;
+            .map(|(t, q)| keys::queues(t, q))
+            .unwrap_or_default();
+        let mut bad_queue = false;
+        r.scan_raw(
+            Keyspace::Queues,
+            &from,
+            &[],
+            cap.saturating_add(1),
+            &mut |key, value| {
+                let parsed = (|| {
+                    let (tenant, at) = keys::read_name(key, 0)?;
+                    let (queue, end) = keys::read_name(key, at)?;
+                    (end == key.len()).then_some((tenant, queue))
+                })();
+                match (parsed, rows::queue_decode(value)) {
+                    (Some((tenant, queue)), Ok(config)) => {
+                        queues.push((tenant, queue, config));
+                        true
+                    }
+                    _ => {
+                        bad_queue = true;
+                        false
+                    }
+                }
+            },
+        )?;
+        if bad_queue {
+            return Err(StoreError::corrupt(Keyspace::Queues, "queue row"));
         }
+        stopped_at = if queues.len() > cap {
+            queues.pop().map(|(t, q, _)| (t, q))
+        } else {
+            None
+        };
+    }
+    let mut visits_left = cfg.visit_total.max(1);
+    for (tenant, queue, qcfg) in queues {
         if budget == 0 {
             out.more = true;
+            stopped_at = Some((tenant.clone(), queue.clone()));
             break;
         }
         if visits_left == 0 {
@@ -263,22 +271,11 @@ pub fn plan<R: Reads + ?Sized>(r: &R, now_us: i64, cfg: &Config) -> Result<Plann
         let mut next: Option<Pid> = None;
         if pids.len() >= cap {
             next = pids.last().map(|p| p.saturating_add(1));
-        } else if let Some(s) = start {
-            // The tail ran out: wrap, up to the partition this pass began at.
-            let room = cap - pids.len();
-            let mut head = Vec::new();
-            r.scan_queue_partitions(&tenant, &queue, None, room, &mut |pid| {
-                if pid >= s {
-                    return false;
-                }
-                head.push(pid);
-                true
-            })?;
-            if head.len() >= room {
-                next = head.last().map(|p| p.saturating_add(1));
-            }
-            pids.extend(head);
         }
+        // Reaching this queue's tail ends its turn. Do not wrap it here:
+        // a queue larger than visit_total would otherwise consume every pass
+        // forever, starving all following queues in the catalog. The catalog
+        // cursor eventually wraps, and this queue then starts at its head.
         for pid in pids {
             if budget == 0 {
                 out.more = true;
@@ -323,8 +320,11 @@ pub fn plan<R: Reads + ?Sized>(r: &R, now_us: i64, cfg: &Config) -> Result<Plann
                 }
             }
         }
-        if visits_left == 0 && next.is_some() {
-            // This queue is not done: the next pass starts here.
+        if (visits_left == 0 || budget == 0) && next.is_some() {
+            // This queue is not done: retain both the queue and pid cursor.
+            // Otherwise a full effect budget could skip the rest of this
+            // queue until the entire catalog has wrapped.
+            out.more |= budget == 0;
             stopped_at = Some((tenant.clone(), queue.clone()));
             break;
         }

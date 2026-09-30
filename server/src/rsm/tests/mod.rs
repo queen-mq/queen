@@ -74,3 +74,5 @@ mod store_scrub;
 mod store_sigbus;
 mod timers;
 mod timers_crash;
+
+mod maintenance_bounded;
