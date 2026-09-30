@@ -122,8 +122,10 @@ services:
       QUEEN_POP_FUSION: ${QUEEN_POP_FUSION:-0}
       LOG_LEVEL: warn
     restart: "no"
-    cpus: ${BENCH_BROKER_CPUS:-1.0}
-    mem_limit: ${BENCH_BROKER_MEMORY:-1024m}
+    # The whole backend budget, like Redis's: on PostgreSQL storage the broker
+    # and the database split it.
+    cpus: ${BENCH_BROKER_CPUS:-2.0}
+    mem_limit: ${BENCH_BROKER_MEMORY:-2048m}
     pids_limit: 256
     volumes:
       - broker-buffers:/var/lib/queen/data
