@@ -1454,3 +1454,6 @@ async fn lanes_a_woken_long_poll_pop_of_a_queue_across_lanes_claims_on_its_first
         "every woken pop claims on its first re-plan; rounds that found nothing: {missed:?}"
     );
 }
+
+#[path = "batcher_boundaries.rs"]
+mod boundaries;

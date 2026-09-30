@@ -1801,18 +1801,11 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
         }
 
         loop {
-            // Take every command that has already arrived BEFORE planning. The
-            // biased select below reaches the command channel last, so without
-            // this a cycle plans on a partial queue while the channel fills:
-            // faster cycles → smaller entries → more result wakes → even less
-            // intake (measured: 1024-deep channel full, submit waits 6-110 ms).
-            while let Ok(more) = st.cmd_rx.try_recv() {
-                st.enqueue(more);
-            }
+            // Admit arrivals at every planning boundary, including when apply
+            // keeps freeing pipeline slots. A bounded intake cannot be held
+            // here forever by producers refilling the channel.
+            st.drain_arrivals();
             st.sync_scan();
-            while st.can_plan() {
-                st.plan_cycle().await;
-            }
             if st.should_exit() {
                 break;
             }
@@ -1873,7 +1866,13 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                     st.note_wake("hold");
                     st.check_hold();
                 }
-                maybe = st.cmd_rx.recv() => {
+                // Plan ONE cycle, after checking role/quiesce/results/ticks.
+                // The next cycle returns through intake and this select even
+                // when there is a backlog and every proposal commits at once.
+                _ = std::future::ready(()), if st.can_plan() => {
+                    st.plan_cycle().await;
+                }
+                maybe = st.cmd_rx.recv(), if !st.closing => {
                     st.note_wake("arrival");
                     match maybe {
                         Some(sub) => {
@@ -1884,9 +1883,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                             // commands, instead of ~one per select wake. Order
                             // preserved; drain_batch still applies the caps.
                             if st.cfg.drain_greedy {
-                                while let Ok(more) = st.cmd_rx.try_recv() {
-                                    st.enqueue(more);
-                                }
+                                st.drain_arrivals();
                             }
                         }
                         None => st.closing = true,
@@ -2214,6 +2211,22 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             self.lane.push_back(sub);
         } else {
             self.queue.push_back(sub);
+        }
+    }
+
+    /// Pull at most one channel's capacity into the internal lanes. Commands
+    /// arriving during planning get the next boundary, without an unbounded
+    /// try_recv loop postponing role changes or timers under continuous load.
+    fn drain_arrivals(&mut self) {
+        for _ in 0..self.cfg.command_queue_depth.max(1) {
+            match self.cmd_rx.try_recv() {
+                Ok(sub) => self.enqueue(sub),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.closing = true;
+                    break;
+                }
+            }
         }
     }
 
