@@ -1091,15 +1091,6 @@ fn the_fast_typed_reads_answer_what_the_owned_reads_answer() {
         assert_eq!(r.partition_head(8).unwrap(), None);
         assert_eq!(r.partition_with(8, |_| ()).unwrap(), None);
         assert_eq!(r.cursor(7, "g").unwrap().as_ref(), Some(c));
-        let h = r.cursor_head(7, "g").unwrap().unwrap();
-        assert_eq!(h.committed, 4);
-        assert!(h.lease_live(4_999) && !h.lease_live(5_000));
-        assert_eq!(h.delivered_len, 2);
-        assert_eq!(
-            r.cursor_with(7, "g", |x| (x.worker.map(str::to_string), x.to_row()))
-                .unwrap(),
-            Some((c.worker.clone(), c.clone()))
-        );
         assert!(r.has_cursor(7, "g").unwrap());
         assert!(!r.has_cursor(7, "h").unwrap());
         assert!(r.is_garbage(9).unwrap());

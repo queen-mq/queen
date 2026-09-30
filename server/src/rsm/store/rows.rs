@@ -591,141 +591,6 @@ pub fn cursor_decode(b: &[u8]) -> Result<CursorRow, CodecError> {
     })
 }
 
-/// A cursor row's scalars — everything but the worker name, the delivered set
-/// and the metadata, which are what allocate. [`cursor_head_decode`] reads it
-/// with no allocation, so a typed read can decode it under the table's lock
-/// ([`super::TypedReads::cursor_head`]): the reads that ask "is the group
-/// caught up", "is a lease live" or "is there a cursor at all" need no more.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CursorHead {
-    pub committed: i64,
-    pub batch_end: Option<u64>,
-    /// `worker.is_some()`.
-    pub has_worker: bool,
-    pub lease_expires_at_us: Option<i64>,
-    pub lease_acquired_at_us: Option<i64>,
-    pub batch_retry_count: u32,
-    pub attempt_offset: Option<u64>,
-    pub attempt_count: u32,
-    pub total_consumed: u64,
-    pub lease_conflated: bool,
-    /// `delivered.len()`.
-    pub delivered_len: u32,
-    pub created_at_us: i64,
-}
-
-impl CursorHead {
-    /// [`lease_live`] on the head: a set worker AND a future expiry.
-    pub fn lease_live(&self, now_us: i64) -> bool {
-        self.has_worker && self.lease_expires_at_us.is_some_and(|e| e > now_us)
-    }
-}
-
-/// A cursor row BORROWED from its stored bytes ([`cursor_ref_decode`]): the
-/// head, the worker and the metadata as `&str`, the delivered set as its raw
-/// 16-byte ids.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CursorRef<'a> {
-    pub head: CursorHead,
-    pub worker: Option<&'a str>,
-    /// `delivered_len × 16` bytes: the ids back to back.
-    pub delivered_raw: &'a [u8],
-    pub metadata: &'a str,
-}
-
-impl<'a> CursorRef<'a> {
-    /// The delivered set's ids, in order.
-    pub fn delivered(&self) -> impl Iterator<Item = [u8; 16]> + 'a {
-        self.delivered_raw
-            .chunks_exact(16)
-            .map(|c| c.try_into().expect("16 bytes"))
-    }
-
-    pub fn to_row(self) -> CursorRow {
-        CursorRow {
-            committed: self.head.committed,
-            batch_end: self.head.batch_end,
-            worker: self.worker.map(str::to_string),
-            lease_expires_at_us: self.head.lease_expires_at_us,
-            lease_acquired_at_us: self.head.lease_acquired_at_us,
-            batch_retry_count: self.head.batch_retry_count,
-            attempt_offset: self.head.attempt_offset,
-            attempt_count: self.head.attempt_count,
-            total_consumed: self.head.total_consumed,
-            lease_conflated: self.head.lease_conflated,
-            delivered: self.delivered().collect(),
-            created_at_us: self.head.created_at_us,
-            metadata: self.metadata.to_string(),
-        }
-    }
-}
-
-/// [`cursor_decode`] borrowing from `b`, with no allocation.
-pub fn cursor_ref_decode(b: &[u8]) -> Result<CursorRef<'_>, CodecError> {
-    let mut r = Reader::new(b);
-    let version = r.u8("cursor row version")?;
-    if version != ROW_V1 && version != ROW_V2 {
-        return Err(CodecError::UnknownVersion {
-            kind: 0,
-            version: version as u16,
-        });
-    }
-    let committed = r.i64("committed")?;
-    let batch_end = r.opt_u64("batch_end")?;
-    let worker = match r.u8("worker")? {
-        0 => None,
-        1 => Some(str_ref(&mut r, "worker")?),
-        _ => return Err(CodecError::Field("worker")),
-    };
-    let lease_expires_at_us = r.opt_i64("lease_expires_at_us")?;
-    let lease_acquired_at_us = r.opt_i64("lease_acquired_at_us")?;
-    let batch_retry_count = r.u32("batch_retry_count")?;
-    let attempt_offset = r.opt_u64("attempt_offset")?;
-    let attempt_count = r.u32("attempt_count")?;
-    let total_consumed = r.u64("total_consumed")?;
-    let lease_conflated = r.bool("lease_conflated")?;
-    let n = r.u32("delivered")?;
-    let bytes = (n as usize)
-        .checked_mul(16)
-        .ok_or(CodecError::Field("delivered"))?;
-    let rest = r.rest();
-    if bytes > rest.len() {
-        return Err(CodecError::Field("delivered"));
-    }
-    let delivered_raw = &rest[..bytes];
-    r.skip(bytes, "delivered")?;
-    let created_at_us = r.i64("created_at_us")?;
-    let metadata = if version == ROW_V2 {
-        str_ref(&mut r, "metadata")?
-    } else {
-        ""
-    };
-    Ok(CursorRef {
-        head: CursorHead {
-            committed,
-            batch_end,
-            has_worker: worker.is_some(),
-            lease_expires_at_us,
-            lease_acquired_at_us,
-            batch_retry_count,
-            attempt_offset,
-            attempt_count,
-            total_consumed,
-            lease_conflated,
-            delivered_len: n,
-            created_at_us,
-        },
-        worker,
-        delivered_raw,
-        metadata,
-    })
-}
-
-/// [`cursor_decode`]'s scalars, with no allocation.
-pub fn cursor_head_decode(b: &[u8]) -> Result<CursorHead, CodecError> {
-    cursor_ref_decode(b).map(|c| c.head)
-}
-
 /// The claim predicate: a cursor with no worker, no lease expiry, or an
 /// expiry at or before `now` is CLAIMABLE, so a live lease is a set worker AND
 /// a future expiry (ported from pgless `Cursor::lease_live`).
@@ -1466,17 +1331,9 @@ mod tests {
             c.delivered = delivered;
             c.metadata = metadata.to_string();
             let b = cursor_encode(&c);
-            let r = cursor_ref_decode(&b).unwrap();
-            assert_eq!(r.to_row(), c);
-            assert_eq!(r.head, cursor_head_decode(&b).unwrap());
-            assert_eq!(r.head.delivered_len as usize, c.delivered.len());
-            assert_eq!(r.head.has_worker, c.worker.is_some());
-            for now in [0, i64::MAX] {
-                assert_eq!(r.head.lease_live(now), lease_live(&c, now));
-            }
+            assert_eq!(cursor_decode(&b).unwrap(), c);
             for cut in [0, 1, 9, b.len() - 1] {
                 assert!(cursor_decode(&b[..cut]).is_err());
-                assert!(cursor_ref_decode(&b[..cut]).is_err(), "{cut}");
             }
         }
     }

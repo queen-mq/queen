@@ -464,6 +464,10 @@ impl Notify for RaftNotify {
         self.waker.appended(tenant, queue, partition);
     }
 
+    fn engine(&self) -> Option<Arc<crate::rsm::consume::Engine>> {
+        self.waker.engine()
+    }
+
     fn durable(&self, index: u64) {
         self.shared.durable_index.fetch_max(index, Ordering::AcqRel);
         // The queue logs may now give up files wholly at or below `index` —
@@ -2322,6 +2326,26 @@ impl<S: Store + 'static> RaftReplicator<S> {
         self.raft
             .as_ref()
             .map(|r| r.metrics().borrow_watched().clone())
+    }
+
+    /// How long ago a quorum last acknowledged this node as leader (openraft's
+    /// `last_quorum_acked`): the consumption engine's leader lease
+    /// (`crate::rsm::consume`). `None` while this node does not lead, or no
+    /// quorum has acknowledged it yet in this term; a single voter is its own
+    /// quorum (zero).
+    pub fn quorum_ack_age(&self) -> Option<Duration> {
+        let raft = self.raft.as_ref()?;
+        let metrics = raft.metrics();
+        let m = metrics.borrow_watched();
+        if m.state != ServerState::Leader {
+            return None;
+        }
+        if m.membership_config.membership().voter_ids().count() < 2 {
+            return Some(Duration::ZERO);
+        }
+        m.last_quorum_acked
+            .as_ref()
+            .map(|t| openraft::Instant::elapsed(&**t))
     }
 }
 

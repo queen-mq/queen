@@ -166,7 +166,7 @@ fn fill(s: &HeedStore) {
         .unwrap();
     w.add_counter(&keys::counter_partition(1, Counter::Pushed), 7)
         .unwrap();
-    w.put_pending("t", "q", "g", 1, 5_000).unwrap();
+    w.put_lease("w", 1, "g", 5_000).unwrap();
     w.durable_commit().unwrap();
 }
 
@@ -189,7 +189,12 @@ fn assert_filled(s: &HeedStore) {
             Some(&[][..])
         );
         assert_eq!(r.partition_counter(1, Counter::Pushed)?, 7);
-        assert_eq!(r.pending_at("t", "q", "g", 1)?, Some(5_000));
+        let mut leases = Vec::new();
+        r.scan_worker_leases("w", 4, &mut |pid, g, at| {
+            leases.push((pid, g.to_string(), at));
+            true
+        })?;
+        assert_eq!(leases, vec![(1, "g".to_string(), 5_000)]);
         Ok(())
     })
     .unwrap();

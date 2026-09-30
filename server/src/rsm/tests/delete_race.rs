@@ -11,8 +11,8 @@
 //!   the node poisons itself) once the delete's first chunk has removed a small
 //!   partition's row, and files the message into a partition being deleted (it
 //!   is lost with it) when the chunk has not finished;
-//! - a lease renew never sets a cursor on a deleted pid: a `CursorSet` on a
-//!   missing partition row is just as fatal.
+//! - a cursor row (a seek, a consumption-engine checkpoint) never reaches a
+//!   deleted pid: a `CursorSet` on a missing partition row is just as fatal.
 //!
 //! The first half runs the real batcher over this node's real replicator
 //! (`QUEEN_RAFT_REPLICATOR`: local or openraft) and apply, behind a [`Gate`]
@@ -50,9 +50,7 @@ use crate::rsm::effect::{Effect, GarbageScope, Pid};
 use crate::rsm::entry::{decode_entry, Entry, Outcome, PushVerdict};
 use crate::rsm::planner::kv::parse_ops;
 use crate::rsm::planner::timers::{parse_timer_ops, TimerFireConfig, TimersCommand};
-use crate::rsm::planner::{
-    EffectsCommand, KvCommand, PlanConfig, PopCommand, PushCommand, RenewCommand, SubIntent,
-};
+use crate::rsm::planner::{EffectsCommand, KvCommand, PlanConfig, PushCommand};
 use crate::rsm::replicator::local::{NoWaker, OpenConfig};
 use crate::rsm::replicator::node::{NodeReplicator, ReplicatorKind};
 use crate::rsm::replicator::{
@@ -434,42 +432,6 @@ fn push(id: u64, queue: &str, partition: &str, txns: &[&str]) -> Command {
     })
 }
 
-fn pop_wildcard(id: u64, queue: &str, group: &str, worker: &str) -> Command {
-    Command::PopWildcard(PopCommand {
-        wait: false,
-        request_id: rid(id),
-        tenant: TENANT.to_string(),
-        queue: queue.to_string(),
-        partition: None,
-        group: group.to_string(),
-        worker: worker.to_string(),
-        budget: 100,
-        max_parts: 10,
-        lease_seconds: 60,
-        auto_ack: false,
-        conflate: false,
-        sub: SubIntent {
-            mode: "all".to_string(),
-            from_us: None,
-            now: false,
-        },
-        skip_window_debounce: false,
-        namespace: String::new(),
-        task: String::new(),
-        create_cfg: Some(qcfg()),
-        deadline_us: 0,
-    })
-}
-
-fn renew(id: u64, worker: &str) -> Command {
-    Command::Renew(RenewCommand {
-        request_id: rid(id),
-        tenant: None,
-        worker: worker.to_string(),
-        seconds: 120,
-    })
-}
-
 fn effects(id: u64, effects: Vec<Effect>) -> Command {
     Command::Effects(EffectsCommand {
         request_id: rid(id),
@@ -584,18 +546,6 @@ fn created(reply: &Reply) -> (Pid, u64) {
     }
 }
 
-/// `(pid, start, end)` of every claim of a pop.
-fn claims(reply: &Reply) -> Vec<(Pid, u64, u64)> {
-    match done(reply).0 {
-        Outcome::Pop(o) => o
-            .claims
-            .iter()
-            .map(|c| (c.pid, c.start_offset, c.end_offset))
-            .collect(),
-        other => panic!("expected a pop outcome, got {other:?}"),
-    }
-}
-
 /// A command's reply, and whether the node survived it: a poisoned apply
 /// answers the waiter `Retry` and the read index `Fatal`.
 async fn reply_and_health(fx: &Fx, rx: oneshot::Receiver<Reply>, what: &str) -> Reply {
@@ -637,20 +587,40 @@ async fn seed(fx: &Fx, id: u64) -> Pid {
     pid
 }
 
+/// The message a push was answered for is the only one of a live partition
+/// `pid` (its row committed, not garbage): waits for the store to show it.
+async fn assert_holds_the_message(fx: &Fx, pid: Pid) {
+    let end = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (live, last) = fx
+            .store
+            .read(|r| {
+                Ok((
+                    r.garbage(pid)?.is_none(),
+                    r.partition(pid)?.map(|p| p.last_offset),
+                ))
+            })
+            .expect("read");
+        if live && last == Some(0) {
+            return;
+        }
+        assert!(
+            Instant::now() < end,
+            "partition {pid} does not hold the pushed message: live {live}, last offset {last:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
 /// After the race: the delete finishes, and the message the push was answered
-/// for is in a live partition of the re-created queue, where a pop finds it.
-async fn assert_push_survives(fx: &Fx, old: Pid, pids: &[Pid], new: Pid, id: u64) {
+/// for is in a live partition of the re-created queue.
+async fn assert_push_survives(fx: &Fx, old: Pid, pids: &[Pid], new: Pid) {
     assert_ne!(
         new, old,
         "the push after the delete was filed into the deleted partition {old}"
     );
     fx.finish_chunks(pids, GarbageScope::Queue, 1_000).await;
-    let popped = fx.submit(pop_wildcard(id, "q", "g", "w1")).await;
-    assert_eq!(
-        claims(&popped),
-        vec![(new, 0, 0)],
-        "the pushed message is claimable in its new partition"
-    );
+    assert_holds_the_message(fx, new).await;
     let gone = fx
         .store
         .read(|r| Ok(r.partition(old)?.is_none() && r.garbage(old)?.is_none()))
@@ -697,7 +667,7 @@ async fn a_push_planned_after_a_queue_delete_in_the_same_cycle_gets_a_new_partit
     let (new, offset) = created(&racing);
     assert_eq!(offset, 0, "a fresh partition starts at 0");
     fx.settle(done(&racing).1).await;
-    assert_push_survives(&fx, old, &pids, new, 5).await;
+    assert_push_survives(&fx, old, &pids, new).await;
     fx.close().await;
 }
 
@@ -772,7 +742,7 @@ async fn a_push_planned_while_a_queue_delete_is_in_flight_gets_a_new_partition()
     );
     let (new, _) = created(&racing);
     fx.settle(done(&racing).1).await;
-    assert_push_survives(&fx, old, &pids, new, 4).await;
+    assert_push_survives(&fx, old, &pids, new).await;
     fx.close().await;
 }
 
@@ -797,7 +767,7 @@ async fn a_push_racing_the_delete_of_a_large_partition_is_not_lost() {
     let racing = reply_and_health(&fx, racing, "the racing push").await;
     let (new, _) = created(&racing);
     fx.settle(done(&racing).1).await;
-    assert_push_survives(&fx, old, &pids, new, 4).await;
+    assert_push_survives(&fx, old, &pids, new).await;
     fx.close().await;
 }
 
@@ -859,41 +829,7 @@ async fn a_push_planned_while_a_tenant_purge_is_in_flight_recreates_the_queue() 
     let queue = fx.store.read(|r| r.queue(TENANT, "q")).expect("read");
     assert!(queue.is_some(), "the push re-created the purged queue");
     fx.finish_chunks(&pids, GarbageScope::Tenant, 1_000).await;
-    let popped = fx.submit(pop_wildcard(4, "q", "g", "w1")).await;
-    assert_eq!(claims(&popped), vec![(new, 0, 0)]);
-    fx.close().await;
-}
-
-/// A lease renew planned while the delete of the leased partition is in
-/// flight: the renew walks the worker's committed leases, and the partition
-/// is gone by the time its `CursorSet` would apply.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_renew_planned_while_a_queue_delete_is_in_flight_skips_the_deleted_lease() {
-    let fx = Fx::open("renew", batcher_cfg(4)).await;
-    let old = seed(&fx, 1).await;
-    let popped = fx.submit(pop_wildcard(2, "q", "g", "w1")).await;
-    assert_eq!(claims(&popped), vec![(old, 0, 0)], "w1 leases the seed");
-    fx.settle(done(&popped).1).await;
-    let (delete, _pids) = queue_delete(&fx.store, 3, "q", 1_000);
-
-    fx.gate.close();
-    let base = fx.gate.proposals();
-    let del = fx.send(delete).await;
-    fx.gate.wait_proposals(base + 1).await;
-    let renewed = fx.send(renew(4, "w1")).await;
-    // The renew either plans nothing (answered at once) or proposes.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    fx.gate.open();
-
-    let _ = reply_and_health(&fx, del, "the queue delete").await;
-    let renewed = reply_and_health(&fx, renewed, "the racing renew").await;
-    match &renewed {
-        Reply::Done {
-            outcome: Outcome::Renew(r),
-            ..
-        } => assert_eq!(r.renewed, 0, "the deleted partition's lease is not renewed"),
-        other => panic!("expected a renew outcome, got {other:?}"),
-    }
+    assert_holds_the_message(&fx, new).await;
     fx.close().await;
 }
 
@@ -982,7 +918,6 @@ impl Cycles {
             enabled: true,
             epoch: 0,
             verify: true,
-            verify_rings: true,
             reset_every: 0,
         };
         let out = plan_cycle_blocking(

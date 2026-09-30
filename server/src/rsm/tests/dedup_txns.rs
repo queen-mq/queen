@@ -11,8 +11,7 @@
 //! touch the process-wide record mode a concurrent test might read.
 
 use crate::rsm::dedup::{
-    self, resolve_seg_rows, scan_seg_rows_for_hash, AckRes, DedupFront, ProbeVerdict, Seed,
-    SeedHash, TxnsRow,
+    self, scan_seg_rows_for_hash, AckRes, DedupFront, ProbeVerdict, Seed, SeedHash, TxnsRow,
 };
 use crate::rsm::store::{keys, HeedStore, Keyspace, Reads, Store, Writes};
 
@@ -872,7 +871,7 @@ fn difffuzz_segment_vs_txns_50_seeds() {
                 continue;
             }
 
-            // (2) Probe / resolve verdicts match the txns authority.
+            // (2) Probe verdicts match the txns authority.
             let queries = 200 + rng.below(200);
             for _ in 0..queries {
                 let hash = if !seen[p].is_empty() && rng.below(10) < 7 {
@@ -891,24 +890,6 @@ fn difffuzz_segment_vs_txns_50_seeds() {
                     divergences += 1;
                     eprintln!(
                         "seed {seed} pid {pid} probe divergence: seg={seg_probe:?} txns={txns_probe:?} floor={floor}"
-                    );
-                }
-
-                let hi_base = next_base[p].max(1);
-                let committed = rng.below(hi_base + 1) as i64 - 1;
-                let ts = 0u64; // no prune in this fixture
-                let lo = ((committed + 1).max(ts as i64)).max(0) as u64;
-                let hi = if rng.below(2) == 0 {
-                    lo + rng.below(hi_base + 1)
-                } else {
-                    u64::MAX
-                };
-                let seg_res = resolve_seg_rows(&cache, &hash, lo, hi, committed, ts);
-                let txns_res = resolve_txns(t.s(), pid, &hash, lo, hi, committed, ts);
-                if seg_res != txns_res {
-                    divergences += 1;
-                    eprintln!(
-                        "seed {seed} pid {pid} resolve divergence: seg={seg_res:?} txns={txns_res:?} lo={lo} hi={hi} committed={committed}"
                     );
                 }
             }

@@ -18,7 +18,7 @@
 //!
 //! | field | kind | on the landing of entry `T` |
 //! |---|---|---|
-//! | `queues`, `groups`, `pids_by_key`, `cursors`, `kv` | last writer wins | drop the key iff its tag is `T` |
+//! | `queues`, `groups`, `pids_by_key`, `kv` | last writer wins | drop the key iff its tag is `T` |
 //! | `parts[pid].created`, `.watermark` | last writer wins | drop iff tagged `T`; drop the part once empty |
 //! | `parts[pid].appends` | one per `Append` | remove the one tagged `T` at that base |
 //! | `dedup` | one occurrence per frame | remove `(offset, created_at)`: an offset is unique in its partition |
@@ -439,9 +439,7 @@ impl KeptOverlay {
             p.watermark = None;
             !p.is_empty()
         });
-        ov.cursors = HashMap::default();
         ov.dedup = HashMap::default();
-        ov.appended = Default::default();
         for k in self.entries.iter_mut() {
             k.parts = false;
         }
@@ -529,7 +527,6 @@ impl KeptOverlay {
         diff_tagged("queues", &a.queues, &b.queues, &pa, &pb)
             .or_else(|| diff_tagged("groups", &a.groups, &b.groups, &pa, &pb))
             .or_else(|| diff_tagged("pids_by_key", &a.pids_by_key, &b.pids_by_key, &pa, &pb))
-            .or_else(|| diff_tagged("cursors", &a.cursors, &b.cursors, &pa, &pb))
             .or_else(|| diff_tagged("kv", &a.kv, &b.kv, &pa, &pb))
             .or_else(|| diff_tagged("gone", &a.gone, &b.gone, &pa, &pb))
             .or_else(|| {
@@ -558,11 +555,6 @@ impl KeptOverlay {
                 }
             })
             .or_else(|| diff_parts(a, b, &pa, &pb))
-            // B13: each index is its own overlay's; where both placed a pid,
-            // under the same queue (the kept one places more of them).
-            .or_else(|| a.append_index_diff().map(|d| format!("kept: {d}")))
-            .or_else(|| b.append_index_diff().map(|d| format!("rebuilt: {d}")))
-            .or_else(|| diff_placements(a, b))
             .or_else(|| diff_map("dedup", &a.dedup, &b.dedup, |x, y| x == y))
             .or_else(|| {
                 diff_map("timers", &a.timers, &b.timers, |x, y| {
@@ -600,28 +592,6 @@ fn diff_tagged<K: Eq + Hash + Debug, V: PartialEq + Debug>(
     pb: &dyn Fn(u64) -> Option<usize>,
 ) -> Option<String> {
     diff_map(name, a, b, |x, y| x.v == y.v && pa(x.tag) == pb(y.tag))
-}
-
-/// B13: a pid both overlays placed must be under the same queue.
-fn diff_placements(a: &Overlay, b: &Overlay) -> Option<String> {
-    let queue_of = |o: &Overlay, pid: &u64| -> Option<(String, String)> {
-        let h = o.appended.placed.get(pid)?;
-        o.appended.by_queue.get(h)?.iter().find_map(|q| {
-            q.pids
-                .contains(pid)
-                .then(|| (q.tenant.clone(), q.queue.clone()))
-        })
-    };
-    for pid in a.appended.placed.keys() {
-        if b.appended.placed.contains_key(pid) && queue_of(a, pid) != queue_of(b, pid) {
-            return Some(format!(
-                "append index: pid {pid} placed under {:?} (kept) vs {:?} (rebuilt)",
-                queue_of(a, pid),
-                queue_of(b, pid)
-            ));
-        }
-    }
-    None
 }
 
 fn diff_parts(
@@ -687,13 +657,10 @@ impl Overlay {
         }
         shrink(&mut self.dedup);
         shrink(&mut self.parts);
-        shrink(&mut self.cursors);
         shrink(&mut self.request_ids);
         shrink(&mut self.kv);
         shrink(&mut self.timers);
         shrink(&mut self.gone);
-        shrink(&mut self.appended.placed);
-        shrink(&mut self.appended.by_queue);
     }
 
     /// Take out everything entry `e` put in when it was folded under `tag` —
@@ -794,9 +761,6 @@ impl Overlay {
                         .position(|a| a.tag == tag && a.base == *base_offset)
                         .ok_or("a landed append is not in the overlay")?;
                     p.appends.remove(at);
-                    if p.appends.is_empty() {
-                        self.appended.remove(*pid);
-                    }
                     if p.is_empty() {
                         self.parts.remove(pid);
                     }
@@ -816,9 +780,6 @@ impl Overlay {
                             self.dedup.remove(&key);
                         }
                     }
-                }
-                Effect::CursorSet { pid, group, .. } | Effect::CursorDelete { pid, group } => {
-                    drop_if_tagged(&mut self.cursors, &(*pid, group.clone()), tag)?;
                 }
                 Effect::Watermark { pid, .. } => {
                     if let Some(p) = self.parts.get_mut(pid) {

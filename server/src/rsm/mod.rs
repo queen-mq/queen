@@ -28,7 +28,7 @@
 //! | `command` | command types built by the receiver (§9.1) | WP-1.7 |
 //! | `planner` | leader-side planning, pure over (committed view, overlay) (§7) | WP-1.5, phase 2 |
 //! | `apply` | the only mutator of committed state (I1) | WP-1.4 |
-//! | `state` | committed view: store access + RAM derived indexes (§6.3) | WP-1.2 |
+//! | `state` | committed view: what the planner reads of the store | WP-1.2 |
 //! | `store` | ordered store adapter (heed, D9) and keyspaces (§6.1) | WP-1.2 |
 //! | `segments` | payload segment files (§11.2) | WP-1.3 |
 //! | `dedup` | the dedup index, option (a) lean encoding (D10) | WP-1.2 |
@@ -94,9 +94,7 @@ pub mod apply;
 /// commands when the planner falls behind.
 pub mod admit;
 
-/// The committed view: store reads plus the RAM-derived indexes of §6.3
-/// (ready rings, deadline heaps, hot caches, timer wheel, notifiers).
-/// Owner: WP-1.2.
+/// The committed view: what the planner reads of the store. Owner: WP-1.2.
 pub mod state;
 
 /// The ordered store adapter (heed/LMDB, D9) and the replicated keyspaces of
@@ -178,6 +176,8 @@ pub mod kv_reads;
 /// Not replicated; gated by `QUEEN_RAFT_METRICS` (default on).
 pub mod timing;
 
+/// The consumption engine: the one writer of every group's cursors and leases.
+pub mod consume;
 /// TEMPORARY claim-scarcity diagnostics (2026-09-21). Not for merge.
 pub mod dbgctr;
 

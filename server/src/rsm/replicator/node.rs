@@ -205,6 +205,20 @@ impl<S: Store + 'static> NodeReplicator<S> {
         }
     }
 
+    /// How long ago a quorum last acknowledged this node as leader: the
+    /// consumption engine's leader lease ([`crate::rsm::consume`]). `None`
+    /// while this node does not lead (or no quorum acknowledged it yet this
+    /// term). A local replicator is a single node, its own quorum: zero while
+    /// it leads.
+    pub fn quorum_ack_age(&self) -> Option<std::time::Duration> {
+        match self {
+            NodeReplicator::Local(r) => Replicator::role(r)
+                .is_leader()
+                .then_some(std::time::Duration::ZERO),
+            NodeReplicator::Raft(r) => r.quorum_ack_age(),
+        }
+    }
+
     /// Where a follower forwards client requests: the leader's HTTP address,
     /// when another node leads. `None` on the leader, on a single node, and
     /// while no leader is known.

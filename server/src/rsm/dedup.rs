@@ -670,40 +670,6 @@ pub fn scan_seg_rows_for_hash(
     None
 }
 
-/// Resolve one hash for `log_ack_by_hash_v1` (005) over the committed segment
-/// rows: the same two legs as [`resolve_txns`] — `eff` = MIN over `[lo, hi]`,
-/// `below` = any occurrence at or below `committed` — reading occurrences at or
-/// above `txns_start` (the scan floor). Sourced from the segment rows instead of
-/// the `txns` keyspace.
-pub fn resolve_seg_rows(
-    rows: &[(u64, TxnsRow)],
-    hash: &[u8; 16],
-    lo: u64,
-    hi: u64,
-    committed: i64,
-    txns_start: u64,
-) -> AckRes {
-    let mut res = AckRes::default();
-    for (base, row) in rows {
-        if *base < txns_start {
-            continue; // below the txns window floor (the txns scan starts there)
-        }
-        for (i, h) in row.iter_hashes().enumerate() {
-            if &h != hash {
-                continue;
-            }
-            let off = base + i as u64;
-            if (off as i64) <= committed {
-                res.below = true;
-            }
-            if off >= lo && off <= hi {
-                res.eff = Some(res.eff.map_or(off, |b: u64| b.min(off)));
-            }
-        }
-    }
-    res
-}
-
 // ---------------------------------------------------------------------------
 // Resolve (005) — planning
 // ---------------------------------------------------------------------------

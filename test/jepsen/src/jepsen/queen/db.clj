@@ -62,7 +62,6 @@
         "QUEEN_RAFT_TOKEN"              (:raft-token test)
         "QUEEN_RAFT_DIR"                data-dir
         "QUEEN_RAFT_DEDUP_INDEX"        (:dedup-index test)
-        "QUEEN_RAFT_POP_FASTPATH_EMPTY" "1"
         "QUEEN_RAFT_CLIENT_OFFLOAD"     (if (:offload test) "1" "0")
         "QUEEN_BIND_ADDR"               ip
         "PORT"                          qh/http-port

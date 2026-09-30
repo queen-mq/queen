@@ -36,6 +36,7 @@ use crate::util::uuidv7_bytes;
 /// build with no builder installed (the WP-1.7a seam tests) still gets.
 mod autopilot;
 pub mod groups;
+mod intake;
 pub mod real;
 mod remote;
 

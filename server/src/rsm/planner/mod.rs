@@ -2,6 +2,14 @@
 //! client command into EFFECTS and an OUTCOME, over the committed view plus an
 //! overlay of the entries still in flight.
 //!
+//! The planner plans what the log carries: pushes, the catalog and its
+//! configuration, KV, timers, transactions (their pushes, KV and timers) and
+//! the deterministic effect commands — among them the consumption engine's
+//! checkpoints. It plans NO consumption: pops, acks, nacks, renews, DLQ heads,
+//! positional acks and positions are served on the leader by the consumption
+//! engine ([`crate::rsm::consume`]), the one writer of every group's cursors
+//! and leases, and one that reaches the planner is refused.
+//!
 //! # What "pure" means here, and where the line is
 //!
 //! The planner reads committed state (a store read transaction, [`Committed`])
@@ -16,8 +24,8 @@
 //!
 //! Unlike apply and the store, the planner is NOT under the I2
 //! `disallowed_methods` deny: D5 makes TIME the planner's to stamp, and §5.2
-//! allows randomness in the planner (a partition uuid, a dlq id, the wildcard
-//! rotation). Apply carries no clock and no randomness, so every absolute time
+//! allows randomness in the planner (a partition uuid, a group id, a timer's
+//! dlq id). Apply carries no clock and no randomness, so every absolute time
 //! and every id the planner mints travels in an effect.
 //!
 //! # The differences from pgless, and why
@@ -31,25 +39,11 @@
 //!   are node-local (D8, I7) and never reach the planner. The replicated `txns`
 //!   rows carry `(base_offset) → (end, created_at, hashes)` for every `Append`
 //!   and outlive retention (D10), so the planner reconstructs a partition's
-//!   segment shape — base, end, created_at, and the hashes the delivered set
+//!   segment shape — base, end, created_at, and the hashes the dedup probe
 //!   needs — from them plus the overlay's own appends. It never reads `seg_loc`.
-//! * **Seeding is by the subscription INSTANT, which is position-exact.** §8
-//!   calls RSM seeding position-based; the mechanism that realises it is the
-//!   group's stored subscription instant (`registered_at_us` for `new`,
-//!   `subscription_timestamp_us` for `timestamp`) compared to each append's
-//!   `created_at`. D5's clock (`now = max(wall, last_now+1, max_created_at+1)`)
-//!   makes `created_at < registered_at` hold for exactly the appends committed
-//!   BEFORE the registration entry, so the comparison is the position
-//!   comparison. The `(reg_index, reg_effect)` positions apply records on the
-//!   group row are not needed under this formulation.
-//! * **The delivered set is in the cursor (O16).** A claim records the distinct
-//!   transaction hashes it delivered on the cursor row, bounded by the batch
-//!   size, so the ack fast path is deterministic instead of resting on a RAM map
-//!   a failover loses.
 //! * **No repacking, no decompression (O20).** The receiver pre-packs one frame
 //!   per message; a duplicate drops a survivor and the `Append` blob is the
-//!   survivors concatenated, never repacked. A forced-DLQ ack carries the
-//!   receiver's snapshot of the poison frame, never decompressed here.
+//!   survivors concatenated, never repacked.
 //!
 //! # The cycle, and who calls what
 //!
@@ -81,10 +75,8 @@ use smallvec::SmallVec;
 use crate::rsm::fasthash::FxBuild;
 use std::rc::Rc;
 
-use crate::rsm::dedup::{
-    self, AckRes, DedupFront, IndexMode, ProbeVerdict, Seed, SeedHash, TxnsRow,
-};
-use crate::rsm::effect::{CursorRow, Effect, GroupMeta, Pid, QueueConfig, SubscriptionMode};
+use crate::rsm::dedup::{self, DedupFront, IndexMode, ProbeVerdict, Seed, SeedHash, TxnsRow};
+use crate::rsm::effect::{Effect, GroupMeta, Pid, QueueConfig, SubscriptionMode};
 use crate::rsm::entry::{Entry, Outcome, RequestId};
 use crate::rsm::qlog::set::{QLogReader, QLogSet};
 use crate::rsm::segments::{DedupFrame, Reader};
@@ -92,13 +84,11 @@ use crate::rsm::state::Committed;
 use crate::rsm::store::rows::GroupRow;
 use crate::rsm::store::{keys, Keyspace, Reads, StoreError, TypedReads};
 
-pub mod ack;
 /// KEEP_OVERLAY: the overlay kept between cycles on the planner thread.
 pub(crate) mod kept;
 /// KV: versions from `kv_version_base + ordinal`, TTL, prefix lists,
 /// `required`, and the leader's expiry sweep. WP-2.2.
 pub mod kv;
-pub mod pop;
 pub mod push;
 /// Timers: schedule/cancel, the fire step, backoff and the `__timer__` DLQ.
 /// WP-2.3.
@@ -110,8 +100,8 @@ pub use kv::{KvCommand, KvOp};
 // inline stubs, exactly as they stood inside `rsm/mod.rs` before this WP filled
 // `planner`. The owning WP flips one to a file.
 
-/// The transaction's `positions` rider: set or forget where a consumer group
-/// reads a partition ([`Planner::plan_positions`]).
+/// The transaction's `positions` rider, as the receiver validates it (the
+/// consumption engine sets and forgets the positions).
 pub mod positions;
 /// The transaction wire: one command, all-or-nothing (Phase B). Its KV leg
 /// is [`Planner::plan_kv_writes`]; a timers leg would be
@@ -155,21 +145,7 @@ pub struct PlanConfig {
     /// sets the product default (`txns`) and keeps `record` (apply side) in
     /// step via [`dedup::set_record_index_mode`].
     pub index_mode: IndexMode,
-    /// `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (default 500): a lease granted before
-    /// this leader's term ([`PlanConfig::term_start_us`]) was timed by another
-    /// node's clock, so it is held this much past its expiry before its batch
-    /// goes to another worker. A leader whose clock runs ahead of the
-    /// grantor's would otherwise end the lease early (Jepsen P8 W2 under
-    /// restarts: node clocks 576 ms apart, two workers holding one message
-    /// for 50-289 ms). 0 = off.
-    pub lease_skew_grace_us: i64,
-    /// The RSM clock when this leader's term began planning, set per cycle by
-    /// the batcher; `None` (no grace) outside a leader's term.
-    pub term_start_us: Option<i64>,
 }
-
-/// The default of [`PlanConfig::lease_skew_grace_us`].
-pub const LEASE_SKEW_GRACE_US_DEFAULT: i64 = 500_000;
 
 impl Default for PlanConfig {
     fn default() -> PlanConfig {
@@ -178,8 +154,6 @@ impl Default for PlanConfig {
             plan_budget_ms: PLAN_BUDGET_MS_DEFAULT,
             slow_command_ms: SLOW_COMMAND_MS_DEFAULT,
             index_mode: IndexMode::Rows,
-            lease_skew_grace_us: LEASE_SKEW_GRACE_US_DEFAULT,
-            term_start_us: None,
         }
     }
 }
@@ -228,17 +202,6 @@ impl Refusal {
 
 fn store_err(e: StoreError) -> Refusal {
     Refusal::from_store(e)
-}
-
-/// What [`Planner::planned_pending`] decided for one `(pid, group)` row.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PlannedPending {
-    /// Unknown from the planned state: leave the ring as it is.
-    Keep,
-    /// No work for the group there.
-    Clear,
-    /// Work from this instant on.
-    At(i64),
 }
 
 /// What a `plan_*` decided (§5.4).
@@ -375,6 +338,12 @@ pub struct SubIntent {
     pub now: bool,
 }
 
+/// [`PopCommand::max_parts`] of an autopilot pop that left its width to the
+/// broker: the leader's consumption engine picks it from the group's exact
+/// state ([`crate::rsm::consume`]), for a pop sent here and one a follower
+/// forwarded alike.
+pub const MAX_PARTS_AUTO: i32 = -1;
+
 /// A pop of one named partition, the whole queue by wildcard, or a discovery
 /// group across a namespace or task. One struct, three entry points.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -390,7 +359,9 @@ pub struct PopCommand {
     pub worker: String,
     /// Max frames across the whole pop.
     pub budget: i32,
-    /// Wildcard/discovery: max partitions claimed; `0` = unlimited.
+    /// Wildcard/discovery: max partitions claimed; `0` = unlimited;
+    /// [`MAX_PARTS_AUTO`] = the leader's consumption engine picks it (the pop
+    /// autopilot).
     pub max_parts: i32,
     pub lease_seconds: i32,
     pub auto_ack: bool,
@@ -603,131 +574,6 @@ struct CreatedPart {
     created_at_us: i64,
 }
 
-/// B13: the pids an overlay holds an append for, by the queue they belong to —
-/// what a wildcard pop gathers as its in-flight candidates. The pop used to
-/// take every appended pid of every queue and read each one's partition row
-/// (garbage, row, three names) only to compare its queue: pops × appended
-/// pids reads a cycle, in every lane.
-///
-/// A pid is here exactly while `parts[pid].appends` is non-empty: the fold of
-/// its first append puts it in, the landing of its last takes it out. It is
-/// PLACED under its queue when the overlay knows the queue — a create in
-/// flight, or the planner that folded the push saying so
-/// ([`Overlay::place_appended`]) — and waits in `unplaced` otherwise, until a
-/// wildcard pop reads its row ([`Planner::place_unplaced`]): once per pid
-/// while its appends are in flight, not once per pop. A pid never changes
-/// queue and is never reused, so a placement holds for as long as it stays.
-/// `unknown` holds the pids whose row the planner could not find — no
-/// partition view of them exists, so they are nobody's candidate (as
-/// before).
-#[derive(Clone, Debug, Default)]
-struct AppendIndex {
-    /// `queue_hash(tenant, queue)` → the queues with that hash (in practice
-    /// one) and their appended pids, in pid order.
-    by_queue: HashMap<u64, SmallVec<[QueuePids; 1]>, FxBuild>,
-    /// pid → the hash of the queue it is placed under.
-    placed: HashMap<Pid, u64, FxBuild>,
-    unplaced: BTreeSet<Pid>,
-    unknown: BTreeSet<Pid>,
-}
-
-/// One queue's appended pids ([`AppendIndex`]).
-#[derive(Clone, Debug)]
-struct QueuePids {
-    tenant: String,
-    queue: String,
-    pids: BTreeSet<Pid>,
-}
-
-/// The key [`AppendIndex`] files a queue under. The names are compared on
-/// every lookup, so a collision costs a second bucket, never a wrong pid.
-fn queue_hash(tenant: &str, queue: &str) -> u64 {
-    use std::hash::Hasher;
-    let mut h = crate::rsm::fasthash::FxHasher::default();
-    h.write(tenant.as_bytes());
-    h.write_u8(0x1F);
-    h.write(queue.as_bytes());
-    h.finish()
-}
-
-impl AppendIndex {
-    /// A pid's first append was folded: place it when its queue is known.
-    fn add(&mut self, pid: Pid, queue: Option<(&str, &str)>) {
-        match queue {
-            Some((t, q)) => self.place(pid, t, q),
-            None => {
-                self.unplaced.insert(pid);
-            }
-        }
-    }
-
-    /// File `pid` under `(tenant, queue)`.
-    fn place(&mut self, pid: Pid, tenant: &str, queue: &str) {
-        let h = queue_hash(tenant, queue);
-        let bucket = self.by_queue.entry(h).or_default();
-        match bucket
-            .iter_mut()
-            .find(|b| b.tenant == tenant && b.queue == queue)
-        {
-            Some(b) => {
-                b.pids.insert(pid);
-            }
-            None => bucket.push(QueuePids {
-                tenant: tenant.to_string(),
-                queue: queue.to_string(),
-                pids: BTreeSet::from([pid]),
-            }),
-        }
-        self.placed.insert(pid, h);
-    }
-
-    /// The last append of `pid` landed: it leaves the index.
-    fn remove(&mut self, pid: Pid) {
-        if let Some(h) = self.placed.remove(&pid) {
-            if let Some(bucket) = self.by_queue.get_mut(&h) {
-                bucket.retain(|b| {
-                    b.pids.remove(&pid);
-                    !b.pids.is_empty()
-                });
-                if bucket.is_empty() {
-                    self.by_queue.remove(&h);
-                }
-            }
-        } else if !self.unplaced.remove(&pid) {
-            self.unknown.remove(&pid);
-        }
-    }
-
-    /// The pids placed under `(tenant, queue)`, in pid order.
-    fn of_queue<'a>(&'a self, tenant: &str, queue: &str) -> impl Iterator<Item = Pid> + 'a {
-        self.by_queue
-            .get(&queue_hash(tenant, queue))
-            .and_then(|bucket| {
-                bucket
-                    .iter()
-                    .find(|b| b.tenant == tenant && b.queue == queue)
-            })
-            .into_iter()
-            .flat_map(|b| b.pids.iter().copied())
-    }
-
-    /// Every pid in the index, placed or not.
-    fn all(&self) -> BTreeSet<Pid> {
-        self.placed
-            .keys()
-            .chain(self.unplaced.iter())
-            .chain(self.unknown.iter())
-            .copied()
-            .collect()
-    }
-
-    fn contains(&self, pid: Pid) -> bool {
-        self.placed.contains_key(&pid)
-            || self.unplaced.contains(&pid)
-            || self.unknown.contains(&pid)
-    }
-}
-
 /// The planner's view of everything not yet in committed state: the entries
 /// still in flight (D4, up to four) and the commands planned so far in the
 /// current cycle. Built and owned by the batcher.
@@ -756,7 +602,6 @@ pub struct Overlay {
     groups: HashMap<(String, String, String), Tagged<Option<GroupRow>>, FxBuild>,
     pids_by_key: HashMap<(String, String, String), Tagged<Pid>, FxBuild>,
     parts: HashMap<Pid, OverlayPart, FxBuild>,
-    cursors: HashMap<(Pid, String), Tagged<Option<CursorRow>>, FxBuild>,
     /// `(pid, hash) → [(offset, created_at)]`: the occurrences an overlay
     /// `Append` added, merged with committed `dedup` on a probe or a resolve.
     /// One key per in-flight message, so the value keeps its (almost always
@@ -791,10 +636,8 @@ pub struct Overlay {
     /// The tenant of a `TenantPurge` in flight: as `dropped_queues` for every
     /// queue of the tenant, and its KV rows and timers too.
     purged_tenants: HashMap<String, Tagged<()>, FxBuild>,
-    /// B13: the pids with an append here, by queue ([`AppendIndex`]).
-    appended: AppendIndex,
     /// B27: whether the folds keep partition state — appends, their dedup
-    /// occurrences, cursors, watermarks. Control's kept overlay runs without it
+    /// occurrences, watermarks. Control's kept overlay runs without it
     /// while it plans nothing that reads it ([`kept::KeptOverlay::partitions`]):
     /// folding and unfolding every message of every entry cost the serial
     /// planner thread 238-595 ns per pushed message for commands it did not
@@ -878,13 +721,7 @@ impl std::fmt::Debug for InFlightOutcome {
 /// Whether `eff` is partition state ([`Overlay::partition_state`]): what a
 /// catalog-only overlay leaves out, and folds later if it has to.
 fn is_partition_state(eff: &Effect) -> bool {
-    matches!(
-        eff,
-        Effect::Append { .. }
-            | Effect::CursorSet { .. }
-            | Effect::CursorDelete { .. }
-            | Effect::Watermark { .. }
-    )
+    matches!(eff, Effect::Append { .. } | Effect::Watermark { .. })
 }
 
 /// Frame `i`'s hash in an `Append`'s `hashes`, exactly as the fold reads it (a
@@ -917,7 +754,6 @@ impl Overlay {
             groups: HashMap::default(),
             pids_by_key: HashMap::default(),
             parts: HashMap::default(),
-            cursors: HashMap::default(),
             dedup: HashMap::default(),
             request_ids: HashMap::default(),
             kv: HashMap::default(),
@@ -925,7 +761,6 @@ impl Overlay {
             gone: HashMap::default(),
             dropped_queues: HashMap::default(),
             purged_tenants: HashMap::default(),
-            appended: AppendIndex::default(),
             partition_state: true,
             record_ids: true,
             tag: 0,
@@ -1111,11 +946,6 @@ impl Overlay {
                     },
                     tag,
                 });
-                // An append always folds after its partition's create, so this
-                // only matters for an index a caller filled out of order.
-                if self.appended.unplaced.remove(pid) {
-                    self.appended.place(*pid, tenant, queue);
-                }
                 self.next_pid = self.next_pid.max(pid.saturating_add(1));
                 self.max_created_at_us = self.max_created_at_us.max(*created_at_us);
             }
@@ -1124,8 +954,7 @@ impl Overlay {
             Effect::Append { created_at_us, .. } if !self.partition_state => {
                 self.max_created_at_us = self.max_created_at_us.max(*created_at_us);
             }
-            Effect::CursorSet { .. } | Effect::CursorDelete { .. } | Effect::Watermark { .. }
-                if !self.partition_state => {}
+            Effect::Watermark { .. } if !self.partition_state => {}
             Effect::Append {
                 pid,
                 base_offset,
@@ -1144,36 +973,18 @@ impl Overlay {
                         .or_default()
                         .push((base_offset + i as u64, *created_at_us));
                 }
-                let part = self.parts.entry(*pid).or_default();
-                let first = part.appends.is_empty();
-                part.appends.push(OverlayAppend {
-                    base: *base_offset,
-                    end,
-                    created_at_us: *created_at_us,
-                    hashes: hs,
-                    tag,
-                });
-                if first {
-                    let queue = part
-                        .created
-                        .as_ref()
-                        .map(|c| (c.v.tenant.as_str(), c.v.queue.as_str()));
-                    self.appended.add(*pid, queue);
-                }
-                self.max_created_at_us = self.max_created_at_us.max(*created_at_us);
-            }
-            Effect::CursorSet { pid, group, row } => {
-                self.cursors.insert(
-                    (*pid, group.clone()),
-                    Tagged {
-                        v: Some(row.clone()),
+                self.parts
+                    .entry(*pid)
+                    .or_default()
+                    .appends
+                    .push(OverlayAppend {
+                        base: *base_offset,
+                        end,
+                        created_at_us: *created_at_us,
+                        hashes: hs,
                         tag,
-                    },
-                );
-            }
-            Effect::CursorDelete { pid, group } => {
-                self.cursors
-                    .insert((*pid, group.clone()), Tagged { v: None, tag });
+                    });
+                self.max_created_at_us = self.max_created_at_us.max(*created_at_us);
             }
             Effect::Watermark {
                 pid,
@@ -1224,8 +1035,9 @@ impl Overlay {
                 self.fold_timer(eff, tag);
             }
             // Everything else the planner neither emits nor needs to see through
-            // the overlay (a delete's chunks, streams, traces): a later phase
-            // folds what its planner reads.
+            // the overlay (a delete's chunks, cursors — the consumption
+            // engine's — streams, traces): a later phase folds what its
+            // planner reads.
             _ => {}
         }
     }
@@ -1268,114 +1080,6 @@ impl Overlay {
     /// committed state, and must not delete a partition a push just wrote.
     pub(crate) fn touches_partition(&self, pid: Pid) -> bool {
         self.parts.contains_key(&pid)
-    }
-
-    /// B13: the planner that folded an append to `pid` knows its queue — say
-    /// so, and no wildcard pop has to read the partition row to find it. A
-    /// no-op unless `pid` has an append here that is not placed yet.
-    pub(crate) fn place_appended(&mut self, pid: Pid, tenant: &str, queue: &str) {
-        if self.appended.unplaced.remove(&pid) {
-            self.appended.place(pid, tenant, queue);
-        }
-    }
-
-    /// B13: the appended pids of `(tenant, queue)` a wildcard pop may claim,
-    /// in pid order — the in-flight part of its candidates. Only the pids the
-    /// planner has placed ([`Planner::place_unplaced`] places the rest first).
-    /// The overlay's own reasons for a partition view to be `None` filter
-    /// here (a delete in flight takes the pid; a queue delete in flight took
-    /// every committed partition of the queue); the claim re-reads the
-    /// partition, so a pid the committed side lost (garbage) is tried and
-    /// found empty, exactly as when it was never offered.
-    pub(crate) fn appended_candidates<'a>(
-        &'a self,
-        tenant: &'a str,
-        queue: &'a str,
-    ) -> impl Iterator<Item = Pid> + 'a {
-        let dropped = self.queue_dropped(tenant, queue);
-        self.appended.of_queue(tenant, queue).filter(move |pid| {
-            !self.is_gone(*pid)
-                && (!dropped || self.parts.get(pid).is_some_and(|p| p.created.is_some()))
-        })
-    }
-
-    /// B13: whether every appended pid is placed under its queue (or known to
-    /// have no partition row).
-    pub(crate) fn appended_placed(&self) -> bool {
-        self.appended.unplaced.is_empty()
-    }
-
-    /// B13/B14: the `(tenant, queue)` an appended pid is placed under, `None`
-    /// when it has no append here or is not placed yet.
-    pub(crate) fn appended_queue(&self, pid: Pid) -> Option<(&str, &str)> {
-        let h = self.appended.placed.get(&pid)?;
-        self.appended.by_queue.get(h)?.iter().find_map(|b| {
-            b.pids
-                .contains(&pid)
-                .then_some((b.tenant.as_str(), b.queue.as_str()))
-        })
-    }
-
-    /// B13, the equivalence check: the first way the append index is not the
-    /// index of this overlay's appends, or `None`.
-    pub(crate) fn append_index_diff(&self) -> Option<String> {
-        let want: BTreeSet<Pid> = self
-            .parts
-            .iter()
-            .filter(|(_, p)| !p.appends.is_empty())
-            .map(|(pid, _)| *pid)
-            .collect();
-        let got = self.appended.all();
-        if got != want {
-            return Some(format!(
-                "append index: indexed {:?} vs appended {:?}",
-                got.symmetric_difference(&want).take(8).collect::<Vec<_>>(),
-                want.len()
-            ));
-        }
-        let placed_n =
-            self.appended.placed.len() + self.appended.unplaced.len() + self.appended.unknown.len();
-        if placed_n != want.len() {
-            return Some(format!(
-                "append index: a pid is in two places ({placed_n} vs {})",
-                want.len()
-            ));
-        }
-        for (h, bucket) in &self.appended.by_queue {
-            for b in bucket {
-                if queue_hash(&b.tenant, &b.queue) != *h || b.pids.is_empty() {
-                    return Some(format!(
-                        "append index: bucket {}/{} misfiled",
-                        b.tenant, b.queue
-                    ));
-                }
-                for pid in &b.pids {
-                    if self.appended.placed.get(pid) != Some(h) {
-                        return Some(format!("append index: pid {pid} placed twice"));
-                    }
-                    if let Some(c) = self.parts.get(pid).and_then(|p| p.created.as_ref()) {
-                        if c.v.tenant != b.tenant || c.v.queue != b.queue {
-                            return Some(format!(
-                                "append index: pid {pid} under {}/{} but created in {}/{}",
-                                b.tenant, b.queue, c.v.tenant, c.v.queue
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    /// B13: the queue each placed pid is filed under (tests).
-    #[cfg(test)]
-    pub(crate) fn appended_queue_of(&self, pid: Pid) -> Option<(String, String)> {
-        let h = self.appended.placed.get(&pid)?;
-        self.appended.by_queue.get(h)?.iter().find_map(|b| {
-            b.pids
-                .contains(&pid)
-                .then(|| (b.tenant.clone(), b.queue.clone()))
-        })
     }
 
     /// For background retention ([`crate::rsm::retention_scan::judge`]):
@@ -1535,15 +1239,6 @@ pub struct Planner<'a, R: Reads + ?Sized> {
     /// owns it across cycles. A [`DedupFront::disabled`] instance makes the
     /// planner probe exactly as the baseline does.
     front: &'a DedupFront,
-    /// `QUEEN_RAFT_CLAIM_FROM_RING` (PERF-I, default on): take the O(claimed)
-    /// bounded claim path — one txns scan from the segment covering `wanted`,
-    /// the delivered hashes folded into that pass — instead of the baseline's
-    /// `segs_from(log_start)` full-history scan plus a separate `hashes_in_range`
-    /// scan per claim. Read once from the environment; a test flips it with
-    /// [`Planner::set_claim_from_ring`] to run the differential A/B in-process.
-    /// It changes only which store reads the planner makes; the effects and the
-    /// outcome are identical either way (the property test proves it).
-    claim_from_ring: bool,
     /// PERF-E `DEDUP_INDEX=segment`: the segment read side, shared with the pop
     /// payload path. `Some` in production (the facade hands the batcher a
     /// cloned `Reader`); `None` for a planner built without segments — legal
@@ -1563,47 +1258,20 @@ pub struct Planner<'a, R: Reads + ?Sized> {
     /// / unused outside `segment` mode. The planner runs on one blocking thread
     /// per cycle, so the `RefCell` is never contended.
     seg_cache: RefCell<HashMap<Pid, Rc<CommittedTxnsRows>>>,
-    /// PERF-E: the committed segment SHAPE (`(base, end, created)`, NO hashes)
-    /// for the pop walk and the segment-covering probe, which never read the
-    /// hashes. Built without the per-frame `.seg` reads the hash cache pays, so
-    /// a pop does not `pread` the whole committed window. Same per-cycle scope
-    /// as `seg_cache`.
-    seg_shape_cache: RefCell<HashMap<Pid, Rc<Vec<Seg>>>>,
     /// PERF-E: the per-pid committed segment context (bucket, committed bound,
-    /// sealed-file list), cached so both the shape read and the bounded pop hash
-    /// read reuse one `partition_files` scan. `None` = no committed frames.
+    /// sealed-file list), cached so every committed read of a pid this cycle
+    /// reuses one `partition_files` scan. `None` = no committed frames.
     seg_ctx_cache: RefCell<HashMap<Pid, Option<Rc<SegCtx>>>>,
-    /// Per ring, the partition this cycle's wildcard pops have tried up to: the next pop of the ring walks on from there instead of re-trying,
-    /// from the head, every partition the earlier ones claimed or found
-    /// unclaimable (with many ready partitions, a cycle's pops were quadratic:
-    /// ~1 s a cycle at 10M, 2026-09-29).
-    ring_walked: RefCell<HashMap<(String, String, String), Pid>>,
-}
-
-/// The process-wide `QUEEN_RAFT_CLAIM_FROM_RING` default (PERF-I), read once.
-/// On unless set to `0`/`false`. The planner is not under the I2 `env`/clock
-/// deny (that is apply's, state's and the store's), so it may read this.
-fn claim_from_ring_default() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| {
-        std::env::var("QUEEN_RAFT_CLAIM_FROM_RING")
-            .map(|s| s != "0" && !s.eq_ignore_ascii_case("false"))
-            .unwrap_or(true)
-    })
 }
 
 /// A partition merged across committed state and the overlay — the shape the
-/// pop walk, the push serialiser and seeding read. There is no `hw`:
-/// `last_offset` is the visible tail. Numbers only: the committed row is read
-/// in place ([`TypedReads::partition_with`]), and a caller that needs the
-/// names asks for them ([`Planner::partition_queue`]) — the view used to copy
-/// three strings out of every partition read (task 7).
+/// push serialiser reads. There is no `hw`: `last_offset` is the visible tail.
+/// Numbers only: the committed row is read in place
+/// ([`TypedReads::partition_with`]) — the view used to copy three strings out
+/// of every partition read (task 7).
 #[derive(Clone, Copy, Debug)]
 struct PartView {
-    pid: Pid,
     last_offset: i64,
-    log_start: u64,
-    txns_start: u64,
     last_created_at_us: i64,
 }
 
@@ -1616,29 +1284,6 @@ enum CommittedPart {
     Head(crate::rsm::store::rows::PartitionHead),
 }
 
-/// The fields of a cursor a `pending` row depends on ([`Planner::planned_pending`]).
-#[derive(Clone, Copy, Debug)]
-struct CursorLease {
-    committed: i64,
-    has_worker: bool,
-    lease_expires_at_us: Option<i64>,
-}
-
-impl CursorLease {
-    fn of(c: &CursorRow) -> CursorLease {
-        CursorLease {
-            committed: c.committed,
-            has_worker: c.worker.is_some(),
-            lease_expires_at_us: c.lease_expires_at_us,
-        }
-    }
-
-    /// [`crate::rsm::store::rows::lease_live`].
-    fn lease_live(&self, now_us: i64) -> bool {
-        self.has_worker && self.lease_expires_at_us.is_some_and(|e| e > now_us)
-    }
-}
-
 /// A partition's committed dedup rows reconstructed from the segment files
 /// (PERF-E `DEDUP_INDEX=segment`), base-sorted, with `TxnsRow::end` INCLUSIVE
 /// (the stored-`txns`-row shape every reader expects).
@@ -1646,9 +1291,8 @@ type CommittedTxnsRows = Vec<(u64, TxnsRow)>;
 
 /// The committed segment context of a partition (PERF-E): its logical bucket,
 /// the committed offset bound (`committed last_offset + 1`, from the RoTxn), and
-/// its committed sealed-file list (`partition_files`). Cached per pid per cycle
-/// so a pop that reads shape then a bounded hash range scans `partition_files`
-/// once, not twice. `None` when the partition is unknown or has no committed
+/// its committed sealed-file list (`partition_files`). Cached per pid per
+/// cycle. `None` when the partition is unknown or has no committed
 /// frames.
 struct SegCtx {
     bucket: u16,
@@ -1659,22 +1303,6 @@ struct SegCtx {
     /// `(bucket, sealed)`. Derived from the COMMITTED partition row, like every
     /// other field here.
     queue_id: u64,
-}
-
-impl PartView {
-    /// The first offset a pop can still be served (`log_start - 1`, the "last
-    /// acked" form the cursor arithmetic uses).
-    fn floor(&self) -> i64 {
-        self.log_start as i64 - 1
-    }
-}
-
-/// One segment (one `Append`) as the pop walk sees it.
-#[derive(Clone, Copy, Debug)]
-struct Seg {
-    base: u64,
-    end: u64,
-    created_at_us: i64,
 }
 
 impl<'a, R: Reads + ?Sized> Planner<'a, R> {
@@ -1690,21 +1318,11 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             now_us,
             cfg,
             front,
-            claim_from_ring: claim_from_ring_default(),
             reader,
             qlog_reader: None,
             seg_cache: RefCell::new(HashMap::new()),
-            seg_shape_cache: RefCell::new(HashMap::new()),
             seg_ctx_cache: RefCell::new(HashMap::new()),
-            ring_walked: RefCell::new(HashMap::new()),
         }
-    }
-
-    /// Override the [`Planner::claim_from_ring`] path for this planner (tests:
-    /// the differential A/B runs the same workload both ways in one process).
-    pub fn set_claim_from_ring(&mut self, v: bool) -> &mut Self {
-        self.claim_from_ring = v;
-        self
     }
 
     /// Point the committed `DEDUP_INDEX=segment` dedup reads at the per-queue log
@@ -1716,43 +1334,16 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         self
     }
 
-    /// Whether the O(claimed) bounded claim path is active (PERF-I).
-    pub(crate) fn claim_from_ring(&self) -> bool {
-        self.claim_from_ring
-    }
-
     /// The dedup front the batcher threads through this cycle.
     pub fn front(&self) -> &DedupFront {
         self.front
-    }
-
-    pub fn now_us(&self) -> i64 {
-        self.now_us
-    }
-
-    pub fn committed(&self) -> &Committed<'a, R> {
-        &self.committed
     }
 
     pub fn plan_effects(&self, ov: &mut Overlay, c: &EffectsCommand) -> Planned {
         if c.effects.is_empty() {
             return Ok(Plan::Empty(Outcome::Empty));
         }
-        // A cursor the receiver wrote from committed state (a seek) names
-        // partitions it read before this was planned. One a delete in flight
-        // takes away, or one being chunk-deleted, would reach apply after its
-        // row is gone — fatal there. Refused whole and retryable: the retry
-        // reads the partitions again.
-        for e in &c.effects {
-            if let Effect::CursorSet { pid, .. } = e {
-                if self.partition(ov, *pid)?.is_none() {
-                    return Err(Refusal::retry(
-                        "partition_gone",
-                        format!("partition {pid} is gone or being deleted"),
-                    ));
-                }
-            }
-        }
+        self.check_partition_rows(ov, &c.effects)?;
         let mut effects = c.effects.clone();
         self.cover_dropped_partitions(ov, &mut effects)?;
         ov.apply_effects(&effects);
@@ -1770,6 +1361,32 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             }
         }
         Ok(Plan::logged(effects, Outcome::Empty))
+    }
+
+    /// The cursor and dead-letter rows `effects` write (a seek's, the
+    /// consumption engine's checkpoints and transaction riders) name
+    /// partitions read before this was planned. A cursor row of one a delete
+    /// in flight takes away, or one being chunk-deleted, would reach apply
+    /// after its partition row is gone — fatal there — and a dead letter would
+    /// outlive the partition it names. Refused whole and retryable: the retry
+    /// reads the partitions again (the engine drops the rows of a partition
+    /// that is gone and sends the rest).
+    pub(crate) fn check_partition_rows(
+        &self,
+        ov: &Overlay,
+        effects: &[Effect],
+    ) -> Result<(), Refusal> {
+        for e in effects {
+            if let Effect::CursorSet { pid, .. } | Effect::DlqInsert { pid, .. } = e {
+                if self.partition(ov, *pid)?.is_none() {
+                    return Err(Refusal::retry(
+                        "partition_gone",
+                        format!("partition {pid} is gone or being deleted"),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// A queue delete or a tenant purge takes away every partition of what it
@@ -1941,6 +1558,9 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         self.committed.queue(tenant, queue).map_err(store_err)
     }
 
+    /// Whether `(tenant, queue, group)` is registered: a registration or a
+    /// delete in flight (the overlay), else committed state — unless a delete
+    /// in flight drops the queue's groups.
     fn group(
         &self,
         ov: &Overlay,
@@ -1957,9 +1577,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         if ov.queue_dropped(tenant, queue) {
             return Ok(None);
         }
-        self.committed
-            .group(tenant, queue, group)
-            .map_err(store_err)
+        self.reads().group(tenant, queue, group).map_err(store_err)
     }
 
     /// The live pid of a partition NAME. A name a delete in flight sweeps
@@ -1998,7 +1616,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             return Ok(None);
         }
         let overlay = ov.parts.get(&pid);
-        let (mut last_offset, mut log_start, mut txns_start, mut last_created) = match (
+        let (mut last_offset, mut last_created) = match (
             self.committed_part(ov, pid)?,
             overlay.and_then(|o| o.created.as_ref()),
         ) {
@@ -2006,30 +1624,16 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             // one of a queue a delete in flight drops is going away with it
             // — named in the delete's garbage or not.
             (CommittedPart::Dropped, _) => return Ok(None),
-            (CommittedPart::Head(h), _) => (
-                h.last_offset,
-                h.log_start,
-                h.txns_start,
-                h.last_created_at_us,
-            ),
-            (CommittedPart::None, Some(c)) => (-1, 0, 0, c.v.created_at_us - 1),
+            (CommittedPart::Head(h), _) => (h.last_offset, h.last_created_at_us),
+            (CommittedPart::None, Some(c)) => (-1, c.v.created_at_us - 1),
             (CommittedPart::None, None) => return Ok(None),
         };
-        if let Some(o) = overlay {
-            if let Some(last) = o.appends.last() {
-                last_offset = last.end as i64;
-                last_created = last.created_at_us;
-            }
-            if let Some(Tagged { v: (ls, ts), .. }) = o.watermark {
-                log_start = ls;
-                txns_start = ts;
-            }
+        if let Some(last) = overlay.and_then(|o| o.appends.last()) {
+            last_offset = last.end as i64;
+            last_created = last.created_at_us;
         }
         Ok(Some(PartView {
-            pid,
             last_offset,
-            log_start,
-            txns_start,
             last_created_at_us: last_created,
         }))
     }
@@ -2054,408 +1658,12 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         Ok(got.unwrap_or(CommittedPart::None))
     }
 
-    fn cursor(&self, ov: &Overlay, pid: Pid, group: &str) -> Result<Option<CursorRow>, Refusal> {
-        if ov.is_gone(pid) {
-            return Ok(None);
-        }
-        if let Some(t) = ov.cursors.get(&(pid, group.to_string())) {
-            return Ok(t.v.clone());
-        }
-        self.committed.cursor(pid, group).map_err(store_err)
-    }
-
-    /// [`Planner::cursor`], only the fields a `pending` row depends on — the
-    /// committed one read in place, without copying the worker, the delivered
-    /// set and the metadata.
-    fn cursor_lease(
-        &self,
-        ov: &Overlay,
-        pid: Pid,
-        group: &str,
-    ) -> Result<Option<CursorLease>, Refusal> {
-        if ov.is_gone(pid) {
-            return Ok(None);
-        }
-        if let Some(t) = ov.cursors.get(&(pid, group.to_string())) {
-            return Ok(t.v.as_ref().map(CursorLease::of));
-        }
-        Ok(self
-            .reads()
-            .cursor_head(pid, group)
-            .map_err(store_err)?
-            .map(|h| CursorLease {
-                committed: h.committed,
-                has_worker: h.has_worker,
-                lease_expires_at_us: h.lease_expires_at_us,
-            }))
-    }
-
-    /// B13: place every appended pid of the overlay that is not placed yet
-    /// under its queue: its create in flight, the kept rings' cache, or its
-    /// partition row (read raw: a pid's queue is what it was created in,
-    /// garbage or not — the claim decides whether it is live). One read per
-    /// pid while its appends are in flight, where every wildcard pop used to
-    /// read every appended pid. A pid without a row goes to `unknown`: no
-    /// partition view of it exists, so no pop is offered it (as before).
-    pub(crate) fn place_unplaced(&self, ov: &mut Overlay) -> Result<(), Refusal> {
-        if ov.appended.unplaced.is_empty() {
-            return Ok(());
-        }
-        let pending: Vec<Pid> = std::mem::take(&mut ov.appended.unplaced)
-            .into_iter()
-            .collect();
-        for (i, &pid) in pending.iter().enumerate() {
-            let created = ov
-                .parts
-                .get(&pid)
-                .and_then(|p| p.created.as_ref())
-                .map(|c| (c.v.tenant.clone(), c.v.queue.clone()));
-            let queue = match created {
-                Some(q) => Some(q),
-                None => match self.committed.cached_queue(pid) {
-                    Some((t, q)) => Some((t.to_string(), q.to_string())),
-                    None => match self.reads().partition(pid) {
-                        Ok(row) => row.map(|r| (r.tenant, r.queue)),
-                        Err(e) => {
-                            // Nothing lost: what is left waits for the next pop.
-                            ov.appended.unplaced.extend(pending[i..].iter().copied());
-                            return Err(store_err(e));
-                        }
-                    },
-                },
-            };
-            match queue {
-                Some((t, q)) => ov.appended.place(pid, &t, &q),
-                None => {
-                    ov.appended.unknown.insert(pid);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// The `(tenant, queue)` a partition belongs to, as the overlay sees it
-    /// (`None` when it is unknown or on its way out).
-    pub(crate) fn partition_queue(
-        &self,
-        ov: &Overlay,
-        pid: Pid,
-    ) -> Result<Option<(String, String)>, Refusal> {
-        if ov.is_gone(pid) {
-            return Ok(None);
-        }
-        let reads = self.reads();
-        if !reads.is_garbage(pid).map_err(store_err)? {
-            let committed = reads
-                .partition_with(pid, |p| {
-                    (!ov.queue_dropped(p.tenant, p.queue))
-                        .then(|| (p.tenant.to_string(), p.queue.to_string()))
-                })
-                .map_err(store_err)?;
-            if let Some(named) = committed {
-                return Ok(named);
-            }
-        }
-        Ok(ov
-            .parts
-            .get(&pid)
-            .and_then(|o| o.created.as_ref())
-            .map(|c| (c.v.tenant.clone(), c.v.queue.clone())))
-    }
-
-    /// Whether the partition belongs to `tenant` (it is live: the caller read
-    /// its view), without copying its names.
-    fn partition_of_tenant(&self, ov: &Overlay, pid: Pid, tenant: &str) -> Result<bool, Refusal> {
-        if let Some(c) = ov.parts.get(&pid).and_then(|o| o.created.as_ref()) {
-            return Ok(c.v.tenant == tenant);
-        }
-        Ok(self
-            .reads()
-            .partition_with(pid, |p| p.tenant == tenant)
-            .map_err(store_err)?
-            .unwrap_or(false))
-    }
-
-    /// The `pending` row apply will hold for `(pid, group)` once everything the
-    /// overlay carries has landed, by apply's own rules (`cursor_set`,
-    /// `append_pending`): no row when the group is caught up, the lease expiry
-    /// while a lease is live, else ready now. `appended`: the overlay appends to
-    /// `pid` — with no cursor for the group that is what arms the row; without
-    /// an append and without a cursor the planner cannot tell (the row may
-    /// predate the group's registration), so the ring keeps what it has.
-    /// `None` when the partition is unknown or on its way out. A delayed or
-    /// window-buffered queue's future visibility is not modelled: the row reads
-    /// ready now and the claim, which re-verifies, finds nothing.
-    pub(crate) fn planned_pending(
-        &self,
-        ov: &Overlay,
-        pid: Pid,
-        group: &str,
-        appended: bool,
-    ) -> Result<Option<(String, String, PlannedPending)>, Refusal> {
-        let Some(part) = self.partition(ov, pid)? else {
-            return Ok(None);
-        };
-        let Some((tenant, queue)) = self.partition_queue(ov, pid)? else {
-            return Ok(None);
-        };
-        let state = self.pending_state(ov, &part, group, appended)?;
-        Ok(Some((tenant, queue, state)))
-    }
-
-    /// B14: [`Planner::planned_pending`] of `pid`'s rows for every group in
-    /// `groups`, into `out` in the same order — the partition read once, not
-    /// once per group, and its names not at all (the caller knows the queue).
-    /// `false` (and nothing in `out`) when the partition is unknown or on its
-    /// way out.
-    pub(crate) fn planned_rows(
-        &self,
-        ov: &Overlay,
-        pid: Pid,
-        groups: &[&str],
-        appended: bool,
-        out: &mut Vec<PlannedPending>,
-    ) -> Result<bool, Refusal> {
-        let Some(part) = self.partition(ov, pid)? else {
-            return Ok(false);
-        };
-        for g in groups {
-            out.push(self.pending_state(ov, &part, g, appended)?);
-        }
-        Ok(true)
-    }
-
-    fn pending_state(
-        &self,
-        ov: &Overlay,
-        part: &PartView,
-        group: &str,
-        appended: bool,
-    ) -> Result<PlannedPending, Refusal> {
-        Ok(match self.cursor_lease(ov, part.pid, group)? {
-            Some(c) if c.committed >= part.last_offset => PlannedPending::Clear,
-            Some(c) if c.lease_live(self.now_us) => {
-                PlannedPending::At(c.lease_expires_at_us.unwrap_or(self.now_us))
-            }
-            Some(_) => PlannedPending::At(self.now_us),
-            None if appended => PlannedPending::At(self.now_us),
-            None => PlannedPending::Keep,
-        })
-    }
-
-    // ---- segments (from the txns keyspace + overlay) ----------------------
-
-    /// The partition's segments with `base >= from_base`, in offset order:
-    /// committed `txns` rows merged with the overlay's own appends. Bounded by
-    /// nothing in phase 1 (the pop walk of pgless was equally O(segments); the
-    /// per-partition segment RAM is the ratified §6.1 cost, R-105). A production
-    /// bound (scan near `wanted`) is a follow-up.
-    fn segs_from(
-        &self,
-        ov: &Overlay,
-        part: &PartView,
-        from_base: u64,
-    ) -> Result<Vec<Seg>, Refusal> {
-        let mut segs: Vec<Seg> = Vec::new();
-        // The committed segments: `segment` mode reconstructs them from the
-        // committed segment rows (RAM-cached per pid this cycle); `txns`/`rows`
-        // scan the `txns` keyspace. Both yield the same `(base, end, created)`
-        // shape for `base >= from_base`, `end` inclusive.
-        if self.cfg.index_mode == IndexMode::Segment {
-            // Shape only — the pop walk never reads the hashes, so no per-frame
-            // `.seg` read.
-            let shape = self.committed_seg_shape(part.pid)?;
-            for s in shape.iter() {
-                if s.base >= from_base {
-                    segs.push(*s);
-                }
-            }
-        } else {
-            let prefix = keys::txns_prefix(part.pid);
-            let from = keys::txns(part.pid, from_base);
-            let mut bad: Option<StoreError> = None;
-            self.reads()
-                .scan_raw(
-                    Keyspace::Txns,
-                    &from,
-                    &prefix,
-                    usize::MAX,
-                    &mut |k, v| match (keys::txns_base_of(k), TxnsRow::decode(v)) {
-                        (Some(base), Ok(row)) => {
-                            segs.push(Seg {
-                                base,
-                                end: row.end,
-                                created_at_us: row.created_at_us,
-                            });
-                            true
-                        }
-                        _ => {
-                            bad = Some(StoreError::corrupt(Keyspace::Txns, "txns row"));
-                            false
-                        }
-                    },
-                )
-                .map_err(store_err)?;
-            if let Some(e) = bad {
-                return Err(store_err(e));
-            }
-        }
-        if let Some(o) = ov.parts.get(&part.pid) {
-            for a in &o.appends {
-                if a.base >= from_base {
-                    segs.push(Seg {
-                        base: a.base,
-                        end: a.end,
-                        created_at_us: a.created_at_us,
-                    });
-                }
-            }
-        }
-        segs.sort_by_key(|s| s.base);
-        Ok(segs)
-    }
-
-    /// The distinct transaction hashes delivered in the inclusive offset range
-    /// `[lo, hi]`: the delivered set a claim records on the cursor (O16),
-    /// bounded by the batch size. Committed hashes come from the `txns` rows,
-    /// overlay hashes from the overlay's appends.
-    fn hashes_in_range(
-        &self,
-        ov: &Overlay,
-        pid: Pid,
-        lo: u64,
-        hi: u64,
-    ) -> Result<Vec<[u8; 16]>, Refusal> {
-        if hi < lo {
-            return Ok(Vec::new());
-        }
-        let mut seen: BTreeSet<[u8; 16]> = BTreeSet::new();
-        let mut out: Vec<[u8; 16]> = Vec::new();
-        let mut push = |h: [u8; 16]| {
-            if seen.insert(h) {
-                out.push(h);
-            }
-        };
-        // committed rows overlapping [lo, hi]. `segment` mode reads the cached
-        // committed segment rows; `txns`/`rows` scan the `txns` keyspace from the
-        // row that may cover `lo` (the greatest base <= lo).
-        if self.cfg.index_mode == IndexMode::Segment {
-            // O(claimed) walk from the record covering `lo`, STOPPING at `hi`:
-            // only the `[lo, hi]` records are read (and their hashes `pread`),
-            // never the whole history. The source is the QLOG when the knob is on
-            // (Phase A2), else the segments — same bounded walk, same committed
-            // tail (`ctx.committed_end`).
-            if let Some(ctx) = self.seg_ctx(pid)? {
-                self.claim_frames_of(
-                    pid,
-                    &ctx,
-                    lo,
-                    true,
-                    &mut |base, _end_incl, _created, hashes| {
-                        if base > hi {
-                            return false; // past the range: nothing more overlaps
-                        }
-                        let hs = hashes.unwrap_or_default();
-                        for (i, chunk) in hs.chunks_exact(16).enumerate() {
-                            let off = base + i as u64;
-                            if off >= lo && off <= hi {
-                                push(<[u8; 16]>::try_from(chunk).unwrap());
-                            }
-                        }
-                        true
-                    },
-                )?;
-            }
-        } else {
-            let prefix = keys::txns_prefix(pid);
-            let start_base = self.seg_base_covering(pid, lo)?.unwrap_or(lo);
-            let from = keys::txns(pid, start_base);
-            let mut bad: Option<StoreError> = None;
-            let mut stop = false;
-            self.reads()
-                .scan_raw(Keyspace::Txns, &from, &prefix, usize::MAX, &mut |k, v| {
-                    if stop {
-                        return false;
-                    }
-                    match (keys::txns_base_of(k), TxnsRow::decode(v)) {
-                        (Some(base), Ok(row)) => {
-                            if base > hi {
-                                stop = true;
-                                return false;
-                            }
-                            for (i, h) in row.iter_hashes().enumerate() {
-                                let off = base + i as u64;
-                                if off >= lo && off <= hi {
-                                    push(h);
-                                }
-                            }
-                            true
-                        }
-                        _ => {
-                            bad = Some(StoreError::corrupt(Keyspace::Txns, "txns row"));
-                            false
-                        }
-                    }
-                })
-                .map_err(store_err)?;
-            if let Some(e) = bad {
-                return Err(store_err(e));
-            }
-        }
-        if let Some(o) = ov.parts.get(&pid) {
-            for a in &o.appends {
-                for (i, h) in a.hashes.iter().enumerate() {
-                    let off = a.base + i as u64;
-                    if off >= lo && off <= hi {
-                        push(*h);
-                    }
-                }
-            }
-        }
-        Ok(out)
-    }
-
-    /// The base offset of the segment covering `off` (the greatest base ≤ off),
-    /// or `None` when no committed segment does. Overlay appends are the tail;
-    /// the caller adds them.
-    fn seg_base_covering(&self, pid: Pid, off: u64) -> Result<Option<u64>, Refusal> {
-        // `segment` mode: the greatest committed base <= off from the cache
-        // (base-sorted); `txns`/`rows`: a one-step reverse scan of the keyspace.
-        if self.cfg.index_mode == IndexMode::Segment {
-            let shape = self.committed_seg_shape(pid)?;
-            let found = shape
-                .iter()
-                .map(|s| s.base)
-                .take_while(|base| *base <= off)
-                .last();
-            return Ok(found);
-        }
-        let prefix = keys::txns_prefix(pid);
-        let from = keys::txns(pid, off);
-        let mut found: Option<u64> = None;
-        let mut bad: Option<StoreError> = None;
-        self.reads()
-            .scan_rev_raw(Keyspace::Txns, &from, &prefix, 1, &mut |k, _v| {
-                match keys::txns_base_of(k) {
-                    Some(base) => found = Some(base),
-                    None => bad = Some(StoreError::corrupt(Keyspace::Txns, "txns key")),
-                }
-                false
-            })
-            .map_err(store_err)?;
-        if let Some(e) = bad {
-            return Err(store_err(e));
-        }
-        Ok(found)
-    }
-
     // ---- the committed dedup authority from the SEGMENTS (PERF-E) ----------
 
     /// The committed dedup rows of `pid` reconstructed from the segment files
     /// (`DEDUP_INDEX=segment`), materialized ONCE per pid per cycle and shared
     /// across every committed `Txns`-authority read of that pid this cycle
-    /// (`segs_from`, `hashes_in_range`, `seg_base_covering`, the dedup probe /
-    /// resolve, the front seed, the bounded pop gather). Base-sorted, with
+    /// (the dedup probe and the front seed). Base-sorted, with
     /// `TxnsRow::end` INCLUSIVE (like a stored `txns` row); bounded to the
     /// committed tail by [`segments::Reader::committed_dedup_rows`].
     ///
@@ -2474,16 +1682,14 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         Ok(rc)
     }
 
-    /// The WHOLE committed window (from_base 0): the dedup probe/resolve/seed
-    /// authority, cached per pid per cycle. It is bloom-gated (a probe reads it
-    /// only on a "maybe"), so its O(window) hash reads are acceptable there. The
-    /// POP delivered set does NOT use this — it walks the segment index O(claimed)
-    /// via [`segments::Reader::claim_frames`], never the whole window.
+    /// The WHOLE committed window: the dedup probe/seed authority, cached per
+    /// pid per cycle. It is bloom-gated (a probe reads it only on a "maybe"),
+    /// so its O(window) hash reads are acceptable there.
     fn build_committed_txns_rows(&self, pid: Pid) -> Result<CommittedTxnsRows, Refusal> {
         let Some(ctx) = self.seg_ctx(pid)? else {
             return Ok(Vec::new());
         };
-        let frames = self.committed_frames_of(pid, &ctx, 0, true)?;
+        let frames = self.committed_frames_of(pid, &ctx)?;
         {
             use crate::rsm::dbgctr::{inc, C};
             inc(&C.push_dedup_build, 1);
@@ -2504,23 +1710,16 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             .collect())
     }
 
-    /// The committed dedup frames of `pid` from `from_base`, bounded to the
+    /// Every committed dedup frame of `pid`, with its hashes, bounded to the
     /// committed tail — from the QLOG when `QUEEN_RAFT_QLOG` is on (Phase A2),
     /// else the segments (lever 1). Either source returns the SAME
     /// `(base, end-exclusive, created_at, hashes)` shape and the SAME committed
     /// bound (`ctx.committed_end`, the committed partition row's `last_offset + 1`
     /// — the exactly-once invariant), so off-vs-on is byte-identical.
-    /// `with_hashes == false` reads the shape only (no per-record hash read).
-    fn committed_frames_of(
-        &self,
-        pid: Pid,
-        ctx: &SegCtx,
-        from_base: u64,
-        with_hashes: bool,
-    ) -> Result<Vec<DedupFrame>, Refusal> {
+    fn committed_frames_of(&self, pid: Pid, ctx: &SegCtx) -> Result<Vec<DedupFrame>, Refusal> {
         if let Some(ql) = self.qlog_reader.as_ref() {
             let frames = ql
-                .committed_frames(ctx.queue_id, pid, from_base, ctx.committed_end, with_hashes)
+                .committed_frames(ctx.queue_id, pid, 0, ctx.committed_end, true)
                 .map_err(|e| Refusal::retry("unavailable", format!("qlog dedup read: {e}")))?;
             return Ok(frames
                 .into_iter()
@@ -2538,89 +1737,9 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 "DEDUP_INDEX=segment planner has no segment reader",
             ));
         };
-        if with_hashes {
-            reader
-                .committed_dedup_rows(ctx.bucket, pid, from_base, ctx.committed_end, &ctx.sealed)
-                .map_err(|e| Refusal::retry("unavailable", format!("segment dedup read: {e}")))
-        } else {
-            reader
-                .committed_dedup_shape(ctx.bucket, pid, from_base, ctx.committed_end, &ctx.sealed)
-                .map_err(|e| Refusal::retry("unavailable", format!("segment shape read: {e}")))
-        }
-    }
-
-    /// The O(claimed) forward claim walk of `pid` from `from_offset`, bounded to
-    /// `ctx.committed_end` — from the QLOG when the knob is on, else the segments.
-    /// Reuses lever 1's bounded walk (O(claimed), not O(window)); the qlog twin
-    /// stops at the SAME committed tail (never reads an uncommitted record in the
-    /// committed leg — the overlay covers those).
-    fn claim_frames_of(
-        &self,
-        pid: Pid,
-        ctx: &SegCtx,
-        from_offset: u64,
-        want_hashes: bool,
-        cb: &mut dyn FnMut(u64, u64, i64, Option<Vec<u8>>) -> bool,
-    ) -> Result<(), Refusal> {
-        if let Some(ql) = self.qlog_reader.as_ref() {
-            return ql
-                .claim_frames(
-                    ctx.queue_id,
-                    pid,
-                    from_offset,
-                    ctx.committed_end,
-                    want_hashes,
-                    cb,
-                )
-                .map_err(|e| Refusal::retry("unavailable", format!("qlog claim walk: {e}")));
-        }
-        let Some(reader) = self.reader.as_ref() else {
-            return Err(Refusal::retry(
-                "unavailable",
-                "DEDUP_INDEX=segment planner has no segment reader",
-            ));
-        };
         reader
-            .claim_frames(
-                ctx.bucket,
-                pid,
-                from_offset,
-                ctx.committed_end,
-                &ctx.sealed,
-                want_hashes,
-                cb,
-            )
-            .map_err(|e| Refusal::retry("unavailable", format!("segment claim walk: {e}")))
-    }
-
-    /// The committed segment SHAPE of `pid` (`(base, end, created)`, NO hashes),
-    /// cached per pid per cycle. Built over the WHOLE window without any per-frame
-    /// `.seg` read (the pop walk and the segment-covering probe never touch the
-    /// hashes), so it is cheap even at from_base 0. Same committed-bounding as the
-    /// rows cache.
-    fn committed_seg_shape(&self, pid: Pid) -> Result<Rc<Vec<Seg>>, Refusal> {
-        if let Some(hit) = self.seg_shape_cache.borrow().get(&pid) {
-            return Ok(hit.clone());
-        }
-        let segs = self.build_committed_seg_shape(pid)?;
-        let rc = Rc::new(segs);
-        self.seg_shape_cache.borrow_mut().insert(pid, rc.clone());
-        Ok(rc)
-    }
-
-    fn build_committed_seg_shape(&self, pid: Pid) -> Result<Vec<Seg>, Refusal> {
-        let Some(ctx) = self.seg_ctx(pid)? else {
-            return Ok(Vec::new());
-        };
-        let frames = self.committed_frames_of(pid, &ctx, 0, false)?;
-        Ok(frames
-            .into_iter()
-            .map(|f| Seg {
-                base: f.base_offset,
-                end: f.end - 1, // exclusive -> inclusive, the `Seg`/`txns` shape
-                created_at_us: f.created_at_us,
-            })
-            .collect())
+            .committed_dedup_rows(ctx.bucket, pid, 0, ctx.committed_end, &ctx.sealed)
+            .map_err(|e| Refusal::retry("unavailable", format!("segment dedup read: {e}")))
     }
 
     /// The committed segment context for `pid` (bucket, committed offset bound,
@@ -3026,126 +2145,6 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         }
         Ok(Seed::Complete(buf))
     }
-
-    /// Resolve one hash for a hash ack: `eff` = MIN over `[lo, hi]`,
-    /// `below` = any occurrence at or below `committed`. Merges committed and
-    /// overlay occurrences. Under `txns` the committed legs come from an ordered
-    /// range scan of the txns rows over `[txns_start, …]` (PERF-E); under `rows`
-    /// from the `(pid, hash)` occurrence list.
-    // The span is four scalars (lo/hi/committed/txns_start) the caller has
-    // already computed; bundling them buys nothing but a struct at one call site.
-    #[allow(clippy::too_many_arguments)]
-    fn dedup_resolve(
-        &self,
-        ov: &Overlay,
-        pid: Pid,
-        hash: &[u8; 16],
-        lo: u64,
-        hi: u64,
-        committed: i64,
-        txns_start: u64,
-    ) -> Result<AckRes, Refusal> {
-        let mut res = match self.cfg.index_mode {
-            IndexMode::Rows => {
-                dedup::resolve(self.reads(), pid, hash, lo, hi, committed).map_err(store_err)?
-            }
-            IndexMode::Txns => {
-                dedup::resolve_txns(self.reads(), pid, hash, lo, hi, committed, txns_start)
-                    .map_err(store_err)?
-            }
-            IndexMode::Segment => {
-                let rows = self.committed_txns_rows(pid)?;
-                dedup::resolve_seg_rows(&rows, hash, lo, hi, committed, txns_start)
-            }
-        };
-        if let Some(occ) = ov.dedup.get(&(pid, *hash)) {
-            for (off, _created) in occ {
-                if (*off as i64) <= committed {
-                    res.below = true;
-                }
-                if *off >= lo && *off <= hi {
-                    res.eff = Some(res.eff.map_or(*off, |b| b.min(*off)));
-                }
-            }
-        }
-        Ok(res)
-    }
-
-    // ---- seeding ----------------------------------------------------------
-
-    /// The cursor `committed` a first-contact (partition, group) seeds to, from
-    /// the group's stored subscription (§8). `all` = before
-    /// `log_start`; `new` = before the first append at/after the group's
-    /// registration instant; `timestamp` = before the first append at/after the
-    /// subscription timestamp. All three are one `seed_from_ts` over the
-    /// segments, and the instant is position-exact by D5's clock (see the
-    /// module header).
-    fn seed_committed(
-        &self,
-        ov: &Overlay,
-        part: &PartView,
-        group_row: &GroupRow,
-    ) -> Result<i64, Refusal> {
-        let floor = part.floor();
-        let seed = match group_row.meta.mode {
-            SubscriptionMode::All => floor,
-            SubscriptionMode::New => {
-                let segs = self.segs_from(ov, part, part.log_start)?;
-                seed_from_ts(
-                    &segs,
-                    part.log_start,
-                    part.last_offset,
-                    group_row.meta.registered_at_us,
-                )
-            }
-            SubscriptionMode::Timestamp => {
-                let segs = self.segs_from(ov, part, part.log_start)?;
-                seed_from_ts(
-                    &segs,
-                    part.log_start,
-                    part.last_offset,
-                    group_row.meta.subscription_timestamp_us,
-                )
-            }
-        };
-        Ok(seed.max(floor).max(-1))
-    }
-
-    /// Seed from a pop-carried intent when the group has no stored policy:
-    /// `now`/`new` → the tail, an explicit instant → `seed_from_ts`, anything
-    /// unparsable → ignore.
-    fn seed_from_intent(
-        &self,
-        ov: &Overlay,
-        part: &PartView,
-        intent: &SubIntent,
-    ) -> Result<Option<i64>, Refusal> {
-        if let Some(ts) = intent.from_us {
-            let segs = self.segs_from(ov, part, part.log_start)?;
-            return Ok(Some(seed_from_ts(
-                &segs,
-                part.log_start,
-                part.last_offset,
-                ts,
-            )));
-        }
-        if intent.now || intent.mode == "new" {
-            return Ok(Some(part.last_offset));
-        }
-        Ok(None)
-    }
-}
-
-/// The cursor a subscription seeds: just before the first retained segment
-/// stamped at or after `ts_us`; the allocated tail when nothing is that recent.
-/// Inclusive (`created_at >= ts`).
-fn seed_from_ts(segs: &[Seg], log_start: u64, last_offset: i64, ts_us: i64) -> i64 {
-    for s in segs {
-        if s.base >= log_start && s.created_at_us >= ts_us {
-            return s.base as i64 - 1;
-        }
-    }
-    last_offset
 }
 
 // ---------------------------------------------------------------------------
@@ -3173,7 +2172,7 @@ pub fn bucket_of(tenant: &str, queue: &str, partition: &str) -> u16 {
 }
 
 /// A group's stored policy built for a first-contact registration from a
-/// pop-carried intent. `now`/`new`/unparsable → `new` at the
+/// carried intent (a position's): `now`/`new`/unparsable → `new` at the
 /// registration instant; an explicit instant → `timestamp`; otherwise `all`.
 pub(crate) fn group_meta_for_registration(
     id: [u8; 16],

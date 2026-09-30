@@ -8,10 +8,10 @@
 //!   (I3: no duplicate offsets), a step-down with four entries in flight (the
 //!   log they built applies to a consistent state), and a request-id replay
 //!   across cycles (I6).
-//! - **the real path** — an end-to-end push / pop / ack through the batcher over
-//!   the [`LocalReplicator`] and WP-1.4's apply thread, a restart, and recovery;
-//!   and an `#[ignore]` throughput smoke of four in flight against one (laptop
-//!   numbers, §0.3, smoke only).
+//! - **the real path** — an end-to-end push and cursor checkpoint through the
+//!   batcher over the [`LocalReplicator`] and WP-1.4's apply thread, a restart,
+//!   and recovery; and an `#[ignore]` throughput smoke of four in flight
+//!   against one (laptop numbers, §0.3, smoke only).
 //! - **the WP-1.11 F-1 submission-order guards** — that the log index follows
 //!   plan order under the pipeline (I5). The pure fake-number reorder the old
 //!   spawn-per-propose form allowed is a scheduler race that does not reproduce
@@ -30,10 +30,9 @@ use crate::rsm::apply::{
     self, state_digest, Applier, Committed as ApplyCommitted, NoNotify, SystemClock,
 };
 use crate::rsm::batcher::{Batcher, BatcherConfig, Command, CommandTx, Reply, Submission};
+use crate::rsm::effect::Effect;
 use crate::rsm::entry::{decode_entry, Outcome, PushVerdict};
-use crate::rsm::planner::{
-    AckCommand, AckItem, AckStatus, AckTarget, PopCommand, PushCommand, SubIntent,
-};
+use crate::rsm::planner::{EffectsCommand, PushCommand};
 use crate::rsm::replicator::fake::{FakeReplicator, Step};
 use crate::rsm::replicator::local::{LocalReplicator, NoWaker, OpenConfig};
 use crate::rsm::replicator::log::{Fsync, LogOptions};
@@ -48,7 +47,7 @@ use bytes::Bytes;
 use tokio::sync::watch;
 
 use super::apply::{cfg, seg_opts, store_opts};
-use super::planner_harness::{item, qcfg, rid, TENANT};
+use super::planner_harness::{cursor_row, item, qcfg, rid, TENANT};
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -78,52 +77,19 @@ fn push(id: u64, queue: &str, partition: &str, txns: &[&str]) -> Command {
     })
 }
 
-fn pop_pinned(id: u64, queue: &str, partition: &str, group: &str, worker: &str) -> Command {
-    Command::PopPinned(PopCommand {
-        wait: false,
+/// A consumption-engine checkpoint: `group` has acked each `(pid, committed)`.
+fn checkpoint(id: u64, group: &str, cursors: &[(u64, i64)]) -> Command {
+    Command::Effects(EffectsCommand {
         request_id: rid(id),
         tenant: TENANT.to_string(),
-        queue: queue.to_string(),
-        partition: Some(partition.to_string()),
-        group: group.to_string(),
-        worker: worker.to_string(),
-        budget: 100,
-        max_parts: 10,
-        lease_seconds: 60,
-        auto_ack: false,
-        conflate: false,
-        sub: SubIntent {
-            mode: "all".to_string(),
-            from_us: None,
-            now: false,
-        },
-        skip_window_debounce: false,
-        namespace: String::new(),
-        task: String::new(),
-        create_cfg: Some(qcfg()),
-        deadline_us: 0,
-    })
-}
-
-fn ack_ok(id: u64, pid: u64, queue: &str, group: &str, worker: &str, txns: &[&str]) -> Command {
-    Command::Ack(AckCommand {
-        request_id: rid(id),
-        targets: vec![AckTarget {
-            pid,
-            tenant: TENANT.to_string(),
-            queue: queue.to_string(),
-            group: group.to_string(),
-            worker: worker.to_string(),
-            items: txns
-                .iter()
-                .map(|t| AckItem {
-                    hash: crate::util::txn_hash128(t),
-                    status: AckStatus::Ok,
-                    error: None,
-                    snapshot: None,
-                })
-                .collect(),
-        }],
+        effects: cursors
+            .iter()
+            .map(|(pid, committed)| Effect::CursorSet {
+                pid: *pid,
+                group: group.to_string(),
+                row: cursor_row(*committed),
+            })
+            .collect(),
     })
 }
 
@@ -141,6 +107,19 @@ fn done(reply: &Reply) -> (&Outcome, Option<u64>) {
     match reply {
         Reply::Done { outcome, at } => (outcome, at.map(|a| a.index)),
         other => panic!("expected Done, got {other:?}"),
+    }
+}
+
+/// Wait until an independent read of the store sees `index` applied (the reply
+/// is sent on apply; the store commit follows on its cadence).
+async fn settle(store: &HeedStore, index: u64) {
+    let end = Instant::now() + Duration::from_secs(10);
+    while store.read(|r| r.applied_index()).expect("read applied") < index {
+        assert!(
+            Instant::now() < end,
+            "the store never reached index {index}"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
     }
 }
 
@@ -654,7 +633,7 @@ async fn a_request_id_expiry_backlog_clears_after_one_tick() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
-async fn end_to_end_push_pop_ack_then_restart_and_recover() {
+async fn end_to_end_push_and_checkpoint_then_restart_and_recover() {
     let dir = scratch("e2e");
 
     let (digest1, applied1) = {
@@ -668,36 +647,16 @@ async fn end_to_end_push_pop_ack_then_restart_and_recover() {
         let (pid, first_offset) = push_created(&p);
         assert_eq!(first_offset, 0, "gapless from 0");
 
-        // Pop them (first contact registers the group and seeds `all`).
-        let popped = submit(&tx, pop_pinned(2, "q", "p0", "g", "w1")).await;
-        let claim = match done(&popped).0 {
-            Outcome::Pop(o) => {
-                assert_eq!(o.claims.len(), 1, "one claim");
-                o.claims[0].clone()
-            }
-            other => panic!("expected Pop, got {other:?}"),
-        };
-        assert_eq!(claim.pid, pid);
-        assert_eq!(claim.start_offset, 0);
-        assert_eq!(claim.end_offset, 2);
-
-        // Ack all three.
-        let acked = submit(&tx, ack_ok(3, pid, "q", "g", "w1", &["a", "b", "c"])).await;
-        match done(&acked).0 {
-            Outcome::Ack(o) => {
-                assert_eq!(o.results.len(), 1);
-                assert_eq!(o.results[0].committed, 2, "cursor advanced past the batch");
-            }
-            other => panic!("expected Ack, got {other:?}"),
-        }
-
-        // A second pop finds nothing pending: an empty outcome, answered once
-        // the pipeline the plan read has drained.
-        let empty = submit(&tx, pop_pinned(4, "q", "p0", "g", "w1")).await;
-        match done(&empty).0 {
-            Outcome::Pop(o) => assert!(o.claims.is_empty(), "nothing left to claim"),
-            other => panic!("expected empty Pop, got {other:?}"),
-        }
+        // The consumption engine checkpoints a group that consumed all three.
+        let acked = submit(&tx, checkpoint(2, "g", &[(pid, 2)])).await;
+        let at = done(&acked).1.expect("the checkpoint was logged");
+        settle(&store, at).await;
+        let cursor = store.read(|r| r.cursor(pid, "g")).expect("read");
+        assert_eq!(
+            cursor.map(|c| c.committed),
+            Some(2),
+            "the checkpointed cursor is committed and applied"
+        );
 
         // Drain the driver, then reclaim the replicator and shut it down.
         drop(tx);
@@ -1213,42 +1172,15 @@ async fn the_pipeline_holds_at_pipeline_unapplied_entries_when_apply_stalls() {
 }
 
 // ---------------------------------------------------------------------------
-// LANES (`QUEEN_LANES` > 1): where a woken long-poll wildcard pop is planned
+// LANES (`QUEEN_LANES` > 1)
 // ---------------------------------------------------------------------------
 
-fn pop_wildcard(id: u64, queue: &str, group: &str, worker: &str, wait: bool) -> Command {
-    Command::PopWildcard(PopCommand {
-        wait,
-        request_id: rid(id),
-        tenant: TENANT.to_string(),
-        queue: queue.to_string(),
-        partition: None,
-        group: group.to_string(),
-        worker: worker.to_string(),
-        budget: 100,
-        max_parts: 10,
-        lease_seconds: 60,
-        auto_ack: false,
-        conflate: false,
-        sub: SubIntent {
-            mode: "all".to_string(),
-            from_us: None,
-            now: false,
-        },
-        skip_window_debounce: false,
-        namespace: String::new(),
-        task: String::new(),
-        create_cfg: None,
-        deadline_us: 0,
-    })
-}
-
-/// A real node whose batcher plans on `lanes` lanes, and one long-poll
-/// consumer (group `g`, worker `w`).
+/// A real node whose batcher plans on `lanes` lanes.
 struct LanesNode {
     tx: CommandTx,
     handle: tokio::task::JoinHandle<()>,
     repl: Arc<LocalReplicator<HeedStore>>,
+    store: Arc<HeedStore>,
     dir: PathBuf,
     next: u64,
 }
@@ -1262,11 +1194,12 @@ impl LanesNode {
             lanes,
             ..small_pipeline(4, 5_000)
         };
-        let (tx, handle) = Batcher::new(store, repl.clone(), cfg).spawn();
+        let (tx, handle) = Batcher::new(store.clone(), repl.clone(), cfg).spawn();
         LanesNode {
             tx,
             handle,
             repl,
+            store,
             dir,
             next: 50_000,
         }
@@ -1284,85 +1217,13 @@ impl LanesNode {
         reply
     }
 
-    /// A long-poll wildcard pop: the pids it claimed (none: the facade parks it).
-    async fn pop(&mut self, queue: &str) -> Vec<u64> {
-        let id = self.id();
-        let reply = submit(&self.tx, pop_wildcard(id, queue, "g", "w", true)).await;
-        match done(&reply).0 {
-            Outcome::Pop(o) => o.claims.iter().map(|c| c.pid).collect(),
-            other => panic!("expected a pop outcome, got {other:?}"),
-        }
-    }
-
-    async fn ack(&mut self, pid: u64, queue: &str, txns: &[String]) {
-        let id = self.id();
-        let txns: Vec<&str> = txns.iter().map(String::as_str).collect();
-        let reply = submit(&self.tx, ack_ok(id, pid, queue, "g", "w", &txns)).await;
-        let _ = done(&reply);
-    }
-
     async fn close(self) {
         drop(self.tx);
         let _ = self.handle.await;
         drop(self.repl);
+        drop(self.store);
         let _ = std::fs::remove_dir_all(&self.dir);
     }
-}
-
-/// LANES: a parked long-poll wildcard pop, woken by an append to its queue,
-/// claims on its FIRST re-plan when the queue's partitions all sit in one lane.
-/// The facade parks a long-poll pop that comes back empty and submits it again
-/// when an append to its queue applies (`WaitGates::wake_one`). The router
-/// used to place that re-plan by a ready hint the owning lane's push never
-/// refreshes, else round-robin, and a lane with nothing ready answered a
-/// long-poll pop empty: on 8 lanes a one-partition queue was claimed once
-/// every ~8 wakes (measured 2026-09-25, 100 queues: pop_claims /
-/// pop_over_queue = 1/8, e2e p50 82 ms against 8.9 ms on one planner).
-#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
-async fn lanes_a_woken_long_poll_pop_of_a_one_lane_queue_claims_on_its_first_replan() {
-    const LANES: u64 = 8;
-    let mut node = LanesNode::open("lanes-one-lane", LANES);
-    // One partition per queue; the pids are consecutive, so the queues cover
-    // every lane (pid % LANES).
-    let mut queues = Vec::new();
-    for i in 0..LANES {
-        let q = format!("q{i}");
-        let (pid, _) = push_created(&node.push(&q, "p0", &format!("{q}-0")).await);
-        queues.push((q, pid));
-    }
-    // The consumer's first pop registers the group and takes the backlog; it
-    // acks, and its next pop finds nothing: that is the pop that parks.
-    for (q, pid) in &queues {
-        assert_eq!(
-            node.pop(q).await,
-            vec![*pid],
-            "{q}: first contact takes the backlog"
-        );
-        node.ack(*pid, q, &[format!("{q}-0")]).await;
-        assert!(
-            node.pop(q).await.is_empty(),
-            "{q}: nothing left, the pop parks"
-        );
-    }
-    // Each append wakes the parked pop, which is planned again: count the
-    // wakes it takes to claim.
-    let mut wakes = Vec::new();
-    for (q, pid) in &queues {
-        let mut n = 0u64;
-        loop {
-            n += 1;
-            node.push(q, "p0", &format!("{q}-{n}")).await;
-            if !node.pop(q).await.is_empty() || n == 3 * LANES {
-                break;
-            }
-        }
-        wakes.push((q.clone(), pid % LANES, n));
-    }
-    node.close().await;
-    assert!(
-        wakes.iter().all(|(_, _, n)| *n == 1),
-        "every woken pop claims on its first re-plan; (queue, lane, wakes to claim): {wakes:?}"
-    );
 }
 
 /// LANES: pushes that create their partition, many in one cycle, are planned
@@ -1416,41 +1277,34 @@ async fn lanes_pushes_that_create_partitions_in_one_cycle_take_dense_ids() {
     node.close().await;
 }
 
-/// LANES: the same when the queue's partitions span lanes. The router can only
-/// guess which lane holds the ready one; a guessed lane that finds nothing
-/// hands the pop to control, which sees every partition — a long-poll pop too,
-/// or it parks on a false empty and the next wake guesses again.
+/// LANES: the consumption engine's checkpoints — cursor rows of one lane's
+/// partitions, planned by that lane, and rows across lanes, planned by
+/// control — commit and apply like any command, and a checkpoint naming a
+/// partition that does not exist is refused, retryably.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
-async fn lanes_a_woken_long_poll_pop_of_a_queue_across_lanes_claims_on_its_first_replan() {
+async fn lanes_checkpoints_commit_their_cursor_rows_from_a_lane_and_from_control() {
     const LANES: u64 = 8;
-    let mut node = LanesNode::open("lanes-across", LANES);
-    let q = "spread";
-    let (pa, _) = push_created(&node.push(q, "a", "a-0").await);
-    let (pb, _) = push_created(&node.push(q, "b", "b-0").await);
+    let mut node = LanesNode::open("lanes-checkpoint", LANES);
+    let (pa, _) = push_created(&node.push("cq", "a", "a-0").await);
+    let (pb, _) = push_created(&node.push("cq", "b", "b-0").await);
     assert_ne!(pa % LANES, pb % LANES, "two lanes");
-    let mut first = node.pop(q).await;
-    first.sort_unstable();
-    assert_eq!(first, vec![pa, pb], "first contact takes both backlogs");
-    node.ack(pa, q, &["a-0".to_string()]).await;
-    node.ack(pb, q, &["b-0".to_string()]).await;
-    assert!(node.pop(q).await.is_empty(), "nothing left, the pop parks");
-    // Appends to ONE partition, two rounds per lane: each wakes the parked
-    // pop, which must claim at once.
-    let mut missed = Vec::new();
-    let mut unacked: Vec<String> = Vec::new();
-    for round in 1..=2 * LANES {
-        let txn = format!("b-{round}");
-        node.push(q, "b", &txn).await;
-        unacked.push(txn);
-        if node.pop(q).await.is_empty() {
-            missed.push(round);
-        } else {
-            node.ack(pb, q, &std::mem::take(&mut unacked)).await;
-        }
+    let one_lane = node.id();
+    let reply = submit(&node.tx, checkpoint(one_lane, "g", &[(pa, 0)])).await;
+    assert!(done(&reply).1.is_some(), "a one-lane checkpoint is logged");
+    let across = node.id();
+    let reply = submit(&node.tx, checkpoint(across, "g", &[(pa, 0), (pb, 0)])).await;
+    let at = done(&reply).1.expect("a checkpoint across lanes is logged");
+    let unknown = node.id();
+    match submit(&node.tx, checkpoint(unknown, "g", &[(pb + 1_000, 0)])).await {
+        Reply::Refused(r) => assert!(r.retryable, "a retryable refusal, got {r:?}"),
+        other => panic!("a cursor row on no partition was {other:?}"),
     }
+    settle(&node.store, at).await;
+    let rows = node
+        .store
+        .read(|r| Ok((r.cursor(pa, "g")?, r.cursor(pb, "g")?)))
+        .expect("read");
+    assert_eq!(rows.0.map(|c| c.committed), Some(0));
+    assert_eq!(rows.1.map(|c| c.committed), Some(0));
     node.close().await;
-    assert!(
-        missed.is_empty(),
-        "every woken pop claims on its first re-plan; rounds that found nothing: {missed:?}"
-    );
 }

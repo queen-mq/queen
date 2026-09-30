@@ -312,8 +312,6 @@ impl ReadFixture {
                         let mut c = rows::cursor_fresh(pid as i64, 1_000);
                         c.total_consumed = pid;
                         w.put_cursor(pid, &group, &c).unwrap();
-                        w.put_pending(TENANT, &queue, &group, pid, 5_000 + pid as i64)
-                            .unwrap();
                     }
                     w.add_counter(&keys::counter_partition(pid, Counter::Pushed), 3)
                         .unwrap();
@@ -374,7 +372,6 @@ fn planner_reads(f: &ReadFixture, n: u64) -> f64 {
                 hits += r.partition(got)?.is_some() as u64;
                 hits += r.group(TENANT, queue, group)?.is_some() as u64;
                 hits += r.cursor(*pid, group)?.is_some() as u64;
-                hits += r.pending_at(TENANT, queue, group, *pid)?.is_some() as u64;
                 hits += r.partition_counter(*pid, Counter::Pushed)? as u64;
                 Ok(())
             })

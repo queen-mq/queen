@@ -50,6 +50,7 @@ description: "Every Prometheus metric family the broker exposes, with its type a
 | Family | Type | Help |
 | --- | --- | --- |
 | `queen_raft_admit_bytes` | gauge | Admission budget and bytes held by storage-growing commands in the pipeline |
+| `queen_raft_admit_forwarded_total` | counter | Commands followers forwarded to this node that it admitted, and that it refused as overloaded |
 | `queen_raft_admit_total` | counter | Commands that waited for admission room, and that were refused with 429 |
 | `queen_raft_admit_waiting` | gauge | Commands waiting for admission room now |
 
@@ -78,7 +79,6 @@ description: "Every Prometheus metric family the broker exposes, with its type a
 | `queen_raft_log_fsync_seconds` | summary | Log group fsync duration |
 | `queen_raft_plan_cpu_seconds` | summary | Planner command loop, thread CPU time |
 | `queen_raft_plan_deferred` | summary | Commands drained but deferred unplanned by the plan budget cut |
-| `queen_raft_plan_ring_loads_total` | counter | Kept rings scanned from pending |
 | `queen_raft_plan_seconds` | summary | Planner cycle duration |
 | `queen_raft_plan_whole_cpu_seconds` | summary | Whole plan_cycle_blocking call, thread CPU |
 | `queen_raft_plan_whole_wall_seconds` | summary | Whole plan_cycle_blocking call, wall |

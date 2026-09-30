@@ -122,6 +122,12 @@ pub trait Waker: Send + Sync {
     fn wake_append(&self, tenant: &str, queue: &str, group: &str) {
         self.wake(tenant, queue, Some(group))
     }
+
+    /// The facade's consumption engine, for apply (see
+    /// `apply::Notify::engine`). `None` by default.
+    fn engine(&self) -> Option<Arc<crate::rsm::consume::Engine>> {
+        None
+    }
 }
 
 /// A waker that drops every wake. Boot before the seam, and every test that
@@ -229,6 +235,10 @@ impl Notify for ReplNotify {
 
     fn appended(&self, tenant: &str, queue: &str, partition: &str) {
         self.waker.appended(tenant, queue, partition);
+    }
+
+    fn engine(&self) -> Option<Arc<crate::rsm::consume::Engine>> {
+        self.waker.engine()
     }
 
     fn durable(&self, index: u64) {

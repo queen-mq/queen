@@ -727,8 +727,7 @@ fn the_reusable_helper_refuses_a_repeated_key_and_folds_nothing() {
     cell.node
         .store()
         .read(|r| {
-            let d = crate::rsm::state::Derived::default();
-            let committed = crate::rsm::state::Committed::new(r, &d);
+            let committed = crate::rsm::state::Committed::new(r);
             let front = crate::rsm::dedup::DedupFront::disabled();
             let p = crate::rsm::planner::Planner::new(
                 committed,
@@ -776,8 +775,7 @@ fn an_oversized_call_is_refused_before_anything_is_planned() {
     cell.node
         .store()
         .read(|r| {
-            let d = crate::rsm::state::Derived::default();
-            let committed = crate::rsm::state::Committed::new(r, &d);
+            let committed = crate::rsm::state::Committed::new(r);
             let front = crate::rsm::dedup::DedupFront::disabled();
             let cfg = crate::rsm::planner::PlanConfig {
                 entry_max_bytes: 1024,

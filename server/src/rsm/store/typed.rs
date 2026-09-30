@@ -19,11 +19,10 @@
 //! with its key built on the stack ([`keys::KeyBuf`]): nothing is copied out
 //! of the table but what the row decodes into, nothing is pinned to the
 //! handle, and no key is allocated. The accessors that allocate nothing at all
-//! — [`TypedReads::partition_head`], [`TypedReads::cursor_head`],
-//! [`TypedReads::is_garbage`], [`TypedReads::has_partition`],
-//! [`TypedReads::has_cursor`], and the borrowed views
-//! [`TypedReads::partition_with`] / [`TypedReads::cursor_with`] — are for the
-//! reads the push and pop paths make on every command.
+//! — [`TypedReads::partition_head`], [`TypedReads::is_garbage`],
+//! [`TypedReads::has_partition`], [`TypedReads::has_cursor`], and the
+//! borrowed view [`TypedReads::partition_with`] — are for the reads the push
+//! path and the consumption engine make on every command.
 
 use crate::rsm::effect::{
     CursorRow, Pid, QueueConfig, QuotaGrant, QuotaKind, StreamsQueryRow, TimerRow, TraceEvent,
@@ -31,8 +30,8 @@ use crate::rsm::effect::{
 
 use super::keys::{self, Counter};
 use super::rows::{
-    self, CursorHead, CursorRef, DlqRow, EphConfigRow, FileRow, GarbageRow, GroupRow, KvRow,
-    PartitionHead, PartitionRef, PartitionRow, RequestIdRow, SegLocRow, StreamsStateRow,
+    self, DlqRow, EphConfigRow, FileRow, GarbageRow, GroupRow, KvRow, PartitionHead, PartitionRef,
+    PartitionRow, RequestIdRow, SegLocRow, StreamsStateRow,
 };
 use super::{Keyspace, Reads, Result, StoreError, Writes};
 use crate::rsm::effect::CodecError;
@@ -346,28 +345,6 @@ pub trait TypedReads: Reads {
         )
     }
 
-    /// The cursor's scalars (committed, lease, attempts, counts) with NO
-    /// allocation — [`TypedReads::cursor`] copies the worker, the delivered
-    /// set and the metadata on every call.
-    fn cursor_head(&self, pid: Pid, group: &str) -> Result<Option<CursorHead>> {
-        let k = keys::cursors_buf(pid, group);
-        decode_at(self, Keyspace::Cursors, &k, rows::cursor_head_decode)
-    }
-
-    /// `f` over the cursor row BORROWED from the table, under its read lock
-    /// (see [`TypedReads::partition_with`]). `f` must not touch the store.
-    fn cursor_with<T>(
-        &self,
-        pid: Pid,
-        group: &str,
-        f: impl FnOnce(&CursorRef<'_>) -> T,
-    ) -> Result<Option<T>> {
-        let k = keys::cursors_buf(pid, group);
-        decode_at(self, Keyspace::Cursors, &k, |b| {
-            rows::cursor_ref_decode(b).map(|c| f(&c))
-        })
-    }
-
     /// Every group's cursor on one partition, in group-name order.
     fn scan_cursors(
         &self,
@@ -426,37 +403,6 @@ pub trait TypedReads: Reads {
                 }
             },
         )?;
-        match err {
-            Some(e) => Err(e),
-            None => Ok(n),
-        }
-    }
-
-    /// `pending`: when this partition is next worth looking at for this group.
-    fn pending_at(&self, tenant: &str, queue: &str, group: &str, pid: Pid) -> Result<Option<i64>> {
-        let k = keys::pending_buf(tenant, queue, group, pid);
-        decode_at(self, Keyspace::Pending, &k, rows::i64_decode)
-    }
-
-    /// Every `pending` row, in key order: the O(pending) rebuild of the ready
-    /// rings (§6.3). `cb` gets (tenant, queue, group, pid, ready_at_us).
-    fn scan_pending(
-        &self,
-        from: &[u8],
-        limit: usize,
-        cb: &mut dyn FnMut(&str, &str, &str, Pid, i64) -> bool,
-    ) -> Result<usize> {
-        let mut err: Option<StoreError> = None;
-        let n = self.scan_raw(Keyspace::Pending, from, &[], limit, &mut |k, v| match (
-            keys::pending_parts(k),
-            rows::i64_decode(v),
-        ) {
-            (Some((t, q, g, pid)), Ok(at)) => cb(&t, &q, &g, pid, at),
-            _ => {
-                err = Some(StoreError::corrupt(Keyspace::Pending, "pending row"));
-                false
-            }
-        })?;
         match err {
             Some(e) => Err(e),
             None => Ok(n),
@@ -1129,23 +1075,6 @@ pub trait TypedWrites: Writes {
     fn del_lease(&mut self, worker: &str, pid: Pid, group: &str) -> Result<bool> {
         let k = keys::leases_by_worker_buf(worker, pid, group);
         self.del_raw(Keyspace::LeasesByWorker, &k)
-    }
-
-    fn put_pending(
-        &mut self,
-        tenant: &str,
-        queue: &str,
-        group: &str,
-        pid: Pid,
-        ready_at_us: i64,
-    ) -> Result<()> {
-        let k = keys::pending_buf(tenant, queue, group, pid);
-        self.put_raw(Keyspace::Pending, &k, &rows::i64_encode(ready_at_us))
-    }
-
-    fn del_pending(&mut self, tenant: &str, queue: &str, group: &str, pid: Pid) -> Result<bool> {
-        let k = keys::pending_buf(tenant, queue, group, pid);
-        self.del_raw(Keyspace::Pending, &k)
     }
 
     // ---------------------------------------------------------- dead letters

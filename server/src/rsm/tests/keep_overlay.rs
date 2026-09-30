@@ -1,22 +1,19 @@
 //! KEEP_OVERLAY (`QUEEN_RAFT_KEEP_OVERLAY`) — THE GATE.
 //!
-//! The planner thread keeps the overlay and the wildcard rings BETWEEN cycles
-//! and takes out, per landed entry, exactly what that entry put in
-//! ([`crate::rsm::planner::kept`], [`crate::rsm::state::PlanRings`]). What must
-//! hold:
+//! The planner thread keeps the overlay BETWEEN cycles and takes out, per
+//! landed entry, exactly what that entry put in
+//! ([`crate::rsm::planner::kept`]). What must hold:
 //!
 //! 1. After EVERY cycle of a mixed workload the kept overlay equals — field by
 //!    field, and tag by tag through the entry each tag names — the overlay the
-//!    old path rebuilds from scratch, and every kept ring equals a rebuild from
-//!    `pending` (the walk, the deferred rows, the next deadline, the rows).
-//!    Both checks run INSIDE the real `plan_cycle_blocking` (`KeepCfg::verify`,
-//!    `verify_rings`) at the point the planner is about to use the state. The
-//!    workload: pushes that create queues and partitions and hit a dedup
-//!    window, wildcard / pinned / discovery pops (leases that expire, auto-ack,
-//!    a delayed queue whose rows wait in the deferred set), hash and
-//!    positional acks with ok/failed/dlq/retry, nacks, renews, DLQ heads,
-//!    transactions (committed, rolled back on a duplicate, DLQ-replay ones
-//!    that answer empty), KV puts, incrs, deletes and the expiry sweep, timer
+//!    old path rebuilds from scratch. The check runs INSIDE the real
+//!    `plan_cycle_blocking` (`KeepCfg::verify`) at the point the planner is
+//!    about to use the state. The workload: pushes that create queues and
+//!    partitions and hit a dedup window, the consumption engine's checkpoints
+//!    (cursor rows, leases, dead letters, group registrations) on live and on
+//!    deleted partitions, transactions (committed, rolled back on a duplicate,
+//!    DLQ-replay ones that answer empty, consumer-group commits of cursor rows
+//!    behind a KV fence), KV puts, incrs, deletes and the expiry sweep, timer
 //!    schedules and cancels with a fire step whose fires fail, back off and
 //!    dead-letter, group deletes, watermarks, queue deletes and tenant purges
 //!    built as the facade builds them (garbage and a first chunk in one entry)
@@ -43,8 +40,7 @@
 //! The gate was checked against deliberate bugs in the kept path — a
 //! `created` flag not dropped when its create lands, dedup occurrences not
 //! removed, a timer chain not re-folded, a scalar kept monotone instead of
-//! recomputed, a cursor write not re-read into the rings, a registration not
-//! dropping its ring, the stray-fold check off: every one fails it.
+//! recomputed, the stray-fold check off: every one fails it.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
@@ -56,16 +52,12 @@ use crate::rsm::batcher::{
     plan_cycle_blocking, Command, KeepCfg, KeepStats, PlanOutput, PlannerState,
 };
 use crate::rsm::dedup::DedupFront;
-use crate::rsm::effect::{Effect, GarbageScope, Pid, QueueConfig};
-use crate::rsm::entry::{encode_entry, Entry, Outcome, RequestId};
+use crate::rsm::effect::{CursorRow, Effect, GarbageScope, GroupMeta, Pid, QueueConfig};
+use crate::rsm::entry::{encode_entry, AckOutcome, AckResult, Entry, Outcome, RequestId};
 use crate::rsm::planner::kv::parse_ops;
 use crate::rsm::planner::timers::{parse_timer_ops, TimerFireConfig, TimersCommand};
 use crate::rsm::planner::txn::TxnCommand;
-use crate::rsm::planner::{
-    AckCommand, AckItem, AckPositionalCommand, AckStatus, AckTarget, DlqHeadCommand, DlqSnapshot,
-    EffectsCommand, KvCommand, NackCommand, PlanConfig, PopCommand, PushCommand, PushItem,
-    RenewCommand, SubIntent,
-};
+use crate::rsm::planner::{EffectsCommand, KvCommand, PlanConfig, PushCommand, PushItem};
 use crate::rsm::store::{keys, rows, Keyspace, Reads, Store, TypedReads};
 
 use super::apply::{cfg, seg_opts, Node};
@@ -117,7 +109,7 @@ const WORKERS: [&str; 3] = ["w0", "w1", "w2"];
 const TIMER_QUEUES: [&str; 2] = ["qt", "qtf"];
 
 /// The config a queue is created with: `q1` is discoverable, `qd` dedups, `qw`
-/// delays visibility (its `pending` rows wait in the deferred set).
+/// delays visibility.
 fn queue_cfg(queue: &str) -> QueueConfig {
     let mut c = qcfg();
     c.id[1] = queue
@@ -142,20 +134,8 @@ fn rid_of(n: u64) -> RequestId {
     id
 }
 
-/// A delivered, leased batch a later command can ack, nack or renew.
-#[derive(Clone, Debug)]
-struct Delivered {
-    pid: Pid,
-    queue: String,
-    group: String,
-    worker: String,
-    start: u64,
-    end: u64,
-}
-
-/// The adaptive command stream: it learns partitions, offsets, hashes and
-/// leased batches from the entries the planner proposes, so its acks and pops
-/// target real state. Everything it decides comes from its seeded [`Rng`] and
+/// The adaptive command stream: it learns partitions and their tails from the
+/// entries the planner proposes, so its checkpoints target real state. Everything it decides comes from its seeded [`Rng`] and
 /// from those entries, so two runs that propose the same entries generate the
 /// same stream.
 struct Workload {
@@ -164,14 +144,15 @@ struct Workload {
     next_txn: u64,
     recent_txns: Vec<String>,
     submitted: Vec<Command>,
-    commands: HashMap<RequestId, Command>,
     /// pid → (queue, partition), from `PartitionCreate`.
     pid_queue: HashMap<Pid, (String, String)>,
-    /// queue → its partitions, in creation order.
-    partitions: HashMap<String, Vec<(String, Pid)>>,
-    /// (pid, offset) → the frame's hash, from every `Append`.
-    hashes: HashMap<(Pid, u64), [u8; 16]>,
-    delivered: Vec<Delivered>,
+    /// pid → its last offset, from every `Append`.
+    tails: HashMap<Pid, u64>,
+    /// Partitions a delete took away: checkpoints still name some of them
+    /// (the engine's view lags), and the planner must refuse those.
+    gone: Vec<Pid>,
+    /// The next dead-letter id.
+    next_dlq: u64,
     /// The highest watermark emitted per pid (they never move back).
     watermark: HashMap<Pid, u64>,
 }
@@ -184,11 +165,10 @@ impl Workload {
             next_txn: 1,
             recent_txns: Vec::new(),
             submitted: Vec::new(),
-            commands: HashMap::new(),
             pid_queue: HashMap::new(),
-            partitions: HashMap::new(),
-            hashes: HashMap::new(),
-            delivered: Vec::new(),
+            tails: HashMap::new(),
+            gone: Vec::new(),
+            next_dlq: 1,
             watermark: HashMap::new(),
         }
     }
@@ -240,168 +220,172 @@ impl Workload {
         Command::Push(self.push_cmd(&queue, &partition, n))
     }
 
-    fn pop_base(&mut self, queue: &str) -> PopCommand {
-        let auto_ack = self.rng.chance(15);
-        PopCommand {
-            wait: false,
-            request_id: self.id(),
-            tenant: TENANT.to_string(),
-            queue: queue.to_string(),
-            partition: None,
-            group: self.rng.pick(&GROUPS).to_string(),
-            worker: self.rng.pick(&WORKERS).to_string(),
-            budget: 1 + self.rng.below(12) as i32,
-            max_parts: 1 + self.rng.below(4) as i32,
-            // Short leases, so some expire under the workload and come back.
-            lease_seconds: 1 + self.rng.below(3) as i32,
-            auto_ack,
-            conflate: false,
-            sub: SubIntent {
-                mode: if self.rng.chance(20) { "new" } else { "all" }.to_string(),
-                from_us: None,
-                now: false,
-            },
-            skip_window_debounce: false,
-            namespace: String::new(),
-            task: String::new(),
-            create_cfg: Some(queue_cfg(queue)),
-            deadline_us: 0,
+    /// A partition the workload knows, now and then one a delete took away.
+    fn some_pid(&mut self) -> Option<Pid> {
+        if !self.gone.is_empty() && self.rng.chance(10) {
+            let i = self.rng.below(self.gone.len() as u64) as usize;
+            return Some(self.gone[i]);
         }
-    }
-
-    fn pop_wildcard(&mut self) -> Command {
-        let queue = self.rng.pick(&QUEUES).to_string();
-        Command::PopWildcard(self.pop_base(&queue))
-    }
-
-    fn pop_pinned(&mut self) -> Option<Command> {
-        let queue = self.rng.pick(&QUEUES).to_string();
-        let parts = self.partitions.get(&queue)?.clone();
-        let (name, _) = parts[self.rng.below(parts.len() as u64) as usize].clone();
-        let mut c = self.pop_base(&queue);
-        c.partition = Some(name);
-        Some(Command::PopPinned(c))
-    }
-
-    fn pop_discover(&mut self) -> Command {
-        let mut c = self.pop_base("");
-        c.namespace = "ns".into();
-        c.group = "gd".into();
-        c.create_cfg = None;
-        Command::PopDiscover(c)
-    }
-
-    fn take_delivered(&mut self) -> Option<Delivered> {
-        if self.delivered.is_empty() {
+        let mut pids: Vec<Pid> = self.pid_queue.keys().copied().collect();
+        if pids.is_empty() {
             return None;
         }
-        let i = self.rng.below(self.delivered.len() as u64) as usize;
-        Some(self.delivered.swap_remove(i))
+        pids.sort_unstable();
+        Some(pids[self.rng.below(pids.len() as u64) as usize])
     }
 
-    fn ack_target(&mut self, d: &Delivered) -> AckTarget {
-        let mut items = Vec::new();
-        for off in d.start..=d.end {
-            let Some(h) = self.hashes.get(&(d.pid, off)).copied() else {
-                continue;
+    /// A cursor row as the engine checkpoints it: somewhere in the partition's
+    /// retained range, now and then with a live lease on a batch past it.
+    fn cursor_row(&mut self, pid: Pid) -> CursorRow {
+        let tail = self.tails.get(&pid).copied().unwrap_or(0) as i64;
+        let committed = self.rng.below(tail as u64 + 2) as i64 - 1;
+        let leased = committed < tail && self.rng.chance(40);
+        CursorRow {
+            committed,
+            batch_end: leased.then_some(tail as u64),
+            worker: leased.then(|| self.rng.pick(&WORKERS).to_string()),
+            lease_expires_at_us: leased.then_some(BASE_US + 3_600_000_000),
+            lease_acquired_at_us: leased.then_some(BASE_US),
+            batch_retry_count: self.rng.below(2) as u32,
+            attempt_offset: None,
+            attempt_count: 0,
+            total_consumed: committed.max(0) as u64,
+            lease_conflated: false,
+            delivered: Vec::new(),
+            created_at_us: BASE_US,
+            metadata: String::new(),
+        }
+    }
+
+    /// The cursor rows (and now and then a dead letter) of one engine
+    /// checkpoint over 1-3 partitions.
+    fn checkpoint_effects(&mut self) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        for _ in 0..1 + self.rng.below(3) {
+            let Some(pid) = self.some_pid() else {
+                break;
             };
-            let status = match self.rng.below(20) {
-                0 => AckStatus::Failed,
-                1 => AckStatus::Dlq,
-                2 => AckStatus::Retry,
-                _ => AckStatus::Ok,
-            };
-            let snapshot =
-                matches!(status, AckStatus::Failed | AckStatus::Dlq).then(|| DlqSnapshot {
+            let group = self.rng.pick(&GROUPS).to_string();
+            let row = self.cursor_row(pid);
+            if self.rng.chance(15) {
+                let queue = self
+                    .pid_queue
+                    .get(&pid)
+                    .map(|(q, _)| q.clone())
+                    .unwrap_or_else(|| "q0".to_string());
+                let mut dlq_id = [0u8; 16];
+                dlq_id[..8].copy_from_slice(&self.next_dlq.to_be_bytes());
+                dlq_id[8] = 0xD1;
+                self.next_dlq += 1;
+                effects.push(Effect::DlqInsert {
+                    dlq_id,
+                    tenant: TENANT.to_string(),
+                    queue,
+                    pid,
+                    group: group.clone(),
+                    offset: row.committed.max(0),
                     message_id: None,
-                    txn: format!("off{off}"),
+                    txn: format!("poison{}", self.next_dlq),
                     payload: b"{}".to_vec(),
+                    error: "boom".into(),
+                    retry_count: 3,
+                    failed_at_us: BASE_US,
                 });
-            items.push(AckItem {
-                hash: h,
-                status,
-                error: snapshot.as_ref().map(|_| "boom".to_string()),
-                snapshot,
-            });
+            }
+            effects.push(Effect::CursorSet { pid, group, row });
         }
-        AckTarget {
-            pid: d.pid,
-            tenant: TENANT.to_string(),
-            queue: d.queue.clone(),
-            group: d.group.clone(),
-            // A lease-less ack now and then (it still advances, 005).
-            worker: if self.rng.chance(10) {
-                String::new()
-            } else {
-                d.worker.clone()
-            },
-            items,
+        effects
+    }
+
+    /// An engine checkpoint: one effect command of cursor rows.
+    fn checkpoint(&mut self) -> Option<Command> {
+        let effects = self.checkpoint_effects();
+        if effects.is_empty() {
+            return None;
         }
-    }
-
-    fn ack(&mut self) -> Option<Command> {
-        let d = self.take_delivered()?;
-        let t = self.ack_target(&d);
-        Some(Command::Ack(AckCommand {
+        Some(Command::Effects(EffectsCommand {
             request_id: self.id(),
-            targets: vec![t],
-        }))
-    }
-
-    fn ack_positional(&mut self) -> Option<Command> {
-        let d = self.take_delivered()?;
-        Some(Command::AckPositional(AckPositionalCommand {
-            request_id: self.id(),
-            pid: d.pid,
             tenant: TENANT.to_string(),
-            queue: d.queue.clone(),
-            group: d.group.clone(),
-            worker: d.worker.clone(),
-            upto: Some(d.end as i64),
-            ok: self.rng.chance(80),
-            release_lease: true,
-            acked_count: (d.end - d.start + 1) as i32,
+            effects,
         }))
     }
 
-    fn nack(&mut self) -> Option<Command> {
-        let d = self.take_delivered()?;
-        Some(Command::Nack(NackCommand {
+    /// A group's first contact, registered by the engine.
+    fn register(&mut self) -> Command {
+        let queue = self.rng.pick(&QUEUES).to_string();
+        let group = self.rng.pick(&GROUPS).to_string();
+        Command::Effects(EffectsCommand {
             request_id: self.id(),
-            pid: d.pid,
             tenant: TENANT.to_string(),
-            queue: d.queue,
-            group: d.group,
-            worker: d.worker,
-        }))
-    }
-
-    fn dlq_head(&mut self) -> Option<Command> {
-        let d = self.take_delivered()?;
-        Some(Command::DlqHead(DlqHeadCommand {
-            request_id: self.id(),
-            pid: d.pid,
-            tenant: TENANT.to_string(),
-            queue: d.queue,
-            group: d.group,
-            worker: d.worker,
-            offset: d.start,
-            error: "poison".into(),
-            snapshot: DlqSnapshot {
-                message_id: None,
-                txn: "poison".into(),
-                payload: b"{}".to_vec(),
-            },
-        }))
-    }
-
-    fn renew(&mut self) -> Command {
-        Command::Renew(RenewCommand {
-            request_id: self.id(),
-            tenant: None,
-            worker: self.rng.pick(&WORKERS).to_string(),
-            seconds: 2,
+            effects: vec![Effect::GroupUpsert {
+                tenant: TENANT.to_string(),
+                queue,
+                group,
+                meta: GroupMeta {
+                    id: [7; 16],
+                    partition_name: String::new(),
+                    namespace: String::new(),
+                    task: String::new(),
+                    mode: crate::rsm::effect::SubscriptionMode::All,
+                    subscription_timestamp_us: 0,
+                    conflation: false,
+                    seeded: false,
+                    registered_at_us: BASE_US,
+                },
+            }],
         })
+    }
+
+    /// A consumer-group commit: the engine's cursor rows and its per-target
+    /// results riding a transaction, behind a KV fence now and then.
+    fn commit(&mut self) -> Option<Command> {
+        let extra_effects = self.checkpoint_effects();
+        if extra_effects.is_empty() {
+            return None;
+        }
+        let results = extra_effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::CursorSet { pid, row, .. } => Some(AckResult {
+                    pid: *pid,
+                    committed: row.committed,
+                    acked: 1,
+                    conflated: 0,
+                    dlq: 0,
+                    lease_released: row.worker.is_none(),
+                    batch_retry_count: row.batch_retry_count,
+                    noop_hashes: Vec::new(),
+                    stale_hashes: Vec::new(),
+                }),
+                _ => None,
+            })
+            .collect();
+        let kv = if self.rng.chance(50) {
+            let k = format!("fence{}", self.rng.below(2));
+            parse_ops(
+                &[json!({"op":"put","ns":"fence","key":k,"value":{"n":1},"forever":true})],
+                TENANT,
+                true,
+                511,
+                crate::rsm::planner::kv::MAX_VALUE_BYTES_DEFAULT,
+            )
+            .expect("kv op")
+        } else {
+            Vec::new()
+        };
+        Some(Command::Transaction(TxnCommand {
+            request_id: self.id(),
+            tenant: TENANT.to_string(),
+            pushes: Vec::new(),
+            acks: Vec::new(),
+            positional_acks: Vec::new(),
+            kv,
+            timers: Vec::new(),
+            extra_effects,
+            allow_duplicate: false,
+            positions: Vec::new(),
+            engine_acks: AckOutcome { results },
+        }))
     }
 
     fn transaction(&mut self) -> Command {
@@ -415,22 +399,12 @@ impl Workload {
             let p = format!("p{}", self.rng.below(3));
             pushes.push(self.push_cmd("qd", &p, 1));
         }
-        let acks = match self.take_delivered() {
-            Some(d) if self.rng.chance(40) => {
-                let mut t = self.ack_target(&d);
-                for it in &mut t.items {
-                    it.status = AckStatus::Ok;
-                    it.snapshot = None;
-                    it.error = None;
-                }
-                t.worker = d.worker.clone();
-                vec![t]
-            }
-            Some(d) => {
-                self.delivered.push(d);
-                Vec::new()
-            }
-            None => Vec::new(),
+        // The consumption half, as the engine hands it over: cursor rows of
+        // the bundle's acks as riders.
+        let extra_effects = if self.rng.chance(40) {
+            self.checkpoint_effects()
+        } else {
+            Vec::new()
         };
         let kv = if self.rng.chance(30) {
             let k = format!("tk{}", self.rng.below(3));
@@ -449,15 +423,16 @@ impl Workload {
             request_id: self.id(),
             tenant: TENANT.to_string(),
             pushes,
-            acks,
+            acks: Vec::new(),
             positional_acks: Vec::new(),
             kv,
             timers: Vec::new(),
-            extra_effects: Vec::new(),
+            extra_effects,
             // The DLQ-replay shape: a duplicate answers empty WITHOUT restoring
             // the overlay (the earlier push groups stay folded).
             allow_duplicate: self.rng.chance(25),
             positions: Vec::new(),
+            engine_acks: AckOutcome::default(),
         })
     }
 
@@ -673,23 +648,18 @@ impl Workload {
         let mut out: Vec<Command> = Vec::new();
         for _ in 0..n {
             let c = match self.rng.below(100) {
-                0..=29 => Some(self.push()),
-                30..=44 => Some(self.pop_wildcard()),
-                45..=49 => self.pop_pinned(),
-                50..=51 => Some(self.pop_discover()),
-                52..=61 => self.ack(),
-                62..=65 => self.ack_positional(),
-                66..=67 => self.nack(),
-                68..=69 => Some(self.renew()),
-                70 => self.dlq_head(),
-                71..=76 => Some(self.transaction()),
-                77..=81 => Some(self.kv()),
-                82..=86 => Some(self.timers()),
-                87 => Some(self.group_delete()),
-                88..=89 => self.watermark_cmd(store),
-                90..=91 => Some(self.queue_delete(store)),
-                92 => self.partition_delete(),
-                93 => self.delete_resume(store),
+                0..=34 => Some(self.push()),
+                35..=52 => self.checkpoint(),
+                53..=55 => Some(self.register()),
+                56..=60 => self.commit(),
+                61..=68 => Some(self.transaction()),
+                69..=75 => Some(self.kv()),
+                76..=82 => Some(self.timers()),
+                83..=84 => Some(self.group_delete()),
+                85..=86 => self.watermark_cmd(store),
+                87..=88 => Some(self.queue_delete(store)),
+                89 => self.partition_delete(),
+                90..=91 => self.delete_resume(store),
                 // A replay of anything submitted before: in flight, committed,
                 // or never logged — the request-id lookup decides. (Not the raw
                 // effects: once the short request-id window below has expired
@@ -715,13 +685,12 @@ impl Workload {
             }
         }
         for c in &out {
-            self.commands.insert(c.request_id(), c.clone());
             self.submitted.push(c.clone());
         }
         out
     }
 
-    /// Learn from a proposed entry: partitions, frame hashes, leased batches.
+    /// Learn from a proposed entry: partitions and their tails.
     fn observe(&mut self, e: &Entry) {
         for eff in &e.effects {
             match eff {
@@ -733,72 +702,36 @@ impl Workload {
                 } => {
                     self.pid_queue
                         .insert(*pid, (queue.clone(), partition.clone()));
-                    self.partitions
-                        .entry(queue.clone())
-                        .or_default()
-                        .push((partition.clone(), *pid));
                 }
                 Effect::Append {
                     pid,
                     base_offset,
                     count,
-                    hashes,
                     ..
                 } => {
-                    for i in 0..*count as usize {
-                        let mut h = [0u8; 16];
-                        h.copy_from_slice(&hashes[i * 16..i * 16 + 16]);
-                        self.hashes.insert((*pid, base_offset + i as u64), h);
-                    }
+                    self.tails.insert(*pid, base_offset + *count as u64 - 1);
                 }
-                // Gone for the watermarks; acks, nacks and renews of their
-                // leases still come, and must find nothing to move.
+                // Gone for the watermarks; checkpoints still name them now
+                // and then, and must be refused.
                 Effect::GarbageAdd { pids, scope, .. }
                     if !matches!(scope, GarbageScope::Group { .. }) =>
                 {
                     for pid in pids {
-                        self.pid_queue.remove(pid);
+                        if self.pid_queue.remove(pid).is_some() {
+                            self.gone.push(*pid);
+                        }
                     }
                 }
                 Effect::PartitionDelete { pid } => {
-                    self.pid_queue.remove(pid);
+                    if self.pid_queue.remove(pid).is_some() {
+                        self.gone.push(*pid);
+                    }
                 }
                 _ => {}
             }
         }
-        for c in &e.commands {
-            let Some(cmd) = self.commands.get(&c.request_id) else {
-                continue;
-            };
-            let group = match cmd {
-                Command::PopPinned(p) | Command::PopWildcard(p) | Command::PopDiscover(p) => {
-                    p.group.clone()
-                }
-                _ => continue,
-            };
-            if let Outcome::Pop(pop) = &c.outcome {
-                for claim in &pop.claims {
-                    if claim.lease_expires_at_us.is_none() {
-                        continue;
-                    }
-                    let queue = self
-                        .pid_queue
-                        .get(&claim.pid)
-                        .map(|(q, _)| q.clone())
-                        .unwrap_or_default();
-                    self.delivered.push(Delivered {
-                        pid: claim.pid,
-                        queue,
-                        group: group.clone(),
-                        worker: claim.worker.clone(),
-                        start: claim.start_offset,
-                        end: claim.end_offset,
-                    });
-                }
-            }
-        }
-        if self.delivered.len() > 64 {
-            self.delivered.drain(0..16);
+        if self.gone.len() > 64 {
+            self.gone.drain(0..16);
         }
     }
 }
@@ -998,7 +931,6 @@ fn keep_verified() -> KeepCfg {
         enabled: true,
         epoch: 0,
         verify: true,
-        verify_rings: true,
         reset_every: 0,
     }
 }
@@ -1012,8 +944,6 @@ struct Report {
     kinds: BTreeMap<String, usize>,
     overlapped: usize,
     lingering: usize,
-    /// `(ring loads, ring drops)`.
-    rings: (u64, u64),
 }
 
 /// Drive `cycles` cycles of the workload through a rig; then land everything
@@ -1043,7 +973,6 @@ fn run(tag: &str, seed: u64, keep: KeepCfg, front: DedupFront, cycles: usize) ->
     Report {
         digest: rig.node.digest(),
         stats: rig.state.stats.clone(),
-        rings: rig.state.ring_stats(),
         log: std::mem::take(&mut rig.log),
         kinds: std::mem::take(&mut rig.kinds),
         overlapped: rig.overlapped,
@@ -1153,17 +1082,9 @@ fn gate(seed: u64, front_on: bool, cycles: usize) {
         );
     }
     assert_eq!(kept.digest, plain.digest, "the two stores diverged");
-    // B34: the kept rings check a few rows against `pending` every cycle; with
-    // apply quiescent between cycles they never differ, so the check never
-    // dropped one.
-    assert_eq!(
-        crate::rsm::state::verify_drops_on_this_thread(),
-        0,
-        "the ring check dropped a ring that did not differ"
-    );
     eprintln!(
         "keep_overlay gate seed {seed} front {front_on}: {} entries over {} cycles; kept {} \
-         poisoned {} rebuilt {}; in flight {} lingering {}; ring loads {} drops {}; {:?}",
+         poisoned {} rebuilt {}; in flight {} lingering {}; {:?}",
         kept.log.len(),
         cycles + 4,
         stats.kept,
@@ -1171,8 +1092,6 @@ fn gate(seed: u64, front_on: bool, cycles: usize) {
         stats.rebuilt,
         kept.overlapped,
         kept.lingering,
-        kept.rings.0,
-        kept.rings.1,
         kept.kinds
     );
 }
@@ -1363,6 +1282,7 @@ fn a_cycle_that_folds_what_its_entry_does_not_carry_is_not_kept() {
         extra_effects: Vec::new(),
         allow_duplicate: true,
         positions: Vec::new(),
+        engine_acks: AckOutcome::default(),
     });
     let rebuilt0 = rig.state.stats.rebuilt;
     let out = rig.cycle(vec![replay], &s);

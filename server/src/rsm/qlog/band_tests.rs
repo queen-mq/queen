@@ -558,7 +558,7 @@ mod planner_e2e {
     use crate::rsm::planner::{Overlay, Plan, PlanConfig, Planned, Planner, PushCommand, PushItem};
     use crate::rsm::qlog::set::QLogReader;
     use crate::rsm::segments;
-    use crate::rsm::state::{Committed, Derived};
+    use crate::rsm::state::Committed;
     use crate::rsm::store::{HeedStore, Store, StoreOpts, TypedReads};
 
     const BASE_US: i64 = 1_800_000_000_000_000;
@@ -622,10 +622,8 @@ mod planner_e2e {
     ) -> (Vec<Planned>, Option<Entry>) {
         store
             .read(|r| {
-                let d0 = Derived::default();
-                let now = Committed::new(r, &d0).plan_now(wall)?;
-                let d = Derived::rebuild(r, now)?;
-                let committed = Committed::new(r, &d);
+                let committed = Committed::new(r);
+                let now = committed.plan_now(wall)?;
                 let mut ov = Overlay::new(r.next_pid()?, r.kv_version_next()?);
                 ov.mark_cycle_start();
                 let cfg = PlanConfig {

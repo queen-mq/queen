@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::rsm::dedup;
 use crate::rsm::effect::{CursorRow, GarbageScope, GroupMeta, SubscriptionMode};
-use crate::rsm::state::Derived;
 use crate::rsm::store::keys::{self, Counter};
 use crate::rsm::store::rows::{
     self, DlqRow, FileRow, GarbageRow, GroupRow, PartitionRow, SegLocRow,
@@ -157,7 +156,6 @@ fn every_message_path_keyspace_round_trips_through_a_commit() {
         w.put_partition_file(1, 4).unwrap();
         w.put_cursor(1, "g", &cur).unwrap();
         w.put_lease("worker-1", 1, "g", 9_000).unwrap();
-        w.put_pending("t1", "q1", "g", 1, 5_500).unwrap();
         w.put_dlq("t1", "q1", &samples::uuid(3), &dlq).unwrap();
         w.put_request_outcome(&samples::uuid(5), 5_000, b"outcome")
             .unwrap();
@@ -188,7 +186,6 @@ fn every_message_path_keyspace_round_trips_through_a_commit() {
         assert_eq!(r.partition(1)?.as_ref(), Some(&part));
         assert_eq!(r.pid_of("t1", "q1", "p0")?, Some(1));
         assert_eq!(r.cursor(1, "g")?.as_ref(), Some(&cur));
-        assert_eq!(r.pending_at("t1", "q1", "g", 1)?, Some(5_500));
         assert_eq!(r.dlq("t1", "q1", &samples::uuid(3))?.as_ref(), Some(&dlq));
         assert_eq!(r.dlq_id_at(1, "g", 9)?, Some(samples::uuid(3)));
         assert_eq!(
@@ -215,7 +212,6 @@ fn every_message_path_keyspace_round_trips_through_a_commit() {
         assert!(w.del_group("t1", "q1", "g").unwrap());
         assert!(w.del_cursor(1, "g").unwrap());
         assert!(w.del_lease("worker-1", 1, "g").unwrap());
-        assert!(w.del_pending("t1", "q1", "g", 1).unwrap());
         assert!(w.del_dlq("t1", "q1", &samples::uuid(3), &dlq).unwrap());
         assert!(w.del_partition_file(1, 4).unwrap());
         assert!(w.del_partition(1, &part).unwrap());
@@ -1350,36 +1346,6 @@ fn a_delete_chunk_resumes_past_keys_at_the_engine_s_limit() {
     .unwrap();
 }
 
-#[test]
-fn the_ready_rings_rebuild_over_a_chunk_boundary_of_max_length_keys() {
-    // §11.5 step 4 rebuilds the rings from `pending` in chunks of
-    // `REBUILD_CHUNK`. `pending` is `(tenant, queue, group, pid)` — the same
-    // three unbounded names — and Queen routinely runs tens of thousands of
-    // partitions per queue, so a group whose names total the limit with more
-    // than one chunk of pending partitions is an ordinary state, not an edge:
-    // with a resume key one byte over the limit the rebuild could never
-    // finish, and the node could never serve.
-    let t = TempStore::new();
-    let s = t.s();
-    let max = s.max_key_len();
-    // name(t) + name(q) + name(g) + 8 = 3 + 3 + (len + 2) + 8.
-    let g = "g".repeat(max - 16);
-    let n = crate::rsm::state::REBUILD_CHUNK + 4;
-    {
-        let mut w = s.write().unwrap();
-        for pid in 0..n as u64 {
-            let k = keys::pending("t", "q", &g, pid);
-            assert_eq!(k.len(), max);
-            w.put_pending("t", "q", &g, pid, 100).unwrap();
-        }
-        w.commit().unwrap();
-    }
-    let d = s.read(|r| Derived::rebuild(r, 1_000)).unwrap();
-    assert_eq!(d.pending_rows(), n as u64, "the rebuild stopped early");
-    assert_eq!(d.rings_len(), 1);
-    assert_eq!(d.ring("t", "q", &g).unwrap().live_len(), n);
-}
-
 // ---------------------------------------------------------------------------
 // Dedup (D10 option (a), lean) over a real store
 // ---------------------------------------------------------------------------
@@ -1592,51 +1558,8 @@ fn a_corrupt_occurrence_list_is_fatal_not_guessed() {
 }
 
 // ---------------------------------------------------------------------------
-// The derived indexes (§6.3)
+// The committed view
 // ---------------------------------------------------------------------------
-
-#[test]
-fn the_ready_rings_rebuild_from_pending_and_the_leases_from_their_index() {
-    let t = TempStore::new();
-    let s = t.s();
-    {
-        let mut w = s.write().unwrap();
-        w.put_pending("t", "q", "g1", 1, 100).unwrap();
-        w.put_pending("t", "q", "g1", 2, 5_000).unwrap();
-        w.put_pending("t", "q", "g2", 1, 100).unwrap();
-        w.put_pending("t2", "q", "g1", 7, 100).unwrap();
-        w.put_lease("w1", 1, "g1", 9_000).unwrap();
-        w.put_lease("w2", 2, "g1", 1_000).unwrap();
-        w.commit().unwrap();
-    }
-    let d = s.read(|r| Derived::rebuild(r, 1_000)).unwrap();
-    assert_eq!(d.rings_len(), 3, "one per (tenant, queue, group)");
-    assert_eq!(d.pending_rows(), 4);
-    let ring = d.ring("t", "q", "g1").unwrap();
-    assert!(ring.contains(1), "ready_at 100 <= now 1000");
-    assert!(!ring.contains(2), "ready_at 5000 is deferred");
-    assert_eq!(ring.next_deadline(), Some(5_000));
-    assert_eq!(d.lease_count(), 2);
-    assert_eq!(d.next_lease_deadline(), Some(1_000));
-    assert_eq!(d.expired_leases(1_000, 10).len(), 1);
-
-    // The planner walks the ring without changing it (I1).
-    s.read(|r| {
-        let v = crate::rsm::state::Committed::new(r, &d);
-        let mut seen = Vec::new();
-        v.candidates("t", "q", "g1", 10, &mut |pid| {
-            seen.push(pid);
-            true
-        });
-        assert_eq!(seen, vec![1]);
-        Ok(())
-    })
-    .unwrap();
-    assert!(
-        d.ring("t", "q", "g1").unwrap().contains(1),
-        "the walk consumed nothing"
-    );
-}
 
 #[test]
 fn the_committed_view_hides_garbage_pids_and_stamps_a_monotone_now() {
@@ -1652,11 +1575,9 @@ fn the_committed_view_hides_garbage_pids_and_stamps_a_monotone_now() {
             .unwrap();
         w.commit().unwrap();
     }
-    let d = Derived::default();
     s.read(|r| {
-        let v = crate::rsm::state::Committed::new(r, &d);
+        let v = crate::rsm::state::Committed::new(r);
         assert_eq!(v.pid_of("t", "q", "p")?, Some(1));
-        assert!(v.partition(1)?.is_some());
         // D5/I5: never below the last committed now, never below the highest
         // created_at, and the wall clock is the CALLER's (no clock in here).
         assert_eq!(v.plan_now(0)?, 9_501);
@@ -1680,12 +1601,11 @@ fn the_committed_view_hides_garbage_pids_and_stamps_a_monotone_now() {
         w.commit().unwrap();
     }
     s.read(|r| {
-        let v = crate::rsm::state::Committed::new(r, &d);
+        let v = crate::rsm::state::Committed::new(r);
         // §5.2: readers and planners ignore garbage pids, and the NAME is
         // reusable at once.
         assert_eq!(v.pid_of("t", "q", "p")?, None);
-        assert!(v.partition(1)?.is_none());
-        assert!(v.garbage(1)?.is_some());
+        assert!(r.garbage(1)?.is_some());
         // The raw row is still there for the DeleteChunk loop.
         assert!(r.partition(1)?.is_some());
         Ok(())
@@ -1745,7 +1665,6 @@ fn measure_write_amplification_and_commit_cost() {
         part.last_offset = (offset + MSGS_PER_ENTRY as u64 - 1) as i64;
         w.put_partition(pid, &part).unwrap();
         w.put_cursor(pid, "g", &a_cursor(offset as i64)).unwrap();
-        w.put_pending("t", "q", "g", pid, 1_000).unwrap();
         w.put_seg_loc(
             pid,
             offset,

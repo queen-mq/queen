@@ -4,10 +4,13 @@
 //! A follower does its clients' work itself: it parses and validates the
 //! request, prepares the command exactly as the leader would, and renders the
 //! answer from its OWN state. Only the prepared command crosses to the leader,
-//! whose batcher plans it with every other command; the reply comes back with
-//! the index its entry landed at, and the follower waits until it has applied
-//! that index itself before it answers — so a pop reads its payloads from the
-//! follower's own queue logs. A push or an ack whose answer renders from its
+//! whose intake serves it as it serves its own clients' ([`super::intake`]):
+//! consumption by the engine — which HOLDS a long-poll pop there until data
+//! arrives, so no follower parks one — the rest planned by the batcher with
+//! every other command. The reply comes back with the index its entry landed
+//! at (or the leader's applied index, for an answer from memory), and the
+//! follower waits until it has applied that far itself before it answers — so
+//! a pop reads its payloads from the follower's own queue logs. A push or an ack whose answer renders from its
 //! outcome alone waits less: until the follower knows the entry committed with
 //! the reply's term, one append after the leader's commit, however far behind
 //! its apply runs (`QUEEN_RAFT_FOLLOWER_ANSWER_AT_DONE`, `RaftFacade::submit_offloaded`).
@@ -28,6 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use super::RsmError;
 use crate::rsm::batcher::{Command, CommandTx, Reply, Submission};
+use crate::rsm::consume::Engine;
 use crate::rsm::entry::Outcome;
 use crate::rsm::planner::Refusal;
 use crate::rsm::replicator::AppliedAt;
@@ -132,12 +136,14 @@ pub(super) fn decode_reply(b: &[u8]) -> Result<(Reply, u64), RsmError> {
     }
 }
 
-/// The leader side: plan a follower's prepared command through this node's
-/// batcher, under the push admission budget (its share of it: `from` names
-/// the follower, [`crate::rsm::admit`]), and answer the encoded reply.
-/// `cmd_tx` is weak, so a follower's request never keeps a stopped facade's
-/// batcher alive.
+/// The leader side: serve a follower's prepared command here as this node's
+/// own client's is served ([`super::intake::submit_here`]: consumption by
+/// the engine, the rest planned by this node's batcher), under the push
+/// admission budget (its share of it: `from` names the follower,
+/// [`crate::rsm::admit`]), and answer the encoded reply. `cmd_tx` is weak, so
+/// a follower's request never keeps a stopped facade's batcher alive.
 pub(super) async fn serve(
+    engine: Arc<Engine>,
     cmd_tx: tokio::sync::mpsc::WeakSender<Submission>,
     admit: Option<&'static crate::rsm::admit::AdmitGate>,
     applied: Arc<dyn Fn() -> u64 + Send + Sync>,
@@ -147,11 +153,12 @@ pub(super) async fn serve(
     let req: SubmitReq =
         postcard::from_bytes(&body).map_err(|e| format!("prepared command: {e}"))?;
     let deadline = Instant::now() + Duration::from_millis(req.budget_ms.clamp(1, 120_000));
-    let reply = submit_local(cmd_tx, admit, from, req.command, deadline).await;
+    let reply = submit_local(&engine, cmd_tx, admit, from, req.command, deadline).await;
     Ok(bytes::Bytes::from(encode_reply(reply, applied())))
 }
 
 async fn submit_local(
+    engine: &Engine,
     cmd_tx: tokio::sync::mpsc::WeakSender<Submission>,
     admit: Option<&'static crate::rsm::admit::AdmitGate>,
     from: crate::rsm::admit::Source,
@@ -175,23 +182,7 @@ async fn submit_local(
         ),
         _ => None,
     };
-    let Some(tx) = cmd_tx.upgrade() else {
-        return Err(RsmError::Internal("planner channel closed".into()));
-    };
-    let (sub, rx) = Submission::new(command);
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    match tokio::time::timeout(remaining, tx.send(sub)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(_closed)) => return Err(RsmError::Internal("planner channel closed".into())),
-        Err(_elapsed) => return Err(RsmError::Timeout),
-    }
-    drop(tx);
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    match tokio::time::timeout(remaining, rx).await {
-        Ok(Ok(reply)) => Ok(reply),
-        Ok(Err(_dropped)) => Err(RsmError::Internal("planner dropped the reply".into())),
-        Err(_elapsed) => Err(RsmError::Timeout),
-    }
+    super::intake::submit_here(engine, || cmd_tx.upgrade(), command, deadline).await
 }
 
 /// The handler a cluster node installs on its replicator.
@@ -204,6 +195,7 @@ async fn submit_local(
 /// the answer there; called from anywhere else (the batched intake, which
 /// already runs off it) it runs in place.
 pub(super) fn handler(
+    engine: Arc<Engine>,
     cmd_tx: &CommandTx,
     admit: Option<&'static crate::rsm::admit::AdmitGate>,
     applied: Arc<dyn Fn() -> u64 + Send + Sync>,
@@ -214,7 +206,14 @@ pub(super) fn handler(
     let clients = tokio::runtime::Handle::try_current().ok();
     Arc::new(move |body: bytes::Bytes| -> Answer {
         let from = crate::rsm::admit::forwarded_from();
-        let fut = serve(weak.clone(), admit, applied.clone(), from, body);
+        let fut = serve(
+            engine.clone(),
+            weak.clone(),
+            admit,
+            applied.clone(),
+            from,
+            body,
+        );
         match &clients {
             Some(rt) if on_raft_runtime() => {
                 let task = rt.spawn(fut);
@@ -258,7 +257,23 @@ mod tests {
         };
         let (clients, raft) = (rt("clients"), rt("queen-raft"));
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Submission>(8);
-        let h = clients.block_on(async { handler(&tx, None, Arc::new(|| 7)) });
+        let dir = std::env::temp_dir().join(format!(
+            "queen-remote-handler-{}-{}",
+            std::process::id(),
+            crate::frames::uuid_bytes_to_string(&crate::util::uuidv7_bytes())
+        ));
+        let store = Arc::new(
+            crate::rsm::store::HeedStore::open(
+                &dir.join("store"),
+                &crate::rsm::store::StoreOpts {
+                    map_bytes: Some(64 << 20),
+                    ..Default::default()
+                },
+            )
+            .expect("store"),
+        );
+        let engine = Engine::new(store);
+        let h = clients.block_on(async { handler(engine, &tx, None, Arc::new(|| 7)) });
         let reached = Arc::new(AtomicBool::new(false));
         let seen = reached.clone();
         clients.spawn(async move {
@@ -267,13 +282,12 @@ mod tests {
                 let _ = sub.reply.send(Reply::Retry { hint: Some(3) });
             }
         });
-        let cmd = Command::Nack(crate::rsm::planner::NackCommand {
+        // A command the batcher plans (consumption is the engine's, which
+        // this node, leading nothing, would answer `Retry` itself).
+        let cmd = Command::Effects(crate::rsm::planner::EffectsCommand {
             request_id: [9; 16],
-            pid: 1,
-            tenant: String::new(),
-            queue: String::new(),
-            group: "g".into(),
-            worker: "w".into(),
+            tenant: "t".into(),
+            effects: vec![crate::rsm::effect::Effect::Noop],
         });
         let body = bytes::Bytes::from(encode_request(&cmd, Duration::from_secs(5)).unwrap());
         let answer = raft
@@ -297,6 +311,7 @@ mod tests {
         assert!(matches!(reply, Reply::Retry { hint: Some(3) }), "{reply:?}");
         assert!(!on_raft_runtime(), "a test thread is not a raft one");
         drop(tx);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A follower's prepared transaction reaches the leader with its positions
@@ -326,6 +341,7 @@ mod tests {
                     now: false,
                 },
             }],
+            engine_acks: Default::default(),
         };
         let bytes = encode_request(&Command::Transaction(txn.clone()), Duration::from_secs(1))
             .expect("encode");

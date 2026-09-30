@@ -336,6 +336,35 @@ fn only_pushes_and_acks_that_render_from_their_outcome_answer_at_commit() {
         !RaftFacade::answers_at_commit(&nack, &done(Outcome::Empty)),
         "anything else waits for this node's apply"
     );
+    // The engine's consumption answers render from their outcome alone.
+    assert!(RaftFacade::answers_at_commit(
+        &nack,
+        &done(Outcome::Ack(AckOutcome {
+            results: Vec::new()
+        }))
+    ));
+    let renew = Command::Renew(crate::rsm::planner::RenewCommand {
+        request_id: [5; 16],
+        tenant: None,
+        worker: "w".into(),
+        seconds: 30,
+    });
+    assert!(RaftFacade::answers_at_commit(
+        &renew,
+        &done(Outcome::Renew(crate::rsm::entry::RenewOutcome {
+            renewed: 1,
+            min_expires_at_us: Some(1),
+        }))
+    ));
+    assert!(
+        !RaftFacade::answers_at_commit(
+            &renew,
+            &done(Outcome::Ack(AckOutcome {
+                results: Vec::new()
+            }))
+        ),
+        "an outcome of another kind: no"
+    );
     assert!(
         !RaftFacade::answers_at_commit(
             &push_cmd(),
@@ -563,6 +592,345 @@ async fn a_follower_serves_push_pop_ack_over_its_streams() {
         .await
         .expect("pop on the leader");
     assert!(left.empty, "all acked: {}", left.body);
+    drop((follower, leader));
+    for n in nodes {
+        close_facade(n).await;
+    }
+    for d in dirs {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+/// A long-poll through a follower is held by the LEADER's consumption engine
+/// (the follower forwards it and parks nothing itself), so a message pushed
+/// while it waits reaches it promptly — through any node. The follower-parked
+/// pop this replaces waited for an apply-time wake that had often fired
+/// before it parked: follower e2e p99 = 2 s (2026-09-30).
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn a_follower_long_poll_is_held_on_the_leader_and_answered_promptly() {
+    use crate::rsm::facade::PopOptions;
+    let _one = ONE_AT_A_TIME.lock().await;
+    let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("longpoll")).collect();
+    let ports = free_ports(3);
+    let mut hs = Vec::new();
+    for (i, d) in dirs.iter().enumerate() {
+        let (d, c) = (d.clone(), cluster_config(&ports, i as u64 + 1));
+        hs.push(tokio::task::spawn_blocking(move || open_facade(&d, c)));
+    }
+    let mut nodes = Vec::new();
+    for h in hs {
+        nodes.push(Arc::new(h.await.expect("open")));
+    }
+    let end = Instant::now() + Duration::from_secs(30);
+    let l = loop {
+        let leaders: Vec<usize> = (0..3)
+            .filter(|i| nodes[*i].health().role == "leader")
+            .collect();
+        if leaders.len() == 1 {
+            break leaders[0];
+        }
+        assert!(Instant::now() < end, "no single ready leader");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let leader = nodes[l].clone();
+    let follower = nodes[(l + 1) % 3].clone();
+    let other = nodes[(l + 2) % 3].clone();
+    let ctx = |ms: u64| {
+        ReqCtx::new(
+            crate::config::DEFAULT_TENANT,
+            Deadline::after(Duration::from_millis(ms)),
+        )
+    };
+    let pop = || PopReq {
+        queue: "longpoll".into(),
+        group: Some("g".into()),
+        batch: 10,
+        auto_ack: false,
+        wait: true,
+        timeout_ms: 5_000,
+        options: PopOptions {
+            lease_seconds: 30,
+            subscription_mode: "all".into(),
+            ..PopOptions::default()
+        },
+    };
+    // The queue and the group exist before the first long-poll.
+    let seed = br#"{"items":[{"queue":"longpoll","partition":"p0","payload":{"n":0}}]}"#;
+    leader
+        .push(ctx(5_000), PushReq { raw: seed.to_vec() })
+        .await
+        .expect("seed push");
+    let first = follower
+        .pop_wildcard(ctx(5_000), pop())
+        .await
+        .expect("first pop");
+    assert!(!first.empty, "the seed is delivered: {}", first.body);
+    ack_all(&follower, &parse(&first.body)).await;
+
+    let mut worst = Duration::ZERO;
+    for n in 1..=12u64 {
+        // The long-poll parks (on the leader) before anything is pushed.
+        let waiting = {
+            let follower = follower.clone();
+            tokio::spawn(async move {
+                let out = follower.pop_wildcard(ctx(5_000), pop()).await;
+                (out, Instant::now())
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Pushed through the leader, then through the other follower.
+        let via = if n % 2 == 0 { &leader } else { &other };
+        let raw = format!(
+            "{{\"items\":[{{\"queue\":\"longpoll\",\"partition\":\"p{}\",\"payload\":{{\"n\":{n}}}}}]}}",
+            n % 3
+        );
+        via.push(
+            ctx(5_000),
+            PushReq {
+                raw: raw.into_bytes(),
+            },
+        )
+        .await
+        .expect("push");
+        let pushed = Instant::now();
+        let (out, at) = waiting.await.expect("pop task");
+        let out = out.expect("the long-poll is answered");
+        assert!(!out.empty, "round {n}: the long-poll got the message");
+        let body = parse(&out.body);
+        assert_eq!(
+            body["messages"][0]["data"]["n"], n,
+            "round {n}: the message pushed while it waited: {body}"
+        );
+        worst = worst.max(at.saturating_duration_since(pushed));
+        ack_all(&follower, &body).await;
+    }
+    eprintln!("follower long-poll: slowest push→answer {worst:?}");
+    assert!(
+        worst < Duration::from_millis(1_000),
+        "a follower's long-poll answered {worst:?} after the push"
+    );
+
+    // A transaction through the follower: the leader's engine prepares its
+    // ack, and the one entry carries the ack's rows with the push.
+    leader
+        .push(
+            ctx(5_000),
+            PushReq {
+                raw: br#"{"items":[{"queue":"txin","payload":{"n":1},"transactionId":"tx1"}]}"#
+                    .to_vec(),
+            },
+        )
+        .await
+        .expect("push txin");
+    let queue_pop = |q: &str| PopReq {
+        queue: q.into(),
+        group: None,
+        batch: 10,
+        auto_ack: false,
+        wait: true,
+        timeout_ms: 2_000,
+        options: PopOptions::default(),
+    };
+    let input = follower
+        .pop_wildcard(ctx(2_000), queue_pop("txin"))
+        .await
+        .expect("pop txin");
+    assert!(!input.empty, "the input is delivered");
+    let input = parse(&input.body);
+    let out = follower
+        .transaction(
+            ctx(5_000),
+            crate::rsm::facade::TxnReq {
+                raw: serde_json::json!({
+                    "operations": [
+                        {"type": "ack", "transactionId": "tx1",
+                         "partitionId": input["partitionId"], "leaseId": input["leaseId"]},
+                        {"type": "push", "items": [
+                            {"queue": "txout", "payload": {"done": 1}, "transactionId": "o1"}]}
+                    ]
+                })
+                .to_string()
+                .into_bytes(),
+            },
+        )
+        .await
+        .expect("transaction through the follower");
+    let out = parse(&out.body);
+    assert_eq!(out["success"], true, "{out}");
+    let produced = follower
+        .pop_wildcard(ctx(2_000), queue_pop("txout"))
+        .await
+        .expect("pop txout");
+    assert!(!produced.empty, "the transaction's push is delivered");
+    let again = follower
+        .pop_wildcard(
+            ctx(600),
+            PopReq {
+                timeout_ms: 600,
+                ..queue_pop("txin")
+            },
+        )
+        .await
+        .expect("pop txin again");
+    assert!(
+        again.empty,
+        "the transaction's ack consumed the input: {}",
+        again.body
+    );
+
+    // A long-poll that finds nothing is answered empty near its deadline,
+    // not early and not an error.
+    let t0 = Instant::now();
+    let idle = follower
+        .pop_wildcard(
+            ctx(1_000),
+            PopReq {
+                timeout_ms: 1_000,
+                ..pop()
+            },
+        )
+        .await
+        .expect("an idle long-poll is answered");
+    assert!(idle.empty, "nothing to deliver: {}", idle.body);
+    assert!(
+        t0.elapsed() >= Duration::from_millis(500),
+        "held, not answered at once ({:?})",
+        t0.elapsed()
+    );
+    drop((leader, follower, other));
+    for n in nodes {
+        close_facade(n).await;
+    }
+    for d in dirs {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+/// Ack every message of a pop answer through `node`.
+async fn ack_all(node: &RaftFacade, pop: &Value) {
+    let pid = pop["partitionId"]
+        .as_str()
+        .expect("partitionId")
+        .to_string();
+    let lease = pop["leaseId"].as_str().expect("leaseId").to_string();
+    let group = pop["consumerGroup"].as_str().expect("group").to_string();
+    let msgs = pop["messages"].as_array().expect("messages").clone();
+    let body = serde_json::json!({
+        "consumerGroup": group,
+        "acknowledgments": msgs.iter().map(|m| serde_json::json!({
+            "transactionId": m["transactionId"],
+            "partitionId": m["partitionId"].as_str().unwrap_or(&pid),
+            "status": "completed",
+            "leaseId": lease,
+        })).collect::<Vec<_>>(),
+    });
+    let out = node
+        .ack(
+            ReqCtx::new(
+                crate::config::DEFAULT_TENANT,
+                Deadline::after(Duration::from_secs(5)),
+            ),
+            AckReq {
+                queue: None,
+                group,
+                raw: body.to_string().into_bytes(),
+            },
+        )
+        .await
+        .expect("ack");
+    let out = parse(&out.body);
+    for r in out.as_array().expect("ack array") {
+        assert_eq!(r["success"], true, "{out}");
+    }
+}
+
+/// An autopilot pop through a FOLLOWER takes every ready partition: its
+/// width is picked by the leader's engine, the one node that knows how many
+/// partitions are ready. A follower that sized it alone had no count and fell
+/// back to one partition per pop (2026-09-30).
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn a_follower_autopilot_pop_takes_every_ready_partition() {
+    use crate::rsm::facade::PopOptions;
+    let _one = ONE_AT_A_TIME.lock().await;
+    let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("autopilot")).collect();
+    let ports = free_ports(3);
+    let mut hs = Vec::new();
+    for (i, d) in dirs.iter().enumerate() {
+        let (d, c) = (d.clone(), cluster_config(&ports, i as u64 + 1));
+        hs.push(tokio::task::spawn_blocking(move || open_facade(&d, c)));
+    }
+    let mut nodes = Vec::new();
+    for h in hs {
+        nodes.push(Arc::new(h.await.expect("open")));
+    }
+    let end = Instant::now() + Duration::from_secs(30);
+    let l = loop {
+        let leaders: Vec<usize> = (0..3)
+            .filter(|i| nodes[*i].health().role == "leader")
+            .collect();
+        if leaders.len() == 1 {
+            break leaders[0];
+        }
+        assert!(Instant::now() < end, "no single ready leader");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let leader = nodes[l].clone();
+    let follower = nodes[(l + 1) % 3].clone();
+    let ctx = || {
+        ReqCtx::new(
+            crate::config::DEFAULT_TENANT,
+            Deadline::after(Duration::from_secs(10)),
+        )
+    };
+    // Eight sparse partitions, three messages each, pushed through the leader.
+    for p in 0..8 {
+        let items: Vec<String> = (0..3)
+            .map(|i| {
+                format!(
+                    r#"{{"queue":"ap","partition":"p{p}","payload":{{"n":{i}}},"transactionId":"ap-{p}-{i}"}}"#
+                )
+            })
+            .collect();
+        leader
+            .push(
+                ctx(),
+                PushReq {
+                    raw: format!(r#"{{"items":[{}]}}"#, items.join(",")).into_bytes(),
+                },
+            )
+            .await
+            .expect("push");
+    }
+    // One autopilot pop through the follower: width and batch left to the
+    // broker, as an SDK sends it (`partitions` unset = 1 on the wire).
+    let out = follower
+        .pop_wildcard(
+            ctx(),
+            PopReq {
+                queue: "ap".into(),
+                group: Some("apg".into()),
+                batch: 200,
+                auto_ack: false,
+                wait: true,
+                timeout_ms: 5_000,
+                options: PopOptions {
+                    subscription_mode: "all".into(),
+                    max_parts: 1,
+                    auto_parts: true,
+                    auto_batch: true,
+                    ..PopOptions::default()
+                },
+            },
+        )
+        .await
+        .expect("autopilot pop through the follower");
+    let body = parse(&out.body);
+    assert_eq!(
+        body["messages"].as_array().map(Vec::len),
+        Some(24),
+        "every ready partition in one pop: {body}"
+    );
+    assert_eq!(body["autopilot"]["partitions"], 8, "{body}");
     drop((follower, leader));
     for n in nodes {
         close_facade(n).await;

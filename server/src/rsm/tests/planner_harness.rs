@@ -10,10 +10,12 @@
 //! construction: the planner writes nothing, apply writes everything).
 //!
 //! The applier is re-opened per apply on purpose: `Applier::open` runs §11.5
-//! recovery and rebuilds the derived rings from committed `pending`, which is
-//! the same state the planner rebuilds to plan the next cycle — so the two can
-//! never drift on a stale in-RAM ring. It also sidesteps a self-referential
-//! borrow of the store.
+//! recovery over the committed state the planner reads to plan the next cycle.
+//! It also sidesteps a self-referential borrow of the store.
+//!
+//! No consumption is planned (the consumption engine serves it): a test moves
+//! a group's cursor the way the engine's checkpoints do, with an effect
+//! command ([`cursor_set`]).
 
 #![allow(dead_code)]
 
@@ -21,15 +23,14 @@ use std::sync::Arc;
 
 use crate::rsm::apply::{Applier, Committed as ApplyCommitted, NoNotify, StateDigest};
 use crate::rsm::dedup::DedupFront;
-use crate::rsm::effect::{CursorRow, Pid, QueueConfig};
+use crate::rsm::effect::{CursorRow, Effect, GarbageScope, Pid, QueueConfig};
 use crate::rsm::entry::{Entry, Outcome, RequestId};
 use crate::rsm::planner::timers::{FireReport, TimerFireConfig, TimersCommand};
+use crate::rsm::planner::txn::TxnCommand;
 use crate::rsm::planner::{
-    AckCommand, AckItem, AckPositionalCommand, AckStatus, AckTarget, DlqHeadCommand, DlqSnapshot,
-    KvCommand, NackCommand, Overlay, Plan, PlanConfig, Planned, Planner, PopCommand, PushCommand,
-    PushItem, RenewCommand, SubIntent,
+    EffectsCommand, KvCommand, Overlay, Plan, PlanConfig, Planned, Planner, PushCommand, PushItem,
 };
-use crate::rsm::state::{Committed, Derived};
+use crate::rsm::state::Committed;
 use crate::rsm::store::keys::Counter;
 use crate::rsm::store::rows::{DlqRow, PartitionRow};
 use crate::rsm::store::{Reads, Store, TypedReads};
@@ -86,14 +87,9 @@ pub fn qcfg() -> QueueConfig {
 #[derive(Clone, Debug)]
 pub enum Cmd {
     Push(PushCommand),
-    PopPinned(PopCommand),
-    PopWildcard(PopCommand),
-    PopDiscover(PopCommand),
-    Ack(AckCommand),
-    AckPos(AckPositionalCommand),
-    Nack(NackCommand),
-    Renew(RenewCommand),
-    DlqHead(DlqHeadCommand),
+    /// Deterministic effects: a catalog change, or cursor rows as the
+    /// consumption engine's checkpoints write them.
+    Effects(EffectsCommand),
     /// A KV call (WP-2.2).
     Kv(KvCommand),
     /// One leader KV expiry step, planned exactly as the batcher plans it (a
@@ -104,35 +100,27 @@ pub enum Cmd {
     },
     /// WP-2.3: a timers call (schedule / cancel).
     Timers(TimersCommand),
+    /// A transaction: pushes, KV, timers, positions on new partitions, and
+    /// the consumption engine's riders.
+    Txn(TxnCommand),
 }
 
 impl Cmd {
     fn request_id(&self) -> RequestId {
         match self {
             Cmd::Push(c) => c.request_id,
-            Cmd::PopPinned(c) | Cmd::PopWildcard(c) | Cmd::PopDiscover(c) => c.request_id,
-            Cmd::Ack(c) => c.request_id,
-            Cmd::AckPos(c) => c.request_id,
-            Cmd::Nack(c) => c.request_id,
-            Cmd::Renew(c) => c.request_id,
-            Cmd::DlqHead(c) => c.request_id,
+            Cmd::Effects(c) => c.request_id,
             Cmd::Kv(c) => c.request_id,
             Cmd::KvSweep { id, .. } => rid(*id),
             Cmd::Timers(c) => c.request_id,
+            Cmd::Txn(c) => c.request_id,
         }
     }
 
     fn plan<R: Reads + ?Sized>(&self, p: &Planner<'_, R>, ov: &mut Overlay) -> Planned {
         match self {
             Cmd::Push(c) => p.plan_push(ov, c),
-            Cmd::PopPinned(c) => p.plan_pop_pinned(ov, c),
-            Cmd::PopWildcard(c) => p.plan_pop_wildcard(ov, c),
-            Cmd::PopDiscover(c) => p.plan_pop_discover(ov, c),
-            Cmd::Ack(c) => p.plan_ack(ov, c),
-            Cmd::AckPos(c) => p.plan_ack_positional(ov, c),
-            Cmd::Nack(c) => p.plan_nack(ov, c),
-            Cmd::Renew(c) => p.plan_renew(ov, c),
-            Cmd::DlqHead(c) => p.plan_dlq_head(ov, c),
+            Cmd::Effects(c) => p.plan_effects(ov, c),
             Cmd::Kv(c) => p.plan_kv(ov, c),
             Cmd::KvSweep { limit, .. } => {
                 let effects = p.plan_kv_sweep(ov, *limit)?;
@@ -147,6 +135,7 @@ impl Cmd {
                 }
             }
             Cmd::Timers(c) => p.plan_timers(ov, c),
+            Cmd::Txn(c) => p.plan_transaction(ov, c),
         }
     }
 }
@@ -181,163 +170,87 @@ pub fn push_cfg(id: u64, queue: &str, partition: &str, txns: &[&str], cfg: Queue
     })
 }
 
-fn pop_base(id: u64, queue: &str, group: &str, worker: &str) -> PopCommand {
-    PopCommand {
-        wait: false,
-        request_id: rid(id),
-        tenant: TENANT.to_string(),
-        queue: queue.to_string(),
-        partition: None,
-        group: group.to_string(),
-        worker: worker.to_string(),
-        budget: 100,
-        max_parts: 10,
-        lease_seconds: 60,
-        auto_ack: false,
-        conflate: false,
-        sub: SubIntent {
-            mode: "all".to_string(),
-            from_us: None,
-            now: false,
-        },
-        skip_window_debounce: false,
-        namespace: String::new(),
-        task: String::new(),
-        create_cfg: Some(qcfg()),
-        deadline_us: 0,
+/// A group's cursor row as the consumption engine checkpoints it: the last
+/// acked offset `committed`, no lease.
+pub fn cursor_row(committed: i64) -> CursorRow {
+    CursorRow {
+        committed,
+        batch_end: None,
+        worker: None,
+        lease_expires_at_us: None,
+        lease_acquired_at_us: None,
+        batch_retry_count: 0,
+        attempt_offset: None,
+        attempt_count: 0,
+        total_consumed: 0,
+        lease_conflated: false,
+        delivered: Vec::new(),
+        created_at_us: BASE_US,
+        metadata: String::new(),
     }
 }
 
-pub fn pop_pinned(id: u64, queue: &str, partition: &str, group: &str, worker: &str) -> Cmd {
-    let mut c = pop_base(id, queue, group, worker);
-    c.partition = Some(partition.to_string());
-    Cmd::PopPinned(c)
-}
-
-pub fn pop_wildcard(id: u64, queue: &str, group: &str, worker: &str) -> Cmd {
-    Cmd::PopWildcard(pop_base(id, queue, group, worker))
-}
-
-/// A wildcard pop the builder hands to the test to tweak (budget, sub, auto_ack…).
-pub fn pop_wildcard_with(
-    id: u64,
-    queue: &str,
-    group: &str,
-    worker: &str,
-    f: impl FnOnce(&mut PopCommand),
-) -> Cmd {
-    let mut c = pop_base(id, queue, group, worker);
-    f(&mut c);
-    Cmd::PopWildcard(c)
-}
-
-pub fn pop_pinned_with(
-    id: u64,
-    queue: &str,
-    partition: &str,
-    group: &str,
-    worker: &str,
-    f: impl FnOnce(&mut PopCommand),
-) -> Cmd {
-    let mut c = pop_base(id, queue, group, worker);
-    c.partition = Some(partition.to_string());
-    f(&mut c);
-    Cmd::PopPinned(c)
-}
-
-pub fn ack(
-    id: u64,
-    pid: Pid,
-    queue: &str,
-    group: &str,
-    worker: &str,
-    items: &[(&str, AckStatus)],
-) -> Cmd {
-    Cmd::Ack(AckCommand {
+/// Deterministic effects as one command.
+pub fn effects(id: u64, effects: Vec<Effect>) -> Cmd {
+    Cmd::Effects(EffectsCommand {
         request_id: rid(id),
-        targets: vec![AckTarget {
+        tenant: TENANT.to_string(),
+        effects,
+    })
+}
+
+/// A checkpoint of one cursor: `group` has acked `pid` up to `committed`.
+pub fn cursor_set(id: u64, pid: Pid, group: &str, committed: i64) -> Cmd {
+    effects(
+        id,
+        vec![Effect::CursorSet {
             pid,
-            tenant: TENANT.to_string(),
-            queue: queue.to_string(),
             group: group.to_string(),
-            worker: worker.to_string(),
-            items: items
-                .iter()
-                .map(|(t, s)| AckItem {
-                    hash: crate::util::txn_hash128(t),
-                    status: *s,
-                    error: None,
-                    snapshot: matches!(s, AckStatus::Failed | AckStatus::Dlq).then(|| {
-                        DlqSnapshot {
-                            message_id: None,
-                            txn: t.to_string(),
-                            payload: frame(t),
-                        }
-                    }),
-                })
-                .collect(),
+            row: cursor_row(committed),
         }],
-    })
+    )
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn ack_pos(
-    id: u64,
-    pid: Pid,
-    queue: &str,
-    group: &str,
-    worker: &str,
-    upto: Option<i64>,
-    ok: bool,
-    acked_count: i32,
-) -> Cmd {
-    ack_pos_with_release(id, pid, queue, group, worker, upto, ok, true, acked_count)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn ack_pos_with_release(
-    id: u64,
-    pid: Pid,
-    queue: &str,
-    group: &str,
-    worker: &str,
-    upto: Option<i64>,
-    ok: bool,
-    release_lease: bool,
-    acked_count: i32,
-) -> Cmd {
-    Cmd::AckPos(AckPositionalCommand {
+/// An empty transaction (fill in the legs a test needs).
+pub fn txn(id: u64) -> TxnCommand {
+    TxnCommand {
         request_id: rid(id),
-        pid,
         tenant: TENANT.to_string(),
-        queue: queue.to_string(),
-        group: group.to_string(),
-        worker: worker.to_string(),
-        upto,
-        ok,
-        release_lease,
-        acked_count,
-    })
+        pushes: Vec::new(),
+        acks: Vec::new(),
+        positional_acks: Vec::new(),
+        kv: Vec::new(),
+        timers: Vec::new(),
+        extra_effects: Vec::new(),
+        allow_duplicate: false,
+        positions: Vec::new(),
+        engine_acks: Default::default(),
+    }
 }
 
-pub fn nack(id: u64, pid: Pid, queue: &str, group: &str, worker: &str) -> Cmd {
-    Cmd::Nack(NackCommand {
-        request_id: rid(id),
-        pid,
-        tenant: TENANT.to_string(),
-        queue: queue.to_string(),
-        group: group.to_string(),
-        worker: worker.to_string(),
-    })
-}
-
-pub fn renew(id: u64, worker: &str, seconds: i32) -> Cmd {
-    Cmd::Renew(RenewCommand {
-        request_id: rid(id),
-        tenant: None,
-        worker: worker.to_string(),
-        seconds,
-    })
+/// A queue delete as the receiver writes it: the queue row, and every one of
+/// its partitions (`pids`) to garbage with a first chunk.
+pub fn delete_queue(id: u64, queue: &str, pids: &[Pid]) -> Cmd {
+    effects(
+        id,
+        vec![
+            Effect::QueueDelete {
+                tenant: TENANT.to_string(),
+                queue: queue.to_string(),
+            },
+            Effect::GarbageAdd {
+                pids: pids.to_vec(),
+                scope: GarbageScope::Queue,
+                deleted_at_us: BASE_US,
+            },
+            Effect::DeleteChunk {
+                pids: pids.to_vec(),
+                scope: GarbageScope::Queue,
+                resume: Vec::new(),
+                limit: 1_000,
+            },
+        ],
+    )
 }
 
 // --------------------------------------------------------------------------
@@ -353,13 +266,6 @@ pub struct Cell {
     /// default so existing tests plan precisely as the baseline; `enable_front`
     /// turns it on for the PERF-B tests.
     front: DedupFront,
-    /// `QUEEN_RAFT_CLAIM_FROM_RING` override for this cell (PERF-I): `None` uses
-    /// the environment default (on), `Some(v)` forces the bounded/ baseline claim
-    /// path so the differential A/B runs both in one process.
-    claim_from_ring: Option<bool>,
-    /// The planner's `PlanConfig::term_start_us` (a leader's term began then):
-    /// `None`, as in every test that does not set it.
-    term_start: Option<i64>,
 }
 
 /// What one [`Cell::run`] produced: the per-command results in input order, and
@@ -393,15 +299,7 @@ impl Cell {
             term: 1,
             wall: BASE_US,
             front: DedupFront::disabled(),
-            claim_from_ring: None,
-            term_start: None,
         }
-    }
-
-    /// Force the PERF-I claim path for this cell (the differential A/B).
-    pub fn claim_from_ring(&mut self, v: bool) -> &mut Cell {
-        self.claim_from_ring = Some(v);
-        self
     }
 
     /// Turn the dedup front on for this cell (PERF-B tests). `cap_mb` bounds the
@@ -414,12 +312,6 @@ impl Cell {
     /// The cell's persistent dedup front, for asserting on its stats.
     pub fn front(&self) -> &DedupFront {
         &self.front
-    }
-
-    /// Plan as a leader whose term began at `t` (`PlanConfig::term_start_us`).
-    pub fn set_term_start(&mut self, t: Option<i64>) -> &mut Cell {
-        self.term_start = t;
-        self
     }
 
     /// Advance the wall clock the planner stamps from.
@@ -497,26 +389,15 @@ impl Cell {
         self.node
             .store()
             .read(|r| {
-                let d0 = Derived::default();
-                let base = Committed::new(r, &d0).plan_now(wall)?;
-                let d = Derived::rebuild(r, base)?;
-                let committed = Committed::new(r, &d);
+                let committed = Committed::new(r);
                 let mut ov = Overlay::new(r.next_pid()?, r.kv_version_next()?);
                 for e in in_flight {
                     ov.ingest_entry(e);
                 }
                 let now = ov.plan_now(&committed, wall).expect("plan now");
                 ov.mark_cycle_start();
-                let planner = Planner::new(
-                    committed,
-                    now,
-                    PlanConfig {
-                        term_start_us: self.term_start,
-                        ..PlanConfig::default()
-                    },
-                    &self.front,
-                    None,
-                );
+                let planner =
+                    Planner::new(committed, now, PlanConfig::default(), &self.front, None);
                 let (effects, report) = planner.plan_timer_fire(&mut ov, fire).expect("fire");
                 Ok((report, effects))
             })
@@ -558,25 +439,12 @@ impl Cell {
         self.node
             .store()
             .read(|r| {
-                let d0 = Derived::default();
-                let now = Committed::new(r, &d0).plan_now(wall)?;
-                let d = Derived::rebuild(r, now)?;
-                let committed = Committed::new(r, &d);
+                let committed = Committed::new(r);
+                let now = committed.plan_now(wall)?;
                 let mut ov = Overlay::new(r.next_pid()?, r.kv_version_next()?);
                 ov.mark_cycle_start();
-                let mut planner = Planner::new(
-                    committed,
-                    now,
-                    PlanConfig {
-                        term_start_us: self.term_start,
-                        ..PlanConfig::default()
-                    },
-                    &self.front,
-                    None,
-                );
-                if let Some(v) = self.claim_from_ring {
-                    planner.set_claim_from_ring(v);
-                }
+                let planner =
+                    Planner::new(committed, now, PlanConfig::default(), &self.front, None);
 
                 // §7.1 step 3: the request-id lookup FIRST (D6, I6). A committed
                 // or in-flight hit is answered from the recorded outcome and

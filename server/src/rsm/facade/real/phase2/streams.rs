@@ -230,6 +230,7 @@ impl RaftFacade {
             extra_effects: extra,
             allow_duplicate: false,
             positions: Vec::new(),
+            engine_acks: Default::default(),
         });
         let out = match self.submit(&ctx, cmd).await? {
             Reply::Done { outcome, .. } => crate::rsm::batcher::TxnOutcome::from_outcome(&outcome)

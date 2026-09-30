@@ -114,7 +114,6 @@ use crate::rsm::effect::{Assigns, CodecError, Effect, GarbageScope, Kind, Pid};
 use crate::rsm::entry::{CommandRecord, Entry, Outcome, RequestId};
 use crate::rsm::qlog::set::QLogSet;
 use crate::rsm::segments::{self, FileState, Position, Release, SegError, Segments};
-use crate::rsm::state::Derived;
 use crate::rsm::store::keys::{self, Counter};
 use crate::rsm::store::rows::{self, FileRow, GarbageRow, GroupRow, SegLocRow};
 use crate::rsm::store::{
@@ -476,6 +475,14 @@ pub trait Notify: Send + Sync {
     /// `QUEEN_RAFT_APPLY_SKIP` checks. It must not block (a file write of a
     /// few hundred bytes is the most it may do).
     fn failed(&self, _failure: &ApplyFailure) {}
+
+    /// The consumption engine of the facade this apply feeds
+    /// ([`crate::rsm::consume`]): apply hands it every append and catalog
+    /// effect. Resolved once when apply starts; `None` when there is no
+    /// engine (boot before the seam, most apply tests).
+    fn engine(&self) -> Option<Arc<crate::rsm::consume::Engine>> {
+        None
+    }
 }
 
 /// Why apply stopped this node at one entry, as the operator needs it: which
@@ -664,28 +671,6 @@ pub struct ApplyConfig {
     /// read-modify-write. Also gates the per-transaction group-list cache that
     /// serves the append path's `scan_groups` (same lifetime, same transparency).
     pub batch_counters: bool,
-    /// `QUEEN_RAFT_PENDING_TRANSITIONS` (PERF-D/PERF-H, §6.1). ON: the append
-    /// path maintains a partition's `pending.ready_at` for a group at the
-    /// EARLIEST wall-time it could yield a claim — a live lease floors it at the
-    /// lease expiry (a fresh frame arms the partition for AFTER the lease, never
-    /// under it), and the row is written only on a TRANSITION (no row yet, or the
-    /// floored `ready_at` is earlier than the stored one), not on every append.
-    /// The derived ring is moved on exactly those transitions and apply promotes
-    /// due deadlines at each entry boundary, so a rebuild from `pending`
-    /// reproduces the live ring at any boundary. This is the CORRECT maintenance:
-    /// the OFF path overwrites `ready_at` on every append and never floors it at
-    /// a lease, so a delayed or leased queue can push an already-claimable
-    /// partition into the future (an under-arm the claim then papers over).
-    ///
-    /// PERF-H proved ON correct (never under-arms), rebuild-equal at every
-    /// boundary, cadence-independent (the I2 test) and crash-safe. It is
-    /// nonetheless shipped OFF (DEFAULT) for one
-    /// reason and it is NOT correctness: ON changes the value the replicated
-    /// `pending` keyspace holds (earliest, not last), so the §12.9 digest moves,
-    /// and every differential/crash reference that runs `cfg()` alongside a node
-    /// on `default()` must flip in the same commit. That lockstep flip of the
-    /// shared test config is a coordinated change; the knob makes it one line.
-    pub pending_transitions: bool,
     /// `QUEEN_RAFT_QLOG` (`ALICE_PGLESS_NEWARCH.md` Phase A1 write / A2 read).
     /// OFF (default): exactly today's behaviour — apply keeps no per-queue log
     /// and touches no `qlog/` directory. ON: apply writes every `Append` into its
@@ -759,22 +744,8 @@ impl Default for ApplyConfig {
             apply_writers: 0,
             // PERF-D: counter batching is transparent, so it is on everywhere
             // (unit tests included) — a test that reads a counter after a commit
-            // sees the same value either way. PERF-H: pending-transitions is the
-            // CORRECT `pending.ready_at` maintenance and is PROVEN ready to be
-            // the default — never arms later than an already-claimable partition,
-            // floors a leased partition at its lease expiry, rebuild-equal at
-            // every entry boundary, cadence-independent and crash-safe (the
-            // tests below). It is still shipped OFF for ONE reason, and it is not
-            // correctness: turning it on changes the value the replicated
-            // `pending` keyspace holds (the earliest `ready_at`, not the last),
-            // so the whole differential suite — the planner/batcher/replicator
-            // reference runs that compare against `run_workload`/`cfg()` — must
-            // flip in the SAME commit or the crash/replay references diverge.
-            // That lockstep flip of the shared test config is a coordinated
-            // change, not a mid-round unilateral one; the knob makes it a
-            // one-line switch when the package lands.
+            // sees the same value either way.
             batch_counters: true,
-            pending_transitions: true, // PLAN_RAFT_DRAIN_FIX P2.1: ON by default
             // Phase C: the per-queue logs ARE the WAL — on by default
             // (`QUEEN_RAFT_QLOG=0` keeps the pre-qlog raft-log path).
             qlog: true,
@@ -832,7 +803,6 @@ impl ApplyConfig {
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or_else(default_apply_writers),
             batch_counters: flag("QUEEN_RAFT_BATCH_COUNTERS", d.batch_counters),
-            pending_transitions: flag("QUEEN_RAFT_PENDING_TRANSITIONS", d.pending_transitions),
             qlog: flag("QUEEN_RAFT_QLOG", d.qlog),
             // Set by the `LocalReplicator` boot, never from the environment: the
             // storage seam decides who owns the qlog, not a knob.
@@ -950,10 +920,6 @@ pub struct Recovered {
     pub replay_after: u64,
     /// What the segment tree did: truncations, deletions, rebuilt indexes.
     pub segments: segments::Recovery,
-    /// Ready rings and live leases rebuilt from `pending` and
-    /// `leases_by_worker` (§6.3, O(work outstanding), never O(retained)).
-    pub rings: usize,
-    pub leases: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -984,88 +950,6 @@ struct CounterCache {
     adds: HashMap<Box<[u8]>, i64, crate::rsm::fasthash::FxBuild>,
     /// Stamp maxima since the last flush, by counter key.
     stamps: HashMap<Box<[u8]>, i64, crate::rsm::fasthash::FxBuild>,
-}
-
-/// The live lease of each leased (partition, group), one index per shard
-/// holding its pids' ([`Shard::leases`]).
-///
-/// A partition has a handful of groups, so each pid keeps a short list and a
-/// lookup is one hash probe plus a comparison or two, with no allocation. It is
-/// only ever LOOKED UP by (pid, group), never iterated in an order that could
-/// reach state, so the hash map does not break I2.
-#[derive(Debug, Default)]
-struct LeaseIndex {
-    at: HashMap<Pid, Vec<(Box<str>, i64)>, crate::rsm::fasthash::FxBuild>,
-}
-
-impl LeaseIndex {
-    /// Every live lease, from `leases_by_worker` (O(live leases)).
-    fn rebuild<R: Reads + ?Sized>(reads: &R) -> crate::rsm::store::Result<LeaseIndex> {
-        let mut idx = LeaseIndex::default();
-        let mut bad = false;
-        reads.scan_raw(
-            Keyspace::LeasesByWorker,
-            &[],
-            &[],
-            usize::MAX,
-            &mut |k, v| match (keys::leases_by_worker_parts(k), rows::i64_decode(v)) {
-                (Some((_worker, pid, group)), Ok(at)) => {
-                    idx.note(pid, &group, at);
-                    true
-                }
-                _ => {
-                    bad = true;
-                    false
-                }
-            },
-        )?;
-        if bad {
-            return Err(StoreError::corrupt(Keyspace::LeasesByWorker, "lease row"));
-        }
-        Ok(idx)
-    }
-
-    fn note(&mut self, pid: Pid, group: &str, expires_at_us: i64) {
-        let list = self.at.entry(pid).or_default();
-        match list.iter_mut().find(|(g, _)| &**g == group) {
-            Some(slot) => slot.1 = expires_at_us,
-            None => list.push((Box::from(group), expires_at_us)),
-        }
-    }
-
-    fn clear(&mut self, pid: Pid, group: &str) {
-        if let Some(list) = self.at.get_mut(&pid) {
-            list.retain(|(g, _)| &**g != group);
-            if list.is_empty() {
-                self.at.remove(&pid);
-            }
-        }
-    }
-
-    fn forget_partition(&mut self, pid: Pid) {
-        self.at.remove(&pid);
-    }
-
-    fn expiry(&self, pid: Pid, group: &str) -> Option<i64> {
-        self.at
-            .get(&pid)?
-            .iter()
-            .find(|(g, _)| &**g == group)
-            .map(|(_, at)| *at)
-    }
-
-    fn len(&self) -> usize {
-        self.at.values().map(Vec::len).sum()
-    }
-
-    /// One index per shard, each holding the leases of that shard's pids.
-    fn split(self, shards: usize) -> Vec<LeaseIndex> {
-        let mut out: Vec<LeaseIndex> = (0..shards).map(|_| LeaseIndex::default()).collect();
-        for (pid, list) in self.at {
-            out[shard_of(pid, shards)].at.insert(pid, list);
-        }
-        out
-    }
 }
 
 impl CounterCache {
@@ -1268,6 +1152,9 @@ pub struct Applier<'s, S: Store> {
     local_metrics: Arc<crate::rsm::local_metrics::LocalMetrics>,
     cfg: ApplyConfig,
     notify: Arc<dyn Notify>,
+    /// The consumption engine this apply feeds ([`Notify::engine`], resolved
+    /// once at open): appends and catalog effects are reported to it.
+    engine: Option<Arc<crate::rsm::consume::Engine>>,
 
     /// PERF-D: the counter overlay of the effects the apply thread executes
     /// itself (the global ones), §6.4. Each shard keeps its own
@@ -1275,12 +1162,9 @@ pub struct Applier<'s, S: Store> {
     /// all of them, and every commit and durable point flushes all of them.
     counters: CounterCache,
     /// The shards of `QUEEN_RAFT_APPLY_SHARDS` (one or more): each owns the
-    /// counter overlay of its pids' effects, the live leases of its pids (the
-    /// append path floors a leased partition's `pending.ready_at` at them;
-    /// rebuilt at open from `leases_by_worker`, so they read the same on every
-    /// node, I2), its queue cache (B41: groups and delays, kept across commits
-    /// and invalidated by every catalogue write) and the entry's wake counts.
-    /// Shard `pid % shards` owns pid's.
+    /// counter overlay of its pids' effects, its queue cache (B41: groups,
+    /// kept across commits and invalidated by every catalogue write) and the
+    /// entry's wake counts. Shard `pid % shards` owns pid's.
     shards: Vec<Shard>,
     /// The pid-keyed effects of the entry waiting for the next global effect
     /// (sharded apply only; empty with one shard).
@@ -1536,25 +1420,14 @@ impl<'s, S: Store> Applier<'s, S> {
         if dedup::record_index_mode() == dedup::IndexMode::Segment {
             segments.retain_active_hashes(true);
         }
-        let leases_index = store.read(|r| LeaseIndex::rebuild(r))?;
         let data_dir = seg_root
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
         let local_metrics = crate::rsm::local_metrics::open(data_dir.join("local.db"))
             .map_err(ApplyError::LocalMetrics)?;
-        // Apply keeps no ready rings (the planner keeps its own): what recovery
-        // reports is the `pending` rows the planner's rings rebuild from.
-        let rings = store.read(|r| r.count(Keyspace::Pending))? as usize;
-        let leases = leases_index.len();
         let nshards = cfg.apply_shards.max(1);
-        let shards: Vec<Shard> = leases_index
-            .split(nshards)
-            .into_iter()
-            .map(|leases| {
-                let mut s = Shard::new(cfg.batch_counters, max_created_at_us);
-                s.leases = leases;
-                s
-            })
+        let shards: Vec<Shard> = (0..nshards)
+            .map(|_| Shard::new(cfg.batch_counters, max_created_at_us))
             .collect();
         // A store that cannot hand out shard writers (one with a keyspace
         // outside RAM) runs every run on this thread; probed once here, so a
@@ -1609,6 +1482,7 @@ impl<'s, S: Store> Applier<'s, S> {
             key: Vec::with_capacity(64),
             req_row: Vec::with_capacity(256),
             cfg,
+            engine: notify.engine(),
             notify,
             applied_index,
             applied_term,
@@ -1637,8 +1511,6 @@ impl<'s, S: Store> Applier<'s, S> {
             durable_index,
             replay_after: durable_index,
             segments: seg_recovery,
-            rings,
-            leases,
         };
         tracing::info!(
             target: "rsm",
@@ -1651,8 +1523,6 @@ impl<'s, S: Store> Applier<'s, S> {
             rescanned = rec.segments.rescanned.len(),
             verified = rec.segments.verified.len(),
             scanned_frames = rec.segments.scanned_frames,
-            rings,
-            leases,
             shards = applier.shards.len(),
             shard_threads = applier.pool.as_ref().map_or(0, |p| p.workers()),
             "rsm apply recovered",
@@ -1686,15 +1556,6 @@ impl<'s, S: Store> Applier<'s, S> {
     /// `(runs executed on the shard threads, runs executed on this thread)`.
     pub fn run_counts(&self) -> (u64, u64) {
         (self.runs[0], self.runs[1])
-    }
-
-    /// The rings and lease deadlines a rebuild from committed state gives at the
-    /// last applied stamp. Apply keeps no rings of its own any more (see
-    /// [`Applier::leases`]); tests that inspect "the rings" read the `pending`
-    /// and `leases_by_worker` rows they were a mirror of, through this rebuild.
-    pub fn derived(&self) -> Derived {
-        Derived::rebuild(&self.writes, self.last_now_us)
-            .expect("rebuild the derived rings from committed state")
     }
 
     /// The read side of the segment files, for the blocking pool (§9.4). A
@@ -2074,6 +1935,11 @@ impl<'s, S: Store> Applier<'s, S> {
             }
             self.failed_effect = Some(o);
             self.effect(&ecx, o, e)?;
+            // The consumption engine drops or refreshes what a catalog effect
+            // names (the pid-keyed ones report from their shard).
+            if let (Some(en), None) = (&self.engine, shard::pid_keyed(e)) {
+                en.on_effect(e, ecx.index);
+            }
             if let Some(cmds) = kv_render.get(&o) {
                 self.render_kv_reads(c, cmds);
             }
@@ -2452,6 +2318,7 @@ impl<'s, S: Store> Applier<'s, S> {
                 wants_appended: ecx.wants_appended,
                 wants_append_wakes: ecx.wants_append_wakes,
                 positions: &self.positions,
+                engine: self.engine.as_ref(),
             };
             let ords = &self.run.ords;
             let busy = ords.iter().filter(|o| !o.is_empty()).count();
@@ -2565,6 +2432,7 @@ impl<'s, S: Store> Applier<'s, S> {
             wants_appended: ecx.wants_appended,
             wants_append_wakes: ecx.wants_append_wakes,
             positions: &[],
+            engine: self.engine.as_ref(),
         };
         let mut side = shard::Side::Inline {
             segments: &mut self.segments,
@@ -2692,16 +2560,10 @@ impl<'s, S: Store> Applier<'s, S> {
                 // The queue's group set changed; the append path's cached
                 // list must be read again (every shard's).
                 self.invalidate_queue(tenant, queue);
-                // A NEW group with a backlog to find (`all`/`timestamp`, queue
-                // mode included) must see the partitions that PREDATE it. Their
-                // appends wrote no `pending` row for a group that did not exist,
-                // and the wildcard first contact enumerates them for ONE pop
-                // only — so every partition that pop did not claim was stranded
-                // until its next append (a push-then-consume queue drained one
-                // partition and stopped). Arm them all now: `ready_at` early is
-                // harmless (the claim re-verifies, the ring law); late strands.
-                if existed.is_none() && meta.mode != crate::rsm::effect::SubscriptionMode::New {
-                    self.arm_predating_partitions(tenant, queue, group, meta.mode, now_us)?;
+                // A NEW `all` group starts at the retained floor: its `pending`
+                // gauge carries the backlog it inherited.
+                if existed.is_none() && meta.mode == crate::rsm::effect::SubscriptionMode::All {
+                    self.inherit_backlog(tenant, queue, group)?;
                 }
                 Ok(())
             }
@@ -2711,8 +2573,6 @@ impl<'s, S: Store> Applier<'s, S> {
                 group,
             } => {
                 self.writes.del_group(tenant, queue, group)?;
-                let prefix = keys::pending_prefix(tenant, queue, group);
-                self.sweep(Keyspace::Pending, &prefix)?;
                 // The group's COUNTERS go with its name (§6.4): they are the
                 // lag inputs of a group that no longer exists, and the name is
                 // reusable at once (§5.2) — a group recreated under it would
@@ -2778,15 +2638,12 @@ impl<'s, S: Store> Applier<'s, S> {
                     self.writes.put_garbage(*pid, &row)?;
                     if !matches!(scope, GarbageScope::Group { .. }) {
                         // Readers and planners ignore a garbage pid from this
-                        // point (§5.2 rules), so it leaves the rings now and
-                        // not when the last chunk lands.
-                        let s = shard_of(*pid, self.shards.len());
-                        self.shards[s].leases.forget_partition(*pid);
-                        // And its share of every surviving group's `pending`
-                        // gauge goes now, while the cursors are still here to
-                        // say what that share is: the chunks that follow
-                        // delete them one stage at a time, and by the time the
-                        // partition row goes there is nothing left to read.
+                        // point (§5.2 rules), so its share of every surviving
+                        // group's `pending` gauge goes now, while the cursors
+                        // are still here to say what that share is: the chunks
+                        // that follow delete them one stage at a time, and by
+                        // the time the partition row goes there is nothing left
+                        // to read.
                         self.settle_group_pending(*pid)?;
                     }
                 }
@@ -3078,19 +2935,11 @@ impl<'s, S: Store> Applier<'s, S> {
 
     // -- groups ------------------------------------------------------------
 
-    /// Arm, for a just-registered group, every partition of the queue that
-    /// already holds frames (see the `GroupUpsert` arm): one `pending` row at
-    /// `now_us` each, in pid order (deterministic, I2), and — for `all`, whose
-    /// seed is the retained floor — the group's pending counter carries the
-    /// backlog it inherited. O(partitions), once per group registration.
-    fn arm_predating_partitions(
-        &mut self,
-        tenant: &str,
-        queue: &str,
-        group: &str,
-        mode: crate::rsm::effect::SubscriptionMode,
-        now_us: i64,
-    ) -> Result<()> {
+    /// A just-registered `all` group (see the `GroupUpsert` arm) is seeded at
+    /// the retained floor of every partition of the queue: its pending counter
+    /// carries the backlog it inherited. In pid order (deterministic, I2),
+    /// O(partitions), once per group registration.
+    fn inherit_backlog(&mut self, tenant: &str, queue: &str, group: &str) -> Result<()> {
         let mut pids: Vec<Pid> = Vec::new();
         self.writes
             .scan_queue_partitions(tenant, queue, None, usize::MAX, &mut |pid| {
@@ -3105,10 +2954,7 @@ impl<'s, S: Store> Applier<'s, S> {
             if p.last_offset < p.log_start as i64 {
                 continue; // nothing retained to find
             }
-            self.writes.put_pending(tenant, queue, group, pid, now_us)?;
-            if mode == crate::rsm::effect::SubscriptionMode::All {
-                inherited += p.last_offset + 1 - p.log_start as i64;
-            }
+            inherited += p.last_offset + 1 - p.log_start as i64;
         }
         if inherited > 0 {
             self.ctr_add(
@@ -3303,8 +3149,6 @@ impl<'s, S: Store> Applier<'s, S> {
             })?;
         for g in &groups {
             self.writes.del_group(tenant, queue, g)?;
-            let prefix = keys::pending_prefix(tenant, queue, g);
-            self.sweep(Keyspace::Pending, &prefix)?;
         }
         // The queue and its group set are gone (every shard's cache).
         self.invalidate_queue(tenant, queue);
@@ -3338,7 +3182,7 @@ impl<'s, S: Store> Applier<'s, S> {
             self.settle_group_pending(pid)?;
         }
 
-        // cursors, their leases and their pending rows
+        // cursors and their lease index rows
         let mut cursors: Vec<(String, Option<String>)> = Vec::new();
         self.writes.scan_cursors(pid, usize::MAX, &mut |g, c| {
             cursors.push((g.to_string(), c.worker.clone()));
@@ -3349,7 +3193,6 @@ impl<'s, S: Store> Applier<'s, S> {
                 self.writes.del_lease(w, pid, g)?;
             }
             self.writes.del_cursor(pid, g)?;
-            self.writes.del_pending(&tenant, &queue, g, pid)?;
         }
 
         // dead letters filed against it
@@ -3411,8 +3254,6 @@ impl<'s, S: Store> Applier<'s, S> {
 
         self.writes.del_partition(pid, &p)?;
         self.writes.del_garbage(pid)?;
-        let s = shard_of(pid, self.shards.len());
-        self.shards[s].leases.forget_partition(pid);
         Ok(())
     }
 
@@ -3639,7 +3480,7 @@ impl<'s, S: Store> Applier<'s, S> {
         Ok((n, next))
     }
 
-    /// Cursors, with their `leases_by_worker` and `pending` twins.
+    /// Cursors, with their `leases_by_worker` twins.
     fn sweep_cursors(
         &mut self,
         pid: Pid,
@@ -3660,16 +3501,9 @@ impl<'s, S: Store> Applier<'s, S> {
                 }
                 true
             })?;
-        let names = self
-            .writes
-            .partition(pid)?
-            .map(|p| (p.tenant.clone(), p.queue.clone()));
         let s = shard_of(pid, self.shards.len());
         for g in &victims {
             self.shards[s].cursor_delete(&mut self.writes, pid, g)?;
-            if let Some((tenant, queue)) = &names {
-                self.writes.del_pending(tenant, queue, g, pid)?;
-            }
         }
         let next = if victims.len() == limit {
             victims.last().and_then(|g| {

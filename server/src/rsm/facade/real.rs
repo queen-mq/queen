@@ -11,7 +11,12 @@
 //!   segment [`segments::Reader`] the payload reads use (§7.5, D7);
 //! - a [`Batcher`] (§7.1), spawned as one tokio task, that drains commands,
 //!   plans, proposes and answers each receiver once its entry is committed AND
-//!   applied on this node (I4).
+//!   applied on this node (I4);
+//! - the consumption engine ([`crate::rsm::consume`]), which serves every pop,
+//!   ack, nack, renew, DLQ head and positional ack from the leader's memory
+//!   and checkpoints the cursors and leases through the batcher; the leader's
+//!   intake ([`super::intake`]) sends consumption there and the rest to the
+//!   batcher, for this node's clients and its followers' alike.
 //!
 //! # What the facade does, and where the line to the planner is
 //!
@@ -19,10 +24,10 @@
 //! message ids, hash transaction ids (`xxh3_128`), pack one frame per message
 //! (O20, the survivors' frames are concatenated by the planner, never
 //! repacked), build the typed [`Command`], submit it, and render the wire answer
-//! from the [`Outcome`] the batcher returns. It never plans and never writes
-//! committed state; the planner (`rsm/planner`) and apply (`rsm/apply`) own
-//! that. A pop's payload bytes are read from THIS node's own segment files after
-//! the claim applied locally (D7).
+//! from the [`Outcome`] the batcher or the engine returns. It never plans and
+//! never writes committed state; the planner (`rsm/planner`), the engine and
+//! apply (`rsm/apply`) own that. A pop's payload bytes are read from THIS
+//! node's own files once this node has applied what the claim covers (D7).
 //!
 //! Phase 2 adds transactions, KV, timers, streams, administration, dashboard
 //! reads, retention, metrics and compaction to that same committed-state seam.
@@ -102,10 +107,12 @@ const QUEUE_MODE_GROUP: &str = "__QUEUE_MODE__";
 /// Bridges [`Waker`] (called on the apply thread after an `Append` or a lease
 /// release) to the process [`Notifier`] parked pops wait on (§9.5). It replaces
 /// the mesh `MESSAGE_AVAILABLE` frame: a wake for `(tenant, queue, group)` wakes
-/// every pop parked on that queue's gate on this node.
+/// every pop parked on that queue's gate on this node. It also hands apply this
+/// facade's consumption engine ([`Waker::engine`]).
 struct NotifierWaker {
     notifier: Arc<Notifier>,
     gates: Arc<WaitGates>,
+    engine: Arc<crate::rsm::consume::Engine>,
 }
 
 impl Waker for NotifierWaker {
@@ -124,14 +131,8 @@ impl Waker for NotifierWaker {
         self.notifier.wake_local_hint(&qkey, "");
     }
 
-    /// An append made a partition claimable for `group`: on the leader the
-    /// plan-time wake (`batcher::PlanWaker`) already woke a pop for it and
-    /// left a token, which this spends; otherwise (a follower, a timer fire, a
-    /// token gone stale) it is the wake it always was.
-    fn wake_append(&self, tenant: &str, queue: &str, group: &str) {
-        self.gates.wake_applied_append(tenant, queue, group);
-        let qkey = crate::handlers::tenant_queue_key(tenant, queue);
-        self.notifier.wake_local_hint(&qkey, "");
+    fn engine(&self) -> Option<Arc<crate::rsm::consume::Engine>> {
+        Some(self.engine.clone())
     }
 
     fn wants_append_wakes(&self) -> bool {
@@ -169,22 +170,7 @@ struct WaitGates {
         std::collections::HashMap<(String, String), std::collections::HashMap<String, usize>>,
     >,
     pinned_total: std::sync::atomic::AtomicUsize,
-    /// Wakes already given at PLAN time (`batcher::PlanWaker`), per (tenant,
-    /// queue, group), and when: the apply-time wake of the same append spends
-    /// one instead of waking a second pop (which would find the partition
-    /// claimed and re-park, one wasted pipeline trip per append). Tokens
-    /// older than [`PLAN_TOKEN_TTL`] are ignored: an entry planned but never
-    /// applied here (a lost leadership) must not swallow later wakes.
-    plan_tokens: std::sync::Mutex<PlanTokens>,
 }
-
-/// (tenant, queue, group) -> (plan-time wakes not yet spent, when last given).
-type PlanTokens = std::collections::HashMap<(String, String, String), (usize, std::time::Instant)>;
-
-/// How long a plan-time wake token stands in for its apply-time wake: well
-/// past the plan-to-apply time of a healthy entry (tens of ms), short enough
-/// that a lost entry's tokens cannot hide a later append's wake for long.
-const PLAN_TOKEN_TTL: Duration = Duration::from_secs(2);
 
 /// A pinned pop's registration while it is parked (see [`WaitGates::pinned`]).
 struct PinnedPark<'a> {
@@ -267,70 +253,13 @@ impl WaitGates {
         }
     }
 
-    /// `appends` partitions of (tenant, queue) got frames in an entry this
-    /// node just PLANNED as leader: wake that many parked pops of every group
-    /// of the queue now (the claim lands in a later entry, after the append),
-    /// and leave a token per wake for the apply-time wake of the same append.
-    fn wake_planned(&self, tenant: &str, queue: &str, appends: usize) {
-        let gates: Vec<(String, Arc<tokio::sync::Notify>)> = {
-            let map = self.map.read_unpoisoned();
-            map.iter()
-                .filter(|((t, q, _), _)| t == tenant && q == queue)
-                .map(|((_, _, g), gate)| (g.clone(), gate.clone()))
-                .collect()
-        };
-        if gates.is_empty() {
-            return;
-        }
-        let now = std::time::Instant::now();
-        {
-            let mut tokens = self
-                .plan_tokens
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for (g, _) in &gates {
-                let slot = tokens
-                    .entry((tenant.to_string(), queue.to_string(), g.clone()))
-                    .or_insert((0, now));
-                if now.duration_since(slot.1) > PLAN_TOKEN_TTL {
-                    slot.0 = 0;
-                }
-                slot.0 += appends;
-                slot.1 = now;
-            }
-        }
-        for (_, gate) in gates {
-            for _ in 0..appends {
-                gate.notify_one();
-            }
-        }
-    }
-
-    /// The apply-time wake of an append: spent against a plan-time token when
-    /// one stands for it, else a wake as always.
-    fn wake_applied_append(&self, tenant: &str, queue: &str, group: &str) {
-        {
-            let mut tokens = self
-                .plan_tokens
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let key = (tenant.to_string(), queue.to_string(), group.to_string());
-            if let Some(slot) = tokens.get_mut(&key) {
-                if slot.0 > 0 && slot.1.elapsed() <= PLAN_TOKEN_TTL {
-                    slot.0 -= 1;
-                    if slot.0 == 0 {
-                        tokens.remove(&key);
-                    }
-                    return;
-                }
-                tokens.remove(&key);
-            }
-        }
-        self.wake_one(tenant, queue, Some(group));
-    }
-
     fn wake_one(&self, tenant: &str, queue: &str, group: Option<&str>) {
         let map = self.map.read_unpoisoned();
+        // The engine holds every long-poll it takes; a gate here is rare (a
+        // pop it answered early), and apply wakes a group per append.
+        if map.is_empty() {
+            return;
+        }
         match group {
             Some(g) => {
                 let key = (tenant.to_string(), queue.to_string(), g.to_string());
@@ -349,6 +278,11 @@ impl WaitGates {
         }
     }
 }
+
+/// How long a long-poll the engine did not hold (it answered empty early: a
+/// queue that does not exist yet, a group it just dropped) waits here before
+/// it asks again, unless the engine wakes its gate first.
+const UNHELD_REPOLL: Duration = Duration::from_millis(250);
 
 /// P1.1: the least deadline a long-poll RE-poll must still have to be submitted
 /// (`QUEEN_RAFT_POP_SUBMIT_MIN_MS`, default 100 ms). Below it the pop answers
@@ -398,11 +332,6 @@ pub struct RaftFacade {
     gates: Arc<WaitGates>,
     /// The batcher task handle, kept so [`RaftFacade::shutdown`] can join it.
     batcher_join: tokio::task::JoinHandle<()>,
-    /// `QUEEN_RAFT_POP_FASTPATH_EMPTY` (PERF-J, default on): answer a wildcard
-    /// pop that is provably empty from committed state WITHOUT submitting a
-    /// `PopWildcard` command onto the single serial batcher pipeline. Resolved
-    /// once at open.
-    pop_fastpath_empty: bool,
     /// `QUEEN_RAFT_POP_PARK_RECHECK_MS` (default 5000): how long a parked
     /// long-poll waits for a wake before it re-checks on its own. Wakes are
     /// event-driven (an append or a lease release applied here), so the re-check
@@ -413,6 +342,10 @@ pub struct RaftFacade {
     pop_park_recheck: Duration,
     /// The pop autopilot's per-lane state (`autopilot=true`, wildcard pops).
     autopilot: super::autopilot::Autopilot,
+    /// This facade's consumption engine ([`crate::rsm::consume`]): every pop,
+    /// ack, nack, renew, DLQ head and positional ack, and a transaction's
+    /// consumption half, is its to serve while this node leads.
+    engine: Arc<crate::rsm::consume::Engine>,
     /// Push admission budget ([`crate::rsm::admit`], one per process);
     /// `None` when disabled.
     admit: Option<&'static crate::rsm::admit::AdmitGate>,
@@ -433,14 +366,8 @@ pub struct RaftFacade {
     disk_low_pct: f64,
 }
 
-/// Wall micros for the PERF-J fastpath's `ready_at` comparison. A coarse hint —
-/// the pending ring's `ready_at` is in the RSM clock base (monotone wall micros),
-/// so a few microseconds of skew only ever makes a borderline deferred partition
-/// look not-yet-ready, which self-heals on the next re-poll (§9.5). A wall
-/// clock BEHIND the RSM clock by more (after a leader's clock excursion) makes
-/// the fastpath step aside ([`RaftFacade::wildcard_would_be_empty`]). The
-/// drained-partition case this optimises has no pending row at all, so it does
-/// not depend on this clock.
+/// Wall micros: the clock the consumption engine serves on (pop deadlines,
+/// lease expiries) and the facade's own timestamps.
 fn wall_micros() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -596,6 +523,8 @@ impl RaftFacade {
         };
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("create raft data dir {}: {e}", dir.display()))?;
+        // Start the uptime clock at boot, not at the first read of it.
+        crate::rsm::dashboard::started();
         // What /api/v1/raft/{status,members} report about this node's disk.
         crate::rsm::dashboard::set_disk_gate(crate::rsm::dashboard::DiskGate {
             dir: dir.clone(),
@@ -641,10 +570,15 @@ impl RaftFacade {
         // On every node: the damage it looks for is this node's own.
         crate::rsm::scrub::spawn(&store, crate::rsm::scrub::Config::from_env());
 
+        // The consumption engine: one per facade (a node runs one per raft
+        // group, and the tests many per process). Apply reaches it through the
+        // waker; it serves only while this node leads.
+        let engine = crate::rsm::consume::Engine::new(store.clone());
         let gates = Arc::new(WaitGates::default());
         let waker: Arc<dyn Waker> = Arc::new(NotifierWaker {
             notifier: ctx.notifier.clone(),
             gates: gates.clone(),
+            engine: engine.clone(),
         });
         let repl = Arc::new(
             NodeReplicator::open_with_opts(
@@ -730,17 +664,35 @@ impl RaftFacade {
         // A membership change pauses the batcher around openraft's own config
         // entries (batcher::QuiesceReq).
         let (quiesce_tx, quiesce_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut batcher = Batcher::new(store.clone(), repl.clone(), batcher_cfg)
-            .with_reader(reader.clone())
-            .with_qlog_reader(qlog_reader.clone())
-            .with_quiesce(quiesce_rx);
-        if crate::rsm::batcher::wake_at_plan() {
-            let g = gates.clone();
-            batcher = batcher.with_plan_waker(Arc::new(move |tenant, queue, appends| {
-                g.wake_planned(tenant, queue, appends)
+        // The engine's leader lease: how long ago a quorum last acknowledged
+        // this node as leader (weak: the facade's shutdown takes the
+        // replicator back by value).
+        {
+            let repl_w = Arc::downgrade(&repl);
+            engine.set_leader_lease(Arc::new(move || {
+                repl_w.upgrade().and_then(|r| r.quorum_ack_age())
             }));
         }
+        // The segment-authority readers (`QUEEN_RAFT_DEDUP_INDEX=segment`): the
+        // engine resolves claims and acks through the frames there.
+        engine.set_segment_readers(reader.clone(), qlog_reader.clone());
+        // A pop the engine did not hold parks here on its group's gate: the
+        // engine wakes it when a partition of the group becomes claimable.
+        {
+            let g = gates.clone();
+            engine.set_waker(Arc::new(move |tenant: &str, queue: &str, group: &str| {
+                g.wake_one(tenant, queue, Some(group))
+            }));
+        }
+        let batcher = Batcher::new(store.clone(), repl.clone(), batcher_cfg)
+            .with_reader(reader.clone())
+            .with_qlog_reader(qlog_reader.clone())
+            .with_quiesce(quiesce_rx)
+            .with_engine(engine.clone());
         let (cmd_tx, batcher_join) = batcher.spawn();
+        // The engine's checkpoints and clock (every node: only a leader's
+        // engine has anything to checkpoint).
+        super::intake::spawn_ticker(engine.clone(), &cmd_tx);
         if let NodeReplicator::Raft(r) = &*repl {
             r.set_quiesce_hook(crate::rsm::batcher::quiesce_hook(quiesce_tx));
         }
@@ -755,7 +707,12 @@ impl RaftFacade {
             let weak = Arc::downgrade(&repl);
             let applied: Arc<dyn Fn() -> u64 + Send + Sync> =
                 Arc::new(move || weak.upgrade().map_or(0, |r| r.applied_index()));
-            repl.set_remote_handler(super::remote::handler(&cmd_tx, admit, applied));
+            repl.set_remote_handler(super::remote::handler(
+                engine.clone(),
+                &cmd_tx,
+                admit,
+                applied,
+            ));
         }
         // A peer's dashboard read gathers this node's own data (D17). Weak, for
         // the same reason as the remote handler above.
@@ -805,7 +762,6 @@ impl RaftFacade {
             notifier: ctx.notifier.clone(),
             gates,
             batcher_join,
-            pop_fastpath_empty: env_flag("QUEEN_RAFT_POP_FASTPATH_EMPTY", true),
             pop_park_recheck: Duration::from_millis(
                 std::env::var("QUEEN_RAFT_POP_PARK_RECHECK_MS")
                     .ok()
@@ -814,6 +770,7 @@ impl RaftFacade {
                     .clamp(10, 60_000),
             ),
             autopilot: super::autopilot::Autopilot::from_env(),
+            engine,
             admit,
             offload,
             pop_floor: std::sync::atomic::AtomicU64::new(0),
@@ -849,9 +806,9 @@ impl RaftFacade {
             notifier: _,
             gates: _,
             batcher_join,
-            pop_fastpath_empty: _,
             pop_park_recheck: _,
             autopilot: _,
+            engine,
             admit: _,
             data_dir: _,
             storage_full: _,
@@ -865,6 +822,7 @@ impl RaftFacade {
         } = self;
         drop(cmd_tx); // the batcher sees a closed channel, drains, and exits
         let _ = batcher_join.await; // its Arc<repl>/Arc<store> drop here
+        drop(engine); // it holds the store too (its ticker's and the replicator's go with them)
         drop(reader); // the segment Shared reference the facade held
         drop(qlog_reader); // the qlog Shared reference the facade held
 
@@ -944,20 +902,19 @@ impl RaftFacade {
         if self.offload {
             return self.submit_offloaded(ctx, command).await;
         }
-        let (sub, rx) = Submission::new(command);
-        // The bounded channel absorbs back-pressure; a full channel waits, up to
-        // the deadline.
-        let send = tokio::time::timeout(ctx.deadline.remaining(), self.cmd_tx.send(sub)).await;
-        match send {
-            Ok(Ok(())) => {}
-            Ok(Err(_closed)) => return Err(RsmError::Internal("planner channel closed".into())),
-            Err(_elapsed) => return Err(RsmError::Timeout),
-        }
-        match tokio::time::timeout(ctx.deadline.remaining(), rx).await {
-            Ok(Ok(reply)) => Ok(reply),
-            Ok(Err(_dropped)) => Err(RsmError::Internal("planner dropped the reply".into())),
-            Err(_elapsed) => Err(RsmError::Timeout),
-        }
+        self.submit_here(ctx, command).await
+    }
+
+    /// Serve `command` on this node as the leader ([`super::intake`]):
+    /// consumption by the engine, the rest planned by this node's batcher.
+    async fn submit_here(&self, ctx: &ReqCtx, command: Command) -> Result<Reply, RsmError> {
+        super::intake::submit_here(
+            &self.engine,
+            || Some(self.cmd_tx.clone()),
+            command,
+            ctx.deadline.instant(),
+        )
+        .await
     }
 
     /// A cluster node's submit: planned here while this node leads, otherwise
@@ -981,22 +938,10 @@ impl RaftFacade {
                 return Err(RsmError::Timeout);
             }
             if matches!(self.repl.role(), Role::Leader { .. }) {
-                let (sub, rx) = Submission::new(command.clone());
-                match tokio::time::timeout(ctx.deadline.remaining(), self.cmd_tx.send(sub)).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(_closed)) => {
-                        return Err(RsmError::Internal("planner channel closed".into()))
-                    }
-                    Err(_elapsed) => return Err(RsmError::Timeout),
-                }
-                match tokio::time::timeout(ctx.deadline.remaining(), rx).await {
-                    Ok(Ok(Reply::Retry { .. })) => {}
-                    Ok(Ok(Reply::Refused(r))) if Self::retries_refusal(&r) => {}
-                    Ok(Ok(reply)) => return Ok(reply),
-                    Ok(Err(_dropped)) => {
-                        return Err(RsmError::Internal("planner dropped the reply".into()))
-                    }
-                    Err(_elapsed) => return Err(RsmError::Timeout),
+                match self.submit_here(ctx, command.clone()).await? {
+                    Reply::Retry { .. } => {}
+                    Reply::Refused(r) if Self::retries_refusal(&r) => {}
+                    reply => return Ok(reply),
                 }
             } else {
                 let pop = matches!(
@@ -1023,11 +968,15 @@ impl RaftFacade {
                 // consumer's ack stuck behind a queue of pushes stalls its
                 // consumption (2026-09-30: follower acks 0.55 s vs 0.1 s).
                 let drain = !command.grows_storage();
-                match self
-                    .repl
-                    .forward_command(b, ctx.deadline.remaining(), drain)
-                    .await
-                {
+                let forwarded = if pop {
+                    self.forward_pop(b, ctx.deadline.remaining(), &command)
+                        .await
+                } else {
+                    self.repl
+                        .forward_command(b, ctx.deadline.remaining(), drain)
+                        .await
+                };
+                match forwarded {
                     Ok(answer) => match super::remote::decode_reply(&answer)? {
                         (Reply::Retry { .. }, _) => {}
                         (Reply::Refused(r), _) if Self::retries_refusal(&r) => {}
@@ -1101,10 +1050,12 @@ impl RaftFacade {
     /// Whether a follower may answer `reply` to `command` as soon as it knows
     /// the entry committed, without waiting for its own apply
     /// (`QUEEN_RAFT_FOLLOWER_ANSWER_AT_DONE`, default on): the caller renders
-    /// a push's or an ack's answer from the outcome alone. Not a push with a
-    /// duplicate (its answer reads the original message id from this node's
-    /// queue log), and never a pop (its answer reads the claimed payloads from
-    /// this node's own state).
+    /// a push's, an ack's, a nack's or a renew's answer from the outcome
+    /// alone (the consumption ones are the engine's, answered from the
+    /// leader's memory: `at` is their checkpoint's entry, or `None`). Not a
+    /// push with a duplicate (its answer reads the original message id from
+    /// this node's queue log), and never a pop (its answer reads the claimed
+    /// payloads from this node's own state).
     pub(crate) fn answers_at_commit(command: &Command, reply: &Reply) -> bool {
         static ON: std::sync::LazyLock<bool> =
             std::sync::LazyLock::new(|| env_flag("QUEEN_RAFT_FOLLOWER_ANSWER_AT_DONE", true));
@@ -1119,10 +1070,19 @@ impl RaftFacade {
                 .items
                 .iter()
                 .any(|v| matches!(v, PushVerdict::Duplicate { .. })),
+            // Consumption answers render from their outcome alone (the
+            // engine's, served from the leader's memory).
             (
-                Command::Ack(_),
+                Command::Ack(_) | Command::Nack(_) | Command::AckPositional(_),
                 Reply::Done {
                     outcome: Outcome::Ack(_),
+                    ..
+                },
+            ) => true,
+            (
+                Command::Renew(_),
+                Reply::Done {
+                    outcome: Outcome::Renew(_),
                     ..
                 },
             ) => true,
@@ -1185,142 +1145,39 @@ impl RaftFacade {
 
     /// A pop the leader answered with claims this node will not deliver (its
     /// caller's deadline passed while it waited to apply them): release every
-    /// lease with a `Nack` — lease dropped, cursor unmoved, no retry charged,
-    /// the same release the leader's batcher gives an orphaned local claim —
-    /// forwarded to the leader in the background.
+    /// lease ([`release_claims`]).
     fn release_unanswered(&self, command: &Command, reply: &Reply) {
-        let group = match command {
-            Command::PopWildcard(c) | Command::PopPinned(c) | Command::PopDiscover(c) => {
-                c.group.clone()
-            }
-            _ => return,
-        };
-        let Reply::Done {
-            outcome: Outcome::Pop(pop),
-            ..
-        } = reply
-        else {
-            return;
-        };
-        let nacks: Vec<Command> = pop
-            .claims
-            .iter()
-            .filter(|c| c.lease_expires_at_us.is_some())
-            .map(|c| {
-                Command::Nack(crate::rsm::planner::NackCommand {
-                    request_id: uuidv7_bytes(),
-                    pid: c.pid,
-                    tenant: String::new(),
-                    queue: String::new(),
-                    group: group.clone(),
-                    worker: c.worker.clone(),
-                })
-            })
-            .collect();
-        crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.fwd_unanswered_pops, 1);
-        if nacks.is_empty() {
-            return;
-        }
-        crate::rsm::dbgctr::inc(
-            &crate::rsm::dbgctr::C.fwd_unanswered_claims,
-            nacks.len() as u64,
-        );
+        release_claims(&self.repl, command, reply);
+    }
+
+    /// Forward a pop to the leader on a task of its own. The leader's engine
+    /// holds a long-poll until data arrives, and this node's caller may be
+    /// gone by then (its client disconnected, its request was dropped): the
+    /// task then hands back every lease the leader granted it
+    /// ([`release_claims`]) instead of leaving each partition frozen for the
+    /// whole lease.
+    async fn forward_pop(
+        &self,
+        body: bytes::Bytes,
+        ttl: Duration,
+        command: &Command,
+    ) -> Result<bytes::Bytes, crate::rsm::replicator::raft::RemoteError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
         let repl = self.repl.clone();
+        let command = command.clone();
         tokio::spawn(async move {
-            let budget = Duration::from_secs(5);
-            for cmd in nacks {
-                if let Ok(b) = super::remote::encode_request(&cmd, budget) {
-                    let _ = repl
-                        .forward_command(bytes::Bytes::from(b), budget, true)
-                        .await;
+            let res = repl.forward_command(body, ttl, true).await;
+            if let Err(Ok(answer)) = tx.send(res) {
+                if let Ok((reply, _)) = super::remote::decode_reply(&answer) {
+                    release_claims(&repl, &command, &reply);
                 }
             }
         });
-    }
-
-    /// PERF-J: whether a wildcard pop of `(tenant, queue, group)` is provably
-    /// empty from committed state, so it need not enter the serial batcher
-    /// pipeline (`QUEEN_RAFT_POP_FASTPATH_EMPTY`). The committed read runs on the
-    /// blocking pool (I15), like every other store read on the facade's hot
-    /// paths. Any error (join or store) is treated as "not provably empty", so
-    /// the caller submits and the planner decides — correctness over the
-    /// optimisation.
-    /// The pop autopilot's width input: the group's partitions claimable now,
-    /// counted up to `cap` off the committed store (`None` when unknown).
-    async fn ready_count(
-        &self,
-        tenant: &str,
-        queue: &str,
-        group: &str,
-        cap: usize,
-    ) -> Option<usize> {
-        let store = self.store.clone();
-        let tenant = tenant.to_string();
-        let queue = queue.to_string();
-        let group = group.to_string();
-        let wall = wall_micros();
-        let res = tokio::task::spawn_blocking(move || {
-            store.read(|r| {
-                // On the RSM clock, never behind it (D5; see
-                // `wildcard_would_be_empty`).
-                let now_us = wall.max(r.last_now_us()?);
-                crate::rsm::planner::pop::wildcard_ready_count(
-                    r, &tenant, &queue, &group, now_us, cap,
-                )
-            })
+        rx.await.unwrap_or_else(|_| {
+            Err(crate::rsm::replicator::raft::RemoteError::Transport(
+                "the pop's forward task ended".into(),
+            ))
         })
-        .await;
-        match res {
-            Ok(Ok(n)) => n,
-            _ => None,
-        }
-    }
-
-    /// How far the RSM clock (the last applied entry's `now`) runs ahead of
-    /// this node's wall clock; 0 when it does not, or on any error. A deadline
-    /// the planner compares with the RSM clock is set on that clock: from a
-    /// wall clock behind it (this node's stepped back, or the leader's ran
-    /// ahead) every pop's `wall + timeout` had passed before it was planned,
-    /// and each was answered empty (P9 W2: 150 s ahead, every pop of every
-    /// node empty until the drain gave up).
-    async fn rsm_ahead_us(&self) -> i64 {
-        let store = self.store.clone();
-        let wall = wall_micros();
-        match tokio::task::spawn_blocking(move || store.read(|r| r.last_now_us())).await {
-            Ok(Ok(last)) => last.saturating_sub(wall).max(0),
-            _ => 0,
-        }
-    }
-
-    async fn wildcard_would_be_empty(&self, tenant: &str, queue: &str, group: &str) -> bool {
-        let store = self.store.clone();
-        let tenant = tenant.to_string();
-        let queue = queue.to_string();
-        let group = group.to_string();
-        let now_us = wall_micros();
-        let res = tokio::task::spawn_blocking(move || {
-            store.read(|r| {
-                // `ready_at` is on the RSM clock. A wall clock BEHIND it (a
-                // leader's clock jumped forward and came back: the RSM clock
-                // keeps its high-water mark, D5) calls ready work "not yet"
-                // until it catches up — P9 W5: every pop answered empty for
-                // minutes after a +170 s excursion of the leader's clock. From
-                // behind, this node proves nothing: the planner decides.
-                if r.last_now_us()? > now_us {
-                    return Ok(false);
-                }
-                crate::rsm::planner::pop::wildcard_pop_provably_empty(
-                    r,
-                    &tenant,
-                    &queue,
-                    &group,
-                    now_us,
-                    crate::rsm::planner::pop::POP_FASTPATH_SCAN_CAP,
-                )
-            })
-        })
-        .await;
-        matches!(res, Ok(Ok(true)))
     }
 
     /// [`resolve_ack_targets`] on the blocking pool (I15). A cluster node
@@ -1406,16 +1263,22 @@ impl RaftFacade {
 // Reply → RsmError, and the derived per-command request id
 // ---------------------------------------------------------------------------
 
-/// How much earlier than its caller's deadline a follower's forwarded pop stops
-/// claiming (on top of the planner's own reply margin): the leader's answer
-/// still has to cross back, apply on this node, and be rendered.
+/// How much earlier than its caller's deadline a pop stops claiming (on top
+/// of the engine's own reply margin): a claim is answered once the checkpoint
+/// holding its lease commits, and a follower's answer still has to cross
+/// back, apply on that node, and be rendered. Every pop, the leader's own
+/// clients' too: with the margin on followers only, a leader-attached
+/// long-poll claimed in its last 50 ms and missed its deadline waiting for
+/// the checkpoint (2026-09-30, 10k queues: 478-966 timeouts per leader-attached
+/// loader against 71-245 per follower-attached one).
 ///
 /// Capped at a quarter of the time the pop has left. Whole, it swallowed short
 /// long-polls: with the planner's 50 ms a follower pop with `timeout=300` never
 /// claimed at all (the Rust streams runner polls every 300 ms: 4 of 39 tests
-/// passed against a follower, 39 against the leader). A claim this node then
-/// fails to apply in time is handed back (`release_unanswered`).
-const FOLLOWER_POP_MARGIN: Duration = Duration::from_millis(250);
+/// passed against a follower, 39 against the leader). A claim nobody receives
+/// in time is handed back (`release_unanswered`, the engine's
+/// `release_claims`).
+const POP_ANSWER_MARGIN: Duration = Duration::from_millis(250);
 
 /// PLAN_CONFLATION §3.1/§3.3, the answer half: `"conflation":true` on every
 /// answer whose EFFECTIVE policy is conflating, empty ones included, and
@@ -1453,6 +1316,61 @@ fn autopilot_echo(
 }
 
 /// Map a non-`Done` [`Reply`] to the typed facade error.
+/// Hand back every lease a pop's answer granted that nobody will deliver:
+/// one `Nack` per leased claim — lease dropped, cursor unmoved, no retry
+/// charged — sent to the leader's engine in the background.
+fn release_claims(repl: &Arc<NodeReplicator<HeedStore>>, command: &Command, reply: &Reply) {
+    let (tenant, queue, group) = match command {
+        Command::PopWildcard(c) | Command::PopPinned(c) | Command::PopDiscover(c) => {
+            (c.tenant.clone(), c.queue.clone(), c.group.clone())
+        }
+        _ => return,
+    };
+    let Reply::Done {
+        outcome: Outcome::Pop(pop),
+        ..
+    } = reply
+    else {
+        return;
+    };
+    let nacks: Vec<Command> = pop
+        .claims
+        .iter()
+        .filter(|c| c.lease_expires_at_us.is_some())
+        .map(|c| {
+            Command::Nack(crate::rsm::planner::NackCommand {
+                request_id: uuidv7_bytes(),
+                pid: c.pid,
+                tenant: tenant.clone(),
+                // A discovery pop spans queues: the pid names the partition
+                // either way.
+                queue: queue.clone(),
+                group: group.clone(),
+                worker: c.worker.clone(),
+            })
+        })
+        .collect();
+    crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.fwd_unanswered_pops, 1);
+    if nacks.is_empty() {
+        return;
+    }
+    crate::rsm::dbgctr::inc(
+        &crate::rsm::dbgctr::C.fwd_unanswered_claims,
+        nacks.len() as u64,
+    );
+    let repl = repl.clone();
+    tokio::spawn(async move {
+        let budget = Duration::from_secs(5);
+        for cmd in nacks {
+            if let Ok(b) = super::remote::encode_request(&cmd, budget) {
+                let _ = repl
+                    .forward_command(bytes::Bytes::from(b), budget, true)
+                    .await;
+            }
+        }
+    });
+}
+
 fn reply_error(reply: Reply) -> RsmError {
     match reply {
         Reply::Retry { hint } => RsmError::Retry {
@@ -2007,6 +1925,7 @@ impl RaftFacade {
             extra_effects: Vec::new(),
             allow_duplicate: false,
             positions: position_ops,
+            engine_acks: Default::default(),
         });
         let out = match self.submit(&ctx, cmd).await? {
             Reply::Done { outcome, .. } => crate::rsm::batcher::TxnOutcome::from_outcome(&outcome)
@@ -2977,24 +2896,14 @@ impl RaftFacade {
         let budget = batch.min(i32::MAX as u32) as i32;
         let gate_key = (ctx.tenant.clone(), queue.clone(), group.clone());
         // POP AUTOPILOT (facade/autopilot.rs): a wildcard pop that delegated
-        // its width and/or batch gets them per attempt from the lane's state.
+        // its batch gets it per attempt from the lane's drain rate here, and
+        // one that delegated its width leaves it to the leader's engine.
         let auto = partition.is_none()
             && namespace.is_empty()
             && task.is_empty()
             && (options.auto_parts || options.auto_batch);
-        let _live = auto.then(|| self.autopilot.enter(gate_key.clone()));
         let mut last_plan: Option<super::autopilot::Plan> = None;
         let mut attempt: u32 = 0;
-        // P2.2: set when the last park ended on a WAKE. Wakes fire right after
-        // apply, before the store commit, so the committed-state fast path could
-        // still read the partition as unclaimable and swallow the one wake meant
-        // for it; a woken pop therefore goes straight to the planner, whose
-        // overlay folds every applied-but-uncommitted entry.
-        let mut woke = false;
-        // The planner judges the deadline below on the RSM clock: how far that
-        // runs ahead of this node's wall clock (0 when it does not).
-        let rsm_ahead_us = self.rsm_ahead_us().await;
-
         loop {
             // PLAN_RAFT_DRAIN_FIX P1.1: a re-poll that cannot come back before the
             // deadline is not started — a pop that times out while queued still
@@ -3015,45 +2924,22 @@ impl RaftFacade {
             }
             attempt += 1;
             crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.pop_h_attempts, 1);
-            // P1.2: the planner refuses to claim once nobody can receive the answer.
-            // A follower serving its own client also has to apply the claim and
-            // render it after the leader answers, so it asks the leader to stop
-            // claiming a little earlier (`FOLLOWER_POP_MARGIN`, at most a quarter
-            // of what is left).
+            // P1.2: the engine holds a long-poll pop until data arrives or this
+            // deadline (the leader's wall clock), and never claims for a pop
+            // nobody can receive. A claim's answer waits for the checkpoint
+            // holding its lease to commit, and a follower serving its own
+            // client also has to apply the claim and render it after the
+            // leader answers, so every pop asks the engine to stop claiming a
+            // little earlier (`POP_ANSWER_MARGIN`, at most a quarter of what
+            // is left).
             let remaining = ctx.deadline.remaining();
-            let mut deadline_us = wall_micros()
-                .saturating_add(rsm_ahead_us)
-                .saturating_add(remaining.as_micros().min(i64::MAX as u128) as i64);
-            if self.offload
-                && !matches!(
-                    self.repl.role(),
-                    crate::rsm::replicator::Role::Leader { .. }
-                )
-            {
-                let margin = FOLLOWER_POP_MARGIN.min(remaining / 4);
-                deadline_us = deadline_us.saturating_sub(margin.as_micros() as i64);
-            }
+            let margin = POP_ANSWER_MARGIN.min(remaining / 4);
+            let deadline_us = wall_micros()
+                .saturating_add(remaining.as_micros().min(i64::MAX as u128) as i64)
+                .saturating_sub(margin.as_micros() as i64);
             let (attempt_budget, attempt_parts) = if auto {
-                let ready = if !options.auto_parts {
-                    None
-                } else if let Some(n) = self.autopilot.cached_ready(&gate_key) {
-                    Some(n)
-                } else {
-                    let cap = self.autopilot.ready_scan_cap(&gate_key);
-                    let t_ready = std::time::Instant::now();
-                    let n = self.ready_count(&ctx.tenant, &queue, &group, cap).await;
-                    crate::rsm::dbgctr::inc(
-                        &crate::rsm::dbgctr::C.pop_h_ready_us,
-                        t_ready.elapsed().as_micros() as u64,
-                    );
-                    if let Some(n) = n {
-                        self.autopilot.store_ready(&gate_key, n);
-                    }
-                    n
-                };
                 let plan = self.autopilot.plan(
                     &gate_key,
-                    ready,
                     options.auto_parts,
                     options.auto_batch,
                     options.max_parts.clamp(1, 64),
@@ -3062,7 +2948,11 @@ impl RaftFacade {
                 last_plan = Some(plan);
                 (
                     plan.batch.min(i32::MAX as u32) as i32,
-                    plan.partitions.clamp(1, 64) as i32,
+                    if options.auto_parts {
+                        crate::rsm::planner::MAX_PARTS_AUTO
+                    } else {
+                        plan.partitions.clamp(1, 64) as i32
+                    },
                 )
             } else if partition.is_some() {
                 (budget, 1)
@@ -3102,73 +2992,36 @@ impl RaftFacade {
                 None => Command::PopWildcard(cmd),
             };
 
-            // PERF-J: a wildcard pop that is provably empty from committed state
-            // (the group is registered and no partition is ready) never enters
-            // the single serial batcher pipeline, where its ~0.5 ms plan would
-            // queue behind — and delay — the pushes. It flows into exactly the
-            // same empty handling below (long-poll park or empty render); a push
-            // that lands meanwhile re-arms the ring and wakes the park, so no
-            // claim is stranded (§9.5).
-            //
-            // The check reads THIS node's state, which in a cluster may not yet
-            // hold an ack or a push another node already answered. A long-poll
-            // is woken when that entry applies here. A no-wait pop answers
-            // once: before it answers empty it takes the read barrier and looks
-            // again, or it answers a false empty (measured: pop here, ack on
-            // another node, pop here again — 3 in 40 empty). A pop that finds
-            // work pays nothing extra. Sending no-wait pops to the planner
-            // instead is slower where it matters: the Rust
-            // `concurrent_consumers_never_deliver_the_same_message_twice` got
-            // 144-175 of its 200 messages through in its 6 s with the fast
-            // path off.
-            let t_fast = std::time::Instant::now();
-            let fast_empty = self.pop_fastpath_empty
-                && !woke
-                && matches!(command, Command::PopWildcard(_))
-                && self
-                    .wildcard_would_be_empty(&ctx.tenant, &queue, &group)
-                    .await
-                && (wait
-                    // Behind the leader's read index a moment later (a
-                    // lagging follower): the pop goes to the leader now
-                    // instead of waiting out the lag first and then again for
-                    // its claim to apply (`caught_up`).
-                    || (matches!(self.caught_up(ctx).await, Ok(true))
-                        && self
-                            .wildcard_would_be_empty(&ctx.tenant, &queue, &group)
-                            .await));
+            // Every pop goes to the consumption engine on the leader (a
+            // follower forwards it there): the engine answers from memory, and
+            // holds a long-poll until data or `deadline_us`.
+            let t_submit = std::time::Instant::now();
+            crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.pop_h_submits, 1);
+            let reply = self.submit(ctx, command).await?;
             crate::rsm::dbgctr::inc(
-                &crate::rsm::dbgctr::C.pop_h_fastpath_us,
-                t_fast.elapsed().as_micros() as u64,
+                &crate::rsm::dbgctr::C.pop_h_submit_us,
+                t_submit.elapsed().as_micros() as u64,
             );
-            let claims = if fast_empty {
-                crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.pop_h_fastpath_empty, 1);
-                Vec::new()
-            } else {
-                let t_submit = std::time::Instant::now();
-                crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.pop_h_submits, 1);
-                let reply = self.submit(ctx, command).await?;
-                crate::rsm::dbgctr::inc(
-                    &crate::rsm::dbgctr::C.pop_h_submit_us,
-                    t_submit.elapsed().as_micros() as u64,
-                );
-                match reply {
-                    Reply::Done { outcome, .. } => match outcome {
-                        Outcome::Pop(o) => o.claims,
-                        other => {
-                            return Err(RsmError::Internal(format!(
-                                "pop got a non-pop outcome: {other:?}"
-                            )))
-                        }
-                    },
-                    other => return Err(reply_error(other)),
-                }
+            let claims = match reply {
+                Reply::Done { outcome, .. } => match outcome {
+                    Outcome::Pop(o) => o.claims,
+                    other => {
+                        return Err(RsmError::Internal(format!(
+                            "pop got a non-pop outcome: {other:?}"
+                        )))
+                    }
+                },
+                other => return Err(reply_error(other)),
             };
 
-            if claims.is_empty() && !fast_empty {
+            if claims.is_empty() {
                 crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.pop_h_submit_empty, 1);
             }
             if !claims.is_empty() {
+                if let (true, Some(plan)) = (options.auto_parts, last_plan.as_mut()) {
+                    // The echo reports the width the engine used.
+                    plan.partitions = claims.len().min(u32::MAX as usize) as u32;
+                }
                 if auto && !auto_ack {
                     // The lease's drain clock starts (the batch's input).
                     let n: u64 = claims
@@ -3214,8 +3067,14 @@ impl RaftFacade {
                     )
                     .await;
             }
+            // The engine held this long-poll until its deadline: nothing came.
+            // An empty answer that came back EARLY was not held (a queue that
+            // does not exist yet, a group the engine just dropped): park here
+            // until the engine wakes the group's gate, or a short re-poll.
+            let held =
+                wall_micros().saturating_add(POP_SUBMIT_MIN.as_micros() as i64) >= deadline_us;
             let remaining = ctx.deadline.remaining();
-            if remaining.is_zero() {
+            if held || remaining.is_zero() {
                 return self
                     .answer_pop(
                         ctx,
@@ -3229,7 +3088,7 @@ impl RaftFacade {
                     )
                     .await;
             }
-            let park = remaining.min(self.pop_park_recheck);
+            let park = remaining.min(self.pop_park_recheck).min(UNHELD_REPOLL);
             // The dashboard's parked gauge (1 Hz samples, data.rs ≈1197).
             let _parked = crate::metrics::global().map(|m| m.parked.enter(&ctx.tenant, &queue));
             let _pinned = partition
@@ -3237,7 +3096,7 @@ impl RaftFacade {
                 .then(|| self.gates.park_pinned(&gate_key));
             let t_park = std::time::Instant::now();
             crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.pop_h_parks, 1);
-            woke = self.gates.wait(&gate_key, park).await;
+            let woke = self.gates.wait(&gate_key, park).await;
             crate::rsm::dbgctr::inc(
                 &crate::rsm::dbgctr::C.pop_h_park_us,
                 t_park.elapsed().as_micros() as u64,

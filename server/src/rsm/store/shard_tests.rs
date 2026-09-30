@@ -370,8 +370,14 @@ fn a_shard_writer_reads_every_writer_and_types_like_the_write_handle() {
         3
     );
     assert_eq!(a.partition_counter(7, Counter::Pushed).unwrap(), 3);
-    a.put_pending("t", "q", "g", 7, 44).unwrap();
-    assert_eq!(main.pending_at("t", "q", "g", 7).unwrap(), Some(44));
+    a.put_lease("w", 7, "g", 44).unwrap();
+    let mut leases = Vec::new();
+    main.scan_worker_leases("w", 4, &mut |pid, g, at| {
+        leases.push((pid, g.to_string(), at));
+        true
+    })
+    .unwrap();
+    assert_eq!(leases, vec![(7, "g".to_string(), 44)]);
     let mut seen = Vec::new();
     b.scan_cursors(7, 10, &mut |g, _c| {
         seen.push(g.to_string());
@@ -411,7 +417,10 @@ fn a_shard_writer_reads_every_writer_and_types_like_the_write_handle() {
     std::thread::scope(|sc| {
         sc.spawn(|| {
             assert!(s
-                .checkpoint_get(Keyspace::Pending, &keys::pending("t", "q", "g", 7))
+                .checkpoint_get(
+                    Keyspace::LeasesByWorker,
+                    &keys::leases_by_worker("w", 7, "g")
+                )
                 .unwrap()
                 .is_some());
             assert!(s

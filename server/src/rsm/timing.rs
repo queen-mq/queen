@@ -555,9 +555,6 @@ pub struct RsmMetrics {
     pub keep_fallback: AtomicU64,
     pub keep_poisoned: AtomicU64,
     pub keep_mismatch: AtomicU64,
-    /// KEEP_OVERLAY: kept rings scanned from `pending` (first use or after a
-    /// drop), the only `pending` scans the kept path makes.
-    pub ring_loads: AtomicU64,
     pub apply_stats: ApplyStatsMirror,
     /// A monotone counter incremented per apply-channel receive, so the
     /// exporter can show the apply-thread receive rate alongside the depth.
@@ -908,12 +905,6 @@ pub fn render_prometheus(out: &mut String) {
             c.load(Ordering::Relaxed)
         ));
     }
-    out.push_str("# HELP queen_raft_plan_ring_loads_total Kept rings scanned from pending\n");
-    out.push_str("# TYPE queen_raft_plan_ring_loads_total counter\n");
-    out.push_str(&format!(
-        "queen_raft_plan_ring_loads_total {}\n",
-        m.ring_loads.load(Ordering::Relaxed)
-    ));
     out.push_str("# HELP queen_raft_apply_receives_total Apply-channel receives\n");
     out.push_str("# TYPE queen_raft_apply_receives_total counter\n");
     out.push_str(&format!(

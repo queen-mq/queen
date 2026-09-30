@@ -1,7 +1,16 @@
 //! Positions: set or forget where a consumer group reads a partition, as a
-//! rider of the transaction wire (`"positions": [...]`, planned inside the
-//! one `Transaction` command, so it is all-or-nothing with everything else the
+//! rider of the transaction wire (`"positions": [...]`, served inside the one
+//! `Transaction` command, so it is all-or-nothing with everything else the
 //! bundle carries — a `required` KV precondition beside it included).
+//!
+//! This module is the receiver's half: the wire shape and its validation
+//! ([`parse_position_ops`]). The consumption engine ([`crate::rsm::consume`])
+//! owns every cursor and serves the ops (its `txn_prepare`), all but one
+//! kind: an op that names a partition that does not exist yet. Allocating a
+//! partition is the planner's, so the engine leaves those in the bundle and
+//! [`Planner::plan_positions`] creates the partition, registers the group on
+//! its first contact and writes the cursor row, in the bundle's entry. What
+//! follows is the contract both keep.
 //!
 //! A POSITION is the next offset a group reads on a partition. It is stored as
 //! the group's cursor row, `committed = offset - 1` — the same row Queen's own
@@ -29,12 +38,6 @@
 //!   client that set it will read back;
 //! - a set that would leave the row exactly as it is writes NOTHING — no
 //!   effect, and no entry when nothing else in the bundle writes either.
-//!
-//! Planned WITHOUT folding into the overlay (like
-//! [`Planner::plan_kv_writes`]): the bundle-local state below layers the ops
-//! of one call over the overlay, and the caller folds the effects once the
-//! whole bundle has planned — which is what lets a positions-and-KV bundle
-//! refuse without restoring anything.
 
 use std::collections::{HashMap, HashSet};
 
@@ -181,37 +184,27 @@ pub fn parse_position_ops(
     Ok(out)
 }
 
-/// A cursor row with every lease field released (a position set is
-/// authoritative; see the module header).
-fn release_lease(c: &mut CursorRow) {
-    c.batch_end = None;
-    c.worker = None;
-    c.lease_expires_at_us = None;
-    c.lease_acquired_at_us = None;
-    c.batch_retry_count = 0;
-    c.attempt_offset = None;
-    c.attempt_count = 0;
-    c.lease_conflated = false;
-    c.delivered.clear();
-}
-
 impl<'a, R: Reads + ?Sized> Planner<'a, R> {
-    /// Plan one call's positions against `ov` WITHOUT folding them (see the
-    /// module header). The effects, in op order: a `PartitionCreate` for a
-    /// partition the op names first, a `GroupUpsert` for a group's first
-    /// contact with the queue, and the `CursorSet` / `CursorDelete`.
+    /// Plan the positions of one call on partitions that do not exist yet,
+    /// against `ov` WITHOUT folding them (the caller folds the bundle whole).
+    /// The effects, in op order: the `PartitionCreate` of a partition the op
+    /// names first, a `GroupUpsert` for a group's first contact with the
+    /// queue, and the `CursorSet`. Forgetting a position on a partition that
+    /// does not exist writes nothing. An op on a partition that exists
+    /// (committed or in flight) is the engine's and is refused.
     pub fn plan_positions(
         &self,
         ov: &Overlay,
         tenant: &str,
         ops: &[PositionOp],
     ) -> Result<Vec<Effect>, Refusal> {
-        let mut effects: Vec<Effect> = Vec::with_capacity(ops.len());
+        let mut effects: Vec<Effect> = Vec::with_capacity(ops.len() * 2);
         // What this call already decided, layered over the overlay.
         let mut queues: HashSet<&str> = HashSet::new();
         let mut created: HashMap<(&str, &str), Pid> = HashMap::new();
         let mut next_pid = ov.peek_pid();
         let mut registered: HashSet<(&str, &str)> = HashSet::new();
+        // The rows this call wrote on the partitions it created.
         let mut rows: HashMap<(Pid, &str), Option<CursorRow>> = HashMap::new();
         let mut planned_bytes = 0usize;
 
@@ -225,15 +218,23 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 }
                 queues.insert(op.queue.as_str());
             }
-            let known = match created.get(&(op.queue.as_str(), op.partition.as_str())) {
-                Some(pid) => Some(*pid),
-                None => self.pid_of(ov, tenant, &op.queue, &op.partition)?,
-            };
-            let pid = match (known, op.offset) {
-                (Some(pid), _) => pid,
-                // Forgetting a position on a partition that does not exist.
-                (None, None) => continue,
-                (None, Some(_)) => {
+            let key = (op.queue.as_str(), op.partition.as_str());
+            let pid = match created.get(&key) {
+                Some(pid) => *pid,
+                None => {
+                    if self.pid_of(ov, tenant, &op.queue, &op.partition)?.is_some() {
+                        return Err(Refusal::retry(
+                            "internal",
+                            format!(
+                                "a position on the existing partition {}/{} is served by the \
+                                 consumption engine",
+                                op.queue, op.partition
+                            ),
+                        ));
+                    }
+                    let Some(_) = op.offset else {
+                        continue;
+                    };
                     let pid = next_pid;
                     next_pid += 1;
                     effects.push(Effect::PartitionCreate {
@@ -244,40 +245,24 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                         partition: op.partition.clone(),
                         created_at_us: self.now_us,
                     });
-                    created.insert((op.queue.as_str(), op.partition.as_str()), pid);
+                    created.insert(key, pid);
                     pid
                 }
             };
-            let key = (pid, op.group.as_str());
-            let current = match rows.get(&key) {
-                Some(r) => r.clone(),
-                None => self.cursor(ov, pid, &op.group)?,
-            };
+            let rkey = (pid, op.group.as_str());
+            let current = rows.get(&rkey).cloned().flatten();
             let Some(offset) = op.offset else {
+                // Forgotten on a partition this call created: the row goes if
+                // an earlier op of the call wrote one.
                 if current.is_some() {
                     effects.push(Effect::CursorDelete {
                         pid,
                         group: op.group.clone(),
                     });
                 }
-                rows.insert(key, None);
+                rows.insert(rkey, None);
                 continue;
             };
-            let mut row = current
-                .clone()
-                .unwrap_or_else(|| cursor_fresh(-1, self.now_us));
-            release_lease(&mut row);
-            // `offset <= i64::MAX` (the receiver checked it), so this is exact.
-            row.committed = offset as i64 - 1;
-            row.metadata = op.metadata.clone();
-            if current.as_ref() == Some(&row) {
-                // Already exactly there: a position set to where it is writes
-                // nothing. It is the common case, not a corner — a Kafka client
-                // re-sends every partition whose previous commit is still in
-                // flight, and at 500,000 partitions most of a commit's
-                // partitions have not moved since the one before it.
-                continue;
-            }
             let gkey = (op.queue.as_str(), op.group.as_str());
             if !registered.contains(&gkey) {
                 if self.group(ov, tenant, &op.queue, &op.group)?.is_none() {
@@ -298,13 +283,21 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 }
                 registered.insert(gkey);
             }
+            let mut row = cursor_fresh(-1, self.now_us);
+            // `offset <= i64::MAX` (the receiver checked it), so this is exact.
+            row.committed = offset as i64 - 1;
+            row.metadata = op.metadata.clone();
+            if current.as_ref() == Some(&row) {
+                // Set again to where an earlier op of the call put it.
+                continue;
+            }
             planned_bytes += 96 + op.group.len() + row.metadata.len();
             effects.push(Effect::CursorSet {
                 pid,
                 group: op.group.clone(),
                 row: row.clone(),
             });
-            rows.insert(key, Some(row));
+            rows.insert(rkey, Some(row));
         }
         // §5.1 413: the planned size of the command's positions.
         if planned_bytes > self.cfg.entry_max_bytes {

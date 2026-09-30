@@ -83,7 +83,7 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tokio::time::MissedTickBehavior;
 
 use crate::rsm::dedup::DedupFront;
-use crate::rsm::effect::{Effect, Pid};
+use crate::rsm::effect::Effect;
 use crate::rsm::entry::{encode_entry, Entry, Outcome, RequestId};
 use crate::rsm::planner::kept::KeptOverlay;
 use crate::rsm::planner::timers::{TimerFireConfig, TimersCommand};
@@ -97,7 +97,7 @@ use crate::rsm::planner::{
 use crate::rsm::qlog::set::QLogReader;
 use crate::rsm::replicator::{AppliedAt, NodeId, ProposeError, Replicator, Role};
 use crate::rsm::segments::Reader;
-use crate::rsm::state::{Committed, Derived, PlanRings, RingKey, RingSnapshot};
+use crate::rsm::state::Committed;
 use crate::rsm::store::{Reads, Store, TypedReads};
 
 #[path = "batcher_lanes.rs"]
@@ -197,9 +197,9 @@ pub struct BatcherConfig {
     pub maintenance_every_ms: u64,
     pub maintenance: crate::rsm::maintenance::Config,
     /// `QUEEN_RAFT_KEEP_OVERLAY` (default on): the planner thread keeps the
-    /// overlay and the wildcard rings BETWEEN cycles and updates them per
-    /// landed entry ([`crate::rsm::planner::kept`], [`PlanRings`]). Off: every
-    /// cycle rebuilds both from scratch, the path before the knob.
+    /// overlay BETWEEN cycles and updates it per landed entry
+    /// ([`crate::rsm::planner::kept`]). Off: every cycle rebuilds it from
+    /// scratch, the path before the knob.
     pub keep_overlay: bool,
     /// `QUEEN_RAFT_KEEP_OVERLAY_VERIFY` (default off): also rebuild the overlay
     /// the old way every cycle and compare. A difference is logged and counted
@@ -329,12 +329,6 @@ impl BatcherConfig {
                 plan_budget_ms: num("QUEEN_RAFT_PLAN_MAX_MS", d.plan.plan_budget_ms),
                 slow_command_ms: num("QUEEN_RAFT_SLOW_COMMAND_MS", d.plan.slow_command_ms),
                 index_mode,
-                // 0 turns it off, so not `num` (which ignores 0).
-                lease_skew_grace_us: std::env::var("QUEEN_RAFT_MAX_CLOCK_SKEW_MS")
-                    .ok()
-                    .and_then(|v| v.trim().parse::<i64>().ok())
-                    .map_or(d.plan.lease_skew_grace_us, |ms| ms.max(0) * 1000),
-                term_start_us: None,
             },
             driver_notify: flag("QUEEN_RAFT_DRIVER_NOTIFY", d.driver_notify),
             push_priority: flag("QUEEN_RAFT_PUSH_PRIORITY", d.push_priority),
@@ -513,6 +507,22 @@ pub(crate) fn refused_items(refusal: &Refusal, n: usize) -> Vec<crate::rsm::entr
 }
 
 impl Command {
+    /// Whether this is a consumption command: the consumption engine's
+    /// ([`crate::rsm::consume`]) to serve on the leader, never the planner's.
+    pub(crate) fn is_consumption(&self) -> bool {
+        matches!(
+            self,
+            Command::PopWildcard(_)
+                | Command::PopPinned(_)
+                | Command::PopDiscover(_)
+                | Command::Ack(_)
+                | Command::AckPositional(_)
+                | Command::Nack(_)
+                | Command::Renew(_)
+                | Command::DlqHead(_)
+        )
+    }
+
     /// Whether §11.8 must refuse this command while a node is above the disk
     /// high-water mark. Deletes, acknowledgements and admin cleanup continue.
     pub(crate) fn grows_storage(&self) -> bool {
@@ -705,18 +715,23 @@ impl Command {
 
     /// Dispatch to the matching `plan_*`. The planner folds a `Logged` plan's
     /// effects into the overlay before returning, so the next command in the
-    /// cycle sees them (§7.2).
+    /// cycle sees them (§7.2). Consumption is the engine's
+    /// ([`crate::rsm::consume`]) and never reaches a planner: one that does is
+    /// refused.
     fn plan<R: Reads + ?Sized>(&self, p: &Planner<'_, R>, ov: &mut Overlay) -> Planned {
         match self {
             Command::Push(c) => p.plan_push(ov, c),
-            Command::PopPinned(c) => p.plan_pop_pinned(ov, c),
-            Command::PopWildcard(c) => p.plan_pop_wildcard(ov, c),
-            Command::PopDiscover(c) => p.plan_pop_discover(ov, c),
-            Command::Ack(c) => p.plan_ack(ov, c),
-            Command::AckPositional(c) => p.plan_ack_positional(ov, c),
-            Command::Nack(c) => p.plan_nack(ov, c),
-            Command::Renew(c) => p.plan_renew(ov, c),
-            Command::DlqHead(c) => p.plan_dlq_head(ov, c),
+            Command::PopPinned(_)
+            | Command::PopWildcard(_)
+            | Command::PopDiscover(_)
+            | Command::Ack(_)
+            | Command::AckPositional(_)
+            | Command::Nack(_)
+            | Command::Renew(_)
+            | Command::DlqHead(_) => Err(Refusal::retry(
+                "internal",
+                "consumption commands are served by the engine",
+            )),
             Command::Transaction(c) => p.plan_transaction(ov, c),
             Command::Kv(c) => p.plan_kv(ov, c),
             Command::Timers(c) => p.plan_timers(ov, c),
@@ -857,13 +872,7 @@ struct InFlightEntry {
 
 impl InFlightEntry {
     /// Answer every waiter from this entry's committed outcome (`Ok`).
-    ///
-    /// PLAN_RAFT_DRAIN_FIX P1.3: returns the `(pid, group, worker)` of every
-    /// LEASED pop claim whose waiter is gone (timed out, disconnected). Nobody
-    /// will ack those leases; the driver releases them at once instead of
-    /// letting them freeze their partitions for the whole lease.
-    fn resolve_ok(&mut self, at: AppliedAt) -> Vec<(Pid, String, String)> {
-        let mut undelivered: Vec<crate::rsm::entry::PopOutcome> = Vec::new();
+    fn resolve_ok(&mut self, at: AppliedAt) {
         self.resolved = Some(at);
         let waiters = std::mem::take(&mut self.waiters);
         for w in waiters {
@@ -894,27 +903,19 @@ impl InFlightEntry {
                     },
                 ),
             };
-            if let Err(Reply::Done {
-                outcome: Outcome::Pop(pop),
-                ..
-            }) = tx.send(msg)
-            {
-                undelivered.push(pop);
-            }
+            let _ = tx.send(msg);
         }
-        undelivered
-            .iter()
-            .flat_map(|pop| self.leased_of(&pop.claims))
-            .collect()
     }
 
     /// The entry is committed (not yet applied here): answer every waiter
     /// whose reply is its outcome alone — a push, a multi-push, an ack, a
-    /// nack, and an empty read that barriered on this entry. A pop keeps
-    /// waiting for local apply (its answer reads this node's rows and payload
-    /// files), as do KV calls (rendered by apply, at their position),
+    /// nack, and an empty read that barriered on this entry — and every
+    /// command `at_commit` names (the consumption engine's checkpoints: durable
+    /// once committed, and the claims and acks they carry wait on them). A pop
+    /// keeps waiting for local apply (its answer reads this node's rows and
+    /// payload files), as do KV calls (rendered by apply, at their position),
     /// transactions, renews and dead-letter reads.
-    fn answer_committed(&mut self, at: AppliedAt) {
+    fn answer_committed(&mut self, at: AppliedAt, at_commit: &dyn Fn(&RequestId) -> bool) {
         let waiters = std::mem::take(&mut self.waiters);
         for w in waiters {
             match w {
@@ -926,7 +927,7 @@ impl InFlightEntry {
                         .find(|c| c.request_id == request_id)
                         .map(|c| &c.outcome);
                     match outcome {
-                        Some(o) if answerable_at_commit(o) => {
+                        Some(o) if answerable_at_commit(o) || at_commit(&request_id) => {
                             let _ = reply.send(Reply::Done {
                                 outcome: o.clone(),
                                 at: Some(at),
@@ -947,37 +948,6 @@ impl InFlightEntry {
                 }
             }
         }
-    }
-
-    /// `(pid, group, worker)` of every LEASED claim in `claims`; the group is
-    /// on the `CursorSet` this entry wrote for that claim.
-    fn leased_of(&self, claims: &[crate::rsm::entry::PopClaim]) -> Vec<(Pid, String, String)> {
-        claims
-            .iter()
-            .filter(|c| c.lease_expires_at_us.is_some())
-            .filter_map(|c| {
-                self.entry.effects.iter().find_map(|e| match e {
-                    Effect::CursorSet { pid, group, row }
-                        if *pid == c.pid && row.worker.as_deref() == Some(c.worker.as_str()) =>
-                    {
-                        Some((c.pid, group.clone(), c.worker.clone()))
-                    }
-                    _ => None,
-                })
-            })
-            .collect()
-    }
-
-    /// Every leased claim of every pop this entry carries — for an entry whose
-    /// waiters were all answered `Retry` (a propose timeout) but that applied.
-    fn leased_claims(&self) -> Vec<(Pid, String, String)> {
-        let mut out = Vec::new();
-        for c in &self.entry.commands {
-            if let Outcome::Pop(pop) = &c.outcome {
-                out.extend(self.leased_of(&pop.claims));
-            }
-        }
-        out
     }
 
     /// Fail every waiter (`Retry`), dropping this entry's overlay contribution.
@@ -1130,59 +1100,18 @@ fn plan_fire_step<R: Reads + ?Sized>(
     }
 }
 
-/// KEEP_OVERLAY verify: the first difference between a kept ring and what a
-/// rebuild from `pending` offers at `now_us` — the walk, the deferred rows, the
-/// next deadline, and the rows themselves — or `None`.
-fn ring_diff<R: Reads + ?Sized>(
-    r: &R,
-    rings: &PlanRings,
-    key: &RingKey,
-    now_us: i64,
-) -> crate::rsm::store::Result<Option<String>> {
-    let (t, q, g) = key;
-    let Some(mut got) = rings.snapshot(t, q, g) else {
-        return Ok(Some("not kept".into()));
-    };
-    let mut rows: Vec<(Pid, i64)> = Vec::new();
-    let prefix = crate::rsm::store::keys::pending_prefix(t, q, g);
-    r.scan_pending(&prefix, usize::MAX, &mut |tt, qq, gg, pid, at| {
-        if tt != t || qq != q || gg != g {
-            return false;
-        }
-        rows.push((pid, at));
-        true
-    })?;
-    if got.rows != rows {
-        return Ok(Some(format!(
-            "rows: kept {:?} vs pending {rows:?}",
-            got.rows
-        )));
-    }
-    got.rows = Vec::new();
-    let d = Derived::rebuild_rings(r, now_us, Some(std::slice::from_ref(key)))?;
-    let want = RingSnapshot::of_rebuild(d.ring(t, q, g));
-    if got != want {
-        return Ok(Some(format!("kept {got:?} vs rebuilt {want:?}")));
-    }
-    Ok(None)
-}
-
 /// KEEP_OVERLAY: drop the kept state every this many cycles and rebuild it —
 /// a bound on how long any drift nothing detected could live (a few seconds
 /// at full load; one rebuild each time, the cost every cycle paid before).
 pub(crate) const KEEP_RESET_EVERY: u64 = 1 << 14;
-/// Every this many cycles, forget the kept rings no batch has walked for
-/// [`RING_IDLE_CYCLES`]: they are scanned afresh if a pop comes back.
-const RING_EVICT_EVERY: u64 = 1 << 10;
-const RING_IDLE_CYCLES: u64 = 1 << 12;
 /// The most verify mismatches [`KeepStats`] remembers.
 const KEEP_MISMATCH_KEEP: usize = 16;
 
 /// How one cycle treats the state the planner thread keeps (KEEP_OVERLAY).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct KeepCfg {
-    /// [`BatcherConfig::keep_overlay`]. Off: the overlay and the rings are
-    /// rebuilt from scratch every cycle and nothing is kept.
+    /// [`BatcherConfig::keep_overlay`]. Off: the overlay is rebuilt from
+    /// scratch every cycle and nothing is kept.
     pub(crate) enabled: bool,
     /// The driver's epoch. It moves whenever the in-flight list stops being
     /// "the entries this thread planned, minus the ones that landed" — a lost
@@ -1192,10 +1121,6 @@ pub(crate) struct KeepCfg {
     /// [`BatcherConfig::keep_overlay_verify`]: compare with the old path's
     /// rebuild every cycle; plan from the rebuild when they differ.
     pub(crate) verify: bool,
-    /// Also compare every kept ring with a rebuild from `pending`. Exact only
-    /// while apply is quiescent between cycles (the store is read live), so it
-    /// is for the tests.
-    pub(crate) verify_rings: bool,
     /// Drop the kept state every this many cycles (`0` = never).
     pub(crate) reset_every: u64,
 }
@@ -1207,7 +1132,6 @@ impl KeepCfg {
             enabled: false,
             epoch: 0,
             verify: false,
-            verify_rings: false,
             reset_every: 0,
         }
     }
@@ -1242,25 +1166,16 @@ impl KeepStats {
 }
 
 /// What the `queen-planner` thread keeps between cycles (KEEP_OVERLAY): the
-/// overlay with the in-flight entries it folded, and the wildcard rings. Owned
-/// by that one thread, so it takes no lock.
+/// overlay with the in-flight entries it folded. Owned by that one thread, so
+/// it takes no lock.
 #[derive(Default)]
 pub(crate) struct PlannerState {
     overlay: Option<KeptOverlay>,
-    rings: Option<PlanRings>,
     epoch: u64,
     cycles: u64,
     pub(crate) stats: KeepStats,
     /// The lanes (`QUEEN_LANES` > 1), made on the first cycle that uses them.
     lanes: Option<Box<lanes::LanesState>>,
-}
-
-impl PlannerState {
-    /// `(rings scanned from pending, times every ring was dropped)` by the
-    /// kept rings in hand (tests).
-    pub(crate) fn ring_stats(&self) -> (u64, u64) {
-        self.rings.as_ref().map_or((0, 0), |r| (r.loads, r.drops))
-    }
 }
 
 /// Plan one cycle inside ONE store read transaction (I15: on the planner
@@ -1287,61 +1202,26 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
     maintenance: Option<crate::rsm::maintenance::Config>,
     scan: Option<Arc<crate::rsm::retention_scan::ScanShared>>,
 ) -> crate::rsm::store::Result<PlanOutput> {
-    // P4: the rings this batch's wildcard pops walk — the only part of
-    // `Derived` the planner reads. A discovery pop spans queues: every ring.
-    let ring_keys: Option<Vec<RingKey>> =
-        if batch.iter().any(|c| matches!(c, Command::PopDiscover(_))) {
-            None
-        } else {
-            let mut keys: Vec<RingKey> = batch
-                .iter()
-                .filter_map(|c| match c {
-                    Command::PopWildcard(p) => {
-                        Some((p.tenant.clone(), p.queue.clone(), p.group.clone()))
-                    }
-                    _ => None,
-                })
-                .collect();
-            keys.sort_unstable();
-            keys.dedup();
-            Some(keys)
-        };
-
     // KEEP_OVERLAY: a state kept under another epoch (or with the knob off) is
     // gone, and every `reset_every` cycles it is rebuilt whatever it says.
     if !keep.enabled || state.epoch != keep.epoch {
         state.overlay = None;
-        state.rings = None;
         state.epoch = keep.epoch;
     }
     state.cycles += 1;
     let cycle_no = state.cycles;
     if keep.reset_every > 0 && cycle_no.is_multiple_of(keep.reset_every) {
-        // The overlay starts over; the rings are kept: they check themselves
-        // against `pending` a ring at a time as they advance (B34), where
-        // dropping them rescanned every pending row of every kept ring at once.
         state.overlay = None;
     }
-    // Taken OUT for the cycle: only a cycle that reaches its end puts them
+    // Taken OUT for the cycle: only a cycle that reaches its end puts it
     // back, so an error part-way (a store read refused, a panic) leaves
     // nothing half-advanced for the next one — it rebuilds.
     let prior = state.overlay.take();
-    let mut rings = if keep.enabled {
-        state.rings.take()
-    } else {
-        None
-    };
 
     store.read(|r| {
         let store_applied = r.applied_index()?;
         let base_pid = r.next_pid()?;
         let base_kv = r.kv_version_next()?;
-
-        // The committed clock floor (D5). Used to rebuild the rings and as the
-        // base the overlay lifts above.
-        let empty = Derived::default();
-        let base_now = Committed::new(r, &empty).plan_now(wall_us)?;
-        crate::rsm::dbgctr::maybe_dump(r, base_now);
 
         // The overlay (§7.2): every in-flight entry the committed read does not
         // yet reflect, folded. KEEP_OVERLAY advances the kept one past the
@@ -1385,47 +1265,7 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
             }
         }
 
-        // The rings this batch's wildcard pops walk. KEEP_OVERLAY keeps them
-        // and re-reads, per landed entry, the `pending` rows it wrote
-        // ([`PlanRings::advance`]); a ring is scanned only the first time a
-        // batch needs it. The old path — the knob off, and a discovery pop,
-        // which spans every ring — rebuilds them from `pending`.
-        if keep.enabled {
-            let pr = rings.get_or_insert_with(|| PlanRings::new(store_applied, base_now));
-            let loads0 = pr.loads;
-            pr.advance(r, &folded, store_applied, base_now)?;
-            if let Some(keys) = &ring_keys {
-                for k in keys {
-                    pr.ensure(r, k, cycle_no)?;
-                }
-            }
-            if cycle_no.is_multiple_of(RING_EVICT_EVERY) {
-                pr.evict_idle(cycle_no.saturating_sub(RING_IDLE_CYCLES));
-            }
-            if metrics_on && pr.loads > loads0 {
-                tm.ring_loads
-                    .fetch_add(pr.loads - loads0, std::sync::atomic::Ordering::Relaxed);
-            }
-            if keep.verify_rings {
-                for key in pr.keys() {
-                    if let Some(what) = ring_diff(r, pr, &key, base_now)? {
-                        state
-                            .stats
-                            .mismatch(format!("cycle {cycle_no}: ring {key:?}: {what}"));
-                    }
-                }
-            }
-        }
-        let kept_rings = keep.enabled && ring_keys.is_some();
-        let derived = if kept_rings {
-            Derived::default()
-        } else {
-            Derived::rebuild_rings(r, base_now, ring_keys.as_deref())?
-        };
-        let committed = match rings.as_ref() {
-            Some(pr) if kept_rings => Committed::with_plan_rings(r, &derived, pr),
-            _ => Committed::new(r, &derived),
-        };
+        let committed = Committed::new(r);
 
         // The cycle's own folds carry its tag; each step below checks it folded
         // exactly the effects it added to the entry, so the kept overlay is the
@@ -1676,9 +1516,9 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
         };
 
         // KEEP_OVERLAY: keep the overlay — now carrying this cycle's entry as in
-        // flight — and the rings for the next cycle. An overlay that folded
-        // anything its entry does not carry, or whose build met a request id
-        // twice, is dropped: the next cycle rebuilds.
+        // flight — for the next cycle. An overlay that folded anything its
+        // entry does not carry, or whose build met a request id twice, is
+        // dropped: the next cycle rebuilds.
         if keep.enabled {
             let mut keep_it = !poisoned && kept.exact();
             if keep_it {
@@ -1692,7 +1532,6 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
                 state.stats.poisoned += 1;
                 bump(&tm.keep_poisoned);
             }
-            state.rings = rings;
         }
         Ok(PlanOutput {
             store_applied,
@@ -1774,33 +1613,11 @@ pub struct Batcher<S: Store, R: Replicator> {
     qlog_reader: Option<QLogReader>,
     /// Membership changes pausing the driver ([`QuiesceReq`]).
     quiesce_rx: Option<mpsc::UnboundedReceiver<QuiesceReq>>,
-    /// Wakes the pops parked on a queue when an append to it is PLANNED
-    /// ([`PlanWaker`]); `None` leaves every wake to apply.
-    plan_waker: Option<PlanWaker>,
-}
-
-/// Called by the driver once per cycle, after it proposed an entry, with each
-/// `(tenant, queue)` the entry's pushes appended to and how many partitions
-/// they appended to: the facade wakes that many parked pops of every group of
-/// the queue there and then, instead of when the entry applies — the claim is
-/// planned against the in-flight append in a later cycle and commits after it,
-/// so a consumer sees the message one raft round earlier. Leader-side only (a
-/// follower plans nothing); followers keep their apply-time wakes.
-pub type PlanWaker = Arc<dyn Fn(&str, &str, usize) + Send + Sync>;
-
-/// `QUEEN_RAFT_WAKE_AT_PLAN` (default on): see [`PlanWaker`].
-static WAKE_AT_PLAN: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
-    !matches!(
-        std::env::var("QUEEN_RAFT_WAKE_AT_PLAN")
-            .as_deref()
-            .map(str::trim),
-        Ok("0") | Ok("false") | Ok("off") | Ok("no")
-    )
-});
-
-/// Whether the facade should install a [`PlanWaker`].
-pub fn wake_at_plan() -> bool {
-    *WAKE_AT_PLAN
+    /// The facade's consumption engine ([`crate::rsm::consume`]): told when
+    /// this driver starts and stops planning as leader, and when a
+    /// transaction's entry lands; it serves any consumption command that
+    /// still reaches this driver. `None`: no engine (driver tests).
+    engine: Option<Arc<crate::rsm::consume::Engine>>,
 }
 
 /// `QUEEN_RAFT_ANSWER_AT_COMMIT` (default on): free pipeline slots and answer
@@ -1845,7 +1662,9 @@ struct Launched {
     replies: Vec<oneshot::Sender<Reply>>,
     received: Vec<Option<Instant>>,
     arrivals: Vec<Instant>,
-    wake_hint: Option<Vec<Vec<(String, String)>>>,
+    /// The request id of each drained transaction, by batch position (the
+    /// engine releases the reservation of one this cycle does not log).
+    txn_ids: Vec<Option<RequestId>>,
     epoch0: u64,
     hold0: bool,
     expire: bool,
@@ -1900,7 +1719,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             reader: None,
             qlog_reader: None,
             quiesce_rx: None,
-            plan_waker: None,
+            engine: None,
         }
     }
 
@@ -1911,9 +1730,9 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
         self
     }
 
-    /// Wake parked pops when an append is planned ([`PlanWaker`]).
-    pub fn with_plan_waker(mut self, w: PlanWaker) -> Batcher<S, R> {
-        self.plan_waker = Some(w);
+    /// Hand the driver the facade's consumption engine (see [`Batcher::engine`]).
+    pub fn with_engine(mut self, engine: Arc<crate::rsm::consume::Engine>) -> Batcher<S, R> {
+        self.engine = Some(engine);
         self
     }
 
@@ -1939,14 +1758,27 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
     /// the task handle; dropping every sender drains the driver and exits it.
     pub fn spawn(self) -> (CommandTx, tokio::task::JoinHandle<()>) {
         let (cmd_tx, cmd_rx) = mpsc::channel(self.cfg.command_queue_depth);
+        // Leading already (a single node, a restart that won its election
+        // before this driver starts): the engine serves this term from now on,
+        // not from the driver's first poll — a command sent the moment the
+        // facade opened would be answered `Retry` in between.
+        let role = *self.repl.watch_role().borrow();
+        let told = match (role, &self.engine) {
+            (Role::Leader { term }, Some(e)) => {
+                e.on_leader(term, self.repl.metrics().last_log_index);
+                Some(term)
+            }
+            _ => None,
+        };
         // W1: the driver is core. It is a task on the caller's runtime, not a
         // named thread, so the `core` wrapper (not the thread name) is what
         // makes a panic in it abort instead of silently wedging every write.
-        let handle = tokio::spawn(crate::obs::panic_policy::core(self.run(cmd_rx)));
+        let handle = tokio::spawn(crate::obs::panic_policy::core(self.run(cmd_rx, told)));
         (cmd_tx, handle)
     }
 
-    async fn run(self, cmd_rx: mpsc::Receiver<Submission>) {
+    /// The driver. `told`: the term the engine was told it leads at spawn.
+    async fn run(self, cmd_rx: mpsc::Receiver<Submission>, told: Option<u64>) {
         let (result_tx, result_rx) = mpsc::unbounded_channel();
         let mut expire =
             tokio::time::interval(Duration::from_millis(self.cfg.request_expire_every_ms));
@@ -2063,15 +1895,24 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             last_cycle_at: None,
             plan_epoch: 0,
             quiesce_rx: self.quiesce_rx,
-            plan_waker: self.plan_waker,
+            engine: self.engine,
             prefetch: None,
             quiescing: None,
             realign_at: None,
-            term_start_us: None,
             clock_anchor: None,
         };
         if role.is_leader() {
             st.begin_term_clock();
+            // Leading from the start: the engine serves this term (it was
+            // told at spawn, unless the term changed since).
+            if let (Role::Leader { term }, Some(e)) = (role, &st.engine) {
+                if told != Some(term) {
+                    e.on_leader(term, st.repl.metrics().last_log_index);
+                }
+            }
+        } else if let (Some(_), Some(e)) = (told, &st.engine) {
+            // Leadership went between the spawn and this first look.
+            e.on_step_down();
         }
 
         loop {
@@ -2353,8 +2194,8 @@ struct RunState<S: Store, R: Replicator> {
     /// Membership changes pausing the driver ([`QuiesceReq`]), and the one
     /// pausing it now.
     quiesce_rx: Option<mpsc::UnboundedReceiver<QuiesceReq>>,
-    /// See [`PlanWaker`].
-    plan_waker: Option<PlanWaker>,
+    /// See [`Batcher::engine`].
+    engine: Option<Arc<crate::rsm::consume::Engine>>,
     /// The next cycle, launched by the one being finished before it proposed
     /// (`QUEEN_RAFT_PIPELINED_PLANNING`); finished by the next `plan_cycle`.
     prefetch: Option<Launched>,
@@ -2362,9 +2203,6 @@ struct RunState<S: Store, R: Replicator> {
     /// An entry landed at another index than planned: planning resumes, from
     /// the log's end, once apply reaches this index ([`RunState::check_hold`]).
     realign_at: Option<u64>,
-    /// The RSM clock when this node's current leadership began planning
-    /// ([`crate::rsm::planner::PlanConfig::term_start_us`]).
-    term_start_us: Option<i64>,
     /// The RSM clock when this node's leadership began planning, and the
     /// monotonic instant it was read at ([`RunState::plan_wall`]).
     clock_anchor: Option<(i64, Instant)>,
@@ -2527,6 +2365,29 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             let _ = sub.reply.send(Reply::Retry { hint });
             return;
         }
+        // Consumption is the engine's, served before the driver
+        // (`facade::intake`). One that still reaches it (a path that submits
+        // here directly) is served by the engine too, never planned: this is
+        // the backstop.
+        if sub.command.is_consumption() {
+            if let Some(engine) = &self.engine {
+                match engine.serve(&sub.command, now_micros()) {
+                    crate::rsm::consume::Served::Now(reply) => {
+                        let _ = sub.reply.send(reply);
+                        return;
+                    }
+                    crate::rsm::consume::Served::Later(rx) => {
+                        let reply = sub.reply;
+                        tokio::spawn(async move {
+                            let answer = rx.await.unwrap_or(Reply::Retry { hint: None });
+                            let _ = reply.send(answer);
+                        });
+                        return;
+                    }
+                    crate::rsm::consume::Served::NotMine => {}
+                }
+            }
+        }
         if self.cfg.drain_lane && !matches!(sub.command, Command::Push(_) | Command::MultiPush(_)) {
             self.lane.push_back(sub);
         } else {
@@ -2534,8 +2395,8 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         }
     }
 
-    /// Put a submission back at the FRONT of its lane (a budget-cut deferral,
-    /// an orphan-release nack): it is the next of its kind to be planned.
+    /// Put a submission back at the FRONT of its lane (a budget-cut
+    /// deferral): it is the next of its kind to be planned.
     fn requeue_front(&mut self, sub: Submission) {
         if self.cfg.drain_lane && !matches!(sub.command, Command::Push(_) | Command::MultiPush(_)) {
             self.lane.push_front(sub);
@@ -2730,27 +2591,15 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         // when the metrics knob is off, since `received_at` is then `None`.
         let received: Vec<Option<Instant>> = batch.iter().map(|s| s.received_at).collect();
 
-        // The queues each drained push appends to, by batch position, for the
-        // plan-time wake ([`PlanWaker`]); taken before the commands move.
-        let wake_hint: Option<Vec<Vec<(String, String)>>> = self.plan_waker.as_ref().map(|_| {
-            batch
-                .iter()
-                .map(|s| match &s.command {
-                    Command::Push(c) => vec![(c.tenant.clone(), c.queue.clone())],
-                    Command::MultiPush(c) => c
-                        .pushes
-                        .iter()
-                        .map(|p| (p.tenant.clone(), p.queue.clone()))
-                        .collect(),
-                    Command::Transaction(c) => c
-                        .pushes
-                        .iter()
-                        .map(|p| (p.tenant.clone(), p.queue.clone()))
-                        .collect(),
-                    _ => Vec::new(),
-                })
-                .collect()
-        });
+        // The request id of each drained transaction, by batch position:
+        // taken before the commands move.
+        let txn_ids: Vec<Option<RequestId>> = batch
+            .iter()
+            .map(|s| match &s.command {
+                Command::Transaction(c) => Some(c.request_id),
+                _ => None,
+            })
+            .collect();
 
         // Split the submissions: commands go to the blocking planner, reply
         // senders stay here in the same order.
@@ -2769,8 +2618,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         let expire_window_us = expire.then(|| self.cfg.request_id_window_s as i64 * 1_000_000);
         let kv_sweep_limit = kv_sweep.then_some(self.cfg.kv_sweep_limit);
         let store = self.store.clone();
-        let mut cfg = self.cfg.plan.clone();
-        cfg.term_start_us = self.term_start_us;
+        let cfg = self.cfg.plan.clone();
         let front = self.front.clone();
         let reader = self.reader.clone();
         let qlog_reader = self.qlog_reader.clone();
@@ -2781,7 +2629,6 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             enabled: self.cfg.keep_overlay,
             epoch: self.plan_epoch,
             verify: self.cfg.keep_overlay_verify,
-            verify_rings: false,
             reset_every: KEEP_RESET_EVERY,
         };
 
@@ -2851,7 +2698,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             replies,
             received,
             arrivals,
-            wake_hint,
+            txn_ids,
             epoch0,
             hold0,
             expire,
@@ -2882,7 +2729,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             replies,
             received,
             arrivals,
-            wake_hint,
+            txn_ids,
             epoch0,
             hold0,
             expire: _,
@@ -2959,6 +2806,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             && (self.plan_epoch != epoch0 || (!hold0 && self.holding_until.is_some()))
         {
             self.invalidate_kept();
+            for id in &txn_ids {
+                self.txn_not_logged(*id);
+            }
             let lost = self.paused.then(|| self.role_rx.borrow().leader_hint());
             for reply in replies {
                 let _ = match lost {
@@ -2979,6 +2829,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 // due, stays due. (The planner thread kept nothing from a cycle
                 // that failed; the epoch says so too.)
                 self.invalidate_kept();
+                for id in &txn_ids {
+                    self.txn_not_logged(*id);
+                }
                 for reply in replies {
                     let _ =
                         reply.send(Reply::Refused(Refusal::retry("unavailable", e.to_string())));
@@ -2987,6 +2840,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             }
             Err(join) => {
                 self.invalidate_kept();
+                for id in &txn_ids {
+                    self.txn_not_logged(*id);
+                }
                 for reply in replies {
                     let _ = reply.send(Reply::Refused(Refusal::retry(
                         "unavailable",
@@ -3035,14 +2891,14 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             Some(entry) if !self.repl.wants_bytes() => match entry.validate() {
                 Ok(()) => Some(Bytes::new()),
                 Err(e) => {
-                    self.route_encode_failure(out.slots, replies, received, &e);
+                    self.route_encode_failure(out.slots, replies, received, &txn_ids, &e);
                     return;
                 }
             },
             Some(entry) => match encode_entry(entry) {
                 Ok(bytes) => Some(Bytes::from(bytes)),
                 Err(e) => {
-                    self.route_encode_failure(out.slots, replies, received, &e);
+                    self.route_encode_failure(out.slots, replies, received, &txn_ids, &e);
                     return;
                 }
             },
@@ -3102,33 +2958,22 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             Vec::new()
         };
 
-        // The plan-time wake's counts: one per partition a LOGGED push of this
-        // entry appends to, by queue (an all-duplicate group appends nothing
-        // and overcounts by one wake at worst: the pop it wakes re-parks).
-        let plan_wakes: Vec<((String, String), usize)> = match (&wake_hint, has_entry) {
-            (Some(hint), true) => {
-                let mut m: HashMap<(String, String), usize> = HashMap::new();
-                for (pos, slot) in out.slots.iter().enumerate() {
-                    if let Slot::Logged(_) = slot {
-                        for tq in hint.get(pos).into_iter().flatten() {
-                            *m.entry(tq.clone()).or_default() += 1;
-                        }
-                    }
-                }
-                m.into_iter().collect()
-            }
-            _ => Vec::new(),
-        };
-
         let mut waiters: Vec<Waiter> = Vec::new();
         let mut deferred: Vec<Submission> = Vec::new();
 
-        for ((slot, reply), arrived) in out
+        for (((slot, reply), arrived), txn_id) in out
             .slots
             .into_iter()
             .zip(replies.into_iter())
             .zip(received.into_iter())
+            .zip(txn_ids.into_iter())
         {
+            // A transaction this cycle did not log — refused, planned empty (a
+            // lost KV precondition), or answered from an earlier commit of its
+            // id: the reservation of its consumption half, if any, is released.
+            if matches!(slot, Slot::Immediate(_) | Slot::Empty(_)) {
+                self.txn_not_logged(txn_id);
+            }
             match slot {
                 Slot::Immediate(r) => {
                     let _ = reply.send(r);
@@ -3198,11 +3043,6 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     .record_dur(started.elapsed());
             }
             self.propose(seq, index, entry, waiters, bytes);
-            if let Some(w) = self.plan_waker.as_ref() {
-                for ((tenant, queue), n) in &plan_wakes {
-                    w(tenant, queue, *n);
-                }
-            }
         } else {
             debug_assert!(waiters.is_empty(), "no entry but waiters were attached");
         }
@@ -3242,16 +3082,24 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         slots: Vec<Slot>,
         replies: Vec<oneshot::Sender<Reply>>,
         received: Vec<Option<Instant>>,
+        txn_ids: &[Option<RequestId>],
         err: &crate::rsm::effect::CodecError,
     ) {
         tracing::error!(target: "rsm", error = ?err, "batcher entry failed to encode; refusing its commands");
         // The planner thread kept this entry as in flight; it never will be.
         self.invalidate_kept();
-        for ((slot, reply), arrived) in slots
+        for (pos, ((slot, reply), arrived)) in slots
             .into_iter()
             .zip(replies.into_iter())
             .zip(received.into_iter())
+            .enumerate()
         {
+            // Nothing of this cycle is logged: a refused transaction's
+            // reservation is released (a requeued one keeps it: it is planned
+            // again as it is).
+            if !matches!(slot, Slot::InFlightHit { .. } | Slot::Deferred(_)) {
+                self.txn_not_logged(txn_ids.get(pos).copied().flatten());
+            }
             match slot {
                 // PERF-J: keep the original arrival on the requeued tail.
                 Slot::Deferred(command) => self.requeue_front(Submission {
@@ -3436,8 +3284,10 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                             .propose_roundtrip
                             .record_dur(at0.elapsed());
                     }
-                    let orphans = e.resolve_ok(at);
-                    self.release_orphans(orphans);
+                    // The engine first: an answered caller's next command
+                    // finds the transaction's rows live.
+                    txns_landed(&self.engine, &e.entry);
+                    e.resolve_ok(at);
                 }
             }
             Err(ProposeError::Timeout) => {
@@ -3468,6 +3318,12 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     /// §7.1: drop the whole overlay, fail every waiter `Retry`, and stop
     /// planning until this node is leader again (I13).
     fn lose_leadership(&mut self, hint: Option<NodeId>) {
+        // The consumption engine stops serving with the pipeline: whatever
+        // it held answers `Retry`, and what it reserved or leased is loaded
+        // again from committed state if this node plans again.
+        if let Some(e) = &self.engine {
+            e.on_step_down();
+        }
         for mut e in self.inflight.drain(..) {
             e.fail(hint);
         }
@@ -3505,6 +3361,12 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     // is guaranteed to hold complete. A single-node
                     // LocalReplicator never regains, so this is inert in phase 1.
                     self.front.reset();
+                    // The consumption engine serves from now on, in this term:
+                    // it starts from the committed cursor rows (their leases
+                    // live on) after its failover pause.
+                    if let Some(e) = &self.engine {
+                        e.on_leader(term, self.next_index - 1);
+                    }
                     // KEEP_OVERLAY: and plan from state rebuilt under the new term.
                     self.invalidate_kept();
                 }
@@ -3512,6 +3374,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             Role::Stopped => {
                 self.stopped = true;
                 self.invalidate_kept();
+                if let Some(e) = &self.engine {
+                    e.on_step_down();
+                }
             }
             _ => {
                 // Follower / Learner / Candidate: drop the overlay, fail
@@ -3547,6 +3412,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 self.next_index = self.repl.metrics().last_log_index + 1;
                 self.front.reset();
                 self.invalidate_kept();
+                if let Some(e) = &self.engine {
+                    e.on_leader(term, self.next_index - 1);
+                }
             }
         }
     }
@@ -3560,10 +3428,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
 
     /// A term begins planning: the RSM clock is read once, here, from the
     /// wall ([`RunState::rsm_now`]: never behind the last applied entry) —
-    /// the lease grace's term start and the clock's anchor.
+    /// the clock's anchor.
     fn begin_term_clock(&mut self) {
         let now = self.rsm_now();
-        self.term_start_us = Some(now);
         self.clock_anchor = Some((now, Instant::now()));
     }
 
@@ -3627,7 +3494,6 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             // every timed-out entry at or below the applied index resolved so
             // it no longer counts, and resume planning.
             let applied = self.repl.applied_index();
-            let mut orphans: Vec<(Pid, String, String)> = Vec::new();
             let mut superseded = false;
             for e in self.inflight.iter_mut() {
                 if e.timed_out && e.resolved.is_none() && e.index <= applied {
@@ -3641,8 +3507,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                         index: e.index,
                         term: e.term,
                     });
-                    // P1.3: answered `Retry`, yet applied — its leases are orphans.
-                    orphans.extend(e.leased_claims());
+                    txns_landed(&self.engine, &e.entry);
                 }
             }
             if superseded {
@@ -3650,7 +3515,6 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 self.lose_leadership(hint);
                 return;
             }
-            self.release_orphans(orphans);
             self.holding_until = None;
         }
     }
@@ -3681,13 +3545,15 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     /// entry at or below `c` that this node proposed in term `t` is committed
     /// (see [`Replicator::committed_watch`] for why only term `t`'s), so it
     /// leaves the pipeline and its outcome-only waiters are answered. The rest
-    /// of its lifecycle — the overlay, the waiters that need local rows, the
-    /// orphaned-lease release, the term check — stays at apply.
+    /// of its lifecycle — the overlay, the waiters that need local rows, a
+    /// transaction's landing in the engine, the term check — stays at apply.
     fn on_committed(&mut self) {
         let Some(rx) = self.committed_rx.as_mut() else {
             return;
         };
         let (c, t) = *rx.borrow_and_update();
+        let engine = self.engine.clone();
+        let at_commit = |id: &RequestId| engine.as_ref().is_some_and(|en| en.answers_at_commit(id));
         for e in self.inflight.iter_mut() {
             if e.index > c {
                 break;
@@ -3696,10 +3562,13 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 continue;
             }
             e.committed = true;
-            e.answer_committed(AppliedAt {
-                index: e.index,
-                term: e.term,
-            });
+            e.answer_committed(
+                AppliedAt {
+                    index: e.index,
+                    term: e.term,
+                },
+                &at_commit,
+            );
         }
     }
 
@@ -3710,7 +3579,6 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     /// path (both guard on `resolved`): whichever reaches an entry first
     /// resolves it, the other is a no-op.
     fn resolve_applied(&mut self, applied: u64) {
-        let mut orphans: Vec<(Pid, String, String)> = Vec::new();
         let mut superseded = false;
         for e in self.inflight.iter_mut() {
             // In-flight entries are pushed in index order and never reordered,
@@ -3734,6 +3602,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 }
                 None => break,
             }
+            // The engine first: an answered caller's next command finds the
+            // transaction's rows live.
+            txns_landed(&self.engine, &e.entry);
             if e.timed_out {
                 // Its waiters were already answered `Retry` (I3); mark it
                 // resolved so it leaves the pipeline (mirrors `check_hold`).
@@ -3741,22 +3612,18 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     index: e.index,
                     term,
                 });
-                // P1.3: those waiters got `Retry`, yet the entry applied — every
-                // lease it granted is an orphan.
-                orphans.extend(e.leased_claims());
             } else {
                 if let Some(at0) = e.proposed_at {
                     crate::rsm::timing::metrics()
                         .propose_roundtrip
                         .record_dur(at0.elapsed());
                 }
-                orphans.extend(e.resolve_ok(AppliedAt {
+                e.resolve_ok(AppliedAt {
                     index: e.index,
                     term,
-                }));
+                });
             }
         }
-        self.release_orphans(orphans);
         if superseded {
             // Every waiter `Retry`: the facade takes each command, under its
             // request id, to the node that leads now.
@@ -3774,24 +3641,22 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         }
     }
 
-    /// PLAN_RAFT_DRAIN_FIX P1.3: release every orphaned lease through the
-    /// ordinary planner path — a `Nack` (lease released, cursor unmoved, no
-    /// retry charged), queued at the FRONT so the partition is claimable again
-    /// within one cycle instead of after the whole lease. Its own answer goes
-    /// nowhere (an `Ack` outcome, so it can never orphan anything itself).
-    fn release_orphans(&mut self, orphans: Vec<(Pid, String, String)>) {
-        for (pid, group, worker) in orphans {
-            crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.orphan_released, 1);
-            let (sub, _rx) = Submission::new(Command::Nack(NackCommand {
-                request_id: crate::util::uuidv7_bytes(),
-                pid,
-                tenant: String::new(),
-                queue: String::new(),
-                group,
-                worker,
-            }));
-            self.requeue_front(sub);
+    /// A transaction this driver did not log (refused, planned empty, its
+    /// cycle dropped): the engine releases the reservation of its consumption
+    /// half — unless an earlier attempt of the same id is still in flight,
+    /// whose landing decides ([`txns_landed`]).
+    fn txn_not_logged(&self, id: Option<RequestId>) {
+        let (Some(engine), Some(id)) = (&self.engine, id) else {
+            return;
+        };
+        if self
+            .inflight
+            .iter()
+            .any(|e| e.entry.commands.iter().any(|c| c.request_id == id))
+        {
+            return;
         }
+        engine.txn_resolve(id, false);
     }
 
     /// Fail every remaining waiter (`Retry`) — the driver is exiting.
@@ -3801,6 +3666,22 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         }
         while let Some(sub) = self.lane.pop_front().or_else(|| self.queue.pop_front()) {
             let _ = sub.reply.send(Reply::Retry { hint });
+        }
+    }
+}
+
+/// Every transaction of `entry`, which applied on this leader: the engine
+/// makes the rows its consumption half reserved the live state
+/// ([`crate::rsm::consume::Engine::txn_resolve`]; ids it never reserved are
+/// ignored).
+fn txns_landed(engine: &Option<Arc<crate::rsm::consume::Engine>>, entry: &Entry) {
+    let Some(engine) = engine else {
+        return;
+    };
+    for c in &entry.commands {
+        if matches!(&c.outcome, Outcome::Placeholder(p) if p.tag() == crate::rsm::planner::txn::TXN_OUTCOME_TAG)
+        {
+            engine.txn_resolve(c.request_id, true);
         }
     }
 }

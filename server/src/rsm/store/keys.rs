@@ -186,13 +186,6 @@ pub fn cursors_buf(p: Pid, group: &str) -> KeyBuf {
     k
 }
 
-/// [`pending`] on the stack.
-pub fn pending_buf(tenant: &str, queue: &str, group: &str, p: Pid) -> KeyBuf {
-    let mut k = groups_buf(tenant, queue, group);
-    k.extend_from_slice(&p.to_be_bytes());
-    k
-}
-
 /// [`leases_by_worker`] on the stack.
 pub fn leases_by_worker_buf(worker: &str, p: Pid, group: &str) -> KeyBuf {
     let mut k = KeyBuf::new();
@@ -395,7 +388,11 @@ pub fn leases_by_worker_parts(k: &[u8]) -> Option<(String, Pid, String)> {
     Some((worker, p, group))
 }
 
-/// `(tenant, queue, group, pid)` → `ready_at_us` (§6.1 `pending`).
+/// `(tenant, queue, group, pid)`: the `pending` keyspace's key shape. Nothing
+/// writes the keyspace any more (what a group can claim is the consumption
+/// engine's, in memory); it stays in the store's database list, and its key
+/// shape in the store's own tests.
+#[cfg(test)]
 pub fn pending(tenant: &str, queue: &str, group: &str, p: Pid) -> Vec<u8> {
     let mut k = with(tenant.len() + queue.len() + group.len() + 14);
     push_name(&mut k, tenant);
@@ -405,24 +402,10 @@ pub fn pending(tenant: &str, queue: &str, group: &str, p: Pid) -> Vec<u8> {
     k
 }
 
-/// Every partition with work for one (tenant, queue, group), in pid order:
-/// the O(pending) rebuild of the ready rings (§6.3).
+/// Every [`pending`] key of one (tenant, queue, group), in pid order.
+#[cfg(test)]
 pub fn pending_prefix(tenant: &str, queue: &str, group: &str) -> Vec<u8> {
     groups(tenant, queue, group)
-}
-
-/// Everything pending for one tenant, for the rebuild's outer walk.
-pub fn pending_tenant_prefix(tenant: &str) -> Vec<u8> {
-    queues_prefix(tenant)
-}
-
-/// `(tenant, queue, group, pid)` of a `pending` key.
-pub fn pending_parts(k: &[u8]) -> Option<(String, String, String, Pid)> {
-    let (t, at) = read_name(k, 0)?;
-    let (q, at) = read_name(k, at)?;
-    let (g, at) = read_name(k, at)?;
-    let p = read_u64(k, at)?;
-    Some((t, q, g, p))
 }
 
 // ---------------------------------------------------------------------------
@@ -1062,11 +1045,6 @@ mod tests {
 
     #[test]
     fn composite_parts_decode() {
-        let k = pending("t", "q", "g", 42);
-        assert_eq!(
-            pending_parts(&k),
-            Some(("t".into(), "q".into(), "g".into(), 42))
-        );
         let k = leases_by_worker("w", 42, "g");
         assert_eq!(
             leases_by_worker_parts(&k),
@@ -1151,7 +1129,6 @@ mod tests {
                 &queue_partitions(t, q, 9)[..]
             );
             assert_eq!(&cursors_buf(9, g)[..], &cursors(9, g)[..]);
-            assert_eq!(&pending_buf(t, q, g, 9)[..], &pending(t, q, g, 9)[..]);
             assert_eq!(
                 &leases_by_worker_buf(t, 9, g)[..],
                 &leases_by_worker(t, 9, g)[..]

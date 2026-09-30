@@ -5,7 +5,7 @@
 //! the dedup window) and contributes nothing to the append; the survivors get
 //! one gapless run. Offsets are gapless and `created_at` is strictly monotone
 //! per partition (`max(now, last_created_at + 1)`, PUSHSER) so every timestamp
-//! walk downstream — retention, seeding, the pop head probe — holds.
+//! walk downstream — retention, a group's subscription seeding — holds.
 //!
 //! Divergence from the SQL shape, not its behaviour (the same note pgless
 //! carried): `log_push_one_v1` answers `duplicate` for a whole segment and
@@ -194,9 +194,6 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         // Fold the command's effects so a later command in the cycle sees the
         // new partition, the new tail and the new dedup occurrences (§7.2).
         ov.apply_effects(&effects);
-        // B13: this push knows its partition's queue; a wildcard pop then
-        // finds the append without reading the partition row.
-        ov.place_appended(pid, &cmd.tenant, &cmd.queue);
 
         // Keep the dedup front (PERF-B) a superset of the committed index it
         // fronts: a partition minted here is born seeded, and every planned

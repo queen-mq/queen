@@ -940,36 +940,16 @@ fn an_apply_owned_queue_log_gets_the_same_records_in_the_same_order() {
 }
 
 #[test]
-fn the_ablation_paths_are_shard_invariant_too() {
+fn the_ablation_path_is_shard_invariant_too() {
     // Counters batched off: shards write counters straight into the store, so
-    // the runs execute one shard after another (no pool). Transitions off:
-    // `pending` is overwritten on every append.
-    for (name, c) in [
-        (
-            "unbatched",
-            ApplyConfig {
-                batch_counters: false,
-                ..base()
-            },
-        ),
-        (
-            "no-transitions",
-            ApplyConfig {
-                pending_transitions: false,
-                ..base()
-            },
-        ),
-    ] {
-        let want = run(&format!("{name}-1"), 0xAB1A_7E00, 180, c, true);
-        let got = run(
-            &format!("{name}-4"),
-            0xAB1A_7E00,
-            180,
-            sharded(c, 4, 1),
-            true,
-        );
-        assert_same(&format!("{name}, 4 shards"), &want, &got);
-    }
+    // the runs execute one shard after another (no pool).
+    let c = ApplyConfig {
+        batch_counters: false,
+        ..base()
+    };
+    let want = run("unbatched-1", 0xAB1A_7E00, 180, c, true);
+    let got = run("unbatched-4", 0xAB1A_7E00, 180, sharded(c, 4, 1), true);
+    assert_same("unbatched, 4 shards", &want, &got);
 }
 
 #[test]
@@ -1373,7 +1353,7 @@ fn the_append_path_sees_catalogue_changes_at_once() {
             ],
         ))
         .expect("setup");
-        // The group list and the delay are read (and cached) here...
+        // The group list is read (and cached) here...
         a.apply(&one(2, t + 10, 2, 2, vec![app(1, 0, 2, t + 10)]))
             .expect("append");
         a.commit().expect("commit");
@@ -1390,7 +1370,7 @@ fn the_append_path_sees_catalogue_changes_at_once() {
         a.commit().expect("commit");
         a.apply(&one(4, t + 30, 2, 4, vec![app(1, 5, 1, t + 30)]))
             .expect("append");
-        // A delay: a new partition's first frame is armed after it.
+        // A queue upsert (a new delay) and a new partition's first frame.
         qc.delayed_processing = 5;
         a.apply(&one(
             5,
@@ -1410,7 +1390,7 @@ fn the_append_path_sees_catalogue_changes_at_once() {
         .expect("delay");
         a.commit().expect("commit");
         // The first group goes: an append after it must not bring its
-        // `pending` row or its counters back.
+        // counters back.
         a.apply(&one(
             6,
             t + 50,
@@ -1436,13 +1416,6 @@ fn the_append_path_sees_catalogue_changes_at_once() {
                     3 + 1 + 1 + 2,
                     "{shards} shards: g2 pending"
                 );
-                assert!(r.pending_at(tn, qn, "g2", 1)?.is_some());
-                assert_eq!(
-                    r.pending_at(tn, qn, "g2", 2)?,
-                    Some(t + 40 + 5_000_000),
-                    "{shards} shards: the new delay"
-                );
-                assert_eq!(r.pending_at(tn, qn, "g1", 1)?, None, "g1's rows stay gone");
                 assert_eq!(
                     r.counter_at(&keys::counter_group(tn, qn, "g1", Counter::Pending))?,
                     0

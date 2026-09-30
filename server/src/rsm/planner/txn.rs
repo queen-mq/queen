@@ -7,11 +7,21 @@
 //! present-in-all commit rule (§4.1–4.3). A torn bundle is cut from every tail
 //! and leaves no offset gap (its offsets were never applied).
 //!
+//! The consumption half of a bundle (`acks`, `positional_acks`, `positions`,
+//! `requiredLeases`) is the consumption engine's ([`crate::rsm::consume`]): it
+//! validates and reserves them on the leader BEFORE planning, and hands the
+//! planner the cursor and DLQ rows they write as `extra_effects` and their
+//! per-target results as `engine_acks`, with the acks stripped. The planner
+//! plans what it owns — pushes, KV, timers, and the positions on partitions
+//! that do not exist yet (allocating a partition is the planner's,
+//! [`Planner::plan_positions`]) — and refuses a bundle that still carries acks
+//! (they must never reach the planner).
+//!
 //! The planner side mirrors the SQL wire transaction: a pushed message that is
-//! a DUPLICATE, or an ack the cursor does not honour (wrong/expired lease,
-//! already acked), rolls the WHOLE bundle back (`QDUP` / `QTXN`, HTTP 200
-//! `success:false`). The overlay is restored on refusal so a rolled-back bundle
-//! leaves no phantom state for later commands of the same cycle.
+//! a DUPLICATE rolls the WHOLE bundle back (`QDUP`, HTTP 200 `success:false`),
+//! and so does a lost KV `required` precondition. The overlay is restored on
+//! refusal so a rolled-back bundle leaves no phantom state for later commands
+//! of the same cycle.
 
 use crate::rsm::effect::Effect;
 use crate::rsm::entry::{
@@ -34,19 +44,22 @@ pub struct TxnCommand {
     /// One per (queue, partition), items in bundle order (the receiver packs
     /// them exactly like a push).
     pub pushes: Vec<PushCommand>,
-    /// One per (pid, group, worker), like a batch ack.
+    /// One per (pid, group, worker), like a batch ack. The engine's
+    /// (`txn_prepare`): stripped before planning.
     pub acks: Vec<AckTarget>,
-    /// Positional source acknowledgements used by Streams cycles. They are
-    /// planned inside this same command so source ack, state and sink pushes
-    /// remain one atomic entry.
+    /// Positional source acknowledgements used by Streams cycles, so source
+    /// ack, state and sink pushes remain one atomic entry. The engine's:
+    /// stripped before planning.
     pub positional_acks: Vec<AckPositionalCommand>,
     /// The `kv` rider, validated with the wire's limits (`parse_ops(.., true, ..)`).
     pub kv: Vec<KvOp>,
     /// The `timers` rider (schedules and cancels, `parse_timer_ops`).
     pub timers: Vec<super::timers::TimerOp>,
     /// Deterministic riders that must commit with the transaction. Streams
-    /// uses this for state cells; keeping them on the transaction command is
-    /// what makes source ack + sink append + state update one log entry.
+    /// uses this for state cells; the consumption engine puts the cursor and
+    /// DLQ rows of the bundle's acks and positions here. Keeping them on the
+    /// transaction command is what makes source ack + sink append + state
+    /// update one log entry.
     pub extra_effects: Vec<Effect>,
     /// DLQ replay is the one transaction-shaped operation where a duplicate
     /// destination is a successful no-op: the source row must remain in DLQ.
@@ -54,8 +67,16 @@ pub struct TxnCommand {
     pub allow_duplicate: bool,
     /// The `positions` rider ([`super::positions`]): consumer-group positions
     /// set or forgotten, all-or-nothing with everything else in the bundle.
+    /// The engine's, but for those on a partition that does not exist yet,
+    /// which it leaves here for the planner to create.
     #[serde(default)]
     pub positions: Vec<super::positions::PositionOp>,
+    /// The engine's per-target results for the bundle's `acks` and
+    /// `positional_acks` (`TxnPart::acks` of `txn_prepare`), in their input
+    /// order. The planner records them as the outcome's `acks`, so a retry of
+    /// the request id reads what the engine answered.
+    #[serde(default)]
+    pub engine_acks: AckOutcome,
 }
 
 /// The decoded transaction outcome: per push group, per ack target.
@@ -146,14 +167,17 @@ impl TxnOutcome {
 impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// Plan a transaction all-or-nothing (see the module header).
     pub fn plan_transaction(&self, ov: &mut Overlay, cmd: &TxnCommand) -> Planned {
-        if cmd.pushes.is_empty()
-            && cmd.acks.is_empty()
-            && cmd.positional_acks.is_empty()
-            && cmd.timers.is_empty()
-            && cmd.extra_effects.is_empty()
-            && !cmd.positions.is_empty()
-        {
-            return self.plan_positions_bundle(ov, cmd);
+        if !cmd.acks.is_empty() || !cmd.positional_acks.is_empty() {
+            return Err(Refusal::retry(
+                "internal",
+                "a transaction's acks are served by the consumption engine",
+            ));
+        }
+        // The engine's cursor and dead-letter rows name partitions it read
+        // before this was planned: checked first, before anything folds.
+        self.check_partition_rows(ov, &cmd.extra_effects)?;
+        if cmd.pushes.is_empty() && cmd.timers.is_empty() {
+            return self.plan_riders_bundle(ov, cmd);
         }
         let saved = ov.clone();
         let refuse = |ov: &mut Overlay, r: Refusal| -> Planned {
@@ -207,51 +231,8 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             out.pushes.push(o);
         }
 
-        for t in &cmd.acks {
-            let (res, effs) = match self.ack_target(ov, t) {
-                Ok(v) => v,
-                Err(r) => return refuse(ov, r),
-            };
-            if !res.stale_hashes.is_empty() {
-                return refuse(
-                    ov,
-                    Refusal::client(
-                        "rejected_ack",
-                        format!(
-                            "QTXN {} acked message(s) on partition {} are not leased by \
-                             this worker or were already acked; the transaction rolled back",
-                            res.stale_hashes.len(),
-                            t.pid
-                        ),
-                    ),
-                );
-            }
-            ov.apply_effects(&effs);
-            effects.extend(effs);
-            out.acks.results.push(res);
-        }
-
-        for a in &cmd.positional_acks {
-            let (effs, ack) = match self.plan_ack_positional(ov, a) {
-                Ok(Plan::Logged {
-                    effects,
-                    outcome: Outcome::Ack(ack),
-                }) => (effects, ack),
-                Ok(Plan::Empty(Outcome::Ack(ack))) => (Vec::new(), ack),
-                Ok(Plan::Refused(r)) | Err(r) => return refuse(ov, r),
-                Ok(other) => {
-                    return refuse(
-                        ov,
-                        Refusal::retry("internal", format!("positional ack planned {other:?}")),
-                    )
-                }
-            };
-            effects.extend(effs);
-            out.acks.results.extend(ack.results);
-        }
-
-        // Positions, after the bundle's messages and acks and before its keys:
-        // planned against everything above, folded like them.
+        // Positions on new partitions, after the bundle's messages and before
+        // its keys: planned against everything above, folded like them.
         if !cmd.positions.is_empty() {
             let effs = match self.plan_positions(ov, &cmd.tenant, &cmd.positions) {
                 Ok(e) => e,
@@ -261,10 +242,11 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             effects.extend(effs);
         }
 
-        // The KV rider last (024's order: the bundle's messages, then its keys).
-        // A lost `required` precondition aborts the WHOLE bundle: nothing is
-        // logged, the overlay is restored, and the answer carries the one
-        // failed precondition so the receiver renders 024's detail.
+        // The KV rider after the bundle's messages (024's order: the bundle's
+        // messages, then its keys). A lost `required` precondition aborts the
+        // WHOLE bundle: nothing is logged, the overlay is restored, and the
+        // answer carries the one failed precondition so the receiver renders
+        // 024's detail.
         if !cmd.kv.is_empty() {
             let kvp = match self.plan_kv_writes(ov, &cmd.tenant, &cmd.kv) {
                 Ok(p) => p,
@@ -272,14 +254,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             };
             if let Some(f) = kvp.failed {
                 *ov = saved.clone();
-                let failed = TxnOutcome {
-                    kv: KvOutcome {
-                        results: Vec::new(),
-                        failed: Some(f),
-                    },
-                    ..TxnOutcome::default()
-                };
-                return failed.into_outcome().map(Plan::Empty);
+                return failed_kv(f);
             }
             ov.apply_effects(&kvp.effects);
             effects.extend(kvp.effects);
@@ -306,6 +281,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             effects.extend(cmd.extra_effects.clone());
         }
 
+        out.acks = cmd.engine_acks.clone();
         let outcome = match out.into_outcome() {
             Ok(o) => o,
             Err(r) => return refuse(ov, r),
@@ -317,29 +293,25 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         }
     }
 
-    /// A bundle of positions and KV operations only — what a consumer group's
-    /// commit is: the positions, and a `required` fence beside them.
+    /// A bundle with no pushes and no timers: KV operations, positions on new
+    /// partitions and the riders the engine (or Streams) hands over — what a
+    /// consumer group's commit is: its cursor rows, and a `required` fence
+    /// beside them.
     ///
-    /// Both legs plan WITHOUT touching the overlay ([`Planner::plan_kv_writes`],
-    /// [`Planner::plan_positions`]) and are folded together at the end, so a
-    /// refusal or a lost precondition has nothing to restore — which is what
-    /// spares this bundle the overlay CLONE the general path takes to be able
-    /// to roll back. A group committing after every poll sends one of these
-    /// per commit batch, and the clone is proportional to everything in flight.
-    fn plan_positions_bundle(&self, ov: &mut Overlay, cmd: &TxnCommand) -> Planned {
+    /// The KV and positions legs plan WITHOUT touching the overlay
+    /// ([`Planner::plan_kv_writes`], [`Planner::plan_positions`]) and
+    /// everything folds at the end, so a refusal or a lost precondition has
+    /// nothing to restore — which spares this bundle the overlay CLONE the
+    /// general path takes to be able to roll back. A group committing after
+    /// every poll sends one of these per commit batch, and the clone is
+    /// proportional to everything in flight.
+    fn plan_riders_bundle(&self, ov: &mut Overlay, cmd: &TxnCommand) -> Planned {
         let mut effects: Vec<Effect> = Vec::new();
         let mut out = TxnOutcome::default();
         if !cmd.kv.is_empty() {
             let kvp = self.plan_kv_writes(ov, &cmd.tenant, &cmd.kv)?;
             if let Some(f) = kvp.failed {
-                let failed = TxnOutcome {
-                    kv: KvOutcome {
-                        results: Vec::new(),
-                        failed: Some(f),
-                    },
-                    ..TxnOutcome::default()
-                };
-                return failed.into_outcome().map(Plan::Empty);
+                return failed_kv(f);
             }
             effects.extend(kvp.effects);
             out.kv = KvOutcome {
@@ -347,7 +319,11 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 failed: None,
             };
         }
-        effects.extend(self.plan_positions(ov, &cmd.tenant, &cmd.positions)?);
+        if !cmd.positions.is_empty() {
+            effects.extend(self.plan_positions(ov, &cmd.tenant, &cmd.positions)?);
+        }
+        effects.extend(cmd.extra_effects.iter().cloned());
+        out.acks = cmd.engine_acks.clone();
         let outcome = out.into_outcome()?;
         ov.apply_effects(&effects);
         if effects.is_empty() {
@@ -356,4 +332,17 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             Ok(Plan::logged(effects, outcome))
         }
     }
+}
+
+/// The answer of a bundle whose KV `required` precondition was lost: nothing
+/// logged, the one failed precondition, and no ack results (none applied).
+fn failed_kv(f: crate::rsm::entry::KvPrecondition) -> Planned {
+    let failed = TxnOutcome {
+        kv: KvOutcome {
+            results: Vec::new(),
+            failed: Some(f),
+        },
+        ..TxnOutcome::default()
+    };
+    failed.into_outcome().map(Plan::Empty)
 }

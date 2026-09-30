@@ -189,10 +189,8 @@ pub fn cfg() -> ApplyConfig {
         // its own tests that set `apply_writers`.
         seg_buffered: true,
         apply_writers: 0,
-        // PERF-D: batch counters everywhere (transparent), keep pending on the
-        // shipped byte-for-byte path; the transition tests opt in per-test.
+        // PERF-D: batch counters everywhere (transparent).
         batch_counters: true,
-        pending_transitions: true, // P2.1: lockstep with ApplyConfig::default()
         // Phase A1: the shadow qlog is off across the shared apply suite, so
         // every existing test runs today's exact path; the qlog tests opt in.
         qlog: false,
@@ -689,18 +687,10 @@ fn perf_d_store_ops_per_append() {
     // subscribed groups. Returns (puts/append, ns/append) over `windows` × 256
     // append entries applied after setup, committing every 256 (the shipped
     // store-commit cadence), so the counter flush at each commit is amortised in.
-    fn run(
-        parts: u64,
-        batch: u32,
-        groups: u64,
-        batch_counters: bool,
-        pending_transitions: bool,
-        windows: u64,
-    ) -> (f64, f64) {
+    fn run(parts: u64, batch: u32, groups: u64, batch_counters: bool, windows: u64) -> (f64, f64) {
         let node = Node::new("perfd");
         let cfg = ApplyConfig {
             batch_counters,
-            pending_transitions,
             ..cfg()
         };
         let (mut a, _) = Applier::open(
@@ -787,32 +777,27 @@ fn perf_d_store_ops_per_append() {
         ("A20k", 100u64, 10u32, 1u64, 40u64),
         ("C1000", 1000, 1, 1, 40),
     ] {
-        let off = run(parts, batch, groups, false, false, windows);
-        let ctr = run(parts, batch, groups, true, false, windows);
-        let both = run(parts, batch, groups, true, true, windows);
+        let off = run(parts, batch, groups, false, windows);
+        let ctr = run(parts, batch, groups, true, windows);
         println!(
             "{name} ({parts} parts, batch {batch}, {groups} grp): \
-             puts/append off={:.2} counters={:.2} counters+pending={:.2} | \
-             ns/append off={:.0} counters={:.0} both={:.0}",
-            off.0, ctr.0, both.0, off.1, ctr.1, both.1
+             puts/append off={:.2} counters={:.2} | ns/append off={:.0} counters={:.0}",
+            off.0, ctr.0, off.1, ctr.1
         );
     }
 }
 
 /// I2 for PERF-D: the committed replicated state after the same entries, and at
 /// every entry boundary, must be identical whatever the store-commit cadence —
-/// the batched counters (and, with `pending_transitions` on, the transition
-/// `pending` writes) must fold to a cadence-free result. Run at commit cadences
-/// of 1, 3 and 1000 entries and compare the digest snapshot taken at every
-/// boundary (a boundary forces a commit and reads committed state).
-fn cadence_independence(pending_transitions: bool) {
+/// the batched counters must fold to a cadence-free result. Run at commit
+/// cadences of 1, 3 and 1000 entries and compare the digest snapshot taken at
+/// every boundary (a boundary forces a commit and reads committed state).
+#[test]
+fn batched_counters_are_independent_of_the_commit_cadence() {
     let m = 90u64;
     let mut w = Workload::new(0x1D2);
     let entries: Vec<Committed> = (0..m).map(|_| w.next()).collect();
-    let cfg = ApplyConfig {
-        pending_transitions,
-        ..cfg()
-    };
+    let cfg = cfg();
 
     let snapshots = |cadence: usize| -> Vec<u128> {
         let node = Node::new("cad");
@@ -850,749 +835,24 @@ fn cadence_independence(pending_transitions: bool) {
     let d1 = snapshots(1);
     let d3 = snapshots(3);
     let d1000 = snapshots(1000);
-    assert_eq!(
-        d1, d3,
-        "cadence 1 vs 3 diverged (pending_transitions={pending_transitions})"
-    );
-    assert_eq!(
-        d1, d1000,
-        "cadence 1 vs 1000 diverged (pending_transitions={pending_transitions})"
-    );
-}
-
-#[test]
-fn batched_counters_are_independent_of_the_commit_cadence() {
-    cadence_independence(false);
-}
-
-#[test]
-fn pending_transitions_are_independent_of_the_commit_cadence() {
-    cadence_independence(true);
-}
-
-#[test]
-fn pending_transitions_rebuild_from_pending_equals_the_live_rings() {
-    // PERF-D: with transitions on, the ring is moved only on the transitions
-    // that write the `pending` row, so a rebuild of the ready rings from the
-    // committed `pending` keyspace (what a reopen / leadership start does) is
-    // byte-for-byte the live ring — the same ready candidates in order and the
-    // same parked deadlines. The workload's delay is 0 and its lease deadlines
-    // are 30 s out, so nothing is due for promotion between the two.
-    use crate::rsm::state::{Derived, ReadyIndex};
-
-    // The ready MEMBERSHIP (sorted), the deferred count and the next deadline —
-    // not the FIFO walk order, which a rebuild resets to pid order on BOTH the
-    // transitions-on and the shipped path (the ring is a hint, coarse by
-    // contract). Equal membership is what "the same rings" means here.
-    fn summary(d: &Derived) -> Vec<(String, Vec<Pid>, usize, Option<i64>)> {
-        let mut out = Vec::new();
-        for g in ["g1", "g2"] {
-            let (mut ready, mut deferred, mut next) = (Vec::new(), 0usize, None);
-            if let Some(r) = d.ring(TENANT, QUEUE, g) {
-                let r: &ReadyIndex = r;
-                r.walk(usize::MAX, &mut |pid| {
-                    ready.push(pid);
-                    true
-                });
-                ready.sort_unstable();
-                deferred = r.deferred_len();
-                next = r.next_deadline();
-            }
-            out.push((g.to_string(), ready, deferred, next));
-        }
-        out
-    }
-
-    let cfg = ApplyConfig {
-        pending_transitions: true,
-        ..cfg()
-    };
-    let node = Node::new("pend-rebuild");
-    let mut w = Workload::new(0xBEEF);
-    let live = {
-        let (mut a, _) = Applier::open(
-            node.store(),
-            &node.seg_dir(),
-            seg_opts(),
-            cfg,
-            Arc::new(crate::rsm::apply::NoNotify),
-        )
-        .expect("open");
-        for _ in 0..80 {
-            let c = w.next();
-            a.apply(&c).expect("apply");
-        }
-        a.commit().expect("commit"); // so the rebuild sees the committed pending
-                                     // Also check pending is in step with outstanding work per group.
-        node.store()
-            .read(|r| {
-                for pid in 1..=4u64 {
-                    let Some(p) = r.partition(pid)? else { continue };
-                    for g in ["g1", "g2"] {
-                        let committed = r.cursor(pid, g)?.map(|c| c.committed).unwrap_or(-1);
-                        let has_work = committed < p.last_offset;
-                        let has_row = r.pending_at(TENANT, QUEUE, g, pid)?.is_some();
-                        assert_eq!(
-                            has_row, has_work,
-                            "pid {pid} g {g}: pending row {has_row} but outstanding work {has_work}"
-                        );
-                    }
-                }
-                Ok(())
-            })
-            .expect("read");
-        summary(&a.derived())
-    };
-    let rebuilt = node
-        .store()
-        .read(|r| {
-            let now = r.last_now_us()?;
-            Ok(summary(&Derived::rebuild(r, now)?))
-        })
-        .expect("read");
-    assert_eq!(live, rebuilt, "the rebuilt rings differ from the live ones");
-}
-
-// ---------------------------------------------------------------------------
-// PERF-H: the ring re-arm audit made executable
-//
-// Every one of these drives real entries through `apply` (which now promotes
-// the live rings to each entry's stamp) with `pending_transitions` on — the
-// default — and checks the one law: a partition is in its group's ring exactly
-// when it is claimable, and re-enters it on every event that makes it
-// claimable again.
-// ---------------------------------------------------------------------------
-
-/// Per-group `(ready sorted, parked count, next deadline)` — the shape the
-/// rebuild-equality test uses, normalised so a group with an empty live ring
-/// and a group a rebuild never created read the same.
-fn ring_summary(
-    d: &crate::rsm::state::Derived,
-    groups: &[&str],
-) -> Vec<(String, Vec<Pid>, usize, Option<i64>)> {
-    let mut out = Vec::new();
-    for g in groups {
-        let (mut ready, mut deferred, mut next) = (Vec::new(), 0usize, None);
-        if let Some(r) = d.ring(TENANT, QUEUE, g) {
-            r.walk(usize::MAX, &mut |pid| {
-                ready.push(pid);
-                true
-            });
-            ready.sort_unstable();
-            deferred = r.deferred_len();
-            next = r.next_deadline();
-        }
-        out.push((g.to_string(), ready, deferred, next));
-    }
-    out
-}
-
-/// A pop that leases `pid` to `w1` until `expires`, having consumed up to
-/// `committed`, with the batch reaching `batch_end`.
-fn lease_pop(committed: i64, batch_end: u64, expires: i64, now: i64) -> CursorRow {
-    let mut row = fresh_cursor(committed, now);
-    row.worker = Some("w1".into());
-    row.lease_expires_at_us = Some(expires);
-    row.lease_acquired_at_us = Some(now);
-    row.batch_end = Some(batch_end);
-    row
-}
-
-/// Queue + one group + `parts` partitions, in one entry at [`BASE_US`].
-fn setup_entry(parts: u64, groups: &[&str], qc: QueueConfig) -> Committed {
-    let mut effects = vec![Effect::QueueUpsert {
-        tenant: TENANT.into(),
-        queue: QUEUE.into(),
-        cfg: qc,
-    }];
-    for (i, g) in groups.iter().enumerate() {
-        effects.push(Effect::GroupUpsert {
-            tenant: TENANT.into(),
-            queue: QUEUE.into(),
-            group: (*g).into(),
-            meta: group_meta(i as u64, BASE_US),
-        });
-    }
-    for p in 0..parts {
-        effects.push(Effect::PartitionCreate {
-            pid: 1 + p,
-            uuid: uuid(1 + p),
-            tenant: TENANT.into(),
-            queue: QUEUE.into(),
-            partition: format!("p{p}"),
-            created_at_us: BASE_US,
-        });
-    }
-    Build::new(BASE_US, 1, 0).cmd(effects).at(1, 1)
-}
-
-fn transitions_cfg() -> ApplyConfig {
-    ApplyConfig {
-        pending_transitions: true,
-        ..cfg()
-    }
-}
-
-#[test]
-fn an_append_to_a_leased_partition_is_armed_for_after_the_lease() {
-    // The pop defers the partition to the lease expiry; a frame appended while
-    // the lease is live must NOT pull `ready_at` back to now (the wildcard pop
-    // would only offer it and skip — the lease is live). Covers both the
-    // backlog-left pop (a `pending` row already holds the expiry) and the
-    // draining pop (no row, the floor comes from the live lease).
-    let node = Node::new("leased-append");
-    let (mut a, _) = Applier::open(
-        node.store(),
-        &node.seg_dir(),
-        seg_opts(),
-        transitions_cfg(),
-        Arc::new(crate::rsm::apply::NoNotify),
-    )
-    .expect("open");
-    let exp = BASE_US + 5_000_000;
-    a.apply(&setup_entry(2, &["g1"], queue_config(BASE_US)))
-        .expect("setup");
-    // pid 1: 10 frames, pop leaves backlog (committed 4 < last 9).
-    // pid 2: 3 frames, pop drains it (committed 2 == last 2) but keeps a lease.
-    a.apply(
-        &Build::new(BASE_US + 10, 3, 10)
-            .cmd(vec![Effect::Append {
-                pid: 1,
-                bucket: 1,
-                base_offset: 0,
-                count: 10,
-                created_at_us: BASE_US + 10,
-                hashes: hashes(7, 10),
-                blob: vec![0xAB; 240],
-            }])
-            .cmd(vec![Effect::Append {
-                pid: 2,
-                bucket: 2,
-                base_offset: 0,
-                count: 3,
-                created_at_us: BASE_US + 10,
-                hashes: hashes(9, 3),
-                blob: vec![0xAB; 72],
-            }])
-            .at(2, 1),
-    )
-    .expect("append");
-    a.apply(
-        &Build::new(BASE_US + 20, 3, 20)
-            .cmd(vec![Effect::CursorSet {
-                pid: 1,
-                group: "g1".into(),
-                row: lease_pop(4, 9, exp, BASE_US + 20),
-            }])
-            .cmd(vec![Effect::CursorSet {
-                pid: 2,
-                group: "g1".into(),
-                row: lease_pop(2, 2, exp, BASE_US + 20),
-            }])
-            .at(3, 1),
-    )
-    .expect("pop");
-    a.commit().expect("commit");
-    node.store()
-        .read(|r| {
-            assert_eq!(
-                r.pending_at(TENANT, QUEUE, "g1", 1).unwrap(),
-                Some(exp),
-                "backlog-left pop must defer to the lease expiry"
-            );
-            assert_eq!(
-                r.pending_at(TENANT, QUEUE, "g1", 2).unwrap(),
-                None,
-                "the draining pop left no pending row"
-            );
-            Ok(())
-        })
-        .expect("read");
-    assert_eq!(a.derived().lease_count(), 2);
-
-    // Append to BOTH while leased, at now well below the expiry.
-    a.apply(
-        &Build::new(BASE_US + 100, 3, 100)
-            .cmd(vec![Effect::Append {
-                pid: 1,
-                bucket: 1,
-                base_offset: 10,
-                count: 1,
-                created_at_us: BASE_US + 100,
-                hashes: hashes(8, 1),
-                blob: vec![0xAB; 24],
-            }])
-            .cmd(vec![Effect::Append {
-                pid: 2,
-                bucket: 2,
-                base_offset: 3,
-                count: 1,
-                created_at_us: BASE_US + 100,
-                hashes: hashes(11, 1),
-                blob: vec![0xAB; 24],
-            }])
-            .at(4, 1),
-    )
-    .expect("append while leased");
-    a.commit().expect("commit");
-    node.store()
-        .read(|r| {
-            assert_eq!(
-                r.pending_at(TENANT, QUEUE, "g1", 1).unwrap(),
-                Some(exp),
-                "the append undercut a live lease (pid 1)"
-            );
-            assert_eq!(
-                r.pending_at(TENANT, QUEUE, "g1", 2).unwrap(),
-                Some(exp),
-                "the draining-lease append armed pid 2 at now, not after the lease"
-            );
-            Ok(())
-        })
-        .expect("read");
-    assert!(
-        !a.derived().ring_has_ready(TENANT, QUEUE, "g1"),
-        "a leased partition is offered to the pop"
-    );
-}
-
-#[test]
-fn the_shipped_default_overwrites_a_leased_partitions_ready_at() {
-    // Why the transitions path is the default: with it OFF, the append path
-    // OVERWRITES `ready_at` unconditionally, so a frame appended under a live
-    // lease pulls the partition's revisit time back to now — an under-arm the
-    // claim then has to paper over. This pins that difference.
-    let node = Node::new("leased-append-off");
-    let (mut a, _) = Applier::open(
-        node.store(),
-        &node.seg_dir(),
-        seg_opts(),
-        // The OFF path, explicitly: PLAN_RAFT_DRAIN_FIX P2.1 made ON the default.
-        ApplyConfig {
-            pending_transitions: false,
-            ..cfg()
-        },
-        Arc::new(crate::rsm::apply::NoNotify),
-    )
-    .expect("open");
-    let exp = BASE_US + 5_000_000;
-    a.apply(&setup_entry(1, &["g1"], queue_config(BASE_US)))
-        .expect("setup");
-    a.apply(
-        &Build::new(BASE_US + 10, 2, 10)
-            .cmd(vec![Effect::Append {
-                pid: 1,
-                bucket: 1,
-                base_offset: 0,
-                count: 10,
-                created_at_us: BASE_US + 10,
-                hashes: hashes(7, 10),
-                blob: vec![0xAB; 240],
-            }])
-            .at(2, 1),
-    )
-    .expect("append");
-    a.apply(
-        &Build::new(BASE_US + 20, 2, 20)
-            .cmd(vec![Effect::CursorSet {
-                pid: 1,
-                group: "g1".into(),
-                row: lease_pop(4, 9, exp, BASE_US + 20),
-            }])
-            .at(3, 1),
-    )
-    .expect("pop");
-    a.apply(
-        &Build::new(BASE_US + 100, 2, 100)
-            .cmd(vec![Effect::Append {
-                pid: 1,
-                bucket: 1,
-                base_offset: 10,
-                count: 1,
-                created_at_us: BASE_US + 100,
-                hashes: hashes(8, 1),
-                blob: vec![0xAB; 24],
-            }])
-            .at(4, 1),
-    )
-    .expect("append while leased");
-    a.commit().expect("commit");
-    let ra = node
-        .store()
-        .read(|r| r.pending_at(TENANT, QUEUE, "g1", 1))
-        .expect("read");
-    assert_eq!(
-        ra,
-        Some(BASE_US + 100),
-        "the shipped path was expected to overwrite the lease deferral"
-    );
-}
-
-#[test]
-fn a_delayed_queue_keeps_the_earliest_visibility() {
-    // `delayed_processing`: a late frame's visibility is LATER than an earlier
-    // one's, so on the transitions path the append must not push the partition's
-    // `ready_at` forward past an already-visible frame (an under-arm that would
-    // strand claimable work). The shipped OFF path would overwrite it.
-    let mut qc = queue_config(BASE_US);
-    qc.delayed_processing = 2; // 2 s
-    let node = Node::new("delayed");
-    let (mut a, _) = Applier::open(
-        node.store(),
-        &node.seg_dir(),
-        seg_opts(),
-        transitions_cfg(),
-        Arc::new(crate::rsm::apply::NoNotify),
-    )
-    .expect("open");
-    a.apply(&setup_entry(1, &["g1"], qc)).expect("setup");
-    // Frame 0 created at BASE_US → visible at BASE_US + 2_000_000.
-    a.apply(
-        &Build::new(BASE_US, 2, 10)
-            .cmd(vec![Effect::Append {
-                pid: 1,
-                bucket: 1,
-                base_offset: 0,
-                count: 1,
-                created_at_us: BASE_US,
-                hashes: hashes(1, 1),
-                blob: vec![0xAB; 24],
-            }])
-            .at(2, 1),
-    )
-    .expect("append 0");
-    // A much later frame, created at BASE_US + 1_000_000 → visible later still.
-    a.apply(
-        &Build::new(BASE_US + 1_000_000, 2, 20)
-            .cmd(vec![Effect::Append {
-                pid: 1,
-                bucket: 1,
-                base_offset: 1,
-                count: 1,
-                created_at_us: BASE_US + 1_000_000,
-                hashes: hashes(2, 1),
-                blob: vec![0xAB; 24],
-            }])
-            .at(3, 1),
-    )
-    .expect("append 1");
-    a.commit().expect("commit");
-    let ra = node
-        .store()
-        .read(|r| r.pending_at(TENANT, QUEUE, "g1", 1))
-        .expect("read");
-    assert_eq!(
-        ra,
-        Some(BASE_US + 2_000_000),
-        "the second append pushed ready_at past the first frame's visibility"
-    );
-}
-
-#[test]
-fn a_lease_expiry_re_arms_the_live_ring_at_the_next_entry() {
-    // No ack, no release: the lease simply EXPIRES. The partition must re-enter
-    // its ring the moment an entry's stamp reaches the expiry — the case the
-    // unwired `promote_due` used to miss for the live ring, and the reason the
-    // apply loop now promotes at each boundary. The planner side is covered by
-    // the rebuild equality below.
-    let node = Node::new("expiry-rearm");
-    let (mut a, _) = Applier::open(
-        node.store(),
-        &node.seg_dir(),
-        seg_opts(),
-        transitions_cfg(),
-        Arc::new(crate::rsm::apply::NoNotify),
-    )
-    .expect("open");
-    let exp = BASE_US + 1_000_000;
-    a.apply(&setup_entry(1, &["g1"], queue_config(BASE_US)))
-        .expect("setup");
-    a.apply(
-        &Build::new(BASE_US + 10, 2, 10)
-            .cmd(vec![Effect::Append {
-                pid: 1,
-                bucket: 1,
-                base_offset: 0,
-                count: 5,
-                created_at_us: BASE_US + 10,
-                hashes: hashes(7, 5),
-                blob: vec![0xAB; 120],
-            }])
-            .at(2, 1),
-    )
-    .expect("append");
-    a.apply(
-        &Build::new(BASE_US + 20, 2, 20)
-            .cmd(vec![Effect::CursorSet {
-                pid: 1,
-                group: "g1".into(),
-                row: lease_pop(1, 4, exp, BASE_US + 20),
-            }])
-            .at(3, 1),
-    )
-    .expect("pop");
-    assert!(
-        !a.derived().ring_has_ready(TENANT, QUEUE, "g1"),
-        "leased: deferred to the expiry"
-    );
-    assert_eq!(a.derived().next_ring_deadline(), Some(exp));
-    // A later, unrelated entry (a Noop) whose stamp is past the expiry: apply
-    // promotes the ring even though nothing touched pid 1.
-    a.apply(&Build::new(exp + 1, 2, 30).cmd(vec![Effect::Noop]).at(4, 1))
-        .expect("tick past expiry");
-    assert!(
-        a.derived().ring_has_ready(TENANT, QUEUE, "g1"),
-        "the expired lease did not re-arm the live ring"
-    );
-    a.commit().expect("commit");
-    let rebuilt = node
-        .store()
-        .read(|r| crate::rsm::state::Derived::rebuild(r, exp + 1))
-        .expect("read");
-    assert!(
-        rebuilt.ring_has_ready(TENANT, QUEUE, "g1"),
-        "a rebuild past the expiry disagrees with the live ring"
-    );
-}
-
-#[test]
-fn transitions_ring_equals_a_rebuild_at_every_boundary() {
-    // The strong invariant: with transitions on, after EVERY entry the live
-    // rings equal a rebuild from committed `pending` at that entry's stamp —
-    // ready membership, parked count and next deadline. Unlike the earlier
-    // equality test this drives SHORT leases and a clock that jumps past them,
-    // so promotions actually fire and the promote-at-boundary path is exercised.
-    let groups = ["g1", "g2"];
-    let node = Node::new("boundary-eq");
-    let (mut a, _) = Applier::open(
-        node.store(),
-        &node.seg_dir(),
-        seg_opts(),
-        transitions_cfg(),
-        Arc::new(crate::rsm::apply::NoNotify),
-    )
-    .expect("open");
-    a.apply(&setup_entry(4, &groups, queue_config(BASE_US)))
-        .expect("setup");
-
-    let lease = 300_000i64;
-    let mut last = [-1i64; 4];
-    let mut committed = [[-1i64; 2]; 4];
-    let mut rng = 0x51ED_2A17u64;
-    let roll = |rng: &mut u64| {
-        *rng = rng
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        *rng >> 20
-    };
-    let mut now = BASE_US + 1_000;
-    let mut idx = 2u64;
-    let mut ids = 1_000u64;
-
-    for step in 0..250u64 {
-        now += 80_000 + (roll(&mut rng) % 400_000) as i64; // steps that cross a lease
-        let pi = (roll(&mut rng) % 4) as usize;
-        let pid = 1 + pi as u64;
-        let want_append = roll(&mut rng) % 5 < 3 || last[pi] < 0;
-        let effects = if want_append {
-            let count = 1 + (roll(&mut rng) % 4) as u32;
-            let base = (last[pi] + 1) as u64;
-            last[pi] += count as i64;
-            vec![Effect::Append {
-                pid,
-                bucket: (pi % 8) as u16,
-                base_offset: base,
-                count,
-                created_at_us: now,
-                hashes: hashes(roll(&mut rng), count),
-                blob: vec![0xAB; 24 * count as usize],
-            }]
-        } else {
-            let gi = (roll(&mut rng) % 2) as usize;
-            let step_by = 1 + (roll(&mut rng) % 3) as i64;
-            let cur = committed[pi][gi];
-            let next = (cur + step_by).min(last[pi]);
-            committed[pi][gi] = next;
-            let leased = roll(&mut rng) % 2 == 0 && next < last[pi];
-            let row = if leased {
-                lease_pop(next, last[pi] as u64, now + lease, now)
-            } else {
-                fresh_cursor(next, now)
-            };
-            vec![Effect::CursorSet {
-                pid,
-                group: groups[gi].into(),
-                row,
-            }]
-        };
-        a.apply(&Build::new(now, 5, ids).cmd(effects).at(idx, 1))
-            .expect("apply");
-        ids += 2;
-        idx += 1;
-        a.commit().expect("commit");
-
-        let live = ring_summary(&a.derived(), &groups);
-        let rebuilt = node
-            .store()
-            .read(|r| {
-                Ok(ring_summary(
-                    &crate::rsm::state::Derived::rebuild(r, now)?,
-                    &groups,
-                ))
-            })
-            .expect("read");
-        assert_eq!(
-            live, rebuilt,
-            "step {step} at now {now}: live rings != a rebuild",
-        );
-    }
-}
-
-#[test]
-fn slow_consumers_never_leave_the_ring_empty_while_lag_remains() {
-    // 8 partitions, one group, short leases, consumers that lease and stall
-    // (never ack), with fresh frames arriving under the leases. Every round the
-    // clock jumps past the lease, so the held partitions must re-arm: the ring a
-    // pop would walk (both the live one and a rebuild) must hold EXACTLY the
-    // partitions that are claimable now — never empty while any partition has
-    // un-acked backlog and no live lease. This is the lease pathology AB-0 could
-    // not provoke, made deterministic.
-    const N: u64 = 8;
-    let lease = 200_000i64;
-    let node = Node::new("slow-consumers");
-    let (mut a, _) = Applier::open(
-        node.store(),
-        &node.seg_dir(),
-        seg_opts(),
-        transitions_cfg(),
-        Arc::new(crate::rsm::apply::NoNotify),
-    )
-    .expect("open");
-    a.apply(&setup_entry(N, &["g1"], queue_config(BASE_US)))
-        .expect("setup");
-    // Seed every partition with 3 frames.
-    let mut last = [-1i64; N as usize];
-    let committed = [-1i64; N as usize];
-    let mut lease_exp = [None::<i64>; N as usize];
-    let mut idx = 2u64;
-    let mut ids = 1_000u64;
-    for (p, last_p) in last.iter_mut().enumerate() {
-        a.apply(
-            &Build::new(BASE_US + 10 + p as i64, 1 + N, ids)
-                .cmd(vec![Effect::Append {
-                    pid: 1 + p as u64,
-                    bucket: (p % 8) as u16,
-                    base_offset: 0,
-                    count: 3,
-                    created_at_us: BASE_US + 10 + p as i64,
-                    hashes: hashes(p as u64 + 1, 3),
-                    blob: vec![0xAB; 72],
-                }])
-                .at(idx, 1),
-        )
-        .expect("seed");
-        *last_p = 2;
-        idx += 1;
-        ids += 1;
-    }
-
-    let mut now = BASE_US + 1_000;
-    for round in 0..40u64 {
-        now += lease + 50_000; // every held lease from last round has expired
-
-        // Claimable now = backlog remains AND no live lease.
-        let claimable = |committed: &[i64], last: &[i64], lease_exp: &[Option<i64>]| -> Vec<Pid> {
-            (0..N as usize)
-                .filter(|&p| {
-                    committed[p] < last[p] && lease_exp[p].map(|e| e <= now).unwrap_or(true)
-                })
-                .map(|p| 1 + p as u64)
-                .collect()
-        };
-
-        // Build one entry: pop (lease, no ack) up to 4 claimable partitions, and
-        // slip a fresh frame under one still-leased partition.
-        let mut effects = Vec::new();
-        let mut expect = claimable(&committed, &last, &lease_exp);
-        expect.sort_unstable();
-        // Appends during leases: add a frame to a partition leased last round.
-        if let Some(p) = (0..N as usize).find(|&p| lease_exp[p].is_some_and(|e| e > now - lease)) {
-            let base = (last[p] + 1) as u64;
-            effects.push(Effect::Append {
-                pid: 1 + p as u64,
-                bucket: (p % 8) as u16,
-                base_offset: base,
-                count: 1,
-                created_at_us: now,
-                hashes: hashes(9_000 + round, 1),
-                blob: vec![0xAB; 24],
-            });
-            last[p] += 1;
-        }
-        for &pid in expect.iter().take(4) {
-            let p = (pid - 1) as usize;
-            // Lease without acking: committed unchanged, backlog stays.
-            effects.push(Effect::CursorSet {
-                pid,
-                group: "g1".into(),
-                row: lease_pop(committed[p], last[p] as u64, now + lease, now),
-            });
-            lease_exp[p] = Some(now + lease);
-        }
-        if effects.is_empty() {
-            effects.push(Effect::Noop);
-        }
-        a.apply(&Build::new(now, 1 + N, ids).cmd(effects).at(idx, 1))
-            .expect("round");
-        idx += 1;
-        ids += 1;
-        a.commit().expect("commit");
-
-        // After the entry, the just-leased partitions are deferred; recompute
-        // what is claimable at this same `now` and assert BOTH rings hold it.
-        let mut want = claimable(&committed, &last, &lease_exp);
-        want.sort_unstable();
-        let live = ring_summary(&a.derived(), &["g1"]);
-        let rebuilt = node
-            .store()
-            .read(|r| {
-                Ok(ring_summary(
-                    &crate::rsm::state::Derived::rebuild(r, now)?,
-                    &["g1"],
-                ))
-            })
-            .expect("read");
-        assert_eq!(live[0].1, want, "round {round}: live ring != claimable");
-        assert_eq!(rebuilt[0].1, want, "round {round}: rebuild != claimable");
-        // Lag is always > 0 here (nothing is ever acked), and every lease from a
-        // prior round has expired, so there is always claimable work and the
-        // ring is never empty.
-        assert!(
-            !want.is_empty(),
-            "round {round}: lag remains but nothing is claimable"
-        );
-    }
+    assert_eq!(d1, d3, "cadence 1 vs 3 diverged");
+    assert_eq!(d1, d1000, "cadence 1 vs 1000 diverged");
 }
 
 #[test]
 fn batched_counters_survive_a_crash_at_a_non_durable_commit() {
-    crash_at_non_durable_commit(false);
-    crash_at_non_durable_commit(true);
+    crash_at_non_durable_commit();
 }
 
 /// The `replicator_crash` shape in process: apply a prefix with periodic
 /// NON-DURABLE commits (no durable point, so `durable_index` stays 0), then a
 /// tail with no commit, then drop the applier — the open transaction AND the
-/// per-transaction overlay (counters, and with transitions on the `pending`
-/// decisions) go with it. Reopen at the committed prefix and replay the whole
-/// stream (the prefix is skipped), then settle. The state must equal a clean
-/// run of the same stream (PERF-D: the overlay is transparent across a crash at
-/// a non-durable commit).
-fn crash_at_non_durable_commit(pending_transitions: bool) {
-    let cfg = ApplyConfig {
-        pending_transitions,
-        ..cfg()
-    };
+/// per-transaction counter overlay go with it. Reopen at the committed prefix
+/// and replay the whole stream (the prefix is skipped), then settle. The state
+/// must equal a clean run of the same stream (PERF-D: the overlay is
+/// transparent across a crash at a non-durable commit).
+fn crash_at_non_durable_commit() {
+    let cfg = cfg();
     let m = 60u64;
     let mut w = Workload::new(0xC0FFEE);
     let entries: Vec<Committed> = (0..m).map(|_| w.next()).collect();
@@ -1668,8 +928,7 @@ fn crash_at_non_durable_commit(pending_transitions: bool) {
     assert_eq!(
         got.whole,
         want.whole,
-        "state diverged across the crash (pending_transitions={pending_transitions}), \
-         first at {:?}",
+        "state diverged across the crash, first at {:?}",
         got.first_difference(&want),
     );
 }
@@ -1860,7 +1119,7 @@ fn a_phase_two_kind_is_applied_not_skipped() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn an_append_writes_the_payload_the_index_and_the_pending_rows() {
+fn an_append_writes_the_payload_the_index_and_the_counters() {
     let node = Node::new("append");
     let rec = Arc::new(Recorder::default());
     {
@@ -1961,10 +1220,14 @@ fn an_append_writes_the_payload_the_index_and_the_pending_rows() {
             assert_eq!(row.end, 2);
             assert_eq!(row.count(), 3);
 
-            // One `pending` row per subscribed group (§6.1).
+            // No `pending` row: what a group can claim is the consumption
+            // engine's (in memory, on the leader), not apply's.
+            assert_eq!(r.count(Keyspace::Pending).unwrap(), 0);
+            // The subscribed group's backlog gauge moved with the append.
             assert_eq!(
-                r.pending_at(TENANT, QUEUE, "g1", 1).unwrap(),
-                Some(BASE_US + 10)
+                r.group_counter(TENANT, QUEUE, "g1", Counter::Pending)
+                    .unwrap(),
+                3
             );
             // Counters (§6.4). Pushed is counted at queue and tenant scope
             // only: the partition keeps just what a reader asks it for.
@@ -2032,7 +1295,7 @@ fn an_append_that_does_not_continue_the_partition_is_refused() {
 }
 
 #[test]
-fn a_cursor_carries_its_lease_index_and_wakes_on_release() {
+fn a_checkpointed_cursor_moves_the_group_counters_and_wakes_on_release() {
     let node = Node::new("cursor");
     let rec = Arc::new(Recorder::default());
     {
@@ -2085,8 +1348,8 @@ fn a_cursor_carries_its_lease_index_and_wakes_on_release() {
         )
         .expect("apply");
 
-        // A claim: the lease index gets its row and the ring defers the
-        // partition to the lease expiry.
+        // A claim, as the consumption engine checkpoints it: the cursor row
+        // carries the lease, and the lease index gets its row.
         let mut row = fresh_cursor(-1, BASE_US);
         row.worker = Some("w1".into());
         row.lease_expires_at_us = Some(BASE_US + 30_000_000);
@@ -2102,10 +1365,12 @@ fn a_cursor_carries_its_lease_index_and_wakes_on_release() {
                 .at(3, 1),
         )
         .expect("apply");
-        assert_eq!(a.derived().lease_count(), 1);
         a.commit().expect("commit");
         node.store()
             .read(|r| {
+                let c = r.cursor(1, "g1")?.expect("the leased cursor");
+                assert_eq!(c.worker.as_deref(), Some("w1"));
+                assert_eq!(c.lease_expires_at_us, Some(BASE_US + 30_000_000));
                 let mut seen = Vec::new();
                 r.scan_worker_leases("w1", 16, &mut |pid, g, at| {
                     seen.push((pid, g.to_string(), at));
@@ -2116,8 +1381,7 @@ fn a_cursor_carries_its_lease_index_and_wakes_on_release() {
             })
             .expect("read");
 
-        // The release: ack everything, no lease. The `pending` row goes with
-        // it and the wake fires for the group.
+        // The release: ack everything, no lease; the index row goes.
         let row = fresh_cursor(3, BASE_US);
         a.apply(
             &Build::new(BASE_US + 30, 2, 30)
@@ -2130,12 +1394,17 @@ fn a_cursor_carries_its_lease_index_and_wakes_on_release() {
         )
         .expect("apply");
         a.commit().expect("commit");
-        assert_eq!(a.derived().lease_count(), 0);
     }
 
     node.store()
         .read(|r| {
-            assert_eq!(r.pending_at(TENANT, QUEUE, "g1", 1).unwrap(), None);
+            assert_eq!(r.count(Keyspace::Pending).unwrap(), 0);
+            let mut left = 0;
+            r.scan_worker_leases("w1", 16, &mut |_, _, _| {
+                left += 1;
+                true
+            })?;
+            assert_eq!(left, 0, "the released lease left the index");
             assert_eq!(
                 r.counter_at(&keys::counter_group(
                     TENANT,
@@ -2736,8 +2005,8 @@ fn two_nodes_with_different_hash_seeds_reach_the_same_digest() {
     // every replicated keyspace, in key order.
     //
     // The seeds ARE different: `RandomState::new` bumps a per-thread counter
-    // for every instance, so the two `Derived`s, the two stores and everything
-    // they build hash differently. The assertion below fails the test rather
+    // for every instance, so the two stores and everything they build hash
+    // differently. The assertion below fails the test rather
     // than passing it vacuously if that ever stops being true.
     use std::collections::hash_map::RandomState;
     use std::hash::BuildHasher;
@@ -2871,7 +2140,7 @@ fn a_reopened_node_recovers_its_indexes_and_replays_from_the_durable_point() {
     node.close();
     let node = Node::at(dir);
     {
-        let (a, rec) = Applier::open(
+        let (_a, rec) = Applier::open(
             node.store(),
             &node.seg_dir(),
             seg_opts(),
@@ -2884,13 +2153,6 @@ fn a_reopened_node_recovers_its_indexes_and_replays_from_the_durable_point() {
         assert_eq!(rec.applied_index, 40);
         assert_eq!(rec.durable_index, 40);
         assert_eq!(rec.replay_after, 40);
-        // Step 4: the rings and the leases are back, rebuilt from `pending`
-        // and `leases_by_worker` and from nothing else.
-        assert!(rec.rings > 0, "the ready rings came back");
-        assert!(
-            a.derived().pending_rows() > 0,
-            "the rebuild walked the pending keyspace"
-        );
         // Step 3, Phase C: the segment bytes above the checkpoint are
         // referenced by no recovered row, so they are CUT (the WAL replay
         // re-appends them) — never verified-and-kept.
@@ -5647,12 +4909,11 @@ fn retention_cycle_uncommitted<S: Store>(
 }
 
 #[test]
-fn a_group_registered_after_the_messages_sees_every_partition() {
+fn a_group_registered_after_the_messages_inherits_every_partitions_backlog() {
     // Push-then-consume: partitions that hold frames BEFORE the group exists
-    // wrote no `pending` row for it, and the wildcard first contact enumerates
-    // them for one pop only. Registering an `all` group must arm EVERY one of
-    // them, or all but the first-claimed partition are stranded (found by the
-    // Phase C power-loss gate: 500 of 5000 drained, then nothing).
+    // counted nothing for it. Registering an `all` group seeds it at the
+    // retained floor of every one of them: its `pending` gauge carries the
+    // whole backlog it inherited, which the dashboards read as its lag.
     let node = Node::new("group-after-push");
     let (mut a, _) = Applier::open(
         node.store(),
@@ -5696,12 +4957,6 @@ fn a_group_registered_after_the_messages_sees_every_partition() {
     a.commit().expect("commit"); // PERF-D batches counters until a commit
     node.store()
         .read(|r| {
-            for pid in 1..=3u64 {
-                assert!(
-                    r.pending_at(TENANT, QUEUE, "late", pid)?.is_some(),
-                    "pid {pid} predates the group and must be armed"
-                );
-            }
             assert_eq!(
                 r.counter_at(&keys::counter_group(
                     TENANT,
@@ -5715,13 +4970,34 @@ fn a_group_registered_after_the_messages_sees_every_partition() {
             Ok(())
         })
         .expect("read");
-    assert_eq!(
-        a.derived()
-            .ring(TENANT, QUEUE, "late")
-            .map(|r| r.live_len()),
-        Some(3),
-        "all three partitions are in the live ring"
-    );
+}
+
+/// The queue, its groups and `parts` partitions, in one entry at index 1.
+fn setup_entry(parts: u64, groups: &[&str], qc: QueueConfig) -> Committed {
+    let mut effects = vec![Effect::QueueUpsert {
+        tenant: TENANT.into(),
+        queue: QUEUE.into(),
+        cfg: qc,
+    }];
+    for (i, g) in groups.iter().enumerate() {
+        effects.push(Effect::GroupUpsert {
+            tenant: TENANT.into(),
+            queue: QUEUE.into(),
+            group: (*g).into(),
+            meta: group_meta(i as u64, BASE_US),
+        });
+    }
+    for p in 0..parts {
+        effects.push(Effect::PartitionCreate {
+            pid: 1 + p,
+            uuid: uuid(1 + p),
+            tenant: TENANT.into(),
+            queue: QUEUE.into(),
+            partition: format!("p{p}"),
+            created_at_us: BASE_US,
+        });
+    }
+    Build::new(BASE_US, 1, 0).cmd(effects).at(1, 1)
 }
 
 // ---------------------------------------------------------------------------

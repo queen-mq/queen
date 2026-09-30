@@ -12,9 +12,8 @@
 //! An effect is PID-KEYED ([`pid_keyed`]) when every row it reads or writes is
 //! keyed by its partition id — the partition row, its cursors, its `seg_loc`,
 //! `txns` and `dedup` rows, its `dlq_by_pos` lists — or by names together with
-//! that pid (`pending (tenant, queue, group, pid)`, `leases_by_worker (worker,
-//! pid, group)`, `queue_partitions (tenant, queue, pid)`, `streams_state
-//! (query, pid, key)`), and the only shared rows it READS are catalogue rows
+//! that pid (`queue_partitions (tenant, queue, pid)`, `streams_state (query,
+//! pid, key)`), and the only shared rows it READS are catalogue rows
 //! (`queues`, `groups`, `garbage`) that no pid-keyed effect writes. Two such
 //! effects on different pids therefore touch disjoint rows and commute: any
 //! interleaving leaves the same bytes. Effects on ONE pid go to one shard
@@ -88,7 +87,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
 
 use super::{
-    partition_scoped, ApplyConfig, ApplyError, ApplyStats, CounterCache, LeaseIndex, Result,
+    partition_scoped, ApplyConfig, ApplyError, ApplyStats, CounterCache, Result,
     DLQ_TRIM_PER_WATERMARK,
 };
 use crate::rsm::dedup;
@@ -239,6 +238,8 @@ pub(super) struct Cx<'a> {
     /// The segment positions the coordinator's pre-pass gave this run's
     /// `Append`s, by effect ordinal (empty on the inline path).
     pub(super) positions: &'a [Option<Position>],
+    /// The consumption engine appends and cursor effects are reported to.
+    pub(super) engine: Option<&'a std::sync::Arc<crate::rsm::consume::Engine>>,
 }
 
 /// Where a pid-keyed effect's NODE-LOCAL side effects go (module header).
@@ -273,12 +274,11 @@ pub(super) struct RetentionRec {
 // ---------------------------------------------------------------------------
 
 /// What the append path needs of a queue, cached per shard ACROSS commits:
-/// its registered groups and its configured delay. Both are catalogue rows no
-/// pid-keyed effect writes, and every apply-side write to them (a queue or
-/// group upsert or delete, a tenant purge) invalidates the entry
-/// ([`QueueCache::invalidate`]); apply is the only writer of the store (I1),
-/// so the cache answers exactly what a read would (I2). The group list used
-/// to be re-read after every commit and the queue row decoded on every append.
+/// its registered groups. They are catalogue rows no pid-keyed effect writes,
+/// and every apply-side write to them (a queue or group upsert or delete, a
+/// tenant purge) invalidates the entry ([`QueueCache::invalidate`]); apply is
+/// the only writer of the store (I1), so the cache answers exactly what a read
+/// would (I2). The group list used to be re-read after every commit.
 ///
 /// The same slot counts the entry's WAKES for the queue, by group, so an
 /// event costs an increment instead of three `String` clones and a sort.
@@ -288,9 +288,6 @@ pub(super) struct QueueCtx {
     /// The registered groups in key order (what `scan_groups` gives), `None`
     /// until read and after a change to the queue's group set.
     groups: Option<Arc<[Arc<str>]>>,
-    /// `max(delayed_processing, window_buffer)` in µs (0 without a queue
-    /// row), `None` until read and after a queue upsert or delete.
-    delay_us: Option<i64>,
     /// This entry's APPEND wakes, parallel to `groups` (valid only for the
     /// list they were counted against; frozen into `named` when it goes).
     by_index: Vec<u32>,
@@ -309,7 +306,6 @@ impl QueueCtx {
             tenant: Arc::from(tenant),
             queue: Arc::from(queue),
             groups: None,
-            delay_us: None,
             by_index: Vec::new(),
             named: Vec::new(),
             all: false,
@@ -389,7 +385,6 @@ impl QueueCache {
             let q = &mut self.slots[i as usize];
             q.freeze();
             q.groups = None;
-            q.delay_us = None;
         }
     }
 
@@ -475,16 +470,13 @@ impl QueueCache {
 // One shard
 // ---------------------------------------------------------------------------
 
-/// Everything a shard owns: its counter overlay, its partitions' leases, its
-/// queue cache, what it counted for the entry, and the node-local side
-/// effects it keeps for the coordinator. The coordinator owns every `Shard`
-/// and lends one to a thread for the length of a run.
+/// Everything a shard owns: its counter overlay, its queue cache, what it
+/// counted for the entry, and the node-local side effects it keeps for the
+/// coordinator. The coordinator owns every `Shard` and lends one to a thread
+/// for the length of a run.
 pub(super) struct Shard {
     /// The counter overlay of this shard's bumps (module header).
     pub(super) ctr: CounterCache,
-    /// The live lease of each leased (partition, group) of this shard's pids
-    /// (the append path floors a leased partition's `pending.ready_at` at it).
-    pub(super) leases: LeaseIndex,
     pub(super) queues: QueueCache,
     /// `(tenant, queue, partition)` of this entry's appends, for
     /// [`super::Notify::appended`], collected only while someone listens.
@@ -515,7 +507,6 @@ impl Shard {
     pub(super) fn new(batch_counters: bool, max_created_at_us: i64) -> Shard {
         Shard {
             ctr: CounterCache::new(batch_counters),
-            leases: LeaseIndex::default(),
             queues: QueueCache::default(),
             appended: Vec::new(),
             stats: ApplyStats::default(),
@@ -585,28 +576,52 @@ impl Shard {
                 created_at_us,
                 hashes,
                 blob,
-            } => self.append(
-                w,
-                cx,
-                side,
-                ord,
-                AppendArgs {
-                    pid: *pid,
-                    bucket: *bucket,
-                    base_offset: *base_offset,
-                    count: *count,
-                    created_at_us: *created_at_us,
-                    hashes,
-                    blob,
-                },
-            ),
-            Effect::CursorSet { pid, group, row } => self.cursor_set(w, cx, *pid, group, row),
-            Effect::CursorDelete { pid, group } => self.cursor_delete(w, *pid, group),
+            } => {
+                self.append(
+                    w,
+                    cx,
+                    side,
+                    ord,
+                    AppendArgs {
+                        pid: *pid,
+                        bucket: *bucket,
+                        base_offset: *base_offset,
+                        count: *count,
+                        created_at_us: *created_at_us,
+                        hashes,
+                        blob,
+                    },
+                )?;
+                if let (Some(en), true) = (cx.engine, *count > 0) {
+                    en.on_append(*pid, (*base_offset + u64::from(*count) - 1) as i64);
+                }
+                Ok(())
+            }
+            Effect::CursorSet { pid, group, row } => {
+                self.cursor_set(w, *pid, group, row)?;
+                if let Some(en) = cx.engine {
+                    en.on_effect(e, cx.index);
+                }
+                Ok(())
+            }
+            Effect::CursorDelete { pid, group } => {
+                self.cursor_delete(w, *pid, group)?;
+                if let Some(en) = cx.engine {
+                    en.on_effect(e, cx.index);
+                }
+                Ok(())
+            }
             Effect::Watermark {
                 pid,
                 log_start,
                 txns_start,
-            } => self.watermark(w, cx, side, ord, *pid, *log_start, *txns_start),
+            } => {
+                self.watermark(w, cx, side, ord, *pid, *log_start, *txns_start)?;
+                if let Some(en) = cx.engine {
+                    en.on_effect(e, cx.index);
+                }
+                Ok(())
+            }
             Effect::DlqInsert {
                 dlq_id,
                 tenant,
@@ -668,6 +683,9 @@ impl Shard {
                         metrics.record_churn(cx.now_us, tenant, queue, 1, 0)
                     }
                     Side::Deferred => self.churn.push(ord),
+                }
+                if let Some(en) = cx.engine {
+                    en.on_effect(e, cx.index);
                 }
                 Ok(())
             }
@@ -925,34 +943,20 @@ impl Shard {
         )?;
         self.stamp(w, pid, tenant, queue, Counter::LastPushUs, created_at_us)?;
 
-        // `pending`, one row per subscribed group (§6.1): the ready rings
-        // rebuild from it in O(pending), so nothing here walks partitions.
+        // Every subscribed group's `pending` gauge (§6.4), and its wake: the
+        // group has new work.
         let slot = self.queues.slot(tenant, queue);
-        let ready_at = self.ready_at(w, slot, created_at_us)?;
         let groups = self.groups_of(w, cx.cfg, slot)?;
-        let transitions = cx.cfg.pending_transitions;
         for (gi, g) in groups.iter().enumerate() {
-            self.append_pending(w, tenant, queue, g, pid, ready_at, transitions)?;
             key_group(&mut self.key, tenant, queue, g, Counter::Pending);
             self.ctr.add(w, &self.key, n)?;
-            // P2.2: a frame appended under a live lease is not claimable by
-            // anyone (the transitions path floors it at the lease); the lease's
-            // own release wakes a pop, so waking one here would only burn a
-            // pipeline trip on a pop that must come back empty.
-            let leased = transitions
-                && self
-                    .leases
-                    .expiry(pid, g)
-                    .is_some_and(|exp| exp > cx.now_us);
-            if !leased {
-                if cx.cfg.batch_counters {
-                    self.queues.wake_index(slot, gi);
-                } else {
-                    // A fresh scan each append (the ablation path): the list
-                    // the counts would index is not the cached one.
-                    self.queues.touch(slot);
-                    self.queues.slots[slot as usize].named_slot(g).1 += 1;
-                }
+            if cx.cfg.batch_counters {
+                self.queues.wake_index(slot, gi);
+            } else {
+                // A fresh scan each append (the ablation path): the list the
+                // counts would index is not the cached one.
+                self.queues.touch(slot);
+                self.queues.slots[slot as usize].named_slot(g).1 += 1;
             }
         }
         if cx.wants_append_wakes {
@@ -963,32 +967,6 @@ impl Shard {
         self.stats.messages += count as u64;
         self.stats.bytes_appended += retained_len;
         Ok(())
-    }
-
-    /// When a partition is next worth looking at for a group after an append.
-    ///
-    /// COARSE BY CONTRACT, exactly like the ring entry it becomes: the claim
-    /// re-verifies everything against the cursor row. `delayed_processing` and
-    /// `window_buffer` are the two configured reasons a fresh frame is not
-    /// claimable yet. Read once per queue per shard ([`QueueCtx`]), not once
-    /// per append.
-    fn ready_at<R: Reads + ?Sized>(&mut self, r: &R, slot: u32, created_at_us: i64) -> Result<i64> {
-        let q = &mut self.queues.slots[slot as usize];
-        let delay_us = match q.delay_us {
-            Some(d) => d,
-            None => {
-                let d = match r.queue(&q.tenant, &q.queue)? {
-                    None => 0,
-                    Some(cfg) => {
-                        let delay = cfg.delayed_processing.max(cfg.window_buffer).max(0) as i64;
-                        delay.saturating_mul(1_000_000)
-                    }
-                };
-                q.delay_us = Some(d);
-                d
-            }
-        };
-        Ok(created_at_us.saturating_add(delay_us))
     }
 
     /// The queue's subscribed group names, in key order. With
@@ -1020,50 +998,11 @@ impl Shard {
         Ok(list)
     }
 
-    /// Maintain one group's `pending` row for an append (§6.1).
-    ///
-    /// With `transitions` off: an unconditional `put_pending` on every append,
-    /// which OVERWRITES the stored `ready_at` with this frame's. With it on
-    /// (the default), `ready_at` is maintained to the EARLIEST wall-time the
-    /// partition could yield a claim: a live lease floors it at the lease
-    /// expiry, and the row is written only on a TRANSITION (no row yet, or an
-    /// earlier `ready_at`). Every input is committed state plus the lease's
-    /// RAM twin (rebuilt from `leases_by_worker`), so the decision is a pure,
-    /// cadence-free function of the replicated log (I2).
-    #[allow(clippy::too_many_arguments)]
-    fn append_pending<W: Writes + ?Sized>(
-        &mut self,
-        w: &mut W,
-        tenant: &str,
-        queue: &str,
-        group: &str,
-        pid: Pid,
-        ready_at: i64,
-        transitions: bool,
-    ) -> Result<()> {
-        if transitions {
-            let floored = match self.leases.expiry(pid, group) {
-                Some(exp) if exp > ready_at => exp,
-                _ => ready_at,
-            };
-            if let Some(stored) = w.pending_at(tenant, queue, group, pid)? {
-                if floored >= stored {
-                    return Ok(());
-                }
-            }
-            w.put_pending(tenant, queue, group, pid, floored)?;
-            return Ok(());
-        }
-        w.put_pending(tenant, queue, group, pid, ready_at)?;
-        Ok(())
-    }
-
     // -- cursors -----------------------------------------------------------
 
     fn cursor_set<W: Writes + ?Sized>(
         &mut self,
         w: &mut W,
-        cx: &Cx<'_>,
         pid: Pid,
         group: &str,
         row: &CursorRow,
@@ -1076,28 +1015,20 @@ impl Shard {
         };
         let (tenant, queue) = (p.tenant.as_str(), p.queue.as_str());
         let old = w.cursor(pid, group)?;
+        let leased = |c: &CursorRow| c.worker.is_some() && c.lease_expires_at_us.is_some();
+        let had_lease = old.as_ref().is_some_and(leased);
+        let has_lease = leased(row);
 
-        // `leases_by_worker` is the derived index a lease renew walks.
-        // It mirrors the cursor row exactly: one entry while the row names a
-        // worker and an expiry, none otherwise.
-        let had_lease = old
-            .as_ref()
-            .map(|c| c.worker.is_some() && c.lease_expires_at_us.is_some())
-            .unwrap_or(false);
+        // `leases_by_worker` is the committed index of every lease by worker:
+        // a renew on a leader whose consumption engine has not loaded the
+        // worker's groups yet walks it. It mirrors the cursor row exactly: one
+        // entry while the row names a worker and an expiry, none otherwise.
         if let Some(worker) = old.as_ref().and_then(|c| c.worker.as_deref()) {
             w.del_lease(worker, pid, group)?;
         }
-        let has_lease = match (&row.worker, row.lease_expires_at_us) {
-            (Some(worker), Some(exp)) => {
-                w.put_lease(worker, pid, group, exp)?;
-                self.leases.note(pid, group, exp);
-                true
-            }
-            _ => {
-                self.leases.clear(pid, group);
-                false
-            }
-        };
+        if let (Some(worker), Some(exp)) = (&row.worker, row.lease_expires_at_us) {
+            w.put_lease(worker, pid, group, exp)?;
+        }
 
         w.put_cursor(pid, group, row)?;
 
@@ -1132,20 +1063,6 @@ impl Shard {
             self.stamp(w, pid, tenant, queue, Counter::LastPopUs, at)?;
         }
 
-        // `pending` mirrors "this partition has work for this group". A live
-        // lease is not work for anyone else until it expires, which is what
-        // the ring's deferral is for.
-        if row.committed >= p.last_offset {
-            w.del_pending(tenant, queue, group, pid)?;
-        } else {
-            let ready_at = if has_lease {
-                row.lease_expires_at_us.unwrap_or(cx.now_us)
-            } else {
-                cx.now_us
-            };
-            w.put_pending(tenant, queue, group, pid, ready_at)?;
-        }
-
         // A released lease is the other half of a wake (§9.5): the partition
         // became claimable for whoever is parked on it — only if it still holds
         // work (P2.2: a drained partition would wake a pop into an empty trip).
@@ -1156,8 +1073,8 @@ impl Shard {
         Ok(())
     }
 
-    /// A cursor, its lease index row and its `pending` row. Also the
-    /// coordinator's, for a group delete's and a partition's chunks.
+    /// A cursor and its lease index row. Also the coordinator's, for a group
+    /// delete's and a partition's chunks.
     pub(super) fn cursor_delete<W: Writes + ?Sized>(
         &mut self,
         w: &mut W,
@@ -1171,11 +1088,7 @@ impl Shard {
         if let Some(worker) = &old.worker {
             w.del_lease(worker, pid, group)?;
         }
-        self.leases.clear(pid, group);
         w.del_cursor(pid, group)?;
-        if let Some(p) = w.partition(pid)? {
-            w.del_pending(&p.tenant, &p.queue, group, pid)?;
-        }
         Ok(())
     }
 

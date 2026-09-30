@@ -282,8 +282,9 @@ pub struct PopOutcome {
     pub claims: Vec<PopClaim>,
 }
 
-/// One (partition, group) target of an ack (005).
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One (partition, group) target of an ack (005). Serde: it rides a
+/// transaction command as the engine's results ([`crate::rsm::planner::txn::TxnCommand::engine_acks`]).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct AckResult {
     pub pid: Pid,
     /// The cursor after the ack.
@@ -303,7 +304,7 @@ pub struct AckResult {
     pub stale_hashes: Vec<[u8; 16]>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct AckOutcome {
     /// In INPUT order.
     pub results: Vec<AckResult>,
