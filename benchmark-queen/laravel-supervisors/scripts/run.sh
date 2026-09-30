@@ -33,6 +33,8 @@ QUEEN_FAST_SCALE_UP="${BENCH_QUEEN_FAST_SCALE_UP:-0}"
 QUEEN_POLL_INTERVAL="${BENCH_POLL_INTERVAL:-1}"
 # PostgreSQL durability, the Queen counterpart of --redis-appendfsync.
 POSTGRES_SYNCHRONOUS_COMMIT="${BENCH_POSTGRES_SYNCHRONOUS_COMMIT:-on}"
+# Broker storage: PostgreSQL, or Raft on a local data directory (compose.raft.yml).
+QUEEN_STORAGE="${BENCH_QUEEN_STORAGE:-postgres}"
 LEDGER_MODE="${BENCH_LEDGER_MODE:-off}"
 REDIS_APPENDONLY="${BENCH_REDIS_APPENDONLY:-yes}"
 REDIS_APPEND_FSYNC="${BENCH_REDIS_APPEND_FSYNC:-everysec}"
@@ -96,6 +98,8 @@ Options:
   --queen-poll-interval N       Queen supervisor poll, seconds (default: 1)
   --postgres-synchronous-commit on|off
                                 PostgreSQL commit durability (default: on)
+  --queen-storage postgres|raft Broker storage; raft needs the image
+                                queen-laravel-supervisor-broker:raft (default: postgres)
   --redis-appendonly yes|no     Redis AOF durability (default: yes)
   --redis-appendfsync MODE      Redis AOF fsync: always|everysec|no (default: everysec)
   --ledger                      Enable durable attempt/effect auditing; changes the workload
@@ -211,6 +215,7 @@ while [ "$#" -gt 0 ]; do
         --queen-fast-scale-up) QUEEN_FAST_SCALE_UP="${2:?--queen-fast-scale-up requires a value}"; shift 2 ;;
         --queen-poll-interval) QUEEN_POLL_INTERVAL="${2:?--queen-poll-interval requires a value}"; shift 2 ;;
         --postgres-synchronous-commit) POSTGRES_SYNCHRONOUS_COMMIT="${2:?--postgres-synchronous-commit requires a value}"; shift 2 ;;
+        --queen-storage) QUEEN_STORAGE="${2:?--queen-storage requires a value}"; shift 2 ;;
         --redis-appendonly) REDIS_APPENDONLY="${2:?--redis-appendonly requires a value}"; shift 2 ;;
         --redis-appendfsync) REDIS_APPEND_FSYNC="${2:?--redis-appendfsync requires a value}"; shift 2 ;;
         --ledger) LEDGER_MODE="durable"; shift ;;
@@ -310,6 +315,14 @@ require_decimal "--target-clear" "$TARGET_CLEAR_SECONDS"
 [ "$QUEEN_FAST_SCALE_UP" -le 1 ] || die "--queen-fast-scale-up must be 0 or 1"
 [ "$QUEEN_POLL_INTERVAL" -le 60 ] || die "--queen-poll-interval must not exceed 60"
 case "$POSTGRES_SYNCHRONOUS_COMMIT" in on|off) ;; *) die "--postgres-synchronous-commit must be on or off" ;; esac
+case "$QUEEN_STORAGE" in
+    postgres) ;;
+    raft)
+        COMPOSE_FILE="${BENCH_DIR}/compose.raft.yml"
+        BROKER_IMAGE="queen-laravel-supervisor-broker:raft"
+        ;;
+    *) die "--queen-storage must be postgres or raft" ;;
+esac
 [ "$WORKER_TIMEOUT" -le 86400 ] || die "--worker-timeout must not exceed 86400"
 [ "$RETRY_AFTER" -le 86401 ] || die "--retry-after must not exceed 86401"
 if [ "$LEASE_RENEWAL" = true ]; then
@@ -809,16 +822,19 @@ done
 if [ "$contains_horizon_engine" -eq 1 ]; then
     docker compose --file "$COMPOSE_FILE" pull redis
 fi
-if [ "$contains_queen_engine" -eq 1 ]; then
+if [ "$contains_queen_engine" -eq 1 ] && [ "$QUEEN_STORAGE" = postgres ]; then
     docker compose --file "$COMPOSE_FILE" pull postgres
 fi
 
 if [ "$BUILD_IMAGES" -eq 1 ]; then
     printf 'Building benchmark application image...\n'
     docker compose --file "$COMPOSE_FILE" --profile tools build producer
-    if [ "$contains_queen_engine" -eq 1 ]; then
+    if [ "$contains_queen_engine" -eq 1 ] && [ "$QUEEN_STORAGE" = postgres ]; then
         printf 'Building Queen broker image...\n'
         docker compose --file "$COMPOSE_FILE" --profile queen-php build broker
+    elif [ "$contains_queen_engine" -eq 1 ]; then
+        # The Raft broker is built from its own branch, outside this checkout.
+        [ -n "$(image_id "$BROKER_IMAGE")" ] || die "missing image: $BROKER_IMAGE"
     fi
 else
     [ -n "$(image_id "$APP_IMAGE")" ] || die "missing image: $APP_IMAGE"
@@ -838,9 +854,11 @@ if [ "$contains_horizon_engine" -eq 1 ]; then
 fi
 if [ "$contains_queen_engine" -eq 1 ]; then
     EXPECTED_BROKER_IMAGE_ID="$(image_id "$BROKER_IMAGE")"
-    EXPECTED_POSTGRES_IMAGE_ID="$(image_id 'postgres:16.10-bookworm')"
     [ -n "$EXPECTED_BROKER_IMAGE_ID" ] || die "unable to resolve immutable broker image ID"
-    [ -n "$EXPECTED_POSTGRES_IMAGE_ID" ] || die "unable to resolve immutable PostgreSQL image ID"
+    if [ "$QUEEN_STORAGE" = postgres ]; then
+        EXPECTED_POSTGRES_IMAGE_ID="$(image_id 'postgres:16.10-bookworm')"
+        [ -n "$EXPECTED_POSTGRES_IMAGE_ID" ] || die "unable to resolve immutable PostgreSQL image ID"
+    fi
 fi
 
 campaign_nonce="$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
@@ -882,6 +900,7 @@ export BENCHMARK_QUEEN_EVENT_DRIVEN="$QUEEN_EVENT_DRIVEN"
 export BENCHMARK_QUEEN_FAST_SCALE_UP="$QUEEN_FAST_SCALE_UP"
 export BENCHMARK_QUEEN_POLL_INTERVAL="$QUEEN_POLL_INTERVAL"
 export BENCHMARK_POSTGRES_SYNCHRONOUS_COMMIT="$POSTGRES_SYNCHRONOUS_COMMIT"
+export BENCHMARK_QUEEN_STORAGE="$QUEEN_STORAGE"
 export BENCH_POSTGRES_SYNCHRONOUS_COMMIT="$POSTGRES_SYNCHRONOUS_COMMIT"
 export BENCHMARK_SAMPLE_INTERVAL="$SAMPLE_INTERVAL"
 export BENCHMARK_POST_DRAIN="$POST_DRAIN_SECONDS"
@@ -1027,6 +1046,7 @@ settings = {
     "queen_fast_scale_up": os.environ["BENCHMARK_QUEEN_FAST_SCALE_UP"] == "1",
     "queen_poll_interval_seconds": int(os.environ["BENCHMARK_QUEEN_POLL_INTERVAL"]),
     "postgres_synchronous_commit": os.environ["BENCHMARK_POSTGRES_SYNCHRONOUS_COMMIT"],
+    "queen_storage": os.environ["BENCHMARK_QUEEN_STORAGE"],
     "sample_interval_seconds": float(os.environ["BENCHMARK_SAMPLE_INTERVAL"]),
     "warmup_jobs": int(os.environ["BENCHMARK_WARMUP_JOBS"]),
     "completion_timeout_seconds": int(os.environ["BENCHMARK_COMPLETION_TIMEOUT"]),
@@ -1170,8 +1190,10 @@ run_lane() {
     else
         [ "$(image_id "$BROKER_IMAGE")" = "$EXPECTED_BROKER_IMAGE_ID" ] \
             || die "broker image tag changed after provenance capture"
-        [ "$(image_id 'postgres:16.10-bookworm')" = "$EXPECTED_POSTGRES_IMAGE_ID" ] \
-            || die "PostgreSQL image tag changed after provenance capture"
+        if [ "$QUEEN_STORAGE" = postgres ]; then
+            [ "$(image_id 'postgres:16.10-bookworm')" = "$EXPECTED_POSTGRES_IMAGE_ID" ] \
+                || die "PostgreSQL image tag changed after provenance capture"
+        fi
     fi
     preflight_current_resources_absent
 
@@ -1249,11 +1271,13 @@ run_lane() {
         SAMPLER_TARGETS+=(--target "backend-redis=${backend_pid}")
     else
         broker_id="$(compose_current ps --quiet broker)"
-        postgres_id="$(compose_current ps --quiet postgres)"
         broker_pid="$(docker inspect --format '{{.State.Pid}}' "$broker_id")"
-        postgres_pid="$(docker inspect --format '{{.State.Pid}}' "$postgres_id")"
         SAMPLER_TARGETS+=(--target "backend-broker=${broker_pid}")
-        SAMPLER_TARGETS+=(--target "backend-postgres=${postgres_pid}")
+        if [ "$QUEEN_STORAGE" = postgres ]; then
+            postgres_id="$(compose_current ps --quiet postgres)"
+            postgres_pid="$(docker inspect --format '{{.State.Pid}}' "$postgres_id")"
+            SAMPLER_TARGETS+=(--target "backend-postgres=${postgres_pid}")
+        fi
     fi
 
     sampler_output="/stats/${run_id}.jsonl"
