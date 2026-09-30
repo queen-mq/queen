@@ -78,7 +78,7 @@ implementations rather than a byte-for-byte Horizon clone.
 | `minProcesses` | `min_processes_per_queue` | Horizon's minimum applies to every queue; `min_processes` bounds the whole pool |
 | `maxProcesses` | `max_processes` | Upper target bound |
 | `balanceMaxShift` | `balance_max_shift` | Maximum elastic change per cycle; add `fast_scale_up` to close half the gap per cycle |
-| `balanceCooldown` | `balance_cooldown` | Seconds between elastic changes |
+| `balanceCooldown` | `balance_cooldown` | Seconds between elastic changes; with `event_driven`, increases wait one second |
 | `maxJobs` | `max_jobs` | Worker recycle limit |
 | `maxTime` | `max_time` | Worker lifetime limit |
 | `timeout`, `tries`, `memory`, `sleep`, `rest`, `force` | Same names | Same worker concepts |

@@ -469,6 +469,44 @@ def fig_laravel_scale_up(out: Path, theme: Theme) -> str:
     return "laravel-fast-scale-up"
 
 
+def fig_laravel_event_driven(out: Path, theme: Theme) -> str:
+    """Workers after a burst at the production cadence, polled against woken
+    by the broker, every run drawn; the legend carries the median time to the
+    full twenty."""
+    rows = read_csv(LARAVEL / "event-driven.csv")
+
+    style(theme)
+    fig, ax = plt.subplots(figsize=(7.2, 2.8))
+    for mode, color, label in (("event", theme.series[0], "event_driven"), ("poll", theme.series[1], "Polling")):
+        runs = []
+        for run in sorted({r["run"] for r in rows if r["mode"] == mode}):
+            series = [r for r in rows if r["mode"] == mode and r["run"] == run]
+            runs.append(([float(r["t"]) for r in series], [int(r["workers"]) for r in series]))
+        peak = max(max(workers) for _, workers in runs)
+        full = sorted(next(x for x, w in zip(t, workers) if w == peak) for t, workers in runs)
+        for index, (t, workers) in enumerate(runs):
+            ax.step(
+                t,
+                workers,
+                where="post",
+                color=color,
+                alpha=0.85,
+                linewidth=1.2,
+                label=f"{label}: {peak} workers after {full[len(full) // 2]:.1f} s, median of {len(runs)}"
+                if index == 0
+                else None,
+            )
+    finish(ax, theme, "Worker processes")
+    ax.set_xlabel("Seconds after the burst started", color=theme.ink, fontsize=8.5)
+    ax.set_xlim(0, 20)
+    ax.set_ylim(0, 22)
+    ax.set_yticks([0, 5, 10, 15, 20])
+    ax.legend(loc="lower right")
+
+    save(fig, out, "laravel-event-driven", theme)
+    return "laravel-event-driven"
+
+
 FIGURES = (
     fig_soak24,
     fig_pipeline,
@@ -477,6 +515,7 @@ FIGURES = (
     fig_laravel_prefork,
     fig_laravel_replicas,
     fig_laravel_scale_up,
+    fig_laravel_event_driven,
 )
 
 

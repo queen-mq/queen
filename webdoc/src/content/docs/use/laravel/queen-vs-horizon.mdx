@@ -75,7 +75,8 @@ implementation and tests named in this page's frontmatter.
 | Queue backend | Redis only; the official docs state Redis Cluster is not supported | Queen broker with its durable storage as source of truth |
 | Dynamic balancing | `auto`, with `size` or `time` strategy | `auto`, with independent `size` or `time` implementation |
 | Per-queue minimum | `minProcesses` applies to every queue | `min_processes_per_queue` |
-| Scale-up rate | `balanceMaxShift` workers per cooldown | The same, or `fast_scale_up`: half of the gap per cycle |
+| Reaction to new jobs | Reads the queue sizes every `balanceCooldown`, three seconds by default | The same polling, or `event_driven`: the broker wakes the master when jobs arrive |
+| Scale-up rate | `balanceMaxShift` workers per cooldown | The same, or `fast_scale_up`: half of the gap per cycle, every second with `event_driven` |
 | Fixed allocation | `simple` | `simple` |
 | Ordered queue priority | `balance=false` | `balance=off` |
 | Master runtime | PHP with Laravel/Horizon loaded | PHP reference engine or optimized Rust engine |
