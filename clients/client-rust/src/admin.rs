@@ -118,13 +118,11 @@ impl Admin {
 
     /// # This broker does not route it
     ///
-    /// `/api/v1/resources/partitions` is registered nowhere in the broker, so
-    /// every call answers 404 `no_such_route` — the same trap as the JS SDK's
-    /// `clearQueue` and `moveMessageToDlq`, which this client does not offer
-    /// for exactly that reason. It is kept, and pinned by
-    /// `the_partitions_resource_is_not_a_route_on_this_broker`, only because
-    /// removing a public method is a breaking change; use
-    /// [`Admin::queue`] for a single queue's partition counts.
+    /// `GET /api/v1/resources/partitions`: the partitions holding the most
+    /// pending (`queue` narrows to one queue, `limit` caps the rows, default
+    /// 610), each with its `queue`, `partition`, `id`, `pending`,
+    /// `processing` and `lagSeconds` (the age of the oldest message its
+    /// slowest reader has not consumed, `null` when caught up).
     pub async fn partitions(&self, params: &[(&'static str, String)]) -> Result<serde_json::Value> {
         self.get(&with_query("/api/v1/resources/partitions", params))
             .await

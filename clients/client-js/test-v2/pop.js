@@ -226,11 +226,14 @@ export async function popV4DefaultOne(client) {
 
     await new Promise(r => setTimeout(r, 500))
 
-    // No .partitions() → max_partitions defaults to 1 → single partition.
+    // No .partitions() and autopilot off → the pre-1.2 default of one
+    // partition. (With autopilot on, the SDK default, an unset width is the
+    // broker's to pick: one consumer and four ready partitions take all four.)
     const res = await client
     .queue(queueName)
     .batch(100)
     .wait(false)
+    .autopilot(false)
     .pop()
 
     if (res.length !== 5) {

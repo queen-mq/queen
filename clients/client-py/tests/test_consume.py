@@ -566,13 +566,16 @@ async def test_consumer_multi_partition_default_one(client):
         else:
             received.append(msgs)
 
-    # No .partitions() call → max_partitions defaults to 1 → single partition.
+    # No .partitions() call and autopilot off → the pre-1.2 default of one
+    # partition. (With autopilot on, the SDK default, an unset width is the
+    # broker's to pick: one consumer and four ready partitions take all four.)
     await (
         client.queue(queue_name)
         .batch(100)
         .wait(False)
         .limit(1)
         .auto_ack(True)
+        .autopilot(False)
         .consume(handler)
     )
 

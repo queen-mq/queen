@@ -5,7 +5,7 @@
 # (RetentionEnabled, DeadLetterQueue, ...) that exist only in the local,
 # unpublished clients/client-go — go.work wires them in. GOWORK=off would fail
 # to build. So we copy go.work + BOTH modules and do NOT disable the workspace.
-FROM golang:1.24-bookworm
+FROM golang:1.26-bookworm
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends make curl ca-certificates git \

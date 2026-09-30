@@ -193,8 +193,10 @@ func TestPop_V4GlobalCap(t *testing.T) {
 }
 
 // TestPop_V4DefaultOnePartition mirrors pop.js#popV4DefaultOne. Without
-// --max-partitions, default is 1 partition per pop; only the first
-// partition's messages come back.
+// --max-partitions and with autopilot off (QUEEN_SDK_POP_AUTOPILOT=off), a pop
+// claims one partition, the pre-1.2 default; only the first partition's
+// messages come back. (With autopilot on, an untouched --max-partitions is the
+// broker's to pick, and one consumer takes every ready partition.)
 func TestPop_V4DefaultOnePartition(t *testing.T) {
 	q := uniqueQueue(t, "pop-v4-default")
 	createQueue(t, q)
@@ -207,7 +209,12 @@ func TestPop_V4DefaultOnePartition(t *testing.T) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	got := popN(t, q, 100, "--cg", "ct-v4-def", "--from-mode", "all", "--wait=false")
+	out, stderr, code := runWith(runOpts{env: []string{"QUEEN_SDK_POP_AUTOPILOT=off"}},
+		"pop", q, "-n", "100", "-o", "ndjson", "--cg", "ct-v4-def", "--from-mode", "all", "--wait=false")
+	if code != 0 {
+		t.Fatalf("pop: exit %d\nstdout: %s\nstderr: %s", code, out, stderr)
+	}
+	got := parseNDJSONMessages(t, out)
 	if len(got) != 5 {
 		t.Errorf("default 1-partition pop: got %d, want 5", len(got))
 	}

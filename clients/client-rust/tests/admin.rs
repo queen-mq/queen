@@ -1419,24 +1419,63 @@ async fn a_queue_detail_reports_its_partitions_and_totals() {
     drop_queue(&q, &queue).await;
 }
 
-// `Admin::partitions` posts to `/api/v1/resources/partitions`, which this broker
-// does not route — the same trap already documented on `clear_queue` and
-// `move_message_to_dlq`, but for a method that is still exposed. Pinning the 404
-// means the day the route lands (or the method goes) somebody has to come here.
+// `Admin::partitions` reads `/api/v1/resources/partitions`: the partitions
+// holding the most pending (of one queue with `queue=`), each with its queue,
+// name, id, pending and processing counts and `lagSeconds`. The route landed
+// with the dashboard's sunflower (it used to answer 404 `no_such_route`, which
+// this test pinned until it did).
 #[tokio::test]
-async fn the_partitions_resource_is_not_a_route_on_this_broker() {
+async fn the_partitions_resource_ranks_a_queues_partitions_by_pending() {
     let q = broker!();
-    let err = q
-        .admin()
-        .partitions(&[])
-        .await
-        .expect_err("/api/v1/resources/partitions answered — the method is no longer dead");
-    assert_eq!(err.status(), Some(404), "unexpected error: {err}");
+    let queue = unique("res-parts");
+    create_queue(&q, &queue, QueueOptions::default()).await;
+    for (lane, n) in [("busy", 3), ("quiet", 1)] {
+        for i in 0..n {
+            q.queue(&queue)
+                .partition(lane)
+                .push(serde_json::json!({ "lane": lane, "i": i }))
+                .await
+                .unwrap();
+        }
+    }
+
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    for _ in 0..25 {
+        let body = q
+            .admin()
+            .partitions(&[("queue", queue.clone())])
+            .await
+            .expect("/api/v1/resources/partitions failed");
+        rows = body
+            .get("partitions")
+            .and_then(|p| p.as_array())
+            .cloned()
+            .unwrap_or_else(|| panic!("no partitions array: {body}"));
+        if rows.len() >= 2 {
+            break;
+        }
+        sleep_ms(200).await;
+    }
+    let pending = |name: &str| {
+        rows.iter()
+            .find(|r| r.get("partition").and_then(|v| v.as_str()) == Some(name))
+            .and_then(|r| r.get("pending").and_then(|v| v.as_i64()))
+    };
+    assert_eq!(pending("busy"), Some(3), "rows: {rows:?}");
+    assert_eq!(pending("quiet"), Some(1), "rows: {rows:?}");
     assert_eq!(
-        err.code().map(|c| c.as_str()),
-        Some("no_such_route"),
-        "the broker's route-miss code did not survive decoding: {err}"
+        rows[0].get("partition").and_then(|v| v.as_str()),
+        Some("busy"),
+        "the busiest partition comes first: {rows:?}"
     );
+    for r in &rows {
+        assert_eq!(r.get("queue").and_then(|v| v.as_str()), Some(queue.as_str()));
+        for key in ["id", "processing", "lagSeconds"] {
+            assert!(r.get(key).is_some(), "a row lost `{key}`: {r}");
+        }
+    }
+
+    drop_queue(&q, &queue).await;
 }
 
 // `Admin::list_messages` is the console's message browser. On this engine the
