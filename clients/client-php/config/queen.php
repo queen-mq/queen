@@ -113,6 +113,21 @@ return [
             'interval' => env('QUEEN_SUPERVISOR_REMOTE_STATUS_INTERVAL'),
             'ttl' => env('QUEEN_SUPERVISOR_REMOTE_STATUS_TTL'),
         ],
+        // Boot Laravel once in a fork server and fork every worker from it,
+        // instead of booting each worker: workers share the framework and the
+        // opcache copy-on-write. Needs ext-pcntl and ext-posix.
+        'prefork' => filter_var(env('QUEEN_SUPERVISOR_PREFORK', false), FILTER_VALIDATE_BOOL),
+        // Lets several replicas of this supervisor (Kubernetes pods, hosts)
+        // share one backlog. Each replica registers in the broker's key/value
+        // store and runs an even share of the worker target, so together they
+        // scale like one supervisor; min_processes and max_processes apply to
+        // each replica. Replicas coordinate when their consumer group and
+        // queue set are the same. Fixed pools (balance=simple) are not split.
+        'coordination' => [
+            'enabled' => filter_var(env('QUEEN_SUPERVISOR_COORDINATION', false), FILTER_VALIDATE_BOOL),
+            'connection' => env('QUEEN_SUPERVISOR_COORDINATION_CONNECTION', 'queen'),
+            'namespace' => env('QUEEN_SUPERVISOR_COORDINATION_NAMESPACE', 'queen-supervisor'),
+        ],
         'supervisors' => [
             'default' => [
                 'connection' => 'queen',
@@ -121,6 +136,12 @@ return [
                 'balance' => env('QUEEN_SUPERVISOR_BALANCE', 'auto'),
                 'strategy' => env('QUEEN_SUPERVISOR_STRATEGY', 'size'),
                 'min_processes' => env('QUEEN_SUPERVISOR_MIN_PROCESSES', 1),
+                // balance=auto only: workers every queue keeps even without
+                // backlog, like Horizon's per-queue minProcesses.
+                'min_processes_per_queue' => env('QUEEN_SUPERVISOR_MIN_PROCESSES_PER_QUEUE', 0),
+                // Close half of the gap to the target every cycle when the
+                // backlog grows, instead of one balance_max_shift step.
+                'fast_scale_up' => filter_var(env('QUEEN_SUPERVISOR_FAST_SCALE_UP', false), FILTER_VALIDATE_BOOL),
                 'max_processes' => env('QUEEN_SUPERVISOR_MAX_PROCESSES', 10),
                 'target_jobs_per_process' => env('QUEEN_SUPERVISOR_TARGET_JOBS', 10),
                 'target_clear_seconds' => env('QUEEN_SUPERVISOR_TARGET_CLEAR_SECONDS', 60),
@@ -164,6 +185,52 @@ return [
         'allow_local' => env('QUEEN_DASHBOARD_ALLOW_LOCAL', true),
         // Page size of the failed-jobs page (keyset pagination, newest first).
         'failed_jobs_limit' => env('QUEEN_DASHBOARD_FAILED_JOBS_LIMIT', 50),
+    ],
+
+    // Like Horizon's `waits`: seconds the oldest job of a queue may wait
+    // before `queen:check-waits` reports it (schedule it every minute). Keys
+    // are connection:queue; the wait is measured by the broker per consumer
+    // group, not estimated.
+    'waits' => [
+        'queen:' . env('QUEEN_QUEUE', 'default') => (int) env('QUEEN_WAIT_THRESHOLD', 60),
+    ],
+
+    // Where queen:check-waits sends LongWaitDetected besides the event:
+    // comma-separated mail addresses. One notification per queue and group
+    // per throttle window.
+    'notifications' => [
+        'mail' => env('QUEEN_NOTIFY_MAIL'),
+        'throttle_minutes' => (int) env('QUEEN_NOTIFY_THROTTLE_MINUTES', 5),
+    ],
+
+    // Per-job-class metrics for the dashboard's Jobs page: every worker of a
+    // Queen connection counts jobs, failures and runtime per class and writes
+    // them to the broker's key/value store once every ten seconds.
+    'job_metrics' => [
+        'enabled' => filter_var(env('QUEEN_JOB_METRICS', true), FILTER_VALIDATE_BOOL),
+        'connection' => env('QUEEN_JOB_METRICS_CONNECTION', 'queen'),
+        'namespace' => env('QUEEN_JOB_METRICS_NAMESPACE', 'queen-metrics'),
+    ],
+
+    // Monitored tags, like Horizon's: jobs are tagged when pushed (their
+    // tags() method, or one Model:key tag per Eloquent model they carry),
+    // and workers record jobs carrying a tag chosen on the dashboard's Tags
+    // page, for retention_minutes.
+    'tags' => [
+        'enabled' => filter_var(env('QUEEN_TAGS', true), FILTER_VALIDATE_BOOL),
+        'connection' => env('QUEEN_TAGS_CONNECTION', 'queen'),
+        'namespace' => env('QUEEN_TAGS_NAMESPACE', 'queen-metrics'),
+        'retention_minutes' => (int) env('QUEEN_TAGS_RETENTION_MINUTES', 1440),
+    ],
+
+    // Prometheus text for scrapers and autoscalers (Kubernetes HPA through
+    // prometheus-adapter, KEDA): queue depth, supervisor instances, workers
+    // per pool, coordinated replicas. Off by default; the scraper sends
+    // `Authorization: Bearer <token>`, and the token needs 32+ characters.
+    'metrics' => [
+        'enabled' => filter_var(env('QUEEN_METRICS_ENABLED', false), FILTER_VALIDATE_BOOL),
+        'path' => env('QUEEN_METRICS_PATH', 'queen/metrics'),
+        'token' => env('QUEEN_METRICS_TOKEN'),
     ],
 
     // The Rust supervisor is version-pinned by this Composer package, but is

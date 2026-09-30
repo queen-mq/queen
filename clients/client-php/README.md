@@ -43,14 +43,24 @@ living in Redis memory, so it follows the broker's durability and backup story r
 second one for Redis.
 
 **A control plane that is not a Laravel application.** The Rust supervisor loads Artisan once to
-resolve configuration, then leaves only Rust and your ordinary `queue:work` processes resident.
+resolve configuration, then leaves only Rust and your ordinary `queue:work` processes resident:
+2.9 MiB against Horizon's 65 MiB in the qualification campaign.
 
-**Stay on Horizon** if you need job tags, silencing, retained throughput graphs, long-wait
-notifications, or supervisor masters on more than one host. Queen does not have those yet. The
-honest, itemized comparison is [Queen or Horizon](https://queenmq.com/use/laravel/queen-vs-horizon).
+**Smaller workers.** With prefork, Laravel boots once and every worker is forked from it, sharing the
+framework and the opcache: 38 to 75% less worker memory in our measurements.
+
+**Built for Kubernetes.** Coordinated replicas split every pool's target, and a Prometheus endpoint
+gives HPA or KEDA the backlog to scale pods on.
+
+**Metrics without a snapshot command.** Per-job-class throughput and runtime, monitored tags and
+long-wait alerts are recorded by every worker into the broker, across every host.
+
+**Stay on Horizon** if you need silenced jobs, job lists, batches, Slack or SMS notification routes,
+or per-supervisor controls. The honest, itemized comparison is
+[Queen or Horizon](https://queenmq.com/use/laravel/queen-vs-horizon).
 
 > **Preview.** The queue driver is usable on its own. The supervisor and dashboard are preview
-> features, Unix-only, and one master per application and consumer group. Read
+> features and Unix-only. Read
 > [Production checks](https://queenmq.com/use/laravel/supervisors#production-checks) before
 > replacing Horizon.
 
@@ -115,8 +125,12 @@ Same concepts, snake_case names, independent implementations.
 | `balance: simple` | `balance: simple` | fixed `processes`, evenly spread |
 | `balance: false` | `balance: off` | ordered queue list on every worker |
 | `autoScalingStrategy` | `strategy` | `size` or `time` |
-| `minProcesses` / `maxProcesses` | `min_processes` / `max_processes` | |
-| `balanceMaxShift` | `balance_max_shift` | |
+| `minProcesses` | `min_processes_per_queue` | Horizon's minimum is per queue; `min_processes` bounds the pool |
+| `maxProcesses` | `max_processes` | |
+| `balanceMaxShift` | `balance_max_shift` | add `fast_scale_up` to close half the gap per cycle |
+| `waits` | `waits` | schedule `queen:check-waits` every minute |
+| `tags()`, monitored tags | same `tags()`, Tags page | |
+| `horizon:snapshot` metrics | `job_metrics` | live, nothing to schedule |
 | `balanceCooldown` | `balance_cooldown` | |
 | `maxJobs` / `maxTime` | `max_jobs` / `max_time` | worker recycle limits |
 | `timeout` `tries` `memory` `sleep` `rest` `force` | same names | |
@@ -251,6 +265,8 @@ vendor/bin/queen-supervisor --php php --artisan artisan
             'strategy'              => 'time',   // time | size
             'min_processes'         => 1,
             'max_processes'         => 20,
+            'min_processes_per_queue' => 1,     // every queue stays warm
+            'fast_scale_up'         => true,     // close half the gap per cycle
             'target_clear_seconds'  => 60,
             'balance_cooldown'      => 3,
             'balance_max_shift'     => 2,
@@ -277,6 +293,8 @@ Each pool reads these; the defaults are the ones shipped in `config/queen.php`.
 | `QUEEN_SUPERVISOR_DEFAULT_RUNTIME_SECONDS` | `1` | assumed runtime until samples exist |
 | `QUEEN_SUPERVISOR_BALANCE_COOLDOWN` | `3` | seconds between scaling decisions |
 | `QUEEN_SUPERVISOR_BALANCE_MAX_SHIFT` | `1` | processes added or removed per decision |
+| `QUEEN_SUPERVISOR_MIN_PROCESSES_PER_QUEUE` | `0` | `auto` only: workers every queue keeps without backlog |
+| `QUEEN_SUPERVISOR_FAST_SCALE_UP` | `false` | close half of the gap to the target per decision |
 | `QUEEN_SUPERVISOR_SCALE_DOWN_DELAY` | `10` | idle seconds before shrinking |
 | `QUEEN_SUPERVISOR_RESTART_BACKOFF` | `1` | first restart delay |
 | `QUEEN_SUPERVISOR_RESTART_BACKOFF_MAX` | `30` | backoff ceiling |
@@ -292,10 +310,24 @@ php artisan queen:supervisor terminate
 php artisan queen:supervisor-config --pretty  # resolved config, credentials redacted
 ```
 
-> **One master per application and consumer group.** The state lock stops a second local owner, but
-> there is no distributed leader lease yet: two replicas on two hosts both see the whole backlog and
-> both scale to maximum. In Kubernetes use one replica with a `Recreate` strategy. Workers can be as
-> many as you like — the restriction is on the supervising master.
+> **Several replicas need coordination.** Each master sizes its pools from the whole backlog, so two
+> uncoordinated replicas on two hosts both scale to maximum. Set `QUEEN_SUPERVISOR_COORDINATION=true`
+> on every replica: they register in the broker's key/value store and each runs an even share of
+> every autoscaling pool's target, with `min_processes` and `max_processes` applied per replica.
+> Replicas coordinate when their broker, consumer group and queue set match; fixed pools are not
+> split. Without coordination, run one replica with a `Recreate` strategy.
+
+**Prefork workers.** `QUEEN_SUPERVISOR_PREFORK=true` boots Laravel once in a fork server and forks
+every worker from it, with the same arguments and environment a spawned worker gets. The server
+opens no connection before forking, purges database and Redis connections in each child, and
+SIGKILLs its workers if the master dies. A failed fork falls back to spawning. Needs `ext-pcntl`
+and `ext-posix`.
+
+**Monitoring.** The dashboard's Jobs and Tags pages, `queen:check-waits` with the
+`LongWaitDetected` event and mail, and a Prometheus endpoint at `/queen/metrics`
+(`QUEEN_METRICS_ENABLED`, `QUEEN_METRICS_TOKEN`) are described in
+[Monitoring and alerts](https://queenmq.com/use/laravel/monitoring).
+> [Several replicas](https://queenmq.com/use/laravel/supervisors#several-replicas).
 
 Requires Unix with `pcntl` and `posix`. Windows is rejected explicitly rather than left to fail;
 WSL runs the Linux artifact. Installer verification, air-gapped installs, Sigstore pinning and the
@@ -354,14 +386,14 @@ Set both on every supervisor host and on the web hosts. Each supervisor instance
 own slot under the key, so the dashboard lists every host or pod: a live local supervisor first,
 then each published one with its host name, and totals over the live ones. Published instances are
 **read-only**: pause, continue and terminate stay with `php artisan queen:supervisor` on their own
-host. Liveness comes from the published heartbeat alone. When two running masters own the same
-queue and consumer group, the dashboard warns: run one supervisor replica per consumer group. The
+host. Liveness comes from the published heartbeat alone. When two running masters autoscale the
+same queue and consumer group without coordinating, the dashboard warns. The
 document is split across `<key>/<instance_id>/head` and `<key>/<instance_id>/chunk/NNNN` in the
 `queen-supervisor` namespace, written in one transaction, so it never depends on the key/value value
 ceiling. A `<key>/head` document from an earlier release is still read. Publishing is best effort
 and budgeted into the heartbeat; a broker outage shows the supervisor as stale and never stops
-supervision. The Rust engine publishes the same format from supervisor 0.3.0, which is the release
-this package pins; 0.2.0 wrote the single `<key>/head` slot.
+supervision. The Rust engine publishes the same format from supervisor 0.3.0 (this package pins
+0.4.0); 0.2.0 wrote the single `<key>/head` slot.
 
 | Variable | Default | |
 | --- | --- | --- |

@@ -268,23 +268,41 @@ fn send(
     body: &[u8],
     operations: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    post_kv(client, connection, body, |response| {
+        verify_applied(response, operations)
+    })
+    .map(|_| ())
+}
+
+/// One `POST /api/v1/kv` batch, tried on each endpoint in order until one
+/// answers and `check` accepts the answer.
+pub(crate) fn post_kv<F>(
+    client: &reqwest::blocking::Client,
+    connection: &QueenConfig,
+    body: &[u8],
+    check: F,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>>
+where
+    F: Fn(&serde_json::Value) -> Result<(), Box<dyn std::error::Error>>,
+{
     let mut last_error = None;
     for endpoint in connection_endpoints(connection) {
-        match send_to(client, connection, endpoint, body, operations) {
-            Ok(()) => return Ok(()),
+        match post_kv_to(client, connection, endpoint, body)
+            .and_then(|response| check(&response).map(|()| response))
+        {
+            Ok(response) => return Ok(response),
             Err(error) => last_error = Some(error),
         }
     }
-    Err(last_error.unwrap_or_else(|| "remote_status connection has no Queen URL".into()))
+    Err(last_error.unwrap_or_else(|| "the connection has no Queen URL".into()))
 }
 
-fn send_to(
+fn post_kv_to(
     client: &reqwest::blocking::Client,
     connection: &QueenConfig,
     endpoint: &str,
     body: &[u8],
-    operations: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let mut url = reqwest::Url::parse(endpoint)?;
     url.path_segments_mut()
         .map_err(|_| "Queen URL cannot be a base URL")?
@@ -300,9 +318,10 @@ fn send_to(
         request = request.bearer_auth(token);
     }
     let response = request.send()?.error_for_status()?;
-    let response: serde_json::Value =
-        serde_json::from_slice(&read_response_limited(response, MAX_CONFIG_BYTES)?)?;
-    verify_applied(&response, operations)
+    Ok(serde_json::from_slice(&read_response_limited(
+        response,
+        MAX_CONFIG_BYTES,
+    )?)?)
 }
 
 /// A batch answers `{results: [...]}` index-aligned to its operations; the

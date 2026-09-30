@@ -769,6 +769,15 @@ class QueenQueue extends BaseQueue implements QueueContract
             }
             $payload['_queen'] = ['partition' => $partition, 'attempts' => 0];
         }
+        // Horizon's payload key: workers read monitored tags without
+        // unserializing the command.
+        $container = \Illuminate\Container\Container::getInstance();
+        if (!$container->bound('config') || $container->make('config')->get('queen.tags.enabled', true) === true) {
+            $tags = \Queen\Laravel\Monitoring\JobTags::for($job);
+            if ($tags !== []) {
+                $payload['tags'] = $tags;
+            }
+        }
 
         return $payload;
     }

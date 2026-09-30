@@ -114,8 +114,8 @@ class SupervisorBinaryInstallerTest extends TestCase
             'target' => 'x86_64-pc-windows-msvc',
             'os' => 'windows',
             'arch' => 'amd64',
-            'filename' => 'queen-supervisor-0.3.0-windows-amd64.tar.gz',
-            'url' => 'https://github.example.test/queen-supervisor-0.3.0-windows-amd64.tar.gz',
+            'filename' => 'queen-supervisor-0.4.0-windows-amd64.tar.gz',
+            'url' => 'https://github.example.test/queen-supervisor-0.4.0-windows-amd64.tar.gz',
             'sha256' => str_repeat('b', 64),
         ];
         $parsed = SupervisorReleaseManifest::fromJson(json_encode($extensible, JSON_THROW_ON_ERROR));
@@ -140,7 +140,7 @@ class SupervisorBinaryInstallerTest extends TestCase
         );
 
         $this->assertTrue($result['installed']);
-        $this->assertSame('0.3.0', $result['version']);
+        $this->assertSame('0.4.0', $result['version']);
         $this->assertSame(str_repeat('c', 40), $result['source_commit']);
         $this->assertSame(hash_file('sha256', $manifest), $result['manifest_sha256']);
         $this->assertTrue(is_executable($result['binary']));
@@ -439,7 +439,7 @@ class SupervisorBinaryInstallerTest extends TestCase
         $process->run();
 
         $this->assertSame(0, $process->getExitCode(), $process->getErrorOutput());
-        $this->assertSame("queen-supervisor 0.3.0\n", $process->getOutput());
+        $this->assertSame("queen-supervisor 0.4.0\n", $process->getOutput());
         $this->assertDirectoryDoesNotExist($storage . '/queen-supervisor');
 
         $defaultContext = new Process(
@@ -593,13 +593,13 @@ class SupervisorBinaryInstallerTest extends TestCase
         $installer->install(
             $this->temporaryDirectory() . '/installed',
             'https://mirror.example.test/releases/' . SupervisorBinary::MANIFEST_FILENAME,
-            releaseBaseUrl: 'https://cdn.example.test/queen/v0.3.0/',
+            releaseBaseUrl: 'https://cdn.example.test/queen/v0.4.0/',
             platform: SupervisorBinary::platform('Linux', 'amd64'),
         );
 
         $this->assertSame([
             'https://mirror.example.test/releases/' . SupervisorBinary::MANIFEST_FILENAME,
-            'https://cdn.example.test/queen/v0.3.0/queen-supervisor-0.3.0-linux-amd64.tar.gz',
+            'https://cdn.example.test/queen/v0.4.0/queen-supervisor-0.4.0-linux-amd64.tar.gz',
         ], $requested);
     }
 
@@ -743,7 +743,7 @@ if [ "${1:-}" = "--version" ]; then
     mkdir -m 0755 "$original" || exit 92
     printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'substituted binary'" > "$original/$filename" || exit 93
     chmod 0755 "$original/$filename" || exit 94
-    printf '%s\n' 'queen-supervisor 0.3.0'
+    printf '%s\n' 'queen-supervisor 0.4.0'
     exit 0
 fi
 exit 95
@@ -907,7 +907,7 @@ SH;
     ): array
     {
         $directory = $this->temporaryDirectory();
-        $tar = $directory . '/queen-supervisor-0.3.0-linux-amd64.tar';
+        $tar = $directory . '/queen-supervisor-0.4.0-linux-amd64.tar';
         $archive = $tar . '.gz';
         $fixtureBinary = __DIR__ . '/Fixtures/Supervisor/queen-supervisor';
         $phar = new \PharData($tar);
@@ -945,8 +945,8 @@ SH;
                 'target' => 'x86_64-unknown-linux-musl',
                 'os' => 'linux',
                 'arch' => 'amd64',
-                'filename' => 'queen-supervisor-0.3.0-linux-amd64.tar.gz',
-                'url' => 'https://github.example.test/queen-supervisor-0.3.0-linux-amd64.tar.gz',
+                'filename' => 'queen-supervisor-0.4.0-linux-amd64.tar.gz',
+                'url' => 'https://github.example.test/queen-supervisor-0.4.0-linux-amd64.tar.gz',
                 'sha256' => str_repeat('a', 64),
             ]],
         ];

@@ -26,7 +26,7 @@ class SupervisorConfigCommand extends Command
             return self::FAILURE;
         }
         // --for-engine is how the native (Rust) engine loads its contract,
-        // remote_status included: both engines publish it.
+        // remote_status and coordination included: both engines use them.
         if (!$this->option('for-engine')) {
             $resolved = $this->redact($resolved);
         }
@@ -67,11 +67,13 @@ class SupervisorConfigCommand extends Command
         foreach ($config['queen']['headers'] ?? [] as $name => $_value) {
             $config['queen']['headers'][$name] = '[redacted]';
         }
-        if (($config['remote_status']['connection']['bearer_token'] ?? null) !== null) {
-            $config['remote_status']['connection']['bearer_token'] = '[redacted]';
-        }
-        foreach ($config['remote_status']['connection']['headers'] ?? [] as $name => $_value) {
-            $config['remote_status']['connection']['headers'][$name] = '[redacted]';
+        foreach (['remote_status', 'coordination'] as $feature) {
+            if (($config[$feature]['connection']['bearer_token'] ?? null) !== null) {
+                $config[$feature]['connection']['bearer_token'] = '[redacted]';
+            }
+            foreach ($config[$feature]['connection']['headers'] ?? [] as $name => $_value) {
+                $config[$feature]['connection']['headers'][$name] = '[redacted]';
+            }
         }
         return $config;
     }
@@ -90,8 +92,10 @@ class SupervisorConfigCommand extends Command
                 $config['connections'][$connectionName]['headers'] = new \stdClass();
             }
         }
-        if (($config['remote_status']['connection']['headers'] ?? null) === []) {
-            $config['remote_status']['connection']['headers'] = new \stdClass();
+        foreach (['remote_status', 'coordination'] as $feature) {
+            if (($config[$feature]['connection']['headers'] ?? null) === []) {
+                $config[$feature]['connection']['headers'] = new \stdClass();
+            }
         }
 
         return $config;

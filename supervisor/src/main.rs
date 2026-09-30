@@ -1,7 +1,12 @@
+mod coordination;
+mod prefork;
 mod remote_status;
 
+use coordination::{CoordinationConfig, Coordinator};
+use prefork::{ForkServer, WorkerProcess};
 use remote_status::{RemoteStatusConfig, RemoteStatusPublisher};
 use serde::Deserialize;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::{File, OpenOptions};
@@ -14,6 +19,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -71,6 +77,12 @@ struct Config {
     // Emitted by Laravel only when enabled, so an absent key means disabled.
     #[serde(default)]
     remote_status: Option<RemoteStatusConfig>,
+    // Emitted by Laravel only when enabled, so an absent key means disabled.
+    #[serde(default)]
+    coordination: Option<CoordinationConfig>,
+    // Emitted by Laravel only when enabled.
+    #[serde(default)]
+    prefork: bool,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -139,6 +151,12 @@ struct SupervisorConfig {
     lease_renewal: bool,
     #[serde(default = "default_scale_down_delay")]
     scale_down_delay: u64,
+    // Emitted by Laravel only when set; auto pools only.
+    #[serde(default)]
+    min_processes_per_queue: usize,
+    // Emitted by Laravel only when true.
+    #[serde(default)]
+    fast_scale_up: bool,
     #[serde(default = "default_restart_backoff")]
     restart_backoff: u64,
     #[serde(default = "default_restart_backoff_max")]
@@ -197,7 +215,7 @@ type Draining = Vec<DrainingWorker>;
 type PendingTelemetryCleanup = HashMap<String, HashSet<u32>>;
 
 struct Worker {
-    child: Child,
+    child: WorkerProcess,
     started_at: Instant,
     stability_reported: bool,
     restart_probe: bool,
@@ -212,6 +230,10 @@ struct DrainingWorker {
 
 impl Worker {
     fn new(child: Child, restart_probe: bool) -> Self {
+        Self::from_process(WorkerProcess::Spawned(child), restart_probe)
+    }
+
+    fn from_process(child: WorkerProcess, restart_probe: bool) -> Self {
         Self {
             child,
             started_at: Instant::now(),
@@ -320,6 +342,8 @@ struct StatusSnapshot<'a> {
     desired: &'a HashMap<String, HashMap<String, usize>>,
     depths: &'a HashMap<String, HashMap<String, usize>>,
     depths_available: &'a HashMap<String, bool>,
+    /// Live replicas sharing each coordinated pool's target.
+    replicas: &'a HashMap<String, usize>,
 }
 
 const HELP: &str = "queen-supervisor - low-memory Laravel worker supervisor\n\n\
@@ -409,6 +433,26 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         .remote_status
         .as_ref()
         .map(RemoteStatusPublisher::new);
+    let mut coordinator = config
+        .coordination
+        .as_ref()
+        .map(|settings| Coordinator::new(settings, &state.instance_id, state.hostname.as_deref()));
+    let coordinated_scopes = coordinated_scopes(&config);
+    let fork_server = if config.prefork {
+        match ForkServer::start(&config, &running) {
+            Ok(server) => {
+                eprintln!("prefork: fork server started");
+                Some(Rc::new(RefCell::new(server)))
+            }
+            Err(error) => {
+                eprintln!("prefork disabled, spawning workers: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut replica_counts = current_replica_counts(coordinator.as_ref(), &coordinated_scopes);
 
     eprintln!(
         "queen-supervisor started ({} pool definitions)",
@@ -425,6 +469,7 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
             desired: &last_desired,
             depths: &last_depths,
             depths_available: &depths_available,
+            replicas: &replica_counts,
         },
     )?;
     remote_status::publish(&mut remote_status, &client, &status);
@@ -435,6 +480,12 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                 let control_state = match control.command {
                     ControlCommand::Pause => {
                         paused = true;
+                        // A paused replica serves nothing; the others take
+                        // over its share.
+                        if let Some(coordinator) = coordinator.as_mut() {
+                            coordinator.leave(&client, &scope_list(&coordinated_scopes));
+                        }
+                        replica_counts.clear();
                         last_depths.clear();
                         depths_available.clear();
                         // A stopped queue:work process can retain prefetched
@@ -451,6 +502,8 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     ControlCommand::Continue => {
                         paused = false;
+                        replica_counts =
+                            current_replica_counts(coordinator.as_ref(), &coordinated_scopes);
                         "running"
                     }
                     ControlCommand::Terminate => {
@@ -469,6 +522,7 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                         desired: &last_desired,
                         depths: &last_depths,
                         depths_available: &depths_available,
+                        replicas: &replica_counts,
                     },
                 ) {
                     Ok(status) => remote_status::publish(&mut remote_status, &client, &status),
@@ -502,6 +556,12 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         reap_draining(&config, &mut draining, &mut pending_telemetry_cleanup);
         observe_stable_workers(&config, &mut pools, &mut restarts);
         if last_poll.elapsed() >= Duration::from_secs(config.poll_interval) {
+            if let (Some(coordinator), false) = (coordinator.as_mut(), paused) {
+                coordinator.heartbeat(&client, &scope_list(&coordinated_scopes));
+            }
+            if !paused {
+                replica_counts = current_replica_counts(coordinator.as_ref(), &coordinated_scopes);
+            }
             let mut names: Vec<_> = config.supervisors.keys().cloned().collect();
             names.sort_unstable();
             let mut unavailable_connections = HashSet::new();
@@ -571,7 +631,10 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                         .unwrap_or_else(|| fail_open_desired(options));
                     last_desired.insert(name.clone(), fallback.clone());
                     if let Err(error) = reconcile(
-                        &config,
+                        &Launcher {
+                            config: &config,
+                            forks: fork_server.as_ref(),
+                        },
                         &name,
                         options,
                         fallback,
@@ -585,7 +648,12 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 last_depths.insert(name.clone(), depths.clone());
                 depths_available.insert(name.clone(), true);
-                let raw = desired(options, &depths, &runtimes);
+                let (replica, replicas) =
+                    match (coordinator.as_ref(), coordinated_scopes.get(&name)) {
+                        (Some(coordinator), Some(scope)) => coordinator.position(scope),
+                        _ => (0, 1),
+                    };
+                let raw = desired_share(options, &depths, &runtimes, replica, replicas);
                 let current = current_allocation(&pools, &name, options);
                 let target = stabilize_desired(
                     options,
@@ -596,7 +664,10 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                 );
                 last_desired.insert(name.clone(), target.clone());
                 if let Err(error) = reconcile(
-                    &config,
+                    &Launcher {
+                        config: &config,
+                        forks: fork_server.as_ref(),
+                    },
                     &name,
                     options,
                     target,
@@ -620,6 +691,7 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                     desired: &last_desired,
                     depths: &last_depths,
                     depths_available: &depths_available,
+                    replicas: &replica_counts,
                 },
             ) {
                 Ok(status) => remote_status::publish(&mut remote_status, &client, &status),
@@ -636,6 +708,11 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         thread::sleep(Duration::from_millis(200));
     }
 
+    // The other replicas take over this share while it drains.
+    if let Some(coordinator) = coordinator.as_mut() {
+        coordinator.leave(&client, &scope_list(&coordinated_scopes));
+    }
+    replica_counts.clear();
     match state.write_status(
         "rust",
         "terminating",
@@ -647,6 +724,7 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
             desired: &last_desired,
             depths: &last_depths,
             depths_available: &depths_available,
+            replicas: &replica_counts,
         },
     ) {
         Ok(status) => remote_status::publish(&mut remote_status, &client, &status),
@@ -665,6 +743,10 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         Duration::from_secs(config.shutdown_grace),
         &mut pending_telemetry_cleanup,
     );
+    if let Some(server) = &fork_server {
+        // Every worker has drained: the server exits, fencing any straggler.
+        server.borrow_mut().close(Duration::from_secs(5));
+    }
     match state.write_status(
         "rust",
         "stopped",
@@ -676,6 +758,7 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
             desired: &last_desired,
             depths: &last_depths,
             depths_available: &depths_available,
+            replicas: &replica_counts,
         },
     ) {
         Ok(status) => remote_status::publish(&mut remote_status, &client, &status),
@@ -977,6 +1060,15 @@ fn validate_config(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         if !matches!(options.strategy.as_str(), "size" | "time") {
             return Err(format!("supervisor [{name}] has invalid strategy").into());
         }
+        if options.min_processes_per_queue > 0
+            && (options.balance != "auto"
+                || options.min_processes_per_queue > options.max_processes / options.queues.len())
+        {
+            return Err(format!(
+                "supervisor [{name}] min_processes_per_queue needs balance auto and must fit max_processes for every queue"
+            )
+            .into());
+        }
         if (options.balance == "auto" && options.max_processes < options.queues.len())
             || (options.balance == "simple" && options.processes < options.queues.len())
         {
@@ -1060,6 +1152,9 @@ fn validate_config(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         remote_status.validate(config.heartbeat_timeout)?;
     }
     let loop_budget = control_loop_budget(config)?;
+    if let Some(coordination) = &config.coordination {
+        coordination.validate(loop_budget)?;
+    }
     if config.control_ttl <= loop_budget {
         return Err(format!(
             "control_ttl must exceed the conservative control-loop budget of {loop_budget} seconds"
@@ -1179,8 +1274,56 @@ fn control_loop_budget(config: &Config) -> Result<u64, Box<dyn std::error::Error
             .checked_add(remote_status.publish_budget(config.http_timeout)?)
             .ok_or("control-loop remote status timing budget overflowed")?;
     }
+    if let Some(coordination) = &config.coordination {
+        let scopes = scope_list(&coordinated_scopes(config)).len();
+        budget = budget
+            .checked_add(coordination.heartbeat_budget(scopes, config.http_timeout)?)
+            .ok_or("control-loop coordination timing budget overflowed")?;
+    }
 
     Ok(budget)
+}
+
+/// The coordination scope of every autoscaling pool; fixed pools run their
+/// `processes` on every replica and do not coordinate.
+fn coordinated_scopes(config: &Config) -> HashMap<String, String> {
+    config
+        .supervisors
+        .iter()
+        .filter(|(_, options)| options.balance != "simple")
+        .map(|(name, options)| {
+            let endpoints = connection_config(config, &options.connection)
+                .map(connection_endpoints)
+                .unwrap_or_default();
+            (
+                name.clone(),
+                coordination::scope(&endpoints, &options.consumer_group, &options.queues),
+            )
+        })
+        .collect()
+}
+
+/// Live replicas each coordinated pool currently shares its target with; one
+/// until the first listing, as in the PHP engine.
+fn current_replica_counts(
+    coordinator: Option<&Coordinator<'_>>,
+    scopes: &HashMap<String, String>,
+) -> HashMap<String, usize> {
+    coordinator
+        .map(|coordinator| {
+            scopes
+                .iter()
+                .map(|(name, scope)| (name.clone(), coordinator.position(scope).1))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn scope_list(scopes: &HashMap<String, String>) -> Vec<String> {
+    let mut list: Vec<String> = scopes.values().cloned().collect();
+    list.sort_unstable();
+    list.dedup();
+    list
 }
 
 fn status_configuration(config: &Config) -> serde_json::Value {
@@ -1669,6 +1812,7 @@ impl State {
             desired: last_desired,
             depths: last_depths,
             depths_available,
+            replicas,
         } = snapshot;
         let now = Instant::now();
         let mut draining_by_pool: HashMap<PoolKey, (usize, Vec<u32>)> = HashMap::new();
@@ -1761,6 +1905,8 @@ impl State {
                     "process_cost_per_worker": worker_process_cost,
                     "reserved_processes": running.saturating_add(draining_count).saturating_mul(worker_process_cost),
                     "renewal_helpers_reserved": running.saturating_add(draining_count).saturating_mul(worker_process_cost.saturating_sub(1)),
+                    // Live replicas sharing this pool's target; null when it is not coordinated.
+                    "replicas": if state == "running" { replicas.get(supervisor).copied() } else { None },
                 }));
                 supervisor_entries.insert(
                     queue.clone(),
@@ -2121,6 +2267,7 @@ fn fail_open_desired(options: &SupervisorConfig) -> HashMap<String, usize> {
         options,
         &weights,
         options.min_processes.max(options.queues.len()),
+        0,
     )
 }
 
@@ -2424,12 +2571,34 @@ fn desired(
     depths: &HashMap<String, usize>,
     runtimes: &HashMap<String, f64>,
 ) -> HashMap<String, usize> {
+    desired_share(options, depths, runtimes, 0, 1)
+}
+
+/// The workers one supervisor should run per queue.
+///
+/// Coordinated replicas of the same pool each pass their position among the
+/// live replicas. The backlog then sizes one fleet target, each replica takes
+/// an even share of it (the remainder going to the lowest positions, and at
+/// least its slice of the queues with backlog), and min_processes and
+/// max_processes bound every replica. Fixed pools are not
+/// split. The Laravel package's `AutoScaler::desired` is the same rule.
+fn desired_share(
+    options: &SupervisorConfig,
+    depths: &HashMap<String, usize>,
+    runtimes: &HashMap<String, f64>,
+    replica: usize,
+    replicas: usize,
+) -> HashMap<String, usize> {
+    let replicas = replicas.max(1);
+    let replica = replica.min(replicas - 1);
     if options.balance == "simple" {
         return spread(
             empty_allocation(options),
             options.processes,
             &options.queues.iter().cloned().map(|q| (q, 1.0)).collect(),
             &options.queues,
+            0,
+            0,
         );
     }
 
@@ -2448,16 +2617,33 @@ fn desired(
     } else {
         (total_pressure / scaling_divisor(options)).ceil() as usize
     };
-    if total_pressure > 0.0 && options.balance == "auto" {
+    let mut offset = 0;
+    if total_pressure > 0.0 && total_pressure.is_finite() {
         let active_queues = options
             .queues
             .iter()
             .filter(|queue| weights.get(*queue).copied().unwrap_or(0.0) > 0.0)
             .count();
-        target = target.max(active_queues);
+        if options.balance == "auto" {
+            // A positive backlog must not be made permanently unreachable by
+            // rounding a small global target onto the first declared queue.
+            target = target.max(active_queues);
+        }
+        // The fleet target is shared, the remainder going to the lowest
+        // positions.
+        let mut share = target / replicas + usize::from(replica < target % replicas);
+        if options.balance == "auto" {
+            // Replicas start covering the queues with backlog at evenly
+            // spaced positions, which move only with the replica or queue
+            // count. A share of at least that spacing closes every gap that
+            // max_processes leaves room to close.
+            share = share.max(active_queues.div_ceil(replicas));
+            offset = replica * active_queues / replicas;
+        }
+        target = share;
     }
     target = target.clamp(options.min_processes, options.max_processes);
-    allocation_for_target(options, &weights, target)
+    allocation_for_target(options, &weights, target, offset)
 }
 
 fn scaling_weights(
@@ -2515,13 +2701,20 @@ fn allocation_for_target(
     options: &SupervisorConfig,
     weights: &HashMap<String, f64>,
     target: usize,
+    offset: usize,
 ) -> HashMap<String, usize> {
     let mut allocation = empty_allocation(options);
     if options.balance == "off" {
         allocation.insert(options.queues[0].clone(), target);
         return allocation;
     }
-    spread(allocation, target, weights, &options.queues)
+    let floor = if options.balance == "auto" {
+        options.min_processes_per_queue
+    } else {
+        0
+    };
+    let target = target.max(floor * options.queues.len());
+    spread(allocation, target, weights, &options.queues, offset, floor)
 }
 
 fn stabilize_desired(
@@ -2561,19 +2754,34 @@ impl ScaleGuard {
     }
 }
 
+/// `floor` workers on every queue, then one worker per queue with backlog still
+/// without one, starting at `offset` among those queues, then the rest in
+/// proportion to the backlog.
 fn spread(
     mut allocation: HashMap<String, usize>,
     target: usize,
     weights: &HashMap<String, f64>,
     queues: &[String],
+    offset: usize,
+    floor: usize,
 ) -> HashMap<String, usize> {
-    let mut remaining = target;
     for queue in queues {
-        if remaining > 0 && weights.get(queue).copied().unwrap_or(0.0) > 0.0 {
-            *allocation.get_mut(queue).unwrap() += 1;
-            remaining -= 1;
-        }
+        *allocation.get_mut(queue).unwrap() += floor;
     }
+    let target = target - floor * queues.len();
+    let active: Vec<&String> = queues
+        .iter()
+        .filter(|queue| {
+            weights.get(*queue).copied().unwrap_or(0.0) > 0.0 && allocation[*queue] == 0
+        })
+        .collect();
+    let covered = target.min(active.len());
+    for index in 0..covered {
+        *allocation
+            .get_mut(active[(offset + index) % active.len()])
+            .unwrap() += 1;
+    }
+    let remaining = target - covered;
     for _ in 0..remaining {
         let mut selected = &queues[0];
         let mut best = -1.0_f64;
@@ -2658,8 +2866,15 @@ impl RestartGuard {
     }
 }
 
+/// How workers start: the resolved configuration, and the fork server when
+/// prefork is on.
+struct Launcher<'a> {
+    config: &'a Config,
+    forks: Option<&'a Rc<RefCell<ForkServer>>>,
+}
+
 fn reconcile(
-    config: &Config,
+    launcher: &Launcher<'_>,
     name: &str,
     options: &SupervisorConfig,
     desired: HashMap<String, usize>,
@@ -2667,6 +2882,7 @@ fn reconcile(
     restarts: &mut RestartStates,
     draining: &mut Draining,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let Launcher { config, forks } = *launcher;
     let supervised_processes = options.queues.iter().fold(0usize, |total, queue| {
         total.saturating_add(
             pools
@@ -2675,7 +2891,8 @@ fn reconcile(
                 .unwrap_or(0),
         )
     });
-    let mut budget = reconcile_budget(options, supervised_processes);
+    let desired_total = desired.values().sum();
+    let mut budget = reconcile_budget(options, supervised_processes, desired_total);
     let used_process_budget = process_budget_used(config, pools, draining);
     let mut process_slots = remaining_process_slots(config.process_limit, used_process_budget);
     let worker_process_cost = process_cost(options);
@@ -2719,6 +2936,7 @@ fn reconcile(
                 queue,
                 options,
                 permission == SpawnPermission::Probe,
+                forks,
             ) {
                 Ok(worker) => {
                     restart.mark_spawned(permission);
@@ -2745,17 +2963,25 @@ fn reconcile(
     Ok(())
 }
 
-fn reconcile_budget(options: &SupervisorConfig, active: usize) -> usize {
+fn reconcile_budget(options: &SupervisorConfig, active: usize, desired: usize) -> usize {
     // balance_max_shift bounds elastic changes, but baseline capacity must be
     // established and restored without waiting through several cooldowns.
-    let baseline = if options.balance == "simple" {
-        options.processes
-    } else {
-        options.min_processes
+    let baseline = match options.balance.as_str() {
+        "simple" => options.processes,
+        "auto" => options
+            .min_processes
+            .max(options.min_processes_per_queue * options.queues.len()),
+        _ => options.min_processes,
     };
-    options
+    let budget = options
         .balance_max_shift
-        .max(baseline.saturating_sub(active))
+        .max(baseline.saturating_sub(active));
+    if options.fast_scale_up && desired > active {
+        // A burst closes half of the remaining gap every cycle instead of one
+        // balance_max_shift step; scaling down stays gradual.
+        return budget.max((desired - active).div_ceil(2));
+    }
+    budget
 }
 
 fn process_cost(options: &SupervisorConfig) -> usize {
@@ -2795,7 +3021,29 @@ fn spawn_worker(
     queue: &str,
     o: &SupervisorConfig,
     restart_probe: bool,
+    forks: Option<&Rc<RefCell<ForkServer>>>,
 ) -> Result<Worker, std::io::Error> {
+    if let Some(server) = forks.filter(|server| !server.borrow().disabled) {
+        let (arguments, environment) = worker_invocation(config, name, queue, o);
+        let forked = server.borrow_mut().fork(&arguments, &environment);
+        match forked {
+            Ok(pid) => {
+                eprintln!("started {name}:{queue} pid={pid} (forked)");
+                return Ok(Worker::from_process(
+                    WorkerProcess::Forked {
+                        pid,
+                        server: Rc::clone(server),
+                        status: None,
+                    },
+                    restart_probe,
+                ));
+            }
+            // The server stays open to report the workers it already forked.
+            Err(error) => {
+                eprintln!("[{name}:{queue}] prefork failed, spawning workers from now on: {error}")
+            }
+        }
+    }
     let mut command = worker_command(config, name, queue, o);
     #[cfg(unix)]
     unsafe {
@@ -2827,51 +3075,84 @@ fn spawn_worker(
     Ok(Worker::new(child, restart_probe))
 }
 
-fn worker_command(config: &Config, name: &str, queue: &str, o: &SupervisorConfig) -> Command {
-    let mut command = Command::new(&config.php_binary);
+/// The `queue:work` arguments after the command name, and the environment a
+/// worker gets on top of the master's (None removes a variable). A spawned
+/// and a forked worker receive exactly the same.
+fn worker_invocation(
+    config: &Config,
+    name: &str,
+    queue: &str,
+    o: &SupervisorConfig,
+) -> (Vec<String>, Vec<(String, Option<String>)>) {
     let worker_queues = if o.balance == "off" {
         o.queues.join(",")
     } else {
         queue.to_owned()
     };
+    let mut arguments = vec![
+        o.connection.clone(),
+        format!("--queue={worker_queues}"),
+        format!("--sleep={}", o.sleep),
+        format!("--timeout={}", o.timeout),
+        format!("--tries={}", o.tries),
+        format!("--memory={}", o.memory),
+        format!("--backoff={}", o.backoff),
+        format!("--max-jobs={}", o.max_jobs),
+        format!("--max-time={}", o.max_time),
+        format!("--rest={}", o.rest),
+    ];
+    if o.force {
+        arguments.push("--force".to_owned());
+    }
+    if o.quiet {
+        arguments.push("--quiet".to_owned());
+    }
+    let telemetry = (o.strategy == "time" && o.balance != "simple").then(|| {
+        Path::new(&config.state_directory)
+            .join("telemetry")
+            .to_string_lossy()
+            .into_owned()
+    });
+    let mut environment = vec![
+        (
+            "QUEEN_LARAVEL_CONSUMER_GROUP".to_owned(),
+            Some(o.consumer_group.clone()),
+        ),
+        (
+            "QUEEN_LARAVEL_CONNECTION".to_owned(),
+            Some(o.connection.clone()),
+        ),
+        ("QUEEN_LARAVEL_SUPERVISOR".to_owned(), Some(name.to_owned())),
+        (
+            "QUEEN_LARAVEL_RETRY_AFTER".to_owned(),
+            Some(o.retry_after.to_string()),
+        ),
+        ("QUEEN_SUPERVISOR_TELEMETRY_DIR".to_owned(), telemetry),
+    ];
+    if o.balance == "off" {
+        // A blocking reserve on the first queue in Laravel's ordered list
+        // would prevent lower-priority queues from ever being checked.
+        environment.push(("QUEEN_LARAVEL_BLOCK_FOR".to_owned(), Some("0".to_owned())));
+    }
+    (arguments, environment)
+}
+
+fn worker_command(config: &Config, name: &str, queue: &str, o: &SupervisorConfig) -> Command {
+    let (arguments, environment) = worker_invocation(config, name, queue, o);
+    let mut command = Command::new(&config.php_binary);
     command
         .current_dir(&config.cwd)
         .arg(&config.artisan)
         .arg("queue:work")
-        .arg(&o.connection)
-        .arg(format!("--queue={worker_queues}"))
-        .arg(format!("--sleep={}", o.sleep))
-        .arg(format!("--timeout={}", o.timeout))
-        .arg(format!("--tries={}", o.tries))
-        .arg(format!("--memory={}", o.memory))
-        .arg(format!("--backoff={}", o.backoff))
-        .arg(format!("--max-jobs={}", o.max_jobs))
-        .arg(format!("--max-time={}", o.max_time))
-        .arg(format!("--rest={}", o.rest))
-        .env("QUEEN_LARAVEL_CONSUMER_GROUP", &o.consumer_group)
-        .env("QUEEN_LARAVEL_CONNECTION", &o.connection)
-        .env("QUEEN_LARAVEL_SUPERVISOR", name)
-        .env("QUEEN_LARAVEL_RETRY_AFTER", o.retry_after.to_string())
-        .env_remove("QUEEN_SUPERVISOR_TELEMETRY_DIR")
+        .args(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    if o.strategy == "time" && o.balance != "simple" {
-        command.env(
-            "QUEEN_SUPERVISOR_TELEMETRY_DIR",
-            Path::new(&config.state_directory).join("telemetry"),
-        );
-    }
-    if o.force {
-        command.arg("--force");
-    }
-    if o.quiet {
-        command.arg("--quiet");
-    }
-    if o.balance == "off" {
-        // A blocking reserve on the first queue in Laravel's ordered list
-        // would prevent lower-priority queues from ever being checked.
-        command.env("QUEEN_LARAVEL_BLOCK_FOR", "0");
+    for (variable, value) in environment {
+        match value {
+            Some(value) => command.env(variable, value),
+            None => command.env_remove(variable),
+        };
     }
     command
 }
@@ -3112,7 +3393,7 @@ fn reap_draining(config: &Config, draining: &mut Draining, pending: &mut Pending
     });
 }
 
-fn signal_worker(child: &mut Child, signal: i32) {
+fn signal_worker(child: &mut WorkerProcess, signal: i32) {
     #[cfg(unix)]
     unsafe {
         libc::kill(child.id() as i32, signal);
@@ -3121,7 +3402,7 @@ fn signal_worker(child: &mut Child, signal: i32) {
     let _ = child.kill();
 }
 
-fn signal_process_group(child: &mut Child, signal: i32) {
+fn signal_process_group(child: &mut WorkerProcess, signal: i32) {
     #[cfg(unix)]
     unsafe {
         let pid = child.id() as i32;
@@ -3203,6 +3484,8 @@ mod tests {
             rest: 0,
             force: false,
             quiet: true,
+            min_processes_per_queue: 0,
+            fast_scale_up: false,
         }
     }
 
@@ -3229,6 +3512,8 @@ mod tests {
             connections: HashMap::new(),
             supervisors: HashMap::from([("default".into(), options)]),
             remote_status: None,
+            coordination: None,
+            prefork: false,
         }
     }
 
@@ -3370,13 +3655,13 @@ mod tests {
     #[test]
     fn reconcile_budget_immediately_establishes_baseline_capacity() {
         let simple = options("simple");
-        assert_eq!(reconcile_budget(&simple, 0), 6);
-        assert_eq!(reconcile_budget(&simple, 3), 3);
-        assert_eq!(reconcile_budget(&simple, 6), 1);
+        assert_eq!(reconcile_budget(&simple, 0, 0), 6);
+        assert_eq!(reconcile_budget(&simple, 3, 0), 3);
+        assert_eq!(reconcile_budget(&simple, 6, 0), 1);
 
         let auto = options("auto");
-        assert_eq!(reconcile_budget(&auto, 0), 2);
-        assert_eq!(reconcile_budget(&auto, 2), 1);
+        assert_eq!(reconcile_budget(&auto, 0, 0), 2);
+        assert_eq!(reconcile_budget(&auto, 2, 0), 1);
     }
 
     #[test]
@@ -4197,6 +4482,294 @@ mod tests {
         validate_config(&resolved).unwrap();
     }
 
+    fn share(
+        options: &SupervisorConfig,
+        depths: &[(&str, usize)],
+        replica: usize,
+        replicas: usize,
+    ) -> HashMap<String, usize> {
+        let depths = depths
+            .iter()
+            .map(|(queue, depth)| ((*queue).to_owned(), *depth))
+            .collect();
+        desired_share(options, &depths, &HashMap::new(), replica, replicas)
+    }
+
+    fn total(allocation: &HashMap<String, usize>) -> usize {
+        allocation.values().sum()
+    }
+
+    // The same cases as the Laravel package's ReplicaScalingTest: replicas of
+    // both engines must split a fleet target identically.
+    #[test]
+    fn replicas_split_the_fleet_target_like_the_laravel_package() {
+        let auto = options("auto");
+        let busy = [("high", 95), ("default", 5)];
+        assert_eq!(total(&share(&auto, &busy, 0, 2)), 5);
+        assert_eq!(total(&share(&auto, &busy, 1, 2)), 5);
+        assert_eq!(total(&share(&auto, &busy, 0, 1)), 10);
+
+        let mut no_minimum = options("auto");
+        no_minimum.min_processes = 0;
+        let shares: Vec<usize> = (0..3)
+            .map(|rank| {
+                total(&share(
+                    &no_minimum,
+                    &[("high", 70), ("default", 0)],
+                    rank,
+                    3,
+                ))
+            })
+            .collect();
+        assert_eq!(shares, vec![3, 2, 2]);
+
+        assert_eq!(
+            total(&share(&auto, &[("high", 10), ("default", 0)], 1, 2)),
+            2
+        );
+        assert_eq!(
+            total(&share(&auto, &[("high", 400), ("default", 0)], 0, 2)),
+            10
+        );
+        for rank in 0..3 {
+            assert_eq!(
+                total(&share(&auto, &[("high", 0), ("default", 0)], rank, 3)),
+                2
+            );
+        }
+
+        let simple = options("simple");
+        assert_eq!(
+            share(&simple, &[("high", 100), ("default", 0)], 1, 4),
+            HashMap::from([("high".to_owned(), 3), ("default".to_owned(), 3)])
+        );
+
+        let mut off = options("off");
+        off.min_processes = 0;
+        assert_eq!(
+            share(&off, &[("high", 30), ("default", 30)], 1, 2),
+            HashMap::from([("high".to_owned(), 3), ("default".to_owned(), 0)])
+        );
+    }
+
+    // The same cases as the Laravel package's FastScaleUpTest.
+    #[test]
+    fn a_fast_burst_closes_half_of_the_gap_every_cycle() {
+        let mut fast = options("auto");
+        fast.max_processes = 20;
+        fast.min_processes = 1;
+        assert_eq!(reconcile_budget(&fast, 1, 20), 1);
+        fast.fast_scale_up = true;
+        assert_eq!(reconcile_budget(&fast, 1, 20), 10);
+        assert_eq!(reconcile_budget(&fast, 11, 20), 5);
+        assert_eq!(reconcile_budget(&fast, 19, 20), 1);
+        // Scaling down keeps the configured step.
+        assert_eq!(reconcile_budget(&fast, 20, 4), 1);
+
+        let mut cycles = 0;
+        let mut active = 1;
+        while active < 20 {
+            active += reconcile_budget(&fast, active, 20).min(20 - active);
+            cycles += 1;
+        }
+        assert_eq!(cycles, 5);
+
+        let mut floor = options("auto");
+        floor.min_processes = 0;
+        floor.min_processes_per_queue = 2;
+        assert_eq!(reconcile_budget(&floor, 0, 4), 4);
+    }
+
+    // The same cases as the Laravel package's PerQueueMinimumTest.
+    #[test]
+    fn every_queue_keeps_its_minimum_like_horizon() {
+        let mut floor = options("auto");
+        floor.min_processes = 0;
+        floor.min_processes_per_queue = 2;
+        let pair = |high: usize, default: usize| {
+            HashMap::from([("high".to_owned(), high), ("default".to_owned(), default)])
+        };
+
+        assert_eq!(
+            share(&floor, &[("high", 0), ("default", 0)], 0, 1),
+            pair(2, 2)
+        );
+        assert_eq!(
+            share(&floor, &[("high", 0), ("default", 0)], 1, 2),
+            pair(2, 2)
+        );
+        let busy = share(&floor, &[("high", 95), ("default", 0)], 0, 1);
+        assert_eq!(busy, pair(8, 2));
+        assert_eq!(fail_open_desired(&floor), pair(2, 2));
+
+        let mut simple = options("simple");
+        simple.min_processes_per_queue = 1;
+        let error = validate_config(&config(simple)).unwrap_err().to_string();
+        assert!(error.contains("min_processes_per_queue"), "{error}");
+        let mut too_many = options("auto");
+        too_many.min_processes_per_queue = 6;
+        let error = validate_config(&config(too_many)).unwrap_err().to_string();
+        assert!(error.contains("min_processes_per_queue"), "{error}");
+    }
+
+    #[test]
+    fn replicas_cover_different_queues_when_the_target_is_small() {
+        let mut four = options("auto");
+        four.queues = vec!["a".into(), "b".into(), "c".into(), "d".into()];
+        four.min_processes = 0;
+        let depths = [("a", 1), ("b", 1), ("c", 1), ("d", 1)];
+        let expected = |counts: [usize; 4]| {
+            ["a", "b", "c", "d"]
+                .iter()
+                .zip(counts)
+                .map(|(queue, count)| ((*queue).to_owned(), count))
+                .collect::<HashMap<_, _>>()
+        };
+
+        assert_eq!(share(&four, &depths, 0, 2), expected([1, 1, 0, 0]));
+        assert_eq!(share(&four, &depths, 1, 2), expected([0, 0, 1, 1]));
+    }
+
+    #[test]
+    fn every_queue_with_backlog_is_covered_when_the_maximum_cuts_the_share() {
+        let mut five = options("auto");
+        five.queues = (0..5).map(|index| format!("q{index}")).collect();
+        five.min_processes = 0;
+        five.max_processes = 3;
+        let depths = |depth: usize| -> Vec<(String, usize)> {
+            five.queues
+                .iter()
+                .map(|queue| (queue.clone(), depth))
+                .collect()
+        };
+        let fleet = |depth: usize| -> HashMap<String, usize> {
+            let depths = depths(depth);
+            let depths: Vec<(&str, usize)> = depths
+                .iter()
+                .map(|(queue, depth)| (queue.as_str(), *depth))
+                .collect();
+            let mut fleet = HashMap::new();
+            for rank in 0..3 {
+                for (queue, workers) in share(&five, &depths, rank, 3) {
+                    *fleet.entry(queue).or_insert(0) += workers;
+                }
+            }
+            fleet
+        };
+
+        let busy = fleet(60);
+        assert_eq!(busy.values().sum::<usize>(), 9);
+        assert!(busy.values().all(|workers| *workers > 0), "{busy:?}");
+        // Coverage does not move when the backlog grows.
+        let covered = |fleet: &HashMap<String, usize>| {
+            let mut queues: Vec<String> = fleet
+                .iter()
+                .filter(|(_, workers)| **workers > 0)
+                .map(|(queue, _)| queue.clone())
+                .collect();
+            queues.sort();
+            queues
+        };
+        assert_eq!(covered(&busy), covered(&fleet(61)));
+
+        let mut small = five;
+        small.max_processes = 10;
+        let depths: Vec<(&str, usize)> = small
+            .queues
+            .iter()
+            .map(|queue| (queue.as_str(), 1))
+            .collect();
+        let mut fleet = HashMap::new();
+        for rank in 0..3 {
+            for (queue, workers) in share(&small, &depths, rank, 3) {
+                *fleet.entry(queue).or_insert(0) += workers;
+            }
+        }
+        assert!(fleet.values().all(|workers| *workers > 0), "{fleet:?}");
+    }
+
+    #[test]
+    fn the_laravel_coordination_contract_parses_and_joins_the_loop_budget() {
+        let mut document: serde_json::Value = serde_json::from_str(
+            r#"{
+                "version": 2,
+                "cwd": "/app",
+                "php_binary": "/usr/bin/php",
+                "artisan": "/app/artisan",
+                "state_directory": "/tmp/queen-supervisor-test",
+                "poll_interval": 3,
+                "http_timeout": 5,
+                "control_ttl": 3600,
+                "heartbeat_timeout": 34,
+                "shutdown_grace": 75,
+                "process_limit": 256,
+                "telemetry_ttl": 300,
+                "queen": {"url": "http://127.0.0.1:6632", "urls": ["http://127.0.0.1:6632"], "bearer_token": null, "headers": {}},
+                "connections": {
+                    "queen": {"url": "http://127.0.0.1:6632", "urls": ["http://127.0.0.1:6632"], "bearer_token": null, "headers": {}}
+                },
+                "supervisors": {
+                    "default": {
+                        "connection": "queen", "consumer_group": "workers", "queues": ["default"],
+                        "balance": "off", "strategy": "size", "processes": 1, "min_processes": 1,
+                        "max_processes": 1, "target_jobs_per_process": 10, "target_clear_seconds": 60,
+                        "default_runtime_seconds": 1, "balance_cooldown": 3, "balance_max_shift": 1,
+                        "scale_down_delay": 10, "restart_backoff": 1, "restart_backoff_max": 30,
+                        "stable_after": 60, "sleep": 3, "timeout": 60, "retry_after": 90,
+                        "lease_renewal": false, "tries": 3, "memory": 128, "backoff": 0,
+                        "max_jobs": 0, "max_time": 0, "rest": 0, "force": false, "quiet": true
+                    }
+                },
+                "coordination": {
+                    "connection": {
+                        "url": "http://127.0.0.1:6632",
+                        "urls": ["http://127.0.0.1:6632", "http://127.0.0.1:6633"],
+                        "bearer_token": "write-secret",
+                        "headers": {"X-Queen-Key": "header-secret"}
+                    },
+                    "namespace": "queen-supervisor",
+                    "ttl": 34
+                }
+            }"#,
+        )
+        .unwrap();
+        let mut resolved: Config = serde_json::from_value(document.clone()).unwrap();
+        let coordination = resolved.coordination.as_ref().unwrap();
+        assert_eq!(
+            coordination.connection.bearer_token.as_deref(),
+            Some("write-secret")
+        );
+        assert_eq!(
+            coordinated_scopes(&resolved),
+            HashMap::from([(
+                "default".to_owned(),
+                coordination::scope(
+                    &["http://127.0.0.1:6632"],
+                    "workers",
+                    &["default".to_owned()]
+                )
+            )])
+        );
+
+        // poll 3 + one depth batch * 1 endpoint * timeout 5 + 1 process start * 5
+        // + margin 5 + one coordination call per endpoint (2) * timeout 5.
+        assert_eq!(control_loop_budget(&resolved).unwrap(), 28);
+        validate_config(&resolved).unwrap();
+
+        resolved.coordination.as_mut().unwrap().ttl = 28;
+        let error = validate_config(&resolved).unwrap_err().to_string();
+        assert!(error.contains("coordination ttl"), "{error}");
+
+        // A fixed pool does not coordinate, so it costs no call.
+        document["supervisors"]["default"]["balance"] = serde_json::json!("simple");
+        let fixed: Config = serde_json::from_value(document.clone()).unwrap();
+        assert!(coordinated_scopes(&fixed).is_empty());
+        assert_eq!(control_loop_budget(&fixed).unwrap(), 18);
+
+        document["coordination"]["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<Config>(document).is_err());
+    }
+
     #[test]
     fn the_laravel_remote_status_contract_parses_and_joins_the_loop_budget() {
         let document: serde_json::Value = serde_json::from_str(
@@ -4469,12 +5042,14 @@ mod tests {
                     desired: &desired,
                     depths: &depths,
                     depths_available: &available,
+                    replicas: &HashMap::from([("default".to_owned(), 2)]),
                 },
             )
             .unwrap();
         let status: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(directory.join("status.json")).unwrap())
                 .unwrap();
+        assert_eq!(status["pool_status"][0]["replicas"], 2);
         assert_eq!(status["instance_id"], state.instance_id);
         // The dashboard tells published instances apart by host.
         let hostname = status["hostname"].as_str().unwrap();
@@ -4613,6 +5188,7 @@ mod tests {
                     desired: &HashMap::new(),
                     depths: &HashMap::new(),
                     depths_available: &HashMap::new(),
+                    replicas: &HashMap::new(),
                 },
             )
             .unwrap();
@@ -4672,6 +5248,7 @@ mod tests {
                     desired: &HashMap::new(),
                     depths: &HashMap::new(),
                     depths_available: &HashMap::new(),
+                    replicas: &HashMap::new(),
                 },
             )
             .unwrap();
@@ -5031,7 +5608,7 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
                 }
             });
         }
-        let mut child = command.spawn().unwrap();
+        let mut child = WorkerProcess::Spawned(command.spawn().unwrap());
         let deadline = Instant::now() + Duration::from_secs(2);
         while !ready.exists() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));

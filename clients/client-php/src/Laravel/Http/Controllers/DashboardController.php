@@ -6,7 +6,10 @@ use Illuminate\Contracts\View\View;
 use Illuminate\Http\Request;
 use Queen\Laravel\Dashboard\DashboardPage;
 use Queen\Laravel\Dashboard\DashboardRepository;
+use Queen\Laravel\Dashboard\JobMetricsReader;
 use Queen\Laravel\Dashboard\ThroughputReader;
+use Queen\Laravel\Monitoring\JobTags;
+use Queen\Laravel\Monitoring\TagMonitor;
 
 final class DashboardController
 {
@@ -15,6 +18,8 @@ final class DashboardController
         DashboardRepository $dashboard,
         DashboardPage $page,
         ThroughputReader $throughput,
+        JobMetricsReader $jobMetrics,
+        TagMonitor $tags,
     ): View {
         $section = (string) $request->route()?->parameter('section', 'overview');
         // Keyset cursor of the failed-jobs page; every other page ignores it.
@@ -32,7 +37,41 @@ final class DashboardController
             }
         }
 
+        if ($section === 'jobs') {
+            $range = JobMetricsReader::range($request->query('range'));
+            $data['jobMetrics'] = $jobMetrics->read($range);
+            if ($range !== JobMetricsReader::DEFAULT_RANGE) {
+                $data['refreshUrl'] .= '?range=' . $range;
+            }
+        }
+
+        if ($section === 'tags') {
+            $data['tagMonitor'] = $this->tags($tags, $request->query('tag'));
+            if ($data['tagMonitor']['selected'] !== null) {
+                $data['refreshUrl'] .= '?tag=' . rawurlencode($data['tagMonitor']['selected']);
+            }
+        }
+
         return view('queen::dashboard', $data);
+    }
+
+    /** @return array{available: bool, monitored: list<string>, selected: ?string, jobs: list<array<string, mixed>>} */
+    private function tags(TagMonitor $tags, mixed $selected): array
+    {
+        try {
+            $monitored = $tags->monitored();
+            $selected = is_string($selected) ? (JobTags::normalize([$selected])[0] ?? null) : null;
+            $selected = in_array($selected, $monitored, true) ? $selected : ($monitored[0] ?? null);
+
+            return [
+                'available' => true,
+                'monitored' => $monitored,
+                'selected' => $selected,
+                'jobs' => $selected === null ? [] : $tags->recent($selected),
+            ];
+        } catch (\Throwable) {
+            return ['available' => false, 'monitored' => [], 'selected' => null, 'jobs' => []];
+        }
     }
 
     private function cursor(mixed $value): ?int

@@ -266,6 +266,44 @@ code {
     color: var(--muted);
     font-size: 13px;
 }
+.tag-form {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+.tag-form input {
+    min-height: 40px;
+    min-width: min(260px, 100%);
+    padding: 7px 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: inherit;
+    font: inherit;
+}
+.tag-form input:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+.tag-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+}
+.tag-list a.badge { text-decoration: none; overflow-wrap: anywhere; }
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+.replica-share {
+    display: block;
+    color: var(--muted);
+    font-size: 11px;
+    white-space: nowrap;
+}
 .instance-host {
     color: var(--muted);
     font-weight: 500;
