@@ -25,6 +25,12 @@ QUEEN_ACK_BATCH="${QUEEN_ACK_BATCH:-1}"
 QUEEN_BULK_BATCH="${QUEEN_BULK_BATCH:-100}"
 QUEEN_PARTITIONS="${QUEEN_PARTITIONS:-64}"
 QUEEN_POP_FUSION="${QUEEN_POP_FUSION:-0}"
+# Supervisor features of the Queen lanes; Horizon ignores them.
+QUEEN_PREFORK="${BENCH_QUEEN_PREFORK:-0}"
+QUEEN_OPCACHE_CLI="${BENCH_QUEEN_OPCACHE_CLI:-0}"
+QUEEN_EVENT_DRIVEN="${BENCH_QUEEN_EVENT_DRIVEN:-0}"
+QUEEN_FAST_SCALE_UP="${BENCH_QUEEN_FAST_SCALE_UP:-0}"
+QUEEN_POLL_INTERVAL="${BENCH_POLL_INTERVAL:-1}"
 LEDGER_MODE="${BENCH_LEDGER_MODE:-off}"
 REDIS_APPENDONLY="${BENCH_REDIS_APPENDONLY:-yes}"
 REDIS_APPEND_FSYNC="${BENCH_REDIS_APPEND_FSYNC:-everysec}"
@@ -81,6 +87,11 @@ Options:
   --queen-bulk-batch N          Jobs per bulk producer call/request (default: 100)
   --queen-partitions N          Queen partitions scanned per pop (default: 64)
   --queen-pop-fusion 0|1        Broker pop-transaction fusion (default: 0)
+  --queen-prefork 0|1           Fork Queen workers from one booted Laravel (default: 0)
+  --queen-opcache-cli 0|1       CLI opcache in the Queen lanes only (default: 0)
+  --queen-event-driven 0|1      Wake Queen supervisors on new jobs (default: 0)
+  --queen-fast-scale-up 0|1     Close half the gap per Queen reconcile (default: 0)
+  --queen-poll-interval N       Queen supervisor poll, seconds (default: 1)
   --redis-appendonly yes|no     Redis AOF durability (default: yes)
   --redis-appendfsync MODE      Redis AOF fsync: always|everysec|no (default: everysec)
   --ledger                      Enable durable attempt/effect auditing; changes the workload
@@ -190,6 +201,11 @@ while [ "$#" -gt 0 ]; do
         --queen-bulk-batch) QUEEN_BULK_BATCH="${2:?--queen-bulk-batch requires a value}"; shift 2 ;;
         --queen-partitions) QUEEN_PARTITIONS="${2:?--queen-partitions requires a value}"; shift 2 ;;
         --queen-pop-fusion) QUEEN_POP_FUSION="${2:?--queen-pop-fusion requires a value}"; shift 2 ;;
+        --queen-prefork) QUEEN_PREFORK="${2:?--queen-prefork requires a value}"; shift 2 ;;
+        --queen-opcache-cli) QUEEN_OPCACHE_CLI="${2:?--queen-opcache-cli requires a value}"; shift 2 ;;
+        --queen-event-driven) QUEEN_EVENT_DRIVEN="${2:?--queen-event-driven requires a value}"; shift 2 ;;
+        --queen-fast-scale-up) QUEEN_FAST_SCALE_UP="${2:?--queen-fast-scale-up requires a value}"; shift 2 ;;
+        --queen-poll-interval) QUEEN_POLL_INTERVAL="${2:?--queen-poll-interval requires a value}"; shift 2 ;;
         --redis-appendonly) REDIS_APPENDONLY="${2:?--redis-appendonly requires a value}"; shift 2 ;;
         --redis-appendfsync) REDIS_APPEND_FSYNC="${2:?--redis-appendfsync requires a value}"; shift 2 ;;
         --ledger) LEDGER_MODE="durable"; shift ;;
@@ -246,6 +262,11 @@ require_positive_int "--queen-ack-batch" "$QUEEN_ACK_BATCH"
 require_positive_int "--queen-bulk-batch" "$QUEEN_BULK_BATCH"
 require_positive_int "--queen-partitions" "$QUEEN_PARTITIONS"
 require_uint "--queen-pop-fusion" "$QUEEN_POP_FUSION"
+require_uint "--queen-prefork" "$QUEEN_PREFORK"
+require_uint "--queen-opcache-cli" "$QUEEN_OPCACHE_CLI"
+require_uint "--queen-event-driven" "$QUEEN_EVENT_DRIVEN"
+require_uint "--queen-fast-scale-up" "$QUEEN_FAST_SCALE_UP"
+require_positive_int "--queen-poll-interval" "$QUEEN_POLL_INTERVAL"
 require_uint "--warmup-jobs" "$WARMUP_JOBS"
 require_positive_int "--timeout" "$WAIT_TIMEOUT"
 require_positive_int "--worker-timeout" "$WORKER_TIMEOUT"
@@ -278,6 +299,11 @@ require_decimal "--target-clear" "$TARGET_CLEAR_SECONDS"
 [ "$QUEEN_BULK_BATCH" -le 1000 ] || die "--queen-bulk-batch must not exceed 1000"
 [ "$QUEEN_PARTITIONS" -le 64 ] || die "--queen-partitions must not exceed 64"
 [ "$QUEEN_POP_FUSION" -le 1 ] || die "--queen-pop-fusion must be 0 or 1"
+[ "$QUEEN_PREFORK" -le 1 ] || die "--queen-prefork must be 0 or 1"
+[ "$QUEEN_OPCACHE_CLI" -le 1 ] || die "--queen-opcache-cli must be 0 or 1"
+[ "$QUEEN_EVENT_DRIVEN" -le 1 ] || die "--queen-event-driven must be 0 or 1"
+[ "$QUEEN_FAST_SCALE_UP" -le 1 ] || die "--queen-fast-scale-up must be 0 or 1"
+[ "$QUEEN_POLL_INTERVAL" -le 60 ] || die "--queen-poll-interval must not exceed 60"
 [ "$WORKER_TIMEOUT" -le 86400 ] || die "--worker-timeout must not exceed 86400"
 [ "$RETRY_AFTER" -le 86401 ] || die "--retry-after must not exceed 86401"
 if [ "$LEASE_RENEWAL" = true ]; then
@@ -844,6 +870,11 @@ export BENCHMARK_QUEEN_ACK_BATCH="$QUEEN_ACK_BATCH"
 export BENCHMARK_QUEEN_BULK_BATCH="$QUEEN_BULK_BATCH"
 export BENCHMARK_QUEEN_PARTITIONS="$QUEEN_PARTITIONS"
 export BENCHMARK_QUEEN_POP_FUSION="$QUEEN_POP_FUSION"
+export BENCHMARK_QUEEN_PREFORK="$QUEEN_PREFORK"
+export BENCHMARK_QUEEN_OPCACHE_CLI="$QUEEN_OPCACHE_CLI"
+export BENCHMARK_QUEEN_EVENT_DRIVEN="$QUEEN_EVENT_DRIVEN"
+export BENCHMARK_QUEEN_FAST_SCALE_UP="$QUEEN_FAST_SCALE_UP"
+export BENCHMARK_QUEEN_POLL_INTERVAL="$QUEEN_POLL_INTERVAL"
 export BENCHMARK_SAMPLE_INTERVAL="$SAMPLE_INTERVAL"
 export BENCHMARK_POST_DRAIN="$POST_DRAIN_SECONDS"
 export BENCHMARK_WARMUP_JOBS="$WARMUP_JOBS"
@@ -982,6 +1013,11 @@ settings = {
     "queen_bulk_batch": int(os.environ["BENCHMARK_QUEEN_BULK_BATCH"]),
     "queen_partitions": int(os.environ["BENCHMARK_QUEEN_PARTITIONS"]),
     "queen_pop_fusion": os.environ["BENCHMARK_QUEEN_POP_FUSION"] == "1",
+    "queen_prefork": os.environ["BENCHMARK_QUEEN_PREFORK"] == "1",
+    "queen_opcache_cli": os.environ["BENCHMARK_QUEEN_OPCACHE_CLI"] == "1",
+    "queen_event_driven": os.environ["BENCHMARK_QUEEN_EVENT_DRIVEN"] == "1",
+    "queen_fast_scale_up": os.environ["BENCHMARK_QUEEN_FAST_SCALE_UP"] == "1",
+    "queen_poll_interval_seconds": int(os.environ["BENCHMARK_QUEEN_POLL_INTERVAL"]),
     "sample_interval_seconds": float(os.environ["BENCHMARK_SAMPLE_INTERVAL"]),
     "warmup_jobs": int(os.environ["BENCHMARK_WARMUP_JOBS"]),
     "completion_timeout_seconds": int(os.environ["BENCHMARK_COMPLETION_TIMEOUT"]),
@@ -1157,6 +1193,17 @@ run_lane() {
         export BENCH_CONNECTION="redis"
     else
         export BENCH_CONNECTION="queen"
+    fi
+    # Queen supervisor features. CLI opcache is a Queen-lane factor: with
+    # spawned Horizon workers each process would keep its own copy.
+    export BENCH_QUEEN_PREFORK="$([ "$QUEEN_PREFORK" = 1 ] && echo true || echo false)"
+    export BENCH_QUEEN_EVENT_DRIVEN="$([ "$QUEEN_EVENT_DRIVEN" = 1 ] && echo true || echo false)"
+    export BENCH_QUEEN_FAST_SCALE_UP="$([ "$QUEEN_FAST_SCALE_UP" = 1 ] && echo true || echo false)"
+    export BENCH_POLL_INTERVAL="$QUEEN_POLL_INTERVAL"
+    if [ "$engine" = "horizon" ]; then
+        export BENCH_OPCACHE_CLI=0
+    else
+        export BENCH_OPCACHE_CLI="$QUEEN_OPCACHE_CLI"
     fi
 
     printf '\n[%02d] %s / %s / %s\n' "$lane_number" "$engine" "$profile" "$repetition_label"

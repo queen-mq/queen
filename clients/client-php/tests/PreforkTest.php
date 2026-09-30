@@ -59,6 +59,21 @@ final class PreforkTest extends TestCase
         $this->assertSame($seen['pid'], $seen['pgid']);
     }
 
+    public function testAForkedWorkerShowsTheCommandLineOfASpawnedOne(): void
+    {
+        $report = $this->report();
+        $pid = $this->server->fork(['sleep', $report], [], 5);
+        $this->waitUntil(fn (): bool => is_file($report) && filesize($report) > 0);
+
+        $command = is_readable("/proc/{$pid}/cmdline")
+            ? str_replace("\0", ' ', (string) file_get_contents("/proc/{$pid}/cmdline"))
+            : (string) shell_exec('ps -o command= -p ' . $pid);
+        if (trim($command) === '') {
+            $this->markTestSkipped('Neither /proc nor ps shows process command lines here.');
+        }
+        $this->assertStringContainsString('queue:work sleep ' . $report, $command);
+    }
+
     public function testASignalledWorkerReportsTheShellExitCode(): void
     {
         $report = $this->report();

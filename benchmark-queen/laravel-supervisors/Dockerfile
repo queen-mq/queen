@@ -30,8 +30,14 @@ RUN apt-get update \
         pcntl \
         posix \
     && pecl install "redis-${PHP_REDIS_VERSION}" \
-    && docker-php-ext-enable redis \
+    && docker-php-ext-enable redis opcache \
     && rm -rf /tmp/pear /var/lib/apt/lists/*
+
+# opcache is loaded in every lane but serves the command line only where the
+# lane sets BENCH_OPCACHE_CLI=1 (PHP expands the variable when it reads the
+# file; unset or 0 keeps it off).
+RUN printf '%s\n' 'opcache.enable=1' 'opcache.enable_cli=${BENCH_OPCACHE_CLI}' \
+    > /usr/local/etc/php/conf.d/zz-benchmark-opcache.ini
 
 
 FROM php:8.3-cli-bookworm AS app
