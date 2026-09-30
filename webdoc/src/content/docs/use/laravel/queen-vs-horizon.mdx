@@ -5,7 +5,7 @@ type: concept
 tier: use
 status: preview
 sidebar:
-  order: 5
+  order: 6
   label: Queen vs Horizon
 sourceOfTruth:
   - clients/client-php/config/queen.php
@@ -16,6 +16,15 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Supervisor/SupervisorState.php
   - clients/client-php/src/Laravel/Dashboard/DashboardRepository.php
   - supervisor/src/main.rs
+  - supervisor/src/coordination.rs
+  - supervisor/src/prefork.rs
+  - clients/client-php/src/Laravel/Supervisor/AutoScaler.php
+  - clients/client-php/src/Laravel/Supervisor/ReplicaCoordinator.php
+  - clients/client-php/src/Laravel/Supervisor/Prefork/ForkServer.php
+  - clients/client-php/src/Laravel/Monitoring/JobMetricsRecorder.php
+  - clients/client-php/src/Laravel/Monitoring/TagMonitor.php
+  - clients/client-php/src/Laravel/Monitoring/QueueWaits.php
+  - clients/client-php/src/Laravel/Dashboard/PrometheusMetrics.php
   - benchmark-queen/laravel-supervisors/QUALIFICATION_SUMMARY_20260829.md
   - benchmark-queen/laravel-supervisors/QUALIFICATION_REPORT_20260829.md
 verifiedBy:
@@ -29,6 +38,8 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-29 (through e54bb5b3): the panel now charts jobs completed and failed per queue from the broker's counters; the richer-dashboard section says so and keeps per-job-class metrics as a Horizon advantage.
 # sourceOfTruth re-read 2026-09-29 (through f94b76ec + this patch): remote status is no longer PHP-only; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through 022337fb + this patch): the panel lists every published supervisor instance and warns about two masters on one consumer group; the dashboard and multi-host rows say so.
+# sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): coordinated replicas make several masters per consumer group possible; the multi-host row and section say so.
+# sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): per-job metrics, monitored tags, long-wait alerts, a Prometheus endpoint, per-queue minimums, fast scale-up, prefork workers and coordinated replicas close or reverse several rows; the table, both advantage sections and the choice lists say so, with the control-plane and prefork charts.
 ---
 
 Queen is not a drop-in reimplementation of Horizon. Both can supervise Laravel workers, but they
@@ -62,15 +73,19 @@ implementation and tests named in this page's frontmatter.
 | Laravel jobs | Standard dispatch, middleware, retry, backoff and failures | Same Laravel application surface |
 | Queue backend | Redis only; the official docs state Redis Cluster is not supported | Queen broker with its durable storage as source of truth |
 | Dynamic balancing | `auto`, with `size` or `time` strategy | `auto`, with independent `size` or `time` implementation |
+| Per-queue minimum | `minProcesses` applies to every queue | `min_processes_per_queue` |
+| Scale-up rate | `balanceMaxShift` workers per cooldown | The same, or `fast_scale_up`: half of the gap per cycle |
 | Fixed allocation | `simple` | `simple` |
 | Ordered queue priority | `balance=false` | `balance=off` |
 | Master runtime | PHP with Laravel/Horizon loaded | PHP reference engine or optimized Rust engine |
+| Worker memory | Every worker boots Laravel | The same, or prefork: workers forked from one booted Laravel share it copy-on-write |
 | Crash-loop control | Process restart behavior managed by Horizon and the outer monitor | Capped restart backoff plus an open/one-probe circuit breaker in both engines |
-| Multiple master hosts | Master records and supervisor state are shared through Horizon's Redis repository | Not safe yet; one master per application and consumer group |
-| Dashboard | Mature Horizon dashboard over its Redis state | Local supervisor panel, which can also list supervisors on other hosts read-only, plus a separate global Queen broker dashboard |
-| Retained job and queue metrics | Snapshot command and retained graphs | Live bounded supervisor state; broker analytics are separate |
-| Job tags and silencing | Automatic/manual tags and silenced jobs | Not implemented in the Laravel supervisor panel |
-| Long-wait notifications | Mail, Slack and SMS routes with per-queue thresholds | No package-native wait alert routing yet |
+| Multiple master hosts | Master records and supervisor state are shared through Horizon's Redis repository | Opt-in coordination: replicas share each pool's target through the broker's key/value store; otherwise one master per application and consumer group |
+| Dashboard | Mature Horizon dashboard over its Redis state | Supervisor panel listing every host or pod, Jobs and Tags pages, plus a separate global Queen broker dashboard |
+| Job metrics | Per-job and per-queue graphs from the scheduled `horizon:snapshot` | Live per-job-class throughput, failures and runtime over one hour to one day, from every worker; per-queue completed and failed chart from the broker's counters |
+| Job tags and silencing | Automatic and `tags()` tags, monitored tags and silenced jobs | Automatic and `tags()` tags and monitored tags; no silencing |
+| Long-wait notifications | Mail, Slack and SMS routes; the wait is estimated from backlog and runtime | `queen:check-waits`: the broker's age of the oldest waiting job per consumer group, a `LongWaitDetected` event and mail |
+| Autoscaler metrics | Not built in | Prometheus endpoint for Kubernetes HPA and KEDA |
 | Per-supervisor controls | Pause, continue and status for individual supervisors | Controls currently apply to the complete local master |
 | Failed jobs | Horizon commands and dashboard integration | Laravel commands remain authoritative; Queen synchronizes a DLQ snapshot and shows paged metadata, plus the exception on a detail page per job |
 | Clear a queue | `horizon:clear` | No atomic clear across ready jobs, live leases and Laravel timers |
@@ -88,8 +103,48 @@ The Rust master does not keep a Laravel application resident after configuration
 diagnostic campaign its median proportional set size was **2.9 MiB**, against **65.0 MiB** for the
 Horizon orchestrator. The Queen PHP reference master measured 35.1 MiB.
 
+<Chart
+  src="laravel-control-plane"
+  alt="Horizontal bars of orchestrator memory: Horizon 65.0 MiB, Queen PHP 35.1 MiB, Queen Rust 2.9 MiB."
+  caption="Orchestrator proportional set size, median of three matched runs per engine."
+  source="benchmark-queen/laravel-supervisors/QUALIFICATION_SUMMARY_20260829.md"
+/>
+
 That is a control-plane result, not a whole-stack memory claim. Queen still needs its broker and
 storage.
+
+### Smaller workers
+
+Horizon, like Laravel's own `queue:work`, boots the framework once per worker. Queen's
+[prefork workers](/use/laravel/supervisors#prefork-workers) boot it once per master and fork every
+worker from it, so the workers share the framework and the opcache copy-on-write. Workers dominate
+the memory of a Laravel queue fleet, so this is where the whole-stack figure moves.
+
+<Chart
+  src="laravel-prefork-memory"
+  alt="Grouped bars of total worker memory. Forked workers use much less memory than workers that each boot Laravel in every case, most with opcache on and eight workers under load."
+  caption="Total PSS of the workers, median of three runs, PHP 8.4 in a Linux container. Forked includes the fork server itself."
+  source="benchmark-queen/2026-09-30-laravel-supervisor-features/raw/prefork-memory.csv"
+/>
+
+Eight workers after 600 jobs used 336 MiB when each booted Laravel and 85 MiB when forked, opcache
+on: 75% less. With opcache off the saving was 48%, and four idle workers saved 38 to 59%. These are
+measured 15 seconds after the burst; a worker that runs for hours writes to more of the shared pages,
+so the saving shrinks with time.
+
+### Built for Kubernetes replicas
+
+[Coordinated replicas](/use/laravel/supervisors#several-replicas) split every pool's target through
+the broker's key/value store, so a supervisor Deployment scales with its replica count or an HPA,
+and the [Prometheus endpoint](/use/laravel/monitoring#prometheus-and-kubernetes-autoscaling) gives
+KEDA the backlog to scale on. The dashboard lists every pod and warns about masters that share a
+queue without coordinating.
+
+### Metrics without a snapshot command
+
+Per-job-class metrics, monitored tags and long-wait alerts are recorded by the workers into the
+broker, so they cover every host and need no scheduled snapshot. A long-wait alert reads the age of
+the oldest waiting job instead of estimating it. See [Monitoring and alerts](/use/laravel/monitoring).
 
 ### One contract, two engines
 
@@ -128,20 +183,24 @@ storage and state-directory decisions.
 
 ### A richer Laravel-specific dashboard
 
-Horizon includes per-job runtime snapshots, job tags, silencing, long-wait notifications and
-per-supervisor controls. Queen's current Laravel panel focuses on local process health, safe master
-controls, read-only failed-job details and a per-queue chart of jobs completed and failed, read from
-the broker's own counters; it has no per-job-class metrics. Global backlog analytics and DLQ
-operations live in the separate broker dashboard, and failed-job web mutations are not implemented.
+Horizon still has silenced jobs, lists of recent, pending and completed jobs, batches, Slack and SMS
+notification routes and per-supervisor controls. Queen's panel
+covers process health, safe master controls, per-job-class metrics over up to a day, monitored tags,
+read-only failed-job details and a per-queue chart from the broker's counters; controls apply to a
+whole master, global backlog analytics and DLQ operations live in the separate broker dashboard, and
+failed-job web mutations are not implemented.
 
 ### Multi-host supervisors
 
 Horizon stores live master and supervisor records in its
 [Redis repository](https://github.com/laravel/horizon/blob/5.x/src/Repositories/RedisMasterSupervisorRepository.php).
 Queen's filesystem lock prevents a second local owner only; it does not elect one leader across
-hosts. A Queen deployment must run one master replica for an application and consumer group, with
-no rolling-surge overlap. The panel can list supervisors on several hosts through remote status, and
-warns when two of them run the same queue for one consumer group, but it does not coordinate them.
+hosts. With [coordination](/use/laravel/supervisors#several-replicas) enabled, several masters
+register in the broker's key/value store and each runs a share of every pool's target, so a
+Kubernetes Deployment can scale them. Without it, a Queen deployment must run one master replica
+for an application and consumer group, with no rolling-surge overlap. The panel lists supervisors on
+several hosts through remote status and warns about masters that share a queue without
+coordinating.
 
 ### Fewer release artifacts
 
@@ -198,17 +257,18 @@ same fast profile with renewal enabled.
 ## Choose Horizon when
 
 - Redis is the intended queue backend and the team already operates it well.
-- Job tags, silencing, retained Horizon graphs or built-in long-wait notifications are required.
-- Multiple application hosts must run independent supervisor masters today.
+- Silenced jobs, job lists, batches or Slack and SMS routes are required.
+- Several masters must run without a shared broker to coordinate through.
 - A native release artifact or Unix-only supervisor boundary is unacceptable.
 - The application does not need Queen's partition, replay, timer or transaction model.
 
 ## Evaluate Queen when
 
 - Queen is already the desired queue backend.
-- The resident memory of the PHP orchestration master matters.
+- The resident memory of the PHP orchestration master, or of the workers, matters.
+- Workers run as Kubernetes pods that should scale with the backlog.
 - Per-entity FIFO lanes, consumer groups, replay or atomic ack-and-push are useful to the workload.
-- One supervisor master can own a large local worker pool.
+- One master can own a large local worker pool, or coordinated replicas can share one target.
 - The team can qualify its own jobs under at-least-once delivery and the current preview gates.
 
 If Queen fits, follow the [Horizon migration runbook](/use/laravel/migrate-from-horizon). If any

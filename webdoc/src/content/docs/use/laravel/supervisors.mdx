@@ -18,8 +18,15 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Supervisor/RemoteStatusPublisher.php
   - clients/client-php/src/Laravel/Supervisor/SupervisorState.php
   - clients/client-php/src/Laravel/Supervisor/AutoScaler.php
+  - clients/client-php/src/Laravel/Supervisor/ReplicaCoordinator.php
+  - clients/client-php/src/Laravel/Supervisor/Prefork/ForkServer.php
+  - clients/client-php/src/Laravel/Supervisor/Prefork/ForkServerClient.php
+  - clients/client-php/src/Laravel/Supervisor/Prefork/ForkedProcess.php
+  - clients/client-php/src/Laravel/Commands/ForkServerCommand.php
   - clients/client-php/src/Laravel/Supervisor/Binary/SupervisorBinaryInstaller.php
   - supervisor/src/main.rs
+  - supervisor/src/coordination.rs
+  - supervisor/src/prefork.rs
   - .github/workflows/release-supervisor.yml
 verifiedBy:
   - clients/client-php/tests/LaravelSupervisorTest.php
@@ -27,12 +34,20 @@ verifiedBy:
   - clients/client-php/tests/LaravelSupervisorProductionTest.php
   - clients/client-php/tests/SupervisorBinaryInstallerTest.php
   - clients/client-php/tests/LaravelSupervisorRemoteStatusTest.php
+  - clients/client-php/tests/LaravelSupervisorCoordinationTest.php
+  - clients/client-php/tests/ReplicaCoordinatorTest.php
+  - clients/client-php/tests/ReplicaScalingTest.php
+  - clients/client-php/tests/PerQueueMinimumTest.php
+  - clients/client-php/tests/FastScaleUpTest.php
+  - clients/client-php/tests/PreforkTest.php
 # sourceOfTruth re-read 2026-09-29 (through fc71b65b + this patch): adds PHP-only remote status publication and its heartbeat budget; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through cd2c7135): the config change is a dashboard comment only and changes no supervisor setting; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through e54bb5b3): SupervisorConfiguration gains readOnlyConnection for the dashboard and changes no supervisor setting; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through f94b76ec + this patch): the Rust engine now publishes remote status and --for-engine exports it; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through 1ef4bb47 + this patch): the installer and launcher now run on thread-safe PHP; the requirement is documented; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through 022337fb + this patch): both engines record the host name in status and publish into a per-instance slot; the package pins supervisor 0.3.0; the dashboard warns about two masters on one consumer group; page matches the code.
+# sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): adds coordinated replicas (ReplicaCoordinator, coordination.rs, the replica share in both scalers, the coordination settings and budget) and pins supervisor 0.4.0; the new Several replicas section describes them; page matches the code.
+# sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): adds min_processes_per_queue, fast_scale_up and prefork workers with their charts, and corrects the coordination TTL and scope; page matches the code.
 ---
 
 The Queen supervisor is a **local control plane**. It starts ordinary Laravel
@@ -49,7 +64,8 @@ Both engines consume the same resolved configuration:
 Switching engines does not change the pool configuration, CLI controls or dashboard protocol. Both
 engines can also [publish their status](/use/laravel/dashboard#a-supervisor-on-another-host) for a
 dashboard on another host; the Rust engine does so from supervisor 0.2.0, and into its own
-instance slot from 0.3.0, which the package pins.
+instance slot from 0.3.0. The package pins 0.4.0, which also coordinates
+[several replicas](#several-replicas).
 
 ## Requirements
 
@@ -111,6 +127,8 @@ budget of 20 workers across two queues:
             'strategy' => 'time',
             'min_processes' => 2,
             'max_processes' => 20,
+            'min_processes_per_queue' => 1,   // every queue stays warm
+            'fast_scale_up' => true,          // close half the gap per cycle
             'target_clear_seconds' => 60,
             'default_runtime_seconds' => 1,
             'balance_cooldown' => 3,
@@ -134,7 +152,8 @@ The important inequalities are enforced at startup:
   process slots, one for Artisan and one for its lazy helper;
 - control TTL and heartbeat timeout must exceed the bounded reconciliation loop. With
   `remote_status` enabled, that loop also includes one request timeout per broker endpoint for the
-  publish, and the publish interval must be shorter than the heartbeat timeout.
+  publish, and the publish interval must be shorter than the heartbeat timeout. With `coordination`
+  enabled, it includes one request timeout per broker endpoint for every four autoscaling pools.
 
 Inspect the document that either engine will consume:
 
@@ -144,7 +163,8 @@ php artisan queen:supervisor-config --pretty
 
 This form redacts tokens and header values. `--for-engine` contains credentials and must not be
 written to logs or ordinary build artifacts. It is the form the Rust engine loads, `remote_status`
-included with its write credential, because that engine publishes the status document too.
+and `coordination` included with their write credential, because that engine publishes the status
+document and coordinates with other replicas too.
 
 ## Balancing modes
 
@@ -163,6 +183,38 @@ for `target_clear_seconds`. Before telemetry exists, the time strategy uses
 remain stable for `scale_down_delay` before Queen drains capacity. Draining workers continue to
 count against `process_limit`, including their reserved renewal helper, so a reallocation cannot
 create a temporary process spike.
+
+### Dedicated and balancing workers
+
+Every entry in `supervisors` is its own pool, so one application can mix workers dedicated to a
+queue with workers that move between queues by backlog, as Horizon supervisors do:
+
+```php
+'supervisors' => [
+    'payments' => ['queues' => ['payments'], 'balance' => 'simple', 'processes' => 2],
+    'shared'   => ['queues' => ['emails', 'default', 'reports'], 'balance' => 'auto',
+                   'min_processes' => 1, 'max_processes' => 20, 'min_processes_per_queue' => 1],
+],
+```
+
+`min_processes` bounds a whole pool. `min_processes_per_queue`, the equivalent of Horizon's per-queue
+`minProcesses`, keeps that many workers on every queue of an `auto` pool even without backlog, so the
+first job of a quiet queue wakes a worker in milliseconds instead of waiting for the next poll. The
+floor for every queue must fit `max_processes`.
+
+### Fast scale-up
+
+Each reconcile adds at most `balance_max_shift` workers, one by default, as in Horizon: a burst that
+needs twenty workers takes nineteen cycles to reach them. With `fast_scale_up`, each cycle closes half
+of the remaining gap instead, so the same burst takes five; scaling down keeps its step and its
+`scale_down_delay`.
+
+<Chart
+  src="laravel-fast-scale-up"
+  alt="Two lines of running worker processes after a burst of 600 jobs. fast_scale_up reaches twenty workers after 3.6 seconds; one step per cycle climbs by about one worker a second and reaches twenty after 18.1 seconds."
+  caption="One Rust supervisor, balance_cooldown 1, poll_interval 1, max_processes 20, the same burst in both runs."
+  source="benchmark-queen/2026-09-30-laravel-supervisor-features/raw/scale-up.csv"
+/>
 
 ## Run the PHP engine
 
@@ -263,6 +315,40 @@ Pause drains current workers and starts no replacements until continue. It does 
 process while that process retains a prefetched tail. Terminate drains for `shutdown_grace`, then
 forces the remaining process group down.
 
+## Prefork workers
+
+A spawned worker boots Laravel on its own: autoloader, configuration, service providers and, with
+opcache enabled on the command line, its own compiled copy of the framework. With prefork enabled,
+the master starts one fork server that boots Laravel once and opens no queue, database or cache
+connection, and every worker is forked from it. The workers share the booted framework and the
+opcache copy-on-write, and a new worker starts in milliseconds.
+
+```dotenv
+QUEEN_SUPERVISOR_PREFORK=true
+```
+
+<Chart
+  src="laravel-prefork-memory"
+  alt="Grouped bars of total proportional set size. In every case the forked workers use much less memory than workers that each boot Laravel, and the gap is largest with opcache on and eight workers under load."
+  caption="Total PSS of the workers, median of three runs, PHP 8.4 in a Linux container. Forked includes the fork server itself."
+  source="benchmark-queen/2026-09-30-laravel-supervisor-features/raw/prefork-memory.csv"
+/>
+
+A forked worker runs `queue:work` with exactly the arguments and environment a spawned one gets, and
+leads its own session, so it is drained, restarted, fenced and counted like any other worker. The
+fork server is a fence too: when its master is gone, it SIGKILLs every worker it forked before it
+exits. It learns that from its stdin closing or, with the Rust engine, from the SIGTERM set as its
+parent-death signal. A SIGTERM or SIGINT while the master lives, such as systemd stopping the whole
+unit or Ctrl-C in a terminal, leaves the workers to the master, which drains them. If the fork server
+cannot start, or a fork fails or times out, the supervisor logs it and spawns workers instead; the
+server stays open for the workers it already forked, and a worker forked after its request timed out
+is stopped.
+
+- Needs `ext-pcntl` and `ext-posix` in the PHP that runs the fork server.
+- A provider that opens a connection while Laravel boots would share it across forks. The fork
+  server purges database and Redis connections in every child; keep other connections lazy.
+- Deploys still restart the master: the fork server holds the code it booted.
+
 ## Production checks
 
 Before placing a Queen supervisor in production:
@@ -278,17 +364,67 @@ Before placing a Queen supervisor in production:
    effects.
 7. Exercise graceful and forced shutdown with the application's longest real job before rollout.
 
+## Several replicas
+
+A supervisor sizes its autoscaling pools from the whole backlog of their queues. Two masters that
+do this independently, on two hosts or two Kubernetes pods, both reach for the full target and
+together can exceed `max_processes`. Enable coordination on every replica so they share one target
+instead:
+
+```dotenv
+QUEEN_SUPERVISOR_COORDINATION=true
+```
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `QUEEN_SUPERVISOR_COORDINATION` | `false` | Share each autoscaling pool's target with its other replicas |
+| `QUEEN_SUPERVISOR_COORDINATION_CONNECTION` | `queen` | Laravel queue connection whose broker and credentials are used |
+| `QUEEN_SUPERVISOR_COORDINATION_NAMESPACE` | `queen-supervisor` | Key/value namespace |
+
+<Chart
+  src="laravel-replicas"
+  alt="Two panels of worker processes over thirty seconds for two supervisor pods on one queue. Without coordination the pods together run above the dashed fleet target at every sample, up to twice it: 12 workers for a target of 6. With coordination their total equals the target at every sample."
+  caption="Two Rust supervisors, max_processes 8 each, target_jobs_per_process 10, the same 150-job backlog in both runs."
+  source="benchmark-queen/2026-09-30-laravel-supervisor-features/raw/replicas.csv"
+/>
+
+On every poll each replica renews its key `coordination/v1/<scope>/<instance_id>` in the broker's
+[key/value store](/use/kv) and lists the other replicas of the same scope in the same call. The key's
+TTL is the control-loop bound, at most the heartbeat timeout. The scope is the broker endpoints, the
+consumer group and the set of queues: replicas coordinate when all three are identical, even while
+their names or limits differ during a rollout. The
+backlog then sizes one fleet target, each replica runs an even share of it, and the remainder goes to
+the replicas whose instance ids sort first. When the target is smaller than the number of queues
+with backlog, the replicas cover different queues. Both engines use the same keys and the same rule,
+so PHP and Rust replicas coordinate with each other.
+
+- `min_processes` and `max_processes` apply to every replica. A fleet of N replicas runs between N
+  times `min_processes` and N times `max_processes` workers; change N with the replica count of the
+  Deployment, or with an HPA.
+- Fixed pools (`balance` `simple`) are not split: every replica runs its `processes`.
+- A replica that pauses or stops deletes its keys, and the others take over its share at their next
+  poll. A replica that crashes still counts until its key expires, so capacity can be short by its
+  share for up to one control-loop bound.
+- Coordination is not leader election. Replicas read the list at slightly different moments, so
+  the shares match the target within a poll or two. When the broker cannot be reached, a replica
+  keeps its last list for one TTL and then sizes its pools alone, as without coordination: more
+  workers than the target, never fewer.
+- One call lists up to 100 replicas for each of four pools, so the broker's
+  `QUEEN_KV_MAX_KEYS_PER_CALL` must stay at least 404 (1,024 by default).
+- Registering is a key/value write, so the connection keeps its write credential and never uses
+  `read_bearer_token`.
+
+Status reports `replicas` for each coordinated pool. The dashboard shows each pool's share and warns
+only about masters that autoscale the same queue without coordinating.
+
 <Aside type="danger">
-Run exactly one Queen supervisor master for one application and consumer group. The filesystem
-lock excludes a second owner on the same host, but Queen has no distributed fenced leader lease for
-supervisors yet. Two masters on different hosts can both observe the same backlog and scale to the
-maximum. In Kubernetes use one replica with no surge overlap, such as a `Recreate` strategy. With
-remote status enabled, the dashboard warns when two running masters own the same queue and consumer
-group.
+Without coordination, run exactly one Queen supervisor master for one application and consumer
+group. The filesystem lock excludes a second owner on the same host only. In Kubernetes use one
+replica with no surge overlap, such as a `Recreate` strategy.
 </Aside>
 
-The singleton limit applies to the master, not to its worker count. Multiple Queen broker endpoints
-provide broker failover for depth reads; they do not provide active-active supervisor leadership.
+The limit applies to the master, not to its worker count. Multiple Queen broker endpoints provide
+broker failover for depth reads; they do not provide active-active supervisor leadership.
 
 Next, [enable the local dashboard](/use/laravel/dashboard) or follow the
 [Horizon migration runbook](/use/laravel/migrate-from-horizon).
