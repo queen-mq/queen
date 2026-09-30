@@ -15,9 +15,14 @@ Everything is a single solid colour with no negative-space parts, so the mark
 survives on any background without knockouts.
 
 Two containers, and the rule for choosing:
-  nude mark  — favicons, docs header, dashboard sidebar, sign-in badge
-  tile       — app icons, apple-touch, avatars, README (self-contained: it
-               carries its own background, so it needs no per-theme variant)
+  nude mark  — docs header
+  tile       — avatars, schema.org logo (self-contained: it carries its own
+               background, so it needs no per-theme variant)
+
+The favicons and the README use the sunflower badge instead: the queen bee
+flying to the sunflower, assets/queen-sunflower-bee.svg. That file is a
+vector master of its own (drawn, not constructed here); this script only
+rasterises it, with rsvg-convert.
 
 The tile costs ~18% of usable stroke at a given canvas size (it spends 30% of
 the side on safe area), which is why anything at or below 32px uses the nude
@@ -27,15 +32,14 @@ Outputs (all regenerated, do not hand-edit):
   assets/queen-mark.svg              master, currentColor
   assets/queen-tile.svg              master, dark tile
   assets/queen-tile-light.svg        master, light tile
-  assets/queen-tile.png              512px, repo README (GitHub is light OR dark)
+  assets/queen-tile.png              512px
   assets/queen-social-card.png       1280x640, GitHub social preview (upload only)
-  app/public/favicon.svg             theme-adaptive nude mark
-  app/public/favicon-32.png          raster fallback: the tile, self-contained
-  app/public/queen-mark.svg          dashboard sidebar + boot + proxy sign-in badge
-  webdoc/public/favicon.svg          theme-adaptive nude mark
+  app/public/favicon.svg             the sunflower badge, as is
+  app/public/favicon-32.png          raster fallback
+  webdoc/public/favicon.svg          the sunflower badge, as is
   webdoc/public/favicon-32.png       raster fallback
   webdoc/public/favicon.ico          16/32/48 for browsers that ignore SVG icons
-  webdoc/public/apple-touch-icon.png 180px tile
+  webdoc/public/apple-touch-icon.png 180px badge on white (iOS blacks out alpha)
   webdoc/public/queen-tile.png       512px, schema.org Organization.logo
 
 The docs header is NOT in that list: it inlines the geometry so the fill can be
@@ -48,6 +52,8 @@ Then: cd app && npm run build     (server/webapp/dist is the artifact BOTH the
 import io
 import math
 import os
+import shutil
+import subprocess
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -208,6 +214,25 @@ def tile_raster(size, tile_col=DARK, mark_col=LIGHT):
     return _draw(size, shapes)
 
 
+_BADGE = None
+
+
+def badge_raster(size, bg=None):
+    """The sunflower badge at `size`. rsvg-convert renders the master once at
+    1024 and PIL downsamples: a 16px favicon comes out cleaner that way than
+    rasterising the SVG straight at 16px."""
+    global _BADGE
+    if _BADGE is None:
+        png = subprocess.run(
+            ["rsvg-convert", "-w", "1024", "-h", "1024", P("assets", "queen-sunflower-bee.svg")],
+            check=True, capture_output=True).stdout
+        _BADGE = Image.open(io.BytesIO(png)).convert("RGBA")
+    img = _BADGE.resize((size, size), Image.LANCZOS)
+    if bg is not None:
+        img = Image.alpha_composite(Image.new("RGBA", img.size, bg), img)
+    return img
+
+
 def write(text, *path):
     out = P(*path)
     os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -227,23 +252,22 @@ write(mark_svg(), "assets", "queen-mark.svg")
 write(tile_svg(), "assets", "queen-tile.svg")
 write(tile_svg(tile_col=LIGHT, mark_col=DARK), "assets", "queen-tile-light.svg")
 
-print("favicons (vector adapts to the tab strip; the raster fallback carries its own ground)")
+print("favicons (the sunflower badge carries its own ground, so one version serves light and dark)")
 for dest in ("app/public/favicon.svg", "webdoc/public/favicon.svg"):
-    write(mark_svg(adaptive=True), dest)
+    shutil.copyfile(P("assets", "queen-sunflower-bee.svg"), P(dest))
+    print("  ", dest, f"{os.path.getsize(P(dest))} bytes")
 for dest in ("app/public/favicon-32.png", "webdoc/public/favicon-32.png"):
-    save(tile_raster(32), dest)
-tile_raster(256).save(P("webdoc/public/favicon.ico"), sizes=[(16, 16), (32, 32), (48, 48)])
+    save(badge_raster(32), dest)
+badge_raster(256).save(P("webdoc/public/favicon.ico"), sizes=[(16, 16), (32, 32), (48, 48)])
 print("  ", "webdoc/public/favicon.ico",
       f"{os.path.getsize(P('webdoc/public/favicon.ico')) // 1024}KB")
-save(tile_raster(180), "webdoc/public/apple-touch-icon.png")
+save(badge_raster(180, bg=(255, 255, 255, 255)), "webdoc/public/apple-touch-icon.png")
 
 print("marks")
-# The dashboard is dark-only, so its mark is simply white. The docs are not.
-write(mark_svg(fill=LIGHT), "app/public/queen-mark.svg")
 # No webdoc/public/queen-mark.svg: the docs header INLINES the geometry so its
 # fill can be currentColor and track the site's manual theme toggle. See the
 # comment in webdoc/src/components/Header.astro.
-save(tile_raster(512), "assets", "queen-tile.png")            # README
+save(tile_raster(512), "assets", "queen-tile.png")
 # schema.org Organization.logo (webdoc/astro.config.ts): consumers fetch it
 # blind and composite it on a ground of their choosing, so it has to be the
 # self-contained tile, and a raster — several ignore SVG.

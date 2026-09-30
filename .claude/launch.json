@@ -105,6 +105,58 @@
         "cd app && PATH=/Users/alice/.nvm/versions/node/v24.15.0/bin:$PATH QUEEN_DEV_UPSTREAM=http://localhost:6711 exec npx vite --port 4004 --strictPort"
       ],
       "port": 4004
+    },
+    {
+      "name": "queen-access-broker",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "/private/tmp/claude-502/-Users-alice-Work-queen/b735da12-16be-49bd-b065-535beb218524/scratchpad/access-local/run-broker.sh"
+      ],
+      "port": 6721
+    },
+    {
+      "name": "queen-access-app",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "cd app && PATH=/Users/alice/.nvm/versions/node/v24.15.0/bin:$PATH QUEEN_DEV_UPSTREAM=http://localhost:6721 exec npx vite --port 4005 --strictPort"
+      ],
+      "port": 4005
+    },
+    {
+      "name": "queen-broker-sunflower",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "QUEEN_RAFT_DIR=/private/tmp/claude-502/-Users-alice-Work-queen/333dae8f-b4d2-47ab-b60c-eca07759d559/scratchpad/broker-6647 QUEEN_RAFT_DISK_HIGH_PCT=99.5 QUEEN_RAFT_DISK_LOW_PCT=99 PORT=6647 exec server/target/debug/queen"
+      ],
+      "port": 6647
+    },
+    {
+      "name": "queen-app-sunflower",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "cd app && PATH=/Users/alice/.nvm/versions/node/v24.15.0/bin:$PATH QUEEN_DEV_UPSTREAM=http://localhost:6647 exec npx vite --port 4006 --strictPort"
+      ],
+      "port": 4006
+    },
+    {
+      "name": "queen-proxy-sidebar",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "/private/tmp/claude-502/-Users-alice-Work-queen/333dae8f-b4d2-47ab-b60c-eca07759d559/scratchpad/proxy-local/run-broker.sh"
+      ],
+      "port": 6731
+    },
+    {
+      "name": "queen-app-sidebar",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "cd app && PATH=/Users/alice/.nvm/versions/node/v24.15.0/bin:$PATH QUEEN_DEV_UPSTREAM=http://localhost:6731 exec npx vite --port 4007 --strictPort"
+      ],
+      "port": 4007
     }
   ]
 }

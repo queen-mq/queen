@@ -1,9 +1,6 @@
 <div align="center">
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/queen-tile-light.svg">
-  <img src="assets/queen-tile.svg" alt="" width="76" height="76">
-</picture>
+<img src="assets/queen-sunflower-bee.svg" alt="" width="120" height="120">
 
 # Queen MQ
 

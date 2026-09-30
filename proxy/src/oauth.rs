@@ -1814,7 +1814,7 @@ margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center
 background:#020202;color:#f5f5f5;padding:24px}}\
 .card{{width:100%;max-width:340px}}\
 .brand{{display:flex;align-items:center;gap:9px;margin-bottom:20px}}\
-.mark{{width:28px;height:28px;flex:none;object-fit:contain}}\
+.mark{{width:28px;height:28px;flex:none;border-radius:50%;object-fit:contain}}\
 .word{{font-size:15px;font-weight:600;line-height:1;color:#f5f5f5;letter-spacing:-.015em}}\
 .word b{{font-weight:500;font-size:11px;letter-spacing:.06em;margin-left:3px;color:#9e9e9e}}\
 .panel{{background:#0f0f0f;border:1px solid #262626;border-radius:8px;padding:22px 20px}}\
@@ -1845,15 +1845,14 @@ padding:8px 10px;border-radius:6px;font-size:13px;margin-bottom:14px}}\
 }
 
 /// The brand mark as a `data:` URI — the SAME built asset the sidebar shows
-/// (`app/public/queen-mark.svg`, the geometry with its fill hard-set to white
-/// because this page is dark), pulled out of the embedded webapp so the
-/// sign-in page and the app it fronts can never drift apart, and so
-/// regenerating the brand (assets/generate-brand.py + `npm run build`) updates
-/// this page too.
+/// (`app/public/queen-sunflower.webp`, the sunflower-and-bee scene without the
+/// badge's rim), pulled out of the embedded webapp so the sign-in page and the
+/// app it fronts can never drift apart, and so replacing it (+ `npm run build`)
+/// updates this page too.
 ///
 /// It is inlined rather than linked because webapp.rs's gate is deliberately
 /// absolute — not one byte without a live session — so a plain
-/// `<img src="/queen-mark.svg">` here would 302 back to this very page.
+/// `<img src="/queen-sunflower.webp">` here would 302 back to this very page.
 /// Encoded once: the bytes are fixed for the life of the process.
 ///
 /// Empty when the webapp is not built. The page then renders without a mark
@@ -1862,17 +1861,14 @@ padding:8px 10px;border-radius:6px;font-size:13px;margin-bottom:14px}}\
 fn brand_badge_data_uri() -> &'static str {
     static URI: OnceLock<String> = OnceLock::new();
     URI.get_or_init(|| match crate::webapp::embedded_asset(BRAND_BADGE) {
-        Some(bytes) => format!("data:image/svg+xml;base64,{}", B64.encode(bytes)),
+        Some(bytes) => format!("data:image/webp;base64,{}", B64.encode(bytes)),
         None => String::new(),
     })
 }
 
-/// The tab icon: the webapp's own favicon — the same geometry again, but the
-/// theme-adaptive cut, which carries a `prefers-color-scheme` rule so it reads
+/// The tab icon: the webapp's own favicon, the sunflower badge as vector
+/// (`assets/queen-sunflower-bee.svg`). It carries its own ground, so it reads
 /// on a light or a dark tab strip without a second file.
-///
-/// Both marks are now pure vector paths of a few hundred bytes, so carrying the
-/// icon and the badge separately costs nothing worth optimising away.
 fn favicon_data_uri() -> &'static str {
     static URI: OnceLock<String> = OnceLock::new();
     URI.get_or_init(|| match crate::webapp::embedded_asset(BRAND_FAVICON) {
@@ -1882,8 +1878,8 @@ fn favicon_data_uri() -> &'static str {
 }
 
 /// Brand art inside the built webapp (`app/public/` is copied to the Vite
-/// output root): the dark-surface mark the sidebar shows, and the tab icon.
-const BRAND_BADGE: &str = "queen-mark.svg";
+/// output root): the mark the sidebar shows, and the tab icon.
+const BRAND_BADGE: &str = "queen-sunflower.webp";
 const BRAND_FAVICON: &str = "favicon.svg";
 
 #[cfg(test)]
@@ -2527,32 +2523,30 @@ mod tests {
     #[test]
     fn the_login_brand_is_embedded() {
         // The sign-in page can only inline what the build actually embedded.
-        // If `app/public/queen-mark.svg` is renamed or the webapp is not built,
-        // fail HERE rather than shipping a login page with no mark.
-        let decode = |uri: &str, what: &str| {
+        // If `app/public/queen-sunflower.webp` is renamed or the webapp is not
+        // built, fail HERE rather than shipping a login page with no mark.
+        let decode = |uri: &str, prefix: &str, what: &str| {
             let b64 = uri
-                .strip_prefix("data:image/svg+xml;base64,")
-                .unwrap_or_else(|| panic!("{what} is an svg data URI"));
-            String::from_utf8(B64.decode(b64).expect("valid base64")).unwrap()
+                .strip_prefix(prefix)
+                .unwrap_or_else(|| panic!("{what} is a {prefix} URI"));
+            B64.decode(b64).expect("valid base64")
         };
 
-        let badge = decode(brand_badge_data_uri(), "badge");
-        assert!(badge.contains("<svg"), "decodes back to the mark the sidebar shows");
-        // The sign-in page is dark, so the badge must carry an explicit light
-        // fill: `currentColor` would resolve against a <img> context and land
-        // on black, i.e. an invisible mark on this page.
-        assert!(!badge.contains("currentColor"), "badge fill is resolved, not inherited");
+        let badge = decode(brand_badge_data_uri(), "data:image/webp;base64,", "badge");
+        assert!(
+            badge.len() > 12 && &badge[..4] == b"RIFF" && &badge[8..12] == b"WEBP",
+            "decodes back to the webp the sidebar shows"
+        );
 
-        let icon = decode(favicon_data_uri(), "favicon");
+        let icon = decode(favicon_data_uri(), "data:image/svg+xml;base64,", "favicon");
+        let icon = String::from_utf8(icon).unwrap();
         assert!(icon.contains("<svg"), "decodes back to the tab icon");
 
         // Inlining is pointless if the art then reaches for a URL of its own:
-        // webapp.rs would answer that with a 302 back to this page. Both marks
+        // webapp.rs would answer that with a 302 back to this page. The icon
         // must be self-contained geometry, with nothing to fetch.
-        for (what, svg) in [("badge", &badge), ("favicon", &icon)] {
-            assert!(!svg.contains("href=\"/"), "no same-origin refs inside the {what}");
-            assert!(!svg.contains("href=\"http"), "no remote refs inside the {what}");
-            assert!(!svg.contains("<image"), "{what} is vector, with no raster to fetch");
-        }
+        assert!(!icon.contains("href=\"/"), "no same-origin refs inside the favicon");
+        assert!(!icon.contains("href=\"http"), "no remote refs inside the favicon");
+        assert!(!icon.contains("<image"), "favicon is vector, with no raster to fetch");
     }
 }
