@@ -1,4 +1,5 @@
 mod coordination;
+mod lease;
 mod prefork;
 mod remote_status;
 mod watch;
@@ -87,6 +88,9 @@ struct Config {
     // Emitted by Laravel only when enabled, so an absent key means disabled.
     #[serde(default)]
     event_driven: Option<watch::EventDrivenConfig>,
+    // The master's lease renewal socket, set when the service runs.
+    #[serde(skip)]
+    lease_socket: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -148,9 +152,8 @@ struct SupervisorConfig {
     #[serde(default = "default_retry_after")]
     retry_after: u64,
     // Laravel validates the renewal timing budget before exporting this
-    // contract. The Rust supervisor does not renew leases itself, but it must
-    // accept and preserve compatibility with the resolved v2 supervisor
-    // document consumed by both engines.
+    // contract. On Linux the master serves renewal for these workers (see
+    // lease.rs); the timing itself arrives from each worker.
     #[serde(default)]
     lease_renewal: bool,
     #[serde(default = "default_scale_down_delay")]
@@ -409,6 +412,8 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         .to_str()
         .ok_or("canonical state_directory is not valid UTF-8")?
         .to_owned();
+
+    config.lease_socket = start_lease_service(&config, &state.directory);
 
     let running = Arc::new(AtomicBool::new(true));
     let signal = Arc::clone(&running);
@@ -2170,7 +2175,8 @@ fn hostname() -> Option<String> {
     let name: Vec<u8> = buffer
         .iter()
         .take_while(|&&byte| byte != 0)
-        .map(|&byte| byte as u8)
+        // c_char is i8 on x86_64 and u8 on aarch64 Linux.
+        .map(|&byte| u8::from_ne_bytes(byte.to_ne_bytes()))
         .collect();
     String::from_utf8(name).ok().filter(|name| !name.is_empty())
 }
@@ -3188,6 +3194,38 @@ fn process_budget_used(config: &Config, pools: &Pools, draining: &Draining) -> u
     })
 }
 
+/// Serve lease renewal from the master when a pool renews leases. Linux only:
+/// there a worker dies with its master (PDEATHSIG, or the fork server) and a
+/// pidfd pins it for fencing. Elsewhere, or with
+/// QUEEN_SUPERVISOR_LEASE_SERVICE=false, each worker starts a PHP helper. A
+/// helper still counts in process_cost, since a worker falls back to one when
+/// the service refuses it.
+fn start_lease_service(config: &Config, directory: &Path) -> Option<String> {
+    if !cfg!(target_os = "linux") || !config.supervisors.values().any(|o| o.lease_renewal) {
+        return None;
+    }
+    let disabled = std::env::var("QUEEN_SUPERVISOR_LEASE_SERVICE").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        )
+    });
+    if disabled {
+        eprintln!("lease renewal: one helper process per worker (QUEEN_SUPERVISOR_LEASE_SERVICE)");
+        return None;
+    }
+    match lease::start(directory, lease::signal_fence()) {
+        Ok(path) => {
+            eprintln!("lease renewal: served by the supervisor");
+            Some(path)
+        }
+        Err(error) => {
+            eprintln!("lease renewal: one helper process per worker, the service failed: {error}");
+            None
+        }
+    }
+}
+
 fn remaining_process_slots(limit: usize, used: usize) -> usize {
     limit.saturating_sub(used)
 }
@@ -3305,6 +3343,10 @@ fn worker_invocation(
             Some(o.retry_after.to_string()),
         ),
         ("QUEEN_SUPERVISOR_TELEMETRY_DIR".to_owned(), telemetry),
+        (
+            "QUEEN_SUPERVISOR_LEASE_SOCKET".to_owned(),
+            config.lease_socket.clone().filter(|_| o.lease_renewal),
+        ),
     ];
     if o.balance == "off" {
         // A blocking reserve on the first queue in Laravel's ordered list
@@ -3747,6 +3789,7 @@ mod tests {
             coordination: None,
             prefork: false,
             event_driven: None,
+            lease_socket: None,
         }
     }
 
@@ -3968,6 +4011,27 @@ mod tests {
         assert!(fixed_time_command.get_envs().any(|(name, value)| {
             name == std::ffi::OsStr::new("QUEEN_SUPERVISOR_TELEMETRY_DIR") && value.is_none()
         }));
+    }
+
+    #[test]
+    fn only_workers_that_renew_leases_get_the_lease_socket() {
+        let socket = |renewal: bool, served: bool| {
+            let mut options = options("auto");
+            options.lease_renewal = renewal;
+            let mut config = config(options);
+            config.lease_socket = served.then(|| "/state/lease.sock".to_owned());
+            let (_, environment) =
+                worker_invocation(&config, "default", "high", &config.supervisors["default"]);
+            environment
+                .into_iter()
+                .find(|(name, _)| name == "QUEEN_SUPERVISOR_LEASE_SOCKET")
+                .expect("the variable is always set or removed")
+                .1
+        };
+        assert_eq!(socket(true, true).as_deref(), Some("/state/lease.sock"));
+        // None removes a value inherited from the master's environment.
+        assert_eq!(socket(false, true), None);
+        assert_eq!(socket(true, false), None);
     }
 
     #[test]
