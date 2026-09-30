@@ -63,6 +63,7 @@ class QueenConnector implements ConnectorInterface
         $ackBatch = self::boundedInteger($config['ack_batch'] ?? 1, 'ack_batch', 1, $prefetch);
         $bulkBatch = self::boundedInteger($config['bulk_batch'] ?? 100, 'bulk_batch', 1, 1000);
         $ackAsync = self::boolean($config['ack_async'] ?? false, 'ack_async');
+        $popAhead = self::boolean($config['pop_ahead'] ?? false, 'pop_ahead');
         if ($ackAsync && $ackBatch > 1) {
             throw new InvalidArgumentException('Queen Laravel ack_async requires ack_batch 1: a batch already defers its ACKs.');
         }
@@ -78,6 +79,12 @@ class QueenConnector implements ConnectorInterface
         if ($prefetch > 1 && !$leaseRenewal && !array_key_exists('handler', $config)) {
             throw new InvalidArgumentException(
                 "Queen Laravel prefetch [{$prefetch}] requires lease_renewal so every prefetched lease remains fenced while Laravel executes synchronous job code.",
+            );
+        }
+        // A batch popped ahead is a local tail too.
+        if ($popAhead && !$leaseRenewal && !array_key_exists('handler', $config)) {
+            throw new InvalidArgumentException(
+                'Queen Laravel pop_ahead requires lease_renewal so the batch it pops ahead remains fenced.',
             );
         }
         $leaseRenewalIntervalOption = $config['lease_renewal_interval'] ?? null;
@@ -237,6 +244,7 @@ class QueenConnector implements ConnectorInterface
             prefetch: $prefetch,
             ackBatch: $ackBatch,
             ackAsync: $ackAsync,
+            popAhead: $popAhead,
             bulkBatch: $bulkBatch,
             popAutopilot: $popAutopilot,
             leaseRenewer: $leaseRenewer,

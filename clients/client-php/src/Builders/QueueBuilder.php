@@ -2,6 +2,7 @@
 
 namespace Queen\Builders;
 
+use GuzzleHttp\Promise\PromiseInterface;
 use Queen\Queen;
 use Queen\Http\HttpClient;
 use Queen\Http\Retry429Policy;
@@ -427,8 +428,7 @@ class QueueBuilder
         return $this->popWithDecision();
     }
 
-    /** @return array{messages: array, autopilot: array{partitions: int, batch: int, waitMillis: int}|null} */
-    private function popWithDecision(): array
+    private function popRequestPath(): string
     {
         $path = $this->buildPopPath();
 
@@ -493,14 +493,50 @@ class QueueBuilder
             $params['conflation'] = 'true';
         }
 
-        $query = http_build_query($params);
-        $affinityKey = $this->getAffinityKey();
+        return "{$path}?" . http_build_query($params);
+    }
 
+    /** @return array{messages: array, autopilot: array{partitions: int, batch: int, waitMillis: int}|null} */
+    private function popWithDecision(): array
+    {
         // wait=true is a long-poll: on 429 it should back off and keep waiting
         // rather than give up after the bounded push-like budget.
         $retryKind = $this->consumeWait ? Retry429Policy::KIND_POP : null;
-        $result = $this->httpClient->get("{$path}?{$query}", $this->consumeTimeoutMillis + 5000, $affinityKey, $retryKind);
+        $result = $this->httpClient->get($this->popRequestPath(), $this->popRequestTimeoutMillis(), $this->getAffinityKey(), $retryKind);
 
+        return $this->popDecision($result);
+    }
+
+    /**
+     * Send this pop and return as soon as it is on the wire; settlePop()
+     * reads the messages. One attempt against one backend, no 429 retry.
+     */
+    public function popDetached(): PromiseInterface
+    {
+        return $this->httpClient->getDetached($this->popRequestPath(), $this->getAffinityKey());
+    }
+
+    /**
+     * The messages of a popDetached() request, waiting at most
+     * $timeoutMillis or else the pop's own request budget.
+     *
+     * @throws \Throwable when the request failed or got no answer in time
+     */
+    public function settlePop(PromiseInterface $pop, ?int $timeoutMillis = null): array
+    {
+        return $this->popDecision(
+            $this->httpClient->settleDetached($pop, $timeoutMillis ?? $this->popRequestTimeoutMillis()),
+        )['messages'];
+    }
+
+    private function popRequestTimeoutMillis(): int
+    {
+        return $this->consumeTimeoutMillis + 5000;
+    }
+
+    /** @return array{messages: array, autopilot: array{partitions: int, batch: int, waitMillis: int}|null} */
+    private function popDecision(mixed $result): array
+    {
         // Before the empty-response shortcut below, not after: an old broker's
         // empty pop is a bodiless 204 that arrives here as null, and that is
         // exactly the response an idle conflating consumer must not mistake for

@@ -138,20 +138,30 @@ class HttpClient
     // Detached requests
     // ===========================
     //
-    // A detached POST is on the wire when postDetached() returns, and nothing
-    // else runs until settleDetached(): the caller does other work meanwhile,
-    // such as the next job. One attempt against one backend, no 429 retry;
-    // the caller retries a rejection synchronously.
+    // A detached request is on the wire when it is sent, and nothing else runs
+    // until settleDetached(): the caller does other work meanwhile, such as
+    // the next job. One attempt against one backend, no 429 retry; the caller
+    // retries a rejection synchronously.
 
     public function postDetached(string $path, array $body, ?string $affinityKey = null): PromiseInterface
     {
-        $options = $this->buildRequestOptions('POST', $body, null);
+        return $this->sendDetached('POST', $path, $body, $affinityKey);
+    }
+
+    public function getDetached(string $path, ?string $affinityKey = null): PromiseInterface
+    {
+        return $this->sendDetached('GET', $path, null, $affinityKey);
+    }
+
+    private function sendDetached(string $method, string $path, ?array $body, ?string $affinityKey): PromiseInterface
+    {
+        $options = $this->buildRequestOptions($method, $body, null);
         // The answer may be settled long after it arrived, when the caller's
         // work ends: curl must not count that time against the request.
         // settleDetached() bounds the wait instead.
         $options['timeout'] = 0;
 
-        $promise = $this->detachedClient()->requestAsync('POST', $this->resolveUrl($affinityKey) . $path, $options)
+        $promise = $this->detachedClient()->requestAsync($method, $this->resolveUrl($affinityKey) . $path, $options)
             ->then(fn (ResponseInterface $response) => $this->parseResponse($response));
         // cURL writes only while it is driven. One pass writes the whole
         // request on a reused keep-alive connection; a new connection sends it
