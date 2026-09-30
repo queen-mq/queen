@@ -492,7 +492,9 @@ mod tests {
     }
 
     /// W1 gate: a panic inside a spawned tokio task, and inside an HTTP handler
-    /// (one connection), leaves the process serving.
+    /// (one connection), leaves the process serving. (The HTTP stack is the
+    /// `server` feature's.)
+    #[cfg(feature = "server")]
     #[test]
     fn panic_policy_task_panic_keeps_serving() {
         if child_case().as_deref() == Some("task") {
@@ -546,6 +548,7 @@ mod tests {
         assert!(stderr.contains("injected facade-task panic"), "{stderr}");
     }
 
+    #[cfg(feature = "server")]
     async fn http_get(addr: std::net::SocketAddr, path: &str) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();

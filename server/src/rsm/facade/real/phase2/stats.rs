@@ -644,13 +644,6 @@ mod tests {
             .expect("pop");
         assert!(!popped.empty);
         let tenant = crate::config::DEFAULT_TENANT;
-        let known = stats_for(&f.store);
-        let now = wall_us();
-
-        let all = f
-            .store
-            .read(|r| tenant_stats(r, tenant, now, 100, None, Some(&known)))
-            .expect("read");
         let by = |v: &[QueueStat], q: &str| {
             let s = v.iter().find(|s| s.name == q).expect("queue");
             (
@@ -661,6 +654,41 @@ mod tests {
                 s.fig.processing,
             )
         };
+        let blank = || StoreStats {
+            store: Arc::downgrade(&f.store),
+            figures: RwLock::new(HashMap::new()),
+            last_read: AtomicI64::new(0),
+            running: AtomicBool::new(false),
+            lag: Mutex::new(None),
+        };
+        // The pop is answered once its checkpoint COMMITS; the node applies
+        // it just after, and the group's counters reach the store with apply's
+        // next store commit (every few ms): the figures below are read once
+        // both show (the lease row, the registered group's backlog).
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            let (walk, est) = (blank(), blank());
+            let walked = f
+                .store
+                .read(|r| tenant_stats(r, tenant, wall_us(), 100, None, Some(&walk)))
+                .expect("read");
+            let counted = f
+                .store
+                .read(|r| tenant_stats(r, tenant, wall_us(), 0, None, Some(&est)))
+                .expect("read");
+            if by(&walked, "b").4 == 1 && by(&counted, "b").3 == 5 {
+                break;
+            }
+            assert!(Instant::now() < until, "the pop's checkpoint never applied");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let known = stats_for(&f.store);
+        let now = wall_us();
+
+        let all = f
+            .store
+            .read(|r| tenant_stats(r, tenant, now, 100, None, Some(&known)))
+            .expect("read");
         assert_eq!(by(&all, "a"), (true, 3, 3, 3, 0));
         assert_eq!(by(&all, "b"), (true, 5, 5, 5, 1));
 
@@ -678,13 +706,7 @@ mod tests {
         );
 
         // Nothing walked before, nothing left: the counters' estimate.
-        let fresh = StoreStats {
-            store: Arc::downgrade(&f.store),
-            figures: RwLock::new(HashMap::new()),
-            last_read: AtomicI64::new(0),
-            running: AtomicBool::new(false),
-            lag: Mutex::new(None),
-        };
+        let fresh = blank();
         let est = f
             .store
             .read(|r| tenant_stats(r, tenant, now, 0, None, Some(&fresh)))

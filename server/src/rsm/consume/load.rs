@@ -389,7 +389,7 @@ impl Engine {
                     if me.gen.load(Ordering::Acquire) != gen {
                         break;
                     }
-                    let now = super::wall_us();
+                    let now = me.now_us();
                     let seg = me.seg_source();
                     let r = me.store.read(|r| {
                         let fr = me.frames(r, &seg);
@@ -430,7 +430,7 @@ impl Engine {
             }
             return;
         }
-        let now = super::wall_us();
+        let now = me.now_us();
         for h in held {
             me.run_held(h, now);
         }

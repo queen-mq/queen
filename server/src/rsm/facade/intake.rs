@@ -43,12 +43,33 @@ fn writes_positions(c: &EffectsCommand) -> bool {
     })
 }
 
-/// Wall-clock micros: the clock the engine serves on.
-fn wall_micros() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_micros() as i64)
-        .unwrap_or(0)
+/// How much earlier than its caller's deadline a pop stops claiming (on top
+/// of the engine's own reply margin): a claim is answered once the checkpoint
+/// holding its lease commits, and a follower's answer still has to cross
+/// back, apply on that node, and be rendered. Every pop, the leader's own
+/// clients' too: with the margin on followers only, a leader-attached
+/// long-poll claimed in its last 50 ms and missed its deadline waiting for
+/// the checkpoint (2026-09-30, 10k queues: 478-966 timeouts per leader-attached
+/// loader against 71-245 per follower-attached one).
+///
+/// Capped at a quarter of the time the pop has left. Whole, it swallowed short
+/// long-polls: with the planner's 50 ms a follower pop with `timeout=300` never
+/// claimed at all (the Rust streams runner polls every 300 ms: 4 of 39 tests
+/// passed against a follower, 39 against the leader). A claim nobody receives
+/// in time is handed back (the facade's `release_unanswered`, the engine's
+/// `release_claims`).
+pub(super) const POP_ANSWER_MARGIN: Duration = Duration::from_millis(250);
+
+/// A pop's deadline on the ENGINE's clock: the time its caller has left,
+/// measured here on the leader (a forwarded command carries its budget), less
+/// the answer margin. The deadline a facade stamped came off ITS wall clock,
+/// which a clock jump or a skewed follower can put anywhere.
+fn pop_deadline_us(engine: &Engine, deadline: Instant) -> i64 {
+    let left = deadline.saturating_duration_since(Instant::now());
+    let usable = left.saturating_sub(POP_ANSWER_MARGIN.min(left / 4));
+    engine
+        .now_us()
+        .saturating_add(usable.as_micros().min(i64::MAX as u128) as i64)
 }
 
 /// Serve `command` on this node, the leader, before `deadline`: the engine's
@@ -78,8 +99,13 @@ pub(super) async fn submit_here(
         },
         other => other,
     };
+    let mut command = command;
+    if let Command::PopWildcard(c) | Command::PopPinned(c) | Command::PopDiscover(c) = &mut command
+    {
+        c.deadline_us = pop_deadline_us(engine, deadline);
+    }
     if command.is_consumption() || matches!(&command, Command::Effects(c) if writes_positions(c)) {
-        match engine.serve(&command, wall_micros()) {
+        match engine.serve(&command, engine.now_us()) {
             Served::Now(reply) => return Ok(reply),
             Served::Later(rx) => return answer_later(rx, deadline).await,
             Served::NotMine => {}
@@ -99,7 +125,7 @@ pub(super) async fn submit_here(
 /// (planner/txn.rs) refuses any other consumption leg and records
 /// `engine_acks` as its outcome's acks.
 fn prepare(engine: &Engine, mut t: TxnCommand) -> Result<Command, Refusal> {
-    if let Some(part) = engine.txn_prepare(&t, wall_micros())? {
+    if let Some(part) = engine.txn_prepare(&t, engine.now_us())? {
         t.acks.clear();
         t.positional_acks.clear();
         t.positions = part.planner_positions;
@@ -184,7 +210,7 @@ pub(super) fn spawn_ticker(engine: Arc<Engine>, cmd_tx: &CommandTx) {
             let Some(tx) = weak.upgrade() else {
                 break;
             };
-            let now = wall_micros();
+            let now = engine.now_us();
             if ticked.elapsed() >= TICK_EVERY {
                 ticked = Instant::now();
                 engine.tick(now);

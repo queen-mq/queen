@@ -2300,6 +2300,70 @@
         ]
       }
     },
+    "/api/v1/resources/partitions": {
+      "get": {
+        "operationId": "get_api_v1_resources_partitions",
+        "tags": [
+          "Queues"
+        ],
+        "summary": "GET /api/v1/resources/partitions",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No leader is known (an election, or a cluster without its majority), or the command timed out: retry after the Retry-After seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/rsm/facade/real/phase2.rs::api_partitions",
+        "x-queen-query-params": "adapter",
+        "x-queen-note": "Served by the broker's generic adapter, which reads its own query string and body: parameters and body are documented on the reference page for this route, not derived here.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/v1/resources/overview": {
       "get": {
         "operationId": "get_api_v1_resources_overview",

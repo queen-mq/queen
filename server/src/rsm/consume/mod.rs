@@ -184,6 +184,13 @@ pub(crate) fn wall_us() -> i64 {
         .map_or(0, |d| d.as_micros() as i64)
 }
 
+/// This process's monotonic clock in µs (from an arbitrary origin).
+fn mono_us() -> i64 {
+    static ORIGIN: std::sync::LazyLock<std::time::Instant> =
+        std::sync::LazyLock::new(std::time::Instant::now);
+    ORIGIN.elapsed().as_micros().min(i64::MAX as u128) as i64
+}
+
 pub(crate) const SEC_US: i64 = 1_000_000;
 
 /// Appends a busy shard queued for the serve thread: `(pid, last offset)`.
@@ -207,6 +214,8 @@ pub struct Engine {
     pub(crate) serve_after_us: AtomicI64,
     /// When this node's term began (leases acquired before it are foreign).
     pub(crate) term_start_us: AtomicI64,
+    /// The engine's clock is `mono_us() + clock_offset` ([`Engine::now_us`]).
+    pub(crate) clock_offset: AtomicI64,
     /// The log's last index when this node began to lead: every entry past it
     /// is this term's, and a cursor row such an entry writes is the engine's
     /// own (a checkpoint, a transaction's rows, a seek it served) or one for a
@@ -267,6 +276,7 @@ impl Engine {
             gen: AtomicU64::new(0),
             serve_after_us: AtomicI64::new(0),
             term_start_us: AtomicI64::new(0),
+            clock_offset: AtomicI64::new(wall_us() - mono_us()),
             own_from: AtomicU64::new(u64::MAX),
             reg: RwLock::new(Registry::default()),
             shards: (0..SHARDS).map(|_| Mutex::new(Shard::default())).collect(),
@@ -459,7 +469,7 @@ impl Engine {
 
     /// The transaction's entry committed (`true`) or never will (`false`).
     pub fn txn_resolve(&self, id: RequestId, committed: bool) {
-        self.resolve_txn(id, committed, wall_us());
+        self.resolve_txn(id, committed, self.now_us());
     }
 
     /// Apply appended to `pid` up to `last_offset` (every node).
@@ -489,6 +499,27 @@ impl Engine {
         hooks::note_hook(t.elapsed());
     }
 
+    /// The engine's clock (µs): the wall clock as it read when this node
+    /// began to lead — never behind the log's own clock, never behind this
+    /// engine's earlier reading — carried forward by the monotonic clock. A
+    /// lease is timed on it, so a wall clock that jumps while this node leads
+    /// cannot cut one short: with the raw wall clock, a leader whose clock
+    /// flipped between true time and +59 s every millisecond (Jepsen's clock
+    /// strobe) expired 3 s leases at once and handed their messages out again
+    /// while their holders still worked on them (2026-09-30, p11-w2-clock:
+    /// 223 lease overlaps).
+    pub fn now_us(&self) -> i64 {
+        mono_us().saturating_add(self.clock_offset.load(Ordering::Acquire))
+    }
+
+    /// Re-anchor the clock to the wall clock, never below `floor_us` (the
+    /// log's clock) nor below what it already reads.
+    fn anchor_clock(&self, floor_us: i64) {
+        let target = wall_us().max(floor_us).max(self.now_us());
+        self.clock_offset
+            .store(target.saturating_sub(mono_us()), Ordering::Release);
+    }
+
     /// This node leads (again): forget everything, pause, load lazily. The
     /// pause (the checkpoint interval plus the clock skew) covers answers and
     /// leases another leader may still have given; a single voter (the lease
@@ -497,7 +528,12 @@ impl Engine {
     /// `last_index`: the log's last index as this node begins to lead (every
     /// later entry is this term's, [`Engine::own_from`]).
     pub fn on_leader(&self, _term: u64, last_index: u64) {
-        let now = wall_us();
+        let floor = {
+            use crate::rsm::store::{Store, TypedReads};
+            self.store.read(|r| r.last_now_us()).unwrap_or(0)
+        };
+        self.anchor_clock(floor);
+        let now = self.now_us();
         self.reset(Reply::Retry { hint: None });
         self.own_from.store(last_index, Ordering::Release);
         self.term_start_us.store(now, Ordering::Release);

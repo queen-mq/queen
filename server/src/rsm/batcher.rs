@@ -2371,7 +2371,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         // the backstop.
         if sub.command.is_consumption() {
             if let Some(engine) = &self.engine {
-                match engine.serve(&sub.command, now_micros()) {
+                match engine.serve(&sub.command, engine.now_us()) {
                     crate::rsm::consume::Served::Now(reply) => {
                         let _ = sub.reply.send(reply);
                         return;

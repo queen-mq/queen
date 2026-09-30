@@ -1263,22 +1263,9 @@ impl RaftFacade {
 // Reply → RsmError, and the derived per-command request id
 // ---------------------------------------------------------------------------
 
-/// How much earlier than its caller's deadline a pop stops claiming (on top
-/// of the engine's own reply margin): a claim is answered once the checkpoint
-/// holding its lease commits, and a follower's answer still has to cross
-/// back, apply on that node, and be rendered. Every pop, the leader's own
-/// clients' too: with the margin on followers only, a leader-attached
-/// long-poll claimed in its last 50 ms and missed its deadline waiting for
-/// the checkpoint (2026-09-30, 10k queues: 478-966 timeouts per leader-attached
-/// loader against 71-245 per follower-attached one).
-///
-/// Capped at a quarter of the time the pop has left. Whole, it swallowed short
-/// long-polls: with the planner's 50 ms a follower pop with `timeout=300` never
-/// claimed at all (the Rust streams runner polls every 300 ms: 4 of 39 tests
-/// passed against a follower, 39 against the leader). A claim nobody receives
-/// in time is handed back (`release_unanswered`, the engine's
-/// `release_claims`).
-const POP_ANSWER_MARGIN: Duration = Duration::from_millis(250);
+/// [`super::intake::POP_ANSWER_MARGIN`]; the leader's intake recomputes a
+/// pop's deadline on its engine's clock anyway.
+use super::intake::POP_ANSWER_MARGIN;
 
 /// PLAN_CONFLATION §3.1/§3.3, the answer half: `"conflation":true` on every
 /// answer whose EFFECTIVE policy is conflating, empty ones included, and

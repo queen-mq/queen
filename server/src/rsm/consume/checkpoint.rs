@@ -127,7 +127,7 @@ impl Engine {
         if !matches!(reply, Reply::Done { .. }) {
             return;
         }
-        let now = super::wall_us();
+        let now = self.now_us();
         let grace = self.grace();
         let mut woken: Vec<Gid> = Vec::new();
         for (pid, gid, worker, end) in claims {
@@ -336,7 +336,7 @@ impl Engine {
             }
             t
         };
-        let now = super::wall_us();
+        let now = self.now_us();
         let mut gone: Vec<Pid> = Vec::new();
         let mut settled: Vec<u64> = Vec::new();
         for (pid, gid, ver) in &t.rows {

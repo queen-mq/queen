@@ -1515,3 +1515,20 @@ fn a_single_voter_serves_without_the_failover_pause() {
     assert_eq!(got.len(), 1);
     assert!(start.elapsed() < std::time::Duration::from_millis(400));
 }
+
+/// The engine times leases on its own clock: it only moves forward, and a new
+/// term anchors it at or above the log's clock — a wall clock that jumps (or
+/// strobes, as Jepsen's clock nemesis does) cannot expire a lease early.
+#[test]
+fn the_engine_clock_only_moves_forward_and_anchors_at_or_above_the_log() {
+    let h = H::new("clock");
+    let a = h.e.now_us();
+    assert!(h.e.now_us() >= a);
+    // The log's clock is a minute ahead of this wall clock: the clock follows.
+    h.e.anchor_clock(a + 60_000_000);
+    let b = h.e.now_us();
+    assert!(b >= a + 60_000_000, "{b} vs {a}");
+    // A later anchor with the wall clock behind never pulls it back.
+    h.e.anchor_clock(0);
+    assert!(h.e.now_us() >= b);
+}

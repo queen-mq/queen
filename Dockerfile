@@ -105,7 +105,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-server
 RUN test -f /queen && echo "Build successful"
 
 # Stage 3: Build queenctl (Go operator CLI)
-FROM golang:1.24-alpine AS cli-builder
+FROM golang:1.26-alpine AS cli-builder
 
 # Embed broker version + commit + build date into the binary so
 # `queenctl version` reports the same string the broker does.

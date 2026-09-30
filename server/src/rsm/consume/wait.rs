@@ -19,7 +19,7 @@ use std::time::Duration;
 use crate::rsm::planner::PopCommand;
 
 use super::state::{lock, read, Gid, Group, Waiter, SHARDS};
-use super::{wall_us, Engine};
+use super::Engine;
 
 /// How often a parked pop without a deadline is looked at again (its caller
 /// may have left).
@@ -141,7 +141,7 @@ impl Engine {
                     None => return,
                 }
             };
-            let now = wall_us();
+            let now = self.now_us();
             match self.retry_waiter(g, w, now) {
                 None => continue, // answered: the next one
                 Some(w) => {
@@ -334,7 +334,7 @@ fn serve_loop(weak: std::sync::Weak<Engine>, waking: Arc<Waking>) {
         // Appends apply queued while their shard was busy: armed first, so
         // the groups they wake are served in this pass.
         e.drain_appends();
-        let now = wall_us();
+        let now = e.now_us();
         if now.saturating_sub(clock_at) >= period.as_micros() as i64 {
             clock_at = now;
             e.tick_inner(now);

@@ -51,8 +51,10 @@ async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
     ONE_AT_A_TIME.lock().await
 }
 
-/// `QUEEN_TEST_LOG=<filter>` prints the nodes' logs (one test at a time).
+/// `QUEEN_TEST_LOG=<filter>` prints the nodes' logs (one test at a time; the
+/// subscriber is the `server` feature's).
 fn log_init() {
+    #[cfg(feature = "server")]
     if let Ok(f) = std::env::var("QUEEN_TEST_LOG") {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::new(f))

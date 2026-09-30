@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use crate::rsm::effect::{Effect, GarbageScope, Pid};
 
 use super::state::{lock, read, shard_of, write, Gid, Group, GroupCfg, Load};
-use super::{wall_us, Engine};
+use super::Engine;
 
 /// Apply's time in the leader engine's hooks (diagnostics): calls, time in
 /// them, the longest, time waking groups and appends queued for the serve
@@ -96,7 +96,7 @@ impl Engine {
             }
         };
         let mut woken: Vec<Gid> = Vec::new();
-        self.append_locked(&mut sh, pid, last, wall_us(), self.grace(), &mut woken);
+        self.append_locked(&mut sh, pid, last, self.now_us(), self.grace(), &mut woken);
         drop(sh);
         let t_wake = Instant::now();
         for gid in woken {
@@ -113,7 +113,7 @@ impl Engine {
         if !self.appends_pending.swap(false, Ordering::AcqRel) {
             return;
         }
-        let now = wall_us();
+        let now = self.now_us();
         let grace = self.grace();
         let mut woken: Vec<Gid> = Vec::new();
         for si in 0..self.appends.len() {
@@ -296,7 +296,7 @@ impl Engine {
             }
             Effect::CursorSet { pid, group, row } => {
                 let term = self.term_start_us.load(Ordering::Acquire);
-                let now = wall_us();
+                let now = self.now_us();
                 let grace = self.grace();
                 let mut woken = None;
                 {

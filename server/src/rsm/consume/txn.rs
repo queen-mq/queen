@@ -313,7 +313,7 @@ impl Engine {
 
     /// Release the reservation of `keys` held by `id`.
     fn unreserve(&self, keys: &[(Pid, Gid)], id: &RequestId) {
-        let now = super::wall_us();
+        let now = self.now_us();
         let grace = self.grace();
         let mut woken = Vec::new();
         for (pid, gid) in keys {
