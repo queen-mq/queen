@@ -58,6 +58,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-30 (through 022337fb + this patch): every supervisor instance publishes into its own slot of the key (Rust from supervisor 0.3.0), so the panel lists each one with its host, sums the live ones and warns when two masters share a queue; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): pools report their coordinated replicas and the shared-queue warning ignores coordinated replicas and fixed pools; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): the panel gains the Jobs and Tags pages and a Prometheus endpoint, documented on the new monitoring page; per-pool rows show replica shares.
+# sourceOfTruth re-read 2026-09-30 (through dc5b5994): the event_driven switch and its stripes export change no dashboard behavior; page matches the code.
 ---
 
 The Laravel panel answers one question: **what is this application's Queen supervisor doing?** It
