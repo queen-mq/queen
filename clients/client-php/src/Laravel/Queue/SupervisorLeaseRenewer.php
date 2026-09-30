@@ -17,6 +17,8 @@ use RuntimeException;
  */
 final class SupervisorLeaseRenewer implements LeaseRenewer
 {
+    use RenewsOneLease;
+
     private const CONNECT_TIMEOUT_SECONDS = 1.0;
 
     private const READY_TIMEOUT_MILLIS = 5000;
@@ -28,12 +30,6 @@ final class SupervisorLeaseRenewer implements LeaseRenewer
 
     /** The process that owns the connection; a fork must not share it. */
     private ?int $owner = null;
-
-    /** @var array<string, true> */
-    private array $tracked = [];
-
-    /** @var array<string, string> */
-    private array $failures = [];
 
     private string $buffer = '';
 
@@ -85,9 +81,7 @@ final class SupervisorLeaseRenewer implements LeaseRenewer
 
     public function track(string $leaseId, int $deadlineMonotonicMillis): void
     {
-        if ($leaseId === '' || strlen($leaseId) > 255 || preg_match('/[\x00-\x1F\x7F]/', $leaseId)) {
-            throw new RuntimeException('Queen returned an invalid lease ID for renewal.');
-        }
+        $this->validateLeaseId($leaseId);
         if ($this->owner !== getmypid()) {
             // A forked child inherited the parent's session: never speak on
             // it, since a `shutdown` would stop the parent's renewals.
@@ -98,18 +92,7 @@ final class SupervisorLeaseRenewer implements LeaseRenewer
             $this->assertHealthy($leaseId);
             return;
         }
-        if ($this->tracked !== []) {
-            throw new RuntimeException(
-                'Queen Laravel lease renewal supports exactly one live pop lease per synchronous worker.',
-            );
-        }
-        $initialReserveSeconds = 2 * $this->requestBudgetSeconds
-            + 1
-            + $this->killGraceSeconds
-            + $this->safetyMarginSeconds;
-        if ($deadlineMonotonicMillis <= self::monotonicMillis() + $initialReserveSeconds * 1000) {
-            throw new RuntimeException("Queen lease [{$leaseId}] reached its renewal deadline before tracking began.");
-        }
+        $this->assertTrackable($leaseId, $deadlineMonotonicMillis);
 
         $this->send([
             'command' => 'track',
@@ -153,14 +136,7 @@ final class SupervisorLeaseRenewer implements LeaseRenewer
             throw new RuntimeException('Queen lease renewal belongs to another process.');
         }
         $this->drain();
-        if (isset($this->failures[$leaseId])) {
-            throw new RuntimeException(
-                "Queen lease renewal became unsafe for [{$leaseId}]: {$this->failures[$leaseId]}",
-            );
-        }
-        if (!isset($this->tracked[$leaseId])) {
-            throw new RuntimeException("Queen lease renewal is not tracking [{$leaseId}].");
-        }
+        $this->assertLeaseSafe($leaseId);
         if ($this->closedByMaster || !is_resource($this->socket)) {
             throw new RuntimeException('Queen supervisor lease renewal stopped unexpectedly.');
         }
@@ -316,15 +292,6 @@ final class SupervisorLeaseRenewer implements LeaseRenewer
         }
     }
 
-    private function recordFailure(?array $event): void
-    {
-        if (($event['event'] ?? null) === 'unsafe'
-            && is_string($event['lease_id'] ?? null)
-            && $event['lease_id'] !== '') {
-            $this->failures[$event['lease_id']] = (string) ($event['error'] ?? 'renewal deadline exhausted');
-        }
-    }
-
     private function nextEvent(): ?array
     {
         if ($this->events !== []) {
@@ -380,10 +347,5 @@ final class SupervisorLeaseRenewer implements LeaseRenewer
         $this->buffer = '';
         $this->events = [];
         $this->closedByMaster = false;
-    }
-
-    private static function monotonicMillis(): int
-    {
-        return intdiv(hrtime(true), 1_000_000);
     }
 }
