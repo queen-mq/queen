@@ -811,7 +811,7 @@ pub struct RingView {
     pub left: usize,
     /// The first [`RING_VIEW_ROWS`] of their instants, oldest first — the
     /// order the lane claims in.
-    pub rows: Vec<i64>,
+    pub rows: smallvec::SmallVec<[i64; RING_VIEW_ROWS]>,
 }
 
 /// How many instants a [`RingView`] carries: the first pops of a ring a cycle
@@ -837,13 +837,39 @@ struct PlanRing {
 impl PlanRing {
     /// Mirror one `pending` row: `Some(ready_at)` written, `None` deleted.
     fn set(&mut self, pid: Pid, at: Option<i64>, now_us: i64) {
-        if let Some(old) = self.at.remove(&pid) {
+        use std::collections::hash_map::Entry;
+        // Update an occupied hash slot in place. Landing and the in-flight
+        // refresh often repeat the same pending value; neither needs a hash
+        // removal/reinsert or a rewrite of an already-correct ordered set.
+        let old = match (self.at.entry(pid), at) {
+            (Entry::Occupied(mut row), Some(at)) => Some(std::mem::replace(row.get_mut(), at)),
+            (Entry::Occupied(row), None) => Some(row.remove()),
+            (Entry::Vacant(row), Some(at)) => {
+                row.insert(at);
+                None
+            }
+            (Entry::Vacant(_), None) => return,
+        };
+        if old == at {
+            if let Some(at) = at {
+                // An identical timestamp may still cross the supplied clock,
+                // in either direction. Only then move it between the sets.
+                if at <= now_us {
+                    if self.deferred.remove(&(at, pid)) {
+                        self.ready.insert((at, pid));
+                    }
+                } else if self.ready.remove(&(at, pid)) {
+                    self.deferred.insert((at, pid));
+                }
+            }
+            return;
+        }
+        if let Some(old) = old {
             if !self.ready.remove(&(old, pid)) {
                 self.deferred.remove(&(old, pid));
             }
         }
         if let Some(at) = at {
-            self.at.insert(pid, at);
             if at <= now_us {
                 self.ready.insert((at, pid));
             } else {
@@ -937,7 +963,7 @@ impl PlanRings {
     pub fn view(&self, key: &RingKey, now_us: i64) -> Option<RingView> {
         let (t, q, g) = key;
         let ring = self.ring(t, q, g)?;
-        let mut rows: Vec<i64> = ring
+        let mut rows: smallvec::SmallVec<[i64; RING_VIEW_ROWS]> = ring
             .ready
             .iter()
             .take(RING_VIEW_ROWS)
@@ -1212,6 +1238,16 @@ impl PlanRings {
         cycle: u64,
     ) -> Result<()> {
         let (t, q, g) = key;
+        // Warm hits borrow names; only a missing ring owns new map keys.
+        if let Some(ring) = self
+            .rings
+            .get_mut(t)
+            .and_then(|qs| qs.get_mut(q))
+            .and_then(|gs| gs.get_mut(g))
+        {
+            ring.last_used = cycle;
+            return Ok(());
+        }
         let now = self.now_us;
         let gs = self
             .rings
@@ -1219,10 +1255,6 @@ impl PlanRings {
             .or_default()
             .entry(q.clone())
             .or_default();
-        if let Some(ring) = gs.get_mut(g) {
-            ring.last_used = cycle;
-            return Ok(());
-        }
         let mut ring = PlanRing {
             last_used: cycle,
             ..PlanRing::default()
@@ -1970,3 +2002,6 @@ mod tests {
         assert!(d.ring_has_ready("t", "q", "g"), "promoted at its deadline");
     }
 }
+
+#[cfg(test)]
+mod ring_update_tests;

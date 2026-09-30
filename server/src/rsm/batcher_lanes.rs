@@ -1563,6 +1563,10 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
                 .collect()
         })
         .collect();
+    // Every lane reads the same keys. Share their owned strings rather than
+    // cloning the entire vector for each worker. Push-only cycles keep None
+    // so an empty key list still needs no allocation.
+    let ring_keys = (!ring_keys.is_empty()).then(|| Arc::<[RingKey]>::from(ring_keys));
     let mut waits = Vec::new();
     let mut ran = vec![false; n as usize];
     for (l, cmds) in per_lane.into_iter().enumerate() {
@@ -1572,7 +1576,7 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
         // scan per lane at every such cycle: seconds with millions of pending
         // partitions, 2026-09-29).
         if cmds.is_empty()
-            && ring_keys.is_empty()
+            && ring_keys.is_none()
             && !ls.lanes[l]
                 .lock()
                 .expect("lane state")
@@ -1611,7 +1615,7 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
                 cmds,
                 cfg,
                 now_us,
-                &keys,
+                keys.as_deref().unwrap_or_default(),
                 cycle_no,
             );
             drop(st);
@@ -2641,7 +2645,7 @@ mod router_tests {
                     rings.view(&key, expiry),
                     Some(RingView {
                         left: 1,
-                        rows: vec![expiry]
+                        rows: smallvec::smallvec![expiry]
                     }),
                     "from its expiry on"
                 );
