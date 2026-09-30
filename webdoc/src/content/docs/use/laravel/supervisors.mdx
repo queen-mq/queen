@@ -57,6 +57,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): adds min_processes_per_queue, fast_scale_up and prefork workers with their charts, and corrects the coordination TTL and scope; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through cdd1bcc9 + this patch): adds event_driven (watch.rs, QueueWatcher, the grow-only step in both engines, the stripes export and budget); the Event-driven scaling section describes it; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through 708fd8b2): a skipped event-driven pool now counts as evaluated, and both coordinators expose whether they hold a replica view; no documented behavior changes; page matches the code.
+# sourceOfTruth re-read 2026-10-01 (through the ack_async and pop_ahead hardening): detached requests settle their own connect, a late popped batch is handed back untracked, and a failed detached send falls back to the synchronous ACK; nothing this page states changes.
 ---
 
 The Queen supervisor is a **local control plane**. It starts ordinary Laravel

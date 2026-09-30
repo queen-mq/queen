@@ -28,6 +28,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): the Horizon settings map gains per-queue minimums, fast scale-up, waits, notifications, job metrics, tags and coordination; the inventory says which Horizon surfaces Queen now covers.
 # sourceOfTruth re-read 2026-09-30 (through 708fd8b2): a skipped event-driven pool now counts as evaluated, and both coordinators expose whether they hold a replica view; no documented behavior changes; page matches the code.
 # sourceOfTruth re-read 2026-10-01 (through this patch): ack_async and pop_ahead are opt-in and the master now renews leases on Linux; the migration mapping is unchanged, and pop_ahead stays off for the queue lists this page recommends for strict priority.
+# sourceOfTruth re-read 2026-10-01 (through the ack_async and pop_ahead hardening): detached requests settle their own connect, a late popped batch is handed back untracked, and a failed detached send falls back to the synchronous ACK; nothing this page states changes.
 ---
 
 Moving from Horizon changes two things, not one:
