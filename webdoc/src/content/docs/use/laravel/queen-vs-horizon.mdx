@@ -141,7 +141,23 @@ so the saving shrinks with time.
 the broker's key/value store, so a supervisor Deployment scales with its replica count or an HPA,
 and the [Prometheus endpoint](/use/laravel/monitoring#prometheus-and-kubernetes-autoscaling) gives
 KEDA the backlog to scale on. The dashboard lists every pod and warns about masters that share a
-queue without coordinating.
+queue without coordinating. [Scale Laravel queues on Kubernetes](/use/laravel/kubernetes) puts the
+pieces together.
+
+### Faster reaction to bursts
+
+Horizon reads its queue sizes every `balanceCooldown`, three seconds by default, and moves
+`balanceMaxShift` workers per check. A Queen supervisor polls at the same cadence by default. With
+[`event_driven`](/use/laravel/supervisors#event-driven-scaling), the broker wakes it when jobs
+arrive, and with `fast_scale_up` each step closes half of the gap to the target, once a second while
+the pool climbs.
+
+<Chart
+  src="laravel-event-driven"
+  alt="Step lines of running worker processes after a burst of 600 jobs, three runs per mode. With event_driven the workers climb every second and reach twenty after about 5.6 seconds; with polling they climb every three seconds and reach twenty after about 13.9 seconds."
+  caption="One Rust supervisor at the production cadence, poll_interval 3 and balance_cooldown 3, with fast_scale_up and max_processes 20; medians of three runs. Horizon was not part of this run."
+  source="benchmark-queen/2026-09-30-laravel-supervisor-features/raw/event-driven.csv"
+/>
 
 ### Metrics without a snapshot command
 
@@ -270,6 +286,7 @@ same fast profile with renewal enabled.
 - Queen is already the desired queue backend.
 - The resident memory of the PHP orchestration master, or of the workers, matters.
 - Workers run as Kubernetes pods that should scale with the backlog.
+- Bursts must get workers within seconds, not within several cooldowns.
 - Per-entity FIFO lanes, consumer groups, replay or atomic ack-and-push are useful to the workload.
 - One master can own a large local worker pool, or coordinated replicas can share one target.
 - The team can qualify its own jobs under at-least-once delivery and the current preview gates.

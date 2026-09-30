@@ -136,6 +136,7 @@
     "/use/kv",
     "/use/laravel",
     "/use/laravel/dashboard",
+    "/use/laravel/kubernetes",
     "/use/laravel/migrate-from-horizon",
     "/use/laravel/monitoring",
     "/use/laravel/queen-vs-horizon",
