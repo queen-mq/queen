@@ -3,6 +3,8 @@
 namespace Queen\Http;
 
 use GuzzleHttp\Client;
+use GuzzleHttp\Handler\CurlMultiHandler;
+use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Promise\PromiseInterface;
 use GuzzleHttp\Promise\Utils as PromiseUtils;
 use JsonException;
@@ -12,6 +14,8 @@ use UnexpectedValueException;
 
 class HttpClient
 {
+    private const DETACHED_POLL_MICROS = 200;
+
     private ?string $baseUrl;
     private ?LoadBalancer $loadBalancer;
     private int $timeoutMillis;
@@ -22,6 +26,9 @@ class HttpClient
     private array $headers;
     private array $retry429;
     private Client $guzzle;
+    private bool $customHandler;
+    private ?CurlMultiHandler $detachedHandler = null;
+    private ?Client $detachedGuzzle = null;
 
     public function __construct(array $options = [])
     {
@@ -41,6 +48,7 @@ class HttpClient
         // 'handler' overrides Guzzle's handler stack, the seam tests use to
         // drive the retry/failover paths without a live server.
         $handler = $options['handler'] ?? null;
+        $this->customHandler = $handler !== null;
         $this->guzzle = new Client($handler !== null ? ['handler' => $handler] : []);
     }
 
@@ -124,6 +132,77 @@ class HttpClient
     public function deleteAsync(string $path, ?int $requestTimeoutMillis = null, ?string $affinityKey = null): PromiseInterface
     {
         return $this->executeRequestAsync($this->resolveUrl($affinityKey) . $path, 'DELETE', null, $requestTimeoutMillis);
+    }
+
+    // ===========================
+    // Detached requests
+    // ===========================
+    //
+    // A detached POST is on the wire when postDetached() returns, and nothing
+    // else runs until settleDetached(): the caller does other work meanwhile,
+    // such as the next job. One attempt against one backend, no 429 retry;
+    // the caller retries a rejection synchronously.
+
+    public function postDetached(string $path, array $body, ?string $affinityKey = null): PromiseInterface
+    {
+        $options = $this->buildRequestOptions('POST', $body, null);
+        // The answer may be settled long after it arrived, when the caller's
+        // work ends: curl must not count that time against the request.
+        // settleDetached() bounds the wait instead.
+        $options['timeout'] = 0;
+
+        $promise = $this->detachedClient()->requestAsync('POST', $this->resolveUrl($affinityKey) . $path, $options)
+            ->then(fn (ResponseInterface $response) => $this->parseResponse($response));
+        // cURL writes only while it is driven. One pass writes the whole
+        // request on a reused keep-alive connection; a new connection sends it
+        // when the caller settles.
+        $this->detachedHandler?->tick();
+
+        return $promise;
+    }
+
+    /**
+     * The detached request's result, waiting at most $timeoutMillis (the
+     * client timeout by default).
+     *
+     * @throws \Throwable the transport or HTTP failure; a request still
+     *         unanswered at the deadline is cancelled.
+     */
+    public function settleDetached(PromiseInterface $promise, ?int $timeoutMillis = null): mixed
+    {
+        if ($this->detachedHandler !== null) {
+            $timeoutMillis ??= $this->timeoutMillis;
+            $deadline = hrtime(true) + $timeoutMillis * 1_000_000;
+            while (true) {
+                $this->detachedHandler->tick();
+                if ($promise->getState() !== PromiseInterface::PENDING) {
+                    break;
+                }
+                if (hrtime(true) >= $deadline) {
+                    $promise->cancel();
+                    throw new \RuntimeException("Queen did not answer a detached request within {$timeoutMillis} ms.");
+                }
+                usleep(self::DETACHED_POLL_MICROS);
+            }
+        }
+
+        return $promise->wait();
+    }
+
+    private function detachedClient(): Client
+    {
+        // Tests drive every request through their own handler.
+        if ($this->customHandler) {
+            return $this->guzzle;
+        }
+        if ($this->detachedGuzzle === null) {
+            // A tick must never wait in select() for the answer: that would
+            // make a detached request synchronous again.
+            $this->detachedHandler = new CurlMultiHandler(['select_timeout' => 0]);
+            $this->detachedGuzzle = new Client(['handler' => HandlerStack::create($this->detachedHandler)]);
+        }
+
+        return $this->detachedGuzzle;
     }
 
     /**

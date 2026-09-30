@@ -62,6 +62,10 @@ class QueenConnector implements ConnectorInterface
         $prefetch = self::boundedInteger($config['prefetch'] ?? 1, 'prefetch', 1, 1000);
         $ackBatch = self::boundedInteger($config['ack_batch'] ?? 1, 'ack_batch', 1, $prefetch);
         $bulkBatch = self::boundedInteger($config['bulk_batch'] ?? 100, 'bulk_batch', 1, 1000);
+        $ackAsync = self::boolean($config['ack_async'] ?? false, 'ack_async');
+        if ($ackAsync && $ackBatch > 1) {
+            throw new InvalidArgumentException('Queen Laravel ack_async requires ack_batch 1: a batch already defers its ACKs.');
+        }
         $dispatchAfterCommit = self::boolean($config['after_commit'] ?? false, 'after_commit');
         $popAutopilot = self::boolean($config['autopilot'] ?? false, 'autopilot');
         $leaseRenewal = self::boolean($config['lease_renewal'] ?? false, 'lease_renewal');
@@ -194,16 +198,29 @@ class QueenConnector implements ConnectorInterface
                 );
             }
 
+            $timing = [
+                $retryAfter,
+                $leaseRenewalInterval,
+                $leaseRenewalTimeout,
+                $requestBudget,
+                $leaseRenewalKillGrace,
+                $leaseRenewalSafetyMargin,
+            ];
             $leaseRenewer = new LazyLeaseRenewer(
-                static fn (): LeaseRenewer => new ProcessLeaseRenewer(
-                    $clientConfig,
-                    $retryAfter,
-                    $leaseRenewalInterval,
-                    $leaseRenewalTimeout,
-                    $requestBudget,
-                    $leaseRenewalKillGrace,
-                    $leaseRenewalSafetyMargin,
-                ),
+                static function () use ($clientConfig, $timing): LeaseRenewer {
+                    // The native supervisor serves renewal for its workers; a
+                    // worker it refuses renews through its own helper.
+                    $socket = getenv('QUEEN_SUPERVISOR_LEASE_SOCKET');
+                    if (is_string($socket) && $socket !== '') {
+                        try {
+                            return new SupervisorLeaseRenewer($socket, $clientConfig, ...$timing);
+                        } catch (\Throwable $exception) {
+                            error_log('Queen lease renewal falls back to a helper process: ' . $exception->getMessage());
+                        }
+                    }
+
+                    return new ProcessLeaseRenewer($clientConfig, ...$timing);
+                },
             );
         }
 
@@ -219,6 +236,7 @@ class QueenConnector implements ConnectorInterface
             dispatchAfterCommit: $dispatchAfterCommit,
             prefetch: $prefetch,
             ackBatch: $ackBatch,
+            ackAsync: $ackAsync,
             bulkBatch: $bulkBatch,
             popAutopilot: $popAutopilot,
             leaseRenewer: $leaseRenewer,

@@ -2,7 +2,9 @@
 
 namespace Queen\Laravel\Queue;
 
+use GuzzleHttp\Promise\PromiseInterface;
 use Illuminate\Container\Container;
+use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Queue\Queue as QueueContract;
 use Illuminate\Queue\Events\WorkerStopping;
 use Illuminate\Queue\InvalidPayloadException;
@@ -17,6 +19,9 @@ use UnexpectedValueException;
 
 class QueenQueue extends BaseQueue implements QueueContract
 {
+    /** The shutdown tail release has the same bound. */
+    private const SHUTDOWN_ACK_TIMEOUT_MILLIS = 2_000;
+
     /** @var array<string, array{messages: list<array>, next: int}> */
     private array $prefetched = [];
 
@@ -38,11 +43,22 @@ class QueenQueue extends BaseQueue implements QueueContract
     /** @var array<string, int> Locally unsettled deliveries per broker lease. */
     private array $leaseOutstanding = [];
 
+    /**
+     * The ack_async ACK on the wire, settled before the next ACK, release or
+     * broker pop, and at shutdown.
+     *
+     * @var array{promise: PromiseInterface, message: array, context: array}|null
+     */
+    private ?array $pendingAck = null;
+
     private int $nextBatchId = 0;
 
     private bool $workerStoppingListenerRegistered = false;
 
     private bool $shutDown = false;
+
+    /** The process that consumes; a child it forks must not settle its work. */
+    private ?int $consumerPid = null;
 
     /**
      * @param (\Closure(string, \Closure(): mixed): mixed)|null $failedJobRetryHandler
@@ -64,6 +80,7 @@ class QueenQueue extends BaseQueue implements QueueContract
         private ?LeaseRenewer $leaseRenewer = null,
         private ?\Closure $failedJobRetryHandler = null,
         private ?\Closure $shutdownTailReleaser = null,
+        private bool $ackAsync = false,
     ) {
         $this->dispatchAfterCommit = $dispatchAfterCommit;
     }
@@ -102,12 +119,15 @@ class QueenQueue extends BaseQueue implements QueueContract
      */
     public function shutdown(): void
     {
-        if ($this->shutDown) {
+        if ($this->shutDown || ($this->consumerPid !== null && $this->consumerPid !== getmypid())) {
             return;
         }
         $this->shutDown = true;
 
         try {
+            // Bounded like the tail release below, and not retried: a lost
+            // answer leaves the job to lease expiry.
+            $this->settlePendingAck(self::SHUTDOWN_ACK_TIMEOUT_MILLIS, retry: false);
             $groups = $this->shutdownAcknowledgementGroups();
             if ($groups !== []) {
                 // A synchronous Laravel worker can own a prefetched tail for
@@ -469,6 +489,7 @@ class QueenQueue extends BaseQueue implements QueueContract
             throw new RuntimeException('Queen Laravel queue connection cannot pop after worker shutdown began.');
         }
 
+        $this->consumerPid ??= getmypid();
         $queue = $this->getQueue($queue);
         if ($this->prefetch > 1 && isset($this->activeDeliveries[$queue])) {
             throw new RuntimeException(
@@ -480,6 +501,8 @@ class QueenQueue extends BaseQueue implements QueueContract
         if ($message !== null) {
             return $this->makeJob($message, $queue);
         }
+        // Its lease must be settled before the broker is asked for another.
+        $this->settlePendingAck();
 
         // QueueBuilder gives the HTTP request a further 5 s of slack. For a
         // non-blocking Laravel worker retain the normal 30 s request budget
@@ -585,7 +608,11 @@ class QueenQueue extends BaseQueue implements QueueContract
         ?string $queue = null,
     ): void
     {
+        $this->settlePendingAck();
         $affinityKey = $queue !== null ? "{$queue}:Default:{$group}" : null;
+        if (!$failed && $this->ackAsync && $this->sendAckDetached($message, $group, $affinityKey)) {
+            return;
+        }
         if (!$failed && $this->ackBatch > 1) {
             $this->pendingAcknowledgements[] = [
                 'message' => $message,
@@ -631,6 +658,82 @@ class QueenQueue extends BaseQueue implements QueueContract
         }
         $this->markDeliveryHandled($message);
         $this->settleLeaseMessage($message);
+    }
+
+    private function sendAckDetached(array $message, string $group, ?string $affinityKey): bool
+    {
+        $context = array_filter(
+            ['group' => $group, 'affinityKey' => $affinityKey],
+            static fn (mixed $value): bool => $value !== null,
+        );
+        try {
+            $promise = $this->queen->ackDetached($message, 'completed', $context);
+        } catch (\InvalidArgumentException) {
+            // The synchronous path reports the malformed message.
+            return false;
+        }
+        $this->pendingAck = ['promise' => $promise, 'message' => $message, 'context' => $context];
+        $this->markDeliveryHandled($message);
+        // The job is done: its lease needs no renewal on its account. After
+        // the lease's last ACK the broker closes it, and renewing a closed
+        // lease would fence an idle worker.
+        $this->settleLeaseMessage($message);
+
+        return true;
+    }
+
+    /**
+     * Read the answer to the ACK sent by ack_async, retrying a lost request
+     * with the ordinary client. A failure cannot be thrown to the job it
+     * belongs to, which has finished: it is reported, and the lease is
+     * abandoned as a synchronous failure would, so the job is delivered again.
+     */
+    private function settlePendingAck(?int $timeoutMillis = null, bool $retry = true): void
+    {
+        $pending = $this->pendingAck;
+        if ($pending === null) {
+            return;
+        }
+        $this->pendingAck = null;
+
+        try {
+            try {
+                $result = $this->queen->settleAck($pending['promise'], $timeoutMillis);
+            } catch (\Throwable $lost) {
+                // Only a request without a definitive answer is sent again.
+                $status = $lost instanceof HttpException ? $lost->statusCode : 0;
+                if (!$retry || ($status >= 400 && $status < 500 && $status !== 429)) {
+                    throw $lost;
+                }
+                $result = $this->queen->ack($pending['message'], 'completed', $pending['context']);
+            }
+            $this->assertSuccessful($result, 'acknowledge job');
+        } catch (\Throwable $acknowledgementFailure) {
+            if ($this->leaseRenewer !== null) {
+                $this->abandonLease($pending['message']);
+            } else {
+                $this->discardPrefetchedSiblings($pending['message']);
+            }
+            $this->reportQuietly(new RuntimeException(
+                'Queen Laravel could not acknowledge a completed job, which will run again after its lease expires: '
+                    . $acknowledgementFailure->getMessage(),
+                0,
+                $acknowledgementFailure,
+            ));
+        }
+    }
+
+    /** Report through Laravel when it can, never throwing to the caller. */
+    private function reportQuietly(\Throwable $exception): void
+    {
+        try {
+            if (isset($this->container) && $this->container->bound(ExceptionHandler::class)) {
+                $this->container->make(ExceptionHandler::class)->report($exception);
+                return;
+            }
+        } catch (\Throwable) {
+        }
+        error_log($exception->getMessage());
     }
 
     /** Flush successful ACKs deferred by ack_batch. */
@@ -686,6 +789,7 @@ class QueenQueue extends BaseQueue implements QueueContract
         int $delay,
         int $attempts,
     ): void {
+        $this->settlePendingAck();
         try {
             $this->flushAcknowledgements();
 
@@ -1084,6 +1188,7 @@ class QueenQueue extends BaseQueue implements QueueContract
         $this->batchOutstanding = [];
         $this->pendingAcknowledgements = [];
         $this->leaseOutstanding = [];
+        $this->pendingAck = null;
     }
 
     private function assertJobTimeoutIsSafe(QueenJob $job): void
