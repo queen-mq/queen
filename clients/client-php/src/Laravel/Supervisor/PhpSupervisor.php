@@ -140,14 +140,16 @@ final class PhpSupervisor
                     if (!$ready && !$growOnly) {
                         continue;
                     }
+                    // Counted as evaluated even when skipped below, so a
+                    // skipped pool is due again only after a wake interval.
+                    $this->lastEvaluated[$name] = microtime(true);
                     if (!$pollDue && $this->withoutReplicaView($name)) {
                         // A replica that just resumed has no view of the
-                        // others and would size itself alone: wait for the
-                        // poll's heartbeat.
+                        // others and would size itself alone: keep the wake
+                        // for the poll's heartbeat.
                         continue;
                     }
                     unset($this->woken[$name]);
-                    $this->lastEvaluated[$name] = microtime(true);
                     $depthFailed = false;
 
                     $runtimes = [];
@@ -231,6 +233,9 @@ final class PhpSupervisor
                 $this->writeStatus($this->paused ? 'paused' : 'running');
                 if ($pollDue) {
                     $lastPoll = microtime(true);
+                } else {
+                    // An event pass never runs back to back.
+                    usleep(200_000);
                 }
                 if ($once) {
                     break;

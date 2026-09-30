@@ -628,10 +628,13 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                 if !ready && !grow_only {
                     continue;
                 }
+                // Counted as evaluated even when skipped below, so a skipped
+                // pool is due again only after a wake interval.
+                last_evaluated.insert(name.clone(), Instant::now());
                 if !poll_due {
                     // A replica that just resumed has no view of the others
-                    // and would size itself alone: wait for the poll's
-                    // heartbeat.
+                    // and would size itself alone: keep the wake for the
+                    // poll's heartbeat.
                     if let (Some(coordinator), Some(scope)) =
                         (coordinator.as_ref(), coordinated_scopes.get(&name))
                     {
@@ -641,7 +644,6 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 woken.remove(&name);
-                last_evaluated.insert(name.clone(), Instant::now());
 
                 // Scan independently of broker health so a short-lived
                 // worker's final sample is ingested and reclaimed even when

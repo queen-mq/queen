@@ -395,7 +395,7 @@ document is split across `<key>/<instance_id>/head` and `<key>/<instance_id>/chu
 ceiling. A `<key>/head` document from an earlier release is still read. Publishing is best effort
 and budgeted into the heartbeat; a broker outage shows the supervisor as stale and never stops
 supervision. The Rust engine publishes the same format from supervisor 0.3.0 (this package pins
-0.4.0); 0.2.0 wrote the single `<key>/head` slot.
+0.5.0); 0.2.0 wrote the single `<key>/head` slot.
 
 | Variable | Default | |
 | --- | --- | --- |
