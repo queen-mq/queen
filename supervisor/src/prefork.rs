@@ -568,27 +568,33 @@ mod tests {
         let server = Rc::new(RefCell::new(
             ForkServer::start(&config, &AtomicBool::new(true)).unwrap(),
         ));
-        let late = report();
         server.borrow_mut().fork_timeout = Duration::ZERO;
-        let timed_out = server.borrow_mut().fork(
-            &["sleep".to_owned(), late.to_str().unwrap().to_owned()],
-            &[],
-        );
-        assert!(timed_out.is_err());
-
-        // The late reply precedes this one on the pipe.
-        server.borrow_mut().fork_timeout = FORK_TIMEOUT;
-        let exited = report();
-        let mut worker = forked(&server, &["exit", exited.to_str().unwrap(), "0"], &[]);
-        let stray = *server
-            .borrow()
-            .strays
-            .iter()
-            .next()
-            .expect("a stray worker");
+        // A loaded host can deliver the reply within the zero timeout: stop
+        // that worker and ask again.
+        let late = (1..=5)
+            .find_map(|_| {
+                let late = report();
+                let argv = ["sleep".to_owned(), late.to_str().unwrap().to_owned()];
+                let early = server.borrow_mut().request_fork(&argv, &[]);
+                match early {
+                    Err(_) => Some(late),
+                    Ok(pid) => {
+                        // SAFETY: plain signal delivery to the worker just forked.
+                        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                        None
+                    }
+                }
+            })
+            .expect("the fork never timed out");
+        // Nothing reads the server meanwhile, so the late worker runs until
+        // the master sees its reply.
+        let stray = u32::try_from(wait_for_report(&late)["pid"].as_u64().unwrap()).unwrap();
+        // SAFETY: signal 0 only checks that the process exists.
+        assert_eq!(unsafe { libc::kill(stray as i32, 0) }, 0);
 
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !server.borrow().strays.is_empty() {
+        // SAFETY: as above.
+        while unsafe { libc::kill(stray as i32, 0) } == 0 || !server.borrow().strays.is_empty() {
             assert!(
                 Instant::now() < deadline,
                 "the stray worker was not stopped"
@@ -596,6 +602,9 @@ mod tests {
             assert_eq!(server.borrow_mut().exit_status(stray), None);
             std::thread::sleep(Duration::from_millis(20));
         }
+        server.borrow_mut().fork_timeout = FORK_TIMEOUT;
+        let exited = report();
+        let mut worker = forked(&server, &["exit", exited.to_str().unwrap(), "0"], &[]);
         assert_eq!(worker.wait().unwrap().code(), Some(0));
         server.borrow_mut().close(Duration::from_secs(5));
         let _ = std::fs::remove_file(late);

@@ -170,6 +170,15 @@ def save(fig, out: Path, name: str, theme: Theme) -> None:
     text = path.read_text()
     text = re.sub(r"<metadata>.*?</metadata>\s*", "", text, flags=re.S)
     text = re.sub(r"<!-- Created with matplotlib.*?-->\s*", "", text, flags=re.S)
+    # Clip-path and marker ids hash full-precision coordinates, whose last bits
+    # differ between hosts (fonts, CPU) although the drawing does not. Number
+    # them in order of appearance so the file depends only on what is drawn.
+    ids: dict[str, str] = {}
+    text = re.sub(
+        r"\b([mp])[0-9a-f]{10}\b",
+        lambda m: ids.setdefault(m.group(0), f"{m.group(1)}{len(ids)}"),
+        text,
+    )
     # Put the page's font stack back. The figure was laid out with DejaVu Sans
     # (see style()) so the geometry is reproducible; the browser should still
     # render Inter. Every string in these figures uses the one family, so

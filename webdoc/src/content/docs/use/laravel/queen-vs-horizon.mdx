@@ -40,6 +40,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-30 (through 022337fb + this patch): the panel lists every published supervisor instance and warns about two masters on one consumer group; the dashboard and multi-host rows say so.
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): coordinated replicas make several masters per consumer group possible; the multi-host row and section say so.
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): per-job metrics, monitored tags, long-wait alerts, a Prometheus endpoint, per-queue minimums, fast scale-up, prefork workers and coordinated replicas close or reverse several rows; the table, both advantage sections and the choice lists say so, with the control-plane and prefork charts.
+# sourceOfTruth re-read 2026-09-30 (through 93492e56): prefork.rs changed only its tests (the late-fork stray tests are deterministic); page matches the code.
 ---
 
 Queen is not a drop-in reimplementation of Horizon. Both can supervise Laravel workers, but they

@@ -25,6 +25,7 @@ sourceOfTruth:
   - .github/workflows/docs.yml
 # sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 # sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): gen-proxy-routes.mjs gained the two replay arms, a write-inherits-read assertion and a new CLASSIFY_FINGERPRINT; gen-routes.mjs and gen-openapi.mjs gained the KV console access arm and the matching tag. The workflow this page describes is unchanged.
+# sourceOfTruth re-read 2026-09-30 (through fbc23fa8 + this patch): charts.py gained four Laravel supervisor figures and numbers the SVG ids so a render is identical on every host; the Benchmark figures section says so, and the three rules are unchanged.
 ---
 
 This site exists because the previous one drifted far enough from the implementation to
@@ -277,7 +278,10 @@ A chart is a claim, so the figures are derived like everything else:
 stdout artifacts under `benchmark-queen/` and renders one SVG per theme into
 `public/charts/`. `--check` re-renders into a temporary directory and compares, so
 a changed artifact fails CI until the figure is regenerated. Rendering needs
-python3 with matplotlib; the workflow installs it.
+python3 with matplotlib; the workflow installs it. The output does not depend on
+the host: `charts.py` strips the render date and numbers the clip-path and marker
+ids, which matplotlib derives from coordinates whose last bits differ between
+machines.
 
 Three rules the figures follow, each of which caught a real mistake during the
 first pass:

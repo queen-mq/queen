@@ -108,21 +108,29 @@ final class PreforkTest extends TestCase
 
     public function testAWorkerForkedAfterItsRequestTimedOutIsStopped(): void
     {
-        try {
-            $this->server->fork(['sleep', $this->report()], [], 0);
-            $this->fail('The fork should have timed out.');
-        } catch (\RuntimeException $error) {
-            $this->assertStringContainsString('did not answer in time', $error->getMessage());
+        // A loaded host can deliver the reply within the zero timeout: stop
+        // that worker and ask again.
+        for ($attempt = 1; ; ++$attempt) {
+            $report = $this->report();
+            try {
+                $early = $this->server->fork(['sleep', $report], [], 0);
+            } catch (\RuntimeException $error) {
+                $this->assertStringContainsString('did not answer in time', $error->getMessage());
+                break;
+            }
+            posix_kill($early, SIGKILL);
+            $this->assertLessThan(5, $attempt, 'The fork never timed out.');
         }
+        // Nothing reads the server meanwhile, so the late worker runs until
+        // the client sees its reply.
+        $this->waitUntil(fn (): bool => is_file($report) && filesize($report) > 0);
+        $stray = json_decode((string) file_get_contents($report), true)['pid'];
+        $this->assertTrue(posix_kill($stray, 0));
 
-        // The late reply precedes this one on the pipe.
-        $worker = new ForkedProcess($this->server, $this->server->fork(['exit', $this->report(), '0'], [], 5));
+        $this->waitUntil(fn (): bool => $this->server->exitStatus($stray) === null && !@posix_kill($stray, 0));
         $strays = new \ReflectionProperty(ForkServerClient::class, 'strays');
-        $stray = array_key_first($strays->getValue($this->server));
-        $this->assertIsInt($stray);
-
         $this->waitUntil(fn (): bool => $this->server->exitStatus($stray) === null && $strays->getValue($this->server) === []);
-        $this->assertFalse(@posix_kill($stray, 0));
+        $worker = new ForkedProcess($this->server, $this->server->fork(['exit', $this->report(), '0'], [], 5));
         $this->waitUntil(fn (): bool => !$worker->isRunning());
         $this->assertSame(0, $worker->getExitCode());
     }
