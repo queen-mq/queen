@@ -65,6 +65,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-30 (through 022337fb + this patch): remote status is published per supervisor instance, the package pins supervisor 0.3.0 and the panel lists every instance; no setting or default changes.
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): adds the supervisor.coordination keys for coordinated replicas and pins supervisor 0.4.0.
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): adds the prefork, per-queue minimum, fast scale-up, waits, notifications, job metrics, tags and Prometheus keys, and pins supervisor 0.4.0.
+# sourceOfTruth re-read 2026-09-30 (through 708fd8b2): a skipped event-driven pool now counts as evaluated, and both coordinators expose whether they hold a replica view; no documented behavior changes; page matches the code.
 ---
 
 The Composer package is `queen-mq/php-client`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or

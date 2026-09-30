@@ -26,6 +26,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-30 (through 022337fb + this patch): the host name in status and per-instance remote status slots change nothing in the runbook; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): coordinated replicas are an alternative to the single master; the checklist says so.
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): the Horizon settings map gains per-queue minimums, fast scale-up, waits, notifications, job metrics, tags and coordination; the inventory says which Horizon surfaces Queen now covers.
+# sourceOfTruth re-read 2026-09-30 (through 708fd8b2): a skipped event-driven pool now counts as evaluated, and both coordinators expose whether they hold a replica view; no documented behavior changes; page matches the code.
 ---
 
 Moving from Horizon changes two things, not one:
