@@ -157,11 +157,35 @@ engine can also publish it to the broker for a dashboard served by other hosts. 
 [Worker supervisors](/use/laravel/supervisors), then enable the
 [Laravel dashboard](/use/laravel/dashboard) only after authentication is in place.
 
+Both engines offer the same opt-in features beyond Horizon's pools, each off by default:
+
+| Feature | What it does | Measured |
+| --- | --- | --- |
+| [Coordinated replicas](/use/laravel/supervisors#several-replicas) | Several pods or hosts on one queue share one worker target | Two pods held the target at every sample, instead of up to twice it |
+| [Prefork workers](/use/laravel/supervisors#prefork-workers) | Laravel boots once per master; workers are forked from it and share its memory | 8 workers after 600 jobs: 85 MiB instead of 336 MiB |
+| [Event-driven scaling](/use/laravel/supervisors#event-driven-scaling) | The broker wakes the master when jobs arrive, instead of the next poll | 20 workers after a burst in 5.6 s instead of 13.9 s |
+| [Per-queue minimum and fast scale-up](/use/laravel/supervisors#dedicated-and-balancing-workers) | Every queue keeps a warm worker; a burst closes half the gap each cycle | |
+| [Monitoring and alerts](/use/laravel/monitoring) | Job metrics per class, monitored tags, long-wait alerts, a Prometheus endpoint for KEDA | |
+
+The measurements come from one host; the [benchmark page](/benchmarks/laravel-supervisors) has the
+method. [Scale Laravel queues on Kubernetes](/use/laravel/kubernetes) puts the features together
+for pods that follow the backlog.
+
 <CardGrid>
   <LinkCard
     href="/use/laravel/supervisors"
     title="Worker supervisors"
     description="Configure pools, autoscaling, the PHP fallback and the optimized Rust engine."
+  />
+  <LinkCard
+    href="/use/laravel/kubernetes"
+    title="Scale on Kubernetes"
+    description="Pods that share one worker target, fork cheap workers, wake on new jobs and follow the backlog."
+  />
+  <LinkCard
+    href="/use/laravel/monitoring"
+    title="Monitoring and alerts"
+    description="Job metrics per class, monitored tags, long-wait alerts and a Prometheus endpoint."
   />
   <LinkCard
     href="/use/laravel/dashboard"
