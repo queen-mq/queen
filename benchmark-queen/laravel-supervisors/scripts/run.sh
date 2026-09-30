@@ -32,6 +32,7 @@ QUEEN_OPCACHE_CLI="${BENCH_QUEEN_OPCACHE_CLI:-0}"
 QUEEN_EVENT_DRIVEN="${BENCH_QUEEN_EVENT_DRIVEN:-0}"
 QUEEN_FAST_SCALE_UP="${BENCH_QUEEN_FAST_SCALE_UP:-0}"
 QUEEN_ACK_ASYNC="${BENCH_QUEEN_ACK_ASYNC:-0}"
+QUEEN_POP_AHEAD="${BENCH_QUEEN_POP_AHEAD:-0}"
 QUEEN_LEASE_SERVICE="${BENCH_QUEEN_LEASE_SERVICE:-1}"
 QUEEN_POLL_INTERVAL="${BENCH_POLL_INTERVAL:-1}"
 # PostgreSQL durability, the Queen counterpart of --redis-appendfsync.
@@ -101,6 +102,8 @@ Options:
   --queen-event-driven 0|1      Wake Queen supervisors on new jobs (default: 0)
   --queen-fast-scale-up 0|1     Close half the gap per Queen reconcile (default: 0)
   --queen-ack-async 0|1         Send Queen ACKs without waiting (default: 0)
+  --queen-pop-ahead 0|1         Pop the next Queen batch during the last job
+                                of the current one (default: 0)
   --queen-lease-service 0|1     Renew leases in the Queen supervisor, not
                                 one PHP helper per worker (default: 1)
   --queen-poll-interval N       Queen supervisor poll, seconds (default: 1)
@@ -223,6 +226,7 @@ while [ "$#" -gt 0 ]; do
         --queen-event-driven) QUEEN_EVENT_DRIVEN="${2:?--queen-event-driven requires a value}"; shift 2 ;;
         --queen-fast-scale-up) QUEEN_FAST_SCALE_UP="${2:?--queen-fast-scale-up requires a value}"; shift 2 ;;
         --queen-ack-async) QUEEN_ACK_ASYNC="${2:?--queen-ack-async requires a value}"; shift 2 ;;
+        --queen-pop-ahead) QUEEN_POP_AHEAD="${2:?--queen-pop-ahead requires a value}"; shift 2 ;;
         --queen-lease-service) QUEEN_LEASE_SERVICE="${2:?--queen-lease-service requires a value}"; shift 2 ;;
         --queen-poll-interval) QUEEN_POLL_INTERVAL="${2:?--queen-poll-interval requires a value}"; shift 2 ;;
         --postgres-synchronous-commit) POSTGRES_SYNCHRONOUS_COMMIT="${2:?--postgres-synchronous-commit requires a value}"; shift 2 ;;
@@ -288,13 +292,15 @@ require_uint "--queen-opcache-cli" "$QUEEN_OPCACHE_CLI"
 require_uint "--queen-event-driven" "$QUEEN_EVENT_DRIVEN"
 require_uint "--queen-fast-scale-up" "$QUEEN_FAST_SCALE_UP"
 require_uint "--queen-ack-async" "$QUEEN_ACK_ASYNC"
+require_uint "--queen-pop-ahead" "$QUEEN_POP_AHEAD"
 require_uint "--queen-lease-service" "$QUEEN_LEASE_SERVICE"
 require_positive_int "--queen-poll-interval" "$QUEEN_POLL_INTERVAL"
 require_uint "--warmup-jobs" "$WARMUP_JOBS"
 require_positive_int "--timeout" "$WAIT_TIMEOUT"
 require_positive_int "--worker-timeout" "$WORKER_TIMEOUT"
 LEASE_RENEWAL=false
-if [ "$QUEEN_PREFETCH" -gt 1 ]; then
+# A batch popped ahead is a local tail too: both require renewal.
+if [ "$QUEEN_PREFETCH" -gt 1 ] || [ "$QUEEN_POP_AHEAD" = 1 ]; then
     LEASE_RENEWAL=true
 fi
 if [ "$RETRY_AFTER" = "0" ]; then
@@ -327,6 +333,7 @@ require_decimal "--target-clear" "$TARGET_CLEAR_SECONDS"
 [ "$QUEEN_EVENT_DRIVEN" -le 1 ] || die "--queen-event-driven must be 0 or 1"
 [ "$QUEEN_FAST_SCALE_UP" -le 1 ] || die "--queen-fast-scale-up must be 0 or 1"
 [ "$QUEEN_ACK_ASYNC" -le 1 ] || die "--queen-ack-async must be 0 or 1"
+[ "$QUEEN_POP_AHEAD" -le 1 ] || die "--queen-pop-ahead must be 0 or 1"
 [ "$QUEEN_LEASE_SERVICE" -le 1 ] || die "--queen-lease-service must be 0 or 1"
 if [ "$QUEEN_ACK_ASYNC" = 1 ] && [ "$QUEEN_ACK_BATCH" -gt 1 ]; then
     die "--queen-ack-async requires --queen-ack-batch 1"
@@ -922,6 +929,7 @@ export BENCHMARK_QUEEN_OPCACHE_CLI="$QUEEN_OPCACHE_CLI"
 export BENCHMARK_QUEEN_EVENT_DRIVEN="$QUEEN_EVENT_DRIVEN"
 export BENCHMARK_QUEEN_FAST_SCALE_UP="$QUEEN_FAST_SCALE_UP"
 export BENCHMARK_QUEEN_ACK_ASYNC="$QUEEN_ACK_ASYNC"
+export BENCHMARK_QUEEN_POP_AHEAD="$QUEEN_POP_AHEAD"
 export BENCHMARK_QUEEN_LEASE_SERVICE="$QUEEN_LEASE_SERVICE"
 export BENCHMARK_QUEEN_POLL_INTERVAL="$QUEEN_POLL_INTERVAL"
 export BENCHMARK_POSTGRES_SYNCHRONOUS_COMMIT="$POSTGRES_SYNCHRONOUS_COMMIT"
@@ -1071,6 +1079,7 @@ settings = {
     "queen_event_driven": os.environ["BENCHMARK_QUEEN_EVENT_DRIVEN"] == "1",
     "queen_fast_scale_up": os.environ["BENCHMARK_QUEEN_FAST_SCALE_UP"] == "1",
     "queen_ack_async": os.environ["BENCHMARK_QUEEN_ACK_ASYNC"] == "1",
+    "queen_pop_ahead": os.environ["BENCHMARK_QUEEN_POP_AHEAD"] == "1",
     "queen_lease_service": os.environ["BENCHMARK_QUEEN_LEASE_SERVICE"] == "1",
     "queen_poll_interval_seconds": int(os.environ["BENCHMARK_QUEEN_POLL_INTERVAL"]),
     "postgres_synchronous_commit": os.environ["BENCHMARK_POSTGRES_SYNCHRONOUS_COMMIT"],
@@ -1259,6 +1268,7 @@ run_lane() {
     export BENCH_QUEEN_EVENT_DRIVEN="$([ "$QUEEN_EVENT_DRIVEN" = 1 ] && echo true || echo false)"
     export BENCH_QUEEN_FAST_SCALE_UP="$([ "$QUEEN_FAST_SCALE_UP" = 1 ] && echo true || echo false)"
     export BENCH_QUEEN_ACK_ASYNC="$([ "$QUEEN_ACK_ASYNC" = 1 ] && echo true || echo false)"
+    export BENCH_QUEEN_POP_AHEAD="$([ "$QUEEN_POP_AHEAD" = 1 ] && echo true || echo false)"
     export BENCH_QUEEN_LEASE_SERVICE="$([ "$QUEEN_LEASE_SERVICE" = 1 ] && echo true || echo false)"
     export BENCH_POLL_INTERVAL="$QUEEN_POLL_INTERVAL"
     if [ "$engine" = "horizon" ]; then
