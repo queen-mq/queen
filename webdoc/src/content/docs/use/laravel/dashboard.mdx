@@ -18,6 +18,7 @@ sourceOfTruth:
   - clients/client-php/resources/views/dashboard/partials/notices.blade.php
   - clients/client-php/resources/views/dashboard/partials/overview.blade.php
   - clients/client-php/resources/views/dashboard/partials/sidebar.blade.php
+  - clients/client-php/resources/views/dashboard/partials/supervisor-instance.blade.php
   - clients/client-php/resources/views/dashboard/partials/supervisor-pool-row.blade.php
   - clients/client-php/resources/views/dashboard/partials/supervisor.blade.php
   - clients/client-php/resources/views/dashboard/partials/workload.blade.php
@@ -50,14 +51,16 @@ verifiedBy:
   - clients/client-php/tests/LaravelSupervisorRemoteStatusTest.php
   - clients/client-php/tests/RemoteStatusDocumentTest.php
   - clients/client-php/tests/RemoteStatusPublisherTest.php
+  - clients/client-php/tests/RemoteStatusReaderTest.php
 # sourceOfTruth re-read 2026-09-29 (through 5b7aabef + this patch): adds the published assets with route fallback, the in-place refresh script with its pause control, one page per section, keyset-paged failed jobs and the failed-job detail page with its bounded SQL read; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through 109b23c2 + this patch): adds the jobs-processed chart read from the broker's queue-ops counters, and the failed-job drawer; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through f94b76ec + this patch): the Rust engine publishes the same remote status format from supervisor 0.2.0; page matches the code.
+# sourceOfTruth re-read 2026-09-30 (through 022337fb + this patch): every supervisor instance publishes into its own slot of the key (Rust from supervisor 0.3.0), so the panel lists each one with its host, sums the live ones and warns when two masters share a queue; page matches the code.
 ---
 
 The Laravel panel answers one question: **what is this application's Queen supervisor doing?** It
-reads the private supervisor state already written by the PHP or Rust engine on this host. When the
-supervisor runs on another host, it can read instead the copy the engine
+reads the private supervisor state already written by the PHP or Rust engine on this host. When
+supervisors run on other hosts or pods, it can also read the copy each engine
 [publishes to the broker](#a-supervisor-on-another-host). It does not poll queue depth again and it
 is not a replacement for Queen's global broker dashboard.
 
@@ -149,8 +152,9 @@ control actions.
 
 ## What the panel shows
 
-- master engine, PID, state, generation and live/stale heartbeat;
+- master engine, host, PID, state, generation and live/stale heartbeat of each supervisor instance;
 - whether that status is local or published by a supervisor on another host;
+- a warning when more than one running master owns the same queue and consumer group;
 - pools, queues, worker counts and workers currently draining;
 - last queue depth already sampled by the supervisor;
 - [jobs completed, failed and dispatched](#jobs-processed) per queue over the last hour, six hours,
@@ -283,36 +287,52 @@ QUEEN_SUPERVISOR_REMOTE_STATUS=true
 QUEEN_SUPERVISOR_REMOTE_STATUS_KEY=orders-production
 ```
 
-Set both variables on the supervisor host and on every web host, so the publisher and the reader
-address the same key. The key must be unique per application and environment that share a broker.
+Set both variables on every supervisor host and on every web host, so the publishers and the reader
+address the same key. Use one key per application and environment that share a broker. Every
+supervisor instance publishes into its own slot under that key, named by its `instance_id`, so
+several hosts or pods never overwrite each other.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `QUEEN_SUPERVISOR_REMOTE_STATUS` | `false` | Publish the status document |
-| `QUEEN_SUPERVISOR_REMOTE_STATUS_KEY` | none | Key of the document, required when enabled |
+| `QUEEN_SUPERVISOR_REMOTE_STATUS_KEY` | none | Key the documents are published under, required when enabled |
 | `QUEEN_SUPERVISOR_REMOTE_STATUS_CONNECTION` | `queen` | Laravel queue connection whose broker and credentials are used |
 | `QUEEN_SUPERVISOR_REMOTE_STATUS_NAMESPACE` | `queen-supervisor` | Key/value namespace |
 | `QUEEN_SUPERVISOR_REMOTE_STATUS_INTERVAL` | `poll_interval` | Seconds between publishes; a state change publishes at once |
 | `QUEEN_SUPERVISOR_REMOTE_STATUS_TTL` | twice `heartbeat_timeout`, at least 300 | Expiry of the published copy |
 
-The dashboard shows a live local supervisor when there is one, and otherwise the published copy,
-labelled as such. That view is **read-only**: pause, continue and terminate stay with
-`php artisan queen:supervisor` on the supervisor host, and a control POST answers `409`. Liveness
-comes from the published heartbeat alone, because a web host cannot check the supervisor's owner
-lock. Keep `heartbeat_timeout` and the supervisor's clock sane: a copy older than the heartbeat
-timeout shows as stale, and an expired one as unavailable.
+The Supervisors page shows one card per instance: a live local supervisor first, then every
+published one, live before stale, each with its host name, PID and last heartbeat. The overview,
+the header and the notices sum workers, draining processes and the process budget over the live
+instances, and report ready or healthy only when every live instance is. A stopping or stopped
+master is not live, so the old pod of a rollout stays listed as stale until its copy expires and
+never counts in those totals. A local supervisor keeps its controls; every published instance is
+**read-only**: pause, continue and terminate stay with `php artisan queen:supervisor` on its own
+host, and a control POST for it answers `409`. Liveness comes from the published heartbeat alone,
+because a web host cannot check another supervisor's owner lock. Keep `heartbeat_timeout` and the
+supervisors' clocks sane: a copy older than the heartbeat timeout shows as stale, and an expired
+one disappears.
+
+When more than one running instance owns the same queue for the same consumer group, the panel
+warns. There is no distributed leader lease, so each master sizes its workers from the whole
+backlog and together they can exceed `max_processes`; run
+[one supervisor replica](/use/laravel/supervisors) per consumer group.
 
 What travels is the same document as `status.json` without its legacy pool map. It is split across
-`<key>/head` and `<key>/chunk/NNNN`, written in one batch transaction and read back with one
-`getPrefix` snapshot, so it never depends on the 64 KiB key/value value ceiling. Chunks left over
-by an earlier, larger write are recognized by their write id and expire with their TTL. The
-connection is resolved without `read_bearer_token`, because publishing is a key/value write.
+`<key>/<instance_id>/head` and `<key>/<instance_id>/chunk/NNNN`, written in one batch transaction,
+so it never depends on the 64 KiB key/value value ceiling. The panel lists every slot with
+`getPrefix` and decodes each one from a single page, which is one snapshot; a slot a page cuts
+through is read whole on the next page. Chunks left over by an earlier, larger write are recognized
+by their write id and expire with their TTL, like the slots of instances that are gone. A document
+at `<key>/head`, the single slot of releases before per-instance slots, is still read, so web hosts
+can be upgraded before their supervisors. The connection is resolved without `read_bearer_token`,
+because publishing is a key/value write.
 
 Publishing is best effort. The resolver adds one request timeout per broker endpoint to the
 heartbeat budget, a failure is reported once per failure streak, and a broker outage shows the
-supervisor as stale without ever stopping supervision. The Rust engine writes the same format from
-supervisor 0.2.0: `queen:supervisor-config --for-engine` hands it the setting with its write
-credential, and it publishes after every status write, throttled to the interval and forced on
+supervisor as stale without ever stopping supervision. The Rust engine publishes from supervisor
+0.2.0, and into its own instance slot from 0.3.0: `queen:supervisor-config --for-engine` hands it
+the setting with its write credential, and it publishes after every status write, throttled to the interval and forced on
 every state change, exactly like the PHP engine.
 
 ## Behind a load balancer

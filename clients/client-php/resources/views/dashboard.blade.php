@@ -35,27 +35,30 @@
     $budgetLabel = $processBudget['valid']
         ? number_format($processBudget['used']) . ' / ' . number_format($processBudget['limit'])
         : '—';
-    $masterStateLabel = match ($supervisor['state']) {
-        'running' => 'Active',
-        'paused' => 'Paused',
-        'terminating' => 'Stopping',
-        'starting' => 'Starting',
-        'stopped' => 'Stopped',
-        default => 'Unknown',
+    // Shared with the per-instance cards of the supervisors page.
+    $stateLabelFor = fn (array $supervisor): string => match ($supervisor['availability']) {
+        'live' => match ($supervisor['state']) {
+            'running' => 'Active',
+            'paused' => 'Paused',
+            'terminating' => 'Stopping',
+            'starting' => 'Starting',
+            'stopped' => 'Stopped',
+            'mixed' => 'Mixed',
+            default => 'Unknown',
+        },
+        'stale' => 'Stale',
+        default => 'Unavailable',
     };
-    if ($supervisor['availability'] === 'live') {
-        $stateLabel = $masterStateLabel;
-        $livenessLabel = 'Live';
-        $livenessTone = 'success';
-    } elseif ($supervisor['availability'] === 'stale') {
-        $stateLabel = 'Stale';
-        $livenessLabel = 'Stale';
-        $livenessTone = 'warning';
-    } else {
-        $stateLabel = 'Unavailable';
-        $livenessLabel = 'Unavailable';
-        $livenessTone = 'danger';
-    }
+    $stateLabel = $stateLabelFor($supervisor);
+    [$livenessLabel, $livenessTone] = match ($supervisor['availability']) {
+        'live' => ['Live', 'success'],
+        'stale' => ['Stale', 'warning'],
+        default => ['Unavailable', 'danger'],
+    };
+    $instanceCount = $supervisor['instances'];
+    $liveInstanceCount = $supervisor['live_instances'];
+    $stateSourceLabel = ($instanceCount > 1 ? $instanceCount . ' supervisor instances · ' : '')
+        . (($supervisor['source'] ?? null) === 'remote' ? 'supervisor state published through the broker' : 'local supervisor state only');
     $readinessLabel = $supervisor['ready'] ? 'Ready' : 'Not ready';
     $readinessTone = $supervisor['ready'] ? 'success' : ($supervisor['availability'] === 'live' ? 'warning' : 'danger');
     $capacityLabel = $supervisor['capacity_satisfied'] ? 'Satisfied' : 'Below desired';
@@ -79,7 +82,7 @@
             @include('queen::dashboard.partials.notices')
             @include($contentView)
 
-            <footer class="footer">@if ($autoRefresh)<span data-refresh-state>Auto-refreshes every {{ $refreshSeconds }} seconds</span> · @endif{{ ($snapshot['supervisor']['source'] ?? null) === 'remote' ? 'supervisor state published through the broker' : 'local supervisor state only' }}</footer>
+            <footer class="footer">@if ($autoRefresh)<span data-refresh-state>Auto-refreshes every {{ $refreshSeconds }} seconds</span> · @endif{{ $stateSourceLabel }}</footer>
         </main>
     </div>
 </div>

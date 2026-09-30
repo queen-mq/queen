@@ -6,7 +6,8 @@ use Queen\Queen;
 
 /**
  * Copies the supervisor status document to the broker's key/value store, in
- * the chunked format described by RemoteStatusDocument.
+ * the chunked format described by RemoteStatusDocument, under this instance's
+ * own slot of the configured key.
  *
  * The local status.json stays the source of truth for this host: liveness,
  * the owner lock and every control command keep reading it. The published
@@ -58,7 +59,7 @@ final class RemoteStatusPublisher
             $operations = RemoteStatusDocument::operations(
                 $document,
                 $this->namespace,
-                $this->key,
+                RemoteStatusDocument::instanceKey($this->key, $document['instance_id'] ?? null),
                 $this->ttlSeconds,
                 RemoteStatusDocument::newWriteId(),
             );

@@ -138,6 +138,131 @@ final class RemoteStatusDocumentTest extends TestCase
         $this->assertLessThanOrEqual(RemoteStatusDocument::PREFIX_LIMIT, 2 * count($operations));
     }
 
+    public function testEveryInstanceIsDecodedFromItsOwnSlotInKeyOrder(): void
+    {
+        $php = ['instance_id' => str_repeat('b', 32), 'engine' => 'php'];
+        $rust = ['instance_id' => '000000000000000018d9e392917a928f00000001', 'engine' => 'rust'];
+
+        $rows = $this->slotRows([$php, $rust], 'orders');
+
+        $this->assertSame([$rust, $php], RemoteStatusDocument::decodeAll($rows, 'orders'));
+    }
+
+    public function testTheSlotOfEarlierReleasesIsStillDecoded(): void
+    {
+        $legacy = ['instance_id' => str_repeat('c', 32), 'state' => 'running'];
+        $current = ['instance_id' => str_repeat('d', 32), 'state' => 'running'];
+        $rows = $this->sorted([
+            ...$this->rows(RemoteStatusDocument::operations($legacy, 'ns', 'orders', 600, self::WRITE_ID)),
+            ...$this->slotRows([$current], 'orders'),
+        ]);
+
+        $this->assertSame([$legacy, $current], RemoteStatusDocument::decodeAll($rows, 'orders'));
+    }
+
+    public function testADocumentFiledUnderAnotherInstanceIsIgnored(): void
+    {
+        $document = ['instance_id' => str_repeat('a', 32)];
+        $rows = $this->rows(RemoteStatusDocument::operations(
+            $document,
+            'ns',
+            RemoteStatusDocument::instanceKey('orders', str_repeat('b', 32)),
+            600,
+            self::WRITE_ID,
+        ));
+
+        $this->assertSame([], RemoteStatusDocument::decodeAll($rows, 'orders'));
+    }
+
+    public function testOneBrokenSlotDoesNotHideTheOthers(): void
+    {
+        $rows = $this->slotRows([['instance_id' => str_repeat('a', 32)], ['instance_id' => str_repeat('b', 32)]], 'orders');
+        $rows[0]['value']['write'] = str_repeat('e', 32);
+
+        $this->assertSame([['instance_id' => str_repeat('b', 32)]], RemoteStatusDocument::decodeAll($rows, 'orders'));
+        $this->assertSame([], RemoteStatusDocument::decodeAll('not rows', 'orders'));
+    }
+
+    public function testANumericKeyIsNotMistakenForAnInstanceSlot(): void
+    {
+        $legacy = ['state' => 'running'];
+        $current = ['instance_id' => str_repeat('d', 32)];
+        $rows = $this->sorted([
+            ...$this->rows(RemoteStatusDocument::operations($legacy, 'ns', '2026', 600, self::WRITE_ID)),
+            ...$this->slotRows([$current], '2026'),
+        ]);
+
+        $this->assertSame([$legacy, $current], RemoteStatusDocument::decodeAll($rows, '2026'));
+    }
+
+    public function testOnlyDocumentKeysBelongToASlot(): void
+    {
+        $instance = str_repeat('a', 40);
+
+        $this->assertSame('orders', RemoteStatusDocument::slot('orders/head', 'orders'));
+        $this->assertSame('orders', RemoteStatusDocument::slot('orders/chunk/0000', 'orders'));
+        $this->assertSame("orders/{$instance}", RemoteStatusDocument::slot("orders/{$instance}/head", 'orders'));
+        $this->assertSame("orders/{$instance}", RemoteStatusDocument::slot("orders/{$instance}/chunk/0023", 'orders'));
+        foreach ([
+            'other/head',
+            'orders',
+            'orders/',
+            'orders/chunk/1',
+            "orders/{$instance}",
+            "orders/{$instance}/notes",
+            "orders/{$instance}/{$instance}/head",
+            'orders/NOT-AN-INSTANCE-ID/head',
+            'orders/0123abc/head',
+        ] as $key) {
+            $this->assertNull(RemoteStatusDocument::slot($key, 'orders'), $key);
+        }
+    }
+
+    public function testOnlyEngineGeneratedInstanceIdsNameASlot(): void
+    {
+        $this->assertSame(
+            'orders/0123456789abcdef0123456789abcdef',
+            RemoteStatusDocument::instanceKey('orders', '0123456789abcdef0123456789abcdef'),
+        );
+
+        foreach ([null, 42, '', 'ABCDEF0123456789', '0123456789abcde', 'head', str_repeat('a', 16) . '/x', str_repeat('a', 129)] as $invalid) {
+            try {
+                RemoteStatusDocument::instanceKey('orders', $invalid);
+                $this->fail('An invalid instance id was accepted: ' . json_encode($invalid));
+            } catch (\InvalidArgumentException) {
+                $this->addToAssertionCount(1);
+            }
+        }
+    }
+
+    /**
+     * Rows of every document published into its instance slot, in byte order.
+     *
+     * @param list<array<string, mixed>> $documents
+     * @return list<array{key: string, value: mixed}>
+     */
+    private function slotRows(array $documents, string $key): array
+    {
+        $rows = [];
+        foreach ($documents as $document) {
+            $slot = RemoteStatusDocument::instanceKey($key, $document['instance_id']);
+            array_push($rows, ...$this->rows(RemoteStatusDocument::operations($document, 'ns', $slot, 600, self::WRITE_ID)));
+        }
+
+        return $this->sorted($rows);
+    }
+
+    /**
+     * @param list<array{key: string, value: mixed}> $rows
+     * @return list<array{key: string, value: mixed}>
+     */
+    private function sorted(array $rows): array
+    {
+        usort($rows, fn (array $a, array $b): int => strcmp($a['key'], $b['key']));
+
+        return $rows;
+    }
+
     /** @return array<string, mixed> */
     private function largeDocument(int $bytes): array
     {

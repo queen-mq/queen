@@ -7,7 +7,7 @@ if [ "${QUEEN_TEST_LAUNCH_CONTEXT:-}" = "1" ]; then
     exit 0
 fi
 if [ "${1:-}" = "--version" ]; then
-    printf '%s\n' 'queen-supervisor 0.2.0'
+    printf '%s\n' 'queen-supervisor 0.3.0'
     exit 0
 fi
 printf '%s\n' 'fixture supervisor'

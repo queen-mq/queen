@@ -337,8 +337,8 @@ Gate::define('viewQueenDashboard', fn ($user) => $user?->canOperateQueues() === 
 ```
 
 Controls are POST-only, CSRF-protected and carry the exact supervisor `instance_id`, so a stale page
-cannot command a replaced master. The panel reads one local state directory; it is not a multi-host
-aggregator. Global backlog analytics and DLQ operations live in the Queen broker dashboard.
+cannot command a replaced master. Without remote status, the panel reads one local state directory.
+Global backlog analytics and DLQ operations live in the Queen broker dashboard.
 [Dashboard reference](https://queenmq.com/use/laravel/dashboard).
 
 **Supervisor on another host.** When the dashboard is served by other processes than the supervisor
@@ -347,22 +347,26 @@ status to the broker's key/value store:
 
 ```dotenv
 QUEEN_SUPERVISOR_REMOTE_STATUS=true
-QUEEN_SUPERVISOR_REMOTE_STATUS_KEY=orders-production   # unique per application and environment
+QUEEN_SUPERVISOR_REMOTE_STATUS_KEY=orders-production   # one per application and environment
 ```
 
-Set both on the supervisor host and on the web hosts. The dashboard shows the local supervisor when
-one is live, otherwise the published copy, marked as such and **read-only**: pause, continue and
-terminate stay with `php artisan queen:supervisor` on the supervisor host. Liveness comes from the
-published heartbeat alone. The document is split across `<key>/head` and `<key>/chunk/NNNN` in the
+Set both on every supervisor host and on the web hosts. Each supervisor instance publishes into its
+own slot under the key, so the dashboard lists every host or pod: a live local supervisor first,
+then each published one with its host name, and totals over the live ones. Published instances are
+**read-only**: pause, continue and terminate stay with `php artisan queen:supervisor` on their own
+host. Liveness comes from the published heartbeat alone. When two running masters own the same
+queue and consumer group, the dashboard warns: run one supervisor replica per consumer group. The
+document is split across `<key>/<instance_id>/head` and `<key>/<instance_id>/chunk/NNNN` in the
 `queen-supervisor` namespace, written in one transaction, so it never depends on the key/value value
-ceiling. Publishing is best effort and budgeted into the heartbeat; a broker outage shows the
-supervisor as stale and never stops supervision. The Rust engine publishes the same format from
-supervisor 0.2.0, which is the release this package pins.
+ceiling. A `<key>/head` document from an earlier release is still read. Publishing is best effort
+and budgeted into the heartbeat; a broker outage shows the supervisor as stale and never stops
+supervision. The Rust engine publishes the same format from supervisor 0.3.0, which is the release
+this package pins; 0.2.0 wrote the single `<key>/head` slot.
 
 | Variable | Default | |
 | --- | --- | --- |
 | `QUEEN_SUPERVISOR_REMOTE_STATUS` | `false` | publish the status document |
-| `QUEEN_SUPERVISOR_REMOTE_STATUS_KEY` | — | required when enabled |
+| `QUEEN_SUPERVISOR_REMOTE_STATUS_KEY` | — | required when enabled; shared by every supervisor of the application |
 | `QUEEN_SUPERVISOR_REMOTE_STATUS_CONNECTION` | `queen` | Queen connection whose broker and credentials are used |
 | `QUEEN_SUPERVISOR_REMOTE_STATUS_NAMESPACE` | `queen-supervisor` | key/value namespace |
 | `QUEEN_SUPERVISOR_REMOTE_STATUS_INTERVAL` | `poll_interval` | seconds between publishes; a state change publishes at once |

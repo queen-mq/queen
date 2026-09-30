@@ -304,6 +304,7 @@ struct TelemetryScope<'a> {
 struct State {
     directory: PathBuf,
     instance_id: String,
+    hostname: Option<String>,
     _lock: File,
     #[cfg(unix)]
     directory_device: u64,
@@ -1552,6 +1553,7 @@ impl State {
         Ok(Self {
             directory,
             instance_id,
+            hostname: hostname(),
             _lock: lock,
             #[cfg(unix)]
             directory_device: metadata.dev(),
@@ -1796,6 +1798,7 @@ impl State {
             "engine": engine,
             "state": state,
             "pid": std::process::id(),
+            "hostname": &self.hostname,
             "instance_id": &self.instance_id,
             "updated_at": iso8601_from_epoch(updated_at_epoch),
             "updated_at_epoch": updated_at_epoch,
@@ -1912,6 +1915,22 @@ fn iso8601_from_epoch(timestamp: u64) -> String {
     year += i64::from(month <= 2);
 
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+/// Tells apart the hosts or pods that publish to one remote status key.
+fn hostname() -> Option<String> {
+    let mut buffer = [0 as libc::c_char; 256];
+    // SAFETY: the pointer and length describe `buffer`, which outlives the call.
+    if unsafe { libc::gethostname(buffer.as_mut_ptr(), buffer.len()) } != 0 {
+        return None;
+    }
+    // POSIX leaves a truncated name unterminated; the scan stops at the buffer end.
+    let name: Vec<u8> = buffer
+        .iter()
+        .take_while(|&&byte| byte != 0)
+        .map(|&byte| byte as u8)
+        .collect();
+    String::from_utf8(name).ok().filter(|name| !name.is_empty())
 }
 
 fn new_instance_id() -> String {
@@ -4457,6 +4476,9 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(directory.join("status.json")).unwrap())
                 .unwrap();
         assert_eq!(status["instance_id"], state.instance_id);
+        // The dashboard tells published instances apart by host.
+        let hostname = status["hostname"].as_str().unwrap();
+        assert!(!hostname.is_empty() && !hostname.contains('\0'));
         assert_eq!(status["schema"], STATUS_SCHEMA);
         assert_eq!(status["paused"], false);
         assert_eq!(status["stopping"], false);

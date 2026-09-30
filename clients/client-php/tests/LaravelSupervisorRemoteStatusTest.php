@@ -13,6 +13,7 @@ use Queen\Laravel\Supervisor\SupervisorConfiguration;
 use Queen\Queen;
 use Queen\Tests\Support\PlanHandler;
 use ReflectionMethod;
+use ReflectionProperty;
 use Symfony\Component\Console\Output\BufferedOutput;
 
 final class LaravelSupervisorRemoteStatusTest extends TestCase
@@ -178,23 +179,32 @@ final class LaravelSupervisorRemoteStatusTest extends TestCase
             },
         );
         $writeStatus = new ReflectionMethod(PhpSupervisor::class, 'writeStatus');
+        // run() owns the generation before it writes any status.
+        $lock = (new ReflectionProperty(PhpSupervisor::class, 'state'))->getValue($supervisor)->acquireLock();
 
-        $writeStatus->invoke($supervisor, 'running');
-        $writeStatus->invoke($supervisor, 'running');
-        $writeStatus->invoke($supervisor, 'paused');
+        try {
+            $writeStatus->invoke($supervisor, 'running');
+            $writeStatus->invoke($supervisor, 'running');
+            $writeStatus->invoke($supervisor, 'paused');
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
 
         $this->assertSame(1, $clients['remote_status']['retryAttempts']);
         $this->assertSame('write-token', $clients['remote_status']['bearerToken']);
         $this->assertSame(2, $handler->count());
         $operations = json_decode((string) $handler->requests[1]->getBody(), true)['operations'];
+        $local = json_decode((string) file_get_contents($this->stateDirectory . '/status.json'), true);
         $published = RemoteStatusDocument::decode(
             array_map(fn (array $op): array => ['key' => $op['key'], 'value' => $op['value']], $operations),
-            'orders',
+            RemoteStatusDocument::instanceKey('orders', $local['instance_id']),
         );
-        $local = json_decode((string) file_get_contents($this->stateDirectory . '/status.json'), true);
         unset($local['pools']);
         $this->assertSame($local, $published);
         $this->assertSame('paused', $published['state']);
+        // The dashboard tells published instances apart by host.
+        $this->assertSame(gethostname(), $published['hostname']);
     }
 
     /**

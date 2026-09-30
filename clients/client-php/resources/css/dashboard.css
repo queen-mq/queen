@@ -266,6 +266,11 @@ code {
     color: var(--muted);
     font-size: 13px;
 }
+.instance-host {
+    color: var(--muted);
+    font-weight: 500;
+    overflow-wrap: anywhere;
+}
 .header-meta {
     color: var(--muted);
     font-size: 13px;

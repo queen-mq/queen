@@ -4,6 +4,20 @@
 @if ($controlError)
     <div class="notice error" role="alert">{{ $controlError }}</div>
 @endif
+@if ($snapshot['shared_queues'] !== [])
+    @php($sharedQueue = $snapshot['shared_queues'][0])
+    @php($otherSharedQueues = count($snapshot['shared_queues']) - 1)
+    <div class="availability-notice" role="status">
+        <span class="state-mark" aria-hidden="true"></span>
+        <div>
+            <strong>{{ $sharedQueue['instances'] }} running supervisors share queue {{ $sharedQueue['queue'] }} of consumer group {{ $sharedQueue['consumer_group'] }}</strong>
+            <span>
+                Each master sizes its workers from the whole backlog, so together they can exceed max_processes. Run one supervisor replica per consumer group.
+                @if ($otherSharedQueues > 0) {{ $otherSharedQueues }} other {{ $otherSharedQueues === 1 ? 'queue is' : 'queues are' }} shared too. @endif
+            </span>
+        </div>
+    </div>
+@endif
 @if ($supervisor['availability'] !== 'live')
     <div class="availability-notice" role="status">
         <span class="state-mark" aria-hidden="true"></span>

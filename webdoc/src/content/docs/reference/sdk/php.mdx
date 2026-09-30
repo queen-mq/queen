@@ -62,6 +62,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-29 (through 8ca3d2a9): the failed-job detail read is bounded in SQL and shows max tries instead of attempts; nothing this reference describes changes.
 # sourceOfTruth re-read 2026-09-29 (through f94b76ec + this patch): either engine publishes remote status and the package pins supervisor 0.2.0; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through 1ef4bb47 + this patch): thread-safe PHP support in the installer and launcher changes no setting or default listed here; page matches the code.
+# sourceOfTruth re-read 2026-09-30 (through 022337fb + this patch): remote status is published per supervisor instance, the package pins supervisor 0.3.0 and the panel lists every instance; no setting or default changes.
 ---
 
 The Composer package is `queen-mq/php-client`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
@@ -718,7 +719,8 @@ The package also provides a disabled-by-default local panel. It reads bounded st
 local master and protects HTML, JSON and controls with the same `viewQueenDashboard` Gate. In
 production, enabling the route without defining an allowing Gate still returns `403`. With
 `supervisor.remote_status` enabled, either engine also publishes that state to the broker's
-key/value store, and a panel on another host shows it read-only. Failed jobs are paged with a
+key/value store, one slot per supervisor instance, and a panel on another host lists every instance
+read-only. Failed jobs are paged with a
 keyset cursor, and each has a detail page with its exception and stack trace, never its
 payload.
 
