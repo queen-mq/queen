@@ -28,6 +28,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-29 (through 8ca3d2a9): the detail page still shows the exception; the failed-jobs row holds.
 # sourceOfTruth re-read 2026-09-29 (through e54bb5b3): the panel now charts jobs completed and failed per queue from the broker's counters; the richer-dashboard section says so and keeps per-job-class metrics as a Horizon advantage.
 # sourceOfTruth re-read 2026-09-29 (through f94b76ec + this patch): remote status is no longer PHP-only; page matches the code.
+# sourceOfTruth re-read 2026-09-30 (through 022337fb + this patch): the panel lists every published supervisor instance and warns about two masters on one consumer group; the dashboard and multi-host rows say so.
 ---
 
 Queen is not a drop-in reimplementation of Horizon. Both can supervise Laravel workers, but they
@@ -66,7 +67,7 @@ implementation and tests named in this page's frontmatter.
 | Master runtime | PHP with Laravel/Horizon loaded | PHP reference engine or optimized Rust engine |
 | Crash-loop control | Process restart behavior managed by Horizon and the outer monitor | Capped restart backoff plus an open/one-probe circuit breaker in both engines |
 | Multiple master hosts | Master records and supervisor state are shared through Horizon's Redis repository | Not safe yet; one master per application and consumer group |
-| Dashboard | Mature Horizon dashboard over its Redis state | Local supervisor panel, which can also show a PHP supervisor on another host read-only, plus a separate global Queen broker dashboard |
+| Dashboard | Mature Horizon dashboard over its Redis state | Local supervisor panel, which can also list supervisors on other hosts read-only, plus a separate global Queen broker dashboard |
 | Retained job and queue metrics | Snapshot command and retained graphs | Live bounded supervisor state; broker analytics are separate |
 | Job tags and silencing | Automatic/manual tags and silenced jobs | Not implemented in the Laravel supervisor panel |
 | Long-wait notifications | Mail, Slack and SMS routes with per-queue thresholds | No package-native wait alert routing yet |
@@ -139,7 +140,8 @@ Horizon stores live master and supervisor records in its
 [Redis repository](https://github.com/laravel/horizon/blob/5.x/src/Repositories/RedisMasterSupervisorRepository.php).
 Queen's filesystem lock prevents a second local owner only; it does not elect one leader across
 hosts. A Queen deployment must run one master replica for an application and consumer group, with
-no rolling-surge overlap.
+no rolling-surge overlap. The panel can list supervisors on several hosts through remote status, and
+warns when two of them run the same queue for one consumer group, but it does not coordinate them.
 
 ### Fewer release artifacts
 

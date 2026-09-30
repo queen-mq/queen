@@ -32,6 +32,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-29 (through e54bb5b3): SupervisorConfiguration gains readOnlyConnection for the dashboard and changes no supervisor setting; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through f94b76ec + this patch): the Rust engine now publishes remote status and --for-engine exports it; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through 1ef4bb47 + this patch): the installer and launcher now run on thread-safe PHP; the requirement is documented; page matches the code.
+# sourceOfTruth re-read 2026-09-30 (through 022337fb + this patch): both engines record the host name in status and publish into a per-instance slot; the package pins supervisor 0.3.0; the dashboard warns about two masters on one consumer group; page matches the code.
 ---
 
 The Queen supervisor is a **local control plane**. It starts ordinary Laravel
@@ -47,7 +48,8 @@ Both engines consume the same resolved configuration:
 
 Switching engines does not change the pool configuration, CLI controls or dashboard protocol. Both
 engines can also [publish their status](/use/laravel/dashboard#a-supervisor-on-another-host) for a
-dashboard on another host; the Rust engine does so from supervisor 0.2.0.
+dashboard on another host; the Rust engine does so from supervisor 0.2.0, and into its own
+instance slot from 0.3.0, which the package pins.
 
 ## Requirements
 
@@ -245,7 +247,8 @@ workers stays ready while a replacement is in backoff or probe; that degraded ci
 visible in pool health. `status --check-liveness` checks only the master owner and heartbeat, which
 keeps liveness separate from serving readiness. Per-pool `capacity_satisfied` exposes ordinary
 scale-up lag without making readiness flap during a healthy rebalance. Controls are fenced to the
-exact `instance_id`; a stale command cannot apply to a replacement master.
+exact `instance_id`; a stale command cannot apply to a replacement master. Status also records the
+host name, which is how the dashboard tells published instances apart.
 
 Use `status --check-capacity` for a stricter processing-health gate that requires
 `running >= desired` and a healthy restart circuit for every pool. This check is intentionally
@@ -279,7 +282,9 @@ Before placing a Queen supervisor in production:
 Run exactly one Queen supervisor master for one application and consumer group. The filesystem
 lock excludes a second owner on the same host, but Queen has no distributed fenced leader lease for
 supervisors yet. Two masters on different hosts can both observe the same backlog and scale to the
-maximum. In Kubernetes use one replica with no surge overlap, such as a `Recreate` strategy.
+maximum. In Kubernetes use one replica with no surge overlap, such as a `Recreate` strategy. With
+remote status enabled, the dashboard warns when two running masters own the same queue and consumer
+group.
 </Aside>
 
 The singleton limit applies to the master, not to its worker count. Multiple Queen broker endpoints
