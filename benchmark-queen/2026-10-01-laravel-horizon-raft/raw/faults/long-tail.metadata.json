@@ -1,0 +1,72 @@
+{
+  "campaign_id": "fault-20260930T230940Z-1a9680102f-90429",
+  "created_at": "2026-09-30T23:09:40.240893Z",
+  "git": {
+    "branch": "bench/horizon-vs-queen-2026-09-30",
+    "commit": "1a9680102ff68939fdeee6c52aa0dac45758c3ae",
+    "dirty": false
+  },
+  "host": {
+    "machine": "arm64",
+    "platform": "macOS-26.5-arm64-arm-64bit"
+  },
+  "known_limits": [
+    "The fixture disables durable failed-job storage; failure signals are therefore log-derived.",
+    "The worker writes completion at the end of handle(), not a start event for its next job. A qualified worker plus backlog, a long sleep, and a short injection delay are strong but not nanosecond-exact proof that SIGKILL landed inside user code.",
+    "This smoke test measures one crash per fresh backend; estimate probabilities with repeated runs.",
+    "The lease guard covers the configured sleep floor only; CPU work and framework overhead still require additional retry_after margin.",
+    "allow_lease_risk bypasses only this harness sleep-floor guard. Current Queen supervisors always require lease renewal when prefetch is greater than one.",
+    "The effect ledger is a fixture-local idempotent transactional witness. It is not atomic with the queue ACK or an arbitrary external side effect and cannot establish exactly-once delivery."
+  ],
+  "method": {
+    "delivery_semantics": "at-least-once",
+    "effect_witness": "fixture-local idempotent SQLite effects, durable before completion and queue ACK; conservation and duplicate-side-effect gates are reported separately",
+    "fault": "SIGKILL exactly one active queue worker",
+    "horizon_worker_command": "artisan horizon:work",
+    "queen_worker_command": "artisan queue:work",
+    "renewal_helper_command": "LeaseRenewalWorker::main",
+    "sterilized_environment": {
+      "BENCH_FAILED_DRIVER": "null",
+      "BENCH_LEASE_RENEWAL": "true",
+      "BENCH_LEASE_RENEWAL_INTERVAL": "",
+      "BENCH_QUEUES": ""
+    },
+    "strict_duplicate_observation": "reported separately from at-least-once recovery",
+    "target_qualification": "worker PID must have written a completion for this run; injection follows after kill_delay_ms while a long-job backlog remains"
+  },
+  "qualification": "diagnostic_smoke",
+  "schema": "queen.laravel-supervisors.fault-recovery/v1",
+  "settings": {
+    "allow_lease_risk": true,
+    "bench_queues_csv": "",
+    "build_images": false,
+    "completion_timeout_seconds": 300,
+    "cpu_iterations": 0,
+    "dispatch_mode": "single",
+    "dry_run": false,
+    "engines": [
+      "queen-rust"
+    ],
+    "failed_driver": "null",
+    "fault_scenario": "worker-sigkill",
+    "job_tries": 2,
+    "jobs": 16,
+    "kill_delay_ms": 100,
+    "lease_renewal": true,
+    "ledger_mode": "durable",
+    "profile": "fixed",
+    "queen_ack_async": true,
+    "queen_ack_batch": 1,
+    "queen_lease_service": true,
+    "queen_prefetch": 4,
+    "queen_storage": "raft",
+    "queues": [
+      "benchmark"
+    ],
+    "respawn_timeout_seconds": 30,
+    "retry_after_seconds": 30,
+    "sleep_ms": 8000,
+    "worker_timeout_seconds": 10,
+    "workers": 2
+  }
+}
