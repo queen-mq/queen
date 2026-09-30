@@ -45,6 +45,10 @@ return [
             storage_path('queen-supervisor'),
         ),
         'telemetry_ttl' => 300,
+        // Off unless a campaign sets them: replicas sharing one target, and
+        // workers forked from one booted Laravel.
+        'coordination' => ['enabled' => (bool) env('QUEEN_SUPERVISOR_COORDINATION', false)],
+        'prefork' => (bool) env('QUEEN_SUPERVISOR_PREFORK', false),
         'supervisors' => [
             'bench' => [
                 'connection' => $benchmark['connection'],
@@ -60,6 +64,7 @@ return [
                 'default_runtime_seconds' => $benchmark['default_runtime_seconds'],
                 'balance_cooldown' => $benchmark['balance_cooldown'],
                 'balance_max_shift' => $benchmark['balance_max_shift'],
+                'fast_scale_up' => (bool) env('QUEEN_SUPERVISOR_FAST_SCALE_UP', false),
                 'scale_down_delay' => $benchmark['scale_down_delay'],
                 'restart_backoff' => 1,
                 'restart_backoff_max' => 30,
