@@ -384,8 +384,14 @@ triggers on changes to `server/src/**`, `server/sql/**`, the proxy's router, con
 modules, and every client/example tree scanned by the snippet generator, not only on changes
 under `webdoc/**`.
 
-The workflow builds and gates; it does not deploy. Deployment is Cloudflare Pages against
-`dist/`.
+On `master` the same workflow deploys: when every gate passed, its `deploy` job publishes the
+`dist/` that the build produced to the Cloudflare Worker `queen` with `wrangler deploy`
+(`webdoc/wrangler.jsonc`). The Worker serves static assets only and declares no routes, so the
+`queenmq.com` binding set in the Cloudflare dashboard stays as it is. A pull request never deploys,
+and a manual run of the workflow on `master` deploys again. The job needs the repository variable
+`CLOUDFLARE_ACCOUNT_ID` and the secret `CLOUDFLARE_API_TOKEN`, a token that may edit Workers
+scripts; without them it is skipped. To publish by hand, run `pnpm build` and then
+`npx wrangler@4.145.0 deploy` from `webdoc/`.
 
 ## Adding a page
 
