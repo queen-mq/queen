@@ -9,6 +9,11 @@ name: docs
 # same reason: every snippet on the tutorial and full-example pages is extracted
 # verbatim from a program under it, so editing a program without rebuilding the
 # partials is exactly the drift gen:check exists to catch.
+#
+# On master (a push, or a manual run) the deploy job then publishes the dist/
+# this build produced and checked to queenmq.com. It stays off until the
+# repository variable CLOUDFLARE_ACCOUNT_ID and the secret CLOUDFLARE_API_TOKEN
+# exist, so master is not red while Cloudflare access is being set up.
 on:
   push:
     paths:
@@ -54,9 +59,11 @@ on:
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
+# A newer push replaces an older run of the same branch, except on master,
+# where the older run may be deploying: master runs queue instead.
 concurrency:
   group: docs-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
   build:
@@ -130,3 +137,66 @@ jobs:
 
       - name: Source-of-truth freshness
         run: pnpm check:sourceoftruth
+
+      # Only a build of master that passed every gate above is published.
+      - name: Keep the site for the deploy
+        if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: webdoc-dist
+          path: webdoc/dist
+          retention-days: 3
+          if-no-files-found: error
+
+  deploy:
+    needs: build
+    if: >-
+      github.ref == 'refs/heads/master'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && vars.CLOUDFLARE_ACCOUNT_ID != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    environment:
+      name: docs
+      url: https://queenmq.com
+    # One deploy at a time, whichever run it comes from.
+    concurrency:
+      group: docs-deploy
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: webdoc
+    steps:
+      # wrangler.jsonc names the Worker and the assets directory; the site
+      # itself comes from the checked build, not from a second build here.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: webdoc/wrangler.jsonc
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: webdoc-dist
+          path: webdoc/dist
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # The Worker `queen` serves static assets only; routes are not declared,
+      # so the queenmq.com binding set in the dashboard is left untouched.
+      - name: Deploy to Cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4.145.0 deploy
+      - name: The site answers
+        run: |
+          for path in / /use/laravel/supervisors/; do
+            for _ in 1 2 3 4 5; do
+              code=$(curl -s -o /dev/null -w '%{http_code}' "https://queenmq.com${path}")
+              [ "$code" = 200 ] && break
+              sleep 5
+            done
+            echo "https://queenmq.com${path} -> ${code}"
+            test "$code" = 200
+          done
