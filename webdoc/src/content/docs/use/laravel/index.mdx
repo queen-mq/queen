@@ -126,12 +126,30 @@ QUEEN_ACK_BATCH=1
 QUEEN_LEASE_RENEWAL=true
 ```
 
-Enable lease renewal even with `prefetch=1` when the longest runtime cannot be bounded safely. Lease
-renewal starts a small PHP helper beside each worker. It extends the active lease and fences the
-worker if renewal can no longer finish safely. An exact-PID `SIGCHLD` watchdog also kills the
-owning worker if that helper disappears while a lease is active. This Unix CLI path requires
-PCNTL/POSIX support, and application code must not replace Queen's signal handler. Renewal cannot
-make external side effects exactly once, so jobs must remain idempotent.
+Enable lease renewal even with `prefetch=1` when the longest runtime cannot be bounded safely.
+Renewal extends the active lease and fences the worker if renewal can no longer finish safely. Under
+the [Rust supervisor on Linux](/use/laravel/supervisors#lease-renewal-in-the-master), the master
+renews the leases of all its workers. Elsewhere, lease renewal starts a small PHP helper beside each
+worker, and an exact-PID `SIGCHLD` watchdog kills the owning worker if that helper disappears while
+a lease is active. This Unix CLI path requires PCNTL/POSIX support, and application code must not
+replace Queen's signal handler. Renewal cannot make external side effects exactly once, so jobs
+must remain idempotent.
+
+### Asynchronous acknowledgements
+
+With `ack_async`, a worker sends the acknowledgement of a completed job and starts the next job at
+once. The broker commits the acknowledgement while the next job runs, and the worker reads the
+answer when that job ends or before its next pop.
+
+```dotenv
+QUEEN_ACK_ASYNC=true
+```
+
+The cost is a later failure report. When the broker refuses an acknowledgement, the job after it
+has already run on the same lease. The worker reports the refusal through Laravel's exception
+handler, abandons the lease and discards the rest of its prefetched jobs, and the refused job is
+delivered again after its lease expires. Delivery stays at-least-once. `ack_async` requires
+`ack_batch=1`, because a batch already defers its acknowledgements.
 
 ## What changes from another Laravel connection
 

@@ -155,7 +155,9 @@ The important inequalities are enforced at startup:
 - `shutdown_grace` must be longer than every pool's `timeout`;
 - `max_processes` must cover every queue in `auto` mode;
 - aggregate pool maxima must fit `process_limit`; a renewal-enabled worker reserves two child
-  process slots, one for Artisan and one for its lazy helper;
+  process slots, one for Artisan and one for its lazy helper. The second slot stays reserved when
+  the [master renews the leases](#lease-renewal-in-the-master), because a worker the master refuses
+  starts a helper;
 - control TTL and heartbeat timeout must exceed the bounded reconciliation loop. With
   `remote_status` enabled, that loop also includes one request timeout per broker endpoint for the
   publish, and the publish interval must be shorter than the heartbeat timeout. With `coordination`
@@ -424,6 +426,30 @@ again in every process. With prefork, the fork server preloads once and every wo
 without prefork, every spawned worker preloads on its own. Preload needs `opcache.enable_cli=1` and,
 when PHP runs as root, `opcache.preload_user`. Preloaded code changes only when the process
 restarts, which a deploy already does through `terminate`. Preload was not part of the benchmark.
+
+## Lease renewal in the master
+
+On Linux the Rust supervisor renews the leases of its workers itself, so no worker starts a PHP
+lease helper. The master listens on `lease.sock` in its private state directory and exports the
+path to every worker of a pool with `lease_renewal` as `QUEEN_SUPERVISOR_LEASE_SOCKET`. Each worker
+connects once and sends its client settings and renewal timing. One master thread per worker then
+runs the helper's algorithm with the same safety rules:
+
+- a renewal must be able to finish before the lease deadline less the safety margin;
+- when it cannot, the master sends `SIGTERM` to the worker, then `SIGKILL` after the kill grace;
+- when the connection breaks while a lease is held, the master kills the worker at once.
+
+The master accepts only processes of its own user, identifies each worker from the kernel's socket
+credentials, and signals it through a pidfd, so a recycled PID never receives a signal. Every
+worker still dies with the master, as before.
+
+A worker that cannot reach the master, or that the master refuses, logs the reason and starts its
+own helper, so renewal never stops. The PHP engine and macOS always use helpers. To use helpers
+under the Rust supervisor too, set this variable in the master's environment:
+
+```dotenv
+QUEEN_SUPERVISOR_LEASE_SERVICE=false
+```
 
 ## Production checks
 

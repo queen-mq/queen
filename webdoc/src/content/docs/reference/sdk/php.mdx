@@ -478,6 +478,7 @@ Publish the config with the `queen-config` tag; it lands at `config/queen.php`. 
 | `block_for` | `QUEEN_BLOCK_FOR` | `0` seconds |
 | `prefetch` | `QUEEN_PREFETCH` | `1` job |
 | `ack_batch` | `QUEEN_ACK_BATCH` | `1` job (cannot exceed `prefetch`) |
+| `ack_async` | `QUEEN_ACK_ASYNC` | `false` (requires `ack_batch=1`) |
 | `lease_renewal` | `QUEEN_LEASE_RENEWAL` | `false` |
 | `lease_renewal_interval` | `QUEEN_LEASE_RENEWAL_INTERVAL` | derived from lease timing |
 | `lease_renewal_timeout` | `QUEEN_LEASE_RENEWAL_TIMEOUT` | `5` seconds |
@@ -576,9 +577,11 @@ broker timeout and the HTTP client adds five seconds of transport slack.
 The default `prefetch=1` and `ack_batch=1` keep the per-job synchronous ACK
 boundary. Short, idempotent workloads can opt into a larger prefetch; the
 connector then requires `lease_renewal=true` on every worker path. One pop feeds
-the standard sequential Laravel worker, while the helper keeps the active job,
+the standard sequential Laravel worker, while the renewer keeps the active job,
 local tail and deferred acknowledgements leased. This remains at-least-once
-delivery and widens the crash duplicate window. An exact-PID `SIGCHLD` watchdog
+delivery and widens the crash duplicate window. The renewer is the Rust
+supervisor master on Linux, which exports `QUEEN_SUPERVISOR_LEASE_SOCKET` to its
+workers, and otherwise one PHP helper per worker. An exact-PID `SIGCHLD` watchdog
 fences the worker if its helper disappears while a lease is active. The renewed
 profile requires Unix CLI PHP with PCNTL/POSIX support; application code must
 not replace Queen's signal handler. Leave prefetch at `1` for unsupported
