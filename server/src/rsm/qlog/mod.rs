@@ -1532,6 +1532,20 @@ impl QLog {
         s
     }
 
+    /// Pin the located file while its index is protected. Committed records
+    /// are immutable; the fd keeps the old inode readable if retention unlinks
+    /// or replaces a sealed file after this plan leaves the queue's lock.
+    fn owned_read_plan(&self, pid: u64, offset: u64) -> io::Result<Option<OwnedReadPlan>> {
+        let Some(loc) = self.locate(pid, offset) else {
+            return Ok(None);
+        };
+        Ok(Some(OwnedReadPlan {
+            file: self.cache.file(loc.file_id)?,
+            cache: self.cache.clone(),
+            loc,
+        }))
+    }
+
     pub fn read_owned(&self, pid: u64, offset: u64) -> io::Result<Option<OwnedRecord>> {
         match self.locate(pid, offset) {
             Some(loc) => Ok(Some(self.read_located(&loc)?)),
@@ -2620,6 +2634,8 @@ fn read_located_in(f: &File, dir: &Path, loc: &Located) -> io::Result<OwnedRecor
         ));
     }
     let mut buf = vec![0u8; loc.len as usize];
+    #[cfg(test)]
+    read_plan_tests::probe_payload_read();
     f.read_exact_at(&mut buf, loc.offset)?;
     let rr = record::decode(&buf).map_err(io::Error::from)?;
     if rr.header.record_len() != loc.len as usize {
@@ -2909,6 +2925,21 @@ enum Slot {
     Hit(Arc<[u8]>),
     /// To `pread` from file `.0` through the fd resolved under the read guard.
     Miss(u64, Option<Arc<File>>),
+}
+
+/// A payload read whose index lookup and fd acquisition are complete. Finish
+/// it outside the queue log lock: pread, checksum and decompression must not
+/// block the writer from publishing a new append's index.
+struct OwnedReadPlan {
+    file: Arc<File>,
+    cache: Arc<ReadCache>,
+    loc: Located,
+}
+
+impl OwnedReadPlan {
+    fn finish(self) -> io::Result<OwnedRecord> {
+        read_located_in(&self.file, &self.cache.dir, &self.loc)
+    }
 }
 
 /// PLAN_RAFT_DRAIN_FIX P3: a committed-hashes read split in two. The PLAN (the
@@ -3293,3 +3324,6 @@ fn zero_fill(f: &File, from: u64, to: u64) -> io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod read_plan_tests;

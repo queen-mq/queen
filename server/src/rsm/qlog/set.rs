@@ -2264,6 +2264,10 @@ impl QLogReader {
     /// The whole record holding `(pid, offset)` — the pop payload read. `None`
     /// when the queue is unknown or no live file holds the offset (a gap the pop
     /// render skips, exactly as a segment `read_at_within` miss).
+    /// Callers select committed offsets. The index lookup pins the file under
+    /// the log lock; payload I/O, verification and decompression run after it
+    /// is released. A pinned file survives retention unlink/rename, but does
+    /// not protect an uncommitted suffix from Raft truncation.
     pub fn read_owned(
         &self,
         queue_id: u64,
@@ -2271,7 +2275,13 @@ impl QLogReader {
         offset: u64,
     ) -> io::Result<Option<OwnedRecord>> {
         match self.log_for(queue_id, pid) {
-            Some(l) => l.read().expect("qlog poisoned").read_owned(pid, offset),
+            Some(l) => {
+                let plan = l
+                    .read()
+                    .expect("qlog poisoned")
+                    .owned_read_plan(pid, offset)?;
+                plan.map(|p| p.finish()).transpose()
+            }
             None => Ok(None),
         }
     }
