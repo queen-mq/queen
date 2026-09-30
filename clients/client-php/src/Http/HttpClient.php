@@ -14,7 +14,12 @@ use UnexpectedValueException;
 
 class HttpClient
 {
-    private const DETACHED_POLL_MICROS = 200;
+    /**
+     * Waiting for a detached answer polls, since a tick must not block: from
+     * 50 µs, doubling to 1 ms, so a long wait costs little CPU.
+     */
+    private const DETACHED_POLL_MIN_MICROS = 50;
+    private const DETACHED_POLL_MAX_MICROS = 1_000;
 
     private ?string $baseUrl;
     private ?LoadBalancer $loadBalancer;
@@ -183,6 +188,7 @@ class HttpClient
         if ($this->detachedHandler !== null) {
             $timeoutMillis ??= $this->timeoutMillis;
             $deadline = hrtime(true) + $timeoutMillis * 1_000_000;
+            $pause = self::DETACHED_POLL_MIN_MICROS;
             while (true) {
                 $this->detachedHandler->tick();
                 if ($promise->getState() !== PromiseInterface::PENDING) {
@@ -192,7 +198,8 @@ class HttpClient
                     $promise->cancel();
                     throw new \RuntimeException("Queen did not answer a detached request within {$timeoutMillis} ms.");
                 }
-                usleep(self::DETACHED_POLL_MICROS);
+                usleep($pause);
+                $pause = min($pause * 2, self::DETACHED_POLL_MAX_MICROS);
             }
         }
 
