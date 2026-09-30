@@ -49,6 +49,7 @@ return [
         // workers forked from one booted Laravel.
         'coordination' => ['enabled' => (bool) env('QUEEN_SUPERVISOR_COORDINATION', false)],
         'prefork' => (bool) env('QUEEN_SUPERVISOR_PREFORK', false),
+        'event_driven' => (bool) env('QUEEN_SUPERVISOR_EVENT_DRIVEN', false),
         'supervisors' => [
             'bench' => [
                 'connection' => $benchmark['connection'],

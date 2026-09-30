@@ -219,6 +219,14 @@ impl<'a> Coordinator<'a> {
         self.position_at(Instant::now(), scope)
     }
 
+    /// Whether a current view of the scope exists; without one, `position`
+    /// answers as if this replica were alone.
+    pub(crate) fn has_view(&self, scope: &str) -> bool {
+        self.views.get(scope).is_some_and(|(_, at)| {
+            Instant::now().saturating_duration_since(*at) <= Duration::from_secs(self.config.ttl)
+        })
+    }
+
     fn position_at(&self, now: Instant, scope: &str) -> (usize, usize) {
         match self.views.get(scope) {
             Some((members, at))

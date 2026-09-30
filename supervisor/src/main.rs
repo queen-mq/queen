@@ -1,6 +1,7 @@
 mod coordination;
 mod prefork;
 mod remote_status;
+mod watch;
 
 use coordination::{CoordinationConfig, Coordinator};
 use prefork::{ForkServer, WorkerProcess};
@@ -83,9 +84,12 @@ struct Config {
     // Emitted by Laravel only when enabled.
     #[serde(default)]
     prefork: bool,
+    // Emitted by Laravel only when enabled, so an absent key means disabled.
+    #[serde(default)]
+    event_driven: Option<watch::EventDrivenConfig>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
 struct QueenConfig {
     #[serde(default)]
@@ -453,6 +457,16 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     let mut replica_counts = current_replica_counts(coordinator.as_ref(), &coordinated_scopes);
+    let wakes = match config.event_driven.as_ref() {
+        Some(settings) => Some(watch::start(&config, settings, Arc::clone(&running))?),
+        None => None,
+    };
+    // Pools still climbing towards a higher target after an event-driven
+    // reconcile was held back by its step budget.
+    let mut climbing: HashSet<String> = HashSet::new();
+    // Pools a watched queue woke, kept until they are evaluated.
+    let mut woken: HashSet<String> = HashSet::new();
+    let mut last_evaluated: HashMap<String, Instant> = HashMap::new();
 
     eprintln!(
         "queen-supervisor started ({} pool definitions)",
@@ -555,12 +569,38 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         );
         reap_draining(&config, &mut draining, &mut pending_telemetry_cleanup);
         observe_stable_workers(&config, &mut pools, &mut restarts);
-        if last_poll.elapsed() >= Duration::from_secs(config.poll_interval) {
-            if let (Some(coordinator), false) = (coordinator.as_mut(), paused) {
-                coordinator.heartbeat(&client, &scope_list(&coordinated_scopes));
+        let poll_due = last_poll.elapsed() >= Duration::from_secs(config.poll_interval);
+        let event_due = match (&wakes, paused) {
+            (Some(wakes), false) => {
+                woken.extend(woken_pools(&config, &wakes.take()));
+                // A pool at its maximum has nothing to gain from a wake.
+                woken.retain(|name| has_room(&config, &pools, name));
+                event_due_pools(
+                    &config,
+                    &pools,
+                    &woken,
+                    &climbing,
+                    &last_evaluated,
+                    Instant::now(),
+                )
             }
-            if !paused {
-                replica_counts = current_replica_counts(coordinator.as_ref(), &coordinated_scopes);
+            (Some(wakes), true) => {
+                wakes.take();
+                woken.clear();
+                climbing.clear();
+                HashSet::new()
+            }
+            (None, _) => HashSet::new(),
+        };
+        if poll_due || !event_due.is_empty() {
+            if poll_due {
+                if let (Some(coordinator), false) = (coordinator.as_mut(), paused) {
+                    coordinator.heartbeat(&client, &scope_list(&coordinated_scopes));
+                }
+                if !paused {
+                    replica_counts =
+                        current_replica_counts(coordinator.as_ref(), &coordinated_scopes);
+                }
             }
             let mut names: Vec<_> = config.supervisors.keys().cloned().collect();
             names.sort_unstable();
@@ -568,6 +608,9 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
             for name in names {
                 if !running.load(Ordering::SeqCst) {
                     break;
+                }
+                if !poll_due && !event_due.contains(&name) {
+                    continue;
                 }
                 let options = &config.supervisors[&name];
                 let ready = last_reconcile
@@ -579,9 +622,26 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                     depths_available.insert(name.clone(), false);
                     continue;
                 }
-                if !ready {
+                // Woken or climbing inside the cooldown: this evaluation may
+                // only add workers. Anything else waits for the cooldown.
+                let grow_only = !ready && event_due.contains(&name);
+                if !ready && !grow_only {
                     continue;
                 }
+                if !poll_due {
+                    // A replica that just resumed has no view of the others
+                    // and would size itself alone: wait for the poll's
+                    // heartbeat.
+                    if let (Some(coordinator), Some(scope)) =
+                        (coordinator.as_ref(), coordinated_scopes.get(&name))
+                    {
+                        if !coordinator.has_view(scope) {
+                            continue;
+                        }
+                    }
+                }
+                woken.remove(&name);
+                last_evaluated.insert(name.clone(), Instant::now());
 
                 // Scan independently of broker health so a short-lived
                 // worker's final sample is ingested and reclaimed even when
@@ -622,8 +682,14 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                     break;
                 }
                 if depth_failed {
+                    climbing.remove(&name);
                     last_depths.remove(&name);
                     depths_available.insert(name.clone(), false);
+                }
+                if depth_failed && grow_only {
+                    continue;
+                }
+                if depth_failed {
                     scale_guards.entry(name.clone()).or_default().reset();
                     let fallback = last_desired
                         .get(&name)
@@ -653,8 +719,20 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                         (Some(coordinator), Some(scope)) => coordinator.position(scope),
                         _ => (0, 1),
                     };
-                let raw = desired_share(options, &depths, &runtimes, replica, replicas);
+                let mut raw = desired_share(options, &depths, &runtimes, replica, replicas);
                 let current = current_allocation(&pools, &name, options);
+                let active: usize = current.values().sum();
+                if grow_only {
+                    match grow_only_target(options, &raw, &current) {
+                        Some(grown) => raw = grown,
+                        None => {
+                            // Not an increase: leave it, and the scale-down
+                            // window, to the regular cadence.
+                            climbing.remove(&name);
+                            continue;
+                        }
+                    }
+                }
                 let target = stabilize_desired(
                     options,
                     raw,
@@ -678,6 +756,17 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("[{name}] reconcile failed: {error}");
                     continue;
                 }
+                if wakes.is_some() {
+                    let started: usize = current_allocation(&pools, &name, options).values().sum();
+                    let wanted: usize = last_desired[&name].values().sum();
+                    // Held back by the step budget, not by a failing restart:
+                    // keep climbing at the wake cadence.
+                    if started > active && started < wanted {
+                        climbing.insert(name.clone());
+                    } else {
+                        climbing.remove(&name);
+                    }
+                }
                 last_reconcile.insert(name, Instant::now());
             }
             match state.write_status(
@@ -700,7 +789,9 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                     running.store(false, Ordering::SeqCst);
                 }
             }
-            last_poll = Instant::now();
+            if poll_due {
+                last_poll = Instant::now();
+            }
         }
         if status_failure.is_some() {
             break;
@@ -1154,6 +1245,9 @@ fn validate_config(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     let loop_budget = control_loop_budget(config)?;
     if let Some(coordination) = &config.coordination {
         coordination.validate(loop_budget)?;
+    }
+    if let Some(event_driven) = &config.event_driven {
+        event_driven.validate()?;
     }
     if config.control_ttl <= loop_budget {
         return Err(format!(
@@ -2682,6 +2776,87 @@ fn empty_allocation(options: &SupervisorConfig) -> HashMap<String, usize> {
     options.queues.iter().cloned().map(|q| (q, 0)).collect()
 }
 
+/// The pools one of whose watched queues grew, from the watcher's
+/// `connection\0queue` keys.
+fn woken_pools(config: &Config, keys: &HashSet<String>) -> HashSet<String> {
+    config
+        .supervisors
+        .iter()
+        .filter(|(_, options)| {
+            watch::follows_backlog(options)
+                && options
+                    .queues
+                    .iter()
+                    .any(|queue| keys.contains(&watch::key(&options.connection, queue)))
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+fn has_room(config: &Config, pools: &Pools, name: &str) -> bool {
+    config.supervisors.get(name).is_some_and(|options| {
+        current_allocation(pools, name, options)
+            .values()
+            .sum::<usize>()
+            < options.max_processes
+    })
+}
+
+/// The pools to evaluate before the next regular poll: woken or still
+/// climbing, with room to grow, a wake interval after their last evaluation.
+fn event_due_pools(
+    config: &Config,
+    pools: &Pools,
+    woken: &HashSet<String>,
+    climbing: &HashSet<String>,
+    last_evaluated: &HashMap<String, Instant>,
+    now: Instant,
+) -> HashSet<String> {
+    config
+        .supervisors
+        .iter()
+        .filter(|(name, options)| {
+            watch::follows_backlog(options)
+                && has_room(config, pools, name)
+                && watch::due(
+                    woken.contains(*name),
+                    climbing.contains(*name),
+                    last_evaluated.get(*name).copied(),
+                    now,
+                )
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// Inside the cooldown a woken pool may only add workers: no queue loses
+/// one, and the pool grows by what the target adds overall, filling the
+/// queues short of their target in declared order. None when that adds
+/// nothing.
+fn grow_only_target(
+    options: &SupervisorConfig,
+    raw: &HashMap<String, usize>,
+    current: &HashMap<String, usize>,
+) -> Option<HashMap<String, usize>> {
+    let active: usize = current.values().sum();
+    let mut room = raw.values().sum::<usize>().saturating_sub(active);
+    if room == 0 {
+        return None;
+    }
+    let mut target = current.clone();
+    for queue in &options.queues {
+        let short = raw
+            .get(queue)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(current.get(queue).copied().unwrap_or(0));
+        let added = short.min(room);
+        *target.entry(queue.clone()).or_default() += added;
+        room -= added;
+    }
+    (target.values().sum::<usize>() > active).then_some(target)
+}
+
 fn current_allocation(
     pools: &Pools,
     supervisor: &str,
@@ -3489,6 +3664,61 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_woken_or_climbing_pool_is_due_before_the_next_poll_once_a_second() {
+        let config = config(options("auto"));
+        let pools = Pools::new();
+        let now = Instant::now();
+        let keys = HashSet::from([watch::key("queen", "default")]);
+        let woken = woken_pools(&config, &keys);
+        let none = HashSet::new();
+        let fresh = HashMap::from([("default".to_owned(), now)]);
+
+        assert_eq!(woken, HashSet::from(["default".to_owned()]));
+        assert_eq!(
+            event_due_pools(&config, &pools, &woken, &none, &HashMap::new(), now),
+            woken
+        );
+        assert!(event_due_pools(&config, &pools, &woken, &none, &fresh, now).is_empty());
+        assert!(event_due_pools(&config, &pools, &none, &none, &HashMap::new(), now).is_empty());
+        let climbing = HashSet::from(["default".to_owned()]);
+        assert_eq!(
+            event_due_pools(&config, &pools, &none, &climbing, &HashMap::new(), now).len(),
+            1
+        );
+        let other = HashSet::from([watch::key("other", "default")]);
+        assert!(woken_pools(&config, &other).is_empty());
+        let fixed = self::config(options("simple"));
+        assert!(woken_pools(&fixed, &keys).is_empty());
+    }
+
+    #[test]
+    fn a_grow_only_evaluation_never_takes_a_worker_from_a_queue() {
+        let options = options("auto");
+        let current = HashMap::from([("high".to_owned(), 4), ("default".to_owned(), 0)]);
+
+        // The backlog moved from high to default: grow default by what the
+        // target adds overall, and keep high until the cooldown.
+        let raw = HashMap::from([("high".to_owned(), 0), ("default".to_owned(), 5)]);
+        assert_eq!(
+            grow_only_target(&options, &raw, &current),
+            Some(HashMap::from([
+                ("high".to_owned(), 4),
+                ("default".to_owned(), 1)
+            ]))
+        );
+        let raw = HashMap::from([("high".to_owned(), 6), ("default".to_owned(), 3)]);
+        assert_eq!(
+            grow_only_target(&options, &raw, &current),
+            Some(HashMap::from([
+                ("high".to_owned(), 6),
+                ("default".to_owned(), 3)
+            ]))
+        );
+        let raw = HashMap::from([("high".to_owned(), 1), ("default".to_owned(), 3)]);
+        assert_eq!(grow_only_target(&options, &raw, &current), None);
+    }
+
     fn config(options: SupervisorConfig) -> Config {
         Config {
             version: CONFIG_VERSION,
@@ -3514,6 +3744,7 @@ mod tests {
             remote_status: None,
             coordination: None,
             prefork: false,
+            event_driven: None,
         }
     }
 

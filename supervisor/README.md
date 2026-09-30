@@ -63,6 +63,14 @@ exit statuses on fd 3, every worker leads its own session, and the server,
 started with SIGTERM as its parent-death signal, SIGKILLs its workers when the
 master dies. A failed fork makes the master spawn from then on. The code is in
 `src/prefork.rs` and mirrors the Laravel package's `Prefork` classes.
+With `event_driven` (`queen.supervisor.event_driven`), one thread per
+connection holds a read-only long poll (`POST /api/v1/fetch`: no lease, no
+consumer cursor) over the Laravel partition stripes of every autoscaling pool.
+When a watched queue grows, that pool reads its depth at once and may grow
+inside `balance_cooldown`, then again every second while it is below its
+target; scaling down keeps its cooldown and `scale_down_delay`. A broker
+without the endpoint, or a token that may not consume, turns the watcher off
+and polling continues. The code is in `src/watch.rs`.
 Startup and recovery establish `processes` in `simple` mode, or at least
 `min_processes` otherwise, without spreading baseline capacity across several
 cooldown windows. `balance_max_shift` limits subsequent elastic changes.

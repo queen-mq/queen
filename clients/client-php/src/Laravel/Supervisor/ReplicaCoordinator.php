@@ -168,6 +168,14 @@ final class ReplicaCoordinator
      *
      * @return array{0: int, 1: int} [replica, replicas]
      */
+    /** Whether a current view of the scope exists; without one, position() answers as if alone. */
+    public function hasView(string $scope): bool
+    {
+        $view = $this->views[$scope] ?? null;
+
+        return $view !== null && $this->now() - $view['at'] <= $this->ttlSeconds;
+    }
+
     public function position(string $scope): array
     {
         $view = $this->views[$scope] ?? null;

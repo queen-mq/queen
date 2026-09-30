@@ -61,6 +61,14 @@ final class PhpSupervisor
     private ReplicaCoordinator|false|null $coordinator = null;
     private ForkServerClient|false|null $forkServer = null;
     private bool $preforkFailed = false;
+    /** @var array<string, QueueWatcher>|null event-driven watchers by connection; null when disabled */
+    private ?array $watchers = null;
+    /** @var array<string, true> pools a watched queue woke, kept until they are evaluated */
+    private array $woken = [];
+    /** @var array<string, true> pools still climbing towards a higher target */
+    private array $climbing = [];
+    /** @var array<string, float> when each pool was last evaluated, for the wake interval */
+    private array $lastEvaluated = [];
 
     public function __construct(
         private QueueManager $queues,
@@ -82,6 +90,7 @@ final class PhpSupervisor
 
         try {
             $this->startForkServer();
+            $this->startWatchers();
             $this->writeStatus('running');
             $lastPoll = 0.0;
             do {
@@ -96,12 +105,18 @@ final class PhpSupervisor
                 $this->reapDraining();
                 $this->observeStableWorkers();
 
-                if (microtime(true) - $lastPoll < $this->config['poll_interval']) {
-                    usleep(200_000);
+                $pollDue = microtime(true) - $lastPoll >= $this->config['poll_interval'];
+                if ($this->paused) {
+                    $this->woken = [];
+                    $this->climbing = [];
+                }
+                $eventDue = $this->paused ? [] : $this->eventDuePools(microtime(true));
+                if (!$pollDue && $eventDue === []) {
+                    $this->waitForWork();
                     continue;
                 }
 
-                if (!$this->paused) {
+                if ($pollDue && !$this->paused) {
                     $this->replicaCoordinator()?->heartbeat(array_values($this->coordinatedScopes()));
                 }
 
@@ -110,14 +125,30 @@ final class PhpSupervisor
                 // performs its own fail-open reconcile from the last target.
                 $unavailableConnections = [];
                 foreach ($this->config['supervisors'] as $name => $options) {
+                    if (!$pollDue && !isset($eventDue[$name])) {
+                        continue;
+                    }
                     if ($this->paused) {
                         $this->lastDepths[$name] = [];
                         $this->depthsAvailable[$name] = false;
                         continue;
                     }
-                    if (time() - ($this->lastReconcile[$name] ?? 0) < $options['balance_cooldown']) {
+                    $ready = time() - ($this->lastReconcile[$name] ?? 0) >= $options['balance_cooldown'];
+                    // Woken or climbing inside the cooldown: this evaluation
+                    // may only add workers. Anything else waits for the cooldown.
+                    $growOnly = !$ready && isset($eventDue[$name]);
+                    if (!$ready && !$growOnly) {
                         continue;
                     }
+                    if (!$pollDue && $this->withoutReplicaView($name)) {
+                        // A replica that just resumed has no view of the
+                        // others and would size itself alone: wait for the
+                        // poll's heartbeat.
+                        continue;
+                    }
+                    unset($this->woken[$name]);
+                    $this->lastEvaluated[$name] = microtime(true);
+                    $depthFailed = false;
 
                     $runtimes = [];
                     try {
@@ -141,12 +172,16 @@ final class PhpSupervisor
                         $this->depthsAvailable[$name] = true;
                         [$replica, $replicas] = $this->replicaPosition($name);
                         $desired = $this->scaler->desired($options, $depths, $runtimes, $replica, $replicas);
-                        $this->lastDesired[$name] = $desired;
                     } catch (\Throwable $error) {
                         $this->lastDepths[$name] = [];
                         $this->depthsAvailable[$name] = false;
                         $unavailableConnections[$options['connection']] = true;
                         $this->emit("[{$name}] depth failed: {$error->getMessage()}\n", 'err');
+                        $depthFailed = true;
+                        unset($this->climbing[$name]);
+                        if ($growOnly) {
+                            continue;
+                        }
                         // An observability outage must not tear down healthy
                         // capacity or stop replacement of crashed workers. On
                         // the very first poll, treat every configured queue as
@@ -163,9 +198,30 @@ final class PhpSupervisor
                         continue;
                     }
 
+                    $current = $this->currentAllocation($name, $options['queues']);
+                    $active = array_sum($current);
+                    if ($growOnly) {
+                        $desired = self::growOnlyTarget($options, $desired, $current);
+                        if ($desired === null) {
+                            // Not an increase: leave it, and the scale-down
+                            // window, to the regular cadence.
+                            unset($this->climbing[$name]);
+                            continue;
+                        }
+                    }
                     $desired = $this->stabilizeDownscale($name, $options, $desired);
                     $this->lastDesired[$name] = $desired;
                     $this->reconcile($name, $options, $desired);
+                    if ($this->watchers !== null && !$depthFailed) {
+                        $started = array_sum($this->currentAllocation($name, $options['queues']));
+                        // Held back by the step budget, not by a failing
+                        // restart: keep climbing at the wake cadence.
+                        if ($started > $active && $started < array_sum($desired)) {
+                            $this->climbing[$name] = true;
+                        } else {
+                            unset($this->climbing[$name]);
+                        }
+                    }
                     $this->lastReconcile[$name] = time();
                 }
 
@@ -173,7 +229,9 @@ final class PhpSupervisor
                     break;
                 }
                 $this->writeStatus($this->paused ? 'paused' : 'running');
-                $lastPoll = microtime(true);
+                if ($pollDue) {
+                    $lastPoll = microtime(true);
+                }
                 if ($once) {
                     break;
                 }
@@ -735,6 +793,135 @@ final class PhpSupervisor
         }
 
         return $desired;
+    }
+
+    /**
+     * The pools to evaluate before the next regular poll: woken or still
+     * climbing, with room to grow, a wake interval after their last
+     * evaluation. A pool at its maximum drops its wake.
+     *
+     * @return array<string, true>
+     */
+    private function eventDuePools(float $now): array
+    {
+        if ($this->watchers === null) {
+            return [];
+        }
+        $due = [];
+        foreach ($this->config['supervisors'] as $name => $options) {
+            $room = array_sum($this->currentAllocation($name, $options['queues'])) < $options['max_processes'];
+            if (!$room) {
+                unset($this->woken[$name]);
+            }
+            if (!QueueWatcher::followsBacklog($options) || !$room
+                || $now - ($this->lastEvaluated[$name] ?? 0.0) < QueueWatcher::WAKE_INTERVAL_SECONDS) {
+                continue;
+            }
+            if (isset($this->woken[$name]) || isset($this->climbing[$name])) {
+                $due[$name] = true;
+            }
+        }
+
+        return $due;
+    }
+
+    /**
+     * Inside the cooldown a woken pool may only add workers: no queue loses
+     * one, and the pool grows by what the target adds overall, filling the
+     * queues short of their target in declared order. Null when that adds
+     * nothing. The Rust engine's grow_only_target is the same rule.
+     *
+     * @param array<string, mixed> $options
+     * @param array<string, int> $raw
+     * @param array<string, int> $current
+     * @return array<string, int>|null
+     */
+    public static function growOnlyTarget(array $options, array $raw, array $current): ?array
+    {
+        $active = array_sum($current);
+        $room = max(0, array_sum($raw) - $active);
+        if ($room === 0) {
+            return null;
+        }
+        $target = $current;
+        foreach ($options['queues'] as $queue) {
+            $added = min(max(0, ($raw[$queue] ?? 0) - ($current[$queue] ?? 0)), $room);
+            $target[$queue] = ($target[$queue] ?? 0) + $added;
+            $room -= $added;
+        }
+
+        return array_sum($target) > $active ? $target : null;
+    }
+
+    private function withoutReplicaView(string $name): bool
+    {
+        $scope = $this->coordinatedScopes()[$name] ?? null;
+        $coordinator = $scope !== null ? $this->replicaCoordinator() : null;
+
+        return $coordinator !== null && !$coordinator->hasView($scope);
+    }
+
+    /**
+     * Between polls: park on the broker until a watched queue grows, for at
+     * most QueueWatcher::WAIT_MILLIS, or sleep when nothing is watched.
+     */
+    private function waitForWork(): void
+    {
+        $watchers = $this->paused ? [] : array_filter(
+            $this->watchers ?? [],
+            static fn (QueueWatcher $watcher): bool => $watcher->ready(),
+        );
+        if ($watchers === []) {
+            usleep(200_000);
+
+            return;
+        }
+        $wait = intdiv(QueueWatcher::WAIT_MILLIS, count($watchers));
+        $keys = [];
+        foreach ($watchers as $connection => $watcher) {
+            foreach ($watcher->wait($wait) as $queue) {
+                $keys[QueueWatcher::key((string) $connection, $queue)] = true;
+            }
+        }
+        foreach ($this->config['supervisors'] as $name => $options) {
+            if (!QueueWatcher::followsBacklog($options)) {
+                continue;
+            }
+            foreach ($options['queues'] as $queue) {
+                if (isset($keys[QueueWatcher::key($options['connection'], $queue)])) {
+                    $this->woken[$name] = true;
+                }
+            }
+        }
+    }
+
+    /** With event_driven enabled, one watcher per connection with autoscaling pools. */
+    private function startWatchers(): void
+    {
+        if (!is_array($this->config['event_driven'] ?? null) || $this->watchers !== null) {
+            return;
+        }
+        $this->watchers = [];
+        foreach (QueueWatcher::lanes($this->config) as $connection => $lanes) {
+            $connection = (string) $connection;
+            $settings = $this->config['connections'][$connection] ?? ($connection === 'queen' ? ($this->config['queen'] ?? null) : null);
+            if (!is_array($settings)) {
+                $this->emit("event-driven: connection [{$connection}] is missing from the resolved contract, polling continues\n", 'err');
+                continue;
+            }
+            if (count($lanes) > QueueWatcher::MAX_ENTRIES) {
+                $this->emit("event-driven: connection [{$connection}] has " . count($lanes) . ' partition(s) to watch, over the broker\'s '
+                    . QueueWatcher::MAX_ENTRIES . " per fetch; the rest are found by the regular poll\n", 'err');
+            }
+            $this->watchers[$connection] = new QueueWatcher(
+                ['urls' => $settings['urls'] ?? [$settings['url']], 'bearer_token' => $settings['bearer_token'] ?? null, 'headers' => $settings['headers'] ?? []],
+                $connection,
+                $lanes,
+                (float) ($this->config['http_timeout'] ?? 5),
+                $this->output,
+            );
+            $this->emit('event-driven: watching ' . min(count($lanes), QueueWatcher::MAX_ENTRIES) . " partition(s) on connection [{$connection}]\n", 'out');
+        }
     }
 
     /** @return array<string, int> */
