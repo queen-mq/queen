@@ -20,6 +20,7 @@ RUNS=3
 SLEEP_MS=10
 CPU_ITERATIONS=0
 DISPATCH_MODE="${BENCH_DISPATCH_MODE:-single}"
+DISPATCH_RATE="${BENCH_DISPATCH_RATE:-0}"
 QUEEN_PREFETCH="${QUEEN_PREFETCH:-1}"
 QUEEN_ACK_BATCH="${QUEEN_ACK_BATCH:-1}"
 QUEEN_BULK_BATCH="${QUEEN_BULK_BATCH:-100}"
@@ -30,6 +31,8 @@ QUEEN_PREFORK="${BENCH_QUEEN_PREFORK:-0}"
 QUEEN_OPCACHE_CLI="${BENCH_QUEEN_OPCACHE_CLI:-0}"
 QUEEN_EVENT_DRIVEN="${BENCH_QUEEN_EVENT_DRIVEN:-0}"
 QUEEN_FAST_SCALE_UP="${BENCH_QUEEN_FAST_SCALE_UP:-0}"
+QUEEN_ACK_ASYNC="${BENCH_QUEEN_ACK_ASYNC:-0}"
+QUEEN_LEASE_SERVICE="${BENCH_QUEEN_LEASE_SERVICE:-1}"
 QUEEN_POLL_INTERVAL="${BENCH_POLL_INTERVAL:-1}"
 # PostgreSQL durability, the Queen counterpart of --redis-appendfsync.
 POSTGRES_SYNCHRONOUS_COMMIT="${BENCH_POSTGRES_SYNCHRONOUS_COMMIT:-on}"
@@ -86,6 +89,8 @@ Options:
   --sleep-ms N                  Sleep in every job (default: 10)
   --cpu-iterations N            SHA-256 rounds in every job (default: 0)
   --dispatch-mode single|bulk   Producer API shape (default: single)
+  --dispatch-rate N             Measured jobs per second, single mode; 0 is
+                                as fast as possible (default: 0)
   --queen-prefetch N            Jobs claimed by each Queen pop (default: 1)
   --queen-ack-batch N           Deferred Queen ACK batch; <= prefetch (default: 1)
   --queen-bulk-batch N          Jobs per bulk producer call/request (default: 100)
@@ -95,6 +100,9 @@ Options:
   --queen-opcache-cli 0|1       CLI opcache in the Queen lanes only (default: 0)
   --queen-event-driven 0|1      Wake Queen supervisors on new jobs (default: 0)
   --queen-fast-scale-up 0|1     Close half the gap per Queen reconcile (default: 0)
+  --queen-ack-async 0|1         Send Queen ACKs without waiting (default: 0)
+  --queen-lease-service 0|1     Renew leases in the Queen supervisor, not
+                                one PHP helper per worker (default: 1)
   --queen-poll-interval N       Queen supervisor poll, seconds (default: 1)
   --postgres-synchronous-commit on|off
                                 PostgreSQL commit durability (default: on)
@@ -204,6 +212,7 @@ while [ "$#" -gt 0 ]; do
         --sleep-ms) SLEEP_MS="${2:?--sleep-ms requires a value}"; shift 2 ;;
         --cpu-iterations) CPU_ITERATIONS="${2:?--cpu-iterations requires a value}"; shift 2 ;;
         --dispatch-mode) DISPATCH_MODE="${2:?--dispatch-mode requires a value}"; shift 2 ;;
+        --dispatch-rate) DISPATCH_RATE="${2:?--dispatch-rate requires a value}"; shift 2 ;;
         --queen-prefetch) QUEEN_PREFETCH="${2:?--queen-prefetch requires a value}"; shift 2 ;;
         --queen-ack-batch) QUEEN_ACK_BATCH="${2:?--queen-ack-batch requires a value}"; shift 2 ;;
         --queen-bulk-batch) QUEEN_BULK_BATCH="${2:?--queen-bulk-batch requires a value}"; shift 2 ;;
@@ -213,6 +222,8 @@ while [ "$#" -gt 0 ]; do
         --queen-opcache-cli) QUEEN_OPCACHE_CLI="${2:?--queen-opcache-cli requires a value}"; shift 2 ;;
         --queen-event-driven) QUEEN_EVENT_DRIVEN="${2:?--queen-event-driven requires a value}"; shift 2 ;;
         --queen-fast-scale-up) QUEEN_FAST_SCALE_UP="${2:?--queen-fast-scale-up requires a value}"; shift 2 ;;
+        --queen-ack-async) QUEEN_ACK_ASYNC="${2:?--queen-ack-async requires a value}"; shift 2 ;;
+        --queen-lease-service) QUEEN_LEASE_SERVICE="${2:?--queen-lease-service requires a value}"; shift 2 ;;
         --queen-poll-interval) QUEEN_POLL_INTERVAL="${2:?--queen-poll-interval requires a value}"; shift 2 ;;
         --postgres-synchronous-commit) POSTGRES_SYNCHRONOUS_COMMIT="${2:?--postgres-synchronous-commit requires a value}"; shift 2 ;;
         --queen-storage) QUEEN_STORAGE="${2:?--queen-storage requires a value}"; shift 2 ;;
@@ -276,6 +287,8 @@ require_uint "--queen-prefork" "$QUEEN_PREFORK"
 require_uint "--queen-opcache-cli" "$QUEEN_OPCACHE_CLI"
 require_uint "--queen-event-driven" "$QUEEN_EVENT_DRIVEN"
 require_uint "--queen-fast-scale-up" "$QUEEN_FAST_SCALE_UP"
+require_uint "--queen-ack-async" "$QUEEN_ACK_ASYNC"
+require_uint "--queen-lease-service" "$QUEEN_LEASE_SERVICE"
 require_positive_int "--queen-poll-interval" "$QUEEN_POLL_INTERVAL"
 require_uint "--warmup-jobs" "$WARMUP_JOBS"
 require_positive_int "--timeout" "$WAIT_TIMEOUT"
@@ -313,6 +326,11 @@ require_decimal "--target-clear" "$TARGET_CLEAR_SECONDS"
 [ "$QUEEN_OPCACHE_CLI" -le 1 ] || die "--queen-opcache-cli must be 0 or 1"
 [ "$QUEEN_EVENT_DRIVEN" -le 1 ] || die "--queen-event-driven must be 0 or 1"
 [ "$QUEEN_FAST_SCALE_UP" -le 1 ] || die "--queen-fast-scale-up must be 0 or 1"
+[ "$QUEEN_ACK_ASYNC" -le 1 ] || die "--queen-ack-async must be 0 or 1"
+[ "$QUEEN_LEASE_SERVICE" -le 1 ] || die "--queen-lease-service must be 0 or 1"
+if [ "$QUEEN_ACK_ASYNC" = 1 ] && [ "$QUEEN_ACK_BATCH" -gt 1 ]; then
+    die "--queen-ack-async requires --queen-ack-batch 1"
+fi
 [ "$QUEEN_POLL_INTERVAL" -le 60 ] || die "--queen-poll-interval must not exceed 60"
 case "$POSTGRES_SYNCHRONOUS_COMMIT" in on|off) ;; *) die "--postgres-synchronous-commit must be on or off" ;; esac
 case "$QUEEN_STORAGE" in
@@ -331,6 +349,10 @@ else
     [ "$RETRY_AFTER" -gt $(( QUEEN_PREFETCH * WORKER_TIMEOUT )) ] || die "--retry-after must exceed --queen-prefetch multiplied by --worker-timeout without lease renewal"
 fi
 case "$DISPATCH_MODE" in single|bulk) ;; *) die "--dispatch-mode must be single or bulk" ;; esac
+require_uint "--dispatch-rate" "$DISPATCH_RATE"
+if [ "$DISPATCH_RATE" -gt 0 ] && [ "$DISPATCH_MODE" != single ]; then
+    die "--dispatch-rate requires --dispatch-mode single"
+fi
 case "$SCALING_STRATEGY" in size|time) ;; *) die "--strategy must be size or time" ;; esac
 case "$LEDGER_MODE" in off|durable) ;; *) die "BENCH_LEDGER_MODE must be off or durable" ;; esac
 case "$REDIS_APPENDONLY" in yes|no) ;; *) die "BENCH_REDIS_APPENDONLY must be yes or no" ;; esac
@@ -885,6 +907,7 @@ export BENCHMARK_RUNS="$RUNS"
 export BENCHMARK_SLEEP_MS="$SLEEP_MS"
 export BENCHMARK_CPU_ITERATIONS="$CPU_ITERATIONS"
 export BENCHMARK_DISPATCH_MODE="$DISPATCH_MODE"
+export BENCHMARK_DISPATCH_RATE="$DISPATCH_RATE"
 export BENCHMARK_QUEUE="$TIMED_QUEUE"
 export BENCHMARK_QUEUES=""
 export BENCHMARK_FAILED_DRIVER="null"
@@ -898,6 +921,8 @@ export BENCHMARK_QUEEN_PREFORK="$QUEEN_PREFORK"
 export BENCHMARK_QUEEN_OPCACHE_CLI="$QUEEN_OPCACHE_CLI"
 export BENCHMARK_QUEEN_EVENT_DRIVEN="$QUEEN_EVENT_DRIVEN"
 export BENCHMARK_QUEEN_FAST_SCALE_UP="$QUEEN_FAST_SCALE_UP"
+export BENCHMARK_QUEEN_ACK_ASYNC="$QUEEN_ACK_ASYNC"
+export BENCHMARK_QUEEN_LEASE_SERVICE="$QUEEN_LEASE_SERVICE"
 export BENCHMARK_QUEEN_POLL_INTERVAL="$QUEEN_POLL_INTERVAL"
 export BENCHMARK_POSTGRES_SYNCHRONOUS_COMMIT="$POSTGRES_SYNCHRONOUS_COMMIT"
 export BENCHMARK_QUEEN_STORAGE="$QUEEN_STORAGE"
@@ -1032,6 +1057,7 @@ settings = {
     "sleep_ms": int(os.environ["BENCHMARK_SLEEP_MS"]),
     "cpu_iterations": int(os.environ["BENCHMARK_CPU_ITERATIONS"]),
     "dispatch_mode": os.environ["BENCHMARK_DISPATCH_MODE"],
+    "dispatch_rate": int(os.environ["BENCHMARK_DISPATCH_RATE"]),
     "queues": [os.environ["BENCHMARK_QUEUE"]],
     "failed_driver": os.environ["BENCHMARK_FAILED_DRIVER"],
     "lease_renewal": os.environ["BENCHMARK_LEASE_RENEWAL"] == "true",
@@ -1044,6 +1070,8 @@ settings = {
     "queen_opcache_cli": os.environ["BENCHMARK_QUEEN_OPCACHE_CLI"] == "1",
     "queen_event_driven": os.environ["BENCHMARK_QUEEN_EVENT_DRIVEN"] == "1",
     "queen_fast_scale_up": os.environ["BENCHMARK_QUEEN_FAST_SCALE_UP"] == "1",
+    "queen_ack_async": os.environ["BENCHMARK_QUEEN_ACK_ASYNC"] == "1",
+    "queen_lease_service": os.environ["BENCHMARK_QUEEN_LEASE_SERVICE"] == "1",
     "queen_poll_interval_seconds": int(os.environ["BENCHMARK_QUEEN_POLL_INTERVAL"]),
     "postgres_synchronous_commit": os.environ["BENCHMARK_POSTGRES_SYNCHRONOUS_COMMIT"],
     "queen_storage": os.environ["BENCHMARK_QUEEN_STORAGE"],
@@ -1230,6 +1258,8 @@ run_lane() {
     export BENCH_QUEEN_PREFORK="$([ "$QUEEN_PREFORK" = 1 ] && echo true || echo false)"
     export BENCH_QUEEN_EVENT_DRIVEN="$([ "$QUEEN_EVENT_DRIVEN" = 1 ] && echo true || echo false)"
     export BENCH_QUEEN_FAST_SCALE_UP="$([ "$QUEEN_FAST_SCALE_UP" = 1 ] && echo true || echo false)"
+    export BENCH_QUEEN_ACK_ASYNC="$([ "$QUEEN_ACK_ASYNC" = 1 ] && echo true || echo false)"
+    export BENCH_QUEEN_LEASE_SERVICE="$([ "$QUEEN_LEASE_SERVICE" = 1 ] && echo true || echo false)"
     export BENCH_POLL_INTERVAL="$QUEEN_POLL_INTERVAL"
     if [ "$engine" = "horizon" ]; then
         export BENCH_OPCACHE_CLI=0
@@ -1348,7 +1378,8 @@ run_lane() {
         --jobs="$JOBS" \
         --sleep-ms="$SLEEP_MS" \
         --cpu-iterations="$CPU_ITERATIONS" \
-        --dispatch-mode="$DISPATCH_MODE" >"${CURRENT_HOST_RUN}/dispatch-command.json"
+        --dispatch-mode="$DISPATCH_MODE" \
+        --rate="$DISPATCH_RATE" >"${CURRENT_HOST_RUN}/dispatch-command.json"
 
     set +e
     producer php artisan bench:results --no-ansi "$run_id" \

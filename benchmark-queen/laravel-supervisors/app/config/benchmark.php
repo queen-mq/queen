@@ -189,6 +189,7 @@ return [
     'failed_limit' => $integer('BENCH_FAILED_LIMIT', 1000, 1, 1_000_000),
     'queen_prefetch' => $queenPrefetch,
     'queen_ack_batch' => $queenAckBatch,
+    'queen_ack_async' => filter_var(env('QUEEN_ACK_ASYNC', false), FILTER_VALIDATE_BOOL),
     'queen_bulk_batch' => $integer('QUEEN_BULK_BATCH', 100, 1, 1_000),
     'queen_partitions' => $integer('QUEEN_PARTITIONS', 64, 1, 64),
     'queen_pop_fusion' => $integer('QUEEN_POP_FUSION', 0, 0, 1) === 1,
