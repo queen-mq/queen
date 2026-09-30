@@ -4,6 +4,7 @@ use std::sync::Mutex;
 struct BoundaryReplicator {
     inner: Arc<FakeReplicator>,
     after_first: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    completion_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 #[async_trait]
 impl Replicator for BoundaryReplicator {
@@ -13,6 +14,10 @@ impl Replicator for BoundaryReplicator {
         // The backlog has already left cmd_rx, and the next cycle can plan.
         if let Some(hook) = self.after_first.lock().unwrap().take() {
             hook();
+        }
+        let gate = self.completion_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let _ = gate.await;
         }
         result
     }
@@ -65,6 +70,7 @@ impl BoundaryFixture {
         let repl = Arc::new(BoundaryReplicator {
             inner: Arc::new(FakeReplicator::new(1)),
             after_first: Mutex::new(None),
+            completion_gate: Mutex::new(None),
         });
         let mut batcher = Batcher::new(
             store.clone(),
@@ -104,8 +110,34 @@ impl BoundaryFixture {
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(
+            Arc::strong_count(&self.repl),
+            1,
+            "the joined driver must release every proposal's replicator reference"
+        );
         drop(self._store);
         let _ = std::fs::remove_dir_all(self.dir);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn shutdown_joins_a_completion_task_after_the_applied_wake_answers_the_client() {
+    for lanes in [1, 8] {
+        let fx = BoundaryFixture::new(lanes, None);
+        let (release, gate) = tokio::sync::oneshot::channel();
+        *fx.repl.completion_gate.lock().unwrap() = Some(gate);
+        let (sub, rx) = Submission::new(push(1, "q", "p", &["a"]));
+        fx.tx.try_send(sub).unwrap();
+        // Apply is published, but the backend's propose future cannot return
+        // while this test retains `release`. The applied wake answers alone.
+        let reply = tokio::time::timeout(Duration::from_secs(10), rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(reply, Reply::Done { .. }));
+        assert!(!release.is_closed(), "the completion is still pending");
+        fx.close().await;
+        assert!(release.is_closed(), "shutdown dropped the pending future");
     }
 }
 

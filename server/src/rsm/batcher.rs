@@ -1767,6 +1767,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             cmd_rx,
             result_tx,
             result_rx,
+            completion_tasks: tokio::task::JoinSet::new(),
             applied_notify,
             queue: VecDeque::new(),
             lane: VecDeque::new(),
@@ -1801,6 +1802,10 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
         }
 
         loop {
+            // Reap completed forwarders without adding a select wake per
+            // proposal. The set must not retain task handles for the node's
+            // entire lifetime.
+            while st.completion_tasks.try_join_next().is_some() {}
             // Admit arrivals at every planning boundary, including when apply
             // keeps freeing pipeline slots. A bounded intake cannot be held
             // here forever by producers refilling the channel.
@@ -1902,6 +1907,12 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
         }
         // On a Fatal exit, nothing else will answer the stragglers.
         st.fail_all(None);
+        // An applied-index wake can resolve an entry before its propose
+        // future returns. Cancel and JOIN the remaining forwarders so the
+        // driver's JoinHandle also releases their replicator references.
+        // Client outcomes have already been resolved or failed above; this
+        // only stops waiting for a redundant backend completion.
+        st.completion_tasks.shutdown().await;
     }
 }
 
@@ -2006,6 +2017,7 @@ struct RunState<S: Store, R: Replicator> {
     cmd_rx: mpsc::Receiver<Submission>,
     result_tx: mpsc::UnboundedSender<(u64, Result<AppliedAt, ProposeError>)>,
     result_rx: mpsc::UnboundedReceiver<(u64, Result<AppliedAt, ProposeError>)>,
+    completion_tasks: tokio::task::JoinSet<()>,
     /// PERF-G: the replicator's applied-index wake (`QUEEN_RAFT_DRIVER_NOTIFY`),
     /// or `None` when the knob is off or the backend does not expose it.
     applied_notify: Option<Arc<Notify>>,
@@ -2880,10 +2892,11 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 let result_tx = self.result_tx.clone();
                 // W1: core — a completion that dies unsent leaves the entry
                 // unresolved and the pipeline stuck behind it.
-                tokio::spawn(crate::obs::panic_policy::core(async move {
-                    let res = fut.await;
-                    let _ = result_tx.send((seq, res));
-                }));
+                self.completion_tasks
+                    .spawn(crate::obs::panic_policy::core(async move {
+                        let res = fut.await;
+                        let _ = result_tx.send((seq, res));
+                    }));
             }
         }
     }
