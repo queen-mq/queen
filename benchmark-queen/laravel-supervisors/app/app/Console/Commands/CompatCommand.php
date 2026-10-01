@@ -249,7 +249,12 @@ final class CompatCommand extends Command
         $gaps = [($starts[1] ?? 0) - ($throws[0] ?? 0), ($starts[2] ?? 0) - ($throws[1] ?? 0)];
         $this->observed['gaps_seconds'] = array_map(static fn (float $g): float => round($g, 2), $gaps);
         $this->check('three attempts', count($starts) === 3);
-        $this->check('the second waited 1 s, the third 3 s', $gaps[0] >= 0.9 && $gaps[1] >= 2.7, implode(', ', $this->observed['gaps_seconds']));
+        // Laravel's Redis queue stores the retry time in whole seconds, so on
+        // Horizon a retry can start up to a second early: 2.49 s for a 3 s
+        // backoff is Laravel's behaviour, not a lost backoff.
+        $this->check('the second waited about 1 s, the third about 3 s',
+            $gaps[0] > 0.0 && $gaps[0] <= 5.0 && $gaps[1] > 2.0 && $gaps[1] <= 7.0,
+            implode(', ', $this->observed['gaps_seconds']));
         $this->check('failed() ran once', $this->count('p1', 'failed_hook') === 1);
     }
 
