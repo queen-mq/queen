@@ -1,0 +1,107 @@
+---
+/**
+ * One Queen worker over time, three ways, with every round trip to the broker
+ * either on the critical path (the worker waits) or off it (the request
+ * travels while a job runs).
+ *
+ * The rows are not drawn by hand: a small simulation, workerTimeline() in
+ * src/lib/schematic-models.ts, follows the order in which QueenQueue
+ * (clients/client-php/src/Laravel/Queue/QueenQueue.php) sends requests and
+ * reads their answers, so the waits it draws are the waits the code has.
+ *
+ * - pop(): a job from the local batch if one is left; otherwise
+ *   nextFromBroker(), which first reads the answer to an ACK still on the wire,
+ *   then pops.
+ * - With pop_ahead, handing out the last job of a full batch sends the next
+ *   pop (popAhead()), which travels while that job runs.
+ * - delete(): reads the previous ACK's answer, then sends this job's ACK and
+ *   waits for it, or with ack_async sends it and returns; then takes in the
+ *   batch popped ahead (settlePendingPop()).
+ *
+ * The broker is assumed to have a backlog, so every pop returns a full batch.
+ * Times are schematic: a round trip is drawn at a fraction of a job.
+ */
+import Schematic from "./Schematic.astro";
+import { TOKEN, arrowHead } from "../lib/schematic";
+import { workerTimeline, type WorkerRow } from "../lib/schematic-models";
+
+interface Props {
+  /** `prefetch`: jobs one pop leases. ack_async gains little at 1. */
+  prefetch?: number;
+  /** How many jobs each row runs. Default: two batches. */
+  jobs?: number;
+  /** A round trip to the broker, as a fraction of a job's run time. */
+  roundTrip?: number;
+  /** Overrides the generated description. */
+  alt?: string;
+  /** One line under the figure. */
+  caption?: string;
+}
+
+const { caption } = Astro.props;
+const { prefetch, rows, alt: defaultAlt } = workerTimeline(Astro.props);
+const alt = Astro.props.alt ?? defaultAlt;
+
+// --- Geometry --------------------------------------------------------------
+const W = 680;
+const X0 = 24;
+const X1 = 656;
+const T_END = Math.max(...rows.map((r) => Math.max(r.end, ...r.flights.map((f) => f.end))));
+const x = (t: number) => X0 + (t / T_END) * (X1 - X0);
+const TOP = 6;
+const BAR = 22;
+/** A row is its title, its track, and room for the lanes it uses. */
+const rowHeight = (row: WorkerRow) => 22 + BAR + (row.flights.some((f) => f.lane === 1) ? 44 : row.flights.length ? 34 : 18);
+const rowTop = rows.map((_, i) => TOP + rows.slice(0, i).reduce((sum, r) => sum + rowHeight(r), 0));
+const trackY = (i: number) => rowTop[i] + 22;
+const laneY = (i: number, lane: 0 | 1) => trackY(i) + BAR + 10 + lane * 11;
+const LEGEND_Y = TOP + rows.reduce((sum, r) => sum + rowHeight(r), 0) + 8;
+const H = LEGEND_Y + 30;
+
+const waitsLabel = (n: number) => `${n} round ${n === 1 ? "trip" : "trips"} waited`;
+---
+
+<Schematic width={W} height={H} alt={alt} caption={caption}>
+  {
+    rows.map((row, i) => (
+      <g>
+        <text x={X0} y={trackY(i) - 8} class="s-title" fill={TOKEN.fg}>
+          {row.code ? <tspan class="s-code">{row.title}</tspan> : row.title}
+          <tspan class="s-note" fill={TOKEN.muted} dx="8">{row.note}</tspan>
+        </text>
+        <text x={X1} y={trackY(i) - 8} text-anchor="end" class="s-label s-num" fill={TOKEN.danger}>
+          {waitsLabel(row.waits.length)}
+        </text>
+        {row.jobs.map((job) => (
+          <g>
+            <rect x={x(job.start)} y={trackY(i)} width={x(job.end) - x(job.start)} height={BAR} rx="3" fill={TOKEN.surface} stroke={TOKEN.borderStrong} stroke-width="1.25" />
+            <text x={(x(job.start) + x(job.end)) / 2} y={trackY(i) + 15} text-anchor="middle" class="s-small s-num" fill={TOKEN.fg}>{job.label}</text>
+          </g>
+        ))}
+        {row.waits.map((wait) => (
+          <g>
+            <rect x={x(wait.start) + 0.75} y={trackY(i) + 1} width={x(wait.end) - x(wait.start) - 1.5} height={BAR - 2} rx="2" fill={TOKEN.dangerBg} stroke={TOKEN.danger} stroke-width="1" stroke-dasharray="3 2" />
+            <text x={(x(wait.start) + x(wait.end)) / 2} y={trackY(i) + 14.5} text-anchor="middle" class="s-tiny" fill={TOKEN.danger}>{wait.label}</text>
+          </g>
+        ))}
+        {row.flights.map((flight) => (
+          <g>
+            <path d={`M ${x(flight.start) + 2} ${laneY(i, flight.lane)} H ${x(flight.end) - 5}`} stroke={TOKEN.info} stroke-width="1.5" />
+            <path d={arrowHead([x(flight.start), laneY(i, flight.lane)], [x(flight.end), laneY(i, flight.lane)], 5)} fill={TOKEN.info} />
+            <text x={x(flight.end) + 3} y={laneY(i, flight.lane) + 3.5} class="s-small" fill={TOKEN.info}>{flight.label}</text>
+          </g>
+        ))}
+      </g>
+    ))
+  }
+
+  {/* Legend. */}
+  <rect x={X0} y={LEGEND_Y} width="22" height="14" rx="2" fill={TOKEN.surface} stroke={TOKEN.borderStrong} stroke-width="1.25" />
+  <text x={X0 + 28} y={LEGEND_Y + 11} class="s-small" fill={TOKEN.muted}>a job</text>
+  <rect x={X0 + 74} y={LEGEND_Y} width="22" height="14" rx="2" fill={TOKEN.dangerBg} stroke={TOKEN.danger} stroke-width="1" stroke-dasharray="3 2" />
+  <text x={X0 + 102} y={LEGEND_Y + 11} class="s-small" fill={TOKEN.muted}>the worker waits for the broker</text>
+  <path d={`M ${X0 + 282} ${LEGEND_Y + 7} H ${X0 + 300}`} stroke={TOKEN.info} stroke-width="1.5" />
+  <path d={arrowHead([X0 + 282, LEGEND_Y + 7], [X0 + 305, LEGEND_Y + 7], 5)} fill={TOKEN.info} />
+  <text x={X0 + 311} y={LEGEND_Y + 11} class="s-small" fill={TOKEN.muted}>a request in flight while a job runs</text>
+  <text x={X1} y={LEGEND_Y + 11} text-anchor="end" class="s-small" fill={TOKEN.muted}>prefetch {prefetch}, not to scale</text>
+</Schematic>

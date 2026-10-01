@@ -1,0 +1,178 @@
+---
+/**
+ * Two Kubernetes pods of the Rust supervisor on one queue set, coordinated
+ * through the broker.
+ *
+ * What each box is, in the code:
+ *
+ * - The supervisor master (supervisor/src/main.rs) is the container's main
+ *   process. It sizes one pool per supervisor and queue, starts and drains
+ *   the workers, and serves lease renewal for all of them on a private Unix
+ *   socket, `lease.sock` (supervisor/src/lease/mod.rs).
+ * - With prefork (supervisor/src/prefork.rs) one fork server,
+ *   `php artisan queen:fork-server`, boots Laravel once, and every worker is
+ *   forked from it: each runs `queue:work` for its pool's queue.
+ * - With coordination (supervisor/src/coordination.rs) each master keeps one
+ *   key under `coordination/v1/<scope>/` in the broker's key/value store and
+ *   lists the scope on every poll; every replica computes the same fleet
+ *   target from the backlog and runs its share, the remainder going to the
+ *   lowest positions (`desired_share`).
+ *
+ * The split of a pod's share between its two pools is illustrative: the
+ * master divides it by backlog.
+ */
+import Schematic from "./Schematic.astro";
+import { TOKEN, arrow } from "../lib/schematic";
+import { supervisorTopology } from "../lib/schematic-models";
+
+interface Props {
+  /** The fleet target both replicas compute from the backlog, 2 to 6. */
+  target?: number;
+  /** Overrides the generated description. */
+  alt?: string;
+  /** One line under the figure. */
+  caption?: string;
+}
+
+const { caption } = Astro.props;
+const { target, pods: PODS, shares, alt: defaultAlt } = supervisorTopology(Astro.props);
+const alt = Astro.props.alt ?? defaultAlt;
+
+// --- Geometry --------------------------------------------------------------
+const W = 680;
+const POD_W = 324;
+const POD_TOP = 8;
+const POD_BOTTOM = 248;
+const BROKER_TOP = 296;
+const BROKER_BOTTOM = 398;
+const H = BROKER_BOTTOM + 8;
+const WORKER_W = 76;
+const WORKER_H = 28;
+
+const pods = shares.map((share, i) => {
+  const px = 8 + i * (POD_W + 16);
+  const emails = share >= 2 ? 1 : 0;
+  const pools = [
+    { name: "default", x: px + 12, w: 176, workers: share - emails },
+    { name: "emails", x: px + 196, w: 104, workers: emails },
+  ];
+  const master = { x: px + 12, y: 38, w: 288, h: 64 };
+  const lease = { x: px + 194, y: 46, w: 98, h: 48 };
+  const forkServer = { x: px + 12, y: 118, w: 160, h: 40 };
+  const poolTop = 186;
+  const poolH = 56;
+  const workers = pools.flatMap((pool) =>
+    Array.from({ length: pool.workers }, (_, k) => ({ x: pool.x + 8 + k * (WORKER_W + 8), y: poolTop + 8 })),
+  );
+  const forkFrom: [number, number] = [forkServer.x + forkServer.w / 2, forkServer.y + forkServer.h];
+  const railX = px + POD_W - 12;
+  return {
+    i,
+    px,
+    share,
+    pools,
+    master,
+    lease,
+    forkServer,
+    poolTop,
+    poolH,
+    workers,
+    forks: workers.map((w) => arrow([forkFrom, [w.x + WORKER_W / 2, w.y]], 0, 5)),
+    boot: arrow([[forkServer.x + 40, master.y + master.h], [forkServer.x + 40, forkServer.y]], 0, 5),
+    leases: arrow([[lease.x + 58, poolTop], [lease.x + 58, lease.y + lease.h]], 0, 5),
+    control: arrow([[master.x + master.w, master.y + 32], [railX, master.y + 32], [railX, BROKER_TOP]], 6, 6),
+    jobs: arrow([[px + 150, poolTop + poolH], [px + 150, BROKER_TOP]], 0, 6),
+    railX,
+  };
+});
+
+const CELLS = 10;
+---
+
+<Schematic width={W} height={H} alt={alt} caption={caption}>
+  {
+    pods.map((pod) => (
+      <g>
+        <rect x={pod.px} y={POD_TOP} width={POD_W} height={POD_BOTTOM - POD_TOP} rx="10" fill={TOKEN.surface} stroke={TOKEN.borderStrong} stroke-width="1.25" />
+        <text x={pod.px + 12} y={POD_TOP + 20} class="s-title" fill={TOKEN.fg}>Pod {pod.i + 1}</text>
+        <text x={pod.px + POD_W - 12} y={POD_TOP + 20} text-anchor="end" class="s-small" fill={TOKEN.muted}>
+          runs {pod.share} of the fleet target {target}
+        </text>
+
+        <rect x={pod.master.x} y={pod.master.y} width={pod.master.w} height={pod.master.h} rx="7" fill={TOKEN.card} stroke={TOKEN.borderStrong} stroke-width="1.5" />
+        <text x={pod.master.x + 10} y={pod.master.y + 20} class="s-label" fill={TOKEN.fg}>
+          supervisor master
+        </text>
+        <text x={pod.master.x + 10} y={pod.master.y + 36} class="s-small" fill={TOKEN.muted}>Rust: the pod's main process</text>
+        <text x={pod.master.x + 10} y={pod.master.y + 50} class="s-small" fill={TOKEN.muted}>sizes pools, drains workers</text>
+        <rect x={pod.lease.x} y={pod.lease.y} width={pod.lease.w} height={pod.lease.h} rx="6" fill={TOKEN.warningBg} stroke={TOKEN.warning} stroke-width="1.25" />
+        <text x={pod.lease.x + 10} y={pod.lease.y + 19} class="s-small" fill={TOKEN.fg}>lease service</text>
+        <text x={pod.lease.x + 10} y={pod.lease.y + 36} class="s-code" fill={TOKEN.warning}>lease.sock</text>
+
+        <path d={pod.boot.line} fill="none" stroke={TOKEN.muted} stroke-width="1.25" />
+        <path d={pod.boot.head} fill={TOKEN.muted} />
+        <rect x={pod.forkServer.x} y={pod.forkServer.y} width={pod.forkServer.w} height={pod.forkServer.h} rx="7" fill={TOKEN.infoBg} stroke={TOKEN.info} stroke-width="1.5" />
+        <text x={pod.forkServer.x + 10} y={pod.forkServer.y + 17} class="s-label" fill={TOKEN.fg}>fork server</text>
+        <text x={pod.forkServer.x + 10} y={pod.forkServer.y + 32} class="s-small" fill={TOKEN.muted}>Laravel booted once</text>
+
+        {pod.forks.map((fork) => (
+          <g>
+            <path d={fork.line} fill="none" stroke={TOKEN.info} stroke-width="1.25" />
+            <path d={fork.head} fill={TOKEN.info} />
+          </g>
+        ))}
+        <text x={pod.forkServer.x + 2} y={pod.poolTop - 10} class="s-code s-small" fill={TOKEN.info}>fork()</text>
+
+        <path d={pod.leases.line} fill="none" stroke={TOKEN.warning} stroke-width="1.25" stroke-dasharray="4 3" />
+        <path d={pod.leases.head} fill={TOKEN.warning} />
+        <text x={pod.lease.x + 64} y={pod.poolTop - 30} class="s-small" fill={TOKEN.muted}>leases</text>
+        <text x={pod.lease.x + 64} y={pod.poolTop - 17} class="s-small" fill={TOKEN.muted}>to renew</text>
+
+        {pod.pools.map((pool) => (
+          <g>
+            <rect x={pool.x} y={pod.poolTop} width={pool.w} height={pod.poolH} rx="7" fill="none" stroke={TOKEN.borderStrong} stroke-width="1" stroke-dasharray="3 3" />
+            <text x={pool.x + 8} y={pod.poolTop + pod.poolH - 7} class="s-small" fill={TOKEN.muted}>
+              pool <tspan class="s-code">{pool.name}</tspan>
+            </text>
+          </g>
+        ))}
+        {pod.workers.map((w) => (
+          <g>
+            <rect x={w.x} y={w.y} width={WORKER_W} height={WORKER_H} rx="5" fill={TOKEN.card} stroke={TOKEN.info} stroke-width="1.25" />
+            <text x={w.x + WORKER_W / 2} y={w.y + 18} text-anchor="middle" class="s-code s-small" fill={TOKEN.fg}>queue:work</text>
+          </g>
+        ))}
+
+        <path d={pod.control.line} fill="none" stroke={TOKEN.warning} stroke-width="1.5" />
+        <path d={pod.control.head} fill={TOKEN.warning} />
+        <path d={pod.jobs.line} fill="none" stroke={TOKEN.info} stroke-width="1.5" />
+        <path d={pod.jobs.head} fill={TOKEN.info} />
+        <text x={pod.px + 144} y={POD_BOTTOM + 24} text-anchor="end" class="s-small" fill={TOKEN.fg}>pop, ack</text>
+        <text x={pod.railX - 8} y={POD_BOTTOM + 18} text-anchor="end" class="s-small" fill={TOKEN.fg}>renew leases,</text>
+        <text x={pod.railX - 8} y={POD_BOTTOM + 31} text-anchor="end" class="s-small" fill={TOKEN.fg}>depth, coordination</text>
+      </g>
+    ))
+  }
+
+  {/* The broker both pods share. */}
+  <rect x="8" y={BROKER_TOP} width={W - 16} height={BROKER_BOTTOM - BROKER_TOP} rx="10" fill={TOKEN.card} stroke={TOKEN.borderStrong} stroke-width="1.5" />
+  <text x="20" y={BROKER_TOP + 22} class="s-title" fill={TOKEN.fg}>Queen broker</text>
+  {
+    ["default", "emails"].map((queue, row) => (
+      <g>
+        <text x="20" y={BROKER_TOP + 50 + row * 30} class="s-code s-small" fill={TOKEN.muted}>{queue}</text>
+        {Array.from({ length: CELLS }, (_, c) => (
+          <rect x={80 + c * 20} y={BROKER_TOP + 37 + row * 30} width="16" height="18" rx="2" fill={TOKEN.surface} stroke={TOKEN.border} stroke-width="1.25" />
+        ))}
+        <text x={80 + CELLS * 20 + 4} y={BROKER_TOP + 50 + row * 30} class="s-small" fill={TOKEN.muted}>partitions</text>
+      </g>
+    ))
+  }
+  <rect x="372" y={BROKER_TOP + 12} width="288" height={BROKER_BOTTOM - BROKER_TOP - 24} rx="7" fill={TOKEN.warningBg} stroke={TOKEN.warning} stroke-width="1.25" />
+  <text x="384" y={BROKER_TOP + 32} class="s-label" fill={TOKEN.fg}>key/value store</text>
+  <text x="384" y={BROKER_TOP + 50} class="s-code s-small" fill={TOKEN.warning}>coordination/v1/&lt;scope&gt;/&lt;instance&gt;</text>
+  <text x="384" y={BROKER_TOP + 67} class="s-small" fill={TOKEN.muted}>one key per pod, renewed every poll</text>
+  <text x="384" y={BROKER_TOP + 81} class="s-small" fill={TOKEN.muted}>
+    {PODS} keys, so the target {target} splits {shares.join(" + ")}
+  </text>
+</Schematic>
