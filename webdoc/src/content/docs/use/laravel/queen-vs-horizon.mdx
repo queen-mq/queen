@@ -418,31 +418,70 @@ does not belong in this comparison.
 
 ## Reliability boundary
 
-The qualification exercised two queues, synchronized failed jobs and a worker killed during user
-code. Horizon, Queen PHP and Queen Rust all preserved the 24 expected idempotent effects and drained
-their queue after redelivery. The Raft campaign repeated the worker kill with lease renewal in the
-master and asynchronous ACKs. In a second run, a prefetched batch outlived its 30 s lease while the
-master renewed it, and every job completed with no duplicate effect. That verifies the tested
-at-least-once path.
+On one Linux server, the three engines went through 15 failures, two replica scenarios, a 45-minute
+mixed soak and 32 Laravel queue features; the two tables below summarize them. Earlier, the
+qualification and the Raft campaign killed workers during user code, and a prefetched batch outlived
+its 30 s lease while the master renewed it, with no duplicate effect. That verifies the tested
+at-least-once paths.
 
 It does not verify exactly-once external effects. A process can perform an external side effect and
 die before its acknowledgement becomes durable in any of the three systems. Jobs still need an
 idempotency strategy.
 
-Queen's remaining pre-GA gates include a 24-hour Laravel soak, persistent broker, network and storage
-faults, broader scaling and partition matrices, native release verification and the
-same fast profile with renewal enabled.
+Queen's remaining pre-GA gates include a 24-hour Laravel soak, network and storage faults, the same
+failure lanes on PostgreSQL storage and a Raft cluster, broader scaling and partition matrices, and
+native release verification.
 
 ## What happens when something fails
 
-The table records, for each failure injected into the same Laravel application, what Horizon, the
-Queen PHP supervisor and the Queen Rust supervisor did.
+The same Laravel application ran through each failure on Horizon, the Queen PHP supervisor and the
+Queen Rust supervisor, on one Linux server, with Queen's production-like settings. Pass means that
+every job completed once, or failed once into `failed_jobs`, and that no two attempts of one job ran
+at the same time.
 
-{/* TABLE: failure-matrix */}
+| Failure | Horizon | Queen PHP | Queen Rust |
+| --- | --- | --- | --- |
+| A job throws until `tries` runs out | Pass | Pass | Pass |
+| A job throws once, then succeeds | Pass | Pass | Pass |
+| A job calls `release()` or `fail()` | Pass | Pass | Pass |
+| A job runs past its `timeout` | Pass | Pass | Pass |
+| A job takes its worker over `--memory` | Pass | Pass | Pass |
+| A job exceeds PHP's `memory_limit` | Pass | Pass | Pass |
+| SIGKILL on a worker during a job | Pass | Pass | Pass |
+| SIGKILL on the master | Pass | Pass | Pass |
+| A deploy during jobs shorter than the grace | Pass | Pass | Pass |
+| A deploy during jobs longer than the grace | Pass | Pass | Pass |
+| A deploy during the second of two long jobs on one worker | Pass | Pass | Pass |
+| The backend restarts | 2 of 300 jobs ran twice | Pass | Pass |
+| The backend freezes for 5 s | Pass | Pass | Pass |
+| The backend freezes for 45 s, past the lease | Pass | Pass | Pass |
+| `dispatch()` while the backend is down | Pass: it throws | Pass: it throws | Pass: it throws |
+| Two masters, one killed | Pass | Pass | Pass |
+| Two masters, restarted one after the other | Pass | Pass | Pass |
+
+A fourth profile, the Rust engine with prefetch 4, `ack_async` and `pop_ahead`, passed every lane
+except one: a job that crashes its worker also charges an attempt to the jobs prefetched with it
+([prefetch](/use/laravel/concepts#prefetch-ack_async-and-pop_ahead)). The first run of these lanes
+found three defects in the Queen PHP client and supervisors, fixed in this release; the
+[benchmark page](/benchmarks/laravel-supervisors#failures-replicas-a-soak-and-laravel-features-2026-10-02)
+has every lane, the defects and the data.
 
 ## Laravel queue features
 
-The table records, for each Laravel queue feature exercised with the same application, the result
-under Horizon, the Queen PHP supervisor and the Queen Rust supervisor.
+Each feature ran with the same application on the three engines and was checked against the
+behaviour that the Laravel documentation states.
 
-{/* TABLE: compatibility-matrix */}
+| Area | Features checked | Horizon | Queen PHP | Queen Rust |
+| --- | --- | --- | --- | --- |
+| Delays and retries | `delay()`, a `DateTimeInterface` delay, `backoff` arrays, `retryUntil()`, `release()` with a delay, `maxExceptions`, `failOnTimeout`, `ThrottlesExceptions` | Pass | Pass | Pass |
+| Uniqueness and limits | `ShouldBeUnique`, `ShouldBeUniqueUntilProcessing`, `WithoutOverlapping`, `RateLimited`, `Skip` | Pass | Pass | Pass |
+| Chains and batches | chains, a failing chain's `catch`, batches with `then`, `catch` and `finally`, `allowFailures()`, `cancel()`, `queue:retry-batch` | Pass | Pass | Pass |
+| Other queued work | queued listeners, queued notifications, queued closures with `catch`, `ShouldBeEncrypted`, `$deleteWhenMissingModels`, a job that forks | Pass | Pass | Pass |
+| Transactions and events | `afterCommit`, `Queue::before`, `Queue::after` and `Queue::failing` | Pass | Pass | Pass |
+| Commands | `queue:retry`, `queue:forget`, `queue:flush`, `queue:prune-failed`, `queue:monitor`, `Queue::size()` | Pass | Pass | Pass |
+| Clearing a queue | `queue:clear` | Clears it | Not supported: the command fails, and the jobs still run | Not supported |
+
+The Rust engine with prefetch 4, `ack_async` and `pop_ahead` passed all 32 features as well.
+Laravel's Redis queue stores due times in whole seconds, so on Horizon a retry can start up to a
+second early or late: for `backoff` `[1, 3]`, Horizon's retries came after 1.81 and 4.03 s, Queen's
+after 1.02 and 3.05 s.
