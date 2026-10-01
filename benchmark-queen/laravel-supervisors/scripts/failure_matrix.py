@@ -196,11 +196,13 @@ class Lane:
 
     # ---------------------------------------------------------------- lifecycle
 
-    def up(self, replicas: int = 1) -> None:
+    def up(self, replicas: int = 1, prepare: Callable[[Lane], None] | None = None) -> None:
         self.replicas = replicas
         self.docker("volume", "create", self.volume)
         self.docker("run", "--rm", "--user", "0:0", "--mount", f"type=volume,src={self.volume},dst=/results",
                     APP_IMAGE, "sh", "-ceu", "chown 1000:1000 /results; chmod 0770 /results")
+        if prepare is not None:
+            prepare(self)
         self.compose("up", "--detach", "--no-build", "--scale", f"{self.profile.engine}={replicas}",
                      self.profile.engine, "producer")
         self.wait_healthy()
@@ -677,13 +679,20 @@ def soak(lane: Lane) -> list[Check]:
     return checks
 
 
+COMPAT_DATABASE = "/results/compat.sqlite"
+
+
+def compat_database(lane: Lane) -> None:
+    """The SQLite file and its tables, before any worker starts: queue:work reads the
+    cache (the restart signal) as it boots, and the compatibility lanes' cache is this
+    database. It lives on the results volume, shared by every container of the lane."""
+    lane.compose("run", "--rm", "--no-deps", "producer", "sh", "-ceu",
+                 f"touch {COMPAT_DATABASE} && php artisan --no-ansi bench:compat setup")
+
+
 def laravel_compat(lane: Lane) -> list[Check]:
     """Laravel's queue features, each checked by `bench:compat` inside the supervisor's
-    container: the workers there share its SQLite file and file cache."""
-    lane.docker("exec", lane.container(lane.profile.engine), "touch", "/tmp/compat.sqlite")
-    # The supervisor's processes may already hold the empty file open: setup
-    # creates the tables, then every scenario uses them.
-    lane.app_artisan("bench:compat", "setup")
+    container, beside its workers."""
     checks: list[Check] = []
     for name in COMPAT_SCENARIOS:
         result = lane.app_artisan("bench:compat", name, f"--run-id={lane.run_id}-{name}", check=False)
@@ -706,6 +715,7 @@ class Scenario:
     run: Callable[[Lane], list[Check]]
     env: dict[str, str] = field(default_factory=dict)
     replicas: int = 1
+    prepare: Callable[[Lane], None] | None = None
 
 
 SCENARIOS = [
@@ -728,9 +738,9 @@ SCENARIOS = [
     Scenario("replicas-rolling", replicas_rolling, {"BENCH_QUEEN_COORDINATION": "true"}, replicas=2),
     Scenario("soak", soak, {"BENCH_WORKERS": "8", "BENCH_MIN_WORKERS": "8", "BENCH_MAX_WORKERS": "8"}),
     Scenario("laravel-compat", laravel_compat, {
-        "BENCH_CACHE_STORE": "database", "BENCH_DB_DATABASE": "/tmp/compat.sqlite",
+        "BENCH_CACHE_STORE": "database", "BENCH_DB_DATABASE": COMPAT_DATABASE,
         "BENCH_WORKERS": "3", "BENCH_MIN_WORKERS": "3", "BENCH_MAX_WORKERS": "3",
-    }),
+    }, prepare=compat_database),
 ]
 
 
@@ -739,7 +749,7 @@ def run_lane(scenario: Scenario, profile: Profile, output: Path) -> dict:
     print(f"\n== {scenario.name} / {profile.name} ({lane.project})", flush=True)
     result: dict = {"scenario": scenario.name, "profile": profile.name, "run_id": lane.run_id}
     try:
-        lane.up(scenario.replicas)
+        lane.up(scenario.replicas, scenario.prepare)
         checks = scenario.run(lane)
         result["checks"] = [check.__dict__ for check in checks]
         result["passed"] = all(check.passed for check in checks)
