@@ -712,6 +712,10 @@ body:has(dialog.drawer[open]) { overflow: hidden; }
 }
 .detail-block .detail-heading h3 { margin-bottom: 0; }
 .detail-heading-end { justify-content: flex-end; margin-top: 8px; }
+.retry-form { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.retry-form span { color: var(--muted); font-size: 13px; }
+.retry-command { margin-top: 12px; }
+.retry-command summary { color: var(--muted-strong); cursor: pointer; font-size: 13px; }
 .detail-block .detail-heading + pre { margin-top: 8px; }
 /* Shown only once the dashboard script runs: without it nothing would copy. */
 .copy-button { display: none; }

@@ -7,6 +7,7 @@ use Queen\Laravel\Http\Controllers\DashboardScriptController;
 use Queen\Laravel\Http\Controllers\DashboardStatusController;
 use Queen\Laravel\Http\Controllers\DashboardStylesheetController;
 use Queen\Laravel\Http\Controllers\FailedJobController;
+use Queen\Laravel\Http\Controllers\FailedJobRetryController;
 use Queen\Laravel\Http\Controllers\SupervisorControlController;
 use Queen\Laravel\Http\Controllers\TagController;
 
@@ -27,6 +28,9 @@ Route::get('/failed-jobs', DashboardController::class)->defaults('section', 'fai
 Route::get('/failed-jobs/{id}', FailedJobController::class)
     ->where('id', DashboardSections::FAILED_JOB_ID_PATTERN)
     ->name('failed-job');
+Route::post('/failed-jobs/{id}/retry', FailedJobRetryController::class)
+    ->where('id', DashboardSections::FAILED_JOB_ID_PATTERN)
+    ->name('failed-job.retry');
 Route::get('/configuration', DashboardController::class)->defaults('section', 'configuration')->name('configuration');
 Route::get('/api/status', DashboardStatusController::class)->name('status');
 Route::post('/control/{command}', SupervisorControlController::class)

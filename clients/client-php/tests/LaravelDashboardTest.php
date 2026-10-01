@@ -1793,6 +1793,75 @@ final class LaravelDashboardTest extends TestCase
         $this->get('/queen/failed-jobs/failed-1')->assertForbidden();
     }
 
+    public function testAFailedJobIsRetriedFromItsDetailWithOneClick(): void
+    {
+        $this->app['config']->set('queue.connections.discard', ['driver' => 'null']);
+        $this->failedJobsFile(2, ['connection' => 'discard', 'payload' => json_encode([
+            'uuid' => '9b2c1d3e-0000-4000-8000-000000000001',
+            'displayName' => 'App\\Jobs\\SendInvoice',
+            // queue:retry unserializes the command to refresh retryUntil.
+            'data' => ['command' => serialize(new \stdClass())],
+        ], JSON_THROW_ON_ERROR)]);
+        $this->app['env'] = 'local';
+
+        $form = $this->dashboardXPath($this->get('/queen/failed-jobs/failed-1')->assertOk()->getContent())
+            ->query('//section[@id="failed-job"]//form[@method="post"]')->item(0);
+        $this->assertNotNull($form, 'the detail offers a retry button');
+        $this->assertSame('/queen/failed-jobs/failed-1/retry', $form->getAttribute('action'));
+
+        $this->withSession(['_token' => 'queen-csrf'])
+            ->post('/queen/failed-jobs/failed-1/retry', ['_token' => 'queen-csrf'])
+            ->assertStatus(303)
+            ->assertHeader('Location', '/queen/failed-jobs')
+            ->assertSessionHas('queen_dashboard_control_status', 'Failed job [failed-1] was pushed back onto queue [default].');
+        $remaining = array_column(json_decode((string) file_get_contents($this->failedPath), true), 'id');
+        $this->assertSame(['failed-2'], $remaining, 'queue:retry removed it from the failed-job store');
+    }
+
+    public function testRetryNeedsCsrfAndTheDashboardAbility(): void
+    {
+        $this->failedJobsFile(1);
+        $this->app['env'] = 'local';
+        $this->post('/queen/failed-jobs/failed-1/retry')->assertStatus(419);
+        $this->get('/queen/failed-jobs/failed-1/retry')->assertStatus(405);
+
+        Gate::define('viewQueenDashboard', static fn (?Authenticatable $user = null): bool => false);
+        $this->app['env'] = 'production';
+        $this->withSession(['_token' => 'queen-csrf'])
+            ->post('/queen/failed-jobs/failed-1/retry', ['_token' => 'queen-csrf'])
+            ->assertForbidden();
+        $this->assertCount(1, json_decode((string) file_get_contents($this->failedPath), true));
+    }
+
+    public function testARetryThatCannotRunKeepsTheJobAndSaysWhy(): void
+    {
+        $this->failedJobsFile(1, ['connection' => 'missing-connection']);
+        $this->app['env'] = 'local';
+
+        $this->withSession(['_token' => 'queen-csrf'])
+            ->post('/queen/failed-jobs/failed-1/retry', ['_token' => 'queen-csrf'])
+            ->assertStatus(303)
+            ->assertHeader('Location', '/queen/failed-jobs/failed-1')
+            ->assertSessionHas('queen_dashboard_control_error');
+        $this->assertStringContainsString(
+            'Failed job [failed-1] was not retried',
+            (string) session('queen_dashboard_control_error'),
+        );
+        $this->assertCount(1, json_decode((string) file_get_contents($this->failedPath), true));
+    }
+
+    public function testRetryingAJobThatIsNoLongerFailedSaysSo(): void
+    {
+        $this->failedJobsFile(1);
+        $this->app['env'] = 'local';
+
+        $this->withSession(['_token' => 'queen-csrf'])
+            ->post('/queen/failed-jobs/failed-9/retry', ['_token' => 'queen-csrf'])
+            ->assertStatus(303)
+            ->assertHeader('Location', '/queen/failed-jobs')
+            ->assertSessionHas('queen_dashboard_control_error', 'Failed job [failed-9] is no longer in the failed-job store.');
+    }
+
     private function failedJobsTable(int $rows, bool $uuids = false): void
     {
         Schema::create('failed_jobs', function (Blueprint $table): void {
