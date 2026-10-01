@@ -5,6 +5,21 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**Laravel: a job handed back unstarted keeps its attempt.** A worker that stopped with a
+prefetched tail (`--memory`, `--max-jobs`, a deploy, Laravel's timeout handler), or that could
+not track a batch popped ahead, handed the jobs back with a `retry` ACK. The broker counts the
+next pop of such a position as a redelivery, so each hand-back charged an attempt to jobs that
+never ran, and with `tries = 1` they failed with `MaxAttemptsExceeded` on their next delivery.
+The hand-back is now one transaction that completes each unstarted job and pushes a copy to its
+partition with the runs so far, as a release does. A crash (SIGKILL, out of memory, node loss)
+still returns the tail by lease expiry, charged one attempt: keep `tries` at 2 or more with
+`prefetch` above 1.
+
+**Laravel: a forked child no longer kills its worker.** With the PHP lease-renewal helper, a
+child forked by a job (Laravel's fork concurrency driver, `pcntl_fork()`) stopped the parent's
+helper when it exited, and the parent's watchdog then SIGKILLed the parent mid-job; the child
+was also fenced as soon as a subprocess of its own ended.
+
 **PHP client: a detached request is written before the next job runs.** With `ack_async` or
 `pop_ahead`, a request on a new connection (a worker's first detached request, or one after the
 broker closed an idle keep-alive connection) was only started when it was sent: cURL wrote it
@@ -24,6 +39,21 @@ freed the cURL handles it inherited, so the job hung until its timeout and left 
 The cURL transport now sets `CURLOPT_QUICK_EXIT` and shares one DNS cache between its handles,
 so detached requests reuse the synchronous handle's resolution and never start a resolver
 thread of their own.
+
+**Laravel: job metrics and tag records make one bounded attempt.** They are written from every
+worker's job events and on `WorkerStopping`, and used the queue's ordinary client, whose
+retries held the worker on a slow or rate-limiting broker and could spend the shutdown grace
+before the prefetched tail was handed back. They now use one 2-second attempt.
+
+**Supervisors (both engines).** A worker that ran at least `stable_after` and exits non-zero
+(`queue:work` exits 12 at `--memory`, a job timeout kills the worker) is restarted at once: it
+no longer holds its pool at a single probe for `stable_after`. On stop, the workers get SIGTERM
+before the coordination leave and the remote status publish, which a slow broker could stretch
+past the platform's stop deadline. The PHP engine's event-driven watcher can no longer freeze
+the master loop on an answer that stalls mid-body, its fork server survives a failed
+`pcntl_fork()`, and preforked workers honour `--quiet`. The Rust engine trusts the platform's
+CA store (and `SSL_CERT_FILE`), so a broker behind a private CA works, and its lease service
+fences a worker before it logs why, so a broken stderr pipe cannot skip the fence.
 
 ## 1.6.0 - 2026-09-11
 
