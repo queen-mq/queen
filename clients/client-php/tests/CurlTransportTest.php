@@ -189,6 +189,50 @@ class CurlTransportTest extends TestCase
         $this->assertSame('GET', $client->settleDetached($client->getDetached('/echo'))['method']);
     }
 
+    public function testEveryRequestAsksForTcpKeepAlive(): void
+    {
+        $options = new \ReflectionMethod(CurlTransport::class, 'options');
+        $retryAfter = [];
+        foreach ([[5_000, 5_000], [0, 0]] as [$timeout, $connectTimeout]) {
+            $set = $options->invokeArgs(new CurlTransport(), ['GET', $this->server->url, [], null, $timeout, $connectTimeout, &$retryAfter]);
+            $this->assertSame(1, $set[CURLOPT_TCP_KEEPALIVE]);
+            $this->assertSame(30, $set[CURLOPT_TCP_KEEPIDLE]);
+            $this->assertSame(15, $set[CURLOPT_TCP_KEEPINTVL]);
+        }
+    }
+
+    public function testAnIdleConnectionRunsTheKernelKeepAliveTimer(): void
+    {
+        if (!is_readable('/proc/net/tcp')) {
+            $this->markTestSkipped('Needs Linux /proc/net/tcp.');
+        }
+        $client = $this->client();
+        $synchronous = $client->get('/echo')['peer'];
+        $detached = $client->settleDetached($client->postDetached('/echo', []))['peer'];
+
+        foreach (['synchronous' => $synchronous, 'detached' => $detached] as $kind => $peer) {
+            $port = (int) substr($peer, strrpos($peer, ':') + 1);
+            $this->assertSame('02', $this->tcpTimer($port), "the {$kind} connection has no keep-alive timer");
+        }
+    }
+
+    /** The kernel's timer type for the established socket on a local port: 02 is keep-alive. */
+    private function tcpTimer(int $port): ?string
+    {
+        $local = sprintf(':%04X', $port);
+        foreach (['/proc/net/tcp', '/proc/net/tcp6'] as $table) {
+            foreach (array_slice(file($table, FILE_IGNORE_NEW_LINES) ?: [], 1) as $line) {
+                $fields = preg_split('/\s+/', trim($line));
+                // local_address rem_address st tx_queue:rx_queue tr:tm->when
+                if (str_ends_with($fields[1], $local) && $fields[3] === '01') {
+                    return substr($fields[5], 0, 2);
+                }
+            }
+        }
+
+        return null;
+    }
+
     private function client(array $options = []): HttpClient
     {
         return new HttpClient($options + ['baseUrl' => $this->server->url, 'timeoutMillis' => 5_000]);

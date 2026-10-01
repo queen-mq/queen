@@ -73,6 +73,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-01 (through the ack_async and pop_ahead hardening): detached requests settle their own connect, a late popped batch is handed back untracked, and a failed detached send falls back to the synchronous ACK; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-01 (through db3f21b0): QueenQueue and Queen only gained private helpers (abandonDelivery, affinityKey, retryWire, affinityKeyOf); no behavior this page states changes.
 # sourceOfTruth re-read 2026-10-01 (through the cURL transport): HttpClient sends synchronous and detached requests over CurlTransport; the Transport subsection and the Errors section say so.
+# sourceOfTruth re-read 2026-10-01 (through the TCP keep-alive change): CurlTransport sets TCP keep-alive on every connection; the Transport subsection says so.
 ---
 
 The Composer package is `queen-mq/php-client`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
@@ -128,7 +129,10 @@ the `Retry-After` contract and the jitter are in
 With `ext-curl`, every synchronous request, and the detached ACK and pop of the Laravel driver, go
 over the client's own kept-alive cURL handles instead of Guzzle. A pop and an ACK then cost the
 client about 60% less CPU, and a Laravel worker with 10 ms jobs used 13 to 25% less in the
-benchmark; retries, failover, timeouts, TLS verification and errors behave as before. Guzzle stays for the async API and carries every request when an HTTP proxy variable is set
+benchmark; retries, failover, timeouts, TLS verification and errors behave as before. Its
+connections carry TCP keep-alive probes after 30 idle seconds, every 15 seconds after that, so a
+NAT gateway or load balancer that silently drops an idle connection does not leave the next
+request waiting for its timeout. Guzzle stays for the async API and carries every request when an HTTP proxy variable is set
 (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` or a lower-case form), when `ext-curl` is missing, or when
 `QUEEN_SDK_HTTP_TRANSPORT=guzzle`.
 

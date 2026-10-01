@@ -20,6 +20,15 @@ final class CurlTransport
 {
     private const CONNECT_TIMEOUT_MILLIS = 5_000;
 
+    /**
+     * TCP keep-alive on every connection: a NAT gateway, firewall or load
+     * balancer that silently forgets an idle connection would otherwise
+     * leave the next request waiting for its whole timeout. Probes start
+     * after 30 idle seconds and repeat every 15.
+     */
+    private const KEEPALIVE_IDLE_SECONDS = 30;
+    private const KEEPALIVE_INTERVAL_SECONDS = 15;
+
     /** The longest single wait for a detached answer, so deadlines stay prompt. */
     private const SELECT_SECONDS = 0.25;
 
@@ -178,6 +187,9 @@ final class CurlTransport
             CURLOPT_CONNECTTIMEOUT_MS => $connectTimeoutMillis,
             // Laravel workers own SIGALRM for job timeouts.
             CURLOPT_NOSIGNAL => true,
+            CURLOPT_TCP_KEEPALIVE => 1,
+            CURLOPT_TCP_KEEPIDLE => self::KEEPALIVE_IDLE_SECONDS,
+            CURLOPT_TCP_KEEPINTVL => self::KEEPALIVE_INTERVAL_SECONDS,
             CURLOPT_HEADERFUNCTION => static function ($handle, string $line) use (&$retryAfter): int {
                 if (strncasecmp($line, 'Retry-After:', 12) === 0) {
                     $retryAfter[] = trim(substr($line, 12));

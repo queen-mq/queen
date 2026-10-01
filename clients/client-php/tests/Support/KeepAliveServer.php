@@ -6,8 +6,9 @@ namespace Queen\Tests\Support;
  * An HTTP/1.1 server with keep-alive and several connections at once, in a
  * child PHP process, for tests of the real cURL path. Routes:
  *
- * - `/echo`: 200 with the method, path, lower-cased headers, body and the
- *   number of the connection that carried the request;
+ * - `/echo`: 200 with the method, path, lower-cased headers, body, the
+ *   number of the connection that carried the request and the client's
+ *   address;
  * - `/status/<code>`: that status with `{"error": "status <code>"}`;
  * - `/flaky`: 503 once, then 200 `{"ok": true}`;
  * - `/limited`: 429 with `Retry-After: 2` and a rate-limit error;
@@ -23,15 +24,16 @@ final class KeepAliveServer
 $server = stream_socket_server("tcp://{$address}");
 $clients = [];
 $buffers = [];
+$peers = [];
 $connections = 0;
 $flaky = 0;
-$answer = static function (string $method, string $target, array $headers, string $body, int $connection) use (&$flaky): string {
+$answer = static function (string $method, string $target, array $headers, string $body, int $connection, string $peer) use (&$flaky): string {
     $path = (string) parse_url($target, PHP_URL_PATH);
     $status = 200;
     $extra = '';
     $payload = json_encode(['ok' => true]);
     if ($path === '/echo') {
-        $payload = json_encode(['method' => $method, 'target' => $target, 'headers' => $headers, 'body' => $body, 'connection' => $connection]);
+        $payload = json_encode(['method' => $method, 'target' => $target, 'headers' => $headers, 'body' => $body, 'connection' => $connection, 'peer' => $peer]);
     } elseif (preg_match('#^/status/(\d+)$#', $path, $match)) {
         $status = (int) $match[1];
         $payload = json_encode(['error' => "status {$status}"]);
@@ -67,8 +69,9 @@ while (true) {
     }
     foreach ($read as $stream) {
         if ($stream === $server) {
-            $clients[++$connections] = stream_socket_accept($server);
+            $clients[++$connections] = stream_socket_accept($server, 0, $peer);
             $buffers[$connections] = '';
+            $peers[$connections] = (string) $peer;
             continue;
         }
         $id = array_search($stream, $clients, true);
@@ -76,7 +79,7 @@ while (true) {
         if ($chunk === '' || $chunk === false) {
             if (feof($stream)) {
                 fclose($stream);
-                unset($clients[$id], $buffers[$id]);
+                unset($clients[$id], $buffers[$id], $peers[$id]);
             }
             continue;
         }
@@ -95,7 +98,7 @@ while (true) {
             }
             $body = (string) substr($buffers[$id], $end + 4, $length);
             $buffers[$id] = (string) substr($buffers[$id], $end + 4 + $length);
-            fwrite($stream, $answer($method, $target, $headers, $body, $id));
+            fwrite($stream, $answer($method, $target, $headers, $body, $id, $peers[$id]));
         }
     }
 }
