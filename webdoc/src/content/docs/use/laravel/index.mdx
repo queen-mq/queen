@@ -15,6 +15,7 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Queue/QueenQueue.php
   - clients/client-php/src/Laravel/Queue/QueenJob.php
   - clients/client-php/src/Laravel/Queue/ProcessLeaseRenewer.php
+  - benchmark-queen/2026-10-01-linux-vm-horizon-raft/README.md
 verifiedBy:
   - clients/client-php/tests/LaravelServiceProviderTest.php
   - clients/client-php/tests/LaravelQueueDriverTest.php
@@ -27,6 +28,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-30 (through dc5b5994): the event_driven switch in config/queen.php adds nothing this overview describes; page matches the code.
 # sourceOfTruth re-read 2026-10-01 (through db3f21b0): QueenQueue and Queen only gained private helpers (abandonDelivery, affinityKey, retryWire, affinityKeyOf); no behavior this page states changes.
 # sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): QueenQueue pops ahead only after a full batch; the Pop the next batch ahead section states the rule.
+# sourceOfTruth re-read 2026-10-01 (Linux server campaign): the pop_ahead section adds the measured effect of the full-batch rule.
 ---
 
 Queen can play two separate roles in a Laravel application:
@@ -176,8 +178,9 @@ still leaves too little of the new lease to renew it safely, the worker returns 
 queue at once. A worker that serves a comma-separated queue list never pops ahead, because its
 next job may come from another queue. A worker pops ahead only after a full batch: a batch that
 came back short shows that the queue was nearly empty, so a pop sent ahead would most likely come
-back empty too. Under a light load the worker then sends one pop per job, not two. A pop sent ahead
-never waits for new jobs, so an idle queue behaves as before.
+back empty too. Under a light load the worker then sends one pop per job, not two: at 500 jobs/s on
+the benchmark server that took 12% off the broker's CPU and 8% off the workers', with no change under
+a backlog. A pop sent ahead never waits for new jobs, so an idle queue behaves as before.
 
 ## What changes from another Laravel connection
 

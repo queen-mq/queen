@@ -19,6 +19,7 @@ sourceOfTruth:
   - supervisor/src/prefork.rs
   - supervisor/src/watch.rs
   - supervisor/src/lease/mod.rs
+  - benchmark-queen/2026-10-01-linux-vm-horizon-raft/README.md
 verifiedBy:
   - clients/client-php/tests/ReplicaCoordinatorTest.php
   - clients/client-php/tests/ReplicaScalingTest.php
@@ -28,6 +29,7 @@ verifiedBy:
   - clients/client-php/tests/LaravelSupervisorRemoteStatusTest.php
 # sourceOfTruth re-read 2026-10-01 (through the ack_async and pop_ahead hardening): detached requests settle their own connect, a late popped batch is handed back untracked, and a failed detached send falls back to the synchronous ACK; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): pop_ahead pops ahead only after a full batch; the tuning table and its figures are unchanged.
+# sourceOfTruth re-read 2026-10-01 (Linux server campaign): the What to expect table adds the server rows for lease renewal in the master and for ack_async with pop_ahead.
 ---
 
 This guide puts the supervisor features together for one common setup: Laravel workers in a
@@ -202,8 +204,9 @@ pod's share within seconds, while KEDA changes the number of pods over minutes.
 
 ## What to expect
 
-Measured on one host with Docker Desktop, so the size of each effect, not a guarantee for your
-cluster. The method and every run are on the [benchmark page](/benchmarks/laravel-supervisors).
+Measured on one host with Docker Desktop, and the last two rows also on a dedicated Linux server, so
+the size of each effect, not a guarantee for your cluster. The method and every run are on the
+[benchmark page](/benchmarks/laravel-supervisors).
 
 | Feature | Without | With |
 | --- | --- | --- |
@@ -212,6 +215,8 @@ cluster. The method and every run are on the [benchmark page](/benchmarks/larave
 | `event_driven` with `fast_scale_up`, time to 20 workers after a burst | 13.9 s | 5.6 s |
 | Lease renewal in the master, 8 prefetching workers and their master | 161 MiB | 70 MiB |
 | `ack_async` and `pop_ahead`, 10 ms jobs on the Raft broker, 8 workers | 453 jobs/s | 643 jobs/s |
+| Lease renewal in the master, Linux server, 32 workers | 417 MiB | 116 MiB |
+| `ack_async` and `pop_ahead`, Linux server, 32 workers | 1,879 jobs/s | 2,794 jobs/s |
 
 <Chart
   src="laravel-event-driven"

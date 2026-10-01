@@ -666,6 +666,116 @@ def fig_laravel_horizon_latency(out: Path, theme: Theme) -> str:
     return "laravel-horizon-latency"
 
 
+LINUX_VM = BENCH / "2026-10-01-linux-vm-horizon-raft" / "raw" / "runs.csv"
+
+
+def vm_median(rows, group: str, lane: str, engine: str, field: str) -> float:
+    """The median of one field over a server lane's correct runs."""
+    from statistics import median
+
+    return median(
+        float(r[field]) for r in rows
+        if r["group"] == group and r["lane"] == lane and r["engine"] == engine and r["correct"] == "True"
+    )
+
+
+def paired_bars(ax, theme: Theme, labels, horizon, queen, xlabel: str) -> None:
+    """Horizontal bar pairs, Horizon above Queen, each bar labelled with its value."""
+    y = range(len(labels))
+    height = 0.38
+    bars_h = ax.barh([i + height / 2 for i in y], horizon, height, color=theme.series[1], label="Horizon, Redis")
+    bars_q = ax.barh([i - height / 2 for i in y], queen, height, color=theme.series[0], label="Queen, Raft broker")
+    finish(ax, theme, "")
+    ax.grid(axis="x")
+    ax.grid(axis="y", visible=False)
+    ax.set_yticks(list(y), labels)
+    ax.set_xlabel(xlabel, color=theme.ink, fontsize=8.5)
+    ax.set_xlim(0, max(queen + horizon) * 1.16)
+    for bars in (bars_h, bars_q):
+        for bar in bars:
+            ax.annotate(f"{bar.get_width():,.0f}", xy=(bar.get_width(), bar.get_y() + bar.get_height() / 2),
+                        xytext=(4, 0), textcoords="offset points", va="center", fontsize=8,
+                        color=theme.ink_strong)
+    # The top pair is the shortest in every caller: its right side is free.
+    ax.legend(loc="upper right")
+
+
+def fig_laravel_vm_capacity(out: Path, theme: Theme) -> str:
+    """Worker capacity on the Linux server: every job enqueued before the
+    workers start, so the producer does not set the rate."""
+    rows = read_csv(LINUX_VM)
+    lanes = [
+        ("drain", "drain-32", "10 ms jobs, 32 workers, both fsync every write"),
+        ("drain", "drain-everysec-32", "10 ms jobs, 32 workers, Redis fsync once a second"),
+        ("nofsync", "drain-nofsync-32", "10 ms jobs, 32 workers, Redis never fsyncs"),
+        ("drain", "drain-noop-32", "Empty jobs, 32 workers"),
+        ("drain", "drain-64", "10 ms jobs, 64 workers"),
+    ][::-1]
+    labels = [label for _, _, label in lanes]
+    horizon = [vm_median(rows, g, lane, "horizon", "jobs_per_second") for g, lane, _ in lanes]
+    queen = [vm_median(rows, g, lane, "queen-rust", "jobs_per_second") for g, lane, _ in lanes]
+
+    style(theme)
+    fig, ax = plt.subplots(figsize=(7.2, 3.6))
+    paired_bars(ax, theme, labels, horizon, queen,
+                "Completed jobs per second, queue full before the workers start, median of 3 runs")
+    save(fig, out, "laravel-vm-capacity", theme)
+    return "laravel-vm-capacity"
+
+
+def fig_laravel_vm_memory(out: Path, theme: Theme) -> str:
+    """Memory of the application container as the pool grows."""
+    rows = read_csv(LINUX_VM)
+    pools = [
+        ("load", "throughput-16", "16 workers"),
+        ("load", "throughput-32", "32 workers"),
+        ("drain", "drain-64", "64 workers"),
+    ][::-1]
+    labels = [label for _, _, label in pools]
+    horizon = [vm_median(rows, g, lane, "horizon", "app_memory_mib") for g, lane, _ in pools]
+    queen = [vm_median(rows, g, lane, "queen-rust", "app_memory_mib") for g, lane, _ in pools]
+
+    style(theme)
+    fig, ax = plt.subplots(figsize=(7.2, 2.6))
+    paired_bars(ax, theme, labels, horizon, queen,
+                "Application container memory (MiB), master and workers, median of 3 runs")
+    save(fig, out, "laravel-vm-memory", theme)
+    return "laravel-vm-memory"
+
+
+def fig_laravel_vm_latency(out: Path, theme: Theme) -> str:
+    """Dispatch-to-completion latency with jobs arriving one by one: p50 and
+    p95 per engine, at 500 jobs/s and in the 15-minute soak at 400 jobs/s."""
+    rows = read_csv(LINUX_VM)
+    lanes = [("paced-500", "500 jobs/s asked, 16 workers"), ("soak", "400 jobs/s for 15 minutes")]
+
+    style(theme)
+    fig, axes = plt.subplots(1, 2, figsize=(7.2, 2.6), sharey=True, gridspec_kw={"wspace": 0.1})
+    top = 0.0
+    for ax, (lane, title) in zip(axes, lanes):
+        groups = ["p50", "p95"]
+        horizon = [vm_median(rows, "load", lane, "horizon", f"end_to_end_{p}_ms") for p in groups]
+        queen = [vm_median(rows, "load", lane, "queen-rust", f"end_to_end_{p}_ms") for p in groups]
+        top = max(top, *horizon, *queen)
+        x = range(len(groups))
+        width = 0.36
+        bars_h = ax.bar([i - width / 2 for i in x], horizon, width, color=theme.series[1], label="Horizon")
+        bars_q = ax.bar([i + width / 2 for i in x], queen, width, color=theme.series[0], label="Queen")
+        finish(ax, theme, "End-to-end latency (ms)" if ax is axes[0] else "")
+        ax.set_title(title, color=theme.ink_strong, fontsize=9, loc="left")
+        ax.set_xticks(list(x), groups)
+        for bars in (bars_h, bars_q):
+            for bar in bars:
+                ax.annotate(f"{bar.get_height():.0f}", xy=(bar.get_x() + bar.get_width() / 2, bar.get_height()),
+                            xytext=(0, 3), textcoords="offset points", ha="center", fontsize=8,
+                            color=theme.ink_strong)
+    axes[0].legend(loc="upper left")
+    axes[0].set_ylim(0, top * 1.2)
+
+    save(fig, out, "laravel-vm-latency", theme)
+    return "laravel-vm-latency"
+
+
 FIGURES = (
     fig_soak24,
     fig_pipeline,
@@ -679,6 +789,9 @@ FIGURES = (
     fig_laravel_horizon_memory,
     fig_laravel_queen_optimizations,
     fig_laravel_horizon_latency,
+    fig_laravel_vm_capacity,
+    fig_laravel_vm_memory,
+    fig_laravel_vm_latency,
 )
 
 
