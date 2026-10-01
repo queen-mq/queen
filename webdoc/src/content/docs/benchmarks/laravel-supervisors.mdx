@@ -49,6 +49,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): coordination, prefork and fast scale-up are opt-in and off in the benchmarked configuration, so the qualification results stand; the supervisor-features section adds the new measurements.
 # sourceOfTruth re-read 2026-10-01 (through f5eb7a39): the Raft dataset README now states the repeat's 70 runs; the Raft section matches it.
 # sourceOfTruth re-read 2026-10-01 (through c97c1ca7): run.sh and fault-recovery.sh only spell their Compose switches through a helper; no option or measurement changes.
+# sourceOfTruth re-read 2026-10-01 (through eaf37ad0): run.sh and the compose files gain an HTTP transport switch for the Queen lanes; the transport A/B paragraph says what it measured.
 ---
 
 This qualification asks whether Queen can replace the **process control plane** of Laravel
@@ -367,6 +368,13 @@ Queen application used 7.8 CPU seconds for 5,000 jobs, against Horizon's 3.1; wi
 were equal, 5.8 against 6.0 seconds for 10,000 jobs. The HTTP client costs more per request than
 phpredis. At 100 paced jobs/s the Raft broker also used 4.7 CPU seconds against Redis's 1.1. Size
 worker CPU from your own jobs.
+
+The PHP client's [cURL transport](/reference/sdk/php#transport) was measured afterwards in
+Queen-only lanes, against the Guzzle transport on identical images. With 10 ms jobs and fsync on every
+write the application used 6.3 to 6.8 CPU seconds for 5,000 jobs against 7.4 to 7.7, at 660 to 665
+against 649 to 652 jobs/s. With empty jobs and prefork it used more, 6.5 to 6.9 against 5.6 to 6.3
+seconds for 10,000 jobs, and the broker's CPU rose by about a third; without prefork the two were
+within noise. That case is not explained yet.
 
 Seven of these lanes ran again on the final commit, after the last review fixes: throughput and
 latency moved by at most 3%, and the time to the burst's peak became 5.3 s for Queen against 6.3 s
