@@ -40,6 +40,13 @@ final class ProcessLeaseRenewer implements LeaseRenewer
 
     private ?int $watchdogPid = null;
 
+    /**
+     * The process that started the helper. A job may fork (Laravel's fork
+     * concurrency driver does): the child inherits this object, and must
+     * neither drive nor watch its parent's helper.
+     */
+    private ?int $owner = null;
+
     public function __construct(
         private array $clientConfig,
         private int $leaseSeconds,
@@ -108,6 +115,9 @@ final class ProcessLeaseRenewer implements LeaseRenewer
     public function track(string $leaseId, int $deadlineMonotonicMillis): void
     {
         $this->validateLeaseId($leaseId);
+        if ($this->inherited()) {
+            $this->abandonInheritedHelper();
+        }
         if (isset($this->tracked[$leaseId])) {
             $this->assertHealthy($leaseId);
             return;
@@ -136,7 +146,8 @@ final class ProcessLeaseRenewer implements LeaseRenewer
 
     public function forget(string $leaseId): void
     {
-        if (!isset($this->tracked[$leaseId])) {
+        // A forked child must not stop the renewal of its parent's lease.
+        if (!isset($this->tracked[$leaseId]) || $this->inherited()) {
             return;
         }
 
@@ -156,6 +167,9 @@ final class ProcessLeaseRenewer implements LeaseRenewer
 
     public function assertHealthy(string $leaseId): void
     {
+        if ($this->inherited()) {
+            throw new RuntimeException('Queen lease renewal belongs to another process.');
+        }
         $this->drainOutput();
         $this->assertLeaseSafe($leaseId);
         if (!$this->running()) {
@@ -170,6 +184,12 @@ final class ProcessLeaseRenewer implements LeaseRenewer
         $this->disarmHelperDeathWatchdog();
 
         if (!is_resource($this->process)) {
+            return;
+        }
+        if ($this->inherited()) {
+            // A `shutdown` would stop the parent's helper, and the parent's
+            // watchdog would then fence the parent in the middle of its job.
+            $this->abandonInheritedHelper();
             return;
         }
 
@@ -266,7 +286,9 @@ final class ProcessLeaseRenewer implements LeaseRenewer
         $reportedPid = (int) ($info['pid'] ?? 0);
         foreach (self::$armedWatchdogs as $pid => $reference) {
             $renewer = $reference->get();
-            if (!$renewer instanceof self) {
+            // A forked child inherits the registry, but its parent's helper
+            // is not its child: proc_get_status() would report it stopped.
+            if (!$renewer instanceof self || $renewer->inherited()) {
                 unset(self::$armedWatchdogs[$pid]);
                 continue;
             }
@@ -351,6 +373,7 @@ final class ProcessLeaseRenewer implements LeaseRenewer
         }
         $this->process = $process;
         $this->pipes = $pipes;
+        $this->owner = getmypid();
         stream_set_blocking($this->pipes[1], false);
         stream_set_blocking($this->pipes[2], false);
 
@@ -396,6 +419,9 @@ final class ProcessLeaseRenewer implements LeaseRenewer
 
     private function send(array $command): void
     {
+        if ($this->inherited()) {
+            throw new RuntimeException('Queen lease renewal helper belongs to another process.');
+        }
         if (!isset($this->pipes[0]) || !is_resource($this->pipes[0])) {
             throw new RuntimeException('Queen lease renewal helper input is unavailable.');
         }
@@ -490,6 +516,34 @@ final class ProcessLeaseRenewer implements LeaseRenewer
         $micros = ($timeoutMillis % 1000) * 1000;
 
         return @stream_select($read, $write, $except, $seconds, $micros) > 0;
+    }
+
+    /** Whether this process only inherited the helper through fork(). */
+    private function inherited(): bool
+    {
+        return $this->owner !== null && $this->owner !== getmypid();
+    }
+
+    /**
+     * Drop an inherited helper without a word to it: closing this process's
+     * copies of its pipes leaves the parent's open, and the parent still
+     * renews and watches its own lease.
+     */
+    private function abandonInheritedHelper(): void
+    {
+        if ($this->watchdogPid !== null) {
+            unset(self::$armedWatchdogs[$this->watchdogPid]);
+            $this->watchdogPid = null;
+            self::restoreSigchldHandlerWhenIdle();
+        }
+        $this->process = null;
+        $this->pipes = [];
+        $this->owner = null;
+        $this->tracked = [];
+        $this->failures = [];
+        $this->stderr = '';
+        $this->stdoutBuffer = '';
+        $this->events = [];
     }
 
     private function running(): bool
