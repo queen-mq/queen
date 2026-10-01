@@ -2,14 +2,17 @@
 
 namespace Queen\Http;
 
+use InvalidArgumentException;
+
 /**
  * HTTP/1.1 over cURL handles kept alive between requests, without Guzzle's
  * PSR-7 objects, middleware and promises: a pop or an ACK is the hot path of
  * every worker, and those layers cost more CPU than the request itself.
  *
  * It keeps the Guzzle path's semantics: TLS verified, no redirects, the
- * caller's headers, a total and a connect timeout, and only Retry-After read
- * from the response headers. HttpClient owns retries, failover and parsing.
+ * caller's headers, a total and a connect timeout, compressed answers decoded,
+ * and only Retry-After read from the response headers. HttpClient owns
+ * retries, failover and parsing.
  *
  * @internal
  */
@@ -46,7 +49,7 @@ final class CurlTransport
     public function request(string $method, string $url, array $headers, ?string $body, int $timeoutMillis): array
     {
         $handle = $this->handle();
-        $retryAfter = '';
+        $retryAfter = [];
         curl_reset($handle);
         curl_setopt_array($handle, $this->options($method, $url, $headers, $body, $timeoutMillis, self::CONNECT_TIMEOUT_MILLIS, $retryAfter));
         $responseBody = curl_exec($handle);
@@ -57,14 +60,15 @@ final class CurlTransport
         return [
             'status' => (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE),
             'body' => $responseBody,
-            'retryAfter' => $retryAfter,
+            'retryAfter' => implode(', ', $retryAfter),
         ];
     }
 
     /**
      * Start a request and return once cURL has written what it can: on a
      * kept-alive connection the whole request; a new connection proceeds
-     * while settle() waits. No timeout runs until then.
+     * while settle() waits. No timeout runs until then. A request dropped
+     * without settle() is freed with it.
      *
      * @param array<string, string|list<string>> $headers
      */
@@ -72,9 +76,12 @@ final class CurlTransport
     {
         $multi = $this->multi();
         $easy = curl_init();
-        $request = new DetachedRequest($easy, $url);
+        $request = new DetachedRequest($easy, $url, fn () => $this->release($easy));
         curl_setopt_array($easy, $this->options($method, $url, $headers, $body, 0, 0, $request->retryAfter));
-        curl_multi_add_handle($multi, $easy);
+        $added = curl_multi_add_handle($multi, $easy);
+        if ($added !== CURLM_OK) {
+            throw new TransportException('cURL could not start a detached request: ' . curl_multi_strerror($added), $added);
+        }
         $this->drive();
 
         return $request;
@@ -91,10 +98,12 @@ final class CurlTransport
         $multi = $this->multi();
         $id = spl_object_id($request->handle);
         $deadline = hrtime(true) + $timeoutMillis * 1_000_000;
+        // An answer that already arrived is taken even with no time left.
+        $this->drive();
         while (!isset($this->finished[$id])) {
             $left = ($deadline - hrtime(true)) / 1e9;
             if ($left <= 0) {
-                $this->release($request);
+                $request->release();
                 throw new TransportException("Queen did not answer a detached request within {$timeoutMillis} ms.", 28);
             }
             // Blocks until a socket is ready, unlike a Guzzle tick.
@@ -103,14 +112,13 @@ final class CurlTransport
         }
 
         $result = $this->finished[$id];
-        unset($this->finished[$id]);
         $answer = [
             'status' => (int) curl_getinfo($request->handle, CURLINFO_RESPONSE_CODE),
             'body' => (string) curl_multi_getcontent($request->handle),
-            'retryAfter' => $request->retryAfter,
+            'retryAfter' => implode(', ', $request->retryAfter),
         ];
         $error = curl_error($request->handle);
-        $this->release($request);
+        $request->release();
         if ($result !== CURLE_OK) {
             throw TransportException::fromCurl($result, $error, $request->url);
         }
@@ -118,15 +126,9 @@ final class CurlTransport
         return $answer;
     }
 
-    /** Stop waiting for a started request. */
-    public function cancel(DetachedRequest $request): void
-    {
-        unset($this->finished[spl_object_id($request->handle)]);
-        $this->release($request);
-    }
-
     /**
      * @param array<string, string|list<string>> $headers
+     * @param list<string> $retryAfter receives every Retry-After value
      */
     private function options(
         string $method,
@@ -135,11 +137,18 @@ final class CurlTransport
         ?string $body,
         int $timeoutMillis,
         int $connectTimeoutMillis,
-        string &$retryAfter,
+        array &$retryAfter,
     ): array {
-        $lines = ['Expect:', 'User-Agent: queen-php-client'];
+        // No Expect: 100-continue round trip, and no Accept-Encoding sent
+        // although compressed answers are decoded, both as Guzzle does.
+        $lines = ['Expect:', 'Accept-Encoding:', 'User-Agent: queen-php-client'];
         foreach ($headers as $name => $value) {
-            $lines[] = $name . ': ' . (is_array($value) ? implode(', ', $value) : $value);
+            $value = is_array($value) ? implode(', ', $value) : (string) $value;
+            if (strpbrk($name . $value, "\r\n") !== false) {
+                throw new InvalidArgumentException("Header [{$name}] must not contain a line break.");
+            }
+            // libcurl drops "Name:" with no value; "Name;" sends it empty.
+            $lines[] = $value === '' ? "{$name};" : "{$name}: {$value}";
         }
         $options = [
             CURLOPT_URL => $url,
@@ -150,13 +159,14 @@ final class CurlTransport
             CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
             CURLOPT_SSL_VERIFYPEER => true,
             CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_ENCODING => '',
             CURLOPT_TIMEOUT_MS => $timeoutMillis,
             CURLOPT_CONNECTTIMEOUT_MS => $connectTimeoutMillis,
             // Laravel workers own SIGALRM for job timeouts.
             CURLOPT_NOSIGNAL => true,
             CURLOPT_HEADERFUNCTION => static function ($handle, string $line) use (&$retryAfter): int {
                 if (strncasecmp($line, 'Retry-After:', 12) === 0) {
-                    $retryAfter = trim(substr($line, 12));
+                    $retryAfter[] = trim(substr($line, 12));
                 }
 
                 return strlen($line);
@@ -169,8 +179,9 @@ final class CurlTransport
             $options[CURLOPT_POSTFIELDS] = $body ?? '';
         } else {
             $options[CURLOPT_CUSTOMREQUEST] = $method;
-            if ($body !== null) {
-                $options[CURLOPT_POSTFIELDS] = $body;
+            // A PUT always states its length, as Guzzle sends it.
+            if ($body !== null || $method === 'PUT') {
+                $options[CURLOPT_POSTFIELDS] = $body ?? '';
             }
         }
 
@@ -184,6 +195,9 @@ final class CurlTransport
         do {
             $status = curl_multi_exec($multi, $running);
         } while ($status === CURLM_CALL_MULTI_PERFORM);
+        if ($status !== CURLM_OK) {
+            throw new TransportException('cURL failed: ' . curl_multi_strerror($status), $status);
+        }
         while (($message = curl_multi_info_read($multi)) !== false) {
             if ($message['msg'] === CURLMSG_DONE) {
                 $this->finished[spl_object_id($message['handle'])] = $message['result'];
@@ -191,10 +205,11 @@ final class CurlTransport
         }
     }
 
-    private function release(DetachedRequest $request): void
+    private function release(\CurlHandle $easy): void
     {
-        if ($this->multi !== null) {
-            curl_multi_remove_handle($this->multi, $request->handle);
+        unset($this->finished[spl_object_id($easy)]);
+        if ($this->multi !== null && $this->owner === getmypid()) {
+            curl_multi_remove_handle($this->multi, $easy);
         }
     }
 

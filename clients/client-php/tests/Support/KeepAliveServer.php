@@ -12,7 +12,9 @@ namespace Queen\Tests\Support;
  * - `/flaky`: 503 once, then 200 `{"ok": true}`;
  * - `/limited`: 429 with `Retry-After: 2` and a rate-limit error;
  * - `/slow`: 200 after two seconds;
- * - `/empty`: 204.
+ * - `/empty`: 204;
+ * - `/gzip`: a gzip-encoded JSON answer, whatever the request asked;
+ * - `/malformed`: 200 with a truncated JSON body.
  */
 final class KeepAliveServer
 {
@@ -45,6 +47,12 @@ $answer = static function (string $method, string $target, array $headers, strin
     } elseif ($path === '/empty') {
         $status = 204;
         $payload = '';
+    } elseif ($path === '/gzip') {
+        // A gateway that compresses whatever the client asked.
+        $extra = "Content-Encoding: gzip\r\n";
+        $payload = gzencode(json_encode(['compressed' => true]));
+    } elseif ($path === '/malformed') {
+        $payload = '{"messages": [';
     }
 
     return "HTTP/1.1 {$status} X\r\n{$extra}Content-Type: application/json\r\nContent-Length: "

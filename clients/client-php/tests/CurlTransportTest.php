@@ -104,8 +104,8 @@ class CurlTransportTest extends TestCase
 
     public function testAForkedChildOpensItsOwnConnection(): void
     {
-        if (!function_exists('pcntl_fork')) {
-            $this->markTestSkipped('Needs ext-pcntl.');
+        if (!function_exists('pcntl_fork') || !function_exists('posix_kill')) {
+            $this->markTestSkipped('Needs ext-pcntl and ext-posix.');
         }
         $client = $this->client();
         $before = $client->get('/echo')['connection'];
@@ -113,9 +113,12 @@ class CurlTransportTest extends TestCase
 
         $pid = pcntl_fork();
         if ($pid === 0) {
-            file_put_contents($report, (string) $client->get('/echo')['connection']);
-            // No destructor may run here: one would stop the parent's server.
-            posix_kill(getmypid(), SIGKILL);
+            try {
+                file_put_contents($report, (string) $client->get('/echo')['connection']);
+            } finally {
+                // No destructor or test may run here: one would stop the parent's server.
+                posix_kill(getmypid(), SIGKILL);
+            }
         }
         pcntl_waitpid($pid, $status);
         $child = (int) file_get_contents($report);
@@ -133,11 +136,57 @@ class CurlTransportTest extends TestCase
             try {
                 $client = $this->client();
                 $this->assertFalse($this->usesCurlTransport($client), $setting);
-                $this->assertSame(['ok' => true], $client->get('/flaky') ?? ['ok' => true]);
+                $this->assertSame('GET', $client->get('/echo')['method']);
+                $pending = $client->postDetached('/echo', ['a' => 1]);
+                $this->assertSame('POST', $client->settleDetached($pending)['method'], 'the Guzzle detached path');
             } finally {
                 putenv(strstr($setting, '=', true));
             }
         }
+    }
+
+    public function testCompressedMalformedAndBodylessAnswersBehaveAsWithGuzzle(): void
+    {
+        $client = $this->client(['retryAttempts' => 1]);
+
+        $this->assertSame(['compressed' => true], $client->get('/gzip'));
+        $put = $client->put('/echo');
+        $this->assertSame(['PUT', '0'], [$put['method'], $put['headers']['content-length'] ?? null]);
+        $this->expectException(\UnexpectedValueException::class);
+        $client->get('/malformed');
+    }
+
+    public function testHeaderValuesAreSentEmptyButNeverWithALineBreak(): void
+    {
+        $empty = $this->client(['headers' => ['X-Empty' => '']])->get('/echo');
+        $this->assertSame('', $empty['headers']['x-empty'] ?? null);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->client(['bearerToken' => "secret\n"])->get('/echo');
+    }
+
+    public function testDetachedRequestsSettleWaitFailAndFreeTheirHandle(): void
+    {
+        $client = $this->client();
+        $this->assertSame('POST', $client->postDetached('/echo', ['a' => 1])->wait()['method'], 'wait() settles');
+
+        $closed = stream_socket_server('tcp://127.0.0.1:0');
+        $refused = new HttpClient(['baseUrl' => 'http://' . stream_socket_get_name($closed, false)]);
+        fclose($closed);
+        try {
+            $refused->settleDetached($refused->postDetached('/echo', ['a' => 1]), 2_000);
+            $this->fail('A refused connection was answered.');
+        } catch (TransportException $exception) {
+            $this->assertSame(7, $exception->getCode());
+            $this->assertInstanceOf(\GuzzleHttp\Exception\GuzzleException::class, $exception);
+        }
+
+        // A dropped request leaves nothing behind in the shared multi handle.
+        $client->postDetached('/slow', []);
+        gc_collect_cycles();
+        $transport = (new \ReflectionProperty($client, 'transport'))->getValue($client);
+        $this->assertSame([], (new \ReflectionProperty($transport, 'finished'))->getValue($transport));
+        $this->assertSame('GET', $client->settleDetached($client->getDetached('/echo'))['method']);
     }
 
     private function client(array $options = []): HttpClient

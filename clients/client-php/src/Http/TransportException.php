@@ -2,8 +2,13 @@
 
 namespace Queen\Http;
 
-/** No HTTP answer arrived: the connection failed or timed out. */
-final class TransportException extends \RuntimeException
+use GuzzleHttp\Exception\TransferException;
+
+/**
+ * No HTTP answer arrived: the connection failed or timed out. A Guzzle
+ * TransferException, as the Guzzle path threw, so existing catch blocks hold.
+ */
+final class TransportException extends TransferException
 {
     public static function fromCurl(int $code, string $error, string $url): self
     {

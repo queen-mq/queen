@@ -194,7 +194,16 @@ class HttpClient
                 $this->requestHeaders(),
                 $body === null ? null : json_encode($body, JSON_THROW_ON_ERROR),
             );
-            $promise = new Promise();
+            // wait() settles like settleDetached(). The promise reaches itself
+            // weakly, so dropping it still frees the request.
+            $self = new \stdClass();
+            $promise = new Promise(function () use ($self): void {
+                $promise = $self->promise->get();
+                if ($promise !== null && isset($this->detached[$promise])) {
+                    $this->settleDetached($promise);
+                }
+            });
+            $self->promise = \WeakReference::create($promise);
             $this->detached[$promise] = $request;
 
             return $promise;
