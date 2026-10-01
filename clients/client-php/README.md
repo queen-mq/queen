@@ -219,7 +219,7 @@ starting point for a migration.
 | `QUEEN_BULK_BATCH` | `100` | bound for `Queue::bulk()`, not for `dispatch()` |
 | `QUEEN_LEASE_RENEWAL` | `false` | keeps the lease alive under a running job |
 | `QUEEN_ACK_ASYNC` | `false` | sends each ACK without waiting; the answer is read after the next job |
-| `QUEEN_POP_AHEAD` | `false` | pops the next batch while the last job of the current one runs |
+| `QUEEN_POP_AHEAD` | `false` | pops the next batch while the last job of a full batch runs |
 
 Raising prefetch trades round trips for a wider redelivery window: a crash can redeliver the
 unflushed batch, and a paused worker can sit on prefetched jobs until the lease expires. So the
@@ -245,6 +245,10 @@ starts one small PHP helper, on Unix CLI PHP. Delivery stays at least once eithe
 still need idempotency keys. `process_limit` still counts a slot for the helper, which a worker
 starts when the master refuses it.
 [The safe delivery profile](https://queenmq.com/use/laravel/#start-with-the-safe-delivery-profile).
+
+Requests go over the client's own kept-alive cURL handles, not Guzzle: a pop and an ACK cost the
+client about 60% less CPU, and with 10 ms jobs a whole worker used 13 to 25% less.
+`QUEEN_SDK_HTTP_TRANSPORT=guzzle` switches back; an HTTP proxy variable does so too.
 
 `QUEEN_ACK_ASYNC` and `QUEEN_POP_AHEAD` take the broker's round trip off the worker's path. A failed
 asynchronous ACK is reported one job later and the job is delivered again; `QUEEN_POP_AHEAD` needs

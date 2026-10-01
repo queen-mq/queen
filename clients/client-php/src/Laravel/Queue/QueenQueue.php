@@ -69,6 +69,13 @@ class QueenQueue extends BaseQueue implements QueueContract
     /** When the last job was handed out, to skip pop_ahead after long jobs. */
     private ?int $jobHandedOutMillis = null;
 
+    /**
+     * Whether the broker's last answer filled a whole batch. A short one means
+     * the queue was nearly empty, so a pop ahead would most likely come back
+     * empty: an extra request for nothing.
+     */
+    private bool $lastBatchFull = false;
+
     private int $nextBatchId = 0;
 
     private bool $workerStoppingListenerRegistered = false;
@@ -533,8 +540,9 @@ class QueenQueue extends BaseQueue implements QueueContract
         $this->jobHandedOutMillis = self::monotonicMillis();
         // The batch popped ahead waits for this job, leased but not renewed:
         // skip it after a job long enough to eat into that lease, and on a
-        // priority list, where the next job may come from another queue.
-        if ($this->pendingPop === null && !isset($this->prefetched[$queue])
+        // priority list, where the next job may come from another queue. Only
+        // a backlog repays it, so a short last batch skips it too.
+        if ($this->pendingPop === null && !isset($this->prefetched[$queue]) && $this->lastBatchFull
             && count($this->queuesPopped) === 1 && $previousJobMillis * 3 < $this->retryAfter * 1000) {
             $this->popAhead($queue);
         }
@@ -556,6 +564,7 @@ class QueenQueue extends BaseQueue implements QueueContract
         // long-poll), never renew past an expired broker lease.
         $popStartedMillis = self::monotonicMillis();
         $messages = array_values($this->popBuilder($queue, $this->blockFor > 0)->pop());
+        $this->lastBatchFull = count($messages) >= $this->prefetch;
         if ($messages === []) {
             return null;
         }
@@ -639,9 +648,11 @@ class QueenQueue extends BaseQueue implements QueueContract
             return;
         }
         $this->pendingPop = null;
+        $this->lastBatchFull = false;
 
         try {
             $messages = array_values($pending['builder']->settlePop($pending['promise'], $timeoutMillis));
+            $this->lastBatchFull = count($messages) >= $this->prefetch;
         } catch (\Throwable $lost) {
             $this->reportQuietly(new RuntimeException(
                 'Queen Laravel could not read the jobs it popped ahead; any it leased run after the lease expires: '

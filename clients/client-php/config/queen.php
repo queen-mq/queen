@@ -44,8 +44,9 @@ return [
     // the answer is read before the next pop.
     'ack_async' => env('QUEEN_ACK_ASYNC', false),
     // Pop the next batch while the last job of the current one runs, and take
-    // it in when that job ends. The batch is leased one job earlier. Requires
-    // lease_renewal.
+    // it in when that job ends. The batch is leased one job earlier. Only
+    // after a full batch: a short one means the queue was nearly empty, and a
+    // pop sent ahead would come back empty. Requires lease_renewal.
     'pop_ahead' => env('QUEEN_POP_AHEAD', false),
     // Let the broker choose the pop sweep width instead of the fixed
     // `partitions` stripe count above. Only that one dimension is delegated:

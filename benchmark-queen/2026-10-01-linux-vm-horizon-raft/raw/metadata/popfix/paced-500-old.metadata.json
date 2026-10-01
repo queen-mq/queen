@@ -1,0 +1,149 @@
+{
+  "campaign_id": "20261001T123454Z-79af91ee21-e248823ed6e7cd3fdb840667",
+  "campaign_nonce": "e248823ed6e7cd3fdb840667",
+  "completed_at": "2026-10-01T12:41:59.712046Z",
+  "created_at": "2026-10-01T12:34:54.501114Z",
+  "docker": {
+    "Architecture": "x86_64",
+    "CgroupVersion": "2",
+    "KernelVersion": "6.8.0-142-generic",
+    "MemTotal": 33652006912,
+    "NCPU": 16,
+    "OSType": "linux",
+    "OperatingSystem": "Ubuntu 24.04.5 LTS",
+    "ServerVersion": "29.1.3",
+    "compose_version": "2.40.3+ds1-0ubuntu1~24.04.1"
+  },
+  "git": {
+    "branch": "bench-drain",
+    "commit": "79af91ee214ab1cb3a8e3e71add0954aa65cb7ff",
+    "dirty": false
+  },
+  "host": {
+    "cpu_governors": [],
+    "cpu_model": "INTEL(R) XEON(R) GOLD 6548N",
+    "logical_cpus": 16,
+    "machine": "x86_64",
+    "microcode": "0x1",
+    "platform": "Linux-6.8.0-142-generic-x86_64-with-glibc2.39",
+    "python": "3.12.3",
+    "storage_final": {
+      "free_bytes": 186155245568,
+      "path": "/root/results/popfix/paced-500-old/20261001T123454Z-79af91ee21-e248823ed6e7cd3fdb840667",
+      "total_bytes": 206900281344
+    },
+    "storage_initial": {
+      "free_bytes": 186315341824,
+      "path": "/root/results/popfix/paced-500-old/20261001T123454Z-79af91ee21-e248823ed6e7cd3fdb840667",
+      "total_bytes": 206900281344
+    },
+    "thermal_zones": []
+  },
+  "host_qualification": {
+    "cgroup_v2": true,
+    "decision": "diagnostic_native",
+    "docker_desktop": false,
+    "foreign_container_override": false,
+    "host_system": "Linux",
+    "native_linux": true,
+    "publishable_host_eligible": true,
+    "requested": "auto"
+  },
+  "images": {
+    "app": {
+      "architecture": "amd64",
+      "created": "2026-10-01T09:23:14.423821314Z",
+      "id": "sha256:09c4b09e8ade1bf18852c3b08397dda8e4ce25e2549272d2d641ac83efc733b8",
+      "os": "linux",
+      "reference": "queen-laravel-supervisor-bench:local",
+      "repo_digests": [
+        "queen-laravel-supervisor-bench@sha256:09c4b09e8ade1bf18852c3b08397dda8e4ce25e2549272d2d641ac83efc733b8"
+      ]
+    },
+    "broker": {
+      "architecture": "amd64",
+      "created": "2026-10-01T09:22:01.445373985Z",
+      "id": "sha256:94a7944d2494489e158798c02cddefd437ffb871fe2eb14849cd51ca1df8c989",
+      "os": "linux",
+      "reference": "queen-laravel-supervisor-broker:raft",
+      "repo_digests": [
+        "queen-laravel-supervisor-broker@sha256:94a7944d2494489e158798c02cddefd437ffb871fe2eb14849cd51ca1df8c989"
+      ]
+    },
+    "postgres": null,
+    "redis": null
+  },
+  "protocol": {
+    "analyzer_sha256": "1be7a3eb040c44a42c94cb83c65676e6229ac7c16d333eab1c8ad79ace2885b3",
+    "compose_sha256": "a1196c841e951382e369692be7cad5135aa32f8c8b32dc4d7b6c2b81b6405412",
+    "ga_protocol_sha256": "9b90e76d7619163ab240b8d8a67e493ff5837a23d2ce8251686e535679d0b50c",
+    "runner_sha256": "f2f4bac25801320ad45eff0f80913e21efc3f876f2ca68359d37efdffefc6bea",
+    "sampler_sha256": "8be5b567e0561f5aff6f066c7658c558d1874abc2a561c6003f6dcc4de54038c"
+  },
+  "qualification": "diagnostic_native",
+  "schema": "queen.laravel-supervisors.campaign/v1",
+  "settings": {
+    "allow_foreign_containers": false,
+    "autoscaling_strategy": "size",
+    "backlog_first": false,
+    "balance_cooldown_seconds": 3,
+    "balance_max_shift": 1,
+    "completion_timeout_seconds": 3600,
+    "cpu_iterations": 0,
+    "dispatch_mode": "single",
+    "dispatch_rate": 500,
+    "durability": {
+      "broker_file_buffer": "named_volume",
+      "postgres_fsync": "on",
+      "postgres_full_page_writes": "on",
+      "postgres_synchronous_commit": "on",
+      "redis_appendfsync": "always",
+      "redis_appendonly": "yes",
+      "storage": "fresh_named_volumes"
+    },
+    "engines": [
+      "queen-rust"
+    ],
+    "failed_driver": "null",
+    "jobs": 60000,
+    "lease_renewal": true,
+    "ledger_mode": "off",
+    "max_workers": 16,
+    "min_workers": 1,
+    "post_drain_seconds_by_profile": {
+      "fixed": 2
+    },
+    "postgres_synchronous_commit": "on",
+    "profiles": [
+      "fixed"
+    ],
+    "pss_requested": true,
+    "queen_ack_async": true,
+    "queen_ack_batch": 1,
+    "queen_bulk_batch": 100,
+    "queen_event_driven": false,
+    "queen_fast_scale_up": false,
+    "queen_http_transport": "curl",
+    "queen_lease_service": true,
+    "queen_opcache_cli": true,
+    "queen_partitions": 64,
+    "queen_poll_interval_seconds": 1,
+    "queen_pop_ahead": true,
+    "queen_pop_fusion": false,
+    "queen_prefetch": 4,
+    "queen_prefork": true,
+    "queen_storage": "raft",
+    "queues": [
+      "benchmark"
+    ],
+    "retry_after_seconds": 180,
+    "runs": 3,
+    "sample_interval_seconds": 1.0,
+    "sleep_ms": 10,
+    "target_clear_seconds": 1.0,
+    "target_jobs_per_process": 10,
+    "warmup_jobs": 50,
+    "worker_timeout_seconds": 120,
+    "workers": 16
+  }
+}

@@ -46,6 +46,51 @@ class PopAheadTest extends TestCase
         $this->assertSame('false', $query['wait'], 'a pop ahead never long-polls');
     }
 
+    public function testAShortBatchMeansTheQueueIsNearlyEmptySoNothingIsPoppedAhead(): void
+    {
+        $handler = new PlanHandler([
+            $this->pop('lease-1', ['job-1']),
+            self::ACKED,
+            $this->pop('lease-2', ['job-2', 'job-3']),
+            self::ACKED,
+            $this->pop('lease-3', ['job-4', 'job-5']),
+        ]);
+        $queue = $this->queue($handler, new PopAheadLeaseRenewer(), prefetch: 2);
+
+        $queue->pop('emails')->delete();
+        $this->assertSame(['pop', 'ack'], $this->paths($handler), 'one job of two: no backlog to pop ahead into');
+
+        $queue->pop('emails')->delete();
+        $this->assertSame(['pop', 'ack', 'pop', 'ack'], $this->paths($handler));
+        $this->assertSame('job-3', $queue->pop('emails')->getJobId());
+        $this->assertSame(['pop', 'ack', 'pop', 'ack', 'pop'], $this->paths($handler), 'a full batch pops ahead again');
+    }
+
+    public function testAShortBatchPoppedAheadStopsPoppingAheadUntilAFullOne(): void
+    {
+        $handler = new PlanHandler([
+            $this->pop('lease-1', ['job-1', 'job-2']),
+            self::ACKED,
+            $this->pop('lease-2', ['job-3']),
+            self::ACKED,
+            self::ACKED,
+            $this->pop('lease-3', ['job-4', 'job-5']),
+        ]);
+        $queue = $this->queue($handler, new PopAheadLeaseRenewer(), prefetch: 2);
+
+        $queue->pop('emails')->delete();
+        $queue->pop('emails')->delete();
+        $this->assertSame(['pop', 'ack', 'pop', 'ack'], $this->paths($handler), 'job-3 was popped ahead with job-2');
+
+        $third = $queue->pop('emails');
+        $this->assertSame('job-3', $third->getJobId());
+        $third->delete();
+        $this->assertSame(['pop', 'ack', 'pop', 'ack', 'ack'], $this->paths($handler), 'one job of two: none popped ahead with job-3');
+
+        $this->assertSame('job-4', $queue->pop('emails')->getJobId());
+        $this->assertSame(['pop', 'ack', 'pop', 'ack', 'ack', 'pop'], $this->paths($handler));
+    }
+
     public function testABatchTooLateToTrackIsHandedBackAtOnce(): void
     {
         $handler = new PlanHandler([
