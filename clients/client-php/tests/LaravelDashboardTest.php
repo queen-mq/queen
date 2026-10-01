@@ -1825,6 +1825,19 @@ final class LaravelDashboardTest extends TestCase
         $this->assertSame(['failed-2'], $remaining, 'queue:retry removed it from the failed-job store');
     }
 
+    public function testTheFailedJobsListPointsToTheRetryButton(): void
+    {
+        $this->failedJobsFile(1);
+
+        $help = $this->dashboardXPath($this->get('/queen/failed-jobs')->assertOk()->getContent())
+            ->query('//p[@class="failed-help"]')->item(0);
+
+        $this->assertSame(
+            "Select a job to see why it failed and to retry it; payloads are never displayed. Use Laravel's queue commands to forget, flush or prune jobs.",
+            trim($help->textContent),
+        );
+    }
+
     public function testRetryNeedsCsrfAndTheDashboardAbility(): void
     {
         $this->failedJobsFile(1);
