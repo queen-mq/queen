@@ -1,6 +1,6 @@
 ---
 title: Laravel queues
-description: "Install the Queen queue connection, dispatch an existing Laravel job, run a worker, and choose how to supervise it."
+description: "Where to start with Queen for a Laravel application that runs Horizon, then the reference: install the queue connection, dispatch an existing job, run a worker and choose how to supervise it."
 type: quickstart
 tier: use
 status: preview
@@ -16,6 +16,8 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Queue/QueenJob.php
   - clients/client-php/src/Laravel/Queue/ProcessLeaseRenewer.php
   - benchmark-queen/2026-10-01-linux-vm-horizon-raft/README.md
+  - benchmark-queen/2026-10-01-laravel-horizon-raft/README.md
+  - benchmark-queen/2026-09-30-laravel-supervisor-features/README.md
 verifiedBy:
   - clients/client-php/tests/LaravelServiceProviderTest.php
   - clients/client-php/tests/LaravelQueueDriverTest.php
@@ -29,7 +31,52 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-01 (through db3f21b0): QueenQueue and Queen only gained private helpers (abandonDelivery, affinityKey, retryWire, affinityKeyOf); no behavior this page states changes.
 # sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): QueenQueue pops ahead only after a full batch; the Pop the next batch ahead section states the rule.
 # sourceOfTruth re-read 2026-10-01 (Linux server campaign): the pop_ahead section adds the measured effect of the full-batch rule.
+# sourceOfTruth re-read 2026-10-02 (Start here orientation): the new top section quotes the Linux-server, Raft and supervisor-features READMEs; QueenQueue subscribes every group with mode all, so the install step now says a consumer group does not separate applications; the reference sections are unchanged.
 ---
+
+## Start here
+
+Queen replaces two parts of a Horizon setup: Redis, where the jobs wait, and Horizon's master, which
+runs the workers. Your job classes stay as they are. Each line below names the measurement behind it:
+
+- **More jobs per worker at the same durability.** On a dedicated Linux server, with every write
+  fsynced on both sides, 32 workers completed 2,753 jobs/s of 10 ms jobs against 1,124 for Horizon,
+  and 64 workers 4,395 against 1,090
+  ([benchmark](/benchmarks/laravel-supervisors#horizon-against-queen-on-a-linux-server-2026-10-01)).
+- **Lower latency at a steady rate.** On the same server, with 16 workers and 500 jobs/s asked, 95%
+  of jobs completed within 23 ms of their dispatch, against 227 ms for Horizon, whose producer
+  reached 440 jobs/s
+  ([benchmark](/benchmarks/laravel-supervisors#horizon-against-queen-on-a-linux-server-2026-10-01)).
+- **Smaller workers.** With 64 workers forked from one booted Laravel, the application container used
+  183 MiB against 1,892 MiB for Horizon
+  ([benchmark](/benchmarks/laravel-supervisors#horizon-against-queen-on-a-linux-server-2026-10-01)).
+- **Long jobs on a short `retry_after`.** The lease of a running job is renewed, and a worker that
+  cannot renew it is stopped before the lease ends. In a fault test, a prefetched job ended 32.1 s
+  after it was queued, past its 30 s lease, on its first attempt
+  ([benchmark](/benchmarks/laravel-supervisors#horizon-against-queen-on-raft-2026-10-01)).
+- **Workers within seconds of a burst.** Woken by the broker, one supervisor with `fast_scale_up`
+  reached 20 workers 5.6 s after a burst, against 13.9 s when it polled every 3 s; Horizon was not
+  part of that run
+  ([benchmark](/benchmarks/laravel-supervisors#event-driven-scaling)).
+
+These results are diagnostic: each comes from one host, and the protocol was written by the Queen
+team. Horizon keeps advantages too, such as less broker CPU at a low, steady rate and a more complete
+dashboard.
+
+{/* CHART: laravel-headline */}
+
+Read these pages in this order:
+
+1. [How Queen runs Laravel jobs](/use/laravel/concepts): stripes, leases, timers, the dead-letter
+   queue and the supervisor, each beside what Horizon does.
+2. [Queen or Horizon](/use/laravel/queen-vs-horizon): the comparison at a glance, with the evidence
+   for every row.
+3. [Migrate from Horizon](/use/laravel/migrate-from-horizon): the checklist, the configuration map
+   and the pitfalls.
+
+The rest of this page is the reference for the queue connection.
+
+## The connection and the supervisor
 
 Queen can play two separate roles in a Laravel application:
 
@@ -89,7 +136,9 @@ Unix-only today and add `pcntl` and `posix` requirements.
 
    Add `QUEEN_BEARER_TOKEN` when the broker requires authentication. Keep secrets outside source
    control. Give each logical application and environment a stable consumer-group name: two
-   applications sharing one group intentionally share one cursor and split the work.
+   applications sharing one group intentionally share one cursor and split the work. A group does
+   not separate applications, though: two groups on one queue each receive every job, so give each
+   application and environment its own queue names or its own broker as well.
 
 4. **Dispatch an existing job.** Nothing changes at the call site.
 
@@ -221,6 +270,11 @@ method. [Scale Laravel queues on Kubernetes](/use/laravel/kubernetes) puts the f
 for pods that follow the backlog.
 
 <CardGrid>
+  <LinkCard
+    href="/use/laravel/concepts"
+    title="How Queen runs Laravel jobs"
+    description="Stripes, leases, renewal and fencing, timers, the dead-letter queue and the supervisor, each beside what Horizon does."
+  />
   <LinkCard
     href="/use/laravel/supervisors"
     title="Worker supervisors"
