@@ -67,7 +67,7 @@ The main lanes ran on commits `cb08f2cb` (without `pop_ahead`) and
 `e0dd7e45` (with it). Fixes after the final review changed the client again,
 so seven lanes ran again on `85584a8f`: `strict-all`, `everysec-all`,
 `noop-all`, `lean-all`, `latency-300-all`, `latency-100-all` and `burst-all`.
-All 65 runs were correct. Throughput and latency medians moved by at most 3%,
+All 70 runs were correct. Throughput and latency medians moved by at most 3%,
 except the time to the burst's peak: 5.3 s for Queen and 6.3 s for Horizon,
 against 4.3 s and 7.3 s before.
 

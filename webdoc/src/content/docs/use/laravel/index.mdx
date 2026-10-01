@@ -25,6 +25,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-29 (through f94b76ec + this patch): either engine can publish remote status; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): the coordination, prefork, waits, notifications, job metrics, tags and Prometheus blocks in config/queen.php and the new provider bindings add nothing this overview describes; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through dc5b5994): the event_driven switch in config/queen.php adds nothing this overview describes; page matches the code.
+# sourceOfTruth re-read 2026-10-01 (through db3f21b0): QueenQueue and Queen only gained private helpers (abandonDelivery, affinityKey, retryWire, affinityKeyOf); no behavior this page states changes.
 ---
 
 Queen can play two separate roles in a Laravel application:
