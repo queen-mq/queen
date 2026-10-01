@@ -84,12 +84,33 @@ final class JobMetricsTest extends TestCase
         $recorder = $this->recorder($handler);
 
         $this->process($recorder, 'App\Jobs\Export', false, 30_000);
-        $this->process($recorder, 'App\Jobs\Export', false);
+        $this->process($recorder, 'App\Jobs\Export', false, 10_000);
         $recorder->flush();
 
-        $counts = $this->operations($handler, 0)[0]['value']['classes']['App\Jobs\Export'];
+        // The first write follows the first job; the last one holds both.
+        $counts = $this->operations($handler, $handler->count() - 1)[0]['value']['classes']['App\Jobs\Export'];
+        $this->assertSame(2, $counts['processed']);
         $this->assertGreaterThanOrEqual(30, $counts['max_ms']);
-        $this->assertLessThanOrEqual($counts['runtime_ms'], $counts['max_ms'], 'one run, not the sum');
+        // Both runs took time, so a sum would reach runtime_ms.
+        $this->assertLessThan($counts['runtime_ms'], $counts['max_ms'], 'one run, not the sum');
+    }
+
+    public function testACacheThatCannotBeResolvedCostsOnlyTheCache(): void
+    {
+        $handler = new PlanHandler([], ['status' => 200, 'json' => ['rows' => [
+            ['key' => 'jobs/v1/1790000100/aaaa', 'value' => ['classes' => ['App\Jobs\Send' => ['processed' => 2, 'failed' => 0, 'runtime_ms' => 40]]]],
+        ], 'truncated' => false]]);
+        $reader = new JobMetricsReader(
+            $this->queen($handler),
+            'queen-metrics',
+            fn () => throw new \RuntimeException('Cache store [missing] is not defined.'),
+            fn (): int => 1_790_000_500,
+        );
+
+        $metrics = $reader->read('1h');
+
+        $this->assertTrue($metrics['available']);
+        $this->assertSame(2, $metrics['totals']['processed']);
     }
 
     public function testTheReaderKeepsTheLongestRunOfEveryWorker(): void

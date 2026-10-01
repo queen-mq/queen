@@ -58,7 +58,7 @@ final class JobMetricsReader
     public function read(string $range): array
     {
         $range = self::range($range);
-        $cache = $this->cache !== null ? ($this->cache)() : null;
+        $cache = $this->cacheStore();
         $key = 'queen:dashboard:job-metrics:' . $range;
         if ($cache !== null) {
             try {
@@ -151,6 +151,19 @@ final class JobMetricsReader
             ],
             'classes' => $table,
         ];
+    }
+
+    private function cacheStore(): ?CacheRepository
+    {
+        if ($this->cache === null) {
+            return null;
+        }
+        try {
+            return ($this->cache)();
+        } catch (\Throwable) {
+            // A store that cannot be resolved costs the cache, not the page.
+            return null;
+        }
     }
 
     /** @param array<string, array{processed: int, failed: int, runtime_ms: int, max_ms: ?int}> $classes */
