@@ -219,7 +219,7 @@ starting point for a migration.
 | `QUEEN_BULK_BATCH` | `100` | bound for `Queue::bulk()`, not for `dispatch()` |
 | `QUEEN_LEASE_RENEWAL` | `false` | keeps the lease alive under a running job |
 | `QUEEN_ACK_ASYNC` | `false` | sends each ACK without waiting; the answer is read after the next job |
-| `QUEEN_POP_AHEAD` | `false` | pops the next batch while the last job of the current one runs |
+| `QUEEN_POP_AHEAD` | `false` | pops the next batch while the last job of a full batch runs |
 
 Raising prefetch trades round trips for a wider redelivery window: a crash can redeliver the
 unflushed batch, and a paused worker can sit on prefetched jobs until the lease expires. So the

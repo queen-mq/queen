@@ -26,6 +26,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): the coordination, prefork, waits, notifications, job metrics, tags and Prometheus blocks in config/queen.php and the new provider bindings add nothing this overview describes; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through dc5b5994): the event_driven switch in config/queen.php adds nothing this overview describes; page matches the code.
 # sourceOfTruth re-read 2026-10-01 (through db3f21b0): QueenQueue and Queen only gained private helpers (abandonDelivery, affinityKey, retryWire, affinityKeyOf); no behavior this page states changes.
+# sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): QueenQueue pops ahead only after a full batch; the Pop the next batch ahead section states the rule.
 ---
 
 Queen can play two separate roles in a Laravel application:
@@ -173,8 +174,10 @@ prefetched job. The worker tracks the new lease as soon as the job ends, before 
 worker does not pop ahead after a job that took more than a third of `retry_after`, and when a job
 still leaves too little of the new lease to renew it safely, the worker returns the batch to the
 queue at once. A worker that serves a comma-separated queue list never pops ahead, because its
-next job may come from another queue. A pop sent ahead never waits for new jobs, so an idle queue
-behaves as before.
+next job may come from another queue. A worker pops ahead only after a full batch: a batch that
+came back short shows that the queue was nearly empty, so a pop sent ahead would most likely come
+back empty too. Under a light load the worker then sends one pop per job, not two. A pop sent ahead
+never waits for new jobs, so an idle queue behaves as before.
 
 ## What changes from another Laravel connection
 

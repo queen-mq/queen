@@ -27,6 +27,7 @@ verifiedBy:
   - clients/client-php/tests/LaravelMetricsTest.php
   - clients/client-php/tests/LaravelSupervisorRemoteStatusTest.php
 # sourceOfTruth re-read 2026-10-01 (through the ack_async and pop_ahead hardening): detached requests settle their own connect, a late popped batch is handed back untracked, and a failed detached send falls back to the synchronous ACK; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): pop_ahead pops ahead only after a full batch; the tuning table and its figures are unchanged.
 ---
 
 This guide puts the supervisor features together for one common setup: Laravel workers in a
