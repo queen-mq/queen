@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -129,6 +130,18 @@ class FailureMatrixChecksTest(unittest.TestCase):
         self.assertFalse(matrix.soak_drained(report(93, {"late-0000001": "not completed yet"}), 93))
         self.assertTrue(matrix.soak_drained(report(93, {}), 93))
         self.assertTrue(matrix.soak_drained(report(93, {"late-0000001": "completed 2 times"}), 93))
+
+    def test_the_compat_lane_runs_every_scenario_of_both_commands(self) -> None:
+        commands = Path(__file__).resolve().parents[2] / "app" / "app" / "Console" / "Commands"
+
+        for scenarios, php in ((matrix.COMPAT_SCENARIOS, "CompatCommand.php"),
+                               (matrix.COMPAT_MORE_SCENARIOS, "CompatMoreCommand.php")):
+            constant = re.search(r"SCENARIOS = \[(.*?)\];", (commands / php).read_text(), re.S)
+            assert constant is not None
+            self.assertEqual(list(scenarios), re.findall(r"'([a-z-]+)'", constant.group(1)), php)
+        self.assertFalse(set(matrix.COMPAT_SCENARIOS) & set(matrix.COMPAT_MORE_SCENARIOS))
+        self.assertEqual(("prune-failed", "fork-in-job"), matrix.COMPAT_MORE_SCENARIOS[-2:],
+                         "prune-failed empties the failed-job store; fork-in-job can leave retries behind")
 
 
 if __name__ == "__main__":

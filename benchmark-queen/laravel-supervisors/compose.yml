@@ -69,7 +69,7 @@ x-app-environment: &app-environment
   REDIS_QUEUE_DB: "0"
 
 x-app: &app
-  image: queen-laravel-supervisor-bench:local
+  image: ${BENCH_APP_IMAGE:-queen-laravel-supervisor-bench:local}
   build:
     context: ../..
     dockerfile: benchmark-queen/laravel-supervisors/Dockerfile

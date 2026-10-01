@@ -66,4 +66,11 @@ class CompatJob implements ShouldQueue
         }
         $log->record($this->runId, $this->jobId, $attempt, 'completed', $this->mode);
     }
+
+    /** How many times this job logged `event` so far, whatever its attempt counter says. */
+    protected function logged(FailureMatrixLog $log, string $event): int
+    {
+        return count(array_filter($log->read($this->runId),
+            fn (array $e): bool => $e['job_id'] === $this->jobId && $e['event'] === $event));
+    }
 }
