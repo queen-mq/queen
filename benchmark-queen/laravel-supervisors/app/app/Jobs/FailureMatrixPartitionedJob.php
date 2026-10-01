@@ -11,7 +11,7 @@ use Queen\Laravel\Contracts\QueenPartitionable;
  */
 final class FailureMatrixPartitionedJob extends FailureMatrixJob implements QueenPartitionable
 {
-    public function __construct(public readonly string $partition, mixed ...$job)
+    public function __construct(public string $partition, mixed ...$job)
     {
         parent::__construct(...$job);
     }

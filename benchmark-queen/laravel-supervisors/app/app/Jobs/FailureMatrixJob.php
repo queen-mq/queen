@@ -36,15 +36,18 @@ class FailureMatrixJob implements ShouldQueue
 
     public int $timeout;
 
+    // Not readonly: Laravel restores a queued job's properties from the
+    // scope of its class, and PHP refuses to initialize a parent's readonly
+    // property from a subclass (FailureMatrixPartitionedJob).
     public function __construct(
-        public readonly string $runId,
-        public readonly string $jobId,
-        public readonly string $mode,
-        public readonly int $sleepMs,
+        public string $runId,
+        public string $jobId,
+        public string $mode,
+        public int $sleepMs,
         int $tries,
         int $backoff,
         int $timeout,
-        public readonly int $allocateMib = 0,
+        public int $allocateMib = 0,
     ) {
         if (!in_array($mode, self::MODES, true)) {
             throw new RuntimeException("Unknown failure-matrix mode [{$mode}].");
