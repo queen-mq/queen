@@ -84,6 +84,11 @@ not equivalent to a child-process replacement.
 EOF
 }
 
+# "true" or "false" for a 0|1 switch, the spelling Compose passes on.
+switch_word() {
+    if [ "$1" = 1 ]; then printf true; else printf false; fi
+}
+
 die() {
     printf 'error: %s\n' "$*" >&2
     exit 1
@@ -995,8 +1000,10 @@ run_lane() {
     export BENCH_LEASE_RENEWAL_INTERVAL=''
     export QUEEN_PREFETCH="$QUEEN_PREFETCH"
     export QUEEN_ACK_BATCH="$QUEEN_ACK_BATCH"
-    export BENCH_QUEEN_ACK_ASYNC="$([ "$QUEEN_ACK_ASYNC" = 1 ] && echo true || echo false)"
-    export BENCH_QUEEN_LEASE_SERVICE="$([ "$QUEEN_LEASE_SERVICE" = 1 ] && echo true || echo false)"
+    BENCH_QUEEN_ACK_ASYNC="$(switch_word "$QUEEN_ACK_ASYNC")"
+    export BENCH_QUEEN_ACK_ASYNC
+    BENCH_QUEEN_LEASE_SERVICE="$(switch_word "$QUEEN_LEASE_SERVICE")"
+    export BENCH_QUEEN_LEASE_SERVICE
     export BENCH_QUEEN_POP_AHEAD=false
     export QUEEN_BULK_BATCH=100
     export QUEEN_PARTITIONS=64

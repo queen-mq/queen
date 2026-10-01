@@ -149,6 +149,11 @@ must build their images in the same invocation; `--no-build` is rejected.
 EOF
 }
 
+# "true" or "false" for a 0|1 switch, the spelling Compose passes on.
+switch_word() {
+    if [ "$1" = 1 ]; then printf true; else printf false; fi
+}
+
 die() {
     printf 'error: %s\n' "$*" >&2
     exit 1
@@ -1264,12 +1269,18 @@ run_lane() {
     fi
     # Queen supervisor features. CLI opcache is a Queen-lane factor: with
     # spawned Horizon workers each process would keep its own copy.
-    export BENCH_QUEEN_PREFORK="$([ "$QUEEN_PREFORK" = 1 ] && echo true || echo false)"
-    export BENCH_QUEEN_EVENT_DRIVEN="$([ "$QUEEN_EVENT_DRIVEN" = 1 ] && echo true || echo false)"
-    export BENCH_QUEEN_FAST_SCALE_UP="$([ "$QUEEN_FAST_SCALE_UP" = 1 ] && echo true || echo false)"
-    export BENCH_QUEEN_ACK_ASYNC="$([ "$QUEEN_ACK_ASYNC" = 1 ] && echo true || echo false)"
-    export BENCH_QUEEN_POP_AHEAD="$([ "$QUEEN_POP_AHEAD" = 1 ] && echo true || echo false)"
-    export BENCH_QUEEN_LEASE_SERVICE="$([ "$QUEEN_LEASE_SERVICE" = 1 ] && echo true || echo false)"
+    BENCH_QUEEN_PREFORK="$(switch_word "$QUEEN_PREFORK")"
+    export BENCH_QUEEN_PREFORK
+    BENCH_QUEEN_EVENT_DRIVEN="$(switch_word "$QUEEN_EVENT_DRIVEN")"
+    export BENCH_QUEEN_EVENT_DRIVEN
+    BENCH_QUEEN_FAST_SCALE_UP="$(switch_word "$QUEEN_FAST_SCALE_UP")"
+    export BENCH_QUEEN_FAST_SCALE_UP
+    BENCH_QUEEN_ACK_ASYNC="$(switch_word "$QUEEN_ACK_ASYNC")"
+    export BENCH_QUEEN_ACK_ASYNC
+    BENCH_QUEEN_POP_AHEAD="$(switch_word "$QUEEN_POP_AHEAD")"
+    export BENCH_QUEEN_POP_AHEAD
+    BENCH_QUEEN_LEASE_SERVICE="$(switch_word "$QUEEN_LEASE_SERVICE")"
+    export BENCH_QUEEN_LEASE_SERVICE
     export BENCH_POLL_INTERVAL="$QUEEN_POLL_INTERVAL"
     if [ "$engine" = "horizon" ]; then
         export BENCH_OPCACHE_CLI=0
