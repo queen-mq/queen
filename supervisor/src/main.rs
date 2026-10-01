@@ -49,6 +49,12 @@ const MIN_CONTROL_TTL_SECONDS: u64 = 30;
 const MAX_CONTROL_TTL_SECONDS: u64 = 86_400;
 const CONFIG_EXPORT_TIMEOUT_SECONDS: u64 = 60;
 const CRASH_CIRCUIT_THRESHOLD: u32 = 5;
+const MAX_EXIT_MARKER_BYTES: u64 = 64;
+const MAX_EXIT_MARKER_ENTRIES: usize = 8_192;
+const JOB_TIMEOUT_MARKER: &str = "timeout";
+const MEMORY_LIMIT_MARKER: &str = "memory";
+// Laravel's Worker::EXIT_MEMORY_LIMIT.
+const LARAVEL_EXIT_MEMORY_LIMIT: i32 = 12;
 const MAX_DEPTH_POLL_CONCURRENCY: usize = 16;
 const CONTROL_CLOCK_SKEW_SECONDS: u64 = 5;
 const PROCESS_START_BUDGET_SECONDS: u64 = 5;
@@ -91,6 +97,9 @@ struct Config {
     // The master's lease renewal socket, set when the service runs.
     #[serde(skip)]
     lease_socket: Option<String>,
+    // Where workers leave exit markers, set once that directory is ready.
+    #[serde(skip)]
+    exit_markers: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -413,6 +422,13 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("canonical state_directory is not valid UTF-8")?
         .to_owned();
 
+    config.exit_markers = match prepare_exit_markers(&state.directory) {
+        Ok(directory) => Some(directory.to_string_lossy().into_owned()),
+        Err(error) => {
+            eprintln!("exit markers disabled, a job timeout counts as a crash: {error}");
+            None
+        }
+    };
     config.lease_socket = start_lease_service(&config, &state.directory);
 
     let running = Arc::new(AtomicBool::new(true));
@@ -3040,6 +3056,17 @@ impl RestartGuard {
         }
     }
 
+    /// Admit the next probe at once, with the failure count unchanged.
+    fn release_probe(&mut self, now: Instant) {
+        if matches!(self.phase, RestartPhase::Probe) {
+            self.phase = if self.consecutive_failures >= CRASH_CIRCUIT_THRESHOLD {
+                RestartPhase::Open { until: now }
+            } else {
+                RestartPhase::Backoff { until: now }
+            };
+        }
+    }
+
     fn state_name(&self) -> &'static str {
         match self.phase {
             RestartPhase::Closed => "closed",
@@ -3254,6 +3281,7 @@ fn spawn_worker(
         match forked {
             Ok(pid) => {
                 eprintln!("started {name}:{queue} pid={pid} (forked)");
+                forget_exit_marker(config, pid);
                 return Ok(Worker::from_process(
                     WorkerProcess::Forked {
                         pid,
@@ -3297,6 +3325,7 @@ fn spawn_worker(
     }
     let child = command.spawn()?;
     eprintln!("started {name}:{queue} pid={}", child.id());
+    forget_exit_marker(config, child.id());
     Ok(Worker::new(child, restart_probe))
 }
 
@@ -3357,6 +3386,11 @@ fn worker_invocation(
             "QUEEN_SUPERVISOR_LEASE_SOCKET".to_owned(),
             config.lease_socket.clone().filter(|_| o.lease_renewal),
         ),
+        // Where the worker says why it exits; see prepare_exit_markers.
+        (
+            "QUEEN_SUPERVISOR_EXITS_DIR".to_owned(),
+            config.exit_markers.clone(),
+        ),
     ];
     if o.balance == "off" {
         // A blocking reserve on the first queue in Laravel's ordered list
@@ -3401,7 +3435,8 @@ fn reap(
             Ok(None) => true,
             Ok(Some(status)) => {
                 let pid = worker.child.id();
-                record_worker_exit(key, worker, status, options, restart);
+                let announced = announced_exit(config, pid, status);
+                record_worker_exit(key, worker, status, announced, options, restart);
                 schedule_telemetry_cleanup(config, &key.0, pid, pending);
                 false
             }
@@ -3418,10 +3453,12 @@ fn reap(
     }
 }
 
+/// `announced`: what the worker said about this exit; see announced_exit.
 fn record_worker_exit(
     key: &PoolKey,
     worker: &Worker,
     status: ExitStatus,
+    announced: Option<AnnouncedExit>,
     options: &SupervisorConfig,
     restart: &mut RestartGuard,
 ) {
@@ -3447,6 +3484,17 @@ fn record_worker_exit(
         );
         return;
     }
+    if announced == Some(AnnouncedExit::MemoryLimit) {
+        // A deliberate stop after a job, like --max-jobs: it made progress.
+        restart.record_healthy();
+        eprintln!(
+            "[{}:{}] pid={} stopped at Laravel's --memory limit after a job; restarting",
+            key.0,
+            key.1,
+            worker.child.id(),
+        );
+        return;
+    }
     // Backoff is for short-lived exits. A worker that ran this long is not
     // crash-looping: queue:work exits 12 at --memory, and a job timeout kills
     // the worker.
@@ -3458,6 +3506,20 @@ fn record_worker_exit(
             key.1,
             worker.child.id(),
             uptime.as_secs_f64(),
+        );
+        return;
+    }
+    if announced == Some(AnnouncedExit::JobTimeout) {
+        // The job failed, not the worker, however soon it came. A probe
+        // proved nothing either way: the next one starts at once.
+        if worker.restart_probe {
+            restart.release_probe(Instant::now());
+        }
+        eprintln!(
+            "[{}:{}] pid={} exited after Laravel's job timeout; restarted without backoff",
+            key.0,
+            key.1,
+            worker.child.id(),
         );
         return;
     }
@@ -3475,6 +3537,161 @@ fn record_worker_exit(
         },
         delay.as_secs(),
     );
+}
+
+/// Laravel SIGKILLs a worker whose job outlives its timeout, which looks like
+/// any other SIGKILL from here, the OOM killer's included. So the worker first
+/// leaves `exits/<pid>` holding `timeout` (the Laravel package's
+/// WorkerExitMarker) in this private directory of the state directory. A
+/// worker that passes --memory exits 12 after an idle sleep as well as after a
+/// job; it writes `memory` only after a job. The directory is emptied for
+/// every generation: a marker an earlier one left explains no exit of this one.
+fn prepare_exit_markers(state_directory: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let directory = state_directory.join("exits");
+    match fs::create_dir(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    let metadata = fs::symlink_metadata(&directory)?;
+    if !metadata.file_type().is_dir() {
+        return Err(format!("{} must be a real directory", directory.display()).into());
+    }
+    #[cfg(unix)]
+    {
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(format!(
+                "{} must be owned by the supervisor user",
+                directory.display()
+            )
+            .into());
+        }
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+    }
+    // A leftover only matters for its pid, and spawn_worker removes it when a
+    // worker starts with that pid.
+    let names: Vec<_> = fs::read_dir(&directory)?
+        .take(MAX_EXIT_MARKER_ENTRIES)
+        .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+        .collect();
+    for name in names {
+        remove_exit_marker_entry(&directory.join(name));
+    }
+    Ok(directory)
+}
+
+/// What a worker said about its exit before it exited; see prepare_exit_markers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AnnouncedExit {
+    /// Laravel's job timeout SIGKILLed it.
+    JobTimeout,
+    /// It passed --memory after handling a job.
+    MemoryLimit,
+}
+
+/// What the worker announced before this exit: Laravel's job timeout, when
+/// SIGKILL ended it, or its memory limit after a job, when it exited 12. A
+/// marker explains no other exit. Either way the marker is consumed.
+fn announced_exit(config: &Config, pid: u32, status: ExitStatus) -> Option<AnnouncedExit> {
+    let directory = config.exit_markers.as_deref()?;
+    match take_exit_marker(Path::new(directory), pid)?.as_str() {
+        JOB_TIMEOUT_MARKER if killed_by_sigkill(status) => Some(AnnouncedExit::JobTimeout),
+        MEMORY_LIMIT_MARKER if status.code() == Some(LARAVEL_EXIT_MEMORY_LIMIT) => {
+            Some(AnnouncedExit::MemoryLimit)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(unix)]
+fn killed_by_sigkill(status: ExitStatus) -> bool {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal() == Some(libc::SIGKILL)
+}
+
+#[cfg(not(unix))]
+fn killed_by_sigkill(_status: ExitStatus) -> bool {
+    false
+}
+
+fn forget_exit_marker(config: &Config, pid: u32) {
+    if let Some(directory) = config.exit_markers.as_deref() {
+        remove_exit_marker(Path::new(directory), pid);
+    }
+}
+
+/// Read and remove the marker a worker left before it exited: at most a few
+/// bytes, from a private regular file, never through a symbolic link. None
+/// when there is none. Anything else under that name is removed as well.
+fn take_exit_marker(directory: &Path, pid: u32) -> Option<String> {
+    let path = exit_marker_path(directory, pid)?;
+    remove_exit_marker_entry(&directory.join(format!("{pid}.tmp")));
+    let inspected = fs::symlink_metadata(&path).ok()?;
+    let marker = read_exit_marker(&path, &inspected);
+    remove_exit_marker_entry(&path);
+    marker
+}
+
+/// Remove a worker's marker, and its temporary file, unread.
+fn remove_exit_marker(directory: &Path, pid: u32) {
+    if let Some(path) = exit_marker_path(directory, pid) {
+        remove_exit_marker_entry(&path);
+        remove_exit_marker_entry(&directory.join(format!("{pid}.tmp")));
+    }
+}
+
+/// `<directory>/<pid>`, when the directory is the private one the master made.
+fn exit_marker_path(directory: &Path, pid: u32) -> Option<PathBuf> {
+    if pid == 0 {
+        return None;
+    }
+    let metadata = fs::symlink_metadata(directory).ok()?;
+    if !metadata.file_type().is_dir() {
+        return None;
+    }
+    #[cfg(unix)]
+    if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o7777 != 0o700 {
+        return None;
+    }
+    Some(directory.join(pid.to_string()))
+}
+
+fn read_exit_marker(path: &Path, inspected: &fs::Metadata) -> Option<String> {
+    if !inspected.file_type().is_file()
+        || inspected.len() == 0
+        || inspected.len() > MAX_EXIT_MARKER_BYTES
+    {
+        return None;
+    }
+    #[cfg(unix)]
+    if inspected.uid() != unsafe { libc::geteuid() } || inspected.mode() & 0o7777 != 0o600 {
+        return None;
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    // O_NONBLOCK: a FIFO swapped in after the check cannot stall the loop.
+    #[cfg(unix)]
+    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let file = options.open(path).ok()?;
+    let opened = file.metadata().ok()?;
+    if !opened.file_type().is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    if opened.dev() != inspected.dev() || opened.ino() != inspected.ino() {
+        return None;
+    }
+    let body = read_file_limited(file, path, MAX_EXIT_MARKER_BYTES).ok()?;
+    let marker = body.trim();
+    (!marker.is_empty()).then(|| marker.to_owned())
+}
+
+/// remove_file() removes a symbolic link itself, never its target; a
+/// directory stays.
+fn remove_exit_marker_entry(path: &Path) {
+    if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.file_type().is_dir()) {
+        let _ = fs::remove_file(path);
+    }
 }
 
 fn observe_stable_workers(config: &Config, pools: &mut Pools, restarts: &mut RestartStates) {
@@ -3606,6 +3823,8 @@ fn reap_draining(config: &Config, draining: &mut Draining, pending: &mut Pending
     draining.retain_mut(|entry| match entry.worker.child.try_wait() {
         Ok(Some(_)) => {
             schedule_telemetry_cleanup(config, &entry.pool.0, entry.worker.child.id(), pending);
+            // A drained worker's exit is not classified: drop its marker.
+            forget_exit_marker(config, entry.worker.child.id());
             false
         }
         Ok(None) if now >= entry.deadline => {
@@ -3815,6 +4034,7 @@ mod tests {
             prefork: false,
             event_driven: None,
             lease_socket: None,
+            exit_markers: None,
         }
     }
 
@@ -4511,12 +4731,19 @@ mod tests {
         };
 
         let (successful_sibling, success) = exited_worker(0, false);
-        record_worker_exit(&key, &successful_sibling, success, &options, &mut guard);
+        record_worker_exit(
+            &key,
+            &successful_sibling,
+            success,
+            None,
+            &options,
+            &mut guard,
+        );
         assert_eq!(guard.state_name(), "probe");
         assert_eq!(guard.consecutive_failures, CRASH_CIRCUIT_THRESHOLD);
 
         let (failed_sibling, failure) = exited_worker(1, false);
-        record_worker_exit(&key, &failed_sibling, failure, &options, &mut guard);
+        record_worker_exit(&key, &failed_sibling, failure, None, &options, &mut guard);
         assert_eq!(guard.state_name(), "probe");
         assert_eq!(guard.consecutive_failures, CRASH_CIRCUIT_THRESHOLD);
         assert_eq!(
@@ -4537,7 +4764,14 @@ mod tests {
         let (mut failed_probe, failure) = exited_worker(1, true);
         failed_probe.started_at = Instant::now() - Duration::from_secs(options.stable_after + 1);
 
-        record_worker_exit(&key, &failed_probe, failure, &options, &mut failed_guard);
+        record_worker_exit(
+            &key,
+            &failed_probe,
+            failure,
+            None,
+            &options,
+            &mut failed_guard,
+        );
         assert_eq!(failed_guard.state_name(), "open");
         assert_eq!(
             failed_guard.consecutive_failures,
@@ -4553,6 +4787,7 @@ mod tests {
             &key,
             &successful_probe,
             success,
+            None,
             &options,
             &mut successful_guard,
         );
@@ -4585,7 +4820,7 @@ mod tests {
         for (mut worker, status) in [(memory_limit, exited_12), (timed_out, killed_status)] {
             worker.started_at = long_ago;
             let mut guard = RestartGuard::default();
-            record_worker_exit(&key, &worker, status, &options, &mut guard);
+            record_worker_exit(&key, &worker, status, None, &options, &mut guard);
             assert_eq!(
                 guard.state_name(),
                 "closed",
@@ -4599,8 +4834,250 @@ mod tests {
 
         let (failed_at_once, status) = exited_worker(1, false);
         let mut guard = RestartGuard::default();
-        record_worker_exit(&key, &failed_at_once, status, &options, &mut guard);
+        record_worker_exit(&key, &failed_at_once, status, None, &options, &mut guard);
         assert_eq!(guard.state_name(), "backoff");
+    }
+
+    /// A configuration whose exit-marker directory is ready, as run() makes it.
+    fn exit_marker_config(label: &str) -> (Config, PathBuf) {
+        let state_directory = temporary_directory(label);
+        let mut resolved = config(options("auto"));
+        resolved.state_directory = state_directory.to_string_lossy().into_owned();
+        let exits = prepare_exit_markers(&state_directory).unwrap();
+        resolved.exit_markers = Some(exits.to_string_lossy().into_owned());
+        (resolved, state_directory)
+    }
+
+    /// Reap until the pool's worker has exited and been classified.
+    #[cfg(unix)]
+    fn reap_exit(config: &Config, pools: &mut Pools, restarts: &mut RestartStates, key: &PoolKey) {
+        let mut pending = PendingTelemetryCleanup::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !pools[key].is_empty() {
+            assert!(Instant::now() < deadline, "the worker never exited");
+            reap(config, pools, restarts, &mut pending);
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn entries(directory: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Laravel SIGKILLs a worker whose job outlives its timeout, which the
+    /// worker announces first in exits/<pid>.
+    #[cfg(unix)]
+    #[test]
+    fn a_worker_killed_after_its_job_timeout_restarts_without_backoff() {
+        let (resolved, state_directory) = exit_marker_config("job-timeout");
+        let exits = state_directory.join("exits");
+        let key = ("default".to_owned(), "high".to_owned());
+        let mut restarts = RestartStates::new();
+
+        let timed_out = sleeping_worker(false);
+        let pid = timed_out.child.id();
+        write_private_file(&exits.join(pid.to_string()), b"timeout");
+        // SAFETY: plain signal delivery to the child this test spawned.
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        let mut pools = Pools::from([(key.clone(), vec![timed_out])]);
+        reap_exit(&resolved, &mut pools, &mut restarts, &key);
+
+        assert_eq!(restarts[&key].state_name(), "closed");
+        assert_eq!(restarts[&key].consecutive_failures, 0);
+        assert!(entries(&exits).is_empty());
+
+        // The OOM killer, a lease fence or kill -9 leave no marker.
+        let killed = sleeping_worker(false);
+        // SAFETY: as above.
+        unsafe { libc::kill(killed.child.id() as i32, libc::SIGKILL) };
+        pools.insert(key.clone(), vec![killed]);
+        reap_exit(&resolved, &mut pools, &mut restarts, &key);
+
+        assert_eq!(restarts[&key].state_name(), "backoff");
+        assert_eq!(restarts[&key].consecutive_failures, 1);
+        fs::remove_dir_all(state_directory).unwrap();
+    }
+
+    /// queue:work exits 12 at --memory after an idle sleep too: only a worker
+    /// that handled a job announces it, and only that one is not a crash.
+    #[cfg(unix)]
+    #[test]
+    fn a_worker_stopped_at_its_memory_limit_after_a_job_restarts_like_a_clean_exit() {
+        let (resolved, state_directory) = exit_marker_config("memory-limit");
+        let exits = state_directory.join("exits");
+        let options = options("auto");
+        let key = ("default".to_owned(), "high".to_owned());
+        let mut guard = RestartGuard::default();
+
+        let (worker, status) = exited_worker(12, false);
+        write_private_file(&exits.join(worker.child.id().to_string()), b"memory");
+        let announced = announced_exit(&resolved, worker.child.id(), status);
+        assert_eq!(announced, Some(AnnouncedExit::MemoryLimit));
+        record_worker_exit(&key, &worker, status, announced, &options, &mut guard);
+        assert_eq!(guard.state_name(), "closed");
+        assert_eq!(guard.consecutive_failures, 0);
+        assert!(entries(&exits).is_empty());
+
+        // No marker: no job ran before the limit, so the boot footprint is
+        // above --memory and every restart stops the same way.
+        let (idle, status) = exited_worker(12, false);
+        let announced = announced_exit(&resolved, idle.child.id(), status);
+        assert_eq!(announced, None);
+        record_worker_exit(&key, &idle, status, announced, &options, &mut guard);
+        assert_eq!(guard.state_name(), "backoff");
+
+        // A memory marker explains exit 12 alone.
+        let (failed, status) = exited_worker(1, false);
+        write_private_file(&exits.join(failed.child.id().to_string()), b"memory");
+        assert_eq!(announced_exit(&resolved, failed.child.id(), status), None);
+        fs::remove_dir_all(state_directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_exit_marker_only_explains_a_sigkill() {
+        let (resolved, state_directory) = exit_marker_config("marker-without-kill");
+        let exits = state_directory.join("exits");
+        let (failed, status) = exited_worker(1, false);
+        let pid = failed.child.id();
+        write_private_file(&exits.join(pid.to_string()), b"timeout");
+
+        assert_eq!(announced_exit(&resolved, pid, status), None);
+        assert!(entries(&exits).is_empty());
+
+        let mut disabled = resolved;
+        disabled.exit_markers = None;
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "kill -9 $$"])
+            .spawn()
+            .unwrap();
+        let killed = child.wait().unwrap();
+        write_private_file(&exits.join(child.id().to_string()), b"timeout");
+        assert_eq!(announced_exit(&disabled, child.id(), killed), None);
+        fs::remove_dir_all(state_directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_timed_out_probe_is_replaced_at_once_and_leaves_the_circuit_as_it_was() {
+        let options = options("auto");
+        let key = ("default".to_owned(), "high".to_owned());
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "kill -9 $$"])
+            .spawn()
+            .unwrap();
+        let status = child.wait().unwrap();
+        let probe = Worker::new(child, true);
+        let mut guard = RestartGuard {
+            consecutive_failures: CRASH_CIRCUIT_THRESHOLD,
+            phase: RestartPhase::Probe,
+        };
+
+        record_worker_exit(
+            &key,
+            &probe,
+            status,
+            Some(AnnouncedExit::JobTimeout),
+            &options,
+            &mut guard,
+        );
+
+        assert_eq!(guard.state_name(), "open");
+        assert_eq!(guard.consecutive_failures, CRASH_CIRCUIT_THRESHOLD);
+        assert_eq!(
+            guard.spawn_permission(Instant::now()),
+            SpawnPermission::Probe
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_markers_are_read_once_and_only_from_a_private_regular_file() {
+        let state_directory = temporary_directory("exit-markers");
+        let exits = prepare_exit_markers(&state_directory).unwrap();
+        let elsewhere = temporary_directory("exit-marker-target");
+        let outside = elsewhere.join("target");
+        write_private_file(&outside, b"timeout");
+
+        std::os::unix::fs::symlink(&outside, exits.join("1")).unwrap();
+        write_private_file(&exits.join("2"), &[b'x'; 65]);
+        write_private_file(&exits.join("3"), b"timeout");
+        fs::set_permissions(exits.join("3"), fs::Permissions::from_mode(0o644)).unwrap();
+        write_private_file(&exits.join("4"), b"timeout\n");
+        write_private_file(&exits.join("5.tmp"), b"timeout");
+        fs::create_dir(exits.join("6")).unwrap();
+
+        assert_eq!(take_exit_marker(&exits, 1), None);
+        assert_eq!(fs::read(&outside).unwrap(), b"timeout");
+        assert_eq!(take_exit_marker(&exits, 2), None);
+        assert_eq!(take_exit_marker(&exits, 3), None);
+        assert_eq!(take_exit_marker(&exits, 4).as_deref(), Some("timeout"));
+        assert_eq!(take_exit_marker(&exits, 4), None);
+        assert_eq!(take_exit_marker(&exits, 5), None);
+        assert_eq!(take_exit_marker(&exits, 6), None);
+        assert_eq!(entries(&exits), vec!["6".to_owned()]);
+
+        write_private_file(&exits.join("7"), b"timeout");
+        write_private_file(&exits.join("7.tmp"), b"timeout");
+        remove_exit_marker(&exits, 7);
+        assert_eq!(entries(&exits), vec!["6".to_owned()]);
+        fs::remove_dir_all(state_directory).unwrap();
+        fs::remove_dir_all(elsewhere).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_master_empties_the_exit_markers_and_passes_their_directory_to_workers() {
+        let state_directory = temporary_directory("exit-marker-reset");
+        let exits = state_directory.join("exits");
+        fs::create_dir(&exits).unwrap();
+        fs::set_permissions(&exits, fs::Permissions::from_mode(0o755)).unwrap();
+        write_private_file(&exits.join("123"), b"timeout");
+        write_private_file(&exits.join("123.tmp"), b"timeout");
+        std::os::unix::fs::symlink("/etc/hosts", exits.join("456")).unwrap();
+
+        assert_eq!(prepare_exit_markers(&state_directory).unwrap(), exits);
+        assert!(entries(&exits).is_empty());
+        assert_eq!(fs::symlink_metadata(&exits).unwrap().mode() & 0o7777, 0o700);
+        assert!(Path::new("/etc/hosts").exists());
+
+        let exits_variable = |config: &Config| {
+            worker_invocation(config, "default", "high", &config.supervisors["default"])
+                .1
+                .into_iter()
+                .find(|(name, _)| name == "QUEEN_SUPERVISOR_EXITS_DIR")
+                .expect("the variable is always set or removed")
+                .1
+        };
+        let mut resolved = config(options("auto"));
+        // None removes a value inherited from the master's environment.
+        assert_eq!(exits_variable(&resolved), None);
+        resolved.exit_markers = Some(exits.to_string_lossy().into_owned());
+        assert_eq!(
+            exits_variable(&resolved).as_deref(),
+            Some(exits.to_str().unwrap())
+        );
+        fs::remove_dir_all(state_directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_markers_refuse_a_linked_directory() {
+        let state_directory = temporary_directory("exit-marker-link");
+        let elsewhere = temporary_directory("exit-marker-elsewhere");
+        std::os::unix::fs::symlink(&elsewhere, state_directory.join("exits")).unwrap();
+        write_private_file(&elsewhere.join("123"), b"timeout");
+
+        assert!(prepare_exit_markers(&state_directory).is_err());
+        assert_eq!(take_exit_marker(&state_directory.join("exits"), 123), None);
+        assert!(elsewhere.join("123").exists());
+        fs::remove_dir_all(state_directory).unwrap();
+        fs::remove_dir_all(elsewhere).unwrap();
     }
 
     #[cfg(unix)]
