@@ -58,10 +58,9 @@ PHP;
     public function testTheRequestReachesTheServerBeforeItIsSettled(): void
     {
         $client = new HttpClient(['baseUrl' => $this->startServer(200_000), 'timeoutMillis' => 5_000]);
-        // A new connection sends its first request only when it is settled.
-        $this->assertSame(['attempt' => 0], $client->settleDetached($client->postDetached('/api/v1/ack', ['attempt' => 0])));
 
-        foreach ([1, 2] as $attempt) {
+        // The first request opens the connection: it is written all the same.
+        foreach ([0, 1, 2] as $attempt) {
             $started = microtime(true);
             $promise = $client->postDetached('/api/v1/ack', ['attempt' => $attempt]);
             $this->assertLessThan(0.15, microtime(true) - $started, 'sending waited for the answer');

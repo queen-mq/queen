@@ -3,6 +3,19 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased
+
+**PHP client: a detached request is written before the next job runs.** With `ack_async` or
+`pop_ahead`, a request on a new connection (a worker's first detached request, or one after the
+broker closed an idle keep-alive connection) was only started when it was sent: cURL wrote it
+when the request was settled, which with `prefetch` above 1 is after the next job. A hard kill
+during that job (shutdown grace exceeded, out of memory, node loss) lost the ACK, and the
+acknowledged job ran again when its lease expired. `postDetached()` and `getDetached()` now
+return once the whole request is written, the connection included; on the Guzzle transport
+(behind a proxy, or with `QUEEN_SDK_HTTP_TRANSPORT=guzzle`) this holds for a request with a
+body, the ACK. A request that cannot be written within the 5-second connect timeout throws at
+once, and the Laravel queue then acknowledges synchronously.
+
 ## 1.6.0 - 2026-09-11
 
 **A read-scoped credential could replay a dead letter through the proxy. It cannot now.**

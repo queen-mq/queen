@@ -22,6 +22,9 @@ class HttpClient
     private const DETACHED_POLL_MIN_MICROS = 50;
     private const DETACHED_POLL_MAX_MICROS = 1_000;
 
+    /** A detached request is written within the connect timeout, or dropped. */
+    private const DETACHED_WRITE_MILLIS = 5_000;
+
     private ?string $baseUrl;
     private ?LoadBalancer $loadBalancer;
     private int $timeoutMillis;
@@ -173,7 +176,8 @@ class HttpClient
     // A detached request is on the wire when it is sent, and nothing else runs
     // until settleDetached(): the caller does other work meanwhile, such as
     // the next job. One attempt against one backend, no 429 retry; the caller
-    // retries a rejection synchronously.
+    // retries a rejection synchronously. A request that cannot be written
+    // within the connect timeout throws at once: nothing reached the server.
 
     public function postDetached(string $path, array $body, ?string $affinityKey = null): PromiseInterface
     {
@@ -212,17 +216,49 @@ class HttpClient
         $options = $this->buildRequestOptions($method, $body, null);
         // The answer may be settled long after it arrived, when the caller's
         // work ends: curl must not count that time against the request.
-        // settleDetached() bounds the wait instead. That covers the connect
-        // too: a new connection only proceeds while the caller settles.
+        // settleDetached() bounds the wait instead.
         $options['timeout'] = 0;
         $options['connect_timeout'] = 0;
+        // Guzzle hides the handle: the upload progress tells when a body is
+        // written.
+        $written = $body === null;
+        if (!$written) {
+            $options['progress'] = static function (
+                int $downloadTotal,
+                int $downloaded,
+                int $uploadTotal,
+                int $uploaded,
+            ) use (&$written): void {
+                $written = $written || ($uploadTotal > 0 && $uploaded >= $uploadTotal);
+            };
+        }
 
         $promise = $this->detachedClient()->requestAsync($method, $this->resolveUrl($affinityKey) . $path, $options)
             ->then(fn (ResponseInterface $response) => $this->parseResponse($response));
+        if ($this->detachedHandler === null) {
+            return $promise;
+        }
         // cURL writes only while it is driven. One pass writes the whole
-        // request on a reused keep-alive connection; a new connection sends it
-        // when the caller settles.
-        $this->detachedHandler?->tick();
+        // request on a reused keep-alive connection; a new connection is
+        // driven until the body is written, as CurlTransport::start() does:
+        // the caller may settle only after its next job, and an ACK still
+        // unwritten when the process dies is lost. A request without a body
+        // (a pop sent ahead) is not tracked: losing it loses no work.
+        $deadline = hrtime(true) + self::DETACHED_WRITE_MILLIS * 1_000_000;
+        $pause = self::DETACHED_POLL_MIN_MICROS;
+        $this->detachedHandler->tick();
+        while (!$written && $promise->getState() === PromiseInterface::PENDING) {
+            if (hrtime(true) >= $deadline) {
+                $promise->cancel();
+                throw new TransportException(
+                    'Queen could not send a detached request within ' . self::DETACHED_WRITE_MILLIS . ' ms.',
+                    28,
+                );
+            }
+            usleep($pause);
+            $pause = min($pause * 2, self::DETACHED_POLL_MAX_MICROS);
+            $this->detachedHandler->tick();
+        }
 
         return $promise;
     }

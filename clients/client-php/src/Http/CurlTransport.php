@@ -82,12 +82,17 @@ final class CurlTransport
     }
 
     /**
-     * Start a request and return once cURL has written what it can: on a
-     * kept-alive connection the whole request; a new connection proceeds
-     * while settle() waits. No timeout runs until then. A request dropped
-     * without settle() is freed with it.
+     * Start a request and return once cURL has written all of it: on a
+     * kept-alive connection one pass does, a new connection is established
+     * first. Writing must not wait for settle(), which with prefetch comes
+     * after the next job: a request still unwritten when the process dies is
+     * lost, and a lost ACK runs its job again. Writing takes at most the
+     * connect timeout; a request still unwritten then is dropped, so nothing
+     * reached the server, and reported. No timeout runs on the answer until
+     * settle(). A request dropped without settle() is freed with it.
      *
      * @param array<string, string|list<string>> $headers
+     * @throws TransportException when the request could not be written in time
      */
     public function start(string $method, string $url, array $headers, ?string $body): DetachedRequest
     {
@@ -100,6 +105,19 @@ final class CurlTransport
             throw new TransportException('cURL could not start a detached request: ' . curl_multi_strerror($added), $added);
         }
         $this->drive();
+        $id = spl_object_id($easy);
+        $deadline = hrtime(true) + self::CONNECT_TIMEOUT_MILLIS * 1_000_000;
+        $idle = self::IDLE_MIN_MICROS;
+        while (!isset($this->finished[$id]) && !self::written($easy, $body)) {
+            if (!$this->wait($multi, $deadline, $idle)) {
+                $request->release();
+                throw new TransportException(
+                    'Queen could not send a detached request within ' . self::CONNECT_TIMEOUT_MILLIS . ' ms.',
+                    28,
+                );
+            }
+            $this->drive();
+        }
 
         return $request;
     }
@@ -119,17 +137,9 @@ final class CurlTransport
         $this->drive();
         $idle = self::IDLE_MIN_MICROS;
         while (!isset($this->finished[$id])) {
-            $left = ($deadline - hrtime(true)) / 1e9;
-            if ($left <= 0) {
+            if (!$this->wait($multi, $deadline, $idle)) {
                 $request->release();
                 throw new TransportException("Queen did not answer a detached request within {$timeoutMillis} ms.", 28);
-            }
-            // Blocks until a socket is ready, unlike a Guzzle tick.
-            $selected = hrtime(true);
-            if (curl_multi_select($multi, min($left, self::SELECT_SECONDS)) < 1
-                && hrtime(true) - $selected < 1_000_000) {
-                usleep($idle);
-                $idle = min($idle * 2, self::IDLE_MAX_MICROS);
             }
             $this->drive();
         }
@@ -212,6 +222,34 @@ final class CurlTransport
         }
 
         return $options;
+    }
+
+    /**
+     * Wait until one of cURL's sockets is ready, or briefly when it has none
+     * to watch: false once $deadline (hrtime) has passed.
+     */
+    private function wait(\CurlMultiHandle $multi, int $deadline, int &$idle): bool
+    {
+        $left = ($deadline - hrtime(true)) / 1e9;
+        if ($left <= 0) {
+            return false;
+        }
+        // Blocks until a socket is ready, unlike a Guzzle tick.
+        $selected = hrtime(true);
+        if (curl_multi_select($multi, min($left, self::SELECT_SECONDS)) < 1
+            && hrtime(true) - $selected < 1_000_000) {
+            usleep($idle);
+            $idle = min($idle * 2, self::IDLE_MAX_MICROS);
+        }
+
+        return true;
+    }
+
+    /** Whether cURL has written the whole request: its headers, then its body. */
+    private static function written(\CurlHandle $easy, ?string $body): bool
+    {
+        return curl_getinfo($easy, CURLINFO_REQUEST_SIZE) > 0
+            && curl_getinfo($easy, CURLINFO_SIZE_UPLOAD_T) >= strlen($body ?? '');
     }
 
     /** Run cURL without waiting and record every request that finished. */

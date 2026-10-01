@@ -189,6 +189,40 @@ class CurlTransportTest extends TestCase
         $this->assertSame('GET', $client->settleDetached($client->getDetached('/echo'))['method']);
     }
 
+    /**
+     * With prefetch, an ACK sent detached is settled only after the next job:
+     * if a new connection held it back until then, a hard kill during that
+     * job would run the acknowledged job again.
+     */
+    #[\PHPUnit\Framework\Attributes\TestWith(['curl'])]
+    #[\PHPUnit\Framework\Attributes\TestWith(['guzzle'])]
+    public function testADetachedRequestOnANewConnectionReachesTheServerBeforeItIsSettled(string $transport): void
+    {
+        if ($transport === 'guzzle') {
+            putenv('QUEEN_SDK_HTTP_TRANSPORT=guzzle');
+        }
+        try {
+            $client = $this->client();
+            $this->assertSame($transport === 'curl', $this->usesCurlTransport($client));
+
+            // The first detached request of a client opens its own connection.
+            $ack = $client->postDetached('/echo?ack=1', ['transactionId' => 't-1']);
+            $pop = $transport === 'curl' ? $client->getDetached('/echo?pop=1') : null;
+            // The next job runs: nothing settles the requests meanwhile.
+            usleep(300_000);
+            $received = $this->client()->get('/received');
+
+            $this->assertContains('POST /echo?ack=1', $received, 'the ACK waited for settle()');
+            if ($pop !== null) {
+                $this->assertContains('GET /echo?pop=1', $received, 'the pop sent ahead waited for settle()');
+                $this->assertSame('GET', $client->settleDetached($pop)['method']);
+            }
+            $this->assertSame('POST', $client->settleDetached($ack)['method']);
+        } finally {
+            putenv('QUEEN_SDK_HTTP_TRANSPORT');
+        }
+    }
+
     public function testEveryRequestAsksForTcpKeepAlive(): void
     {
         $options = new \ReflectionMethod(CurlTransport::class, 'options');
