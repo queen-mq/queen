@@ -945,11 +945,14 @@ async fn batch_caps_the_whole_claim_not_each_partition() {
     // And without `partitions()` a claim is a single lane, however large the
     // batch. This asserts the lane count rather than the message count: how much
     // one checkout takes is the broker's business, how many lanes it locks is
-    // the contract.
+    // the contract. "No partitions = one lane" is the pre-1.2 default, so the
+    // pop says autopilot off: with autopilot an unset width is the broker's to
+    // pick, and the engine picks every ready lane.
     let single = q
         .queue(&queue)
         .group("g-single-lane")
         .batch(want as i32)
+        .autopilot(false)
         .wait(false)
         .subscription_mode(SubscriptionMode::All)
         .pop()

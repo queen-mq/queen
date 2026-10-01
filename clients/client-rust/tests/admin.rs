@@ -1469,7 +1469,10 @@ async fn the_partitions_resource_ranks_a_queues_partitions_by_pending() {
         "the busiest partition comes first: {rows:?}"
     );
     for r in &rows {
-        assert_eq!(r.get("queue").and_then(|v| v.as_str()), Some(queue.as_str()));
+        assert_eq!(
+            r.get("queue").and_then(|v| v.as_str()),
+            Some(queue.as_str())
+        );
         for key in ["id", "processing", "lagSeconds"] {
             assert!(r.get(key).is_some(), "a row lost `{key}`: {r}");
         }

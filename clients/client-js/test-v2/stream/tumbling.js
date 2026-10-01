@@ -294,9 +294,9 @@ export async function tumblingForeachCtxHasWindowAndPartition(client) {
   const queryId = mkName('tumblingForeachCtxHasWindowAndPartition', 'q')
 
   await client.queue(src).create()
-  for (let i = 0; i < 3; i++) {
-    await client.queue(src).partition('myKey').push([{ data: { v: i } }])
-  }
+  // One push, so all three get the same broker createdAt: three pushes can
+  // straddle a second and split across two 1 s windows (count 1, then 2).
+  await client.queue(src).partition('myKey').push([0, 1, 2].map(v => ({ data: { v } })))
 
   const captured = []
   const handle = await Stream

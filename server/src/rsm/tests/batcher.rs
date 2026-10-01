@@ -123,6 +123,26 @@ async fn settle(store: &HeedStore, index: u64) {
     }
 }
 
+/// Take the replicator back after the driver joined. A completion the driver
+/// no longer waits for can hold its clone a moment longer, so wait for it.
+async fn sole_replicator<R>(repl: Arc<R>) -> R {
+    let end = Instant::now() + Duration::from_secs(10);
+    let mut repl = repl;
+    loop {
+        match Arc::try_unwrap(repl) {
+            Ok(r) => return r,
+            Err(still) => {
+                assert!(
+                    Instant::now() < end,
+                    "replicator still shared after the driver stopped"
+                );
+                repl = still;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+}
+
 /// The `(pid, offset)` of the first item of a push outcome, which must be a
 /// `Created` verdict.
 fn push_created(reply: &Reply) -> (u64, u64) {
@@ -661,8 +681,7 @@ async fn end_to_end_push_and_checkpoint_then_restart_and_recover() {
         // Drain the driver, then reclaim the replicator and shut it down.
         drop(tx);
         handle.await.expect("driver join");
-        let repl = Arc::try_unwrap(repl)
-            .unwrap_or_else(|_| panic!("replicator still shared after the driver stopped"));
+        let repl = sole_replicator(repl).await;
         let applied1 = repl.applied_index();
         let (_stats, store2) = repl.shutdown().expect("shutdown");
         drop(store); // the test's clone, so the returned Arc is sole
@@ -888,7 +907,7 @@ async fn pipeline_four_over_the_real_log_stays_i5_correct_under_load() {
 
     drop(tx);
     handle.await.expect("driver join");
-    let repl = Arc::try_unwrap(repl).unwrap_or_else(|_| panic!("replicator still shared"));
+    let repl = sole_replicator(repl).await;
     let (_stats, store2) = repl.shutdown().expect("shutdown");
     drop(store);
     drop(store2);
