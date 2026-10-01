@@ -6140,6 +6140,148 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
         assert!(draining.is_empty());
     }
 
+    /// A broker behind a private CA, as curl and so the PHP client accept it:
+    /// from the platform store or SSL_CERT_FILE. Otherwise the lease renewal
+    /// fails and fences every job that outlives its first lease.
+    #[cfg(unix)]
+    #[test]
+    fn a_broker_certificate_from_a_private_ca_is_trusted() {
+        let openssl = |args: &[&str], directory: &Path| {
+            Command::new("openssl")
+                .args(args)
+                .current_dir(directory)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        let directory = temporary_directory("private-ca");
+        if !openssl(&["version"], &directory) {
+            // No openssl command line to stand up a TLS broker.
+            let _ = fs::remove_dir_all(&directory);
+            return;
+        }
+        fs::write(
+            directory.join("leaf.ext"),
+            "subjectAltName=DNS:localhost\nbasicConstraints=CA:FALSE\n\
+             keyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n",
+        )
+        .unwrap();
+        for step in [
+            &[
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                "ca.key",
+                "-out",
+                "ca.pem",
+                "-days",
+                "2",
+                "-subj",
+                "/CN=queen-test-ca",
+                "-addext",
+                "basicConstraints=critical,CA:true",
+                "-addext",
+                "keyUsage=critical,keyCertSign",
+            ][..],
+            &[
+                "req",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                "leaf.key",
+                "-out",
+                "leaf.csr",
+                "-subj",
+                "/CN=localhost",
+            ],
+            &[
+                "x509",
+                "-req",
+                "-in",
+                "leaf.csr",
+                "-CA",
+                "ca.pem",
+                "-CAkey",
+                "ca.key",
+                "-CAcreateserial",
+                "-out",
+                "leaf.pem",
+                "-days",
+                "2",
+                "-extfile",
+                "leaf.ext",
+            ],
+        ] {
+            assert!(openssl(step, &directory), "openssl {step:?} failed");
+        }
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut broker = Command::new("openssl")
+            .args([
+                "s_server", "-cert", "leaf.pem", "-key", "leaf.key", "-www", "-quiet",
+            ])
+            .args(["-accept", &format!("127.0.0.1:{port}")])
+            .current_dir(&directory)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the TLS broker never listened"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        // The CA travels in SSL_CERT_FILE, for the helper process alone.
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::private_ca_helper",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("QUEEN_PRIVATE_CA_URL", format!("https://localhost:{port}/"))
+            .env("SSL_CERT_FILE", directory.join("ca.pem"))
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        let _ = broker.kill();
+        let _ = broker.wait();
+        let _ = fs::remove_dir_all(&directory);
+        assert!(
+            status.success(),
+            "the supervisor refused a broker certificate its CA bundle trusts"
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess helper for a_broker_certificate_from_a_private_ca_is_trusted"]
+    fn private_ca_helper() {
+        let Some(url) = std::env::var_os("QUEEN_PRIVATE_CA_URL") else {
+            return;
+        };
+        // Built as every client of the supervisor is: its roots are the
+        // crate's TLS features, not the call site.
+        let client = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let response = client.get(url.to_str().unwrap()).send().unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+    }
+
     /// The broker calls of a stop (coordination leave, remote status) may
     /// take http_timeout per endpoint on a slow broker: they run only once
     /// every worker has its SIGTERM.
