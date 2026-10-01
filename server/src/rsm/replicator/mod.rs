@@ -65,6 +65,28 @@ pub mod raft;
 /// A Raft node id (§12.3 TypeConfig: `NodeId = u64`).
 pub type NodeId = u64;
 
+/// D20 at boot: a store whose cluster version (§12.8) is above what this node
+/// reads (`reads`) belongs to a cluster that already writes formats this build
+/// cannot decode — a downgrade. Refused at open, saying what to run, instead
+/// of at the first entry it cannot read (I16).
+pub(crate) fn check_cluster_version(node: NodeId, cluster: u32, reads: u32) -> io::Result<()> {
+    if cluster <= reads {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "rsm",
+        node,
+        cluster_version = cluster,
+        reads,
+        "rsm: this build cannot read the log of the cluster this store belongs to: refusing to start",
+    );
+    Err(io::Error::other(format!(
+        "this build reads effect catalogue version {reads}, and the cluster this store belongs \
+         to writes version {cluster} (§12.8): run a release that reads it (the one the other \
+         nodes run), never an older one"
+    )))
+}
+
 /// The role this node plays. A single-node [`LocalReplicator`] is always
 /// [`Role::Leader`] with term 1 until it stops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,6 +218,13 @@ pub struct MemberSeen {
     pub last_ack_ms: Option<u64>,
     /// The last log index the leader knows the member holds (RSM numbering).
     pub matched: Option<u64>,
+    /// The highest effect catalogue version the member said it reads (D20,
+    /// §12.8: `replicator/raft/members.rs`). `None`: it has said none to this
+    /// leader — a node older than 2.0.0-beta.2, at the baseline (3). Optional
+    /// on the wire both ways: a leader before beta.2 sends no field, and a
+    /// follower before it ignores this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kinds: Option<u32>,
 }
 
 /// Who is in the cluster and when the raft leader last heard from each
@@ -243,6 +272,7 @@ impl ClusterMembers {
                     raft: String::new(),
                     last_ack_ms: Some(0),
                     matched: None,
+                    kinds: Some(crate::rsm::effect::SUPPORTED_KINDS_VERSION),
                 }],
             }),
             view_age: Some(std::time::Duration::ZERO),
@@ -458,6 +488,15 @@ pub trait Replicator: Send + Sync + 'static {
     ) -> Result<(), ReplError>;
 
     fn metrics(&self) -> ReplMetrics;
+
+    /// On the leader: the highest effect catalogue version every member of
+    /// the cluster reads (§12.8, D20) — what the cluster version may rise to.
+    /// `None` while that is not known: this node does not lead, or a member
+    /// has not answered it recently (it may come back as a build nobody heard
+    /// from). The default is a node alone: what this build reads.
+    fn kinds_floor(&self) -> Option<u32> {
+        Some(crate::rsm::effect::SUPPORTED_KINDS_VERSION)
+    }
 }
 
 /// The state machine (§12.1). Implemented by the apply side. In phase 1 the

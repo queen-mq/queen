@@ -121,6 +121,9 @@ fn resolve<R: Reads + ?Sized>(
 
 /// Hash-resolved ack of one `(pid, group)` target (005), on `cur` in place.
 /// `has_row`: the group has a cursor on the partition (none: rejected).
+/// `keep_released`: the cluster reads a released lease in a cursor row
+/// (catalogue version 3, [`Engine::cluster_allows`]); below it an ack that
+/// settles a batch keeps none, and its repeat is stale, as before beta.1.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn ack_target<R: Reads + ?Sized>(
     fr: &Frames<'_, R>,
@@ -131,6 +134,7 @@ pub(crate) fn ack_target<R: Reads + ?Sized>(
     cfg: &crate::rsm::effect::QueueConfig,
     now: i64,
     repeat_ok: bool,
+    keep_released: bool,
 ) -> Result<Acked> {
     let pid = target.pid;
     let worker = &target.worker;
@@ -214,6 +218,7 @@ pub(crate) fn ack_target<R: Reads + ?Sized>(
                 cur.released = cur0
                     .lease
                     .as_ref()
+                    .filter(|_| keep_released)
                     .map(|l| (l.worker.clone(), (committed + 1).max(0) as u64, batch_end));
                 cur.committed = new;
                 cur.attempt_offset = None;
@@ -521,7 +526,8 @@ pub(crate) fn ack_target<R: Reads + ?Sized>(
     // repeat of this ack is answered as this one is ([`repeat_of_released`]).
     // Not a release for redelivery (a `failed` with budget left): those
     // messages come back, and a repeat is stale.
-    if has_lease
+    if keep_released
+        && has_lease
         && !released_for_retry
         && cur.lease.is_none()
         && cur.committed >= batch_end as i64
@@ -826,7 +832,15 @@ impl Engine {
                 let mut cur = p.cur.clone();
                 let has_row = p.has_row;
                 let acked = match ack_target(
-                    &fr, &mut cur, has_row, txns_start, t, &cfg.queue, now, true,
+                    &fr,
+                    &mut cur,
+                    has_row,
+                    txns_start,
+                    t,
+                    &cfg.queue,
+                    now,
+                    true,
+                    self.cluster_allows(crate::rsm::effect::VERSION_3),
                 ) {
                     Ok(a) => a,
                     Err(e) if deps.rows.is_empty() => return Err(e),

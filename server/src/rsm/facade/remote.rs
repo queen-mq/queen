@@ -23,6 +23,18 @@
 //! `forward`), or one `/raft/v1/submit` call each (`QUEEN_RAFT_FWD_BATCH=0`, or
 //! a leader that predates the streams). A retried command keeps its request
 //! id, so a reply lost in transit and a retry never plan it twice (I6).
+//!
+//! # Shapes across releases (D20)
+//!
+//! Both ends may run different releases in a rolling upgrade. A NEW shape of
+//! a request ([`Command`]: new variants go last, so postcard keeps every
+//! older one's index) or of a reply is sent only once the cluster version,
+//! read from the sender's own committed state, admits the catalogue version
+//! that introduced it ([`crate::rsm::effect::cluster_allows`],
+//! `RaftFacade::cluster_allows`): every member, the leader included, then
+//! decodes it. A leader that receives a request it cannot decode answers
+//! `retry` ([`serve`]): it did not run, and the caller retries, never takes it
+//! for an answer lost in flight.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -151,8 +163,21 @@ pub(super) async fn serve(
     from: crate::rsm::admit::Source,
     body: bytes::Bytes,
 ) -> Result<bytes::Bytes, String> {
-    let req: SubmitReq =
-        postcard::from_bytes(&body).map_err(|e| format!("prepared command: {e}"))?;
+    let req: SubmitReq = match postcard::from_bytes(&body) {
+        Ok(req) => req,
+        // A shape this build does not know (D20: a follower that sent it
+        // before the cluster version admitted it, or a damaged frame). It
+        // never ran: answered `retry`, which the follower hands its caller
+        // as a retryable 503 — not the failed call it was, which a follower
+        // takes for "sent, maybe ran" and answers an ack `outcome_unknown`.
+        Err(e) => {
+            tracing::warn!(target: "rsm", error = %e, "a forwarded command does not decode here; answered retry");
+            return Ok(bytes::Bytes::from(encode_reply(
+                Err(RsmError::Retry { leader_hint: None }),
+                applied(),
+            )));
+        }
+    };
     let deadline = Instant::now() + Duration::from_millis(req.budget_ms.clamp(1, 120_000));
     let reply = submit_local(&engine, cmd_tx, admit, from, req.command, deadline).await;
     Ok(bytes::Bytes::from(encode_reply(reply, applied())))
@@ -311,6 +336,57 @@ mod tests {
         let (reply, _) = decode_reply(&answer.expect("answered")).expect("decodes");
         assert!(matches!(reply, Reply::Retry { hint: Some(3) }), "{reply:?}");
         assert!(!on_raft_runtime(), "a test thread is not a raft one");
+        drop(tx);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D20: a forwarded command whose shape this build does not know — a
+    /// variant past the last one it has (what a follower on a newer release
+    /// would send too early), or a damaged frame — is answered `retry`: it
+    /// never ran. Not a failed call, which the follower takes for "sent, maybe
+    /// ran" and answers an ack `outcome_unknown`; and never a panic.
+    #[test]
+    fn a_forwarded_command_this_build_cannot_decode_is_answered_retry() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let dir = std::env::temp_dir().join(format!(
+            "queen-remote-undecodable-{}-{}",
+            std::process::id(),
+            crate::frames::uuid_bytes_to_string(&crate::util::uuidv7_bytes())
+        ));
+        let store = Arc::new(
+            crate::rsm::store::HeedStore::open(
+                &dir.join("store"),
+                &crate::rsm::store::StoreOpts {
+                    map_bytes: Some(64 << 20),
+                    ..Default::default()
+                },
+            )
+            .expect("store"),
+        );
+        let engine = Engine::new(store);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Submission>(1);
+        // budget_ms = 1000 (a varint), then the Command variant 99.
+        let unknown_variant = bytes::Bytes::from_static(&[0xE8, 0x07, 99]);
+        let garbage = bytes::Bytes::from_static(&[0xFF; 9]);
+        for body in [unknown_variant, garbage] {
+            let answer = rt
+                .block_on(serve(
+                    engine.clone(),
+                    tx.downgrade(),
+                    None,
+                    Arc::new(|| 5),
+                    crate::rsm::admit::Source::Forwarded,
+                    body,
+                ))
+                .expect("an answer, not a failed call");
+            match decode_reply(&answer) {
+                Err(RsmError::Retry { leader_hint: None }) => {}
+                other => panic!("expected retry, got {other:?}"),
+            }
+        }
         drop(tx);
         let _ = std::fs::remove_dir_all(&dir);
     }

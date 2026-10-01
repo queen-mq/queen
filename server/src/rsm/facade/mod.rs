@@ -642,6 +642,13 @@ pub struct RaftHealth {
     /// `QUEEN_RAFT_APPLY_SKIP`) and the entry that stopped apply here, with
     /// the exact setting that steps over it. `None` without one.
     pub apply: Option<serde_json::Value>,
+    /// The committed cluster version (§12.8, D20): the highest effect
+    /// catalogue version the leader writes (`clusterVersion`). `None` without
+    /// a state machine.
+    pub cluster_version: Option<u32>,
+    /// The highest catalogue version this node reads (`kinds`): what it tells
+    /// the leader the cluster version may rise to.
+    pub kinds: Option<u32>,
 }
 
 impl RaftHealth {
@@ -651,8 +658,15 @@ impl RaftHealth {
             Some(a) => format!(",\"apply\":{a}"),
             None => String::new(),
         };
+        let mut versions = String::new();
+        if let Some(v) = self.cluster_version {
+            versions.push_str(&format!(",\"clusterVersion\":{v}"));
+        }
+        if let Some(k) = self.kinds {
+            versions.push_str(&format!(",\"kinds\":{k}"));
+        }
         format!(
-            "{{\"role\":\"{}\",\"leader\":{},\"term\":{},\"applied\":{},\"commit\":{},\"lag\":{},\"storageReady\":{}{apply}}}",
+            "{{\"role\":\"{}\",\"leader\":{},\"term\":{},\"applied\":{},\"commit\":{},\"lag\":{},\"storageReady\":{}{versions}{apply}}}",
             self.role, self.leader_known, self.term, self.applied, self.commit, self.lag_ms, self.storage_ready
         )
     }
@@ -909,6 +923,8 @@ impl Rsm for NotReady {
             lag_ms: 0,
             storage_ready: false,
             apply: None,
+            cluster_version: None,
+            kinds: None,
         }
     }
 

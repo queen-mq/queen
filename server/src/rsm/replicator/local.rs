@@ -1489,9 +1489,22 @@ impl<S: Store + 'static> LocalReplicator<S> {
         // 2. Where the store reopened (§11.5 step 2). The apply thread reads
         //    the same values inside its own recovery; reading them here too is
         //    a read transaction, no conflict.
-        let (store_applied, store_term, store_durable) = store
-            .read(|r| Ok((r.applied_index()?, r.applied_term()?, r.durable_index()?)))
+        let (store_applied, store_term, store_durable, cluster_version) = store
+            .read(|r| {
+                Ok((
+                    r.applied_index()?,
+                    r.applied_term()?,
+                    r.durable_index()?,
+                    r.cluster_version()?,
+                ))
+            })
             .map_err(|e| io::Error::other(format!("read store recovery point: {e}")))?;
+        // D20: a downgrade below what this node's log already holds.
+        super::check_cluster_version(
+            cfg.node_id,
+            cluster_version,
+            crate::rsm::effect::SUPPORTED_KINDS_VERSION,
+        )?;
 
         // The raft log is the WAL only with the qlog knob off; with it on the
         // queue logs are, and the same check runs against them after replay.

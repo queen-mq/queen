@@ -193,7 +193,8 @@ pub struct BatcherConfig {
     pub timer_fire: TimerFireConfig,
     /// Leader-only retention, trace-expiry and delete-resume cadence. `0`
     /// disables it (the programmatic test default); real nodes enable it from
-    /// `RETENTION_INTERVAL`.
+    /// `RETENTION_INTERVAL`. The background retention scanner starts a round
+    /// at most this often too ([`crate::rsm::retention_scan::round_wait`]).
     pub maintenance_every_ms: u64,
     pub maintenance: crate::rsm::maintenance::Config,
     /// `QUEEN_RAFT_KEEP_OVERLAY` (default on): the planner thread keeps the
@@ -220,6 +221,12 @@ pub struct BatcherConfig {
     /// the planner only judges what it proposes. `None` keeps the walk on the
     /// planning thread, as do lanes (`QUEEN_LANES` > 1).
     pub retention_scan: Option<crate::rsm::retention_scan::ScanConfig>,
+    /// `QUEEN_RAFT_CLUSTER_VERSION_MS` (default 1000 on real nodes; `0` = off,
+    /// the programmatic default): how often the leader compares the cluster
+    /// version (§12.8) with what every member reads, and raises it
+    /// ([`RunState::raise_cluster_version`], D20). A membership change, or a
+    /// member restarted on a new release, is seen within one period.
+    pub cluster_version_every_ms: u64,
 }
 
 impl Default for BatcherConfig {
@@ -252,6 +259,7 @@ impl Default for BatcherConfig {
             lanes: 8,
             monotonic_clock: true,
             retention_scan: None,
+            cluster_version_every_ms: 0,
         }
     }
 }
@@ -385,6 +393,11 @@ impl BatcherConfig {
                 .map(|v| !v.trim().eq_ignore_ascii_case("wall"))
                 .unwrap_or(d.monotonic_clock),
             retention_scan: crate::rsm::retention_scan::ScanConfig::from_env(),
+            // `0` is honoured here (off), as for the timer tick.
+            cluster_version_every_ms: std::env::var("QUEEN_RAFT_CLUSTER_VERSION_MS")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(1_000),
             // Off unless explicitly turned on: only "1"/"true"/"on"/"yes".
             keep_overlay_verify: std::env::var("QUEEN_RAFT_KEEP_OVERLAY_VERIFY")
                 .map(|v| {
@@ -406,6 +419,11 @@ impl BatcherConfig {
 /// receiver maps HTTP requests and forwarded frames onto these; the batcher is
 /// their only consumer, and the planner has already been written against the
 /// per-kind structs (`PushCommand`, `PopCommand`, …).
+///
+/// A follower forwards these to the leader as postcard (`facade/remote.rs`),
+/// across releases in a rolling upgrade: a new variant goes last, and a node
+/// sends a new variant or a new shape only once the cluster version admits it
+/// (D20, [`crate::rsm::effect::cluster_allows`]).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub enum Command {
     Push(PushCommand),
@@ -1061,6 +1079,10 @@ pub(crate) struct PlanOutput {
     fire_more: bool,
     maintained: bool,
     maintenance_more: bool,
+    /// The committed cluster version (§12.8, D20) the cycle planned under,
+    /// read in its own read transaction: `entry` must not carry a
+    /// `kinds_version` above it ([`RunState::finish`]).
+    pub(crate) cluster_version: u32,
 }
 
 /// The leader-loop step that fires due timers (WP-2.3): plan it against the
@@ -1236,6 +1258,7 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
         let store_applied = r.applied_index()?;
         let base_pid = r.next_pid()?;
         let base_kv = r.kv_version_next()?;
+        let cluster_version = r.cluster_version()?;
 
         // The overlay (§7.2): every in-flight entry the committed read does not
         // yet reflect, folded. KEEP_OVERLAY advances the kept one past the
@@ -1558,6 +1581,7 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
             fire_more,
             maintained,
             maintenance_more,
+            cluster_version,
         })
     })
 }
@@ -1840,10 +1864,13 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
         let scan = match cfg.retention_scan {
             Some(scan_cfg) if maintenance_on => {
                 let shared = crate::rsm::retention_scan::ScanShared::new(&cfg.maintenance);
+                // A round per maintenance interval at most, the walk's own
+                // cadence before it left the planner (`RETENTION_INTERVAL`).
                 match crate::rsm::retention_scan::spawn(
                     self.store.clone(),
                     cfg.maintenance.clone(),
                     scan_cfg,
+                    Duration::from_millis(cfg.maintenance_every_ms.max(1)),
                     shared.clone(),
                 ) {
                     Ok(()) => {
@@ -1865,6 +1892,11 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
         let scan_on = scan.is_some();
         let mut scan_tick = tokio::time::interval(Duration::from_millis(200));
         scan_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        // D20: the cluster version's cadence.
+        let version_on = cfg.cluster_version_every_ms > 0;
+        let mut version_tick =
+            tokio::time::interval(Duration::from_millis(cfg.cluster_version_every_ms.max(1)));
+        version_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let committed_rx = if *ANSWER_AT_COMMIT {
             self.repl.committed_watch()
         } else {
@@ -1914,6 +1946,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             quiescing: None,
             realign_at: None,
             clock_anchor: None,
+            version_raise: None,
         };
         if role.is_leader() {
             st.begin_term_clock();
@@ -2009,6 +2042,10 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                         st.note_wake("retention_scan");
                         st.scan_due = true;
                     }
+                }
+                _ = version_tick.tick(), if version_on => {
+                    st.note_wake("cluster_version");
+                    st.raise_cluster_version();
                 }
                 _ = tokio::time::sleep(Duration::from_millis(HOLD_POLL_MS)),
                     if st.holding_until.is_some() || st.realign_at.is_some() || st.quiescing.is_some() =>
@@ -2220,6 +2257,9 @@ struct RunState<S: Store, R: Replicator> {
     /// The RSM clock when this node's leadership began planning, and the
     /// monotonic instant it was read at ([`RunState::plan_wall`]).
     clock_anchor: Option<(i64, Instant)>,
+    /// The `ClusterVersionSet` this driver proposed and whose answer it has
+    /// not seen ([`RunState::raise_cluster_version`]): one at a time.
+    version_raise: Option<(u32, oneshot::Receiver<Reply>)>,
 }
 
 /// The next [`QuiesceReq`], or never when no channel was handed in.
@@ -2922,6 +2962,32 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         // Drop the in-flight entries the committed read now reflects (§7.2).
         self.drop_landed(out.store_applied);
 
+        // D20: the engine writes under the cluster version this cycle read,
+        // which every later cycle's read is at least (it never goes down).
+        if let Some(e) = &self.engine {
+            e.note_cluster_version(out.cluster_version);
+        }
+        // D20: never an entry above the cluster version. Every writer of a
+        // newer shape asks `effect::cluster_allows` first; one that did not
+        // fails the commands it planned here, as an entry that cannot encode
+        // does, instead of stopping every member that cannot read it (I16).
+        if let Some(entry) = out
+            .entry
+            .as_ref()
+            .filter(|e| e.kinds_version > out.cluster_version)
+        {
+            tracing::error!(
+                target: "rsm",
+                kinds_version = entry.kinds_version,
+                cluster_version = out.cluster_version,
+                "rsm: an entry above the cluster version was planned (a writer that does not \
+                 consult effect::cluster_allows); refusing its commands",
+            );
+            let e = crate::rsm::effect::CodecError::UnknownCatalogue(entry.kinds_version);
+            self.route_encode_failure(out.slots, replies, received, &txn_ids, &e);
+            return;
+        }
+
         // Encode the entry BEFORE routing any answer, so an entry that cannot
         // encode fails only the commands that went into it, and nothing is
         // half-answered. `encode_entry` re-runs `Entry::validate` (§5.1).
@@ -3557,6 +3623,56 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             }
             self.holding_until = None;
         }
+    }
+
+    /// D20, §12.8: raise the cluster version to what every member reads. The
+    /// replicator says what that is ([`Replicator::kinds_floor`]: every member
+    /// heard from recently, each at what it said on this leader's appends, one
+    /// that said nothing at the baseline); when it is above the committed
+    /// version, this leader plans ONE `ClusterVersionSet` — a version-1 effect,
+    /// which every node applies — as a command of its own, and plans no other
+    /// until that one is answered. The version never goes down: only a higher
+    /// one than committed is proposed, and apply writes what was proposed.
+    /// From the entry it commits in, the writers that ask
+    /// [`crate::rsm::effect::cluster_allows`] may use the new formats.
+    fn raise_cluster_version(&mut self) {
+        if let Some((to, rx)) = self.version_raise.as_mut() {
+            match rx.try_recv() {
+                Err(oneshot::error::TryRecvError::Empty) => return,
+                Ok(Reply::Done { .. }) => {}
+                Ok(other) => {
+                    tracing::warn!(target: "rsm", to = *to, reply = ?other, "rsm: the cluster version was not raised; trying again");
+                }
+                Err(oneshot::error::TryRecvError::Closed) => {}
+            }
+            self.version_raise = None;
+        }
+        if self.paused || self.stopped || self.closing || self.quiescing.is_some() {
+            return;
+        }
+        let Some(floor) = self.repl.kinds_floor() else {
+            return;
+        };
+        let committed = match self.store.read(|r| r.cluster_version()) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        if floor <= committed {
+            return;
+        }
+        tracing::info!(
+            target: "rsm",
+            from = committed,
+            to = floor,
+            "rsm: every member reads effect catalogue version {floor}: raising the cluster version",
+        );
+        let (sub, rx) = Submission::new(Command::Effects(crate::rsm::planner::EffectsCommand {
+            request_id: crate::util::uuidv7_bytes(),
+            tenant: String::new(),
+            effects: vec![Effect::ClusterVersionSet { version: floor }],
+        }));
+        self.enqueue(sub);
+        self.version_raise = Some((floor, rx));
     }
 
     /// PERF-K trace: record which `select!` arm woke the driver, and bump the

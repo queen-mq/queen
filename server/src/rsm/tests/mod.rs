@@ -37,11 +37,14 @@
 //!   FATAL line naming the file and exit 1, not a bare bus error.
 //! - [`store_scrub`] the scheduled scrub: it finds a damaged row under a
 //!   running store, completes passes over a healthy one, and ends with it.
+//! - [`cluster_version`] the cluster version (§12.8, D20) on running clusters:
+//!   it rises by itself to what every member reads, and never falls.
 
 mod apply;
 mod apply_crash;
 mod apply_shards;
 mod batcher;
+mod cluster_version;
 mod dedup_txns;
 mod delete_race;
 mod edge;

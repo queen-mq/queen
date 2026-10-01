@@ -108,6 +108,7 @@ fn test_opts() -> RaftOpts {
         force_recover: None,
         apply_skip: Vec::new(),
         promote_max_lag: 1000,
+        kinds: Some(crate::rsm::effect::SUPPORTED_KINDS_VERSION),
     }
 }
 

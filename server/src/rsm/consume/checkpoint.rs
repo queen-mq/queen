@@ -239,7 +239,7 @@ impl Engine {
                     effs.push(Effect::CursorSet {
                         pid,
                         group: group.clone(),
-                        row: p.cur.row(),
+                        row: self.logged_row(&p.cur),
                     });
                 }
                 let dlq = std::mem::take(&mut p.dlq);

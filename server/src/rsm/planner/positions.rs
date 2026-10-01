@@ -207,6 +207,8 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         // The rows this call wrote on the partitions it created.
         let mut rows: HashMap<(Pid, &str), Option<CursorRow>> = HashMap::new();
         let mut planned_bytes = 0usize;
+        // A position's metadata is a catalogue version 2 shape (D20).
+        let cluster = self.cluster_version()?;
 
         for op in ops {
             if !queues.contains(op.queue.as_str()) {
@@ -287,6 +289,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             // `offset <= i64::MAX` (the receiver checked it), so this is exact.
             row.committed = offset as i64 - 1;
             row.metadata = op.metadata.clone();
+            row.admit(cluster);
             if current.as_ref() == Some(&row) {
                 // Set again to where an earlier op of the call put it.
                 continue;

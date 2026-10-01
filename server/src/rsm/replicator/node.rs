@@ -169,6 +169,16 @@ impl<S: Store + 'static> NodeReplicator<S> {
         }
     }
 
+    /// The highest effect catalogue version this node reads (D20): what it
+    /// tells the leader on every append ([`super::raft::RaftOpts::kinds`]);
+    /// a local replicator reads what its build reads.
+    pub fn kinds(&self) -> u32 {
+        match self {
+            NodeReplicator::Local(_) => crate::rsm::effect::SUPPORTED_KINDS_VERSION,
+            NodeReplicator::Raft(r) => r.kinds(),
+        }
+    }
+
     pub fn kind(&self) -> ReplicatorKind {
         match self {
             NodeReplicator::Local(_) => ReplicatorKind::Local,
@@ -430,6 +440,13 @@ impl<S: Store + 'static> Replicator for NodeReplicator<S> {
         match self {
             NodeReplicator::Local(r) => r.metrics(),
             NodeReplicator::Raft(r) => r.metrics(),
+        }
+    }
+
+    fn kinds_floor(&self) -> Option<u32> {
+        match self {
+            NodeReplicator::Local(r) => r.kinds_floor(),
+            NodeReplicator::Raft(r) => r.kinds_floor(),
         }
     }
 }

@@ -767,3 +767,52 @@ fn a_repeated_ack_of_a_released_lease_is_answered_as_the_first() {
         "the next leader knows the lease: {next:?}"
     );
 }
+
+/// Below catalogue version 3 — a cluster version that says some member cannot
+/// read a released lease (D20) — an ack that settles its batch keeps none: no
+/// row the engine logs carries one, so no effect is above version 2, and a
+/// repeat of the ack is stale, as it was before beta.1. Once the version
+/// rises, the next settled batch keeps its lease again.
+#[test]
+fn below_catalogue_version_3_an_ack_keeps_no_released_lease() {
+    use crate::rsm::effect::{kinds_version_of, Effect};
+    let mut h = H::new("ack-v2");
+    h.set_cluster_version(2);
+    h.queue("q", qcfg());
+    let pid = lease(&mut h, "q", "p0", &["a", "b"], "w1");
+    let first = h.ack(pid, "q", "g", "w1", &[("a", Ok), ("b", Ok)]);
+    assert_eq!(first.committed, 1, "{first:?}");
+    assert!(
+        first.lease_released && first.stale_hashes.is_empty(),
+        "{first:?}"
+    );
+    let row = h.cursor(pid, "g").expect("cursor row");
+    assert_eq!((row.committed, &row.released), (1, &None));
+    assert!(
+        h.logged
+            .iter()
+            .any(|e| matches!(e, Effect::CursorSet { .. })),
+        "the ack's checkpoint was logged"
+    );
+    assert!(
+        kinds_version_of(&h.logged) <= 2,
+        "an effect above the cluster version: {:?}",
+        h.logged
+    );
+    // The same ack again: stale, as before beta.1 (the lease is not kept).
+    let again = h.ack(pid, "q", "g", "w1", &[("a", Ok), ("b", Ok)]);
+    assert_eq!(again.stale_hashes.len(), 2, "{again:?}");
+
+    // Every member reads 3 now: the next settled batch keeps its lease.
+    h.set_cluster_version(3);
+    h.push("q", "p0", &["c"]);
+    h.advance(1_000_000);
+    only(h.pinned("q", "p0", "g", "w2"));
+    h.advance(1000);
+    let next = h.ack(pid, "q", "g", "w2", &[("c", Ok)]);
+    assert!(next.lease_released, "{next:?}");
+    let row = h.cursor(pid, "g").expect("cursor row");
+    assert!(row.released.is_some(), "{row:?}");
+    let repeat = h.ack(pid, "q", "g", "w2", &[("c", Ok)]);
+    assert!(repeat.stale_hashes.is_empty(), "{repeat:?}");
+}

@@ -275,3 +275,321 @@ async fn with_the_scanner_on_retention_still_expires_messages() {
         "the queue without retention keeps its messages"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Rounds: at most one per maintenance interval (2026-10-01)
+// ---------------------------------------------------------------------------
+
+/// The gate on its own: no wait for a leadership's first round, the rest of
+/// the interval since the last one began, none once a round outran it.
+#[test]
+fn a_round_waits_out_the_interval_since_the_last_one_began() {
+    use crate::rsm::retention_scan::round_wait;
+    use std::time::{Duration, Instant};
+    let every = Duration::from_millis(5_000);
+    let t0 = Instant::now();
+    assert_eq!(round_wait(None, t0, every), Duration::ZERO, "first round");
+    assert_eq!(
+        round_wait(Some(t0), t0 + Duration::from_millis(41), every),
+        Duration::from_millis(4_959),
+        "a small store wrapped after one slice: the rest of the interval"
+    );
+    assert_eq!(round_wait(Some(t0), t0 + every, every), Duration::ZERO);
+    assert_eq!(
+        round_wait(Some(t0), t0 + Duration::from_secs(20), every),
+        Duration::ZERO,
+        "a 20 s round over 1M partitions: the next starts at once"
+    );
+}
+
+/// Wait until `f` holds, for at most `within`.
+fn eventually(within: std::time::Duration, f: impl Fn() -> bool) -> bool {
+    let end = std::time::Instant::now() + within;
+    while std::time::Instant::now() < end {
+        if f() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    f()
+}
+
+/// The scanner thread over a store smaller than one slice: before 2026-10-01
+/// it walked it every slice pace (2,048 / 50,000 per s = 41 ms, ~24 rounds a
+/// second, 0.22 of a core on the prod leader); now once per maintenance
+/// interval, a new leadership's first round at once.
+#[test]
+fn a_store_smaller_than_a_slice_is_walked_once_per_interval() {
+    use crate::rsm::retention_scan::{spawn, ScanConfig};
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    let rows: Vec<(u64, PartitionRow)> = (1..=3).map(|pid| (pid, part(0, 0, -1, NOW))).collect();
+    let (_d, store) = store("rounds", &rows);
+    let store = std::sync::Arc::new(store);
+    let cfg = maintenance::Config::default();
+    let scan = ScanConfig {
+        per_s: 50_000,
+        slice: 2_048,
+    };
+    let rounds = |s: &ScanShared| s.rounds.load(Ordering::Relaxed);
+
+    // A 300 ms interval for one second: at most 1 + elapsed / interval.
+    let every = Duration::from_millis(300);
+    let shared = ScanShared::new(&cfg);
+    spawn(store.clone(), cfg.clone(), scan, every, shared.clone()).expect("spawn");
+    let t0 = Instant::now();
+    shared.set_leading(true);
+    assert!(
+        eventually(Duration::from_secs(5), || rounds(&shared) >= 1),
+        "a round ran"
+    );
+    std::thread::sleep(Duration::from_millis(1_000));
+    let n = rounds(&shared);
+    let bound = 1 + (t0.elapsed().as_millis() / every.as_millis()) as u64;
+    shared.stop();
+    assert!(
+        n <= bound,
+        "{n} rounds in {:?}, at most {bound}",
+        t0.elapsed()
+    );
+
+    // A long interval: one round, then nothing until a NEW leadership, whose
+    // first round starts at once (not an interval later).
+    let shared = ScanShared::new(&cfg);
+    spawn(
+        store.clone(),
+        cfg,
+        scan,
+        Duration::from_secs(3_600),
+        shared.clone(),
+    )
+    .expect("spawn");
+    shared.set_leading(true);
+    assert!(
+        eventually(Duration::from_secs(5), || rounds(&shared) == 1),
+        "the first round starts at once"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(rounds(&shared), 1, "no second round inside the interval");
+    shared.set_leading(false);
+    shared.set_leading(true);
+    assert!(
+        eventually(Duration::from_secs(5), || rounds(&shared) == 2),
+        "a new leadership's first round starts at once"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(rounds(&shared), 2);
+    shared.stop();
+}
+
+// ---------------------------------------------------------------------------
+// Judging a partition nothing can move (2026-10-01)
+// ---------------------------------------------------------------------------
+
+/// A read handle that counts what reaches the `txns` keyspace.
+struct Counting<'a, R: crate::rsm::store::Reads + ?Sized> {
+    r: &'a R,
+    txns_scans: std::cell::Cell<usize>,
+    txns_rows: std::cell::Cell<usize>,
+}
+
+impl<'a, R: crate::rsm::store::Reads + ?Sized> Counting<'a, R> {
+    fn new(r: &'a R) -> Counting<'a, R> {
+        Counting {
+            r,
+            txns_scans: std::cell::Cell::new(0),
+            txns_rows: std::cell::Cell::new(0),
+        }
+    }
+
+    fn note(&self, ks: crate::rsm::store::Keyspace, rows: usize) {
+        if ks == crate::rsm::store::Keyspace::Txns {
+            self.txns_scans.set(self.txns_scans.get() + 1);
+            self.txns_rows.set(self.txns_rows.get() + rows);
+        }
+    }
+}
+
+impl<R: crate::rsm::store::Reads + ?Sized> crate::rsm::store::Reads for Counting<'_, R> {
+    fn get_raw(
+        &self,
+        ks: crate::rsm::store::Keyspace,
+        key: &[u8],
+    ) -> crate::rsm::store::Result<Option<&[u8]>> {
+        self.r.get_raw(ks, key)
+    }
+
+    fn get_with(
+        &self,
+        ks: crate::rsm::store::Keyspace,
+        key: &[u8],
+        f: &mut dyn FnMut(&[u8]),
+    ) -> crate::rsm::store::Result<bool> {
+        self.r.get_with(ks, key, f)
+    }
+
+    fn max_key_len(&self) -> usize {
+        self.r.max_key_len()
+    }
+
+    fn scan_raw(
+        &self,
+        ks: crate::rsm::store::Keyspace,
+        from: &[u8],
+        prefix: &[u8],
+        limit: usize,
+        cb: &mut dyn FnMut(&[u8], &[u8]) -> bool,
+    ) -> crate::rsm::store::Result<usize> {
+        let n = self.r.scan_raw(ks, from, prefix, limit, cb)?;
+        self.note(ks, n);
+        Ok(n)
+    }
+
+    fn scan_rev_raw(
+        &self,
+        ks: crate::rsm::store::Keyspace,
+        from: &[u8],
+        prefix: &[u8],
+        limit: usize,
+        cb: &mut dyn FnMut(&[u8], &[u8]) -> bool,
+    ) -> crate::rsm::store::Result<usize> {
+        let n = self.r.scan_rev_raw(ks, from, prefix, limit, cb)?;
+        self.note(ks, n);
+        Ok(n)
+    }
+}
+
+/// `n` one-message appends to `pid` from offset `base`, each with its txns
+/// row stamped `created`.
+fn txns_rows(store: &HeedStore, pid: u64, base: u64, n: u64, created: i64) {
+    let mut w = store.write().unwrap();
+    for off in base..base + n {
+        let mut h = [0u8; 16];
+        h[..8].copy_from_slice(&off.to_be_bytes());
+        crate::rsm::dedup::record_txns(&mut w, pid, off, off, &[(h, off)], created).unwrap();
+    }
+    w.commit().unwrap();
+}
+
+const HOUR_US: i64 = 3_600 * 1_000_000;
+
+/// The prod shape (2026-10-01): retention off, a 1 h dedup window, 1,500
+/// messages pushed a day ago, both watermarks at 0. Nothing can move, and the
+/// judgment reads no txns row; the walk before read 1,002 of them (the oldest,
+/// then `row_limit + 1`) on every visit, to the same verdict.
+#[test]
+fn a_partition_nothing_can_move_is_judged_without_reading_its_txns_rows() {
+    let (_d, store) = store("skip", &[(1, part(0, 0, 1_499, NOW - DAY_US))]);
+    txns_rows(&store, 1, 0, 1_500, NOW - DAY_US);
+    let cfg = maintenance::Config::default();
+    store
+        .read(|r| {
+            let qcfg = super::apply::queue_config(0);
+            let cut = maintenance::queue_cutoffs(r, NOW, &cfg, "t", "q", &qcfg);
+            let part = r.partition(1)?.expect("partition");
+            let now = Counting::new(r);
+            let got = maintenance::judge_partition(&now, NOW, &cfg, 1, &part, &cut)?;
+            assert_eq!(now.txns_scans.get(), 0, "no txns row read");
+            let before = Counting::new(r);
+            let want = maintenance::judge_partition_unskipped(&before, NOW, &cfg, 1, &part, &cut)?;
+            assert_eq!(before.txns_rows.get(), 1 + cfg.row_limit + 1);
+            assert_eq!(got, want);
+            assert_eq!(got, None, "it holds messages: no delete either");
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// A partition WITH retention moves its watermarks exactly as before: the
+/// log past every row older than the retention, the txns watermark past the
+/// rows older than the dedup window, never past the log one.
+#[test]
+fn a_partition_with_retention_moves_its_watermarks_as_before() {
+    // 10 rows two days old, then 10 from a minute ago.
+    let (_d, store) = store("retained", &[(1, part(0, 0, 19, NOW - 60_000_000))]);
+    txns_rows(&store, 1, 0, 10, NOW - 2 * DAY_US);
+    txns_rows(&store, 1, 10, 10, NOW - 60_000_000);
+    let cfg = maintenance::Config::default();
+    store
+        .read(|r| {
+            let mut qcfg = super::apply::queue_config(0);
+            qcfg.retention_enabled = true;
+            qcfg.retention_seconds = 86_400;
+            let cut = maintenance::queue_cutoffs(r, NOW, &cfg, "t", "q", &qcfg);
+            let part = r.partition(1)?.expect("partition");
+            let got = maintenance::judge_partition(r, NOW, &cfg, 1, &part, &cut)?;
+            assert_eq!(
+                got,
+                Some(maintenance::Verdict::Watermark {
+                    log_start: 10,
+                    txns_start: 10,
+                })
+            );
+            assert_eq!(
+                got,
+                maintenance::judge_partition_unskipped(r, NOW, &cfg, 1, &part, &cut)?
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// The shortcuts against the walk as it was, over every combination that
+/// decides them: which cutoffs apply, where the watermarks stand, how old the
+/// rows are, whether the partition still holds anything, and none at all.
+/// The verdict never differs.
+#[test]
+fn the_shortcuts_give_the_walks_verdict_in_every_case() {
+    let ages = [None, Some(2 * DAY_US), Some(HOUR_US / 2), Some(2 * HOUR_US)];
+    let mut cases = 0;
+    // (nothing, a watermark, a delete): the grid reaches all three.
+    let mut seen = [0usize; 3];
+    for (i, age) in ages.iter().enumerate() {
+        for (log_start, txns_start, last_offset) in [
+            (0u64, 0u64, 19i64),
+            (5, 5, 19),
+            (10, 5, 19),
+            (20, 20, 19),
+            (20, 10, 19),
+        ] {
+            let tag = format!("grid-{i}-{log_start}-{txns_start}");
+            let created = NOW - 40 * DAY_US;
+            let mut row = part(log_start, txns_start, last_offset, 1);
+            row.created_at_us = created;
+            let (_d, store) = store(&tag, &[(1, row)]);
+            if let Some(age) = age {
+                txns_rows(&store, 1, 0, 20, NOW - age);
+            }
+            let cfg = maintenance::Config::default();
+            let day_ago = Some(NOW - DAY_US);
+            let cuts = [
+                maintenance::cutoffs_for_test(None, None, None, NOW - HOUR_US),
+                maintenance::cutoffs_for_test(day_ago, None, None, NOW - HOUR_US),
+                maintenance::cutoffs_for_test(None, None, day_ago, NOW - HOUR_US),
+                maintenance::cutoffs_for_test(None, day_ago, None, NOW - HOUR_US),
+                maintenance::cutoffs_for_test(Some(NOW - HOUR_US / 4), None, None, NOW),
+            ];
+            store
+                .read(|r| {
+                    let part = r.partition(1)?.expect("partition");
+                    for cut in &cuts {
+                        let got = maintenance::judge_partition(r, NOW, &cfg, 1, &part, cut)?;
+                        let want =
+                            maintenance::judge_partition_unskipped(r, NOW, &cfg, 1, &part, cut)?;
+                        assert_eq!(got, want, "{tag} {cut:?}");
+                        cases += 1;
+                        seen[match got {
+                            None => 0,
+                            Some(maintenance::Verdict::Watermark { .. }) => 1,
+                            Some(maintenance::Verdict::Delete) => 2,
+                        }] += 1;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        }
+    }
+    assert_eq!(cases, 4 * 5 * 5);
+    assert!(seen.iter().all(|n| *n > 0), "verdicts seen: {seen:?}");
+}

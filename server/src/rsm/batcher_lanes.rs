@@ -1376,12 +1376,13 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
     let mut multi_dups: Vec<(usize, usize)> = Vec::new();
     let mut lane_pieces: Vec<Vec<Piece>> = (0..n).map(|_| Vec::new()).collect();
     let mut create_pieces: Vec<Piece> = Vec::new();
-    let (store_applied, base_pid, base_kv, now_us) = {
+    let (store_applied, base_pid, base_kv, now_us, cluster_version) = {
         let st = store.clone();
         st.read(|r| {
             let store_applied = r.applied_index()?;
             let base_pid = r.next_pid()?;
             let base_kv = r.kv_version_next()?;
+            let cluster_version = r.cluster_version()?;
             let base_now = Committed::new(r).plan_now(wall_us)?;
             // L2: one clock for the cycle, above everything in flight.
             let now_us = ls.records.iter().fold(base_now, |m, rec| {
@@ -1544,7 +1545,7 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
                     };
                 }
             }
-            Ok((store_applied, base_pid, base_kv, now_us))
+            Ok((store_applied, base_pid, base_kv, now_us, cluster_version))
         })?
     };
 
@@ -2417,6 +2418,7 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
         fire_more,
         maintained,
         maintenance_more,
+        cluster_version,
     })
 }
 

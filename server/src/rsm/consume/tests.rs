@@ -95,6 +95,8 @@ pub(super) struct H {
     pub now: i64,
     next_pid: u64,
     rid: u64,
+    /// Every effect a checkpoint or a transaction logged, in apply order.
+    pub logged: Vec<Effect>,
 }
 
 impl Drop for H {
@@ -137,6 +139,7 @@ impl H {
             now: wall_us(),
             next_pid: 1,
             rid: 0,
+            logged: Vec::new(),
         }
     }
 
@@ -330,6 +333,23 @@ impl H {
         drop(w);
         for e in effects {
             self.e.on_effect(e, 0);
+        }
+        self.logged.extend_from_slice(effects);
+    }
+
+    /// The cluster version moves to `v` (D20): what apply writes for a
+    /// `ClusterVersionSet`, then what the batcher tells the engine once its
+    /// planning reads it — or, when the version goes DOWN (a test's forced
+    /// one, never a cluster's), a new leader reading it.
+    pub fn set_cluster_version(&mut self, v: u32) {
+        let mut w = self.store.write().expect("write");
+        w.set_meta_u32(crate::rsm::store::meta::CLUSTER_VERSION, v)
+            .expect("meta");
+        w.commit().expect("commit");
+        drop(w);
+        self.e.note_cluster_version(v);
+        if self.e.cluster.load(Ordering::Acquire) != v {
+            self.failover();
         }
     }
 

@@ -135,6 +135,7 @@ fn test_opts() -> RaftOpts {
         force_recover: None,
         apply_skip: Vec::new(),
         promote_max_lag: 1000,
+        kinds: Some(crate::rsm::effect::SUPPORTED_KINDS_VERSION),
     }
 }
 
@@ -1997,4 +1998,152 @@ async fn fresh_nodes_wait_while_the_node_with_the_data_is_silent() {
     let last = propose_all(nodes[l].as_ref().unwrap(), &entries[N as usize..]).await;
     tokio::task::block_in_place(|| wait_applied(&nodes, last));
     converge(nodes, 2 * N, "found");
+}
+
+/// An entry raising the cluster version to `version` (D20), as a leader's
+/// batcher plans one, on a cluster that has planned nothing else (the bases
+/// are the store's first ones).
+fn cluster_version_entry(version: u32) -> Bytes {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_micros() as i64;
+    let mut e = crate::rsm::entry::Entry::new(now, 1, 1);
+    e.add_command(
+        [0xC5; 16],
+        crate::rsm::entry::Outcome::Empty,
+        vec![crate::rsm::effect::Effect::ClusterVersionSet { version }],
+    )
+    .expect("a command");
+    Bytes::from(encode_entry(&e).expect("encode"))
+}
+
+/// The catalogue version each member reads (§12.8, D20), end to end over the
+/// Raft RPCs: every member answers the leader's appends with what it reads
+/// (`x-queen-raft-kinds`), and the leader's floor is the lowest of them — a
+/// member that says nothing (a node older than this build) at the baseline.
+/// On a cluster at version 4, a node that reads less is refused: added as a
+/// learner (the leader asks it first, and asks a node that does not answer in
+/// vain), or restarted on a store at that version (its own boot refuses).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_member_says_what_it_reads_and_one_that_reads_less_is_refused() {
+    use crate::rsm::replicator::MembershipChange;
+    let _one = serial().await;
+    log_init();
+    let dirs: Vec<PathBuf> = (0..4).map(|_| scratch("kinds")).collect();
+    let ports = free_ports(4);
+    let reads = |kinds: Option<u32>| RaftOpts {
+        kinds,
+        ..test_opts()
+    };
+    let founders = |id| cluster_config(&ports[..3], id);
+    // Nodes 1 and 2 read 4; node 3 says nothing, as a 2.0.0-beta.1 node.
+    let opts = vec![reads(Some(4)), reads(Some(4)), reads(None)];
+    let mut nodes = tokio::task::block_in_place(|| open_all_in(&dirs[..3], &opts, founders));
+
+    // The leader hears every member: the floor is the baseline, held down by
+    // node 3, whatever node leads.
+    let floor_is = |nodes: &[Option<RaftReplicator<HeedStore>>], want: Option<u32>| {
+        let end = Instant::now() + Duration::from_secs(20);
+        loop {
+            let l = leader_of(nodes);
+            let got = nodes[l].as_ref().unwrap().kinds_floor();
+            if got == want {
+                return l;
+            }
+            assert!(
+                Instant::now() < end,
+                "the leader's floor stayed {got:?}, want {want:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let l = tokio::task::block_in_place(|| floor_is(&nodes, Some(3)));
+    let st = nodes[l]
+        .as_ref()
+        .unwrap()
+        .membership_status(deadline())
+        .await;
+    let kinds: Vec<(u64, Option<u32>)> = st.members.iter().map(|m| (m.node_id, m.kinds)).collect();
+    assert_eq!(kinds, vec![(1, Some(4)), (2, Some(4)), (3, None)], "{st:?}");
+
+    // Node 3 restarts reading 4: the floor rises to 4.
+    let _ = close(nodes[2].take().unwrap());
+    let (d3, c3) = (dirs[2].clone(), founders(3));
+    nodes[2] = Some(tokio::task::block_in_place(move || {
+        open_node_in(&d3, 3, c3, reads(Some(4)))
+    }));
+    let l = tokio::task::block_in_place(|| floor_is(&nodes, Some(4)));
+
+    // The cluster at version 4 (as a leader's batcher raises it).
+    let at = nodes[l]
+        .as_ref()
+        .unwrap()
+        .propose(cluster_version_entry(4), deadline())
+        .await
+        .expect("propose");
+    tokio::task::block_in_place(|| wait_applied(&nodes, at.index));
+    for n in nodes.iter().flatten() {
+        let v = n
+            .store_for_test()
+            .read(|r| {
+                use crate::rsm::store::TypedReads;
+                r.cluster_version()
+            })
+            .expect("read");
+        assert_eq!(v, 4);
+    }
+
+    // Node 4 joins reading 3: the leader asks it first, and refuses it.
+    let joiner = |kinds| RaftOpts {
+        join: true,
+        ..reads(kinds)
+    };
+    let add = MembershipChange::AddLearner {
+        node: 4,
+        raft: node_addr(&ports, 4),
+        http: "127.0.0.1:1".into(),
+    };
+    let (d4, c4) = (dirs[3].clone(), cluster_config(&ports, 4));
+    let four = tokio::task::block_in_place(move || open_node_in(&d4, 4, c4, joiner(Some(3))));
+    let leader = nodes[l].as_ref().unwrap();
+    assert_eq!(
+        refused_code(change(leader, add.clone()).await),
+        "kinds_behind"
+    );
+    let _ = close(four);
+    // Down, it cannot say: refused too.
+    assert_eq!(
+        refused_code(change(leader, add.clone()).await),
+        "kinds_unknown"
+    );
+    // Up again, reading 4: added.
+    let (d4, c4) = (dirs[3].clone(), cluster_config(&ports, 4));
+    let four = tokio::task::block_in_place(move || open_node_in(&d4, 4, c4, joiner(Some(4))));
+    let st = change(leader, add).await.expect("add the learner");
+    assert!(st.learners.contains(&4), "{st:?}");
+    assert_eq!(st.cluster_version, Some(4), "{st:?}");
+    let _ = close(four);
+
+    // A founder restarted on a build that reads 3 (or says nothing) refuses
+    // to start on its store at version 4; it starts again reading 4.
+    let _ = close(nodes[0].take().unwrap());
+    for older in [Some(3), None] {
+        let (d1, c1) = (dirs[0].clone(), founders(1));
+        let refused =
+            tokio::task::block_in_place(move || try_open_node_in(&d1, 1, c1, reads(older)));
+        let e = refused.err().expect("an older build is refused at boot");
+        assert!(e.to_string().contains("writes version 4"), "{e}");
+    }
+    let (d1, c1) = (dirs[0].clone(), founders(1));
+    nodes[0] = Some(tokio::task::block_in_place(move || {
+        open_node_in(&d1, 1, c1, reads(Some(4)))
+    }));
+    tokio::task::block_in_place(|| leader_of(&nodes));
+    for n in nodes.iter_mut() {
+        let _ = close(n.take().unwrap());
+    }
+    for d in dirs {
+        let _ = std::fs::remove_dir_all(d);
+    }
 }

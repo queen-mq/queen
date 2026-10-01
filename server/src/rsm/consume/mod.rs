@@ -53,7 +53,7 @@ mod tests_ack;
 #[cfg(test)]
 mod tests_pop;
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
@@ -275,6 +275,16 @@ pub struct Engine {
     /// checkpoints this node applies late — are adopted ([`hooks`]).
     /// `u64::MAX` until known: every row is looked at.
     pub(crate) own_from: AtomicU64,
+    /// The committed cluster version (§12.8, D20) this engine writes under:
+    /// read from the store when it begins to lead, then moved by the batcher
+    /// as its planning reads it ([`Engine::note_cluster_version`]) — never
+    /// ahead of what the batcher checks every entry against, so a row this
+    /// engine writes is never one the batcher refuses. The rows it logs are
+    /// [`CursorRow::admit`]ted to it, and an ack keeps no released lease
+    /// below [`crate::rsm::effect::VERSION_3`] ([`Engine::cluster_allows`]).
+    ///
+    /// [`CursorRow::admit`]: crate::rsm::effect::CursorRow::admit
+    pub(crate) cluster: AtomicU32,
     pub(crate) reg: RwLock<Registry>,
     pub(crate) shards: Box<[Mutex<Shard>]>,
     /// Per shard: appends apply reported while the shard was busy, for the
@@ -331,6 +341,7 @@ impl Engine {
             term_start_us: AtomicI64::new(0),
             clock_offset: AtomicI64::new(wall_us() - mono_us()),
             own_from: AtomicU64::new(u64::MAX),
+            cluster: AtomicU32::new(crate::rsm::effect::BASELINE_KINDS_VERSION),
             reg: RwLock::new(Registry::default()),
             shards: (0..SHARDS).map(|_| Mutex::new(Shard::default())).collect(),
             appends: (0..SHARDS).map(|_| Mutex::new(Vec::new())).collect(),
@@ -407,6 +418,31 @@ impl Engine {
     /// The skew grace a foreign lease is held for.
     pub(crate) fn grace(&self) -> i64 {
         self.k.skew_us
+    }
+
+    /// The batcher planned a cycle under committed cluster version `version`
+    /// (D20): from now on this engine may write what it admits. Never down.
+    /// Not from apply's hook: apply reports an effect before the store commits
+    /// it, and the batcher checks each entry against what its read of the
+    /// store says.
+    pub fn note_cluster_version(&self, version: u32) {
+        self.cluster.fetch_max(version, Ordering::AcqRel);
+    }
+
+    /// Whether the cluster this engine leads lets it write what was minted at
+    /// catalogue `version` (D20, [`crate::rsm::effect::cluster_allows`]).
+    pub(crate) fn cluster_allows(&self, version: u16) -> bool {
+        crate::rsm::effect::cluster_allows(self.cluster.load(Ordering::Acquire), version)
+    }
+
+    /// The cursor row this engine logs for `cur`: its whole row, admitted to
+    /// the cluster version ([`crate::rsm::effect::CursorRow::admit`]). Every
+    /// `CursorSet` the engine writes — a checkpoint's, a transaction's — is
+    /// one of these.
+    pub(crate) fn logged_row(&self, cur: &state::Cur) -> crate::rsm::effect::CursorRow {
+        let mut row = cur.row();
+        row.admit(self.cluster.load(Ordering::Acquire));
+        row
     }
 
     /// Why this node may not serve now (`None`: it may).
@@ -618,10 +654,16 @@ impl Engine {
         // Nothing runs on the incarnation being replaced while it is (a term
         // change without a step-down in between: the batcher's first look).
         self.leader.store(false, Ordering::Release);
-        let floor = {
+        // The cluster version as the store has it now: never above the
+        // cluster's (the batcher's cycles move it up as their reads see more,
+        // `note_cluster_version`); the baseline if the read fails.
+        let (floor, cluster) = {
             use crate::rsm::store::{Store, TypedReads};
-            self.store.read(|r| r.last_now_us()).unwrap_or(0)
+            self.store
+                .read(|r| Ok((r.last_now_us()?, r.cluster_version()?)))
+                .unwrap_or((0, crate::rsm::effect::BASELINE_KINDS_VERSION))
         };
+        self.cluster.store(cluster, Ordering::Release);
         self.anchor_clock(floor);
         let now = self.now_us();
         self.reset(Reply::Retry { hint: None });

@@ -118,6 +118,7 @@ static POINTS_ARMED: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 /// unless the variable names at least one point. Called from the raft boot
 /// paths (`run_raft`, `embedded::boot`).
 pub fn init_from_env() {
+    refuse_apply_from_env();
     let Ok(spec) = std::env::var("QUEEN_TEST_FAULTS") else {
         return;
     };
@@ -235,6 +236,35 @@ pub(crate) fn mid_entry_hook() {
 
 static REFUSE_ENABLED: AtomicBool = AtomicBool::new(false);
 static REFUSED: OnceLock<Mutex<std::collections::HashSet<[u8; 16]>>> = OnceLock::new();
+/// `QUEEN_TEST_REFUSE_APPLY_KV`'s namespace and key ([`refuse_apply_from_env`]).
+static REFUSED_KV: OnceLock<(String, String)> = OnceLock::new();
+
+/// `QUEEN_TEST_REFUSE_APPLY_KV=<namespace>/<key>`: from boot on, apply refuses
+/// every entry that writes that KV key (default tenant), at its last effect —
+/// on every node started with it, the same entry, as a logic bug would. It is
+/// how the operator's `QUEEN_RAFT_APPLY_SKIP` is rehearsed on a real cluster
+/// (test only: never set it on a cluster that serves anyone).
+fn refuse_apply_from_env() {
+    let Ok(v) = std::env::var("QUEEN_TEST_REFUSE_APPLY_KV") else {
+        return;
+    };
+    let Some((ns, key)) = v
+        .trim()
+        .split_once('/')
+        .filter(|(ns, key)| !ns.is_empty() && !key.is_empty())
+    else {
+        eprintln!("fault: QUEEN_TEST_REFUSE_APPLY_KV={v}: expected <namespace>/<key>");
+        std::process::exit(2);
+    };
+    tracing::warn!(
+        target: "rsm",
+        ns,
+        key,
+        "apply refusal armed: every entry that writes this KV key stops apply (test only)"
+    );
+    let _ = REFUSED_KV.set((ns.to_string(), key.to_string()));
+    REFUSE_ENABLED.store(true, Ordering::Release);
+}
 
 /// From now on apply refuses, at its LAST effect (so the entry is half
 /// executed when it stops, like a real mid-entry refusal), every entry carrying
@@ -264,6 +294,17 @@ pub fn stop_refusing_apply_of(id: [u8; 16]) {
 pub fn apply_refusal(entry: &crate::rsm::entry::Entry) -> Option<(usize, String)> {
     if !REFUSE_ENABLED.load(Ordering::Relaxed) || entry.effects.is_empty() {
         return None;
+    }
+    if let Some((ns, key)) = REFUSED_KV.get() {
+        let writes_it = entry.effects.iter().any(|e| {
+            matches!(e, crate::rsm::effect::Effect::KvPut { ns: n, key: k, .. } if n == ns && k == key)
+        });
+        if writes_it {
+            return Some((
+                entry.effects.len() - 1,
+                format!("a test refuses every entry that writes KV {ns}/{key}"),
+            ));
+        }
     }
     let ids = REFUSED.get()?.lock().expect("refused ids");
     entry

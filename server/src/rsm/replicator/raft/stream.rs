@@ -55,7 +55,10 @@
 //!
 //! A follower that does not serve the route (404) is reached over the unary
 //! route for a minute before the stream is tried again; so is every follower
-//! with `QUEEN_RAFT_STREAM_APPEND=0`.
+//! with `QUEEN_RAFT_STREAM_APPEND=0`. The handshake's answer headers say what
+//! the follower reads, as the unary route's answers do: compressed entries
+//! ([`wire::WIRE_HEADER`]) and the effect catalogue
+//! ([`super::members::KINDS_HEADER`], D20); an older follower sends neither.
 
 use std::collections::VecDeque;
 use std::io;
@@ -264,6 +267,9 @@ pub(crate) struct Conn {
     answers: mpsc::UnboundedReceiver<io::Result<(u64, Answer)>>,
     /// The follower reads compressed entries ([`wire::WIRE_HEADER`]).
     pub(crate) reads_zstd: bool,
+    /// The catalogue version the follower said it reads on the handshake
+    /// ([`super::members::KINDS_HEADER`]; `None`: it said none).
+    pub(crate) kinds: Option<u32>,
     /// A session gave up on it (a missed deadline, a protocol error): the
     /// next session opens a new one.
     broken: bool,
@@ -335,6 +341,11 @@ async fn connect(
         s => return Err(ConnectFail::Network(format!("{url}: {s}"))),
     }
     let reads_zstd = wire::reads_zstd(resp.headers().get(wire::WIRE_HEADER).map(|v| v.as_bytes()));
+    let kinds = super::members::kinds_of_header(
+        resp.headers()
+            .get(super::members::KINDS_HEADER)
+            .map(|v| v.as_bytes()),
+    );
     let (atx, arx) = mpsc::unbounded_channel::<io::Result<(u64, Answer)>>();
     let mut body = resp.into_body();
     let reader = tokio::spawn(crate::obs::panic_policy::non_core(async move {
@@ -373,6 +384,7 @@ async fn connect(
         tx,
         answers: arx,
         reads_zstd,
+        kinds,
         broken: false,
         reader,
     })

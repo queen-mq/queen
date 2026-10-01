@@ -287,6 +287,12 @@ impl Rsm for GroupRouter {
             h.leader_known &= o.leader_known;
             h.storage_ready &= o.storage_ready;
             h.lag_ms = h.lag_ms.max(o.lag_ms);
+            // Each group has its own cluster version: the lowest is what every
+            // group writes.
+            h.cluster_version = match (h.cluster_version, o.cluster_version) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
             if o.role == "leader" && h.role != "leader" {
                 h.role = format!("{}+leader", h.role);
             }

@@ -30,6 +30,14 @@
 //!   within `promote_max_lag` entries of the leader's last one
 //!   (`learner_behind`), unless `force`: a voter far behind holds back every
 //!   commit whose quorum needs it.
+//! - **The catalogue (D20, §12.8).** Once the cluster version is above the
+//!   baseline, a node joins only if it reads it: the leader asks a new learner
+//!   (`/raft/v1/state`, its `kinds`) before adding it, and a learner is
+//!   promoted only if it said so on the leader's appends (`kinds_behind`, or
+//!   `kinds_unknown` for a node that does not answer). Not even `force` skips
+//!   this: a member that cannot read the log stops on its first entry it
+//!   cannot decode (I16). At the baseline every node since 2.0.0-beta.1
+//!   reads the log, so nothing is asked.
 //!
 //! Every change is idempotent, so a caller that lost an answer can repeat it:
 //! adding a learner already there with the same addresses, promoting a voter,
@@ -94,6 +102,17 @@ pub(crate) struct AdminCtx {
     /// over to it ([`super::forward`]) instead of working them on its own
     /// runtime's few threads.
     pub(crate) clients: std::sync::OnceLock<tokio::runtime::Handle>,
+    /// The catalogue check's inputs ([`KindsCheck`]); unset (a unit test's
+    /// context), the check passes.
+    pub(crate) kinds: std::sync::OnceLock<KindsCheck>,
+}
+
+/// What the catalogue check (D20) reads: the committed cluster version on
+/// this node, and the token a new node's `/raft/v1/state` takes.
+pub(crate) struct KindsCheck {
+    /// A read of this node's store.
+    pub(crate) cluster_version: Box<dyn Fn() -> Result<u32, String> + Send + Sync>,
+    pub(crate) token: Option<std::sync::Arc<str>>,
 }
 
 impl AdminCtx {
@@ -104,7 +123,13 @@ impl AdminCtx {
             promote_max_lag,
             live_within,
             clients: std::sync::OnceLock::new(),
+            kinds: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The committed cluster version, when this context can read it.
+    fn cluster_version(&self) -> Option<Result<u32, String>> {
+        self.kinds.get().map(|k| (k.cluster_version)())
     }
 }
 
@@ -129,6 +154,11 @@ pub struct MemberStatus {
     pub last_ack_ms: Option<u64>,
     /// Acknowledged within the liveness window (the leader always is).
     pub live: bool,
+    /// The effect catalogue version the member said it reads (D20, the
+    /// leader's figure); `None`: it said none — a node older than
+    /// 2.0.0-beta.2, at the baseline (3) — or it has not answered this leader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kinds: Option<u32>,
 }
 
 /// The membership as one node reports it.
@@ -162,6 +192,10 @@ pub struct MembershipStatus {
     pub live_within_ms: u64,
     pub promote_max_lag: u64,
     pub members: Vec<MemberStatus>,
+    /// The committed cluster version (§12.8, D20) on the node that took this
+    /// view: the highest effect catalogue version the leader writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_version: Option<u32>,
 }
 
 /// A call a follower sends the leader over `POST /raft/v1/membership`: the
@@ -287,6 +321,18 @@ pub(crate) fn status(m: &Metrics, members: &MembersState, ctx: &AdminCtx) -> Mem
         .and_then(|(v, _)| v.members.iter().filter_map(|x| x.matched).max());
     let mut out = Vec::new();
     for (id, node) in mem.nodes() {
+        // What it said it reads: the leader's own reports, or the copy of
+        // them in the view it sent (D20).
+        let kinds = if *id == m.id {
+            members.own_kinds()
+        } else if leading {
+            members.reported_kinds(*id).flatten()
+        } else {
+            received
+                .as_ref()
+                .and_then(|(view, _)| view.members.iter().find(|x| x.id == *id))
+                .and_then(|seen| seen.kinds)
+        };
         let (matched, last_ack_ms) = if leading {
             if *id == m.id {
                 (Some(last), Some(0))
@@ -329,6 +375,7 @@ pub(crate) fn status(m: &Metrics, members: &MembersState, ctx: &AdminCtx) -> Mem
             },
             last_ack_ms,
             live: (leading && *id == m.id) || last_ack_ms.is_some_and(|a| a < live_ms),
+            kinds,
         });
     }
     MembershipStatus {
@@ -352,6 +399,7 @@ pub(crate) fn status(m: &Metrics, members: &MembersState, ctx: &AdminCtx) -> Mem
         live_within_ms: live_ms,
         promote_max_lag: ctx.promote_max_lag,
         members: out,
+        cluster_version: ctx.cluster_version().and_then(Result::ok),
     }
 }
 
@@ -658,6 +706,7 @@ pub(crate) async fn change_on_leader<S: Store + 'static>(
             what,
         } => (changes, retain, what),
     };
+    check_kinds(&m, members, ctx, &change, deadline).await?;
     let observed = *m.membership_config.log_id();
     tracing::warn!(
         target: "rsm",
@@ -738,6 +787,103 @@ pub(crate) async fn change_on_leader<S: Store + 'static>(
     );
     let m = raft.metrics().borrow_watched().clone();
     Ok(status(&m, members, ctx))
+}
+
+/// The catalogue check (D20; the module header): a node joins, or becomes a
+/// voter, only if it reads every catalogue version the cluster writes.
+async fn check_kinds(
+    m: &Metrics,
+    members: &MembersState,
+    ctx: &AdminCtx,
+    change: &MembershipChange,
+    deadline: Instant,
+) -> Result<(), ReplError> {
+    let Some(k) = ctx.kinds.get() else {
+        return Ok(());
+    };
+    let cluster = (k.cluster_version)().map_err(|e| {
+        ReplError::refused(
+            "store_unreadable",
+            format!("the cluster version could not be read on the leader: {e}; retry"),
+        )
+    })?;
+    if cluster <= crate::rsm::effect::BASELINE_KINDS_VERSION {
+        return Ok(());
+    }
+    if let MembershipChange::AddLearner { node, raft, .. } = change {
+        let ttl = deadline
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_secs(2));
+        let said = match super::network::post(
+            &super::network::http_client(),
+            &format!("http://{}/raft/v1/state", raft.trim()),
+            k.token.as_deref(),
+            "application/json",
+            axum::body::Body::empty(),
+            ttl,
+        )
+        .await
+        {
+            Ok(b) => serde_json::from_slice::<super::NodeState>(&b)
+                .map(|st| {
+                    st.kinds
+                        .unwrap_or(crate::rsm::effect::BASELINE_KINDS_VERSION)
+                })
+                .ok(),
+            Err(_) => None,
+        };
+        return match said {
+            Some(v) if v >= cluster => Ok(()),
+            Some(v) => Err(kinds_behind(*node, v, cluster)),
+            None => Err(ReplError::refused(
+                "kinds_unknown",
+                format!(
+                    "node {node} did not answer at {raft} (/raft/v1/state): start it before \
+                     adding it — the cluster writes effect catalogue version {cluster}, and the \
+                     leader adds only a node that says it reads it"
+                ),
+            )),
+        };
+    }
+    check_kinds_reported(m, members, cluster, change)
+}
+
+/// The promotion half of [`check_kinds`]: every learner a change makes a
+/// voter said, on the leader's appends, that it reads `cluster` (one that
+/// said nothing reads the baseline).
+fn check_kinds_reported(
+    m: &Metrics,
+    members: &MembersState,
+    cluster: u32,
+    change: &MembershipChange,
+) -> Result<(), ReplError> {
+    let learners: BTreeSet<NodeId> = m.membership_config.membership().learner_ids().collect();
+    let promoted: Vec<NodeId> = match change {
+        MembershipChange::Promote { nodes, .. } => nodes.clone(),
+        MembershipChange::SetVoters { voters, .. } => voters.clone(),
+        _ => return Ok(()),
+    };
+    for n in promoted.into_iter().filter(|n| learners.contains(n)) {
+        let said = members
+            .reported_kinds(n)
+            .flatten()
+            .unwrap_or(crate::rsm::effect::BASELINE_KINDS_VERSION);
+        if said < cluster {
+            return Err(kinds_behind(n, said, cluster));
+        }
+    }
+    Ok(())
+}
+
+fn kinds_behind(node: NodeId, reads: u32, cluster: u32) -> ReplError {
+    ReplError::refused(
+        "kinds_behind",
+        format!(
+            "node {node} reads effect catalogue version {reads}, and the cluster writes version \
+             {cluster} (§12.8): it would stop on the first entry it cannot read. Run the release \
+             the other members run on it first"
+        ),
+    )
 }
 
 fn map_write_error(e: RaftError<TypeConfig, ClientWriteError<TypeConfig>>) -> ReplError {
@@ -1113,5 +1259,111 @@ mod tests {
             http: "n5:6632".into(),
         };
         assert_eq!(code(plan(&m, &ctx(), &new)), "change: add learner 5");
+    }
+
+    /// D20: what the cluster version may rise to is the lowest of what every
+    /// member said on the leader's appends — voters and learners, a member
+    /// that said nothing at the baseline (3), the leader at its own — and
+    /// nothing at all while a member is silent or this node does not lead.
+    #[test]
+    fn the_cluster_version_rises_only_to_what_every_live_member_reads() {
+        let spec = |live: &'static [u64]| Leader {
+            configs: THREE,
+            learners: &[4],
+            live,
+            matched: &[(2, 50), (3, 50), (4, 50)],
+            last: 50,
+            committed: true,
+        };
+        let m = spec(&[2, 3, 4]).metrics();
+        let within = Duration::from_secs(2);
+        let st = MembersState::new(Some(4));
+        assert_eq!(
+            st.kinds_floor(&m, within),
+            Some(3),
+            "nobody said: the baseline"
+        );
+        st.note_kinds(2, Some(4));
+        st.note_kinds(3, Some(4));
+        assert_eq!(
+            st.kinds_floor(&m, within),
+            Some(3),
+            "learner 4 said nothing: the baseline"
+        );
+        st.note_kinds(4, Some(5));
+        assert_eq!(st.kinds_floor(&m, within), Some(4), "the leader reads 4");
+        // Node 3 came back as an older build: its first answer says nothing.
+        st.note_kinds(3, None);
+        assert_eq!(st.kinds_floor(&m, within), Some(3));
+        st.note_kinds(3, Some(4));
+        assert_eq!(st.kinds_floor(&m, within), Some(4));
+        // Node 3 silent: not assumed to read anything.
+        assert_eq!(st.kinds_floor(&spec(&[2, 4]).metrics(), within), None);
+        // Not leading: nothing.
+        let mut f = m.clone();
+        f.state = ServerState::Follower;
+        assert_eq!(st.kinds_floor(&f, within), None);
+        // A node that says nothing about itself counts itself at the baseline.
+        let old = MembersState::new(None);
+        for n in [2, 3, 4] {
+            old.note_kinds(n, Some(4));
+        }
+        assert_eq!(old.kinds_floor(&m, within), Some(3));
+        // What the view shows: each member's own word.
+        let st_view = st.leader_view(&m).expect("leading");
+        let kinds: Vec<(u64, Option<u32>)> =
+            st_view.members.iter().map(|x| (x.id, x.kinds)).collect();
+        assert_eq!(
+            kinds,
+            vec![(1, Some(4)), (2, Some(4)), (3, Some(4)), (4, Some(5))]
+        );
+    }
+
+    /// D20: above the baseline, a learner becomes a voter only if it said on
+    /// the leader's appends that it reads the cluster version; one that said
+    /// nothing reads the baseline.
+    #[test]
+    fn a_learner_that_does_not_read_the_cluster_version_is_not_promoted() {
+        let m = Leader {
+            configs: THREE,
+            learners: &[4],
+            live: &[2, 3, 4],
+            matched: &[(2, 50), (3, 50), (4, 50)],
+            last: 50,
+            committed: true,
+        }
+        .metrics();
+        let st = MembersState::new(Some(4));
+        let promote = MembershipChange::Promote {
+            nodes: vec![4],
+            force: true,
+        };
+        let refused = |r: Result<(), ReplError>| match r {
+            Err(ReplError::Refused { code, .. }) => code,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+        assert_eq!(
+            refused(check_kinds_reported(&m, &st, 4, &promote)),
+            "kinds_behind"
+        );
+        st.note_kinds(4, Some(3));
+        assert_eq!(
+            refused(check_kinds_reported(&m, &st, 4, &promote)),
+            "kinds_behind"
+        );
+        st.note_kinds(4, Some(4));
+        assert!(check_kinds_reported(&m, &st, 4, &promote).is_ok());
+        let set = MembershipChange::SetVoters {
+            voters: vec![1, 2, 3, 4],
+            force: false,
+        };
+        assert!(check_kinds_reported(&m, &st, 4, &set).is_ok());
+        st.note_kinds(4, None);
+        assert_eq!(
+            refused(check_kinds_reported(&m, &st, 4, &set)),
+            "kinds_behind"
+        );
+        // Voters already voting, and removals, are not this check's.
+        assert!(check_kinds_reported(&m, &st, 4, &MembershipChange::Remove { node: 4 }).is_ok());
     }
 }

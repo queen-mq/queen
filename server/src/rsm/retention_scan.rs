@@ -22,6 +22,18 @@
 //! older than the snapshot, and consumer positions in it are behind the current
 //! ones. Leader only; a group per batcher, so every raft group has its own.
 //! `QUEEN_RAFT_RETENTION_SCAN=0` puts the walk back on the planner thread.
+//!
+//! # Rounds (2026-10-01)
+//!
+//! A round — every partition once — starts at most once per maintenance
+//! interval (`RETENTION_INTERVAL`, the batcher's `maintenance_every_ms`), as
+//! the walk on the planner thread did: [`round_wait`]. Within a round the
+//! slices keep their pace, so a big store is still walked at `per_s`, and a
+//! round longer than the interval is followed by the next one at once. Before
+//! this, the next round began the moment one wrapped: a store smaller than one
+//! slice was walked every 41 ms, ~24 times a second, and the prod leader
+//! (129 partitions, retention off) spent 0.22 of a core on this thread idle.
+//! A new leadership starts its first round at once.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -54,11 +66,13 @@ impl Proposal {
     }
 }
 
-/// `QUEEN_RAFT_RETENTION_SCAN` (default on) and its pace.
+/// `QUEEN_RAFT_RETENTION_SCAN` (default on) and its pace. The rounds' cadence
+/// is the batcher's maintenance interval, handed to [`spawn`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScanConfig {
     /// `QUEEN_RAFT_RETENTION_SCAN_PER_S` (default 50,000): partitions walked per
-    /// second. A round over 1M partitions takes 20 s, over 10M ~3.5 min.
+    /// second within a round. A round over 1M partitions takes 20 s, over 10M
+    /// ~3.5 min; one over a store smaller than a slice, a few milliseconds.
     pub per_s: u64,
     /// Partitions per store snapshot.
     pub slice: usize,
@@ -97,6 +111,10 @@ pub(crate) const TAKE_PER_CYCLE: usize = 1_024;
 pub(crate) struct ScanShared {
     /// This node plans as leader (the batcher's planning gate is open).
     leading: AtomicBool,
+    /// Bumped each time [`ScanShared::set_leading`] opens the gate: the
+    /// scanner starts a new leadership's first round at once, however briefly
+    /// the gate was shut ([`round_wait`]).
+    leaderships: AtomicU64,
     stop: AtomicBool,
     queue: Mutex<VecDeque<Proposal>>,
     /// Most proposals waiting: the scanner pauses while the planner catches up.
@@ -115,6 +133,7 @@ impl ScanShared {
     pub(crate) fn new(cfg: &maintenance::Config) -> Arc<ScanShared> {
         Arc::new(ScanShared {
             leading: AtomicBool::new(false),
+            leaderships: AtomicU64::new(0),
             stop: AtomicBool::new(false),
             queue: Mutex::new(VecDeque::new()),
             cap: 8 * TAKE_PER_CYCLE,
@@ -132,6 +151,13 @@ impl ScanShared {
     /// what is queued: a follower plans nothing, and a later leadership scans
     /// again from its own committed state.
     pub(crate) fn set_leading(&self, on: bool) {
+        // The count moves BEFORE the gate opens, so a scanner that sees the
+        // gate open sees the new leadership too: counted after, a scanner
+        // between the two started a round under the old count, then a second
+        // one at once under the new. (One caller: the batcher's driver.)
+        if on && !self.leading.load(Ordering::Acquire) {
+            self.leaderships.fetch_add(1, Ordering::AcqRel);
+        }
         self.leading.store(on, Ordering::Release);
         if !on {
             self.lock().clear();
@@ -161,35 +187,79 @@ impl ScanShared {
 }
 
 /// Start the scanner thread for this batcher's store. It runs until
-/// [`ScanShared::stop`], walking only while [`ScanShared::set_leading`] is on.
+/// [`ScanShared::stop`], walking only while [`ScanShared::set_leading`] is on,
+/// a round at most every `every` (the maintenance interval, [`round_wait`]).
 pub(crate) fn spawn<S: Store + Send + Sync + 'static>(
     store: Arc<S>,
     cfg: maintenance::Config,
     scan: ScanConfig,
+    every: Duration,
     shared: Arc<ScanShared>,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("queen-rsm-retscan".into())
-        .spawn(move || run(store, cfg, scan, shared))
+        .spawn(move || run(store, cfg, scan, every, shared))
         .map(|_| ())
 }
+
+/// How long the scanner waits before it starts a round: rounds begin at most
+/// `every` apart (`last`: when the previous one of this leadership began), so
+/// a store smaller than a slice is walked once per maintenance interval, not
+/// once per slice pace. A round that ran longer than `every` is followed at
+/// once (the wait is zero), and a leadership's first round (`last` = `None`)
+/// starts at once.
+pub(crate) fn round_wait(last: Option<Instant>, now: Instant, every: Duration) -> Duration {
+    last.map_or(Duration::ZERO, |began| {
+        (began + every).saturating_duration_since(now)
+    })
+}
+
+/// How often a scanner with nothing to do looks again: at the stop flag, the
+/// leadership gate, room in the queue, and the next round's start.
+const IDLE_POLL: Duration = Duration::from_millis(100);
 
 fn run<S: Store>(
     store: Arc<S>,
     cfg: maintenance::Config,
     scan: ScanConfig,
+    every: Duration,
     shared: Arc<ScanShared>,
 ) {
     let slice = scan.slice.max(1);
     let pace = Duration::from_secs_f64(slice as f64 / scan.per_s.max(1) as f64);
     let mut cursor: Pid = 0;
+    // The round gate: when this leadership's last round began (`None` before
+    // its first), and which leadership that was.
+    let mut last_round: Option<Instant> = None;
+    let mut leadership = shared.leaderships.load(Ordering::Acquire);
     let mut round_started = Instant::now();
     let mut round_visited = 0u64;
     let mut round_proposed = 0u64;
     while !shared.stop.load(Ordering::Acquire) {
         if !shared.leading.load(Ordering::Acquire) || shared.queued() + slice > shared.cap {
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(IDLE_POLL);
             continue;
+        }
+        // After the gate: the count it was opened under is visible
+        // ([`ScanShared::set_leading`]).
+        let now_leadership = shared.leaderships.load(Ordering::Acquire);
+        if now_leadership != leadership {
+            leadership = now_leadership;
+            last_round = None;
+        }
+        if cursor == 0 {
+            // The next slice begins a round (the cursor is back at the first
+            // partition only at a round's start).
+            let wait = round_wait(last_round, Instant::now(), every);
+            if !wait.is_zero() {
+                std::thread::sleep(wait.min(IDLE_POLL));
+                continue;
+            }
+            let now = Instant::now();
+            last_round = Some(now);
+            round_started = now;
+            round_visited = 0;
+            round_proposed = 0;
         }
         let started = Instant::now();
         let result = store.read(|r| {
@@ -212,8 +282,9 @@ fn run<S: Store>(
                 }
                 if found.wrapped {
                     shared.rounds.fetch_add(1, Ordering::Relaxed);
-                    // A small store finishes a round every few ms: only a big
-                    // or slow round is worth a line.
+                    // A small store finishes a round in a few ms: only a big
+                    // or slow round is worth a line. `secs` is the walk, from
+                    // the round's first slice to its last.
                     let secs = round_started.elapsed().as_secs_f64();
                     if round_visited >= 100_000 || secs >= 10.0 {
                         tracing::info!(
@@ -224,9 +295,6 @@ fn run<S: Store>(
                             "rsm retention scan round",
                         );
                     }
-                    round_started = Instant::now();
-                    round_visited = 0;
-                    round_proposed = 0;
                 }
             }
             Err(e) => {

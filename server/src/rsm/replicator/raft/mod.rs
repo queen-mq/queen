@@ -651,6 +651,12 @@ pub struct RaftOpts {
     /// `QUEEN_RAFT_PROMOTE_MAX_LAG` (default 1000): the most entries behind the
     /// leader a learner may be and still be promoted without `force`.
     pub promote_max_lag: u64,
+    /// The effect catalogue version this node says it reads on every append
+    /// it answers ([`members::KINDS_HEADER`], D20):
+    /// [`crate::rsm::effect::SUPPORTED_KINDS_VERSION`]. A test sets another
+    /// to play a newer or an older build, or `None` to say nothing, as a node
+    /// older than 2.0.0-beta.2 (it then counts as the baseline).
+    pub kinds: Option<u32>,
 }
 
 impl RaftOpts {
@@ -682,6 +688,7 @@ impl RaftOpts {
             force_recover,
             apply_skip,
             promote_max_lag: admin::promote_max_lag_from_env(),
+            kinds: Some(crate::rsm::effect::SUPPORTED_KINDS_VERSION),
         })
     }
 }
@@ -1139,7 +1146,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
         let state_dir = data_dir.join("raft");
         let group = repair::group_of_dir(&data_dir);
 
-        let (applied, term, durable, qlog_durable) = store
+        let (applied, term, durable, qlog_durable, cluster_version) = store
             .read(|r| {
                 Ok((
                     r.applied_index()?,
@@ -1147,9 +1154,17 @@ impl<S: Store + 'static> RaftReplicator<S> {
                     r.durable_index()?,
                     r.meta_u64(crate::rsm::store::meta::QLOG_DURABLE_INDEX)?
                         .unwrap_or(0),
+                    r.cluster_version()?,
                 ))
             })
             .map_err(|e| io::Error::other(format!("read the store's recovery point: {e}")))?;
+        // D20: a downgrade below what the cluster already writes.
+        super::check_cluster_version(
+            cfg.node_id,
+            cluster_version,
+            opts.kinds
+                .unwrap_or(crate::rsm::effect::BASELINE_KINDS_VERSION),
+        )?;
         if applied > 0 && !state_dir.join("state.json").exists() {
             return Err(io::Error::other(format!(
                 "{} was written by the local replicator: the openraft replicator does not adopt \
@@ -1240,11 +1255,27 @@ impl<S: Store + 'static> RaftReplicator<S> {
             leader_raft: std::sync::RwLock::new(None),
             remote: Arc::new(std::sync::OnceLock::new()),
             local: Arc::new(std::sync::OnceLock::new()),
-            members: Arc::new(members::MembersState::default()),
+            members: Arc::new(members::MembersState::new(opts.kinds)),
             admin: Arc::new(admin::AdminCtx::new(opts.promote_max_lag, live_within)),
             apply_failure: Mutex::new(None),
             state_dir: state_dir.clone(),
         });
+        // The membership checks' catalogue inputs (D20): the committed cluster
+        // version, and the token a joining node's `/raft/v1/state` takes.
+        {
+            let store_v = store.clone();
+            let _ = shared.admin.kinds.set(admin::KindsCheck {
+                cluster_version: Box::new(move || {
+                    store_v
+                        .read(|r| r.cluster_version())
+                        .map_err(|e| e.to_string())
+                }),
+                token: cluster
+                    .as_ref()
+                    .and_then(|c| c.token.as_deref())
+                    .map(Arc::from),
+            });
+        }
 
         // The apply thread: the queue logs are written by our log writer, never
         // by the applier.
@@ -2065,6 +2096,12 @@ impl<S: Store + 'static> RaftReplicator<S> {
         self.shared.node_id
     }
 
+    /// The highest effect catalogue version this node reads, as it tells the
+    /// leader (D20, [`RaftOpts::kinds`]; the baseline when it says nothing).
+    pub fn kinds(&self) -> u32 {
+        self.shared.members.reads_kinds()
+    }
+
     /// Who is in the cluster and when the leader last heard from each member,
     /// as this node knows it ([`members`]).
     pub fn members(&self) -> super::ClusterMembers {
@@ -2418,10 +2455,16 @@ pub(crate) struct NodeState {
     pub voters: Vec<NodeId>,
     /// It has a log, a term or a membership: a cluster exists around it.
     pub initialized: bool,
+    /// The effect catalogue version it reads (D20), what a leader asks before
+    /// it adds the node ([`admin`]). Absent from a node older than
+    /// 2.0.0-beta.2, which reads the baseline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kinds: Option<u32>,
 }
 
 impl NodeState {
-    pub(crate) fn of(m: &openraft::RaftMetrics<TypeConfig>) -> NodeState {
+    /// The state `m` describes, of a node that says it reads `kinds`.
+    pub(crate) fn of(m: &openraft::RaftMetrics<TypeConfig>, kinds: Option<u32>) -> NodeState {
         let mem = m.membership_config.membership();
         NodeState {
             node_id: m.id,
@@ -2431,6 +2474,7 @@ impl NodeState {
             initialized: m.last_log_index.is_some()
                 || m.current_term > 0
                 || mem.nodes().next().is_some(),
+            kinds,
         }
     }
 }
@@ -2769,6 +2813,16 @@ impl<S: Store + 'static> Replicator for RaftReplicator<S> {
             log_files: files,
             log_bytes: bytes,
         }
+    }
+
+    /// What every member said it reads, as this leader heard it, while
+    /// every member answers within the membership checks' liveness window
+    /// ([`members::MembersState::kinds_floor`]).
+    fn kinds_floor(&self) -> Option<u32> {
+        let m = self.metrics_now()?;
+        self.shared
+            .members
+            .kinds_floor(&m, self.shared.admin.live_within)
     }
 }
 

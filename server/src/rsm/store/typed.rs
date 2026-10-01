@@ -113,8 +113,16 @@ pub trait TypedReads: Reads {
         Ok(self.meta_i64(super::meta::MAX_CREATED_AT_US)?.unwrap_or(0))
     }
 
+    /// The replicated cluster version (§12.8, D20): the highest effect
+    /// catalogue version a leader may write
+    /// ([`crate::rsm::effect::cluster_allows`]). A store that never applied a
+    /// [`crate::rsm::effect::Effect::ClusterVersionSet`] — every cluster
+    /// before 2.0.0-beta.2 — is at
+    /// [`crate::rsm::effect::BASELINE_KINDS_VERSION`].
     fn cluster_version(&self) -> Result<u32> {
-        Ok(self.meta_u32(super::meta::CLUSTER_VERSION)?.unwrap_or(0))
+        Ok(self
+            .meta_u32(super::meta::CLUSTER_VERSION)?
+            .unwrap_or(crate::rsm::effect::BASELINE_KINDS_VERSION))
     }
 
     // --------------------------------------------------------------- queues

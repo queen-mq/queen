@@ -1327,3 +1327,70 @@ async fn lanes_checkpoints_commit_their_cursor_rows_from_a_lane_and_from_control
     assert_eq!(rows.1.map(|c| c.committed), Some(0));
     node.close().await;
 }
+
+/// D20: the leader never proposes an entry above the committed cluster
+/// version. A writer that did not consult `effect::cluster_allows` — here a
+/// checkpoint carrying a released lease (catalogue version 3) on a cluster at
+/// version 2 — has its commands refused, as an entry that cannot encode would,
+/// and nothing reaches the log; the same row admitted to the version goes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_entry_above_the_cluster_version_is_refused_and_never_proposed() {
+    use crate::rsm::effect::{CursorRow, ReleasedLease};
+    use crate::rsm::store::rows::PartitionRow;
+    use crate::rsm::store::{TypedWrites, Writes};
+
+    // The single planner and the lanes read the version each.
+    for lanes in [1, 8] {
+        let dir = scratch("cluster-version");
+        let store = Arc::new(HeedStore::open(&dir.join("store"), &store_opts()).expect("store"));
+        {
+            let mut w = store.write().expect("write");
+            w.put_partition(7, &PartitionRow::new([7; 16], TENANT, "q", "p", 1))
+                .expect("partition");
+            w.set_meta_u32(crate::rsm::store::meta::CLUSTER_VERSION, 2)
+                .expect("meta");
+            w.commit().expect("commit");
+        }
+        let fake = Arc::new(FakeReplicator::new(1));
+        let cfg = BatcherConfig {
+            lanes,
+            ..small_pipeline(4, 5_000)
+        };
+        let (tx, handle) = Batcher::new(store.clone(), fake.clone(), cfg).spawn();
+        let row_set = |id: u64, row: CursorRow| {
+            Command::Effects(EffectsCommand {
+                request_id: rid(id),
+                tenant: TENANT.to_string(),
+                effects: vec![Effect::CursorSet {
+                    pid: 7,
+                    group: "g".to_string(),
+                    row,
+                }],
+            })
+        };
+        let mut v3 = cursor_row(0);
+        v3.released = Some(ReleasedLease {
+            worker: "w1".into(),
+            lo: 0,
+            hi: 0,
+        });
+        match submit(&tx, row_set(1, v3.clone())).await {
+            Reply::Refused(r) => assert_eq!(r.code, "entry_encode_failed", "{r:?}"),
+            other => panic!("expected the entry refused, got {other:?}"),
+        }
+        assert_eq!(fake.proposal_count(), 0, "nothing reached the log");
+
+        let mut admitted = v3;
+        admitted.admit(2);
+        assert_eq!(admitted.released, None);
+        done(&submit(&tx, row_set(2, admitted)).await);
+        let proposals = fake.proposals();
+        assert_eq!(proposals.len(), 1);
+        let entry = decode_entry(&proposals[0]).expect("decode");
+        assert!(entry.kinds_version <= 2, "{}", entry.kinds_version);
+
+        drop(tx);
+        let _ = handle.await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

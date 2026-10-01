@@ -31,19 +31,48 @@
 //! different nodes agree about who is live. A follower cut off from the leader
 //! serves a copy that ages, and a consumer that sees the age knows not to judge
 //! by it.
+//!
+//! ## What each member reads (D20, §12.8)
+//!
+//! The same RPCs carry the other direction's news: every member answers the
+//! leader's appends — and opens the append stream — with the highest effect
+//! catalogue version it reads ([`KINDS_HEADER`]), and the leader keeps the
+//! latest per member ([`MembersState::note_kinds`]). The lowest of them, over
+//! every member heard from recently, is what the cluster version may rise to
+//! ([`MembersState::kinds_floor`]); the batcher raises it. The view carries
+//! each member's figure ([`MemberSeen::kinds`]), so every node can show it.
 
+use std::collections::HashMap;
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use openraft::ServerState;
 
 use super::types::{rsm_index, NodeId, TypeConfig};
+use crate::rsm::effect::{BASELINE_KINDS_VERSION, SUPPORTED_KINDS_VERSION};
 use crate::rsm::replicator::{ClusterMembers, MemberSeen, MembersView};
 
 /// The header an AppendEntries carries the leader's view in:
 /// `<term>;<age of the view in ms>;<MembersView JSON>`. The term comes first so
 /// a follower can drop a deposed leader's view without parsing it.
 pub(crate) const MEMBERS_HEADER: &str = "x-queen-raft-members";
+
+/// The answer header a member sets on the leader's appends — the unary route's
+/// answer and the append stream's handshake: the highest effect catalogue
+/// version it reads (D20, §12.8), in decimal (`/raft/v1/state` says the same
+/// in its body, `kinds`, for a node the leader is about to add). What
+/// the cluster version may rise to is the lowest of these over every member
+/// ([`MembersState::kinds_floor`]). A node older than 2.0.0-beta.2 sends none
+/// and counts as [`BASELINE_KINDS_VERSION`]; it ignores the header it does
+/// not know, so reporting it needs nothing of the old nodes in a rolling
+/// upgrade.
+pub(crate) const KINDS_HEADER: &str = "x-queen-raft-kinds";
+
+/// A [`KINDS_HEADER`] value: `None` without one, or one that is not a number.
+pub(crate) fn kinds_of_header(v: Option<&[u8]>) -> Option<u32> {
+    v.and_then(|v| std::str::from_utf8(v).ok())
+        .and_then(|v| v.trim().parse::<u32>().ok())
+}
 
 /// How often the leader re-takes its view. Appends go out far more often; they
 /// carry the last one taken, with its age.
@@ -52,8 +81,18 @@ pub(crate) const PUBLISH_EVERY: Duration = Duration::from_millis(100);
 /// The members' view this node can serve: when it took office and the view it
 /// publishes while it leads, and the last view received from a leader while it
 /// follows.
-#[derive(Default)]
 pub(crate) struct MembersState {
+    /// The catalogue version this node says it reads ([`KINDS_HEADER`]):
+    /// [`SUPPORTED_KINDS_VERSION`], or a test's (`RaftOpts::kinds`). `None`:
+    /// it says nothing, as a node older than this build.
+    own_kinds: Option<u32>,
+    /// What each member said it reads, as this node heard it on its appends
+    /// while leading: the version (`None`: it answered without one, an older
+    /// node at the baseline) and when. A report is what the process that
+    /// answered says; one restarted as another build answers the next append,
+    /// or opens the next stream, with its own — and a member not heard from
+    /// recently is not counted at all ([`MembersState::kinds_floor`]).
+    kinds: Mutex<HashMap<NodeId, (Option<u32>, Instant)>>,
     /// `(term, when this node became leader of it)` while it leads.
     leading_since: Mutex<Option<(u64, Instant)>>,
     /// The view this node last took as leader: its term, the serialized view,
@@ -66,6 +105,12 @@ pub(crate) struct MembersState {
     /// The last leader that handed its leadership to another member (a
     /// `TransferLeader` this node received), and when.
     handed_off: Mutex<Option<(NodeId, Instant)>>,
+}
+
+impl Default for MembersState {
+    fn default() -> Self {
+        MembersState::new(Some(SUPPORTED_KINDS_VERSION))
+    }
 }
 
 /// How long ago the leader last heard from one member, in milliseconds.
@@ -89,6 +134,93 @@ fn silence_ms(
 }
 
 impl MembersState {
+    /// A node that says it reads catalogue version `own_kinds` (`None`: says
+    /// nothing, [`KINDS_HEADER`]).
+    pub(crate) fn new(own_kinds: Option<u32>) -> MembersState {
+        MembersState {
+            own_kinds,
+            kinds: Mutex::new(HashMap::new()),
+            leading_since: Mutex::new(None),
+            published: RwLock::new(None),
+            received: Mutex::new(None),
+            handed_off: Mutex::new(None),
+        }
+    }
+
+    /// What this node says it reads; `None` when it says nothing.
+    pub(crate) fn own_kinds(&self) -> Option<u32> {
+        self.own_kinds
+    }
+
+    /// The highest catalogue version this node reads: what it says, or the
+    /// baseline when it says nothing.
+    pub(crate) fn reads_kinds(&self) -> u32 {
+        self.own_kinds.unwrap_or(BASELINE_KINDS_VERSION)
+    }
+
+    /// The [`KINDS_HEADER`] value this node answers with, if it says one.
+    pub(crate) fn kinds_header(&self) -> Option<axum::http::HeaderValue> {
+        self.own_kinds.map(axum::http::HeaderValue::from)
+    }
+
+    /// `node` answered this leader saying it reads `kinds` (`None`: said
+    /// nothing). The latest answer stands: a member restarted as an older
+    /// build lowers its own entry on its first answer.
+    pub(crate) fn note_kinds(&self, node: NodeId, kinds: Option<u32>) {
+        self.kinds
+            .lock()
+            .expect("kinds")
+            .insert(node, (kinds, Instant::now()));
+    }
+
+    /// What `node` last said it reads: `None` before it answered this node
+    /// as leader, `Some(None)` when it answered without saying.
+    pub(crate) fn reported_kinds(&self, node: NodeId) -> Option<Option<u32>> {
+        self.kinds
+            .lock()
+            .expect("kinds")
+            .get(&node)
+            .map(|(k, _)| *k)
+    }
+
+    /// On the leader: the highest catalogue version EVERY member reads — the
+    /// lowest of what each said, a member that said nothing (or has not
+    /// answered this node yet) at the baseline, this node at its own — which
+    /// the cluster version may rise to (§12.8, D20). Voters and learners
+    /// alike: a learner follows the log, and is a voter one change later.
+    ///
+    /// `None` unless every member acknowledged an RPC within `live` (openraft's
+    /// figure, this leader's term): a member that is down is not assumed
+    /// upgraded, nor kept at a version it said before it stopped — it may
+    /// come back as another build — so the version waits until every member
+    /// answers again. `None` too when this node does not lead.
+    pub(crate) fn kinds_floor(
+        &self,
+        m: &openraft::RaftMetrics<TypeConfig>,
+        live: Duration,
+    ) -> Option<u32> {
+        if m.state != ServerState::Leader {
+            return None;
+        }
+        let reported = self.kinds.lock().expect("kinds");
+        let mut floor = self.reads_kinds();
+        for (id, _) in m.membership_config.membership().nodes() {
+            if *id == m.id {
+                continue;
+            }
+            let acked = matches!(
+                m.heartbeat.as_ref().and_then(|h| h.get(id)),
+                Some(Some(t)) if openraft::Instant::elapsed(&**t) < live
+            );
+            if !acked {
+                return None;
+            }
+            let said = reported.get(id).and_then(|(k, _)| *k);
+            floor = floor.min(said.unwrap_or(BASELINE_KINDS_VERSION));
+        }
+        Some(floor)
+    }
+
     /// Keep the leadership stamp and the published view in step with the
     /// metrics. Called by the watch task on every metrics change.
     pub(crate) fn note(&self, m: &openraft::RaftMetrics<TypeConfig>) {
@@ -289,6 +421,11 @@ impl MembersState {
                         .and_then(|r| r.get(id))
                         .and_then(|l| l.as_ref())
                         .map(|l| rsm_index(l.index)),
+                    kinds: if *id == m.id {
+                        self.own_kinds
+                    } else {
+                        self.reported_kinds(*id).flatten()
+                    },
                 }
             })
             .collect();
@@ -355,6 +492,7 @@ mod tests {
                     raft: format!("10.0.0.{id}:7400"),
                     last_ack_ms: Some(id * 10),
                     matched: Some(99),
+                    kinds: Some(3),
                 })
                 .collect(),
         }
@@ -460,6 +598,46 @@ mod tests {
         let newer = published(3, 10, Duration::ZERO).header().unwrap();
         follower.receive(newer.as_bytes());
         assert_eq!(follower.received().unwrap().0.leader, 3);
+    }
+
+    /// A rolling upgrade from 2.0.0-beta.1 (D20): a beta.1 follower reads a
+    /// view that carries `kinds` (serde passes over a field it does not know),
+    /// and this build reads beta.1's view, which has none. The same for a
+    /// `/raft/v1/state` answer.
+    #[test]
+    fn what_a_member_reads_crosses_a_beta1_node_both_ways() {
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct Beta1Seen {
+            id: NodeId,
+            voter: bool,
+            http: String,
+            raft: String,
+            last_ack_ms: Option<u64>,
+            matched: Option<u64>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Beta1View {
+            leader: NodeId,
+            members: Vec<Beta1Seen>,
+        }
+        let json = serde_json::to_string(&view(1)).unwrap();
+        assert!(json.contains("\"kinds\":3"), "{json}");
+        let old: Beta1View = serde_json::from_str(&json).expect("beta.1 reads it");
+        assert_eq!((old.leader, old.members.len()), (1, 3));
+        assert_eq!(old.members[1].matched, Some(99));
+
+        let beta1 = r#"{"leader":1,"term":7,"members":[{"id":2,"voter":true,"http":"h:1","raft":"r:2","last_ack_ms":10,"matched":99}]}"#;
+        let v: MembersView = serde_json::from_str(beta1).expect("this build reads beta.1's");
+        assert_eq!(v.members[0].kinds, None);
+        // A header value that is not a number is no report at all.
+        assert_eq!(kinds_of_header(Some(b"4")), Some(4));
+        assert_eq!(kinds_of_header(Some(b" 5 ")), Some(5));
+        assert_eq!(kinds_of_header(Some(b"x")), None);
+        assert_eq!(kinds_of_header(None), None);
+
+        let state = r#"{"nodeId":4,"term":0,"lastLogIndex":null,"voters":[],"initialized":false}"#;
+        let st: super::super::NodeState = serde_json::from_str(state).expect("beta.1's state");
+        assert_eq!(st.kinds, None);
     }
 
     /// The node that handed leadership away is remembered for the window, and

@@ -347,11 +347,42 @@ pub fn plan<R: Reads + ?Sized>(r: &R, now_us: i64, cfg: &Config) -> Result<Plann
 }
 
 /// A queue's retention cutoffs at `now_us` ([`judge_partition`]).
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Cutoffs {
     all: Option<i64>,
     completed: Option<i64>,
     max_wait: Option<i64>,
     txns: i64,
+}
+
+impl Cutoffs {
+    /// The newest cutoff that can move a partition's LOG watermark (`None`: no
+    /// rule can — retention off and no max wait). The txns watermark never
+    /// passes the log one ([`judge_partition`]'s `.min(log_target)`), so with
+    /// none of these it can only catch up to where the log already starts.
+    fn log_cut(&self) -> Option<i64> {
+        [self.all, self.max_wait, self.completed]
+            .into_iter()
+            .flatten()
+            .max()
+    }
+}
+
+/// Retention cutoffs straight from their parts, for the tests of
+/// [`judge_partition`] (a queue's are [`queue_cutoffs`]).
+#[cfg(test)]
+pub(crate) fn cutoffs_for_test(
+    all: Option<i64>,
+    completed: Option<i64>,
+    max_wait: Option<i64>,
+    txns: i64,
+) -> Cutoffs {
+    Cutoffs {
+        all,
+        completed,
+        max_wait,
+        txns,
+    }
 }
 
 /// The cutoffs `qcfg` sets for queue `(tenant, queue)` at `now_us`.
@@ -384,6 +415,7 @@ pub(crate) fn queue_cutoffs<R: Reads + ?Sized>(
 }
 
 /// What retention does to one partition now ([`judge_partition`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Verdict {
     Watermark { log_start: u64, txns_start: u64 },
     Delete,
@@ -401,25 +433,86 @@ pub(crate) fn judge_partition<R: Reads + ?Sized>(
     part: &rows::PartitionRow,
     cut: &Cutoffs,
 ) -> Result<Option<Verdict>> {
+    judge_with(r, now_us, cfg, pid, part, cut, true)
+}
+
+/// [`judge_partition`] without its two shortcuts for a partition nothing can
+/// move: the walk as it ran until 2026-10-01, the reference the tests hold
+/// the shortcuts to.
+#[cfg(test)]
+pub(crate) fn judge_partition_unskipped<R: Reads + ?Sized>(
+    r: &R,
+    now_us: i64,
+    cfg: &Config,
+    pid: Pid,
+    part: &rows::PartitionRow,
+    cut: &Cutoffs,
+) -> Result<Option<Verdict>> {
+    judge_with(r, now_us, cfg, pid, part, cut, false)
+}
+
+/// See [`judge_partition`]; `skip` takes the shortcuts.
+///
+/// # When nothing can move (2026-10-01)
+///
+/// The judgment ends in a watermark only when `log_target > log_start` or
+/// `txn_target > txns_start`, and `txn_target` is capped at `log_target`.
+/// `log_target` rises above `log_start` only through a LOG cutoff (`all`,
+/// `max_wait`, `completed`) that a row at or past `log_start` is older than.
+/// So when no log cutoff can move the log, `log_target == log_start <=
+/// txns_start` and neither watermark moves: the verdict is [`idle_verdict`]'s,
+/// whatever the rows say. Two cases make that knowable early:
+///
+/// - **no log cutoff at all** (retention off, no max wait — every queue on
+///   prod, 2026-10-01) and `txns_start >= log_start`: decided before any txns
+///   row is read. The dedup window alone (`cut.txns`) used to send every such
+///   partition whose oldest row was older than an hour through the
+///   `row_limit + 1` scan, ~70 µs a visit for nothing.
+/// - **the oldest row is no older than any log cutoff**: rows are in created
+///   order, so every row at or past `log_start` (they all come after the
+///   oldest, `txns_start <= log_start`) is too, and no log cutoff moves the
+///   log; with `txns_start >= log_start` the full scan is skipped as well.
+///
+/// Same verdict in every case, then. The one thing the first shortcut gives
+/// up is noticing an oldest txns row that does not decode (the second reads
+/// that row, and one that does not decode takes the full scan, as before).
+/// The walk was never the corruption check — it reads at most
+/// `row_limit + 1` rows, and none past an oldest one that is fresh — and
+/// every reader of the row still refuses it.
+fn judge_with<R: Reads + ?Sized>(
+    r: &R,
+    now_us: i64,
+    cfg: &Config,
+    pid: Pid,
+    part: &rows::PartitionRow,
+    cut: &Cutoffs,
+    skip: bool,
+) -> Result<Option<Verdict>> {
+    let log_cut = cut.log_cut();
+    let settled = part.txns_start >= part.log_start;
+    if skip && settled && log_cut.is_none() {
+        return idle_verdict(r, now_us, cfg, pid, part);
+    }
     let mut segments = Vec::new();
     let prefix = keys::txns_prefix(pid);
     let from = keys::txns(pid, part.txns_start);
     let mut corrupt = false;
-    // Rows are in created order: when the oldest is newer than every cutoff,
-    // nothing here is stale, and the full scan below would move no watermark.
-    let newest_cut = [cut.all, cut.max_wait, cut.completed]
-        .into_iter()
-        .flatten()
-        .fold(cut.txns, i64::max);
-    let mut oldest_fresh = true;
+    // The oldest row's stamp (`None`: no row). One that does not decode is
+    // fresh for no cutoff, so the scan below meets it and reports it.
+    let mut oldest_at: Option<i64> = None;
+    let mut oldest_bad = false;
     r.scan_raw(Keyspace::Txns, &from, &prefix, 1, &mut |_key, value| {
         match TxnsRow::decode(value) {
-            Ok(row) => oldest_fresh = row.created_at_us >= newest_cut,
-            Err(_) => oldest_fresh = false,
+            Ok(row) => oldest_at = Some(row.created_at_us),
+            Err(_) => oldest_bad = true,
         }
         false
     })?;
-    if oldest_fresh {
+    let fresh = |cutoff: i64| !oldest_bad && oldest_at.is_none_or(|at| at >= cutoff);
+    // Rows are in created order: when the oldest is newer than every cutoff,
+    // nothing here is stale, and the full scan below would move no watermark.
+    let newest_cut = log_cut.map_or(cut.txns, |c| c.max(cut.txns));
+    if fresh(newest_cut) || (skip && settled && log_cut.is_some_and(fresh)) {
         return idle_verdict(r, now_us, cfg, pid, part);
     }
     r.scan_raw(

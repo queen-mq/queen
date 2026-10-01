@@ -1519,6 +1519,13 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         self.committed.reads()
     }
 
+    /// The committed cluster version (§12.8, D20): what a row this planner
+    /// writes may carry ([`crate::rsm::effect::CursorRow::admit`]).
+    pub(crate) fn cluster_version(&self) -> Result<u32, Refusal> {
+        use crate::rsm::store::TypedReads;
+        self.reads().cluster_version().map_err(store_err)
+    }
+
     /// §5.4/D6/I6: committed `request_ids`, then the entries in flight. A
     /// committed hit answers and plans nothing; an in-flight hit waits on that
     /// entry (the batcher owns the wait).

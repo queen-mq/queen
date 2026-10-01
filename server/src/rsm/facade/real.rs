@@ -543,6 +543,25 @@ fn filesystem_used_pct(path: &std::path::Path) -> Option<f64> {
 }
 
 impl RaftFacade {
+    /// The committed cluster version on this node (§12.8, D20): the highest
+    /// effect catalogue version the leader writes, a node sends in a forwarded
+    /// shape, and every member reads. The baseline if the store cannot answer
+    /// (it never rose above it then, as far as this node can tell).
+    pub(crate) fn cluster_version(&self) -> u32 {
+        self.store
+            .read(|r| r.cluster_version())
+            .unwrap_or(crate::rsm::effect::BASELINE_KINDS_VERSION)
+    }
+
+    /// Whether this node may send (or, leading, write) a shape minted at
+    /// catalogue `version`: the cluster version admits it, so every member
+    /// decodes it ([`crate::rsm::effect::cluster_allows`]; the rule is in
+    /// `effect.rs`'s header). Every forwarded shape today is at the baseline;
+    /// the next one asks this before it goes.
+    pub(crate) fn cluster_allows(&self, version: u16) -> bool {
+        crate::rsm::effect::cluster_allows(self.cluster_version(), version)
+    }
+
     /// The node's replicator, for a test that drives leadership directly.
     /// Drop it before [`RaftFacade::shutdown`], which takes the last reference.
     #[cfg(test)]
@@ -4946,6 +4965,8 @@ impl Rsm for RaftFacade {
             lag_ms: self.catch_up_lag_ms(m.applied_index, &role),
             storage_ready: !matches!(role, crate::rsm::replicator::Role::Stopped),
             apply: self.repl.apply_status(),
+            cluster_version: Some(self.cluster_version()),
+            kinds: Some(self.repl.kinds()),
         }
     }
 

@@ -44,6 +44,39 @@
 //! [`CodecError::fatal`] reports as "stop this node": I16 forbids skipping an
 //! effect this build does not understand.
 //!
+//! # The cluster version (§12.8, D20): how a format change rolls
+//!
+//! The cluster version is replicated state (`meta.cluster_version`, written
+//! by [`Effect::ClusterVersionSet`] — a version-1 kind, so every node applies
+//! it). A store without one is at [`BASELINE_KINDS_VERSION`]. The leader
+//! raises it, never lowers it, once every member of the membership — voters
+//! and learners — answered its appends saying it reads the new version, and
+//! answered recently (the `x-queen-raft-kinds` header,
+//! `replicator/raft/members.rs`; a member that says nothing is at the
+//! baseline). So every node that follows the log can read every version up to
+//! the cluster's, and a node that cannot is refused before it joins
+//! (`replicator/raft/admin.rs`) or before it boots on such a store.
+//!
+//! The rule for a format change, then. A new catalogue version N+1 — a new
+//! kind, a new shape of an old one, a new outcome — ships in a release that
+//! DECODES it (`SUPPORTED_KINDS_VERSION` = N+1) and EMITS it only where
+//! [`cluster_allows`]`(cluster, N+1)` holds, the cluster version read from
+//! committed state on the leader; until then the writer emits the version-N
+//! shape (the feature is off). A rolling upgrade is then an ordinary one: the
+//! old nodes never see N+1, and once the last node is up on the new release
+//! the leader raises the version and the feature turns on. The gate today is
+//! [`CursorRow::admit`]: version 2's metadata, version 3's released lease.
+//! The batcher refuses an entry whose `kinds_version` is above the cluster's,
+//! so a writer that forgot the gate fails its own commands instead of
+//! stopping every older node.
+//!
+//! Forwarded command shapes (a follower's prepared command, postcard over
+//! `/raft/v1/forward` and `/raft/v1/submit`; the leader's reply) follow the
+//! same rule: a node sends a new shape only when the cluster version, read
+//! from its own committed state, says every member decodes it. The receiver
+//! of a payload it cannot decode answers a retryable error, never a panic
+//! (`facade/remote.rs`), so a shape sent too early degrades to a retry.
+//!
 //! # What is modelled here
 //!
 //! The whole catalogue of §5.2, so later phases only add versions. The
@@ -68,15 +101,30 @@ pub const VERSION_2: u16 = 2;
 
 /// The third catalogue version: [`Kind::CursorSet`] carrying the lease the
 /// last ack released ([`CursorRow::released`]), after the metadata (written
-/// even when empty). Every ack that completes a batch writes it: a build
-/// below this version cannot follow a log this build leads (stop-all
-/// upgrade).
+/// even when empty). Every ack that completes a batch writes it, so a build
+/// below this version cannot follow a log a 2.0.0-beta.1 leader wrote: beta.1
+/// went out as a stop-all upgrade, before the cluster version gated anything,
+/// and every cluster since is at least here ([`BASELINE_KINDS_VERSION`]).
 pub const VERSION_3: u16 = 3;
 
 /// The highest catalogue version this build can decode and apply. The
 /// replicated cluster version (§12.8) may be lower; it never rises above the
-/// minimum of every voter's value (D20).
+/// minimum of every member's value (D20). A node reports it to the leader on
+/// every append it answers.
 pub const SUPPORTED_KINDS_VERSION: u32 = VERSION_3 as u32;
+
+/// The cluster version of a store that holds none, and of a member that
+/// reports none: 3. Every node of a 2.0.0-beta.1 cluster or later reads it
+/// (beta.1 was a stop-all upgrade, so no older node can be among them), and
+/// nothing before beta.2 wrote a cluster version or reported one.
+pub const BASELINE_KINDS_VERSION: u32 = VERSION_3 as u32;
+
+/// Whether a cluster at catalogue version `cluster` lets a leader write
+/// something minted at `version` (D20): every member reads it. See the module
+/// header for the rule this gate enforces.
+pub fn cluster_allows(cluster: u32, version: u16) -> bool {
+    u32::from(version) <= cluster
+}
 
 /// Refuse a length prefix above this before allocating: a corrupt file or a
 /// hostile peer must not drive an OOM. Far above
@@ -423,6 +471,24 @@ pub struct CursorRow {
     /// answered as the first was (success), not "stale", on any leader. A row
     /// that carries it is [`Kind::CursorSet`] at catalogue [`VERSION_3`].
     pub released: Option<ReleasedLease>,
+}
+
+impl CursorRow {
+    /// The row as a cluster at catalogue version `cluster` may log it (D20):
+    /// without what was minted after that version — the released lease
+    /// ([`VERSION_3`]), the position metadata ([`VERSION_2`]). Every leader
+    /// side writer of a [`Kind::CursorSet`] passes its row through here, so
+    /// the effect's version ([`Effect::version`]) never exceeds the cluster's:
+    /// below version 3 an ack keeps no released lease (its repeat is stale,
+    /// as before beta.1), below version 2 a position keeps no metadata.
+    pub fn admit(&mut self, cluster: u32) {
+        if !cluster_allows(cluster, VERSION_3) {
+            self.released = None;
+        }
+        if !cluster_allows(cluster, VERSION_2) {
+            self.metadata.clear();
+        }
+    }
 }
 
 /// The lease an ack released ([`CursorRow::released`]).

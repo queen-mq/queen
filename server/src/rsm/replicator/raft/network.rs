@@ -20,7 +20,9 @@
 //! Every `append` from the leader also carries its members view in the
 //! `x-queen-raft-members` header ([`super::members`]), and every stream frame
 //! carries it too. A follower's answers to both say which wire features it
-//! reads ([`super::wire::WIRE_HEADER`]: compressed entries).
+//! reads ([`super::wire::WIRE_HEADER`]: compressed entries) and which effect
+//! catalogue version ([`super::members::KINDS_HEADER`]: what the cluster
+//! version may rise to, D20); the leader keeps the latest of each per member.
 //!
 //! A transport failure is `Unreachable` when the peer could not be connected
 //! (openraft backs off) and a network error otherwise (openraft retries).
@@ -261,11 +263,22 @@ async fn post_with(
 ) -> Result<Bytes, Fail> {
     post_answer(client, url, token, content_type, body, ttl, members)
         .await
-        .map(|(b, _)| b)
+        .map(|a| a.bytes)
 }
 
-/// [`post_with`], also answering whether the peer said it reads compressed
-/// entries ([`wire::WIRE_HEADER`]).
+/// A peer's answer and what its headers said about it.
+struct Answered {
+    bytes: Bytes,
+    /// It reads compressed entries ([`wire::WIRE_HEADER`]).
+    reads_zstd: bool,
+    /// The catalogue version it reads, if it said
+    /// ([`super::members::KINDS_HEADER`]).
+    kinds: Option<u32>,
+}
+
+/// [`post_with`], also answering what the peer's answer headers said: whether
+/// it reads compressed entries ([`wire::WIRE_HEADER`]) and which catalogue
+/// version it reads ([`super::members::KINDS_HEADER`]).
 async fn post_answer(
     client: &HttpClient,
     url: &str,
@@ -274,7 +287,7 @@ async fn post_answer(
     body: Body,
     ttl: Duration,
     members: Option<axum::http::HeaderValue>,
-) -> Result<(Bytes, bool), Fail> {
+) -> Result<Answered, Fail> {
     let mut req = Request::builder()
         .method(Method::POST)
         .uri(url)
@@ -294,6 +307,11 @@ async fn post_answer(
     };
     let status = resp.status();
     let reads_zstd = wire::reads_zstd(resp.headers().get(wire::WIRE_HEADER).map(|v| v.as_bytes()));
+    let kinds = super::members::kinds_of_header(
+        resp.headers()
+            .get(super::members::KINDS_HEADER)
+            .map(|v| v.as_bytes()),
+    );
     let bytes = match tokio::time::timeout(ttl, resp.into_body().collect()).await {
         Err(_) => return Err(Fail::Network(format!("{url}: the answer stalled"))),
         Ok(Err(e)) => return Err(Fail::Network(format!("{url}: {e}"))),
@@ -308,7 +326,11 @@ async fn post_answer(
         let text = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]).into_owned();
         return Err(Fail::Network(format!("{url}: {status}: {text}")));
     }
-    Ok((bytes, reads_zstd))
+    Ok(Answered {
+        bytes,
+        reads_zstd,
+        kinds,
+    })
 }
 
 fn decode<T: DeserializeOwned>(bytes: &[u8], what: &str) -> Result<T, Fail> {
@@ -419,10 +441,13 @@ impl RaftNetworkV2<TypeConfig> for HttpPeer {
                 .stream
                 .conn(&self.client, &self.base, &self.token)
                 .await?
-                .is_some();
-            if !open {
+                .map(|c| c.kinds);
+            let Some(kinds) = open else {
                 return stream_append_sequential(self, input, option).await;
-            }
+            };
+            // What the follower said it reads, on the stream's handshake
+            // (D20): the process at the other end of this connection.
+            self.members.note_kinds(self.target, kinds);
             let ctx = SessionCtx {
                 id: self.stream.session(),
                 target: self.target,
@@ -459,7 +484,7 @@ impl RaftNetworkV2<TypeConfig> for HttpPeer {
         // (super::members).
         let t_rpc = std::time::Instant::now();
         let url = format!("{}/raft/v1/append", self.base);
-        let (bytes, reads_zstd) = post_answer(
+        let answered = post_answer(
             &self.client,
             &url,
             self.token.as_deref(),
@@ -470,7 +495,10 @@ impl RaftNetworkV2<TypeConfig> for HttpPeer {
         )
         .await
         .map_err(Fail::rpc)?;
-        self.reads_zstd = reads_zstd;
+        self.reads_zstd = answered.reads_zstd;
+        // What the follower says it reads, on every answer (D20).
+        self.members.note_kinds(self.target, answered.kinds);
+        let bytes = answered.bytes;
         let res: Result<AppendEntriesResponse<TypeConfig>, RaftError<TypeConfig>> =
             decode(&bytes, "/raft/v1/append").map_err(Fail::rpc)?;
         if n > 0 {
@@ -684,11 +712,17 @@ mod server {
             crate::rsm::replicator::raft::state_machine::stage_add(5, t1.elapsed());
         }
         let mut answer = json_answer(&res);
-        // What this node reads: the leader may send it compressed entries.
+        // What this node reads: the leader may send it compressed entries,
+        // and the effect catalogue up to this version (D20).
         answer.headers_mut().insert(
             wire::WIRE_HEADER,
             axum::http::HeaderValue::from_static(wire::WIRE_FEATURES),
         );
+        if let Some(v) = st.members.kinds_header() {
+            answer
+                .headers_mut()
+                .insert(super::super::members::KINDS_HEADER, v);
+        }
         answer
     }
 
@@ -864,7 +898,7 @@ mod server {
     async fn node_state<S: Store + 'static>(State(st): State<Arc<RpcState<S>>>) -> Response {
         use openraft::async_runtime::WatchReceiver;
         let m = st.raft.metrics().borrow_watched().clone();
-        json_answer(&super::super::NodeState::of(&m))
+        json_answer(&super::super::NodeState::of(&m, st.members.own_kinds()))
     }
 
     /// The leader's append stream ([`super::super::stream`]): the body is
@@ -889,11 +923,15 @@ mod server {
             header::CONTENT_TYPE,
             axum::http::HeaderValue::from_static("application/octet-stream"),
         );
-        // What this node reads: the leader may send it compressed entries.
+        // What this node reads: the leader may send it compressed entries,
+        // and the effect catalogue up to this version (D20).
         h.insert(
             wire::WIRE_HEADER,
             axum::http::HeaderValue::from_static(wire::WIRE_FEATURES),
         );
+        if let Some(v) = st.members.kinds_header() {
+            h.insert(super::super::members::KINDS_HEADER, v);
+        }
         resp
     }
 

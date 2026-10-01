@@ -152,7 +152,17 @@ impl Engine {
                     sh.pids.get(&t.pid).map_or(0, |pi| pi.txns_start)
                 };
                 let s = shadow!(g, t.pid);
-                let acked = ack_target(&fr, &mut s.0, s.1, txns_start, t, &cfg.queue, now, false)?;
+                let acked = ack_target(
+                    &fr,
+                    &mut s.0,
+                    s.1,
+                    txns_start,
+                    t,
+                    &cfg.queue,
+                    now,
+                    false,
+                    self.cluster_allows(crate::rsm::effect::VERSION_3),
+                )?;
                 if !acked.res.stale_hashes.is_empty() {
                     return Ok(Err(qtxn(acked.res.stale_hashes.len(), t.pid)));
                 }
@@ -210,7 +220,13 @@ impl Engine {
                 row.attempt_offset = None;
                 row.attempt_count = 0;
                 row.committed = offset as i64 - 1;
-                row.metadata = op.metadata.clone();
+                // Position metadata is a catalogue version 2 shape (D20): a
+                // cluster below it keeps none, here as in the logged row.
+                row.metadata = if self.cluster_allows(crate::rsm::effect::VERSION_2) {
+                    op.metadata.clone()
+                } else {
+                    String::new()
+                };
                 if s.1 && same(&row, &s.0) {
                     // Already exactly there: nothing is written.
                     continue;
@@ -297,7 +313,7 @@ impl Engine {
                     effects.push(Effect::CursorSet {
                         pid,
                         group: g.name.clone(),
-                        row: cur.row(),
+                        row: self.logged_row(&cur),
                     });
                 }
                 effects.extend(dlq);
