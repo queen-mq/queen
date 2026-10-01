@@ -109,7 +109,7 @@ other job, and nothing keeps the order of one entity's jobs.
 
 ## The job lifecycle
 
-{/* FIGURE: job-lifecycle – dispatch to the broker, a pop under a lease, the job, then an ACK, a release, or a failure into the DLQ and failed_jobs */}
+<JobLifecycle />
 
 1. **Dispatch.** `dispatch()` sends the job to the broker in one HTTP request. The job's UUID is its
    transaction ID, so a push that the client repeats after a lost answer is stored once, within the
@@ -160,7 +160,7 @@ disappears while a lease is held, the worker is killed at once. This fencing sto
 before the broker can hand the job to a second worker, so two attempts of one job never run at the
 same time.
 
-{/* FIGURE: lease-timeline – one long job on a time axis: Redis hands it to a second worker at retry_after while it runs; Queen renews the lease every third of retry_after and, when renewal fails, sends SIGTERM, then SIGKILL, before the deadline */}
+<LeaseTimeline />
 
 With renewal, `retry_after` no longer limits how long a job may run: it sets how long the jobs of a
 crashed worker wait before they run again. Laravel's timeout still applies, and a pool's `timeout`
@@ -247,7 +247,7 @@ prefetch 4 completed 1,879 jobs/s of 10 ms jobs, 2,270 with `ack_async`, and 2,7
 too, while the broker fsynced every write
 ([benchmark](/benchmarks/laravel-supervisors#horizon-against-queen-on-a-linux-server-2026-10-01)).
 
-{/* FIGURE: worker-timeline – one worker on a time axis: pop, job and ACK one after another, then with ack_async and pop_ahead overlapping the broker's answers with the next job */}
+<WorkerTimeline />
 
 <Chart
   src="laravel-queen-optimizations"
@@ -274,7 +274,7 @@ clear the backlog, at the measured job runtime, within `target_clear_seconds`. A
 most `balance_max_shift` workers per `balance_cooldown`, and a lower target must hold for
 `scale_down_delay` before workers drain.
 
-{/* FIGURE: supervisor-topology – the master, its pools of queue:work workers, the fork server and the lease service, and the HTTP calls from each to the broker */}
+<SupervisorTopology />
 
 Two engines run the same configuration. The PHP engine keeps Laravel loaded in the master; the Rust
 engine does not, and the proportional set size of its master measured 2.9 MiB, against 65.0 MiB for
@@ -320,8 +320,10 @@ once and opens no connection, and forks every worker from it. A forked worker sh
 pages of the fork server and copies a page only when it writes to it. On a Linux server, a Horizon
 worker held 28 MiB of private memory and a forked Queen worker 1.4 MiB
 ([benchmark](/benchmarks/laravel-supervisors#horizon-against-queen-on-a-linux-server-2026-10-01)).
+The Horizon workers ran with PHP's default `opcache.enable_cli=0`, the Queen workers with
+`opcache.enable_cli=1`.
 
-{/* FIGURE: prefork-memory – a fork server holding the booted framework and its forked workers sharing those pages, each worker keeping only the pages it wrote */}
+<PreforkMemory />
 
 <Chart
   src="laravel-prefork-memory"
@@ -370,7 +372,7 @@ the unstarted jobs of its batch back to the broker; if that call fails, they wai
 expire. After `shutdown_grace` seconds, the master sends SIGKILL to the workers still running. Their
 jobs were not acknowledged, so they run again once their leases expire.
 
-{/* FIGURE: rolling-update – a deploy on a time axis: SIGTERM, workers finish their jobs and exit, SIGKILL at shutdown_grace, terminationGracePeriodSeconds above it, and a killed job running again after its lease expires */}
+<RollingUpdate />
 
 The startup check compares `shutdown_grace` only with each pool's `timeout`. A job class with a
 longer `$timeout` of its own can still outlive the grace. For such a job, do one of these:

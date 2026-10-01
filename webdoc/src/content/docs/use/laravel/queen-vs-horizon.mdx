@@ -5,7 +5,7 @@ type: concept
 tier: use
 status: preview
 sidebar:
-  order: 6
+  order: 2
   label: Queen vs Horizon
 sourceOfTruth:
   - clients/client-php/config/queen.php
@@ -62,7 +62,12 @@ queue backends: Horizon on Redis, Queen on its own broker. This page compares th
 for a team that runs Horizon today. Every measured row links to the run behind it, and
 [How Queen runs Laravel jobs](/use/laravel/concepts) defines the terms.
 
-{/* CHART: laravel-headline */}
+<Chart
+  src="laravel-headline"
+  alt="Three bar panels, Horizon against Queen, medians of 3 runs. Jobs per second with the queue full: 1,124 against 2,753 with 32 workers, 1,090 against 4,395 with 64. Application memory with 64 workers: 1,892 against 183 MiB. p95 latency at 500 jobs/s asked: 227 against 23 ms."
+  caption="Diagnostic results from one server and one Raft broker node, with a protocol written by the Queen team."
+  source="benchmark-queen/2026-10-01-linux-vm-horizon-raft/raw/runs.csv"
+/>
 
 ## At a glance
 
@@ -199,8 +204,10 @@ pages, so the saving shrinks with time.
 
 On the Linux server, with the master renewing leases instead of a helper process per worker, 64
 workers used 183 MiB against 1,892 MiB for Horizon. A Horizon worker held 28 MiB of private memory, a
-forked Queen worker 1.4 MiB; the rest was shared with the process it was forked from. The benchmark
-job is tiny: a real application's workers keep more private memory, so expect a smaller ratio.
+forked Queen worker 1.4 MiB; the rest was shared with the process it was forked from. The Horizon
+workers ran with PHP's default `opcache.enable_cli=0`, the Queen workers with `opcache.enable_cli=1`.
+The benchmark job is tiny: a real application's workers keep more private memory, so expect a smaller
+ratio.
 
 <Chart
   src="laravel-vm-memory"

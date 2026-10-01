@@ -37,7 +37,16 @@ verifiedBy:
 ## Start here
 
 Queen replaces two parts of a Horizon setup: Redis, where the jobs wait, and Horizon's master, which
-runs the workers. Your job classes stay as they are. Each line below names the measurement behind it:
+runs the workers. Your job classes stay as they are.
+
+<Chart
+  src="laravel-headline"
+  alt="Three bar panels, Horizon against Queen, medians of 3 runs. Jobs per second with the queue full: 1,124 against 2,753 with 32 workers, 1,090 against 4,395 with 64. Application memory with 64 workers: 1,892 against 183 MiB. p95 latency at 500 jobs/s asked: 227 against 23 ms."
+  caption="Diagnostic results from one server and one Raft broker node, with a protocol written by the Queen team."
+  source="benchmark-queen/2026-10-01-linux-vm-horizon-raft/raw/runs.csv"
+/>
+
+Each line below names the measurement behind it:
 
 - **More jobs per worker at the same durability.** On a dedicated Linux server, with every write
   fsynced on both sides, 32 workers completed 2,753 jobs/s of 10 ms jobs against 1,124 for Horizon,
@@ -62,8 +71,6 @@ runs the workers. Your job classes stay as they are. Each line below names the m
 These results are diagnostic: each comes from one host, and the protocol was written by the Queen
 team. Horizon keeps advantages too, such as less broker CPU at a low, steady rate and a more complete
 dashboard.
-
-{/* CHART: laravel-headline */}
 
 Read these pages in this order:
 
