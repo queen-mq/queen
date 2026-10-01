@@ -260,6 +260,21 @@ class CurlTransportTest extends TestCase
         }
     }
 
+    public function testAPopSentAheadToAnUnreachableBackendDoesNotHoldUpTheJob(): void
+    {
+        // TEST-NET-3: never routed, so the connect neither succeeds nor fails at once.
+        $client = new HttpClient(['baseUrl' => 'http://203.0.113.1:6632']);
+        $this->assertTrue($this->usesCurlTransport($client));
+
+        $started = hrtime(true);
+        $pop = $client->getDetached('/api/v1/pop/queue/default');
+        $elapsedMs = (hrtime(true) - $started) / 1e6;
+
+        $this->assertLessThan(1_000, $elapsedMs, 'the job the worker holds runs at once');
+        unset($pop);
+        gc_collect_cycles();
+    }
+
     public function testEveryRequestAsksForTcpKeepAlive(): void
     {
         $options = new \ReflectionMethod(CurlTransport::class, 'options');

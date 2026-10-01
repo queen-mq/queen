@@ -525,8 +525,16 @@ class QueenServiceProvider extends ServiceProvider
             }
             $attributes['domain'] = $domain;
         }
-        // The Workload page checks it again: cached routes skip this method.
-        ConsoleLinks::fromConfig($this->app['config']->get('queen.dashboard.console_url'));
+        // Only links depend on it, and this method runs in every process,
+        // workers included: report a wrong value instead of failing the boot.
+        // The Workload page checks it again, since cached routes skip this.
+        try {
+            ConsoleLinks::fromConfig($this->app['config']->get('queen.dashboard.console_url'));
+        } catch (\InvalidArgumentException $invalid) {
+            if ($this->app->bound(\Illuminate\Contracts\Debug\ExceptionHandler::class)) {
+                $this->app->make(\Illuminate\Contracts\Debug\ExceptionHandler::class)->report($invalid);
+            }
+        }
 
         $this->app['router']->group($attributes, function (): void {
             require __DIR__ . '/../../routes/dashboard.php';

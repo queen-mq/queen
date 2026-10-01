@@ -42,7 +42,14 @@ final class DashboardController
                 $data['refreshUrl'] .= '?range=' . $range;
             }
             $data['queueContents'] = $queueContents->read($data['snapshot']['queues']);
-            $console = ConsoleLinks::fromConfig(config('queen.dashboard.console_url'));
+            try {
+                $console = ConsoleLinks::fromConfig(config('queen.dashboard.console_url'));
+                $data['consoleLinksInvalid'] = false;
+            } catch (\InvalidArgumentException) {
+                // Reported when the application booted.
+                $console = null;
+                $data['consoleLinksInvalid'] = true;
+            }
             // One console address serves one broker: with queues of several
             // connections a link could open the wrong one.
             $several = count(array_unique(array_column($data['queueContents']['queues'], 'connection'))) > 1;

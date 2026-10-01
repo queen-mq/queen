@@ -29,7 +29,8 @@ acknowledged job ran again when its lease expired. `postDetached()` and `getDeta
 return once the whole request is written, the connection included; on the Guzzle transport
 (behind a proxy, or with `QUEEN_SDK_HTTP_TRANSPORT=guzzle`) this holds for a request with a
 body, the ACK. A request that cannot be written within the 5-second connect timeout throws at
-once, and the Laravel queue then acknowledges synchronously.
+once, and the Laravel queue then acknowledges synchronously. A pop sent ahead, which carries no
+body, is waited for at most 250 ms, so a slow or dead backend does not hold up the next job.
 
 **PHP client: a process forked by a job exits.** libcurl's resolver threads do not survive
 `fork()`, and recent libcurl keeps them alive for a moment after each name resolution (2 seconds
@@ -48,12 +49,15 @@ before the prefetched tail was handed back. They now use one 2-second attempt.
 **Laravel dashboard: retry a failed job in one click.** The failed-job page has a *Retry now*
 button. It runs `queue:retry` for that job, so the broker's dead-letter entry and the
 `failed_jobs` row stay in step, and the page still shows the command for a terminal. Forgetting,
-flushing and pruning stay with Laravel's commands.
+flushing and pruning stay with Laravel's commands. An exception during the retry is reported to
+the application's log, and the page shows only its class: its message can quote the job's
+payload. The id `all` is refused, since `queue:retry all` retries every failed job.
 
 **Laravel dashboard: what each queue holds now.** The Workload page shows, for every supervised
 queue, the jobs waiting and running and how long the oldest unfinished job has waited, from one
 broker read per queue, cached for 5 seconds. `QUEEN_DASHBOARD_CONSOLE_URL` links each queue to
-the Queen console, which lists the messages themselves.
+the Queen console, which lists the messages themselves. An invalid value is reported to the
+application's log and turns the links off; it never stops the application or its workers.
 
 **Laravel dashboard: the Configuration page is a tuning guide.** It shows every resolved setting
 of the connection and the supervisor with its environment variable, each pool as the running

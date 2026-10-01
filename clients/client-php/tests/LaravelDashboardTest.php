@@ -1870,6 +1870,42 @@ final class LaravelDashboardTest extends TestCase
         $this->assertCount(1, json_decode((string) file_get_contents($this->failedPath), true));
     }
 
+    public function testARetryExceptionIsReportedAndOnlyItsClassIsShown(): void
+    {
+        $this->failedJobsFile(1);
+        $this->app['env'] = 'local';
+        $kernel = $this->createStub(\Illuminate\Contracts\Console\Kernel::class);
+        $kernel->method('call')->willThrowException(
+            new \RuntimeException('SQLSTATE[HY000]: insert into "jobs" ("payload") values ({"secret":"Pw-7c1e"})'),
+        );
+        $this->app->instance(\Illuminate\Contracts\Console\Kernel::class, $kernel);
+
+        $this->withSession(['_token' => 'queen-csrf'])
+            ->post('/queen/failed-jobs/failed-1/retry', ['_token' => 'queen-csrf'])
+            ->assertStatus(303)
+            ->assertHeader('Location', '/queen/failed-jobs/failed-1');
+
+        $error = (string) session('queen_dashboard_control_error');
+        $this->assertStringContainsString('was not retried: the application raised RuntimeException', $error);
+        $this->assertStringNotContainsString('Pw-7c1e', $error, 'the payload stays out of the page');
+        $this->assertStringNotContainsString('SQLSTATE', $error);
+    }
+
+    public function testAllIsNeverPassedToQueueRetry(): void
+    {
+        $this->failedJobsFile(1);
+        $this->app['env'] = 'local';
+
+        foreach (['all', 'ALL'] as $id) {
+            $this->withSession(['_token' => 'queen-csrf'])
+                ->post("/queen/failed-jobs/{$id}/retry", ['_token' => 'queen-csrf'])
+                ->assertStatus(303)
+                ->assertHeader('Location', '/queen/failed-jobs')
+                ->assertSessionHas('queen_dashboard_control_error', 'Failed job [all] cannot be retried from the dashboard.');
+        }
+        $this->assertCount(1, json_decode((string) file_get_contents($this->failedPath), true));
+    }
+
     public function testRetryingAJobThatIsNoLongerFailedSaysSo(): void
     {
         $this->failedJobsFile(1);
@@ -2165,6 +2201,21 @@ final class LaravelDashboardTest extends TestCase
         );
     }
 
+    public function testAnInvalidConsoleUrlLeavesTheWorkloadPageWithoutLinks(): void
+    {
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+        $this->queueContentsBroker(['default' => ['ready' => 3, 'processing' => 1]]);
+        $this->app['config']->set('queen.dashboard.console_url', 'queen.internal:8080');
+
+        $xpath = $this->dashboardXPath($this->get('/queen/workload')->assertOk()->getContent());
+
+        $this->assertSame(0, $xpath->query('//section[@id="queue-contents"]//a')->length);
+        $this->assertStringContainsString(
+            'No console links: QUEEN_DASHBOARD_CONSOLE_URL is not an http or https URL without user info, query or fragment.',
+            $xpath->query('//section[@id="queue-contents"]')->item(0)->textContent,
+        );
+    }
+
     public function testThePackageReadersDegradeWhenTheirConnectionCannotBeResolved(): void
     {
         // A URL with user info is refused while the read client is built:
@@ -2339,8 +2390,15 @@ final class LaravelDashboardTest extends TestCase
         $this->assertSame('set', $supervisor['remote_status.key'][1]);
     }
 
-    public function testAnInvalidConsoleUrlIsRefusedAtBoot(): void
+    public function testAnInvalidConsoleUrlIsReportedWithoutFailingTheBoot(): void
     {
+        $reported = [];
+        $handler = $this->createStub(\Illuminate\Contracts\Debug\ExceptionHandler::class);
+        $handler->method('report')->willReturnCallback(function (\Throwable $error) use (&$reported): void {
+            $reported[] = $error;
+        });
+        $this->app->instance(\Illuminate\Contracts\Debug\ExceptionHandler::class, $handler);
+
         foreach ([
             'ftp://console.example.test',
             'https://admin:hunter2@console.example.test',
@@ -2352,13 +2410,15 @@ final class LaravelDashboardTest extends TestCase
             42,
         ] as $invalid) {
             $this->app['config']->set('queen.dashboard.console_url', $invalid);
-            try {
-                (new QueenServiceProvider($this->app))->boot();
-                $this->fail('accepted ' . var_export($invalid, true));
-            } catch (\InvalidArgumentException $exception) {
-                $this->assertStringContainsString('queen.dashboard.console_url', $exception->getMessage());
-                $this->assertStringNotContainsString('hunter2', $exception->getMessage(), 'the value may hold a credential');
-            }
+            $before = count($reported);
+
+            // A worker boots the same provider: a link setting must not stop it.
+            (new QueenServiceProvider($this->app))->boot();
+
+            $this->assertCount($before + 1, $reported, 'reported ' . var_export($invalid, true));
+            $message = end($reported)->getMessage();
+            $this->assertStringContainsString('queen.dashboard.console_url', $message);
+            $this->assertStringNotContainsString('hunter2', $message, 'the value may hold a credential');
         }
     }
 

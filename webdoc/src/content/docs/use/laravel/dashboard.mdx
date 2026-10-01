@@ -74,6 +74,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-02 (through 79204459 + this patch): adds the Retry now button of the failed-job detail, the In the queue now card of the Workload page with QUEEN_DASHBOARD_CONSOLE_URL, and the tuning advice and settings of the Configuration page; SupervisorConfiguration's refused-URL error no longer repeats credentials; page matches the code.
 # sourceOfTruth re-read 2026-10-02 (through ad0f816b + this patch): SupervisorState gains the workers' exit markers, and the provider registers their listener and gives job metrics and tags a bounded client; the restart and circuit state the panel shows, and its reads, are unchanged.
 # sourceOfTruth re-read 2026-10-02 (screenshots): three screenshots of the real dashboard, taken during a benchmark workload on the release candidate, show the queue card, a failed job with Retry now and the tuning advice; the text is unchanged.
+# sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid console_url instead of failing the boot, and DashboardController shows the card without links and a note; FailedJobRetryController reports an exception and shows only its class, and refuses the id all.
 ---
 
 The Laravel panel answers one question: **what is this application's Queen supervisor doing?** It
@@ -272,8 +273,9 @@ its messages filtered to `pending` and to `processing`, `/messages?queue={queue}
 The queue name is URL-encoded, and every link opens in a new tab with `rel="noopener noreferrer"`.
 One console address serves one broker, so when the supervised queues use more than one connection,
 the card shows no links and says why. The value must be an `http` or `https` URL without user info,
-query or fragment; a path is kept, for a console behind a prefix. Any other value fails when the
-application boots, like the other dashboard options.
+query or fragment; a path is kept, for a console behind a prefix. Any other value is reported to
+the application's log when it boots, and the card shows no links and says why: the workers boot the
+same service provider, and a link setting must not stop them.
 
 ## Jobs processed
 

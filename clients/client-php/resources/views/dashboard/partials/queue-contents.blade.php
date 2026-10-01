@@ -79,5 +79,8 @@
         @if ($consoleLinksLeftOut)
             <p class="card-note">No console links: these queues use more than one connection, and one console address serves one broker.</p>
         @endif
+        @if ($consoleLinksInvalid ?? false)
+            <p class="card-note">No console links: QUEEN_DASHBOARD_CONSOLE_URL is not an http or https URL without user info, query or fragment.</p>
+        @endif
     @endif
 </section>

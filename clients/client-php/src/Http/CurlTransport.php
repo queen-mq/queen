@@ -21,6 +21,14 @@ final class CurlTransport
     private const CONNECT_TIMEOUT_MILLIS = 5_000;
 
     /**
+     * How long start() waits to write a request without a body, a pop sent
+     * ahead: losing it loses no work, so a slow or dead backend must not hold
+     * up the job that the worker already has. The request goes on, and
+     * settle() finishes it.
+     */
+    private const BODYLESS_WRITE_MILLIS = 250;
+
+    /**
      * TCP keep-alive on every connection: a NAT gateway, firewall or load
      * balancer that silently forgets an idle connection would otherwise
      * leave the next request waiting for its whole timeout. Probes start
@@ -102,8 +110,10 @@ final class CurlTransport
      * after the next job: a request still unwritten when the process dies is
      * lost, and a lost ACK runs its job again. Writing takes at most the
      * connect timeout; a request still unwritten then is dropped, so nothing
-     * reached the server, and reported. No timeout runs on the answer until
-     * settle(). A request dropped without settle() is freed with it.
+     * reached the server, and reported. A request without a body, a pop sent
+     * ahead, is waited for only BODYLESS_WRITE_MILLIS and then left to
+     * settle(). No timeout runs on the answer until settle(). A request
+     * dropped without settle() is freed with it.
      *
      * @param array<string, string|list<string>> $headers
      * @throws TransportException when the request could not be written in time
@@ -124,10 +134,14 @@ final class CurlTransport
         }
         $this->drive();
         $id = spl_object_id($easy);
-        $deadline = hrtime(true) + self::CONNECT_TIMEOUT_MILLIS * 1_000_000;
+        $bodyless = $body === null;
+        $deadline = hrtime(true) + ($bodyless ? self::BODYLESS_WRITE_MILLIS : self::CONNECT_TIMEOUT_MILLIS) * 1_000_000;
         $idle = self::IDLE_MIN_MICROS;
         while (!isset($this->finished[$id]) && !self::written($easy, $body)) {
             if (!$this->wait($multi, $deadline, $idle)) {
+                if ($bodyless) {
+                    return $request;
+                }
                 $request->release();
                 throw new TransportException(
                     'Queen could not send a detached request within ' . self::CONNECT_TIMEOUT_MILLIS . ' ms.',
