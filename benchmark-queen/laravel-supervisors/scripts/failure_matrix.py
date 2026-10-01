@@ -548,6 +548,13 @@ COMPAT_SCENARIOS = (
     "rate-limited", "backoff-array", "retry-until", "max-exceptions", "fail-on-timeout", "encrypted",
     "after-commit", "events", "failed-commands", "queue-size",
 )
+# `bench:compat-more`: the second command, same lane. prune-failed empties the failed-job store, and
+# no scenario after it reads that store. fork-in-job is last: where a worker dies, its retries go on.
+COMPAT_MORE_SCENARIOS = (
+    "queued-listener", "queued-notification", "queued-closure", "throttles-exceptions", "skip-middleware",
+    "unique-until-processing", "missing-models", "batch-allow-failures", "batch-cancel", "retry-batch",
+    "delay-datetime", "release-delay", "queue-monitor", "prune-failed", "fork-in-job",
+)
 
 
 def replicas_kill(lane: Lane) -> list[Check]:
@@ -693,11 +700,13 @@ def compat_database(lane: Lane) -> None:
 
 
 def laravel_compat(lane: Lane) -> list[Check]:
-    """Laravel's queue features, each checked by `bench:compat` inside the supervisor's
-    container, beside its workers."""
+    """Laravel's queue features, each checked by `bench:compat` or `bench:compat-more`
+    inside the supervisor's container, beside its workers."""
     checks: list[Check] = []
-    for name in COMPAT_SCENARIOS:
-        result = lane.app_artisan("bench:compat", name, f"--run-id={lane.run_id}-{name}", check=False)
+    runs = [("bench:compat", name) for name in COMPAT_SCENARIOS]
+    runs += [("bench:compat-more", name) for name in COMPAT_MORE_SCENARIOS]
+    for command, name in runs:
+        result = lane.app_artisan(command, name, f"--run-id={lane.run_id}-{name}", check=False)
         lines = [line for line in result.stdout.splitlines() if line.startswith("{")]
         try:
             data = json.loads(lines[-1])

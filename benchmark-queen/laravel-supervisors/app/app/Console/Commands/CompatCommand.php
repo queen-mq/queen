@@ -10,13 +10,11 @@ use App\Jobs\Compat\CompatRateLimitedJob;
 use App\Jobs\Compat\CompatUniqueJob;
 use App\Support\FailureMatrixLog;
 use Illuminate\Bus\Batch;
-use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Schema;
-use InvalidArgumentException;
 use RuntimeException;
 use Throwable;
 
@@ -26,7 +24,7 @@ use Throwable;
  * documents. Prints one JSON object: the scenario, its checks, and what was
  * observed. Run `bench:compat setup` once per lane first.
  */
-final class CompatCommand extends Command
+final class CompatCommand extends CompatScenarioCommand
 {
     public const SCENARIOS = [
         'delay', 'chain', 'chain-failure', 'batch', 'batch-failure', 'unique', 'without-overlapping',
@@ -40,55 +38,13 @@ final class CompatCommand extends Command
 
     protected $description = 'Check one Laravel queue feature against the running workers';
 
-    private FailureMatrixLog $log;
-
-    private string $run;
-
-    private string $connection;
-
-    private string $queue;
-
-    /** @var list<array{name: string, passed: bool, detail: string}> */
-    private array $checks = [];
-
-    /** @var array<string, mixed> */
-    private array $observed = [];
-
     public function handle(FailureMatrixLog $log): int
     {
-        $scenario = (string) $this->argument('scenario');
-        if ($scenario === 'setup') {
+        if ((string) $this->argument('scenario') === 'setup') {
             return $this->setup();
         }
-        if (!in_array($scenario, self::SCENARIOS, true)) {
-            throw new InvalidArgumentException("Unknown scenario [{$scenario}].");
-        }
-        $this->log = $log;
-        $this->run = (string) ($this->option('run-id') ?: $scenario . '-' . bin2hex(random_bytes(4)));
-        $this->connection = (string) config('benchmark.connection');
-        $this->queue = (string) config('benchmark.queue');
 
-        try {
-            $this->{lcfirst(str_replace(' ', '', ucwords(str_replace('-', ' ', $scenario))))}();
-        } catch (Throwable $error) {
-            $this->check('ran without an exception', false, $error::class . ': ' . $error->getMessage());
-        }
-        if (in_array(false, array_column($this->checks, 'passed'), true)) {
-            // The whole trail, to see why without reproducing it.
-            $this->observed['events'] = array_map(static fn (array $e): array => [
-                $e['job_id'], $e['event'], $e['attempt'], round((float) $e['at'], 2), $e['exception'], $e['pid'],
-            ], $this->log->read($this->run));
-        }
-        $this->line(json_encode([
-            'scenario' => $scenario,
-            'run_id' => $this->run,
-            'connection' => $this->connection,
-            'passed' => $this->checks !== [] && !in_array(false, array_column($this->checks, 'passed'), true),
-            'checks' => $this->checks,
-            'observed' => $this->observed,
-        ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_PARTIAL_OUTPUT_ON_ERROR));
-
-        return self::SUCCESS;
+        return $this->runScenario($log, self::SCENARIOS, fn (string $scenario) => $this->{$scenario}());
     }
 
     private function setup(): int
@@ -119,6 +75,14 @@ final class CompatCommand extends Command
                 $table->integer('cancelled_at')->nullable();
                 $table->integer('created_at');
                 $table->integer('finished_at')->nullable();
+            });
+        }
+        // The notifiables of the queued notification and the models of
+        // `bench:compat-more missing-models`.
+        if (!Schema::hasTable('compat_users')) {
+            Schema::create('compat_users', static function ($table): void {
+                $table->id();
+                $table->string('name');
             });
         }
         $this->line(json_encode(['setup' => 'ok', 'database' => config('database.connections.sqlite.database')]));
@@ -399,18 +363,7 @@ final class CompatCommand extends Command
         foreach ($throwing as $index) {
             $jobs[] = new CompatJob($run, "b{$index}", 'throw');
         }
-        // Three plain closures: serializable-closure cannot serialize a
-        // closure returned by another closure on the same line.
-        return Bus::batch($jobs)
-            ->then(static function (Batch $batch) use ($run): void {
-                app(FailureMatrixLog::class)->record($run, 'batch', null, 'batch_then', 'compat');
-            })
-            ->catch(static function (Batch $batch, Throwable $error) use ($run): void {
-                app(FailureMatrixLog::class)->record($run, 'batch', null, 'batch_catch', 'compat', $error::class);
-            })
-            ->finally(static function (Batch $batch) use ($run): void {
-                app(FailureMatrixLog::class)->record($run, 'batch', null, 'batch_finally', 'compat');
-            })
+        return $this->withBatchCallbacks(Bus::batch($jobs))
             ->onConnection($this->connection)
             ->onQueue($this->queue)
             ->dispatch();
@@ -422,129 +375,5 @@ final class CompatCommand extends Command
     {
         dispatch(CompatPolicyJob::make($this->run, $job, $mode, $sleepMs, $tries, $backoff, $maxExceptions, $timeout, $failOnTimeout, $retryForSeconds)
             ->onConnection($this->connection)->onQueue($this->queue));
-    }
-
-    private function pauseWorkers(): void
-    {
-        if ($this->connection === 'redis') {
-            Artisan::call('horizon:pause');
-            sleep(4);
-
-            return;
-        }
-        Artisan::call('queen:supervisor', ['action' => 'pause']);
-        $this->waitFor(function (): bool {
-            Artisan::call('queen:supervisor', ['action' => 'status', '--json' => true]);
-            $status = json_decode(trim(Artisan::output()), true);
-
-            return is_array($status) && ($status['paused'] ?? false) === true
-                && ($status['process_budget']['active_worker_processes'] ?? 1) === 0;
-        }, 60);
-    }
-
-    private function resumeWorkers(): void
-    {
-        $this->connection === 'redis'
-            ? Artisan::call('horizon:continue')
-            : Artisan::call('queen:supervisor', ['action' => 'continue']);
-    }
-
-    /** @return array<string, string> failed-job id per compat job id of this run */
-    private function failedIds(): array
-    {
-        $ids = [];
-        foreach (app('queue.failer')->all() as $record) {
-            $record = (array) $record;
-            $command = (string) (json_decode((string) ($record['payload'] ?? ''), true)['data']['command'] ?? '');
-            if (str_contains($command, $this->run) && preg_match('/s:5:"jobId";s:\d+:"([^"]+)"/', $command, $match) === 1) {
-                $ids[$match[1]] = (string) ($record['uuid'] ?? $record['id']);
-            }
-        }
-        ksort($ids);
-
-        return $ids;
-    }
-
-    private function mark(string $event): void
-    {
-        $this->log->record($this->run, 'command', null, $event, 'compat');
-    }
-
-    private function waitFor(callable $done, ?int $timeout = null): void
-    {
-        $deadline = microtime(true) + ($timeout ?? (int) $this->option('timeout'));
-        while (!$done()) {
-            if (microtime(true) > $deadline) {
-                throw new RuntimeException('timed out waiting for the workers');
-            }
-            usleep(250_000);
-        }
-    }
-
-    private function settle(int $seconds): void
-    {
-        sleep($seconds);
-    }
-
-    /** @return list<array<string, mixed>> */
-    private function eventsOf(string $job): array
-    {
-        return array_values(array_filter($this->log->read($this->run), static fn (array $e): bool => $e['job_id'] === $job));
-    }
-
-    private function count(string $job, string $event): int
-    {
-        return count(array_filter($this->eventsOf($job), static fn (array $e): bool => $e['event'] === $event));
-    }
-
-    /** @return list<float> */
-    private function times(string $job, string $event): array
-    {
-        return array_values(array_map(static fn (array $e): float => (float) $e['at'],
-            array_filter($this->eventsOf($job), static fn (array $e): bool => $e['event'] === $event)));
-    }
-
-    private function first(string $job, string $event): float
-    {
-        return $this->times($job, $event)[0] ?? 0.0;
-    }
-
-    private function attemptOf(string $job, string $event): int
-    {
-        foreach ($this->eventsOf($job) as $e) {
-            if ($e['event'] === $event) {
-                return (int) $e['attempt'];
-            }
-        }
-
-        return 0;
-    }
-
-    private function exceptionOf(string $job): ?string
-    {
-        foreach ($this->eventsOf($job) as $e) {
-            if ($e['event'] === 'failed_hook') {
-                return $e['exception'];
-            }
-        }
-
-        return null;
-    }
-
-    /** @param list<string> $jobs */
-    private function completedEach(array $jobs): bool
-    {
-        foreach ($jobs as $job) {
-            if ($this->count($job, 'completed') !== 1) {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    private function check(string $name, bool $passed, string $detail = ''): void
-    {
-        $this->checks[] = ['name' => $name, 'passed' => $passed, 'detail' => $detail];
     }
 }
