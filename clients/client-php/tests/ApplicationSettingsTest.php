@@ -14,6 +14,9 @@ final class ApplicationSettingsTest extends TestCase
         $this->assertSame(4, $settings->connectionInteger('prefetch', 1));
         $this->assertTrue($settings->connectionSwitch('lease_renewal', false));
         $this->assertSame(1, $settings->connectionInteger('ack_batch', 1));
+        // Both read integers with filter_var or a signed pattern, so "+8" and " 8 " are 8.
+        $this->assertSame(8, $this->settings(['bulk_batch' => '+8'])->connectionInteger('bulk_batch', 100));
+        $this->assertSame(8, $this->settings(['bulk_batch' => ' 8 '])->connectionInteger('bulk_batch', 100));
         $this->assertSame(
             ['name' => 'prefetch', 'env' => 'QUEEN_PREFETCH', 'value' => '4', 'default' => '1', 'changed' => true, 'invalid' => false],
             array_diff_key($this->row($settings, 'connection', 'prefetch'), ['meaning' => true]),
@@ -54,6 +57,8 @@ final class ApplicationSettingsTest extends TestCase
         $this->assertSame('set', $this->row($settings, 'supervisor', 'read_bearer_token')['value']);
         $this->assertSame('set', $this->row($settings, 'supervisor', 'remote_status.key')['value']);
         $this->assertSame('not set', $this->row($this->settings([]), 'connection', 'bearer_token')['value']);
+        // QueenConnector also reads the client's own spelling.
+        $this->assertSame('set', $this->row($this->settings([], ['bearerToken' => 'tok-c4d2']), 'connection', 'bearer_token')['value']);
     }
 
     public function testEveryBrokerEndpointIsListedWithoutItsCredentials(): void

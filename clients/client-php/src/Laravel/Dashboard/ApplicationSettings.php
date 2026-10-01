@@ -232,7 +232,8 @@ final class ApplicationSettings
         $retryAfter = $this->connectionInteger('retry_after', 90);
         $connectionRows = [
             $this->endpoints($connection),
-            $this->secret('bearer_token', 'QUEEN_BEARER_TOKEN', $connection['bearer_token'] ?? null, 'Credential sent to the broker.'),
+            // QueenConnector also accepts the client's own spelling.
+            $this->secret('bearer_token', 'QUEEN_BEARER_TOKEN', $connection['bearer_token'] ?? $connection['bearerToken'] ?? null, 'Credential sent to the broker.'),
             $this->headers($connection['headers'] ?? []),
         ];
         foreach (self::CONNECTION as $name => $definition) {
@@ -486,13 +487,13 @@ final class ApplicationSettings
         return $scheme . '://' . $host . (isset($parts['port']) ? ':' . (int) $parts['port'] : '');
     }
 
-    /** As the connector and the supervisor accept one: an int, or a string of digits. */
+    /** As the connector and the supervisor accept one: an int, or a string of digits with an optional plus. */
     private static function integerOr(mixed $value, int $default): ?int
     {
         if ($value === null) {
             return $default;
         }
-        if (is_string($value) && preg_match('/^\s*[0-9]{1,18}\s*$/D', $value) === 1) {
+        if (is_string($value) && preg_match('/^\s*\+?[0-9]{1,18}\s*$/D', $value) === 1) {
             return (int) trim($value);
         }
 
