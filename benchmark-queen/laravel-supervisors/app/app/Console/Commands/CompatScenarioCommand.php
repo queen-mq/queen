@@ -104,8 +104,11 @@ abstract class CompatScenarioCommand extends Command
             Artisan::call('queen:supervisor', ['action' => 'status', '--json' => true]);
             $status = json_decode(trim(Artisan::output()), true);
 
+            // A draining worker is still alive for a second or two, and it runs
+            // a job that its last pop returns: wait until none is left.
             return is_array($status) && ($status['paused'] ?? false) === true
-                && ($status['process_budget']['active_worker_processes'] ?? 1) === 0;
+                && ($status['process_budget']['active_worker_processes'] ?? 1) === 0
+                && ($status['process_budget']['draining_worker_processes'] ?? 0) === 0;
         }, 60);
     }
 
