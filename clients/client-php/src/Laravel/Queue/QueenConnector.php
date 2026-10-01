@@ -150,10 +150,10 @@ class QueenConnector implements ConnectorInterface
         }
 
         // Graceful shutdown is a best-effort optimization: correctness falls
-        // back to lease expiry when it fails. Give that final retry ACK one
-        // bounded attempt on the affinity-selected backend, independently of
-        // the ordinary client's retry/failover policy, so WorkerStopping can
-        // never consume the supervisor's entire shutdown grace.
+        // back to lease expiry when it fails. Give that final transaction one
+        // bounded attempt on one backend, independently of the ordinary
+        // client's retry/failover policy, so WorkerStopping can never consume
+        // the supervisor's entire shutdown grace.
         $shutdownClientConfig = $clientConfig;
         $shutdownClientConfig['timeoutMillis'] = self::SHUTDOWN_RELEASE_TIMEOUT_MILLIS;
         $shutdownClientConfig['retryAttempts'] = 1;
@@ -161,17 +161,8 @@ class QueenConnector implements ConnectorInterface
         $shutdownClientConfig['enableFailover'] = false;
         $shutdownClientConfig['retry429'] = ['maxAttempts' => 1, 'baseMs' => 1, 'capMs' => 1];
         $shutdownQueen = null;
-        $shutdownTailReleaser = static function (
-            array $messages,
-            string $group,
-            ?string $affinityKey,
-        ) use (&$shutdownQueen, $shutdownClientConfig): array {
-            $shutdownQueen ??= new Queen($shutdownClientConfig);
-
-            return $shutdownQueen->ack($messages, true, array_filter([
-                'group' => $group,
-                'affinityKey' => $affinityKey,
-            ], static fn (mixed $value): bool => $value !== null));
+        $shutdownClient = static function () use (&$shutdownQueen, $shutdownClientConfig): Queen {
+            return $shutdownQueen ??= new Queen($shutdownClientConfig);
         };
 
         $leaseRenewer = null;
@@ -249,7 +240,7 @@ class QueenConnector implements ConnectorInterface
             popAutopilot: $popAutopilot,
             leaseRenewer: $leaseRenewer,
             failedJobRetryHandler: $this->failedJobRetryHandler,
-            shutdownTailReleaser: $shutdownTailReleaser,
+            shutdownClient: $shutdownClient,
         );
     }
 
