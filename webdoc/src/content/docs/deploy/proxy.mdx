@@ -97,16 +97,25 @@ answers `404`, as if it did not exist.
 | Route | Does |
 | --- | --- |
 | `POST /api/cp/bootstrap` | A tenant, its cluster, an admin and a first API key, in one call |
+| `POST /api/cp/provision` | A tenancy whose user id and key a control plane chose, in one call |
 | `POST /api/cp/tenants` | A tenant |
+| `PUT /api/cp/tenants/:slug/status` | The tenant's status, for all its clusters |
+| `POST /api/cp/tenants/:slug/purge` | The broker's purge of a `deleting` tenant's data |
+| `DELETE /api/cp/tenants/:slug` | Deletes a `deleting` tenant and everything the proxy keeps for it |
+| `GET /api/cp/clusters` | Every cluster, or one plan's |
 | `POST /api/cp/clusters` | A cluster, creating its tenant if needed |
-| `GET /api/cp/clusters/:slug` | A cluster's ids |
+| `GET /api/cp/clusters/:slug` | A cluster's ids, plan, statuses and overrides |
+| `GET /api/cp/clusters/:slug/queues` | The broker's queue listing for one cluster |
+| `POST /api/cp/clusters/:slug/configure` | The broker's queue configuration for one cluster |
 | `PUT /api/cp/clusters/:id/overrides` | Limits above or below the plan for one cluster (`null` clears them) |
 | `PUT /api/cp/clusters/:id/status` | The cluster's status |
 | `GET /api/cp/clusters/:id/usage` | The last hour of metered minutes |
+| `POST /api/cp/activity` | When clusters last had traffic, and what they store |
 | `POST /api/cp/keys` | An API key, from its sha256 hash: the plaintext never reaches the proxy |
 | `DELETE /api/cp/keys/:id` | Revokes a key |
 
-The walkthrough is [multi-tenant](/deploy/multi-tenant).
+Every route is safe to retry. The walkthrough is [multi-tenant](/deploy/multi-tenant), and
+every route's shape is in [the data model](/reference/multi-tenant/tenants#provisioning).
 
 ## Routing
 

@@ -234,8 +234,8 @@ Four things sit outside the guarantee, so nothing here is over-read:
   guarantee needs a dedicated cell.
 - **Not isolation from the operator.** A live operator is admin on every cluster on the
   cell, and whoever holds `QUEEN_PROXY_CP_TOKEN` can create tenants, clusters and API keys
-  through the control plane. Isolation is between tenants, not between a tenant and
-  whoever runs the fleet.
+  through the control plane, list and configure any cluster's queues, and purge and delete
+  a tenant. Isolation is between tenants, not between a tenant and whoever runs the fleet.
 - **Not encryption between tenants.** Payload encryption is per queue with one key per
   broker process, so it protects the stored payloads, not against another tenant, who
   cannot read those messages anyway.

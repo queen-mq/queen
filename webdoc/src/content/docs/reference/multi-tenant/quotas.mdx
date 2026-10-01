@@ -282,7 +282,8 @@ reconciler and pump, so each node's proxy holds its own verdict.
 
 If the broker's response carries no `retainedBytes` field, the quota is simply not
 evaluated that cycle: an existing decision is left alone rather than released on a
-phantom zero. A cluster already over the cap on the very first pass blocks immediately;
+phantom zero. The measured total is what `POST /api/cp/activity` reports as
+`retained_bytes`, `null` until this node has measured the cluster. A cluster already over the cap on the very first pass blocks immediately;
 the release band only ever delays the release side. The measured verdict blocks only when it is
 strictly above the cap; the pre-forward estimate blocks at the cap and therefore permits at most
 the one batch that crosses it.

@@ -315,6 +315,20 @@ impl Registry {
         self.retained.read().unwrap().iter().map(|(id, bytes)| (*id, *bytes)).collect()
     }
 
+    /// One cluster's last measured retained-bytes total (the figure the
+    /// storage quota compares), `None` until the reconciler has measured it
+    /// on this node. Read by the control plane's activity route.
+    pub fn retained_total(&self, cluster_id: Uuid) -> Option<i64> {
+        self.retained.read().unwrap().get(&cluster_id).copied()
+    }
+
+    /// A measured total, as a reconcile pass would publish it (tests of
+    /// the readers).
+    #[cfg(test)]
+    pub(crate) fn set_retained_for_test(&self, cluster_id: Uuid, bytes: i64) {
+        self.retained.write().unwrap().insert(cluster_id, bytes);
+    }
+
     /// Drop a cluster's in-memory queue registry so the next `admit` rebuilds
     /// it from the store, where the soft-delete filter lives.
     ///

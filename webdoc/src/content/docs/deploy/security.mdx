@@ -99,7 +99,8 @@ It serves TLS itself: set `QUEEN_TLS_CERT` and `QUEEN_TLS_KEY`, both PEM paths, 
 speaks HTTPS; set neither and it serves plaintext. Setting exactly one is a boot failure, not a
 downgrade. On the proxy's port, `/metrics` and `/metrics/prometheus` answer only with the
 control-plane token (`x-queen-cp-token`, the value of `QUEEN_PROXY_CP_TOKEN`) and `404` without it,
-and `/api/cp/*` answers `404` altogether when no token is configured.
+and `/api/cp/*` answers `404` altogether when no token is configured. That token provisions,
+purges and deletes tenants, so keep it with the operator.
 
 Where the proxy listens decides what else is exposed. Without `QUEEN_PROXY_PORT`, the proxy fronts
 `PORT` and the broker router has no socket of its own: every request goes through a credential.

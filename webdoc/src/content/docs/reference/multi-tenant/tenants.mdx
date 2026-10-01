@@ -41,8 +41,8 @@ atomic batch as the row, so two nodes can never both win the same value.
 
 | Documents | Holds | Lifecycle |
 | --- | --- | --- |
-| `tenants` | The organisation. `slug` (DNS-label shaped, unique), `name`, `status` | `status`. No route deletes a tenant |
-| `users` | Login identity, scoped to one tenant. Non-unique optional display `name`, globally unique `email`, optional bcrypt `password_hash`, last login time, `is_operator` | No route deletes a user |
+| `tenants` | The organisation. `slug` (DNS-label shaped, unique), `name`, `status` | `status`. `DELETE /api/cp/tenants/:slug` deletes it with everything under it |
+| `users` | Login identity, scoped to one tenant. Non-unique optional display `name`, globally unique `email`, optional bcrypt `password_hash`, last login time, `is_operator` | Deleted only with their tenant |
 | `identities` | One per linked provider (`local`, `google`, `github`) per user, with `verified` | Written by the OAuth sign-in path |
 | `plans` | The limit catalog. `code`, `cell_class`, eleven limit fields, `monthly_msgs_quota`, `features` JSON | Seeded at first boot |
 | `cells` | One Queen deployment. `slug`, `region`, `base_url`, `class`, `cell_secret`, `status`, `capacity_slots`, `used_slots` | Seeded at first boot |
@@ -83,8 +83,8 @@ open.
 payment problem should stop new data arriving, not strand data the tenant has already
 paid to store.
 
-A cluster's status is set with `PUT /api/cp/clusters/:id/status`. No route sets a tenant's
-status.
+A cluster's status is set with `PUT /api/cp/clusters/:id/status`, a tenant's with
+`PUT /api/cp/tenants/:slug/status`.
 
 ## Plans and per-cluster overrides
 
@@ -108,8 +108,9 @@ the proxy enforces, `null` meaning unlimited:
 
 These are the seeds, not a recommendation. No route adds, edits or reassigns a plan: a
 cluster gets its plan when it is created (`plan` on `POST /api/cp/bootstrap` and
-`POST /api/cp/clusters`, default `free`; `QUEEN_PROXY_BOOTSTRAP_PLAN`, default `dev`), and a
-change for one cluster goes through its overrides.
+`POST /api/cp/clusters`, default `free`; required on `POST /api/cp/provision`;
+`QUEEN_PROXY_BOOTSTRAP_PLAN`, default `dev`), and a change for one cluster goes through its
+overrides.
 
 `monthly_msgs_quota` is `null` on **every** seeded plan. Nothing monthly is enforced
 until you set one, which on a seeded plan means a cluster override. The mechanism exists
@@ -156,6 +157,12 @@ The route takes the cluster's id: `GET /api/cp/clusters/acme-prod` returns it (`
 is the cluster provisioned in the next section). A body of `null` or `{}` clears every
 override. Raising one limit for one customer is therefore one call, not a forked plan.
 
+The document is the whole override set, and it is checked before it is stored: its keys are
+the plan's eleven limit names and `monthly_msgs_quota`, each a non-negative integer or
+`null`. Any other key or value is `400 {"code":"invalid"}`, here and on
+`POST /api/cp/provision`, so the last row of the table only describes a document written
+some other way.
+
 ## Provisioning
 
 Provisioning goes through the control plane, `/api/cp/*` on the proxy's port, guarded by
@@ -169,17 +176,34 @@ its next poll.
 | Route | Does |
 | --- | --- |
 | `POST /api/cp/bootstrap` | A tenant, its cluster, an admin and a first API key, in one write |
+| `POST /api/cp/provision` | A tenancy whose ids and key a control plane chose: tenant, cluster, user, role, key and overrides, in one write |
 | `POST /api/cp/tenants` | A tenant, from `{slug, name?}` |
+| `PUT /api/cp/tenants/:slug/status` | `{status}`: `active`, `grace`, `suspended` or `deleting`, for every cluster of the tenant |
+| `POST /api/cp/tenants/:slug/purge` | The broker's own purge, for every cluster of a `deleting` tenant |
+| `DELETE /api/cp/tenants/:slug` | Deletes a `deleting` tenant and everything under it (`?force=true` skips the status check) |
+| `GET /api/cp/clusters` | Every cluster; `?plan=<code>` keeps one plan's |
 | `POST /api/cp/clusters` | Ensures a cluster exists, from `{tenant_slug, tenant_name?, slug, plan?, cell_id?}`, creating the tenant when needed |
-| `GET /api/cp/clusters/:slug` | The cluster's `id`, `tenant_id`, `broker_tenant_uuid` and `slug` |
+| `GET /api/cp/clusters/:slug` | One cluster: its ids, plan, statuses and overrides |
+| `GET /api/cp/clusters/:slug/queues` | The broker's queue listing for the cluster |
+| `POST /api/cp/clusters/:slug/configure` | The broker's `configure` for one of the cluster's queues |
 | `PUT /api/cp/clusters/:id/overrides` | The cluster's limit overrides (`null` clears them) |
 | `PUT /api/cp/clusters/:id/status` | `{status}`: `active`, `push_blocked`, `suspended` or `deleting` |
 | `GET /api/cp/clusters/:id/usage` | The last hour of metered minutes, summed over the nodes |
+| `POST /api/cp/activity` | When each named cluster last had traffic, and how much it stores |
 | `POST /api/cp/keys` | An API key from `{cluster_id, name, key_hash, scopes}`: the plaintext never reaches the proxy |
-| `DELETE /api/cp/keys/:id` | Revokes a key; refuses an unknown or already-revoked one |
+| `DELETE /api/cp/keys/:id` | Revokes a key |
 
-A refused input answers `400 {"code":"invalid"}`, a unique value that is already taken
-`409 {"code":"conflict"}`, and a store that did not answer `503 {"code":"unavailable"}`.
+Every route is safe to retry: a call that already took effect answers success again with
+the same ids, so a control plane that delivers its commands at least once needs no
+bookkeeping of its own for them. A refused input answers `400 {"code":"invalid"}`, a
+unique value that is already taken `409 {"code":"conflict"}`, and a store that did not
+answer `503 {"code":"unavailable"}`. The sections below name the other codes.
+
+The token is checked from the request's head before any of its body is read, and a body
+over 1 MiB is `413 {"code":"payload_too_large"}`. Every slug is read one way: trimmed,
+lowercased, and then it must be a DNS label (`a-z`, `0-9` and `-`, at most 63 characters),
+or the call is `400` before anything is looked up. Tenant and key names are at most 200
+characters and emails at most 254 bytes.
 
 ### One call to onboard
 
@@ -207,23 +231,158 @@ The first tenant of a cell can come from the environment instead, at every boot,
 node, idempotently: `QUEEN_PROXY_BOOTSTRAP_TENANT` and its companions
 ([the bootstrap tenant](/deploy/proxy#the-bootstrap-tenant)).
 
+### A tenancy from a control plane
+
+`POST /api/cp/provision` is for a control plane that owns the identities. It chooses the
+user's id (the `sub` of the sessions it signs) and mints the API key itself, sending only
+the key's sha256:
+
+```bash
+curl -s -X POST http://127.0.0.1:6711/api/cp/provision \
+  -H "x-queen-cp-token: $CP_TOKEN" -H 'Content-Type: application/json' \
+  --data @- <<'EOF'
+{"tenant_slug": "acme", "tenant_name": "Acme Inc", "cluster_slug": "acme", "plan": "free",
+ "user_id": "6f2c1d64-8a3e-4a57-9d1b-2f0c5e7a9b10", "email": "ops@acme.example", "role": "admin",
+ "key_name": "signup", "key_hash": "<sha256 of the key, 64 lowercase hex>",
+ "scopes": ["produce", "consume", "read", "admin"],
+ "overrides": {"max_req_per_sec": 10, "max_retained_bytes": 1073741824}}
+EOF
+```
+
+It ensures, in one atomic write:
+
+- the tenant, by slug, created with `tenant_name` (the slug when absent);
+- the cluster, by slug, created on `plan`. An existing cluster keeps its plan, and a
+  cluster slug that belongs to another tenant is `409`;
+- the user under `user_id`, created, or its email moved to `email` (lowercased). An email
+  that belongs to another user, or a `user_id` of another tenant, is `409`;
+- `role` on the cluster: `admin`, `producer`, `consumer` or `viewer`;
+- the key. A live key of this cluster holding `key_hash` is the one an earlier attempt
+  created, and is kept whatever its name. A hash held by a revoked key or by another
+  cluster's key is `409`;
+- `overrides` as the cluster's whole override document, replacing the old one (`null` or
+  absent is `{}`). Its keys are the plan's eleven limit names and `monthly_msgs_quota`,
+  each a non-negative integer or `null`.
+
+An unknown `plan`, a `key_hash` that is not 64 lowercase hex characters, or any other
+refused field is `400`, and a node that has not seeded its state yet answers `503`. A
+tenant being wiped (status `deleting`) is `409 {"code":"deleting"}`, also when the wipe
+begins while the call runs: the write carries the version of the tenant it read. The
+answer carries `tenant_id`, `cluster_id`, `broker_tenant_uuid`, `user_id`, `key_id`,
+`plan_code`, `overrides` and `created: {tenant, cluster, user, key}`. `plan_code` is the
+cluster's own plan, and each `created` flag says whether this call made that row. A repeat
+answers the same ids with every flag `false` and writes nothing.
+
+### Reading clusters back
+
+`GET /api/cp/clusters/:slug`, and every row of `GET /api/cp/clusters`, carries `id`,
+`slug`, `tenant_id`, `tenant_slug`, `broker_tenant_uuid`, `plan_code`, `status`,
+`tenant_status` and `overrides`. `status` is the cluster's own and `tenant_status` the
+tenant's; the two combine worst-wins, as above. The list is in slug order, and
+`?plan=free` keeps the clusters on that plan. An unknown slug is
+`404 {"code":"cluster_unknown"}`.
+
+### Retiring a tenant
+
+Three calls, in this order, each safe to repeat:
+
+1. `PUT /api/cp/tenants/:slug/status` with `{"status":"deleting"}`. Every cluster of the
+   tenant refuses its data plane (`403 cluster_suspended`) from each node's next cache
+   refresh. The answer is `{ok: true, tenant_id, clusters}`, each cluster as
+   `{id, slug, broker_tenant_uuid}`, and an unknown slug is
+   `404 {"code":"tenant_unknown"}`. Setting the status a tenant already has writes nothing.
+2. `POST /api/cp/tenants/:slug/purge`. For every cluster, the proxy runs the broker's own
+   tenant purge (`DELETE /api/v1/resources/tenant`, which no tenant credential can reach)
+   in-process, for that cluster's `broker_tenant_uuid`: its queues and messages, KV rows,
+   timers, traces and stream queries. It refuses a tenant that is not `deleting`
+   (`409 {"code":"not_deleting"}`) and answers `{existed, done, clusters}`, each cluster as
+   `{slug, broker_tenant_uuid, done, partitions_deleted}`. A cluster is `done` only on a
+   pass the broker confirms that found nothing left to delete, so the pass that deletes
+   answers `done: false` and the next one proves it: repeat the call until `done` is
+   `true`. An answer the broker did not confirm carries an `error`. A cluster the tenant
+   lists whose document is gone keeps the whole call at `done: false`, its id under
+   `missing_clusters`: its broker tenant is unknown. An unknown slug answers
+   `{existed: false, done: true, clusters: []}`.
+3. `DELETE /api/cp/tenants/:slug`. Deletes the tenant and everything the proxy keeps for
+   it: its clusters, users and their identities, roles, API keys, queue rows, usage and
+   audit rows. It refuses a tenant that is not `deleting` (`409 {"code":"not_deleting"}`),
+   and one whose clusters' broker tenants still list a queue
+   (`409 {"code":"not_purged"}`, or `503` when the broker's listing cannot be read);
+   `?force=true` skips both. It answers `{existed: true, clusters}`, each cluster as
+   `{cluster_id, slug, broker_tenant_uuid}`, and `{existed: false, clusters: []}` once the
+   tenant is gone.
+
+The delete does not touch the broker, and the purge does not touch the proxy's documents:
+a tenant deleted without its purge leaves its broker data behind, under a
+`broker_tenant_uuid` the delete's answer is the last place to find.
+
+### Activity
+
+`POST /api/cp/activity` with `{"clusters": ["acme", ...]}`, at most 256 slugs, answers
+`{clusters: [...]}` with one entry per slug, in the order asked:
+
+| Field | Meaning |
+| --- | --- |
+| `slug` | The slug as asked |
+| `found` | Whether a cluster has that slug. Every field below is `null` when none does |
+| `cluster_id` | The cluster's id |
+| `last_activity_at` | The newest minute with traffic of op class `push`, `delivery`, `txn` or `read`, from every node. A rolled-up day whose minutes are already gone counts as its last second |
+| `first_push_at` | The oldest minute still kept with pushed messages |
+| `last_key_used_at` | The newest use of any of the cluster's keys, revoked ones included, recorded at most once a minute per key |
+| `retained_bytes` | The total the storage quota last measured for the cluster on this node |
+
+Times are RFC 3339 in UTC, to the second (`2026-10-01T07:15:00Z`). Missing data is `null`,
+never `0`: a cluster without traffic has no `last_activity_at`, and `retained_bytes` stays
+`null` until the registry has measured the cluster since the node started. A slug that is
+not a DNS label is answered `found: false` like any other unknown one.
+
+### The broker, for one cluster
+
+`GET /api/cp/clusters/:slug/queues` and `POST /api/cp/clusters/:slug/configure` hand their
+request to the broker in-process, with the cluster's `broker_tenant_uuid` as the tenant, and
+pass the broker's answer back as it is: the queue listing (`GET /api/v1/resources/queues`,
+query string included) and a queue's configuration (`POST /api/v1/configure`, the body
+`{queue, options}` unchanged). An unknown slug is `404 {"code":"cluster_unknown"}`: neither
+route creates a cluster. While the cluster or its tenant is `deleting`, `configure` is
+`409 {"code":"deleting"}`, so nothing writes a queue back during a wipe; the listing still
+answers.
+
+Every route that acts on the broker (these two, the purge and the delete's purge check)
+refuses with
+`409 {"code":"system_tenant"}` a cluster bound to the broker's default tenant or to the
+proxy's own, and refuses every cluster while `QUEEN_PROXY_TENANT_HEADER` is off, because
+the clusters' data is then the default tenant's. A tenant a request names is never used:
+the tenant is always the cluster's own.
+
+### Keys, retried
+
+`POST /api/cp/keys` answers `201 {id, existed: false}` for a new key. A hash the cluster
+already holds on a live key answers `200 {id, existed: true}` with that key, whatever its
+name and scopes. A hash held by a revoked key or by another cluster's key is `409`.
+`DELETE /api/cp/keys/:id` answers `{ok: true, already_revoked}`, `true` when the key was
+revoked before, and an unknown id is `404 {"code":"key_unknown"}`.
+
 ### What reaches each operation
 
 | Operation | Reached through | Notes |
 | --- | --- | --- |
-| Create a tenant | `POST /api/cp/tenants`, `POST /api/cp/clusters`, the bootstrap | |
-| Create a cluster | `POST /api/cp/clusters`, the bootstrap | `broker_tenant_uuid` is a fresh random UUID |
-| Create a user | The bootstrap (its admin), the operator Users page, OAuth auto-provisioning | |
+| Create a tenant | `POST /api/cp/tenants`, `POST /api/cp/clusters`, `POST /api/cp/provision`, the bootstrap | |
+| Create a cluster | `POST /api/cp/clusters`, `POST /api/cp/provision`, the bootstrap | `broker_tenant_uuid` is a fresh random UUID |
+| Create a user | The bootstrap (its admin), `POST /api/cp/provision` (under the caller's id), the operator Users page, OAuth auto-provisioning | |
+| Change a user's email | `POST /api/cp/provision` | Refuses an email that belongs to another user |
 | Set a user's display name | The operator Users page | |
 | Record a login | Every successful local or OAuth sign-in | Stores the time and appends its audit row atomically |
 | Set a cluster's status | `PUT /api/cp/clusters/:id/status` | |
-| Set a cluster's overrides | `PUT /api/cp/clusters/:id/overrides` | |
-| Issue an API key | `POST /api/cp/keys`, the console's `POST /api/console/keys`, the bootstrap | `key_hash` must be 64 lowercase hex characters |
-| Revoke an API key | `DELETE /api/cp/keys/:id`, the console's `DELETE /api/console/keys/:id` | Refuses an unknown or already-revoked key |
-| Grant a cluster role | The console's `POST /api/console/members`, the operator Users page, the bootstrap, OAuth auto-provisioning | Refuses a cross-tenant pairing. This is a security boundary, not a convenience check |
+| Set a cluster's overrides | `PUT /api/cp/clusters/:id/overrides`, `POST /api/cp/provision` | |
+| Issue an API key | `POST /api/cp/keys`, `POST /api/cp/provision`, the console's `POST /api/console/keys`, the bootstrap | `key_hash` must be 64 lowercase hex characters |
+| Revoke an API key | `DELETE /api/cp/keys/:id`, the console's `DELETE /api/console/keys/:id` | The console refuses an unknown or already-revoked key; the control plane answers an already-revoked one as done |
+| Grant a cluster role | The console's `POST /api/console/members`, the operator Users page, `POST /api/cp/provision`, the bootstrap, OAuth auto-provisioning | Refuses a cross-tenant pairing. This is a security boundary, not a convenience check |
 | Revoke a cluster role | The console's `DELETE /api/console/members`, the operator Users page | Refuses when there was no grant to remove |
 | Revoke a session | `POST /auth/logout` | The deny-list entry expires with the token |
-| Set a tenant's status, assign a plan, delete a tenant | No route | |
+| Set a tenant's status | `PUT /api/cp/tenants/:slug/status` | |
+| Purge a tenant's broker data | `POST /api/cp/tenants/:slug/purge` | Only a `deleting` tenant |
+| Delete a tenant | `DELETE /api/cp/tenants/:slug` | Only a `deleting` tenant, unless `?force=true` |
+| Assign a plan | No route | |
 | Grant the operator capability | No route | |
 
 No route sets the operator bit, on purpose. The routes an operator may open are
@@ -256,7 +415,7 @@ binary seeds exactly one cell at first boot, `local`, with `base_url` `inprocess
 and no `cell_secret`: the data plane hands each request to the broker router in the same
 process, which runs with its own JWT off, so there is no secret to present. No route
 creates another cell. `POST /api/cp/clusters` takes an optional `cell_id`, which defaults
-to that cell.
+to that cell, and `POST /api/cp/provision` always places a new cluster there.
 
 ### Placement and groups
 
@@ -286,7 +445,9 @@ a `user` actor in the audit trail means a human acted rather than an automation 
 console's second row is best-effort: a failed write does not fail the action it was
 recording.
 
-No route deletes a tenant or a cluster, and no route reads the audit trail back.
+No route reads the audit trail back. A tenant's rows go with the tenant
+(`DELETE /api/cp/tenants/:slug`); the outbox keeps one `tenant_deleted` event with the
+counts, and no copy of the admin's email.
 
 ## Related
 

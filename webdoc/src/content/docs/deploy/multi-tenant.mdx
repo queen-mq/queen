@@ -149,7 +149,9 @@ curl -s -X POST http://127.0.0.1:6711/api/cp/keys \
 ```
 
 The scopes are `produce`, `consume`, `read` and `admin`, and a key needs at least one. The answer
-carries the key's id, which is what `DELETE /api/cp/keys/:id` revokes.
+carries the key's id, which is what `DELETE /api/cp/keys/:id` revokes. Sending the same hash again
+for the same cluster answers that id with `"existed": true` rather than making a second key, so a
+retried call is harmless.
 
 ## Human logins
 

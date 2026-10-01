@@ -304,7 +304,10 @@ curl -s http://127.0.0.1:6711/api/cp/clusters/$CLUSTER_ID/usage \
   -H "x-queen-cp-token: $CP_TOKEN"
 ```
 
-No route returns the daily rows.
+No route returns the daily rows. `POST /api/cp/activity` reads both tables to answer when
+a cluster last had traffic and first pushed: it reads every day row and only the minutes
+no day row covers yet, plus the minutes of the oldest day that pushed
+([activity](/reference/multi-tenant/tenants/#activity)).
 
 ## What metering is not
 

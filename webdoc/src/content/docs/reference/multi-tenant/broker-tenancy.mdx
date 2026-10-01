@@ -147,13 +147,17 @@ tenant-scoped in the generated route table, and every broker registers them.
 ## How the proxy uses it
 
 `QUEEN_PROXY_TENANT_HEADER` defaults to `true`, so the proxy sets the header unless you
-turn it off. Two paths send it:
+turn it off. Three paths send it:
 
 - The data plane, on every request it hands to the broker, with the resolved cluster's
   `broker_tenant_uuid`.
 - The registry reconciler, when it reads `GET /api/v1/resources/queues` for each cluster,
   in-process, to count queues and sum retained bytes. Otherwise it would read the default
   tenant's inventory for every cluster.
+- The control plane's routes that act on the broker for one cluster: a tenant's purge, the
+  queue listing and `configure`
+  ([tenants, clusters and cells](/reference/multi-tenant/tenants/#the-broker-for-one-cluster)).
+  With the switch off they refuse instead of acting on the default tenant.
 
 `GET /healthz` on the proxy reports the live value of the switch as `tenant_header`, so
 a check can assert on the running process rather than on a boot log that outlives it.
