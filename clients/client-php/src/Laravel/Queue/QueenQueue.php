@@ -676,14 +676,12 @@ class QueenQueue extends BaseQueue implements QueueContract
     {
         $wire = [];
         foreach ($this->partitionRepresentatives($messages) as $message) {
-            $message['_status'] = 'retry';
-            $message['_error'] = 'Laravel worker could not track this delivery before its lease ran short.';
-            $wire[] = $message;
+            $wire[] = self::retryWire($message, 'Laravel worker could not track this delivery before its lease ran short.');
         }
         try {
             $result = $this->queen->ack($wire, true, [
                 'group' => $this->consumerGroup,
-                'affinityKey' => "{$queue}:Default:{$this->consumerGroup}",
+                'affinityKey' => $this->affinityKey($queue),
             ]);
             $this->assertBatchAcknowledged($result, count($wire));
         } catch (\Throwable $failure) {
@@ -749,12 +747,7 @@ class QueenQueue extends BaseQueue implements QueueContract
         try {
             $this->assertJobTimeoutIsSafe($job);
         } catch (\Throwable $timeoutFailure) {
-            if ($this->leaseRenewer !== null) {
-                $this->abandonLease($message);
-            } else {
-                $this->discardPrefetchedSiblings($message);
-                $this->markDeliveryHandled($message);
-            }
+            $this->abandonDelivery($message);
             throw $timeoutFailure;
         }
 
@@ -782,7 +775,7 @@ class QueenQueue extends BaseQueue implements QueueContract
         ?string $queue,
     ): void {
         $this->settlePendingAck();
-        $affinityKey = $queue !== null ? "{$queue}:Default:{$group}" : null;
+        $affinityKey = $queue !== null ? $this->affinityKey($queue, $group) : null;
         if (!$failed && $this->ackAsync && $this->sendAckDetached($message, $group, $affinityKey)) {
             return;
         }
@@ -821,12 +814,7 @@ class QueenQueue extends BaseQueue implements QueueContract
 
             $this->assertSuccessful($result, $failed ? 'dead-letter job' : 'acknowledge job');
         } catch (\Throwable $acknowledgementFailure) {
-            if ($this->leaseRenewer !== null) {
-                $this->abandonLease($message);
-            } else {
-                $this->discardPrefetchedSiblings($message);
-                $this->markDeliveryHandled($message);
-            }
+            $this->abandonDelivery($message);
             throw $acknowledgementFailure;
         }
         $this->markDeliveryHandled($message);
@@ -883,11 +871,7 @@ class QueenQueue extends BaseQueue implements QueueContract
             }
             $this->assertSuccessful($result, 'acknowledge job');
         } catch (\Throwable $acknowledgementFailure) {
-            if ($this->leaseRenewer !== null) {
-                $this->abandonLease($pending['message']);
-            } else {
-                $this->discardPrefetchedSiblings($pending['message']);
-            }
+            $this->abandonDelivery($pending['message']);
             $this->reportQuietly(new RuntimeException(
                 'Queen Laravel could not acknowledge a completed job, which will run again after its lease expires: '
                     . $acknowledgementFailure->getMessage(),
@@ -996,12 +980,7 @@ class QueenQueue extends BaseQueue implements QueueContract
         } catch (\Throwable $releaseFailure) {
             // The transaction outcome is ambiguous. Never execute a locally
             // buffered sibling whose partition lease may already have moved.
-            if ($this->leaseRenewer !== null) {
-                $this->abandonLease($message);
-            } else {
-                $this->discardPrefetchedSiblings($message);
-                $this->markDeliveryHandled($message);
-            }
+            $this->abandonDelivery($message);
             throw $releaseFailure;
         }
 
@@ -1312,11 +1291,9 @@ class QueenQueue extends BaseQueue implements QueueContract
         foreach ($this->prefetched as $queue => $state) {
             $unstarted = array_slice($state['messages'], $state['next']);
             foreach ($this->partitionRepresentatives($unstarted) as $message) {
-                $affinityKey = "{$queue}:Default:{$this->consumerGroup}";
+                $affinityKey = $this->affinityKey($queue);
                 $key = json_encode([$this->consumerGroup, $affinityKey], JSON_THROW_ON_ERROR);
-                $wire = $message;
-                $wire['_status'] = 'retry';
-                $wire['_error'] = 'Laravel worker stopped before processing this prefetched delivery.';
+                $wire = self::retryWire($message, 'Laravel worker stopped before processing this prefetched delivery.');
                 $groups[$key][] = [
                     'type' => 'retry',
                     'message' => $message,
@@ -1570,6 +1547,34 @@ class QueenQueue extends BaseQueue implements QueueContract
             fn (array $entry): bool => $this->leaseIdOrNull($entry['message']) !== $leaseId,
         ));
         $this->markDeliveryHandled($message);
+    }
+
+    /**
+     * Give up on a delivery whose outcome is ambiguous: with renewal, the
+     * whole lease; without, the unhandled local siblings of its partition.
+     */
+    private function abandonDelivery(array $message): void
+    {
+        if ($this->leaseRenewer !== null) {
+            $this->abandonLease($message);
+            return;
+        }
+        $this->discardPrefetchedSiblings($message);
+        $this->markDeliveryHandled($message);
+    }
+
+    private function affinityKey(string $queue, ?string $group = null): string
+    {
+        return "{$queue}:Default:" . ($group ?? $this->consumerGroup);
+    }
+
+    /** An unstarted message as a retry ACK entry, with the reason the broker records. */
+    private static function retryWire(array $message, string $reason): array
+    {
+        $message['_status'] = 'retry';
+        $message['_error'] = $reason;
+
+        return $message;
     }
 
     private function leaseId(array $message): string

@@ -155,9 +155,7 @@ class Queen
      */
     public function ack(array|string $message, bool|string $status = true, array $context = []): array
     {
-        $affinityKey = is_string($context['affinityKey'] ?? null) && $context['affinityKey'] !== ''
-            ? $context['affinityKey']
-            : null;
+        $affinityKey = self::affinityKeyOf($context);
 
         // Batch ack
         $isBatch = is_array($message) && (isset($message[0]) || empty($message));
@@ -218,9 +216,7 @@ class Queen
      */
     public function ackDetached(array $message, bool|string $status = true, array $context = []): PromiseInterface
     {
-        $affinityKey = is_string($context['affinityKey'] ?? null) && $context['affinityKey'] !== ''
-            ? $context['affinityKey']
-            : null;
+        $affinityKey = self::affinityKeyOf($context);
 
         return $this->httpClient->postDetached(
             '/api/v1/ack',
@@ -237,6 +233,13 @@ class Queen
     public function settleAck(PromiseInterface $ack, ?int $timeoutMillis = null): array
     {
         return self::ackResult($this->httpClient->settleDetached($ack, $timeoutMillis));
+    }
+
+    private static function affinityKeyOf(array $context): ?string
+    {
+        $affinityKey = $context['affinityKey'] ?? null;
+
+        return is_string($affinityKey) && $affinityKey !== '' ? $affinityKey : null;
     }
 
     private function singleAckBody(array|string $message, bool|string $status, array $context): array
