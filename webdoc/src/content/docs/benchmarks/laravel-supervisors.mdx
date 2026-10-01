@@ -48,6 +48,7 @@ verifiedBy:
   - clients/client-php/tests/SyncedFailedJobProviderLifecycleTest.php
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): coordination, prefork and fast scale-up are opt-in and off in the benchmarked configuration, so the qualification results stand; the supervisor-features section adds the new measurements.
 # sourceOfTruth re-read 2026-10-01 (through f5eb7a39): the Raft dataset README now states the repeat's 70 runs; the Raft section matches it.
+# sourceOfTruth re-read 2026-10-01 (through c97c1ca7): run.sh and fault-recovery.sh only spell their Compose switches through a helper; no option or measurement changes.
 ---
 
 This qualification asks whether Queen can replace the **process control plane** of Laravel
