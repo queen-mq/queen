@@ -19,6 +19,9 @@ sourceOfTruth:
   - clients/client-php/src/Builders/OperationBuilder.php
   - clients/client-php/src/Consumer/HighLevelConsumer.php
   - clients/client-php/src/Http/Retry429Policy.php
+  - clients/client-php/src/Http/HttpClient.php
+  - clients/client-php/src/Http/CurlTransport.php
+  - clients/client-php/src/Http/TransportException.php
   - clients/client-php/src/Exceptions/HttpException.php
   - clients/client-php/src/Exceptions/ErrorCode.php
   - clients/client-php/src/Laravel/QueenServiceProvider.php
@@ -51,6 +54,7 @@ sourceOfTruth:
   - server/src/main.rs
 verifiedBy:
   - clients/client-php/tests/ProcessLeaseRenewerTest.php
+  - clients/client-php/tests/CurlTransportTest.php
   - clients/client-php/tests/SyncedFailedJobProviderLifecycleTest.php
   - clients/client-php/tests/LaravelDashboardTest.php
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
@@ -68,6 +72,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-30 (through 708fd8b2): a skipped event-driven pool now counts as evaluated, and both coordinators expose whether they hold a replica view; no documented behavior changes; page matches the code.
 # sourceOfTruth re-read 2026-10-01 (through the ack_async and pop_ahead hardening): detached requests settle their own connect, a late popped batch is handed back untracked, and a failed detached send falls back to the synchronous ACK; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-01 (through db3f21b0): QueenQueue and Queen only gained private helpers (abandonDelivery, affinityKey, retryWire, affinityKeyOf); no behavior this page states changes.
+# sourceOfTruth re-read 2026-10-01 (through the cURL transport): HttpClient sends synchronous and detached requests over CurlTransport; the Transport subsection and the Errors section say so.
 ---
 
 The Composer package is `queen-mq/php-client`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
@@ -117,6 +122,15 @@ The load-balancing keys are inert with a single URL: the `LoadBalancer` is only 
 the `Retry-After` contract and the jitter are in
 [What the clients do with a 429](/reference/errors#what-the-clients-do-with-a-429).
 `capMs` has a hard 300,000ms ceiling so a single retry sleep remains operationally bounded.
+
+### Transport
+
+With `ext-curl`, every synchronous request, and the detached ACK and pop of the Laravel driver, go
+over the client's own kept-alive cURL handles instead of Guzzle. A pop and an ACK then cost about
+60% less CPU in the worker; retries, failover, timeouts, TLS verification and errors behave as
+before. Guzzle stays for the async API and carries every request when an HTTP proxy variable is set
+(`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` or a lower-case form), when `ext-curl` is missing, or when
+`QUEEN_SDK_HTTP_TRANSPORT=guzzle`.
 
 ## `Queen`
 
@@ -444,7 +458,9 @@ upgrade.
 ## Errors
 
 Non-2xx responses throw `Queen\Exceptions\HttpException`, with `isClusterSuspended()` and
-`isRateLimited()` helpers. The machine-readable codes are constants on
+`isRateLimited()` helpers. A request with no HTTP answer, because the connection failed or timed
+out, throws `Queen\Http\TransportException` on the cURL path; it is a Guzzle `TransferException`,
+like the exceptions of the Guzzle path. The machine-readable codes are constants on
 `Queen\Exceptions\ErrorCode`, one per proxy code listed under
 [Behind the proxy](/reference/errors#behind-the-proxy).
 
