@@ -3,11 +3,12 @@
 return [
     'default' => 'sqlite',
     'connections' => [
-        // The application never queries this database. Keeping a valid default
-        // lets Laravel services resolve without adding a result-store backend.
+        // The benchmark never queries this database. Keeping a valid default
+        // lets Laravel services resolve without adding a result-store backend;
+        // the compatibility lanes point it at a file for batches and afterCommit.
         'sqlite' => [
             'driver' => 'sqlite',
-            'database' => ':memory:',
+            'database' => env('BENCH_DB_DATABASE', ':memory:'),
             'prefix' => '',
             'foreign_key_constraints' => false,
         ],

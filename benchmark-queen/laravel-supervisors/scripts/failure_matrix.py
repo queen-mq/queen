@@ -4,7 +4,7 @@ failure they are meant to survive, each checked for lost jobs, duplicate
 completions and where final failures land.
 
 Usage:
-  failure_matrix.py --output DIR [--scenarios a,b] [--profiles horizon,queen,queen-fast] [--build]
+  failure_matrix.py --output DIR [--scenarios a,b] [--profiles horizon,queen-php,queen-rust] [--build]
 
 Each lane is one scenario on one profile, on a fresh Compose project from
 compose.raft.yml (Redis for Horizon, one Raft broker node for Queen). Jobs are
@@ -37,23 +37,25 @@ class Profile:
     engine: str
     connection: str
     env: dict[str, str]
+    # How the supervisor master shows in `ps`, to find it among its workers.
+    master: str
 
+
+# Close to a production Laravel deployment: one job per pop, renewal by the supervisor.
+PRODUCTION_LIKE = {"QUEEN_PREFETCH": "1", "BENCH_QUEEN_ACK_ASYNC": "false", "BENCH_QUEEN_POP_AHEAD": "false"}
 
 PROFILES = {
-    "horizon": Profile("horizon", "horizon", "redis", {}),
-    # Close to a production Laravel deployment: one job per pop, renewal by the master.
-    "queen": Profile("queen", "queen-rust", "queen", {
-        "QUEEN_PREFETCH": "1",
-        "BENCH_QUEEN_ACK_ASYNC": "false",
-        "BENCH_QUEEN_POP_AHEAD": "false",
-    }),
-    # Every throughput option on.
-    "queen-fast": Profile("queen-fast", "queen-rust", "queen", {
+    "horizon": Profile("horizon", "horizon", "redis", {}, "artisan horizon"),
+    "queen-php": Profile("queen-php", "queen-php", "queen", PRODUCTION_LIKE, "artisan queen:supervise"),
+    "queen-rust": Profile("queen-rust", "queen-rust", "queen", PRODUCTION_LIKE, "queen-supervisor"),
+    # Every throughput option on; not in the default set.
+    "queen-rust-fast": Profile("queen-rust-fast", "queen-rust", "queen", {
         "QUEEN_PREFETCH": "4",
         "BENCH_QUEEN_ACK_ASYNC": "true",
         "BENCH_QUEEN_POP_AHEAD": "true",
-    }),
+    }, "queen-supervisor"),
 }
+DEFAULT_PROFILES = ("horizon", "queen-php", "queen-rust")
 
 
 @dataclass
@@ -125,6 +127,8 @@ class Lane:
         self.output = output
         self.timeline: list[tuple[float, str]] = []
         self.started = time.monotonic()
+        # Scenario-specific observations, saved with the lane's result.
+        self.extra: dict = {}
         self.env = {
             "BENCH_RESULTS_VOLUME": self.volume,
             "BENCH_PROFILE": "fixed",
@@ -173,8 +177,12 @@ class Lane:
     def backend(self) -> str:
         return "redis" if self.profile.engine == "horizon" else "broker"
 
+    def containers(self, service: str) -> list[str]:
+        return self.compose("ps", "--all", "--quiet", service).stdout.split()
+
     def container(self, service: str) -> str:
-        return self.compose("ps", "--all", "--quiet", service).stdout.strip()
+        found = self.containers(service)
+        return found[0] if found else ""
 
     def docker(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["docker", *args], check=check, capture_output=True, text=True, timeout=600)
@@ -182,19 +190,26 @@ class Lane:
     def artisan(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         return self.compose("exec", "--no-TTY", "producer", "php", "artisan", "--no-ansi", *args, check=check)
 
+    def app_artisan(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        """Artisan in the supervisor's own container, beside its workers."""
+        return self.docker("exec", self.container(self.profile.engine), "php", "artisan", "--no-ansi", *args, check=check)
+
     # ---------------------------------------------------------------- lifecycle
 
-    def up(self) -> None:
+    def up(self, replicas: int = 1) -> None:
+        self.replicas = replicas
         self.docker("volume", "create", self.volume)
         self.docker("run", "--rm", "--user", "0:0", "--mount", f"type=volume,src={self.volume},dst=/results",
                     APP_IMAGE, "sh", "-ceu", "chown 1000:1000 /results; chmod 0770 /results")
-        self.compose("up", "--detach", "--no-build", self.profile.engine, "producer")
+        self.compose("up", "--detach", "--no-build", "--scale", f"{self.profile.engine}={replicas}",
+                     self.profile.engine, "producer")
         self.wait_healthy()
         self.wait_workers(int(self.env["BENCH_WORKERS"]))
-        self.note("ready")
+        self.note("ready" if replicas == 1 else f"ready, {replicas} replicas")
 
     def restart_app(self) -> None:
-        self.compose("up", "--detach", "--no-build", self.profile.engine)
+        self.compose("up", "--detach", "--no-build", "--scale", f"{self.profile.engine}={self.replicas}",
+                     self.profile.engine)
         self.wait_healthy()
         self.note("app up again")
 
@@ -205,13 +220,12 @@ class Lane:
     def wait_healthy(self, timeout: float = 180) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            app = self.container(self.profile.engine)
-            if app:
-                state = self.docker("inspect", "--format",
-                                    "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}",
-                                    app, check=False).stdout.strip()
-                if state == "healthy":
-                    return
+            apps = self.containers(self.profile.engine)
+            states = [self.docker("inspect", "--format",
+                                  "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}",
+                                  app, check=False).stdout.strip() for app in apps]
+            if len(apps) >= getattr(self, "replicas", 1) and states and all(s == "healthy" for s in states):
+                return
             time.sleep(1)
         raise RuntimeError(f"{self.profile.engine} did not become healthy")
 
@@ -230,9 +244,8 @@ class Lane:
         return [pid for pid, _, args in self.processes() if needle in args]
 
     def master(self) -> int:
-        needle = "artisan horizon" if self.profile.engine == "horizon" else "queen-supervisor"
         for pid, _, args in self.processes():
-            if needle in args and "horizon:" not in args and pid != 1:
+            if self.profile.master in args and "horizon:" not in args and "sh -c" not in args and pid != 1:
                 return pid
         raise RuntimeError("no supervisor master found")
 
@@ -526,11 +539,171 @@ def dispatch_backend_down(lane: Lane) -> list[Check]:
     ]
 
 
+COMPAT_SCENARIOS = (
+    "delay", "chain", "chain-failure", "batch", "batch-failure", "unique", "without-overlapping",
+    "rate-limited", "backoff-array", "retry-until", "max-exceptions", "fail-on-timeout", "encrypted",
+    "after-commit", "events", "failed-commands", "queue-size",
+)
+
+
+def replicas_kill(lane: Lane) -> list[Check]:
+    """Two supervisor replicas on one queue; one is killed outright, as a node loss would."""
+    expected = ids(0, 40)
+    lane.dispatch("ok", 40, sleep_ms=2_000, tries=3)
+    lane.wait_until(lambda r: sum(r.count(j, "started") for j in expected) >= 3, 60, "jobs started")
+    victim = lane.containers(lane.profile.engine)[0]
+    lane.docker("kill", victim)
+    lane.note(f"replica {victim[:12]} killed (SIGKILL)")
+    jobs = lane.wait_until(lambda r: all(r.count(j, "completed") for j in expected), 300, "all completed")
+    jobs = lane.settle(35)
+    return completed_once(jobs, expected)
+
+
+def replicas_rolling(lane: Lane) -> list[Check]:
+    """A rolling update of two replicas while jobs run: each stops gracefully, then starts again."""
+    expected = ids(0, 60)
+    lane.dispatch("ok", 60, sleep_ms=1_000, tries=3)
+    lane.wait_until(lambda r: sum(r.count(j, "started") for j in expected) >= 3, 60, "jobs started")
+    for replica in lane.containers(lane.profile.engine):
+        lane.docker("stop", "--time", "90", replica)
+        lane.note(f"replica {replica[:12]} stopped (SIGTERM)")
+        lane.docker("start", replica)
+        lane.wait_healthy()
+        lane.note(f"replica {replica[:12]} started again")
+    jobs = lane.wait_until(lambda r: all(r.count(j, "completed") for j in expected), 300, "all completed")
+    jobs = lane.settle(10)
+    return [
+        Check("jobs that ran twice (information)", True,
+              f"{sum(1 for j in expected if jobs.count(j, 'started') > 1)} of {len(expected)}"),
+        *completed_once(jobs, expected),
+    ]
+
+
+SOAK_SECONDS = int(os.environ.get("MATRIX_SOAK_SECONDS", "2700"))
+SOAK_RATE = int(os.environ.get("MATRIX_SOAK_RATE", "5"))
+
+
+def memory_sample(lane: Lane, elapsed: float) -> dict:
+    """The master's and the workers' resident memory, in MiB."""
+    master_rss, workers = None, []
+    for container in lane.containers(lane.profile.engine):
+        rows = lane.docker("exec", container, "ps", "-eo", "rss=,args=", check=False).stdout.splitlines()
+        for row in rows:
+            parts = row.strip().split(None, 1)
+            if len(parts) != 2 or not parts[0].isdigit():
+                continue
+            rss, args = int(parts[0]) / 1024, parts[1]
+            if ("horizon:work" if lane.profile.engine == "horizon" else "artisan queue:work") in args:
+                workers.append(rss)
+            elif lane.profile.master in args and "horizon:" not in args and "sh -c" not in args:
+                master_rss = rss
+    workers.sort()
+    return {"t": round(elapsed), "master_rss_mib": master_rss, "workers": len(workers),
+            "worker_rss_median_mib": workers[len(workers) // 2] if workers else None}
+
+
+def growth(samples: list[dict], key: str) -> tuple[float | None, float | None]:
+    """Median of the first third against the last third of a series."""
+    values = [s[key] for s in samples if s.get(key) is not None]
+    if len(values) < 6:
+        return None, None
+    third = len(values) // 3
+    first, last = sorted(values[:third]), sorted(values[-third:])
+    return first[len(first) // 2], last[len(last) // 2]
+
+
+def soak(lane: Lane) -> list[Check]:
+    """A long mixed workload: a worker killed every 10 minutes, one rolling restart halfway,
+    then every job must end as its kind says, and memory must stay flat."""
+    command = ["docker", "compose", "--file", str(COMPOSE_FILE), "--project-name", lane.project,
+               "--profile", lane.profile.engine, "--profile", "tools", "exec", "--no-TTY", "producer",
+               "php", "artisan", "--no-ansi", "bench:matrix-soak", f"--run-id={lane.run_id}",
+               f"--seconds={SOAK_SECONDS}", f"--rate={SOAK_RATE}"]
+    dispatcher = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                  env={**os.environ, **lane.env})
+    lane.note(f"dispatching {SOAK_RATE} jobs/s for {SOAK_SECONDS} s")
+    started, next_kill, restarted, samples = time.monotonic(), 600.0, False, []
+    while dispatcher.poll() is None:
+        elapsed = time.monotonic() - started
+        samples.append(memory_sample(lane, elapsed))
+        if elapsed >= next_kill:
+            victims = lane.workers()
+            if victims:
+                lane.docker("exec", lane.container(lane.profile.engine), "kill", "-KILL", str(victims[0]), check=False)
+                lane.note(f"SIGKILL worker {victims[0]}")
+            next_kill += 600
+        if not restarted and elapsed >= SOAK_SECONDS / 2:
+            app = lane.container(lane.profile.engine)
+            lane.docker("stop", "--time", "90", app)
+            lane.note("rolling restart: stopped (SIGTERM)")
+            lane.docker("start", app)
+            lane.wait_healthy()
+            lane.note("rolling restart: started again")
+            restarted = True
+        time.sleep(60)
+    out, err = dispatcher.communicate()
+    dispatched = json.loads(out.strip().splitlines()[-1]) if out.strip() else {"error": err[-500:]}
+    lane.note(f"dispatch done: {dispatched}")
+
+    def summary() -> dict:
+        return json.loads(lane.artisan("bench:matrix-report", lane.run_id, "--summary").stdout)
+
+    deadline, report = time.monotonic() + 900, summary()
+    while time.monotonic() < deadline and any(
+        anomaly.startswith("not ") for kind in report["summary"].values() for anomaly in kind["anomalies"].values()
+    ):
+        time.sleep(15)
+        report = summary()
+    lane.note("drained")
+    lane.extra.update({"dispatched": dispatched, "summary": report, "memory": samples})
+
+    checks = []
+    total = sum(kind["jobs"] for kind in report["summary"].values())
+    checks.append(Check("every dispatched job was seen by a worker", total == dispatched.get("dispatched"),
+                        f"{total} of {dispatched.get('dispatched')}"))
+    for name, kind in report["summary"].items():
+        checks.append(Check(f"{name} jobs ended as expected", kind["as_expected"] == kind["jobs"],
+                            f"{kind['as_expected']} of {kind['jobs']}; {dict(list(kind['anomalies'].items())[:5])}"))
+    bad = report["summary"].get("bad", {}).get("jobs", 0)
+    checks.append(Check("one failed-job row per permanent failure", report["failed_store"] == bad,
+                        f"{report['failed_store']} rows, {bad} bad jobs"))
+    if lane.profile.connection == "queen":
+        checks.append(Check("one dead-letter entry per permanent failure", report["dead_letter"] == bad,
+                            f"{report['dead_letter']} entries"))
+    for key, limit in (("master_rss_mib", 0.25), ("worker_rss_median_mib", 0.30)):
+        first, last = growth(samples, key)
+        checks.append(Check(f"{key.replace('_', ' ')} stays flat", first is None or last <= first * (1 + limit) + 8,
+                            f"{first} → {last} MiB (first third → last third)"))
+    return checks
+
+
+def laravel_compat(lane: Lane) -> list[Check]:
+    """Laravel's queue features, each checked by `bench:compat` inside the supervisor's
+    container: the workers there share its SQLite file and file cache."""
+    lane.docker("exec", lane.container(lane.profile.engine), "touch", "/tmp/compat.sqlite")
+    lane.app_artisan("bench:compat", "setup")
+    checks: list[Check] = []
+    for name in COMPAT_SCENARIOS:
+        result = lane.app_artisan("bench:compat", name, f"--run-id={lane.run_id}-{name}", check=False)
+        lines = [line for line in result.stdout.splitlines() if line.startswith("{")]
+        try:
+            data = json.loads(lines[-1])
+        except (IndexError, json.JSONDecodeError):
+            checks.append(Check(f"{name}: ran", False, (result.stderr or result.stdout).strip()[-300:]))
+            lane.note(f"{name}: no result")
+            continue
+        lane.extra[name] = data
+        checks.extend(Check(f"{name}: {c['name']}", c["passed"], c["detail"]) for c in data["checks"])
+        lane.note(f"{name}: {'pass' if data['passed'] else 'FAIL'}")
+    return checks
+
+
 @dataclass(frozen=True)
 class Scenario:
     name: str
     run: Callable[[Lane], list[Check]]
     env: dict[str, str] = field(default_factory=dict)
+    replicas: int = 1
 
 
 SCENARIOS = [
@@ -549,6 +722,13 @@ SCENARIOS = [
     Scenario("pause-short", pause_short),
     Scenario("pause-long", pause_long),
     Scenario("dispatch-backend-down", dispatch_backend_down),
+    Scenario("replicas-kill", replicas_kill, {"BENCH_QUEEN_COORDINATION": "true"}, replicas=2),
+    Scenario("replicas-rolling", replicas_rolling, {"BENCH_QUEEN_COORDINATION": "true"}, replicas=2),
+    Scenario("soak", soak, {"BENCH_WORKERS": "8", "BENCH_MIN_WORKERS": "8", "BENCH_MAX_WORKERS": "8"}),
+    Scenario("laravel-compat", laravel_compat, {
+        "BENCH_CACHE_STORE": "file", "BENCH_DB_DATABASE": "/tmp/compat.sqlite",
+        "BENCH_WORKERS": "3", "BENCH_MIN_WORKERS": "3", "BENCH_MAX_WORKERS": "3",
+    }),
 ]
 
 
@@ -557,11 +737,12 @@ def run_lane(scenario: Scenario, profile: Profile, output: Path) -> dict:
     print(f"\n== {scenario.name} / {profile.name} ({lane.project})", flush=True)
     result: dict = {"scenario": scenario.name, "profile": profile.name, "run_id": lane.run_id}
     try:
-        lane.up()
+        lane.up(scenario.replicas)
         checks = scenario.run(lane)
         result["checks"] = [check.__dict__ for check in checks]
         result["passed"] = all(check.passed for check in checks)
         result["report"] = lane.report().raw
+        result["extra"] = lane.extra
     except Exception as error:  # a lane that cannot finish is a failed lane, not a crashed matrix
         result["passed"] = False
         result["error"] = f"{type(error).__name__}: {error}"
@@ -596,7 +777,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--scenarios", default=",".join(s.name for s in SCENARIOS))
-    parser.add_argument("--profiles", default=",".join(PROFILES))
+    parser.add_argument("--profiles", default=",".join(DEFAULT_PROFILES))
     parser.add_argument("--build", action="store_true", help="rebuild the application image first")
     args = parser.parse_args()
 

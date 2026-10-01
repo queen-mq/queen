@@ -6,7 +6,12 @@ x-app-environment: &app-environment
   APP_DEBUG: "false"
   APP_KEY: base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
   LOG_CHANNEL: stderr
-  CACHE_STORE: array
+  # The Laravel compatibility lanes need a cache and a database shared by the
+  # processes of one container: a file cache and an SQLite file.
+  CACHE_STORE: ${BENCH_CACHE_STORE:-array}
+  BENCH_DB_DATABASE: ${BENCH_DB_DATABASE:-:memory:}
+  # Several supervisor replicas share one target through the broker.
+  QUEEN_SUPERVISOR_COORDINATION: ${BENCH_QUEEN_COORDINATION:-false}
   SESSION_DRIVER: array
   BENCH_PROFILE: ${BENCH_PROFILE:-fixed}
   BENCH_QUEUE: ${BENCH_QUEUE:-benchmark}

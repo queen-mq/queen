@@ -13,7 +13,8 @@ use Throwable;
 final class FailureMatrixReportCommand extends Command
 {
     protected $signature = 'bench:matrix-report {run-id}
-        {--queue= : Queue name; defaults to BENCH_QUEUE}';
+        {--queue= : Queue name; defaults to BENCH_QUEUE}
+        {--summary : Judge each soak job by its kind instead of listing its events}';
 
     protected $description = 'Print a failure-matrix run as one JSON object';
 
@@ -32,6 +33,16 @@ final class FailureMatrixReportCommand extends Command
         }
         unset($job);
         ksort($jobs);
+        if ($this->option('summary')) {
+            $this->line(json_encode([
+                'run_id' => $runId,
+                'summary' => $this->summary($jobs),
+                'failed_store' => count($this->failedStore($runId)['job_ids'] ?? []),
+                'dead_letter' => $this->deadLetter($runId)['entries'] ?? null,
+            ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
+
+            return self::SUCCESS;
+        }
 
         $this->line(json_encode([
             'run_id' => $runId,
@@ -44,6 +55,44 @@ final class FailureMatrixReportCommand extends Command
         return self::SUCCESS;
     }
 
+    /**
+     * Soak jobs by kind: `bad-` must fail once and never complete; every other
+     * kind must complete exactly once and never fail.
+     *
+     * @param array<string, array{events: list<array>, pids: list<int>}> $jobs
+     * @return array<string, mixed>
+     */
+    private function summary(array $jobs): array
+    {
+        $kinds = [];
+        foreach ($jobs as $id => $job) {
+            $kind = explode('-', (string) $id)[0];
+            $count = static fn (string $event): int => count(array_filter($job['events'], static fn (array $e): bool => $e[0] === $event));
+            $completed = $count('completed');
+            $failed = $count('failed_hook');
+            $kinds[$kind] ??= ['jobs' => 0, 'as_expected' => 0, 'attempts' => 0, 'anomalies' => []];
+            $kinds[$kind]['jobs']++;
+            $kinds[$kind]['attempts'] += $count('started');
+            $anomaly = match (true) {
+                $kind === 'bad' && $failed === 1 && $completed === 0 => null,
+                $kind === 'bad' && $failed === 0 => 'not failed yet',
+                $kind === 'bad' => "failed {$failed}, completed {$completed}",
+                $completed === 1 && $failed === 0 => null,
+                $completed === 0 && $failed === 0 => 'not completed yet',
+                $completed > 1 => "completed {$completed} times",
+                default => "completed {$completed}, failed {$failed}",
+            };
+            if ($anomaly === null) {
+                $kinds[$kind]['as_expected']++;
+            } elseif (count($kinds[$kind]['anomalies']) < 20) {
+                $kinds[$kind]['anomalies'][$id] = $anomaly;
+            }
+        }
+        ksort($kinds);
+
+        return $kinds;
+    }
+
     /** @return array{available: bool, job_ids?: list<string>, error?: string} */
     private function failedStore(string $runId): array
     {
@@ -52,7 +101,7 @@ final class FailureMatrixReportCommand extends Command
             foreach (app('queue.failer')->all() as $record) {
                 $payload = (string) (is_array($record) ? ($record['payload'] ?? '') : ($record->payload ?? ''));
                 $command = (string) (json_decode($payload, true)['data']['command'] ?? '');
-                if (str_contains($command, $runId) && preg_match('/s:5:"jobId";s:\d+:"(\d+)"/', $command, $match)) {
+                if (str_contains($command, $runId) && preg_match('/s:5:"jobId";s:\d+:"([^"]+)"/', $command, $match)) {
                     $ids[] = $match[1];
                 }
             }

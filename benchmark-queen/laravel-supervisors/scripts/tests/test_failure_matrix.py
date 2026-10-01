@@ -27,7 +27,7 @@ def report(jobs: dict[str, list[str]], failed: list[str] | None = None, dead_let
 
 class FakeLane:
     def __init__(self, connection: str) -> None:
-        self.profile = matrix.Profile("p", "e", connection, {})
+        self.profile = matrix.Profile("p", "e", connection, {}, "master")
 
 
 class FailureMatrixChecksTest(unittest.TestCase):
@@ -110,7 +110,8 @@ class FailureMatrixChecksTest(unittest.TestCase):
         names = [s.name for s in matrix.SCENARIOS]
 
         self.assertEqual(len(names), len(set(names)))
-        self.assertEqual({"horizon", "queen", "queen-fast"}, set(matrix.PROFILES))
+        self.assertEqual({"horizon", "queen-php", "queen-rust", "queen-rust-fast"}, set(matrix.PROFILES))
+        self.assertEqual(("horizon", "queen-php", "queen-rust"), matrix.DEFAULT_PROFILES)
 
 
 if __name__ == "__main__":
