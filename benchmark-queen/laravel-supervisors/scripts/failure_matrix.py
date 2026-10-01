@@ -263,12 +263,13 @@ class Lane:
     # ---------------------------------------------------------------- jobs
 
     def dispatch(self, mode: str, jobs: int, *, first: int = 0, sleep_ms: int = 0, tries: int = 1,
-                 backoff: int = 0, timeout: int = 60, allocate_mib: int = 0,
+                 backoff: int = 0, timeout: int = 60, allocate_mib: int = 0, partition: str = "",
                  check: bool = True) -> subprocess.CompletedProcess[str]:
         result = self.artisan(
             "bench:matrix-dispatch", f"--run-id={self.run_id}", f"--mode={mode}", f"--jobs={jobs}",
             f"--first={first}", f"--sleep-ms={sleep_ms}", f"--tries={tries}", f"--backoff={backoff}",
-            f"--timeout={timeout}", f"--allocate-mib={allocate_mib}", check=check,
+            f"--timeout={timeout}", f"--allocate-mib={allocate_mib}",
+            *([f"--partition={partition}"] if partition else []), check=check,
         )
         self.note(f"dispatched {jobs} x {mode} (exit {result.returncode})")
         return result
@@ -475,6 +476,27 @@ def stop_long(lane: Lane) -> list[Check]:
     jobs = lane.settle(10)
     return [
         Check("attempts per job (information)", True, "; ".join(f"{j}: {jobs.count(j, 'started')}" for j in expected)),
+        *completed_once(jobs, expected),
+    ]
+
+
+def stop_long_batch(lane: Lane) -> list[Check]:
+    """One worker, two long jobs in one Queen partition: with prefetch, one pop leases both and the
+    worker runs the second from its batch. A deploy kills it during the second job. The first job
+    finished before the deploy, so it must not run again: its ACK must have reached the backend."""
+    expected = ids(0, 2)
+    lane.dispatch("ok", 2, sleep_ms=60_000, timeout=120, tries=3, partition="matrix-batch")
+    lane.wait_until(lambda r: r.count("000000", "completed") and r.count("000001", "started"), 150,
+                    "first done, second started")
+    lane.docker("stop", "--time", "90", lane.container(lane.profile.engine))
+    lane.note("app stopped (SIGTERM, 90 s grace)")
+    lane.restart_app()
+    jobs = lane.wait_until(lambda r: all(r.count(j, "completed") for j in expected), 360, "all completed")
+    jobs = lane.settle(10)
+    return [
+        Check("attempts per job (information)", True, "; ".join(f"{j}: {jobs.count(j, 'started')}" for j in expected)),
+        Check("the job done before the deploy ran once", jobs.count("000000", "started") == 1,
+              f"{jobs.count('000000', 'started')} starts"),
         *completed_once(jobs, expected),
     ]
 
@@ -736,6 +758,9 @@ SCENARIOS = [
     Scenario("stop-short", stop_short),
     # Horizon has no lease renewal: its retry_after must outlast the job.
     Scenario("stop-long", stop_long, {"BENCH_RETRY_AFTER": "90"}),
+    Scenario("stop-long-batch", stop_long_batch, {
+        "BENCH_RETRY_AFTER": "90", "BENCH_WORKERS": "1", "BENCH_MIN_WORKERS": "1", "BENCH_MAX_WORKERS": "1",
+    }),
     Scenario("backend-restart", backend_restart),
     Scenario("pause-short", pause_short),
     Scenario("pause-long", pause_long),

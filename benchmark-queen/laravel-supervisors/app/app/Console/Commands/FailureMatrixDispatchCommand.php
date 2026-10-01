@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Jobs\FailureMatrixJob;
+use App\Jobs\FailureMatrixPartitionedJob;
 use Illuminate\Console\Command;
 use InvalidArgumentException;
 
@@ -19,7 +20,8 @@ final class FailureMatrixDispatchCommand extends Command
         {--timeout=60 : The job\'s $timeout, seconds}
         {--allocate-mib=0 : Memory the memory mode keeps}
         {--connection= : Queue connection; defaults to BENCH_CONNECTION}
-        {--queue= : Queue name; defaults to BENCH_QUEUE}';
+        {--queue= : Queue name; defaults to BENCH_QUEUE}
+        {--partition= : Put every job in this Queen partition, so one pop leases them together}';
 
     protected $description = 'Dispatch failure-matrix jobs, one push each';
 
@@ -34,8 +36,14 @@ final class FailureMatrixDispatchCommand extends Command
         $queue = (string) ($this->option('queue') ?: config('benchmark.queue'));
         $first = $this->integer('first', 0, 1_000_000);
         $jobs = $this->integer('jobs', 1, 100_000);
+        $partition = (string) $this->option('partition');
+        if ($partition !== '' && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $partition) !== 1) {
+            throw new InvalidArgumentException('--partition: 1..128 letters, digits, dot, underscore, colon or dash.');
+        }
         for ($index = $first; $index < $first + $jobs; ++$index) {
-            FailureMatrixJob::dispatch(
+            $job = $partition === '' ? FailureMatrixJob::class : FailureMatrixPartitionedJob::class;
+            $job::dispatch(
+                ...($partition === '' ? [] : ['partition' => $partition]),
                 runId: $runId,
                 jobId: sprintf('%06d', $index),
                 mode: $mode,

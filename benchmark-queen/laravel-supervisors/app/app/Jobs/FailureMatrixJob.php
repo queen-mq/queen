@@ -21,7 +21,7 @@ use Throwable;
  * - `memory`: grows the worker to `allocateMib` MiB in use and keeps it for the
  *   worker's life, then succeeds; above PHP's memory_limit the attempt dies.
  */
-final class FailureMatrixJob implements ShouldQueue
+class FailureMatrixJob implements ShouldQueue
 {
     use Queueable;
 
