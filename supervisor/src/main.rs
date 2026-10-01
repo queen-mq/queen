@@ -3437,8 +3437,19 @@ fn record_worker_exit(
         );
         return;
     }
+    // Backoff is for short-lived exits. A worker that ran this long is not
+    // crash-looping: queue:work exits 12 at --memory, and a job timeout kills
+    // the worker.
     if !worker.restart_probe && uptime >= Duration::from_secs(options.stable_after) {
         restart.record_healthy();
+        eprintln!(
+            "[{}:{}] pid={} exited with {status} after {:.3}s; restarting",
+            key.0,
+            key.1,
+            worker.child.id(),
+            uptime.as_secs_f64(),
+        );
+        return;
     }
     let (delay, circuit_open) = restart.record_failure(options, Instant::now());
     eprintln!(
@@ -4533,6 +4544,49 @@ mod tests {
         );
         assert_eq!(successful_guard.state_name(), "closed");
         assert_eq!(successful_guard.consecutive_failures, 0);
+    }
+
+    /// queue:work exits 12 at --memory, and a job timeout kills the worker:
+    /// routine for a worker that ran for a while, and no reason to hold its
+    /// pool at one probe for stable_after.
+    #[cfg(unix)]
+    #[test]
+    fn a_long_lived_workers_exit_is_not_a_crash() {
+        let options = options("auto");
+        let key = ("default".to_owned(), "high".to_owned());
+        let Some(long_ago) =
+            Instant::now().checked_sub(Duration::from_secs(options.stable_after + 1))
+        else {
+            // A host up for less than a minute cannot date such a worker.
+            return;
+        };
+        let (memory_limit, exited_12) = exited_worker(12, false);
+        let mut killed_child = Command::new("/bin/sh")
+            .args(["-c", "kill -9 $$"])
+            .spawn()
+            .unwrap();
+        let killed_status = killed_child.wait().unwrap();
+        let timed_out = Worker::new(killed_child, false);
+
+        for (mut worker, status) in [(memory_limit, exited_12), (timed_out, killed_status)] {
+            worker.started_at = long_ago;
+            let mut guard = RestartGuard::default();
+            record_worker_exit(&key, &worker, status, &options, &mut guard);
+            assert_eq!(
+                guard.state_name(),
+                "closed",
+                "{status} after a minute throttled the pool"
+            );
+            assert_eq!(
+                guard.spawn_permission(Instant::now()),
+                SpawnPermission::Normal
+            );
+        }
+
+        let (failed_at_once, status) = exited_worker(1, false);
+        let mut guard = RestartGuard::default();
+        record_worker_exit(&key, &failed_at_once, status, &options, &mut guard);
+        assert_eq!(guard.state_name(), "backoff");
     }
 
     #[cfg(unix)]
