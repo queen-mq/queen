@@ -73,6 +73,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): the config/queen.php pop_ahead comment states the full-batch rule; nothing this page describes changes.
 # sourceOfTruth re-read 2026-10-02 (through 79204459 + this patch): adds the Retry now button of the failed-job detail, the In the queue now card of the Workload page with QUEEN_DASHBOARD_CONSOLE_URL, and the tuning advice and settings of the Configuration page; SupervisorConfiguration's refused-URL error no longer repeats credentials; page matches the code.
 # sourceOfTruth re-read 2026-10-02 (through ad0f816b + this patch): SupervisorState gains the workers' exit markers, and the provider registers their listener and gives job metrics and tags a bounded client; the restart and circuit state the panel shows, and its reads, are unchanged.
+# sourceOfTruth re-read 2026-10-02 (screenshots): three screenshots of the real dashboard, taken during a benchmark workload on the release candidate, show the queue card, a failed job with Retry now and the tuning advice; the text is unchanged.
 ---
 
 The Laravel panel answers one question: **what is this application's Queen supervisor doing?** It
@@ -234,6 +235,12 @@ group, the jobs waiting for a worker, the jobs running now, and how long the old
 has been in the queue, waiting or running. It is a summary, not a list of jobs: the Queen console
 browses the messages themselves.
 
+<Screenshot
+  src="laravel-dashboard-queue-now"
+  alt="The In the queue now card of the Workload page: one row for the queue benchmark of the consumer group benchmark, with 399 jobs waiting, 4 running and the oldest unfinished job under a minute old, read from the broker."
+  caption="The real dashboard during a benchmark workload on a Raft broker: four workers, a backlog of short jobs."
+/>
+
 | Column | Read from the broker |
 | --- | --- |
 | Waiting | `ready` of the consumer group's depth, [`GET /api/v1/resources/queues/:queue/depth`](/reference/http/queues#get-apiv1resourcesqueuesqueuedepth) |
@@ -325,6 +332,12 @@ positions: a new failure or a retry while you read an older page shifts that pag
 
 ### Why a job failed
 
+<Screenshot
+  src="laravel-dashboard-failed-job"
+  alt="A failed-job page: a RuntimeException of App Jobs FailureMatrixJob on the queue benchmark, with its ID, connection, maximum tries 1 and timeout 60 s, the message under Why it failed, a collapsed stack trace, the Retry now button and the From a terminal command."
+  caption="The real failed-job page of a benchmark job that throws on purpose. Retry now runs queue:retry for this job."
+/>
+
 Each row of the failed-jobs page ends with an arrow and opens that job in a drawer beside the
 list; **Open as page** shows the same detail at `/queen/failed-jobs/{id}`, which is also where the
 row leads without JavaScript. Automatic refresh pauses while the drawer is open. The detail shows
@@ -356,6 +369,12 @@ The Configuration page opens with **Tuning advice**. It reads this application's
 running supervisor published, the failed-job count and the last hour of
 [job metrics](/use/laravel/monitoring#jobs-per-class). Each item has a severity, the evidence, what
 to do and a **Read more** link to these pages. When nothing calls for a change, the page says so.
+
+<Screenshot
+  src="laravel-dashboard-tuning"
+  alt="The Tuning advice card of the Configuration page with two items: a warning that deploys interrupt App Jobs FailureMatrixJob, because its longest run in the last hour took 45 s while shutdown_grace is 35 s, with what to do; and an info item for 6 failed jobs, with links to the failed jobs and to these pages."
+  caption="Advice computed from the running supervisor and the last hour of job metrics, during a benchmark workload."
+/>
 
 | Severity | Advice when |
 | --- | --- |
