@@ -6,7 +6,9 @@ use Illuminate\Console\Command;
 use Illuminate\Queue\Console\WorkCommand;
 use Queen\Laravel\Supervisor\Prefork\ForkServer;
 use Queen\Laravel\Supervisor\WorkerTelemetry;
+use Symfony\Component\Console\Command\Command as SymfonyCommand;
 use Symfony\Component\Console\Input\ArgvInput;
+use Symfony\Component\Console\Output\OutputInterface;
 
 /**
  * Started by a Queen supervisor master with prefork enabled; see ForkServer.
@@ -48,9 +50,35 @@ class ForkServerCommand extends Command
         return (new ForkServer(
             STDIN,
             $events,
-            fn (array $argv): int => $work->run(new ArgvInput(['artisan', ...$argv]), $this->output),
+            fn (array $argv): int => $this->runWorker($work, $argv),
             fn () => $this->forgetInheritedConnections(),
         ))->serve();
+    }
+
+    /**
+     * Run queue:work in a forked child, with the verbosity its arguments ask
+     * for. Symfony applies --quiet and -v in Application::run(), which a
+     * forked worker never goes through: without this, a pool configured
+     * quiet printed two lines for every job.
+     *
+     * @param list<string> $argv
+     */
+    private function runWorker(SymfonyCommand $work, array $argv): int
+    {
+        $input = new ArgvInput(['artisan', ...$argv]);
+        $verbosity = match (true) {
+            $input->hasParameterOption(['--quiet', '-q'], true) => OutputInterface::VERBOSITY_QUIET,
+            $input->hasParameterOption('-vvv', true) => OutputInterface::VERBOSITY_DEBUG,
+            $input->hasParameterOption('-vv', true) => OutputInterface::VERBOSITY_VERY_VERBOSE,
+            $input->hasParameterOption(['-v', '--verbose'], true) => OutputInterface::VERBOSITY_VERBOSE,
+            default => null,
+        };
+        if ($verbosity !== null) {
+            // The child's own copy of the server's output.
+            $this->output->setVerbosity($verbosity);
+        }
+
+        return $work->run($input, $this->output);
     }
 
     /**
