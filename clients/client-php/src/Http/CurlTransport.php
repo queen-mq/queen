@@ -23,6 +23,14 @@ final class CurlTransport
     /** The longest single wait for a detached answer, so deadlines stay prompt. */
     private const SELECT_SECONDS = 0.25;
 
+    /**
+     * curl_multi_select() returns at once when libcurl has no socket to
+     * watch, for instance while it resolves a name; such a wait sleeps from
+     * 50 µs, doubling to 1 ms, instead of spinning.
+     */
+    private const IDLE_MIN_MICROS = 50;
+    private const IDLE_MAX_MICROS = 1_000;
+
     private ?\CurlHandle $handle = null;
 
     private ?\CurlMultiHandle $multi = null;
@@ -100,6 +108,7 @@ final class CurlTransport
         $deadline = hrtime(true) + $timeoutMillis * 1_000_000;
         // An answer that already arrived is taken even with no time left.
         $this->drive();
+        $idle = self::IDLE_MIN_MICROS;
         while (!isset($this->finished[$id])) {
             $left = ($deadline - hrtime(true)) / 1e9;
             if ($left <= 0) {
@@ -107,7 +116,12 @@ final class CurlTransport
                 throw new TransportException("Queen did not answer a detached request within {$timeoutMillis} ms.", 28);
             }
             // Blocks until a socket is ready, unlike a Guzzle tick.
-            curl_multi_select($multi, min($left, self::SELECT_SECONDS));
+            $selected = hrtime(true);
+            if (curl_multi_select($multi, min($left, self::SELECT_SECONDS)) < 1
+                && hrtime(true) - $selected < 1_000_000) {
+                usleep($idle);
+                $idle = min($idle * 2, self::IDLE_MAX_MICROS);
+            }
             $this->drive();
         }
 
