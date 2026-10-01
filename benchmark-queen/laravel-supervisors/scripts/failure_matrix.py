@@ -28,7 +28,9 @@ from pathlib import Path
 
 BENCH = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = BENCH / "compose.raft.yml"
-APP_IMAGE = "queen-laravel-supervisor-bench:local"
+# Another tag keeps a run apart from other runs on the same Docker host; the
+# compose files read the same variable.
+APP_IMAGE = os.environ.get("BENCH_APP_IMAGE", "queen-laravel-supervisor-bench:local")
 
 
 @dataclass(frozen=True)
